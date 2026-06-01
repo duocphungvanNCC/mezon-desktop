@@ -258,6 +258,7 @@ pub struct ApiMessage {
     pub message_id: String,
     pub content: String,
     pub sender_id: String,
+    pub sender_name: String,
     pub create_time: i64,
 }
 
@@ -324,6 +325,7 @@ impl MezonTransport {
             message_id: message.message_id.to_string(),
             content: message.content,
             sender_id: message.sender_id.to_string(),
+            sender_name: message.username,
             create_time: i64::from(message.create_time_seconds),
         }
     }
@@ -714,14 +716,16 @@ impl MezonTransport {
     /// List messages in a channel.
     pub async fn list_channel_messages(
         &self,
-        _channel_id: &str,
+        clan_id: &str,
+        channel_id: &str,
         _limit: u32,
     ) -> Result<Vec<ApiMessage>> {
         let cid = self.generate_cid();
 
         let api_name = "ListChannelMessages";
         let body = api::ListChannelMessagesRequest {
-            channel_id: _channel_id.parse().unwrap_or_default(),
+            clan_id: clan_id.parse().unwrap_or_default(),
+            channel_id: channel_id.parse().unwrap_or_default(),
             limit: _limit as i32,
             ..Default::default()
         }
@@ -744,14 +748,16 @@ impl MezonTransport {
     /// Send a message to a channel.
     pub async fn send_channel_message(
         &self,
-        _channel_id: &str,
+        clan_id: &str,
+        channel_id: &str,
         content: &str,
     ) -> Result<ApiMessage> {
         let cid = self.generate_cid();
 
         let api_name = "SendChannelMessage";
         let body = realtime::ChannelMessageSend {
-            channel_id: _channel_id.parse().unwrap_or_default(),
+            clan_id: clan_id.parse().unwrap_or_default(),
+            channel_id: channel_id.parse().unwrap_or_default(),
             content: content.to_string(),
             ..Default::default()
         }

@@ -126,6 +126,7 @@ pub struct ChatLayout {
     api: Arc<AppApi>,
     clan_list: Entity<ClanList>,
     auth_state: Entity<AuthState>,
+    last_fetched_channel_id: Option<String>,
 }
 
 impl ChatLayout {
@@ -171,6 +172,7 @@ impl ChatLayout {
             api,
             clan_list,
             auth_state,
+            last_fetched_channel_id: None,
         }
     }
 }
@@ -187,6 +189,48 @@ impl Render for ChatLayout {
                 cx,
             );
         }
+
+        let active_ch = self.channel_list.read(cx).active_channel().cloned();
+        if let Some(ref ch) = active_ch {
+            let prev_id = self.last_fetched_channel_id.clone();
+            if Some(&ch.id) != prev_id.as_ref() {
+                self.last_fetched_channel_id = Some(ch.id.clone());
+                let api = self.api.clone();
+                let ch_id = ch.id.clone();
+                let cl_id = ch.clan_id.clone();
+                let cl_id2 = ch.clan_id.clone();
+                let ch_id2 = ch.id.clone();
+                cx.spawn(async move |_this: gpui::WeakEntity<Self>, _cx: &mut gpui::AsyncApp| {
+                    match api.list_channel_messages(&cl_id, &ch_id, 20).await {
+                        Ok(msgs) => {
+                            tracing::info!(
+                                "✅ Fetched {} messages for channel {}:",
+                                msgs.len(),
+                                ch_id
+                            );
+                            for msg in &msgs {
+                                tracing::info!(
+                                    "  [{sender}] {content}",
+                                    sender = msg.sender_name,
+                                    content = msg.content,
+                                );
+                            }
+                        }
+                        Err(e) => tracing::error!("Failed to fetch messages for {ch_id}: {e}"),
+                    }
+
+                    match api
+                        .send_channel_message(&cl_id2, &ch_id2, "Hello from Rust desktop!")
+                        .await
+                    {
+                        Ok(sent) => tracing::info!("✅ Sent message: id={}", sent.message_id),
+                        Err(e) => tracing::error!("Send failed: {e}"),
+                    }
+                })
+                .detach();
+            }
+        }
+
         let theme = Theme::dark();
 
         self.chat_area.ensure_input(_window, cx);

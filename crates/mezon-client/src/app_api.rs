@@ -4,7 +4,7 @@ use anyhow::Result;
 
 use crate::{
     TransportClient,
-    transport::{ApiAccount, ApiChannelDesc, ApiClanDesc},
+    transport::{ApiAccount, ApiChannelDesc, ApiClanDesc, ApiMessage},
 };
 
 #[derive(Clone)]
@@ -50,5 +50,27 @@ impl AppApi {
 
     pub async fn ping_roundtrip(&self) -> Result<()> {
         self.transport.ping_roundtrip().await
+    }
+
+    pub async fn list_channel_messages(
+        &self,
+        clan_id: &str,
+        channel_id: &str,
+        limit: u32,
+    ) -> Result<Vec<ApiMessage>> {
+        self.transport
+            .list_channel_messages(clan_id, channel_id, limit)
+            .await
+    }
+
+    pub async fn send_channel_message(
+        &self,
+        clan_id: &str,
+        channel_id: &str,
+        content: &str,
+    ) -> Result<ApiMessage> {
+        self.transport
+            .send_channel_message(clan_id, channel_id, content)
+            .await
     }
 }

@@ -184,6 +184,49 @@ impl TransportClient {
         self.inner.is_open().await
     }
 
+    /// List channel messages.
+    pub async fn list_channel_messages(
+        &self,
+        clan_id: &str,
+        channel_id: &str,
+        limit: u32,
+    ) -> Result<Vec<crate::transport::ApiMessage>> {
+        let transport = self.inner.clone();
+        let clan_id = clan_id.to_string();
+        let channel_id = channel_id.to_string();
+
+        runtime()
+            .spawn(async move {
+                transport
+                    .list_channel_messages(&clan_id, &channel_id, limit)
+                    .await
+            })
+            .await
+            .expect("Transport task panicked")
+    }
+
+    /// Send a message to a channel.
+    pub async fn send_channel_message(
+        &self,
+        clan_id: &str,
+        channel_id: &str,
+        content: &str,
+    ) -> Result<crate::transport::ApiMessage> {
+        let transport = self.inner.clone();
+        let clan_id = clan_id.to_string();
+        let channel_id = channel_id.to_string();
+        let content = content.to_string();
+
+        runtime()
+            .spawn(async move {
+                transport
+                    .send_channel_message(&clan_id, &channel_id, &content)
+                    .await
+            })
+            .await
+            .expect("Transport task panicked")
+    }
+
     /// Close the connection.
     ///
     /// Spawns the close operation on the dedicated transport runtime.
