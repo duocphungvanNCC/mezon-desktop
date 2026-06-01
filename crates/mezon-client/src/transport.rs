@@ -767,11 +767,27 @@ impl MezonTransport {
     ) -> Result<ApiMessage> {
         let cid = self.generate_cid();
 
+        let message_id = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos() as i64)
+            .unwrap_or(0);
+
         let api_name = "SendChannelMessage";
+        let parsed_clan_id: i64 = clan_id.parse().unwrap_or(0);
+        let parsed_channel_id: i64 = channel_id.parse().unwrap_or(0);
+        tracing::info!(
+            "send_channel_message: clan_id={} channel_id={} content_len={}",
+            parsed_clan_id,
+            parsed_channel_id,
+            content.len()
+        );
         let body = realtime::ChannelMessageSend {
-            clan_id: clan_id.parse().unwrap_or_default(),
-            channel_id: channel_id.parse().unwrap_or_default(),
+            clan_id: parsed_clan_id,
+            channel_id: parsed_channel_id,
             content: content.to_string(),
+            id: message_id,
+            mode: 0,
+            code: 0,
             ..Default::default()
         }
         .encode_to_vec();

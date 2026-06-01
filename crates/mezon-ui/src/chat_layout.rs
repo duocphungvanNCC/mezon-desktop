@@ -197,7 +197,7 @@ impl ChatLayout {
 
 impl Render for ChatLayout {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let _theme = resolve_theme(&self.settings.read(cx).theme);
+        let theme = resolve_theme(&self.settings.read(cx).theme);
 
         if !self.fetchers_spawned {
             self.fetchers_spawned = true;
@@ -240,7 +240,7 @@ impl Render for ChatLayout {
                     }
 
                     match api
-                        .send_channel_message(&cl_id2, &ch_id2, "Hello from Rust desktop!")
+                        .send_channel_message(&cl_id2, &ch_id2, r#"{"text":"Hello from Rust desktop!"}"#)
                         .await
                     {
                         Ok(sent) => tracing::info!("✅ Sent message: id={}", sent.message_id),
@@ -250,8 +250,6 @@ impl Render for ChatLayout {
                 .detach();
             }
         }
-
-        let theme = Theme::dark();
 
         self.chat_area.ensure_input(_window, cx);
         let content = self.render_content(cx);
