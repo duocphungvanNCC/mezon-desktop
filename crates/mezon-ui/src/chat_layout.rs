@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use gpui::{App, Context, Entity, Window, div, prelude::*, px};
 use mezon_client::AppApi;
-use mezon_store::{AuthState, Category, Channel, ChannelList, Clan, ClanList, Settings};
+use mezon_store::{AuthState, Category, Channel, ChannelList, Clan, ClanList, Message, Settings};
 
 use crate::chat_area::ChatArea;
 use crate::components::compositions::user_info_bar::UserInfoBar;
@@ -218,33 +218,27 @@ impl Render for ChatLayout {
                 let api = self.api.clone();
                 let ch_id = ch.id.clone();
                 let cl_id = ch.clan_id.clone();
-                let cl_id2 = ch.clan_id.clone();
-                let ch_id2 = ch.id.clone();
-                cx.spawn(async move |_this: gpui::WeakEntity<Self>, _cx: &mut gpui::AsyncApp| {
+                cx.spawn(async move |this: gpui::WeakEntity<Self>, cx: &mut gpui::AsyncApp| {
                     match api.list_channel_messages(&cl_id, &ch_id, 20).await {
                         Ok(msgs) => {
                             tracing::info!(
-                                "✅ Fetched {} messages for channel {}:",
+                                "Fetched {} messages for channel {}",
                                 msgs.len(),
                                 ch_id
                             );
-                            for msg in &msgs {
-                                tracing::info!(
-                                    "  [{sender}] {content}",
-                                    sender = msg.sender_name,
-                                    content = msg.content,
-                                );
-                            }
+                            let mut store_msgs: Vec<Message> = msgs
+                                .into_iter()
+                                .map(|m| {
+                                    Message::new(m.message_id, m.content, m.sender_id, m.sender_name, m.create_time)
+                                })
+                                .collect();
+                            store_msgs.reverse();
+                            let _ = this.update(cx, |this, cx| {
+                                this.chat_area.messages = store_msgs;
+                                cx.notify();
+                            });
                         }
                         Err(e) => tracing::error!("Failed to fetch messages for {ch_id}: {e}"),
-                    }
-
-                    match api
-                        .send_channel_message(&cl_id2, &ch_id2, r#"{"text":"Hello from Rust desktop!"}"#)
-                        .await
-                    {
-                        Ok(sent) => tracing::info!("✅ Sent message: id={}", sent.message_id),
-                        Err(e) => tracing::error!("Send failed: {e}"),
                     }
                 })
                 .detach();
@@ -297,11 +291,9 @@ impl ChatLayout {
     fn render_content(&self, cx: &Context<Self>) -> gpui::AnyElement {
         let theme = resolve_theme(&self.settings.read(cx).theme);
 
-        let (session_user_id, session_username) = match self.auth_state.read(cx) {
-            AuthState::Authenticated(session) => {
-                (session.user_id.clone(), session.username.clone())
-            }
-            _ => (String::new(), String::new()),
+        let session_user_id = match self.auth_state.read(cx) {
+            AuthState::Authenticated(session) => session.user_id.clone(),
+            _ => String::new(),
         };
 
         // Use channel_list.active_channel_id to detect channel selection instead
@@ -311,7 +303,7 @@ impl ChatLayout {
         if let Some(ch) = channels.active_channel() {
             return self
                 .chat_area
-                .render(&theme, cx.entity(), &ch.name, &session_user_id, &session_username)
+                .render(&theme, cx.entity(), &ch.name, &session_user_id)
                 .into_any_element();
         }
 

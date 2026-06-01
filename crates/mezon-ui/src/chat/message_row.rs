@@ -10,24 +10,19 @@ pub struct MessageRow {
     combined: bool,
     reply: bool,
     theme: Theme,
-    current_user_id: String,
-    current_username: String,
 }
 
 impl MessageRow {
     pub fn new(
         message: Message,
         theme: &Theme,
-        current_user_id: &str,
-        current_username: &str,
+        _current_user_id: &str,
     ) -> Self {
         Self {
             message,
             combined: false,
             reply: false,
             theme: theme.clone(),
-            current_user_id: current_user_id.to_string(),
-            current_username: current_username.to_string(),
         }
     }
 
@@ -62,11 +57,7 @@ impl MessageRow {
         let theme = &self.theme;
         let time = Self::format_timestamp(msg.create_time);
 
-        let display_name = if msg.sender_id == self.current_user_id {
-            &self.current_username
-        } else {
-            &msg.sender_name
-        };
+        let display_name = &msg.sender_name;
 
         let avatar = Avatar::new()
             .name(display_name)
@@ -117,6 +108,7 @@ impl MessageRow {
             .flex()
             .flex_col()
             .when(!self.combined, |d| d.pl(px(42.)))
+            .when(self.combined, |d| d.pl(px(10.)))
             .child(if self.reply { reply_placeholder.into_any_element() } else { div().into_any_element() })
             .child(if !self.combined { name_row.into_any_element() } else { div().into_any_element() })
             .child(content)

@@ -10,7 +10,6 @@ pub struct MessageList {
     messages: Vec<Message>,
     theme: Theme,
     current_user_id: String,
-    current_username: String,
     typing_users: Vec<String>,
 }
 
@@ -19,13 +18,11 @@ impl MessageList {
         messages: Vec<Message>,
         theme: &Theme,
         current_user_id: &str,
-        current_username: &str,
     ) -> Self {
         Self {
             messages,
             theme: theme.clone(),
             current_user_id: current_user_id.to_string(),
-            current_username: current_username.to_string(),
             typing_users: Vec::new(),
         }
     }
@@ -128,13 +125,12 @@ impl MessageList {
         group: &MessageGroup,
         theme: &Theme,
         current_user_id: &str,
-        current_username: &str,
     ) -> impl IntoElement {
         let mut children: Vec<gpui::AnyElement> = Vec::new();
 
         for (i, msg) in group.messages.iter().enumerate() {
             let is_combined = group.combined[i];
-            let row = MessageRow::new((*msg).clone(), theme, current_user_id, current_username)
+            let row = MessageRow::new((*msg).clone(), theme, current_user_id)
                 .combined(is_combined);
             let rendered = row.render();
             children.push(rendered.into_any_element());
@@ -153,7 +149,7 @@ impl MessageList {
 
         for (i, group) in groups.iter().enumerate() {
             children.push(
-                Self::render_group(group, theme, &self.current_user_id, &self.current_username)
+                Self::render_group(group, theme, &self.current_user_id)
                     .into_any_element(),
             );
 

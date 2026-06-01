@@ -11,7 +11,7 @@ use crate::chat::ReplyTarget;
 use crate::theme::Theme;
 
 pub struct ChatArea {
-    messages: Vec<Message>,
+    pub(crate) messages: Vec<Message>,
     input_state: Option<Entity<InputState>>,
     #[allow(dead_code)]
     replying_to: Option<ReplyTarget>,
@@ -25,19 +25,8 @@ impl Default for ChatArea {
 
 impl ChatArea {
     pub fn new() -> Self {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs() as i64;
-
         Self {
-            messages: vec![
-                Message::new("1", "Hey team, how's the project going?", "alice", "Alice", now - 360),
-                Message::new("2", "Going well! Just finishing up the chat UI.", "bob", "Bob", now - 300),
-                Message::new("3", "I can take a look at the PR after lunch.", "charlie", "Charlie", now - 240),
-                Message::new("4", "Sounds good, no rush.", "bob", "Bob", now - 180),
-                Message::new("5", "Actually, can we sync quickly at 3?", "alice", "Alice", now - 120),
-            ],
+            messages: Vec::new(),
             input_state: None,
             replying_to: None,
         }
@@ -56,11 +45,9 @@ impl ChatArea {
         layout_entity: Entity<crate::ChatLayout>,
         channel_name: &str,
         current_user_id: &str,
-        current_username: &str,
     ) -> impl IntoElement {
         let handle = layout_entity.clone();
         let user_id = current_user_id.to_string();
-        let username = current_username.to_string();
         #[allow(clippy::type_complexity)]
         let on_send: Arc<dyn Fn(&str, &mut Window, &mut App) + Send + Sync> = Arc::new(
             move |value: &str, _window: &mut Window, cx: &mut App| {
@@ -69,14 +56,13 @@ impl ChatArea {
                     .unwrap()
                     .as_secs() as i64;
                 let uid = user_id.clone();
-                let uname = username.clone();
                 let msg_content = value.to_string();
                 handle.update(cx, |this, cx| {
                     this.chat_area.messages.push(Message::new(
                         format!("mock-{}", this.chat_area.messages.len() + 1),
                         msg_content,
+                        uid.clone(),
                         uid,
-                        uname,
                         now,
                     ));
                     cx.notify();
@@ -89,7 +75,7 @@ impl ChatArea {
             .on_send(on_send);
 
         let header = ChannelHeader::new(channel_name);
-        let message_list = MessageList::new(self.messages.clone(), theme, current_user_id, current_username);
+        let message_list = MessageList::new(self.messages.clone(), theme, current_user_id);
 
         div()
             .flex()
