@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use gpui::{App, Context, Entity, FontWeight, Window, div, prelude::*, px};
+use gpui::{App, Context, Entity, Window, div, prelude::*, px};
 use mezon_client::AppApi;
 use mezon_store::{AuthState, Category, Channel, ChannelList, Clan, ClanList};
 
@@ -125,6 +125,7 @@ pub struct ChatLayout {
     fetchers_spawned: bool,
     api: Arc<AppApi>,
     clan_list: Entity<ClanList>,
+    auth_state: Entity<AuthState>,
 }
 
 impl ChatLayout {
@@ -169,6 +170,7 @@ impl ChatLayout {
             fetchers_spawned: false,
             api,
             clan_list,
+            auth_state,
         }
     }
 }
@@ -186,33 +188,6 @@ impl Render for ChatLayout {
             );
         }
         let theme = Theme::dark();
-        let channels = self.channel_list.read(cx);
-
-        let active_channel_name = channels.active_channel().cloned();
-
-        let channel_header = div()
-            .flex()
-            .items_center()
-            .h(px(44.0))
-            .px_4()
-            .border_b_1()
-            .border_color(theme.border)
-            .bg(theme.bg_tertiary)
-            .text_sm()
-            .text_color(theme.text_primary)
-            .child(
-                active_channel_name
-                    .as_ref()
-                    .map(|ch| {
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_2()
-                            .child(div().font_weight(FontWeight::BOLD).child(ch.name.clone()))
-                            .into_any_element()
-                    })
-                    .unwrap_or_else(|| div().child("Select a channel").into_any_element()),
-            );
 
         self.chat_area.ensure_input(_window, cx);
         let content = self.render_content(cx);
@@ -251,7 +226,6 @@ impl Render for ChatLayout {
                     .flex_1()
                     .h_full()
                     .bg(theme.bg_secondary)
-                    .child(channel_header)
                     .child(content),
             )
     }
@@ -261,13 +235,21 @@ impl ChatLayout {
     fn render_content(&self, cx: &Context<Self>) -> gpui::AnyElement {
         let theme = Theme::dark();
 
+        let (session_user_id, session_username) = match self.auth_state.read(cx) {
+            AuthState::Authenticated(session) => {
+                (session.user_id.clone(), session.username.clone())
+            }
+            _ => (String::new(), String::new()),
+        };
+
         // Use channel_list.active_channel_id to detect channel selection instead
         // of self.router.route(), because the router clone in ChatLayout is stale
         // (only the RootView's router gets updated on navigation).
-        if self.channel_list.read(cx).active_channel_id.is_some() {
+        let channels = self.channel_list.read(cx);
+        if let Some(ch) = channels.active_channel() {
             return self
                 .chat_area
-                .render(&theme, cx.entity())
+                .render(&theme, cx.entity(), &ch.name, &session_user_id, &session_username)
                 .into_any_element();
         }
 
