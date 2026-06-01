@@ -7,6 +7,7 @@ use anyhow::{Context, Result};
 use mezon_proto::{api, realtime};
 use prost::Message;
 use serde::{Deserialize, Serialize};
+use serde_json;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU16, Ordering};
@@ -333,11 +334,22 @@ impl MezonTransport {
     }
 
     fn message_from_proto(message: api::ChannelMessage) -> ApiMessage {
+        let content = serde_json::from_str::<serde_json::Value>(&message.content)
+            .ok()
+            .and_then(|v| v.get("t").and_then(|t| t.as_str().map(|s| s.to_string())))
+            .unwrap_or(message.content);
+
         ApiMessage {
             message_id: message.message_id.to_string(),
-            content: message.content,
+            content,
             sender_id: message.sender_id.to_string(),
-            sender_name: message.username,
+            sender_name: if !message.clan_nick.is_empty() {
+                message.clan_nick
+            } else if !message.display_name.is_empty() {
+                message.display_name
+            } else {
+                message.username
+            },
             create_time: i64::from(message.create_time_seconds),
         }
     }
@@ -754,6 +766,7 @@ impl MezonTransport {
         Ok(messages
             .messages
             .into_iter()
+            .filter(|m| m.code == 0)
             .map(Self::message_from_proto)
             .collect())
     }
