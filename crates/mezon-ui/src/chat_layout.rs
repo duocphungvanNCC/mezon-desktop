@@ -232,7 +232,7 @@ impl Render for ChatLayout {
                                     Message::new(m.message_id, m.content, m.sender_id, m.sender_name, m.create_time)
                                 })
                                 .collect();
-                            store_msgs.reverse();
+                            store_msgs.sort_by_key(|m| m.create_time);
                             let fetched_ch_id = ch_id.clone();
                             let _ = this.update(cx, |this, cx| {
                                 if this.last_fetched_channel_id.as_deref() != Some(&fetched_ch_id) {

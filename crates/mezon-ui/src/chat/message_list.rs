@@ -160,13 +160,17 @@ impl MessageList {
         let theme = &self.theme;
 
         let mut children: Vec<gpui::AnyElement> = Vec::new();
-
-        if let Some(first) = self.messages.first() {
-            let date_label = Self::format_date(first.create_time);
-            children.push(Self::date_separator(theme, &date_label).into_any_element());
-        }
+        let mut current_date_label: Option<String> = None;
 
         for (i, group) in groups.iter().enumerate() {
+            let day_label = group.messages.first().map(|m| Self::format_date(m.create_time));
+
+            if day_label != current_date_label {
+                if let Some(ref label) = day_label {
+                    children.push(Self::date_separator(theme, label).into_any_element());
+                }
+                current_date_label = day_label;
+            }
             children.push(
                 Self::render_group(group, theme, &self.current_user_id)
                     .into_any_element(),
