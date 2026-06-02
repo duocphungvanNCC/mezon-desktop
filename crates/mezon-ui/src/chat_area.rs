@@ -44,7 +44,6 @@ impl ChatArea {
         theme: &Theme,
         layout_entity: Entity<crate::ChatLayout>,
         channel_name: &str,
-        member_count: u32,
         current_user_id: &str,
     ) -> impl IntoElement {
         let handle = layout_entity.clone();
@@ -75,7 +74,7 @@ impl ChatArea {
             .with_input(self.input_state.clone().unwrap())
             .on_send(on_send);
 
-        let header = ChannelHeader::new(channel_name, member_count);
+        let header = ChannelHeader::new(channel_name);
         let message_list = MessageList::new(self.messages.clone(), theme, current_user_id);
 
         div()

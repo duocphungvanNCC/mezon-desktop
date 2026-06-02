@@ -4,14 +4,12 @@ use crate::theme::Theme;
 
 pub struct ChannelHeader {
     name: String,
-    member_count: u32,
 }
 
 impl ChannelHeader {
-    pub fn new(name: impl Into<String>, member_count: u32) -> Self {
+    pub fn new(name: impl Into<String>) -> Self {
         Self {
             name: name.into(),
-            member_count,
         }
     }
 
@@ -40,18 +38,7 @@ impl ChannelHeader {
                             .text_color(theme.text_primary)
                             .child(format!("# {}", self.name)),
                     )
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(theme.text_muted)
-                            .child("  ·  "),
-                    )
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(theme.text_muted)
-                            .child(format!("{} members", self.member_count)),
-                    ),
+
             )
             .child(div().flex_1())
             .child(

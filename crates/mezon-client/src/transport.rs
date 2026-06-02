@@ -768,7 +768,14 @@ impl MezonTransport {
         Ok(messages
             .messages
             .into_iter()
-            .filter(|m| m.code == 0)
+            .filter(|m| {
+                if m.code != 0 {
+                    tracing::warn!("Skipping message with code={}", m.code);
+                    false
+                } else {
+                    true
+                }
+            })
             .map(Self::message_from_proto)
             .collect())
     }
