@@ -3,7 +3,7 @@ use gpui::{div, prelude::*, px};
 
 use mezon_store::Message;
 
-use crate::chat::grouping::{group_messages, MessageGroup};
+use crate::chat::grouping::{MessageGroup, group_messages};
 use crate::chat::message_row::MessageRow;
 use crate::theme::Theme;
 
@@ -16,11 +16,7 @@ pub struct MessageList {
 }
 
 impl MessageList {
-    pub fn new(
-        messages: Vec<Message>,
-        theme: &Theme,
-        current_user_id: &str,
-    ) -> Self {
+    pub fn new(messages: Vec<Message>, theme: &Theme, current_user_id: &str) -> Self {
         Self {
             messages,
             theme: theme.clone(),
@@ -56,18 +52,14 @@ impl MessageList {
             .px_4()
             .py_2()
             .w_full()
-            .child(
-                div().flex_1().h(px(1.)).bg(gpui::hsla(0., 0., 0., 0.08)),
-            )
+            .child(div().flex_1().h(px(1.)).bg(gpui::hsla(0., 0., 0., 0.08)))
             .child(
                 div()
                     .text_xs()
                     .text_color(theme.text_muted)
                     .child(label.to_string()),
             )
-            .child(
-                div().flex_1().h(px(1.)).bg(gpui::hsla(0., 0., 0., 0.08)),
-            )
+            .child(div().flex_1().h(px(1.)).bg(gpui::hsla(0., 0., 0., 0.08)))
     }
 
     fn unread_break(_theme: &Theme) -> impl IntoElement {
@@ -129,12 +121,7 @@ impl MessageList {
                     .rounded_full()
                     .bg(theme.text_muted),
             )
-            .child(
-                div()
-                    .text_xs()
-                    .text_color(theme.text_muted)
-                    .child(label),
-            )
+            .child(div().text_xs().text_color(theme.text_muted).child(label))
     }
 
     fn render_group(
@@ -146,8 +133,7 @@ impl MessageList {
 
         for (i, msg) in group.messages.iter().enumerate() {
             let is_combined = group.combined[i];
-            let row = MessageRow::new((*msg).clone(), theme, current_user_id)
-                .combined(is_combined);
+            let row = MessageRow::new((*msg).clone(), theme, current_user_id).combined(is_combined);
             let rendered = row.render();
             children.push(rendered.into_any_element());
         }
@@ -163,7 +149,10 @@ impl MessageList {
         let mut current_date_label: Option<String> = None;
 
         for (i, group) in groups.iter().enumerate() {
-            let day_label = group.messages.first().map(|m| Self::format_date(m.create_time));
+            let day_label = group
+                .messages
+                .first()
+                .map(|m| Self::format_date(m.create_time));
 
             if day_label != current_date_label {
                 if let Some(ref label) = day_label {
@@ -171,10 +160,8 @@ impl MessageList {
                 }
                 current_date_label = day_label;
             }
-            children.push(
-                Self::render_group(group, theme, &self.current_user_id)
-                    .into_any_element(),
-            );
+            children
+                .push(Self::render_group(group, theme, &self.current_user_id).into_any_element());
 
             if self.show_unread_break && i == 2 {
                 children.push(Self::unread_break(theme).into_any_element());

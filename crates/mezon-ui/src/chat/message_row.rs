@@ -13,11 +13,7 @@ pub struct MessageRow {
 }
 
 impl MessageRow {
-    pub fn new(
-        message: Message,
-        theme: &Theme,
-        _current_user_id: &str,
-    ) -> Self {
+    pub fn new(message: Message, theme: &Theme, _current_user_id: &str) -> Self {
         Self {
             message,
             combined: false,
@@ -59,9 +55,7 @@ impl MessageRow {
 
         let display_name = &msg.sender_name;
 
-        let avatar = Avatar::new()
-            .name(display_name)
-            .with_size(Size::Small);
+        let avatar = Avatar::new().name(display_name).with_size(Size::Small);
 
         let name_row = div()
             .flex()
@@ -109,8 +103,16 @@ impl MessageRow {
             .flex_col()
             .when(!self.combined, |d| d.pl(px(42.)))
             .when(self.combined, |d| d.pl(px(10.)))
-            .child(if self.reply { reply_placeholder.into_any_element() } else { div().into_any_element() })
-            .child(if !self.combined { name_row.into_any_element() } else { div().into_any_element() })
+            .child(if self.reply {
+                reply_placeholder.into_any_element()
+            } else {
+                div().into_any_element()
+            })
+            .child(if !self.combined {
+                name_row.into_any_element()
+            } else {
+                div().into_any_element()
+            })
             .child(content)
             .when(!msg.reactions.is_empty(), |d| {
                 d.child(
@@ -164,9 +166,7 @@ impl MessageRow {
             .when(!self.combined, |d| d.pt_3())
             .child(
                 div()
-                    .when(!self.combined, |d| {
-                        d.absolute().left(px(16.)).top(px(10.))
-                    })
+                    .when(!self.combined, |d| d.absolute().left(px(16.)).top(px(10.)))
                     .when(self.combined, |d| d.invisible().w(px(32.)))
                     .child(avatar),
             )
