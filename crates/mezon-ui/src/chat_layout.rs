@@ -303,7 +303,7 @@ impl ChatLayout {
         if let Some(ch) = channels.active_channel() {
             return self
                 .chat_area
-                .render(&theme, cx.entity(), &ch.name, &session_user_id)
+                .render(&theme, cx.entity(), &ch.name, ch.member_count, &session_user_id)
                 .into_any_element();
         }
 

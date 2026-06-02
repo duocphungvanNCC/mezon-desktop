@@ -16,6 +16,7 @@ pub struct Channel {
     pub clan_id: String,
     pub category_name: String,
     pub category_id: Option<String>,
+    pub member_count: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -115,6 +116,7 @@ impl From<ApiChannelDesc> for Channel {
             clan_id: c.clan_id,
             category_name: c.category_name,
             category_id: Some(c.category_id).filter(|s| !s.is_empty() && s != "0"),
+            member_count: c.member_count as u32,
         }
     }
 }
