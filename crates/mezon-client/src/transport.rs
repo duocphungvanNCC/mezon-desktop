@@ -249,6 +249,7 @@ pub struct ApiChannelDesc {
     pub category_id: String,
     pub channel_private: i32,
     pub count_mess_unread: i32,
+    pub member_count: i32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -322,6 +323,7 @@ impl MezonTransport {
             category_id: channel.category_id.to_string(),
             channel_private: channel.channel_private,
             count_mess_unread: channel.count_mess_unread,
+            member_count: channel.member_count,
         }
     }
 

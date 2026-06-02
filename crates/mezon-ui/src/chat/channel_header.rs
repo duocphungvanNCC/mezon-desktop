@@ -4,11 +4,15 @@ use crate::theme::Theme;
 
 pub struct ChannelHeader {
     name: String,
+    member_count: u32,
 }
 
 impl ChannelHeader {
-    pub fn new(name: impl Into<String>) -> Self {
-        Self { name: name.into() }
+    pub fn new(name: impl Into<String>, member_count: u32) -> Self {
+        Self {
+            name: name.into(),
+            member_count,
+        }
     }
 
     pub fn render(&self, theme: &Theme) -> impl IntoElement {
@@ -46,7 +50,7 @@ impl ChannelHeader {
                         div()
                             .text_xs()
                             .text_color(theme.text_muted)
-                            .child("42 members"),
+                            .child(format!("{} members", self.member_count)),
                     ),
             )
             .child(div().flex_1())
