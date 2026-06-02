@@ -41,10 +41,7 @@ mod tests {
 
     #[test]
     fn same_sender_within_window_combines() {
-        let msgs = vec![
-            make_msg("1", "alice", 1000),
-            make_msg("2", "alice", 1100),
-        ];
+        let msgs = vec![make_msg("1", "alice", 1000), make_msg("2", "alice", 1100)];
         let groups = group_messages(&msgs);
         assert_eq!(groups.len(), 1);
         assert_eq!(groups[0].messages.len(), 2);
@@ -53,20 +50,14 @@ mod tests {
 
     #[test]
     fn different_sender_breaks_group() {
-        let msgs = vec![
-            make_msg("1", "alice", 1000),
-            make_msg("2", "bob", 1100),
-        ];
+        let msgs = vec![make_msg("1", "alice", 1000), make_msg("2", "bob", 1100)];
         let groups = group_messages(&msgs);
         assert_eq!(groups.len(), 2);
     }
 
     #[test]
     fn time_window_expires_breaks_group() {
-        let msgs = vec![
-            make_msg("1", "alice", 1000),
-            make_msg("2", "alice", 1400),
-        ];
+        let msgs = vec![make_msg("1", "alice", 1000), make_msg("2", "alice", 1400)];
         let groups = group_messages(&msgs);
         assert_eq!(groups.len(), 2);
     }

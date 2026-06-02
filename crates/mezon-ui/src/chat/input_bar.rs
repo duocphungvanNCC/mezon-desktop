@@ -133,11 +133,7 @@ impl InputBar {
                             .flex_1()
                             .child(Input::new(self.input_state.as_ref().unwrap())),
                     )
-                    .child(
-                        Button::new("send-btn")
-                            .label("Send")
-                            .on_click(on_click),
-                    ),
+                    .child(Button::new("send-btn").label("Send").on_click(on_click)),
             )
     }
 }

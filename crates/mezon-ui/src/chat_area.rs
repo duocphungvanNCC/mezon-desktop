@@ -4,10 +4,10 @@ use gpui::{App, Context, Entity, Window, div, prelude::*};
 use gpui_component::input::InputState;
 use mezon_store::Message;
 
+use crate::chat::ReplyTarget;
 use crate::chat::channel_header::ChannelHeader;
 use crate::chat::input_bar::InputBar;
 use crate::chat::message_list::MessageList;
-use crate::chat::ReplyTarget;
 use crate::theme::Theme;
 
 pub struct ChatArea {
@@ -49,8 +49,8 @@ impl ChatArea {
         let handle = layout_entity.clone();
         let user_id = current_user_id.to_string();
         #[allow(clippy::type_complexity)]
-        let on_send: Arc<dyn Fn(&str, &mut Window, &mut App) + Send + Sync> = Arc::new(
-            move |value: &str, _window: &mut Window, cx: &mut App| {
+        let on_send: Arc<dyn Fn(&str, &mut Window, &mut App) + Send + Sync> =
+            Arc::new(move |value: &str, _window: &mut Window, cx: &mut App| {
                 let now = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap()
@@ -67,8 +67,7 @@ impl ChatArea {
                     ));
                     cx.notify();
                 });
-            },
-        );
+            });
 
         let input_bar = InputBar::new()
             .with_input(self.input_state.clone().unwrap())

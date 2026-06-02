@@ -8,9 +8,7 @@ pub struct ChannelHeader {
 
 impl ChannelHeader {
     pub fn new(name: impl Into<String>) -> Self {
-        Self {
-            name: name.into(),
-        }
+        Self { name: name.into() }
     }
 
     pub fn render(&self, theme: &Theme) -> impl IntoElement {
@@ -26,19 +24,13 @@ impl ChannelHeader {
             .border_color(theme.border)
             .bg(theme.bg_primary)
             .child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap_1()
-                    .child(
-                        div()
-                            .text_sm()
-                            .font_weight(gpui::FontWeight::SEMIBOLD)
-                            .text_color(theme.text_primary)
-                            .child(format!("# {}", self.name)),
-                    )
-
+                div().flex().flex_row().items_center().gap_1().child(
+                    div()
+                        .text_sm()
+                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .text_color(theme.text_primary)
+                        .child(format!("# {}", self.name)),
+                ),
             )
             .child(div().flex_1())
             .child(

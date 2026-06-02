@@ -218,18 +218,23 @@ impl Render for ChatLayout {
                 let api = self.api.clone();
                 let ch_id = ch.id.clone();
                 let cl_id = ch.clan_id.clone();
-                cx.spawn(async move |this: gpui::WeakEntity<Self>, cx: &mut gpui::AsyncApp| {
-                    match api.list_channel_messages(&cl_id, &ch_id, 20).await {
+                cx.spawn(
+                    async move |this: gpui::WeakEntity<Self>, cx: &mut gpui::AsyncApp| match api
+                        .list_channel_messages(&cl_id, &ch_id, 20)
+                        .await
+                    {
                         Ok(msgs) => {
-                            tracing::info!(
-                                "Fetched {} messages for channel {}",
-                                msgs.len(),
-                                ch_id
-                            );
+                            tracing::info!("Fetched {} messages for channel {}", msgs.len(), ch_id);
                             let mut store_msgs: Vec<Message> = msgs
                                 .into_iter()
                                 .map(|m| {
-                                    Message::new(m.message_id, m.content, m.sender_id, m.sender_name, m.create_time)
+                                    Message::new(
+                                        m.message_id,
+                                        m.content,
+                                        m.sender_id,
+                                        m.sender_name,
+                                        m.create_time,
+                                    )
                                 })
                                 .collect();
                             store_msgs.sort_by_key(|m| m.create_time);
@@ -243,8 +248,8 @@ impl Render for ChatLayout {
                             });
                         }
                         Err(e) => tracing::error!("Failed to fetch messages for {ch_id}: {e}"),
-                    }
-                })
+                    },
+                )
                 .detach();
             }
         }
