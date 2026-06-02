@@ -1,3 +1,4 @@
+use chrono::DateTime;
 use gpui::{div, prelude::*, px};
 
 use mezon_store::Message;
@@ -11,6 +12,7 @@ pub struct MessageList {
     theme: Theme,
     current_user_id: String,
     typing_users: Vec<String>,
+    show_unread_break: bool,
 }
 
 impl MessageList {
@@ -24,6 +26,7 @@ impl MessageList {
             theme: theme.clone(),
             current_user_id: current_user_id.to_string(),
             typing_users: Vec::new(),
+            show_unread_break: false,
         }
     }
 
@@ -32,7 +35,18 @@ impl MessageList {
         self
     }
 
-    fn date_separator(theme: &Theme) -> impl IntoElement {
+    pub fn with_unread_break(mut self, show: bool) -> Self {
+        self.show_unread_break = show;
+        self
+    }
+
+    fn format_date(timestamp: i64) -> String {
+        DateTime::from_timestamp(timestamp, 0)
+            .map(|dt| dt.format("%B %d, %Y").to_string())
+            .unwrap_or_default()
+    }
+
+    fn date_separator(theme: &Theme, label: &str) -> impl IntoElement {
         div()
             .id("date-separator")
             .flex()
@@ -49,7 +63,7 @@ impl MessageList {
                 div()
                     .text_xs()
                     .text_color(theme.text_muted)
-                    .child("May 31, 2025"),
+                    .child(label.to_string()),
             )
             .child(
                 div().flex_1().h(px(1.)).bg(gpui::hsla(0., 0., 0., 0.08)),
@@ -80,8 +94,10 @@ impl MessageList {
     fn typing_indicator(theme: &Theme, users: &[String]) -> impl IntoElement {
         let label = if users.is_empty() {
             "Someone is typing...".to_string()
-        } else {
+        } else if users.len() == 1 {
             format!("{} is typing...", users.join(", "))
+        } else {
+            format!("{} are typing...", users.join(", "))
         };
 
         div()
@@ -145,7 +161,10 @@ impl MessageList {
 
         let mut children: Vec<gpui::AnyElement> = Vec::new();
 
-        children.push(Self::date_separator(theme).into_any_element());
+        if let Some(first) = self.messages.first() {
+            let date_label = Self::format_date(first.create_time);
+            children.push(Self::date_separator(theme, &date_label).into_any_element());
+        }
 
         for (i, group) in groups.iter().enumerate() {
             children.push(
@@ -153,7 +172,7 @@ impl MessageList {
                     .into_any_element(),
             );
 
-            if i == 2 {
+            if self.show_unread_break && i == 2 {
                 children.push(Self::unread_break(theme).into_any_element());
             }
         }

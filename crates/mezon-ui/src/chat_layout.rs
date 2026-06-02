@@ -233,7 +233,11 @@ impl Render for ChatLayout {
                                 })
                                 .collect();
                             store_msgs.reverse();
+                            let fetched_ch_id = ch_id.clone();
                             let _ = this.update(cx, |this, cx| {
+                                if this.last_fetched_channel_id.as_deref() != Some(&fetched_ch_id) {
+                                    return;
+                                }
                                 this.chat_area.messages = store_msgs;
                                 cx.notify();
                             });
@@ -303,7 +307,7 @@ impl ChatLayout {
         if let Some(ch) = channels.active_channel() {
             return self
                 .chat_area
-                .render(&theme, cx.entity(), &ch.name, ch.member_count, &session_user_id)
+                .render(&theme, cx.entity(), &ch.name, &session_user_id)
                 .into_any_element();
         }
 
