@@ -6,7 +6,7 @@ use image::GenericImageView;
 
 use crate::{
     TransportClient,
-    transport::{ApiAccount, ApiChannelDesc, ApiClanDesc, ApiMessage},
+    transport::{ApiAccount, ApiChannelDesc, ApiClanDesc, ApiMessage, RealtimeEvent},
 };
 
 fn sanitize_filename(name: &str) -> String {
@@ -24,11 +24,24 @@ fn sanitize_filename(name: &str) -> String {
 #[derive(Clone)]
 pub struct AppApi {
     transport: Arc<TransportClient>,
+    realtime_tx: Arc<tokio::sync::broadcast::Sender<RealtimeEvent>>,
 }
 
 impl AppApi {
     pub fn new(transport: Arc<TransportClient>) -> Self {
-        Self { transport }
+        let (realtime_tx, _) = tokio::sync::broadcast::channel(256);
+        Self {
+            transport,
+            realtime_tx: Arc::new(realtime_tx),
+        }
+    }
+
+    pub fn subscribe(&self) -> tokio::sync::broadcast::Receiver<RealtimeEvent> {
+        self.realtime_tx.subscribe()
+    }
+
+    pub fn publish_event(&self, event: RealtimeEvent) {
+        let _ = self.realtime_tx.send(event);
     }
 
     pub async fn get_account(&self) -> Result<ApiAccount> {

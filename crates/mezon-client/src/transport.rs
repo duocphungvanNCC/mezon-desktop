@@ -2,7 +2,7 @@
 ///
 /// Handles connection management, message routing, and provides typed API methods
 /// for interacting with the Mezon backend.
-use crate::transport_adapter::TransportAdapter;
+pub use crate::transport_adapter::TransportAdapter;
 use anyhow::{Context, Result};
 use mezon_proto::{api, realtime};
 use prost::Message;
@@ -20,6 +20,68 @@ const DEFAULT_SEND_TIMEOUT_MS: u64 = 10000;
 /// Promise executor for matching responses to requests.
 struct PromiseExecutor {
     sender: oneshot::Sender<(u32, Vec<u8>)>,
+}
+
+/// Represents real-time events pushed from the server.
+#[derive(Debug, Clone)]
+pub enum RealtimeEvent {
+    ChannelMessage(api::ChannelMessage),
+    MessageTyping(realtime::MessageTypingEvent),
+    ChannelPresence(realtime::ChannelPresenceEvent),
+    StatusPresence(realtime::StatusPresenceEvent),
+    CustomStatus(realtime::CustomStatusEvent),
+    MessageReaction(api::MessageReaction),
+    MarkAsRead(realtime::MarkAsRead),
+    ChannelCreated(realtime::ChannelCreatedEvent),
+    ChannelUpdated(realtime::ChannelUpdatedEvent),
+    ChannelDeleted(realtime::ChannelDeletedEvent),
+    VoiceStarted(realtime::VoiceStartedEvent),
+    VoiceEnded(realtime::VoiceEndedEvent),
+    VoiceJoined(realtime::VoiceJoinedEvent),
+    VoiceLeaved(realtime::VoiceLeavedEvent),
+    UserChannelAdded(realtime::UserChannelAdded),
+    UserChannelRemoved(realtime::UserChannelRemoved),
+    AddClanUser(realtime::AddClanUserEvent),
+    UserClanRemoved(realtime::UserClanRemoved),
+    ClanUpdated(realtime::ClanUpdatedEvent),
+    ClanProfileUpdated(realtime::ClanProfileUpdatedEvent),
+    ClanDeleted(realtime::ClanDeletedEvent),
+    AddFriend(realtime::AddFriend),
+    RemoveFriend(realtime::RemoveFriend),
+    Unhandled(realtime::envelope::Message),
+}
+
+impl TryFrom<realtime::envelope::Message> for RealtimeEvent {
+    type Error = &'static str;
+
+    fn try_from(msg: realtime::envelope::Message) -> Result<Self, Self::Error> {
+        match msg {
+            realtime::envelope::Message::ChannelMessage(m) => Ok(Self::ChannelMessage(m)),
+            realtime::envelope::Message::MessageTypingEvent(m) => Ok(Self::MessageTyping(m)),
+            realtime::envelope::Message::ChannelPresenceEvent(m) => Ok(Self::ChannelPresence(m)),
+            realtime::envelope::Message::StatusPresenceEvent(m) => Ok(Self::StatusPresence(m)),
+            realtime::envelope::Message::CustomStatusEvent(m) => Ok(Self::CustomStatus(m)),
+            realtime::envelope::Message::MessageReactionEvent(m) => Ok(Self::MessageReaction(m)),
+            realtime::envelope::Message::MarkAsRead(m) => Ok(Self::MarkAsRead(m)),
+            realtime::envelope::Message::ChannelCreatedEvent(m) => Ok(Self::ChannelCreated(m)),
+            realtime::envelope::Message::ChannelUpdatedEvent(m) => Ok(Self::ChannelUpdated(m)),
+            realtime::envelope::Message::ChannelDeletedEvent(m) => Ok(Self::ChannelDeleted(m)),
+            realtime::envelope::Message::VoiceStartedEvent(m) => Ok(Self::VoiceStarted(m)),
+            realtime::envelope::Message::VoiceEndedEvent(m) => Ok(Self::VoiceEnded(m)),
+            realtime::envelope::Message::VoiceJoinedEvent(m) => Ok(Self::VoiceJoined(m)),
+            realtime::envelope::Message::VoiceLeavedEvent(m) => Ok(Self::VoiceLeaved(m)),
+            realtime::envelope::Message::UserChannelAddedEvent(m) => Ok(Self::UserChannelAdded(m)),
+            realtime::envelope::Message::UserChannelRemovedEvent(m) => Ok(Self::UserChannelRemoved(m)),
+            realtime::envelope::Message::AddClanUserEvent(m) => Ok(Self::AddClanUser(m)),
+            realtime::envelope::Message::UserClanRemovedEvent(m) => Ok(Self::UserClanRemoved(m)),
+            realtime::envelope::Message::ClanUpdatedEvent(m) => Ok(Self::ClanUpdated(m)),
+            realtime::envelope::Message::ClanProfileUpdatedEvent(m) => Ok(Self::ClanProfileUpdated(m)),
+            realtime::envelope::Message::ClanDeletedEvent(m) => Ok(Self::ClanDeleted(m)),
+            realtime::envelope::Message::AddFriend(m) => Ok(Self::AddFriend(m)),
+            realtime::envelope::Message::RemoveFriend(m) => Ok(Self::RemoveFriend(m)),
+            other => Ok(Self::Unhandled(other)),
+        }
+    }
 }
 
 /// Main transport client.
@@ -69,7 +131,7 @@ impl MezonTransport {
         host: &str,
         port: u16,
         token: &str,
-        on_message: impl Fn(u16, u32, Vec<u8>) + Send + Sync + 'static,
+        on_event: impl Fn(RealtimeEvent) + Send + Sync + 'static,
         on_disconnected: impl Fn(bool) + Send + Sync + 'static,
     ) -> Result<()> {
         tracing::info!("🌐 MezonTransport::connect() starting");
@@ -110,7 +172,13 @@ impl MezonTransport {
             } else {
                 // Server-initiated message
                 tracing::debug!("  Server-initiated message");
-                on_message(cid, code, message);
+                if let Ok(envelope) = realtime::Envelope::decode(message.as_slice()) {
+                    if let Some(msg) = envelope.message {
+                        if let Ok(event) = RealtimeEvent::try_from(msg) {
+                            on_event(event);
+                        }
+                    }
+                }
             }
         }));
         tracing::debug!("  Message handler set");
