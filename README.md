@@ -26,6 +26,15 @@ The app is under active migration to a native GPUI client.
 The Rust toolchain is pinned in `rust-toolchain.toml`. When using `rustup`, Cargo
 will automatically install and use the configured toolchain and components.
 
+For linux:
+```
+sudo apt install -y pkg-config libcairo2-dev libjpeg-dev libgif-dev
+ sudo apt install libgdk-pixbuf2.0-dev pkg-config
+ sudo apt install libgtk-3-dev
+ sudo apt install libasound2-dev
+ sudo apt install libxdo-dev libxkbcommon-x11-dev
+ ```
+
 ## Quick Start
 
 ```bash
