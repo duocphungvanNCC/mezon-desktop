@@ -264,7 +264,7 @@ pathfinder_geometry   = "0.5"
 foreign-types         = "0.5"
 
 # ---------- Auth ----------
-keyring               = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service", "crypto-openssl"] }
+keyring               = { version = "3", features = ["apple-native", "windows-native", "linux-native", "crypto-openssl"] }
 base64                = "0.22"
 
 # ---------- Util ----------
