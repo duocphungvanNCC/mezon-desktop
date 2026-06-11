@@ -257,18 +257,14 @@ fn spawn_transport_task(
             tracing::info!("Connecting shared TCP transport to {host}:{port}");
             let token = session.token.clone();
             let session_for_update = session.clone();
+            let api_for_publish = api.clone();
             match transport
                 .connect(
                     &host,
                     port,
                     &token,
-                    move |cid, code, message| {
-                        tracing::debug!(
-                            "TCP server message: cid={}, code={}, len={}",
-                            cid,
-                            code,
-                            message.len()
-                        );
+                    move |event| {
+                        api_for_publish.publish_event(event);
                     },
                     move |was_clean| {
                         if was_clean {

@@ -16,6 +16,7 @@ pub use auth::MezonClient;
 pub use auth::{DEFAULT_API_HOST, DEFAULT_API_PORT, DEFAULT_API_SECURE, DEFAULT_SERVER_KEY};
 pub use session::Session;
 pub use transport::MezonTransport;
+pub use transport::RealtimeEvent;
 pub use transport_adapter::TransportAdapter;
 pub use transport_runtime::TransportClient;
 

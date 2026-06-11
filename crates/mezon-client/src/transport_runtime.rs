@@ -72,7 +72,7 @@ impl TransportClient {
         host: &str,
         port: u16,
         token: &str,
-        on_message: impl Fn(u16, u32, Vec<u8>) + Send + Sync + 'static,
+        on_event: impl Fn(crate::transport::RealtimeEvent) + Send + Sync + 'static,
         on_disconnected: impl Fn(bool) + Send + Sync + 'static,
     ) -> Result<()> {
         tracing::info!("🚀 TransportClient::connect() starting");
@@ -88,7 +88,7 @@ impl TransportClient {
                     "🔧 Inside transport runtime, calling MezonTransport::connect()..."
                 );
                 let result = transport
-                    .connect(&host, port, &token, on_message, on_disconnected)
+                    .connect(&host, port, &token, on_event, on_disconnected)
                     .await;
 
                 match &result {
