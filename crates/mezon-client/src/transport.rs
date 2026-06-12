@@ -71,11 +71,15 @@ impl TryFrom<realtime::envelope::Message> for RealtimeEvent {
             realtime::envelope::Message::VoiceJoinedEvent(m) => Ok(Self::VoiceJoined(m)),
             realtime::envelope::Message::VoiceLeavedEvent(m) => Ok(Self::VoiceLeaved(m)),
             realtime::envelope::Message::UserChannelAddedEvent(m) => Ok(Self::UserChannelAdded(m)),
-            realtime::envelope::Message::UserChannelRemovedEvent(m) => Ok(Self::UserChannelRemoved(m)),
+            realtime::envelope::Message::UserChannelRemovedEvent(m) => {
+                Ok(Self::UserChannelRemoved(m))
+            }
             realtime::envelope::Message::AddClanUserEvent(m) => Ok(Self::AddClanUser(m)),
             realtime::envelope::Message::UserClanRemovedEvent(m) => Ok(Self::UserClanRemoved(m)),
             realtime::envelope::Message::ClanUpdatedEvent(m) => Ok(Self::ClanUpdated(m)),
-            realtime::envelope::Message::ClanProfileUpdatedEvent(m) => Ok(Self::ClanProfileUpdated(m)),
+            realtime::envelope::Message::ClanProfileUpdatedEvent(m) => {
+                Ok(Self::ClanProfileUpdated(m))
+            }
             realtime::envelope::Message::ClanDeletedEvent(m) => Ok(Self::ClanDeleted(m)),
             realtime::envelope::Message::AddFriend(m) => Ok(Self::AddFriend(m)),
             realtime::envelope::Message::RemoveFriend(m) => Ok(Self::RemoveFriend(m)),
@@ -172,12 +176,12 @@ impl MezonTransport {
             } else {
                 // Server-initiated message
                 tracing::debug!("  Server-initiated message");
-                if let Ok(envelope) = realtime::Envelope::decode(message.as_slice()) {
-                    if let Some(msg) = envelope.message {
-                        if let Ok(event) = RealtimeEvent::try_from(msg) {
-                            on_event(event);
-                        }
-                    }
+                if let Some(event) = realtime::Envelope::decode(message.as_slice())
+                    .ok()
+                    .and_then(|env| env.message)
+                    .and_then(|msg| RealtimeEvent::try_from(msg).ok())
+                {
+                    on_event(event);
                 }
             }
         }));
@@ -638,6 +642,7 @@ impl MezonTransport {
             "IsFollower" => 206,
             "DeletePinMessage" => 207,
             "MarkAsRead" => 208,
+            "UploadBatchAttachmentFile" => 209,
             _ => {
                 tracing::warn!("Unknown API name: {}, using index 0", api_name);
                 0
@@ -4563,6 +4568,182 @@ impl MezonTransport {
             return Err(anyhow::anyhow!("API error: code={}", code));
         }
 
+        Ok(())
+    }
+
+    /// Authenticate against the server with a refresh token.
+    pub async fn session_refresh(&self, token: &str, is_remember: bool) -> Result<ApiSession> {
+        let cid = self.generate_cid();
+        let body = api::SessionRefreshRequest {
+            token: token.to_string(),
+            is_remember,
+            ..Default::default()
+        }
+        .encode_to_vec();
+        let (code, response) = self.send_api_request(cid, "SessionRefresh", body).await?;
+        if code != 0 {
+            return Err(anyhow::anyhow!("API error: code={}", code));
+        }
+        let session = api::Session::decode(response.as_slice())?;
+        Ok(ApiSession {
+            token: session.token,
+            refresh_token: session.refresh_token,
+            user_id: session.user_id.to_string(),
+        })
+    }
+
+    /// Register email.
+    pub async fn registration_email(
+        &self,
+        req: api::RegistrationEmailRequest,
+    ) -> Result<ApiSession> {
+        let cid = self.generate_cid();
+        let body = req.encode_to_vec();
+        let (code, response) = self
+            .send_api_request(cid, "RegistrationEmail", body)
+            .await?;
+        if code != 0 {
+            return Err(anyhow::anyhow!("API error: code={}", code));
+        }
+        let session = api::Session::decode(response.as_slice())?;
+        Ok(ApiSession {
+            token: session.token,
+            refresh_token: session.refresh_token,
+            user_id: session.user_id.to_string(),
+        })
+    }
+
+    /// Link email.
+    pub async fn link_email(&self, req: api::AccountEmail) -> Result<ApiSession> {
+        let cid = self.generate_cid();
+        let body = req.encode_to_vec();
+        let (code, response) = self.send_api_request(cid, "LinkEmail", body).await?;
+        if code != 0 {
+            return Err(anyhow::anyhow!("API error: code={}", code));
+        }
+        let session = api::Session::decode(response.as_slice())?;
+        Ok(ApiSession {
+            token: session.token,
+            refresh_token: session.refresh_token,
+            user_id: session.user_id.to_string(),
+        })
+    }
+
+    /// Unlink email.
+    pub async fn unlink_email(&self, req: api::AccountEmail) -> Result<()> {
+        let cid = self.generate_cid();
+        let body = req.encode_to_vec();
+        let (code, _) = self.send_api_request(cid, "UnlinkEmail", body).await?;
+        if code != 0 {
+            return Err(anyhow::anyhow!("API error: code={}", code));
+        }
+        Ok(())
+    }
+
+    /// Link SMS.
+    pub async fn link_sms(&self, req: api::AccountMezon) -> Result<ApiSession> {
+        let cid = self.generate_cid();
+        let body = req.encode_to_vec();
+        let (code, response) = self.send_api_request(cid, "LinkSMS", body).await?;
+        if code != 0 {
+            return Err(anyhow::anyhow!("API error: code={}", code));
+        }
+        let session = api::Session::decode(response.as_slice())?;
+        Ok(ApiSession {
+            token: session.token,
+            refresh_token: session.refresh_token,
+            user_id: session.user_id.to_string(),
+        })
+    }
+
+    /// Unlink Mezon (SMS).
+    pub async fn unlink_mezon(&self, req: api::AccountMezon) -> Result<()> {
+        let cid = self.generate_cid();
+        let body = req.encode_to_vec();
+        let (code, _) = self.send_api_request(cid, "UnlinkMezon", body).await?;
+        if code != 0 {
+            return Err(anyhow::anyhow!("API error: code={}", code));
+        }
+        Ok(())
+    }
+
+    /// Confirm link Mezon OTP.
+    pub async fn confirm_link_mezon_otp(
+        &self,
+        req: api::LinkAccountConfirmRequest,
+    ) -> Result<ApiSession> {
+        let cid = self.generate_cid();
+        let body = req.encode_to_vec();
+        let (code, response) = self
+            .send_api_request(cid, "ConfirmLinkMezonOTP", body)
+            .await?;
+        if code != 0 {
+            return Err(anyhow::anyhow!("API error: code={}", code));
+        }
+        let session = api::Session::decode(response.as_slice())?;
+        Ok(ApiSession {
+            token: session.token,
+            refresh_token: session.refresh_token,
+            user_id: session.user_id.to_string(),
+        })
+    }
+
+    /// Multipart upload attachment file start.
+    pub async fn multipart_upload_attachment_file_start(
+        &self,
+        req: api::UploadAttachmentRequest,
+    ) -> Result<api::MultipartUploadAttachment> {
+        let cid = self.generate_cid();
+        let body = req.encode_to_vec();
+        let (code, response) = self
+            .send_api_request(cid, "MultipartUploadAttachmentFileStart", body)
+            .await?;
+        if code != 0 {
+            return Err(anyhow::anyhow!("API error: code={}", code));
+        }
+        Ok(api::MultipartUploadAttachment::decode(response.as_slice())?)
+    }
+
+    /// Multipart upload attachment file finish.
+    pub async fn multipart_upload_attachment_file_finish(
+        &self,
+        req: api::MultipartUploadAttachmentFinishRequest,
+    ) -> Result<api::UploadAttachment> {
+        let cid = self.generate_cid();
+        let body = req.encode_to_vec();
+        let (code, response) = self
+            .send_api_request(cid, "MultipartUploadAttachmentFileFinish", body)
+            .await?;
+        if code != 0 {
+            return Err(anyhow::anyhow!("API error: code={}", code));
+        }
+        Ok(api::UploadAttachment::decode(response.as_slice())?)
+    }
+
+    /// Upload batch attachment file.
+    pub async fn upload_batch_attachment_file(
+        &self,
+        req: api::UploadBatchAttachmentRequest,
+    ) -> Result<api::UploadAttachmentBatch> {
+        let cid = self.generate_cid();
+        let body = req.encode_to_vec();
+        let (code, response) = self
+            .send_api_request(cid, "UploadBatchAttachmentFile", body)
+            .await?;
+        if code != 0 {
+            return Err(anyhow::anyhow!("API error: code={}", code));
+        }
+        Ok(api::UploadAttachmentBatch::decode(response.as_slice())?)
+    }
+
+    /// Delete SD topic.
+    pub async fn delete_sd_topic(&self, req: api::DeleteSdTopicRequest) -> Result<()> {
+        let cid = self.generate_cid();
+        let body = req.encode_to_vec();
+        let (code, _) = self.send_api_request(cid, "DeleteSdTopic", body).await?;
+        if code != 0 {
+            return Err(anyhow::anyhow!("API error: code={}", code));
+        }
         Ok(())
     }
 }
