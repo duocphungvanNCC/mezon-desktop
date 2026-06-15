@@ -108,3 +108,36 @@ fn decode_jwt_claims(token: &str) -> (String, String, u64) {
 
     (user_id, username, expires_at)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_session_is_expired() {
+        // No expiration set (expires_at = 0)
+        let session = Session {
+            expires_at: 0,
+            ..Default::default()
+        };
+        assert!(!session.is_expired());
+
+        // Far future expiration
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let session = Session {
+            expires_at: now + 1000,
+            ..Default::default()
+        };
+        assert!(!session.is_expired());
+
+        // Past expiration
+        let session = Session {
+            expires_at: now - 10,
+            ..Default::default()
+        };
+        assert!(session.is_expired());
+    }
+}

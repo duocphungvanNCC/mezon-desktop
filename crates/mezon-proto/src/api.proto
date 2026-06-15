@@ -1940,6 +1940,14 @@ message UploadAttachmentRequest {
   int32 height = 5;
 }
 
+message UploadBatchAttachmentRequest {
+  repeated UploadAttachmentRequest upload_files = 1;
+}
+
+message UploadAttachmentBatch {
+  repeated UploadAttachment uploaded_files = 1;
+}
+
 message ListMessageMentionRequest {
   // Max number of records to return. Between 1 and 100.
   int32 limit = 1;

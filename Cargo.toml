@@ -9,6 +9,7 @@ members = [
     "crates/mezon-updater",
     "crates/mezon-proto",
     "crates/mezon-i18n",
+    "crates/mezon-active-windows",
     # Vendored GPUI crates
     "crates/vendor/gpui",
     "crates/vendor/gpui_macros",
@@ -52,13 +53,13 @@ todo = "deny"
 
 [workspace.dependencies]
 # ---------- Vendored GPUI internal crates ----------
-gpui               = { path = "crates/vendor/gpui", default-features = false }
+gpui               = { path = "crates/vendor/gpui", default-features = false, features = ["x11", "wayland"] }
 gpui-component     = { path = "crates/vendor/gpui-component/crates/ui", default-features = false }
 gpui-component-macros = { path = "crates/vendor/gpui-component/crates/macros" }
 gpui-component-assets = { path = "crates/vendor/gpui-component/crates/assets" }
 gpui-macros        = { package = "gpui_macros", path = "crates/vendor/gpui_macros" }
 gpui_platform      = { path = "crates/vendor/gpui_platform", default-features = false }
-gpui_linux         = { path = "crates/vendor/gpui_linux", default-features = false }
+gpui_linux         = { path = "crates/vendor/gpui_linux", default-features = false, features = ["x11", "wayland"] }
 gpui_windows       = { path = "crates/vendor/gpui_windows", default-features = false }
 gpui_wgpu          = { path = "crates/vendor/gpui_wgpu", default-features = false }
 gpui_util          = { path = "crates/vendor/gpui_util" }
@@ -87,6 +88,7 @@ mezon-native  = { path = "crates/mezon-native" }
 mezon-proto   = { path = "crates/mezon-proto" }
 mezon-updater = { path = "crates/mezon-updater" }
 mezon-i18n    = { path = "crates/mezon-i18n" }
+mezon-active-windows = { path = "crates/mezon-active-windows" }
 
 # ---------- Async runtime ----------
 tokio                = { version = "1", features = ["full"] }
