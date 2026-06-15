@@ -20,15 +20,16 @@ use serde::{Deserialize, Serialize};
 
 use crate::session::Session;
 
-// ─── Default connection constants ────────────────────────────────────────────
+// ─── Default connection constants (fallback when `.env` is absent) ───────────
+// Override via `.env` — loaded into [`mezon_store::AppConfig`] at startup.
 
-/// Default REST API host (desktop .env: NX_CHAT_APP_API_HOST)
+/// Default REST API host (`NX_CHAT_APP_API_HOST`)
 pub const DEFAULT_API_HOST: &str = "dev-mezon.nccsoft.vn";
-/// Default REST API port (desktop .env: NX_CHAT_APP_API_PORT)
+/// Default REST API port (`NX_CHAT_APP_API_PORT`)
 pub const DEFAULT_API_PORT: u16 = 8088;
-/// Default TLS (desktop .env: NX_CHAT_APP_API_SECURE)
+/// Default TLS (`NX_CHAT_APP_API_SECURE`)
 pub const DEFAULT_API_SECURE: bool = true;
-/// Server key used for Basic auth (desktop .env: NX_CHAT_APP_API_KEY)
+/// Server key for Basic auth (`NX_CHAT_APP_API_KEY`)
 pub const DEFAULT_SERVER_KEY: &str = "defaultkey";
 
 // ─── Wire types ──────────────────────────────────────────────────────────────
@@ -44,6 +45,9 @@ struct ApiSession {
     #[allow(dead_code)]
     #[serde(default)]
     is_remember: bool,
+    /// Socket credential returned after auth (used for WebSocket `token=` query param).
+    #[serde(default)]
+    session_id: Option<String>,
     /// The REST API endpoint this client should use for subsequent calls.
     api_url: Option<String>,
     /// The WebSocket endpoint URL returned by the server after auth.
@@ -225,6 +229,7 @@ impl MezonClient {
         Session {
             token: api.token,
             refresh_token: api.refresh_token,
+            session_id: api.session_id.unwrap_or_default(),
             expires_at,
             api_url: api.api_url,
             api_host,
@@ -336,9 +341,12 @@ fn decode_jwt_claims(token: &str) -> (String, String, u64) {
 
     let user_id = json
         .get("uid")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_owned();
+        .and_then(|v| {
+            v.as_str()
+                .map(str::to_owned)
+                .or_else(|| v.as_u64().map(|n| n.to_string()))
+        })
+        .unwrap_or_default();
     let username = json
         .get("usn")
         .and_then(|v| v.as_str())
