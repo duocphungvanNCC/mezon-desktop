@@ -1,15 +1,19 @@
 use anyhow::Result;
 use gpui::{App, AppContext, AsyncApp, Bounds, Entity, WindowBounds, WindowOptions, px, size};
 use gpui_platform::application;
-use mezon_client::{AppApi, MezonClient, TransportClient, keychain};
+use mezon_client::{
+    AppApi, ConnectionStatus, MezonClient, RealtimeEvent, TransportClient, keychain,
+};
 use mezon_native::instance::SingleInstance;
-use mezon_store::{AuthState, Settings};
+use mezon_store::{AppConfig, AuthState, Settings};
 use mezon_ui::{RootView, init as init_ui, title_bar::TitleBar};
 use std::borrow::Cow;
 use std::sync::Arc;
 use tracing_subscriber::{EnvFilter, fmt};
 
 fn main() -> Result<()> {
+    load_dotenv();
+
     fmt()
         .with_env_filter(
             EnvFilter::try_from_default_env()
@@ -41,6 +45,15 @@ fn main() -> Result<()> {
     Ok(())
 }
 
+/// Load `.env` from the current working directory or workspace root.
+fn load_dotenv() {
+    if dotenvy::dotenv().is_ok() {
+        return;
+    }
+    let workspace_env = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.env");
+    let _ = dotenvy::from_path(workspace_env);
+}
+
 fn run_app(lock: SingleInstance, initial_url: Option<String>) {
     // Build a multi-threaded tokio runtime that lives for the entire process.
     let rt = tokio::runtime::Builder::new_multi_thread()
@@ -59,10 +72,24 @@ fn run_app(lock: SingleInstance, initial_url: Option<String>) {
     );
 
     // ── Determine initial auth state from keychain ────────────────────────────
-    let client = Arc::new(MezonClient::default());
+    let app_config = Arc::new(AppConfig::from_env());
+    tracing::debug!(
+        "App config: rest={}:{} secure={} (gw host; api_host={})",
+        app_config.client_host(),
+        app_config.client_port(),
+        app_config.api_secure,
+        app_config.api_host,
+    );
+    let client = MezonClient::new(
+        app_config.client_host(),
+        app_config.client_port(),
+        app_config.api_secure,
+        &app_config.api_key,
+    );
+    let client = Arc::new(client);
     let transport = Arc::new(TransportClient::new(String::new()));
     let api = Arc::new(AppApi::new(transport.clone()));
-    let initial_auth_state = resolve_initial_auth_state(&rt, &client);
+    let initial_auth_state = resolve_initial_auth_state();
 
     // Sync login-item with settings.
     mezon_native::autostart::sync_auto_start(settings.auto_start);
@@ -180,8 +207,9 @@ fn run_app(lock: SingleInstance, initial_url: Option<String>) {
                 .detach();
             }
 
-            // Background refresh task: wake every 60s, refresh if session is near expiry.
-            spawn_refresh_task(cx, auth_state_handle.clone(), client.clone());
+            // Session refresh is server-pushed over the socket (`refresh_session_event`);
+            // consume it and update the stored session (mezon-js `onrefreshsession`).
+            spawn_session_refresh_consumer(cx, auth_state_handle.clone(), api.clone());
             spawn_transport_task(
                 cx,
                 auth_state_handle.clone(),
@@ -196,68 +224,75 @@ fn run_app(lock: SingleInstance, initial_url: Option<String>) {
         });
 }
 
-/// Keep the shared TCP transport connected for authenticated UI API calls.
+/// Keep the shared abridged TCP transport connected for authenticated UI API calls.
 fn spawn_transport_task(
     cx: &mut App,
     auth_state: Entity<AuthState>,
     transport: Arc<TransportClient>,
     api: Arc<AppApi>,
 ) {
+    // Wake signal that drives reconciliation — fired on auth-state changes and on socket
+    // disconnect. Replaces the old 500ms poll (cf. Zed's reactive `client.status()` loop).
+    let wake = std::sync::Arc::new(tokio::sync::Notify::new());
+    cx.observe(&auth_state, {
+        let wake = wake.clone();
+        move |_, _| wake.notify_one()
+    })
+    .detach();
+
     cx.spawn(async move |cx: &mut AsyncApp| {
         let exec = cx.background_executor().clone();
         let mut connected_token: Option<String> = None;
+        let mut retry_backoff_secs = 1u64;
 
         loop {
-            exec.timer(std::time::Duration::from_millis(500)).await;
-
-            let session = match cx.update(|cx| auth_state.read(cx).clone()) {
-                AuthState::Connecting(session) | AuthState::Authenticated(session) => Some(session),
+            let session = cx.update(|cx| match auth_state.read(cx).clone() {
+                AuthState::Connecting(s) | AuthState::Authenticated(s) => Some(s),
                 _ => None,
-            };
+            });
 
             let Some(session) = session else {
-                if connected_token.take().is_some()
-                    && let Err(e) = transport.close().await
-                {
-                    tracing::warn!("Failed to close TCP transport after logout: {e}");
+                if connected_token.take().is_some() {
+                    if let Err(e) = transport.close().await {
+                        tracing::warn!("Failed to close TCP transport after logout: {e}");
+                    }
+                    api.set_status(ConnectionStatus::Disconnected);
                 }
+                retry_backoff_secs = 1;
+                wake.notified().await;
                 continue;
             };
 
-            if connected_token.as_deref() == Some(session.token.as_str())
+            // Already connected with the right credential — park until something changes.
+            if connected_token.as_deref() == Some(session.ws_credential())
                 && transport.is_open().await
             {
+                retry_backoff_secs = 1;
+                wake.notified().await;
                 continue;
             }
 
-            let Some(host) = session.tcp_host.clone() else {
-                tracing::warn!("Authenticated session missing tcp_host; TCP APIs unavailable");
-                cx.update(|cx| {
-                    auth_state.update(cx, |state, cx| {
-                        if matches!(state, AuthState::Connecting(_)) {
-                            *state = AuthState::NotAuthenticated;
-                            cx.notify();
-                        }
-                    });
-                });
-                continue;
-            };
-            // let Some(port) = session.tcp_port else {
-            //     tracing::warn!("Authenticated session missing tcp_port; TCP APIs unavailable");
-            //     continue;
-            // };
-            let port = 4433;
+            let host = session
+                .tcp_host
+                .clone()
+                .or(session.ws_host.clone())
+                .unwrap_or_else(|| mezon_client::DEFAULT_WS_HOST.to_string());
+            let port = resolve_tcp_port(&session);
 
             if transport.is_open().await
                 && let Err(e) = transport.close().await
             {
-                tracing::warn!("Failed to close stale TCP transport: {e}");
+                tracing::warn!("Failed to close stale transport: {e}");
             }
 
-            tracing::info!("Connecting shared TCP transport to {host}:{port}");
-            let token = session.token.clone();
+            tracing::info!("Connecting shared abridged TCP transport to {host}:{port}");
+            api.set_status(ConnectionStatus::Connecting);
+            // Socket credential: prefer the durable `session_id` (matches mezon-js), not the JWT.
+            let token = session.ws_credential().to_string();
             let session_for_update = session.clone();
             let api_for_publish = api.clone();
+            let api_for_close = api.clone();
+            let wake_for_close = wake.clone();
             match transport
                 .connect(
                     &host,
@@ -272,17 +307,22 @@ fn spawn_transport_task(
                         } else {
                             tracing::warn!("TCP transport closed with error");
                         }
+                        // Reactive reconnect: flag disconnected + wake the manager loop.
+                        api_for_close.set_status(ConnectionStatus::Disconnected);
+                        wake_for_close.notify_one();
                     },
                 )
                 .await
             {
                 Ok(()) => {
-                    tracing::info!("Shared TCP transport connected");
+                    tracing::info!("Shared abridged TCP transport connected");
 
                     exec.timer(std::time::Duration::from_millis(250)).await;
                     match api.get_account().await {
                         Ok(account) => {
                             connected_token = Some(token);
+                            retry_backoff_secs = 1;
+                            api.set_status(ConnectionStatus::Connected);
                             tracing::info!("get_account over shared TCP succeeded");
                             tracing::info!("  User ID: {}", account.user_id);
                             tracing::info!("  Username: {}", account.username);
@@ -301,13 +341,25 @@ fn spawn_transport_task(
                         Err(e) => {
                             tracing::error!("get_account over shared TCP failed: {e}");
                             let _ = transport.close().await;
+                            connected_token = None;
+                            api.set_status(ConnectionStatus::Disconnected);
+                            retry_backoff_secs = (retry_backoff_secs * 2).min(60);
+                            promote_connecting_to_authenticated(
+                                &auth_state,
+                                session_for_update,
+                                cx,
+                            );
+                            backoff_wait(&exec, &wake, retry_backoff_secs).await;
                         }
                     }
                 }
                 Err(e) => {
                     connected_token = None;
-                    tracing::error!("Shared TCP transport connect failed: {e}");
-                    exec.timer(std::time::Duration::from_secs(3)).await;
+                    api.set_status(ConnectionStatus::Disconnected);
+                    retry_backoff_secs = (retry_backoff_secs * 2).min(60);
+                    tracing::error!("Shared abridged TCP transport connect failed: {e}");
+                    promote_connecting_to_authenticated(&auth_state, session_for_update, cx);
+                    backoff_wait(&exec, &wake, retry_backoff_secs).await;
                 }
             }
         }
@@ -315,100 +367,104 @@ fn spawn_transport_task(
     .detach();
 }
 
-/// Attempt to restore a valid session from the OS keychain.
+/// Wait out a reconnect backoff, but wake early if auth/connection state changes.
+async fn backoff_wait(exec: &gpui::BackgroundExecutor, wake: &tokio::sync::Notify, secs: u64) {
+    tokio::select! {
+        _ = wake.notified() => {}
+        _ = exec.timer(std::time::Duration::from_secs(secs)) => {}
+    }
+}
+
+/// Leave the loading screen if transport setup fails — user can retry from the app shell.
+fn promote_connecting_to_authenticated(
+    auth_state: &Entity<AuthState>,
+    session: mezon_client::Session,
+    cx: &mut AsyncApp,
+) {
+    cx.update(|cx| {
+        auth_state.update(cx, |state, cx| {
+            if matches!(state, AuthState::Connecting(_)) {
+                *state = AuthState::Authenticated(session);
+                cx.notify();
+            }
+        });
+    });
+}
+
+/// Resolve abridged TCP port — session field, env override, then heuristics.
+fn resolve_tcp_port(session: &mezon_client::Session) -> u16 {
+    if let Some(port) = session.tcp_port {
+        return port;
+    }
+    if let Some(port) = session.ws_port {
+        return port;
+    }
+    if let Ok(v) = std::env::var("NX_CHAT_APP_TCP_PORT")
+        && let Ok(port) = v.parse()
+    {
+        return port;
+    }
+    match session.tcp_host.as_deref().or(session.ws_host.as_deref()) {
+        Some(h) if h.contains("dev-mezon") || h.contains("nccsoft.vn") => 7349,
+        _ => 4433,
+    }
+}
+
+/// Restore a stored session from the OS keychain.
 ///
-/// - Valid + not expired → `Connecting` (TCP transport not yet established)
-/// - Valid + expired     → try silent refresh → `Connecting` on success, else `NotAuthenticated`
-/// - Nothing stored      → `NotAuthenticated`
-fn resolve_initial_auth_state(rt: &tokio::runtime::Runtime, client: &MezonClient) -> AuthState {
+/// - Stored session → `Connecting` (the socket validates it; the server pushes a fresh token
+///   via `refresh_session_event`, so an expired JWT is fine — `session_id` is the durable cred)
+/// - Nothing stored → `NotAuthenticated`
+///
+/// Note: we no longer REST-refresh on startup. That endpoint (`/v2/account/session/refresh`)
+/// was removed server-side (it 404s); refresh is now socket-driven (see
+/// [`spawn_session_refresh_consumer`]).
+fn resolve_initial_auth_state() -> AuthState {
     match keychain::load_session() {
         None => {
             tracing::info!("No stored session — showing login");
             AuthState::NotAuthenticated
         }
-        Some(session) if !mezon_client::Session::is_expired(&session) => {
-            tracing::info!("Restored valid session for user_id={}", session.user_id);
-            AuthState::Connecting(session)
-        }
         Some(session) => {
-            tracing::info!("Stored session expired — attempting silent refresh");
-            match rt.block_on(client.refresh_session(&session.refresh_token, false)) {
-                Ok(new_session) => {
-                    tracing::info!(
-                        "Silent refresh succeeded for user_id={}",
-                        new_session.user_id
-                    );
-                    if let Err(e) = keychain::save_session(&new_session) {
-                        tracing::warn!("Failed to update keychain after refresh: {e}");
-                    }
-                    AuthState::Connecting(new_session)
-                }
-                Err(e) => {
-                    tracing::warn!("Silent refresh failed: {e} — showing login");
-                    let _ = keychain::clear_session();
-                    AuthState::NotAuthenticated
-                }
-            }
+            tracing::info!(
+                "Restored stored session for user_id={} — connecting",
+                session.user_id
+            );
+            AuthState::Connecting(session)
         }
     }
 }
 
-/// Spawn a background task that refreshes the session ~60 seconds before it expires.
-fn spawn_refresh_task(cx: &mut App, auth_state: Entity<AuthState>, client: Arc<MezonClient>) {
+/// Consume server-pushed `refresh_session_event`s from the socket and update the stored
+/// session in place — the native equivalent of mezon-js `client.onrefreshsession`.
+///
+/// Replaces the old 60s REST-polling refresh task: the server now decides when to refresh
+/// and pushes the new token/session_id over the realtime socket.
+fn spawn_session_refresh_consumer(cx: &mut App, auth_state: Entity<AuthState>, api: Arc<AppApi>) {
     cx.spawn(async move |cx: &mut AsyncApp| {
-        let exec = cx.background_executor().clone();
+        let mut rx = api.subscribe();
         loop {
-            // Check every 60 seconds.
-            exec.timer(std::time::Duration::from_secs(60)).await;
-
-            // Read current session.
-            let session_opt = {
-                let state = cx.update(|cx| auth_state.read(cx).clone());
-                match state {
-                    AuthState::Authenticated(session) => Some(session),
-                    _ => None,
-                }
-            };
-
-            let Some(session) = session_opt else { continue };
-
-            // Refresh if within 5 minutes of expiry.
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs();
-
-            let should_refresh =
-                session.expires_at > 0 && session.expires_at.saturating_sub(now) < 300;
-
-            if !should_refresh {
-                continue;
-            }
-
-            tracing::info!("Session nearing expiry — refreshing");
-            match client.refresh_session(&session.refresh_token, false).await {
-                Ok(new_session) => {
-                    tracing::info!("Session refreshed for user_id={}", new_session.user_id);
-                    if let Err(e) = keychain::save_session(&new_session) {
-                        tracing::warn!("Failed to save refreshed session to keychain: {e}");
-                    }
+            match rx.recv().await {
+                Ok(RealtimeEvent::SessionRefreshed(ev)) => {
+                    tracing::info!("Session refreshed over socket for user_id={}", ev.user_id);
                     cx.update(|cx| {
-                        auth_state.update(cx, |state, cx| {
-                            *state = AuthState::Authenticated(new_session);
-                            cx.notify();
+                        auth_state.update(cx, |state, cx| match state {
+                            AuthState::Authenticated(session) | AuthState::Connecting(session) => {
+                                session.apply_refresh(&ev.token, &ev.refresh_token, &ev.session_id);
+                                if let Err(e) = keychain::save_session(session) {
+                                    tracing::warn!("Failed to persist refreshed session: {e}");
+                                }
+                                cx.notify();
+                            }
+                            _ => {}
                         });
                     });
                 }
-                Err(e) => {
-                    tracing::warn!("Session refresh failed: {e} — logging out");
-                    let _ = keychain::clear_session();
-                    cx.update(|cx| {
-                        auth_state.update(cx, |state, cx| {
-                            *state = AuthState::NotAuthenticated;
-                            cx.notify();
-                        });
-                    });
+                Ok(_) => {}
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                    tracing::warn!("Session refresh consumer lagged by {n} events");
                 }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
             }
         }
     })
@@ -456,6 +512,12 @@ fn open_main_window(
         *auth_out_clone.lock().unwrap() = Some(auth_state.clone());
 
         let title_bar = cx.new(|cx| TitleBar::new("Mezon", settings_entity.clone(), cx));
+
+        // Register the domain stores as globals before any view reads them.
+        // Order matters: ChannelList subscribes to ClanList's events.
+        mezon_store::ClanList::init(api.clone(), cx);
+        mezon_store::ChannelList::init(api.clone(), cx);
+
         let view = cx.new(|cx| {
             RootView::new(
                 title_bar,

@@ -75,7 +75,7 @@ impl TransportClient {
         on_event: impl Fn(crate::transport::RealtimeEvent) + Send + Sync + 'static,
         on_disconnected: impl Fn(bool) + Send + Sync + 'static,
     ) -> Result<()> {
-        tracing::info!("🚀 TransportClient::connect() starting");
+        tracing::info!("TransportClient::connect() starting");
         tracing::debug!("  Spawning connection task on dedicated transport runtime...");
 
         let transport = self.inner.clone();
@@ -84,17 +84,15 @@ impl TransportClient {
 
         runtime()
             .spawn(async move {
-                tracing::debug!(
-                    "🔧 Inside transport runtime, calling MezonTransport::connect()..."
-                );
+                tracing::debug!("Inside transport runtime, calling MezonTransport::connect()...");
                 let result = transport
                     .connect(&host, port, &token, on_event, on_disconnected)
                     .await;
 
                 match &result {
-                    Ok(_) => tracing::debug!("✓ MezonTransport::connect() succeeded in runtime"),
+                    Ok(_) => tracing::debug!("MezonTransport::connect() succeeded in runtime"),
                     Err(e) => {
-                        tracing::error!("✗ MezonTransport::connect() failed in runtime: {}", e)
+                        tracing::error!("MezonTransport::connect() failed in runtime: {}", e)
                     }
                 }
 
@@ -103,7 +101,7 @@ impl TransportClient {
             .await
             .expect("Transport task panicked")?;
 
-        tracing::info!("✅ TransportClient::connect() completed");
+        tracing::info!("TransportClient::connect() completed");
         Ok(())
     }
 
@@ -111,7 +109,7 @@ impl TransportClient {
     ///
     /// Spawns the API call on the dedicated transport runtime.
     pub async fn get_account(&self) -> Result<crate::transport::ApiAccount> {
-        tracing::info!("📞 TransportClient::get_account() called");
+        tracing::info!("TransportClient::get_account() called");
 
         let transport = self.inner.clone();
 
@@ -133,7 +131,7 @@ impl TransportClient {
         &self,
         clan_id: &str,
     ) -> Result<Vec<crate::transport::ApiChannelDesc>> {
-        tracing::info!("📞 TransportClient::list_channel_descs() called");
+        tracing::info!("TransportClient::list_channel_descs() called");
 
         let transport = self.inner.clone();
         let clan_id = clan_id.to_string();
@@ -146,7 +144,7 @@ impl TransportClient {
 
     /// List channels for the current user over the shared transport.
     pub async fn list_channel_by_user_id(&self) -> Result<Vec<crate::transport::ApiChannelDesc>> {
-        tracing::info!("📞 TransportClient::list_channel_by_user_id() called");
+        tracing::info!("TransportClient::list_channel_by_user_id() called");
 
         let transport = self.inner.clone();
 
@@ -158,7 +156,7 @@ impl TransportClient {
 
     /// List clan descriptions over the shared transport.
     pub async fn list_clan_descs(&self) -> Result<Vec<crate::transport::ApiClanDesc>> {
-        tracing::info!("📞 TransportClient::list_clan_descs() called");
+        tracing::info!("TransportClient::list_clan_descs() called");
 
         let transport = self.inner.clone();
 
@@ -175,7 +173,7 @@ impl TransportClient {
         logo: &str,
         banner: &str,
     ) -> Result<crate::transport::ApiClanDesc> {
-        tracing::info!("📞 TransportClient::create_clan_desc() called");
+        tracing::info!("TransportClient::create_clan_desc() called");
 
         let transport = self.inner.clone();
         let clan_name = clan_name.to_string();
@@ -190,7 +188,7 @@ impl TransportClient {
 
     /// Ping server and wait for pong.
     pub async fn ping_roundtrip(&self) -> Result<()> {
-        tracing::info!("🏓 TransportClient::ping_roundtrip() called");
+        tracing::info!("TransportClient::ping_roundtrip() called");
 
         let transport = self.inner.clone();
 
@@ -227,11 +225,32 @@ impl TransportClient {
     }
 
     /// Send a message to a channel.
+    pub async fn join_chat(
+        &self,
+        clan_id: &str,
+        channel_id: &str,
+        channel_type: i32,
+        is_public: bool,
+    ) -> Result<()> {
+        let transport = self.inner.clone();
+        let clan_id = clan_id.to_string();
+        let channel_id = channel_id.to_string();
+        runtime()
+            .spawn(async move {
+                transport
+                    .join_chat(&clan_id, &channel_id, channel_type, is_public)
+                    .await
+            })
+            .await
+            .expect("Transport task panicked")
+    }
+
     pub async fn send_channel_message(
         &self,
         clan_id: &str,
         channel_id: &str,
         content: &str,
+        is_public: bool,
     ) -> Result<crate::transport::ApiMessage> {
         let transport = self.inner.clone();
         let clan_id = clan_id.to_string();
@@ -241,7 +260,7 @@ impl TransportClient {
         runtime()
             .spawn(async move {
                 transport
-                    .send_channel_message(&clan_id, &channel_id, &content)
+                    .send_channel_message(&clan_id, &channel_id, &content, is_public)
                     .await
             })
             .await
@@ -291,7 +310,7 @@ impl TransportClient {
         avatar_url: Option<&str>,
         about_me: Option<&str>,
     ) -> Result<()> {
-        tracing::info!("📞 TransportClient::update_account() called");
+        tracing::info!("TransportClient::update_account() called");
 
         let transport = self.inner.clone();
         let display_name = display_name.map(str::to_string);

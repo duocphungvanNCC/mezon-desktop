@@ -21,18 +21,30 @@ fn sanitize_filename(name: &str) -> String {
         .collect()
 }
 
+/// Connection lifecycle of the realtime transport — the analog of Zed's `client::Status`.
+/// Exposed as a `watch` stream via [`AppApi::status`] so stores/UI react instead of polling.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConnectionStatus {
+    Disconnected,
+    Connecting,
+    Connected,
+}
+
 #[derive(Clone)]
 pub struct AppApi {
     transport: Arc<TransportClient>,
     realtime_tx: Arc<tokio::sync::broadcast::Sender<RealtimeEvent>>,
+    status_tx: Arc<tokio::sync::watch::Sender<ConnectionStatus>>,
 }
 
 impl AppApi {
     pub fn new(transport: Arc<TransportClient>) -> Self {
         let (realtime_tx, _) = tokio::sync::broadcast::channel(256);
+        let (status_tx, _) = tokio::sync::watch::channel(ConnectionStatus::Disconnected);
         Self {
             transport,
             realtime_tx: Arc::new(realtime_tx),
+            status_tx: Arc::new(status_tx),
         }
     }
 
@@ -42,6 +54,21 @@ impl AppApi {
 
     pub fn publish_event(&self, event: RealtimeEvent) {
         let _ = self.realtime_tx.send(event);
+    }
+
+    /// Watch the realtime connection status (cf. Zed `Client::status`). Reactive — no polling.
+    pub fn status(&self) -> tokio::sync::watch::Receiver<ConnectionStatus> {
+        self.status_tx.subscribe()
+    }
+
+    /// Current connection status snapshot.
+    pub fn connection_status(&self) -> ConnectionStatus {
+        *self.status_tx.borrow()
+    }
+
+    /// Update the connection status — called by the transport connection manager.
+    pub fn set_status(&self, status: ConnectionStatus) {
+        let _ = self.status_tx.send(status);
     }
 
     pub async fn get_account(&self) -> Result<ApiAccount> {
@@ -90,14 +117,27 @@ impl AppApi {
             .await
     }
 
+    pub async fn join_chat(
+        &self,
+        clan_id: &str,
+        channel_id: &str,
+        channel_type: i32,
+        is_public: bool,
+    ) -> Result<()> {
+        self.transport
+            .join_chat(clan_id, channel_id, channel_type, is_public)
+            .await
+    }
+
     pub async fn send_channel_message(
         &self,
         clan_id: &str,
         channel_id: &str,
         content: &str,
+        is_public: bool,
     ) -> Result<ApiMessage> {
         self.transport
-            .send_channel_message(clan_id, channel_id, content)
+            .send_channel_message(clan_id, channel_id, content, is_public)
             .await
     }
 
