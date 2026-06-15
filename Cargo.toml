@@ -107,7 +107,6 @@ postage              = { version = "0.5", features = ["futures-traits"] }
 
 # ---------- Networking ----------
 reqwest             = { git = "https://github.com/zed-industries/reqwest.git", rev = "c15662463bda39148ba154100dd44d3fba5873a4", default-features = false, features = ["charset", "http2", "macos-system-configuration", "multipart", "rustls-tls-native-roots", "socks", "stream"], package = "zed-reqwest", version = "0.12.15-zed" }
-tokio-tungstenite   = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
 http                = "1.0"
 http-body           = "1.0"
 serde_urlencoded    = "0.7"

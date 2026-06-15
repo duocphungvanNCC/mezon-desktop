@@ -54,7 +54,7 @@ impl OtpInput {
                                     });
                                 }
 
-                                if (next >= this.digit_count || this.all_filled(cx))
+                                if this.all_filled(cx)
                                     && let Some(ref cb) = this.on_complete
                                 {
                                     let code: String = this

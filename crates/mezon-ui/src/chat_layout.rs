@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
-use gpui::{App, Context, Entity, Window, div, prelude::*, px};
+use gpui::{Context, Entity, Window, div, prelude::*, px};
 use mezon_client::AppApi;
-use mezon_store::{AuthState, Category, Channel, ChannelList, Clan, ClanList, Message, Settings};
+use mezon_store::{AuthState, ChannelList, ClanList, Message, Settings};
 
 use crate::chat_area::ChatArea;
 use crate::components::compositions::user_info_bar::UserInfoBar;
@@ -10,121 +10,17 @@ use crate::router::{Route, Router};
 use crate::theme::{Theme, resolve_theme};
 use crate::{ChannelSidebar, ClanSidebar};
 
-/// Group flat channels into categories by `category_name`.
-/// Channels with an empty `category_name` are placed into a "General" category.
-fn group_channels_by_category(channels: Vec<Channel>) -> Vec<Category> {
-    let mut map: std::collections::HashMap<String, Vec<Channel>> = std::collections::HashMap::new();
-
-    for ch in channels {
-        let cat_name = if ch.category_name.is_empty() {
-            "General".to_string()
-        } else {
-            ch.category_name.clone()
-        };
-        map.entry(cat_name).or_default().push(ch);
-    }
-
-    let mut categories: Vec<Category> = map
-        .into_iter()
-        .map(|(name, chs)| {
-            let clan_id = chs.first().map(|ch| ch.clan_id.clone()).unwrap_or_default();
-            Category {
-                clan_id,
-                name,
-                channels: chs,
-            }
-        })
-        .collect();
-
-    categories.sort_by(|a, b| a.name.cmp(&b.name));
-    categories
-}
-
-fn spawn_clan_list_fetcher(api: Arc<AppApi>, clan_list: Entity<ClanList>, cx: &mut App) {
-    cx.spawn(async move |cx| {
-        tracing::info!("Fetching clan list...");
-        match api.list_clan_descs().await {
-            Ok(clans) => {
-                tracing::info!("Fetched {} clans", clans.len());
-                if !clans.is_empty() {
-                    let store_clans: Vec<Clan> = clans.into_iter().map(Clan::from).collect();
-                    clan_list.update(cx, |model, cx| {
-                        model.update_clans(store_clans);
-                        cx.notify();
-                    });
-                    tracing::info!("Updated ClanList with real data");
-                }
-            }
-            Err(e) => {
-                tracing::error!("Failed to fetch clan list: {}", e);
-            }
-        }
-    })
-    .detach();
-}
-
-fn spawn_channel_list_fetcher(
-    api: Arc<AppApi>,
-    clan_list: Entity<ClanList>,
-    channel_list: Entity<ChannelList>,
-    cx: &mut App,
-) {
-    cx.spawn(async move |cx| {
-        let mut last_clan_id: Option<String> = None;
-        let mut error_count: u32 = 0;
-        const MAX_CONSECUTIVE_ERRORS: u32 = 5;
-        loop {
-            let current_clan_id: Option<String> =
-                cx.update(|app| clan_list.read(app).active_clan_id.clone());
-            if current_clan_id.is_some() && current_clan_id != last_clan_id {
-                if let Some(ref clan_id) = current_clan_id {
-                    match api.list_channel_by_user_id().await {
-                        Ok(api_channels) => {
-                            error_count = 0;
-                            let clan_channels: Vec<Channel> = api_channels
-                                .into_iter()
-                                .filter(|c| c.clan_id == *clan_id)
-                                .map(Channel::from)
-                                .collect();
-                            let categories = group_channels_by_category(clan_channels);
-                            channel_list.update(cx, |list, cx| {
-                                list.categories = categories;
-                                cx.notify();
-                            });
-                        }
-                        Err(e) => {
-                            tracing::error!("Failed to fetch channels: {}", e);
-                            error_count += 1;
-                            if error_count >= MAX_CONSECUTIVE_ERRORS {
-                                tracing::error!(
-                                    "Too many consecutive channel fetch failures, stopping watcher"
-                                );
-                                break;
-                            }
-                        }
-                    }
-                }
-                last_clan_id = current_clan_id;
-            }
-            cx.background_executor()
-                .timer(std::time::Duration::from_millis(500))
-                .await;
-        }
-    })
-    .detach();
-}
-
 pub struct ChatLayout {
     router: Router,
     settings: Entity<Settings>,
-    channel_list: Entity<ChannelList>,
+    pub(crate) channel_list: Entity<ChannelList>,
     pub chat_area: ChatArea,
     clan_sidebar: Entity<ClanSidebar>,
     channel_sidebar: Entity<ChannelSidebar>,
     user_info_bar: UserInfoBar,
-    /// Guard: spawn data fetchers only on the first render call.
-    fetchers_spawned: bool,
-    api: Arc<AppApi>,
+    /// Guard: kick off the initial clan load only once, on first render.
+    loaded: bool,
+    pub(crate) api: Arc<AppApi>,
     clan_list: Entity<ClanList>,
     auth_state: Entity<AuthState>,
     last_fetched_channel_id: Option<String>,
@@ -140,9 +36,9 @@ impl ChatLayout {
         settings: Entity<Settings>,
         cx: &mut Context<Self>,
     ) -> Self {
-        let _ = cx.observe(&settings, |_, _, cx| cx.notify());
+        cx.observe(&settings, |_, _, cx| cx.notify()).detach();
 
-        let channel_list = cx.new(|_| ChannelList::new());
+        let channel_list = ChannelList::global(cx);
 
         let on_navigate: Option<crate::components::NavigateFn> = {
             let nav = navigate.clone();
@@ -174,9 +70,81 @@ impl ChatLayout {
 
         let user_info_bar = UserInfoBar::new(auth_state.clone(), on_settings);
 
-        let _ = cx.observe(&auth_state, |_, _, cx| cx.notify());
-        let _ = cx.observe(&channel_list, |_, _, cx| cx.notify());
-        let _ = cx.observe(&clan_list, |_, _, cx| cx.notify());
+        // Channel loading is driven by ChannelList's own subscription to ClanList events
+        // (store-to-store, Zed-style). These observes just keep the shell repainting.
+        cx.observe(&auth_state, |_, _, cx| cx.notify()).detach();
+        cx.observe(&channel_list, |_, _, cx| cx.notify()).detach();
+        cx.observe(&clan_list, |_, _, cx| cx.notify()).detach();
+
+        {
+            let api = api.clone();
+            cx.spawn(async move |this, cx| {
+                let mut rx = api.subscribe();
+                loop {
+                    match rx.recv().await {
+                        Ok(mezon_client::RealtimeEvent::ChannelMessage(m)) => {
+                            let channel_id = m.channel_id.to_string();
+                            tracing::info!("onchannelmessage: channel_id={channel_id}");
+                            let api_msg = mezon_client::MezonTransport::message_from_proto(m);
+                            let result = this.update(cx, |this, cx| {
+                                let active = this.channel_list.read(cx).active_channel_id.clone();
+                                if active.as_deref() != Some(channel_id.as_str()) {
+                                    tracing::info!(
+                                        "skip — not the open channel (active={active:?})"
+                                    );
+                                    return;
+                                }
+                                let msg = Message::new(
+                                    api_msg.message_id,
+                                    api_msg.content,
+                                    api_msg.sender_id,
+                                    api_msg.sender_name,
+                                    api_msg.create_time,
+                                );
+                                let msgs = &mut this.chat_area.messages;
+                                if msgs.iter().any(|x| x.id == msg.id) {
+                                    tracing::info!(
+                                        "skip duplicate id={} sender_name={}",
+                                        msg.id,
+                                        msg.sender_name
+                                    );
+                                    return;
+                                }
+                                if let Some(slot) = msgs.iter_mut().find(|x| {
+                                    x.id.starts_with("temp-")
+                                        && x.sender_id == msg.sender_id
+                                        && x.content == msg.content
+                                }) {
+                                    tracing::info!(
+                                        "reconciled temp -> id={} sender_name={}",
+                                        msg.id,
+                                        msg.sender_name
+                                    );
+                                    *slot = msg;
+                                } else {
+                                    tracing::info!(
+                                        "appended id={} sender_id={} sender_name={}",
+                                        msg.id,
+                                        msg.sender_id,
+                                        msg.sender_name
+                                    );
+                                    msgs.push(msg);
+                                }
+                                msgs.sort_by_key(|m| m.create_time);
+                                cx.notify();
+                            });
+                            if result.is_err() {
+                                break; // view dropped
+                            }
+                        }
+                        Ok(_) => {}
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                    }
+                }
+            })
+            .detach();
+        }
 
         Self {
             router,
@@ -186,7 +154,7 @@ impl ChatLayout {
             clan_sidebar,
             channel_sidebar,
             user_info_bar,
-            fetchers_spawned: false,
+            loaded: false,
             api,
             clan_list,
             auth_state,
@@ -199,15 +167,9 @@ impl Render for ChatLayout {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = resolve_theme(&self.settings.read(cx).theme);
 
-        if !self.fetchers_spawned {
-            self.fetchers_spawned = true;
-            spawn_clan_list_fetcher(self.api.clone(), self.clan_list.clone(), cx);
-            spawn_channel_list_fetcher(
-                self.api.clone(),
-                self.clan_list.clone(),
-                self.channel_list.clone(),
-                cx,
-            );
+        if !self.loaded {
+            self.loaded = true;
+            self.clan_list.update(cx, |clans, cx| clans.reload(cx));
         }
 
         let active_ch = self.channel_list.read(cx).active_channel().cloned();
@@ -218,6 +180,24 @@ impl Render for ChatLayout {
                 let api = self.api.clone();
                 let ch_id = ch.id.clone();
                 let cl_id = ch.clan_id.clone();
+                let is_public = !ch.private;
+                {
+                    let api = api.clone();
+                    let cl_id = cl_id.clone();
+                    let ch_id = ch_id.clone();
+                    cx.spawn(
+                        async move |_t: gpui::WeakEntity<Self>, _c: &mut gpui::AsyncApp| {
+                            const CHANNEL_TYPE_CHANNEL: i32 = 1;
+                            if let Err(e) = api
+                                .join_chat(&cl_id, &ch_id, CHANNEL_TYPE_CHANNEL, is_public)
+                                .await
+                            {
+                                tracing::warn!("join_chat failed: {e}");
+                            }
+                        },
+                    )
+                    .detach();
+                }
                 cx.spawn(
                     async move |this: gpui::WeakEntity<Self>, cx: &mut gpui::AsyncApp| match api
                         .list_channel_messages(&cl_id, &ch_id, 20)
@@ -300,9 +280,11 @@ impl ChatLayout {
     fn render_content(&self, cx: &Context<Self>) -> gpui::AnyElement {
         let theme = resolve_theme(&self.settings.read(cx).theme);
 
-        let session_user_id = match self.auth_state.read(cx) {
-            AuthState::Authenticated(session) => session.user_id.clone(),
-            _ => String::new(),
+        let (session_user_id, session_user_name) = match self.auth_state.read(cx) {
+            AuthState::Authenticated(session) => {
+                (session.user_id.clone(), session.username.clone())
+            }
+            _ => (String::new(), String::new()),
         };
 
         // Use channel_list.active_channel_id to detect channel selection instead
@@ -312,7 +294,13 @@ impl ChatLayout {
         if let Some(ch) = channels.active_channel() {
             return self
                 .chat_area
-                .render(&theme, cx.entity(), &ch.name, &session_user_id)
+                .render(
+                    &theme,
+                    cx.entity(),
+                    &ch.name,
+                    &session_user_id,
+                    &session_user_name,
+                )
                 .into_any_element();
         }
 
