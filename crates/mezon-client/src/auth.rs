@@ -356,3 +356,51 @@ fn decode_jwt_claims(token: &str) -> (String, String, u64) {
 
     (user_id, username, expires_at)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_endpoint() {
+        assert_eq!(parse_endpoint(None), (None, None, None));
+
+        let (host, port, secure) = parse_endpoint(Some("https://example.com:8443"));
+        assert_eq!(host, Some("example.com".to_string()));
+        assert_eq!(port, Some(8443));
+        assert_eq!(secure, Some(true));
+
+        let (host, port, secure) = parse_endpoint(Some("https://example.com"));
+        assert_eq!(host, Some("example.com".to_string()));
+        assert_eq!(port, None);
+        assert_eq!(secure, Some(true));
+
+        let (host, port, secure) = parse_endpoint(Some("http://127.0.0.1:8080"));
+        assert_eq!(host, Some("127.0.0.1".to_string()));
+        assert_eq!(port, Some(8080));
+        assert_eq!(secure, Some(false));
+
+        let (host, port, secure) = parse_endpoint(Some("example.com:9000"));
+        assert_eq!(host, Some("example.com".to_string()));
+        assert_eq!(port, Some(9000));
+        assert_eq!(secure, Some(false));
+    }
+
+    #[test]
+    fn test_decode_jwt_claims() {
+        // Base64Url-encoded payload: {"uid":"user123","usn":"testuser","exp":1700000000}
+        // payload = eyJ1aWQiOiJ1c2VyMTIzIiwidXNuIjoidGVzdHVzZXIiLCJleHAiOjE3MDAwMDAwMDB9
+        let token =
+            "header.eyJ1aWQiOiJ1c2VyMTIzIiwidXNuIjoidGVzdHVzZXIiLCJleHAiOjE3MDAwMDAwMDB9.signature";
+        let (user_id, username, expires_at) = decode_jwt_claims(token);
+        assert_eq!(user_id, "user123");
+        assert_eq!(username, "testuser");
+        assert_eq!(expires_at, 1700000000);
+
+        // Fallbacks on invalid token
+        let (user_id, username, expires_at) = decode_jwt_claims("invalid_token");
+        assert_eq!(user_id, "");
+        assert_eq!(username, "");
+        assert_eq!(expires_at, 0);
+    }
+}
