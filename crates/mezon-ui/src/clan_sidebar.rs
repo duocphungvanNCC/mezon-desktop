@@ -13,8 +13,7 @@ fn on_clan_click(
 ) -> impl Fn(&ClickEvent, &mut Window, &mut App) {
     move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
         clan_list.update(cx, |m, cx| {
-            m.select_clan(&clan_id);
-            cx.notify();
+            m.select_clan(&clan_id, cx);
         });
     }
 }
