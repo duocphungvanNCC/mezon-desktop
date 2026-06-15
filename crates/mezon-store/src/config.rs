@@ -1,0 +1,339 @@
+//! Runtime configuration loaded from environment variables (typically via `.env`).
+//!
+//! Variable names match the legacy Electron desktop app (`NX_*` prefix) for parity.
+//! Values are read at startup and are not persisted to `settings.json`.
+
+/// Application configuration from environment variables.
+#[derive(Debug, Clone)]
+pub struct AppConfig {
+    // ── REST API (bootstrap, pre-auth) ──────────────────────────────────────
+    pub api_host: String,
+    pub api_port: u16,
+    pub api_secure: bool,
+    pub api_key: String,
+    pub api_gw_host: String,
+    pub api_gw_port: u16,
+
+    // ── WebSocket / streaming ─────────────────────────────────────────────────
+    pub stream_ws_url: String,
+    pub meet_ws_url: String,
+    pub notification_ws_url: String,
+
+    // ── OAuth2 ────────────────────────────────────────────────────────────────
+    pub oauth2_authorize_url: String,
+    pub oauth2_client_id: String,
+    pub oauth2_redirect_uri: String,
+    pub oauth2_response_type: String,
+    pub oauth2_scope: String,
+    pub oauth2_code_challenge_method: String,
+    pub oauth2_log_out: String,
+    pub oauth2_log_out_callback: String,
+    pub google_client_id: String,
+
+    // ── CDN / media ───────────────────────────────────────────────────────────
+    pub domain_url: String,
+    pub redirect_uri: String,
+    pub logo_mezon: String,
+    pub base_img_url: String,
+    pub profile_img_url: String,
+    pub imgproxy_base_url: String,
+    pub imgproxy_key: String,
+
+    // ── Tenor (GIF search) ────────────────────────────────────────────────────
+    pub tenor_key: String,
+    pub tenor_url_categories: String,
+    pub tenor_url_search: String,
+    pub tenor_url_featured: String,
+
+    // ── Treasury / blockchain ─────────────────────────────────────────────────
+    pub mezon_treasury_url: String,
+    pub mezon_treasury_key: String,
+    pub contract_address: String,
+    pub mezon_treasury_url_network: String,
+
+    // ── WebRTC (voice/video) ──────────────────────────────────────────────────
+    pub webrtc_ice_servers_url: String,
+    pub webrtc_ice_servers_username: String,
+    pub webrtc_ice_servers_credential: String,
+
+    // ── Firebase / FCM ────────────────────────────────────────────────────────
+    pub fcm_api_key: String,
+    pub fcm_auth_domain: String,
+    pub fcm_project_id: String,
+    pub fcm_storage_bucket: String,
+    pub fcm_messaging_sender_id: String,
+    pub fcm_app_id: String,
+    pub fcm_measurement_id: String,
+    pub fcm_vapid_key: String,
+
+    // ── Misc ──────────────────────────────────────────────────────────────────
+    pub api_client_key_custom: String,
+    pub sentry_dsn: String,
+    pub anonymous_user_id: String,
+    pub max_length_name_allowed: u32,
+    pub update_url: String,
+}
+
+impl Default for AppConfig {
+    fn default() -> Self {
+        Self::dev_defaults()
+    }
+}
+
+impl AppConfig {
+    /// Development defaults (matches pre-env hardcoded values).
+    pub fn dev_defaults() -> Self {
+        Self {
+            api_host: "dev-mezon.nccsoft.vn".into(),
+            api_port: 8088,
+            api_secure: true,
+            api_key: "defaultkey".into(),
+            api_gw_host: "dev-mezon.nccsoft.vn".into(),
+            api_gw_port: 8088,
+
+            stream_ws_url: "wss://stn.nccsoft.vn".into(),
+            meet_ws_url: "wss://meet.nccsoft.vn".into(),
+            notification_ws_url: "wss://gotify.mezon.ai".into(),
+
+            oauth2_authorize_url: "https://oauth2.mezon.ai/oauth2/auth".into(),
+            oauth2_client_id: "f049f29e-12a9-464c-938f-0a2f60c3210b".into(),
+            oauth2_redirect_uri: "https://dev-mezon.nccsoft.vn/login/callback".into(),
+            oauth2_response_type: "code".into(),
+            oauth2_scope: "openid+offline".into(),
+            oauth2_code_challenge_method: "S256".into(),
+            oauth2_log_out: "https://oauth2.mezon.ai/oauth2/sessions/logout".into(),
+            oauth2_log_out_callback: "https://mezon.ai/logout/callback".into(),
+            google_client_id:
+                "391688022389-1k9kb377ea6dccpqii7m5pifjj0agsjc.apps.googleusercontent.com".into(),
+
+            domain_url: "https://mezon.ai".into(),
+            redirect_uri: "https://mezon.ai".into(),
+            logo_mezon: "https://cdn.mezon.ai/images/mezon_logo.png".into(),
+            base_img_url: "https://cdn.mezon.ai".into(),
+            profile_img_url: "https://profile.mezon.ai".into(),
+            imgproxy_base_url: "https://dev-imgproxy.nccsoft.vn".into(),
+            imgproxy_key: String::new(),
+
+            tenor_key: String::new(),
+            tenor_url_categories: "https://tenor.googleapis.com/v2/categories?key=".into(),
+            tenor_url_search: "https://tenor.googleapis.com/v2/search?q=".into(),
+            tenor_url_featured: "https://tenor.googleapis.com/v2/featured?key=".into(),
+
+            mezon_treasury_url: "https://withdraw-api.nccsoft.vn".into(),
+            mezon_treasury_key: String::new(),
+            contract_address: String::new(),
+            mezon_treasury_url_network: "https://polygonscan.com".into(),
+
+            webrtc_ice_servers_url: "turn:relay.mezon.vn:5349".into(),
+            webrtc_ice_servers_username: "turnmezon".into(),
+            webrtc_ice_servers_credential: String::new(),
+
+            fcm_api_key: String::new(),
+            fcm_auth_domain: "mezon-772fa.firebaseapp.com".into(),
+            fcm_project_id: "mezon-772fa".into(),
+            fcm_storage_bucket: "mezon-772fa.appspot.com".into(),
+            fcm_messaging_sender_id: "285548761692".into(),
+            fcm_app_id: String::new(),
+            fcm_measurement_id: String::new(),
+            fcm_vapid_key: String::new(),
+
+            api_client_key_custom: "mezon.ai".into(),
+            sentry_dsn: String::new(),
+            anonymous_user_id: String::new(),
+            max_length_name_allowed: 64,
+            update_url: "https://cdn.mezon.ai/release/".into(),
+        }
+    }
+
+    /// Load configuration from environment variables, falling back to [`dev_defaults`].
+    pub fn from_env() -> Self {
+        let defaults = Self::dev_defaults();
+        Self {
+            api_host: get_str(&["NX_CHAT_APP_API_HOST"], &defaults.api_host),
+            api_port: get_u16(&["NX_CHAT_APP_API_PORT"], defaults.api_port),
+            api_secure: get_bool(&["NX_CHAT_APP_API_SECURE"], defaults.api_secure),
+            api_key: get_str(&["NX_CHAT_APP_API_KEY"], &defaults.api_key),
+            api_gw_host: get_str(&["NX_CHAT_APP_API_GW_HOST"], &defaults.api_gw_host),
+            api_gw_port: get_u16(&["NX_CHAT_APP_API_GW_PORT"], defaults.api_gw_port),
+
+            stream_ws_url: get_str(&["NX_CHAT_APP_STREAM_WS_URL"], &defaults.stream_ws_url),
+            meet_ws_url: get_str(&["NX_CHAT_APP_MEET_WS_URL"], &defaults.meet_ws_url),
+            notification_ws_url: get_str(
+                &["NX_CHAT_APP_NOTIFICATION_WS_URL"],
+                &defaults.notification_ws_url,
+            ),
+
+            oauth2_authorize_url: get_str(
+                &["NX_CHAT_APP_OAUTH2_AUTHORIZE_URL"],
+                &defaults.oauth2_authorize_url,
+            ),
+            oauth2_client_id: get_str(
+                &["NX_CHAT_APP_OAUTH2_CLIENT_ID"],
+                &defaults.oauth2_client_id,
+            ),
+            oauth2_redirect_uri: get_str(
+                &["NX_CHAT_APP_OAUTH2_REDIRECT_URI"],
+                &defaults.oauth2_redirect_uri,
+            ),
+            oauth2_response_type: get_str(
+                &["NX_CHAT_APP_OAUTH2_RESPONSE_TYPE"],
+                &defaults.oauth2_response_type,
+            ),
+            oauth2_scope: get_str(&["NX_CHAT_APP_OAUTH2_SCOPE"], &defaults.oauth2_scope),
+            oauth2_code_challenge_method: get_str(
+                &["NX_CHAT_APP_OAUTH2_CODE_CHALLENGE_METHOD"],
+                &defaults.oauth2_code_challenge_method,
+            ),
+            oauth2_log_out: get_str(&["NX_CHAT_APP_OAUTH2_LOG_OUT"], &defaults.oauth2_log_out),
+            oauth2_log_out_callback: get_str(
+                &["NX_CHAT_APP_OAUTH2_LOG_OUT_CALLBACK"],
+                &defaults.oauth2_log_out_callback,
+            ),
+            google_client_id: get_str(
+                &["NX_CHAT_APP_GOOGLE_CLIENT_ID"],
+                &defaults.google_client_id,
+            ),
+
+            domain_url: get_str(&["NX_DOMAIN_URL"], &defaults.domain_url),
+            redirect_uri: get_str(&["NX_CHAT_APP_REDIRECT_URI"], &defaults.redirect_uri),
+            logo_mezon: get_str(&["NX_LOGO_MEZON"], &defaults.logo_mezon),
+            base_img_url: get_str(&["NX_BASE_IMG_URL"], &defaults.base_img_url),
+            profile_img_url: get_str(&["NX_PROFILE_IMG_URL"], &defaults.profile_img_url),
+            imgproxy_base_url: get_str(&["NX_IMGPROXY_BASE_URL"], &defaults.imgproxy_base_url),
+            imgproxy_key: get_str(&["NX_IMGPROXY_KEY"], &defaults.imgproxy_key),
+
+            tenor_key: get_str(&["NX_CHAT_APP_API_TENOR_KEY"], &defaults.tenor_key),
+            tenor_url_categories: get_str(
+                &["NX_CHAT_APP_API_TENOR_URL_CATEGORIES"],
+                &defaults.tenor_url_categories,
+            ),
+            tenor_url_search: get_str(
+                &["NX_CHAT_APP_API_TENOR_URL_SEARCH"],
+                &defaults.tenor_url_search,
+            ),
+            tenor_url_featured: get_str(
+                &["NX_CHAT_APP_API_TENOR_URL_FEATURED"],
+                &defaults.tenor_url_featured,
+            ),
+
+            mezon_treasury_url: get_str(
+                &["NX_CHAT_APP_MEZON_TREASURY_URL"],
+                &defaults.mezon_treasury_url,
+            ),
+            mezon_treasury_key: get_str(
+                &["NX_CHAT_APP_API_MEZONTREASURY_KEY"],
+                &defaults.mezon_treasury_key,
+            ),
+            contract_address: get_str(
+                &["NX_CHAT_APP_CONTRACT_ADDRESS"],
+                &defaults.contract_address,
+            ),
+            mezon_treasury_url_network: get_str(
+                &["NX_CHAT_APP_MEZON_TREASURY_URL_NETWORK"],
+                &defaults.mezon_treasury_url_network,
+            ),
+
+            webrtc_ice_servers_url: get_str(
+                &["NX_WEBRTC_ICESERVERS_URL"],
+                &defaults.webrtc_ice_servers_url,
+            ),
+            webrtc_ice_servers_username: get_str(
+                &["NX_WEBRTC_ICESERVERS_USERNAME"],
+                &defaults.webrtc_ice_servers_username,
+            ),
+            webrtc_ice_servers_credential: get_str(
+                &["NX_WEBRTC_ICESERVERS_CREDENTIAL"],
+                &defaults.webrtc_ice_servers_credential,
+            ),
+
+            fcm_api_key: get_str(&["NX_CHAT_APP_FCM_API_KEY"], &defaults.fcm_api_key),
+            fcm_auth_domain: get_str(&["NX_CHAT_APP_FCM_AUTH_DOMAIN"], &defaults.fcm_auth_domain),
+            fcm_project_id: get_str(&["NX_CHAT_APP_FCM_PROJECT_ID"], &defaults.fcm_project_id),
+            fcm_storage_bucket: get_str(
+                &["NX_CHAT_APP_FCM_STORAGE_BUCKET"],
+                &defaults.fcm_storage_bucket,
+            ),
+            fcm_messaging_sender_id: get_str(
+                &["NX_CHAT_APP_FCM_MESSAGING_SENDER_ID"],
+                &defaults.fcm_messaging_sender_id,
+            ),
+            fcm_app_id: get_str(&["NX_CHAT_APP_FCM_APP_ID"], &defaults.fcm_app_id),
+            fcm_measurement_id: get_str(
+                &["NX_CHAT_APP_FCM_MEASUREMENT_ID"],
+                &defaults.fcm_measurement_id,
+            ),
+            fcm_vapid_key: get_str(&["NX_CHAT_APP_FCM_VAPID_KEY"], &defaults.fcm_vapid_key),
+
+            api_client_key_custom: get_str(
+                &["NX_CHAT_APP_API_CLIENT_KEY_CUSTOM"],
+                &defaults.api_client_key_custom,
+            ),
+            sentry_dsn: get_str(&["NX_CHAT_SENTRY_DNS"], &defaults.sentry_dsn),
+            anonymous_user_id: get_str(
+                &["NX_CHAT_APP_ANNONYMOUS_USER_ID"],
+                &defaults.anonymous_user_id,
+            ),
+            max_length_name_allowed: get_u32(
+                &["NX_MAX_LENGTH_NAME_ALLOWED"],
+                defaults.max_length_name_allowed,
+            ),
+            update_url: get_str(&["NX_UPDATE_URL"], &defaults.update_url),
+        }
+    }
+
+    /// REST client bootstrap host — mirrors `getMezonConfig()` in the web app
+    /// (`NX_CHAT_APP_API_GW_HOST`, not `NX_CHAT_APP_API_HOST`).
+    pub fn client_host(&self) -> &str {
+        &self.api_gw_host
+    }
+
+    /// REST client bootstrap port — mirrors `getMezonConfig()` in the web app.
+    pub fn client_port(&self) -> u16 {
+        self.api_gw_port
+    }
+}
+
+fn env_var(names: &[&str]) -> Option<String> {
+    names
+        .iter()
+        .find_map(|name| std::env::var(name).ok().map(|v| v.trim().to_owned()))
+        .filter(|v| !v.is_empty())
+}
+
+fn get_str(names: &[&str], default: &str) -> String {
+    env_var(names).unwrap_or_else(|| default.to_owned())
+}
+
+fn get_u16(names: &[&str], default: u16) -> u16 {
+    env_var(names)
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(default)
+}
+
+fn get_u32(names: &[&str], default: u32) -> u32 {
+    env_var(names)
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(default)
+}
+
+fn get_bool(names: &[&str], default: bool) -> bool {
+    env_var(names)
+        .map(|v| matches!(v.to_ascii_lowercase().as_str(), "true" | "1" | "yes"))
+        .unwrap_or(default)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dev_defaults_match_legacy_constants() {
+        let cfg = AppConfig::dev_defaults();
+        assert_eq!(cfg.api_host, "dev-mezon.nccsoft.vn");
+        assert_eq!(cfg.api_port, 8088);
+        assert!(cfg.api_secure);
+        assert_eq!(cfg.api_key, "defaultkey");
+        assert_eq!(cfg.client_host(), "dev-mezon.nccsoft.vn");
+        assert_eq!(cfg.client_port(), 8088);
+    }
+}

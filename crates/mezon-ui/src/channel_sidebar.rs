@@ -13,9 +13,7 @@ fn on_channel_click(
 ) -> impl Fn(&ClickEvent, &mut Window, &mut App) {
     move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
         channel_list.update(cx, |m, cx| {
-            m.select_channel(&channel_id);
-            m.mark_read(&channel_id);
-            cx.notify();
+            m.select_channel(&channel_id, cx);
         });
         if let Some(ref cb) = on_navigate
             && let Some(ref cid) = clan_id

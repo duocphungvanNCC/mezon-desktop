@@ -168,6 +168,10 @@ impl LoginView {
 
     /// Called when the user has filled all 6 OTP digits.
     fn handle_confirm_otp(entity: &Entity<LoginView>, otp_code: String, cx: &mut App) {
+        if entity.read(cx).loading {
+            return;
+        }
+
         let req_id = entity.read(cx).otp_req_id.clone();
 
         entity.update(cx, |this, cx| {
@@ -260,7 +264,7 @@ impl LoginView {
             tracing::warn!("Failed to save session to keychain: {e}");
         }
 
-        tracing::info!("✓ Authentication successful");
+        tracing::info!("Authentication successful");
         tracing::info!("  User ID: {}", session.user_id);
         tracing::info!("  Username: {}", session.username);
         tracing::info!("  WS URL: {:?}", session.ws_url);
