@@ -48,6 +48,9 @@ pub enum RealtimeEvent {
     ClanDeleted(realtime::ClanDeletedEvent),
     AddFriend(realtime::AddFriend),
     RemoveFriend(realtime::RemoveFriend),
+    /// Server-pushed session refresh over the socket (`refresh_session_event`, field 96).
+    /// The native equivalent of mezon-js `client.onrefreshsession`.
+    SessionRefreshed(api::Session),
     Unhandled(realtime::envelope::Message),
 }
 
@@ -71,16 +74,44 @@ impl TryFrom<realtime::envelope::Message> for RealtimeEvent {
             realtime::envelope::Message::VoiceJoinedEvent(m) => Ok(Self::VoiceJoined(m)),
             realtime::envelope::Message::VoiceLeavedEvent(m) => Ok(Self::VoiceLeaved(m)),
             realtime::envelope::Message::UserChannelAddedEvent(m) => Ok(Self::UserChannelAdded(m)),
-            realtime::envelope::Message::UserChannelRemovedEvent(m) => Ok(Self::UserChannelRemoved(m)),
+            realtime::envelope::Message::UserChannelRemovedEvent(m) => {
+                Ok(Self::UserChannelRemoved(m))
+            }
             realtime::envelope::Message::AddClanUserEvent(m) => Ok(Self::AddClanUser(m)),
             realtime::envelope::Message::UserClanRemovedEvent(m) => Ok(Self::UserClanRemoved(m)),
             realtime::envelope::Message::ClanUpdatedEvent(m) => Ok(Self::ClanUpdated(m)),
-            realtime::envelope::Message::ClanProfileUpdatedEvent(m) => Ok(Self::ClanProfileUpdated(m)),
+            realtime::envelope::Message::ClanProfileUpdatedEvent(m) => {
+                Ok(Self::ClanProfileUpdated(m))
+            }
             realtime::envelope::Message::ClanDeletedEvent(m) => Ok(Self::ClanDeleted(m)),
             realtime::envelope::Message::AddFriend(m) => Ok(Self::AddFriend(m)),
             realtime::envelope::Message::RemoveFriend(m) => Ok(Self::RemoveFriend(m)),
+            realtime::envelope::Message::RefreshSessionEvent(s) => Ok(Self::SessionRefreshed(s)),
             other => Ok(Self::Unhandled(other)),
         }
+    }
+}
+
+fn dispatch_realtime_push(
+    cid: u16,
+    payload: &[u8],
+    on_event: &(dyn Fn(RealtimeEvent) + Send + Sync),
+) {
+    match realtime::Envelope::decode(payload) {
+        Ok(envelope) => match envelope.message {
+            Some(msg) => {
+                tracing::info!("server push (cid={cid}) -> publishing realtime event");
+                if let Ok(event) = RealtimeEvent::try_from(msg) {
+                    on_event(event);
+                }
+            }
+            None => tracing::warn!("server push (cid={cid}): envelope has no message"),
+        },
+        Err(e) => tracing::warn!(
+            "server push (cid={cid}) decode failed (len={}): {e} — FULL HEX: {:02x?}",
+            payload.len(),
+            payload
+        ),
     }
 }
 
@@ -134,7 +165,7 @@ impl MezonTransport {
         on_event: impl Fn(RealtimeEvent) + Send + Sync + 'static,
         on_disconnected: impl Fn(bool) + Send + Sync + 'static,
     ) -> Result<()> {
-        tracing::info!("🌐 MezonTransport::connect() starting");
+        tracing::info!("MezonTransport::connect() starting");
         tracing::debug!("  Host: {}, Port: {}", host, port);
         tracing::debug!("  Token: {}...", &token[..token.len().min(20)]);
 
@@ -145,40 +176,24 @@ impl MezonTransport {
         // Set up message handler
         tracing::debug!("Setting up message handler...");
         let pending_requests = self.pending_requests.clone();
-        let verbose = self.verbose;
+        let on_event: Arc<dyn Fn(RealtimeEvent) + Send + Sync> = Arc::new(on_event);
         adapter.set_on_message(Arc::new(move |cid, code, message| {
-            if verbose {
-                tracing::debug!(
-                    "📨 Incoming message: cid={}, code={}, len={}",
-                    cid,
-                    code,
-                    message.len()
-                );
-            }
+            tracing::info!("on_message: cid={cid} code={code} len={}", message.len());
 
             if cid != 0 {
-                // Response to a request
-                tracing::trace!("  Response for request cid={}", cid);
                 let pending = pending_requests.clone();
+                let on_event = on_event.clone();
                 tokio::spawn(async move {
-                    let mut pending_guard = pending.write().await;
-                    if let Some(executor) = pending_guard.remove(&cid) {
-                        tracing::trace!("  Resolving promise for cid={}", cid);
-                        let _ = executor.sender.send((code, message));
-                    } else if verbose {
-                        tracing::warn!("⚠️  No pending request for cid={}", cid);
+                    let executor = pending.write().await.remove(&cid);
+                    match executor {
+                        Some(executor) => {
+                            let _ = executor.sender.send((code, message));
+                        }
+                        None => dispatch_realtime_push(cid, &message, on_event.as_ref()),
                     }
                 });
             } else {
-                // Server-initiated message
-                tracing::debug!("  Server-initiated message");
-                if let Ok(envelope) = realtime::Envelope::decode(message.as_slice()) {
-                    if let Some(msg) = envelope.message {
-                        if let Ok(event) = RealtimeEvent::try_from(msg) {
-                            on_event(event);
-                        }
-                    }
-                }
+                dispatch_realtime_push(cid, &message, on_event.as_ref());
             }
         }));
         tracing::debug!("  Message handler set");
@@ -189,14 +204,14 @@ impl MezonTransport {
         tracing::debug!("  Close handler set");
 
         // Connect
-        tracing::info!("🔌 Calling adapter.connect()...");
+        tracing::info!("Calling adapter.connect()...");
         tracing::debug!("Host: {}, Port: {}, Token: {}...", host, port, token);
         adapter
             .connect(host, port, token)
             .await
             .with_context(|| format!("Failed to connect adapter to {host}:{port}"))?;
 
-        tracing::info!("✅ MezonTransport::connect() completed successfully");
+        tracing::info!("MezonTransport::connect() completed successfully");
         Ok(())
     }
 
@@ -245,7 +260,7 @@ impl MezonTransport {
     /// Send a ping and wait for matching pong.
     pub async fn ping_roundtrip(&self) -> Result<()> {
         let cid = self.generate_cid();
-        tracing::info!("🏓 MezonTransport::ping_roundtrip() cid={}", cid);
+        tracing::info!("MezonTransport::ping_roundtrip() cid={}", cid);
 
         let (tx, rx) = oneshot::channel();
         {
@@ -259,7 +274,7 @@ impl MezonTransport {
 
         {
             let mut adapter = self.adapter.lock().await;
-            tracing::info!("🏓 Sending ping cid={}", cid);
+            tracing::info!("Sending ping cid={}", cid);
             adapter.send_ping(cid).await?;
         }
 
@@ -267,7 +282,7 @@ impl MezonTransport {
             .await
             .map_err(|_| {
                 tracing::error!(
-                    "✗ Ping timed out after {} ms",
+                    "Ping timed out after {} ms",
                     self.send_timeout_ms.as_millis()
                 );
                 let pending = self.pending_requests.clone();
@@ -278,7 +293,7 @@ impl MezonTransport {
             })?
             .map_err(|_| anyhow::anyhow!("Ping response channel closed"))?;
 
-        tracing::info!("🏓 Pong received for cid={}", cid);
+        tracing::info!("Pong received for cid={}", cid);
         Ok(())
     }
 }
@@ -403,23 +418,35 @@ impl MezonTransport {
         }
     }
 
-    fn message_from_proto(message: api::ChannelMessage) -> ApiMessage {
+    pub fn message_from_proto(message: api::ChannelMessage) -> ApiMessage {
         let content = serde_json::from_str::<serde_json::Value>(&message.content)
             .ok()
             .and_then(|v| v.get("t").and_then(|t| t.as_str().map(|s| s.to_string())))
-            .unwrap_or(message.content);
+            .unwrap_or_else(|| message.content.clone());
+
+        let sender_name = if !message.clan_nick.is_empty() {
+            message.clan_nick.clone()
+        } else if !message.display_name.is_empty() {
+            message.display_name.clone()
+        } else {
+            message.username.clone()
+        };
+
+        tracing::info!(
+            "message_from_proto: id={} sender_id={} clan_nick={:?} display_name={:?} username={:?} -> sender_name={:?}",
+            message.message_id,
+            message.sender_id,
+            message.clan_nick,
+            message.display_name,
+            message.username,
+            sender_name
+        );
 
         ApiMessage {
             message_id: message.message_id.to_string(),
             content,
             sender_id: message.sender_id.to_string(),
-            sender_name: if !message.clan_nick.is_empty() {
-                message.clan_nick
-            } else if !message.display_name.is_empty() {
-                message.display_name
-            } else {
-                message.username
-            },
+            sender_name,
             create_time: i64::from(message.create_time_seconds),
         }
     }
@@ -647,7 +674,7 @@ impl MezonTransport {
 
     /// Get the current user's account.
     pub async fn get_account(&self) -> Result<ApiAccount> {
-        tracing::info!("📞 MezonTransport::get_account() called");
+        tracing::info!("MezonTransport::get_account() called");
 
         let cid = self.generate_cid();
         tracing::debug!("  Generated CID: {}", cid);
@@ -670,13 +697,13 @@ impl MezonTransport {
         match send_result {
             Ok((code, response)) => {
                 tracing::info!(
-                    "✓ Received response: code={}, len={} bytes",
+                    "Received response: code={}, len={} bytes",
                     code,
                     response.len()
                 );
 
                 if code != 0 {
-                    tracing::error!("✗ API error: code={}", code);
+                    tracing::error!("API error: code={}", code);
                     return Err(anyhow::anyhow!("API error: code={}", code));
                 }
 
@@ -697,11 +724,11 @@ impl MezonTransport {
                     (!account.email.is_empty()).then_some(account.email),
                     account.password_setted,
                 );
-                tracing::info!("✓ Decoded account response: {} bytes", response.len());
+                tracing::info!("Decoded account response: {} bytes", response.len());
                 Ok(account)
             }
             Err(e) => {
-                tracing::error!("✗ self.send() failed: {}", e);
+                tracing::error!("self.send() failed: {}", e);
                 Err(e)
             }
         }
@@ -849,35 +876,64 @@ impl MezonTransport {
     }
 
     /// Send a message to a channel.
+    pub async fn join_chat(
+        &self,
+        clan_id: &str,
+        channel_id: &str,
+        channel_type: i32,
+        is_public: bool,
+    ) -> Result<()> {
+        let cid = self.generate_cid();
+        tracing::info!(
+            "join_chat: clan_id={clan_id} channel_id={channel_id} type={channel_type} is_public={is_public}"
+        );
+        let envelope = realtime::Envelope {
+            cid: i32::from(cid),
+            message: Some(realtime::envelope::Message::ChannelJoin(
+                realtime::ChannelJoin {
+                    clan_id: clan_id.parse().unwrap_or(0),
+                    channel_id: channel_id.parse().unwrap_or(0),
+                    channel_type,
+                    is_public,
+                },
+            )),
+        };
+        let (code, _response) = self.send(cid, envelope.encode_to_vec()).await?;
+        if code != 0 {
+            anyhow::bail!("join_chat error: code={code}");
+        }
+        Ok(())
+    }
+
     pub async fn send_channel_message(
         &self,
         clan_id: &str,
         channel_id: &str,
         content: &str,
+        is_public: bool,
     ) -> Result<ApiMessage> {
         let cid = self.generate_cid();
-
-        let message_id = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos() as i64)
-            .unwrap_or(0);
 
         let api_name = "SendChannelMessage";
         let parsed_clan_id: i64 = clan_id.parse().unwrap_or(0);
         let parsed_channel_id: i64 = channel_id.parse().unwrap_or(0);
         tracing::info!(
-            "send_channel_message: clan_id={} channel_id={} content_len={}",
+            "send_channel_message: clan_id={} channel_id={} is_public={} content_len={}",
             parsed_clan_id,
             parsed_channel_id,
+            is_public,
             content.len()
         );
+        // mezon stores message content as JSON `{ "t": <text> }` (matches mezon-js), not raw text.
+        let content_json = serde_json::json!({ "t": content }).to_string();
+        // No client `id`: the server generates the message Snowflake (mezon-js omits it).
+        // Sending a client-side id made the server reject with code 13 (INTERNAL).
         let body = realtime::ChannelMessageSend {
             clan_id: parsed_clan_id,
             channel_id: parsed_channel_id,
-            content: content.to_string(),
-            id: message_id,
-            mode: 0,
-            code: 0,
+            content: content_json,
+            mode: 2, // ChannelStreamMode::STREAM_MODE_CHANNEL (matches mezon-js writeChatMessage)
+            is_public,
             ..Default::default()
         }
         .encode_to_vec();
@@ -888,8 +944,20 @@ impl MezonTransport {
             return Err(anyhow::anyhow!("API error: code={}", code));
         }
 
-        let message = api::ChannelMessage::decode(response.as_slice())?;
-        Ok(Self::message_from_proto(message))
+        let ack = realtime::ChannelMessageAck::decode(response.as_slice())?;
+        tracing::info!(
+            "send_channel_message ack: message_id={} channel_id={} code={}",
+            ack.message_id,
+            ack.channel_id,
+            ack.code
+        );
+        Ok(ApiMessage {
+            message_id: ack.message_id.to_string(),
+            content: content.to_string(),
+            sender_id: String::new(),
+            sender_name: ack.username,
+            create_time: i64::from(ack.create_time_seconds),
+        })
     }
 
     /// List user's friends.

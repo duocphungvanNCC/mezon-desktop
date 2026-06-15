@@ -6,7 +6,6 @@ edition = "2024"
 [dependencies]
 mezon-proto.workspace = true
 tokio.workspace = true
-tokio-tungstenite.workspace = true
 tokio-rustls = { version = "0.26", features = ["ring"] }
 webpki-roots = "1.0.7"
 http_client.workspace = true

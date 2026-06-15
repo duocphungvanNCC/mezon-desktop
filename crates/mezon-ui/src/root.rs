@@ -56,7 +56,7 @@ impl RootView {
             })
         };
 
-        let clan_list: Entity<ClanList> = cx.new(|_| ClanList::new());
+        let clan_list: Entity<ClanList> = ClanList::global(cx);
 
         let router_for_chat = router.clone();
         let clan_list_for_chat = clan_list.clone();
