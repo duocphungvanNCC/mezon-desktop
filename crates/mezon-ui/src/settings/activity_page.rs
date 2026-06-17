@@ -1,6 +1,6 @@
+use crate::components::primitives::{Label, Switch, h_flex, v_flex};
 use crate::theme::resolve_theme;
 use gpui::{Context, Entity, FontWeight, Window, prelude::*};
-use gpui_component::{h_flex, label::Label, switch::Switch, v_flex};
 use mezon_store::Settings;
 
 pub struct ActivityPage {
@@ -9,7 +9,7 @@ pub struct ActivityPage {
 
 impl ActivityPage {
     pub fn new(settings: Entity<Settings>, cx: &mut Context<Self>) -> Self {
-        let _ = cx.observe(&settings, |_, _, cx| cx.notify());
+        cx.observe(&settings, |_, _, cx| cx.notify()).detach();
         Self { settings }
     }
 }

@@ -1,6 +1,6 @@
+use crate::components::primitives::{Icon, IconName, Label, h_flex, v_flex};
 use crate::theme::Theme;
 use gpui::{Context, Entity, FontWeight, Rgba, Window, div, prelude::*, px};
-use gpui_component::{Icon, IconName, h_flex, label::Label, v_flex};
 use mezon_store::Settings;
 
 pub struct AppearancePage {

@@ -17,6 +17,19 @@ use tokio::sync::{Mutex, RwLock, oneshot};
 const DEFAULT_TIMEOUT_MS: u64 = 7000;
 const DEFAULT_SEND_TIMEOUT_MS: u64 = 10000;
 
+fn parse_id<T>(value: &str) -> Result<T>
+where
+    T: std::str::FromStr + Default,
+    T::Err: std::fmt::Display,
+{
+    if value.is_empty() {
+        return Ok(T::default());
+    }
+    value
+        .parse::<T>()
+        .map_err(|e| anyhow::anyhow!("invalid id {value:?}: {e}"))
+}
+
 /// Promise executor for matching responses to requests.
 struct PromiseExecutor {
     sender: oneshot::Sender<(u32, Vec<u8>)>,
@@ -167,7 +180,6 @@ impl MezonTransport {
     ) -> Result<()> {
         tracing::info!("MezonTransport::connect() starting");
         tracing::debug!("  Host: {}, Port: {}", host, port);
-        tracing::debug!("  Token: {}...", &token[..token.len().min(20)]);
 
         tracing::debug!("Acquiring adapter lock...");
         let mut adapter = self.adapter.lock().await;
@@ -205,7 +217,6 @@ impl MezonTransport {
 
         // Connect
         tracing::info!("Calling adapter.connect()...");
-        tracing::debug!("Host: {}, Port: {}, Token: {}...", host, port, token);
         adapter
             .connect(host, port, token)
             .await
@@ -340,6 +351,43 @@ pub struct ApiClanDesc {
     pub clan_id: String,
     pub clan_name: String,
     pub creator_id: String,
+    pub logo: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ApiAttachment {
+    pub url: String,
+    pub filename: String,
+    pub filetype: String,
+    pub width: i32,
+    pub height: i32,
+}
+
+fn parse_message_attachments(bytes: &[u8]) -> Vec<ApiAttachment> {
+    if bytes.is_empty() {
+        return Vec::new();
+    }
+    match api::MessageAttachmentList::decode(bytes) {
+        Ok(list) => list
+            .attachments
+            .into_iter()
+            .filter(|a| !a.url.is_empty())
+            .map(|a| ApiAttachment {
+                url: a.url,
+                filename: a.filename,
+                filetype: a.filetype,
+                width: a.width,
+                height: a.height,
+            })
+            .collect(),
+        Err(e) => {
+            tracing::warn!(
+                "failed to decode message attachments ({} bytes): {e}",
+                bytes.len()
+            );
+            Vec::new()
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -348,7 +396,9 @@ pub struct ApiMessage {
     pub content: String,
     pub sender_id: String,
     pub sender_name: String,
+    pub avatar: String,
     pub create_time: i64,
+    pub attachments: Vec<ApiAttachment>,
 }
 
 impl MezonTransport {
@@ -415,6 +465,7 @@ impl MezonTransport {
             clan_id: clan.clan_id.to_string(),
             clan_name: clan.clan_name,
             creator_id: clan.creator_id.to_string(),
+            logo: clan.logo,
         }
     }
 
@@ -432,14 +483,17 @@ impl MezonTransport {
             message.username.clone()
         };
 
-        tracing::info!(
-            "message_from_proto: id={} sender_id={} clan_nick={:?} display_name={:?} username={:?} -> sender_name={:?}",
+        let attachments = parse_message_attachments(&message.attachments);
+
+        tracing::debug!(
+            "message_from_proto: id={} sender_name={:?} content={:?} attachments={:?}",
             message.message_id,
-            message.sender_id,
-            message.clan_nick,
-            message.display_name,
-            message.username,
-            sender_name
+            sender_name,
+            content,
+            attachments
+                .iter()
+                .map(|a| format!("{} ({})", a.url, a.filetype))
+                .collect::<Vec<_>>(),
         );
 
         ApiMessage {
@@ -447,7 +501,9 @@ impl MezonTransport {
             content,
             sender_id: message.sender_id.to_string(),
             sender_name,
+            avatar: message.avatar,
             create_time: i64::from(message.create_time_seconds),
+            attachments,
         }
     }
 
@@ -739,7 +795,7 @@ impl MezonTransport {
     pub async fn list_clan_users(&self, clan_id: &str) -> Result<Vec<api::ClanUserList>> {
         let cid = self.generate_cid();
         let body = api::ListClanUsersRequest {
-            clan_id: clan_id.parse().unwrap_or_default(),
+            clan_id: parse_id(clan_id)?,
         }
         .encode_to_vec();
         let (code, response) = self.send_api_request(cid, "ListClanUsers", body).await?;
@@ -756,7 +812,7 @@ impl MezonTransport {
 
         let api_name = "ListChannelDescs";
         let body = api::ListChannelDescsRequest {
-            clan_id: clan_id.parse().unwrap_or_default(),
+            clan_id: parse_id(clan_id)?,
             ..Default::default()
         }
         .encode_to_vec();
@@ -784,7 +840,7 @@ impl MezonTransport {
     ) -> Result<api::RoleListEventResponse> {
         let cid = self.generate_cid();
         let body = api::RoleListEventRequest {
-            clan_id: clan_id.parse().unwrap_or_default(),
+            clan_id: parse_id(clan_id)?,
             limit,
             state: 0,
             cursor: cursor.to_string(),
@@ -824,8 +880,8 @@ impl MezonTransport {
     ) -> Result<api::ChannelUserList> {
         let cid = self.generate_cid();
         let body = api::ListChannelUsersRequest {
-            clan_id: clan_id.parse().unwrap_or_default(),
-            channel_id: channel_id.parse().unwrap_or_default(),
+            clan_id: parse_id(clan_id)?,
+            channel_id: parse_id(channel_id)?,
             ..Default::default()
         }
         .encode_to_vec();
@@ -841,15 +897,19 @@ impl MezonTransport {
         &self,
         clan_id: &str,
         channel_id: &str,
-        _limit: u32,
+        message_id: &str,
+        direction: i32,
+        limit: u32,
     ) -> Result<Vec<ApiMessage>> {
         let cid = self.generate_cid();
 
         let api_name = "ListChannelMessages";
         let body = api::ListChannelMessagesRequest {
-            clan_id: clan_id.parse().unwrap_or_default(),
-            channel_id: channel_id.parse().unwrap_or_default(),
-            limit: _limit as i32,
+            clan_id: parse_id(clan_id)?,
+            channel_id: parse_id(channel_id)?,
+            message_id: parse_id(message_id)?,
+            direction,
+            limit: limit as i32,
             ..Default::default()
         }
         .encode_to_vec();
@@ -957,7 +1017,9 @@ impl MezonTransport {
             content: content.to_string(),
             sender_id: String::new(),
             sender_name: ack.username,
+            avatar: String::new(),
             create_time: i64::from(ack.create_time_seconds),
+            attachments: Vec::new(),
         })
     }
 
@@ -1005,7 +1067,7 @@ impl MezonTransport {
     ) -> Result<api::ListChannelBadgeCountResponse> {
         let cid = self.generate_cid();
         let body = api::ListChannelBadgeCountRequest {
-            clan_id: clan_id.parse().unwrap_or_default(),
+            clan_id: parse_id(clan_id)?,
             limit,
             page,
         }
@@ -1029,7 +1091,7 @@ impl MezonTransport {
     ) -> Result<api::NotificationList> {
         let cid = self.generate_cid();
         let body = api::ListNotificationsRequest {
-            clan_id: clan_id.parse().unwrap_or_default(),
+            clan_id: parse_id(clan_id)?,
             limit,
             ..Default::default()
         }
@@ -1047,7 +1109,7 @@ impl MezonTransport {
     pub async fn get_user_profile_on_clan(&self, clan_id: &str) -> Result<api::ClanProfile> {
         let cid = self.generate_cid();
         let body = api::ClanProfileRequest {
-            clan_id: clan_id.parse().unwrap_or_default(),
+            clan_id: parse_id(clan_id)?,
         }
         .encode_to_vec();
         let (code, response) = self
@@ -1063,7 +1125,7 @@ impl MezonTransport {
     pub async fn list_category_descs(&self, clan_id: &str) -> Result<api::CategoryDescList> {
         let cid = self.generate_cid();
         let body = api::CategoryDesc {
-            clan_id: clan_id.parse().unwrap_or_default(),
+            clan_id: parse_id(clan_id)?,
             ..Default::default()
         }
         .encode_to_vec();
@@ -1080,7 +1142,7 @@ impl MezonTransport {
     pub async fn list_channel_detail(&self, channel_id: &str) -> Result<api::ChannelDescription> {
         let cid = self.generate_cid();
         let body = api::ListChannelDetailRequest {
-            channel_id: channel_id.parse().unwrap_or_default(),
+            channel_id: parse_id(channel_id)?,
         }
         .encode_to_vec();
         let (code, response) = self
@@ -1102,8 +1164,8 @@ impl MezonTransport {
     ) -> Result<api::ChannelDescList> {
         let cid = self.generate_cid();
         let body = api::ListThreadRequest {
-            channel_id: channel_id.parse().unwrap_or_default(),
-            clan_id: clan_id.parse().unwrap_or_default(),
+            channel_id: parse_id(channel_id)?,
+            clan_id: parse_id(clan_id)?,
             limit,
             page,
             ..Default::default()
@@ -1138,7 +1200,7 @@ impl MezonTransport {
         let cid = self.generate_cid();
 
         let body = api::NotificationClan {
-            clan_id: _clan_id.parse().unwrap_or_default(),
+            clan_id: parse_id(_clan_id)?,
         }
         .encode_to_vec();
 
@@ -1157,7 +1219,7 @@ impl MezonTransport {
     pub async fn list_events(&self, clan_id: &str) -> Result<api::EventList> {
         let cid = self.generate_cid();
         let body = api::ListEventsRequest {
-            clan_id: clan_id.parse().unwrap_or_default(),
+            clan_id: parse_id(clan_id)?,
         }
         .encode_to_vec();
         let (code, response) = self.send_api_request(cid, "ListEvents", body).await?;
@@ -1183,7 +1245,7 @@ impl MezonTransport {
     pub async fn list_channel_apps(&self, clan_id: &str) -> Result<api::ListChannelAppsResponse> {
         let cid = self.generate_cid();
         let body = api::ListChannelAppsRequest {
-            clan_id: clan_id.parse().unwrap_or_default(),
+            clan_id: parse_id(clan_id)?,
         }
         .encode_to_vec();
         let (code, response) = self.send_api_request(cid, "ListChannelApps", body).await?;
@@ -1233,7 +1295,7 @@ impl MezonTransport {
     pub async fn get_system_message_by_clan_id(&self, clan_id: &str) -> Result<api::SystemMessage> {
         let cid = self.generate_cid();
         let body = api::GetSystemMessage {
-            clan_id: clan_id.parse().unwrap_or_default(),
+            clan_id: parse_id(clan_id)?,
         }
         .encode_to_vec();
         let (code, response) = self
@@ -1253,8 +1315,8 @@ impl MezonTransport {
     ) -> Result<api::PinMessagesList> {
         let cid = self.generate_cid();
         let body = api::PinMessageRequest {
-            channel_id: channel_id.parse().unwrap_or_default(),
-            clan_id: clan_id.parse().unwrap_or_default(),
+            channel_id: parse_id(channel_id)?,
+            clan_id: parse_id(clan_id)?,
             ..Default::default()
         }
         .encode_to_vec();
@@ -1277,8 +1339,8 @@ impl MezonTransport {
     ) -> Result<api::ListChannelTimelineResponse> {
         let cid = self.generate_cid();
         let body = api::ListChannelTimelineRequest {
-            clan_id: clan_id.parse().unwrap_or_default(),
-            channel_id: channel_id.parse().unwrap_or_default(),
+            clan_id: parse_id(clan_id)?,
+            channel_id: parse_id(channel_id)?,
             year,
             limit,
             ..Default::default()
@@ -1303,8 +1365,8 @@ impl MezonTransport {
     ) -> Result<api::RoleList> {
         let cid = self.generate_cid();
         let body = api::ListPermissionOfUsersRequest {
-            clan_id: clan_id.parse().unwrap_or_default(),
-            channel_id: channel_id.parse().unwrap_or_default(),
+            clan_id: parse_id(clan_id)?,
+            channel_id: parse_id(channel_id)?,
         }
         .encode_to_vec();
         let (code, response) = self
@@ -1336,8 +1398,8 @@ impl MezonTransport {
     ) -> Result<api::UserPermissionInChannelListResponse> {
         let cid = self.generate_cid();
         let body = api::UserPermissionInChannelListRequest {
-            clan_id: clan_id.parse().unwrap_or_default(),
-            channel_id: channel_id.parse().unwrap_or_default(),
+            clan_id: parse_id(clan_id)?,
+            channel_id: parse_id(channel_id)?,
         }
         .encode_to_vec();
         let (code, response) = self
@@ -1372,7 +1434,7 @@ impl MezonTransport {
     ) -> Result<api::ListUserOnlineResponse> {
         let cid = self.generate_cid();
         let body = api::ListUserOnlineRequest {
-            clan_id: clan_id.parse().unwrap_or_default(),
+            clan_id: parse_id(clan_id)?,
             limit,
             page,
         }
@@ -1392,8 +1454,8 @@ impl MezonTransport {
     ) -> Result<api::StreamingChannelUserList> {
         let cid = self.generate_cid();
         let body = api::ListChannelUsersRequest {
-            clan_id: clan_id.parse().unwrap_or_default(),
-            channel_id: channel_id.parse().unwrap_or_default(),
+            clan_id: parse_id(clan_id)?,
+            channel_id: parse_id(channel_id)?,
             ..Default::default()
         }
         .encode_to_vec();
@@ -1415,8 +1477,8 @@ impl MezonTransport {
     ) -> Result<api::QuickMenuAccessList> {
         let cid = self.generate_cid();
         let body = api::ListQuickMenuAccessRequest {
-            bot_id: bot_id.parse().unwrap_or_default(),
-            channel_id: channel_id.parse().unwrap_or_default(),
+            bot_id: parse_id(bot_id)?,
+            channel_id: parse_id(channel_id)?,
             menu_type,
         }
         .encode_to_vec();
@@ -1436,7 +1498,7 @@ impl MezonTransport {
     ) -> Result<api::NotificationUserChannel> {
         let cid = self.generate_cid();
         let body = api::NotificationChannel {
-            channel_id: channel_id.parse().unwrap_or_default(),
+            channel_id: parse_id(channel_id)?,
         }
         .encode_to_vec();
         let (code, response) = self
@@ -1455,7 +1517,7 @@ impl MezonTransport {
     ) -> Result<api::NotificationUserChannel> {
         let cid = self.generate_cid();
         let body = api::DefaultNotificationCategory {
-            category_id: category_id.parse().unwrap_or_default(),
+            category_id: parse_id(category_id)?,
         }
         .encode_to_vec();
         let (code, response) = self
@@ -1471,7 +1533,7 @@ impl MezonTransport {
     pub async fn list_clan_users_status(&self, clan_id: &str) -> Result<api::ClanUserStatusList> {
         let cid = self.generate_cid();
         let body = api::ListClanUsersStatusRequest {
-            clan_id: clan_id.parse().unwrap_or_default(),
+            clan_id: parse_id(clan_id)?,
         }
         .encode_to_vec();
         let (code, response) = self
@@ -1490,7 +1552,7 @@ impl MezonTransport {
     ) -> Result<api::ListFavoriteChannelResponse> {
         let cid = self.generate_cid();
         let body = api::ListFavoriteChannelRequest {
-            clan_id: clan_id.parse().unwrap_or_default(),
+            clan_id: parse_id(clan_id)?,
         }
         .encode_to_vec();
         let (code, response) = self
@@ -1525,7 +1587,7 @@ impl MezonTransport {
     ) -> Result<api::AllUsersAddChannelResponse> {
         let cid = self.generate_cid();
         let body = api::AllUsersAddChannelRequest {
-            channel_id: channel_id.parse().unwrap_or_default(),
+            channel_id: parse_id(channel_id)?,
             limit,
         }
         .encode_to_vec();
@@ -1548,8 +1610,8 @@ impl MezonTransport {
     ) -> Result<api::WebhookListResponse> {
         let cid = self.generate_cid();
         let body = api::WebhookListRequest {
-            channel_id: channel_id.parse().unwrap_or_default(),
-            clan_id: clan_id.parse().unwrap_or_default(),
+            channel_id: parse_id(channel_id)?,
+            clan_id: parse_id(clan_id)?,
         }
         .encode_to_vec();
         let (code, response) = self
@@ -1569,8 +1631,8 @@ impl MezonTransport {
     ) -> Result<api::PermissionRoleChannelListEventResponse> {
         let cid = self.generate_cid();
         let body = api::PermissionRoleChannelListEventRequest {
-            role_id: role_id.parse().unwrap_or_default(),
-            channel_id: channel_id.parse().unwrap_or_default(),
+            role_id: parse_id(role_id)?,
+            channel_id: parse_id(channel_id)?,
             ..Default::default()
         }
         .encode_to_vec();
@@ -1592,7 +1654,7 @@ impl MezonTransport {
     ) -> Result<api::ChannelSettingListResponse> {
         let cid = self.generate_cid();
         let body = api::ChannelSettingListRequest {
-            clan_id: clan_id.parse().unwrap_or_default(),
+            clan_id: parse_id(clan_id)?,
             ..Default::default()
         }
         .encode_to_vec();
@@ -1626,7 +1688,7 @@ impl MezonTransport {
     pub async fn get_app(&self, id: &str) -> Result<api::App> {
         let cid = self.generate_cid();
         let body = api::App {
-            id: id.parse().unwrap_or_default(),
+            id: parse_id(id)?,
             ..Default::default()
         }
         .encode_to_vec();
@@ -1652,7 +1714,7 @@ impl MezonTransport {
     pub async fn list_clan_webhook(&self, clan_id: &str) -> Result<api::ListClanWebhookResponse> {
         let cid = self.generate_cid();
         let body = api::ListClanWebhookRequest {
-            clan_id: clan_id.parse().unwrap_or_default(),
+            clan_id: parse_id(clan_id)?,
         }
         .encode_to_vec();
         let (code, response) = self.send_api_request(cid, "ListClanWebhook", body).await?;
@@ -1666,7 +1728,7 @@ impl MezonTransport {
     pub async fn list_sd_topic(&self, clan_id: &str, limit: i32) -> Result<api::SdTopicList> {
         let cid = self.generate_cid();
         let body = api::ListSdTopicRequest {
-            clan_id: clan_id.parse().unwrap_or_default(),
+            clan_id: parse_id(clan_id)?,
             limit,
         }
         .encode_to_vec();
@@ -1681,7 +1743,7 @@ impl MezonTransport {
     pub async fn get_topic_detail(&self, topic_id: &str) -> Result<api::SdTopic> {
         let cid = self.generate_cid();
         let body = api::SdTopicDetailRequest {
-            topic_id: topic_id.parse().unwrap_or_default(),
+            topic_id: parse_id(topic_id)?,
         }
         .encode_to_vec();
         let (code, response) = self.send_api_request(cid, "GetTopicDetail", body).await?;
@@ -1700,8 +1762,8 @@ impl MezonTransport {
     ) -> Result<api::ChannelAttachmentList> {
         let cid = self.generate_cid();
         let body = api::ListChannelAttachmentRequest {
-            channel_id: channel_id.parse().unwrap_or_default(),
-            clan_id: clan_id.parse().unwrap_or_default(),
+            channel_id: parse_id(channel_id)?,
+            clan_id: parse_id(clan_id)?,
             limit,
             ..Default::default()
         }
@@ -1722,7 +1784,7 @@ impl MezonTransport {
     ) -> Result<api::VoiceChannelUserList> {
         let cid = self.generate_cid();
         let body = api::ListChannelUsersRequest {
-            clan_id: clan_id.parse().unwrap_or_default(),
+            clan_id: parse_id(clan_id)?,
             ..Default::default()
         }
         .encode_to_vec();
@@ -1742,7 +1804,7 @@ impl MezonTransport {
     ) -> Result<api::ListArchivedChannelDescsResponse> {
         let cid = self.generate_cid();
         let body = api::ListArchivedChannelDescsRequest {
-            clan_id: clan_id.parse().unwrap_or_default(),
+            clan_id: parse_id(clan_id)?,
         }
         .encode_to_vec();
         let (code, response) = self
@@ -1772,7 +1834,7 @@ impl MezonTransport {
     pub async fn is_banned(&self, channel_id: &str) -> Result<api::IsBannedResponse> {
         let cid = self.generate_cid();
         let body = api::IsBannedRequest {
-            channel_id: channel_id.parse().unwrap_or_default(),
+            channel_id: parse_id(channel_id)?,
         }
         .encode_to_vec();
         let (code, response) = self.send_api_request(cid, "IsBanned", body).await?;
@@ -1790,8 +1852,8 @@ impl MezonTransport {
     ) -> Result<api::BannedUserList> {
         let cid = self.generate_cid();
         let body = api::BannedUserListRequest {
-            clan_id: clan_id.parse().unwrap_or_default(),
-            channel_id: channel_id.parse().unwrap_or_default(),
+            clan_id: parse_id(clan_id)?,
+            channel_id: parse_id(channel_id)?,
         }
         .encode_to_vec();
         let (code, response) = self.send_api_request(cid, "ListBannedUsers", body).await?;
@@ -1811,8 +1873,8 @@ impl MezonTransport {
     ) -> Result<api::ChannelCanvasListResponse> {
         let cid = self.generate_cid();
         let body = api::ChannelCanvasListRequest {
-            channel_id: channel_id.parse().unwrap_or_default(),
-            clan_id: clan_id.parse().unwrap_or_default(),
+            channel_id: parse_id(channel_id)?,
+            clan_id: parse_id(clan_id)?,
             limit,
             page,
             ..Default::default()
@@ -1836,9 +1898,9 @@ impl MezonTransport {
     ) -> Result<api::ChannelCanvasDetailResponse> {
         let cid = self.generate_cid();
         let body = api::ChannelCanvasDetailRequest {
-            id: id.parse().unwrap_or_default(),
-            clan_id: clan_id.parse().unwrap_or_default(),
-            channel_id: channel_id.parse().unwrap_or_default(),
+            id: parse_id(id)?,
+            clan_id: parse_id(clan_id)?,
+            channel_id: parse_id(channel_id)?,
         }
         .encode_to_vec();
         let (code, response) = self
@@ -1861,7 +1923,7 @@ impl MezonTransport {
     ) -> Result<api::ListOnboardingResponse> {
         let cid = self.generate_cid();
         let body = api::ListOnboardingRequest {
-            clan_id: clan_id.parse().unwrap_or_default(),
+            clan_id: parse_id(clan_id)?,
             limit,
             page,
             ..Default::default()
@@ -1882,8 +1944,8 @@ impl MezonTransport {
     ) -> Result<api::OnboardingItem> {
         let cid = self.generate_cid();
         let body = api::OnboardingRequest {
-            id: id.parse().unwrap_or_default(),
-            clan_id: clan_id.parse().unwrap_or_default(),
+            id: parse_id(id)?,
+            clan_id: parse_id(clan_id)?,
         }
         .encode_to_vec();
         let (code, response) = self
@@ -1902,7 +1964,7 @@ impl MezonTransport {
     ) -> Result<api::ListOnboardingStepResponse> {
         let cid = self.generate_cid();
         let body = api::ListOnboardingStepRequest {
-            clan_id: clan_id.parse().unwrap_or_default(),
+            clan_id: parse_id(clan_id)?,
             ..Default::default()
         }
         .encode_to_vec();
@@ -1921,7 +1983,7 @@ impl MezonTransport {
     pub async fn list_role_users(&self, role_id: &str) -> Result<api::RoleUserList> {
         let cid = self.generate_cid();
         let body = api::ListRoleUsersRequest {
-            role_id: role_id.parse().unwrap_or_default(),
+            role_id: parse_id(role_id)?,
             ..Default::default()
         }
         .encode_to_vec();
@@ -1936,7 +1998,7 @@ impl MezonTransport {
     pub async fn list_role_permissions(&self, role_id: &str) -> Result<api::PermissionList> {
         let cid = self.generate_cid();
         let body = api::ListPermissionsRequest {
-            role_id: role_id.parse().unwrap_or_default(),
+            role_id: parse_id(role_id)?,
         }
         .encode_to_vec();
         let (code, response) = self
@@ -1952,7 +2014,7 @@ impl MezonTransport {
     pub async fn is_follower(&self, follow_id: &str) -> Result<api::IsFollowerResponse> {
         let cid = self.generate_cid();
         let body = api::IsFollowerRequest {
-            follow_id: follow_id.parse().unwrap_or_default(),
+            follow_id: parse_id(follow_id)?,
         }
         .encode_to_vec();
         let (code, response) = self.send_api_request(cid, "IsFollower", body).await?;
@@ -1969,7 +2031,7 @@ impl MezonTransport {
     ) -> Result<api::ChanEncryptionMethod> {
         let cid = self.generate_cid();
         let body = api::ChanEncryptionMethod {
-            channel_id: channel_id.parse().unwrap_or_default(),
+            channel_id: parse_id(channel_id)?,
             ..Default::default()
         }
         .encode_to_vec();
@@ -2000,8 +2062,8 @@ impl MezonTransport {
         let body = api::GetPubKeysRequest {
             user_ids: user_ids
                 .iter()
-                .map(|s| s.parse().unwrap_or_default())
-                .collect(),
+                .map(|s| parse_id(s))
+                .collect::<Result<Vec<_>>>()?,
         }
         .encode_to_vec();
         let (code, response) = self.send_api_request(cid, "GetPubKeys", body).await?;
@@ -2015,7 +2077,7 @@ impl MezonTransport {
     pub async fn list_audit_log(&self, clan_id: &str) -> Result<api::ListAuditLog> {
         let cid = self.generate_cid();
         let body = api::ListAuditLogRequest {
-            clan_id: clan_id.parse().unwrap_or_default(),
+            clan_id: parse_id(clan_id)?,
             ..Default::default()
         }
         .encode_to_vec();
@@ -2051,7 +2113,7 @@ impl MezonTransport {
     pub async fn search_thread(&self, clan_id: &str, label: &str) -> Result<api::ChannelDescList> {
         let cid = self.generate_cid();
         let body = api::SearchThreadRequest {
-            clan_id: clan_id.parse().unwrap_or_default(),
+            clan_id: parse_id(clan_id)?,
             label: label.to_string(),
             ..Default::default()
         }
@@ -2099,7 +2161,7 @@ impl MezonTransport {
     ) -> Result<api::GenerateHashChannelAppsResponse> {
         let cid = self.generate_cid();
         let body = api::GenerateHashChannelAppsRequest {
-            app_id: app_id.parse().unwrap_or_default(),
+            app_id: parse_id(app_id)?,
         }
         .encode_to_vec();
         let (code, response) = self
@@ -2120,7 +2182,7 @@ impl MezonTransport {
     ) -> Result<api::NotificationChannelCategorySettingList> {
         let cid = self.generate_cid();
         let body = api::NotificationClan {
-            clan_id: clan_id.parse().unwrap_or_default(),
+            clan_id: parse_id(clan_id)?,
         }
         .encode_to_vec();
         let (code, response) = self
@@ -2139,7 +2201,7 @@ impl MezonTransport {
         let cid = self.generate_cid();
 
         let body = api::ListMutedChannelRequest {
-            clan_id: clan_id.parse().unwrap_or_default(),
+            clan_id: parse_id(clan_id)?,
         }
         .encode_to_vec();
 
@@ -2173,7 +2235,7 @@ impl MezonTransport {
         let cid = self.generate_cid();
 
         let body = api::CreateChannelDescRequest {
-            clan_id: _clan_id.parse().unwrap_or_default(),
+            clan_id: parse_id(_clan_id)?,
             channel_label: channel_label.to_string(),
             r#type: channel_type as i32,
             ..Default::default()
@@ -2197,7 +2259,7 @@ impl MezonTransport {
         let cid = self.generate_cid();
 
         let body = api::DeleteChannelDescRequest {
-            channel_id: _channel_id.parse().unwrap_or_default(),
+            channel_id: parse_id(_channel_id)?,
             ..Default::default()
         }
         .encode_to_vec();
@@ -2218,7 +2280,7 @@ impl MezonTransport {
         let cid = self.generate_cid();
 
         let body = api::AddFriendsRequest {
-            ids: vec![_user_id.parse().unwrap_or_default()],
+            ids: vec![parse_id(_user_id)?],
             ..Default::default()
         }
         .encode_to_vec();
@@ -2237,7 +2299,7 @@ impl MezonTransport {
         let cid = self.generate_cid();
 
         let body = api::DeleteFriendsRequest {
-            ids: vec![_user_id.parse().unwrap_or_default()],
+            ids: vec![parse_id(_user_id)?],
             ..Default::default()
         }
         .encode_to_vec();
@@ -2260,8 +2322,8 @@ impl MezonTransport {
     ) -> Result<()> {
         let cid = self.generate_cid();
         let body = api::UpdateChannelDescRequest {
-            clan_id: clan_id.parse().unwrap_or_default(),
-            channel_id: channel_id.parse().unwrap_or_default(),
+            clan_id: parse_id(clan_id)?,
+            channel_id: parse_id(channel_id)?,
             channel_label: Some(label.to_string()),
             ..Default::default()
         }
@@ -2284,8 +2346,8 @@ impl MezonTransport {
     ) -> Result<()> {
         let cid = self.generate_cid();
         let body = api::ChangeChannelPrivateRequest {
-            clan_id: clan_id.parse().unwrap_or_default(),
-            channel_id: channel_id.parse().unwrap_or_default(),
+            clan_id: parse_id(clan_id)?,
+            channel_id: parse_id(channel_id)?,
             channel_private,
             ..Default::default()
         }
@@ -2308,9 +2370,9 @@ impl MezonTransport {
     ) -> Result<()> {
         let cid = self.generate_cid();
         let body = api::ChangeChannelCategoryRequest {
-            clan_id: clan_id.parse().unwrap_or_default(),
-            channel_id: channel_id.parse().unwrap_or_default(),
-            new_category_id: new_category_id.parse().unwrap_or_default(),
+            clan_id: parse_id(clan_id)?,
+            channel_id: parse_id(channel_id)?,
+            new_category_id: parse_id(new_category_id)?,
         }
         .encode_to_vec();
         let (code, _) = self
@@ -2326,11 +2388,11 @@ impl MezonTransport {
     pub async fn add_channel_users(&self, channel_id: &str, user_ids: &[&str]) -> Result<()> {
         let cid = self.generate_cid();
         let body = api::AddChannelUsersRequest {
-            channel_id: channel_id.parse().unwrap_or_default(),
+            channel_id: parse_id(channel_id)?,
             user_ids: user_ids
                 .iter()
-                .map(|s| s.parse().unwrap_or_default())
-                .collect(),
+                .map(|s| parse_id(s))
+                .collect::<Result<Vec<_>>>()?,
         }
         .encode_to_vec();
         let (code, _) = self.send_api_request(cid, "AddChannelUsers", body).await?;
@@ -2344,11 +2406,11 @@ impl MezonTransport {
     pub async fn remove_channel_users(&self, channel_id: &str, user_ids: &[&str]) -> Result<()> {
         let cid = self.generate_cid();
         let body = api::RemoveChannelUsersRequest {
-            channel_id: channel_id.parse().unwrap_or_default(),
+            channel_id: parse_id(channel_id)?,
             user_ids: user_ids
                 .iter()
-                .map(|s| s.parse().unwrap_or_default())
-                .collect(),
+                .map(|s| parse_id(s))
+                .collect::<Result<Vec<_>>>()?,
         }
         .encode_to_vec();
         let (code, _) = self
@@ -2364,8 +2426,8 @@ impl MezonTransport {
     pub async fn leave_thread(&self, clan_id: &str, channel_id: &str) -> Result<()> {
         let cid = self.generate_cid();
         let body = api::LeaveThreadRequest {
-            clan_id: clan_id.parse().unwrap_or_default(),
-            channel_id: channel_id.parse().unwrap_or_default(),
+            clan_id: parse_id(clan_id)?,
+            channel_id: parse_id(channel_id)?,
         }
         .encode_to_vec();
         let (code, _) = self.send_api_request(cid, "LeaveThread", body).await?;
@@ -2379,8 +2441,8 @@ impl MezonTransport {
     pub async fn archive_channel(&self, clan_id: &str, channel_id: &str) -> Result<()> {
         let cid = self.generate_cid();
         let body = api::ArchiveChannelRequest {
-            clan_id: clan_id.parse().unwrap_or_default(),
-            channel_id: channel_id.parse().unwrap_or_default(),
+            clan_id: parse_id(clan_id)?,
+            channel_id: parse_id(channel_id)?,
         }
         .encode_to_vec();
         let (code, _) = self.send_api_request(cid, "ArchiveChannel", body).await?;
@@ -2394,8 +2456,8 @@ impl MezonTransport {
     pub async fn active_archived_thread(&self, clan_id: &str, channel_id: &str) -> Result<()> {
         let cid = self.generate_cid();
         let body = realtime::ActiveArchivedThread {
-            clan_id: clan_id.parse().unwrap_or_default(),
-            channel_id: channel_id.parse().unwrap_or_default(),
+            clan_id: parse_id(clan_id)?,
+            channel_id: parse_id(channel_id)?,
         }
         .encode_to_vec();
         let (code, _) = self
@@ -2411,8 +2473,8 @@ impl MezonTransport {
     pub async fn close_dm_by_channel_id(&self, clan_id: &str, channel_id: &str) -> Result<()> {
         let cid = self.generate_cid();
         let body = api::DeleteChannelDescRequest {
-            clan_id: clan_id.parse().unwrap_or_default(),
-            channel_id: channel_id.parse().unwrap_or_default(),
+            clan_id: parse_id(clan_id)?,
+            channel_id: parse_id(channel_id)?,
         }
         .encode_to_vec();
         let (code, _) = self
@@ -2428,8 +2490,8 @@ impl MezonTransport {
     pub async fn open_dm_by_channel_id(&self, clan_id: &str, channel_id: &str) -> Result<()> {
         let cid = self.generate_cid();
         let body = api::DeleteChannelDescRequest {
-            clan_id: clan_id.parse().unwrap_or_default(),
-            channel_id: channel_id.parse().unwrap_or_default(),
+            clan_id: parse_id(clan_id)?,
+            channel_id: parse_id(channel_id)?,
         }
         .encode_to_vec();
         let (code, _) = self
@@ -2467,7 +2529,7 @@ impl MezonTransport {
     pub async fn update_clan_desc(&self, clan_id: &str, clan_name: &str) -> Result<()> {
         let cid = self.generate_cid();
         let body = api::UpdateClanDescRequest {
-            clan_id: clan_id.parse().unwrap_or_default(),
+            clan_id: parse_id(clan_id)?,
             clan_name: clan_name.to_string(),
             ..Default::default()
         }
@@ -2483,7 +2545,7 @@ impl MezonTransport {
     pub async fn delete_clan_desc(&self, clan_desc_id: &str) -> Result<()> {
         let cid = self.generate_cid();
         let body = api::DeleteClanDescRequest {
-            clan_desc_id: clan_desc_id.parse().unwrap_or_default(),
+            clan_desc_id: parse_id(clan_desc_id)?,
         }
         .encode_to_vec();
         let (code, _) = self.send_api_request(cid, "DeleteClanDesc", body).await?;
@@ -2497,11 +2559,11 @@ impl MezonTransport {
     pub async fn remove_clan_users(&self, clan_id: &str, user_ids: &[&str]) -> Result<()> {
         let cid = self.generate_cid();
         let body = api::RemoveClanUsersRequest {
-            clan_id: clan_id.parse().unwrap_or_default(),
+            clan_id: parse_id(clan_id)?,
             user_ids: user_ids
                 .iter()
-                .map(|s| s.parse().unwrap_or_default())
-                .collect(),
+                .map(|s| parse_id(s))
+                .collect::<Result<Vec<_>>>()?,
         }
         .encode_to_vec();
         let (code, _) = self.send_api_request(cid, "RemoveClanUsers", body).await?;
@@ -2521,12 +2583,12 @@ impl MezonTransport {
     ) -> Result<()> {
         let cid = self.generate_cid();
         let body = api::BanClanUsersRequest {
-            clan_id: clan_id.parse().unwrap_or_default(),
-            channel_id: channel_id.parse().unwrap_or_default(),
+            clan_id: parse_id(clan_id)?,
+            channel_id: parse_id(channel_id)?,
             user_ids: user_ids
                 .iter()
-                .map(|s| s.parse().unwrap_or_default())
-                .collect(),
+                .map(|s| parse_id(s))
+                .collect::<Result<Vec<_>>>()?,
             ban_time,
             ..Default::default()
         }
@@ -2547,12 +2609,12 @@ impl MezonTransport {
     ) -> Result<()> {
         let cid = self.generate_cid();
         let body = api::BanClanUsersRequest {
-            clan_id: clan_id.parse().unwrap_or_default(),
-            channel_id: channel_id.parse().unwrap_or_default(),
+            clan_id: parse_id(clan_id)?,
+            channel_id: parse_id(channel_id)?,
             user_ids: user_ids
                 .iter()
-                .map(|s| s.parse().unwrap_or_default())
-                .collect(),
+                .map(|s| parse_id(s))
+                .collect::<Result<Vec<_>>>()?,
             ..Default::default()
         }
         .encode_to_vec();
@@ -2572,7 +2634,7 @@ impl MezonTransport {
         let cid = self.generate_cid();
         let body = api::CreateCategoryDescRequest {
             category_name: category_name.to_string(),
-            clan_id: clan_id.parse().unwrap_or_default(),
+            clan_id: parse_id(clan_id)?,
         }
         .encode_to_vec();
         let (code, response) = self
@@ -2588,8 +2650,8 @@ impl MezonTransport {
     pub async fn delete_category_desc(&self, category_id: &str, clan_id: &str) -> Result<()> {
         let cid = self.generate_cid();
         let body = api::DeleteCategoryDescRequest {
-            category_id: category_id.parse().unwrap_or_default(),
-            clan_id: clan_id.parse().unwrap_or_default(),
+            category_id: parse_id(category_id)?,
+            clan_id: parse_id(clan_id)?,
             ..Default::default()
         }
         .encode_to_vec();
@@ -2611,9 +2673,9 @@ impl MezonTransport {
     ) -> Result<()> {
         let cid = self.generate_cid();
         let body = api::UpdateCategoryDescRequest {
-            category_id: category_id.parse().unwrap_or_default(),
+            category_id: parse_id(category_id)?,
             category_name: category_name.to_string(),
-            clan_id: clan_id.parse().unwrap_or_default(),
+            clan_id: parse_id(clan_id)?,
         }
         .encode_to_vec();
         let (code, _) = self.send_api_request(cid, "UpdateCategory", body).await?;
@@ -2627,7 +2689,10 @@ impl MezonTransport {
     pub async fn block_friends(&self, ids: &[&str]) -> Result<()> {
         let cid = self.generate_cid();
         let body = api::BlockFriendsRequest {
-            ids: ids.iter().map(|s| s.parse().unwrap_or_default()).collect(),
+            ids: ids
+                .iter()
+                .map(|s| parse_id(s))
+                .collect::<Result<Vec<_>>>()?,
             ..Default::default()
         }
         .encode_to_vec();
@@ -2642,7 +2707,10 @@ impl MezonTransport {
     pub async fn unblock_friends(&self, ids: &[&str]) -> Result<()> {
         let cid = self.generate_cid();
         let body = api::BlockFriendsRequest {
-            ids: ids.iter().map(|s| s.parse().unwrap_or_default()).collect(),
+            ids: ids
+                .iter()
+                .map(|s| parse_id(s))
+                .collect::<Result<Vec<_>>>()?,
             ..Default::default()
         }
         .encode_to_vec();
@@ -2698,7 +2766,7 @@ impl MezonTransport {
     ) -> Result<()> {
         let cid = self.generate_cid();
         let body = api::UpdateClanProfileRequest {
-            clan_id: clan_id.parse().unwrap_or_default(),
+            clan_id: parse_id(clan_id)?,
             nick_name: Some(nick_name.to_string()),
             avatar: avatar_url.map(|s| s.to_string()),
         }
@@ -2731,9 +2799,9 @@ impl MezonTransport {
     ) -> Result<()> {
         let cid = self.generate_cid();
         let body = api::MarkAsReadRequest {
-            channel_id: channel_id.parse().unwrap_or_default(),
-            category_id: category_id.parse().unwrap_or_default(),
-            clan_id: clan_id.parse().unwrap_or_default(),
+            channel_id: parse_id(channel_id)?,
+            category_id: parse_id(category_id)?,
+            clan_id: parse_id(clan_id)?,
         }
         .encode_to_vec();
         let (code, _) = self.send_api_request(cid, "MarkAsRead", body).await?;
@@ -2823,9 +2891,9 @@ impl MezonTransport {
     ) -> Result<()> {
         let cid = self.generate_cid();
         let body = api::SetNotificationRequest {
-            channel_category_id: channel_category_id.parse().unwrap_or_default(),
+            channel_category_id: parse_id(channel_category_id)?,
             notification_type,
-            clan_id: clan_id.parse().unwrap_or_default(),
+            clan_id: parse_id(clan_id)?,
         }
         .encode_to_vec();
         let (code, _) = self
@@ -2845,7 +2913,7 @@ impl MezonTransport {
     ) -> Result<()> {
         let cid = self.generate_cid();
         let body = api::SetDefaultNotificationRequest {
-            clan_id: clan_id.parse().unwrap_or_default(),
+            clan_id: parse_id(clan_id)?,
             notification_type,
             ..Default::default()
         }
@@ -2868,9 +2936,9 @@ impl MezonTransport {
     ) -> Result<()> {
         let cid = self.generate_cid();
         let body = api::SetNotificationRequest {
-            channel_category_id: channel_category_id.parse().unwrap_or_default(),
+            channel_category_id: parse_id(channel_category_id)?,
             notification_type,
-            clan_id: clan_id.parse().unwrap_or_default(),
+            clan_id: parse_id(clan_id)?,
         }
         .encode_to_vec();
         let (code, _) = self
@@ -2886,9 +2954,9 @@ impl MezonTransport {
     pub async fn set_mute_channel(&self, id: &str, mute_time: i32, clan_id: &str) -> Result<()> {
         let cid = self.generate_cid();
         let body = api::SetMuteRequest {
-            id: id.parse().unwrap_or_default(),
+            id: parse_id(id)?,
             mute_time,
-            clan_id: clan_id.parse().unwrap_or_default(),
+            clan_id: parse_id(clan_id)?,
             ..Default::default()
         }
         .encode_to_vec();
@@ -2903,9 +2971,9 @@ impl MezonTransport {
     pub async fn set_mute_category(&self, id: &str, mute_time: i32, clan_id: &str) -> Result<()> {
         let cid = self.generate_cid();
         let body = api::SetMuteRequest {
-            id: id.parse().unwrap_or_default(),
+            id: parse_id(id)?,
             mute_time,
-            clan_id: clan_id.parse().unwrap_or_default(),
+            clan_id: parse_id(clan_id)?,
             ..Default::default()
         }
         .encode_to_vec();
@@ -2920,7 +2988,10 @@ impl MezonTransport {
     pub async fn delete_notifications(&self, ids: &[&str]) -> Result<()> {
         let cid = self.generate_cid();
         let body = api::DeleteNotificationsRequest {
-            ids: ids.iter().map(|s| s.parse().unwrap_or_default()).collect(),
+            ids: ids
+                .iter()
+                .map(|s| parse_id(s))
+                .collect::<Result<Vec<_>>>()?,
             ..Default::default()
         }
         .encode_to_vec();
@@ -2937,7 +3008,7 @@ impl MezonTransport {
     pub async fn delete_notification_category_setting(&self, category_id: &str) -> Result<()> {
         let cid = self.generate_cid();
         let body = api::DefaultNotificationCategory {
-            category_id: category_id.parse().unwrap_or_default(),
+            category_id: parse_id(category_id)?,
         }
         .encode_to_vec();
         let (code, _) = self
@@ -2953,7 +3024,7 @@ impl MezonTransport {
     pub async fn delete_notification_channel(&self, channel_id: &str) -> Result<()> {
         let cid = self.generate_cid();
         let body = api::NotificationChannel {
-            channel_id: channel_id.parse().unwrap_or_default(),
+            channel_id: parse_id(channel_id)?,
         }
         .encode_to_vec();
         let (code, _) = self
@@ -2969,8 +3040,8 @@ impl MezonTransport {
     pub async fn set_role_channel_permission(&self, role_id: &str, channel_id: &str) -> Result<()> {
         let cid = self.generate_cid();
         let body = api::UpdateRoleChannelRequest {
-            role_id: role_id.parse().unwrap_or_default(),
-            channel_id: channel_id.parse().unwrap_or_default(),
+            role_id: parse_id(role_id)?,
+            channel_id: parse_id(channel_id)?,
             ..Default::default()
         }
         .encode_to_vec();
@@ -3099,7 +3170,7 @@ impl MezonTransport {
     pub async fn set_chan_encryption_method(&self, channel_id: &str, method: &str) -> Result<()> {
         let cid = self.generate_cid();
         let body = api::ChanEncryptionMethod {
-            channel_id: channel_id.parse().unwrap_or_default(),
+            channel_id: parse_id(channel_id)?,
             method: method.to_string(),
         }
         .encode_to_vec();
@@ -3116,8 +3187,8 @@ impl MezonTransport {
     pub async fn transfer_ownership(&self, clan_id: &str, new_owner_id: &str) -> Result<()> {
         let cid = self.generate_cid();
         let body = api::TransferOwnershipRequest {
-            clan_id: clan_id.parse().unwrap_or_default(),
-            new_owner_id: new_owner_id.parse().unwrap_or_default(),
+            clan_id: parse_id(clan_id)?,
+            new_owner_id: parse_id(new_owner_id)?,
         }
         .encode_to_vec();
         let (code, _) = self
@@ -3133,7 +3204,7 @@ impl MezonTransport {
     pub async fn report_message_abuse(&self, message_id: &str, abuse_type: &str) -> Result<()> {
         let cid = self.generate_cid();
         let body = api::ReportMessageAbuseReqest {
-            message_id: message_id.parse().unwrap_or_default(),
+            message_id: parse_id(message_id)?,
             abuse_type: abuse_type.to_string(),
         }
         .encode_to_vec();
@@ -3155,8 +3226,8 @@ impl MezonTransport {
     ) -> Result<()> {
         let cid = self.generate_cid();
         let body = realtime::MessageButtonClicked {
-            message_id: message_id.parse().unwrap_or_default(),
-            channel_id: channel_id.parse().unwrap_or_default(),
+            message_id: parse_id(message_id)?,
+            channel_id: parse_id(channel_id)?,
             button_id: button_id.to_string(),
             ..Default::default()
         }
@@ -3179,8 +3250,8 @@ impl MezonTransport {
     ) -> Result<()> {
         let cid = self.generate_cid();
         let body = realtime::DropdownBoxSelected {
-            message_id: message_id.parse().unwrap_or_default(),
-            channel_id: channel_id.parse().unwrap_or_default(),
+            message_id: parse_id(message_id)?,
+            channel_id: parse_id(channel_id)?,
             selectbox_id: selectbox_id.to_string(),
             ..Default::default()
         }
@@ -3198,7 +3269,7 @@ impl MezonTransport {
     pub async fn add_agent_to_channel(&self, channel_id: &str, room_name: &str) -> Result<()> {
         let cid = self.generate_cid();
         let body = api::UpdateAiAgentRequest {
-            channel_id: channel_id.parse().unwrap_or_default(),
+            channel_id: parse_id(channel_id)?,
             room_name: room_name.to_string(),
         }
         .encode_to_vec();
@@ -3215,7 +3286,7 @@ impl MezonTransport {
     pub async fn disconnect_agent(&self, channel_id: &str, room_name: &str) -> Result<()> {
         let cid = self.generate_cid();
         let body = api::UpdateAiAgentRequest {
-            channel_id: channel_id.parse().unwrap_or_default(),
+            channel_id: parse_id(channel_id)?,
             room_name: room_name.to_string(),
         }
         .encode_to_vec();
@@ -3261,8 +3332,8 @@ impl MezonTransport {
     ) -> Result<api::LinkInviteUser> {
         let cid = self.generate_cid();
         let body = api::LinkInviteUserRequest {
-            clan_id: clan_id.parse().unwrap_or_default(),
-            channel_id: channel_id.parse().unwrap_or_default(),
+            clan_id: parse_id(clan_id)?,
+            channel_id: parse_id(channel_id)?,
             expiry_time,
         }
         .encode_to_vec();
@@ -3279,7 +3350,7 @@ impl MezonTransport {
     pub async fn invite_user(&self, invite_id: &str) -> Result<api::InviteUserRes> {
         let cid = self.generate_cid();
         let body = api::InviteUserRequest {
-            invite_id: invite_id.parse().unwrap_or_default(),
+            invite_id: parse_id(invite_id)?,
         }
         .encode_to_vec();
         let (code, response) = self.send_api_request(cid, "InviteUser", body).await?;
@@ -3319,9 +3390,9 @@ impl MezonTransport {
     ) -> Result<api::ChannelMessageHeader> {
         let cid = self.generate_cid();
         let body = api::Message2InboxRequest {
-            message_id: message_id.parse().unwrap_or_default(),
-            channel_id: channel_id.parse().unwrap_or_default(),
-            clan_id: clan_id.parse().unwrap_or_default(),
+            message_id: parse_id(message_id)?,
+            channel_id: parse_id(channel_id)?,
+            clan_id: parse_id(clan_id)?,
             content: content.to_string(),
             ..Default::default()
         }
@@ -3344,9 +3415,9 @@ impl MezonTransport {
     ) -> Result<api::ChannelMessageHeader> {
         let cid = self.generate_cid();
         let body = api::PinMessageRequest {
-            message_id: message_id.parse().unwrap_or_default(),
-            channel_id: channel_id.parse().unwrap_or_default(),
-            clan_id: clan_id.parse().unwrap_or_default(),
+            message_id: parse_id(message_id)?,
+            channel_id: parse_id(channel_id)?,
+            clan_id: parse_id(clan_id)?,
         }
         .encode_to_vec();
         let (code, response) = self.send_api_request(cid, "CreatePinMessage", body).await?;
@@ -3366,10 +3437,10 @@ impl MezonTransport {
     ) -> Result<()> {
         let cid = self.generate_cid();
         let body = api::DeletePinMessage {
-            id: id.parse().unwrap_or_default(),
-            message_id: message_id.parse().unwrap_or_default(),
-            channel_id: channel_id.parse().unwrap_or_default(),
-            clan_id: clan_id.parse().unwrap_or_default(),
+            id: parse_id(id)?,
+            message_id: parse_id(message_id)?,
+            channel_id: parse_id(channel_id)?,
+            clan_id: parse_id(clan_id)?,
         }
         .encode_to_vec();
         let (code, _) = self.send_api_request(cid, "DeletePinMessage", body).await?;
@@ -3385,13 +3456,13 @@ impl MezonTransport {
         let body = api::UpdateClanOrderRequest {
             clans_order: clans_order
                 .iter()
-                .map(
-                    |(order, clan_id)| api::update_clan_order_request::ClanOrder {
+                .map(|(order, clan_id)| {
+                    Ok(api::update_clan_order_request::ClanOrder {
                         order: *order,
-                        clan_id: clan_id.parse().unwrap_or_default(),
-                    },
-                )
-                .collect(),
+                        clan_id: parse_id(clan_id)?,
+                    })
+                })
+                .collect::<Result<Vec<_>>>()?,
         }
         .encode_to_vec();
         let (code, _) = self.send_api_request(cid, "UpdateClanOrder", body).await?;
@@ -3409,14 +3480,16 @@ impl MezonTransport {
     ) -> Result<()> {
         let cid = self.generate_cid();
         let body = api::UpdateCategoryOrderRequest {
-            clan_id: clan_id.parse().unwrap_or_default(),
+            clan_id: parse_id(clan_id)?,
             categories: categories
                 .iter()
-                .map(|(order, category_id)| api::CategoryOrderUpdate {
-                    order: *order,
-                    category_id: category_id.parse().unwrap_or_default(),
+                .map(|(order, category_id)| {
+                    Ok(api::CategoryOrderUpdate {
+                        order: *order,
+                        category_id: parse_id(category_id)?,
+                    })
                 })
-                .collect(),
+                .collect::<Result<Vec<_>>>()?,
         }
         .encode_to_vec();
         let (code, _) = self
@@ -3432,14 +3505,16 @@ impl MezonTransport {
     pub async fn update_role_order(&self, clan_id: &str, roles: &[(i32, &str)]) -> Result<()> {
         let cid = self.generate_cid();
         let body = api::UpdateRoleOrderRequest {
-            clan_id: clan_id.parse().unwrap_or_default(),
+            clan_id: parse_id(clan_id)?,
             roles: roles
                 .iter()
-                .map(|(order, role_id)| api::RoleOrderUpdate {
-                    order: *order,
-                    role_id: role_id.parse().unwrap_or_default(),
+                .map(|(order, role_id)| {
+                    Ok(api::RoleOrderUpdate {
+                        order: *order,
+                        role_id: parse_id(role_id)?,
+                    })
                 })
-                .collect(),
+                .collect::<Result<Vec<_>>>()?,
         }
         .encode_to_vec();
         let (code, _) = self.send_api_request(cid, "UpdateRoleOrder", body).await?;
@@ -3461,8 +3536,8 @@ impl MezonTransport {
         let cid = self.generate_cid();
         let body = api::CreateEventRequest {
             title: title.to_string(),
-            clan_id: clan_id.parse().unwrap_or_default(),
-            channel_id: channel_id.parse().unwrap_or_default(),
+            clan_id: parse_id(clan_id)?,
+            channel_id: parse_id(channel_id)?,
             start_time_seconds: start_time,
             end_time_seconds: end_time,
             ..Default::default()
@@ -3479,8 +3554,8 @@ impl MezonTransport {
     pub async fn delete_event(&self, event_id: &str, clan_id: &str) -> Result<()> {
         let cid = self.generate_cid();
         let body = api::DeleteEventRequest {
-            event_id: event_id.parse().unwrap_or_default(),
-            clan_id: clan_id.parse().unwrap_or_default(),
+            event_id: parse_id(event_id)?,
+            clan_id: parse_id(clan_id)?,
             ..Default::default()
         }
         .encode_to_vec();
@@ -3495,8 +3570,8 @@ impl MezonTransport {
     pub async fn update_event(&self, event_id: &str, clan_id: &str, title: &str) -> Result<()> {
         let cid = self.generate_cid();
         let body = api::UpdateEventRequest {
-            event_id: event_id.parse().unwrap_or_default(),
-            clan_id: clan_id.parse().unwrap_or_default(),
+            event_id: parse_id(event_id)?,
+            clan_id: parse_id(clan_id)?,
             title: title.to_string(),
             ..Default::default()
         }
@@ -3512,8 +3587,8 @@ impl MezonTransport {
     pub async fn add_user_event(&self, clan_id: &str, event_id: &str) -> Result<()> {
         let cid = self.generate_cid();
         let body = api::UserEventRequest {
-            clan_id: clan_id.parse().unwrap_or_default(),
-            event_id: event_id.parse().unwrap_or_default(),
+            clan_id: parse_id(clan_id)?,
+            event_id: parse_id(event_id)?,
         }
         .encode_to_vec();
         let (code, _) = self.send_api_request(cid, "AddUserEvent", body).await?;
@@ -3527,8 +3602,8 @@ impl MezonTransport {
     pub async fn delete_user_event(&self, clan_id: &str, event_id: &str) -> Result<()> {
         let cid = self.generate_cid();
         let body = api::UserEventRequest {
-            clan_id: clan_id.parse().unwrap_or_default(),
-            event_id: event_id.parse().unwrap_or_default(),
+            clan_id: parse_id(clan_id)?,
+            event_id: parse_id(event_id)?,
         }
         .encode_to_vec();
         let (code, _) = self.send_api_request(cid, "DeleteUserEvent", body).await?;
@@ -3543,7 +3618,7 @@ impl MezonTransport {
         let cid = self.generate_cid();
         let body = api::CreateRoleRequest {
             title: title.to_string(),
-            clan_id: clan_id.parse().unwrap_or_default(),
+            clan_id: parse_id(clan_id)?,
             ..Default::default()
         }
         .encode_to_vec();
@@ -3558,8 +3633,8 @@ impl MezonTransport {
     pub async fn delete_role(&self, role_id: &str, clan_id: &str) -> Result<()> {
         let cid = self.generate_cid();
         let body = api::DeleteRoleRequest {
-            role_id: role_id.parse().unwrap_or_default(),
-            clan_id: clan_id.parse().unwrap_or_default(),
+            role_id: parse_id(role_id)?,
+            clan_id: parse_id(clan_id)?,
             ..Default::default()
         }
         .encode_to_vec();
@@ -3574,7 +3649,7 @@ impl MezonTransport {
     pub async fn update_role(&self, role_id: &str, title: &str) -> Result<()> {
         let cid = self.generate_cid();
         let body = api::UpdateRoleRequest {
-            role_id: role_id.parse().unwrap_or_default(),
+            role_id: parse_id(role_id)?,
             title: Some(title.to_string()),
             ..Default::default()
         }
@@ -3590,7 +3665,7 @@ impl MezonTransport {
     pub async fn delete_role_channel_desc(&self, role_id: &str) -> Result<()> {
         let cid = self.generate_cid();
         let body = api::DeleteRoleRequest {
-            role_id: role_id.parse().unwrap_or_default(),
+            role_id: parse_id(role_id)?,
             ..Default::default()
         }
         .encode_to_vec();
@@ -3609,9 +3684,9 @@ impl MezonTransport {
         let body = api::AddRoleChannelDescRequest {
             role_ids: role_ids
                 .iter()
-                .map(|s| s.parse().unwrap_or_default())
-                .collect(),
-            channel_id: channel_id.parse().unwrap_or_default(),
+                .map(|s| parse_id(s))
+                .collect::<Result<Vec<_>>>()?,
+            channel_id: parse_id(channel_id)?,
         }
         .encode_to_vec();
         let (code, _) = self
@@ -3632,7 +3707,7 @@ impl MezonTransport {
     ) -> Result<()> {
         let cid = self.generate_cid();
         let body = api::ClanEmojiCreateRequest {
-            clan_id: clan_id.parse().unwrap_or_default(),
+            clan_id: parse_id(clan_id)?,
             source: source.to_string(),
             shortname: shortname.to_string(),
             ..Default::default()
@@ -3649,8 +3724,8 @@ impl MezonTransport {
     pub async fn delete_clan_emoji_by_id(&self, id: &str, clan_id: &str) -> Result<()> {
         let cid = self.generate_cid();
         let body = api::ClanEmojiDeleteRequest {
-            id: id.parse().unwrap_or_default(),
-            clan_id: clan_id.parse().unwrap_or_default(),
+            id: parse_id(id)?,
+            clan_id: parse_id(clan_id)?,
             ..Default::default()
         }
         .encode_to_vec();
@@ -3672,9 +3747,9 @@ impl MezonTransport {
     ) -> Result<()> {
         let cid = self.generate_cid();
         let body = api::ClanEmojiUpdateRequest {
-            id: id.parse().unwrap_or_default(),
+            id: parse_id(id)?,
             shortname: shortname.to_string(),
-            clan_id: clan_id.parse().unwrap_or_default(),
+            clan_id: parse_id(clan_id)?,
         }
         .encode_to_vec();
         let (code, _) = self
@@ -3695,7 +3770,7 @@ impl MezonTransport {
     ) -> Result<()> {
         let cid = self.generate_cid();
         let body = api::ClanStickerAddRequest {
-            clan_id: clan_id.parse().unwrap_or_default(),
+            clan_id: parse_id(clan_id)?,
             source: source.to_string(),
             shortname: shortname.to_string(),
             ..Default::default()
@@ -3712,8 +3787,8 @@ impl MezonTransport {
     pub async fn update_clan_sticker_by_id(&self, id: &str, clan_id: &str) -> Result<()> {
         let cid = self.generate_cid();
         let body = api::ClanStickerUpdateByIdRequest {
-            id: id.parse().unwrap_or_default(),
-            clan_id: clan_id.parse().unwrap_or_default(),
+            id: parse_id(id)?,
+            clan_id: parse_id(clan_id)?,
             ..Default::default()
         }
         .encode_to_vec();
@@ -3730,8 +3805,8 @@ impl MezonTransport {
     pub async fn delete_clan_sticker_by_id(&self, id: &str, clan_id: &str) -> Result<()> {
         let cid = self.generate_cid();
         let body = api::ClanStickerDeleteRequest {
-            id: id.parse().unwrap_or_default(),
-            clan_id: clan_id.parse().unwrap_or_default(),
+            id: parse_id(id)?,
+            clan_id: parse_id(clan_id)?,
             ..Default::default()
         }
         .encode_to_vec();
@@ -3754,8 +3829,8 @@ impl MezonTransport {
         let cid = self.generate_cid();
         let body = api::WebhookCreateRequest {
             webhook_name: webhook_name.to_string(),
-            channel_id: channel_id.parse().unwrap_or_default(),
-            clan_id: clan_id.parse().unwrap_or_default(),
+            channel_id: parse_id(channel_id)?,
+            clan_id: parse_id(clan_id)?,
             ..Default::default()
         }
         .encode_to_vec();
@@ -3770,7 +3845,7 @@ impl MezonTransport {
     pub async fn update_webhook_by_id(&self, id: &str, webhook_name: &str) -> Result<()> {
         let cid = self.generate_cid();
         let body = api::WebhookUpdateRequestById {
-            id: id.parse().unwrap_or_default(),
+            id: parse_id(id)?,
             webhook_name: webhook_name.to_string(),
             ..Default::default()
         }
@@ -3788,7 +3863,7 @@ impl MezonTransport {
     pub async fn delete_webhook_by_id(&self, id: &str) -> Result<()> {
         let cid = self.generate_cid();
         let body = api::WebhookDeleteRequestById {
-            id: id.parse().unwrap_or_default(),
+            id: parse_id(id)?,
             ..Default::default()
         }
         .encode_to_vec();
@@ -3809,7 +3884,7 @@ impl MezonTransport {
     ) -> Result<api::GenerateClanWebhookResponse> {
         let cid = self.generate_cid();
         let body = api::GenerateClanWebhookRequest {
-            clan_id: clan_id.parse().unwrap_or_default(),
+            clan_id: parse_id(clan_id)?,
             webhook_name: webhook_name.to_string(),
             ..Default::default()
         }
@@ -3834,8 +3909,8 @@ impl MezonTransport {
     ) -> Result<()> {
         let cid = self.generate_cid();
         let body = api::UpdateClanWebhookRequest {
-            id: id.parse().unwrap_or_default(),
-            clan_id: clan_id.parse().unwrap_or_default(),
+            id: parse_id(id)?,
+            clan_id: parse_id(clan_id)?,
             webhook_name: webhook_name.to_string(),
             ..Default::default()
         }
@@ -3853,8 +3928,8 @@ impl MezonTransport {
     pub async fn delete_clan_webhook_by_id(&self, id: &str, clan_id: &str) -> Result<()> {
         let cid = self.generate_cid();
         let body = api::ClanWebhookRequest {
-            id: id.parse().unwrap_or_default(),
-            clan_id: clan_id.parse().unwrap_or_default(),
+            id: parse_id(id)?,
+            clan_id: parse_id(clan_id)?,
         }
         .encode_to_vec();
         let (code, _) = self
@@ -3885,7 +3960,7 @@ impl MezonTransport {
     pub async fn delete_app(&self, id: &str) -> Result<()> {
         let cid = self.generate_cid();
         let body = api::App {
-            id: id.parse().unwrap_or_default(),
+            id: parse_id(id)?,
             ..Default::default()
         }
         .encode_to_vec();
@@ -3900,7 +3975,7 @@ impl MezonTransport {
     pub async fn update_app(&self, id: &str, appname: &str) -> Result<api::App> {
         let cid = self.generate_cid();
         let body = api::UpdateAppRequest {
-            id: id.parse().unwrap_or_default(),
+            id: parse_id(id)?,
             appname: Some(appname.to_string()),
             ..Default::default()
         }
@@ -3916,8 +3991,8 @@ impl MezonTransport {
     pub async fn add_app_to_clan(&self, app_id: &str, clan_id: &str) -> Result<()> {
         let cid = self.generate_cid();
         let body = api::AppClan {
-            app_id: app_id.parse().unwrap_or_default(),
-            clan_id: clan_id.parse().unwrap_or_default(),
+            app_id: parse_id(app_id)?,
+            clan_id: parse_id(clan_id)?,
         }
         .encode_to_vec();
         let (code, _) = self.send_api_request(cid, "AddAppToClan", body).await?;
@@ -3931,7 +4006,7 @@ impl MezonTransport {
     pub async fn create_system_message(&self, clan_id: &str) -> Result<()> {
         let cid = self.generate_cid();
         let body = api::SystemMessageRequest {
-            clan_id: clan_id.parse().unwrap_or_default(),
+            clan_id: parse_id(clan_id)?,
             ..Default::default()
         }
         .encode_to_vec();
@@ -3948,7 +4023,7 @@ impl MezonTransport {
     pub async fn update_system_message(&self, clan_id: &str) -> Result<()> {
         let cid = self.generate_cid();
         let body = api::SystemMessageRequest {
-            clan_id: clan_id.parse().unwrap_or_default(),
+            clan_id: parse_id(clan_id)?,
             ..Default::default()
         }
         .encode_to_vec();
@@ -3965,7 +4040,7 @@ impl MezonTransport {
     pub async fn delete_system_message(&self, clan_id: &str) -> Result<()> {
         let cid = self.generate_cid();
         let body = api::DeleteSystemMessage {
-            clan_id: clan_id.parse().unwrap_or_default(),
+            clan_id: parse_id(clan_id)?,
         }
         .encode_to_vec();
         let (code, _) = self
@@ -3987,8 +4062,8 @@ impl MezonTransport {
     ) -> Result<api::EditChannelCanvasResponse> {
         let cid = self.generate_cid();
         let body = api::EditChannelCanvasRequest {
-            channel_id: channel_id.parse().unwrap_or_default(),
-            clan_id: clan_id.parse().unwrap_or_default(),
+            channel_id: parse_id(channel_id)?,
+            clan_id: parse_id(clan_id)?,
             title: title.to_string(),
             content: content.to_string(),
             ..Default::default()
@@ -4012,9 +4087,9 @@ impl MezonTransport {
     ) -> Result<()> {
         let cid = self.generate_cid();
         let body = api::DeleteChannelCanvasRequest {
-            canvas_id: canvas_id.parse().unwrap_or_default(),
-            clan_id: clan_id.parse().unwrap_or_default(),
-            channel_id: channel_id.parse().unwrap_or_default(),
+            canvas_id: parse_id(canvas_id)?,
+            clan_id: parse_id(clan_id)?,
+            channel_id: parse_id(channel_id)?,
         }
         .encode_to_vec();
         let (code, _) = self
@@ -4030,8 +4105,8 @@ impl MezonTransport {
     pub async fn add_channel_favorite(&self, channel_id: &str, clan_id: &str) -> Result<()> {
         let cid = self.generate_cid();
         let body = api::AddFavoriteChannelRequest {
-            channel_id: channel_id.parse().unwrap_or_default(),
-            clan_id: clan_id.parse().unwrap_or_default(),
+            channel_id: parse_id(channel_id)?,
+            clan_id: parse_id(clan_id)?,
         }
         .encode_to_vec();
         let (code, _) = self
@@ -4047,8 +4122,8 @@ impl MezonTransport {
     pub async fn remove_channel_favorite(&self, channel_id: &str, clan_id: &str) -> Result<()> {
         let cid = self.generate_cid();
         let body = api::RemoveFavoriteChannelRequest {
-            channel_id: channel_id.parse().unwrap_or_default(),
-            clan_id: clan_id.parse().unwrap_or_default(),
+            channel_id: parse_id(channel_id)?,
+            clan_id: parse_id(clan_id)?,
         }
         .encode_to_vec();
         let (code, _) = self
@@ -4064,7 +4139,7 @@ impl MezonTransport {
     pub async fn create_onboarding(&self, clan_id: &str) -> Result<api::ListOnboardingResponse> {
         let cid = self.generate_cid();
         let body = api::CreateOnboardingRequest {
-            clan_id: clan_id.parse().unwrap_or_default(),
+            clan_id: parse_id(clan_id)?,
             ..Default::default()
         }
         .encode_to_vec();
@@ -4079,8 +4154,8 @@ impl MezonTransport {
     pub async fn update_onboarding(&self, id: &str, clan_id: &str) -> Result<()> {
         let cid = self.generate_cid();
         let body = api::UpdateOnboardingRequest {
-            id: id.parse().unwrap_or_default(),
-            clan_id: clan_id.parse().unwrap_or_default(),
+            id: parse_id(id)?,
+            clan_id: parse_id(clan_id)?,
             ..Default::default()
         }
         .encode_to_vec();
@@ -4095,8 +4170,8 @@ impl MezonTransport {
     pub async fn delete_onboarding(&self, id: &str, clan_id: &str) -> Result<()> {
         let cid = self.generate_cid();
         let body = api::OnboardingRequest {
-            id: id.parse().unwrap_or_default(),
-            clan_id: clan_id.parse().unwrap_or_default(),
+            id: parse_id(id)?,
+            clan_id: parse_id(clan_id)?,
         }
         .encode_to_vec();
         let (code, _) = self.send_api_request(cid, "DeleteOnboarding", body).await?;
@@ -4110,7 +4185,7 @@ impl MezonTransport {
     pub async fn update_onboarding_step(&self, clan_id: &str, onboarding_step: i32) -> Result<()> {
         let cid = self.generate_cid();
         let body = api::UpdateOnboardingStepRequest {
-            clan_id: clan_id.parse().unwrap_or_default(),
+            clan_id: parse_id(clan_id)?,
             onboarding_step,
         }
         .encode_to_vec();
@@ -4132,9 +4207,9 @@ impl MezonTransport {
     ) -> Result<api::SdTopic> {
         let cid = self.generate_cid();
         let body = api::SdTopicRequest {
-            message_id: message_id.parse().unwrap_or_default(),
-            clan_id: clan_id.parse().unwrap_or_default(),
-            channel_id: channel_id.parse().unwrap_or_default(),
+            message_id: parse_id(message_id)?,
+            clan_id: parse_id(clan_id)?,
+            channel_id: parse_id(channel_id)?,
         }
         .encode_to_vec();
         let (code, response) = self.send_api_request(cid, "CreateSdTopic", body).await?;
@@ -4164,7 +4239,7 @@ impl MezonTransport {
     ) -> Result<api::GenerateMeetTokenResponse> {
         let cid = self.generate_cid();
         let body = api::GenerateMeetTokenRequest {
-            channel_id: channel_id.parse().unwrap_or_default(),
+            channel_id: parse_id(channel_id)?,
             room_name: room_name.to_string(),
         }
         .encode_to_vec();
@@ -4186,7 +4261,7 @@ impl MezonTransport {
     ) -> Result<()> {
         let cid = self.generate_cid();
         let body = api::MeetParticipantRequest {
-            channel_id: channel_id.parse().unwrap_or_default(),
+            channel_id: parse_id(channel_id)?,
             room_name: room_name.to_string(),
             username: username.to_string(),
             ..Default::default()
@@ -4210,7 +4285,7 @@ impl MezonTransport {
     ) -> Result<()> {
         let cid = self.generate_cid();
         let body = api::MeetParticipantRequest {
-            channel_id: channel_id.parse().unwrap_or_default(),
+            channel_id: parse_id(channel_id)?,
             room_name: room_name.to_string(),
             username: username.to_string(),
             ..Default::default()
@@ -4233,7 +4308,7 @@ impl MezonTransport {
     ) -> Result<api::CreateRoomChannelApps> {
         let cid = self.generate_cid();
         let body = api::CreateRoomChannelApps {
-            channel_id: channel_id.parse().unwrap_or_default(),
+            channel_id: parse_id(channel_id)?,
             room_name: room_name.to_string(),
         }
         .encode_to_vec();
@@ -4277,8 +4352,8 @@ impl MezonTransport {
     ) -> Result<()> {
         let cid = self.generate_cid();
         let body = api::QuickMenuAccess {
-            bot_id: bot_id.parse().unwrap_or_default(),
-            clan_id: clan_id.parse().unwrap_or_default(),
+            bot_id: parse_id(bot_id)?,
+            clan_id: parse_id(clan_id)?,
             menu_name: menu_name.to_string(),
             ..Default::default()
         }
@@ -4301,8 +4376,8 @@ impl MezonTransport {
     ) -> Result<()> {
         let cid = self.generate_cid();
         let body = api::QuickMenuAccess {
-            bot_id: bot_id.parse().unwrap_or_default(),
-            clan_id: clan_id.parse().unwrap_or_default(),
+            bot_id: parse_id(bot_id)?,
+            clan_id: parse_id(clan_id)?,
             menu_name: menu_name.to_string(),
             ..Default::default()
         }
@@ -4320,8 +4395,8 @@ impl MezonTransport {
     pub async fn delete_quick_menu_access(&self, id: &str, clan_id: &str) -> Result<()> {
         let cid = self.generate_cid();
         let body = api::QuickMenuAccess {
-            id: id.parse().unwrap_or_default(),
-            clan_id: clan_id.parse().unwrap_or_default(),
+            id: parse_id(id)?,
+            clan_id: parse_id(clan_id)?,
             ..Default::default()
         }
         .encode_to_vec();
@@ -4344,9 +4419,9 @@ impl MezonTransport {
     ) -> Result<()> {
         let cid = self.generate_cid();
         let body = realtime::ChannelMessageUpdate {
-            clan_id: clan_id.parse().unwrap_or_default(),
-            channel_id: channel_id.parse().unwrap_or_default(),
-            message_id: message_id.parse().unwrap_or_default(),
+            clan_id: parse_id(clan_id)?,
+            channel_id: parse_id(channel_id)?,
+            message_id: parse_id(message_id)?,
             content: content.to_string(),
             ..Default::default()
         }
@@ -4369,9 +4444,9 @@ impl MezonTransport {
     ) -> Result<()> {
         let cid = self.generate_cid();
         let body = realtime::ChannelMessageRemove {
-            clan_id: clan_id.parse().unwrap_or_default(),
-            channel_id: channel_id.parse().unwrap_or_default(),
-            message_id: message_id.parse().unwrap_or_default(),
+            clan_id: parse_id(clan_id)?,
+            channel_id: parse_id(channel_id)?,
+            message_id: parse_id(message_id)?,
             ..Default::default()
         }
         .encode_to_vec();
@@ -4396,10 +4471,10 @@ impl MezonTransport {
     ) -> Result<()> {
         let cid = self.generate_cid();
         let body = api::MessageReaction {
-            clan_id: clan_id.parse().unwrap_or_default(),
-            channel_id: channel_id.parse().unwrap_or_default(),
-            message_id: message_id.parse().unwrap_or_default(),
-            emoji_id: emoji_id.parse().unwrap_or_default(),
+            clan_id: parse_id(clan_id)?,
+            channel_id: parse_id(channel_id)?,
+            message_id: parse_id(message_id)?,
+            emoji_id: parse_id(emoji_id)?,
             emoji: emoji.to_string(),
             count,
             ..Default::default()
@@ -4423,8 +4498,8 @@ impl MezonTransport {
     ) -> Result<api::CreatePollResponse> {
         let cid = self.generate_cid();
         let body = api::CreatePollRequest {
-            channel_id: channel_id.parse().unwrap_or_default(),
-            clan_id: clan_id.parse().unwrap_or_default(),
+            channel_id: parse_id(channel_id)?,
+            clan_id: parse_id(clan_id)?,
             question: question.to_string(),
             ..Default::default()
         }
@@ -4445,9 +4520,9 @@ impl MezonTransport {
     ) -> Result<api::VotePollResponse> {
         let cid = self.generate_cid();
         let body = api::VotePollRequest {
-            poll_id: poll_id.parse().unwrap_or_default(),
-            message_id: message_id.parse().unwrap_or_default(),
-            channel_id: channel_id.parse().unwrap_or_default(),
+            poll_id: parse_id(poll_id)?,
+            message_id: parse_id(message_id)?,
+            channel_id: parse_id(channel_id)?,
             ..Default::default()
         }
         .encode_to_vec();
@@ -4467,9 +4542,9 @@ impl MezonTransport {
     ) -> Result<()> {
         let cid = self.generate_cid();
         let body = api::ClosePollRequest {
-            poll_id: poll_id.parse().unwrap_or_default(),
-            message_id: message_id.parse().unwrap_or_default(),
-            channel_id: channel_id.parse().unwrap_or_default(),
+            poll_id: parse_id(poll_id)?,
+            message_id: parse_id(message_id)?,
+            channel_id: parse_id(channel_id)?,
         }
         .encode_to_vec();
         let (code, _) = self.send_api_request(cid, "ClosePoll", body).await?;
@@ -4488,9 +4563,9 @@ impl MezonTransport {
     ) -> Result<api::GetPollResponse> {
         let cid = self.generate_cid();
         let body = api::GetPollRequest {
-            poll_id: poll_id.parse().unwrap_or_default(),
-            message_id: message_id.parse().unwrap_or_default(),
-            channel_id: channel_id.parse().unwrap_or_default(),
+            poll_id: parse_id(poll_id)?,
+            message_id: parse_id(message_id)?,
+            channel_id: parse_id(channel_id)?,
         }
         .encode_to_vec();
         let (code, response) = self.send_api_request(cid, "GetPoll", body).await?;
@@ -4509,8 +4584,8 @@ impl MezonTransport {
     ) -> Result<api::CreateChannelTimelineResponse> {
         let cid = self.generate_cid();
         let body = api::CreateChannelTimelineRequest {
-            clan_id: clan_id.parse().unwrap_or_default(),
-            channel_id: channel_id.parse().unwrap_or_default(),
+            clan_id: parse_id(clan_id)?,
+            channel_id: parse_id(channel_id)?,
             title: title.to_string(),
             ..Default::default()
         }
@@ -4536,9 +4611,9 @@ impl MezonTransport {
     ) -> Result<api::UpdateChannelTimelineResponse> {
         let cid = self.generate_cid();
         let body = api::UpdateChannelTimelineRequest {
-            clan_id: clan_id.parse().unwrap_or_default(),
-            channel_id: channel_id.parse().unwrap_or_default(),
-            id: id.parse().unwrap_or_default(),
+            clan_id: parse_id(clan_id)?,
+            channel_id: parse_id(channel_id)?,
+            id: parse_id(id)?,
             title: title.to_string(),
             ..Default::default()
         }
@@ -4563,9 +4638,9 @@ impl MezonTransport {
     ) -> Result<api::ChannelTimelineDetailResponse> {
         let cid = self.generate_cid();
         let body = api::ChannelTimelineDetailRequest {
-            clan_id: clan_id.parse().unwrap_or_default(),
-            channel_id: channel_id.parse().unwrap_or_default(),
-            id: id.parse().unwrap_or_default(),
+            clan_id: parse_id(clan_id)?,
+            channel_id: parse_id(channel_id)?,
+            id: parse_id(id)?,
             ..Default::default()
         }
         .encode_to_vec();

@@ -5,7 +5,7 @@ pub mod message_list;
 pub mod message_row;
 
 pub use channel_header::ChannelHeader;
-pub use grouping::{COMBINE_TIME_WINDOW, MessageGroup, group_messages};
+pub use grouping::{COMBINE_TIME_WINDOW, is_combined};
 pub use input_bar::InputBar;
 pub use message_list::MessageList;
 pub use message_row::MessageRow;

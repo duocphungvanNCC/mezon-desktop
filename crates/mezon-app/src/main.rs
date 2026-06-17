@@ -1,4 +1,5 @@
 use anyhow::Result;
+use futures::StreamExt;
 use gpui::{App, AppContext, AsyncApp, Bounds, Entity, WindowBounds, WindowOptions, px, size};
 use gpui_platform::application;
 use mezon_client::{
@@ -109,7 +110,7 @@ fn run_app(lock: SingleInstance, initial_url: Option<String>) {
 
     application()
         .with_http_client(Arc::new(reqwest_client::ReqwestClient::new()))
-        .with_assets(gpui_component_assets::Assets)
+        .with_assets(mezon_ui::assets::Assets)
         .run(move |cx: &mut App| {
             tracing::debug!("App started");
 
@@ -150,20 +151,27 @@ fn run_app(lock: SingleInstance, initial_url: Option<String>) {
 
             init_ui(cx);
 
+            mezon_ui::theme::set_theme(mezon_ui::theme::resolve_theme(&settings.theme), cx);
+
+            if std::env::var("MEZON_DEV_GALLERY").is_ok() {
+                open_dev_gallery_window(cx);
+                return;
+            }
+
             // Shared channel so background threads can send deep link URLs to the GPUI main thread.
-            let (url_tx, url_rx) = std::sync::mpsc::channel::<String>();
+            let (url_tx, mut url_rx) = futures::channel::mpsc::unbounded::<String>();
 
             // Listen for deep link URLs forwarded from secondary instances.
             {
                 let tx = url_tx.clone();
                 lock.listen_for_urls(move |url| {
-                    let _ = tx.send(url);
+                    let _ = tx.unbounded_send(url);
                 });
             }
 
             // If we were launched with a deep link, inject it immediately.
             if let Some(url) = initial_url {
-                let _ = url_tx.send(url);
+                let _ = url_tx.unbounded_send(url);
             }
 
             // Create the shared Settings entity so all views can observe theme changes.
@@ -179,29 +187,25 @@ fn run_app(lock: SingleInstance, initial_url: Option<String>) {
                 initial_auth_state,
             );
 
-            // Background task: poll `url_rx` and update auth state on the main thread.
             {
                 let auth_state = auth_state_handle.clone();
                 cx.spawn(async move |cx: &mut AsyncApp| {
-                    let exec = cx.background_executor().clone();
-                    loop {
-                        match url_rx.try_recv() {
-                            Ok(url) => {
-                                tracing::info!("Received deep link: {url}");
-                                cx.update(|cx| {
-                                    auth_state.update(cx, |state, cx| {
-                                        if url.starts_with("mezonapp://callback") {
-                                            // Deep link OAuth — kept for future use.
-                                            *state = AuthState::AwaitingCallback;
-                                        }
-                                        cx.notify();
-                                    });
+                    while let Some(url) = url_rx.next().await {
+                        tracing::info!(
+                            "Received deep link: {}",
+                            url.split(['?', '#']).next().unwrap_or_default()
+                        );
+                        cx.update(|cx| {
+                            if url.starts_with("mezonapp://callback") {
+                                auth_state.update(cx, |state, cx| {
+                                    // Deep link OAuth — kept for future use.
+                                    *state = AuthState::AwaitingCallback;
+                                    cx.notify();
                                 });
+                            } else if let Some(route) = mezon_ui::router::parse_link(&url) {
+                                mezon_ui::router::navigate(cx, route);
                             }
-                            Err(std::sync::mpsc::TryRecvError::Disconnected) => break,
-                            Err(std::sync::mpsc::TryRecvError::Empty) => {}
-                        }
-                        exec.timer(std::time::Duration::from_millis(100)).await;
+                        });
                     }
                 })
                 .detach();
@@ -218,7 +222,9 @@ fn run_app(lock: SingleInstance, initial_url: Option<String>) {
             );
 
             // System tray.
-            let _tray = setup_tray(cx, rt_handle.clone());
+            if let Some(tray) = setup_tray(cx, rt_handle.clone()) {
+                cx.set_global(TrayGlobal(tray));
+            }
 
             cx.activate(true);
         });
@@ -472,6 +478,32 @@ fn spawn_session_refresh_consumer(cx: &mut App, auth_state: Entity<AuthState>, a
 }
 
 /// Open the main window and return a cloneable handle to the `AuthState` entity.
+fn open_dev_gallery_window(cx: &mut App) {
+    let options = WindowOptions {
+        titlebar: Some(gpui::TitlebarOptions {
+            title: Some("Mezon Component Gallery".into()),
+            appears_transparent: false,
+            ..Default::default()
+        }),
+        window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
+            None,
+            size(px(900.0), px(800.0)),
+            cx,
+        ))),
+        ..Default::default()
+    };
+
+    cx.open_window(options, |window, cx| {
+        cx.new(|cx| mezon_ui::DevGallery::new(window, cx))
+    })
+    .unwrap_or_else(|e| {
+        tracing::error!("Failed to open dev gallery window: {e}");
+        std::process::exit(1);
+    });
+
+    cx.activate(true);
+}
+
 fn open_main_window(
     cx: &mut App,
     settings: &Settings,
@@ -507,18 +539,18 @@ fn open_main_window(
     let auth_out = Arc::new(std::sync::Mutex::new(None::<Entity<AuthState>>));
     let auth_out_clone = auth_out.clone();
 
-    cx.open_window(options, move |window, cx| {
+    cx.open_window(options, move |_window, cx| {
         let auth_state = cx.new(|_cx| initial_auth);
-        *auth_out_clone.lock().unwrap() = Some(auth_state.clone());
+        *auth_out_clone.lock().unwrap_or_else(|e| e.into_inner()) = Some(auth_state.clone());
 
-        let title_bar = cx.new(|cx| TitleBar::new("Mezon", settings_entity.clone(), cx));
+        let title_bar = cx.new(|cx| TitleBar::new(settings_entity.clone(), cx));
 
         // Register the domain stores as globals before any view reads them.
         // Order matters: ChannelList subscribes to ClanList's events.
         mezon_store::ClanList::init(api.clone(), cx);
         mezon_store::ChannelList::init(api.clone(), cx);
 
-        let view = cx.new(|cx| {
+        cx.new(|cx| {
             RootView::new(
                 title_bar,
                 auth_state,
@@ -527,8 +559,7 @@ fn open_main_window(
                 settings_entity.clone(),
                 cx,
             )
-        });
-        cx.new(|cx| gpui_component::Root::new(view, window, cx))
+        })
     })
     .unwrap_or_else(|e| {
         tracing::error!("Failed to open main window: {e}");
@@ -537,28 +568,24 @@ fn open_main_window(
 
     auth_out
         .lock()
-        .unwrap()
+        .unwrap_or_else(|e| e.into_inner())
         .clone()
         .expect("auth_state not initialised after open_window")
 }
+
+struct TrayGlobal(#[allow(dead_code)] mezon_native::tray::MezonTray);
+impl gpui::Global for TrayGlobal {}
 
 /// Create the system tray (best-effort — log a warning on failure).
 fn setup_tray(
     cx: &mut App,
     rt_handle: Arc<tokio::runtime::Handle>,
 ) -> Option<mezon_native::tray::MezonTray> {
-    let quit_flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let quit_flag_clone = quit_flag.clone();
+    let (quit_tx, mut quit_rx) = futures::channel::mpsc::unbounded::<()>();
 
-    // Background task that watches the quit flag and fires cx.quit().
     cx.spawn(async move |cx: &mut AsyncApp| {
-        let exec = cx.background_executor().clone();
-        loop {
-            if quit_flag_clone.load(std::sync::atomic::Ordering::Relaxed) {
-                cx.update(|cx| cx.quit());
-                break;
-            }
-            exec.timer(std::time::Duration::from_millis(200)).await;
+        if quit_rx.next().await.is_some() {
+            cx.update(|cx| cx.quit());
         }
     })
     .detach();
@@ -570,7 +597,7 @@ fn setup_tray(
         },
         move || {
             tracing::info!("Tray: Quit requested");
-            quit_flag.store(true, std::sync::atomic::Ordering::Relaxed);
+            let _ = quit_tx.unbounded_send(());
         },
         rt_handle,
     ) {

@@ -1,8 +1,13 @@
+use std::rc::Rc;
 use std::sync::Arc;
 
 use gpui::{Context, Entity, Window, div, prelude::*, px};
 use mezon_client::AppApi;
-use mezon_store::{AuthState, ChannelList, ClanList, Message, Settings};
+use mezon_store::{AuthState, ChannelList, ClanList, Message, MessageAttachment, Settings};
+
+const MESSAGE_PAGE_LIMIT: u32 = 50;
+const DIRECTION_BEFORE: i32 = 3;
+const LOAD_MORE_ITEM_THRESHOLD: usize = 6;
 
 use crate::chat_area::ChatArea;
 use crate::components::compositions::user_info_bar::UserInfoBar;
@@ -10,8 +15,22 @@ use crate::router::{Route, Router};
 use crate::theme::{Theme, resolve_theme};
 use crate::{ChannelSidebar, ClanSidebar};
 
+fn to_store_attachments(
+    attachments: Vec<mezon_client::transport::ApiAttachment>,
+) -> Vec<MessageAttachment> {
+    attachments
+        .into_iter()
+        .map(|a| MessageAttachment {
+            url: a.url,
+            filename: a.filename,
+            filetype: a.filetype,
+            width: a.width.max(0) as u32,
+            height: a.height.max(0) as u32,
+        })
+        .collect()
+}
+
 pub struct ChatLayout {
-    router: Router,
     settings: Entity<Settings>,
     pub(crate) channel_list: Entity<ChannelList>,
     pub chat_area: ChatArea,
@@ -24,31 +43,23 @@ pub struct ChatLayout {
     clan_list: Entity<ClanList>,
     auth_state: Entity<AuthState>,
     last_fetched_channel_id: Option<String>,
+    pending_channel_id: Option<String>,
+    loading_more: bool,
+    has_more: bool,
+    list_scroll_installed: bool,
 }
 
 impl ChatLayout {
     pub fn new(
-        router: Router,
         clan_list: Entity<ClanList>,
         auth_state: Entity<AuthState>,
         api: Arc<AppApi>,
-        navigate: crate::components::NavigateFn,
         settings: Entity<Settings>,
         cx: &mut Context<Self>,
     ) -> Self {
         cx.observe(&settings, |_, _, cx| cx.notify()).detach();
 
         let channel_list = ChannelList::global(cx);
-
-        let on_navigate: Option<crate::components::NavigateFn> = {
-            let nav = navigate.clone();
-            Some(Arc::new(move |op, cx| nav(op, cx)))
-        };
-
-        let on_settings: Option<crate::components::NavigateFn> = {
-            let nav = navigate.clone();
-            Some(Arc::new(move |op, cx| nav(op, cx)))
-        };
 
         let clan_list_for_sidebar = clan_list.clone();
         let settings_for_clan = settings.clone();
@@ -62,19 +73,27 @@ impl ChatLayout {
             ChannelSidebar::new(
                 clan_list_for_channel,
                 channel_list_for_channel,
-                on_navigate,
                 settings_for_channel,
                 cx,
             )
         });
 
-        let user_info_bar = UserInfoBar::new(auth_state.clone(), on_settings);
+        let user_info_bar = UserInfoBar::new(auth_state.clone());
 
         // Channel loading is driven by ChannelList's own subscription to ClanList events
         // (store-to-store, Zed-style). These observes just keep the shell repainting.
         cx.observe(&auth_state, |_, _, cx| cx.notify()).detach();
-        cx.observe(&channel_list, |_, _, cx| cx.notify()).detach();
+        cx.observe(&channel_list, |this, _, cx| {
+            this.apply_pending_channel(cx);
+            cx.notify();
+        })
+        .detach();
         cx.observe(&clan_list, |_, _, cx| cx.notify()).detach();
+        cx.observe(&Router::global(cx), |this, _, cx| {
+            this.sync_active_from_route(cx);
+            cx.notify();
+        })
+        .detach();
 
         {
             let api = api.clone();
@@ -100,8 +119,10 @@ impl ChatLayout {
                                     api_msg.sender_id,
                                     api_msg.sender_name,
                                     api_msg.create_time,
-                                );
-                                let msgs = &mut this.chat_area.messages;
+                                )
+                                .with_avatar(api_msg.avatar)
+                                .with_attachments(to_store_attachments(api_msg.attachments));
+                                let msgs = Rc::make_mut(&mut this.chat_area.messages);
                                 if msgs.iter().any(|x| x.id == msg.id) {
                                     tracing::info!(
                                         "skip duplicate id={} sender_name={}",
@@ -131,6 +152,8 @@ impl ChatLayout {
                                     msgs.push(msg);
                                 }
                                 msgs.sort_by_key(|m| m.create_time);
+                                let count = this.chat_area.messages.len();
+                                this.chat_area.list_state.reset(count);
                                 cx.notify();
                             });
                             if result.is_err() {
@@ -147,7 +170,6 @@ impl ChatLayout {
         }
 
         Self {
-            router,
             settings,
             channel_list,
             chat_area: ChatArea::new(),
@@ -159,12 +181,153 @@ impl ChatLayout {
             clan_list,
             auth_state,
             last_fetched_channel_id: None,
+            pending_channel_id: None,
+            loading_more: false,
+            has_more: true,
+            list_scroll_installed: false,
         }
+    }
+
+    fn sync_active_from_route(&mut self, cx: &mut Context<Self>) {
+        let Route::Channel {
+            clan_id,
+            channel_id,
+        } = Router::global(cx).read(cx).route()
+        else {
+            self.pending_channel_id = None;
+            return;
+        };
+        if self.clan_list.read(cx).active_clan_id.as_deref() != Some(clan_id.as_str()) {
+            self.clan_list
+                .update(cx, |clan_list, cx| clan_list.select_clan(&clan_id, cx));
+        }
+        let (present, already_active) = {
+            let channels = self.channel_list.read(cx);
+            (
+                channels.find_channel(&channel_id).is_some(),
+                channels.active_channel_id.as_deref() == Some(channel_id.as_str()),
+            )
+        };
+        if present {
+            self.pending_channel_id = None;
+            if !already_active {
+                self.channel_list.update(cx, |channel_list, cx| {
+                    channel_list.select_channel(&channel_id, cx)
+                });
+            }
+        } else {
+            self.pending_channel_id = Some(channel_id);
+        }
+    }
+
+    fn apply_pending_channel(&mut self, cx: &mut Context<Self>) {
+        let Some(channel_id) = self.pending_channel_id.clone() else {
+            return;
+        };
+        if self
+            .channel_list
+            .read(cx)
+            .find_channel(&channel_id)
+            .is_some()
+        {
+            self.pending_channel_id = None;
+            self.channel_list.update(cx, |channel_list, cx| {
+                channel_list.select_channel(&channel_id, cx)
+            });
+        }
+    }
+
+    fn maybe_load_more(&mut self, cx: &mut Context<Self>) {
+        if self.has_more && !self.loading_more {
+            self.load_more_messages(cx);
+        }
+    }
+
+    fn load_more_messages(&mut self, cx: &mut Context<Self>) {
+        let Some(ch) = self.channel_list.read(cx).active_channel().cloned() else {
+            return;
+        };
+        let Some(oldest_id) = self
+            .chat_area
+            .messages
+            .first()
+            .map(|m| m.id.clone())
+            .filter(|id| !id.starts_with("temp-"))
+        else {
+            return;
+        };
+        self.loading_more = true;
+        let api = self.api.clone();
+        let cl_id = ch.clan_id.clone();
+        let ch_id = ch.id.clone();
+        cx.spawn(async move |this, cx| {
+            let result = api
+                .list_channel_messages(
+                    &cl_id,
+                    &ch_id,
+                    &oldest_id,
+                    DIRECTION_BEFORE,
+                    MESSAGE_PAGE_LIMIT,
+                )
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                this.loading_more = false;
+                let msgs = match result {
+                    Ok(msgs) => msgs,
+                    Err(e) => {
+                        tracing::error!("Failed to load more messages for {ch_id}: {e}");
+                        return;
+                    }
+                };
+                if this.last_fetched_channel_id.as_deref() != Some(&ch_id) {
+                    return;
+                }
+                let reached_start = (msgs.len() as u32) < MESSAGE_PAGE_LIMIT;
+                let existing: std::collections::HashSet<String> = this
+                    .chat_area
+                    .messages
+                    .iter()
+                    .map(|m| m.id.clone())
+                    .collect();
+                let mut older: Vec<Message> = msgs
+                    .into_iter()
+                    .filter(|m| !existing.contains(&m.message_id))
+                    .map(|m| {
+                        Message::new(
+                            m.message_id,
+                            m.content,
+                            m.sender_id,
+                            m.sender_name,
+                            m.create_time,
+                        )
+                        .with_avatar(m.avatar)
+                        .with_attachments(to_store_attachments(m.attachments))
+                    })
+                    .collect();
+                if older.is_empty() {
+                    this.has_more = false;
+                    return;
+                }
+                this.has_more = !reached_start;
+                let prepended = older.len();
+                let mut existing =
+                    match Rc::try_unwrap(std::mem::take(&mut this.chat_area.messages)) {
+                        Ok(v) => v,
+                        Err(rc) => (*rc).clone(),
+                    };
+                older.append(&mut existing);
+                older.sort_by_key(|m| m.create_time);
+                this.chat_area.messages = Rc::new(older);
+                this.chat_area.list_state.splice(0..0, prepended);
+                cx.notify();
+            });
+        })
+        .detach();
     }
 }
 
 impl Render for ChatLayout {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = resolve_theme(&self.settings.read(cx).theme);
 
         if !self.loaded {
@@ -172,11 +335,27 @@ impl Render for ChatLayout {
             self.clan_list.update(cx, |clans, cx| clans.reload(cx));
         }
 
+        if !self.list_scroll_installed {
+            self.list_scroll_installed = true;
+            let weak = cx.entity().downgrade();
+            self.chat_area
+                .list_state
+                .set_scroll_handler(move |event, _window, cx| {
+                    if event.visible_range.start < LOAD_MORE_ITEM_THRESHOLD
+                        && let Some(this) = weak.upgrade()
+                    {
+                        this.update(cx, |this, cx| this.maybe_load_more(cx));
+                    }
+                });
+        }
+
         let active_ch = self.channel_list.read(cx).active_channel().cloned();
         if let Some(ref ch) = active_ch {
             let prev_id = self.last_fetched_channel_id.clone();
             if Some(&ch.id) != prev_id.as_ref() {
                 self.last_fetched_channel_id = Some(ch.id.clone());
+                self.loading_more = false;
+                self.has_more = true;
                 let api = self.api.clone();
                 let ch_id = ch.id.clone();
                 let cl_id = ch.clan_id.clone();
@@ -200,11 +379,12 @@ impl Render for ChatLayout {
                 }
                 cx.spawn(
                     async move |this: gpui::WeakEntity<Self>, cx: &mut gpui::AsyncApp| match api
-                        .list_channel_messages(&cl_id, &ch_id, 20)
+                        .list_channel_messages(&cl_id, &ch_id, "", 0, MESSAGE_PAGE_LIMIT)
                         .await
                     {
                         Ok(msgs) => {
                             tracing::info!("Fetched {} messages for channel {}", msgs.len(), ch_id);
+                            let reached_start = (msgs.len() as u32) < MESSAGE_PAGE_LIMIT;
                             let mut store_msgs: Vec<Message> = msgs
                                 .into_iter()
                                 .map(|m| {
@@ -215,6 +395,8 @@ impl Render for ChatLayout {
                                         m.sender_name,
                                         m.create_time,
                                     )
+                                    .with_avatar(m.avatar)
+                                    .with_attachments(to_store_attachments(m.attachments))
                                 })
                                 .collect();
                             store_msgs.sort_by_key(|m| m.create_time);
@@ -223,7 +405,10 @@ impl Render for ChatLayout {
                                 if this.last_fetched_channel_id.as_deref() != Some(&fetched_ch_id) {
                                     return;
                                 }
-                                this.chat_area.messages = store_msgs;
+                                this.has_more = !reached_start;
+                                this.chat_area.messages = Rc::new(store_msgs);
+                                let count = this.chat_area.messages.len();
+                                this.chat_area.list_state.reset(count);
                                 cx.notify();
                             });
                         }
@@ -234,14 +419,15 @@ impl Render for ChatLayout {
             }
         }
 
-        self.chat_area.ensure_input(_window, cx);
+        self.chat_area.ensure_input(window, cx);
         let content = self.render_content(cx);
 
         div()
             .flex()
             .flex_row()
             .flex_1()
-            .size_full()
+            .w_full()
+            .min_h_0()
             .bg(theme.bg_primary)
             .child(
                 div()
@@ -254,6 +440,7 @@ impl Render for ChatLayout {
                             .flex()
                             .flex_row()
                             .flex_1()
+                            .min_h_0()
                             .child(div().w(px(72.0)).h_full().child(self.clan_sidebar.clone()))
                             .child(
                                 div()
@@ -270,13 +457,78 @@ impl Render for ChatLayout {
                     .flex_col()
                     .flex_1()
                     .h_full()
-                    .bg(theme.bg_secondary)
+                    .bg(theme.bg_primary)
                     .child(content),
             )
     }
 }
 
 impl ChatLayout {
+    pub(crate) fn send_current_message(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(input) = self.chat_area.input_state.clone() else {
+            return;
+        };
+        let content = input.read(cx).value().trim().to_string();
+        if content.is_empty() {
+            return;
+        }
+        input.update(cx, |state, cx| state.set_value("", window, cx));
+
+        let (uid, uname) = match self.auth_state.read(cx) {
+            AuthState::Authenticated(session) => {
+                (session.user_id.clone(), session.username.clone())
+            }
+            _ => (String::new(), String::new()),
+        };
+
+        let Some(channel) = self.channel_list.read(cx).active_channel().cloned() else {
+            tracing::warn!("send: no active channel");
+            return;
+        };
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or_default();
+        let temp_id = format!("temp-{now}");
+
+        Rc::make_mut(&mut self.chat_area.messages).push(Message::new(
+            temp_id.clone(),
+            content.clone(),
+            uid,
+            uname,
+            now,
+        ));
+        let count = self.chat_area.messages.len();
+        self.chat_area.list_state.reset(count);
+        cx.notify();
+
+        let api = self.api.clone();
+        let clan_id = channel.clan_id.clone();
+        let channel_id = channel.id.clone();
+        let is_public = !channel.private;
+        cx.spawn(async move |this, cx| {
+            match api
+                .send_channel_message(&clan_id, &channel_id, &content, is_public)
+                .await
+            {
+                Ok(sent) => {
+                    let _ = this.update(cx, |this, cx| {
+                        if let Some(slot) = Rc::make_mut(&mut this.chat_area.messages)
+                            .iter_mut()
+                            .find(|m| m.id == temp_id)
+                        {
+                            slot.id = sent.message_id;
+                            cx.notify();
+                        }
+                    });
+                }
+                Err(e) => tracing::error!("send_channel_message failed: {e}"),
+            }
+        })
+        .detach();
+    }
+
     fn render_content(&self, cx: &Context<Self>) -> gpui::AnyElement {
         let theme = resolve_theme(&self.settings.read(cx).theme);
 
@@ -287,9 +539,6 @@ impl ChatLayout {
             _ => (String::new(), String::new()),
         };
 
-        // Use channel_list.active_channel_id to detect channel selection instead
-        // of self.router.route(), because the router clone in ChatLayout is stale
-        // (only the RootView's router gets updated on navigation).
         let channels = self.channel_list.read(cx);
         if let Some(ch) = channels.active_channel() {
             return self
@@ -304,8 +553,9 @@ impl ChatLayout {
                 .into_any_element();
         }
 
-        let route = self.router.route();
-        let current_path = self.router.current_path().to_string();
+        let router = Router::global(cx);
+        let route = router.read(cx).route();
+        let current_path = router.read(cx).current_path();
 
         let placeholder = match route {
             Route::Chat => self.render_placeholder(

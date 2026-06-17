@@ -4,28 +4,19 @@ use mezon_store::Settings;
 
 /// Custom frameless title bar.
 pub struct TitleBar {
-    title: String,
     settings: Entity<Settings>,
 }
 
 impl TitleBar {
-    pub fn new(
-        title: impl Into<String>,
-        settings: Entity<Settings>,
-        cx: &mut Context<Self>,
-    ) -> Self {
-        let _ = cx.observe(&settings, |_, _, cx| cx.notify());
-        Self {
-            title: title.into(),
-            settings,
-        }
+    pub fn new(settings: Entity<Settings>, cx: &mut Context<Self>) -> Self {
+        cx.observe(&settings, |_, _, cx| cx.notify()).detach();
+        Self { settings }
     }
 }
 
 impl Render for TitleBar {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = resolve_theme(&self.settings.read(cx).theme);
-        let title = self.title.clone();
 
         div()
             .flex()
@@ -38,21 +29,6 @@ impl Render for TitleBar {
             .on_mouse_down(MouseButton::Left, |_, window, _| {
                 window.start_window_move();
             })
-            .child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap_2()
-                    .px_3()
-                    .child(div().size_4().bg(theme.brand).rounded_sm())
-                    .child(
-                        div()
-                            .text_sm()
-                            .text_color(theme.text_secondary)
-                            .child(title),
-                    ),
-            )
             .child(div().flex_1())
             // Window controls (Windows/Linux only — macOS hides traffic lights)
             .when(cfg!(not(target_os = "macos")), |el| {

@@ -8,15 +8,22 @@ use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::{Mutex, mpsc, oneshot};
+use tokio_rustls::rustls::pki_types::ServerName;
+
+#[cfg(debug_assertions)]
 use tokio_rustls::rustls::client::danger::{
     HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier,
 };
-use tokio_rustls::rustls::pki_types::{CertificateDer, ServerName, UnixTime};
+#[cfg(debug_assertions)]
+use tokio_rustls::rustls::pki_types::{CertificateDer, UnixTime};
+#[cfg(debug_assertions)]
 use tokio_rustls::rustls::{DigitallySignedStruct, SignatureScheme};
 
+#[cfg(debug_assertions)]
 #[derive(Debug)]
 struct NoCertVerifier;
 
+#[cfg(debug_assertions)]
 impl ServerCertVerifier for NoCertVerifier {
     fn verify_server_cert(
         &self,
@@ -62,11 +69,35 @@ impl ServerCertVerifier for NoCertVerifier {
 
 use crate::transport_adapter::{AdapterHandlers, TransportAdapter};
 
+fn build_client_config() -> tokio_rustls::rustls::ClientConfig {
+    tls_crypto::ensure_crypto_provider();
+
+    #[cfg(debug_assertions)]
+    if matches!(
+        std::env::var("MEZON_DANGER_ACCEPT_INVALID_CERTS").as_deref(),
+        Ok("1") | Ok("true")
+    ) {
+        tracing::warn!(
+            "TLS certificate verification DISABLED via MEZON_DANGER_ACCEPT_INVALID_CERTS (debug build only)"
+        );
+        return tokio_rustls::rustls::ClientConfig::builder()
+            .dangerous()
+            .with_custom_certificate_verifier(Arc::new(NoCertVerifier))
+            .with_no_client_auth();
+    }
+
+    let mut root_store = tokio_rustls::rustls::RootCertStore::empty();
+    root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+    tokio_rustls::rustls::ClientConfig::builder()
+        .with_root_certificates(root_store)
+        .with_no_client_auth()
+}
+
 const CODE_FIN: u16 = 0xff;
 const PREFIX_RAW: u8 = 0xff;
 const PREFIX_EXTENDED: u8 = 0x7f;
 const RAW_HEADER_LENGTH: usize = 7;
-const RAW_CHUNK_HEADER_LENGTH: usize = 11;
+const RAW_CHUNK_PAYLOAD_LEN: usize = 4096;
 const MAX_REALTIME_FRAME_LEN: usize = 1 << 20;
 
 fn read_varint(buf: &[u8]) -> Option<(u64, usize)> {
@@ -302,54 +333,96 @@ impl AbridgedTcpAdapter {
                     if buf.len() < RAW_HEADER_LENGTH {
                         return Ok(());
                     }
+                    let cid = u16::from_be_bytes([buf[1], buf[2]]);
                     let code = u32::from_be_bytes([buf[3], buf[4], buf[5], buf[6]]);
+                    let response_code = (code >> 16) & 0xffff;
                     let fin_flag = (code & 0xffff) as u16;
-                    if fin_flag == CODE_FIN {
-                        if buf.len() == RAW_HEADER_LENGTH {
-                            // Header-only FIN: save as pending — body may arrive in next TCP read
-                            *self.pending_raw.lock().await = Some(buf.clone());
-                            buf.drain(..RAW_HEADER_LENGTH);
-                            // Spawn timeout: if body never arrives, dispatch as zero-body response
-                            let pending_raw = self.pending_raw.clone();
-                            let handlers = self.handlers.lock().await.clone();
-                            tokio::spawn(async move {
-                                tokio::time::sleep(Duration::from_millis(100)).await;
-                                let mut pending = pending_raw.lock().await;
-                                if let Some(header) = pending.take() {
-                                    let cid = u16::from_be_bytes([header[1], header[2]]);
-                                    let code = u32::from_be_bytes([
-                                        header[3], header[4], header[5], header[6],
-                                    ]);
-                                    let response_code = (code >> 16) & 0xffff;
-                                    handlers.trigger_message(cid, response_code, vec![]);
-                                }
-                            });
+
+                    if fin_flag != CODE_FIN {
+                        if buf.len() < RAW_HEADER_LENGTH + RAW_CHUNK_PAYLOAD_LEN {
                             return Ok(());
                         }
-                        let body_len = match protobuf_message_len(&buf[RAW_HEADER_LENGTH..]) {
-                            Some(n) => n,
-                            None => return Ok(()),
+                        let payload = buf
+                            [RAW_HEADER_LENGTH..RAW_HEADER_LENGTH + RAW_CHUNK_PAYLOAD_LEN]
+                            .to_vec();
+                        let buffered = {
+                            let mut streams = self.streams.lock().await;
+                            let chunks = streams.entry(cid).or_default();
+                            chunks.push(payload);
+                            chunks.iter().map(Vec::len).sum::<usize>()
                         };
-                        let total = RAW_HEADER_LENGTH + body_len;
-                        let msg = buf[..total].to_vec();
-                        buf.drain(..total);
-                        Some((msg, false))
-                    } else if buf.len() < RAW_CHUNK_HEADER_LENGTH {
-                        return Ok(());
+                        if buffered > MAX_REALTIME_FRAME_LEN {
+                            tracing::warn!(
+                                "resync: cid={cid} buffered {buffered} bytes exceeds cap, dropping stream"
+                            );
+                            self.streams.lock().await.remove(&cid);
+                        }
+                        buf.drain(..RAW_HEADER_LENGTH + RAW_CHUNK_PAYLOAD_LEN);
+                        None
                     } else {
-                        let payload_len =
-                            u32::from_be_bytes([buf[7], buf[8], buf[9], buf[10]]) as usize;
-                        let total = RAW_CHUNK_HEADER_LENGTH + payload_len;
-                        if total > MAX_REALTIME_FRAME_LEN {
-                            tracing::debug!("resync: raw chunk len {total} too large");
-                            buf.drain(..1);
-                            None
-                        } else if buf.len() < total {
-                            return Ok(());
-                        } else {
+                        let mut streams = self.streams.lock().await;
+                        let prefix_len = streams
+                            .get(&cid)
+                            .map(|c| c.iter().map(Vec::len).sum::<usize>())
+                            .unwrap_or(0);
+                        if prefix_len == 0 {
+                            drop(streams);
+                            if buf.len() == RAW_HEADER_LENGTH {
+                                // Header-only FIN: save as pending — body may arrive in next TCP read
+                                *self.pending_raw.lock().await = Some(buf.clone());
+                                buf.drain(..RAW_HEADER_LENGTH);
+                                let pending_raw = self.pending_raw.clone();
+                                let handlers = self.handlers.lock().await.clone();
+                                tokio::spawn(async move {
+                                    tokio::time::sleep(Duration::from_millis(100)).await;
+                                    let mut pending = pending_raw.lock().await;
+                                    if let Some(header) = pending.take() {
+                                        let cid = u16::from_be_bytes([header[1], header[2]]);
+                                        let code = u32::from_be_bytes([
+                                            header[3], header[4], header[5], header[6],
+                                        ]);
+                                        let response_code = (code >> 16) & 0xffff;
+                                        handlers.trigger_message(cid, response_code, vec![]);
+                                    }
+                                });
+                                return Ok(());
+                            }
+                            let body_len = match protobuf_message_len(&buf[RAW_HEADER_LENGTH..]) {
+                                Some(n) => n,
+                                None => return Ok(()),
+                            };
+                            let total = RAW_HEADER_LENGTH + body_len;
                             let msg = buf[..total].to_vec();
                             buf.drain(..total);
                             Some((msg, false))
+                        } else {
+                            let mut combined =
+                                streams.get(&cid).map(|c| c.concat()).unwrap_or_default();
+                            combined.extend_from_slice(&buf[RAW_HEADER_LENGTH..]);
+                            match protobuf_message_len(&combined) {
+                                Some(total) if total >= prefix_len => {
+                                    let fin_bytes = total - prefix_len;
+                                    combined.truncate(total);
+                                    tracing::info!(
+                                        "Complete API response (chunked): cid={cid} code={response_code} len={total} bytes"
+                                    );
+                                    handlers.trigger_message(cid, response_code, combined);
+                                    streams.remove(&cid);
+                                    drop(streams);
+                                    buf.drain(..RAW_HEADER_LENGTH + fin_bytes);
+                                    None
+                                }
+                                Some(_) => {
+                                    tracing::warn!(
+                                        "resync: cid={cid} chunked stream corrupt, dropping"
+                                    );
+                                    streams.remove(&cid);
+                                    drop(streams);
+                                    buf.drain(..1);
+                                    None
+                                }
+                                None => return Ok(()),
+                            }
                         }
                     }
                 } else if first_byte < 127 {
@@ -485,50 +558,12 @@ impl AbridgedTcpAdapter {
                 let cid = u16::from_be_bytes([data[1], data[2]]);
                 let code = u32::from_be_bytes([data[3], data[4], data[5], data[6]]);
                 let response_code = (code >> 16) & 0xffff;
-                let fin_flag = (code & 0xffff) as u16;
-
-                let (payload, payload_len) = if fin_flag == CODE_FIN {
-                    (
-                        data[RAW_HEADER_LENGTH..].to_vec(),
-                        data.len() - RAW_HEADER_LENGTH,
-                    )
-                } else {
-                    let len = u32::from_be_bytes([data[7], data[8], data[9], data[10]]) as usize;
-                    (
-                        data[RAW_CHUNK_HEADER_LENGTH..RAW_CHUNK_HEADER_LENGTH + len].to_vec(),
-                        len,
-                    )
-                };
-
+                let payload = data[RAW_HEADER_LENGTH..].to_vec();
                 tracing::info!(
-                    "RAW: cid={} code={:#x} response_code={} fin_flag={:#x} payload_len={}",
-                    cid,
-                    code,
-                    response_code,
-                    fin_flag,
-                    payload_len
+                    "Complete API response: cid={cid} code={response_code} len={} bytes",
+                    payload.len()
                 );
-
-                let mut streams = self.streams.lock().await;
-                if fin_flag == CODE_FIN {
-                    let chunks = streams.entry(cid).or_insert_with(Vec::new);
-                    if payload_len > 0 {
-                        chunks.push(payload);
-                    }
-                    let complete_buffer: Vec<u8> = chunks.concat();
-                    tracing::info!(
-                        "Complete API response: cid={} code={} len={} bytes",
-                        cid,
-                        response_code,
-                        complete_buffer.len()
-                    );
-                    handlers.trigger_message(cid, response_code, complete_buffer);
-                    streams.remove(&cid);
-                } else {
-                    let chunks = streams.entry(cid).or_insert_with(Vec::new);
-                    chunks.push(payload);
-                    tracing::info!("Buffered chunk for cid={} ({} total)", cid, chunks.len());
-                }
+                handlers.trigger_message(cid, response_code, payload);
                 continue;
             }
 
@@ -649,12 +684,16 @@ impl AbridgedTcpAdapter {
                     tracing::debug!("select: WRITE branch fired");
                     match maybe_msg {
                         Some(packet) => {
-                            tracing::info!(
-                                "WRITE {} bytes [{}] {:02x?}",
-                                packet.len(),
-                                frame_kind(packet[0]),
-                                &packet[..packet.len().min(32)]
-                            );
+                            if packet.first() == Some(&0xef) {
+                                tracing::info!("WRITE handshake frame");
+                            } else {
+                                tracing::info!(
+                                    "WRITE {} bytes [{}] {:02x?}",
+                                    packet.len(),
+                                    frame_kind(packet[0]),
+                                    &packet[..packet.len().min(32)]
+                                );
+                            }
                             match tls.write_all(&packet).await {
                                 Ok(()) => tracing::info!("write_all OK"),
                                 Err(e) => {
@@ -714,13 +753,8 @@ impl Default for AbridgedTcpAdapter {
 impl TransportAdapter for AbridgedTcpAdapter {
     async fn connect(&mut self, host: &str, port: u16, token: &str) -> Result<()> {
         tracing::info!("=== CONNECT START: {}:{} ===", host, port);
-        tracing::info!("Token length: {}", token.len());
 
-        tls_crypto::ensure_crypto_provider();
-        let config = tokio_rustls::rustls::ClientConfig::builder()
-            .dangerous()
-            .with_custom_certificate_verifier(Arc::new(NoCertVerifier))
-            .with_no_client_auth();
+        let config = build_client_config();
         let connector = tokio_rustls::TlsConnector::from(Arc::new(config));
 
         let addr = format!("{}:{}", host, port);
@@ -783,15 +817,7 @@ impl TransportAdapter for AbridgedTcpAdapter {
         let mut handshake = vec![0xef, len_header];
         handshake.extend(&final_token);
 
-        tracing::info!(
-            "Sending handshake: {} bytes (magic=0xef len={})",
-            handshake.len(),
-            len_header
-        );
-        tracing::info!(
-            "Handshake hex: {:02x?}",
-            &handshake[..handshake.len().min(32)]
-        );
+        tracing::info!("Sending handshake");
         write_tx
             .send(handshake)
             .map_err(|_| anyhow::anyhow!("Write channel closed early"))?;
@@ -1000,5 +1026,83 @@ mod tests {
     fn caps_absurd_field_length() {
         let stream = [0x0a, 0xff, 0xff, 0xff, 0xff, 0x0f, 0x00, 0x00];
         assert_eq!(protobuf_message_len(&stream), Some(0));
+    }
+
+    fn raw_frame(cid: u16, fin: bool, payload: &[u8]) -> Vec<u8> {
+        let code: u32 = if fin { u32::from(CODE_FIN) } else { 0 };
+        let mut frame = vec![PREFIX_RAW];
+        frame.extend_from_slice(&cid.to_be_bytes());
+        frame.extend_from_slice(&code.to_be_bytes());
+        frame.extend_from_slice(payload);
+        frame
+    }
+
+    fn channel_messages_body(content_len: usize) -> Vec<u8> {
+        mezon_proto::api::ChannelMessageList {
+            messages: vec![mezon_proto::api::ChannelMessage {
+                content: "x".repeat(content_len),
+                ..Default::default()
+            }],
+            ..Default::default()
+        }
+        .encode_to_vec()
+    }
+
+    async fn captured_responses(
+        adapter: &AbridgedTcpAdapter,
+    ) -> Arc<std::sync::Mutex<Vec<(u16, u32, Vec<u8>)>>> {
+        let received = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink = received.clone();
+        adapter.handlers.lock().await.on_message = Some(Arc::new(move |cid, code, bytes| {
+            sink.lock().unwrap().push((cid, code, bytes));
+        }));
+        received
+    }
+
+    #[tokio::test]
+    async fn reassembles_chunked_api_response_split_across_frames() {
+        let body = channel_messages_body(6000);
+        assert!(body.len() > RAW_CHUNK_PAYLOAD_LEN);
+
+        let adapter = AbridgedTcpAdapter::new();
+        let received = captured_responses(&adapter).await;
+
+        // Mirror the real capture: each 7-byte header and its payload arrive in
+        // separate TCP reads (chunk header, chunk payload, then the final frame).
+        adapter.handle_data(raw_frame(6, false, &[])).await.unwrap();
+        adapter
+            .handle_data(body[..RAW_CHUNK_PAYLOAD_LEN].to_vec())
+            .await
+            .unwrap();
+        adapter
+            .handle_data(raw_frame(6, true, &body[RAW_CHUNK_PAYLOAD_LEN..]))
+            .await
+            .unwrap();
+
+        let received = received.lock().unwrap();
+        assert_eq!(received.len(), 1);
+        assert_eq!(received[0].0, 6);
+        assert_eq!(received[0].1, 0);
+        assert_eq!(received[0].2, body);
+        mezon_proto::api::ChannelMessageList::decode(received[0].2.as_slice()).unwrap();
+    }
+
+    #[tokio::test]
+    async fn delivers_single_frame_api_response() {
+        let body = channel_messages_body(16);
+        assert!(body.len() < RAW_CHUNK_PAYLOAD_LEN);
+
+        let adapter = AbridgedTcpAdapter::new();
+        let received = captured_responses(&adapter).await;
+
+        adapter
+            .handle_data(raw_frame(7, true, &body))
+            .await
+            .unwrap();
+
+        let received = received.lock().unwrap();
+        assert_eq!(received.len(), 1);
+        assert_eq!(received[0].0, 7);
+        assert_eq!(received[0].2, body);
     }
 }

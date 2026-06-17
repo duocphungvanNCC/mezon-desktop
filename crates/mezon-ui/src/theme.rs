@@ -1,4 +1,92 @@
-use gpui::Rgba;
+use gpui::{App, Global, Rgba};
+
+impl Global for Theme {}
+
+pub trait ActiveTheme {
+    fn theme(&self) -> &Theme;
+}
+
+impl ActiveTheme for App {
+    fn theme(&self) -> &Theme {
+        self.global::<Theme>()
+    }
+}
+
+struct MezonThemeSettings {
+    ui_font: gpui::Font,
+    buffer_font: gpui::Font,
+}
+
+impl ::theme::ThemeSettingsProvider for MezonThemeSettings {
+    fn ui_font<'a>(&'a self, _cx: &'a App) -> &'a gpui::Font {
+        &self.ui_font
+    }
+
+    fn buffer_font<'a>(&'a self, _cx: &'a App) -> &'a gpui::Font {
+        &self.buffer_font
+    }
+
+    fn ui_font_size(&self, _cx: &App) -> gpui::Pixels {
+        gpui::px(14.0)
+    }
+
+    fn buffer_font_size(&self, _cx: &App) -> gpui::Pixels {
+        gpui::px(14.0)
+    }
+
+    fn ui_density(&self, _cx: &App) -> ::theme::UiDensity {
+        ::theme::UiDensity::Default
+    }
+}
+
+pub fn init_theme_settings_provider(cx: &mut App) {
+    ::theme::set_theme_settings_provider(
+        Box::new(MezonThemeSettings {
+            ui_font: gpui::font("gg sans"),
+            buffer_font: gpui::font("gg sans"),
+        }),
+        cx,
+    );
+}
+
+pub fn set_theme(theme: Theme, cx: &mut App) {
+    apply_zed_palette(&theme, cx);
+    cx.set_global(theme);
+}
+
+fn apply_zed_palette(theme: &Theme, cx: &mut App) {
+    if !cx.has_global::<::theme::GlobalTheme>() {
+        return;
+    }
+    let mut zed = (**::theme::GlobalTheme::theme(cx)).clone();
+    let colors = &mut zed.styles.colors;
+    colors.background = theme.bg_primary.into();
+    colors.surface_background = theme.bg_secondary.into();
+    colors.elevated_surface_background = theme.bg_floating.into();
+    colors.panel_background = theme.bg_secondary.into();
+    colors.element_background = theme.bg_tertiary.into();
+    colors.element_hover = theme.bg_hover.into();
+    colors.element_active = theme.bg_hover.into();
+    colors.element_selected = theme.brand.into();
+    colors.element_disabled = theme.bg_tertiary.into();
+    colors.ghost_element_hover = theme.bg_hover.into();
+    colors.ghost_element_active = theme.bg_hover.into();
+    colors.border = theme.border.into();
+    colors.border_variant = theme.border.into();
+    colors.border_focused = theme.brand.into();
+    colors.text = theme.text_primary.into();
+    colors.text_muted = theme.text_secondary.into();
+    colors.text_disabled = theme.text_muted.into();
+    colors.text_accent = theme.brand.into();
+
+    let status = &mut zed.styles.status;
+    status.error = theme.status_dnd.into();
+    status.success = theme.status_online.into();
+    status.warning = theme.status_idle.into();
+    status.info = theme.text_link.into();
+
+    ::theme::GlobalTheme::update_theme(cx, std::sync::Arc::new(zed));
+}
 
 pub fn resolve_theme(theme_name: &str) -> Theme {
     match theme_name {

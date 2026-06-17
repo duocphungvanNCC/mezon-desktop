@@ -1,6 +1,6 @@
+use crate::components::primitives::{Icon, IconName, Label, v_flex};
 use crate::theme::{Theme, resolve_theme};
 use gpui::{Context, Entity, FontWeight, Window, div, prelude::*, px};
-use gpui_component::{Icon, IconName, label::Label, v_flex};
 use mezon_store::Settings;
 
 pub struct LanguagePage {
@@ -9,7 +9,7 @@ pub struct LanguagePage {
 
 impl LanguagePage {
     pub fn new(settings: Entity<Settings>, cx: &mut Context<Self>) -> Self {
-        let _ = cx.observe(&settings, |_, _, cx| cx.notify());
+        cx.observe(&settings, |_, _, cx| cx.notify()).detach();
         Self { settings }
     }
 }

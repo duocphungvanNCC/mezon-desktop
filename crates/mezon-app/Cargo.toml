@@ -10,8 +10,6 @@ path = "src/main.rs"
 
 [dependencies]
 gpui.workspace = true
-gpui-component.workspace = true
-gpui-component-assets.workspace = true
 gpui_platform = { workspace = true, features = ["font-kit"] }
 mezon-ui.workspace = true
 mezon-store.workspace = true
@@ -21,6 +19,7 @@ mezon-client.workspace = true
 dotenvy = "0.15"
 reqwest_client.workspace = true
 tokio.workspace = true
+futures.workspace = true
 anyhow.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true

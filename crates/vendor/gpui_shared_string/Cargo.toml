@@ -12,6 +12,7 @@ derive_more.workspace = true
 gpui_util = { path = "../gpui_util" }
 schemars.workspace = true
 serde.workspace = true
+smol_str = "0.3.6"
 
 
 [lints.rust]

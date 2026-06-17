@@ -26,15 +26,40 @@ pub struct Channel {
     pub member_count: u32,
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct MessageAttachment {
+    pub url: String,
+    pub filename: String,
+    pub filetype: String,
+    pub width: u32,
+    pub height: u32,
+}
+
+impl MessageAttachment {
+    pub fn is_image(&self) -> bool {
+        self.filetype.starts_with("image/")
+            || matches!(
+                self.url
+                    .split(['?', '#'])
+                    .next()
+                    .and_then(|u| u.rsplit('.').next())
+                    .map(|ext| ext.to_ascii_lowercase())
+                    .as_deref(),
+                Some("png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "svg" | "avif")
+            )
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Message {
     pub id: String,
     pub content: String,
     pub sender_id: String,
     pub sender_name: String,
+    pub avatar_url: String,
     pub create_time: i64,
     pub reactions: Vec<String>,
-    pub attachments: Vec<String>,
+    pub attachments: Vec<MessageAttachment>,
 }
 
 impl Message {
@@ -50,10 +75,21 @@ impl Message {
             content: content.into(),
             sender_id: sender_id.into(),
             sender_name: sender_name.into(),
+            avatar_url: String::new(),
             create_time,
             reactions: Vec::new(),
             attachments: Vec::new(),
         }
+    }
+
+    pub fn with_attachments(mut self, attachments: Vec<MessageAttachment>) -> Self {
+        self.attachments = attachments;
+        self
+    }
+
+    pub fn with_avatar(mut self, avatar_url: impl Into<String>) -> Self {
+        self.avatar_url = avatar_url.into();
+        self
     }
 }
 
@@ -179,23 +215,57 @@ impl ChannelList {
 
     /// Apply a server-pushed realtime event. Cf. `ChannelStore::handle_update_channels`.
     fn handle_event(&mut self, event: RealtimeEvent, cx: &mut Context<Self>) {
-        // Mark a channel unread when a message lands in it (unless it is the open one).
-        if let RealtimeEvent::ChannelMessage(m) = event {
-            let id = m.channel_id.to_string();
-            if self.active_channel_id.as_deref() != Some(id.as_str())
-                && let Some(ch) = self
-                    .categories
-                    .iter_mut()
-                    .flat_map(|c| &mut c.channels)
-                    .find(|ch| ch.id == id)
-                && !ch.unread
-            {
-                ch.unread = true;
-                cx.emit(ChannelEvent::Unread(id));
-                cx.notify();
+        match event {
+            RealtimeEvent::ChannelMessage(m) => {
+                let id = m.channel_id.to_string();
+                if self.active_channel_id.as_deref() != Some(id.as_str())
+                    && let Some(ch) = self
+                        .categories
+                        .iter_mut()
+                        .flat_map(|c| &mut c.channels)
+                        .find(|ch| ch.id == id)
+                    && !ch.unread
+                {
+                    ch.unread = true;
+                    cx.emit(ChannelEvent::Unread(id));
+                    cx.notify();
+                }
             }
+            RealtimeEvent::ChannelCreated(e)
+                if self.loaded_clan_id.as_deref() == Some(e.clan_id.to_string().as_str()) =>
+            {
+                self.reload_current_clan(cx);
+            }
+            RealtimeEvent::ChannelUpdated(e) => {
+                let label = (!e.channel_label.is_empty()).then_some(e.channel_label);
+                if update_channel(
+                    &mut self.categories,
+                    &e.channel_id.to_string(),
+                    label,
+                    e.channel_private,
+                ) {
+                    cx.notify();
+                }
+            }
+            RealtimeEvent::ChannelDeleted(e) => {
+                let id = e.channel_id.to_string();
+                if remove_channel(&mut self.categories, &id) {
+                    if self.active_channel_id.as_deref() == Some(id.as_str()) {
+                        self.active_channel_id = None;
+                        cx.emit(ChannelEvent::ActiveChannelChanged(None));
+                    }
+                    cx.notify();
+                }
+            }
+            _ => {}
         }
-        // TODO: ChannelCreated / ChannelDeleted / ChannelUpdated handlers go here.
+    }
+
+    fn reload_current_clan(&mut self, cx: &mut Context<Self>) {
+        if let Some(clan_id) = self.loaded_clan_id.clone() {
+            self.loaded_clan_id = None;
+            self.load_for_clan(clan_id, cx);
+        }
     }
 
     pub fn active_channel(&self) -> Option<&Channel> {
@@ -286,4 +356,102 @@ fn group_channels_by_category(channels: Vec<Channel>) -> Vec<Category> {
 
     categories.sort_by(|a, b| a.name.cmp(&b.name));
     categories
+}
+
+fn remove_channel(categories: &mut Vec<Category>, channel_id: &str) -> bool {
+    let mut removed = false;
+    for cat in categories.iter_mut() {
+        let before = cat.channels.len();
+        cat.channels.retain(|ch| ch.id != channel_id);
+        removed |= cat.channels.len() != before;
+    }
+    if removed {
+        categories.retain(|c| !c.channels.is_empty());
+    }
+    removed
+}
+
+fn update_channel(
+    categories: &mut [Category],
+    channel_id: &str,
+    label: Option<String>,
+    private: bool,
+) -> bool {
+    let Some(ch) = categories
+        .iter_mut()
+        .flat_map(|c| &mut c.channels)
+        .find(|ch| ch.id == channel_id)
+    else {
+        return false;
+    };
+    if let Some(label) = label {
+        ch.name = label;
+    }
+    ch.private = private;
+    true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn channel(id: &str, name: &str) -> Channel {
+        Channel {
+            id: id.into(),
+            name: name.into(),
+            channel_type: ChannelType::Text,
+            unread: false,
+            private: false,
+            clan_id: "1".into(),
+            category_name: "General".into(),
+            category_id: None,
+            member_count: 0,
+        }
+    }
+
+    fn categories() -> Vec<Category> {
+        vec![Category {
+            clan_id: "1".into(),
+            name: "General".into(),
+            channels: vec![channel("10", "alpha"), channel("11", "beta")],
+        }]
+    }
+
+    #[test]
+    fn remove_channel_drops_it_and_prunes_empty_category() {
+        let mut c = categories();
+        assert!(remove_channel(&mut c, "10"));
+        assert_eq!(c[0].channels.len(), 1);
+        assert!(remove_channel(&mut c, "11"));
+        assert!(c.is_empty());
+    }
+
+    #[test]
+    fn remove_channel_unknown_is_noop() {
+        let mut c = categories();
+        assert!(!remove_channel(&mut c, "999"));
+        assert_eq!(c[0].channels.len(), 2);
+    }
+
+    #[test]
+    fn update_channel_renames_and_sets_private() {
+        let mut c = categories();
+        assert!(update_channel(&mut c, "10", Some("renamed".into()), true));
+        assert_eq!(c[0].channels[0].name, "renamed");
+        assert!(c[0].channels[0].private);
+    }
+
+    #[test]
+    fn update_channel_blank_label_keeps_name() {
+        let mut c = categories();
+        assert!(update_channel(&mut c, "11", None, true));
+        assert_eq!(c[0].channels[1].name, "beta");
+        assert!(c[0].channels[1].private);
+    }
+
+    #[test]
+    fn update_channel_unknown_is_noop() {
+        let mut c = categories();
+        assert!(!update_channel(&mut c, "999", Some("x".into()), true));
+    }
 }
