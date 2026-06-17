@@ -1,3 +1,6 @@
+use gpui::{App, AppContext, Entity, Global};
+use std::collections::VecDeque;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Route {
     Chat,
@@ -24,10 +27,70 @@ pub enum Route {
     },
 }
 
+impl Route {
+    pub fn to_path(&self) -> String {
+        match self {
+            Route::Chat => "/chat".to_string(),
+            Route::Direct => "/chat/direct".to_string(),
+            Route::DirectMessage {
+                direct_id,
+                message_type,
+            } => format!("/chat/direct/message/{direct_id}/{message_type}"),
+            Route::Channel {
+                clan_id,
+                channel_id,
+            } => format!("/chat/clans/{clan_id}/channels/{channel_id}"),
+            Route::SettingsAccount => "/settings/account".to_string(),
+            Route::SettingsProfile => "/settings/profile".to_string(),
+            Route::SettingsDevices => "/settings/devices".to_string(),
+            Route::SettingsAppearance => "/settings/appearance".to_string(),
+            Route::SettingsActivity => "/settings/activity".to_string(),
+            Route::SettingsNotifications => "/settings/notifications".to_string(),
+            Route::SettingsLanguage => "/settings/language".to_string(),
+            Route::SettingsVoice => "/settings/voice".to_string(),
+            Route::SettingsAdvanced => "/settings/advanced".to_string(),
+            Route::NotFound { path } => path.clone(),
+        }
+    }
+
+    pub fn from_path(path: &str) -> Route {
+        let normalized = normalize_path(path);
+        let segments = normalized
+            .trim_start_matches('/')
+            .split('/')
+            .filter(|segment| !segment.is_empty())
+            .collect::<Vec<_>>();
+
+        match segments.as_slice() {
+            ["chat"] => Route::Chat,
+            ["chat", "direct"] => Route::Direct,
+            ["chat", "direct", "message", direct_id, message_type] => Route::DirectMessage {
+                direct_id: (*direct_id).to_string(),
+                message_type: (*message_type).to_string(),
+            },
+            ["chat", "clans", clan_id, "channels", channel_id] => Route::Channel {
+                clan_id: (*clan_id).to_string(),
+                channel_id: (*channel_id).to_string(),
+            },
+            ["settings"] | ["settings", "account"] => Route::SettingsAccount,
+            ["settings", "profile"] => Route::SettingsProfile,
+            ["settings", "devices"] => Route::SettingsDevices,
+            ["settings", "appearance"] => Route::SettingsAppearance,
+            ["settings", "activity"] => Route::SettingsActivity,
+            ["settings", "notifications"] => Route::SettingsNotifications,
+            ["settings", "language"] => Route::SettingsLanguage,
+            ["settings", "voice"] => Route::SettingsVoice,
+            ["settings", "advanced"] => Route::SettingsAdvanced,
+            _ => Route::NotFound { path: normalized },
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Router {
-    history: Vec<String>,
-    current: usize,
+    current: Route,
+    backward: VecDeque<Route>,
+    forward: VecDeque<Route>,
 }
 
 impl Default for Router {
@@ -37,82 +100,127 @@ impl Default for Router {
 }
 
 impl Router {
-    pub const DEFAULT_PATH: &'static str = "/chat";
+    const MAX_HISTORY: usize = 64;
 
     pub fn new() -> Self {
         Self {
-            history: vec![Self::DEFAULT_PATH.to_string()],
-            current: 0,
+            current: Route::Chat,
+            backward: VecDeque::new(),
+            forward: VecDeque::new(),
         }
     }
 
-    pub fn current_path(&self) -> &str {
-        &self.history[self.current]
+    pub fn route(&self) -> Route {
+        self.current.clone()
     }
 
-    pub fn navigate(&mut self, path: impl Into<String>) {
-        let path = normalize_path(path.into());
-        self.history.truncate(self.current + 1);
-        self.history.push(path);
-        self.current = self.history.len() - 1;
+    pub fn current_path(&self) -> String {
+        self.current.to_path()
     }
 
-    pub fn replace(&mut self, path: impl Into<String>) {
-        self.history[self.current] = normalize_path(path.into());
+    pub fn navigate(&mut self, route: Route) {
+        if route == self.current {
+            return;
+        }
+        self.backward
+            .push_back(std::mem::replace(&mut self.current, route));
+        self.forward.clear();
+        while self.backward.len() > Self::MAX_HISTORY {
+            self.backward.pop_front();
+        }
+    }
+
+    pub fn replace(&mut self, route: Route) {
+        self.current = route;
     }
 
     pub fn go_back(&mut self) {
-        if self.current > 0 {
-            self.current -= 1;
+        if let Some(prev) = self.backward.pop_back() {
+            self.forward
+                .push_back(std::mem::replace(&mut self.current, prev));
+            while self.forward.len() > Self::MAX_HISTORY {
+                self.forward.pop_front();
+            }
+        }
+    }
+
+    pub fn go_forward(&mut self) {
+        if let Some(next) = self.forward.pop_back() {
+            self.backward
+                .push_back(std::mem::replace(&mut self.current, next));
+            while self.backward.len() > Self::MAX_HISTORY {
+                self.backward.pop_front();
+            }
         }
     }
 
     pub fn can_go_back(&self) -> bool {
-        self.current > 0
+        !self.backward.is_empty()
     }
 
-    pub fn route(&self) -> Route {
-        match_path(&self.history[self.current])
-    }
-}
-
-pub fn match_path(path: &str) -> Route {
-    let normalized = normalize_path(path);
-    let segments = normalized
-        .trim_start_matches('/')
-        .split('/')
-        .filter(|segment| !segment.is_empty())
-        .collect::<Vec<_>>();
-
-    match segments.as_slice() {
-        ["chat"] => Route::Chat,
-        ["chat", "direct"] => Route::Direct,
-        ["chat", "direct", "message", direct_id, message_type] => Route::DirectMessage {
-            direct_id: (*direct_id).to_string(),
-            message_type: (*message_type).to_string(),
-        },
-        ["chat", "clans", clan_id, "channels", channel_id] => Route::Channel {
-            clan_id: (*clan_id).to_string(),
-            channel_id: (*channel_id).to_string(),
-        },
-        ["settings"] | ["settings", "account"] => Route::SettingsAccount,
-        ["settings", "profile"] => Route::SettingsProfile,
-        ["settings", "devices"] => Route::SettingsDevices,
-        ["settings", "appearance"] => Route::SettingsAppearance,
-        ["settings", "activity"] => Route::SettingsActivity,
-        ["settings", "notifications"] => Route::SettingsNotifications,
-        ["settings", "language"] => Route::SettingsLanguage,
-        ["settings", "voice"] => Route::SettingsVoice,
-        ["settings", "advanced"] => Route::SettingsAdvanced,
-        _ => Route::NotFound { path: normalized },
+    pub fn can_go_forward(&self) -> bool {
+        !self.forward.is_empty()
     }
 }
 
-fn normalize_path(path: impl AsRef<str>) -> String {
-    let path = path.as_ref();
+struct GlobalRouter(Entity<Router>);
+impl Global for GlobalRouter {}
+
+impl Router {
+    pub fn init(cx: &mut App) -> Entity<Self> {
+        let entity = cx.new(|_| Router::new());
+        cx.set_global(GlobalRouter(entity.clone()));
+        entity
+    }
+
+    pub fn global(cx: &App) -> Entity<Self> {
+        cx.global::<GlobalRouter>().0.clone()
+    }
+}
+
+pub fn parse_link(url: &str) -> Option<Route> {
+    let rest = url.trim().strip_prefix("mezonapp://")?;
+    if rest.starts_with("callback") {
+        return None;
+    }
+    Some(Route::from_path(&format!(
+        "/{}",
+        rest.trim_start_matches('/')
+    )))
+}
+
+pub fn navigate(cx: &mut App, route: Route) {
+    Router::global(cx).update(cx, |router, cx| {
+        router.navigate(route);
+        cx.notify();
+    });
+}
+
+pub fn replace(cx: &mut App, route: Route) {
+    Router::global(cx).update(cx, |router, cx| {
+        router.replace(route);
+        cx.notify();
+    });
+}
+
+pub fn go_back(cx: &mut App) {
+    Router::global(cx).update(cx, |router, cx| {
+        router.go_back();
+        cx.notify();
+    });
+}
+
+pub fn go_forward(cx: &mut App) {
+    Router::global(cx).update(cx, |router, cx| {
+        router.go_forward();
+        cx.notify();
+    });
+}
+
+fn normalize_path(path: &str) -> String {
     let trimmed = path.trim();
     if trimmed.is_empty() || trimmed == "/" {
-        return Router::DEFAULT_PATH.to_string();
+        return "/chat".to_string();
     }
 
     let without_trailing = trimmed.trim_end_matches('/');

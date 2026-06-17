@@ -1,13 +1,11 @@
 use std::sync::Arc;
 
-use gpui::{App, ClickEvent, Window, div, prelude::*, px};
-use gpui_component::input::{Input, InputState};
-
 use crate::chat::ReplyTarget;
-use crate::components::primitives::Button;
+use crate::components::primitives::{Button, Input, InputState};
 use crate::theme::Theme;
+use gpui::{App, ClickEvent, Window, div, prelude::*, px};
 
-type SendHandler = Arc<dyn Fn(&str, &mut Window, &mut App) + Send + Sync>;
+type SendHandler = Arc<dyn Fn(&mut Window, &mut App) + Send + Sync>;
 
 pub struct InputBar {
     input_state: Option<gpui::Entity<InputState>>,
@@ -94,20 +92,11 @@ impl InputBar {
     }
 
     pub fn render(&self, theme: &Theme) -> impl IntoElement {
-        let input_state = self.input_state.clone();
         let on_send = self.on_send.clone();
 
         let on_click = move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
-            if let Some(ref state) = input_state {
-                let value = state.read(cx).value().to_string();
-                if !value.is_empty() && on_send.is_some() {
-                    let handler = on_send.clone().unwrap();
-                    handler(&value, window, cx);
-                    state.update(cx, |s, cx| {
-                        s.set_value("", window, cx);
-                        cx.notify();
-                    });
-                }
+            if let Some(ref handler) = on_send {
+                handler(window, cx);
             }
         };
 

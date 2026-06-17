@@ -44,6 +44,18 @@ pub async fn put_bytes_to_url(url: &str, data: Vec<u8>) -> Result<()> {
     Ok(())
 }
 
+/// Read a file without blocking the caller's async executor.
+///
+/// Callers run on GPUI's smol executor where there is no ambient tokio runtime, so the
+/// read is offloaded to the transport runtime's blocking pool.
+pub async fn read_file(path: std::path::PathBuf) -> Result<Vec<u8>> {
+    runtime()
+        .spawn_blocking(move || std::fs::read(&path))
+        .await
+        .map_err(|e| anyhow::anyhow!("file read task failed: {e}"))?
+        .map_err(Into::into)
+}
+
 /// Transport client wrapper that spawns all operations on a dedicated tokio runtime.
 ///
 /// This allows transport operations (TCP connections, async I/O) to work correctly
@@ -99,7 +111,7 @@ impl TransportClient {
                 result
             })
             .await
-            .expect("Transport task panicked")?;
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))??;
 
         tracing::info!("TransportClient::connect() completed");
         Ok(())
@@ -120,7 +132,7 @@ impl TransportClient {
                 transport.get_account().await
             })
             .await
-            .expect("Transport task panicked");
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?;
 
         tracing::debug!("  Transport runtime task completed");
         result
@@ -139,7 +151,7 @@ impl TransportClient {
         runtime()
             .spawn(async move { transport.list_channel_descs(&clan_id).await })
             .await
-            .expect("Transport task panicked")
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
     }
 
     /// List channels for the current user over the shared transport.
@@ -151,7 +163,7 @@ impl TransportClient {
         runtime()
             .spawn(async move { transport.list_channel_by_user_id().await })
             .await
-            .expect("Transport task panicked")
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
     }
 
     /// List clan descriptions over the shared transport.
@@ -163,7 +175,7 @@ impl TransportClient {
         runtime()
             .spawn(async move { transport.list_clan_descs().await })
             .await
-            .expect("Transport task panicked")
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
     }
 
     /// Create a new clan.
@@ -183,7 +195,7 @@ impl TransportClient {
         runtime()
             .spawn(async move { transport.create_clan_desc(&clan_name, &logo, &banner).await })
             .await
-            .expect("Transport task panicked")
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
     }
 
     /// Ping server and wait for pong.
@@ -195,7 +207,7 @@ impl TransportClient {
         runtime()
             .spawn(async move { transport.ping_roundtrip().await })
             .await
-            .expect("Transport task panicked")
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
     }
 
     /// Check if the connection is open.
@@ -208,20 +220,23 @@ impl TransportClient {
         &self,
         clan_id: &str,
         channel_id: &str,
+        message_id: &str,
+        direction: i32,
         limit: u32,
     ) -> Result<Vec<crate::transport::ApiMessage>> {
         let transport = self.inner.clone();
         let clan_id = clan_id.to_string();
         let channel_id = channel_id.to_string();
+        let message_id = message_id.to_string();
 
         runtime()
             .spawn(async move {
                 transport
-                    .list_channel_messages(&clan_id, &channel_id, limit)
+                    .list_channel_messages(&clan_id, &channel_id, &message_id, direction, limit)
                     .await
             })
             .await
-            .expect("Transport task panicked")
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
     }
 
     /// Send a message to a channel.
@@ -242,7 +257,7 @@ impl TransportClient {
                     .await
             })
             .await
-            .expect("Transport task panicked")
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
     }
 
     pub async fn send_channel_message(
@@ -264,7 +279,7 @@ impl TransportClient {
                     .await
             })
             .await
-            .expect("Transport task panicked")
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
     }
 
     /// Close the connection.
@@ -276,7 +291,7 @@ impl TransportClient {
         runtime()
             .spawn(async move { transport.close().await })
             .await
-            .expect("Transport task panicked")?;
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))??;
 
         Ok(())
     }
@@ -290,7 +305,7 @@ impl TransportClient {
         runtime()
             .spawn(async move { transport.update_user(&display_name, &avatar_url).await })
             .await
-            .expect("Transport task panicked")
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
     }
 
     /// List currently logged-in devices.
@@ -300,7 +315,7 @@ impl TransportClient {
         runtime()
             .spawn(async move { transport.list_loged_device().await.map(|l| l.devices) })
             .await
-            .expect("Transport task panicked")
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
     }
 
     /// Update account profile (display name, avatar URL, about me).
@@ -328,7 +343,7 @@ impl TransportClient {
                     .await
             })
             .await
-            .expect("Transport task panicked")
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
     }
 
     /// Upload an attachment file (used for avatar upload).
@@ -351,7 +366,7 @@ impl TransportClient {
                     .await
             })
             .await
-            .expect("Transport task panicked")
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
     }
 
     /// Get user profile on a clan.
@@ -365,7 +380,7 @@ impl TransportClient {
         runtime()
             .spawn(async move { transport.get_user_profile_on_clan(&clan_id).await })
             .await
-            .expect("Transport task panicked")
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
     }
 
     /// Update user profile by clan.
@@ -387,7 +402,7 @@ impl TransportClient {
                     .await
             })
             .await
-            .expect("Transport task panicked")
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
     }
 
     /// Check duplicate name.
@@ -407,7 +422,7 @@ impl TransportClient {
                     .await
             })
             .await
-            .expect("Transport task panicked")
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
     }
 
     /// Log out the current session.
@@ -419,7 +434,7 @@ impl TransportClient {
         runtime()
             .spawn(async move { transport.session_logout(&token, &refresh_token).await })
             .await
-            .expect("Transport task panicked")
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
     }
 
     pub async fn logout_device(
@@ -440,6 +455,6 @@ impl TransportClient {
                     .await
             })
             .await
-            .expect("Transport task panicked")
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
     }
 }

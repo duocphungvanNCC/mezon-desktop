@@ -1,5 +1,5 @@
+use crate::components::primitives::{Input, InputEvent, InputState};
 use gpui::{Context, Entity, FontWeight, SharedString, Subscription, Window, div, prelude::*};
-use gpui_component::input::{Input, InputEvent, InputState};
 
 use crate::components::TextChangeHandler;
 use crate::theme::Theme;
@@ -24,8 +24,8 @@ impl FormField {
             move |this: &mut Self, _, event: &InputEvent, window, cx| {
                 if let InputEvent::Change = event {
                     if let Some(handler) = &this.on_change {
-                        let value = input.read(cx).value();
-                        handler(value.as_ref(), window, cx);
+                        let value = input.read(cx).value().to_string();
+                        handler(&value, window, cx);
                     }
                     cx.notify();
                 }

@@ -1,18 +1,13 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::components::primitives::{
+    Avatar, Button as GpuiButton, ButtonVariants, Input, InputEvent, InputState, Label, Sizable,
+    Size, h_flex, v_flex,
+};
 use gpui::{
     Context, Entity, FontWeight, PathPromptOptions, SharedString, Subscription, Task, Window, div,
     prelude::*, px,
-};
-use gpui_component::{
-    Disableable as _, Sizable, Size,
-    avatar::Avatar,
-    button::{Button as GpuiButton, ButtonVariants},
-    h_flex,
-    input::{Input, InputEvent, InputState},
-    label::Label,
-    v_flex,
 };
 use mezon_client::AppApi;
 use mezon_store::{ClanList, Settings};
@@ -53,8 +48,8 @@ impl ClanProfileSection {
         clan_list: Entity<ClanList>,
         cx: &mut Context<Self>,
     ) -> Self {
-        let _ = cx.observe(&settings, |_, _, cx| cx.notify());
-        let _ = cx.observe(&clan_list, |_, _, cx| cx.notify());
+        cx.observe(&settings, |_, _, cx| cx.notify()).detach();
+        cx.observe(&clan_list, |_, _, cx| cx.notify()).detach();
         Self {
             api,
             settings,

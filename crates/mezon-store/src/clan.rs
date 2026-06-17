@@ -14,10 +14,11 @@ pub struct Clan {
 
 impl From<ApiClanDesc> for Clan {
     fn from(c: ApiClanDesc) -> Self {
+        let avatar_url = (!c.logo.is_empty()).then_some(c.logo);
         Self {
             id: c.clan_id,
             name: c.clan_name,
-            avatar_url: None,
+            avatar_url,
             unread_count: 0,
         }
     }
@@ -118,21 +119,41 @@ impl ClanList {
 
     /// Apply a server-pushed realtime event. Cf. `ChannelStore::handle_update_channels`.
     fn handle_event(&mut self, event: RealtimeEvent, cx: &mut Context<Self>) {
-        if let RealtimeEvent::ClanDeleted(e) = event {
-            let id = e.clan_id.to_string();
-            let before = self.clans.len();
-            self.clans.retain(|c| c.id != id);
-            if self.clans.len() != before {
-                cx.emit(ClanEvent::Deleted(id.clone()));
-                if self.active_clan_id.as_deref() == Some(id.as_str()) {
-                    let next = self.clans.first().map(|c| c.id.clone());
-                    self.active_clan_id = next.clone();
-                    cx.emit(ClanEvent::ActiveClanChanged(next));
+        match event {
+            RealtimeEvent::ClanDeleted(e) => {
+                let id = e.clan_id.to_string();
+                let before = self.clans.len();
+                self.clans.retain(|c| c.id != id);
+                if self.clans.len() != before {
+                    cx.emit(ClanEvent::Deleted(id.clone()));
+                    if self.active_clan_id.as_deref() == Some(id.as_str()) {
+                        let next = self.clans.first().map(|c| c.id.clone());
+                        self.active_clan_id = next.clone();
+                        cx.emit(ClanEvent::ActiveClanChanged(next));
+                    }
+                    cx.notify();
                 }
-                cx.notify();
             }
+            RealtimeEvent::ClanUpdated(e) => {
+                let name = (!e.clan_name.is_empty()).then_some(e.clan_name);
+                if update_clan(&mut self.clans, &e.clan_id.to_string(), name, e.logo) {
+                    cx.notify();
+                }
+            }
+            RealtimeEvent::AddClanUser(e) => {
+                let id = e.clan_id.to_string();
+                if !self.clans.iter().any(|c| c.id == id) {
+                    self.reload(cx);
+                }
+            }
+            RealtimeEvent::UserClanRemoved(e) => {
+                let id = e.clan_id.to_string();
+                if self.clans.iter().any(|c| c.id == id) {
+                    self.reload(cx);
+                }
+            }
+            _ => {}
         }
-        // TODO: ClanUpdated / AddClanUser / UserClanRemoved handlers go here.
     }
 
     pub fn active_clan(&self) -> Option<&Clan> {
@@ -170,5 +191,65 @@ impl ClanList {
             cx.emit(ClanEvent::ActiveClanChanged(self.active_clan_id.clone()));
         }
         cx.notify();
+    }
+}
+
+fn update_clan(clans: &mut [Clan], clan_id: &str, name: Option<String>, logo: String) -> bool {
+    let Some(clan) = clans.iter_mut().find(|c| c.id == clan_id) else {
+        return false;
+    };
+    if let Some(name) = name {
+        clan.name = name;
+    }
+    clan.avatar_url = (!logo.is_empty()).then_some(logo);
+    true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn clans() -> Vec<Clan> {
+        vec![
+            Clan {
+                id: "1".into(),
+                name: "One".into(),
+                avatar_url: None,
+                unread_count: 0,
+            },
+            Clan {
+                id: "2".into(),
+                name: "Two".into(),
+                avatar_url: Some("old.png".into()),
+                unread_count: 0,
+            },
+        ]
+    }
+
+    #[test]
+    fn update_clan_sets_name_and_logo() {
+        let mut c = clans();
+        assert!(update_clan(
+            &mut c,
+            "1",
+            Some("NewName".into()),
+            "logo.png".into()
+        ));
+        assert_eq!(c[0].name, "NewName");
+        assert_eq!(c[0].avatar_url.as_deref(), Some("logo.png"));
+    }
+
+    #[test]
+    fn update_clan_blank_name_keeps_name_and_empty_logo_clears_avatar() {
+        let mut c = clans();
+        assert!(update_clan(&mut c, "2", None, String::new()));
+        assert_eq!(c[1].name, "Two");
+        assert_eq!(c[1].avatar_url, None);
+    }
+
+    #[test]
+    fn update_clan_unknown_is_noop() {
+        let mut c = clans();
+        assert!(!update_clan(&mut c, "999", Some("x".into()), "y".into()));
     }
 }
