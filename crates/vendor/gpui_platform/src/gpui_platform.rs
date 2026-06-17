@@ -2,7 +2,6 @@
 //! `current_platform` constructor so consumers don't need `#[cfg]` gating.
 
 pub use gpui::Platform;
-pub extern crate gpui;
 
 use std::rc::Rc;
 

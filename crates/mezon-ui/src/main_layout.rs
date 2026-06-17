@@ -14,8 +14,8 @@ impl MainLayout {
         settings: Entity<Settings>,
         cx: &mut Context<Self>,
     ) -> Self {
-        let _ = cx.observe(&channel_list, |_, _, cx| cx.notify());
-        let _ = cx.observe(&settings, |_, _, cx| cx.notify());
+        cx.observe(&channel_list, |_, _, cx| cx.notify()).detach();
+        cx.observe(&settings, |_, _, cx| cx.notify()).detach();
         Self {
             channel_list,
             settings,

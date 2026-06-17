@@ -8,18 +8,20 @@ use crate::theme::resolve_theme;
 fn on_channel_click(
     channel_list: Entity<ChannelList>,
     channel_id: String,
-    on_navigate: Option<crate::components::NavigateFn>,
     clan_id: Option<String>,
 ) -> impl Fn(&ClickEvent, &mut Window, &mut App) {
     move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
         channel_list.update(cx, |m, cx| {
             m.select_channel(&channel_id, cx);
         });
-        if let Some(ref cb) = on_navigate
-            && let Some(ref cid) = clan_id
-        {
-            let path = format!("/chat/clans/{}/channels/{}", cid, channel_id);
-            cb(crate::components::NavOp::Push(path), cx);
+        if let Some(ref cid) = clan_id {
+            crate::router::navigate(
+                cx,
+                crate::router::Route::Channel {
+                    clan_id: cid.clone(),
+                    channel_id: channel_id.clone(),
+                },
+            );
         }
     }
 }
@@ -43,7 +45,6 @@ fn on_category_click(
 pub struct ChannelSidebar {
     clan_list: Entity<ClanList>,
     channel_list: Entity<ChannelList>,
-    on_navigate: Option<crate::components::NavigateFn>,
     settings: Entity<Settings>,
     collapsed: std::collections::HashSet<String>,
 }
@@ -52,17 +53,15 @@ impl ChannelSidebar {
     pub fn new(
         clan_list: Entity<ClanList>,
         channel_list: Entity<ChannelList>,
-        on_navigate: Option<crate::components::NavigateFn>,
         settings: Entity<Settings>,
         cx: &mut Context<Self>,
     ) -> Self {
-        let _ = cx.observe(&clan_list, |_, _, cx| cx.notify());
-        let _ = cx.observe(&channel_list, |_, _, cx| cx.notify());
-        let _ = cx.observe(&settings, |_, _, cx| cx.notify());
+        cx.observe(&clan_list, |_, _, cx| cx.notify()).detach();
+        cx.observe(&channel_list, |_, _, cx| cx.notify()).detach();
+        cx.observe(&settings, |_, _, cx| cx.notify()).detach();
         Self {
             clan_list,
             channel_list,
-            on_navigate,
             settings,
             collapsed: std::collections::HashSet::new(),
         }
@@ -99,7 +98,6 @@ impl Render for ChannelSidebar {
         let active_channel_id = channels.active_channel_id.clone();
         let channel_list_handle = self.channel_list.clone();
         let theme_clone = theme.clone();
-        let on_navigate = self.on_navigate.clone();
         let active_clan_id_for_nav = clans.active_clan_id.clone();
         let sidebar_entity = cx.entity().clone();
 
@@ -127,13 +125,15 @@ impl Render for ChannelSidebar {
             )
             .child(
                 div()
+                    .id("channel-list-scroll")
                     .flex()
                     .flex_col()
                     .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
                     .children(categories.into_iter().map(
                         move |(category_name, is_collapsed, category_channels)| {
                             let category_name = category_name.clone();
-                            let nav = on_navigate.clone();
                             let clan_id_for_nav = active_clan_id_for_nav.clone();
 
                             let mut header = div()
@@ -175,7 +175,6 @@ impl Render for ChannelSidebar {
                                         .map(|ch| {
                                             let ch_id = ch.id.clone();
                                             let row_handle = channel_list_handle.clone();
-                                            let nav_inner = nav.clone();
                                             let clan_id_inner = clan_id_for_nav.clone();
 
                                             let mut row = div()
@@ -196,7 +195,6 @@ impl Render for ChannelSidebar {
                                             row.interactivity().on_click(on_channel_click(
                                                 row_handle,
                                                 ch_id,
-                                                nav_inner,
                                                 clan_id_inner,
                                             ));
 

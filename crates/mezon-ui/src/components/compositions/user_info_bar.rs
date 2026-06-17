@@ -1,36 +1,24 @@
 use gpui::{App, ClickEvent, Entity, SharedString, Window, div, prelude::*, px};
 
-use gpui_component::Sizable;
-
-use crate::components::primitives::{Avatar, Icon, IconName, Size};
-use crate::text_utils::compute_initials;
+use crate::components::primitives::{Avatar, Icon, IconName, Sizable, Size};
 use crate::theme::Theme;
 use mezon_store::AuthState;
 
-fn on_settings_click(
-    on_settings: Option<crate::components::NavigateFn>,
-) -> impl Fn(&ClickEvent, &mut Window, &mut App) {
+fn on_settings_click() -> impl Fn(&ClickEvent, &mut Window, &mut App) {
     move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
-        if let Some(ref cb) = on_settings {
-            cb(crate::components::NavOp::Push("/settings".to_string()), cx);
-        }
+        crate::router::navigate(cx, crate::router::Route::SettingsAccount);
     }
 }
 pub struct UserInfoBar {
     auth_state: Entity<AuthState>,
     presence: String,
-    on_settings: Option<crate::components::NavigateFn>,
 }
 
 impl UserInfoBar {
-    pub fn new(
-        auth_state: Entity<AuthState>,
-        on_settings: Option<crate::components::NavigateFn>,
-    ) -> Self {
+    pub fn new(auth_state: Entity<AuthState>) -> Self {
         Self {
             auth_state,
             presence: "Online".to_string(),
-            on_settings,
         }
     }
 
@@ -41,10 +29,9 @@ impl UserInfoBar {
 
     pub fn render(&self, theme: &Theme, cx: &App) -> impl IntoElement {
         let username = match self.auth_state.read(cx) {
-            mezon_store::AuthState::Authenticated(session) => &session.username,
-            _ => "Unknown",
+            mezon_store::AuthState::Authenticated(session) => session.username.clone(),
+            _ => "Unknown".to_string(),
         };
-        let initials = compute_initials(username);
 
         let presence_color = match self.presence.as_str() {
             "Online" => theme.status_online,
@@ -61,9 +48,7 @@ impl UserInfoBar {
                     .size(px(16.0))
                     .text_color(theme.text_muted),
             );
-        settings_btn
-            .interactivity()
-            .on_click(on_settings_click(self.on_settings.clone()));
+        settings_btn.interactivity().on_click(on_settings_click());
 
         div()
             .flex()
@@ -73,11 +58,11 @@ impl UserInfoBar {
             .px_2()
             .py_2()
             .gap_2()
-            .bg(theme.bg_primary)
+            .bg(theme.bg_secondary)
             .child(
                 div()
                     .relative()
-                    .child(Avatar::new().name(initials).with_size(Size::Small))
+                    .child(Avatar::new().name(username.clone()).with_size(Size::Small))
                     .child(
                         div()
                             .absolute()

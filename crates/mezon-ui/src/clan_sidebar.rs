@@ -1,10 +1,7 @@
 use gpui::{App, ClickEvent, Context, Entity, SharedString, Window, div, prelude::*, px};
 use mezon_store::{ClanList, Settings};
 
-use gpui_component::Sizable;
-
-use crate::components::primitives::{Avatar, Badge, Icon, IconName, Size};
-use crate::text_utils::compute_initials;
+use crate::components::primitives::{Avatar, Badge, Icon, IconName, Sizable, Size};
 use crate::theme::resolve_theme;
 
 fn on_clan_click(
@@ -29,8 +26,8 @@ impl ClanSidebar {
         settings: Entity<Settings>,
         cx: &mut Context<Self>,
     ) -> Self {
-        let _ = cx.observe(&clan_list, |_, _, cx| cx.notify());
-        let _ = cx.observe(&settings, |_, _, cx| cx.notify());
+        cx.observe(&clan_list, |_, _, cx| cx.notify()).detach();
+        cx.observe(&settings, |_, _, cx| cx.notify()).detach();
         Self {
             clan_list,
             settings,
@@ -49,7 +46,7 @@ impl Render for ClanSidebar {
             .flex_col()
             .w_full()
             .h_full()
-            .bg(theme.bg_primary)
+            .bg(theme.bg_tertiary)
             .gap_1()
             .p_2()
             .flex()
@@ -92,7 +89,11 @@ impl Render for ClanSidebar {
                         .interactivity()
                         .on_click(on_clan_click(clan_list_handle, clan_id));
 
-                    let clan_initials = compute_initials(&clan.name);
+                    let mut clan_avatar =
+                        Avatar::new().name(clan.name.clone()).with_size(Size::Small);
+                    if let Some(url) = &clan.avatar_url {
+                        clan_avatar = clan_avatar.src(url.clone());
+                    }
 
                     clan_div.child(
                         div()
@@ -100,7 +101,7 @@ impl Render for ClanSidebar {
                             .items_center()
                             .justify_center()
                             .relative()
-                            .child(Avatar::new().name(clan_initials).with_size(Size::Small))
+                            .child(clan_avatar)
                             .when(unread > 0, |el| {
                                 el.child(
                                     div()

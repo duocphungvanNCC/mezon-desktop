@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
+use crate::components::primitives::{Icon, IconName, Label, h_flex, v_flex};
 use gpui::{ClickEvent, Context, Entity, FontWeight, SharedString, Task, Window, div, prelude::*};
-use gpui_component::{Icon, IconName, h_flex, label::Label, v_flex};
 use mezon_client::AppApi;
 use mezon_store::Settings;
 
@@ -30,7 +30,7 @@ pub struct DevicePage {
 
 impl DevicePage {
     pub fn new(api: Arc<AppApi>, settings: Entity<Settings>, cx: &mut Context<Self>) -> Self {
-        let _ = cx.observe(&settings, |_, _, cx| cx.notify());
+        cx.observe(&settings, |_, _, cx| cx.notify()).detach();
         Self {
             api,
             settings,

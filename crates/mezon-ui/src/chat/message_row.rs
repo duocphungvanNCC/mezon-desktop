@@ -1,9 +1,25 @@
-use gpui::{div, prelude::*, px};
-use gpui_component::Sizable;
+use gpui::{AnyElement, Hsla, Rgba, div, prelude::*, px};
 use mezon_store::Message;
 
-use crate::components::primitives::{Avatar, Size};
+use crate::components::primitives::{Avatar, Sizable, Size};
 use crate::theme::Theme;
+
+fn attachment_box(label: String, bg: Hsla, border: Rgba, color: Rgba) -> AnyElement {
+    div()
+        .flex()
+        .items_center()
+        .justify_center()
+        .w(px(240.))
+        .h(px(120.))
+        .rounded_md()
+        .bg(bg)
+        .border_1()
+        .border_color(border)
+        .text_xs()
+        .text_color(color)
+        .child(label)
+        .into_any_element()
+}
 
 pub struct MessageRow {
     message: Message,
@@ -55,7 +71,10 @@ impl MessageRow {
 
         let display_name = &msg.sender_name;
 
-        let avatar = Avatar::new().name(display_name).with_size(Size::Small);
+        let mut avatar = Avatar::new().name(display_name).with_size(Size::Small);
+        if !msg.avatar_url.is_empty() {
+            avatar = avatar.src(msg.avatar_url.clone());
+        }
 
         let name_row = div()
             .flex()
@@ -101,8 +120,8 @@ impl MessageRow {
         let content_area = div()
             .flex()
             .flex_col()
-            .when(!self.combined, |d| d.pl(px(42.)))
-            .when(self.combined, |d| d.pl(px(10.)))
+            .when(!self.combined, |d| d.pl(px(56.)))
+            .when(self.combined, |d| d.pl(px(16.)))
             .child(if self.reply {
                 reply_placeholder.into_any_element()
             } else {
@@ -135,26 +154,64 @@ impl MessageRow {
                 )
             })
             .when(!msg.attachments.is_empty(), |d| {
-                d.child(
-                    div()
-                        .id("attachments-placeholder")
-                        .flex()
-                        .flex_row()
-                        .gap_1()
-                        .mt_1()
-                        .child(
+                d.child(div().flex().flex_col().gap_2().mt_1().children(
+                    msg.attachments.iter().map(|att| {
+                        if att.is_image() {
+                            let name = if att.filename.is_empty() {
+                                "image".to_string()
+                            } else {
+                                att.filename.clone()
+                            };
+                            let box_bg = gpui::hsla(0., 0., 0., 0.03);
+                            let box_border = theme.border;
+                            let box_color = theme.text_muted;
+                            // let loading_name = name.clone();
+                            // img(att.url.clone())
+                            //     .max_w(px(400.))
+                            //     .max_h(px(300.))
+                            //     .rounded_md()
+                            //     .with_loading(move || {
+                            //         attachment_box(
+                            //             format!("Loading {loading_name}…"),
+                            //             box_bg,
+                            //             box_border,
+                            //             box_color,
+                            //         )
+                            //     })
+                            //     .with_fallback(move || {
+                            //         attachment_box(
+                            //             format!("Couldn't load {name}"),
+                            //             box_bg,
+                            //             box_border,
+                            //             box_color,
+                            //         )
+                            //     })
+                            //     .into_any_element()
+                            attachment_box(name, box_bg, box_border, box_color).into_any_element()
+                        } else {
+                            let label = if att.filename.is_empty() {
+                                "Attachment".to_string()
+                            } else {
+                                att.filename.clone()
+                            };
                             div()
-                                .px_2()
-                                .py_1()
+                                .flex()
+                                .flex_row()
+                                .items_center()
+                                .gap_2()
+                                .px_3()
+                                .py_2()
                                 .rounded_md()
                                 .bg(gpui::hsla(0., 0., 0., 0.03))
                                 .border_1()
                                 .border_color(theme.border)
                                 .text_xs()
-                                .text_color(theme.text_muted)
-                                .child("[attachment.png]"),
-                        ),
-                )
+                                .text_color(theme.text_secondary)
+                                .child(label)
+                                .into_any_element()
+                        }
+                    }),
+                ))
             });
 
         div()
@@ -164,12 +221,11 @@ impl MessageRow {
             .px_4()
             .py(px(2.))
             .when(!self.combined, |d| d.pt_3())
-            .child(
-                div()
-                    .when(!self.combined, |d| d.absolute().left(px(16.)).top(px(10.)))
-                    .when(self.combined, |d| d.invisible().w(px(32.)))
-                    .child(avatar),
-            )
+            .child(if self.combined {
+                div().w(px(40.)).flex_none()
+            } else {
+                div().absolute().left(px(16.)).top(px(10.)).child(avatar)
+            })
             .child(content_area)
     }
 }

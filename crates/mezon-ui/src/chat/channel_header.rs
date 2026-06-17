@@ -33,19 +33,5 @@ impl ChannelHeader {
                 ),
             )
             .child(div().flex_1())
-            .child(
-                div()
-                    .text_sm()
-                    .text_color(theme.text_muted)
-                    .cursor_pointer()
-                    .child("📌"),
-            )
-            .child(
-                div()
-                    .text_sm()
-                    .text_color(theme.text_muted)
-                    .cursor_pointer()
-                    .child("🔍"),
-            )
     }
 }

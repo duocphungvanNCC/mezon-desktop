@@ -1,13 +1,8 @@
+use crate::components::primitives::{Label, Slider, SliderEvent, SliderState, h_flex, v_flex};
 use crate::theme::{Theme, resolve_theme};
 use gpui::{
     App, ClickEvent, Context, Entity, FontWeight, Subscription, Task, WeakEntity, Window, deferred,
     div, prelude::*, px,
-};
-use gpui_component::{
-    h_flex,
-    label::Label,
-    slider::{Slider, SliderEvent, SliderState},
-    v_flex,
 };
 use mezon_native::audio::{
     AudioDeviceInfo, MicCapture, enumerate_input_devices, enumerate_output_devices,
@@ -34,7 +29,7 @@ pub struct VoicePage {
 
 impl VoicePage {
     pub fn new(settings: Entity<Settings>, cx: &mut Context<Self>) -> Self {
-        let _ = cx.observe(&settings, |_, _, cx| cx.notify());
+        cx.observe(&settings, |_, _, cx| cx.notify()).detach();
         let mic_vol = settings.read(cx).mic_volume;
         let speaker_vol = settings.read(cx).speaker_volume;
 

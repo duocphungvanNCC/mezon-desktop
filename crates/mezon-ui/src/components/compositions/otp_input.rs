@@ -1,5 +1,5 @@
+use crate::components::primitives::{Input, InputEvent, InputState};
 use gpui::{App, Context, Entity, Subscription, Window, div, prelude::*};
-use gpui_component::input::{Input, InputEvent, InputState};
 
 use crate::components::OtpCompleteHandler;
 use crate::theme::Theme;

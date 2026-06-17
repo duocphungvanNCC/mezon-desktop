@@ -5,7 +5,10 @@ edition = "2024"
 
 [dependencies]
 gpui.workspace = true
-gpui-component.workspace = true
+ui.workspace = true
+theme.workspace = true
+icons.workspace = true
+menu.workspace = true
 mezon-store.workspace = true
 mezon-client.workspace = true
 mezon-native.workspace = true
@@ -16,3 +19,5 @@ serde.workspace = true
 tokio.workspace = true
 chrono.workspace = true
 flume.workspace = true
+rust-embed.workspace = true
+unicode-segmentation.workspace = true

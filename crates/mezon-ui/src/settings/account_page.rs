@@ -1,20 +1,13 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use gpui::{Context, Entity, FontWeight, SharedString, Task, Window, div, prelude::*, px};
-use gpui_component::{
-    Sizable, Size,
-    avatar::Avatar,
-    button::{Button as GpuiButton, ButtonVariants},
-    divider::Divider,
-    h_flex,
-    label::Label,
-    v_flex,
+use crate::components::primitives::{
+    Avatar, Button as GpuiButton, ButtonVariants, Divider, Label, Sizable, Size, h_flex, v_flex,
 };
+use gpui::{Context, Entity, FontWeight, SharedString, Task, Window, div, prelude::*, px};
 use mezon_client::AppApi;
 use mezon_store::Settings;
 
-use crate::components::{NavOp, NavigateFn};
 use crate::theme::resolve_theme;
 
 struct AccountState {
@@ -27,7 +20,6 @@ struct AccountState {
 }
 
 pub struct AccountPage {
-    navigate: NavigateFn,
     settings: Entity<Settings>,
     account: Option<AccountState>,
     fetch_error: bool,
@@ -37,13 +29,8 @@ pub struct AccountPage {
 }
 
 impl AccountPage {
-    pub fn new(
-        api: Arc<AppApi>,
-        navigate: NavigateFn,
-        settings: Entity<Settings>,
-        cx: &mut Context<Self>,
-    ) -> Self {
-        let _ = cx.observe(&settings, |_, _, cx| cx.notify());
+    pub fn new(api: Arc<AppApi>, settings: Entity<Settings>, cx: &mut Context<Self>) -> Self {
+        cx.observe(&settings, |_, _, cx| cx.notify()).detach();
         let api_clone = api.clone();
         let fetch_task = cx.spawn(async move |this, cx| match api_clone.get_account().await {
             Ok(acct) => {
@@ -77,7 +64,6 @@ impl AccountPage {
         });
 
         Self {
-            navigate,
             settings,
             account: None,
             fetch_error: false,
@@ -122,7 +108,6 @@ impl Render for AccountPage {
         }
 
         let account = self.account.as_ref().unwrap();
-        let navigate = self.navigate.clone();
 
         let display_name = if account.display_name.is_empty() {
             account.username.clone()
@@ -207,9 +192,9 @@ impl Render for AccountPage {
                                     .text_color(theme.text_primary)
                                     .ghost()
                                     .on_click(move |_, _, cx| {
-                                        navigate(
-                                            NavOp::Replace("/settings/profile".to_string()),
+                                        crate::router::replace(
                                             cx,
+                                            crate::router::Route::SettingsProfile,
                                         );
                                     }),
                             ),

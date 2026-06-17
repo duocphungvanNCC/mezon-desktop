@@ -9,11 +9,8 @@
 
 use std::sync::Arc;
 
+use crate::components::primitives::{Button, ButtonVariants as _, Spinner};
 use gpui::{App, Context, Entity, FontWeight, MouseButton, Window, div, prelude::*};
-use gpui_component::{
-    Disableable as _,
-    button::{Button, ButtonVariants as _},
-};
 use mezon_client::{MezonClient, Session, keychain};
 use mezon_store::{AuthState, LoginMethod, Settings};
 
@@ -62,7 +59,7 @@ impl LoginView {
         settings: Entity<Settings>,
         cx: &mut Context<Self>,
     ) -> Self {
-        let _ = cx.observe(&settings, |_, _, cx| cx.notify());
+        cx.observe(&settings, |_, _, cx| cx.notify()).detach();
         Self {
             client,
             auth_state,
@@ -401,12 +398,7 @@ impl Render for LoginView {
 
                     // Loading spinner (shown while verifying code).
                     if self.loading {
-                        card = card.child(
-                            div()
-                                .flex()
-                                .justify_center()
-                                .child(gpui_component::spinner::Spinner::new()),
-                        );
+                        card = card.child(div().flex().justify_center().child(Spinner::new()));
                     }
 
                     // Resend / countdown row.
