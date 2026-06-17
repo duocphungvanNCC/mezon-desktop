@@ -110,10 +110,12 @@ impl AppApi {
         &self,
         clan_id: &str,
         channel_id: &str,
+        message_id: &str,
+        direction: i32,
         limit: u32,
     ) -> Result<Vec<ApiMessage>> {
         self.transport
-            .list_channel_messages(clan_id, channel_id, limit)
+            .list_channel_messages(clan_id, channel_id, message_id, direction, limit)
             .await
     }
 
@@ -193,16 +195,19 @@ impl AppApi {
         clan_id: &str,
         nick_name: &str,
     ) -> Result<bool> {
+        let condition_id: i64 = clan_id
+            .parse()
+            .map_err(|e| anyhow::anyhow!("invalid clan_id {clan_id:?}: {e}"))?;
         let resp = self
             .transport
-            .check_duplicate_name(nick_name, 4, clan_id.parse().unwrap_or_default())
+            .check_duplicate_name(nick_name, 4, condition_id)
             .await?;
         Ok(resp.is_duplicate)
     }
 
     pub async fn upload_avatar(&self, path: &Path) -> Result<String> {
         tracing::info!("upload_avatar: reading file path={:?}", path);
-        let data = std::fs::read(path)?;
+        let data = crate::transport_runtime::read_file(path.to_path_buf()).await?;
 
         let raw_filename = path
             .file_name()

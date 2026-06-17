@@ -35,6 +35,14 @@ members = [
     "crates/vendor/zlog",
     "crates/vendor/ztracing_macro",
     "crates/vendor/perf",
+    # Vendored Zed UI cluster
+    "crates/vendor/ui_macros",
+    "crates/vendor/component",
+    "crates/vendor/icons",
+    "crates/vendor/syntax_theme",
+    "crates/vendor/theme",
+    "crates/vendor/menu",
+    "crates/vendor/ui",
 ]
 resolver = "2"
 
@@ -52,12 +60,22 @@ dbg_macro = "deny"
 todo = "deny"
 
 [workspace.dependencies]
+accesskit          = "0.24.0"
+accesskit_macos    = "0.26.0"
+documented         = "0.9.1"
+num-format         = "0.4.4"
+palette            = { version = "0.7.5", default-features = false, features = ["std"] }
+ui                 = { path = "crates/vendor/ui" }
+ui_macros          = { path = "crates/vendor/ui_macros" }
+component          = { path = "crates/vendor/component" }
+icons              = { path = "crates/vendor/icons" }
+theme              = { path = "crates/vendor/theme" }
+syntax_theme       = { path = "crates/vendor/syntax_theme" }
+menu               = { path = "crates/vendor/menu" }
 # ---------- Vendored GPUI internal crates ----------
 gpui               = { path = "crates/vendor/gpui", default-features = false, features = ["x11", "wayland"] }
-gpui-component     = { path = "crates/vendor/gpui-component/crates/ui", default-features = false }
-gpui-component-macros = { path = "crates/vendor/gpui-component/crates/macros" }
-gpui-component-assets = { path = "crates/vendor/gpui-component/crates/assets" }
 gpui-macros        = { package = "gpui_macros", path = "crates/vendor/gpui_macros" }
+gpui_macros        = { package = "gpui_macros", path = "crates/vendor/gpui_macros" }
 gpui_platform      = { path = "crates/vendor/gpui_platform", default-features = false }
 gpui_linux         = { path = "crates/vendor/gpui_linux", default-features = false, features = ["x11", "wayland"] }
 gpui_windows       = { path = "crates/vendor/gpui_windows", default-features = false }
@@ -227,7 +245,7 @@ uuid                 = { version = "1.1.2", features = ["v4", "v5", "v7", "serde
 bitflags             = "2.6.0"
 backtrace            = "0.3"
 bytemuck             = "1"
-ctor                 = "0.4.0"
+ctor                 = "1.0.6"
 inventory             = "0.3.19"
 slotmap              = "1.0.6"
 stacksafe            = "0.1"

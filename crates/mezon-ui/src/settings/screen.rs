@@ -1,14 +1,9 @@
 use std::sync::Arc;
 
-use gpui::{Context, Entity, Window, div, prelude::*, px};
-use gpui_component::{
-    Icon, IconName,
-    button::{Button as GpuiButton, ButtonVariants},
-    h_flex,
-    label::Label,
-    scroll::ScrollableElement,
-    v_flex,
+use crate::components::primitives::{
+    Button as GpuiButton, ButtonVariants, Icon, IconName, Label, h_flex, v_flex,
 };
+use gpui::{Context, Entity, Window, div, prelude::*, px};
 use mezon_client::AppApi;
 use mezon_store::{AuthState, ClanList, Settings};
 
@@ -21,7 +16,6 @@ use super::language_page::LanguagePage;
 use super::notifications_page::NotificationsPage;
 use super::profile_page::ProfilePage;
 use super::voice_page::VoicePage;
-use crate::components::{NavOp, NavigateFn};
 use crate::theme::{Theme, resolve_theme};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -38,7 +32,6 @@ pub enum SettingsPage {
 }
 
 pub struct SettingsScreen {
-    navigate: NavigateFn,
     auth_state: Entity<AuthState>,
     api: Arc<AppApi>,
     settings: Entity<Settings>,
@@ -60,14 +53,12 @@ impl SettingsScreen {
     pub fn new(
         auth_state: Entity<AuthState>,
         api: Arc<AppApi>,
-        navigate: NavigateFn,
         settings: Entity<Settings>,
         clan_list: Entity<ClanList>,
         cx: &mut Context<Self>,
     ) -> Self {
-        let _ = cx.observe(&settings, |_, _, cx| cx.notify());
+        cx.observe(&settings, |_, _, cx| cx.notify()).detach();
         Self {
-            navigate,
             auth_state,
             api,
             settings,
@@ -95,7 +86,6 @@ impl Render for SettingsScreen {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = resolve_theme(&self.settings.read(cx).theme);
         let locale = self.settings.read(cx).language.clone();
-        let navigate = self.navigate.clone();
         let api = self.api.clone();
         let auth_state = self.auth_state.clone();
         let page = self.current_page;
@@ -105,7 +95,7 @@ impl Render for SettingsScreen {
             SettingsPage::Account => {
                 self.account_page.get_or_insert_with(|| {
                     let settings = self.settings.clone();
-                    cx.new(|cx| AccountPage::new(api.clone(), navigate.clone(), settings, cx))
+                    cx.new(|cx| AccountPage::new(api.clone(), settings, cx))
                 });
             }
             SettingsPage::Profile => {
@@ -192,11 +182,9 @@ impl Render for SettingsScreen {
             label: String,
             is_active: bool,
             theme: &Theme,
-            navigate: NavigateFn,
             path: &str,
         ) -> impl IntoElement {
             let id = id.to_string();
-            let nav = navigate.clone();
             let path = path.to_string();
             let active_bg = gpui::Rgba {
                 r: 233.0 / 255.0,
@@ -225,7 +213,7 @@ impl Render for SettingsScreen {
                 .when(!is_active, |el| el.text_color(theme.text_primary))
                 .child(label)
                 .on_click(move |_, _, cx| {
-                    nav(NavOp::Replace(path.clone()), cx);
+                    crate::router::replace(cx, crate::router::Route::from_path(&path));
                 })
         }
 
@@ -270,7 +258,6 @@ impl Render for SettingsScreen {
                                     mezon_i18n::t(&locale, "setting.accountSettings.account"),
                                     is_account,
                                     &theme,
-                                    navigate.clone(),
                                     "/settings/account",
                                 ))
                                 .child(nav_item(
@@ -278,7 +265,6 @@ impl Render for SettingsScreen {
                                     mezon_i18n::t(&locale, "setting.accountSettings.devices"),
                                     is_device,
                                     &theme,
-                                    navigate.clone(),
                                     "/settings/devices",
                                 ))
                                 .child(nav_item(
@@ -286,7 +272,6 @@ impl Render for SettingsScreen {
                                     mezon_i18n::t(&locale, "setting.accountSettings.profiles"),
                                     is_profile,
                                     &theme,
-                                    navigate.clone(),
                                     "/settings/profile",
                                 ))
                                 // APP SETTINGS section
@@ -308,7 +293,6 @@ impl Render for SettingsScreen {
                                     mezon_i18n::t(&locale, "setting.appSettings.appearance"),
                                     is_appearance,
                                     &theme,
-                                    navigate.clone(),
                                     "/settings/appearance",
                                 ))
                                 .child(nav_item(
@@ -316,7 +300,6 @@ impl Render for SettingsScreen {
                                     mezon_i18n::t(&locale, "setting.appSettings.activity"),
                                     is_activity,
                                     &theme,
-                                    navigate.clone(),
                                     "/settings/activity",
                                 ))
                                 .child(nav_item(
@@ -324,7 +307,6 @@ impl Render for SettingsScreen {
                                     mezon_i18n::t(&locale, "setting.appSettings.notifications"),
                                     is_notifications,
                                     &theme,
-                                    navigate.clone(),
                                     "/settings/notifications",
                                 ))
                                 .child(nav_item(
@@ -332,7 +314,6 @@ impl Render for SettingsScreen {
                                     mezon_i18n::t(&locale, "setting.appSettings.language"),
                                     is_language,
                                     &theme,
-                                    navigate.clone(),
                                     "/settings/language",
                                 ))
                                 .child(nav_item(
@@ -340,7 +321,6 @@ impl Render for SettingsScreen {
                                     mezon_i18n::t(&locale, "setting.appSettings.voice"),
                                     is_voice,
                                     &theme,
-                                    navigate.clone(),
                                     "/settings/voice",
                                 ))
                                 .child(nav_item(
@@ -348,7 +328,6 @@ impl Render for SettingsScreen {
                                     mezon_i18n::t(&locale, "setting.appSettings.advanced"),
                                     is_advanced,
                                     &theme,
-                                    navigate.clone(),
                                     "/settings/advanced",
                                 )),
                         ),
@@ -413,10 +392,11 @@ impl Render for SettingsScreen {
             )
             .child(
                 div()
+                    .id("settings-scroll")
                     .flex()
                     .flex_1()
                     .min_h_0()
-                    .overflow_y_scrollbar()
+                    .overflow_y_scroll()
                     .pt(px(94.0))
                     .pb(px(28.0))
                     .pl(px(40.0))
@@ -436,11 +416,8 @@ impl Render for SettingsScreen {
                             .size_6()
                             .text_color(theme.text_secondary),
                     )
-                    .on_click({
-                        let nav = navigate.clone();
-                        move |_, _, cx| {
-                            nav(NavOp::Back, cx);
-                        }
+                    .on_click(move |_, _, cx| {
+                        crate::router::go_back(cx);
                     }),
             )
     }

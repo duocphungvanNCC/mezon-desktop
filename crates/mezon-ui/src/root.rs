@@ -1,7 +1,10 @@
 use std::sync::Arc;
 
-use gpui::{App, ClickEvent, Context, Entity, FontWeight, Window, div, prelude::*};
-use gpui_component::Sizable;
+use crate::components::primitives::Sizable;
+use gpui::{
+    App, ClickEvent, Context, Entity, FontWeight, MouseButton, NavigationDirection, Window, div,
+    prelude::*,
+};
 use mezon_client::{AppApi, MezonClient};
 use mezon_store::{AuthState, ClanList, Settings};
 
@@ -18,10 +21,8 @@ pub struct RootView {
     settings: Entity<Settings>,
     auth_state: Entity<AuthState>,
     login_view: Entity<LoginView>,
-    router: Router,
     chat_layout: Entity<ChatLayout>,
     settings_screen: Entity<SettingsScreen>,
-    navigate: crate::components::NavigateFn,
 }
 
 impl RootView {
@@ -33,7 +34,12 @@ impl RootView {
         settings: Entity<Settings>,
         cx: &mut Context<Self>,
     ) -> Self {
-        let _ = cx.observe(&settings, |_, _, cx| cx.notify());
+        cx.observe(&settings, |_, settings, cx| {
+            let name = settings.read(cx).theme.clone();
+            crate::theme::set_theme(resolve_theme(&name), cx);
+            cx.notify();
+        })
+        .detach();
 
         let login_view = cx.new({
             let auth_state = auth_state.clone();
@@ -41,38 +47,25 @@ impl RootView {
             move |cx| LoginView::new(client, auth_state, settings, cx)
         });
 
-        let router = Router::new();
-        let root_entity = cx.entity().clone();
-
-        let navigate: crate::components::NavigateFn = {
-            let root_id = root_entity.entity_id();
-            Arc::new(move |op: crate::components::NavOp, cx: &mut App| {
-                root_entity.update(cx, |this, _cx| match op {
-                    crate::components::NavOp::Push(path) => this.router.navigate(path),
-                    crate::components::NavOp::Replace(path) => this.router.replace(path),
-                    crate::components::NavOp::Back => this.router.go_back(),
-                });
-                cx.notify(root_id);
-            })
-        };
+        cx.observe(&Router::global(cx), |this, _, cx| {
+            this.sync_settings_page(cx);
+            cx.notify();
+        })
+        .detach();
 
         let clan_list: Entity<ClanList> = ClanList::global(cx);
 
-        let router_for_chat = router.clone();
         let clan_list_for_chat = clan_list.clone();
         let auth_state_for_chat = auth_state.clone();
         let api_for_chat = api.clone();
-        let navigate_for_chat = navigate.clone();
         let settings_for_chat = settings.clone();
         let chat_layout = cx.new({
             let settings = settings_for_chat;
             move |cx| {
                 ChatLayout::new(
-                    router_for_chat,
                     clan_list_for_chat.clone(),
                     auth_state_for_chat.clone(),
                     api_for_chat.clone(),
-                    navigate_for_chat.clone(),
                     settings.clone(),
                     cx,
                 )
@@ -81,7 +74,6 @@ impl RootView {
 
         let auth_state_for_settings = auth_state.clone();
         let api_for_settings = api.clone();
-        let navigate_for_settings = navigate.clone();
         let clan_list_for_settings = clan_list.clone();
         let settings_screen = cx.new({
             let settings = settings.clone();
@@ -89,7 +81,6 @@ impl RootView {
                 SettingsScreen::new(
                     auth_state_for_settings.clone(),
                     api_for_settings.clone(),
-                    navigate_for_settings.clone(),
                     settings.clone(),
                     clan_list_for_settings.clone(),
                     cx,
@@ -102,11 +93,25 @@ impl RootView {
             settings,
             auth_state,
             login_view,
-            router,
             chat_layout,
             settings_screen,
-            navigate,
         }
+    }
+
+    fn sync_settings_page(&mut self, cx: &mut Context<Self>) {
+        let page = match Router::global(cx).read(cx).route() {
+            Route::SettingsProfile => crate::settings::SettingsPage::Profile,
+            Route::SettingsDevices => crate::settings::SettingsPage::Device,
+            Route::SettingsAppearance => crate::settings::SettingsPage::Appearance,
+            Route::SettingsActivity => crate::settings::SettingsPage::Activity,
+            Route::SettingsNotifications => crate::settings::SettingsPage::Notifications,
+            Route::SettingsLanguage => crate::settings::SettingsPage::Language,
+            Route::SettingsVoice => crate::settings::SettingsPage::Voice,
+            Route::SettingsAdvanced => crate::settings::SettingsPage::Advanced,
+            Route::SettingsAccount => crate::settings::SettingsPage::Account,
+            _ => return,
+        };
+        self.settings_screen.update(cx, |s, _| s.set_page(page));
     }
 }
 
@@ -122,7 +127,7 @@ impl Render for RootView {
             AuthState::AwaitingCallback => render_awaiting_callback(&theme),
             AuthState::Connecting(_) => render_connecting(&theme),
             AuthState::Authenticated(_) => {
-                let route = self.router.route();
+                let route = Router::global(cx).read(cx).route();
                 match route {
                     Route::SettingsAccount
                     | Route::SettingsProfile
@@ -132,26 +137,8 @@ impl Render for RootView {
                     | Route::SettingsNotifications
                     | Route::SettingsLanguage
                     | Route::SettingsVoice
-                    | Route::SettingsAdvanced => {
-                        let page = match route {
-                            Route::SettingsProfile => crate::settings::SettingsPage::Profile,
-                            Route::SettingsDevices => crate::settings::SettingsPage::Device,
-                            Route::SettingsAppearance => crate::settings::SettingsPage::Appearance,
-                            Route::SettingsActivity => crate::settings::SettingsPage::Activity,
-                            Route::SettingsNotifications => {
-                                crate::settings::SettingsPage::Notifications
-                            }
-                            Route::SettingsLanguage => crate::settings::SettingsPage::Language,
-                            Route::SettingsVoice => crate::settings::SettingsPage::Voice,
-                            Route::SettingsAdvanced => crate::settings::SettingsPage::Advanced,
-                            _ => crate::settings::SettingsPage::Account,
-                        };
-                        self.settings_screen.update(cx, |s, _| {
-                            s.set_page(page);
-                        });
-                        self.settings_screen.clone().into_any_element()
-                    }
-                    Route::NotFound { .. } => render_not_found(&theme, &self.navigate),
+                    | Route::SettingsAdvanced => self.settings_screen.clone().into_any_element(),
+                    Route::NotFound { .. } => render_not_found(&theme),
                     _ => self.chat_layout.clone().into_any_element(),
                 }
             }
@@ -163,6 +150,14 @@ impl Render for RootView {
             .size_full()
             .bg(theme.bg_primary)
             .text_color(theme.text_primary)
+            .on_mouse_down(
+                MouseButton::Navigate(NavigationDirection::Back),
+                |_, _, cx| crate::router::go_back(cx),
+            )
+            .on_mouse_down(
+                MouseButton::Navigate(NavigationDirection::Forward),
+                |_, _, cx| crate::router::go_forward(cx),
+            )
             .child(self.title_bar.clone())
             .child(content)
     }
@@ -216,14 +211,12 @@ fn render_connecting(theme: &Theme) -> gpui::AnyElement {
         .into_any_element()
 }
 
-fn render_not_found(theme: &Theme, navigate: &crate::components::NavigateFn) -> gpui::AnyElement {
-    let navigate = navigate.clone();
-    let mut back_btn = Button::new("back-to-chat").label("Back to Chat");
-    back_btn
-        .interactivity()
-        .on_click(move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
-            navigate(crate::components::NavOp::Back, cx);
-        });
+fn render_not_found(theme: &Theme) -> gpui::AnyElement {
+    let back_btn = Button::new("back-to-chat").label("Back to Chat").on_click(
+        move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
+            crate::router::go_back(cx);
+        },
+    );
 
     div()
         .flex()

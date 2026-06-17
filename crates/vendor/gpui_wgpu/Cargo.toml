@@ -17,7 +17,7 @@ gpui.workspace = true
 anyhow.workspace = true
 bytemuck = "1"
 collections.workspace = true
-cosmic-text = "0.17.0"
+cosmic-text = "0.19.0"
 etagere = "0.2"
 itertools.workspace = true
 log.workspace = true
@@ -27,6 +27,7 @@ raw-window-handle = "0.6"
 smallvec.workspace = true
 swash = "0.2.6"
 gpui_util.workspace = true
+unicode-segmentation.workspace = true
 wgpu.workspace = true
 
 # Optional: only needed on platforms with multiple font sources (e.g. Linux)
