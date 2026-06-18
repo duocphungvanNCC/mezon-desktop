@@ -10,17 +10,15 @@ use mezon_store::{AppConfig, AuthState, Settings};
 use mezon_ui::{RootView, init as init_ui, title_bar::TitleBar};
 use std::borrow::Cow;
 use std::sync::Arc;
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::{EnvFilter, fmt};
 
 fn main() -> Result<()> {
     load_dotenv();
 
-    fmt()
-        .with_env_filter(
-            EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| EnvFilter::new("mezon=debug,info")),
-        )
-        .init();
+    init_logging();
+    install_panic_hook();
 
     tracing::info!("Starting Mezon desktop app v{}", env!("CARGO_PKG_VERSION"));
 
@@ -55,15 +53,69 @@ fn load_dotenv() {
     let _ = dotenvy::from_path(workspace_env);
 }
 
-fn run_app(lock: SingleInstance, initial_url: Option<String>) {
-    // Build a multi-threaded tokio runtime that lives for the entire process.
-    let rt = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-        .expect("Failed to build tokio runtime");
-    let rt_handle = Arc::new(rt.handle().clone());
+/// Directory for rotated log files (alongside the app's config dir).
+fn log_dir() -> std::path::PathBuf {
+    dirs::config_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join("mezon")
+        .join("logs")
+}
 
-    let settings = rt.block_on(Settings::load()).unwrap_or_default();
+/// Initialise tracing to stdout **and** a daily-rotated log file. Uses a blocking file writer
+/// (not `non_blocking`) so a panic is flushed to disk before the process aborts.
+fn init_logging() {
+    let env_filter =
+        || EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("mezon=debug,info"));
+
+    let dir = log_dir();
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        tracing_subscriber::registry()
+            .with(env_filter())
+            .with(fmt::layer())
+            .init();
+        tracing::warn!(
+            "File logging disabled (cannot create {}): {e}",
+            dir.display()
+        );
+        return;
+    }
+
+    let file_appender = tracing_appender::rolling::daily(&dir, "mezon.log");
+
+    tracing_subscriber::registry()
+        .with(env_filter())
+        .with(fmt::layer().with_writer(std::io::stdout))
+        .with(fmt::layer().with_ansi(false).with_writer(file_appender))
+        .init();
+}
+
+/// Log panics (location + backtrace) before delegating to the default hook, so a crash leaves
+/// a record in the log file instead of vanishing on stderr (invisible in a bundled `.app`).
+fn install_panic_hook() {
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let location = info
+            .location()
+            .map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column()))
+            .unwrap_or_else(|| "<unknown>".to_string());
+        let message = info
+            .payload()
+            .downcast_ref::<&str>()
+            .copied()
+            .or_else(|| info.payload().downcast_ref::<String>().map(String::as_str))
+            .unwrap_or("<non-string panic payload>");
+        let backtrace = std::backtrace::Backtrace::force_capture();
+        tracing::error!("panic at {location}: {message}\n{backtrace}");
+        default_hook(info);
+    }));
+}
+
+fn run_app(lock: SingleInstance, initial_url: Option<String>) {
+    // Reuse the shared transport runtime for auxiliary background work (the tray's update
+    // check) instead of standing up a second process-wide runtime.
+    let rt_handle = Arc::new(mezon_client::transport_runtime::handle());
+
+    let settings = Settings::load_sync();
 
     tracing::debug!(
         "Settings: theme={}, zoom={}, auto_start={}",
@@ -108,6 +160,7 @@ fn run_app(lock: SingleInstance, initial_url: Option<String>) {
         }
     }));
 
+    let app_config_handle = app_config.clone();
     application()
         .with_http_client(Arc::new(reqwest_client::ReqwestClient::new()))
         .with_assets(mezon_ui::assets::Assets)
@@ -151,6 +204,8 @@ fn run_app(lock: SingleInstance, initial_url: Option<String>) {
 
             init_ui(cx);
 
+            AppConfig::init_global(app_config_handle, cx);
+
             mezon_ui::theme::set_theme(mezon_ui::theme::resolve_theme(&settings.theme), cx);
 
             if std::env::var("MEZON_DEV_GALLERY").is_ok() {
@@ -175,7 +230,7 @@ fn run_app(lock: SingleInstance, initial_url: Option<String>) {
             }
 
             // Create the shared Settings entity so all views can observe theme changes.
-            let settings_entity = cx.new(|_| Settings::load_sync());
+            let settings_entity = cx.new(|_| settings.clone());
 
             // Open the main window and obtain the auth_state entity handle.
             let auth_state_handle = open_main_window(
@@ -330,10 +385,7 @@ fn spawn_transport_task(
                             retry_backoff_secs = 1;
                             api.set_status(ConnectionStatus::Connected);
                             tracing::info!("get_account over shared TCP succeeded");
-                            tracing::info!("  User ID: {}", account.user_id);
-                            tracing::info!("  Username: {}", account.username);
-                            tracing::info!("  Email: {:?}", account.email);
-                            tracing::info!("  Display name: {:?}", account.display_name);
+                            tracing::debug!("authenticated user_id={}", account.user_id);
 
                             cx.update(|cx| {
                                 auth_state.update(cx, |state, cx| {
@@ -547,19 +599,14 @@ fn open_main_window(
 
         // Register the domain stores as globals before any view reads them.
         // Order matters: ChannelList subscribes to ClanList's events.
+        mezon_store::LoginStore::init(client.clone(), cx);
         mezon_store::ClanList::init(api.clone(), cx);
         mezon_store::ChannelList::init(api.clone(), cx);
+        mezon_store::MessagesStore::init(api.clone(), cx);
+        mezon_store::PresenceStore::init(api.clone(), cx);
+        mezon_store::AccountStore::init(api.clone(), cx);
 
-        cx.new(|cx| {
-            RootView::new(
-                title_bar,
-                auth_state,
-                client,
-                api,
-                settings_entity.clone(),
-                cx,
-            )
-        })
+        cx.new(|cx| RootView::new(title_bar, auth_state, settings_entity.clone(), cx))
     })
     .unwrap_or_else(|e| {
         tracing::error!("Failed to open main window: {e}");

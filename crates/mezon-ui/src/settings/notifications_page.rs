@@ -1,5 +1,5 @@
 use crate::components::primitives::{Label, Switch, h_flex, v_flex};
-use crate::theme::resolve_theme;
+use crate::theme::ActiveTheme;
 use gpui::{Context, Entity, FontWeight, Window, prelude::*};
 use mezon_store::Settings;
 
@@ -16,7 +16,7 @@ impl NotificationsPage {
 
 impl Render for NotificationsPage {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = resolve_theme(&self.settings.read(cx).theme);
+        let theme = cx.theme();
         let hide_content = self.settings.read(cx).notifications_hide_content;
         let settings = self.settings.clone();
 

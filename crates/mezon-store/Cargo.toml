@@ -5,7 +5,9 @@ edition = "2024"
 
 [dependencies]
 mezon-client.workspace = true
+mezon-proto.workspace = true
 gpui.workspace = true
+chrono.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 anyhow.workspace = true

@@ -1,5 +1,5 @@
 use crate::components::primitives::{Label, Slider, SliderEvent, SliderState, h_flex, v_flex};
-use crate::theme::{Theme, resolve_theme};
+use crate::theme::{ActiveTheme, Theme};
 use gpui::{
     App, ClickEvent, Context, Entity, FontWeight, Subscription, Task, WeakEntity, Window, deferred,
     div, prelude::*, px,
@@ -121,7 +121,7 @@ impl VoicePage {
 
 impl Render for VoicePage {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = resolve_theme(&self.settings.read(cx).theme);
+        let theme = cx.theme();
 
         let mic_vol_pct = (self.mic_slider.read(cx).value().end() * 100.0) as u32;
         let speaker_vol_pct = (self.speaker_slider.read(cx).value().end() * 100.0) as u32;
@@ -171,7 +171,7 @@ impl Render for VoicePage {
                                             &selected_input_id,
                                             self.input_dropdown_open,
                                             "No input devices",
-                                            &theme,
+                                            theme,
                                             this_handle.clone(),
                                             settings.clone(),
                                             true,
@@ -215,7 +215,7 @@ impl Render for VoicePage {
                                             &selected_output_id,
                                             self.output_dropdown_open,
                                             "No output devices",
-                                            &theme,
+                                            theme,
                                             this_handle.clone(),
                                             settings.clone(),
                                             false,

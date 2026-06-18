@@ -1,11 +1,10 @@
 use gpui::{Context, Entity, FontWeight, Window, div, prelude::*, px};
 use mezon_store::{ChannelList, Settings};
 
-use crate::theme::resolve_theme;
+use crate::theme::ActiveTheme;
 
 pub struct MainLayout {
     channel_list: Entity<ChannelList>,
-    settings: Entity<Settings>,
 }
 
 impl MainLayout {
@@ -16,16 +15,13 @@ impl MainLayout {
     ) -> Self {
         cx.observe(&channel_list, |_, _, cx| cx.notify()).detach();
         cx.observe(&settings, |_, _, cx| cx.notify()).detach();
-        Self {
-            channel_list,
-            settings,
-        }
+        Self { channel_list }
     }
 }
 
 impl Render for MainLayout {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = resolve_theme(&self.settings.read(cx).theme);
+        let theme = cx.theme().clone();
         div()
             .flex()
             .flex_row()

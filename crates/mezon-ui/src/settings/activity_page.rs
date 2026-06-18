@@ -1,5 +1,5 @@
 use crate::components::primitives::{Label, Switch, h_flex, v_flex};
-use crate::theme::resolve_theme;
+use crate::theme::ActiveTheme;
 use gpui::{Context, Entity, FontWeight, Window, prelude::*};
 use mezon_store::Settings;
 
@@ -16,7 +16,7 @@ impl ActivityPage {
 
 impl Render for ActivityPage {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = resolve_theme(&self.settings.read(cx).theme);
+        let theme = cx.theme();
         let tracking = self.settings.read(cx).activity_tracking;
         let settings = self.settings.clone();
 

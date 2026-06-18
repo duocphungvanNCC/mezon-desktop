@@ -230,3 +230,64 @@ fn normalize_path(path: &str) -> String {
         format!("/{without_trailing}")
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn from_path_channel_route() {
+        let route = Route::from_path("/chat/clans/1/channels/42");
+        assert_eq!(
+            route,
+            Route::Channel {
+                clan_id: "1".into(),
+                channel_id: "42".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn from_path_settings_profile() {
+        assert_eq!(
+            Route::from_path("/settings/profile"),
+            Route::SettingsProfile
+        );
+    }
+
+    #[test]
+    fn from_path_unknown_becomes_not_found() {
+        assert_eq!(
+            Route::from_path("/nope/xyz"),
+            Route::NotFound {
+                path: "/nope/xyz".into()
+            }
+        );
+    }
+
+    #[test]
+    fn parse_link_strips_mezonapp_scheme() {
+        assert_eq!(
+            parse_link("mezonapp://chat/clans/9/channels/3"),
+            Some(Route::Channel {
+                clan_id: "9".into(),
+                channel_id: "3".into(),
+            })
+        );
+    }
+
+    #[test]
+    fn parse_link_callback_is_none() {
+        assert_eq!(parse_link("mezonapp://callback?token=secret"), None);
+    }
+
+    #[test]
+    fn to_path_roundtrip_channel() {
+        let route = Route::Channel {
+            clan_id: "7".into(),
+            channel_id: "99".into(),
+        };
+        assert_eq!(route.to_path(), "/chat/clans/7/channels/99");
+        assert_eq!(Route::from_path(&route.to_path()), route);
+    }
+}

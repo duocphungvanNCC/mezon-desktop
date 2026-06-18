@@ -1,11 +1,8 @@
-use std::sync::Arc;
-
 use crate::components::primitives::Sizable;
 use gpui::{
-    App, ClickEvent, Context, Entity, FontWeight, MouseButton, NavigationDirection, Window, div,
-    prelude::*,
+    AnyView, App, ClickEvent, Context, Entity, FontWeight, MouseButton, NavigationDirection,
+    StyleRefinement, Window, div, prelude::*,
 };
-use mezon_client::{AppApi, MezonClient};
 use mezon_store::{AuthState, ClanList, Settings};
 
 use crate::chat_layout::ChatLayout;
@@ -13,12 +10,11 @@ use crate::components::primitives::{Button, Icon, IconName, Size, Spinner};
 use crate::login_view::LoginView;
 use crate::router::{Route, Router};
 use crate::settings::SettingsScreen;
-use crate::theme::{Theme, resolve_theme};
+use crate::theme::{ActiveTheme, Theme, resolve_theme};
 use crate::title_bar::TitleBar;
 
 pub struct RootView {
     title_bar: Entity<TitleBar>,
-    settings: Entity<Settings>,
     auth_state: Entity<AuthState>,
     login_view: Entity<LoginView>,
     chat_layout: Entity<ChatLayout>,
@@ -29,8 +25,6 @@ impl RootView {
     pub fn new(
         title_bar: Entity<TitleBar>,
         auth_state: Entity<AuthState>,
-        client: Arc<MezonClient>,
-        api: Arc<AppApi>,
         settings: Entity<Settings>,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -44,7 +38,7 @@ impl RootView {
         let login_view = cx.new({
             let auth_state = auth_state.clone();
             let settings = settings.clone();
-            move |cx| LoginView::new(client, auth_state, settings, cx)
+            move |cx| LoginView::new(auth_state, settings, cx)
         });
 
         cx.observe(&Router::global(cx), |this, _, cx| {
@@ -57,7 +51,6 @@ impl RootView {
 
         let clan_list_for_chat = clan_list.clone();
         let auth_state_for_chat = auth_state.clone();
-        let api_for_chat = api.clone();
         let settings_for_chat = settings.clone();
         let chat_layout = cx.new({
             let settings = settings_for_chat;
@@ -65,7 +58,6 @@ impl RootView {
                 ChatLayout::new(
                     clan_list_for_chat.clone(),
                     auth_state_for_chat.clone(),
-                    api_for_chat.clone(),
                     settings.clone(),
                     cx,
                 )
@@ -73,14 +65,12 @@ impl RootView {
         });
 
         let auth_state_for_settings = auth_state.clone();
-        let api_for_settings = api.clone();
         let clan_list_for_settings = clan_list.clone();
         let settings_screen = cx.new({
             let settings = settings.clone();
             move |cx| {
                 SettingsScreen::new(
                     auth_state_for_settings.clone(),
-                    api_for_settings.clone(),
                     settings.clone(),
                     clan_list_for_settings.clone(),
                     cx,
@@ -90,7 +80,6 @@ impl RootView {
 
         Self {
             title_bar,
-            settings,
             auth_state,
             login_view,
             chat_layout,
@@ -117,15 +106,16 @@ impl RootView {
 
 impl Render for RootView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = resolve_theme(&self.settings.read(cx).theme);
+        crate::trace_render!("RootView");
+        let theme = cx.theme();
         let state = self.auth_state.read(cx).clone();
 
         let content: gpui::AnyElement = match state {
             AuthState::NotAuthenticated | AuthState::OtpRequested { .. } => {
                 self.login_view.clone().into_any_element()
             }
-            AuthState::AwaitingCallback => render_awaiting_callback(&theme),
-            AuthState::Connecting(_) => render_connecting(&theme),
+            AuthState::AwaitingCallback => render_awaiting_callback(theme),
+            AuthState::Connecting(_) => render_connecting(theme),
             AuthState::Authenticated(_) => {
                 let route = Router::global(cx).read(cx).route();
                 match route {
@@ -138,7 +128,7 @@ impl Render for RootView {
                     | Route::SettingsLanguage
                     | Route::SettingsVoice
                     | Route::SettingsAdvanced => self.settings_screen.clone().into_any_element(),
-                    Route::NotFound { .. } => render_not_found(&theme),
+                    Route::NotFound { .. } => render_not_found(theme),
                     _ => self.chat_layout.clone().into_any_element(),
                 }
             }
@@ -150,6 +140,9 @@ impl Render for RootView {
             .size_full()
             .bg(theme.bg_primary)
             .text_color(theme.text_primary)
+            .on_action(cx.listener(|_, _: &crate::ToggleInspector, window, cx| {
+                window.toggle_inspector(cx);
+            }))
             .on_mouse_down(
                 MouseButton::Navigate(NavigationDirection::Back),
                 |_, _, cx| crate::router::go_back(cx),
@@ -158,7 +151,10 @@ impl Render for RootView {
                 MouseButton::Navigate(NavigationDirection::Forward),
                 |_, _, cx| crate::router::go_forward(cx),
             )
-            .child(self.title_bar.clone())
+            .child(
+                AnyView::from(self.title_bar.clone())
+                    .cached(StyleRefinement::default().w_full().h_8()),
+            )
             .child(content)
     }
 }

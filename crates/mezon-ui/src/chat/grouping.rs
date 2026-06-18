@@ -1,15 +1,7 @@
-use mezon_store::Message;
-
-pub const COMBINE_TIME_WINDOW: i64 = 300;
+use mezon_store::{Message, message_combined_with_prev};
 
 pub fn is_combined(prev: Option<&Message>, msg: &Message) -> bool {
-    match prev {
-        Some(prev) => {
-            prev.sender_id == msg.sender_id
-                && (msg.create_time - prev.create_time).abs() < COMBINE_TIME_WINDOW
-        }
-        None => false,
-    }
+    message_combined_with_prev(prev, msg)
 }
 
 #[cfg(test)]

@@ -1,17 +1,25 @@
+pub mod account;
 pub mod channel;
 pub mod clan;
 pub mod config;
+pub mod login;
+pub mod messages;
+pub mod presence;
 
 use anyhow::{Context, Result};
 use dirs::config_dir;
-use mezon_client::Session;
+pub use mezon_client::Session;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use tokio::fs;
 
+pub use account::*;
 pub use channel::*;
 pub use clan::*;
 pub use config::AppConfig;
+pub use login::LoginStore;
+pub use messages::*;
+pub use presence::*;
 
 /// Persistent application settings — written to ~/.config/mezon/settings.json
 #[derive(Debug, Clone, Serialize, Deserialize)]
