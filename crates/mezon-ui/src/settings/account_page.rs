@@ -1,75 +1,26 @@
-use std::sync::Arc;
 use std::time::Duration;
 
 use crate::components::primitives::{
     Avatar, Button as GpuiButton, ButtonVariants, Divider, Label, Sizable, Size, h_flex, v_flex,
 };
-use gpui::{Context, Entity, FontWeight, SharedString, Task, Window, div, prelude::*, px};
-use mezon_client::AppApi;
-use mezon_store::Settings;
+use gpui::{Context, Entity, FontWeight, SharedString, Window, div, prelude::*, px};
+use mezon_store::{AccountStore, Settings};
 
-use crate::theme::resolve_theme;
-
-struct AccountState {
-    username: SharedString,
-    display_name: SharedString,
-    email: SharedString,
-    avatar_url: Option<SharedString>,
-    phone_number: Option<SharedString>,
-    password_setted: bool,
-}
+use crate::theme::ActiveTheme;
 
 pub struct AccountPage {
-    settings: Entity<Settings>,
-    account: Option<AccountState>,
-    fetch_error: bool,
-    loading: bool,
     toast_message: Option<SharedString>,
-    _fetch_task: Option<Task<()>>,
+    fetch_started: bool,
 }
 
 impl AccountPage {
-    pub fn new(api: Arc<AppApi>, settings: Entity<Settings>, cx: &mut Context<Self>) -> Self {
+    pub fn new(settings: Entity<Settings>, cx: &mut Context<Self>) -> Self {
         cx.observe(&settings, |_, _, cx| cx.notify()).detach();
-        let api_clone = api.clone();
-        let fetch_task = cx.spawn(async move |this, cx| match api_clone.get_account().await {
-            Ok(acct) => {
-                this.update(cx, |this, view_cx| {
-                    let display = acct
-                        .display_name
-                        .clone()
-                        .filter(|s| !s.is_empty())
-                        .unwrap_or_else(|| acct.username.clone());
-                    this.account = Some(AccountState {
-                        username: acct.username.into(),
-                        display_name: display.into(),
-                        email: acct.email.unwrap_or_default().into(),
-                        avatar_url: acct.avatar_url.map(Into::into),
-                        phone_number: acct.phone_number.map(Into::into),
-                        password_setted: acct.password_setted,
-                    });
-                    this.loading = false;
-                    view_cx.notify();
-                })
-                .ok();
-            }
-            Err(_) => {
-                this.update(cx, |this, cx| {
-                    this.fetch_error = true;
-                    this.loading = false;
-                    cx.notify();
-                })
-                .ok();
-            }
-        });
-
+        cx.observe(&AccountStore::global(cx), |_, _, cx| cx.notify())
+            .detach();
         Self {
-            settings,
-            account: None,
-            fetch_error: false,
-            loading: true,
             toast_message: None,
-            _fetch_task: Some(fetch_task),
+            fetch_started: false,
         }
     }
 
@@ -91,40 +42,36 @@ impl AccountPage {
 
 impl Render for AccountPage {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = resolve_theme(&self.settings.read(cx).theme);
+        if !self.fetch_started {
+            self.fetch_started = true;
+            AccountStore::global(cx).update(cx, |store, cx| store.fetch_account(cx));
+        }
 
-        if self.fetch_error {
+        let theme = cx.theme();
+        let store = AccountStore::global(cx).read(cx);
+
+        if store.account_error {
             return v_flex()
                 .gap_4()
                 .child(Label::new("Failed to load account data").text_color(theme.text_muted))
                 .into_any_element();
         }
 
-        if self.loading || self.account.is_none() {
+        if store.account_loading || store.account.is_none() {
             return v_flex()
                 .gap_4()
                 .child(Label::new("Loading account...").text_color(theme.text_muted))
                 .into_any_element();
         }
 
-        let account = self.account.as_ref().unwrap();
+        let account = store.account.as_ref().unwrap();
 
-        let display_name = if account.display_name.is_empty() {
-            account.username.clone()
-        } else {
-            account.display_name.clone()
-        };
+        let display_name: SharedString = account.display_name.clone().into();
+        let username: SharedString = account.username.clone().into();
 
-        let email_display = if account.email.is_empty() {
-            SharedString::from("Not set")
-        } else {
-            SharedString::from(mask_email(&account.email))
-        };
-
-        let _email_label = if account.email.is_empty() {
-            SharedString::from("Set Email")
-        } else {
-            SharedString::from("Change Email")
+        let email_display = match &account.email {
+            Some(email) if !email.is_empty() => SharedString::from(mask_email(email)),
+            _ => SharedString::from("Not set"),
         };
 
         let password_label = if account.password_setted {
@@ -135,7 +82,8 @@ impl Render for AccountPage {
 
         let phone_display = account
             .phone_number
-            .clone()
+            .as_ref()
+            .map(|s| SharedString::from(s.as_str()))
             .unwrap_or(SharedString::from("Not set"));
 
         let phone_label = if account.phone_number.is_some() {
@@ -144,21 +92,20 @@ impl Render for AccountPage {
             SharedString::from("Set Phone")
         };
 
-        let avatar_url = account.avatar_url.clone();
+        let avatar_url = account
+            .avatar_url
+            .as_ref()
+            .map(|url| SharedString::from(crate::imgproxy::profile_url(cx, url)));
 
         v_flex()
             .gap_6()
-            // Profile Card
             .child(
                 v_flex()
                     .rounded_lg()
                     .overflow_hidden()
                     .bg(theme.bg_primary)
                     .shadow_md()
-                    .child(
-                        // Color Banner
-                        div().h(px(100.0)).w_full().bg(theme.brand),
-                    )
+                    .child(div().h(px(100.0)).w_full().bg(theme.brand))
                     .child(
                         h_flex()
                             .px_6()
@@ -180,7 +127,7 @@ impl Render for AccountPage {
                                             .text_color(theme.text_primary),
                                     )
                                     .child(
-                                        Label::new(format!("@{}", account.username))
+                                        Label::new(format!("@{}", username))
                                             .text_sm()
                                             .text_color(theme.text_muted),
                                     ),
@@ -200,14 +147,12 @@ impl Render for AccountPage {
                             ),
                     ),
             )
-            // Info Cards
             .child(
                 v_flex()
                     .rounded_lg()
                     .overflow_hidden()
                     .bg(theme.bg_primary)
                     .shadow_md()
-                    // Display Name
                     .child(
                         h_flex()
                             .justify_between()
@@ -231,7 +176,6 @@ impl Render for AccountPage {
                             ),
                     )
                     .child(Divider::horizontal())
-                    // Username
                     .child(
                         h_flex()
                             .justify_between()
@@ -249,13 +193,12 @@ impl Render for AccountPage {
                                             .child("USERNAME"),
                                     )
                                     .child(
-                                        Label::new(format!("@{}", account.username))
+                                        Label::new(format!("@{}", username))
                                             .text_color(theme.text_muted),
                                     ),
                             ),
                     )
                     .child(Divider::horizontal())
-                    // Email
                     .child(
                         h_flex()
                             .justify_between()
@@ -276,7 +219,6 @@ impl Render for AccountPage {
                             ),
                     )
                     .child(Divider::horizontal())
-                    // Password
                     .child(
                         h_flex()
                             .justify_between()
@@ -306,7 +248,6 @@ impl Render for AccountPage {
                             ),
                     )
                     .child(Divider::horizontal())
-                    // Phone
                     .child(
                         h_flex()
                             .justify_between()

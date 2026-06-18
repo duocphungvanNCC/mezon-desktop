@@ -1,0 +1,449 @@
+use std::path::Path;
+use std::sync::Arc;
+
+use gpui::{App, AppContext, Context, Entity, EventEmitter, Global, Task};
+use mezon_client::AppApi;
+use mezon_client::RealtimeEvent;
+use mezon_client::transport::ApiAccount;
+
+#[derive(Debug, Clone)]
+pub struct UserAccount {
+    pub username: String,
+    pub display_name: String,
+    pub email: Option<String>,
+    pub avatar_url: Option<String>,
+    pub phone_number: Option<String>,
+    pub about_me: Option<String>,
+    pub password_setted: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct LoggedDevice {
+    pub device_id: String,
+    pub device_name: String,
+    pub platform: String,
+    pub ip: String,
+    pub location: String,
+    pub is_current: bool,
+    pub last_active_seconds: u32,
+    pub last_active_label: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct UserClanProfile {
+    pub clan_id: String,
+    pub nick_name: String,
+    pub avatar_url: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub enum AccountEvent {
+    AccountLoaded,
+    AccountLoadFailed,
+    DevicesLoaded,
+    DevicesLoadFailed,
+    AccountSaved,
+    AccountSaveFailed(String),
+    AvatarUploaded(String),
+    AvatarUploadFailed(String),
+    ClanProfileLoaded,
+    ClanProfileLoadFailed(String),
+    ClanProfileSaved,
+    ClanProfileSaveFailed(String),
+    NicknameDuplicateChecked(bool),
+}
+
+pub struct AccountStore {
+    pub account: Option<UserAccount>,
+    pub account_loading: bool,
+    pub account_error: bool,
+    pub devices: Vec<LoggedDevice>,
+    pub devices_loading: bool,
+    pub devices_error: Option<String>,
+    pub clan_profile: Option<UserClanProfile>,
+    pub clan_profile_loading: bool,
+    pub nickname_duplicate: bool,
+    api: Arc<AppApi>,
+    _realtime: Task<()>,
+}
+
+struct GlobalAccountStore(Entity<AccountStore>);
+impl Global for GlobalAccountStore {}
+
+impl EventEmitter<AccountEvent> for AccountStore {}
+
+impl AccountStore {
+    pub fn init(api: Arc<AppApi>, cx: &mut App) -> Entity<Self> {
+        let entity = cx.new(|cx| Self::new(api, cx));
+        cx.set_global(GlobalAccountStore(entity.clone()));
+        entity
+    }
+
+    fn new(api: Arc<AppApi>, cx: &mut Context<Self>) -> Self {
+        let api_for_realtime = api.clone();
+        let realtime = cx.spawn(async move |this, cx| {
+            let mut rx = api_for_realtime.subscribe();
+            loop {
+                match rx.recv().await {
+                    Ok(event) => {
+                        if this
+                            .update(cx, |this, cx| this.handle_event(event, cx))
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                        if this
+                            .update(cx, |this, cx| {
+                                tracing::warn!("AccountStore realtime lagged — refetching account");
+                                if this.account.is_some() || this.account_loading {
+                                    this.fetch_account(cx);
+                                }
+                            })
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                }
+            }
+        });
+
+        Self {
+            account: None,
+            account_loading: false,
+            account_error: false,
+            devices: Vec::new(),
+            devices_loading: false,
+            devices_error: None,
+            clan_profile: None,
+            clan_profile_loading: false,
+            nickname_duplicate: false,
+            api,
+            _realtime: realtime,
+        }
+    }
+
+    fn handle_event(&mut self, event: RealtimeEvent, cx: &mut Context<Self>) {
+        if let RealtimeEvent::ClanProfileUpdated(e) = event {
+            let clan_id = e.clan_id.to_string();
+            if self
+                .clan_profile
+                .as_ref()
+                .is_some_and(|p| p.clan_id == clan_id)
+            {
+                if let Some(profile) = &mut self.clan_profile {
+                    if !e.clan_nick.is_empty() {
+                        profile.nick_name = e.clan_nick.clone();
+                    }
+                    if !e.clan_avatar.is_empty() {
+                        profile.avatar_url = Some(e.clan_avatar.clone());
+                    }
+                }
+                cx.emit(AccountEvent::ClanProfileLoaded);
+                cx.notify();
+            }
+        }
+    }
+
+    pub fn global(cx: &App) -> Entity<Self> {
+        cx.global::<GlobalAccountStore>().0.clone()
+    }
+
+    pub fn fetch_account(&mut self, cx: &mut Context<Self>) {
+        if self.account_loading {
+            return;
+        }
+        self.account_loading = true;
+        self.account_error = false;
+        cx.notify();
+
+        let api = self.api.clone();
+        cx.spawn(async move |this, cx| match api.get_account().await {
+            Ok(acct) => {
+                let _ = this.update(cx, |this, cx| {
+                    this.account = Some(user_account_from_api(acct));
+                    this.account_loading = false;
+                    this.account_error = false;
+                    cx.emit(AccountEvent::AccountLoaded);
+                    cx.notify();
+                });
+            }
+            Err(e) => {
+                tracing::error!("Failed to load account: {e}");
+                let _ = this.update(cx, |this, cx| {
+                    this.account_loading = false;
+                    this.account_error = true;
+                    cx.emit(AccountEvent::AccountLoadFailed);
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
+    }
+
+    pub fn fetch_devices(&mut self, cx: &mut Context<Self>) {
+        if self.devices_loading {
+            return;
+        }
+        self.devices_loading = true;
+        self.devices_error = None;
+        cx.notify();
+
+        let api = self.api.clone();
+        cx.spawn(async move |this, cx| match api.list_loged_device().await {
+            Ok(devices) => {
+                let mapped: Vec<LoggedDevice> =
+                    devices.into_iter().map(logged_device_from_proto).collect();
+                let _ = this.update(cx, |this, cx| {
+                    this.devices = mapped;
+                    this.devices_loading = false;
+                    this.devices_error = None;
+                    cx.emit(AccountEvent::DevicesLoaded);
+                    cx.notify();
+                });
+            }
+            Err(e) => {
+                tracing::error!("Failed to load devices: {e}");
+                let _ = this.update(cx, |this, cx| {
+                    this.devices_loading = false;
+                    this.devices_error = Some("Failed to load devices".into());
+                    cx.emit(AccountEvent::DevicesLoadFailed);
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
+    }
+
+    pub fn save_account(
+        &mut self,
+        display_name: String,
+        avatar_url: Option<String>,
+        about_me: String,
+        cx: &mut Context<Self>,
+    ) {
+        let api = self.api.clone();
+        cx.spawn(async move |this, cx| {
+            match api
+                .update_account(Some(&display_name), avatar_url.as_deref(), Some(&about_me))
+                .await
+            {
+                Ok(()) => {
+                    let _ = this.update(cx, |this, cx| {
+                        if let Some(account) = &mut this.account {
+                            account.display_name = display_name;
+                            account.avatar_url = avatar_url;
+                            account.about_me = Some(about_me);
+                        }
+                        cx.emit(AccountEvent::AccountSaved);
+                        cx.notify();
+                    });
+                }
+                Err(e) => {
+                    let _ = this.update(cx, |_, cx| {
+                        cx.emit(AccountEvent::AccountSaveFailed(e.to_string()));
+                        cx.notify();
+                    });
+                }
+            }
+        })
+        .detach();
+    }
+
+    pub fn upload_avatar(&mut self, path: &Path, cx: &mut Context<Self>) {
+        let api = self.api.clone();
+        let path = path.to_path_buf();
+        cx.spawn(async move |this, cx| match api.upload_avatar(&path).await {
+            Ok(url) => {
+                let _ = this.update(cx, |this, cx| {
+                    if let Some(account) = &mut this.account {
+                        account.avatar_url = Some(url.clone());
+                    }
+                    cx.emit(AccountEvent::AvatarUploaded(url));
+                    cx.notify();
+                });
+            }
+            Err(e) => {
+                let _ = this.update(cx, |_, cx| {
+                    cx.emit(AccountEvent::AvatarUploadFailed(e.to_string()));
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
+    }
+
+    pub fn logout(&mut self, token: String, refresh_token: String, cx: &mut Context<Self>) {
+        let api = self.api.clone();
+        cx.spawn(async move |_this, _cx| {
+            let _ = api.session_logout(&token, &refresh_token).await;
+        })
+        .detach();
+        cx.notify();
+    }
+
+    pub fn fetch_clan_profile(&mut self, clan_id: &str, cx: &mut Context<Self>) {
+        self.clan_profile_loading = true;
+        self.nickname_duplicate = false;
+        cx.notify();
+
+        let api = self.api.clone();
+        let clan_id = clan_id.to_string();
+        cx.spawn(
+            async move |this, cx| match api.get_user_clan_profile(&clan_id).await {
+                Ok(profile) => {
+                    let _ = this.update(cx, |this, cx| {
+                        this.clan_profile = Some(UserClanProfile {
+                            clan_id: clan_id.clone(),
+                            nick_name: profile.nick_name,
+                            avatar_url: (!profile.avatar.is_empty()).then_some(profile.avatar),
+                        });
+                        this.clan_profile_loading = false;
+                        cx.emit(AccountEvent::ClanProfileLoaded);
+                        cx.notify();
+                    });
+                }
+                Err(e) => {
+                    let _ = this.update(cx, |this, cx| {
+                        this.clan_profile = Some(UserClanProfile {
+                            clan_id: clan_id.clone(),
+                            nick_name: String::new(),
+                            avatar_url: None,
+                        });
+                        this.clan_profile_loading = false;
+                        cx.emit(AccountEvent::ClanProfileLoadFailed(e.to_string()));
+                        cx.notify();
+                    });
+                }
+            },
+        )
+        .detach();
+    }
+
+    pub fn save_clan_profile(
+        &mut self,
+        clan_id: &str,
+        nick_name: String,
+        avatar_url: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        let api = self.api.clone();
+        let clan_id = clan_id.to_string();
+        cx.spawn(async move |this, cx| {
+            match api
+                .update_user_clan_profile(&clan_id, &nick_name, avatar_url.as_deref())
+                .await
+            {
+                Ok(()) => {
+                    let _ = this.update(cx, |this, cx| {
+                        this.clan_profile = Some(UserClanProfile {
+                            clan_id: clan_id.clone(),
+                            nick_name: nick_name.clone(),
+                            avatar_url: avatar_url.clone(),
+                        });
+                        cx.emit(AccountEvent::ClanProfileSaved);
+                        cx.notify();
+                    });
+                }
+                Err(e) => {
+                    let _ = this.update(cx, |_, cx| {
+                        cx.emit(AccountEvent::ClanProfileSaveFailed(e.to_string()));
+                        cx.notify();
+                    });
+                }
+            }
+        })
+        .detach();
+    }
+
+    pub fn check_clan_nickname(&mut self, clan_id: &str, nick_name: &str, cx: &mut Context<Self>) {
+        let api = self.api.clone();
+        let clan_id = clan_id.to_string();
+        let nick_name = nick_name.to_string();
+        cx.spawn(async move |this, cx| {
+            let is_dup = api
+                .check_duplicate_clan_nickname(&clan_id, &nick_name)
+                .await
+                .unwrap_or(false);
+            let _ = this.update(cx, |this, cx| {
+                this.nickname_duplicate = is_dup;
+                cx.emit(AccountEvent::NicknameDuplicateChecked(is_dup));
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+}
+
+fn user_account_from_api(acct: ApiAccount) -> UserAccount {
+    let display = acct
+        .display_name
+        .clone()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| acct.username.clone());
+    UserAccount {
+        username: acct.username,
+        display_name: display,
+        email: acct.email,
+        avatar_url: acct.avatar_url,
+        phone_number: acct.phone_number,
+        about_me: acct.about_me,
+        password_setted: acct.password_setted,
+    }
+}
+
+fn logged_device_from_proto(d: mezon_proto::api::LogedDevice) -> LoggedDevice {
+    LoggedDevice {
+        device_id: d.device_id,
+        device_name: d.device_name,
+        platform: d.platform,
+        ip: d.ip,
+        location: d.location,
+        is_current: d.is_current,
+        last_active_seconds: d.last_active_seconds,
+        last_active_label: format_device_last_active(d.last_active_seconds),
+    }
+}
+
+fn format_device_last_active(seconds: u32) -> String {
+    if seconds == 0 {
+        return "Unknown".to_string();
+    }
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as u32)
+        .unwrap_or(0);
+    let ago = now.saturating_sub(seconds);
+    if ago < 60 {
+        format!("{}s ago", ago)
+    } else if ago < 3600 {
+        format!("{}m ago", ago / 60)
+    } else if ago < 86400 {
+        format!("{}h ago", ago / 3600)
+    } else {
+        format!("{}d ago", ago / 86400)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn user_account_from_api_uses_username_when_display_empty() {
+        let acct = user_account_from_api(ApiAccount {
+            user_id: "1".into(),
+            username: "alice".into(),
+            email: Some("a@b.c".into()),
+            display_name: None,
+            avatar_url: None,
+            about_me: None,
+            phone_number: None,
+            password_setted: true,
+        });
+        assert_eq!(acct.display_name, "alice");
+    }
+}

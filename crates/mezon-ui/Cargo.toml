@@ -4,13 +4,12 @@ version.workspace = true
 edition = "2024"
 
 [dependencies]
-gpui.workspace = true
+gpui = { workspace = true, features = ["inspector"] }
 ui.workspace = true
 theme.workspace = true
 icons.workspace = true
 menu.workspace = true
 mezon-store.workspace = true
-mezon-client.workspace = true
 mezon-native.workspace = true
 mezon-i18n.workspace = true
 anyhow.workspace = true

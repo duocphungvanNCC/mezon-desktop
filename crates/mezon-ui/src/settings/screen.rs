@@ -1,11 +1,8 @@
-use std::sync::Arc;
-
 use crate::components::primitives::{
     Button as GpuiButton, ButtonVariants, Icon, IconName, Label, h_flex, v_flex,
 };
 use gpui::{Context, Entity, Window, div, prelude::*, px};
-use mezon_client::AppApi;
-use mezon_store::{AuthState, ClanList, Settings};
+use mezon_store::{AccountStore, AuthState, ClanList, Settings};
 
 use super::account_page::AccountPage;
 use super::activity_page::ActivityPage;
@@ -16,7 +13,7 @@ use super::language_page::LanguagePage;
 use super::notifications_page::NotificationsPage;
 use super::profile_page::ProfilePage;
 use super::voice_page::VoicePage;
-use crate::theme::{Theme, resolve_theme};
+use crate::theme::{ActiveTheme, Theme};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SettingsPage {
@@ -33,7 +30,6 @@ pub enum SettingsPage {
 
 pub struct SettingsScreen {
     auth_state: Entity<AuthState>,
-    api: Arc<AppApi>,
     settings: Entity<Settings>,
     clan_list: Entity<ClanList>,
     current_page: SettingsPage,
@@ -52,7 +48,6 @@ pub struct SettingsScreen {
 impl SettingsScreen {
     pub fn new(
         auth_state: Entity<AuthState>,
-        api: Arc<AppApi>,
         settings: Entity<Settings>,
         clan_list: Entity<ClanList>,
         cx: &mut Context<Self>,
@@ -60,7 +55,6 @@ impl SettingsScreen {
         cx.observe(&settings, |_, _, cx| cx.notify()).detach();
         Self {
             auth_state,
-            api,
             settings,
             clan_list,
             current_page: SettingsPage::Account,
@@ -84,9 +78,8 @@ impl SettingsScreen {
 
 impl Render for SettingsScreen {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = resolve_theme(&self.settings.read(cx).theme);
+        let theme = cx.theme().clone();
         let locale = self.settings.read(cx).language.clone();
-        let api = self.api.clone();
         let auth_state = self.auth_state.clone();
         let page = self.current_page;
 
@@ -95,22 +88,20 @@ impl Render for SettingsScreen {
             SettingsPage::Account => {
                 self.account_page.get_or_insert_with(|| {
                     let settings = self.settings.clone();
-                    cx.new(|cx| AccountPage::new(api.clone(), settings, cx))
+                    cx.new(|cx| AccountPage::new(settings, cx))
                 });
             }
             SettingsPage::Profile => {
                 let settings = self.settings.clone();
                 let clan_list = self.clan_list.clone();
-                self.profile_page.get_or_insert_with(|| {
-                    cx.new(|cx| ProfilePage::new(api.clone(), settings, clan_list, cx))
-                });
+                self.profile_page
+                    .get_or_insert_with(|| cx.new(|cx| ProfilePage::new(settings, clan_list, cx)));
             }
             SettingsPage::Device => {
                 let just_switched = self.prev_page != SettingsPage::Device;
                 if self.device_page.is_none() {
                     let settings = self.settings.clone();
-                    self.device_page =
-                        Some(cx.new(|cx| DevicePage::new(api.clone(), settings, cx)));
+                    self.device_page = Some(cx.new(|cx| DevicePage::new(settings, cx)));
                 } else if just_switched && let Some(device_entity) = &self.device_page {
                     device_entity.update(cx, |d, view_cx| d.refresh(view_cx));
                 }
@@ -343,28 +334,24 @@ impl Render for SettingsScreen {
                                         .ghost()
                                         .w_full()
                                         .on_click({
-                                            let api = api.clone();
                                             let auth_state = auth_state.clone();
                                             move |_, _, cx| {
                                                 let auth = auth_state.read(cx);
                                                 if let AuthState::Authenticated(session) = auth {
-                                                    let api = api.clone();
                                                     let token = session.token.clone();
                                                     let refresh_token =
                                                         session.refresh_token.clone();
                                                     let auth_state = auth_state.clone();
-                                                    cx.spawn(async move |cx| {
-                                                        let _ = api
-                                                            .session_logout(&token, &refresh_token)
-                                                            .await;
-                                                        cx.update(|cx| {
-                                                            auth_state.update(cx, |state, _| {
-                                                                *state =
-                                                                    AuthState::NotAuthenticated;
-                                                            });
-                                                        });
-                                                    })
-                                                    .detach();
+                                                    AccountStore::global(cx).update(
+                                                        cx,
+                                                        |store, cx| {
+                                                            store.logout(token, refresh_token, cx);
+                                                        },
+                                                    );
+                                                    auth_state.update(cx, |state, cx| {
+                                                        *state = AuthState::NotAuthenticated;
+                                                        cx.notify();
+                                                    });
                                                 }
                                             }
                                         }),

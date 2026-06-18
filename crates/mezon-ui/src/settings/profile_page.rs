@@ -1,4 +1,3 @@
-use std::sync::Arc;
 use std::time::Duration;
 
 use crate::components::primitives::{
@@ -6,14 +5,13 @@ use crate::components::primitives::{
     Size, h_flex, v_flex,
 };
 use gpui::{
-    Context, Entity, FontWeight, PathPromptOptions, SharedString, Subscription, Task, Window, div,
+    Context, Entity, FontWeight, PathPromptOptions, SharedString, Subscription, Window, div,
     prelude::*, px,
 };
-use mezon_client::AppApi;
-use mezon_store::{ClanList, Settings};
+use mezon_store::{AccountEvent, AccountStore, ClanList, Settings};
 
 use super::clan_profile_section::ClanProfileSection;
-use crate::theme::{Theme, resolve_theme};
+use crate::theme::{ActiveTheme, Theme};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ProfileTab {
@@ -34,7 +32,6 @@ struct ProfileState {
 }
 
 pub struct ProfilePage {
-    api: Arc<AppApi>,
     settings: Entity<Settings>,
     clan_list: Entity<ClanList>,
     active_tab: ProfileTab,
@@ -43,7 +40,8 @@ pub struct ProfilePage {
     about_me_input: Option<Entity<InputState>>,
     _subscriptions: Vec<Subscription>,
     fetch_error: bool,
-    _fetch_task: Option<Task<()>>,
+    fetch_started: bool,
+    account_loaded: bool,
     clan_section: Option<Entity<ClanProfileSection>>,
     toast_message: Option<SharedString>,
     #[allow(dead_code)]
@@ -52,52 +50,72 @@ pub struct ProfilePage {
 
 impl ProfilePage {
     pub fn new(
-        api: Arc<AppApi>,
         settings: Entity<Settings>,
         clan_list: Entity<ClanList>,
         cx: &mut Context<Self>,
     ) -> Self {
         cx.observe(&settings, |_, _, cx| cx.notify()).detach();
         cx.observe(&clan_list, |_, _, cx| cx.notify()).detach();
-        let api_clone = api.clone();
-        let fetch_task = cx.spawn(async move |this, cx| match api_clone.get_account().await {
-            Ok(acct) => {
-                this.update(cx, |this, view_cx| {
-                    let display = acct
-                        .display_name
-                        .clone()
-                        .filter(|s| !s.is_empty())
-                        .unwrap_or_else(|| acct.username.clone());
-                    let about = acct.about_me.unwrap_or_default();
-                    let avatar = acct.avatar_url;
-
-                    this.profile = Some(ProfileState {
-                        username: acct.username.into(),
-                        display_name: display.clone().into(),
-                        about_me: about.clone().into(),
-                        avatar_url: avatar.clone().map(Into::into),
-                        original_display_name: display.into(),
-                        original_about_me: about.into(),
-                        original_avatar_url: avatar.map(Into::into),
-                        loading: false,
-                        saving: false,
-                    });
-
-                    view_cx.notify();
-                })
-                .ok();
+        cx.observe(&AccountStore::global(cx), |this, store, cx| {
+            if !this.account_loaded
+                && let Some(account) = store.read(cx).account.as_ref()
+            {
+                this.account_loaded = true;
+                let display = account.display_name.clone();
+                let about = account.about_me.clone().unwrap_or_default();
+                let avatar = account.avatar_url.clone();
+                this.profile = Some(ProfileState {
+                    username: account.username.clone().into(),
+                    display_name: display.clone().into(),
+                    about_me: about.clone().into(),
+                    avatar_url: avatar.clone().map(Into::into),
+                    original_display_name: display.into(),
+                    original_about_me: about.into(),
+                    original_avatar_url: avatar.map(Into::into),
+                    loading: false,
+                    saving: false,
+                });
+                cx.notify();
             }
-            Err(_) => {
-                this.update(cx, |this, cx| {
+        })
+        .detach();
+        cx.subscribe(
+            &AccountStore::global(cx),
+            |this, _, event, cx| match event {
+                AccountEvent::AccountLoadFailed => {
                     this.fetch_error = true;
                     cx.notify();
-                })
-                .ok();
-            }
-        });
+                }
+                AccountEvent::AccountSaved => {
+                    if let Some(state) = &mut this.profile {
+                        state.original_display_name = state.display_name.clone();
+                        state.original_about_me = state.about_me.clone();
+                        state.original_avatar_url = state.avatar_url.clone();
+                        state.saving = false;
+                    }
+                    this.show_toast("Profile saved", cx);
+                }
+                AccountEvent::AccountSaveFailed(msg) => {
+                    if let Some(state) = &mut this.profile {
+                        state.saving = false;
+                    }
+                    this.show_toast(format!("Failed to save: {}", msg), cx);
+                }
+                AccountEvent::AvatarUploaded(url) => {
+                    if let Some(state) = &mut this.profile {
+                        state.avatar_url = Some(url.clone().into());
+                    }
+                    cx.notify();
+                }
+                AccountEvent::AvatarUploadFailed(msg) => {
+                    this.show_toast(format!("Failed to upload avatar: {}", msg), cx);
+                }
+                _ => {}
+            },
+        )
+        .detach();
 
         Self {
-            api,
             settings,
             clan_list,
             active_tab: ProfileTab::User,
@@ -106,7 +124,8 @@ impl ProfilePage {
             about_me_input: None,
             _subscriptions: Vec::new(),
             fetch_error: false,
-            _fetch_task: Some(fetch_task),
+            fetch_started: false,
+            account_loaded: false,
             clan_section: None,
             toast_message: None,
             show_delete_confirm: false,
@@ -258,48 +277,24 @@ impl ProfilePage {
         state.saving = true;
         cx.notify();
 
-        let api = self.api.clone();
         let display_name: String = state.display_name.to_string();
         let about_me: String = state.about_me.to_string();
         let avatar_url: Option<String> = state.avatar_url.as_ref().map(|s| s.to_string());
 
-        cx.spawn(async move |this, cx| {
-            match api
-                .update_account(Some(&display_name), avatar_url.as_deref(), Some(&about_me))
-                .await
-            {
-                Ok(()) => {
-                    this.update(cx, |this, cx| {
-                        if let Some(state) = &mut this.profile {
-                            state.original_display_name = state.display_name.clone();
-                            state.original_about_me = state.about_me.clone();
-                            state.original_avatar_url = state.avatar_url.clone();
-                            state.saving = false;
-                        }
-                        this.show_toast("Profile saved", cx);
-                        cx.notify();
-                    })
-                    .ok();
-                }
-                Err(e) => {
-                    this.update(cx, |this, cx| {
-                        if let Some(state) = &mut this.profile {
-                            state.saving = false;
-                        }
-                        this.show_toast(format!("Failed to save: {}", e), cx);
-                        cx.notify();
-                    })
-                    .ok();
-                }
-            }
-        })
-        .detach();
+        AccountStore::global(cx).update(cx, |store, cx| {
+            store.save_account(display_name, avatar_url, about_me, cx);
+        });
     }
 
     fn render_user_section(&mut self, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
         let entity = cx.entity().clone();
-        let form = self.render_form(theme, cx);
-        let preview = self.render_preview(theme);
+        let avatar_display = self
+            .profile
+            .as_ref()
+            .and_then(|p| p.avatar_url.as_ref())
+            .map(|url| SharedString::from(crate::imgproxy::profile_url(cx, url.as_ref())));
+        let form = self.render_form(theme, cx, avatar_display.clone());
+        let preview = self.render_preview(theme, avatar_display);
         let is_dirty = self.is_dirty();
         let saving = self.profile.as_ref().map(|p| p.saving).unwrap_or(false);
 
@@ -372,11 +367,16 @@ impl ProfilePage {
 
 impl Render for ProfilePage {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = resolve_theme(&self.settings.read(cx).theme);
+        if !self.fetch_started && !self.account_loaded && !self.fetch_error {
+            self.fetch_started = true;
+            AccountStore::global(cx).update(cx, |store, cx| store.fetch_account(cx));
+        }
 
         if self.profile.as_ref().is_some_and(|p| !p.loading) && self.display_name_input.is_none() {
             self.init_inputs(window, cx);
         }
+
+        let theme = cx.theme().clone();
 
         if self.fetch_error {
             return v_flex()
@@ -469,14 +469,11 @@ impl Render for ProfilePage {
                             this.clan_list.read(cx).active_clan().map(|c| c.id.clone());
                         this.clan_section.get_or_insert_with(|| {
                             cx.new(|cx| {
-                                let section = ClanProfileSection::new(
-                                    this.api.clone(),
+                                ClanProfileSection::new(
                                     this.settings.clone(),
                                     this.clan_list.clone(),
                                     cx,
-                                );
-                                cx.notify();
-                                section
+                                )
                             })
                         });
                         if let Some(section) = &this.clan_section {
@@ -529,12 +526,16 @@ impl Render for ProfilePage {
 }
 
 impl ProfilePage {
-    fn render_form(&self, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_form(
+        &self,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+        avatar_display: Option<SharedString>,
+    ) -> impl IntoElement {
         let display_name: SharedString = self
             .profile
             .as_ref()
             .map_or("".into(), |p| p.display_name.clone());
-        let avatar_url = self.profile.as_ref().and_then(|p| p.avatar_url.clone());
         let about_me: SharedString = self
             .profile
             .as_ref()
@@ -554,7 +555,7 @@ impl ProfilePage {
                     .items_center()
                     .child(
                         Avatar::new()
-                            .when_some(avatar_url.clone(), |av, url| av.src(url))
+                            .when_some(avatar_display.clone(), |av, url| av.src(url))
                             .name(display_name.clone())
                             .with_size(Size::Large),
                     )
@@ -563,8 +564,7 @@ impl ProfilePage {
                             .label("Change Avatar")
                             .text_color(theme.text_primary)
                             .ghost()
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                let api = this.api.clone();
+                            .on_click(cx.listener(|_this, _, _, cx| {
                                 let root_entity = cx.entity().clone();
                                 let rx = cx.prompt_for_paths(PathPromptOptions {
                                     files: true,
@@ -581,25 +581,11 @@ impl ProfilePage {
                                         Some(p) => p,
                                         None => return,
                                     };
-
-                                    match api.upload_avatar(&path).await {
-                                        Ok(url) => {
-                                            root_entity.update(cx, |this, cx| {
-                                                if let Some(state) = &mut this.profile {
-                                                    state.avatar_url = Some(url.into());
-                                                }
-                                                cx.notify();
-                                            });
-                                        }
-                                        Err(e) => {
-                                            root_entity.update(cx, |this, cx| {
-                                                this.show_toast(
-                                                    format!("Failed to upload avatar: {}", e),
-                                                    cx,
-                                                );
-                                            });
-                                        }
-                                    }
+                                    root_entity.update(cx, |_, cx| {
+                                        AccountStore::global(cx).update(cx, |store, cx| {
+                                            store.upload_avatar(&path, cx);
+                                        });
+                                    });
                                 })
                                 .detach();
                             })),
@@ -664,7 +650,11 @@ impl ProfilePage {
             )
     }
 
-    fn render_preview(&self, theme: &Theme) -> impl IntoElement {
+    fn render_preview(
+        &self,
+        theme: &Theme,
+        avatar_display: Option<SharedString>,
+    ) -> impl IntoElement {
         let display_name: SharedString = self
             .profile
             .as_ref()
@@ -677,7 +667,6 @@ impl ProfilePage {
             .profile
             .as_ref()
             .map_or("".into(), |p| p.username.clone());
-        let avatar_url = self.profile.as_ref().and_then(|p| p.avatar_url.clone());
 
         v_flex()
             .gap_4()
@@ -704,7 +693,9 @@ impl ProfilePage {
                                     .gap_4()
                                     .child(
                                         Avatar::new()
-                                            .when_some(avatar_url.clone(), |av, url| av.src(url))
+                                            .when_some(avatar_display.clone(), |av, url| {
+                                                av.src(url)
+                                            })
                                             .name(display_name.clone())
                                             .with_size(Size::Large),
                                     )

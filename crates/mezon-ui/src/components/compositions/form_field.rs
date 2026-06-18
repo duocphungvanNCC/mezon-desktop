@@ -2,7 +2,7 @@ use crate::components::primitives::{Input, InputEvent, InputState};
 use gpui::{Context, Entity, FontWeight, SharedString, Subscription, Window, div, prelude::*};
 
 use crate::components::TextChangeHandler;
-use crate::theme::Theme;
+use crate::theme::ActiveTheme;
 
 pub struct FormField {
     label: Option<String>,
@@ -69,7 +69,7 @@ impl FormField {
 
 impl Render for FormField {
     fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = Theme::dark();
+        let theme = _cx.theme();
 
         let mut container = div().flex().flex_col().gap_1().w_full();
 

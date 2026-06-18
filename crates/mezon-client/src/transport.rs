@@ -19,15 +19,23 @@ const DEFAULT_SEND_TIMEOUT_MS: u64 = 10000;
 
 fn parse_id<T>(value: &str) -> Result<T>
 where
+    T: std::str::FromStr,
+    T::Err: std::fmt::Display,
+{
+    value
+        .parse::<T>()
+        .map_err(|e| anyhow::anyhow!("invalid id {value:?}: {e}"))
+}
+
+fn parse_id_or_zero<T>(value: &str) -> Result<T>
+where
     T: std::str::FromStr + Default,
     T::Err: std::fmt::Display,
 {
     if value.is_empty() {
         return Ok(T::default());
     }
-    value
-        .parse::<T>()
-        .map_err(|e| anyhow::anyhow!("invalid id {value:?}: {e}"))
+    parse_id(value)
 }
 
 /// Promise executor for matching responses to requests.
@@ -113,7 +121,7 @@ fn dispatch_realtime_push(
     match realtime::Envelope::decode(payload) {
         Ok(envelope) => match envelope.message {
             Some(msg) => {
-                tracing::info!("server push (cid={cid}) -> publishing realtime event");
+                tracing::debug!("server push (cid={cid}) -> publishing realtime event");
                 if let Ok(event) = RealtimeEvent::try_from(msg) {
                     on_event(event);
                 }
@@ -121,9 +129,8 @@ fn dispatch_realtime_push(
             None => tracing::warn!("server push (cid={cid}): envelope has no message"),
         },
         Err(e) => tracing::warn!(
-            "server push (cid={cid}) decode failed (len={}): {e} — FULL HEX: {:02x?}",
-            payload.len(),
-            payload
+            "server push (cid={cid}) decode failed (len={}): {e}",
+            payload.len()
         ),
     }
 }
@@ -190,7 +197,7 @@ impl MezonTransport {
         let pending_requests = self.pending_requests.clone();
         let on_event: Arc<dyn Fn(RealtimeEvent) + Send + Sync> = Arc::new(on_event);
         adapter.set_on_message(Arc::new(move |cid, code, message| {
-            tracing::info!("on_message: cid={cid} code={code} len={}", message.len());
+            tracing::trace!("on_message: cid={cid} code={code} len={}", message.len());
 
             if cid != 0 {
                 let pending = pending_requests.clone();
@@ -486,14 +493,10 @@ impl MezonTransport {
         let attachments = parse_message_attachments(&message.attachments);
 
         tracing::debug!(
-            "message_from_proto: id={} sender_name={:?} content={:?} attachments={:?}",
+            "message_from_proto: id={} sender_name={:?} attachment_count={}",
             message.message_id,
             sender_name,
-            content,
-            attachments
-                .iter()
-                .map(|a| format!("{} ({})", a.url, a.filetype))
-                .collect::<Vec<_>>(),
+            attachments.len(),
         );
 
         ApiMessage {
@@ -775,7 +778,9 @@ impl MezonTransport {
                 }
 
                 let account = api::Account::decode(response.as_slice())?;
-                let user = account.user.unwrap_or_default();
+                let user = account
+                    .user
+                    .ok_or_else(|| anyhow::anyhow!("GetAccount response missing user"))?;
                 let account = Self::account_from_user(
                     user,
                     (!account.email.is_empty()).then_some(account.email),
@@ -813,6 +818,8 @@ impl MezonTransport {
         let api_name = "ListChannelDescs";
         let body = api::ListChannelDescsRequest {
             clan_id: parse_id(clan_id)?,
+            limit: 500,
+            state: 1,
             ..Default::default()
         }
         .encode_to_vec();
@@ -820,7 +827,11 @@ impl MezonTransport {
         let (code, response) = self.send_api_request(cid, api_name, body).await?;
 
         if code != 0 {
-            return Err(anyhow::anyhow!("API error: code={}", code));
+            return Err(anyhow::anyhow!(
+                "API error: code={} {}",
+                code,
+                String::from_utf8_lossy(&response).trim()
+            ));
         }
 
         let channels = api::ChannelDescList::decode(response.as_slice())?;
@@ -907,7 +918,7 @@ impl MezonTransport {
         let body = api::ListChannelMessagesRequest {
             clan_id: parse_id(clan_id)?,
             channel_id: parse_id(channel_id)?,
-            message_id: parse_id(message_id)?,
+            message_id: parse_id_or_zero(message_id)?,
             direction,
             limit: limit as i32,
             ..Default::default()
@@ -952,8 +963,8 @@ impl MezonTransport {
             cid: i32::from(cid),
             message: Some(realtime::envelope::Message::ChannelJoin(
                 realtime::ChannelJoin {
-                    clan_id: clan_id.parse().unwrap_or(0),
-                    channel_id: channel_id.parse().unwrap_or(0),
+                    clan_id: parse_id(clan_id)?,
+                    channel_id: parse_id(channel_id)?,
                     channel_type,
                     is_public,
                 },
@@ -976,8 +987,8 @@ impl MezonTransport {
         let cid = self.generate_cid();
 
         let api_name = "SendChannelMessage";
-        let parsed_clan_id: i64 = clan_id.parse().unwrap_or(0);
-        let parsed_channel_id: i64 = channel_id.parse().unwrap_or(0);
+        let parsed_clan_id: i64 = parse_id(clan_id)?;
+        let parsed_channel_id: i64 = parse_id(channel_id)?;
         tracing::info!(
             "send_channel_message: clan_id={} channel_id={} is_public={} content_len={}",
             parsed_clan_id,
@@ -1040,7 +1051,11 @@ impl MezonTransport {
         Ok(friends
             .friends
             .into_iter()
-            .map(|friend| Self::account_from_user(friend.user.unwrap_or_default(), None, false))
+            .filter_map(|friend| {
+                friend
+                    .user
+                    .map(|user| Self::account_from_user(user, None, false))
+            })
             .collect())
     }
 

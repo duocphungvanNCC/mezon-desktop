@@ -1,5 +1,5 @@
 use crate::components::primitives::{Icon, IconName, Label, h_flex, v_flex};
-use crate::theme::Theme;
+use crate::theme::{ActiveTheme, Theme};
 use gpui::{Context, Entity, FontWeight, Rgba, Window, div, prelude::*, px};
 use mezon_store::Settings;
 
@@ -27,7 +27,7 @@ fn message_row(
     display_name: String,
     timestamp: String,
     message: String,
-    theme: Theme,
+    theme: &Theme,
 ) -> impl IntoElement {
     h_flex()
         .gap_3()
@@ -59,7 +59,7 @@ fn theme_swatch(
     label: String,
     swatch_color: Rgba,
     is_selected: bool,
-    theme: Theme,
+    theme: &Theme,
     settings: Entity<Settings>,
 ) -> impl IntoElement {
     div()
@@ -115,13 +115,7 @@ impl Render for AppearancePage {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let current_theme = self.settings.read(cx).theme.clone();
         let locale = self.settings.read(cx).language.clone();
-        let theme = match current_theme.as_str() {
-            "light" => Theme::light(),
-            "purple" => Theme::purple(),
-            "abyss" => Theme::abyss(),
-            "red_dark" => Theme::red_dark(),
-            _ => Theme::dark(),
-        };
+        let theme = cx.theme();
         let settings = self.settings.clone();
 
         let themes = [
@@ -189,13 +183,7 @@ impl Render for AppearancePage {
                     .gap_5()
                     .overflow_hidden()
                     .children(sample_msgs.map(|(bg, name, ts, msg)| {
-                        message_row(
-                            bg,
-                            name.to_string(),
-                            ts.to_string(),
-                            msg.to_string(),
-                            theme.clone(),
-                        )
+                        message_row(bg, name.to_string(), ts.to_string(), msg.to_string(), theme)
                     })),
             )
             .child(
@@ -212,7 +200,7 @@ impl Render for AppearancePage {
                         label.to_string(),
                         swatch_color,
                         is_selected,
-                        theme.clone(),
+                        theme,
                         settings.clone(),
                     )
                 },

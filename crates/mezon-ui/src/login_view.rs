@@ -4,28 +4,24 @@
 //!   • OTP (default) — two-step: email → OTP code entry
 //!   • Password — email + password form
 //!
-//! The view holds `Entity<AuthState>` and updates it on successful auth.
-//! `Arc<MezonClient>` is injected at construction and used for all API calls.
+//! `LoginView` holds `Entity<AuthState>` and updates it on successful auth.
+//! API calls go through the global [`LoginStore`].
+
+use mezon_store::LoginMethod;
 
 use std::sync::Arc;
 
 use crate::components::primitives::{Button, ButtonVariants as _, Spinner};
 use gpui::{App, Context, Entity, FontWeight, MouseButton, Window, div, prelude::*};
-use mezon_client::{MezonClient, Session, keychain};
-use mezon_store::{AuthState, LoginMethod, Settings};
+use mezon_store::{AuthState, LoginStore, Session, Settings};
 
 use crate::components::compositions::{FormField, OtpInput};
-use crate::theme::resolve_theme;
+use crate::theme::ActiveTheme;
 
 // ─── LoginView state ──────────────────────────────────────────────────────────
 
 pub struct LoginView {
-    /// Injected API client.
-    client: Arc<MezonClient>,
-    /// Handle to the global auth state so we can transition it on success.
     auth_state: Entity<AuthState>,
-    /// Handle to settings for theme resolution.
-    settings: Entity<Settings>,
 
     /// Which login mode is active.
     method: LoginMethod,
@@ -54,16 +50,13 @@ pub struct LoginView {
 
 impl LoginView {
     pub fn new(
-        client: Arc<MezonClient>,
         auth_state: Entity<AuthState>,
         settings: Entity<Settings>,
         cx: &mut Context<Self>,
     ) -> Self {
         cx.observe(&settings, |_, _, cx| cx.notify()).detach();
         Self {
-            client,
             auth_state,
-            settings,
             method: LoginMethod::Otp,
             otp_step: 0,
             otp_req_id: String::new(),
@@ -124,7 +117,7 @@ impl LoginView {
             cx.notify();
         });
 
-        let client = entity.read(cx).client.clone();
+        let client = LoginStore::global(cx).read(cx).client();
         let email_clone = email.clone();
         let entity_clone = entity.clone();
 
@@ -177,7 +170,7 @@ impl LoginView {
             cx.notify();
         });
 
-        let client = entity.read(cx).client.clone();
+        let client = LoginStore::global(cx).read(cx).client();
         let auth_state = entity.read(cx).auth_state.clone();
         let entity_clone = entity.clone();
 
@@ -231,7 +224,7 @@ impl LoginView {
             cx.notify();
         });
 
-        let client = entity.read(cx).client.clone();
+        let client = LoginStore::global(cx).read(cx).client();
         let auth_state = entity.read(cx).auth_state.clone();
         let entity_clone = entity.clone();
 
@@ -257,16 +250,13 @@ impl LoginView {
 
     /// Shared post-auth success handler: save to keychain and transition state.
     fn on_auth_success(session: Session, auth_state: &Entity<AuthState>, cx: &mut App) {
-        if let Err(e) = keychain::save_session(&session) {
+        if let Err(e) = LoginStore::persist_session(&session) {
             tracing::warn!("Failed to save session to keychain: {e}");
         }
 
         tracing::info!("Authentication successful");
         tracing::info!("  User ID: {}", session.user_id);
         tracing::info!("  Username: {}", session.username);
-        tracing::info!("  WS URL: {:?}", session.ws_url);
-        tracing::info!("  API URL: {:?}", session.api_url);
-        tracing::info!("  TCP URL: {:?}", session.tcp_url);
 
         auth_state.update(cx, |state, cx| {
             *state = AuthState::Connecting(session);
@@ -305,7 +295,7 @@ impl LoginView {
 impl Render for LoginView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.ensure_fields(window, cx);
-        let theme = resolve_theme(&self.settings.read(cx).theme);
+        let theme = cx.theme();
 
         // Outer centered column.
         let root = div()

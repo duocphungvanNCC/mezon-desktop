@@ -3,7 +3,8 @@
 //! Variable names match the legacy Electron desktop app (`NX_*` prefix) for parity.
 //! Values are read at startup and are not persisted to `settings.json`.
 
-/// Application configuration from environment variables.
+use gpui::{App, Global};
+use std::sync::Arc;
 #[derive(Debug, Clone)]
 pub struct AppConfig {
     // ── REST API (bootstrap, pre-auth) ──────────────────────────────────────
@@ -291,7 +292,43 @@ impl AppConfig {
     pub fn client_port(&self) -> u16 {
         self.api_gw_port
     }
+
+    pub fn init_global(config: Arc<AppConfig>, cx: &mut App) {
+        cx.set_global(GlobalAppConfig(config));
+    }
+
+    pub fn global(cx: &App) -> &AppConfig {
+        cx.global::<GlobalAppConfig>().0.as_ref()
+    }
+
+    pub fn try_global(cx: &App) -> Option<&AppConfig> {
+        cx.try_global::<GlobalAppConfig>().map(|g| g.0.as_ref())
+    }
+
+    pub fn imgproxy_url(
+        &self,
+        source_image_url: &str,
+        width: u32,
+        height: u32,
+        resize_type: &str,
+    ) -> String {
+        if source_image_url.is_empty() {
+            return String::new();
+        }
+        if !source_image_url.starts_with("https://cdn.mezon")
+            && !source_image_url.starts_with("https://profile.mezon")
+        {
+            return source_image_url.to_string();
+        }
+        let processing_options = format!("rs:{}:{}:{}:1/mb:2097152", resize_type, width, height);
+        let path = format!("/{}/plain/{}@webp", processing_options, source_image_url);
+        let base = self.imgproxy_base_url.trim_end_matches('/');
+        format!("{}/{}{}", base, self.imgproxy_key, path)
+    }
 }
+
+struct GlobalAppConfig(Arc<AppConfig>);
+impl Global for GlobalAppConfig {}
 
 fn env_var(names: &[&str]) -> Option<String> {
     names
@@ -335,5 +372,32 @@ mod tests {
         assert_eq!(cfg.api_key, "defaultkey");
         assert_eq!(cfg.client_host(), "dev-mezon.nccsoft.vn");
         assert_eq!(cfg.client_port(), 8088);
+    }
+
+    #[test]
+    fn imgproxy_url_rewrites_cdn_urls() {
+        let cfg = AppConfig {
+            imgproxy_base_url: "https://imgproxy.example".into(),
+            imgproxy_key: "sig".into(),
+            ..AppConfig::dev_defaults()
+        };
+        let src = "https://cdn.mezon.ai/images/avatar.png";
+        let out = cfg.imgproxy_url(src, 100, 100, "fit");
+        assert!(out.starts_with("https://imgproxy.example/sig/rs:fit:100:100:1/mb:2097152/plain/"));
+        assert!(out.ends_with("@webp"));
+        assert!(out.contains(src));
+    }
+
+    #[test]
+    fn imgproxy_url_skips_external_urls() {
+        let cfg = AppConfig::dev_defaults();
+        let src = "https://example.com/avatar.png";
+        assert_eq!(cfg.imgproxy_url(src, 100, 100, "fit"), src);
+    }
+
+    #[test]
+    fn imgproxy_url_empty_returns_empty() {
+        let cfg = AppConfig::dev_defaults();
+        assert_eq!(cfg.imgproxy_url("", 100, 100, "fit"), "");
     }
 }

@@ -293,7 +293,7 @@ impl AbridgedTcpAdapter {
                     let cid = u16::from_be_bytes([header[1], header[2]]);
                     let code = u32::from_be_bytes([header[3], header[4], header[5], header[6]]);
                     let response_code = (code >> 16) & 0xffff;
-                    tracing::info!("Completing pending 0-length response for cid={}", cid);
+                    tracing::debug!("Completing pending 0-length response for cid={}", cid);
                     let handlers = self.handlers.lock().await.clone();
                     handlers.trigger_message(cid, response_code, vec![]);
                 } else {
@@ -395,15 +395,14 @@ impl AbridgedTcpAdapter {
                             let msg = buf[..total].to_vec();
                             buf.drain(..total);
                             Some((msg, false))
-                        } else {
-                            let mut combined =
-                                streams.get(&cid).map(|c| c.concat()).unwrap_or_default();
+                        } else if let Some(chunks) = streams.get(&cid) {
+                            let mut combined = chunks.concat();
                             combined.extend_from_slice(&buf[RAW_HEADER_LENGTH..]);
                             match protobuf_message_len(&combined) {
                                 Some(total) if total >= prefix_len => {
                                     let fin_bytes = total - prefix_len;
                                     combined.truncate(total);
-                                    tracing::info!(
+                                    tracing::debug!(
                                         "Complete API response (chunked): cid={cid} code={response_code} len={total} bytes"
                                     );
                                     handlers.trigger_message(cid, response_code, combined);
@@ -423,6 +422,12 @@ impl AbridgedTcpAdapter {
                                 }
                                 None => return Ok(()),
                             }
+                        } else {
+                            tracing::warn!(
+                                "chunked response missing stream for cid={cid}, dropping chunk"
+                            );
+                            buf.drain(..RAW_HEADER_LENGTH);
+                            None
                         }
                     }
                 } else if first_byte < 127 {
@@ -511,7 +516,7 @@ impl AbridgedTcpAdapter {
                             buf.drain(..total);
                             match mezon_proto::realtime::Envelope::decode(payload.as_slice()) {
                                 Ok(envelope) => {
-                                    tracing::info!(
+                                    tracing::trace!(
                                         "ws-binary {} bytes -> Envelope cid={} {}",
                                         payload.len(),
                                         envelope.cid,
@@ -545,11 +550,11 @@ impl AbridgedTcpAdapter {
                 continue;
             }
 
-            tracing::info!("process_message: {} bytes", data.len());
+            tracing::trace!("process_message: {} bytes", data.len());
 
             if data[0] == 0x00 {
                 let cid = u16::from_be_bytes([data[1], data[2]]);
-                tracing::info!("PONG: cid={}", cid);
+                tracing::trace!("PONG: cid={}", cid);
                 handlers.trigger_message(cid, 0, vec![]);
                 continue;
             }
@@ -559,7 +564,7 @@ impl AbridgedTcpAdapter {
                 let code = u32::from_be_bytes([data[3], data[4], data[5], data[6]]);
                 let response_code = (code >> 16) & 0xffff;
                 let payload = data[RAW_HEADER_LENGTH..].to_vec();
-                tracing::info!(
+                tracing::debug!(
                     "Complete API response: cid={cid} code={response_code} len={} bytes",
                     payload.len()
                 );
@@ -568,7 +573,7 @@ impl AbridgedTcpAdapter {
             }
 
             let (header_size, payload_length) = if data[0] < 127 {
-                tracing::info!(
+                tracing::trace!(
                     "Standard msg: 1-byte header ({}*4={}bytes)",
                     data[0],
                     data[0] as usize * 4
@@ -576,14 +581,14 @@ impl AbridgedTcpAdapter {
                 (1, data[0] as usize * 4)
             } else {
                 let len = u32::from_le_bytes([data[1], data[2], data[3], 0]) as usize * 4;
-                tracing::info!("Extended msg: len={}", len);
+                tracing::trace!("Extended msg: len={}", len);
                 (4, len)
             };
 
             let framed = &data[header_size..header_size + payload_length];
             let unpadded_end = framed.iter().rposition(|&b| b != 0).map_or(0, |i| i + 1);
             let payload = &framed[..unpadded_end];
-            tracing::info!(
+            tracing::trace!(
                 "Std msg payload: {} bytes (framed {}) {:02x?}",
                 payload.len(),
                 framed.len(),
@@ -591,16 +596,17 @@ impl AbridgedTcpAdapter {
             );
 
             if let Ok(envelope) = mezon_proto::realtime::Envelope::decode(payload) {
-                tracing::info!(
+                tracing::trace!(
                     "abridged -> Envelope cid={} {}",
                     envelope.cid,
                     envelope_detail(&envelope)
                 );
                 handlers.trigger_message(envelope.cid as u16, 0, payload.to_vec());
-            } else {
-                let cid = decode_cid_field(payload).unwrap_or(0);
+            } else if let Some(cid) = decode_cid_field(payload) {
                 tracing::warn!("Failed to decode Envelope, passing raw cid={cid}");
                 handlers.trigger_message(cid, 0, payload.to_vec());
+            } else {
+                tracing::warn!("Failed to decode Envelope and could not extract cid");
             }
         }
     }
@@ -616,7 +622,7 @@ impl AbridgedTcpAdapter {
 
         // Signal that io_loop is ready (select is polling)
         let _ = ready_tx.send(());
-        tracing::info!("I/O loop running, entering select branch");
+        tracing::debug!("I/O loop running, entering select branch");
 
         loop {
             tracing::trace!("select iteration begin");
@@ -633,7 +639,7 @@ impl AbridgedTcpAdapter {
                         }
                         Ok(n) => {
                             read_count += 1;
-                            tracing::info!(
+                            tracing::trace!(
                                 "READ {} bytes [{}] (reads: {}) {:02x?}",
                                 n,
                                 frame_kind(read_buf[0]),
@@ -685,9 +691,9 @@ impl AbridgedTcpAdapter {
                     match maybe_msg {
                         Some(packet) => {
                             if packet.first() == Some(&0xef) {
-                                tracing::info!("WRITE handshake frame");
+                                tracing::trace!("WRITE handshake frame");
                             } else {
-                                tracing::info!(
+                                tracing::trace!(
                                     "WRITE {} bytes [{}] {:02x?}",
                                     packet.len(),
                                     frame_kind(packet[0]),
@@ -695,14 +701,14 @@ impl AbridgedTcpAdapter {
                                 );
                             }
                             match tls.write_all(&packet).await {
-                                Ok(()) => tracing::info!("write_all OK"),
+                                Ok(()) => tracing::trace!("write_all OK"),
                                 Err(e) => {
                                     tracing::error!("write_all error: {}", e);
                                     break;
                                 }
                             }
                             match tls.flush().await {
-                                Ok(()) => tracing::info!("flush OK"),
+                                Ok(()) => tracing::trace!("flush OK"),
                                 Err(e) => {
                                     tracing::error!("flush error: {}", e);
                                     break;
@@ -839,13 +845,13 @@ impl TransportAdapter for AbridgedTcpAdapter {
 
     async fn send(&mut self, message: Vec<u8>) -> Result<()> {
         match mezon_proto::realtime::Envelope::decode(message.as_slice()) {
-            Ok(envelope) => tracing::info!(
+            Ok(envelope) => tracing::trace!(
                 "send() {} bytes -> Envelope cid={} {}",
                 message.len(),
                 envelope.cid,
                 envelope_detail(&envelope)
             ),
-            Err(_) => tracing::info!(
+            Err(_) => tracing::trace!(
                 "send() {} bytes (non-envelope) {:02x?}",
                 message.len(),
                 &message[..message.len().min(16)]
@@ -856,12 +862,12 @@ impl TransportAdapter for AbridgedTcpAdapter {
             tracing::warn!("send(): connection NOT open, rejecting");
             return Err(anyhow::anyhow!("Connection is not open"));
         }
-        tracing::info!("Connection is open");
+        tracing::trace!("Connection is open");
 
         let padding_needed = (4 - (message.len() % 4)) % 4;
         let mut final_payload = message;
         final_payload.extend(vec![0u8; padding_needed]);
-        tracing::info!(
+        tracing::trace!(
             "Padded to {} bytes (+{} padding)",
             final_payload.len(),
             padding_needed
@@ -869,18 +875,18 @@ impl TransportAdapter for AbridgedTcpAdapter {
 
         let len_div4 = final_payload.len() / 4;
         let header = if len_div4 < 127 {
-            tracing::info!("Abridged header: 1-byte ({})", len_div4);
+            tracing::trace!("Abridged header: 1-byte ({})", len_div4);
             vec![len_div4 as u8]
         } else {
             let mut h = vec![PREFIX_EXTENDED, 0, 0, 0];
             h[1..4].copy_from_slice(&(len_div4 as u32).to_le_bytes()[..3]);
-            tracing::info!("Abridged header: 4-byte extended ({})", len_div4);
+            tracing::trace!("Abridged header: 4-byte extended ({})", len_div4);
             h
         };
 
         let mut packet = header;
         packet.extend(&final_payload);
-        tracing::info!(
+        tracing::trace!(
             "Full abridged packet: {} bytes {:02x?}",
             packet.len(),
             &packet[..packet.len().min(64)]
@@ -893,7 +899,7 @@ impl TransportAdapter for AbridgedTcpAdapter {
                     tracing::error!("mpsc send failed: channel closed");
                     anyhow::anyhow!("Write channel closed")
                 })?;
-                tracing::info!("Packet queued via mpsc channel");
+                tracing::trace!("Packet queued via mpsc channel");
             }
             None => {
                 tracing::error!("Write channel not available (None)");

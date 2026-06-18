@@ -1,8 +1,20 @@
-use gpui::{AnyElement, Hsla, Rgba, div, prelude::*, px};
+use gpui::{AnyElement, Hsla, Pixels, Rgba, div, img, prelude::*, px};
 use mezon_store::Message;
 
 use crate::components::primitives::{Avatar, Sizable, Size};
 use crate::theme::Theme;
+
+pub enum MessageAttachmentView {
+    Image {
+        src: String,
+        width: Pixels,
+        height: Pixels,
+        label: String,
+    },
+    File {
+        label: String,
+    },
+}
 
 fn attachment_box(label: String, bg: Hsla, border: Rgba, color: Rgba) -> AnyElement {
     div()
@@ -21,21 +33,36 @@ fn attachment_box(label: String, bg: Hsla, border: Rgba, color: Rgba) -> AnyElem
         .into_any_element()
 }
 
-pub struct MessageRow {
-    message: Message,
+pub struct MessageRow<'a> {
+    message: &'a Message,
     combined: bool,
     reply: bool,
-    theme: Theme,
+    theme: &'a Theme,
+    avatar_src: Option<String>,
+    attachments: Vec<MessageAttachmentView>,
 }
 
-impl MessageRow {
-    pub fn new(message: Message, theme: &Theme, _current_user_id: &str) -> Self {
+impl<'a> MessageRow<'a> {
+    pub fn new(message: &'a Message, theme: &'a Theme, _current_user_id: &str) -> Self {
         Self {
             message,
             combined: false,
             reply: false,
-            theme: theme.clone(),
+            theme,
+            avatar_src: None,
+            attachments: Vec::new(),
         }
+    }
+
+    pub fn attachments(mut self, views: Vec<MessageAttachmentView>) -> Self {
+        self.attachments = views;
+        self
+    }
+
+    pub fn avatar_src(mut self, src: impl Into<String>) -> Self {
+        let src = src.into();
+        self.avatar_src = if src.is_empty() { None } else { Some(src) };
+        self
     }
 
     pub fn combined(mut self, combined: bool) -> Self {
@@ -48,32 +75,19 @@ impl MessageRow {
         self
     }
 
-    fn format_timestamp(ts: i64) -> String {
-        let seconds_since_midnight = ts % 86400;
-        let hours = seconds_since_midnight / 3600;
-        let minutes = (seconds_since_midnight % 3600) / 60;
-
-        let period = if hours >= 12 { "PM" } else { "AM" };
-        let display_hour = if hours == 0 {
-            12
-        } else if hours > 12 {
-            hours - 12
-        } else {
-            hours
-        };
-        format!("{}:{:02} {}", display_hour, minutes, period)
-    }
-
     pub fn render(&self) -> impl IntoElement {
-        let msg = &self.message;
-        let theme = &self.theme;
-        let time = Self::format_timestamp(msg.create_time);
+        crate::trace_render!("MessageRow {}", self.message.id);
+        let msg = self.message;
+        let theme = self.theme;
+        let time = msg.timestamp_label.clone();
 
         let display_name = &msg.sender_name;
 
         let mut avatar = Avatar::new().name(display_name).with_size(Size::Small);
-        if !msg.avatar_url.is_empty() {
-            avatar = avatar.src(msg.avatar_url.clone());
+        if let Some(src) = self.avatar_src.as_deref().filter(|s| !s.is_empty()) {
+            avatar = avatar.src(src);
+        } else if !msg.avatar_url.is_empty() {
+            avatar = avatar.src(msg.avatar_url.as_str());
         }
 
         let name_row = div()
@@ -153,48 +167,35 @@ impl MessageRow {
                         ),
                 )
             })
-            .when(!msg.attachments.is_empty(), |d| {
+            .when(!self.attachments.is_empty(), |d| {
                 d.child(div().flex().flex_col().gap_2().mt_1().children(
-                    msg.attachments.iter().map(|att| {
-                        if att.is_image() {
-                            let name = if att.filename.is_empty() {
-                                "image".to_string()
-                            } else {
-                                att.filename.clone()
-                            };
-                            let box_bg = gpui::hsla(0., 0., 0., 0.03);
-                            let box_border = theme.border;
-                            let box_color = theme.text_muted;
-                            // let loading_name = name.clone();
-                            // img(att.url.clone())
-                            //     .max_w(px(400.))
-                            //     .max_h(px(300.))
-                            //     .rounded_md()
-                            //     .with_loading(move || {
-                            //         attachment_box(
-                            //             format!("Loading {loading_name}…"),
-                            //             box_bg,
-                            //             box_border,
-                            //             box_color,
-                            //         )
-                            //     })
-                            //     .with_fallback(move || {
-                            //         attachment_box(
-                            //             format!("Couldn't load {name}"),
-                            //             box_bg,
-                            //             box_border,
-                            //             box_color,
-                            //         )
-                            //     })
-                            //     .into_any_element()
-                            attachment_box(name, box_bg, box_border, box_color).into_any_element()
-                        } else {
-                            let label = if att.filename.is_empty() {
-                                "Attachment".to_string()
-                            } else {
-                                att.filename.clone()
-                            };
-                            div()
+                    self.attachments.iter().map(|view| {
+                        match view {
+                            MessageAttachmentView::Image {
+                                src,
+                                width,
+                                height,
+                                label,
+                            } => {
+                                if src.is_empty() {
+                                    let box_bg = gpui::hsla(0., 0., 0., 0.03);
+                                    attachment_box(
+                                        label.clone(),
+                                        box_bg,
+                                        theme.border,
+                                        theme.text_muted,
+                                    )
+                                    .into_any_element()
+                                } else {
+                                    img(src.clone())
+                                        .w(*width)
+                                        .h(*height)
+                                        .max_w(px(400.))
+                                        .rounded_md()
+                                        .into_any_element()
+                                }
+                            }
+                            MessageAttachmentView::File { label } => div()
                                 .flex()
                                 .flex_row()
                                 .items_center()
@@ -207,8 +208,8 @@ impl MessageRow {
                                 .border_color(theme.border)
                                 .text_xs()
                                 .text_color(theme.text_secondary)
-                                .child(label)
-                                .into_any_element()
+                                .child(label.clone())
+                                .into_any_element(),
                         }
                     }),
                 ))
