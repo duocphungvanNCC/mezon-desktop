@@ -1,35 +1,27 @@
-use std::rc::Rc;
 use std::sync::Arc;
 
 use crate::components::primitives::{InputEvent, InputState};
-use gpui::{App, Context, Entity, ListAlignment, ListState, Window, div, prelude::*, px};
-use mezon_store::Message;
+use gpui::{App, Context, Entity, Window, div, prelude::*};
+use mezon_store::Settings;
 
 use crate::chat::ReplyTarget;
 use crate::chat::channel_header::ChannelHeader;
 use crate::chat::input_bar::InputBar;
-use crate::chat::message_list::MessageList;
+use crate::chat::message_list::MessageTimeline;
 use crate::theme::Theme;
 
 pub struct ChatArea {
-    pub(crate) messages: Rc<Vec<Message>>,
-    pub(crate) list_state: ListState,
+    pub(crate) timeline: Entity<MessageTimeline>,
     pub(crate) input_state: Option<Entity<InputState>>,
     #[allow(dead_code)]
     replying_to: Option<ReplyTarget>,
 }
 
-impl Default for ChatArea {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl ChatArea {
-    pub fn new() -> Self {
+    pub fn new(settings: Entity<Settings>, cx: &mut Context<crate::ChatLayout>) -> Self {
+        let timeline = cx.new(|cx| MessageTimeline::new(settings, cx));
         Self {
-            messages: Rc::new(Vec::new()),
-            list_state: ListState::new(0, ListAlignment::Bottom, px(200.)),
+            timeline,
             input_state: None,
             replying_to: None,
         }
@@ -57,7 +49,7 @@ impl ChatArea {
         theme: &Theme,
         layout_entity: Entity<crate::ChatLayout>,
         channel_name: &str,
-        current_user_id: &str,
+        _current_user_id: &str,
         _current_user_name: &str,
     ) -> impl IntoElement {
         let on_send = {
@@ -73,20 +65,13 @@ impl ChatArea {
 
         let header = ChannelHeader::new(channel_name);
 
-        let message_list = MessageList::new(
-            self.list_state.clone(),
-            self.messages.clone(),
-            theme,
-            current_user_id,
-        );
-
         div()
             .flex()
             .flex_col()
             .flex_1()
             .min_h_0()
             .child(header.render(theme))
-            .child(message_list.render())
+            .child(self.timeline.clone())
             .child(input_bar.render(theme))
     }
 }

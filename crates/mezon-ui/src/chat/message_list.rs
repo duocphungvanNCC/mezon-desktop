@@ -1,49 +1,75 @@
-use std::rc::Rc;
+use gpui::{
+    AnyElement, Context, Entity, FollowMode, ListAlignment, ListState, Window, div, list,
+    prelude::*, px,
+};
 
-use chrono::DateTime;
-use gpui::{AnyElement, ListState, div, list, prelude::*, px};
+use mezon_store::{Message, MessagesEvent, MessagesStore, Settings};
 
-use mezon_store::Message;
+use crate::chat::message_row::{MessageAttachmentView, MessageRow};
+use crate::theme::{ActiveTheme, Theme};
 
-use crate::chat::grouping::is_combined;
-use crate::chat::message_row::MessageRow;
-use crate::theme::Theme;
+const LOAD_MORE_ITEM_THRESHOLD: usize = 6;
 
-pub struct MessageList {
-    list_state: ListState,
-    messages: Rc<Vec<Message>>,
-    theme: Theme,
-    current_user_id: String,
+pub struct MessageTimeline {
+    pub(crate) list_state: ListState,
+    scroll_installed: bool,
 }
 
-impl MessageList {
-    pub fn new(
-        list_state: ListState,
-        messages: Rc<Vec<Message>>,
-        theme: &Theme,
-        current_user_id: &str,
-    ) -> Self {
+impl MessageTimeline {
+    pub fn new(settings: Entity<Settings>, cx: &mut Context<Self>) -> Self {
+        cx.observe(&settings, |_, _, cx| cx.notify()).detach();
+
+        let store = MessagesStore::global(cx);
+        cx.observe(&store, |_, _, cx| cx.notify()).detach();
+        cx.subscribe(&store, |this, store, event, cx| match event {
+            MessagesEvent::Reset { count } => {
+                this.list_state.reset(*count);
+                this.list_state.set_follow_mode(FollowMode::Tail);
+            }
+            MessagesEvent::OlderPrepended { count } => this.list_state.splice(0..0, *count),
+            MessagesEvent::Appended => {
+                let new_len = store.read(cx).messages.len();
+                let old_len = this.list_state.item_count();
+                if new_len >= old_len {
+                    this.list_state.splice(old_len..old_len, new_len - old_len);
+                } else {
+                    this.list_state.reset(new_len);
+                }
+            }
+        })
+        .detach();
+
+        let list_state = ListState::new(0, ListAlignment::Bottom, px(200.));
+        list_state.set_follow_mode(FollowMode::Tail);
         Self {
             list_state,
-            messages,
-            theme: theme.clone(),
-            current_user_id: current_user_id.to_string(),
+            scroll_installed: false,
         }
     }
+}
 
-    pub fn render(self) -> impl IntoElement {
-        if self.list_state.item_count() != self.messages.len() {
-            self.list_state.reset(self.messages.len());
+impl Render for MessageTimeline {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        crate::trace_render!("MessageTimeline");
+        if !self.scroll_installed {
+            self.scroll_installed = true;
+            let list_state = self.list_state.clone();
+            list_state.set_scroll_handler(move |event, _window, cx| {
+                if event.visible_range.start < LOAD_MORE_ITEM_THRESHOLD {
+                    MessagesStore::global(cx).update(cx, |store, cx| store.load_more(cx));
+                }
+            });
         }
 
-        let messages = self.messages;
-        let theme = self.theme;
-        let current_user_id = self.current_user_id;
+        let store = MessagesStore::global(cx);
+        let count = store.read(cx).messages.len();
+        if self.list_state.item_count() != count {
+            self.list_state.reset(count);
+        }
 
-        let row_messages = messages.clone();
-        let row_theme = theme.clone();
-        let list_element = list(self.list_state.clone(), move |ix, _window, _cx| {
-            render_row(&row_messages, ix, &row_theme, &current_user_id)
+        let list_state = self.list_state.clone();
+        let list_element = list(list_state, move |ix, _window, cx| {
+            render_row(&store.read(cx).messages, ix, cx, "")
         })
         .size_full();
 
@@ -51,29 +77,63 @@ impl MessageList {
     }
 }
 
-fn render_row(messages: &[Message], ix: usize, theme: &Theme, current_user_id: &str) -> AnyElement {
+fn render_row(
+    messages: &[Message],
+    ix: usize,
+    cx: &gpui::App,
+    current_user_id: &str,
+) -> AnyElement {
+    let theme = cx.theme();
     let Some(msg) = messages.get(ix) else {
         return div().into_any_element();
     };
     let prev = ix.checked_sub(1).and_then(|p| messages.get(p));
 
-    let day_label = format_date(msg.create_time);
-    let show_separator = prev.map(|p| format_date(p.create_time)).as_deref() != Some(&day_label);
-    let combined = !show_separator && is_combined(prev, msg);
+    let day_label = msg.day_label.as_str();
+    let show_separator = prev.map(|p| p.day_label.as_str()) != Some(day_label);
+    let combined = !show_separator && msg.combined_with_prev;
 
-    let message_row = MessageRow::new(msg.clone(), theme, current_user_id).combined(combined);
+    let attachment_views = attachment_views(msg, cx);
+    let message_row = MessageRow::new(msg, theme, current_user_id)
+        .combined(combined)
+        .avatar_src(crate::imgproxy::avatar_url(cx, &msg.avatar_url))
+        .attachments(attachment_views);
 
     let mut column = div().flex().flex_col().w_full();
     if show_separator {
-        column = column.child(date_separator(theme, &day_label));
+        column = column.child(date_separator(theme, day_label));
     }
     column.child(message_row.render()).into_any_element()
 }
 
-fn format_date(timestamp: i64) -> String {
-    DateTime::from_timestamp(timestamp, 0)
-        .map(|dt| dt.format("%B %d, %Y").to_string())
-        .unwrap_or_default()
+fn attachment_views(msg: &Message, cx: &gpui::App) -> Vec<MessageAttachmentView> {
+    msg.attachments
+        .iter()
+        .map(|att| {
+            if att.is_image() {
+                let label = if att.filename.is_empty() {
+                    "image".to_string()
+                } else {
+                    att.filename.clone()
+                };
+                let (src, width, height) =
+                    crate::imgproxy::attachment_image(cx, &att.url, att.width, att.height);
+                MessageAttachmentView::Image {
+                    src,
+                    width,
+                    height,
+                    label,
+                }
+            } else {
+                let label = if att.filename.is_empty() {
+                    "Attachment".to_string()
+                } else {
+                    att.filename.clone()
+                };
+                MessageAttachmentView::File { label }
+            }
+        })
+        .collect()
 }
 
 fn date_separator(theme: &Theme, label: &str) -> impl IntoElement {

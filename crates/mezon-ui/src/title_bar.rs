@@ -1,22 +1,21 @@
-use crate::theme::resolve_theme;
+use crate::theme::ActiveTheme;
 use gpui::{Context, Entity, MouseButton, Window, div, prelude::*, rgb};
 use mezon_store::Settings;
 
 /// Custom frameless title bar.
-pub struct TitleBar {
-    settings: Entity<Settings>,
-}
+pub struct TitleBar {}
 
 impl TitleBar {
     pub fn new(settings: Entity<Settings>, cx: &mut Context<Self>) -> Self {
         cx.observe(&settings, |_, _, cx| cx.notify()).detach();
-        Self { settings }
+        Self {}
     }
 }
 
 impl Render for TitleBar {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = resolve_theme(&self.settings.read(cx).theme);
+        let theme = cx.theme();
+        let bg_hover = theme.bg_hover;
 
         div()
             .flex()
@@ -47,7 +46,7 @@ impl Render for TitleBar {
                                 .h_full()
                                 .text_sm()
                                 .text_color(theme.text_secondary)
-                                .hover(move |s| s.bg(theme.bg_hover))
+                                .hover(move |s| s.bg(bg_hover))
                                 .cursor_pointer()
                                 .on_mouse_down(MouseButton::Left, |_, window, _| {
                                     window.minimize_window();
@@ -63,7 +62,7 @@ impl Render for TitleBar {
                                 .h_full()
                                 .text_sm()
                                 .text_color(theme.text_secondary)
-                                .hover(move |s| s.bg(theme.bg_hover))
+                                .hover(move |s| s.bg(bg_hover))
                                 .cursor_pointer()
                                 .on_mouse_down(MouseButton::Left, |_, window, _| {
                                     window.zoom_window();

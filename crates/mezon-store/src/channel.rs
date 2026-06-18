@@ -58,8 +58,33 @@ pub struct Message {
     pub sender_name: String,
     pub avatar_url: String,
     pub create_time: i64,
+    /// Clock label ("3:04 PM") precomputed at insert so `render` never formats.
+    pub timestamp_label: String,
+    /// Day label ("June 17, 2026") precomputed at insert for day separators.
+    pub day_label: String,
+    pub combined_with_prev: bool,
     pub reactions: Vec<String>,
     pub attachments: Vec<MessageAttachment>,
+}
+
+pub const COMBINE_TIME_WINDOW: i64 = 300;
+
+pub fn message_combined_with_prev(prev: Option<&Message>, msg: &Message) -> bool {
+    match prev {
+        Some(prev) => {
+            prev.sender_id == msg.sender_id
+                && prev.day_label == msg.day_label
+                && (msg.create_time - prev.create_time).abs() < COMBINE_TIME_WINDOW
+        }
+        None => false,
+    }
+}
+
+pub fn recompute_message_grouping(messages: &mut [Message]) {
+    for i in 0..messages.len() {
+        let prev = if i > 0 { Some(&messages[i - 1]) } else { None };
+        messages[i].combined_with_prev = message_combined_with_prev(prev, &messages[i]);
+    }
 }
 
 impl Message {
@@ -77,6 +102,9 @@ impl Message {
             sender_name: sender_name.into(),
             avatar_url: String::new(),
             create_time,
+            timestamp_label: format_clock(create_time),
+            day_label: format_day(create_time),
+            combined_with_prev: false,
             reactions: Vec::new(),
             attachments: Vec::new(),
         }
@@ -91,6 +119,27 @@ impl Message {
         self.avatar_url = avatar_url.into();
         self
     }
+}
+
+fn format_clock(ts: i64) -> String {
+    let seconds_since_midnight = ts.rem_euclid(86_400);
+    let hours = seconds_since_midnight / 3600;
+    let minutes = (seconds_since_midnight % 3600) / 60;
+    let period = if hours >= 12 { "PM" } else { "AM" };
+    let display_hour = if hours == 0 {
+        12
+    } else if hours > 12 {
+        hours - 12
+    } else {
+        hours
+    };
+    format!("{display_hour}:{minutes:02} {period}")
+}
+
+fn format_day(ts: i64) -> String {
+    chrono::DateTime::from_timestamp(ts, 0)
+        .map(|dt| dt.format("%B %d, %Y").to_string())
+        .unwrap_or_default()
 }
 
 #[derive(Debug, Clone)]
@@ -161,7 +210,14 @@ impl ChannelList {
                                 break; // store dropped
                             }
                         }
-                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                            if this
+                                .update(cx, |this, cx| this.on_realtime_lagged(cx))
+                                .is_err()
+                            {
+                                break;
+                            }
+                        }
                         Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                     }
                 }
@@ -194,13 +250,10 @@ impl ChannelList {
         self.loaded_clan_id = Some(clan_id.clone());
         let api = self.api.clone();
         cx.spawn(
-            async move |this, cx| match api.list_channel_by_user_id().await {
+            async move |this, cx| match api.list_channel_descs(&clan_id).await {
                 Ok(api_channels) => {
-                    let channels: Vec<Channel> = api_channels
-                        .into_iter()
-                        .filter(|c| c.clan_id == clan_id)
-                        .map(Channel::from)
-                        .collect();
+                    let channels: Vec<Channel> =
+                        api_channels.into_iter().map(Channel::from).collect();
                     let categories = group_channels_by_category(channels);
                     let _ = this.update(cx, |this, cx| {
                         this.categories = categories;
@@ -266,6 +319,11 @@ impl ChannelList {
             self.loaded_clan_id = None;
             self.load_for_clan(clan_id, cx);
         }
+    }
+
+    fn on_realtime_lagged(&mut self, cx: &mut Context<Self>) {
+        tracing::warn!("ChannelList realtime lagged — refetching channels");
+        self.reload_current_clan(cx);
     }
 
     pub fn active_channel(&self) -> Option<&Channel> {
@@ -453,5 +511,19 @@ mod tests {
     fn update_channel_unknown_is_noop() {
         let mut c = categories();
         assert!(!update_channel(&mut c, "999", Some("x".into()), true));
+    }
+
+    #[test]
+    fn message_precomputes_clock_and_day_labels() {
+        // 2021-01-01 00:00:00 UTC = 1_609_459_200; +13h25m = +48_300s.
+        let msg = Message::new("1", "hi", "u", "User", 1_609_459_200 + 48_300);
+        assert_eq!(msg.timestamp_label, "1:25 PM");
+        assert_eq!(msg.day_label, "January 01, 2021");
+    }
+
+    #[test]
+    fn message_clock_label_handles_midnight() {
+        let msg = Message::new("1", "hi", "u", "User", 1_609_459_200);
+        assert_eq!(msg.timestamp_label, "12:00 AM");
     }
 }

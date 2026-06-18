@@ -250,9 +250,9 @@ impl AppApi {
             .transport
             .upload_attachment_file(&filename, &filetype, size, width as i32, height as i32)
             .await?;
-        tracing::info!("upload_avatar: presigned URL received url={}", upload.url);
+        tracing::info!("upload_avatar: presigned URL received");
 
-        tracing::info!("upload_avatar: PUTing file bytes to presigned URL");
+        tracing::info!("upload_avatar: uploading file bytes");
         crate::transport_runtime::put_bytes_to_url(&upload.url, data).await?;
         tracing::info!("upload_avatar: PUT completed successfully");
 
