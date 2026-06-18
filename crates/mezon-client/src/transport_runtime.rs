@@ -12,6 +12,11 @@ use std::sync::OnceLock;
 use tokio::runtime::Runtime;
 
 static TRANSPORT_RUNTIME: OnceLock<Runtime> = OnceLock::new();
+static HTTP_CLIENT: OnceLock<ReqwestClient> = OnceLock::new();
+
+fn http_client() -> &'static ReqwestClient {
+    HTTP_CLIENT.get_or_init(ReqwestClient::new)
+}
 
 /// Get or create the shared transport runtime.
 fn runtime() -> &'static Runtime {
@@ -25,10 +30,16 @@ fn runtime() -> &'static Runtime {
     })
 }
 
+/// A handle to the shared transport runtime, for spawning auxiliary background work
+/// (e.g. the tray's update check) without standing up a second process-wide runtime.
+pub fn handle() -> tokio::runtime::Handle {
+    runtime().handle().clone()
+}
+
 /// HTTP PUT bytes to a pre-signed URL (e.g., S3 upload URL from upload_attachment_file).
 pub async fn put_bytes_to_url(url: &str, data: Vec<u8>) -> Result<()> {
-    tracing::debug!("put_bytes_to_url: PUTting {} bytes to {}", data.len(), url);
-    let client = ReqwestClient::new();
+    tracing::debug!("put_bytes_to_url: PUTting {} bytes", data.len());
+    let client = http_client();
     let request = http::Request::builder()
         .method(http::Method::PUT)
         .uri(url)

@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use gpui::{App, AppContext, Context, Entity, EventEmitter, Global, Task};
 use mezon_client::transport::ApiClanDesc;
-use mezon_client::{AppApi, RealtimeEvent};
+use mezon_client::{AppApi, ConnectionStatus, RealtimeEvent};
 
 #[derive(Debug, Clone)]
 pub struct Clan {
@@ -44,8 +44,8 @@ pub struct ClanList {
     pub clans: Vec<Clan>,
     pub active_clan_id: Option<String>,
     api: Arc<AppApi>,
-    /// Realtime subscription — cancelled when this store is dropped.
     _realtime: Task<()>,
+    _connection_watch: Task<()>,
 }
 
 struct GlobalClanList(Entity<ClanList>);
@@ -73,11 +73,13 @@ impl ClanList {
 
     fn new(api: Arc<AppApi>, cx: &mut Context<Self>) -> Self {
         let realtime = Self::spawn_realtime(api.clone(), cx);
+        let connection_watch = Self::spawn_connection_watch(api.clone(), cx);
         Self {
             clans: Vec::new(),
             active_clan_id: None,
             api,
             _realtime: realtime,
+            _connection_watch: connection_watch,
         }
     }
 
@@ -96,8 +98,46 @@ impl ClanList {
                             break; // store dropped
                         }
                     }
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                        if this
+                            .update(cx, |this, cx| {
+                                tracing::warn!("ClanList realtime lagged — reloading clans");
+                                this.reload(cx);
+                            })
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                }
+            }
+        })
+    }
+
+    fn spawn_connection_watch(api: Arc<AppApi>, cx: &mut Context<Self>) -> Task<()> {
+        cx.spawn(async move |this, cx| {
+            let mut status_rx = api.status();
+            let mut was_connected = false;
+            loop {
+                if status_rx.changed().await.is_err() {
+                    break;
+                }
+                let connected = *status_rx.borrow() == ConnectionStatus::Connected;
+                if connected && !was_connected {
+                    was_connected = true;
+                    if this
+                        .update(cx, |this, cx| {
+                            if this.clans.is_empty() {
+                                this.reload(cx);
+                            }
+                        })
+                        .is_err()
+                    {
+                        break;
+                    }
+                } else if !connected {
+                    was_connected = false;
                 }
             }
         })

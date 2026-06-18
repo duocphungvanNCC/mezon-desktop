@@ -146,6 +146,7 @@ serde_repr           = "0.1"
 # ---------- Logging ----------
 tracing              = "0.1"
 tracing-subscriber   = { version = "0.3", features = ["env-filter"] }
+tracing-appender     = "0.2"
 log                  = { version = "0.4.16", features = ["kv_unstable_serde", "serde"] }
 
 # ---------- macOS platform ----------
@@ -324,7 +325,8 @@ gpui = { path = "crates/vendor/gpui" }
 
 [profile.dev]
 opt-level = 0
-debug = true
+debug = "line-tables-only"
+split-debuginfo = "unpacked"
 
 [profile.dev.package.gpui_macros]
 opt-level = 3
@@ -340,3 +342,9 @@ opt-level = 3
 lto = "thin"
 codegen-units = 1
 strip = true
+
+[profile.profiling]
+inherits = "release"
+strip = false
+debug = "line-tables-only"
+debug-assertions = true

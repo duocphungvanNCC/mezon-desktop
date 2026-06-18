@@ -1,5 +1,5 @@
 use crate::components::primitives::{Icon, IconName, Label, v_flex};
-use crate::theme::{Theme, resolve_theme};
+use crate::theme::{ActiveTheme, Theme};
 use gpui::{Context, Entity, FontWeight, Window, div, prelude::*, px};
 use mezon_store::Settings;
 
@@ -68,7 +68,7 @@ fn language_row(
 impl Render for LanguagePage {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let locale = self.settings.read(cx).language.clone();
-        let theme = resolve_theme(&self.settings.read(cx).theme);
+        let theme = cx.theme();
         let settings_entity = self.settings.clone();
 
         v_flex()
@@ -93,7 +93,7 @@ impl Render for LanguagePage {
                         "\u{1F1FA}\u{1F1F8}",
                         &mezon_i18n::t(&locale, "setting.language.english"),
                         locale == "en",
-                        &theme,
+                        theme,
                         settings_entity.clone(),
                     ))
                     .child(div().h(px(1.0)).w_full().bg(theme.border))
@@ -102,7 +102,7 @@ impl Render for LanguagePage {
                         "\u{1F1FB}\u{1F1F3}",
                         &mezon_i18n::t(&locale, "setting.language.vietnamese"),
                         locale == "vi",
-                        &theme,
+                        theme,
                         settings_entity,
                     )),
             )

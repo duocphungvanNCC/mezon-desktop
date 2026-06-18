@@ -2,7 +2,7 @@ use crate::components::primitives::{Input, InputEvent, InputState};
 use gpui::{App, Context, Entity, Subscription, Window, div, prelude::*};
 
 use crate::components::OtpCompleteHandler;
-use crate::theme::Theme;
+use crate::theme::ActiveTheme;
 
 pub struct OtpInput {
     digit_count: usize,
@@ -147,7 +147,7 @@ impl OtpInput {
 
 impl Render for OtpInput {
     fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = Theme::dark();
+        let theme = _cx.theme();
 
         div()
             .flex()

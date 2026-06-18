@@ -1,4 +1,3 @@
-use std::sync::Arc;
 use std::time::Duration;
 
 use crate::components::primitives::{
@@ -6,13 +5,12 @@ use crate::components::primitives::{
     Size, h_flex, v_flex,
 };
 use gpui::{
-    Context, Entity, FontWeight, PathPromptOptions, SharedString, Subscription, Task, Window, div,
+    Context, Entity, FontWeight, PathPromptOptions, SharedString, Subscription, Window, div,
     prelude::*, px,
 };
-use mezon_client::AppApi;
-use mezon_store::{ClanList, Settings};
+use mezon_store::{AccountEvent, AccountStore, ClanList, Settings};
 
-use crate::theme::{Theme, resolve_theme};
+use crate::theme::{ActiveTheme, Theme};
 
 struct ClanProfileState {
     selected_clan_id: SharedString,
@@ -28,40 +26,93 @@ struct ClanProfileState {
 }
 
 pub struct ClanProfileSection {
-    api: Arc<AppApi>,
-    settings: Entity<Settings>,
     clan_list: Entity<ClanList>,
     profile: Option<ClanProfileState>,
     display_name: SharedString,
     username: SharedString,
     nick_name_input: Option<Entity<InputState>>,
     _subscriptions: Vec<Subscription>,
-    _fetch_task: Option<Task<()>>,
-    _debounce_task: Option<Task<()>>,
     toast_message: Option<SharedString>,
+    selected_clan_id: String,
 }
 
 impl ClanProfileSection {
     pub fn new(
-        api: Arc<AppApi>,
         settings: Entity<Settings>,
         clan_list: Entity<ClanList>,
         cx: &mut Context<Self>,
     ) -> Self {
         cx.observe(&settings, |_, _, cx| cx.notify()).detach();
         cx.observe(&clan_list, |_, _, cx| cx.notify()).detach();
+        cx.observe(&AccountStore::global(cx), |this, store, cx| {
+            if let Some(clan_profile) = store.read(cx).clan_profile.as_ref()
+                && clan_profile.clan_id == this.selected_clan_id
+            {
+                let nick: SharedString = clan_profile.nick_name.clone().into();
+                let avatar: Option<SharedString> = clan_profile.avatar_url.clone().map(Into::into);
+                this.profile = Some(ClanProfileState {
+                    selected_clan_id: clan_profile.clan_id.clone().into(),
+                    nick_name: nick.clone(),
+                    avatar_url: avatar.clone(),
+                    original_nick_name: nick,
+                    original_avatar_url: avatar,
+                    loading: store.read(cx).clan_profile_loading,
+                    saving: false,
+                    duplicate_error: store.read(cx).nickname_duplicate,
+                    fetched: true,
+                });
+                cx.notify();
+            }
+        })
+        .detach();
+        cx.subscribe(
+            &AccountStore::global(cx),
+            |this, _store, event, cx| match event {
+                AccountEvent::ClanProfileSaved => {
+                    if let Some(state) = &mut this.profile {
+                        state.original_nick_name = state.nick_name.clone();
+                        state.original_avatar_url = state.avatar_url.clone();
+                        state.saving = false;
+                    }
+                    this.show_toast("Clan profile saved", cx);
+                }
+                AccountEvent::ClanProfileSaveFailed(msg) => {
+                    if let Some(state) = &mut this.profile {
+                        state.saving = false;
+                    }
+                    this.show_toast(format!("Failed to save clan profile: {}", msg), cx);
+                }
+                AccountEvent::ClanProfileLoadFailed(msg) => {
+                    this.show_toast(format!("Failed to load clan profile: {}", msg), cx);
+                }
+                AccountEvent::NicknameDuplicateChecked(is_dup) => {
+                    if let Some(state) = &mut this.profile {
+                        state.duplicate_error = *is_dup;
+                    }
+                    cx.notify();
+                }
+                AccountEvent::AvatarUploaded(url) => {
+                    if let Some(state) = &mut this.profile {
+                        state.avatar_url = Some(url.clone().into());
+                    }
+                    cx.notify();
+                }
+                AccountEvent::AvatarUploadFailed(msg) => {
+                    this.show_toast(format!("Failed to upload avatar: {}", msg), cx);
+                }
+                _ => {}
+            },
+        )
+        .detach();
         Self {
-            api,
-            settings,
             clan_list,
             profile: None,
             display_name: SharedString::default(),
             username: SharedString::default(),
             nick_name_input: None,
             _subscriptions: Vec::new(),
-            _fetch_task: None,
-            _debounce_task: None,
             toast_message: None,
+            selected_clan_id: String::new(),
         }
     }
 
@@ -94,7 +145,6 @@ impl ClanProfileSection {
             });
         }
 
-        let api = self.api.clone();
         self._subscriptions.push(cx.subscribe_in(&nick, window, {
             let nick = nick.clone();
             move |this: &mut Self, _, event: &InputEvent, _, cx| {
@@ -110,25 +160,17 @@ impl ClanProfileSection {
 
                     let value = value.trim().to_string();
                     if value.len() >= 2 {
-                        let clan_id = this
-                            .profile
-                            .as_ref()
-                            .map_or("".to_string(), |s| s.selected_clan_id.to_string());
-                        let api = api.clone();
+                        let clan_id = this.selected_clan_id.clone();
                         cx.spawn(async move |this, cx| {
                             cx.background_executor()
                                 .timer(Duration::from_millis(600))
                                 .await;
-                            let is_dup = api
-                                .check_duplicate_clan_nickname(&clan_id, &value)
-                                .await
-                                .unwrap_or(false);
-                            let _ = this.update(cx, |this, cx| {
-                                if let Some(state) = &mut this.profile {
-                                    state.duplicate_error = is_dup;
-                                }
-                                cx.notify();
-                            });
+                            this.update(cx, |_, cx| {
+                                AccountStore::global(cx).update(cx, |store, cx| {
+                                    store.check_clan_nickname(&clan_id, &value, cx);
+                                });
+                            })
+                            .ok();
                         })
                         .detach();
                     }
@@ -171,41 +213,13 @@ impl ClanProfileSection {
         state.saving = true;
         cx.notify();
 
-        let api = self.api.clone();
         let clan_id: String = state.selected_clan_id.to_string();
         let nick_name: String = state.nick_name.to_string();
         let avatar_url: Option<String> = state.avatar_url.as_ref().map(|s| s.to_string());
 
-        cx.spawn(async move |this, cx| {
-            match api
-                .update_user_clan_profile(&clan_id, &nick_name, avatar_url.as_deref())
-                .await
-            {
-                Ok(()) => {
-                    this.update(cx, |this, cx| {
-                        if let Some(state) = &mut this.profile {
-                            state.original_nick_name = state.nick_name.clone();
-                            state.original_avatar_url = state.avatar_url.clone();
-                            state.saving = false;
-                        }
-                        this.show_toast("Clan profile saved", cx);
-                        cx.notify();
-                    })
-                    .ok();
-                }
-                Err(e) => {
-                    this.update(cx, |this, cx| {
-                        if let Some(state) = &mut this.profile {
-                            state.saving = false;
-                        }
-                        this.show_toast(format!("Failed to save clan profile: {}", e), cx);
-                        cx.notify();
-                    })
-                    .ok();
-                }
-            }
-        })
-        .detach();
+        AccountStore::global(cx).update(cx, |store, cx| {
+            store.save_clan_profile(&clan_id, nick_name, avatar_url, cx);
+        });
     }
 
     fn discard(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -222,11 +236,9 @@ impl ClanProfileSection {
     }
 
     pub fn fetch(&mut self, clan_id: &str, cx: &mut Context<Self>) {
-        let api = self.api.clone();
-        let clan_id = clan_id.to_string();
-        let entity = cx.entity().clone();
+        self.selected_clan_id = clan_id.to_string();
         self.profile = Some(ClanProfileState {
-            selected_clan_id: clan_id.clone().into(),
+            selected_clan_id: clan_id.into(),
             nick_name: "".into(),
             avatar_url: None,
             original_nick_name: "".into(),
@@ -237,55 +249,13 @@ impl ClanProfileSection {
             fetched: false,
         });
         cx.notify();
-
-        self._fetch_task =
-            Some(cx.spawn(
-                async move |_, cx| match api.get_user_clan_profile(&clan_id).await {
-                    Ok(profile) => {
-                        entity.update(cx, |this, cx| {
-                            let nick: SharedString = profile.nick_name.clone().into();
-                            let avatar: Option<SharedString> = Some(profile.avatar.clone())
-                                .filter(|s| !s.is_empty())
-                                .map(Into::into);
-                            this.profile = Some(ClanProfileState {
-                                selected_clan_id: clan_id.clone().into(),
-                                nick_name: nick.clone(),
-                                avatar_url: avatar.clone(),
-                                original_nick_name: nick,
-                                original_avatar_url: avatar,
-                                loading: false,
-                                saving: false,
-                                duplicate_error: false,
-                                fetched: true,
-                            });
-                            cx.notify();
-                        });
-                    }
-                    Err(e) => {
-                        entity.update(cx, |this, cx| {
-                            this.profile = Some(ClanProfileState {
-                                selected_clan_id: clan_id.clone().into(),
-                                nick_name: "".into(),
-                                avatar_url: None,
-                                original_nick_name: "".into(),
-                                original_avatar_url: None,
-                                loading: false,
-                                saving: false,
-                                duplicate_error: false,
-                                fetched: true,
-                            });
-                            this.show_toast(format!("Failed to load clan profile: {}", e), cx);
-                            cx.notify();
-                        });
-                    }
-                },
-            ));
+        AccountStore::global(cx).update(cx, |store, cx| store.fetch_clan_profile(clan_id, cx));
     }
 }
 
 impl Render for ClanProfileSection {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = resolve_theme(&self.settings.read(cx).theme);
+        let theme = cx.theme().clone();
 
         if self.profile.as_ref().is_some_and(|p| !p.loading) && self.nick_name_input.is_none() {
             self.init_inputs(window, cx);
@@ -314,6 +284,9 @@ impl Render for ClanProfileSection {
             .map_or("".into(), |s| s.nick_name.clone());
 
         let avatar_url = self.profile.as_ref().and_then(|s| s.avatar_url.clone());
+        let avatar_display = avatar_url
+            .as_ref()
+            .map(|url| SharedString::from(crate::imgproxy::profile_url(cx, url.as_ref())));
 
         let duplicate_error = self.profile.as_ref().is_some_and(|s| s.duplicate_error);
 
@@ -322,7 +295,7 @@ impl Render for ClanProfileSection {
             &clan_options,
             &selected_clan_id,
             &nick_name,
-            avatar_url.clone(),
+            avatar_display.clone(),
             loading,
             duplicate_error,
             cx,
@@ -330,7 +303,7 @@ impl Render for ClanProfileSection {
         let preview = Self::render_clan_preview(
             &theme,
             &nick_name,
-            avatar_url,
+            avatar_display,
             &self.display_name,
             &self.username,
         );
@@ -513,10 +486,8 @@ impl ClanProfileSection {
                                         .text_color(theme.text_primary)
                                         .ghost()
                                         .on_click({
-                                            let api = self.api.clone();
                                             let entity = cx.entity().clone();
                                             move |_, _, cx| {
-                                                let api = api.clone();
                                                 let entity = entity.clone();
                                                 let rx = cx.prompt_for_paths(PathPromptOptions {
                                                     files: true,
@@ -533,27 +504,14 @@ impl ClanProfileSection {
                                                         Some(p) => p,
                                                         None => return,
                                                     };
-                                                    match api.upload_avatar(&path).await {
-                                                        Ok(url) => {
-                                                            entity.update(cx, |this, cx| {
-                                                                if let Some(state) =
-                                                                    &mut this.profile
-                                                                {
-                                                                    state.avatar_url =
-                                                                        Some(url.into());
-                                                                }
-                                                                cx.notify();
-                                                            });
-                                                        }
-                                                        Err(e) => {
-                                                            entity.update(cx, |this, cx| {
-                                                                this.show_toast(format!(
-                                                                    "Failed to upload avatar: {}",
-                                                                    e,
-                                                                ), cx);
-                                                            });
-                                                        }
-                                                    }
+                                                    entity.update(cx, |_, cx| {
+                                                        AccountStore::global(cx).update(
+                                                            cx,
+                                                            |store, cx| {
+                                                                store.upload_avatar(&path, cx);
+                                                            },
+                                                        );
+                                                    });
                                                 })
                                                 .detach();
                                             }
