@@ -83,65 +83,79 @@ impl Render for SettingsScreen {
         let auth_state = self.auth_state.clone();
         let page = self.current_page;
 
-        // Lazy init sub-page entities, refresh device on revisit
-        match page {
+        // Lazy-init the active sub-page entity and return it (create-and-use, no unwrap).
+        let content: gpui::AnyElement = match page {
             SettingsPage::Account => {
-                self.account_page.get_or_insert_with(|| {
-                    let settings = self.settings.clone();
-                    cx.new(|cx| AccountPage::new(settings, cx))
-                });
+                let settings = self.settings.clone();
+                self.account_page
+                    .get_or_insert_with(|| cx.new(|cx| AccountPage::new(settings, cx)))
+                    .clone()
+                    .into_any_element()
             }
             SettingsPage::Profile => {
                 let settings = self.settings.clone();
                 let clan_list = self.clan_list.clone();
                 self.profile_page
-                    .get_or_insert_with(|| cx.new(|cx| ProfilePage::new(settings, clan_list, cx)));
+                    .get_or_insert_with(|| cx.new(|cx| ProfilePage::new(settings, clan_list, cx)))
+                    .clone()
+                    .into_any_element()
             }
             SettingsPage::Device => {
                 let just_switched = self.prev_page != SettingsPage::Device;
-                if self.device_page.is_none() {
-                    let settings = self.settings.clone();
-                    self.device_page = Some(cx.new(|cx| DevicePage::new(settings, cx)));
-                } else if just_switched && let Some(device_entity) = &self.device_page {
-                    device_entity.update(cx, |d, view_cx| d.refresh(view_cx));
+                let existed = self.device_page.is_some();
+                let settings = self.settings.clone();
+                let device = self
+                    .device_page
+                    .get_or_insert_with(|| cx.new(|cx| DevicePage::new(settings, cx)))
+                    .clone();
+                if existed && just_switched {
+                    device.update(cx, |d, view_cx| d.refresh(view_cx));
                 }
+                device.into_any_element()
             }
             SettingsPage::Appearance => {
-                self.appearance_page.get_or_insert_with(|| {
-                    let settings = self.settings.clone();
-                    cx.new(|cx| AppearancePage::new(settings, cx))
-                });
+                let settings = self.settings.clone();
+                self.appearance_page
+                    .get_or_insert_with(|| cx.new(|cx| AppearancePage::new(settings, cx)))
+                    .clone()
+                    .into_any_element()
             }
             SettingsPage::Activity => {
-                self.activity_page.get_or_insert_with(|| {
-                    let settings = self.settings.clone();
-                    cx.new(|cx| ActivityPage::new(settings, cx))
-                });
+                let settings = self.settings.clone();
+                self.activity_page
+                    .get_or_insert_with(|| cx.new(|cx| ActivityPage::new(settings, cx)))
+                    .clone()
+                    .into_any_element()
             }
             SettingsPage::Notifications => {
-                self.notifications_page.get_or_insert_with(|| {
-                    let settings = self.settings.clone();
-                    cx.new(|cx| NotificationsPage::new(settings, cx))
-                });
+                let settings = self.settings.clone();
+                self.notifications_page
+                    .get_or_insert_with(|| cx.new(|cx| NotificationsPage::new(settings, cx)))
+                    .clone()
+                    .into_any_element()
             }
             SettingsPage::Language => {
                 let settings = self.settings.clone();
                 self.language_page
-                    .get_or_insert_with(|| cx.new(|cx| LanguagePage::new(settings, cx)));
+                    .get_or_insert_with(|| cx.new(|cx| LanguagePage::new(settings, cx)))
+                    .clone()
+                    .into_any_element()
             }
             SettingsPage::Voice => {
-                self.voice_page.get_or_insert_with(|| {
-                    let settings = self.settings.clone();
-                    cx.new(|cx| VoicePage::new(settings, cx))
-                });
+                let settings = self.settings.clone();
+                self.voice_page
+                    .get_or_insert_with(|| cx.new(|cx| VoicePage::new(settings, cx)))
+                    .clone()
+                    .into_any_element()
             }
             SettingsPage::Advanced => {
-                self.advanced_page.get_or_insert_with(|| {
-                    let settings = self.settings.clone();
-                    cx.new(|cx| AdvancedPage::new(settings, cx))
-                });
+                let settings = self.settings.clone();
+                self.advanced_page
+                    .get_or_insert_with(|| cx.new(|cx| AdvancedPage::new(settings, cx)))
+                    .clone()
+                    .into_any_element()
             }
-        }
+        };
         self.prev_page = page;
 
         let is_account = page == SettingsPage::Account;
@@ -153,20 +167,6 @@ impl Render for SettingsScreen {
         let is_language = page == SettingsPage::Language;
         let is_voice = page == SettingsPage::Voice;
         let is_advanced = page == SettingsPage::Advanced;
-
-        let content: gpui::AnyElement = match page {
-            SettingsPage::Account => self.account_page.clone().unwrap().into_any_element(),
-            SettingsPage::Profile => self.profile_page.clone().unwrap().into_any_element(),
-            SettingsPage::Device => self.device_page.clone().unwrap().into_any_element(),
-            SettingsPage::Appearance => self.appearance_page.clone().unwrap().into_any_element(),
-            SettingsPage::Activity => self.activity_page.clone().unwrap().into_any_element(),
-            SettingsPage::Notifications => {
-                self.notifications_page.clone().unwrap().into_any_element()
-            }
-            SettingsPage::Language => self.language_page.clone().unwrap().into_any_element(),
-            SettingsPage::Voice => self.voice_page.clone().unwrap().into_any_element(),
-            SettingsPage::Advanced => self.advanced_page.clone().unwrap().into_any_element(),
-        };
 
         fn nav_item(
             id: &str,

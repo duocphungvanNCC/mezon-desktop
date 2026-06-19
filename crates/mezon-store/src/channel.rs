@@ -1,11 +1,13 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use gpui::{App, AppContext, Context, Entity, EventEmitter, Global, Subscription, Task};
 use mezon_client::transport::ApiChannelDesc;
-use mezon_client::{AppApi, RealtimeEvent};
+use mezon_client::{AppApi, ConnectionStatus, RealtimeEvent};
 
+use crate::KeyedCache;
 use crate::clan::{ClanEvent, ClanList};
+use crate::realtime::{RealtimeDispatch, RealtimeKind};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChannelType {
@@ -163,14 +165,14 @@ pub enum ChannelEvent {
 /// Same Zed-`ChannelStore` shape as [`ClanList`]: registered as a [`Global`], an
 /// [`EventEmitter`] of [`ChannelEvent`], holding its subscriptions so they cancel on drop.
 pub struct ChannelList {
-    pub categories: Vec<Category>,
+    cache: KeyedCache<String, Vec<Category>>,
+    loading: HashSet<String>,
+    active_clan_id: Option<String>,
     pub active_channel_id: Option<String>,
-    /// Clan whose channels are currently loaded — guards against redundant refetch.
-    loaded_clan_id: Option<String>,
     api: Arc<AppApi>,
-    _realtime: Task<()>,
     /// Reacts to `ClanList` active-clan changes (cf. Zed store-to-store `cx.subscribe`).
     _clan_sub: Subscription,
+    _conn_watch: Task<()>,
 }
 
 struct GlobalChannelList(Entity<ChannelList>);
@@ -196,58 +198,89 @@ impl ChannelList {
     }
 
     fn new(api: Arc<AppApi>, cx: &mut Context<Self>) -> Self {
-        let realtime = {
-            let api = api.clone();
-            cx.spawn(async move |this, cx| {
-                let mut rx = api.subscribe();
-                loop {
-                    match rx.recv().await {
-                        Ok(event) => {
-                            if this
-                                .update(cx, |this, cx| this.handle_event(event, cx))
-                                .is_err()
-                            {
-                                break; // store dropped
-                            }
-                        }
-                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                            if this
-                                .update(cx, |this, cx| this.on_realtime_lagged(cx))
-                                .is_err()
-                            {
-                                break;
-                            }
-                        }
-                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-                    }
-                }
-            })
-        };
+        Self::register_realtime(cx);
 
-        // React to the active clan changing — load that clan's channels.
+        // React to the active clan changing — track it + load that clan's channels (if not cached).
         let clan_sub = cx.subscribe(&ClanList::global(cx), |this, _clan, event, cx| {
             if let ClanEvent::ActiveClanChanged(Some(clan_id)) = event {
+                this.active_clan_id = Some(clan_id.clone());
                 this.load_for_clan(clan_id.clone(), cx);
+                cx.notify();
             }
         });
 
+        let conn_watch = Self::spawn_connection_watch(api.clone(), cx);
+
         Self {
-            categories: Vec::new(),
+            cache: KeyedCache::new(None),
+            loading: HashSet::new(),
+            active_clan_id: None,
             active_channel_id: None,
-            loaded_clan_id: None,
             api,
-            _realtime: realtime,
             _clan_sub: clan_sub,
+            _conn_watch: conn_watch,
         }
     }
 
-    /// Fetch channels for a clan (REST + DTO mapping + grouping, all owned by the store).
-    /// No-op if already loaded for this clan.
+    /// Register realtime handlers with the central dispatcher (cf. `add_message_handler`).
+    fn register_realtime(cx: &mut Context<Self>) {
+        let entity = cx.entity();
+        RealtimeDispatch::global(cx).update(cx, |dispatch, _| {
+            for kind in [
+                RealtimeKind::ChannelMessage,
+                RealtimeKind::ChannelCreated,
+                RealtimeKind::ChannelUpdated,
+                RealtimeKind::ChannelDeleted,
+            ] {
+                dispatch.on(kind, &entity, |this, event, cx| {
+                    this.handle_event(event, cx)
+                });
+            }
+            dispatch.on_lagged(&entity, |this, cx| this.resync(cx));
+        });
+    }
+
+    fn spawn_connection_watch(api: Arc<AppApi>, cx: &mut Context<Self>) -> Task<()> {
+        cx.spawn(async move |this, cx| {
+            let mut status_rx = api.status();
+            let mut was_connected = false;
+            loop {
+                if status_rx.changed().await.is_err() {
+                    break;
+                }
+                let connected = *status_rx.borrow() == ConnectionStatus::Connected;
+                if connected && !was_connected {
+                    was_connected = true;
+                    if this.update(cx, |this, cx| this.resync(cx)).is_err() {
+                        break;
+                    }
+                } else if !connected {
+                    was_connected = false;
+                }
+            }
+        })
+    }
+
+    /// Fetch channels for a clan and cache them under `clan_id`. No-op (no socket re-list) if the
+    /// clan is already cached — realtime events keep the cache fresh; we only fetch the first time
+    /// (or after Lagged/reconnect). DTO→domain mapping is owned by the store.
     pub fn load_for_clan(&mut self, clan_id: String, cx: &mut Context<Self>) {
-        if self.loaded_clan_id.as_deref() == Some(clan_id.as_str()) {
+        if self.cache.is_fresh(&clan_id, crate::CACHE_TTL) {
             return;
         }
-        self.loaded_clan_id = Some(clan_id.clone());
+        self.fetch_clan(clan_id, cx);
+    }
+
+    /// Force a refetch ignoring the TTL (cf. React `noCache: true`).
+    pub fn refresh_clan(&mut self, clan_id: String, cx: &mut Context<Self>) {
+        self.fetch_clan(clan_id, cx);
+    }
+
+    fn fetch_clan(&mut self, clan_id: String, cx: &mut Context<Self>) {
+        if self.loading.contains(&clan_id) {
+            return;
+        }
+        self.loading.insert(clan_id.clone());
         let api = self.api.clone();
         cx.spawn(
             async move |this, cx| match api.list_channel_descs(&clan_id).await {
@@ -256,26 +289,32 @@ impl ChannelList {
                         api_channels.into_iter().map(Channel::from).collect();
                     let categories = group_channels_by_category(channels);
                     let _ = this.update(cx, |this, cx| {
-                        this.categories = categories;
+                        this.loading.remove(&clan_id);
+                        this.cache.insert(clan_id, categories, None);
                         cx.notify();
                     });
                 }
-                Err(e) => tracing::error!("Failed to load channels: {e}"),
+                Err(e) => {
+                    tracing::error!("Failed to load channels: {e}");
+                    let _ = this.update(cx, |this, _| {
+                        this.loading.remove(&clan_id);
+                    });
+                }
             },
         )
         .detach();
     }
 
     /// Apply a server-pushed realtime event. Cf. `ChannelStore::handle_update_channels`.
-    fn handle_event(&mut self, event: RealtimeEvent, cx: &mut Context<Self>) {
+    fn handle_event(&mut self, event: &RealtimeEvent, cx: &mut Context<Self>) {
         match event {
             RealtimeEvent::ChannelMessage(m) => {
                 let id = m.channel_id.to_string();
                 if self.active_channel_id.as_deref() != Some(id.as_str())
                     && let Some(ch) = self
-                        .categories
-                        .iter_mut()
-                        .flat_map(|c| &mut c.channels)
+                        .cache
+                        .values_mut()
+                        .flat_map(|cats| cats.iter_mut().flat_map(|c| &mut c.channels))
                         .find(|ch| ch.id == id)
                     && !ch.unread
                 {
@@ -284,25 +323,50 @@ impl ChannelList {
                     cx.notify();
                 }
             }
-            RealtimeEvent::ChannelCreated(e)
-                if self.loaded_clan_id.as_deref() == Some(e.clan_id.to_string().as_str()) =>
-            {
-                self.reload_current_clan(cx);
+            // Insert incrementally from the event payload — no socket re-list (clan stays cached).
+            RealtimeEvent::ChannelCreated(e) => {
+                let clan_id = e.clan_id.to_string();
+                if self.cache.contains(&clan_id) {
+                    let channel = Channel {
+                        id: e.channel_id.to_string(),
+                        name: e.channel_label.clone(),
+                        channel_type: ChannelType::Text,
+                        unread: false,
+                        private: e.channel_private != 0,
+                        clan_id: clan_id.clone(),
+                        category_name: String::new(),
+                        category_id: Some(e.category_id.to_string())
+                            .filter(|s| !s.is_empty() && s != "0"),
+                        member_count: 0,
+                    };
+                    if let Some(cats) = self.cache.get_mut(&clan_id)
+                        && insert_channel(cats, channel)
+                    {
+                        cx.notify();
+                    }
+                }
             }
             RealtimeEvent::ChannelUpdated(e) => {
-                let label = (!e.channel_label.is_empty()).then_some(e.channel_label);
-                if update_channel(
-                    &mut self.categories,
-                    &e.channel_id.to_string(),
-                    label,
-                    e.channel_private,
-                ) {
+                let id = e.channel_id.to_string();
+                let label = (!e.channel_label.is_empty()).then_some(e.channel_label.clone());
+                let mut changed = false;
+                for cats in self.cache.values_mut() {
+                    if update_channel(cats, &id, label.clone(), e.channel_private) {
+                        changed = true;
+                        break;
+                    }
+                }
+                if changed {
                     cx.notify();
                 }
             }
             RealtimeEvent::ChannelDeleted(e) => {
                 let id = e.channel_id.to_string();
-                if remove_channel(&mut self.categories, &id) {
+                let mut removed = false;
+                for cats in self.cache.values_mut() {
+                    removed |= remove_channel(cats, &id);
+                }
+                if removed {
                     if self.active_channel_id.as_deref() == Some(id.as_str()) {
                         self.active_channel_id = None;
                         cx.emit(ChannelEvent::ActiveChannelChanged(None));
@@ -314,16 +378,12 @@ impl ChannelList {
         }
     }
 
-    fn reload_current_clan(&mut self, cx: &mut Context<Self>) {
-        if let Some(clan_id) = self.loaded_clan_id.clone() {
-            self.loaded_clan_id = None;
+    fn resync(&mut self, cx: &mut Context<Self>) {
+        tracing::info!("ChannelList resync — invalidating channel cache");
+        self.cache.mark_all_stale();
+        if let Some(clan_id) = self.active_clan_id.clone() {
             self.load_for_clan(clan_id, cx);
         }
-    }
-
-    fn on_realtime_lagged(&mut self, cx: &mut Context<Self>) {
-        tracing::warn!("ChannelList realtime lagged — refetching channels");
-        self.reload_current_clan(cx);
     }
 
     pub fn active_channel(&self) -> Option<&Channel> {
@@ -332,11 +392,8 @@ impl ChannelList {
             .and_then(|id| self.find_channel(id))
     }
 
-    pub fn categories_for_clan(&self, clan_id: &str) -> Vec<&Category> {
-        self.categories
-            .iter()
-            .filter(|c| c.clan_id == clan_id)
-            .collect()
+    pub fn categories_for_clan(&self, clan_id: &str) -> &[Category] {
+        self.cache.get(clan_id).map_or(&[], Vec::as_slice)
     }
 
     pub fn select_channel(&mut self, id: &str, cx: &mut Context<Self>) {
@@ -353,20 +410,28 @@ impl ChannelList {
 
     pub fn mark_read(&mut self, id: &str) {
         if let Some(ch) = self
-            .categories
-            .iter_mut()
-            .flat_map(|c| &mut c.channels)
+            .cache
+            .values_mut()
+            .flat_map(|cats| cats.iter_mut().flat_map(|c| &mut c.channels))
             .find(|ch| ch.id == id)
         {
             ch.unread = false;
         }
     }
 
+    /// Find a channel within the **active** clan's tree (current-clan semantics).
     pub fn find_channel(&self, channel_id: &str) -> Option<&Channel> {
-        self.categories
+        self.active_categories()
             .iter()
             .flat_map(|category| &category.channels)
             .find(|channel| channel.id == channel_id)
+    }
+
+    fn active_categories(&self) -> &[Category] {
+        self.active_clan_id
+            .as_deref()
+            .and_then(|c| self.cache.get(c))
+            .map_or(&[], Vec::as_slice)
     }
 }
 
@@ -414,6 +479,46 @@ fn group_channels_by_category(channels: Vec<Channel>) -> Vec<Category> {
 
     categories.sort_by(|a, b| a.name.cmp(&b.name));
     categories
+}
+
+/// Insert a newly-created channel into the right category (resolved by `category_id` from
+/// already-loaded categories, else "General"). No-op if already present. Lets `ChannelCreated`
+/// update the cache incrementally instead of re-listing the clan.
+fn insert_channel(categories: &mut Vec<Category>, mut channel: Channel) -> bool {
+    if categories
+        .iter()
+        .flat_map(|c| &c.channels)
+        .any(|c| c.id == channel.id)
+    {
+        return false;
+    }
+    let clan_id = channel.clan_id.clone();
+    let cat_name = channel
+        .category_id
+        .as_ref()
+        .and_then(|cid| {
+            categories
+                .iter()
+                .find(|c| {
+                    c.channels
+                        .iter()
+                        .any(|ch| ch.category_id.as_deref() == Some(cid))
+                })
+                .map(|c| c.name.clone())
+        })
+        .unwrap_or_else(|| "General".to_string());
+    channel.category_name = cat_name.clone();
+    if let Some(cat) = categories.iter_mut().find(|c| c.name == cat_name) {
+        cat.channels.push(channel);
+    } else {
+        categories.push(Category {
+            clan_id,
+            name: cat_name,
+            channels: vec![channel],
+        });
+        categories.sort_by(|a, b| a.name.cmp(&b.name));
+    }
+    true
 }
 
 fn remove_channel(categories: &mut Vec<Category>, channel_id: &str) -> bool {

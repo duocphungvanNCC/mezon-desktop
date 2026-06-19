@@ -1,0 +1,176 @@
+use std::borrow::Borrow;
+use std::collections::HashMap;
+use std::hash::Hash;
+use std::time::{Duration, Instant};
+
+struct Entry<V> {
+    value: V,
+    fetched_at: Option<Instant>,
+}
+
+/// A keyed cache with per-entry TTL and optional LRU bound — the reusable core of the stores'
+/// "fetch once, reuse from store, refetch when stale/reconnect" model (cf. React `cache-metadata`
+/// + entity adapter). The store owns the value type and decides what each key means.
+pub struct KeyedCache<K, V> {
+    entries: HashMap<K, Entry<V>>,
+    order: Vec<K>,
+    max: Option<usize>,
+}
+
+impl<K: Eq + Hash + Clone, V> KeyedCache<K, V> {
+    pub fn new(max: Option<usize>) -> Self {
+        Self {
+            entries: HashMap::new(),
+            order: Vec::new(),
+            max,
+        }
+    }
+
+    pub fn contains<Q>(&self, key: &Q) -> bool
+    where
+        K: Borrow<Q>,
+        Q: Hash + Eq + ?Sized,
+    {
+        self.entries.contains_key(key)
+    }
+
+    /// `true` if the key is cached **and** fetched within `ttl` (the `shouldForceApiCall` check).
+    pub fn is_fresh<Q>(&self, key: &Q, ttl: Duration) -> bool
+    where
+        K: Borrow<Q>,
+        Q: Hash + Eq + ?Sized,
+    {
+        self.entries
+            .get(key)
+            .and_then(|e| e.fetched_at)
+            .is_some_and(|t| t.elapsed() < ttl)
+    }
+
+    pub fn get<Q>(&self, key: &Q) -> Option<&V>
+    where
+        K: Borrow<Q>,
+        Q: Hash + Eq + ?Sized,
+    {
+        self.entries.get(key).map(|e| &e.value)
+    }
+
+    pub fn get_mut<Q>(&mut self, key: &Q) -> Option<&mut V>
+    where
+        K: Borrow<Q>,
+        Q: Hash + Eq + ?Sized,
+    {
+        self.entries.get_mut(key).map(|e| &mut e.value)
+    }
+
+    pub fn values_mut(&mut self) -> impl Iterator<Item = &mut V> {
+        self.entries.values_mut().map(|e| &mut e.value)
+    }
+
+    /// Insert (or replace) `key` with a fresh timestamp; evicts the LRU entry past `max`,
+    /// never evicting `protect` (e.g. the active channel).
+    pub fn insert(&mut self, key: K, value: V, protect: Option<&K>) {
+        self.order.retain(|k| k != &key);
+        self.entries.insert(
+            key.clone(),
+            Entry {
+                value,
+                fetched_at: Some(Instant::now()),
+            },
+        );
+        self.order.push(key);
+        self.evict(protect);
+    }
+
+    /// Mark `key` most-recently-used (no-op if absent).
+    pub fn touch<Q>(&mut self, key: &Q)
+    where
+        K: Borrow<Q>,
+        Q: Hash + Eq + ?Sized,
+    {
+        if let Some(pos) = self.order.iter().position(|k| k.borrow() == key) {
+            let k = self.order.remove(pos);
+            self.order.push(k);
+        }
+    }
+
+    /// Drop every entry (force a full refetch with an empty cache).
+    pub fn clear(&mut self) {
+        self.entries.clear();
+        self.order.clear();
+    }
+
+    /// Force a refetch on next access **without** dropping values — `is_fresh` returns false for
+    /// every key but `get` still returns the last value (no empty flash on resync).
+    pub fn mark_all_stale(&mut self) {
+        for entry in self.entries.values_mut() {
+            entry.fetched_at = None;
+        }
+    }
+
+    fn evict(&mut self, protect: Option<&K>) {
+        let Some(max) = self.max else {
+            return;
+        };
+        while self.entries.len() > max {
+            let Some(victim) = self.order.first().cloned() else {
+                break;
+            };
+            if protect == Some(&victim) {
+                break;
+            }
+            self.order.remove(0);
+            self.entries.remove(&victim);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fresh_then_stale_keeps_value() {
+        let mut c: KeyedCache<String, i32> = KeyedCache::new(None);
+        c.insert("a".into(), 1, None);
+        assert!(c.is_fresh("a", Duration::from_secs(60)));
+        assert_eq!(c.get("a"), Some(&1));
+
+        c.mark_all_stale();
+        assert!(!c.is_fresh("a", Duration::from_secs(60)));
+        assert_eq!(c.get("a"), Some(&1));
+    }
+
+    #[test]
+    fn lru_evicts_oldest_past_max() {
+        let mut c: KeyedCache<String, i32> = KeyedCache::new(Some(2));
+        c.insert("a".into(), 1, None);
+        c.insert("b".into(), 2, None);
+        c.insert("c".into(), 3, None);
+        assert_eq!(c.get("a"), None);
+        assert_eq!(c.get("b"), Some(&2));
+        assert_eq!(c.get("c"), Some(&3));
+    }
+
+    #[test]
+    fn touch_changes_eviction_order() {
+        let mut c: KeyedCache<String, i32> = KeyedCache::new(Some(2));
+        c.insert("a".into(), 1, None);
+        c.insert("b".into(), 2, None);
+        c.touch("a");
+        c.insert("c".into(), 3, None);
+        assert_eq!(c.get("b"), None);
+        assert_eq!(c.get("a"), Some(&1));
+        assert_eq!(c.get("c"), Some(&3));
+    }
+
+    #[test]
+    fn protect_prevents_evicting_oldest() {
+        let mut c: KeyedCache<String, i32> = KeyedCache::new(Some(2));
+        c.insert("a".into(), 1, None);
+        c.insert("b".into(), 2, None);
+        c.insert("c".into(), 3, Some(&"a".to_string()));
+        assert_eq!(c.get("a"), Some(&1));
+        assert_eq!(c.get("b"), Some(&2));
+        assert_eq!(c.get("c"), Some(&3));
+    }
+}

@@ -1,4 +1,4 @@
-use std::{env, fs, path::PathBuf};
+use std::{env, path::PathBuf};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     if env::var("PROTOC").is_err()
@@ -8,25 +8,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR")?);
-    let src_dir = manifest_dir.join("src");
     let out_dir = PathBuf::from(env::var("OUT_DIR")?);
-    let api_import_dir = out_dir.join("Api");
 
-    fs::create_dir_all(&api_import_dir)?;
-    fs::copy(src_dir.join("api.proto"), api_import_dir.join("api.proto"))?;
+    // Canonical schema lives in the `mezon-protocol` git submodule at the repo root (same approach
+    // as mezon-android). Compile straight from it — no vendored copies, no drift. Include dir =
+    // submodule root so `import "api/api.proto"` resolves.
+    let proto_root = manifest_dir.join("../../mezon-protocol").canonicalize()?;
+    let api_proto = proto_root.join("api/api.proto");
+    let realtime_proto = proto_root.join("rtapi/realtime.proto");
 
     prost_build::Config::new()
         .out_dir(&out_dir)
-        .compile_protos(
-            &[
-                api_import_dir.join("api.proto"),
-                src_dir.join("realtime.proto"),
-            ],
-            &[out_dir, src_dir],
-        )?;
+        .compile_protos(&[api_proto.clone(), realtime_proto.clone()], &[proto_root])?;
 
-    println!("cargo:rerun-if-changed=src/api.proto");
-    println!("cargo:rerun-if-changed=src/realtime.proto");
+    println!("cargo:rerun-if-changed={}", api_proto.display());
+    println!("cargo:rerun-if-changed={}", realtime_proto.display());
 
     Ok(())
 }

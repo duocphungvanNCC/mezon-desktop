@@ -752,16 +752,19 @@ impl Element for TextElement {
         if let Some(selection) = prepaint.selection.take() {
             window.paint_quad(selection)
         }
-        let line = prepaint.line.take().unwrap();
-        line.paint(
+        let Some(line) = prepaint.line.take() else {
+            return;
+        };
+        if let Err(e) = line.paint(
             bounds.origin,
             window.line_height(),
             gpui::TextAlign::Left,
             None,
             window,
             cx,
-        )
-        .unwrap();
+        ) {
+            tracing::warn!("input text paint failed: {e}");
+        }
 
         if focus_handle.is_focused(window)
             && let Some(cursor) = prepaint.cursor.take()

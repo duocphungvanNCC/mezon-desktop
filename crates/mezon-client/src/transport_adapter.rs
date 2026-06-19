@@ -36,16 +36,16 @@ pub trait TransportAdapter: Send + Sync {
     async fn close(&mut self) -> Result<()>;
 
     /// Set the message handler.
-    fn set_on_message(&mut self, handler: MessageHandler);
+    async fn set_on_message(&mut self, handler: MessageHandler);
 
     /// Set the open handler.
-    fn set_on_open(&mut self, handler: OpenHandler);
+    async fn set_on_open(&mut self, handler: OpenHandler);
 
     /// Set the close handler.
-    fn set_on_close(&mut self, handler: CloseHandler);
+    async fn set_on_close(&mut self, handler: CloseHandler);
 
     /// Set the error handler.
-    fn set_on_error(&mut self, handler: ErrorHandler);
+    async fn set_on_error(&mut self, handler: ErrorHandler);
 }
 
 /// Shared state for handlers.

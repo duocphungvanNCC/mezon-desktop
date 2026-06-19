@@ -6,7 +6,7 @@ mod context_menu;
 mod divider;
 mod dropdown;
 mod icon;
-mod input;
+pub(crate) mod input;
 mod label;
 mod modal;
 mod progress;
