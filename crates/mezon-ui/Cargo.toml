@@ -4,6 +4,7 @@ version.workspace = true
 edition = "2024"
 
 [dependencies]
+futures.workspace = true
 gpui = { workspace = true, features = ["inspector"] }
 ui.workspace = true
 theme.workspace = true

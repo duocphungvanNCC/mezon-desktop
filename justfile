@@ -2,6 +2,10 @@
 # GENERAL
 # ------------------------------------------------------------------------------
 
+# Crates we own — vendored Zed crates are excluded (we don't lint/test their code;
+# some of their test targets don't even compile against our pinned deps).
+pkgs := "-p mezon-app -p mezon-ui -p mezon-store -p mezon-client -p mezon-native -p mezon-proto -p mezon-i18n -p mezon-updater"
+
 # List available recipes
 default:
     @just help
@@ -61,17 +65,17 @@ watch:
 
 # Fast check for errors during development
 check:
-    cargo clippy --workspace -- -D warnings
+    cargo clippy {{pkgs}} -- -D warnings
 
 # Strict linting (Use before commit/push)
 lint:
-    cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+    cargo clippy {{pkgs}} --all-targets --all-features --locked -- -D warnings
     cargo fmt --all -- --check
 
 # Auto-fix formatting and clippy suggestions
 fix:
     cargo fmt --all
-    cargo clippy --workspace --fix --allow-dirty --allow-staged
+    cargo clippy {{pkgs}} --fix --allow-dirty --allow-staged
 
 # ------------------------------------------------------------------------------
 # TESTING (Nextest)
@@ -79,7 +83,7 @@ fix:
 
 # Run all tests in the workspace, or pass args straight to cargo-nextest
 test *args:
-    sh -c 'if [ "$#" -eq 0 ]; then exec cargo nextest run --workspace --all-targets; fi; exec cargo nextest run "$@"' sh {{args}}
+    sh -c 'if [ "$#" -eq 0 ]; then exec cargo nextest run {{pkgs}} --all-targets; fi; exec cargo nextest run "$@"' sh {{args}}
 
 # ------------------------------------------------------------------------------
 # CODE COVERAGE (llvm-cov)
@@ -87,11 +91,11 @@ test *args:
 
 # Generate and open HTML coverage report
 cov:
-    cargo llvm-cov --workspace --all-features --open
+    cargo llvm-cov {{pkgs}} --all-features --open
 
 # Run coverage and show summary in terminal
 cov-summary:
-    cargo llvm-cov --workspace --all-features
+    cargo llvm-cov {{pkgs}} --all-features
 
 # ------------------------------------------------------------------------------
 # SECURITY & MAINTENANCE
@@ -123,6 +127,23 @@ update:
 # Build production release
 release:
     cargo build --release
+
+# Bundle the release binary into a macOS Mezon.app
+bundle: release
+    #!/usr/bin/env bash
+    set -euo pipefail
+    app="target/release/bundle/Mezon.app"
+    rm -rf "$app"
+    mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
+    cp crates/mezon-app/Info.plist "$app/Contents/Info.plist"
+    cp target/release/mezon "$app/Contents/MacOS/mezon"
+    chmod +x "$app/Contents/MacOS/mezon"
+    for icon in assets/icons/app.icns crates/mezon-app/app.icns assets/app.icns; do
+        if [ -f "$icon" ]; then cp "$icon" "$app/Contents/Resources/app.icns"; break; fi
+    done
+    codesign --force --deep --sign - "$app" >/dev/null 2>&1 || true
+    echo "Built $app"
+    echo "Run: open \"$app\"  (or double-click in Finder)"
 
 # Clean build artifacts
 clean:

@@ -1,54 +1,36 @@
-/// Transport adapter trait for WebSocket and custom TCP connections.
-///
-/// Provides a common interface for different transport mechanisms (WebSocket, Abridged TCP, etc.)
 use anyhow::Result;
 use async_trait::async_trait;
 use std::sync::Arc;
 
-/// Handler for incoming messages.
-/// Parameters: (cid, code, message_bytes)
 pub type MessageHandler = Arc<dyn Fn(u16, u32, Vec<u8>) + Send + Sync>;
 
-/// Handler for connection open events.
 pub type OpenHandler = Arc<dyn Fn() + Send + Sync>;
 
-/// Handler for connection close events.
-pub type CloseHandler = Arc<dyn Fn(bool) + Send + Sync>; // was_clean
+pub type CloseHandler = Arc<dyn Fn(bool) + Send + Sync>;
 
-/// Handler for connection errors.
 pub type ErrorHandler = Arc<dyn Fn(String) + Send + Sync>;
 
 #[async_trait]
 pub trait TransportAdapter: Send + Sync {
-    /// Connect to the remote endpoint.
-    async fn connect(&mut self, host: &str, port: u16, token: &str) -> Result<()>;
+    async fn connect(&self, host: &str, port: u16, token: &str) -> Result<()>;
 
-    /// Send a message through the transport.
-    async fn send(&mut self, message: Vec<u8>) -> Result<()>;
+    async fn send(&self, message: Vec<u8>) -> Result<()>;
 
-    /// Send a ping message with the given CID.
-    async fn send_ping(&mut self, cid: u16) -> Result<()>;
+    async fn send_ping(&self, cid: u16) -> Result<()>;
 
-    /// Check if the connection is open.
     fn is_open(&self) -> bool;
 
-    /// Close the connection.
-    async fn close(&mut self) -> Result<()>;
+    async fn close(&self) -> Result<()>;
 
-    /// Set the message handler.
-    async fn set_on_message(&mut self, handler: MessageHandler);
+    async fn set_on_message(&self, handler: MessageHandler);
 
-    /// Set the open handler.
-    async fn set_on_open(&mut self, handler: OpenHandler);
+    async fn set_on_open(&self, handler: OpenHandler);
 
-    /// Set the close handler.
-    async fn set_on_close(&mut self, handler: CloseHandler);
+    async fn set_on_close(&self, handler: CloseHandler);
 
-    /// Set the error handler.
-    async fn set_on_error(&mut self, handler: ErrorHandler);
+    async fn set_on_error(&self, handler: ErrorHandler);
 }
 
-/// Shared state for handlers.
 #[derive(Clone, Default)]
 pub struct AdapterHandlers {
     pub on_message: Option<MessageHandler>,
