@@ -7,6 +7,7 @@ pub mod clan_sidebar;
 pub mod components;
 pub mod dev_gallery;
 pub mod direct_message;
+pub mod image_cache;
 pub mod imgproxy;
 pub mod login_view;
 pub mod root;
