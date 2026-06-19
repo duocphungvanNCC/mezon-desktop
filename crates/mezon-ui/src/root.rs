@@ -7,6 +7,7 @@ use mezon_store::{AuthState, ClanList, Settings};
 
 use crate::chat_layout::ChatLayout;
 use crate::components::primitives::{Button, Icon, IconName, Size, Spinner};
+use crate::direct_message::DirectMessageScreen;
 use crate::login_view::LoginView;
 use crate::router::{Route, Router};
 use crate::settings::SettingsScreen;
@@ -19,6 +20,7 @@ pub struct RootView {
     login_view: Entity<LoginView>,
     chat_layout: Entity<ChatLayout>,
     settings_screen: Entity<SettingsScreen>,
+    direct_message_screen: Entity<DirectMessageScreen>,
 }
 
 impl RootView {
@@ -28,6 +30,11 @@ impl RootView {
         settings: Entity<Settings>,
         cx: &mut Context<Self>,
     ) -> Self {
+        // App shell: owns the cross-cutting overlay layers (toasts + modal). Init before child
+        // views so any of them can surface a toast/modal via `Shell::global`.
+        let shell = crate::shell::Shell::init(cx);
+        cx.observe(&shell, |_, _, cx| cx.notify()).detach();
+
         cx.observe(&settings, |_, settings, cx| {
             let name = settings.read(cx).theme.clone();
             crate::theme::set_theme(resolve_theme(&name), cx);
@@ -78,12 +85,20 @@ impl RootView {
             }
         });
 
+        let direct_message_screen = cx.new({
+            let clan_list = clan_list.clone();
+            let auth_state = auth_state.clone();
+            let settings = settings.clone();
+            move |cx| DirectMessageScreen::new(clan_list, auth_state, settings, cx)
+        });
+
         Self {
             title_bar,
             auth_state,
             login_view,
             chat_layout,
             settings_screen,
+            direct_message_screen,
         }
     }
 
@@ -129,10 +144,15 @@ impl Render for RootView {
                     | Route::SettingsVoice
                     | Route::SettingsAdvanced => self.settings_screen.clone().into_any_element(),
                     Route::NotFound { .. } => render_not_found(theme),
+                    Route::Direct | Route::DirectMessage { .. } => {
+                        self.direct_message_screen.clone().into_any_element()
+                    }
                     _ => self.chat_layout.clone().into_any_element(),
                 }
             }
         };
+
+        let overlay = crate::shell::Shell::global(cx).read(cx).render_overlay();
 
         div()
             .flex()
@@ -156,6 +176,7 @@ impl Render for RootView {
                     .cached(StyleRefinement::default().w_full().h_8()),
             )
             .child(content)
+            .child(overlay)
     }
 }
 

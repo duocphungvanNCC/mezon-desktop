@@ -1,5 +1,7 @@
 use gpui::{AnyView, Context, Entity, StyleRefinement, Window, div, prelude::*, px};
-use mezon_store::{AuthState, ChannelList, ClanList, MessagesStore, PresenceStore, Settings};
+use mezon_store::{
+    AuthState, ChannelList, ClanList, MessagesStore, PresenceEvent, PresenceStore, Settings,
+};
 
 use crate::chat_area::ChatArea;
 use crate::components::compositions::user_info_bar::UserInfoBar;
@@ -48,7 +50,13 @@ impl ChatLayout {
 
         let user_info_bar = UserInfoBar::new(auth_state.clone());
 
-        cx.observe(&PresenceStore::global(cx), |this, _, cx| {
+        // The user bar only shows the current user's online status (`user_online`). Typing churns
+        // constantly and never touches `user_online`, so subscribe (not observe) and skip
+        // `TypingChanged` — keeping typing events from dirtying the shell.
+        cx.subscribe(&PresenceStore::global(cx), |this, _, event, cx| {
+            if matches!(event, PresenceEvent::TypingChanged { .. }) {
+                return;
+            }
             this.user_info_bar.sync_presence(cx);
             cx.notify();
         })

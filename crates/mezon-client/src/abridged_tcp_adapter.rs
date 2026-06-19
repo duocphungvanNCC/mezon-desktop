@@ -4,6 +4,7 @@ use async_trait::async_trait;
 use prost::Message;
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -99,6 +100,7 @@ const PREFIX_EXTENDED: u8 = 0x7f;
 const RAW_HEADER_LENGTH: usize = 7;
 const RAW_CHUNK_PAYLOAD_LEN: usize = 4096;
 const MAX_REALTIME_FRAME_LEN: usize = 1 << 20;
+const RESPONSE_CODE_TOO_LARGE: u32 = u16::MAX as u32;
 
 fn read_varint(buf: &[u8]) -> Option<(u64, usize)> {
     let mut value = 0u64;
@@ -151,8 +153,10 @@ fn protobuf_message_len(buf: &[u8]) -> Option<usize> {
 }
 
 fn frame_is_valid_envelope(framed: &[u8]) -> bool {
-    let unpadded_end = framed.iter().rposition(|&b| b != 0).map_or(0, |i| i + 1);
-    mezon_proto::realtime::Envelope::decode(&framed[..unpadded_end]).is_ok()
+    match protobuf_message_len(framed) {
+        Some(len) => mezon_proto::realtime::Envelope::decode(&framed[..len]).is_ok(),
+        None => false,
+    }
 }
 
 fn envelope_prefix_plausible(payload: &[u8]) -> bool {
@@ -251,7 +255,7 @@ type TlsStream = tokio_rustls::client::TlsStream<TcpStream>;
 struct IoLoopState {
     handlers: Arc<Mutex<AdapterHandlers>>,
     streams: Arc<Mutex<HashMap<u16, Vec<Vec<u8>>>>>,
-    is_connected: Arc<Mutex<bool>>,
+    is_connected: Arc<AtomicBool>,
     read_buffer: Arc<Mutex<Vec<u8>>>,
     pending_raw: Arc<Mutex<Option<Vec<u8>>>>,
 }
@@ -260,7 +264,7 @@ pub struct AbridgedTcpAdapter {
     write_tx: Arc<Mutex<Option<mpsc::UnboundedSender<Vec<u8>>>>>,
     handlers: Arc<Mutex<AdapterHandlers>>,
     streams: Arc<Mutex<HashMap<u16, Vec<Vec<u8>>>>>,
-    is_connected: Arc<Mutex<bool>>,
+    is_connected: Arc<AtomicBool>,
     read_buffer: Arc<Mutex<Vec<u8>>>,
     pending_raw: Arc<Mutex<Option<Vec<u8>>>>,
 }
@@ -271,7 +275,7 @@ impl AbridgedTcpAdapter {
             write_tx: Arc::new(Mutex::new(None)),
             handlers: Arc::new(Mutex::new(AdapterHandlers::default())),
             streams: Arc::new(Mutex::new(HashMap::new())),
-            is_connected: Arc::new(Mutex::new(false)),
+            is_connected: Arc::new(AtomicBool::new(false)),
             read_buffer: Arc::new(Mutex::new(Vec::new())),
             pending_raw: Arc::new(Mutex::new(None)),
         }
@@ -282,10 +286,6 @@ impl AbridgedTcpAdapter {
             return Ok(());
         }
 
-        // Check for a pending 0xff FIN header that was waiting for its body.
-        // A 0xff FIN body is always protobuf (starts with byte < 0x80), so if
-        // the incoming data starts with PREFIX_RAW (0xff) it is a *new* message
-        // and the pending header must be completed with an empty payload.
         {
             let mut pending = self.pending_raw.lock().await;
             if let Some(header) = pending.take() {
@@ -293,11 +293,9 @@ impl AbridgedTcpAdapter {
                     let cid = u16::from_be_bytes([header[1], header[2]]);
                     let code = u32::from_be_bytes([header[3], header[4], header[5], header[6]]);
                     let response_code = (code >> 16) & 0xffff;
-                    tracing::debug!("Completing pending 0-length response for cid={}", cid);
                     let handlers = self.handlers.lock().await.clone();
                     handlers.trigger_message(cid, response_code, vec![]);
                 } else {
-                    // Continuation — prepend the pending header to incoming data
                     let mut combined = header;
                     combined.extend(&incoming);
                     drop(pending);
@@ -353,9 +351,10 @@ impl AbridgedTcpAdapter {
                         };
                         if buffered > MAX_REALTIME_FRAME_LEN {
                             tracing::warn!(
-                                "resync: cid={cid} buffered {buffered} bytes exceeds cap, dropping stream"
+                                "cid={cid} response {buffered} bytes exceeds {MAX_REALTIME_FRAME_LEN}-byte cap, failing request"
                             );
                             self.streams.lock().await.remove(&cid);
+                            handlers.trigger_message(cid, RESPONSE_CODE_TOO_LARGE, vec![]);
                         }
                         buf.drain(..RAW_HEADER_LENGTH + RAW_CHUNK_PAYLOAD_LEN);
                         None
@@ -368,11 +367,10 @@ impl AbridgedTcpAdapter {
                         if prefix_len == 0 {
                             drop(streams);
                             if buf.len() == RAW_HEADER_LENGTH {
-                                // Header-only FIN: save as pending — body may arrive in next TCP read
                                 *self.pending_raw.lock().await = Some(buf.clone());
                                 buf.drain(..RAW_HEADER_LENGTH);
                                 let pending_raw = self.pending_raw.clone();
-                                let handlers = self.handlers.lock().await.clone();
+                                let handlers = handlers.clone();
                                 tokio::spawn(async move {
                                     tokio::time::sleep(Duration::from_millis(100)).await;
                                     let mut pending = pending_raw.lock().await;
@@ -522,7 +520,11 @@ impl AbridgedTcpAdapter {
                                         envelope.cid,
                                         envelope_detail(&envelope)
                                     );
-                                    handlers.trigger_message(envelope.cid as u16, 0, payload)
+                                    handlers.trigger_message(
+                                        u16::try_from(envelope.cid).unwrap_or(0),
+                                        0,
+                                        payload,
+                                    )
                                 }
                                 Err(e) => {
                                     tracing::warn!(
@@ -586,8 +588,8 @@ impl AbridgedTcpAdapter {
             };
 
             let framed = &data[header_size..header_size + payload_length];
-            let unpadded_end = framed.iter().rposition(|&b| b != 0).map_or(0, |i| i + 1);
-            let payload = &framed[..unpadded_end];
+            let payload_end = protobuf_message_len(framed).unwrap_or(0);
+            let payload = &framed[..payload_end];
             tracing::trace!(
                 "Std msg payload: {} bytes (framed {}) {:02x?}",
                 payload.len(),
@@ -601,7 +603,11 @@ impl AbridgedTcpAdapter {
                     envelope.cid,
                     envelope_detail(&envelope)
                 );
-                handlers.trigger_message(envelope.cid as u16, 0, payload.to_vec());
+                handlers.trigger_message(
+                    u16::try_from(envelope.cid).unwrap_or(0),
+                    0,
+                    payload.to_vec(),
+                );
             } else if let Some(cid) = decode_cid_field(payload) {
                 tracing::warn!("Failed to decode Envelope, passing raw cid={cid}");
                 handlers.trigger_message(cid, 0, payload.to_vec());
@@ -624,6 +630,15 @@ impl AbridgedTcpAdapter {
         let _ = ready_tx.send(());
         tracing::debug!("I/O loop running, entering select branch");
 
+        let data_adapter = AbridgedTcpAdapter {
+            write_tx: Arc::new(Mutex::new(None)),
+            handlers: state.handlers.clone(),
+            streams: state.streams.clone(),
+            is_connected: state.is_connected.clone(),
+            read_buffer: state.read_buffer.clone(),
+            pending_raw: state.pending_raw.clone(),
+        };
+
         loop {
             tracing::trace!("select iteration begin");
             tokio::select! {
@@ -632,7 +647,7 @@ impl AbridgedTcpAdapter {
                     match result {
                         Ok(0) => {
                             tracing::info!("Server closed connection after {} reads", read_count);
-                            *state.is_connected.lock().await = false;
+                            state.is_connected.store(false, Ordering::Release);
                             let h = state.handlers.lock().await;
                             h.trigger_close(true);
                             break;
@@ -657,28 +672,20 @@ impl AbridgedTcpAdapter {
                                     "Server returned HTTP on abridged TCP port (expected binary framing, not nginx/WSS). Response: {}",
                                     preview.lines().next().unwrap_or("?")
                                 );
-                                *state.is_connected.lock().await = false;
+                                state.is_connected.store(false, Ordering::Release);
                                 let h = state.handlers.lock().await;
                                 h.trigger_error("server spoke HTTP instead of abridged TCP".into());
                                 h.trigger_close(false);
                                 break;
                             }
 
-                            let adapter = AbridgedTcpAdapter {
-                                write_tx: Arc::new(Mutex::new(None)),
-                                handlers: state.handlers.clone(),
-                                streams: state.streams.clone(),
-                                is_connected: state.is_connected.clone(),
-                                read_buffer: state.read_buffer.clone(),
-                                pending_raw: state.pending_raw.clone(),
-                            };
-                            if let Err(e) = adapter.handle_data(data).await {
+                            if let Err(e) = data_adapter.handle_data(data).await {
                                 tracing::error!("handle_data error: {}", e);
                             }
                         }
                         Err(e) => {
                             tracing::error!("READ error: kind={:?} msg={}", e.kind(), e);
-                            *state.is_connected.lock().await = false;
+                            state.is_connected.store(false, Ordering::Release);
                             let h = state.handlers.lock().await;
                             h.trigger_error(e.to_string());
                             h.trigger_close(false);
@@ -749,6 +756,23 @@ fn decode_cid_field(payload: &[u8]) -> Option<u16> {
     None
 }
 
+fn frame_handshake(token: &str) -> Vec<u8> {
+    let token_bytes = token.as_bytes();
+    let padding = (4 - (token_bytes.len() % 4)) % 4;
+    let mut final_token = token_bytes.to_vec();
+    final_token.extend(vec![0u8; padding]);
+    let len_div4 = final_token.len() / 4;
+    let mut frame = if len_div4 < 127 {
+        vec![0xef, len_div4 as u8]
+    } else {
+        let mut h = vec![0xef, PREFIX_EXTENDED, 0, 0, 0];
+        h[2..5].copy_from_slice(&(len_div4 as u32).to_le_bytes()[..3]);
+        h
+    };
+    frame.extend(&final_token);
+    frame
+}
+
 impl Default for AbridgedTcpAdapter {
     fn default() -> Self {
         Self::new()
@@ -815,13 +839,7 @@ impl TransportAdapter for AbridgedTcpAdapter {
         tracing::info!("I/O loop confirmed READY");
 
         // Now send handshake — I/O loop is definitely listening
-        let token_bytes = token.as_bytes();
-        let padding = (4 - (token_bytes.len() % 4)) % 4;
-        let mut final_token = token_bytes.to_vec();
-        final_token.extend(vec![0u8; padding]);
-        let len_header = (final_token.len() / 4) as u8;
-        let mut handshake = vec![0xef, len_header];
-        handshake.extend(&final_token);
+        let handshake = frame_handshake(token);
 
         tracing::info!("Sending handshake");
         write_tx
@@ -830,7 +848,7 @@ impl TransportAdapter for AbridgedTcpAdapter {
         tracing::info!("Handshake queued via mpsc channel");
 
         *self.write_tx.lock().await = Some(write_tx);
-        *self.is_connected.lock().await = true;
+        self.is_connected.store(true, Ordering::Release);
         tracing::info!("Connection state: is_connected=true, write_tx set");
 
         {
@@ -917,41 +935,35 @@ impl TransportAdapter for AbridgedTcpAdapter {
         let mut buffer = vec![0x00];
         buffer.extend(&cid.to_be_bytes());
         let guard = self.write_tx.lock().await;
-        if let Some(ref tx) = *guard {
-            tx.send(buffer)
-                .map_err(|_| anyhow::anyhow!("Write channel closed"))?;
+        match *guard {
+            Some(ref tx) => tx
+                .send(buffer)
+                .map_err(|_| anyhow::anyhow!("Write channel closed"))?,
+            None => return Err(anyhow::anyhow!("Write channel not available")),
         }
         Ok(())
     }
 
     fn is_open(&self) -> bool {
-        self.is_connected.try_lock().map(|g| *g).unwrap_or(false)
+        self.is_connected.load(Ordering::Acquire)
     }
     async fn close(&mut self) -> Result<()> {
-        *self.is_connected.lock().await = false;
+        self.is_connected.store(false, Ordering::Release);
         *self.write_tx.lock().await = None;
         Ok(())
     }
 
-    fn set_on_message(&mut self, handler: crate::transport_adapter::MessageHandler) {
-        if let Ok(mut h) = self.handlers.try_lock() {
-            h.on_message = Some(handler);
-        }
+    async fn set_on_message(&mut self, handler: crate::transport_adapter::MessageHandler) {
+        self.handlers.lock().await.on_message = Some(handler);
     }
-    fn set_on_open(&mut self, handler: crate::transport_adapter::OpenHandler) {
-        if let Ok(mut h) = self.handlers.try_lock() {
-            h.on_open = Some(handler);
-        }
+    async fn set_on_open(&mut self, handler: crate::transport_adapter::OpenHandler) {
+        self.handlers.lock().await.on_open = Some(handler);
     }
-    fn set_on_close(&mut self, handler: crate::transport_adapter::CloseHandler) {
-        if let Ok(mut h) = self.handlers.try_lock() {
-            h.on_close = Some(handler);
-        }
+    async fn set_on_close(&mut self, handler: crate::transport_adapter::CloseHandler) {
+        self.handlers.lock().await.on_close = Some(handler);
     }
-    fn set_on_error(&mut self, handler: crate::transport_adapter::ErrorHandler) {
-        if let Ok(mut h) = self.handlers.try_lock() {
-            h.on_error = Some(handler);
-        }
+    async fn set_on_error(&mut self, handler: crate::transport_adapter::ErrorHandler) {
+        self.handlers.lock().await.on_error = Some(handler);
     }
 }
 
@@ -1034,6 +1046,12 @@ mod tests {
         assert_eq!(protobuf_message_len(&stream), Some(0));
     }
 
+    #[test]
+    fn protobuf_len_includes_trailing_empty_field() {
+        let framed = [0x08, 0x58, 0x22, 0x00, 0x00, 0x00, 0x00, 0x00];
+        assert_eq!(protobuf_message_len(&framed), Some(4));
+    }
+
     fn raw_frame(cid: u16, fin: bool, payload: &[u8]) -> Vec<u8> {
         let code: u32 = if fin { u32::from(CODE_FIN) } else { 0 };
         let mut frame = vec![PREFIX_RAW];
@@ -1110,5 +1128,41 @@ mod tests {
         assert_eq!(received.len(), 1);
         assert_eq!(received[0].0, 7);
         assert_eq!(received[0].2, body);
+    }
+
+    #[tokio::test]
+    async fn reassembles_fin_response_split_from_header() {
+        let body = channel_messages_body(16);
+        assert!(body.len() < RAW_CHUNK_PAYLOAD_LEN);
+
+        let adapter = AbridgedTcpAdapter::new();
+        let received = captured_responses(&adapter).await;
+
+        adapter.handle_data(raw_frame(8, true, &[])).await.unwrap();
+        adapter.handle_data(body.clone()).await.unwrap();
+
+        let received = received.lock().unwrap();
+        assert_eq!(received.len(), 1);
+        assert_eq!(received[0].0, 8);
+        assert_eq!(received[0].2, body);
+    }
+
+    #[test]
+    fn handshake_short_token_uses_1byte_header() {
+        let frame = frame_handshake("abc");
+        assert_eq!(frame[0], 0xef);
+        assert_eq!(frame[1], 1);
+        assert_eq!(frame.len(), 2 + 4);
+    }
+
+    #[test]
+    fn handshake_long_token_uses_extended_header() {
+        let token = "x".repeat(600);
+        let frame = frame_handshake(&token);
+        assert_eq!(frame[0], 0xef);
+        assert_eq!(frame[1], PREFIX_EXTENDED);
+        let len_div4 = u32::from_le_bytes([frame[2], frame[3], frame[4], 0]) as usize;
+        assert_eq!(len_div4, 150);
+        assert_eq!(frame.len(), 5 + 600);
     }
 }

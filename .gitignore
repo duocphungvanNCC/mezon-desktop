@@ -15,4 +15,4 @@ Cargo.lock
 .env
 .env.local
 .session.json
-
+.mcp-sessions.json
