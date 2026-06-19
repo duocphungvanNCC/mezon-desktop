@@ -14,7 +14,6 @@ use std::sync::atomic::{AtomicU16, Ordering};
 use std::time::Duration;
 use tokio::sync::{Mutex, RwLock, oneshot};
 
-const DEFAULT_TIMEOUT_MS: u64 = 7000;
 const DEFAULT_SEND_TIMEOUT_MS: u64 = 10000;
 
 fn parse_id<T>(value: &str) -> Result<T>
@@ -140,11 +139,9 @@ pub struct MezonTransport {
     adapter: Arc<Mutex<Box<dyn TransportAdapter>>>,
     cid_counter: Arc<AtomicU16>,
     pending_requests: Arc<RwLock<HashMap<u16, PromiseExecutor>>>,
-    timeout_ms: Duration,
     send_timeout_ms: Duration,
     #[allow(dead_code)]
     base_path: String,
-    verbose: bool,
 }
 
 impl MezonTransport {
@@ -154,26 +151,24 @@ impl MezonTransport {
             adapter: Arc::new(Mutex::new(adapter)),
             cid_counter: Arc::new(AtomicU16::new(1)),
             pending_requests: Arc::new(RwLock::new(HashMap::new())),
-            timeout_ms: Duration::from_millis(DEFAULT_TIMEOUT_MS),
             send_timeout_ms: Duration::from_millis(DEFAULT_SEND_TIMEOUT_MS),
             base_path,
-            verbose: false,
         }
-    }
-
-    /// Set verbose logging.
-    pub fn set_verbose(&mut self, verbose: bool) {
-        self.verbose = verbose;
     }
 
     /// Set request timeout.
     pub fn set_timeout(&mut self, timeout_ms: u64) {
-        self.timeout_ms = Duration::from_millis(timeout_ms);
+        self.send_timeout_ms = Duration::from_millis(timeout_ms);
     }
 
     /// Generate a unique correlation ID.
     fn generate_cid(&self) -> u16 {
-        self.cid_counter.fetch_add(1, Ordering::SeqCst)
+        loop {
+            let cid = self.cid_counter.fetch_add(1, Ordering::SeqCst);
+            if cid != 0 {
+                return cid;
+            }
+        }
     }
 
     /// Connect to the Mezon backend.
@@ -185,7 +180,7 @@ impl MezonTransport {
         on_event: impl Fn(RealtimeEvent) + Send + Sync + 'static,
         on_disconnected: impl Fn(bool) + Send + Sync + 'static,
     ) -> Result<()> {
-        tracing::info!("MezonTransport::connect() starting");
+        tracing::debug!("MezonTransport::connect() starting");
         tracing::debug!("  Host: {}, Port: {}", host, port);
 
         tracing::debug!("Acquiring adapter lock...");
@@ -196,40 +191,51 @@ impl MezonTransport {
         tracing::debug!("Setting up message handler...");
         let pending_requests = self.pending_requests.clone();
         let on_event: Arc<dyn Fn(RealtimeEvent) + Send + Sync> = Arc::new(on_event);
-        adapter.set_on_message(Arc::new(move |cid, code, message| {
-            tracing::trace!("on_message: cid={cid} code={code} len={}", message.len());
+        adapter
+            .set_on_message(Arc::new(move |cid, code, message| {
+                tracing::trace!("on_message: cid={cid} code={code} len={}", message.len());
 
-            if cid != 0 {
-                let pending = pending_requests.clone();
-                let on_event = on_event.clone();
-                tokio::spawn(async move {
-                    let executor = pending.write().await.remove(&cid);
-                    match executor {
-                        Some(executor) => {
-                            let _ = executor.sender.send((code, message));
+                if cid != 0 {
+                    let pending = pending_requests.clone();
+                    let on_event = on_event.clone();
+                    tokio::spawn(async move {
+                        let executor = pending.write().await.remove(&cid);
+                        match executor {
+                            Some(executor) => {
+                                let _ = executor.sender.send((code, message));
+                            }
+                            None => dispatch_realtime_push(cid, &message, on_event.as_ref()),
                         }
-                        None => dispatch_realtime_push(cid, &message, on_event.as_ref()),
-                    }
-                });
-            } else {
-                dispatch_realtime_push(cid, &message, on_event.as_ref());
-            }
-        }));
+                    });
+                } else {
+                    dispatch_realtime_push(cid, &message, on_event.as_ref());
+                }
+            }))
+            .await;
         tracing::debug!("  Message handler set");
 
         // Set up close handler
         tracing::debug!("Setting up close handler...");
-        adapter.set_on_close(Arc::new(on_disconnected));
+        let pending_for_close = self.pending_requests.clone();
+        adapter
+            .set_on_close(Arc::new(move |was_clean| {
+                let pending = pending_for_close.clone();
+                tokio::spawn(async move {
+                    pending.write().await.clear();
+                });
+                on_disconnected(was_clean);
+            }))
+            .await;
         tracing::debug!("  Close handler set");
 
         // Connect
-        tracing::info!("Calling adapter.connect()...");
+        tracing::debug!("Calling adapter.connect()...");
         adapter
             .connect(host, port, token)
             .await
             .with_context(|| format!("Failed to connect adapter to {host}:{port}"))?;
 
-        tracing::info!("MezonTransport::connect() completed successfully");
+        tracing::debug!("MezonTransport::connect() completed successfully");
         Ok(())
     }
 
@@ -265,6 +271,7 @@ impl MezonTransport {
 
     /// Close the connection.
     pub async fn close(&self) -> Result<()> {
+        self.pending_requests.write().await.clear();
         let mut adapter = self.adapter.lock().await;
         adapter.close().await
     }
@@ -278,7 +285,7 @@ impl MezonTransport {
     /// Send a ping and wait for matching pong.
     pub async fn ping_roundtrip(&self) -> Result<()> {
         let cid = self.generate_cid();
-        tracing::info!("MezonTransport::ping_roundtrip() cid={}", cid);
+        tracing::debug!("MezonTransport::ping_roundtrip() cid={}", cid);
 
         let (tx, rx) = oneshot::channel();
         {
@@ -292,7 +299,7 @@ impl MezonTransport {
 
         {
             let mut adapter = self.adapter.lock().await;
-            tracing::info!("Sending ping cid={}", cid);
+            tracing::debug!("Sending ping cid={}", cid);
             adapter.send_ping(cid).await?;
         }
 
@@ -311,7 +318,7 @@ impl MezonTransport {
             })?
             .map_err(|_| anyhow::anyhow!("Ping response channel closed"))?;
 
-        tracing::info!("Pong received for cid={}", cid);
+        tracing::debug!("Pong received for cid={}", cid);
         Ok(())
     }
 }
@@ -734,7 +741,7 @@ impl MezonTransport {
 
     /// Get the current user's account.
     pub async fn get_account(&self) -> Result<ApiAccount> {
-        tracing::info!("MezonTransport::get_account() called");
+        tracing::debug!("MezonTransport::get_account() called");
 
         let cid = self.generate_cid();
         tracing::debug!("  Generated CID: {}", cid);
@@ -756,7 +763,7 @@ impl MezonTransport {
 
         match send_result {
             Ok((code, response)) => {
-                tracing::info!(
+                tracing::debug!(
                     "Received response: code={}, len={} bytes",
                     code,
                     response.len()
@@ -786,7 +793,7 @@ impl MezonTransport {
                     (!account.email.is_empty()).then_some(account.email),
                     account.password_setted,
                 );
-                tracing::info!("Decoded account response: {} bytes", response.len());
+                tracing::debug!("Decoded account response: {} bytes", response.len());
                 Ok(account)
             }
             Err(e) => {
@@ -820,6 +827,7 @@ impl MezonTransport {
             clan_id: parse_id(clan_id)?,
             limit: 500,
             state: 1,
+            page: 1,
             ..Default::default()
         }
         .encode_to_vec();
@@ -956,7 +964,7 @@ impl MezonTransport {
         is_public: bool,
     ) -> Result<()> {
         let cid = self.generate_cid();
-        tracing::info!(
+        tracing::debug!(
             "join_chat: clan_id={clan_id} channel_id={channel_id} type={channel_type} is_public={is_public}"
         );
         let envelope = realtime::Envelope {
@@ -984,17 +992,30 @@ impl MezonTransport {
         content: &str,
         is_public: bool,
     ) -> Result<ApiMessage> {
+        self.send_channel_message_with_attachments(clan_id, channel_id, content, is_public, vec![])
+            .await
+    }
+
+    pub async fn send_channel_message_with_attachments(
+        &self,
+        clan_id: &str,
+        channel_id: &str,
+        content: &str,
+        is_public: bool,
+        attachments: Vec<api::MessageAttachment>,
+    ) -> Result<ApiMessage> {
         let cid = self.generate_cid();
 
         let api_name = "SendChannelMessage";
         let parsed_clan_id: i64 = parse_id(clan_id)?;
         let parsed_channel_id: i64 = parse_id(channel_id)?;
-        tracing::info!(
-            "send_channel_message: clan_id={} channel_id={} is_public={} content_len={}",
+        tracing::debug!(
+            "send_channel_message: clan_id={} channel_id={} is_public={} content_len={} attachments={}",
             parsed_clan_id,
             parsed_channel_id,
             is_public,
-            content.len()
+            content.len(),
+            attachments.len()
         );
         // mezon stores message content as JSON `{ "t": <text> }` (matches mezon-js), not raw text.
         let content_json = serde_json::json!({ "t": content }).to_string();
@@ -1004,6 +1025,7 @@ impl MezonTransport {
             clan_id: parsed_clan_id,
             channel_id: parsed_channel_id,
             content: content_json,
+            attachments,
             mode: 2, // ChannelStreamMode::STREAM_MODE_CHANNEL (matches mezon-js writeChatMessage)
             is_public,
             ..Default::default()
@@ -1017,7 +1039,7 @@ impl MezonTransport {
         }
 
         let ack = realtime::ChannelMessageAck::decode(response.as_slice())?;
-        tracing::info!(
+        tracing::debug!(
             "send_channel_message ack: message_id={} channel_id={} code={}",
             ack.message_id,
             ack.channel_id,
@@ -2246,13 +2268,25 @@ impl MezonTransport {
         _clan_id: &str,
         channel_label: &str,
         channel_type: u32,
+        category_id: Option<&str>,
+        parent_id: Option<&str>,
     ) -> Result<ApiChannelDesc> {
         let cid = self.generate_cid();
 
+        let category_id = match category_id {
+            Some(id) => parse_id(id)?,
+            None => 0,
+        };
+        let parent_id = match parent_id {
+            Some(id) => parse_id(id)?,
+            None => 0,
+        };
         let body = api::CreateChannelDescRequest {
             clan_id: parse_id(_clan_id)?,
             channel_label: channel_label.to_string(),
             r#type: channel_type as i32,
+            category_id,
+            parent_id,
             ..Default::default()
         }
         .encode_to_vec();
@@ -3110,6 +3144,7 @@ impl MezonTransport {
             size,
             width,
             height,
+            part_count: 0,
         }
         .encode_to_vec();
         let (code, response) = self

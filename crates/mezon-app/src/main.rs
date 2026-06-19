@@ -2,9 +2,7 @@ use anyhow::Result;
 use futures::StreamExt;
 use gpui::{App, AppContext, AsyncApp, Bounds, Entity, WindowBounds, WindowOptions, px, size};
 use gpui_platform::application;
-use mezon_client::{
-    AppApi, ConnectionStatus, MezonClient, RealtimeEvent, TransportClient, keychain,
-};
+use mezon_client::{AppApi, MezonClient, TransportClient};
 use mezon_native::instance::SingleInstance;
 use mezon_store::{AppConfig, AuthState, Settings};
 use mezon_ui::{RootView, init as init_ui, title_bar::TitleBar};
@@ -142,7 +140,7 @@ fn run_app(lock: SingleInstance, initial_url: Option<String>) {
     let client = Arc::new(client);
     let transport = Arc::new(TransportClient::new(String::new()));
     let api = Arc::new(AppApi::new(transport.clone()));
-    let initial_auth_state = resolve_initial_auth_state();
+    let initial_auth_state = mezon_store::resolve_initial_auth_state();
 
     // Sync login-item with settings.
     mezon_native::autostart::sync_auto_start(settings.auto_start);
@@ -162,7 +160,7 @@ fn run_app(lock: SingleInstance, initial_url: Option<String>) {
 
     let app_config_handle = app_config.clone();
     application()
-        .with_http_client(Arc::new(reqwest_client::ReqwestClient::new()))
+        .with_http_client(Arc::new(mezon_client::transport_runtime::new_http_client()))
         .with_assets(mezon_ui::assets::Assets)
         .run(move |cx: &mut App| {
             tracing::debug!("App started");
@@ -266,14 +264,12 @@ fn run_app(lock: SingleInstance, initial_url: Option<String>) {
                 .detach();
             }
 
-            // Session refresh is server-pushed over the socket (`refresh_session_event`);
-            // consume it and update the stored session (mezon-js `onrefreshsession`).
-            spawn_session_refresh_consumer(cx, auth_state_handle.clone(), api.clone());
-            spawn_transport_task(
-                cx,
-                auth_state_handle.clone(),
+            // Connection/session lifecycle (reconnect + backoff + socket-driven session refresh).
+            mezon_store::ConnectionStore::init(
                 transport.clone(),
                 api.clone(),
+                auth_state_handle.clone(),
+                cx,
             );
 
             // System tray.
@@ -283,250 +279,6 @@ fn run_app(lock: SingleInstance, initial_url: Option<String>) {
 
             cx.activate(true);
         });
-}
-
-/// Keep the shared abridged TCP transport connected for authenticated UI API calls.
-fn spawn_transport_task(
-    cx: &mut App,
-    auth_state: Entity<AuthState>,
-    transport: Arc<TransportClient>,
-    api: Arc<AppApi>,
-) {
-    // Wake signal that drives reconciliation — fired on auth-state changes and on socket
-    // disconnect. Replaces the old 500ms poll (cf. Zed's reactive `client.status()` loop).
-    let wake = std::sync::Arc::new(tokio::sync::Notify::new());
-    cx.observe(&auth_state, {
-        let wake = wake.clone();
-        move |_, _| wake.notify_one()
-    })
-    .detach();
-
-    cx.spawn(async move |cx: &mut AsyncApp| {
-        let exec = cx.background_executor().clone();
-        let mut connected_token: Option<String> = None;
-        let mut retry_backoff_secs = 1u64;
-
-        loop {
-            let session = cx.update(|cx| match auth_state.read(cx).clone() {
-                AuthState::Connecting(s) | AuthState::Authenticated(s) => Some(s),
-                _ => None,
-            });
-
-            let Some(session) = session else {
-                if connected_token.take().is_some() {
-                    if let Err(e) = transport.close().await {
-                        tracing::warn!("Failed to close TCP transport after logout: {e}");
-                    }
-                    api.set_status(ConnectionStatus::Disconnected);
-                }
-                retry_backoff_secs = 1;
-                wake.notified().await;
-                continue;
-            };
-
-            // Already connected with the right credential — park until something changes.
-            if connected_token.as_deref() == Some(session.ws_credential())
-                && transport.is_open().await
-            {
-                retry_backoff_secs = 1;
-                wake.notified().await;
-                continue;
-            }
-
-            let host = session
-                .tcp_host
-                .clone()
-                .or(session.ws_host.clone())
-                .unwrap_or_else(|| mezon_client::DEFAULT_WS_HOST.to_string());
-            let port = resolve_tcp_port(&session);
-
-            if transport.is_open().await
-                && let Err(e) = transport.close().await
-            {
-                tracing::warn!("Failed to close stale transport: {e}");
-            }
-
-            tracing::info!("Connecting shared abridged TCP transport to {host}:{port}");
-            api.set_status(ConnectionStatus::Connecting);
-            // Socket credential: prefer the durable `session_id` (matches mezon-js), not the JWT.
-            let token = session.ws_credential().to_string();
-            let session_for_update = session.clone();
-            let api_for_publish = api.clone();
-            let api_for_close = api.clone();
-            let wake_for_close = wake.clone();
-            match transport
-                .connect(
-                    &host,
-                    port,
-                    &token,
-                    move |event| {
-                        api_for_publish.publish_event(event);
-                    },
-                    move |was_clean| {
-                        if was_clean {
-                            tracing::info!("TCP transport closed cleanly");
-                        } else {
-                            tracing::warn!("TCP transport closed with error");
-                        }
-                        // Reactive reconnect: flag disconnected + wake the manager loop.
-                        api_for_close.set_status(ConnectionStatus::Disconnected);
-                        wake_for_close.notify_one();
-                    },
-                )
-                .await
-            {
-                Ok(()) => {
-                    tracing::info!("Shared abridged TCP transport connected");
-
-                    exec.timer(std::time::Duration::from_millis(250)).await;
-                    match api.get_account().await {
-                        Ok(account) => {
-                            connected_token = Some(token);
-                            retry_backoff_secs = 1;
-                            api.set_status(ConnectionStatus::Connected);
-                            tracing::info!("get_account over shared TCP succeeded");
-                            tracing::debug!("authenticated user_id={}", account.user_id);
-
-                            cx.update(|cx| {
-                                auth_state.update(cx, |state, cx| {
-                                    if matches!(state, AuthState::Connecting(_)) {
-                                        *state = AuthState::Authenticated(session_for_update);
-                                        cx.notify();
-                                    }
-                                });
-                            });
-                        }
-                        Err(e) => {
-                            tracing::error!("get_account over shared TCP failed: {e}");
-                            let _ = transport.close().await;
-                            connected_token = None;
-                            api.set_status(ConnectionStatus::Disconnected);
-                            retry_backoff_secs = (retry_backoff_secs * 2).min(60);
-                            promote_connecting_to_authenticated(
-                                &auth_state,
-                                session_for_update,
-                                cx,
-                            );
-                            backoff_wait(&exec, &wake, retry_backoff_secs).await;
-                        }
-                    }
-                }
-                Err(e) => {
-                    connected_token = None;
-                    api.set_status(ConnectionStatus::Disconnected);
-                    retry_backoff_secs = (retry_backoff_secs * 2).min(60);
-                    tracing::error!("Shared abridged TCP transport connect failed: {e}");
-                    promote_connecting_to_authenticated(&auth_state, session_for_update, cx);
-                    backoff_wait(&exec, &wake, retry_backoff_secs).await;
-                }
-            }
-        }
-    })
-    .detach();
-}
-
-/// Wait out a reconnect backoff, but wake early if auth/connection state changes.
-async fn backoff_wait(exec: &gpui::BackgroundExecutor, wake: &tokio::sync::Notify, secs: u64) {
-    tokio::select! {
-        _ = wake.notified() => {}
-        _ = exec.timer(std::time::Duration::from_secs(secs)) => {}
-    }
-}
-
-/// Leave the loading screen if transport setup fails — user can retry from the app shell.
-fn promote_connecting_to_authenticated(
-    auth_state: &Entity<AuthState>,
-    session: mezon_client::Session,
-    cx: &mut AsyncApp,
-) {
-    cx.update(|cx| {
-        auth_state.update(cx, |state, cx| {
-            if matches!(state, AuthState::Connecting(_)) {
-                *state = AuthState::Authenticated(session);
-                cx.notify();
-            }
-        });
-    });
-}
-
-/// Resolve abridged TCP port — session field, env override, then heuristics.
-fn resolve_tcp_port(session: &mezon_client::Session) -> u16 {
-    if let Some(port) = session.tcp_port {
-        return port;
-    }
-    if let Some(port) = session.ws_port {
-        return port;
-    }
-    if let Ok(v) = std::env::var("NX_CHAT_APP_TCP_PORT")
-        && let Ok(port) = v.parse()
-    {
-        return port;
-    }
-    match session.tcp_host.as_deref().or(session.ws_host.as_deref()) {
-        Some(h) if h.contains("dev-mezon") || h.contains("nccsoft.vn") => 7349,
-        _ => 4433,
-    }
-}
-
-/// Restore a stored session from the OS keychain.
-///
-/// - Stored session → `Connecting` (the socket validates it; the server pushes a fresh token
-///   via `refresh_session_event`, so an expired JWT is fine — `session_id` is the durable cred)
-/// - Nothing stored → `NotAuthenticated`
-///
-/// Note: we no longer REST-refresh on startup. That endpoint (`/v2/account/session/refresh`)
-/// was removed server-side (it 404s); refresh is now socket-driven (see
-/// [`spawn_session_refresh_consumer`]).
-fn resolve_initial_auth_state() -> AuthState {
-    match keychain::load_session() {
-        None => {
-            tracing::info!("No stored session — showing login");
-            AuthState::NotAuthenticated
-        }
-        Some(session) => {
-            tracing::info!(
-                "Restored stored session for user_id={} — connecting",
-                session.user_id
-            );
-            AuthState::Connecting(session)
-        }
-    }
-}
-
-/// Consume server-pushed `refresh_session_event`s from the socket and update the stored
-/// session in place — the native equivalent of mezon-js `client.onrefreshsession`.
-///
-/// Replaces the old 60s REST-polling refresh task: the server now decides when to refresh
-/// and pushes the new token/session_id over the realtime socket.
-fn spawn_session_refresh_consumer(cx: &mut App, auth_state: Entity<AuthState>, api: Arc<AppApi>) {
-    cx.spawn(async move |cx: &mut AsyncApp| {
-        let mut rx = api.subscribe();
-        loop {
-            match rx.recv().await {
-                Ok(RealtimeEvent::SessionRefreshed(ev)) => {
-                    tracing::info!("Session refreshed over socket for user_id={}", ev.user_id);
-                    cx.update(|cx| {
-                        auth_state.update(cx, |state, cx| match state {
-                            AuthState::Authenticated(session) | AuthState::Connecting(session) => {
-                                session.apply_refresh(&ev.token, &ev.refresh_token, &ev.session_id);
-                                if let Err(e) = keychain::save_session(session) {
-                                    tracing::warn!("Failed to persist refreshed session: {e}");
-                                }
-                                cx.notify();
-                            }
-                            _ => {}
-                        });
-                    });
-                }
-                Ok(_) => {}
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                    tracing::warn!("Session refresh consumer lagged by {n} events");
-                }
-                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-            }
-        }
-    })
-    .detach();
 }
 
 /// Open the main window and return a cloneable handle to the `AuthState` entity.
@@ -587,37 +339,32 @@ fn open_main_window(
         ..Default::default()
     };
 
-    // Smuggle the Entity out of the open_window closure via an Arc<Mutex<Option<_>>>.
-    let auth_out = Arc::new(std::sync::Mutex::new(None::<Entity<AuthState>>));
-    let auth_out_clone = auth_out.clone();
+    // Entities and store globals are App-scoped, so create them up front and let the window
+    // closure just build the root view from them — no smuggling the handle back out.
+    let auth_state = cx.new(|_| initial_auth);
+    let title_bar = cx.new(|cx| TitleBar::new(settings_entity.clone(), cx));
 
+    // Register the domain stores as globals before any view reads them. Order matters: the
+    // realtime router must exist before stores register handlers in their ctors, and
+    // ChannelList subscribes to ClanList's events.
+    mezon_store::LoginStore::init(client, cx);
+    mezon_store::RealtimeDispatch::init(api.clone(), cx);
+    mezon_store::ClanList::init(api.clone(), cx);
+    mezon_store::ChannelList::init(api.clone(), cx);
+    mezon_store::MessagesStore::init(api.clone(), cx);
+    mezon_store::PresenceStore::init(api.clone(), cx);
+    mezon_store::AccountStore::init(api, cx);
+
+    let root_auth_state = auth_state.clone();
     cx.open_window(options, move |_window, cx| {
-        let auth_state = cx.new(|_cx| initial_auth);
-        *auth_out_clone.lock().unwrap_or_else(|e| e.into_inner()) = Some(auth_state.clone());
-
-        let title_bar = cx.new(|cx| TitleBar::new(settings_entity.clone(), cx));
-
-        // Register the domain stores as globals before any view reads them.
-        // Order matters: ChannelList subscribes to ClanList's events.
-        mezon_store::LoginStore::init(client.clone(), cx);
-        mezon_store::ClanList::init(api.clone(), cx);
-        mezon_store::ChannelList::init(api.clone(), cx);
-        mezon_store::MessagesStore::init(api.clone(), cx);
-        mezon_store::PresenceStore::init(api.clone(), cx);
-        mezon_store::AccountStore::init(api.clone(), cx);
-
-        cx.new(|cx| RootView::new(title_bar, auth_state, settings_entity.clone(), cx))
+        cx.new(|cx| RootView::new(title_bar, root_auth_state, settings_entity, cx))
     })
     .unwrap_or_else(|e| {
         tracing::error!("Failed to open main window: {e}");
         std::process::exit(1);
     });
 
-    auth_out
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .clone()
-        .expect("auth_state not initialised after open_window")
+    auth_state
 }
 
 struct TrayGlobal(#[allow(dead_code)] mezon_native::tray::MezonTray);
