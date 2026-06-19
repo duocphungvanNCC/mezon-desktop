@@ -1,25 +1,34 @@
 pub mod account;
+pub mod cache;
 pub mod channel;
 pub mod clan;
 pub mod config;
+pub mod connection;
 pub mod login;
 pub mod messages;
 pub mod presence;
+pub mod realtime;
 
 use anyhow::{Context, Result};
 use dirs::config_dir;
 pub use mezon_client::Session;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+use std::time::Duration;
 use tokio::fs;
 
 pub use account::*;
+pub use cache::KeyedCache;
 pub use channel::*;
 pub use clan::*;
 pub use config::AppConfig;
+pub use connection::{ConnectionStore, resolve_initial_auth_state};
 pub use login::LoginStore;
 pub use messages::*;
 pub use presence::*;
+pub use realtime::{RealtimeDispatch, RealtimeKind};
+
+pub const CACHE_TTL: Duration = Duration::from_secs(20 * 60);
 
 /// Persistent application settings — written to ~/.config/mezon/settings.json
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -143,6 +143,117 @@ impl AppApi {
             .await
     }
 
+    pub async fn create_channel(
+        &self,
+        clan_id: &str,
+        channel_label: &str,
+        channel_type: u32,
+        category_id: Option<&str>,
+        parent_id: Option<&str>,
+    ) -> Result<ApiChannelDesc> {
+        self.transport
+            .create_channel(clan_id, channel_label, channel_type, category_id, parent_id)
+            .await
+    }
+
+    /// Create a category in a clan; returns its id.
+    pub async fn create_category(&self, clan_id: &str, category_name: &str) -> Result<String> {
+        let category = self
+            .transport
+            .create_category_desc(category_name, clan_id)
+            .await?;
+        Ok(category.category_id.to_string())
+    }
+
+    pub async fn add_channel_users(&self, channel_id: &str, user_ids: Vec<String>) -> Result<()> {
+        self.transport.add_channel_users(channel_id, user_ids).await
+    }
+
+    /// Send a channel message, uploading each `media_url` as an attachment first.
+    pub async fn send_message_with_media(
+        &self,
+        clan_id: &str,
+        channel_id: &str,
+        content: &str,
+        is_public: bool,
+        media_urls: &[String],
+    ) -> Result<ApiMessage> {
+        let mut attachments = Vec::with_capacity(media_urls.len());
+        for url in media_urls {
+            attachments.push(self.upload_media_from_url(url).await?);
+        }
+        self.transport
+            .send_channel_message_with_attachments(
+                clan_id,
+                channel_id,
+                content,
+                is_public,
+                attachments,
+            )
+            .await
+    }
+
+    async fn upload_media_from_url(
+        &self,
+        url: &str,
+    ) -> Result<mezon_proto::api::MessageAttachment> {
+        let (data, content_type) = crate::transport_runtime::fetch_bytes(url).await?;
+        let filetype = content_type.unwrap_or_else(|| "application/octet-stream".to_string());
+        let ext = match filetype.split('/').nth(1) {
+            Some(e) if !e.is_empty() => e,
+            _ => "bin",
+        };
+        let stem = url
+            .split('?')
+            .next()
+            .unwrap_or(url)
+            .rsplit('/')
+            .next()
+            .filter(|s| !s.is_empty())
+            .unwrap_or("media");
+        let filename = if stem.contains('.') {
+            sanitize_filename(stem)
+        } else {
+            sanitize_filename(&format!("{stem}.{ext}"))
+        };
+        let size = data.len() as i32;
+
+        let (width, height) = if filetype.starts_with("image/") {
+            image::load_from_memory(&data)
+                .ok()
+                .map(|img| {
+                    let (w, h) = img.dimensions();
+                    (w as i32, h as i32)
+                })
+                .unwrap_or((0, 0))
+        } else {
+            (0, 0)
+        };
+
+        let upload = self
+            .transport
+            .upload_attachment_file(&filename, &filetype, size, width, height)
+            .await?;
+        crate::transport_runtime::put_bytes_to_url(&upload.url, data).await?;
+        let permanent_url = upload
+            .url
+            .split('?')
+            .next()
+            .unwrap_or(&upload.url)
+            .to_string();
+
+        Ok(mezon_proto::api::MessageAttachment {
+            filename,
+            size,
+            url: permanent_url,
+            filetype,
+            width,
+            height,
+            thumbnail: String::new(),
+            duration: 0,
+        })
+    }
+
     pub async fn update_user(&self, display_name: &str, avatar_url: &str) -> Result<()> {
         self.transport.update_user(display_name, avatar_url).await
     }

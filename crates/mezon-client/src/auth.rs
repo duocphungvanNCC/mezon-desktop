@@ -132,12 +132,11 @@ impl Default for MezonClient {
 impl MezonClient {
     /// Construct a new client with explicit connection parameters.
     pub fn new(host: &str, port: u16, secure: bool, server_key: &str) -> Self {
-        // ReqwestClient::new() calls reqwest::Client::builder().build().into()
-        // The From<reqwest::Client> impl calls Handle::try_current(); if no tokio runtime
-        // is current it falls back to the static OnceLock<Runtime>.
-        // All subsequent .send() calls are spawned onto that handle — safe from any executor.
+        // Built on the shared transport runtime (`new_http_client` enters it) so this REST client
+        // reuses that runtime's handle instead of spinning up reqwest's own — one tokio for all.
+        // `.send()` is then spawned onto that handle, safe to await from any executor.
         Self {
-            http: Arc::new(ReqwestClient::new()),
+            http: Arc::new(crate::transport_runtime::new_http_client()),
             host: host.to_owned(),
             port,
             secure,

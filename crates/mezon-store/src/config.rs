@@ -5,7 +5,9 @@
 
 use gpui::{App, Global};
 use std::sync::Arc;
-#[derive(Debug, Clone)]
+// No `Debug` derive: AppConfig holds secrets (api_key, imgproxy_key, fcm/tenor/treasury keys,
+// webrtc credential). Deny `{:?}` so they can't leak into logs; log specific non-secret fields.
+#[derive(Clone)]
 pub struct AppConfig {
     // ── REST API (bootstrap, pre-auth) ──────────────────────────────────────
     pub api_host: String,

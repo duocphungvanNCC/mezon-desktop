@@ -9,7 +9,8 @@ members = [
     "crates/mezon-updater",
     "crates/mezon-proto",
     "crates/mezon-i18n",
-    "crates/mezon-active-windows",
+    # "crates/mezon-active-windows" excluded: orphan (unused) + does not compile (Rust 2024
+    # `unsafe extern` + core_foundation API mismatch). Re-add once fixed & wired for rich-presence.
     # Vendored GPUI crates
     "crates/vendor/gpui",
     "crates/vendor/gpui_macros",
@@ -106,7 +107,7 @@ mezon-native  = { path = "crates/mezon-native" }
 mezon-proto   = { path = "crates/mezon-proto" }
 mezon-updater = { path = "crates/mezon-updater" }
 mezon-i18n    = { path = "crates/mezon-i18n" }
-mezon-active-windows = { path = "crates/mezon-active-windows" }
+# mezon-active-windows = { path = "crates/mezon-active-windows" }  # excluded — see [workspace.members]
 
 # ---------- Async runtime ----------
 tokio                = { version = "1", features = ["full"] }

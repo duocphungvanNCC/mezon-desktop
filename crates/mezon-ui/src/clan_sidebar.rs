@@ -7,6 +7,7 @@ use gpui::{
 use mezon_store::{ClanList, Settings};
 
 use crate::components::primitives::{Avatar, Badge, Icon, IconName, Sizable, Size};
+use crate::router::{Route, Router};
 use crate::theme::ActiveTheme;
 
 #[derive(Clone)]
@@ -26,6 +27,12 @@ fn on_clan_click(
         clan_list.update(cx, |m, cx| {
             m.select_clan(&clan_id, cx);
         });
+        if !matches!(
+            Router::global(cx).read(cx).route(),
+            Route::Chat | Route::Channel { .. }
+        ) {
+            crate::router::navigate(cx, Route::Chat);
+        }
     }
 }
 
@@ -47,6 +54,8 @@ impl ClanSidebar {
         })
         .detach();
         cx.observe(&settings, |_, _, cx| cx.notify()).detach();
+        cx.observe(&Router::global(cx), |_, _, cx| cx.notify())
+            .detach();
 
         let mut this = Self {
             clan_list,
@@ -81,6 +90,10 @@ impl ClanSidebar {
 impl Render for ClanSidebar {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
+        let dm_active = matches!(
+            Router::global(cx).read(cx).route(),
+            Route::Direct | Route::DirectMessage { .. }
+        );
         let rows = self.rows.clone();
         let clan_list_handle = self.clan_list.clone();
         let list_state = self.list_state.clone();
@@ -100,9 +113,24 @@ impl Render for ClanSidebar {
             .p_2()
             .child(
                 div()
+                    .id("dm-logo")
+                    .relative()
                     .flex()
                     .items_center()
                     .justify_center()
+                    .cursor_pointer()
+                    .on_click(|_, _, cx| crate::router::navigate(cx, Route::Direct))
+                    .when(dm_active, |el| {
+                        el.child(
+                            div()
+                                .absolute()
+                                .left_0()
+                                .top(px(8.))
+                                .bottom(px(8.))
+                                .w(px(4.))
+                                .bg(theme.brand),
+                        )
+                    })
                     .child(Avatar::new().name("U").with_size(Size::Small)),
             )
             .child(div().w_full().h_1().bg(theme.border).my_1())
@@ -118,6 +146,10 @@ fn render_clan_row(
     clan_list_handle: Entity<ClanList>,
 ) -> AnyElement {
     let theme = cx.theme();
+    let dm_active = matches!(
+        Router::global(cx).read(cx).route(),
+        Route::Direct | Route::DirectMessage { .. }
+    );
     let Some(clan) = rows.get(ix) else {
         return div().into_any_element();
     };
@@ -128,15 +160,19 @@ fn render_clan_row(
     let mut clan_div = div()
         .id(SharedString::from(format!("clan-{}", clan.id)))
         .relative()
+        .flex()
         .w_full()
+        .h(px(56.))
+        .items_center()
+        .justify_center()
         .cursor_pointer()
-        .when(clan.is_active, |el| {
+        .when(clan.is_active && !dm_active, |el| {
             el.child(
                 div()
                     .absolute()
                     .left_0()
-                    .top_0()
-                    .bottom_0()
+                    .top(px(16.))
+                    .bottom(px(16.))
                     .w(px(4.))
                     .bg(theme.brand),
             )

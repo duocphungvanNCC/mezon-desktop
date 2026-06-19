@@ -1,10 +1,12 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use gpui::{App, AppContext, Context, Entity, EventEmitter, Global, Task};
+use gpui::{App, AppContext, Context, Entity, EventEmitter, Global};
 use mezon_client::AppApi;
 use mezon_client::RealtimeEvent;
 use mezon_client::transport::ApiAccount;
+
+use crate::realtime::{RealtimeDispatch, RealtimeKind};
 
 #[derive(Debug, Clone)]
 pub struct UserAccount {
@@ -64,7 +66,6 @@ pub struct AccountStore {
     pub clan_profile_loading: bool,
     pub nickname_duplicate: bool,
     api: Arc<AppApi>,
-    _realtime: Task<()>,
 }
 
 struct GlobalAccountStore(Entity<AccountStore>);
@@ -80,36 +81,7 @@ impl AccountStore {
     }
 
     fn new(api: Arc<AppApi>, cx: &mut Context<Self>) -> Self {
-        let api_for_realtime = api.clone();
-        let realtime = cx.spawn(async move |this, cx| {
-            let mut rx = api_for_realtime.subscribe();
-            loop {
-                match rx.recv().await {
-                    Ok(event) => {
-                        if this
-                            .update(cx, |this, cx| this.handle_event(event, cx))
-                            .is_err()
-                        {
-                            break;
-                        }
-                    }
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                        if this
-                            .update(cx, |this, cx| {
-                                tracing::warn!("AccountStore realtime lagged — refetching account");
-                                if this.account.is_some() || this.account_loading {
-                                    this.fetch_account(cx);
-                                }
-                            })
-                            .is_err()
-                        {
-                            break;
-                        }
-                    }
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-                }
-            }
-        });
+        Self::register_realtime(cx);
 
         Self {
             account: None,
@@ -122,11 +94,28 @@ impl AccountStore {
             clan_profile_loading: false,
             nickname_duplicate: false,
             api,
-            _realtime: realtime,
         }
     }
 
-    fn handle_event(&mut self, event: RealtimeEvent, cx: &mut Context<Self>) {
+    /// Register realtime handlers with the central dispatcher (cf. `add_message_handler`).
+    fn register_realtime(cx: &mut Context<Self>) {
+        let entity = cx.entity();
+        RealtimeDispatch::global(cx).update(cx, |dispatch, _| {
+            dispatch.on(
+                RealtimeKind::ClanProfileUpdated,
+                &entity,
+                |this, event, cx| this.handle_event(event, cx),
+            );
+            dispatch.on_lagged(&entity, |this, cx| {
+                tracing::warn!("AccountStore realtime lagged — refetching account");
+                if this.account.is_some() || this.account_loading {
+                    this.fetch_account(cx);
+                }
+            });
+        });
+    }
+
+    fn handle_event(&mut self, event: &RealtimeEvent, cx: &mut Context<Self>) {
         if let RealtimeEvent::ClanProfileUpdated(e) = event {
             let clan_id = e.clan_id.to_string();
             if self

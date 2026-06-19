@@ -6,6 +6,7 @@
 use crate::abridged_tcp_adapter::AbridgedTcpAdapter;
 use crate::transport::MezonTransport;
 use anyhow::Result;
+use futures::AsyncReadExt as _;
 use http_client::{AsyncBody, HttpClient, http};
 use reqwest_client::ReqwestClient;
 use std::sync::OnceLock;
@@ -15,7 +16,15 @@ static TRANSPORT_RUNTIME: OnceLock<Runtime> = OnceLock::new();
 static HTTP_CLIENT: OnceLock<ReqwestClient> = OnceLock::new();
 
 fn http_client() -> &'static ReqwestClient {
-    HTTP_CLIENT.get_or_init(ReqwestClient::new)
+    HTTP_CLIENT.get_or_init(new_http_client)
+}
+
+/// Build a `ReqwestClient` bound to the shared transport runtime: constructing it inside the
+/// runtime context makes reqwest capture this runtime's `Handle` (via `Handle::try_current`)
+/// instead of spinning up its own — so all HTTP shares one tokio runtime with the socket transport.
+pub fn new_http_client() -> ReqwestClient {
+    let _guard = runtime().enter();
+    ReqwestClient::new()
 }
 
 /// Get or create the shared transport runtime.
@@ -53,6 +62,35 @@ pub async fn put_bytes_to_url(url: &str, data: Vec<u8>) -> Result<()> {
         anyhow::bail!("HTTP PUT failed with status {}", status);
     }
     Ok(())
+}
+
+const MAX_FETCH_BYTES: u64 = 64 * 1024 * 1024;
+
+/// HTTP GET bytes from a public URL (e.g. a sample image/video to seed as an attachment).
+/// Returns the body bytes and the `Content-Type` header if present.
+pub async fn fetch_bytes(url: &str) -> Result<(Vec<u8>, Option<String>)> {
+    let client = http_client();
+    let request = http::Request::builder()
+        .method(http::Method::GET)
+        .uri(url)
+        .body(AsyncBody::empty())?;
+    let mut response = client.send(request).await?;
+    let status = response.status();
+    if !status.is_success() {
+        anyhow::bail!("HTTP GET failed with status {}", status);
+    }
+    let content_type = response
+        .headers()
+        .get(http::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
+    let mut bytes: Vec<u8> = Vec::new();
+    let mut limited = response.body_mut().take(MAX_FETCH_BYTES + 1);
+    limited.read_to_end(&mut bytes).await?;
+    if bytes.len() as u64 > MAX_FETCH_BYTES {
+        anyhow::bail!("response exceeds {MAX_FETCH_BYTES}-byte cap");
+    }
+    Ok((bytes, content_type))
 }
 
 /// Read a file without blocking the caller's async executor.
@@ -98,7 +136,7 @@ impl TransportClient {
         on_event: impl Fn(crate::transport::RealtimeEvent) + Send + Sync + 'static,
         on_disconnected: impl Fn(bool) + Send + Sync + 'static,
     ) -> Result<()> {
-        tracing::info!("TransportClient::connect() starting");
+        tracing::debug!("TransportClient::connect() starting");
         tracing::debug!("  Spawning connection task on dedicated transport runtime...");
 
         let transport = self.inner.clone();
@@ -124,7 +162,7 @@ impl TransportClient {
             .await
             .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))??;
 
-        tracing::info!("TransportClient::connect() completed");
+        tracing::debug!("TransportClient::connect() completed");
         Ok(())
     }
 
@@ -132,7 +170,7 @@ impl TransportClient {
     ///
     /// Spawns the API call on the dedicated transport runtime.
     pub async fn get_account(&self) -> Result<crate::transport::ApiAccount> {
-        tracing::info!("TransportClient::get_account() called");
+        tracing::debug!("TransportClient::get_account() called");
 
         let transport = self.inner.clone();
 
@@ -154,7 +192,7 @@ impl TransportClient {
         &self,
         clan_id: &str,
     ) -> Result<Vec<crate::transport::ApiChannelDesc>> {
-        tracing::info!("TransportClient::list_channel_descs() called");
+        tracing::debug!("TransportClient::list_channel_descs() called");
 
         let transport = self.inner.clone();
         let clan_id = clan_id.to_string();
@@ -167,7 +205,7 @@ impl TransportClient {
 
     /// List channels for the current user over the shared transport.
     pub async fn list_channel_by_user_id(&self) -> Result<Vec<crate::transport::ApiChannelDesc>> {
-        tracing::info!("TransportClient::list_channel_by_user_id() called");
+        tracing::debug!("TransportClient::list_channel_by_user_id() called");
 
         let transport = self.inner.clone();
 
@@ -179,7 +217,7 @@ impl TransportClient {
 
     /// List clan descriptions over the shared transport.
     pub async fn list_clan_descs(&self) -> Result<Vec<crate::transport::ApiClanDesc>> {
-        tracing::info!("TransportClient::list_clan_descs() called");
+        tracing::debug!("TransportClient::list_clan_descs() called");
 
         let transport = self.inner.clone();
 
@@ -196,7 +234,7 @@ impl TransportClient {
         logo: &str,
         banner: &str,
     ) -> Result<crate::transport::ApiClanDesc> {
-        tracing::info!("TransportClient::create_clan_desc() called");
+        tracing::debug!("TransportClient::create_clan_desc() called");
 
         let transport = self.inner.clone();
         let clan_name = clan_name.to_string();
@@ -211,7 +249,7 @@ impl TransportClient {
 
     /// Ping server and wait for pong.
     pub async fn ping_roundtrip(&self) -> Result<()> {
-        tracing::info!("TransportClient::ping_roundtrip() called");
+        tracing::debug!("TransportClient::ping_roundtrip() called");
 
         let transport = self.inner.clone();
 
@@ -293,6 +331,100 @@ impl TransportClient {
             .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
     }
 
+    pub async fn send_channel_message_with_attachments(
+        &self,
+        clan_id: &str,
+        channel_id: &str,
+        content: &str,
+        is_public: bool,
+        attachments: Vec<mezon_proto::api::MessageAttachment>,
+    ) -> Result<crate::transport::ApiMessage> {
+        let transport = self.inner.clone();
+        let clan_id = clan_id.to_string();
+        let channel_id = channel_id.to_string();
+        let content = content.to_string();
+
+        runtime()
+            .spawn(async move {
+                transport
+                    .send_channel_message_with_attachments(
+                        &clan_id,
+                        &channel_id,
+                        &content,
+                        is_public,
+                        attachments,
+                    )
+                    .await
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
+    /// Create a new channel in a clan.
+    pub async fn create_channel(
+        &self,
+        clan_id: &str,
+        channel_label: &str,
+        channel_type: u32,
+        category_id: Option<&str>,
+        parent_id: Option<&str>,
+    ) -> Result<crate::transport::ApiChannelDesc> {
+        let transport = self.inner.clone();
+        let clan_id = clan_id.to_string();
+        let channel_label = channel_label.to_string();
+        let category_id = category_id.map(str::to_string);
+        let parent_id = parent_id.map(str::to_string);
+
+        runtime()
+            .spawn(async move {
+                transport
+                    .create_channel(
+                        &clan_id,
+                        &channel_label,
+                        channel_type,
+                        category_id.as_deref(),
+                        parent_id.as_deref(),
+                    )
+                    .await
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
+    /// Create a category in a clan.
+    pub async fn create_category_desc(
+        &self,
+        category_name: &str,
+        clan_id: &str,
+    ) -> Result<mezon_proto::api::CategoryDesc> {
+        let transport = self.inner.clone();
+        let category_name = category_name.to_string();
+        let clan_id = clan_id.to_string();
+
+        runtime()
+            .spawn(async move {
+                transport
+                    .create_category_desc(&category_name, &clan_id)
+                    .await
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
+    /// Add users to a channel.
+    pub async fn add_channel_users(&self, channel_id: &str, user_ids: Vec<String>) -> Result<()> {
+        let transport = self.inner.clone();
+        let channel_id = channel_id.to_string();
+
+        runtime()
+            .spawn(async move {
+                let refs: Vec<&str> = user_ids.iter().map(String::as_str).collect();
+                transport.add_channel_users(&channel_id, &refs).await
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
     /// Close the connection.
     ///
     /// Spawns the close operation on the dedicated transport runtime.
@@ -336,7 +468,7 @@ impl TransportClient {
         avatar_url: Option<&str>,
         about_me: Option<&str>,
     ) -> Result<()> {
-        tracing::info!("TransportClient::update_account() called");
+        tracing::debug!("TransportClient::update_account() called");
 
         let transport = self.inner.clone();
         let display_name = display_name.map(str::to_string);

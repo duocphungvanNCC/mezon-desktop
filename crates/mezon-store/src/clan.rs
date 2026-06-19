@@ -4,6 +4,8 @@ use gpui::{App, AppContext, Context, Entity, EventEmitter, Global, Task};
 use mezon_client::transport::ApiClanDesc;
 use mezon_client::{AppApi, ConnectionStatus, RealtimeEvent};
 
+use crate::realtime::{RealtimeDispatch, RealtimeKind};
+
 #[derive(Debug, Clone)]
 pub struct Clan {
     pub id: String,
@@ -44,7 +46,6 @@ pub struct ClanList {
     pub clans: Vec<Clan>,
     pub active_clan_id: Option<String>,
     api: Arc<AppApi>,
-    _realtime: Task<()>,
     _connection_watch: Task<()>,
 }
 
@@ -72,47 +73,35 @@ impl ClanList {
     }
 
     fn new(api: Arc<AppApi>, cx: &mut Context<Self>) -> Self {
-        let realtime = Self::spawn_realtime(api.clone(), cx);
+        Self::register_realtime(cx);
         let connection_watch = Self::spawn_connection_watch(api.clone(), cx);
         Self {
             clans: Vec::new(),
             active_clan_id: None,
             api,
-            _realtime: realtime,
             _connection_watch: connection_watch,
         }
     }
 
-    /// Subscribe to the realtime broadcast and dispatch each event to `handle_event`.
-    /// Cf. `ChannelStore::new` registering `client.add_message_handler(...)`.
-    fn spawn_realtime(api: Arc<AppApi>, cx: &mut Context<Self>) -> Task<()> {
-        cx.spawn(async move |this, cx| {
-            let mut rx = api.subscribe();
-            loop {
-                match rx.recv().await {
-                    Ok(event) => {
-                        if this
-                            .update(cx, |this, cx| this.handle_event(event, cx))
-                            .is_err()
-                        {
-                            break; // store dropped
-                        }
-                    }
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                        if this
-                            .update(cx, |this, cx| {
-                                tracing::warn!("ClanList realtime lagged — reloading clans");
-                                this.reload(cx);
-                            })
-                            .is_err()
-                        {
-                            break;
-                        }
-                    }
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-                }
+    /// Register realtime handlers with the central dispatcher (cf. `add_message_handler`).
+    fn register_realtime(cx: &mut Context<Self>) {
+        let entity = cx.entity();
+        RealtimeDispatch::global(cx).update(cx, |dispatch, _| {
+            for kind in [
+                RealtimeKind::ClanUpdated,
+                RealtimeKind::ClanDeleted,
+                RealtimeKind::AddClanUser,
+                RealtimeKind::UserClanRemoved,
+            ] {
+                dispatch.on(kind, &entity, |this, event, cx| {
+                    this.handle_event(event, cx)
+                });
             }
-        })
+            dispatch.on_lagged(&entity, |this, cx| {
+                tracing::warn!("ClanList realtime lagged — reloading clans");
+                this.reload(cx);
+            });
+        });
     }
 
     fn spawn_connection_watch(api: Arc<AppApi>, cx: &mut Context<Self>) -> Task<()> {
@@ -126,14 +115,9 @@ impl ClanList {
                 let connected = *status_rx.borrow() == ConnectionStatus::Connected;
                 if connected && !was_connected {
                     was_connected = true;
-                    if this
-                        .update(cx, |this, cx| {
-                            if this.clans.is_empty() {
-                                this.reload(cx);
-                            }
-                        })
-                        .is_err()
-                    {
+                    // Reconnected — realtime pushes were missed while offline, so the cached list
+                    // is stale: always refetch (not just when empty).
+                    if this.update(cx, |this, cx| this.reload(cx)).is_err() {
                         break;
                     }
                 } else if !connected {
@@ -158,7 +142,7 @@ impl ClanList {
     }
 
     /// Apply a server-pushed realtime event. Cf. `ChannelStore::handle_update_channels`.
-    fn handle_event(&mut self, event: RealtimeEvent, cx: &mut Context<Self>) {
+    fn handle_event(&mut self, event: &RealtimeEvent, cx: &mut Context<Self>) {
         match event {
             RealtimeEvent::ClanDeleted(e) => {
                 let id = e.clan_id.to_string();
@@ -175,8 +159,13 @@ impl ClanList {
                 }
             }
             RealtimeEvent::ClanUpdated(e) => {
-                let name = (!e.clan_name.is_empty()).then_some(e.clan_name);
-                if update_clan(&mut self.clans, &e.clan_id.to_string(), name, e.logo) {
+                let name = (!e.clan_name.is_empty()).then_some(e.clan_name.clone());
+                if update_clan(
+                    &mut self.clans,
+                    &e.clan_id.to_string(),
+                    name,
+                    e.logo.clone(),
+                ) {
                     cx.notify();
                 }
             }
@@ -187,9 +176,18 @@ impl ClanList {
                 }
             }
             RealtimeEvent::UserClanRemoved(e) => {
+                // Removed from a clan — drop it locally (no socket re-list), like ClanDeleted.
                 let id = e.clan_id.to_string();
-                if self.clans.iter().any(|c| c.id == id) {
-                    self.reload(cx);
+                let before = self.clans.len();
+                self.clans.retain(|c| c.id != id);
+                if self.clans.len() != before {
+                    cx.emit(ClanEvent::Deleted(id.clone()));
+                    if self.active_clan_id.as_deref() == Some(id.as_str()) {
+                        let next = self.clans.first().map(|c| c.id.clone());
+                        self.active_clan_id = next.clone();
+                        cx.emit(ClanEvent::ActiveClanChanged(next));
+                    }
+                    cx.notify();
                 }
             }
             _ => {}

@@ -28,7 +28,7 @@ impl MessageTimeline {
             }
             MessagesEvent::OlderPrepended { count } => this.list_state.splice(0..0, *count),
             MessagesEvent::Appended => {
-                let new_len = store.read(cx).messages.len();
+                let new_len = store.read(cx).messages().len();
                 let old_len = this.list_state.item_count();
                 if new_len >= old_len {
                     this.list_state.splice(old_len..old_len, new_len - old_len);
@@ -62,14 +62,14 @@ impl Render for MessageTimeline {
         }
 
         let store = MessagesStore::global(cx);
-        let count = store.read(cx).messages.len();
+        let count = store.read(cx).messages().len();
         if self.list_state.item_count() != count {
             self.list_state.reset(count);
         }
 
         let list_state = self.list_state.clone();
         let list_element = list(list_state, move |ix, _window, cx| {
-            render_row(&store.read(cx).messages, ix, cx, "")
+            render_row(store.read(cx).messages(), ix, cx, "")
         })
         .size_full();
 
