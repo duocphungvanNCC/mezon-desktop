@@ -4,6 +4,7 @@ pub mod chat;
 pub mod clan;
 pub mod components;
 pub mod dev;
+pub mod image_cache;
 pub mod router;
 pub mod settings;
 pub mod sidebar;

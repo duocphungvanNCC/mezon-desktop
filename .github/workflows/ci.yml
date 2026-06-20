@@ -5,6 +5,7 @@ on:
   push:
     branches:
       - main
+      - develop
 
 env:
   CARGO_TERM_COLOR: always
@@ -21,14 +22,14 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: 1.94.1
+          toolchain: 1.95.0
           components: rustfmt
 
       - name: Check formatting
         run: cargo fmt --all -- --check
 
-  clippy:
-    name: Clippy
+  lint:
+    name: Lint
     runs-on: macos-latest
     steps:
       - name: Checkout
@@ -45,21 +46,38 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: 1.94.1
+          toolchain: 1.95.0
           components: clippy
           targets: aarch64-apple-darwin,x86_64-apple-darwin
 
       - name: Cache Cargo
         uses: Swatinem/rust-cache@v2
 
-      - name: Run Clippy on Mezon crates
+      - name: Install just
+        run: cargo install just --locked
+
+      - name: Lint Mezon crates
+        run: just lint
+
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.95.0
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install just and nextest
         run: |
-          cargo clippy --no-deps \
-            -p mezon-app \
-            -p mezon-ui \
-            -p mezon-client \
-            -p mezon-store \
-            -p mezon-native \
-            -p mezon-updater \
-            -p mezon-proto \
-            -- -D warnings
+          cargo install just --locked
+          cargo install cargo-nextest --locked
+
+      - name: Run tests
+        run: just test

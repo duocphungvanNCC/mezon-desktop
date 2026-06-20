@@ -2,7 +2,6 @@ use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::Result;
-use image::GenericImageView;
 
 use crate::{
     TransportClient,
@@ -11,6 +10,8 @@ use crate::{
         ApiMessage, ApiVoiceChannelUser, RealtimeEvent,
     },
 };
+
+const CHECK_NAME_TYPE_NICKNAME: i32 = 4;
 
 fn sanitize_filename(name: &str) -> String {
     name.chars()
@@ -22,6 +23,24 @@ fn sanitize_filename(name: &str) -> String {
             }
         })
         .collect()
+}
+
+fn clamp_i32(value: usize) -> i32 {
+    i32::try_from(value).unwrap_or(i32::MAX)
+}
+
+fn image_dimensions(data: &[u8]) -> (i32, i32) {
+    image::ImageReader::new(std::io::Cursor::new(data))
+        .with_guessed_format()
+        .ok()
+        .and_then(|reader| reader.into_dimensions().ok())
+        .map(|(w, h)| {
+            (
+                i32::try_from(w).unwrap_or(i32::MAX),
+                i32::try_from(h).unwrap_or(i32::MAX),
+            )
+        })
+        .unwrap_or((0, 0))
 }
 
 /// Connection lifecycle of the realtime transport — the analog of Zed's `client::Status`.
@@ -188,10 +207,10 @@ impl AppApi {
         mode: i32,
         media_urls: &[String],
     ) -> Result<ApiMessage> {
-        let mut attachments = Vec::with_capacity(media_urls.len());
-        for url in media_urls {
-            attachments.push(self.upload_media_from_url(url).await?);
-        }
+        let attachments = futures::future::try_join_all(
+            media_urls.iter().map(|url| self.upload_media_from_url(url)),
+        )
+        .await?;
         self.transport
             .send_channel_message_with_attachments(
                 clan_id,
@@ -202,6 +221,28 @@ impl AppApi {
                 attachments,
             )
             .await
+    }
+
+    async fn upload_bytes(
+        &self,
+        filename: &str,
+        filetype: &str,
+        size: i32,
+        width: i32,
+        height: i32,
+        data: Vec<u8>,
+    ) -> Result<String> {
+        let upload = self
+            .transport
+            .upload_attachment_file(filename, filetype, size, width, height)
+            .await?;
+        crate::transport_runtime::put_bytes_to_url(&upload.url, data).await?;
+        Ok(upload
+            .url
+            .split('?')
+            .next()
+            .unwrap_or(&upload.url)
+            .to_string())
     }
 
     async fn upload_media_from_url(
@@ -227,36 +268,22 @@ impl AppApi {
         } else {
             sanitize_filename(&format!("{stem}.{ext}"))
         };
-        let size = data.len() as i32;
+        let size = clamp_i32(data.len());
 
         let (width, height) = if filetype.starts_with("image/") {
-            image::load_from_memory(&data)
-                .ok()
-                .map(|img| {
-                    let (w, h) = img.dimensions();
-                    (w as i32, h as i32)
-                })
-                .unwrap_or((0, 0))
+            image_dimensions(&data)
         } else {
             (0, 0)
         };
 
-        let upload = self
-            .transport
-            .upload_attachment_file(&filename, &filetype, size, width, height)
+        let url = self
+            .upload_bytes(&filename, &filetype, size, width, height, data)
             .await?;
-        crate::transport_runtime::put_bytes_to_url(&upload.url, data).await?;
-        let permanent_url = upload
-            .url
-            .split('?')
-            .next()
-            .unwrap_or(&upload.url)
-            .to_string();
 
         Ok(mezon_proto::api::MessageAttachment {
             filename,
             size,
-            url: permanent_url,
+            url,
             filetype,
             width,
             height,
@@ -293,7 +320,6 @@ impl AppApi {
             .await
     }
 
-    /// Full avatar upload flow: get pre-signed URL, PUT file bytes, return permanent URL.
     pub async fn get_user_clan_profile(
         &self,
         clan_id: &str,
@@ -330,7 +356,7 @@ impl AppApi {
             .map_err(|e| anyhow::anyhow!("invalid clan_id {clan_id:?}: {e}"))?;
         let resp = self
             .transport
-            .check_duplicate_name(nick_name, 4, condition_id)
+            .check_duplicate_name(nick_name, CHECK_NAME_TYPE_NICKNAME, condition_id)
             .await?;
         Ok(resp.is_duplicate)
     }
@@ -350,25 +376,23 @@ impl AppApi {
             .unwrap_or("png")
             .to_string();
         let filetype = format!("image/{}", ext);
-        let size = data.len() as i32;
+        let size = clamp_i32(data.len());
+        let (width, height) = image_dimensions(&data);
 
-        let (width, height) = image::load_from_memory(&data)
-            .ok()
-            .map(|img| img.dimensions())
-            .unwrap_or((0, 0));
+        tracing::info!(
+            "upload_avatar: file read ok filename={} filetype={} size={} width={} height={}",
+            filename,
+            filetype,
+            size,
+            width,
+            height
+        );
 
-        let upload = self
-            .transport
-            .upload_attachment_file(&filename, &filetype, size, width as i32, height as i32)
+        let permanent_url = self
+            .upload_bytes(&filename, &filetype, size, width, height, data)
             .await?;
 
-        crate::transport_runtime::put_bytes_to_url(&upload.url, data).await?;
-
-        let permanent_url = upload
-            .url
-            .split_once('?')
-            .map(|(base, _)| base.to_string())
-            .unwrap_or(upload.url);
+        tracing::info!("Avatar upload complete: url={}", permanent_url);
 
         Ok(permanent_url)
     }

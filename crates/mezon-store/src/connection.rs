@@ -16,7 +16,8 @@ use mezon_client::{
 use crate::AuthState;
 use crate::realtime::{RealtimeDispatch, RealtimeKind};
 
-const HEARTBEAT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(15);
+const HEARTBEAT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(10);
+const CONNECT_CONFIRM_GRACE: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// Owns the transport connection manager task + the auth-state observation. Registered as a
 /// [`Global`] so it lives for the process; the held [`Task`]/[`Subscription`] cancel on drop.
@@ -60,7 +61,8 @@ impl ConnectionStore {
         auth_state: Entity<AuthState>,
         cx: &mut Context<Self>,
     ) -> Self {
-        Self::register_session_refresh(&auth_state, cx);
+        let (connect_ack_tx, connect_ack_rx) = tokio::sync::watch::channel(0u64);
+        Self::register_session_refresh(&auth_state, connect_ack_tx, cx);
 
         // Wake signal that drives reconciliation — fired on auth-state changes and on socket
         // disconnect. Replaces the old 500ms poll (cf. Zed's reactive `client.status()` loop).
@@ -100,6 +102,7 @@ impl ConnectionStore {
             let exec = cx.background_executor().clone();
             let mut connected_user_id: Option<String> = None;
             let mut retry_backoff_secs = 1u64;
+            let mut connect_ack_rx = connect_ack_rx;
 
             loop {
                 let session = cx.update(|cx| match auth_state.read(cx).clone() {
@@ -148,6 +151,7 @@ impl ConnectionStore {
                 let api_for_publish = api.clone();
                 let api_for_close = api.clone();
                 let wake_for_close = wake.clone();
+                connect_ack_rx.borrow_and_update();
                 match transport
                     .connect(
                         &host,
@@ -172,34 +176,39 @@ impl ConnectionStore {
                     Ok(()) => {
                         tracing::info!("Shared abridged TCP transport connected");
 
-                        exec.timer(std::time::Duration::from_millis(250)).await;
-                        match api.get_account().await {
-                            Ok(account) => {
-                                connected_user_id = Some(session.user_id.clone());
-                                retry_backoff_secs = 1;
-                                api.set_status(ConnectionStatus::Connected);
-                                tracing::info!("get_account over shared TCP succeeded");
-                                tracing::debug!("authenticated user_id={}", account.user_id);
+                        let confirmed = {
+                            let signaled = tokio::select! {
+                                res = connect_ack_rx.changed() => res.is_ok(),
+                                _ = exec.timer(CONNECT_CONFIRM_GRACE) => true,
+                            };
+                            signaled && transport.is_open().await
+                        };
 
-                                cx.update(|cx| {
-                                    auth_state.update(cx, |state, cx| {
-                                        if let AuthState::Connecting(s) = state {
-                                            let session = s.clone();
-                                            *state = AuthState::Authenticated(session);
-                                            cx.notify();
-                                        }
-                                    });
+                        if confirmed {
+                            connected_user_id = Some(session.user_id.clone());
+                            retry_backoff_secs = 1;
+                            api.set_status(ConnectionStatus::Connected);
+                            tracing::info!("Connection confirmed — handshake accepted");
+
+                            cx.update(|cx| {
+                                auth_state.update(cx, |state, cx| {
+                                    if let AuthState::Connecting(s) = state {
+                                        let session = s.clone();
+                                        *state = AuthState::Authenticated(session);
+                                        cx.notify();
+                                    }
                                 });
-                            }
-                            Err(e) => {
-                                tracing::error!("get_account over shared TCP failed: {e}");
-                                let _ = transport.close().await;
-                                connected_user_id = None;
-                                api.set_status(ConnectionStatus::Disconnected);
-                                retry_backoff_secs = (retry_backoff_secs * 2).min(60);
-                                promote_connecting_to_authenticated(&auth_state, cx);
-                                backoff_wait(&exec, &wake, retry_backoff_secs).await;
-                            }
+                            });
+                        } else {
+                            tracing::warn!(
+                                "Connection not confirmed — handshake rejected or dropped"
+                            );
+                            let _ = transport.close().await;
+                            connected_user_id = None;
+                            api.set_status(ConnectionStatus::Disconnected);
+                            retry_backoff_secs = (retry_backoff_secs * 2).min(60);
+                            promote_connecting_to_authenticated(&auth_state, cx);
+                            backoff_wait(&exec, &wake, retry_backoff_secs).await;
                         }
                     }
                     Err(e) => {
@@ -249,15 +258,20 @@ impl ConnectionStore {
 
     /// Apply server-pushed `refresh_session_event`s and persist the refreshed session — the
     /// native equivalent of mezon-js `client.onrefreshsession`.
-    fn register_session_refresh(auth_state: &Entity<AuthState>, cx: &mut Context<Self>) {
+    fn register_session_refresh(
+        auth_state: &Entity<AuthState>,
+        connect_ack_tx: tokio::sync::watch::Sender<u64>,
+        cx: &mut Context<Self>,
+    ) {
         RealtimeDispatch::global(cx).update(cx, |dispatch, _| {
             dispatch.on(
                 RealtimeKind::SessionRefreshed,
                 auth_state,
-                |state, event, cx| {
+                move |state, event, cx| {
                     let RealtimeEvent::SessionRefreshed(ev) = event else {
                         return;
                     };
+                    connect_ack_tx.send_modify(|n| *n = n.wrapping_add(1));
                     if ev.session_id.is_empty() {
                         return;
                     }
@@ -281,9 +295,10 @@ impl ConnectionStore {
 /// Wait out a reconnect backoff, but wake early if auth/connection state changes.
 async fn backoff_wait(exec: &BackgroundExecutor, wake: &tokio::sync::Notify, secs: u64) {
     let base_ms = secs.saturating_mul(1000);
+    let jitter_cap = (base_ms / 4).max(1);
     let jitter_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| u64::from(d.subsec_nanos()) % base_ms.max(1))
+        .map(|d| u64::from(d.subsec_nanos()) % jitter_cap)
         .unwrap_or(0);
     let delay = std::time::Duration::from_millis(base_ms + jitter_ms);
     tokio::select! {
