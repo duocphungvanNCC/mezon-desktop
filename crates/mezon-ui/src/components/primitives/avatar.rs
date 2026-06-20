@@ -8,8 +8,11 @@ pub struct Avatar {
     src: Option<SharedString>,
     name: Option<SharedString>,
     size: Size,
+    custom_size: Option<Pixels>,
     border_color: Option<Hsla>,
     indicator: Option<AnyElement>,
+    grayscale: bool,
+    fallback_src: Option<SharedString>,
 }
 
 impl Avatar {
@@ -18,13 +21,32 @@ impl Avatar {
             src: None,
             name: None,
             size: Size::Medium,
+            custom_size: None,
             border_color: None,
             indicator: None,
+            grayscale: false,
+            fallback_src: None,
         }
+    }
+
+    /// Override the avatar diameter with an explicit pixel size (e.g. 32px DM rows).
+    pub fn size_px(mut self, size: Pixels) -> Self {
+        self.custom_size = Some(size);
+        self
+    }
+
+    pub fn grayscale(mut self, grayscale: bool) -> Self {
+        self.grayscale = grayscale;
+        self
     }
 
     pub fn src(mut self, src: impl Into<SharedString>) -> Self {
         self.src = Some(src.into());
+        self
+    }
+
+    pub fn fallback_src(mut self, src: impl Into<SharedString>) -> Self {
+        self.fallback_src = Some(src.into());
         self
     }
 
@@ -69,6 +91,7 @@ fn diameter(size: Size) -> Pixels {
 fn initials_circle(d: Pixels, bg: Hsla, text_color: Hsla, initials: String) -> AnyElement {
     div()
         .flex()
+        .flex_shrink_0()
         .items_center()
         .justify_center()
         .size(d)
@@ -80,6 +103,31 @@ fn initials_circle(d: Pixels, bg: Hsla, text_color: Hsla, initials: String) -> A
         .into_any_element()
 }
 
+fn clipped_image(
+    size: Pixels,
+    src: SharedString,
+    grayscale: bool,
+    element_bg: Hsla,
+    loading: impl Fn() -> AnyElement + 'static,
+    on_error: impl Fn() -> AnyElement + 'static,
+) -> AnyElement {
+    div()
+        .size(size)
+        .flex_shrink_0()
+        .rounded_full()
+        .child(
+            img(src)
+                .size(size)
+                .rounded_full()
+                .object_fit(gpui::ObjectFit::Cover)
+                .grayscale(grayscale)
+                .bg(element_bg)
+                .with_loading(loading)
+                .with_fallback(on_error),
+        )
+        .into_any_element()
+}
+
 impl RenderOnce for Avatar {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
         let border_width = if self.border_color.is_some() {
@@ -88,16 +136,18 @@ impl RenderOnce for Avatar {
             px(0.)
         };
 
-        let image_size = diameter(self.size);
+        let image_size = self.custom_size.unwrap_or_else(|| diameter(self.size));
         let container_size = image_size + border_width * 2.;
 
-        let bg = Hsla::from(cx.theme().brand);
-        let text_color = Hsla::from(cx.theme().text_primary);
+        let name = self.name.clone().unwrap_or_default();
+        let bg = avatar_color(name.as_ref());
+        let text_color = Hsla::from(gpui::rgb(0xffffff));
         let element_bg = Hsla::from(cx.theme().bg_tertiary);
-        let initials = name_initials(self.name.clone().unwrap_or_default().as_ref());
+        let initials = name_initials(name.as_ref());
 
         div()
             .size(container_size)
+            .flex_shrink_0()
             .rounded_full()
             .when_some(self.border_color, |this, color| {
                 this.border(border_width).border_color(color)
@@ -105,18 +155,55 @@ impl RenderOnce for Avatar {
             .child(match self.src {
                 Some(src) => {
                     let loading_initials = initials.clone();
-                    let fallback_initials = initials;
-                    img(src)
-                        .size(image_size)
-                        .rounded_full()
-                        .bg(element_bg)
-                        .with_loading(move || {
+                    let fallback_initials = initials.clone();
+                    let raw_fallback = self.fallback_src.clone();
+                    let proxied = src.clone();
+                    let grayscale = self.grayscale;
+                    clipped_image(
+                        image_size,
+                        src,
+                        grayscale,
+                        element_bg,
+                        move || {
                             initials_circle(image_size, bg, text_color, loading_initials.clone())
-                        })
-                        .with_fallback(move || {
+                        },
+                        move || {
+                            if let Some(raw) = raw_fallback.clone()
+                                && !raw.is_empty()
+                                && raw.as_ref() != proxied.as_ref()
+                            {
+                                return clipped_image(
+                                    image_size,
+                                    raw,
+                                    grayscale,
+                                    element_bg,
+                                    {
+                                        let retry_loading = fallback_initials.clone();
+                                        move || {
+                                            initials_circle(
+                                                image_size,
+                                                bg,
+                                                text_color,
+                                                retry_loading.clone(),
+                                            )
+                                        }
+                                    },
+                                    {
+                                        let final_initials = fallback_initials.clone();
+                                        move || {
+                                            initials_circle(
+                                                image_size,
+                                                bg,
+                                                text_color,
+                                                final_initials.clone(),
+                                            )
+                                        }
+                                    },
+                                );
+                            }
                             initials_circle(image_size, bg, text_color, fallback_initials.clone())
-                        })
-                        .into_any_element()
+                        },
+                    )
                 }
                 None => initials_circle(image_size, bg, text_color, initials),
             })
@@ -124,17 +211,23 @@ impl RenderOnce for Avatar {
     }
 }
 
+/// Avatar fallback palette, 1:1 with mezon-react `avatarColors`. The background is picked by
+/// `firstChar.charCodeAt(0) % 7`, matching the web client exactly.
+const AVATAR_COLORS: [u32; 7] = [
+    0xade603, 0x00b2cc, 0xfda63c, 0xe16dcc, 0xe8467b, 0x9c7cfd, 0x22e2b3,
+];
+
+fn first_upper_char(name: &str) -> Option<char> {
+    name.chars().next().and_then(|c| c.to_uppercase().next())
+}
+
+fn avatar_color(name: &str) -> Hsla {
+    let code = first_upper_char(name).map(|c| c as u32).unwrap_or(0);
+    Hsla::from(gpui::rgb(AVATAR_COLORS[(code % 7) as usize]))
+}
+
 fn name_initials(name: &str) -> String {
-    let result: String = name
-        .split(|c: char| c.is_whitespace() || matches!(c, '.' | '_' | '-' | '@'))
-        .filter(|part| !part.is_empty())
-        .take(2)
-        .filter_map(|part| part.chars().next())
-        .collect::<String>()
-        .to_uppercase();
-    if result.is_empty() {
-        "?".to_string()
-    } else {
-        result
-    }
+    first_upper_char(name)
+        .map(|c| c.to_string())
+        .unwrap_or_else(|| "?".to_string())
 }

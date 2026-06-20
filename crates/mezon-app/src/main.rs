@@ -5,7 +5,7 @@ use gpui_platform::application;
 use mezon_client::{AppApi, MezonClient, TransportClient};
 use mezon_native::instance::SingleInstance;
 use mezon_store::{AppConfig, AuthState, Settings};
-use mezon_ui::{RootView, init as init_ui, title_bar::TitleBar};
+use mezon_ui::{RootView, TitleBar, init as init_ui};
 use std::borrow::Cow;
 use std::sync::Arc;
 use tracing_subscriber::layer::SubscriberExt;
@@ -161,7 +161,7 @@ fn run_app(lock: SingleInstance, initial_url: Option<String>) {
     let app_config_handle = app_config.clone();
     application()
         .with_http_client(Arc::new(mezon_client::transport_runtime::new_http_client()))
-        .with_assets(mezon_ui::assets::Assets)
+        .with_assets(mezon_ui::util::assets::Assets)
         .run(move |cx: &mut App| {
             tracing::debug!("App started");
 
@@ -351,6 +351,7 @@ fn open_main_window(
     mezon_store::RealtimeDispatch::init(api.clone(), cx);
     mezon_store::ClanList::init(api.clone(), cx);
     mezon_store::ChannelList::init(api.clone(), cx);
+    mezon_store::DirectMessageStore::init(api.clone(), cx);
     mezon_store::MessagesStore::init(api.clone(), cx);
     mezon_store::PresenceStore::init(api.clone(), cx);
     mezon_store::AccountStore::init(api, cx);

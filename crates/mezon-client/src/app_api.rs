@@ -6,7 +6,10 @@ use image::GenericImageView;
 
 use crate::{
     TransportClient,
-    transport::{ApiAccount, ApiChannelDesc, ApiClanDesc, ApiMessage, RealtimeEvent},
+    transport::{
+        ApiAccount, ApiCategoryDesc, ApiChannelApp, ApiChannelDesc, ApiClanDesc, ApiDirectChannel,
+        ApiMessage, ApiVoiceChannelUser, RealtimeEvent,
+    },
 };
 
 fn sanitize_filename(name: &str) -> String {
@@ -83,6 +86,11 @@ impl AppApi {
         self.transport.list_channel_by_user_id().await
     }
 
+    /// List the user's direct-message / group conversations (clan_id = 0).
+    pub async fn list_dm_channels(&self) -> Result<Vec<ApiDirectChannel>> {
+        self.transport.list_dm_channel_descs().await
+    }
+
     pub async fn list_clan_descs(&self) -> Result<Vec<ApiClanDesc>> {
         self.transport.list_clan_descs().await
     }
@@ -137,9 +145,10 @@ impl AppApi {
         channel_id: &str,
         content: &str,
         is_public: bool,
+        mode: i32,
     ) -> Result<ApiMessage> {
         self.transport
-            .send_channel_message(clan_id, channel_id, content, is_public)
+            .send_channel_message(clan_id, channel_id, content, is_public, mode)
             .await
     }
 
@@ -176,6 +185,7 @@ impl AppApi {
         channel_id: &str,
         content: &str,
         is_public: bool,
+        mode: i32,
         media_urls: &[String],
     ) -> Result<ApiMessage> {
         let mut attachments = Vec::with_capacity(media_urls.len());
@@ -188,6 +198,7 @@ impl AppApi {
                 channel_id,
                 content,
                 is_public,
+                mode,
                 attachments,
             )
             .await
@@ -301,6 +312,14 @@ impl AppApi {
             .await
     }
 
+    pub async fn check_duplicate_clan_name(&self, name: &str, condition_id: &str) -> Result<bool> {
+        let cond: i64 = condition_id
+            .parse()
+            .map_err(|e| anyhow::anyhow!("invalid condition_id {condition_id:?}: {e}"))?;
+        let resp = self.transport.check_duplicate_name(name, 0, cond).await?;
+        Ok(resp.is_duplicate)
+    }
+
     pub async fn check_duplicate_clan_nickname(
         &self,
         clan_id: &str,
@@ -317,7 +336,6 @@ impl AppApi {
     }
 
     pub async fn upload_avatar(&self, path: &Path) -> Result<String> {
-        tracing::info!("upload_avatar: reading file path={:?}", path);
         let data = crate::transport_runtime::read_file(path.to_path_buf()).await?;
 
         let raw_filename = path
@@ -336,47 +354,71 @@ impl AppApi {
 
         let (width, height) = image::load_from_memory(&data)
             .ok()
-            .map(|img| {
-                let dims = img.dimensions();
-                tracing::info!(
-                    "upload_avatar: detected image dimensions {}x{}",
-                    dims.0,
-                    dims.1
-                );
-                dims
-            })
+            .map(|img| img.dimensions())
             .unwrap_or((0, 0));
 
-        tracing::info!(
-            "upload_avatar: file read ok filename={} filetype={} size={} width={} height={}",
-            filename,
-            filetype,
-            size,
-            width,
-            height
-        );
-
-        tracing::info!("upload_avatar: requesting presigned URL");
         let upload = self
             .transport
             .upload_attachment_file(&filename, &filetype, size, width as i32, height as i32)
             .await?;
-        tracing::info!("upload_avatar: presigned URL received");
 
-        tracing::info!("upload_avatar: uploading file bytes");
         crate::transport_runtime::put_bytes_to_url(&upload.url, data).await?;
-        tracing::info!("upload_avatar: PUT completed successfully");
 
         let permanent_url = upload
             .url
-            .split('?')
-            .next()
-            .unwrap_or(&upload.url)
-            .to_string();
-
-        tracing::info!("Avatar upload complete: url={}", permanent_url);
+            .split_once('?')
+            .map(|(base, _)| base.to_string())
+            .unwrap_or(upload.url);
 
         Ok(permanent_url)
+    }
+
+    pub async fn list_categories_typed(&self, clan_id: &str) -> Result<Vec<ApiCategoryDesc>> {
+        self.transport.list_categories_typed(clan_id).await
+    }
+
+    pub async fn list_clan_badge_count(&self) -> Result<Vec<(String, i32, bool)>> {
+        self.transport.list_clan_badge_count().await
+    }
+
+    pub async fn get_notification_clan(&self, clan_id: &str) -> Result<i32> {
+        self.transport.get_notification_clan(clan_id).await
+    }
+
+    pub async fn list_channel_badge_counts(&self, clan_id: &str) -> Result<Vec<ApiChannelDesc>> {
+        self.transport.list_channel_badge_counts(clan_id).await
+    }
+
+    pub async fn list_voice_channel_users(
+        &self,
+        clan_id: &str,
+    ) -> Result<Vec<ApiVoiceChannelUser>> {
+        self.transport.list_voice_channel_users(clan_id).await
+    }
+
+    pub async fn list_channel_apps(&self, clan_id: &str) -> Result<Vec<ApiChannelApp>> {
+        self.transport.list_channel_apps(clan_id).await
+    }
+
+    pub async fn list_favorite_channels(&self, clan_id: &str) -> Result<Vec<String>> {
+        let resp = self.transport.get_list_favorite_channel(clan_id).await?;
+        Ok(resp
+            .channel_ids
+            .into_iter()
+            .map(|id| id.to_string())
+            .collect())
+    }
+
+    pub async fn add_channel_favorite(&self, channel_id: &str, clan_id: &str) -> Result<()> {
+        self.transport
+            .add_channel_favorite(channel_id, clan_id)
+            .await
+    }
+
+    pub async fn remove_channel_favorite(&self, channel_id: &str, clan_id: &str) -> Result<()> {
+        self.transport
+            .remove_channel_favorite(channel_id, clan_id)
+            .await
     }
 
     pub async fn list_loged_device(&self) -> Result<Vec<mezon_proto::api::LogedDevice>> {

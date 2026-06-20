@@ -104,7 +104,7 @@ impl Router {
 
     pub fn new() -> Self {
         Self {
-            current: Route::Chat,
+            current: Route::Direct,
             backward: VecDeque::new(),
             forward: VecDeque::new(),
         }
@@ -289,5 +289,10 @@ mod tests {
         };
         assert_eq!(route.to_path(), "/chat/clans/7/channels/99");
         assert_eq!(Route::from_path(&route.to_path()), route);
+    }
+
+    #[test]
+    fn default_route_is_dm_view() {
+        assert_eq!(Router::new().route(), Route::Direct);
     }
 }

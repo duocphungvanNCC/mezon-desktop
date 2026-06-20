@@ -215,6 +215,68 @@ impl TransportClient {
             .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
     }
 
+    pub async fn list_dm_channel_descs(&self) -> Result<Vec<crate::transport::ApiDirectChannel>> {
+        let transport = self.inner.clone();
+
+        runtime()
+            .spawn(async move { transport.list_dm_channel_descs().await })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
+    pub async fn list_categories_typed(
+        &self,
+        clan_id: &str,
+    ) -> Result<Vec<crate::transport::ApiCategoryDesc>> {
+        let transport = self.inner.clone();
+        let clan_id = clan_id.to_string();
+        runtime()
+            .spawn(async move { transport.list_categories_typed(&clan_id).await })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
+    pub async fn list_channel_badge_counts(
+        &self,
+        clan_id: &str,
+    ) -> Result<Vec<crate::transport::ApiChannelDesc>> {
+        let transport = self.inner.clone();
+        let clan_id = clan_id.to_string();
+        runtime()
+            .spawn(async move { transport.list_channel_badge_counts(&clan_id).await })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
+    pub async fn list_voice_channel_users(
+        &self,
+        clan_id: &str,
+    ) -> Result<Vec<crate::transport::ApiVoiceChannelUser>> {
+        let transport = self.inner.clone();
+        let clan_id = clan_id.to_string();
+        runtime()
+            .spawn(async move { transport.list_voice_channel_users(&clan_id).await })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
+    pub async fn list_clan_badge_count(&self) -> Result<Vec<(String, i32, bool)>> {
+        let transport = self.inner.clone();
+        runtime()
+            .spawn(async move { transport.list_clan_badge_count_typed().await })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
+    pub async fn get_notification_clan(&self, clan_id: &str) -> Result<i32> {
+        let transport = self.inner.clone();
+        let clan_id = clan_id.to_string();
+        runtime()
+            .spawn(async move { transport.get_notification_clan(&clan_id).await })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
     /// List clan descriptions over the shared transport.
     pub async fn list_clan_descs(&self) -> Result<Vec<crate::transport::ApiClanDesc>> {
         tracing::debug!("TransportClient::list_clan_descs() called");
@@ -315,6 +377,7 @@ impl TransportClient {
         channel_id: &str,
         content: &str,
         is_public: bool,
+        mode: i32,
     ) -> Result<crate::transport::ApiMessage> {
         let transport = self.inner.clone();
         let clan_id = clan_id.to_string();
@@ -324,7 +387,7 @@ impl TransportClient {
         runtime()
             .spawn(async move {
                 transport
-                    .send_channel_message(&clan_id, &channel_id, &content, is_public)
+                    .send_channel_message(&clan_id, &channel_id, &content, is_public, mode)
                     .await
             })
             .await
@@ -337,6 +400,7 @@ impl TransportClient {
         channel_id: &str,
         content: &str,
         is_public: bool,
+        mode: i32,
         attachments: Vec<mezon_proto::api::MessageAttachment>,
     ) -> Result<crate::transport::ApiMessage> {
         let transport = self.inner.clone();
@@ -352,6 +416,7 @@ impl TransportClient {
                         &channel_id,
                         &content,
                         is_public,
+                        mode,
                         attachments,
                     )
                     .await
@@ -595,6 +660,54 @@ impl TransportClient {
             .spawn(async move {
                 transport
                     .logout_device(&token, &refresh_token, &device_id)
+                    .await
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
+    pub async fn get_list_favorite_channel(
+        &self,
+        clan_id: &str,
+    ) -> Result<mezon_proto::api::ListFavoriteChannelResponse> {
+        let transport = self.inner.clone();
+        let clan_id = clan_id.to_string();
+        runtime()
+            .spawn(async move { transport.get_list_favorite_channel(&clan_id).await })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
+    pub async fn list_channel_apps(
+        &self,
+        clan_id: &str,
+    ) -> Result<Vec<crate::transport::ApiChannelApp>> {
+        let transport = self.inner.clone();
+        let clan_id = clan_id.to_string();
+        runtime()
+            .spawn(async move { transport.list_channel_apps(&clan_id).await })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
+    pub async fn add_channel_favorite(&self, channel_id: &str, clan_id: &str) -> Result<()> {
+        let transport = self.inner.clone();
+        let channel_id = channel_id.to_string();
+        let clan_id = clan_id.to_string();
+        runtime()
+            .spawn(async move { transport.add_channel_favorite(&channel_id, &clan_id).await })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
+    pub async fn remove_channel_favorite(&self, channel_id: &str, clan_id: &str) -> Result<()> {
+        let transport = self.inner.clone();
+        let channel_id = channel_id.to_string();
+        let clan_id = clan_id.to_string();
+        runtime()
+            .spawn(async move {
+                transport
+                    .remove_channel_favorite(&channel_id, &clan_id)
                     .await
             })
             .await

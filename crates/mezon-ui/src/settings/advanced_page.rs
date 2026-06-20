@@ -16,14 +16,14 @@ impl AdvancedPage {
 
 impl Render for AdvancedPage {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = cx.theme();
+        let theme = cx.theme().clone();
+        let locale = self.settings.read(cx).language.clone();
         let hw_accel = self.settings.read(cx).hardware_acceleration;
-        let settings = self.settings.clone();
 
         v_flex()
             .gap_6()
             .child(
-                Label::new("Advanced")
+                Label::new(mezon_i18n::t(&locale, "setting.advanced.title"))
                     .text_xl()
                     .text_color(theme.text_primary)
                     .font_weight(FontWeight::SEMIBOLD),
@@ -39,23 +39,29 @@ impl Render for AdvancedPage {
                             .justify_between()
                             .items_center()
                             .child(
-                                Label::new("Hardware Acceleration").text_color(theme.text_primary),
+                                Label::new(mezon_i18n::t(
+                                    &locale,
+                                    "setting.advanced.hardwareAcceleration",
+                                ))
+                                .text_color(theme.text_primary),
                             )
                             .child(
                                 Switch::new("hardware-acceleration")
                                     .checked(hw_accel)
-                                    .on_click(move |_, _window, cx| {
-                                        settings.update(cx, |s, _| {
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.settings.update(cx, |s, _| {
                                             s.hardware_acceleration = !s.hardware_acceleration;
                                             s.save_sync();
                                         });
-                                    }),
+                                        cx.notify();
+                                    })),
                             ),
                     )
                     .child(
-                        Label::new(
-                            "Use GPU to accelerate rendering. Restart required to apply changes.",
-                        )
+                        Label::new(mezon_i18n::t(
+                            &locale,
+                            "setting.advanced.hardwareAccelerationDesc",
+                        ))
                         .text_sm()
                         .text_color(theme.text_muted),
                     ),

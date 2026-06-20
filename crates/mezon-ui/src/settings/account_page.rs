@@ -9,8 +9,8 @@ use mezon_store::{AccountStore, Settings};
 use crate::theme::ActiveTheme;
 
 pub struct AccountPage {
+    settings: Entity<Settings>,
     toast_message: Option<SharedString>,
-    fetch_started: bool,
 }
 
 impl AccountPage {
@@ -18,9 +18,10 @@ impl AccountPage {
         cx.observe(&settings, |_, _, cx| cx.notify()).detach();
         cx.observe(&AccountStore::global(cx), |_, _, cx| cx.notify())
             .detach();
+        AccountStore::global(cx).update(cx, |store, cx| store.fetch_account(cx));
         Self {
+            settings,
             toast_message: None,
-            fetch_started: false,
         }
     }
 
@@ -42,25 +43,27 @@ impl AccountPage {
 
 impl Render for AccountPage {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        if !self.fetch_started {
-            self.fetch_started = true;
-            AccountStore::global(cx).update(cx, |store, cx| store.fetch_account(cx));
-        }
-
         let theme = cx.theme();
+        let locale = self.settings.read(cx).language.clone();
         let store = AccountStore::global(cx).read(cx);
 
         if store.account_error {
             return v_flex()
                 .gap_4()
-                .child(Label::new("Failed to load account data").text_color(theme.text_muted))
+                .child(
+                    Label::new(mezon_i18n::t(&locale, "setting.account.failedToLoad"))
+                        .text_color(theme.text_muted),
+                )
                 .into_any_element();
         }
 
         if store.account_loading || store.account.is_none() {
             return v_flex()
                 .gap_4()
-                .child(Label::new("Loading account...").text_color(theme.text_muted))
+                .child(
+                    Label::new(mezon_i18n::t(&locale, "setting.account.loading"))
+                        .text_color(theme.text_muted),
+                )
                 .into_any_element();
         }
 
@@ -71,31 +74,31 @@ impl Render for AccountPage {
 
         let email_display = match &account.email {
             Some(email) if !email.is_empty() => SharedString::from(mask_email(email)),
-            _ => SharedString::from("Not set"),
+            _ => SharedString::from(mezon_i18n::t(&locale, "common.notSet")),
         };
 
         let password_label = if account.password_setted {
-            SharedString::from("Change Password")
+            SharedString::from(mezon_i18n::t(&locale, "setting.account.changePassword"))
         } else {
-            SharedString::from("Set Password")
+            SharedString::from(mezon_i18n::t(&locale, "setting.account.setPassword"))
         };
 
         let phone_display = account
             .phone_number
             .as_ref()
             .map(|s| SharedString::from(s.as_str()))
-            .unwrap_or(SharedString::from("Not set"));
+            .unwrap_or(SharedString::from(mezon_i18n::t(&locale, "common.notSet")));
 
         let phone_label = if account.phone_number.is_some() {
-            SharedString::from("Change Phone")
+            SharedString::from(mezon_i18n::t(&locale, "setting.account.changePhone"))
         } else {
-            SharedString::from("Set Phone")
+            SharedString::from(mezon_i18n::t(&locale, "setting.account.setPhone"))
         };
 
         let avatar_url = account
             .avatar_url
             .as_ref()
-            .map(|url| SharedString::from(crate::imgproxy::profile_url(cx, url)));
+            .map(|url| SharedString::from(crate::util::imgproxy::profile_url(cx, url)));
 
         v_flex()
             .gap_6()
@@ -135,7 +138,10 @@ impl Render for AccountPage {
                             .child(div().flex_1())
                             .child(
                                 GpuiButton::new("edit-profile-btn")
-                                    .label("Edit User Profile")
+                                    .label(mezon_i18n::t(
+                                        &locale,
+                                        "setting.account.editUserProfile",
+                                    ))
                                     .text_color(theme.text_primary)
                                     .ghost()
                                     .on_click(move |_, _, cx| {
@@ -167,7 +173,10 @@ impl Render for AccountPage {
                                             .text_xs()
                                             .font_weight(FontWeight::SEMIBOLD)
                                             .text_color(theme.text_primary)
-                                            .child("DISPLAY NAME"),
+                                            .child(mezon_i18n::t(
+                                                &locale,
+                                                "setting.account.displayName",
+                                            )),
                                     )
                                     .child(
                                         Label::new(display_name.clone())
@@ -190,7 +199,10 @@ impl Render for AccountPage {
                                             .text_xs()
                                             .font_weight(FontWeight::SEMIBOLD)
                                             .text_color(theme.text_primary)
-                                            .child("USERNAME"),
+                                            .child(mezon_i18n::t(
+                                                &locale,
+                                                "setting.account.username",
+                                            )),
                                     )
                                     .child(
                                         Label::new(format!("@{}", username))
@@ -213,7 +225,7 @@ impl Render for AccountPage {
                                             .text_xs()
                                             .font_weight(FontWeight::SEMIBOLD)
                                             .text_color(theme.text_primary)
-                                            .child("EMAIL"),
+                                            .child(mezon_i18n::t(&locale, "setting.account.email")),
                                     )
                                     .child(Label::new(email_display).text_color(theme.text_muted)),
                             ),
@@ -233,7 +245,10 @@ impl Render for AccountPage {
                                             .text_xs()
                                             .font_weight(FontWeight::SEMIBOLD)
                                             .text_color(theme.text_primary)
-                                            .child("PASSWORD"),
+                                            .child(mezon_i18n::t(
+                                                &locale,
+                                                "setting.account.password",
+                                            )),
                                     )
                                     .child(Label::new("••••••••••").text_color(theme.text_muted)),
                             )
@@ -243,7 +258,14 @@ impl Render for AccountPage {
                                     .text_color(theme.text_primary)
                                     .ghost()
                                     .on_click(cx.listener(|this, _, _, cx| {
-                                        this.show_toast("Password management coming soon", cx);
+                                        let locale = this.settings.read(cx).language.clone();
+                                        this.show_toast(
+                                            mezon_i18n::t(
+                                                &locale,
+                                                "setting.account.passwordComingSoon",
+                                            ),
+                                            cx,
+                                        );
                                     })),
                             ),
                     )
@@ -262,7 +284,7 @@ impl Render for AccountPage {
                                             .text_xs()
                                             .font_weight(FontWeight::SEMIBOLD)
                                             .text_color(theme.text_primary)
-                                            .child("PHONE"),
+                                            .child(mezon_i18n::t(&locale, "setting.account.phone")),
                                     )
                                     .child(Label::new(phone_display).text_color(theme.text_muted)),
                             )
@@ -272,7 +294,14 @@ impl Render for AccountPage {
                                     .text_color(theme.text_primary)
                                     .ghost()
                                     .on_click(cx.listener(|this, _, _, cx| {
-                                        this.show_toast("Phone management coming soon", cx);
+                                        let locale = this.settings.read(cx).language.clone();
+                                        this.show_toast(
+                                            mezon_i18n::t(
+                                                &locale,
+                                                "setting.account.phoneComingSoon",
+                                            ),
+                                            cx,
+                                        );
                                     })),
                             ),
                     ),

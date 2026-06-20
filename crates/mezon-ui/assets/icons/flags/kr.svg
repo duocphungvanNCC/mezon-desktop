@@ -1,0 +1,30 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 32 32">
+	<defs>
+		<clipPath id="kr-clip">
+			<rect x="1" y="4" width="30" height="24" rx="4" ry="4" />
+		</clipPath>
+	</defs>
+	<g clip-path="url(#kr-clip)">
+		<rect x="1" y="4" width="30" height="24" fill="#fff" />
+		<g transform="translate(1,4) scale(0.05859375,0.046875)">
+			<g fill-rule="evenodd" transform="rotate(-56.3 367.2 -111.2) scale(9.375)">
+				<g fill="#000001">
+					<path d="M-6-26H6v2H-6Zm0 3H6v2H-6Zm0 3H6v2H-6Z" />
+					<path d="M-6-26H6v2H-6Zm0 3H6v2H-6Zm0 3H6v2H-6Z" transform="translate(0,44)" />
+				</g>
+				<path stroke="#fff" fill="none" d="M0 17v10" />
+				<path fill="#cd212a" d="M0-12a12 12 0 0 1 0 24Z" />
+				<path fill="#0047a0" d="M0-12a12 12 0 0 0 0 24A6 6 0 0 0 0 0Z" />
+				<circle cy="-6" r="6" fill="#cd212a" />
+			</g>
+			<g fill-rule="evenodd" transform="rotate(-123.7 196.5 59.5) scale(9.375)">
+				<g fill="#000001">
+					<path d="M-6-26H6v2H-6Zm0 3H6v2H-6Zm0 3H6v2H-6Z" />
+					<path d="M-6-26H6v2H-6Zm0 3H6v2H-6Zm0 3H6v2H-6Z" transform="translate(0,44)" />
+				</g>
+				<path stroke="#fff" fill="none" d="M0-23.5v3M0 17v3.5m0 3v3" />
+			</g>
+		</g>
+	</g>
+	<path d="M27,4H5c-2.209,0-4,1.791-4,4V24c0,2.209,1.791,4,4,4H27c2.209,0,4-1.791,4-4V8c0-2.209-1.791-4-4-4Zm3,20c0,1.654-1.346,3-3,3H5c-1.654,0-3-1.346-3-3V8c0-1.654,1.346-3,3-3H27c1.654,0,3,1.346,3,3V24Z" opacity=".15"></path>
+</svg>

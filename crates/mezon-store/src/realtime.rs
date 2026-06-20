@@ -30,6 +30,9 @@ pub enum RealtimeKind {
     UserClanRemoved,
     ClanProfileUpdated,
     SessionRefreshed,
+    VoiceJoined,
+    VoiceLeaved,
+    MarkAsRead,
 }
 
 impl RealtimeKind {
@@ -49,6 +52,9 @@ impl RealtimeKind {
             RealtimeEvent::UserClanRemoved(_) => Self::UserClanRemoved,
             RealtimeEvent::ClanProfileUpdated(_) => Self::ClanProfileUpdated,
             RealtimeEvent::SessionRefreshed(_) => Self::SessionRefreshed,
+            RealtimeEvent::VoiceJoined(_) => Self::VoiceJoined,
+            RealtimeEvent::VoiceLeaved(_) => Self::VoiceLeaved,
+            RealtimeEvent::MarkAsRead(_) => Self::MarkAsRead,
             _ => return None,
         })
     }
@@ -188,9 +194,17 @@ mod tests {
     }
 
     #[test]
-    fn kind_of_returns_none_for_unhandled() {
+    fn kind_of_maps_mark_as_read() {
         assert_eq!(
             RealtimeKind::of(&RealtimeEvent::MarkAsRead(realtime::MarkAsRead::default())),
+            Some(RealtimeKind::MarkAsRead)
+        );
+    }
+
+    #[test]
+    fn kind_of_returns_none_for_unhandled() {
+        assert_eq!(
+            RealtimeKind::of(&RealtimeEvent::AddFriend(realtime::AddFriend::default())),
             None
         );
     }

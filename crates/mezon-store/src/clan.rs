@@ -1,3 +1,4 @@
+use std::path::Path;
 use std::sync::Arc;
 
 use gpui::{App, AppContext, Context, Entity, EventEmitter, Global, Task};
@@ -11,17 +12,27 @@ pub struct Clan {
     pub id: String,
     pub name: String,
     pub avatar_url: Option<String>,
-    pub unread_count: u32,
+    pub banner_url: Option<String>,
+    pub badge_count: u32,
+    pub has_unread: bool,
+    pub muted: bool,
+    pub welcome_channel_id: Option<String>,
 }
 
 impl From<ApiClanDesc> for Clan {
     fn from(c: ApiClanDesc) -> Self {
         let avatar_url = (!c.logo.is_empty()).then_some(c.logo);
+        let banner_url = (!c.banner.is_empty()).then_some(c.banner);
+        let welcome_channel_id = (!c.welcome_channel_id.is_empty()).then_some(c.welcome_channel_id);
         Self {
             id: c.clan_id,
             name: c.clan_name,
             avatar_url,
-            unread_count: 0,
+            banner_url,
+            badge_count: 0,
+            has_unread: false,
+            muted: false,
+            welcome_channel_id,
         }
     }
 }
@@ -83,7 +94,6 @@ impl ClanList {
         }
     }
 
-    /// Register realtime handlers with the central dispatcher (cf. `add_message_handler`).
     fn register_realtime(cx: &mut Context<Self>) {
         let entity = cx.entity();
         RealtimeDispatch::global(cx).update(cx, |dispatch, _| {
@@ -92,6 +102,8 @@ impl ClanList {
                 RealtimeKind::ClanDeleted,
                 RealtimeKind::AddClanUser,
                 RealtimeKind::UserClanRemoved,
+                RealtimeKind::ChannelMessage,
+                RealtimeKind::MarkAsRead,
             ] {
                 dispatch.on(kind, &entity, |this, event, cx| {
                     this.handle_event(event, cx)
@@ -127,16 +139,38 @@ impl ClanList {
         })
     }
 
-    /// Fetch the clan list over REST. DTO→domain mapping (`Clan::from`) is owned by the
-    /// store, not the UI.
     pub fn reload(&mut self, cx: &mut Context<Self>) {
         let api = self.api.clone();
-        cx.spawn(async move |this, cx| match api.list_clan_descs().await {
-            Ok(clans) => {
-                let mapped: Vec<Clan> = clans.into_iter().map(Clan::from).collect();
-                let _ = this.update(cx, |this, cx| this.update_clans(mapped, cx));
-            }
-            Err(e) => tracing::error!("Failed to load clans: {e}"),
+        cx.spawn(async move |this, cx| {
+            let (clans_result, badges_result) =
+                tokio::join!(api.list_clan_descs(), api.list_clan_badge_count());
+            let clans = match clans_result {
+                Ok(c) => c,
+                Err(e) => {
+                    tracing::error!("Failed to load clans: {e}");
+                    return;
+                }
+            };
+            let badge_map: std::collections::HashMap<String, (i32, bool)> = badges_result
+                .unwrap_or_else(|e| {
+                    tracing::warn!("clan badge count fetch failed: {e}");
+                    Vec::new()
+                })
+                .into_iter()
+                .map(|(id, badge, has_unread)| (id, (badge, has_unread)))
+                .collect();
+            let mapped: Vec<Clan> = clans
+                .into_iter()
+                .map(|c| {
+                    let mut clan = Clan::from(c);
+                    if let Some(&(badge, has_unread)) = badge_map.get(&clan.id) {
+                        clan.badge_count = badge.max(0) as u32;
+                        clan.has_unread = has_unread;
+                    }
+                    clan
+                })
+                .collect();
+            let _ = this.update(cx, |this, cx| this.update_clans(mapped, cx));
         })
         .detach();
     }
@@ -176,7 +210,6 @@ impl ClanList {
                 }
             }
             RealtimeEvent::UserClanRemoved(e) => {
-                // Removed from a clan — drop it locally (no socket re-list), like ClanDeleted.
                 let id = e.clan_id.to_string();
                 let before = self.clans.len();
                 self.clans.retain(|c| c.id != id);
@@ -190,6 +223,26 @@ impl ClanList {
                     cx.notify();
                 }
             }
+            RealtimeEvent::ChannelMessage(m) => {
+                let clan_id = m.clan_id.to_string();
+                if let Some(clan) = self.clans.iter_mut().find(|c| c.id == clan_id)
+                    && !clan.muted
+                {
+                    clan.badge_count = clan.badge_count.saturating_add(1);
+                    clan.has_unread = true;
+                    cx.notify();
+                }
+            }
+            RealtimeEvent::MarkAsRead(m) => {
+                let clan_id = m.clan_id.to_string();
+                if let Some(clan) = self.clans.iter_mut().find(|c| c.id == clan_id)
+                    && (clan.badge_count > 0 || clan.has_unread)
+                {
+                    clan.badge_count = 0;
+                    clan.has_unread = false;
+                    cx.notify();
+                }
+            }
             _ => {}
         }
     }
@@ -200,8 +253,19 @@ impl ClanList {
             .and_then(|id| self.clans.iter().find(|c| &c.id == id))
     }
 
+    pub fn active_clan_banner(&self) -> Option<&str> {
+        self.active_clan().and_then(|c| c.banner_url.as_deref())
+    }
+
     pub fn is_active_clan(&self, clan_id: &str) -> bool {
         self.active_clan_id.as_deref() == Some(clan_id)
+    }
+
+    pub fn welcome_channel_id(&self, clan_id: &str) -> Option<String> {
+        self.clans
+            .iter()
+            .find(|c| c.id == clan_id)
+            .and_then(|c| c.welcome_channel_id.clone())
     }
 
     pub fn select_clan(&mut self, id: &str, cx: &mut Context<Self>) {
@@ -230,6 +294,46 @@ impl ClanList {
         }
         cx.notify();
     }
+
+    pub fn create_clan(
+        &mut self,
+        name: String,
+        logo: String,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<String, CreateClanError>> {
+        let api = self.api.clone();
+        cx.spawn(async move |this, cx| {
+            let trimmed = name.trim().to_string();
+            let is_dup = api
+                .check_duplicate_clan_name(&trimmed, "0")
+                .await
+                .map_err(|e| CreateClanError::Other(e.to_string()))?;
+            if is_dup {
+                return Err(CreateClanError::DuplicateName);
+            }
+            let desc = api
+                .create_clan_desc(&trimmed, &logo, "")
+                .await
+                .map_err(|e| CreateClanError::Other(e.to_string()))?;
+            let clan_id = desc.clan_id.clone();
+            this.update(cx, |this, cx| {
+                apply_created_clan(&mut this.clans, desc);
+                this.select_clan(&clan_id, cx);
+            })
+            .map_err(|_| CreateClanError::Other("store dropped".into()))?;
+            Ok(clan_id)
+        })
+    }
+
+    pub fn upload_clan_logo(
+        &self,
+        path: &Path,
+        cx: &mut Context<Self>,
+    ) -> Task<anyhow::Result<String>> {
+        let api = self.api.clone();
+        let path = path.to_path_buf();
+        cx.spawn(async move |_this, _cx| api.upload_avatar(&path).await)
+    }
 }
 
 fn update_clan(clans: &mut [Clan], clan_id: &str, name: Option<String>, logo: String) -> bool {
@@ -243,24 +347,49 @@ fn update_clan(clans: &mut [Clan], clan_id: &str, name: Option<String>, logo: St
     true
 }
 
+#[derive(Debug)]
+pub enum CreateClanError {
+    DuplicateName,
+    Other(String),
+}
+
+impl std::fmt::Display for CreateClanError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::DuplicateName => write!(f, "A clan with that name already exists."),
+            Self::Other(msg) => write!(f, "{msg}"),
+        }
+    }
+}
+
+pub(crate) fn apply_created_clan(clans: &mut Vec<Clan>, desc: ApiClanDesc) {
+    let clan = Clan::from(desc);
+    if !clans.iter().any(|c| c.id == clan.id) {
+        clans.push(clan);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    fn make_clan(id: &str, name: &str, avatar_url: Option<&str>) -> Clan {
+        Clan {
+            id: id.into(),
+            name: name.into(),
+            avatar_url: avatar_url.map(|s| s.into()),
+            banner_url: None,
+            badge_count: 0,
+            has_unread: false,
+            muted: false,
+            welcome_channel_id: None,
+        }
+    }
+
     fn clans() -> Vec<Clan> {
         vec![
-            Clan {
-                id: "1".into(),
-                name: "One".into(),
-                avatar_url: None,
-                unread_count: 0,
-            },
-            Clan {
-                id: "2".into(),
-                name: "Two".into(),
-                avatar_url: Some("old.png".into()),
-                unread_count: 0,
-            },
+            make_clan("1", "One", None),
+            make_clan("2", "Two", Some("old.png")),
         ]
     }
 
@@ -289,5 +418,169 @@ mod tests {
     fn update_clan_unknown_is_noop() {
         let mut c = clans();
         assert!(!update_clan(&mut c, "999", Some("x".into()), "y".into()));
+    }
+
+    #[test]
+    fn clan_from_api_desc_zeroes_badge_and_muted() {
+        use mezon_client::transport::ApiClanDesc;
+        let desc = ApiClanDesc {
+            clan_id: "42".into(),
+            clan_name: "Alpha".into(),
+            creator_id: String::new(),
+            logo: "logo.png".into(),
+            banner: String::new(),
+            welcome_channel_id: String::new(),
+        };
+        let clan = Clan::from(desc);
+        assert_eq!(clan.badge_count, 0);
+        assert!(!clan.has_unread);
+        assert!(!clan.muted);
+        assert_eq!(clan.avatar_url.as_deref(), Some("logo.png"));
+        assert!(clan.welcome_channel_id.is_none());
+    }
+
+    #[test]
+    fn badge_map_applies_to_clans_on_reload() {
+        let mut c = clans();
+        let badge_map: std::collections::HashMap<String, (i32, bool)> = [
+            ("1".to_string(), (3_i32, true)),
+            ("99".to_string(), (5_i32, false)),
+        ]
+        .into_iter()
+        .collect();
+        for clan in &mut c {
+            if let Some(&(badge, has_unread)) = badge_map.get(&clan.id) {
+                clan.badge_count = badge.max(0) as u32;
+                clan.has_unread = has_unread;
+            }
+        }
+        assert_eq!(c[0].badge_count, 3);
+        assert!(c[0].has_unread);
+        assert_eq!(c[1].badge_count, 0);
+        assert!(!c[1].has_unread);
+    }
+
+    #[test]
+    fn channel_message_increments_badge_when_not_muted() {
+        use mezon_proto::api;
+        let mut c = clans();
+        let msg = api::ChannelMessage {
+            clan_id: 1,
+            ..Default::default()
+        };
+        let event = RealtimeEvent::ChannelMessage(msg);
+        if let RealtimeEvent::ChannelMessage(m) = &event {
+            let clan_id = m.clan_id.to_string();
+            if let Some(clan) = c.iter_mut().find(|c| c.id == clan_id)
+                && !clan.muted
+            {
+                clan.badge_count = clan.badge_count.saturating_add(1);
+                clan.has_unread = true;
+            }
+        }
+        assert_eq!(c[0].badge_count, 1);
+        assert!(c[0].has_unread);
+    }
+
+    #[test]
+    fn channel_message_skipped_when_muted() {
+        let mut c = clans();
+        c[0].muted = true;
+        if let Some(clan) = c.iter_mut().find(|cl| cl.id == "1")
+            && !clan.muted
+        {
+            clan.badge_count = clan.badge_count.saturating_add(1);
+            clan.has_unread = true;
+        }
+        assert_eq!(c[0].badge_count, 0);
+        assert!(!c[0].has_unread);
+    }
+
+    #[test]
+    fn mark_as_read_resets_badge_and_unread() {
+        use mezon_proto::realtime;
+        let mut c = clans();
+        c[0].badge_count = 7;
+        c[0].has_unread = true;
+        let evt = realtime::MarkAsRead {
+            clan_id: 1,
+            ..Default::default()
+        };
+        if let Some(clan) = c.iter_mut().find(|cl| cl.id == evt.clan_id.to_string())
+            && (clan.badge_count > 0 || clan.has_unread)
+        {
+            clan.badge_count = 0;
+            clan.has_unread = false;
+        }
+        assert_eq!(c[0].badge_count, 0);
+        assert!(!c[0].has_unread);
+    }
+
+    #[test]
+    fn mark_as_read_unknown_clan_is_noop() {
+        use mezon_proto::realtime;
+        let mut c = clans();
+        c[0].badge_count = 3;
+        let evt = realtime::MarkAsRead {
+            clan_id: 999,
+            ..Default::default()
+        };
+        if let Some(clan) = c.iter_mut().find(|cl| cl.id == evt.clan_id.to_string()) {
+            clan.badge_count = 0;
+            clan.has_unread = false;
+        }
+        assert_eq!(c[0].badge_count, 3);
+    }
+
+    #[test]
+    fn apply_created_clan_inserts_new_clan() {
+        use mezon_client::transport::ApiClanDesc;
+        let mut clans = clans();
+        let desc = ApiClanDesc {
+            clan_id: "99".into(),
+            clan_name: "NewClan".into(),
+            creator_id: String::new(),
+            logo: "logo.png".into(),
+            banner: String::new(),
+            welcome_channel_id: String::new(),
+        };
+        apply_created_clan(&mut clans, desc);
+        assert_eq!(clans.len(), 3);
+        let inserted = clans.iter().find(|c| c.id == "99").unwrap();
+        assert_eq!(inserted.name, "NewClan");
+        assert_eq!(inserted.avatar_url.as_deref(), Some("logo.png"));
+        assert_eq!(inserted.badge_count, 0);
+        assert!(!inserted.has_unread);
+    }
+
+    #[test]
+    fn apply_created_clan_skips_duplicate_id() {
+        use mezon_client::transport::ApiClanDesc;
+        let mut clans = clans();
+        let desc = ApiClanDesc {
+            clan_id: "1".into(),
+            clan_name: "SameClan".into(),
+            creator_id: String::new(),
+            logo: String::new(),
+            banner: String::new(),
+            welcome_channel_id: String::new(),
+        };
+        apply_created_clan(&mut clans, desc);
+        assert_eq!(clans.len(), 2);
+        assert_eq!(clans[0].name, "One");
+    }
+
+    #[test]
+    fn create_clan_error_display_duplicate_name() {
+        let err = CreateClanError::DuplicateName;
+        let msg = format!("{err}");
+        assert!(msg.contains("already exists"));
+    }
+
+    #[test]
+    fn create_clan_error_display_other() {
+        let err = CreateClanError::Other("network timeout".into());
+        let msg = format!("{err}");
+        assert_eq!(msg, "network timeout");
     }
 }
