@@ -263,10 +263,8 @@ struct IoLoopState {
 pub struct AbridgedTcpAdapter {
     write_tx: Arc<Mutex<Option<mpsc::UnboundedSender<Vec<u8>>>>>,
     handlers: Arc<Mutex<AdapterHandlers>>,
-    streams: Arc<Mutex<HashMap<u16, Vec<Vec<u8>>>>>,
     is_connected: Arc<AtomicBool>,
-    read_buffer: Arc<Mutex<Vec<u8>>>,
-    pending_raw: Arc<Mutex<Option<Vec<u8>>>>,
+    io_task: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
 }
 
 impl AbridgedTcpAdapter {
@@ -274,13 +272,13 @@ impl AbridgedTcpAdapter {
         Self {
             write_tx: Arc::new(Mutex::new(None)),
             handlers: Arc::new(Mutex::new(AdapterHandlers::default())),
-            streams: Arc::new(Mutex::new(HashMap::new())),
             is_connected: Arc::new(AtomicBool::new(false)),
-            read_buffer: Arc::new(Mutex::new(Vec::new())),
-            pending_raw: Arc::new(Mutex::new(None)),
+            io_task: Arc::new(Mutex::new(None)),
         }
     }
+}
 
+impl IoLoopState {
     async fn handle_data(&self, incoming: Vec<u8>) -> Result<()> {
         if incoming.is_empty() {
             return Ok(());
@@ -513,23 +511,21 @@ impl AbridgedTcpAdapter {
                             let payload = buf[header..total].to_vec();
                             buf.drain(..total);
                             match mezon_proto::realtime::Envelope::decode(payload.as_slice()) {
-                                Ok(envelope) => match u16::try_from(envelope.cid) {
-                                    Ok(cid_u16) => {
-                                        tracing::trace!(
-                                            "ws-binary {} bytes -> Envelope cid={} {}",
-                                            payload.len(),
-                                            cid_u16,
-                                            envelope_detail(&envelope)
-                                        );
-                                        handlers.trigger_message(cid_u16, 0, payload);
-                                    }
-                                    Err(_) => {
-                                        tracing::warn!(
-                                            "ws-binary: invalid cid {} in envelope, dropping frame",
+                                Ok(envelope) => {
+                                    tracing::trace!(
+                                        "ws-binary {} bytes -> Envelope cid={} {}",
+                                        payload.len(),
+                                        envelope.cid,
+                                        envelope_detail(&envelope)
+                                    );
+                                    match u16::try_from(envelope.cid) {
+                                        Ok(cid) => handlers.trigger_message(cid, 0, payload),
+                                        Err(_) => tracing::warn!(
+                                            "ws-binary envelope cid {} out of u16 range, dropping",
                                             envelope.cid
-                                        );
+                                        ),
                                     }
-                                },
+                                }
                                 Err(e) => {
                                     tracing::warn!(
                                         "ws-binary {} bytes — decode failed: {e}",
@@ -592,7 +588,10 @@ impl AbridgedTcpAdapter {
             };
 
             let framed = &data[header_size..header_size + payload_length];
-            let payload_end = protobuf_message_len(framed).unwrap_or(0);
+            let Some(payload_end) = protobuf_message_len(framed) else {
+                tracing::warn!("realtime frame: undecodable protobuf length, dropping frame");
+                continue;
+            };
             let payload = &framed[..payload_end];
             tracing::trace!(
                 "Std msg payload: {} bytes (framed {}) {:02x?}",
@@ -602,20 +601,15 @@ impl AbridgedTcpAdapter {
             );
 
             if let Ok(envelope) = mezon_proto::realtime::Envelope::decode(payload) {
+                tracing::trace!(
+                    "abridged -> Envelope cid={} {}",
+                    envelope.cid,
+                    envelope_detail(&envelope)
+                );
                 match u16::try_from(envelope.cid) {
-                    Ok(cid_u16) => {
-                        tracing::trace!(
-                            "abridged -> Envelope cid={} {}",
-                            cid_u16,
-                            envelope_detail(&envelope)
-                        );
-                        handlers.trigger_message(cid_u16, 0, payload.to_vec());
-                    }
+                    Ok(cid) => handlers.trigger_message(cid, 0, payload.to_vec()),
                     Err(_) => {
-                        tracing::warn!(
-                            "abridged: invalid cid {} in envelope, dropping frame",
-                            envelope.cid
-                        );
+                        tracing::warn!("envelope cid {} out of u16 range, dropping", envelope.cid)
                     }
                 }
             } else if let Some(cid) = decode_cid_field(payload) {
@@ -626,7 +620,9 @@ impl AbridgedTcpAdapter {
             }
         }
     }
+}
 
+impl AbridgedTcpAdapter {
     async fn io_loop(
         mut tls: TlsStream,
         mut write_rx: mpsc::UnboundedReceiver<Vec<u8>>,
@@ -639,15 +635,6 @@ impl AbridgedTcpAdapter {
         // Signal that io_loop is ready (select is polling)
         let _ = ready_tx.send(());
         tracing::debug!("I/O loop running, entering select branch");
-
-        let data_adapter = AbridgedTcpAdapter {
-            write_tx: Arc::new(Mutex::new(None)),
-            handlers: state.handlers.clone(),
-            streams: state.streams.clone(),
-            is_connected: state.is_connected.clone(),
-            read_buffer: state.read_buffer.clone(),
-            pending_raw: state.pending_raw.clone(),
-        };
 
         loop {
             tracing::trace!("select iteration begin");
@@ -689,7 +676,7 @@ impl AbridgedTcpAdapter {
                                 break;
                             }
 
-                            if let Err(e) = data_adapter.handle_data(data).await {
+                            if let Err(e) = state.handle_data(data).await {
                                 tracing::error!("handle_data error: {}", e);
                             }
                         }
@@ -791,8 +778,8 @@ impl Default for AbridgedTcpAdapter {
 
 #[async_trait]
 impl TransportAdapter for AbridgedTcpAdapter {
-    async fn connect(&mut self, host: &str, port: u16, token: &str) -> Result<()> {
-        tracing::debug!("=== CONNECT START ===");
+    async fn connect(&self, host: &str, port: u16, token: &str) -> Result<()> {
+        tracing::info!("=== CONNECT START: {}:{} ===", host, port);
 
         let config = build_client_config();
         let connector = tokio_rustls::TlsConnector::from(Arc::new(config));
@@ -825,14 +812,20 @@ impl TransportAdapter for AbridgedTcpAdapter {
         let (write_tx, write_rx) = mpsc::unbounded_channel();
         let state = IoLoopState {
             handlers: self.handlers.clone(),
-            streams: self.streams.clone(),
+            streams: Arc::new(Mutex::new(HashMap::new())),
             is_connected: self.is_connected.clone(),
-            read_buffer: self.read_buffer.clone(),
-            pending_raw: self.pending_raw.clone(),
+            read_buffer: Arc::new(Mutex::new(Vec::new())),
+            pending_raw: Arc::new(Mutex::new(None)),
         };
 
-        tracing::debug!("Spawning I/O loop...");
-        tokio::spawn(async move {
+        let previous = self.io_task.lock().await.take();
+        if let Some(previous) = previous {
+            previous.abort();
+            let _ = previous.await;
+        }
+
+        tracing::info!("Spawning I/O loop...");
+        let task = tokio::spawn(async move {
             Self::io_loop(tls, write_rx, ready_tx, state).await;
         });
 
@@ -840,7 +833,8 @@ impl TransportAdapter for AbridgedTcpAdapter {
         ready_rx
             .await
             .map_err(|_| anyhow::anyhow!("I/O loop panicked before starting"))?;
-        tracing::debug!("I/O loop confirmed READY");
+        tracing::info!("I/O loop confirmed READY");
+        *self.io_task.lock().await = Some(task);
 
         let handshake = frame_handshake(token);
 
@@ -864,7 +858,7 @@ impl TransportAdapter for AbridgedTcpAdapter {
         Ok(())
     }
 
-    async fn send(&mut self, message: Vec<u8>) -> Result<()> {
+    async fn send(&self, message: Vec<u8>) -> Result<()> {
         match mezon_proto::realtime::Envelope::decode(message.as_slice()) {
             Ok(envelope) => tracing::trace!(
                 "send() {} bytes -> Envelope cid={} {}",
@@ -931,7 +925,7 @@ impl TransportAdapter for AbridgedTcpAdapter {
         Ok(())
     }
 
-    async fn send_ping(&mut self, cid: u16) -> Result<()> {
+    async fn send_ping(&self, cid: u16) -> Result<()> {
         if !self.is_open() {
             return Err(anyhow::anyhow!("Connection is not open"));
         }
@@ -950,22 +944,27 @@ impl TransportAdapter for AbridgedTcpAdapter {
     fn is_open(&self) -> bool {
         self.is_connected.load(Ordering::Acquire)
     }
-    async fn close(&mut self) -> Result<()> {
+    async fn close(&self) -> Result<()> {
         self.is_connected.store(false, Ordering::Release);
         *self.write_tx.lock().await = None;
+        let task = self.io_task.lock().await.take();
+        if let Some(task) = task {
+            task.abort();
+            let _ = task.await;
+        }
         Ok(())
     }
 
-    async fn set_on_message(&mut self, handler: crate::transport_adapter::MessageHandler) {
+    async fn set_on_message(&self, handler: crate::transport_adapter::MessageHandler) {
         self.handlers.lock().await.on_message = Some(handler);
     }
-    async fn set_on_open(&mut self, handler: crate::transport_adapter::OpenHandler) {
+    async fn set_on_open(&self, handler: crate::transport_adapter::OpenHandler) {
         self.handlers.lock().await.on_open = Some(handler);
     }
-    async fn set_on_close(&mut self, handler: crate::transport_adapter::CloseHandler) {
+    async fn set_on_close(&self, handler: crate::transport_adapter::CloseHandler) {
         self.handlers.lock().await.on_close = Some(handler);
     }
-    async fn set_on_error(&mut self, handler: crate::transport_adapter::ErrorHandler) {
+    async fn set_on_error(&self, handler: crate::transport_adapter::ErrorHandler) {
         self.handlers.lock().await.on_error = Some(handler);
     }
 }
@@ -1075,15 +1074,25 @@ mod tests {
         .encode_to_vec()
     }
 
-    async fn captured_responses(
-        adapter: &AbridgedTcpAdapter,
-    ) -> Arc<std::sync::Mutex<Vec<(u16, u32, Vec<u8>)>>> {
+    type CapturedMessages = Arc<std::sync::Mutex<Vec<(u16, u32, Vec<u8>)>>>;
+
+    fn captured_state() -> (IoLoopState, CapturedMessages) {
         let received = Arc::new(std::sync::Mutex::new(Vec::new()));
         let sink = received.clone();
-        adapter.handlers.lock().await.on_message = Some(Arc::new(move |cid, code, bytes| {
-            sink.lock().unwrap().push((cid, code, bytes));
-        }));
-        received
+        let handlers = AdapterHandlers {
+            on_message: Some(Arc::new(move |cid, code, bytes| {
+                sink.lock().unwrap().push((cid, code, bytes));
+            })),
+            ..Default::default()
+        };
+        let state = IoLoopState {
+            handlers: Arc::new(Mutex::new(handlers)),
+            streams: Arc::new(Mutex::new(HashMap::new())),
+            is_connected: Arc::new(AtomicBool::new(true)),
+            read_buffer: Arc::new(Mutex::new(Vec::new())),
+            pending_raw: Arc::new(Mutex::new(None)),
+        };
+        (state, received)
     }
 
     #[tokio::test]
@@ -1091,17 +1100,16 @@ mod tests {
         let body = channel_messages_body(6000);
         assert!(body.len() > RAW_CHUNK_PAYLOAD_LEN);
 
-        let adapter = AbridgedTcpAdapter::new();
-        let received = captured_responses(&adapter).await;
+        let (state, received) = captured_state();
 
         // Mirror the real capture: each 7-byte header and its payload arrive in
         // separate TCP reads (chunk header, chunk payload, then the final frame).
-        adapter.handle_data(raw_frame(6, false, &[])).await.unwrap();
-        adapter
+        state.handle_data(raw_frame(6, false, &[])).await.unwrap();
+        state
             .handle_data(body[..RAW_CHUNK_PAYLOAD_LEN].to_vec())
             .await
             .unwrap();
-        adapter
+        state
             .handle_data(raw_frame(6, true, &body[RAW_CHUNK_PAYLOAD_LEN..]))
             .await
             .unwrap();
@@ -1119,13 +1127,9 @@ mod tests {
         let body = channel_messages_body(16);
         assert!(body.len() < RAW_CHUNK_PAYLOAD_LEN);
 
-        let adapter = AbridgedTcpAdapter::new();
-        let received = captured_responses(&adapter).await;
+        let (state, received) = captured_state();
 
-        adapter
-            .handle_data(raw_frame(7, true, &body))
-            .await
-            .unwrap();
+        state.handle_data(raw_frame(7, true, &body)).await.unwrap();
 
         let received = received.lock().unwrap();
         assert_eq!(received.len(), 1);
@@ -1138,11 +1142,10 @@ mod tests {
         let body = channel_messages_body(16);
         assert!(body.len() < RAW_CHUNK_PAYLOAD_LEN);
 
-        let adapter = AbridgedTcpAdapter::new();
-        let received = captured_responses(&adapter).await;
+        let (state, received) = captured_state();
 
-        adapter.handle_data(raw_frame(8, true, &[])).await.unwrap();
-        adapter.handle_data(body.clone()).await.unwrap();
+        state.handle_data(raw_frame(8, true, &[])).await.unwrap();
+        state.handle_data(body.clone()).await.unwrap();
 
         let received = received.lock().unwrap();
         assert_eq!(received.len(), 1);

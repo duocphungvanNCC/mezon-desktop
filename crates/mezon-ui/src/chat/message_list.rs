@@ -3,9 +3,10 @@ use gpui::{
     list, prelude::*, px,
 };
 
-use mezon_store::{Message, MessagesEvent, MessagesStore, Settings};
+use mezon_store::{ChannelList, Message, MessagesEvent, MessagesStore, Settings};
 
 use crate::chat::message_row::{MessageAttachmentView, MessageRow};
+use crate::image_cache::{LruImageCache, MESSAGE_IMAGE_CACHE_CAPACITY};
 use crate::theme::{ActiveTheme, Theme};
 
 const LOAD_MORE_ITEM_THRESHOLD: usize = 6;
@@ -13,6 +14,9 @@ const LOAD_MORE_ITEM_THRESHOLD: usize = 6;
 pub struct MessageTimeline {
     pub(crate) list_state: ListState,
     settings: Entity<Settings>,
+    scroll_installed: bool,
+    image_cache: Entity<LruImageCache>,
+    cached_for_channel: Option<String>,
 }
 
 impl MessageTimeline {
@@ -41,21 +45,46 @@ impl MessageTimeline {
 
         let list_state = ListState::new(0, ListAlignment::Bottom, px(200.));
         list_state.set_follow_mode(FollowMode::Tail);
-        list_state.set_scroll_handler(move |event, _window, cx| {
-            if event.visible_range.start < LOAD_MORE_ITEM_THRESHOLD {
-                MessagesStore::global(cx).update(cx, |store, cx| store.load_more(cx));
-            }
-        });
+        let image_cache = cx.new(|cx| LruImageCache::new(MESSAGE_IMAGE_CACHE_CAPACITY, cx));
         Self {
             list_state,
             settings,
+            scroll_installed: false,
+            image_cache,
+            cached_for_channel: None,
         }
+    }
+
+    fn clear_image_cache_if_channel_changed(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let channel_id = ChannelList::global(cx).read(cx).active_channel_id.clone();
+        if self.cached_for_channel.as_ref() == channel_id.as_ref() {
+            return;
+        }
+        self.cached_for_channel = channel_id;
+        self.image_cache
+            .update(cx, |cache, cx| cache.clear(window, cx));
     }
 }
 
 impl Render for MessageTimeline {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         crate::trace_render!("MessageTimeline");
+        self.clear_image_cache_if_channel_changed(window, cx);
+
+        if !self.scroll_installed {
+            self.scroll_installed = true;
+            let list_state = self.list_state.clone();
+            list_state.set_scroll_handler(move |event, _window, cx| {
+                if event.visible_range.start < LOAD_MORE_ITEM_THRESHOLD {
+                    MessagesStore::global(cx).update(cx, |store, cx| store.load_more(cx));
+                }
+            });
+        }
+
         let store = MessagesStore::global(cx);
         let locale = self.settings.read(cx).language.clone();
         let reply_label: SharedString = mezon_i18n::t(&locale, "chat.replyingToSomeone").into();
@@ -65,7 +94,11 @@ impl Render for MessageTimeline {
         })
         .size_full();
 
-        div().size_full().child(list_element)
+        div()
+            .flex_1()
+            .min_h_0()
+            .image_cache(self.image_cache.clone())
+            .child(list_element)
     }
 }
 

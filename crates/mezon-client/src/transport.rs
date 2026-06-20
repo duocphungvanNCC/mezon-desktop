@@ -12,9 +12,11 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU16, Ordering};
 use std::time::Duration;
-use tokio::sync::{Mutex, RwLock, oneshot};
+use tokio::sync::{RwLock, oneshot, watch};
 
 const DEFAULT_SEND_TIMEOUT_MS: u64 = 10000;
+const DEFAULT_CONNECT_GATE_MS: u64 = 5000;
+const DEFAULT_PING_TIMEOUT_MS: u64 = 5000;
 
 fn parse_id<T>(value: &str) -> Result<T>
 where
@@ -136,10 +138,13 @@ fn dispatch_realtime_push(
 
 /// Main transport client.
 pub struct MezonTransport {
-    adapter: Arc<Mutex<Box<dyn TransportAdapter>>>,
+    adapter: Arc<dyn TransportAdapter>,
     cid_counter: Arc<AtomicU16>,
     pending_requests: Arc<RwLock<HashMap<u16, PromiseExecutor>>>,
     send_timeout_ms: Duration,
+    connect_gate: Duration,
+    connected_tx: watch::Sender<bool>,
+    connected_rx: watch::Receiver<bool>,
     #[allow(dead_code)]
     base_path: String,
 }
@@ -147,11 +152,15 @@ pub struct MezonTransport {
 impl MezonTransport {
     /// Create a new transport with the given adapter.
     pub fn new(adapter: Box<dyn TransportAdapter>, base_path: String) -> Self {
+        let (connected_tx, connected_rx) = watch::channel(false);
         Self {
-            adapter: Arc::new(Mutex::new(adapter)),
+            adapter: Arc::from(adapter),
             cid_counter: Arc::new(AtomicU16::new(1)),
             pending_requests: Arc::new(RwLock::new(HashMap::new())),
             send_timeout_ms: Duration::from_millis(DEFAULT_SEND_TIMEOUT_MS),
+            connect_gate: Duration::from_millis(DEFAULT_CONNECT_GATE_MS),
+            connected_tx,
+            connected_rx,
             base_path,
         }
     }
@@ -171,6 +180,27 @@ impl MezonTransport {
         }
     }
 
+    async fn wait_connected(&self, deadline: Duration) -> Result<()> {
+        let mut rx = self.connected_rx.clone();
+        if *rx.borrow_and_update() {
+            return Ok(());
+        }
+        match tokio::time::timeout(deadline, async move {
+            while rx.changed().await.is_ok() {
+                if *rx.borrow_and_update() {
+                    return true;
+                }
+            }
+            false
+        })
+        .await
+        {
+            Ok(true) => Ok(()),
+            Ok(false) => Err(anyhow::anyhow!("connection signal closed")),
+            Err(_) => Err(anyhow::anyhow!("not connected (gate timed out)")),
+        }
+    }
+
     /// Connect to the Mezon backend.
     pub async fn connect(
         &self,
@@ -183,15 +213,11 @@ impl MezonTransport {
         tracing::debug!("MezonTransport::connect() starting");
         tracing::debug!("  Host: {}, Port: {}", host, port);
 
-        tracing::debug!("Acquiring adapter lock...");
-        let mut adapter = self.adapter.lock().await;
-        tracing::debug!("  Adapter lock acquired");
-
         // Set up message handler
         tracing::debug!("Setting up message handler...");
         let pending_requests = self.pending_requests.clone();
         let on_event: Arc<dyn Fn(RealtimeEvent) + Send + Sync> = Arc::new(on_event);
-        adapter
+        self.adapter
             .set_on_message(Arc::new(move |cid, code, message| {
                 tracing::trace!("on_message: cid={cid} code={code} len={}", message.len());
 
@@ -214,11 +240,20 @@ impl MezonTransport {
             .await;
         tracing::debug!("  Message handler set");
 
+        let connected_for_open = self.connected_tx.clone();
+        self.adapter
+            .set_on_open(Arc::new(move || {
+                let _ = connected_for_open.send(true);
+            }))
+            .await;
+
         // Set up close handler
         tracing::debug!("Setting up close handler...");
         let pending_for_close = self.pending_requests.clone();
-        adapter
+        let connected_for_close = self.connected_tx.clone();
+        self.adapter
             .set_on_close(Arc::new(move |was_clean| {
+                let _ = connected_for_close.send(false);
                 let pending = pending_for_close.clone();
                 tokio::spawn(async move {
                     pending.write().await.clear();
@@ -228,9 +263,15 @@ impl MezonTransport {
             .await;
         tracing::debug!("  Close handler set");
 
+        self.adapter
+            .set_on_error(Arc::new(|err| {
+                tracing::warn!("realtime transport error: {err}");
+            }))
+            .await;
+
         // Connect
         tracing::debug!("Calling adapter.connect()...");
-        adapter
+        self.adapter
             .connect(host, port, token)
             .await
             .with_context(|| format!("Failed to connect adapter to {host}:{port}"))?;
@@ -241,14 +282,15 @@ impl MezonTransport {
 
     /// Send a raw message and wait for response.
     pub async fn send(&self, cid: u16, message: Vec<u8>) -> Result<(u32, Vec<u8>)> {
+        self.wait_connected(self.connect_gate).await?;
         let (tx, rx) = oneshot::channel();
         {
             let mut pending = self.pending_requests.write().await;
             pending.insert(cid, PromiseExecutor { sender: tx });
         }
-        {
-            let mut adapter = self.adapter.lock().await;
-            adapter.send(message).await?;
+        if let Err(e) = self.adapter.send(message).await {
+            self.pending_requests.write().await.remove(&cid);
+            return Err(e);
         }
         let result = tokio::time::timeout(self.send_timeout_ms, rx)
             .await
@@ -265,21 +307,19 @@ impl MezonTransport {
 
     /// Check if the adapter is connected.
     pub async fn is_open(&self) -> bool {
-        let adapter = self.adapter.lock().await;
-        adapter.is_open()
+        self.adapter.is_open()
     }
 
     /// Close the connection.
     pub async fn close(&self) -> Result<()> {
+        let _ = self.connected_tx.send(false);
         self.pending_requests.write().await.clear();
-        let mut adapter = self.adapter.lock().await;
-        adapter.close().await
+        self.adapter.close().await
     }
 
     /// Send a ping.
     pub async fn ping(&self, cid: u16) -> Result<()> {
-        let mut adapter = self.adapter.lock().await;
-        adapter.send_ping(cid).await
+        self.adapter.send_ping(cid).await
     }
 
     /// Send a ping and wait for matching pong.
@@ -297,19 +337,16 @@ impl MezonTransport {
             );
         }
 
-        {
-            let mut adapter = self.adapter.lock().await;
-            tracing::debug!("Sending ping cid={}", cid);
-            adapter.send_ping(cid).await?;
+        tracing::debug!("Sending ping cid={}", cid);
+        if let Err(e) = self.adapter.send_ping(cid).await {
+            self.pending_requests.write().await.remove(&cid);
+            return Err(e);
         }
 
-        tokio::time::timeout(self.send_timeout_ms, rx)
+        tokio::time::timeout(Duration::from_millis(DEFAULT_PING_TIMEOUT_MS), rx)
             .await
             .map_err(|_| {
-                tracing::error!(
-                    "Ping timed out after {} ms",
-                    self.send_timeout_ms.as_millis()
-                );
+                tracing::error!("Ping timed out after {} ms", DEFAULT_PING_TIMEOUT_MS);
                 let pending = self.pending_requests.clone();
                 tokio::spawn(async move {
                     pending.write().await.remove(&cid);
@@ -471,18 +508,21 @@ impl MezonTransport {
     /// Build a protobuf-encoded API request envelope.
     ///
     /// Wire format: Envelope { cid: uint32, api_request_event: ApiRequestEvent }
-    fn build_api_request(&self, cid: u16, api_name: &str, body: Vec<u8>) -> Vec<u8> {
+    fn build_api_request(&self, cid: u16, api_name: &str, body: Vec<u8>) -> Result<Vec<u8>> {
+        let api_index = self
+            .get_api_index(api_name)
+            .ok_or_else(|| anyhow::anyhow!("unknown API name: {api_name}"))?;
         let envelope = realtime::Envelope {
             cid: i32::from(cid),
             message: Some(realtime::envelope::Message::ApiRequestEvent(
                 realtime::ApiRequestEvent {
-                    api_index: self.get_api_index(api_name) as i32,
+                    api_index: api_index as i32,
                     api_name: api_name.to_string(),
                     body,
                 },
             )),
         };
-        envelope.encode_to_vec()
+        Ok(envelope.encode_to_vec())
     }
 
     async fn send_api_request(
@@ -491,7 +531,7 @@ impl MezonTransport {
         api_name: &str,
         body: Vec<u8>,
     ) -> Result<(u32, Vec<u8>)> {
-        self.send(cid, self.build_api_request(cid, api_name, body))
+        self.send(cid, self.build_api_request(cid, api_name, body)?)
             .await
     }
 
@@ -644,8 +684,8 @@ impl MezonTransport {
     }
 
     /// Get API index from API name (matches TypeScript ApiNameEnum order)
-    fn get_api_index(&self, api_name: &str) -> u32 {
-        match api_name {
+    fn get_api_index(&self, api_name: &str) -> Option<u32> {
+        let index = match api_name {
             // HOT PATH
             "ListChannelDescs" => 0,
             "GetAccount" => 1,
@@ -859,10 +899,11 @@ impl MezonTransport {
             "MarkAsRead" => 208,
             "UploadBatchAttachmentFile" => 209,
             _ => {
-                tracing::warn!("Unknown API name: {}, using index 0", api_name);
-                0
+                tracing::warn!("unknown API name: {api_name}");
+                return None;
             }
-        }
+        };
+        Some(index)
     }
 
     /// Get the current user's account.
@@ -878,10 +919,10 @@ impl MezonTransport {
 
         tracing::debug!("  Building API request envelope...");
         tracing::debug!("    API name: {}", api_name);
-        tracing::debug!("    API index: {}", self.get_api_index(api_name));
+        tracing::debug!("    API index: {:?}", self.get_api_index(api_name));
         tracing::debug!("    Body len: {}", body.len());
 
-        let request_bytes = self.build_api_request(cid, api_name, body);
+        let request_bytes = self.build_api_request(cid, api_name, body)?;
         tracing::debug!("  Request envelope size: {} bytes", request_bytes.len());
 
         tracing::debug!("  Calling self.send() with cid={}...", cid);
@@ -953,7 +994,7 @@ impl MezonTransport {
             clan_id: parse_id(clan_id)?,
             limit: 500,
             state: 1,
-            page: 1,
+            channel_type: 1,
             ..Default::default()
         }
         .encode_to_vec();
@@ -1037,7 +1078,12 @@ impl MezonTransport {
     pub async fn list_clan_descs(&self) -> Result<Vec<ApiClanDesc>> {
         let cid = self.generate_cid();
 
-        let body = api::ListClanDescRequest::default().encode_to_vec();
+        let body = api::ListClanDescRequest {
+            limit: 50,
+            state: 1,
+            ..Default::default()
+        }
+        .encode_to_vec();
         let (code, response) = self.send_api_request(cid, "ListClanDescs", body).await?;
 
         if code != 0 {
@@ -5156,5 +5202,105 @@ impl MezonTransport {
             return Err(anyhow::anyhow!("API error: code={}", code));
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct MockAdapter {
+        send_ok: bool,
+    }
+
+    #[async_trait::async_trait]
+    impl TransportAdapter for MockAdapter {
+        async fn connect(&self, _host: &str, _port: u16, _token: &str) -> Result<()> {
+            Ok(())
+        }
+        async fn send(&self, _message: Vec<u8>) -> Result<()> {
+            if self.send_ok {
+                Ok(())
+            } else {
+                Err(anyhow::anyhow!("mock send failed"))
+            }
+        }
+        async fn send_ping(&self, _cid: u16) -> Result<()> {
+            Ok(())
+        }
+        fn is_open(&self) -> bool {
+            true
+        }
+        async fn close(&self) -> Result<()> {
+            Ok(())
+        }
+        async fn set_on_message(&self, _handler: crate::transport_adapter::MessageHandler) {}
+        async fn set_on_open(&self, _handler: crate::transport_adapter::OpenHandler) {}
+        async fn set_on_close(&self, _handler: crate::transport_adapter::CloseHandler) {}
+        async fn set_on_error(&self, _handler: crate::transport_adapter::ErrorHandler) {}
+    }
+
+    fn transport(send_ok: bool) -> MezonTransport {
+        MezonTransport::new(Box::new(MockAdapter { send_ok }), String::new())
+    }
+
+    #[tokio::test]
+    async fn gate_passes_immediately_when_connected() {
+        let t = transport(true);
+        t.connected_tx.send(true).unwrap();
+        t.wait_connected(Duration::from_secs(5)).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn gate_times_out_when_never_connected() {
+        let t = transport(true);
+        let err = t
+            .wait_connected(Duration::from_millis(50))
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("not connected"));
+    }
+
+    #[tokio::test]
+    async fn gate_resolves_when_connection_arrives_mid_wait() {
+        let t = transport(true);
+        let tx = t.connected_tx.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(30)).await;
+            let _ = tx.send(true);
+        });
+        t.wait_connected(Duration::from_secs(5)).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn send_gate_times_out_and_inserts_no_pending_when_disconnected() {
+        let mut t = transport(true);
+        t.connect_gate = Duration::from_millis(50);
+        let cid = t.generate_cid();
+        let err = t.send(cid, vec![1, 2, 3, 4]).await.unwrap_err();
+        assert!(err.to_string().contains("not connected"));
+        assert!(t.pending_requests.read().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn send_removes_pending_when_adapter_send_fails() {
+        let mut t = transport(false);
+        t.connect_gate = Duration::from_millis(50);
+        t.connected_tx.send(true).unwrap();
+        let cid = t.generate_cid();
+        let err = t.send(cid, vec![1, 2, 3, 4]).await.unwrap_err();
+        assert!(err.to_string().contains("mock send failed"));
+        assert!(t.pending_requests.read().await.is_empty());
+    }
+
+    #[test]
+    fn api_index_pins_known_names_and_rejects_unknown() {
+        let t = transport(true);
+        assert_eq!(t.get_api_index("ListChannelDescs"), Some(0));
+        assert_eq!(t.get_api_index("GetAccount"), Some(1));
+        assert_eq!(t.get_api_index("ListClanDescs"), Some(2));
+        assert_eq!(t.get_api_index("ListChannelMessages"), Some(30));
+        assert_eq!(t.get_api_index("UploadBatchAttachmentFile"), Some(209));
+        assert_eq!(t.get_api_index("DefinitelyNotAnApi"), None);
     }
 }
