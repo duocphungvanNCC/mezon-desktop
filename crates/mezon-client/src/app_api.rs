@@ -5,7 +5,10 @@ use anyhow::Result;
 
 use crate::{
     TransportClient,
-    transport::{ApiAccount, ApiChannelDesc, ApiClanDesc, ApiMessage, RealtimeEvent},
+    transport::{
+        ApiAccount, ApiCategoryDesc, ApiChannelApp, ApiChannelDesc, ApiClanDesc, ApiDirectChannel,
+        ApiMessage, ApiVoiceChannelUser, RealtimeEvent,
+    },
 };
 
 const CHECK_NAME_TYPE_NICKNAME: i32 = 4;
@@ -102,6 +105,11 @@ impl AppApi {
         self.transport.list_channel_by_user_id().await
     }
 
+    /// List the user's direct-message / group conversations (clan_id = 0).
+    pub async fn list_dm_channels(&self) -> Result<Vec<ApiDirectChannel>> {
+        self.transport.list_dm_channel_descs().await
+    }
+
     pub async fn list_clan_descs(&self) -> Result<Vec<ApiClanDesc>> {
         self.transport.list_clan_descs().await
     }
@@ -156,9 +164,10 @@ impl AppApi {
         channel_id: &str,
         content: &str,
         is_public: bool,
+        mode: i32,
     ) -> Result<ApiMessage> {
         self.transport
-            .send_channel_message(clan_id, channel_id, content, is_public)
+            .send_channel_message(clan_id, channel_id, content, is_public, mode)
             .await
     }
 
@@ -195,6 +204,7 @@ impl AppApi {
         channel_id: &str,
         content: &str,
         is_public: bool,
+        mode: i32,
         media_urls: &[String],
     ) -> Result<ApiMessage> {
         let attachments = futures::future::try_join_all(
@@ -207,6 +217,7 @@ impl AppApi {
                 channel_id,
                 content,
                 is_public,
+                mode,
                 attachments,
             )
             .await
@@ -327,6 +338,14 @@ impl AppApi {
             .await
     }
 
+    pub async fn check_duplicate_clan_name(&self, name: &str, condition_id: &str) -> Result<bool> {
+        let cond: i64 = condition_id
+            .parse()
+            .map_err(|e| anyhow::anyhow!("invalid condition_id {condition_id:?}: {e}"))?;
+        let resp = self.transport.check_duplicate_name(name, 0, cond).await?;
+        Ok(resp.is_duplicate)
+    }
+
     pub async fn check_duplicate_clan_nickname(
         &self,
         clan_id: &str,
@@ -343,7 +362,6 @@ impl AppApi {
     }
 
     pub async fn upload_avatar(&self, path: &Path) -> Result<String> {
-        tracing::info!("upload_avatar: reading file path={:?}", path);
         let data = crate::transport_runtime::read_file(path.to_path_buf()).await?;
 
         let raw_filename = path
@@ -377,6 +395,54 @@ impl AppApi {
         tracing::info!("Avatar upload complete: url={}", permanent_url);
 
         Ok(permanent_url)
+    }
+
+    pub async fn list_categories_typed(&self, clan_id: &str) -> Result<Vec<ApiCategoryDesc>> {
+        self.transport.list_categories_typed(clan_id).await
+    }
+
+    pub async fn list_clan_badge_count(&self) -> Result<Vec<(String, i32, bool)>> {
+        self.transport.list_clan_badge_count().await
+    }
+
+    pub async fn get_notification_clan(&self, clan_id: &str) -> Result<i32> {
+        self.transport.get_notification_clan(clan_id).await
+    }
+
+    pub async fn list_channel_badge_counts(&self, clan_id: &str) -> Result<Vec<ApiChannelDesc>> {
+        self.transport.list_channel_badge_counts(clan_id).await
+    }
+
+    pub async fn list_voice_channel_users(
+        &self,
+        clan_id: &str,
+    ) -> Result<Vec<ApiVoiceChannelUser>> {
+        self.transport.list_voice_channel_users(clan_id).await
+    }
+
+    pub async fn list_channel_apps(&self, clan_id: &str) -> Result<Vec<ApiChannelApp>> {
+        self.transport.list_channel_apps(clan_id).await
+    }
+
+    pub async fn list_favorite_channels(&self, clan_id: &str) -> Result<Vec<String>> {
+        let resp = self.transport.get_list_favorite_channel(clan_id).await?;
+        Ok(resp
+            .channel_ids
+            .into_iter()
+            .map(|id| id.to_string())
+            .collect())
+    }
+
+    pub async fn add_channel_favorite(&self, channel_id: &str, clan_id: &str) -> Result<()> {
+        self.transport
+            .add_channel_favorite(channel_id, clan_id)
+            .await
+    }
+
+    pub async fn remove_channel_favorite(&self, channel_id: &str, clan_id: &str) -> Result<()> {
+        self.transport
+            .remove_channel_favorite(channel_id, clan_id)
+            .await
     }
 
     pub async fn list_loged_device(&self) -> Result<Vec<mezon_proto::api::LogedDevice>> {

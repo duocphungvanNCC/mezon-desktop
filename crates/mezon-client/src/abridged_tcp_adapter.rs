@@ -785,34 +785,29 @@ impl TransportAdapter for AbridgedTcpAdapter {
         let connector = tokio_rustls::TlsConnector::from(Arc::new(config));
 
         let addr = format!("{}:{}", host, port);
-        tracing::info!("TCP connecting to {}...", addr);
+        tracing::debug!("TCP connecting...");
         let tcp = tokio::time::timeout(
             std::time::Duration::from_secs(15),
             TcpStream::connect(&addr),
         )
         .await
-        .map_err(|_| anyhow::anyhow!("TCP connect timed out after 15s: {addr}"))?
+        .map_err(|_| anyhow::anyhow!("TCP connect timed out after 15s"))?
         .map_err(|e| anyhow::anyhow!("TCP connect failed: {e}"))?;
         let local = tcp
             .local_addr()
             .map_err(|e| anyhow::anyhow!("local_addr: {e}"))?;
-        let peer = tcp
-            .peer_addr()
-            .map_err(|e| anyhow::anyhow!("peer_addr: {e}"))?;
-        tracing::info!("TCP connected: local={} peer={}", local, peer);
+        tracing::debug!("TCP connected: local={}", local);
 
         let domain = ServerName::try_from(host.to_string())
             .map_err(|e| anyhow::anyhow!("Invalid DNS name: {e}"))?;
-        tracing::info!("DNS name parsed: {:?}", domain);
 
-        tracing::info!("Starting TLS handshake with {}...", host);
+        tracing::debug!("Starting TLS handshake...");
         let tls = connector
             .connect(domain, tcp)
             .await
             .map_err(|e| anyhow::anyhow!("TLS handshake failed: {e}"))?;
-        tracing::info!("TLS handshake complete");
+        tracing::debug!("TLS handshake complete");
 
-        // Spawn I/O loop and wait for it to be ready
         let (ready_tx, ready_rx) = oneshot::channel();
         let (write_tx, write_rx) = mpsc::unbounded_channel();
         let state = IoLoopState {
@@ -834,34 +829,32 @@ impl TransportAdapter for AbridgedTcpAdapter {
             Self::io_loop(tls, write_rx, ready_tx, state).await;
         });
 
-        // Wait for I/O loop to signal readiness
-        tracing::info!("Waiting for I/O loop to be ready...");
+        tracing::debug!("Waiting for I/O loop to be ready...");
         ready_rx
             .await
             .map_err(|_| anyhow::anyhow!("I/O loop panicked before starting"))?;
         tracing::info!("I/O loop confirmed READY");
         *self.io_task.lock().await = Some(task);
 
-        // Now send handshake — I/O loop is definitely listening
         let handshake = frame_handshake(token);
 
-        tracing::info!("Sending handshake");
+        tracing::debug!("Sending handshake");
         write_tx
             .send(handshake)
             .map_err(|_| anyhow::anyhow!("Write channel closed early"))?;
-        tracing::info!("Handshake queued via mpsc channel");
+        tracing::debug!("Handshake queued via mpsc channel");
 
         *self.write_tx.lock().await = Some(write_tx);
         self.is_connected.store(true, Ordering::Release);
-        tracing::info!("Connection state: is_connected=true, write_tx set");
+        tracing::debug!("Connection state: is_connected=true, write_tx set");
 
         {
             let h = self.handlers.lock().await;
             h.trigger_open();
         }
-        tracing::info!("on_open triggered");
+        tracing::debug!("on_open triggered");
 
-        tracing::info!("=== CONNECT COMPLETE ===");
+        tracing::info!("Transport connected");
         Ok(())
     }
 

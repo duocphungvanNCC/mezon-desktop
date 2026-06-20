@@ -1,14 +1,21 @@
+pub mod tokens;
+
+use std::sync::Arc;
+
 use gpui::{App, Global, Rgba};
 
-impl Global for Theme {}
+use crate::theme::tokens::ThemeTokens;
+
+struct GlobalTheme(Arc<Theme>);
+impl Global for GlobalTheme {}
 
 pub trait ActiveTheme {
-    fn theme(&self) -> &Theme;
+    fn theme(&self) -> &Arc<Theme>;
 }
 
 impl ActiveTheme for App {
-    fn theme(&self) -> &Theme {
-        self.global::<Theme>()
+    fn theme(&self) -> &Arc<Theme> {
+        &self.global::<GlobalTheme>().0
     }
 }
 
@@ -51,7 +58,7 @@ pub fn init_theme_settings_provider(cx: &mut App) {
 
 pub fn set_theme(theme: Theme, cx: &mut App) {
     apply_zed_palette(&theme, cx);
-    cx.set_global(theme);
+    cx.set_global(GlobalTheme(Arc::new(theme)));
 }
 
 fn apply_zed_palette(theme: &Theme, cx: &mut App) {
@@ -91,9 +98,13 @@ fn apply_zed_palette(theme: &Theme, cx: &mut App) {
 pub fn resolve_theme(theme_name: &str) -> Theme {
     match theme_name {
         "light" => Theme::light(),
-        "purple" => Theme::purple(),
-        "abyss" => Theme::abyss(),
-        "red_dark" => Theme::red_dark(),
+        "purple" | "purple_haze" => Theme::purple(),
+        "abyss" | "abyss_dark" => Theme::abyss(),
+        "red_dark" | "redDark" => Theme::red_dark(),
+        "sunrise" => Theme::sunrise(),
+        "sunset" => Theme::sunset(),
+        "cisher" => Theme::cisher(),
+        "berrynade" => Theme::berrynade(),
         _ => Theme::dark(),
     }
 }
@@ -138,6 +149,8 @@ pub struct Theme {
 
     // Title bar
     pub title_bar_bg: Rgba, // #1e1f22
+
+    pub tokens: ThemeTokens,
 }
 
 fn rgba(r: u8, g: u8, b: u8, a: f32) -> Rgba {
@@ -151,6 +164,26 @@ fn rgba(r: u8, g: u8, b: u8, a: f32) -> Rgba {
 
 impl Theme {
     pub fn dark() -> Self {
+        Self::from_react("dark")
+    }
+
+    pub fn light() -> Self {
+        Self::from_react("light")
+    }
+
+    pub fn purple() -> Self {
+        Self::from_react("purple_haze")
+    }
+
+    pub fn abyss() -> Self {
+        Self::from_react("abyss_dark")
+    }
+
+    pub fn red_dark() -> Self {
+        Self::from_react("redDark")
+    }
+
+    fn dark_base() -> Self {
         Self {
             bg_primary: rgba(49, 51, 56, 1.0),
             bg_secondary: rgba(43, 45, 49, 1.0),
@@ -180,10 +213,11 @@ impl Theme {
 
             border: rgba(100, 100, 100, 0.4),
             title_bar_bg: rgba(30, 31, 34, 1.0),
+            tokens: ThemeTokens::for_theme("dark"),
         }
     }
 
-    pub fn light() -> Self {
+    fn light_base() -> Self {
         Self {
             bg_primary: rgba(255, 255, 255, 1.0),
             bg_secondary: rgba(242, 243, 245, 1.0),
@@ -213,105 +247,83 @@ impl Theme {
 
             border: rgba(218, 220, 224, 1.0),
             title_bar_bg: rgba(227, 229, 232, 1.0),
+            tokens: ThemeTokens::for_theme("light"),
         }
     }
 
-    pub fn purple() -> Self {
-        Self {
-            bg_primary: rgba(30, 25, 45, 1.0),
-            bg_secondary: rgba(38, 32, 54, 1.0),
-            bg_tertiary: rgba(24, 20, 38, 1.0),
-            bg_floating: rgba(16, 13, 26, 1.0),
-            bg_hover: rgba(120, 90, 200, 0.10),
-
-            text_primary: rgba(242, 243, 245, 1.0),
-            text_secondary: rgba(181, 186, 193, 1.0),
-            text_muted: rgba(128, 132, 142, 1.0),
-            text_link: rgba(160, 130, 255, 1.0),
-
-            interactive_normal: rgba(181, 186, 193, 1.0),
-            interactive_hover: rgba(219, 222, 225, 1.0),
-            interactive_active: rgba(242, 243, 245, 1.0),
-
-            brand: rgba(110, 82, 190, 1.0),
-            brand_hover: rgba(92, 68, 168, 1.0),
-
-            status_online: rgba(35, 165, 90, 1.0),
-            status_idle: rgba(240, 178, 50, 1.0),
-            status_dnd: rgba(225, 2, 79, 1.0),
-            status_offline: rgba(128, 132, 142, 1.0),
-
-            unread_dot: rgba(242, 243, 245, 1.0),
-            mention_badge: rgba(242, 63, 67, 1.0),
-
-            border: rgba(160, 130, 255, 0.25),
-            title_bar_bg: rgba(24, 20, 38, 1.0),
-        }
+    fn from_tokens(mut base: Theme, t: ThemeTokens) -> Theme {
+        base.bg_primary = t.bg_secondary;
+        base.bg_secondary = t.bg_theme_direct_message;
+        base.bg_tertiary = t.bg_primary;
+        base.bg_floating = t.bg_tooltip_app;
+        base.bg_hover = t.bg_item_hover;
+        base.brand = t.button_theme_primary;
+        base.brand_hover = t.bg_button_primary_hover;
+        base.border = t.border_primary;
+        base.text_link = t.color_mention_hover;
+        base.mention_badge = t.mention_color;
+        base.title_bar_bg = t.bg_primary;
+        base.tokens = t;
+        base
     }
 
-    pub fn abyss() -> Self {
-        Self {
-            bg_primary: rgba(13, 15, 22, 1.0),
-            bg_secondary: rgba(18, 20, 30, 1.0),
-            bg_tertiary: rgba(10, 12, 18, 1.0),
-            bg_floating: rgba(6, 8, 14, 1.0),
-            bg_hover: rgba(100, 140, 220, 0.08),
-
-            text_primary: rgba(230, 235, 245, 1.0),
-            text_secondary: rgba(160, 170, 190, 1.0),
-            text_muted: rgba(110, 120, 140, 1.0),
-            text_link: rgba(80, 160, 255, 1.0),
-
-            interactive_normal: rgba(160, 170, 190, 1.0),
-            interactive_hover: rgba(200, 210, 225, 1.0),
-            interactive_active: rgba(230, 235, 245, 1.0),
-
-            brand: rgba(46, 110, 210, 1.0),
-            brand_hover: rgba(36, 92, 178, 1.0),
-
-            status_online: rgba(35, 165, 90, 1.0),
-            status_idle: rgba(240, 178, 50, 1.0),
-            status_dnd: rgba(225, 2, 79, 1.0),
-            status_offline: rgba(110, 120, 140, 1.0),
-
-            unread_dot: rgba(230, 235, 245, 1.0),
-            mention_badge: rgba(242, 63, 67, 1.0),
-
-            border: rgba(80, 120, 200, 0.25),
-            title_bar_bg: rgba(10, 12, 18, 1.0),
-        }
+    fn from_react(name: &str) -> Theme {
+        let t = ThemeTokens::for_theme(name);
+        let bg = t.bg_secondary;
+        let luminance = 0.299 * bg.r + 0.587 * bg.g + 0.114 * bg.b;
+        let base = if luminance > 0.5 {
+            Theme::light_base()
+        } else {
+            Theme::dark_base()
+        };
+        Self::from_tokens(base, t)
     }
 
-    pub fn red_dark() -> Self {
-        Self {
-            bg_primary: rgba(40, 22, 24, 1.0),
-            bg_secondary: rgba(48, 26, 28, 1.0),
-            bg_tertiary: rgba(34, 16, 18, 1.0),
-            bg_floating: rgba(22, 12, 14, 1.0),
-            bg_hover: rgba(220, 80, 80, 0.10),
+    pub fn sunrise() -> Self {
+        Self::from_react("sunrise")
+    }
 
-            text_primary: rgba(240, 225, 225, 1.0),
-            text_secondary: rgba(190, 165, 165, 1.0),
-            text_muted: rgba(140, 120, 120, 1.0),
-            text_link: rgba(255, 130, 130, 1.0),
+    pub fn sunset() -> Self {
+        Self::from_react("sunset")
+    }
 
-            interactive_normal: rgba(190, 165, 165, 1.0),
-            interactive_hover: rgba(215, 190, 190, 1.0),
-            interactive_active: rgba(240, 225, 225, 1.0),
+    pub fn cisher() -> Self {
+        Self::from_react("cisher")
+    }
 
-            brand: rgba(200, 72, 72, 1.0),
-            brand_hover: rgba(170, 58, 58, 1.0),
+    pub fn berrynade() -> Self {
+        Self::from_react("berrynade")
+    }
+}
 
-            status_online: rgba(35, 165, 90, 1.0),
-            status_idle: rgba(240, 178, 50, 1.0),
-            status_dnd: rgba(225, 2, 79, 1.0),
-            status_offline: rgba(140, 120, 120, 1.0),
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-            unread_dot: rgba(240, 225, 225, 1.0),
-            mention_badge: rgba(242, 63, 67, 1.0),
+    fn assert_tracks_react(theme: Theme, token_name: &str) {
+        let t = ThemeTokens::for_theme(token_name);
+        assert_eq!(theme.bg_primary, t.bg_secondary);
+        assert_eq!(theme.bg_secondary, t.bg_theme_direct_message);
+        assert_eq!(theme.bg_tertiary, t.bg_primary);
+        assert_eq!(theme.border, t.border_primary);
+        assert_eq!(theme.brand, t.button_theme_primary);
+        assert_eq!(theme.title_bar_bg, t.bg_primary);
+    }
 
-            border: rgba(220, 100, 100, 0.25),
-            title_bar_bg: rgba(34, 16, 18, 1.0),
-        }
+    #[test]
+    fn semantic_fields_track_react_tokens() {
+        assert_tracks_react(Theme::dark(), "dark");
+        assert_tracks_react(Theme::light(), "light");
+        assert_tracks_react(Theme::purple(), "purple_haze");
+        assert_tracks_react(Theme::abyss(), "abyss_dark");
+        assert_tracks_react(Theme::red_dark(), "redDark");
+    }
+
+    #[test]
+    fn dark_text_hierarchy_not_inverted() {
+        let t = Theme::dark();
+        let lum = |c: Rgba| c.r + c.g + c.b;
+        assert!(lum(t.text_primary) > lum(t.text_secondary));
+        assert!(lum(t.text_secondary) > lum(t.text_muted));
     }
 }

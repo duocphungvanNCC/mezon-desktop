@@ -22,6 +22,7 @@ use crate::theme::ActiveTheme;
 
 pub struct LoginView {
     auth_state: Entity<AuthState>,
+    settings: Entity<Settings>,
 
     /// Which login mode is active.
     method: LoginMethod,
@@ -57,6 +58,7 @@ impl LoginView {
         cx.observe(&settings, |_, _, cx| cx.notify()).detach();
         Self {
             auth_state,
+            settings,
             method: LoginMethod::Otp,
             otp_step: 0,
             otp_req_id: String::new(),
@@ -72,12 +74,14 @@ impl LoginView {
 
     fn ensure_fields(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.email_field.is_none() {
-            self.email_field = Some(cx.new(|cx| FormField::new(window, cx, "Email")));
+            let label = mezon_i18n::t(&self.settings.read(cx).language, "login.email");
+            self.email_field = Some(cx.new(|cx| FormField::new(window, cx, label)));
         }
 
         if self.password_field.is_none() {
+            let label = mezon_i18n::t(&self.settings.read(cx).language, "login.password");
             self.password_field = Some(cx.new(|cx| {
-                let field = FormField::new(window, cx, "Password");
+                let field = FormField::new(window, cx, label);
                 field.set_masked(window, cx);
                 field
             }));
@@ -105,7 +109,8 @@ impl LoginView {
             .unwrap_or_default();
         if email.trim().is_empty() {
             entity.update(cx, |this, cx| {
-                this.error = Some("Please enter your email address.".to_owned());
+                let locale = this.settings.read(cx).language.clone();
+                this.error = Some(mezon_i18n::t(&locale, "login.errors.emailRequired").to_string());
                 cx.notify();
             });
             return;
@@ -212,7 +217,9 @@ impl LoginView {
 
         if email.trim().is_empty() || password.is_empty() {
             entity.update(cx, |this, cx| {
-                this.error = Some("Please enter your email and password.".to_owned());
+                let locale = this.settings.read(cx).language.clone();
+                this.error =
+                    Some(mezon_i18n::t(&locale, "login.errors.emailPasswordRequired").to_string());
                 cx.notify();
             });
             return;
@@ -295,6 +302,7 @@ impl LoginView {
 impl Render for LoginView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.ensure_fields(window, cx);
+        let locale = self.settings.read(cx).language.clone();
         let theme = cx.theme();
 
         // Outer centered column.
@@ -343,7 +351,7 @@ impl Render for LoginView {
                                 .text_sm()
                                 .font_weight(FontWeight::SEMIBOLD)
                                 .text_color(theme.text_primary)
-                                .child("Sign in with OTP"),
+                                .child(mezon_i18n::t(&locale, "login.signInWithOtp")),
                         )
                         .child(self.email_field.as_ref().expect("email field").clone());
 
@@ -352,7 +360,7 @@ impl Render for LoginView {
                     card = card.child(
                         div().w_full().child(
                             Button::new("send-otp")
-                                .label("Send OTP")
+                                .label(mezon_i18n::t(&locale, "login.sendOtp"))
                                 .primary()
                                 .w_full()
                                 .loading(loading)
@@ -365,23 +373,26 @@ impl Render for LoginView {
                     );
                 } else {
                     // Step 1: OTP code entry.
-                    card =
-                        card.child(
-                            div()
-                                .flex()
-                                .flex_col()
-                                .gap_1()
-                                .child(
-                                    div()
-                                        .text_sm()
-                                        .font_weight(FontWeight::SEMIBOLD)
-                                        .text_color(theme.text_primary)
-                                        .child("Enter verification code"),
-                                )
-                                .child(div().text_xs().text_color(theme.text_secondary).child(
-                                    format!("We sent a 6-digit code to {}", self.otp_email),
-                                )),
-                        );
+                    card = card.child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(theme.text_primary)
+                                    .child(mezon_i18n::t(&locale, "login.enterVerificationCode")),
+                            )
+                            .child(div().text_xs().text_color(theme.text_secondary).child(
+                                format!(
+                                    "{} {}",
+                                    mezon_i18n::t(&locale, "login.codeSentTo"),
+                                    self.otp_email
+                                ),
+                            )),
+                    );
 
                     // OTP digit boxes with auto-advance.
                     card = card.child(self.otp_input.as_ref().expect("otp_input").clone());
@@ -400,7 +411,10 @@ impl Render for LoginView {
                                 .justify_center()
                                 .text_xs()
                                 .text_color(theme.text_muted)
-                                .child(format!("Resend code in {countdown}s")),
+                                .child(format!(
+                                    "{} {countdown}s",
+                                    mezon_i18n::t(&locale, "login.resendCodeIn")
+                                )),
                         );
                     } else {
                         let entity = cx.entity().clone();
@@ -419,7 +433,7 @@ impl Render for LoginView {
                                         cx.notify();
                                     });
                                 })
-                                .child("Resend code"),
+                                .child(mezon_i18n::t(&locale, "login.resendCode")),
                         );
                     }
 
@@ -441,7 +455,7 @@ impl Render for LoginView {
                                     cx.notify();
                                 });
                             })
-                            .child("← Change email"),
+                            .child(format!("← {}", mezon_i18n::t(&locale, "login.changeEmail"))),
                     );
                 }
             }
@@ -454,7 +468,7 @@ impl Render for LoginView {
                             .text_sm()
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_color(theme.text_primary)
-                            .child("Sign in with password"),
+                            .child(mezon_i18n::t(&locale, "login.signInWithPassword")),
                     )
                     .child(self.email_field.as_ref().expect("email field").clone())
                     .child(
@@ -476,7 +490,7 @@ impl Render for LoginView {
                         .on_mouse_down(MouseButton::Left, |_, _window, _cx| {
                             let _ = mezon_native::open_url("https://mezon.ai/forgot-password");
                         })
-                        .child("Forgot password?"),
+                        .child(mezon_i18n::t(&locale, "login.forgotPassword")),
                 );
 
                 let loading = self.loading;
@@ -484,7 +498,7 @@ impl Render for LoginView {
                 card = card.child(
                     div().w_full().child(
                         Button::new("sign-in")
-                            .label("Sign In")
+                            .label(mezon_i18n::t(&locale, "login.signIn"))
                             .primary()
                             .w_full()
                             .loading(loading)
@@ -515,14 +529,19 @@ impl Render for LoginView {
                 .items_center()
                 .gap_2()
                 .child(div().flex_1().h(gpui::px(1.0)).bg(theme.border))
-                .child(div().text_xs().text_color(theme.text_muted).child("or"))
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(theme.text_muted)
+                        .child(mezon_i18n::t(&locale, "common.or")),
+                )
                 .child(div().flex_1().h(gpui::px(1.0)).bg(theme.border)),
         );
 
         // Toggle login method link.
         let toggle_label = match self.method {
-            LoginMethod::Otp => "Login by Password",
-            LoginMethod::Password => "Login by OTP",
+            LoginMethod::Otp => mezon_i18n::t(&locale, "login.loginByPassword"),
+            LoginMethod::Password => mezon_i18n::t(&locale, "login.loginByOtp"),
         };
         let entity_toggle = cx.entity().clone();
         card = card.child(

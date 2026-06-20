@@ -16,3 +16,19 @@ Cargo.lock
 .env.local
 .session.json
 .mcp-sessions.json
+
+# Local agent tooling (Claude Code / Cursor)
+.claude/
+.cursor/
+.claudeignore
+.cursorignore
+
+# Local project docs / tooling scripts (personal, not committed)
+AGENTS.md
+CACHE_FLOW.md
+CLAUDE.md
+MASTER_CHECKLIST.md
+TEAM_SETUP.md
+install-team.sh
+profile.json.gz
+scripts/

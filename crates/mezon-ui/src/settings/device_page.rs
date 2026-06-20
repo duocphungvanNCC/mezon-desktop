@@ -5,6 +5,7 @@ use mezon_store::{AccountStore, Settings};
 use crate::theme::ActiveTheme;
 
 pub struct DevicePage {
+    settings: Entity<Settings>,
     fetch_started: bool,
 }
 
@@ -14,6 +15,7 @@ impl DevicePage {
         cx.observe(&AccountStore::global(cx), |_, _, cx| cx.notify())
             .detach();
         Self {
+            settings,
             fetch_started: false,
         }
     }
@@ -31,18 +33,19 @@ impl Render for DevicePage {
         }
 
         let theme = cx.theme();
+        let locale = self.settings.read(cx).language.clone();
         let store = AccountStore::global(cx).read(cx);
 
         v_flex()
             .gap_4()
             .child(
-                Label::new("Devices")
+                Label::new(mezon_i18n::t(&locale, "setting.devices.title"))
                     .text_xl()
                     .text_color(theme.text_primary)
                     .font_weight(FontWeight::SEMIBOLD),
             )
             .child(
-                Label::new("Manage the devices that have access to your account.")
+                Label::new(mezon_i18n::t(&locale, "setting.devices.description"))
                     .text_sm()
                     .text_color(theme.text_muted),
             )
@@ -56,13 +59,13 @@ impl Render for DevicePage {
                 div()
                     .text_sm()
                     .text_color(theme.text_muted)
-                    .child("Loading devices...")
+                    .child(mezon_i18n::t(&locale, "setting.devices.loading"))
                     .into_any_element()
             } else if store.devices.is_empty() {
                 div()
                     .text_sm()
                     .text_color(theme.text_muted)
-                    .child("No devices found.")
+                    .child(mezon_i18n::t(&locale, "setting.devices.none"))
                     .into_any_element()
             } else {
                 let current: Vec<_> = store.devices.iter().filter(|d| d.is_current).collect();
@@ -74,7 +77,7 @@ impl Render for DevicePage {
                         v_flex()
                             .gap_2()
                             .child(
-                                Label::new("CURRENT DEVICE")
+                                Label::new(mezon_i18n::t(&locale, "setting.devices.currentDevice"))
                                     .text_xs()
                                     .font_weight(FontWeight::SEMIBOLD)
                                     .text_color(theme.text_muted),
@@ -104,18 +107,22 @@ impl Render for DevicePage {
                                             .child(
                                                 div().text_xs().text_color(theme.text_muted).child(
                                                     format!(
-                                                        "{} · {} · Active now",
-                                                        device.platform, device.ip
+                                                        "{} · {} · {}",
+                                                        device.platform,
+                                                        device.ip,
+                                                        mezon_i18n::t(
+                                                            &locale,
+                                                            "setting.devices.activeNow"
+                                                        )
                                                     ),
                                                 ),
                                             ),
                                     )
                                     .child(div().flex_1())
                                     .child(
-                                        div()
-                                            .text_xs()
-                                            .text_color(theme.status_online)
-                                            .child("Active now"),
+                                        div().text_xs().text_color(theme.status_online).child(
+                                            mezon_i18n::t(&locale, "setting.devices.activeNow"),
+                                        ),
                                     )
                                     .into_any_element()
                             })),
@@ -124,7 +131,7 @@ impl Render for DevicePage {
                         v_flex()
                             .gap_2()
                             .child(
-                                Label::new("OTHER DEVICES")
+                                Label::new(mezon_i18n::t(&locale, "setting.devices.otherDevices"))
                                     .text_xs()
                                     .font_weight(FontWeight::SEMIBOLD)
                                     .text_color(theme.text_muted),
@@ -135,7 +142,7 @@ impl Render for DevicePage {
                                         .text_sm()
                                         .text_color(theme.text_muted)
                                         .px_4()
-                                        .child("No other devices."),
+                                        .child(mezon_i18n::t(&locale, "setting.devices.noOther")),
                                 )
                             })
                             .children(others.iter().map(|device| {
@@ -183,7 +190,11 @@ impl Render for DevicePage {
                                             .id(format!("remove-device-{}", device_id))
                                             .cursor_pointer()
                                             .text_color(theme.status_dnd)
-                                            .child("✕")
+                                            .child(
+                                                Icon::new(IconName::Close)
+                                                    .size_4()
+                                                    .text_color(theme.status_dnd),
+                                            )
                                             .on_click(
                                                 move |_: &ClickEvent,
                                                       _: &mut Window,

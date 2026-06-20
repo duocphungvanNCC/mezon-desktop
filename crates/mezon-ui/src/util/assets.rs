@@ -4,9 +4,12 @@ use anyhow::anyhow;
 use gpui::{AssetSource, Result, SharedString};
 use rust_embed::RustEmbed;
 
+pub const AVATAR_GROUP: &str = "images/avatar-group.png";
+
 #[derive(RustEmbed)]
 #[folder = "assets"]
 #[include = "icons/**/*.svg"]
+#[include = "images/**/*.png"]
 pub struct Assets;
 
 impl AssetSource for Assets {

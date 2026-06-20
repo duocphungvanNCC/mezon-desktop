@@ -1,3 +1,4 @@
+use crate::components::primitives::{Icon, IconName};
 use crate::theme::ActiveTheme;
 use gpui::{Context, Entity, MouseButton, Window, div, prelude::*, rgb};
 use mezon_store::Settings;
@@ -51,7 +52,11 @@ impl Render for TitleBar {
                                 .on_mouse_down(MouseButton::Left, |_, window, _| {
                                     window.minimize_window();
                                 })
-                                .child("─"),
+                                .child(
+                                    Icon::new(IconName::WindowMinimize)
+                                        .size_4()
+                                        .text_color(theme.text_secondary),
+                                ),
                         )
                         .child(
                             div()
@@ -67,7 +72,11 @@ impl Render for TitleBar {
                                 .on_mouse_down(MouseButton::Left, |_, window, _| {
                                     window.zoom_window();
                                 })
-                                .child("□"),
+                                .child(
+                                    Icon::new(IconName::WindowZoom)
+                                        .size_4()
+                                        .text_color(theme.text_secondary),
+                                ),
                         )
                         .child(
                             div()
@@ -83,7 +92,11 @@ impl Render for TitleBar {
                                 .on_mouse_down(MouseButton::Left, |_, window, _| {
                                     window.remove_window();
                                 })
-                                .child("✕"),
+                                .child(
+                                    Icon::new(IconName::Close)
+                                        .size_4()
+                                        .text_color(theme.text_secondary),
+                                ),
                         ),
                 )
             })

@@ -148,11 +148,14 @@ impl ProfilePage {
     }
 
     fn init_inputs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let display = cx.new(|cx| InputState::new(window, cx).placeholder("Display name"));
+        let locale = self.settings.read(cx).language.clone();
+        let display_ph = mezon_i18n::t(&locale, "setting.profile.displayNamePlaceholder");
+        let about_ph = mezon_i18n::t(&locale, "setting.profile.aboutPlaceholder");
+        let display = cx.new(|cx| InputState::new(window, cx).placeholder(display_ph));
         let about = cx.new(|cx| {
             InputState::new(window, cx)
                 .multi_line(true)
-                .placeholder("Tell us about yourself")
+                .placeholder(about_ph)
         });
 
         if let Some(state) = &self.profile {
@@ -288,13 +291,14 @@ impl ProfilePage {
 
     fn render_user_section(&mut self, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
         let entity = cx.entity().clone();
+        let locale = self.settings.read(cx).language.clone();
         let avatar_display = self
             .profile
             .as_ref()
             .and_then(|p| p.avatar_url.as_ref())
-            .map(|url| SharedString::from(crate::imgproxy::profile_url(cx, url.as_ref())));
+            .map(|url| SharedString::from(crate::util::imgproxy::profile_url(cx, url.as_ref())));
         let form = self.render_form(theme, cx, avatar_display.clone());
-        let preview = self.render_preview(theme, avatar_display);
+        let preview = self.render_preview(theme, &locale, avatar_display);
         let is_dirty = self.is_dirty();
         let saving = self.profile.as_ref().map(|p| p.saving).unwrap_or(false);
 
@@ -306,20 +310,22 @@ impl ProfilePage {
                     v_flex()
                         .gap_3()
                         .pt_4()
-                        .child(
-                            h_flex().gap_2().items_center().child(
-                                div()
-                                    .text_sm()
-                                    .text_color(theme.status_dnd)
-                                    .child("⚠ Careful — you have unsaved changes!"),
-                            ),
-                        )
+                        .child(h_flex().gap_2().items_center().child(
+                            div().text_sm().text_color(theme.status_dnd).child(format!(
+                                "⚠ {}",
+                                mezon_i18n::t(&locale, "setting.profile.unsavedWarning")
+                            )),
+                        ))
                         .child(
                             h_flex()
                                 .gap_3()
                                 .child(
                                     GpuiButton::new("user-save-btn")
-                                        .label(if saving { "Saving…" } else { "Save Changes" })
+                                        .label(if saving {
+                                            mezon_i18n::t(&locale, "setting.profile.saving")
+                                        } else {
+                                            mezon_i18n::t(&locale, "setting.profile.saveChanges")
+                                        })
                                         .disabled(saving)
                                         .text_color(theme.text_secondary)
                                         .on_click({
@@ -333,7 +339,7 @@ impl ProfilePage {
                                 )
                                 .child(
                                     GpuiButton::new("user-discard-btn")
-                                        .label("Discard")
+                                        .label(mezon_i18n::t(&locale, "common.discard"))
                                         .disabled(saving)
                                         .text_color(theme.text_primary)
                                         .ghost()
@@ -377,17 +383,21 @@ impl Render for ProfilePage {
         }
 
         let theme = cx.theme().clone();
+        let locale = self.settings.read(cx).language.clone();
 
         if self.fetch_error {
             return v_flex()
                 .gap_4()
                 .child(
-                    Label::new("Profile")
+                    Label::new(mezon_i18n::t(&locale, "setting.profile.title"))
                         .text_xl()
                         .text_color(theme.text_primary)
                         .font_weight(FontWeight::SEMIBOLD),
                 )
-                .child(Label::new("Failed to load profile data").text_color(theme.text_muted))
+                .child(
+                    Label::new(mezon_i18n::t(&locale, "setting.profile.failedToLoad"))
+                        .text_color(theme.text_muted),
+                )
                 .into_any_element();
         }
 
@@ -395,12 +405,15 @@ impl Render for ProfilePage {
             return v_flex()
                 .gap_4()
                 .child(
-                    Label::new("Profile")
+                    Label::new(mezon_i18n::t(&locale, "setting.profile.title"))
                         .text_xl()
                         .text_color(theme.text_primary)
                         .font_weight(FontWeight::SEMIBOLD),
                 )
-                .child(Label::new("Loading profile...").text_color(theme.text_muted))
+                .child(
+                    Label::new(mezon_i18n::t(&locale, "setting.profile.loading"))
+                        .text_color(theme.text_muted),
+                )
                 .into_any_element();
         }
 
@@ -430,7 +443,7 @@ impl Render for ProfilePage {
                         el.border_color(inactive_border)
                             .text_color(theme.text_muted)
                     })
-                    .child("User Profile")
+                    .child(mezon_i18n::t(&locale, "setting.profile.userProfile"))
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.active_tab = ProfileTab::User;
                         cx.notify();
@@ -452,7 +465,7 @@ impl Render for ProfilePage {
                         el.border_color(inactive_border)
                             .text_color(theme.text_muted)
                     })
-                    .child("Clan Profile")
+                    .child(mezon_i18n::t(&locale, "setting.profile.clanProfile"))
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.active_tab = ProfileTab::Clan;
                         let display_name = this
@@ -495,7 +508,7 @@ impl Render for ProfilePage {
                 v_flex()
                     .gap_4()
                     .child(
-                        Label::new("Loading clan profile...")
+                        Label::new(mezon_i18n::t(&locale, "setting.profile.loadingClan"))
                             .text_color(theme.text_muted)
                             .text_sm(),
                     )
@@ -513,11 +526,15 @@ impl Render for ProfilePage {
             .when(!is_clan, |el| {
                 el.child(
                     GpuiButton::new("delete-account-btn")
-                        .label("Delete Account")
+                        .label(mezon_i18n::t(&locale, "setting.profile.deleteAccount"))
                         .text_color(theme.status_dnd)
                         .ghost()
                         .on_click(cx.listener(|this, _, _, cx| {
-                            this.show_toast("Delete account confirmation coming soon", cx);
+                            let locale = this.settings.read(cx).language.clone();
+                            this.show_toast(
+                                mezon_i18n::t(&locale, "setting.profile.deleteComingSoon"),
+                                cx,
+                            );
                         })),
                 )
             })
@@ -532,6 +549,7 @@ impl ProfilePage {
         cx: &mut Context<Self>,
         avatar_display: Option<SharedString>,
     ) -> impl IntoElement {
+        let locale = self.settings.read(cx).language.clone();
         let display_name: SharedString = self
             .profile
             .as_ref()
@@ -544,7 +562,7 @@ impl ProfilePage {
         v_flex()
             .gap_4()
             .child(
-                Label::new("Profile")
+                Label::new(mezon_i18n::t(&locale, "setting.profile.title"))
                     .text_xl()
                     .text_color(theme.text_primary)
                     .font_weight(FontWeight::SEMIBOLD),
@@ -561,16 +579,20 @@ impl ProfilePage {
                     )
                     .child(
                         GpuiButton::new("change-avatar-btn")
-                            .label("Change Avatar")
+                            .label(mezon_i18n::t(&locale, "common.changeAvatar"))
                             .text_color(theme.text_primary)
                             .ghost()
-                            .on_click(cx.listener(|_this, _, _, cx| {
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                let locale = this.settings.read(cx).language.clone();
                                 let root_entity = cx.entity().clone();
                                 let rx = cx.prompt_for_paths(PathPromptOptions {
                                     files: true,
                                     directories: false,
                                     multiple: false,
-                                    prompt: Some("Choose an avatar image".into()),
+                                    prompt: Some(
+                                        mezon_i18n::t(&locale, "setting.profile.chooseAvatar")
+                                            .into(),
+                                    ),
                                 });
                                 cx.spawn(async move |_this, cx| {
                                     let paths = match rx.await {
@@ -592,7 +614,7 @@ impl ProfilePage {
                     )
                     .child(
                         GpuiButton::new("remove-avatar-btn")
-                            .label("Remove Avatar")
+                            .label(mezon_i18n::t(&locale, "common.removeAvatar"))
                             .text_color(theme.text_muted)
                             .ghost()
                             .on_click(cx.listener(|this, _, _, cx| {
@@ -611,7 +633,7 @@ impl ProfilePage {
                             .text_xs()
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_color(theme.text_primary)
-                            .child("DISPLAY NAME"),
+                            .child(mezon_i18n::t(&locale, "setting.profile.displayName")),
                     )
                     .child(
                         Input::new(
@@ -630,7 +652,7 @@ impl ProfilePage {
                             .text_xs()
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_color(theme.text_primary)
-                            .child("ABOUT ME"),
+                            .child(mezon_i18n::t(&locale, "setting.profile.aboutMe")),
                     )
                     .child(
                         Input::new(
@@ -653,6 +675,7 @@ impl ProfilePage {
     fn render_preview(
         &self,
         theme: &Theme,
+        locale: &str,
         avatar_display: Option<SharedString>,
     ) -> impl IntoElement {
         let display_name: SharedString = self
@@ -671,7 +694,7 @@ impl ProfilePage {
         v_flex()
             .gap_4()
             .child(
-                Label::new("Preview")
+                Label::new(mezon_i18n::t(locale, "common.preview"))
                     .text_xl()
                     .text_color(theme.text_primary)
                     .font_weight(FontWeight::SEMIBOLD),

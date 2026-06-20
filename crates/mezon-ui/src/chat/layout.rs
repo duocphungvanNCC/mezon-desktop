@@ -1,22 +1,26 @@
 use gpui::{AnyView, Context, Entity, StyleRefinement, Window, div, prelude::*, px};
 use mezon_store::{
-    AuthState, ChannelList, ClanList, MessagesStore, PresenceEvent, PresenceStore, Settings,
+    AuthState, ChannelList, ClanList, DirectChannel, DirectMessageStore, MessagesStore,
+    PresenceEvent, PresenceStore, Settings,
 };
 
-use crate::chat_area::ChatArea;
+use crate::chat::area::ChatArea;
 use crate::components::compositions::user_info_bar::UserInfoBar;
 use crate::router::{Route, Router};
 use crate::theme::{ActiveTheme, Theme};
-use crate::{ChannelSidebar, ClanSidebar};
+use crate::{ChannelSidebar, ClanSidebar, DirectSidebar};
 
 pub struct ChatLayout {
     pub(crate) channel_list: Entity<ChannelList>,
     pub chat_area: ChatArea,
     clan_sidebar: Entity<ClanSidebar>,
     channel_sidebar: Entity<ChannelSidebar>,
+    direct_sidebar: Entity<DirectSidebar>,
+    direct_store: Entity<DirectMessageStore>,
     user_info_bar: UserInfoBar,
     clan_list: Entity<ClanList>,
     auth_state: Entity<AuthState>,
+    settings: Entity<Settings>,
     pending_channel_id: Option<String>,
 }
 
@@ -48,6 +52,9 @@ impl ChatLayout {
             )
         });
 
+        let settings_for_direct = settings.clone();
+        let direct_sidebar = cx.new(move |cx| DirectSidebar::new(settings_for_direct, cx));
+
         let user_info_bar = UserInfoBar::new(auth_state.clone());
 
         // The user bar only shows the current user's online status (`user_online`). Typing churns
@@ -67,9 +74,16 @@ impl ChatLayout {
         })
         .detach();
 
+        let direct_store = DirectMessageStore::global(cx);
+        cx.observe(&direct_store, |_, _, cx| cx.notify()).detach();
+
+        let messages_store = MessagesStore::global(cx);
+        cx.observe(&messages_store, |_, _, cx| cx.notify()).detach();
+
         let chat_area = ChatArea::new(settings.clone(), cx);
         cx.observe(&channel_list, |this, _, cx| {
             this.apply_pending_channel(cx);
+            this.ensure_active_channel_for_clan(cx);
             cx.notify();
         })
         .detach();
@@ -82,25 +96,50 @@ impl ChatLayout {
             channel_list,
             clan_sidebar,
             channel_sidebar,
+            direct_sidebar,
+            direct_store,
             user_info_bar,
             clan_list,
             auth_state,
             chat_area,
+            settings,
             pending_channel_id: None,
         };
         this.user_info_bar.sync_presence(cx);
+        this.sync_active_from_route(cx);
         this
     }
 
     fn sync_active_from_route(&mut self, cx: &mut Context<Self>) {
-        let Route::Channel {
-            clan_id,
-            channel_id,
-        } = Router::global(cx).read(cx).route()
-        else {
-            self.pending_channel_id = None;
-            return;
-        };
+        match Router::global(cx).read(cx).route() {
+            Route::Channel {
+                clan_id,
+                channel_id,
+            } => self.sync_channel_route(clan_id, channel_id, cx),
+            Route::DirectMessage {
+                direct_id,
+                message_type,
+            } => {
+                self.pending_channel_id = None;
+                self.direct_store
+                    .update(cx, |store, cx| store.ensure_loaded(cx));
+                let channel_type = message_type.parse::<i32>().unwrap_or(3);
+                MessagesStore::global(cx).update(cx, |store, cx| {
+                    store.open_direct(direct_id, channel_type, cx)
+                });
+            }
+            Route::Direct => {
+                self.pending_channel_id = None;
+                self.direct_store
+                    .update(cx, |store, cx| store.ensure_loaded(cx));
+            }
+            _ => {
+                self.pending_channel_id = None;
+            }
+        }
+    }
+
+    fn sync_channel_route(&mut self, clan_id: String, channel_id: String, cx: &mut Context<Self>) {
         if self.clan_list.read(cx).active_clan_id.as_deref() != Some(clan_id.as_str()) {
             self.clan_list
                 .update(cx, |clan_list, cx| clan_list.select_clan(&clan_id, cx));
@@ -119,6 +158,10 @@ impl ChatLayout {
                     channel_list.select_channel(&channel_id, cx);
                 });
             }
+            // Force the messages store onto this channel even when it's already the active
+            // `ChannelList` selection — covers returning from a DM (where `ChannelList` never
+            // re-emits) so the timeline switches back instead of showing the DM.
+            MessagesStore::global(cx).update(cx, |store, cx| store.open_channel(channel_id, cx));
         } else {
             self.pending_channel_id = Some(channel_id);
         }
@@ -140,6 +183,50 @@ impl ChatLayout {
             });
         }
     }
+
+    fn ensure_active_channel_for_clan(&mut self, cx: &mut Context<Self>) {
+        if matches!(
+            Router::global(cx).read(cx).route(),
+            Route::Direct | Route::DirectMessage { .. }
+        ) {
+            return;
+        }
+        let Some(clan_id) = self.clan_list.read(cx).active_clan_id.clone() else {
+            return;
+        };
+
+        if let Route::Channel {
+            clan_id: route_clan,
+            channel_id,
+        } = Router::global(cx).read(cx).route()
+            && route_clan == clan_id
+            && self
+                .channel_list
+                .read(cx)
+                .channel_in_clan(&clan_id, &channel_id)
+        {
+            return;
+        }
+
+        let welcome = self.clan_list.read(cx).welcome_channel_id(&clan_id);
+        let target = {
+            let channels = self.channel_list.read(cx);
+            welcome
+                .filter(|w| channels.channel_in_clan(&clan_id, w))
+                .or_else(|| channels.default_channel_id(&clan_id))
+        };
+        let Some(channel_id) = target else {
+            return;
+        };
+
+        crate::router::navigate(
+            cx,
+            Route::Channel {
+                clan_id,
+                channel_id,
+            },
+        );
+    }
 }
 
 impl Render for ChatLayout {
@@ -147,6 +234,7 @@ impl Render for ChatLayout {
         crate::trace_render!("ChatLayout");
         self.chat_area.ensure_input(window, cx);
         let theme = cx.theme();
+        let nav_body = self.render_nav_body(cx);
         let content = self.render_content(cx);
 
         div()
@@ -154,14 +242,16 @@ impl Render for ChatLayout {
             .flex_row()
             .flex_1()
             .w_full()
+            .h_full()
             .min_h_0()
             .bg(theme.bg_primary)
             .child(
                 div()
                     .flex()
                     .flex_col()
-                    .w(px(312.0))
+                    .w(px(344.0))
                     .h_full()
+                    .relative()
                     .child(
                         div()
                             .flex()
@@ -174,12 +264,7 @@ impl Render for ChatLayout {
                                         .cached(StyleRefinement::default().size_full()),
                                 ),
                             )
-                            .child(
-                                div().w(px(240.0)).h_full().child(
-                                    AnyView::from(self.channel_sidebar.clone())
-                                        .cached(StyleRefinement::default().size_full()),
-                                ),
-                            ),
+                            .child(div().w(px(272.0)).h_full().child(nav_body)),
                     )
                     .child(self.user_info_bar.render(theme, cx)),
             )
@@ -213,37 +298,75 @@ impl ChatLayout {
             _ => (String::new(), String::new()),
         };
 
-        if self.channel_list.read(cx).active_channel().is_none() {
-            tracing::warn!("send: no active channel");
-            return;
-        }
-
         MessagesStore::global(cx).update(cx, |store, cx| {
             store.send_message(content, uid, uname, cx);
         });
     }
 
+    fn current_dm(&self, cx: &Context<Self>) -> Option<DirectChannel> {
+        let Route::DirectMessage { direct_id, .. } = Router::global(cx).read(cx).route() else {
+            return None;
+        };
+        self.direct_store.read(cx).find(&direct_id).cloned()
+    }
+
+    fn is_dm_route(&self, cx: &Context<Self>) -> bool {
+        matches!(
+            Router::global(cx).read(cx).route(),
+            Route::Direct | Route::DirectMessage { .. }
+        )
+    }
+
+    fn render_nav_body(&self, cx: &Context<Self>) -> gpui::AnyElement {
+        let view: AnyView = if self.is_dm_route(cx) {
+            self.direct_sidebar.clone().into()
+        } else {
+            self.channel_sidebar.clone().into()
+        };
+        view.cached(StyleRefinement::default().size_full())
+            .into_any_element()
+    }
+
     fn render_content(&self, cx: &Context<Self>) -> gpui::AnyElement {
         let theme = cx.theme();
+        let locale = self.settings.read(cx).language.clone();
 
-        let (session_user_id, session_user_name) = match self.auth_state.read(cx) {
-            AuthState::Authenticated(session) => {
-                (session.user_id.clone(), session.username.clone())
+        if self.is_dm_route(cx) {
+            if let Some(dm) = self.current_dm(cx) {
+                return self
+                    .chat_area
+                    .render(theme, &locale, cx.entity(), &dm.label, true)
+                    .into_any_element();
             }
-            _ => (String::new(), String::new()),
-        };
+            return div()
+                .flex()
+                .size_full()
+                .items_center()
+                .justify_center()
+                .flex_col()
+                .gap_4()
+                .child(
+                    crate::components::primitives::Icon::new(
+                        crate::components::primitives::IconName::People,
+                    )
+                    .size_8()
+                    .text_color(theme.text_muted),
+                )
+                .child(
+                    div()
+                        .text_base()
+                        .font_weight(gpui::FontWeight::MEDIUM)
+                        .text_color(theme.text_primary)
+                        .child(mezon_i18n::t(&locale, "dm.emptyState")),
+                )
+                .into_any_element();
+        }
 
         let channels = self.channel_list.read(cx);
         if let Some(ch) = channels.active_channel() {
             return self
                 .chat_area
-                .render(
-                    theme,
-                    cx.entity(),
-                    &ch.name,
-                    &session_user_id,
-                    &session_user_name,
-                )
+                .render(theme, &locale, cx.entity(), &ch.name, false)
                 .into_any_element();
         }
 
@@ -255,13 +378,13 @@ impl ChatLayout {
             Route::Chat => self.render_placeholder(
                 theme,
                 crate::components::primitives::IconName::Inbox,
-                "Chat",
+                mezon_i18n::t(&locale, "nav.chat"),
                 &current_path,
             ),
             Route::Direct => self.render_placeholder(
                 theme,
-                crate::components::primitives::IconName::CircleUser,
-                "Direct Messages",
+                crate::components::primitives::IconName::People,
+                mezon_i18n::t(&locale, "dm.title"),
                 &current_path,
             ),
             Route::DirectMessage {
@@ -269,7 +392,7 @@ impl ChatLayout {
                 message_type: _,
             } => self.render_placeholder(
                 theme,
-                crate::components::primitives::IconName::CircleUser,
+                crate::components::primitives::IconName::People,
                 &format!("Direct {direct_id}"),
                 &current_path,
             ),
@@ -278,7 +401,7 @@ impl ChatLayout {
                 channel_id,
             } => self.render_placeholder(
                 theme,
-                crate::components::primitives::IconName::FolderOpen,
+                crate::components::primitives::IconName::Hashtag,
                 &format!("#{channel_id}"),
                 &current_path,
             ),

@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use crate::components::primitives::{InputEvent, InputState};
-use gpui::{App, Context, Entity, Window, div, prelude::*};
+use gpui::{AnyView, App, Context, Entity, Window, div, prelude::*};
 use mezon_store::Settings;
 
 use crate::chat::ReplyTarget;
@@ -15,21 +15,28 @@ pub struct ChatArea {
     pub(crate) input_state: Option<Entity<InputState>>,
     #[allow(dead_code)]
     replying_to: Option<ReplyTarget>,
+    settings: Entity<Settings>,
 }
 
 impl ChatArea {
     pub fn new(settings: Entity<Settings>, cx: &mut Context<crate::ChatLayout>) -> Self {
-        let timeline = cx.new(|cx| MessageTimeline::new(settings, cx));
+        let timeline = cx.new({
+            let settings = settings.clone();
+            move |cx| MessageTimeline::new(settings, cx)
+        });
         Self {
             timeline,
             input_state: None,
             replying_to: None,
+            settings,
         }
     }
 
     pub fn ensure_input(&mut self, window: &mut Window, cx: &mut Context<crate::ChatLayout>) {
         if self.input_state.is_none() {
-            let input = cx.new(|cx| InputState::new(window, cx).placeholder("Message #general"));
+            let locale = self.settings.read(cx).language.clone();
+            let placeholder = mezon_i18n::t(&locale, "chat.messagePlaceholder");
+            let input = cx.new(|cx| InputState::new(window, cx).placeholder(placeholder));
             cx.subscribe_in(
                 &input,
                 window,
@@ -47,10 +54,10 @@ impl ChatArea {
     pub fn render(
         &self,
         theme: &Theme,
+        locale: &str,
         layout_entity: Entity<crate::ChatLayout>,
         channel_name: &str,
-        _current_user_id: &str,
-        _current_user_name: &str,
+        is_dm: bool,
     ) -> impl IntoElement {
         let on_send = {
             let handle = layout_entity.clone();
@@ -63,7 +70,7 @@ impl ChatArea {
             .with_input(self.input_state.clone().unwrap())
             .on_send(on_send);
 
-        let header = ChannelHeader::new(channel_name);
+        let header = ChannelHeader::new(channel_name).dm(is_dm);
 
         div()
             .flex()
@@ -71,7 +78,12 @@ impl ChatArea {
             .flex_1()
             .min_h_0()
             .child(header.render(theme))
-            .child(self.timeline.clone())
-            .child(input_bar.render(theme))
+            .child(
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .child(AnyView::from(self.timeline.clone())),
+            )
+            .child(input_bar.render(theme, locale))
     }
 }
