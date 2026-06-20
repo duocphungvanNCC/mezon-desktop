@@ -1,4 +1,4 @@
-use gpui::{div, prelude::*, px};
+use gpui::{FontWeight, div, prelude::*, px};
 use mezon_store::ChannelType;
 
 use crate::components::primitives::Icon;
@@ -11,6 +11,9 @@ pub struct ChannelRow {
     unread: bool,
     private: bool,
     selected: bool,
+    badge_count: u32,
+    muted: bool,
+    is_thread: bool,
 }
 
 impl ChannelRow {
@@ -21,7 +24,15 @@ impl ChannelRow {
             unread: false,
             private: false,
             selected: false,
+            badge_count: 0,
+            muted: false,
+            is_thread: false,
         }
+    }
+
+    pub fn is_thread(mut self, is_thread: bool) -> Self {
+        self.is_thread = is_thread;
+        self
     }
 
     pub fn unread(mut self, unread: bool) -> Self {
@@ -39,30 +50,90 @@ impl ChannelRow {
         self
     }
 
-    pub fn render(&self, theme: &Theme) -> impl IntoElement {
-        div()
-            .flex()
-            .flex_row()
-            .items_center()
-            .w_full()
-            .px_2()
-            .py_1()
-            .cursor_pointer()
-            .when(self.selected, |el| {
-                el.bg(theme.bg_primary).text_color(theme.text_primary)
-            })
-            .when(!self.selected, |el| el.text_color(theme.text_secondary))
-            .child(match self.channel_type {
-                ChannelType::Text => div().size_4().child("#").into_any_element(),
-                ChannelType::Voice => Icon::new(IconName::Speaker)
-                    .size(px(16.0))
-                    .text_color(theme.text_secondary)
-                    .into_any_element(),
-            })
-            .child(div().flex_1().mx_1().text_sm().child(self.name.clone()))
-            .when(self.unread, |el| {
-                el.child(div().size_2().rounded_full().bg(theme.brand))
-            })
-            .when(self.private, |el| el.child(div().size_3().child("🔒")))
+    pub fn badge_count(mut self, count: u32) -> Self {
+        self.badge_count = count;
+        self
+    }
+
+    pub fn muted(mut self, muted: bool) -> Self {
+        self.muted = muted;
+        self
+    }
+
+    pub fn render(self, theme: &Theme) -> impl IntoElement {
+        let icon = channel_type_icon(self.channel_type, self.private);
+        let text_color = if self.muted {
+            theme.text_muted
+        } else if self.selected {
+            theme.text_primary
+        } else {
+            theme.text_secondary
+        };
+        let selected_bg = theme.bg_primary;
+        let secondary = theme.text_secondary;
+        let brand = theme.brand;
+        let text_primary = theme.text_primary;
+
+        div().w_full().px_2().child(
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .w_full()
+                .px_2()
+                .py_1()
+                .rounded_lg()
+                .cursor_pointer()
+                .when(self.selected, move |el| el.bg(selected_bg))
+                .text_color(text_color)
+                .child(Icon::new(icon).size(px(16.0)).text_color(secondary))
+                .child(
+                    div()
+                        .flex_1()
+                        .ml_2()
+                        .text_sm()
+                        .overflow_hidden()
+                        .when(self.unread && !self.muted, |el| {
+                            el.font_weight(FontWeight::BOLD)
+                        })
+                        .child(self.name),
+                )
+                .when(self.badge_count > 0 && !self.muted, move |el| {
+                    el.child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .min_w(px(16.0))
+                            .h(px(16.0))
+                            .px_1()
+                            .rounded_full()
+                            .bg(brand)
+                            .text_color(text_primary)
+                            .text_xs()
+                            .child(format!("{}", self.badge_count)),
+                    )
+                })
+                .when(
+                    self.badge_count == 0 && self.unread && !self.muted,
+                    move |el| el.child(div().size_2().rounded_full().bg(brand)),
+                ),
+        )
+    }
+}
+
+fn channel_type_icon(channel_type: ChannelType, private: bool) -> IconName {
+    match (channel_type, private) {
+        (ChannelType::Text, false) => IconName::Hashtag,
+        (ChannelType::Text, true) => IconName::HashtagLocked,
+        (ChannelType::Voice, false) => IconName::Speaker,
+        (ChannelType::Voice, true) => IconName::SpeakerLocked,
+        (ChannelType::Stream, _) => IconName::Stream,
+        (ChannelType::Thread, _) => IconName::ThreadIcon,
+        (ChannelType::Forum, _) => IconName::Forum,
+        (ChannelType::Announcement, _) => IconName::Announcement,
+        (ChannelType::App, false) => IconName::AppChannelIcon,
+        (ChannelType::App, true) => IconName::PrivateAppChannelIcon,
+        (ChannelType::Unknown(_), _) => IconName::Hashtag,
     }
 }

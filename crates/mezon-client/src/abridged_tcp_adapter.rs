@@ -513,19 +513,23 @@ impl AbridgedTcpAdapter {
                             let payload = buf[header..total].to_vec();
                             buf.drain(..total);
                             match mezon_proto::realtime::Envelope::decode(payload.as_slice()) {
-                                Ok(envelope) => {
-                                    tracing::trace!(
-                                        "ws-binary {} bytes -> Envelope cid={} {}",
-                                        payload.len(),
-                                        envelope.cid,
-                                        envelope_detail(&envelope)
-                                    );
-                                    handlers.trigger_message(
-                                        u16::try_from(envelope.cid).unwrap_or(0),
-                                        0,
-                                        payload,
-                                    )
-                                }
+                                Ok(envelope) => match u16::try_from(envelope.cid) {
+                                    Ok(cid_u16) => {
+                                        tracing::trace!(
+                                            "ws-binary {} bytes -> Envelope cid={} {}",
+                                            payload.len(),
+                                            cid_u16,
+                                            envelope_detail(&envelope)
+                                        );
+                                        handlers.trigger_message(cid_u16, 0, payload);
+                                    }
+                                    Err(_) => {
+                                        tracing::warn!(
+                                            "ws-binary: invalid cid {} in envelope, dropping frame",
+                                            envelope.cid
+                                        );
+                                    }
+                                },
                                 Err(e) => {
                                     tracing::warn!(
                                         "ws-binary {} bytes — decode failed: {e}",
@@ -598,16 +602,22 @@ impl AbridgedTcpAdapter {
             );
 
             if let Ok(envelope) = mezon_proto::realtime::Envelope::decode(payload) {
-                tracing::trace!(
-                    "abridged -> Envelope cid={} {}",
-                    envelope.cid,
-                    envelope_detail(&envelope)
-                );
-                handlers.trigger_message(
-                    u16::try_from(envelope.cid).unwrap_or(0),
-                    0,
-                    payload.to_vec(),
-                );
+                match u16::try_from(envelope.cid) {
+                    Ok(cid_u16) => {
+                        tracing::trace!(
+                            "abridged -> Envelope cid={} {}",
+                            cid_u16,
+                            envelope_detail(&envelope)
+                        );
+                        handlers.trigger_message(cid_u16, 0, payload.to_vec());
+                    }
+                    Err(_) => {
+                        tracing::warn!(
+                            "abridged: invalid cid {} in envelope, dropping frame",
+                            envelope.cid
+                        );
+                    }
+                }
             } else if let Some(cid) = decode_cid_field(payload) {
                 tracing::warn!("Failed to decode Envelope, passing raw cid={cid}");
                 handlers.trigger_message(cid, 0, payload.to_vec());
@@ -782,40 +792,35 @@ impl Default for AbridgedTcpAdapter {
 #[async_trait]
 impl TransportAdapter for AbridgedTcpAdapter {
     async fn connect(&mut self, host: &str, port: u16, token: &str) -> Result<()> {
-        tracing::info!("=== CONNECT START: {}:{} ===", host, port);
+        tracing::debug!("=== CONNECT START ===");
 
         let config = build_client_config();
         let connector = tokio_rustls::TlsConnector::from(Arc::new(config));
 
         let addr = format!("{}:{}", host, port);
-        tracing::info!("TCP connecting to {}...", addr);
+        tracing::debug!("TCP connecting...");
         let tcp = tokio::time::timeout(
             std::time::Duration::from_secs(15),
             TcpStream::connect(&addr),
         )
         .await
-        .map_err(|_| anyhow::anyhow!("TCP connect timed out after 15s: {addr}"))?
+        .map_err(|_| anyhow::anyhow!("TCP connect timed out after 15s"))?
         .map_err(|e| anyhow::anyhow!("TCP connect failed: {e}"))?;
         let local = tcp
             .local_addr()
             .map_err(|e| anyhow::anyhow!("local_addr: {e}"))?;
-        let peer = tcp
-            .peer_addr()
-            .map_err(|e| anyhow::anyhow!("peer_addr: {e}"))?;
-        tracing::info!("TCP connected: local={} peer={}", local, peer);
+        tracing::debug!("TCP connected: local={}", local);
 
         let domain = ServerName::try_from(host.to_string())
             .map_err(|e| anyhow::anyhow!("Invalid DNS name: {e}"))?;
-        tracing::info!("DNS name parsed: {:?}", domain);
 
-        tracing::info!("Starting TLS handshake with {}...", host);
+        tracing::debug!("Starting TLS handshake...");
         let tls = connector
             .connect(domain, tcp)
             .await
             .map_err(|e| anyhow::anyhow!("TLS handshake failed: {e}"))?;
-        tracing::info!("TLS handshake complete");
+        tracing::debug!("TLS handshake complete");
 
-        // Spawn I/O loop and wait for it to be ready
         let (ready_tx, ready_rx) = oneshot::channel();
         let (write_tx, write_rx) = mpsc::unbounded_channel();
         let state = IoLoopState {
@@ -826,38 +831,36 @@ impl TransportAdapter for AbridgedTcpAdapter {
             pending_raw: self.pending_raw.clone(),
         };
 
-        tracing::info!("Spawning I/O loop...");
+        tracing::debug!("Spawning I/O loop...");
         tokio::spawn(async move {
             Self::io_loop(tls, write_rx, ready_tx, state).await;
         });
 
-        // Wait for I/O loop to signal readiness
-        tracing::info!("Waiting for I/O loop to be ready...");
+        tracing::debug!("Waiting for I/O loop to be ready...");
         ready_rx
             .await
             .map_err(|_| anyhow::anyhow!("I/O loop panicked before starting"))?;
-        tracing::info!("I/O loop confirmed READY");
+        tracing::debug!("I/O loop confirmed READY");
 
-        // Now send handshake — I/O loop is definitely listening
         let handshake = frame_handshake(token);
 
-        tracing::info!("Sending handshake");
+        tracing::debug!("Sending handshake");
         write_tx
             .send(handshake)
             .map_err(|_| anyhow::anyhow!("Write channel closed early"))?;
-        tracing::info!("Handshake queued via mpsc channel");
+        tracing::debug!("Handshake queued via mpsc channel");
 
         *self.write_tx.lock().await = Some(write_tx);
         self.is_connected.store(true, Ordering::Release);
-        tracing::info!("Connection state: is_connected=true, write_tx set");
+        tracing::debug!("Connection state: is_connected=true, write_tx set");
 
         {
             let h = self.handlers.lock().await;
             h.trigger_open();
         }
-        tracing::info!("on_open triggered");
+        tracing::debug!("on_open triggered");
 
-        tracing::info!("=== CONNECT COMPLETE ===");
+        tracing::info!("Transport connected");
         Ok(())
     }
 

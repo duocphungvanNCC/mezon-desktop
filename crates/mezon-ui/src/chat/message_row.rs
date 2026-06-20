@@ -1,12 +1,14 @@
-use gpui::{AnyElement, Hsla, Pixels, Rgba, div, img, prelude::*, px};
+use gpui::{AnyElement, Pixels, Rgba, SharedString, div, img, prelude::*, px};
 use mezon_store::Message;
 
-use crate::components::primitives::{Avatar, Sizable, Size};
+use crate::components::primitives::{Avatar, Icon, IconName, Sizable, Size};
 use crate::theme::Theme;
+
+const DEFAULT_DISPLAY_NAME_COLOR: u32 = 0x17ac86;
 
 pub enum MessageAttachmentView {
     Image {
-        src: String,
+        src: SharedString,
         width: Pixels,
         height: Pixels,
         label: String,
@@ -16,7 +18,7 @@ pub enum MessageAttachmentView {
     },
 }
 
-fn attachment_box(label: String, bg: Hsla, border: Rgba, color: Rgba) -> AnyElement {
+fn attachment_box(label: String, bg: Rgba, border: Rgba, color: Rgba) -> AnyElement {
     div()
         .flex()
         .items_center()
@@ -38,17 +40,24 @@ pub struct MessageRow<'a> {
     combined: bool,
     reply: bool,
     theme: &'a Theme,
-    avatar_src: Option<String>,
+    reply_label: SharedString,
+    avatar_src: Option<SharedString>,
     attachments: Vec<MessageAttachmentView>,
 }
 
 impl<'a> MessageRow<'a> {
-    pub fn new(message: &'a Message, theme: &'a Theme, _current_user_id: &str) -> Self {
+    pub fn new(
+        message: &'a Message,
+        theme: &'a Theme,
+        _current_user_id: &str,
+        reply_label: SharedString,
+    ) -> Self {
         Self {
             message,
             combined: false,
             reply: false,
             theme,
+            reply_label,
             avatar_src: None,
             attachments: Vec::new(),
         }
@@ -59,7 +68,7 @@ impl<'a> MessageRow<'a> {
         self
     }
 
-    pub fn avatar_src(mut self, src: impl Into<String>) -> Self {
+    pub fn avatar_src(mut self, src: impl Into<SharedString>) -> Self {
         let src = src.into();
         self.avatar_src = if src.is_empty() { None } else { Some(src) };
         self
@@ -99,7 +108,7 @@ impl<'a> MessageRow<'a> {
                 div()
                     .text_sm()
                     .font_weight(gpui::FontWeight::SEMIBOLD)
-                    .text_color(theme.text_primary)
+                    .text_color(gpui::rgb(DEFAULT_DISPLAY_NAME_COLOR))
                     .child(display_name.to_string()),
             )
             .child(div().text_xs().text_color(theme.text_muted).child(time));
@@ -117,18 +126,15 @@ impl<'a> MessageRow<'a> {
             .gap_2()
             .mb_1()
             .child(
-                div()
-                    .w(px(2.))
-                    .h_full()
-                    .min_h(px(16.))
-                    .rounded(px(2.))
-                    .bg(gpui::hsla(0., 0., 0., 0.15)),
+                Icon::new(IconName::ReplyCorner)
+                    .size_4()
+                    .text_color(theme.text_muted),
             )
             .child(
                 div()
                     .text_xs()
                     .text_color(theme.text_muted)
-                    .child("Replying to someone"),
+                    .child(self.reply_label.clone()),
             );
 
         let content_area = div()
@@ -160,7 +166,7 @@ impl<'a> MessageRow<'a> {
                                 .px_2()
                                 .py_0p5()
                                 .rounded_md()
-                                .bg(gpui::hsla(0., 0., 0., 0.05))
+                                .bg(theme.bg_tertiary)
                                 .text_xs()
                                 .text_color(theme.text_muted)
                                 .child("[👍 ❤️]"),
@@ -178,7 +184,7 @@ impl<'a> MessageRow<'a> {
                                 label,
                             } => {
                                 if src.is_empty() {
-                                    let box_bg = gpui::hsla(0., 0., 0., 0.03);
+                                    let box_bg = theme.bg_tertiary;
                                     attachment_box(
                                         label.clone(),
                                         box_bg,
@@ -203,11 +209,16 @@ impl<'a> MessageRow<'a> {
                                 .px_3()
                                 .py_2()
                                 .rounded_md()
-                                .bg(gpui::hsla(0., 0., 0., 0.03))
+                                .bg(theme.bg_tertiary)
                                 .border_1()
                                 .border_color(theme.border)
                                 .text_xs()
                                 .text_color(theme.text_secondary)
+                                .child(
+                                    Icon::new(IconName::FileIcon)
+                                        .size_4()
+                                        .text_color(theme.text_secondary),
+                                )
                                 .child(label.clone())
                                 .into_any_element(),
                         }

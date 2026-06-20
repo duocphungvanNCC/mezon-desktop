@@ -358,6 +358,56 @@ pub struct ApiChannelDesc {
     pub channel_private: i32,
     pub count_mess_unread: i32,
     pub member_count: i32,
+    pub parent_id: String,
+    pub is_mute: bool,
+    pub last_seen_message_id: String,
+    pub last_seen_timestamp: i64,
+    pub last_sent_message_id: String,
+    pub last_sent_timestamp: i64,
+    pub badge_count: i32,
+}
+
+/// A direct-message / group conversation descriptor (clan_id = 0 namespace). Unlike
+/// [`ApiChannelDesc`] this carries the DM participant arrays the UI needs to render rows.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ApiDirectChannel {
+    pub channel_id: String,
+    pub channel_label: String,
+    /// Raw channel type: 2 = group, 3 = 1-1 DM.
+    pub channel_type: u32,
+    pub channel_avatar: String,
+    pub avatars: Vec<String>,
+    pub usernames: Vec<String>,
+    pub display_names: Vec<String>,
+    pub user_ids: Vec<String>,
+    pub onlines: Vec<bool>,
+    pub member_count: i32,
+    pub count_mess_unread: i32,
+    pub last_sent_timestamp: i64,
+    pub last_seen_timestamp: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ApiCategoryDesc {
+    pub category_id: String,
+    pub category_name: String,
+    pub clan_id: String,
+    pub category_order: i32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ApiVoiceChannelUser {
+    pub channel_id: String,
+    pub user_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ApiChannelApp {
+    pub app_id: String,
+    pub app_name: String,
+    pub app_logo: Option<String>,
+    pub app_url: String,
+    pub channel_id: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -366,6 +416,8 @@ pub struct ApiClanDesc {
     pub clan_name: String,
     pub creator_id: String,
     pub logo: String,
+    pub banner: String,
+    pub welcome_channel_id: String,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -461,6 +513,26 @@ impl MezonTransport {
     }
 
     fn channel_desc_from_proto(channel: api::ChannelDescription) -> ApiChannelDesc {
+        let last_seen_message_id = channel
+            .last_seen_message
+            .as_ref()
+            .map(|m| m.id.to_string())
+            .unwrap_or_default();
+        let last_seen_timestamp = channel
+            .last_seen_message
+            .as_ref()
+            .map(|m| i64::from(m.timestamp_seconds))
+            .unwrap_or(0);
+        let last_sent_message_id = channel
+            .last_sent_message
+            .as_ref()
+            .map(|m| m.id.to_string())
+            .unwrap_or_default();
+        let last_sent_timestamp = channel
+            .last_sent_message
+            .as_ref()
+            .map(|m| i64::from(m.timestamp_seconds))
+            .unwrap_or(0);
         ApiChannelDesc {
             channel_id: channel.channel_id.to_string(),
             channel_label: channel.channel_label,
@@ -471,6 +543,54 @@ impl MezonTransport {
             channel_private: channel.channel_private,
             count_mess_unread: channel.count_mess_unread,
             member_count: channel.member_count,
+            parent_id: channel.parent_id.to_string(),
+            is_mute: channel.is_mute,
+            last_seen_message_id,
+            last_seen_timestamp,
+            last_sent_message_id,
+            last_sent_timestamp,
+            badge_count: channel.count_mess_unread,
+        }
+    }
+
+    fn direct_channel_from_proto(channel: api::ChannelDescription) -> ApiDirectChannel {
+        let last_seen_timestamp = channel
+            .last_seen_message
+            .as_ref()
+            .map(|m| i64::from(m.timestamp_seconds))
+            .unwrap_or(0);
+        let last_sent_timestamp = channel
+            .last_sent_message
+            .as_ref()
+            .map(|m| i64::from(m.timestamp_seconds))
+            .unwrap_or(0);
+        ApiDirectChannel {
+            channel_id: channel.channel_id.to_string(),
+            channel_label: channel.channel_label,
+            channel_type: channel.r#type as u32,
+            channel_avatar: channel.channel_avatar,
+            avatars: channel.avatars,
+            usernames: channel.usernames,
+            display_names: channel.display_names,
+            user_ids: channel
+                .user_ids
+                .into_iter()
+                .map(|id| id.to_string())
+                .collect(),
+            onlines: channel.onlines,
+            member_count: channel.member_count,
+            count_mess_unread: channel.count_mess_unread,
+            last_sent_timestamp,
+            last_seen_timestamp,
+        }
+    }
+
+    fn category_desc_from_proto(cat: api::CategoryDesc) -> ApiCategoryDesc {
+        ApiCategoryDesc {
+            category_id: cat.category_id.to_string(),
+            category_name: cat.category_name,
+            clan_id: cat.clan_id.to_string(),
+            category_order: cat.category_order,
         }
     }
 
@@ -480,6 +600,12 @@ impl MezonTransport {
             clan_name: clan.clan_name,
             creator_id: clan.creator_id.to_string(),
             logo: clan.logo,
+            banner: clan.banner,
+            welcome_channel_id: if clan.welcome_channel_id != 0 {
+                clan.welcome_channel_id.to_string()
+            } else {
+                String::new()
+            },
         }
     }
 
@@ -850,6 +976,41 @@ impl MezonTransport {
             .collect())
     }
 
+    /// List the user's direct-message / group conversations (clan_id = 0). Mirrors mezon-react's
+    /// `fetchDirectMessage` → `ListChannelDescs(clan_id="0", channel_type=GROUP)`, which returns
+    /// both 1-1 DMs (type 3) and groups (type 2).
+    pub async fn list_dm_channel_descs(&self) -> Result<Vec<ApiDirectChannel>> {
+        let cid = self.generate_cid();
+
+        let api_name = "ListChannelDescs";
+        let body = api::ListChannelDescsRequest {
+            clan_id: 0,
+            limit: 500,
+            state: 1,
+            channel_type: 2,
+            page: 1,
+            ..Default::default()
+        }
+        .encode_to_vec();
+
+        let (code, response) = self.send_api_request(cid, api_name, body).await?;
+
+        if code != 0 {
+            return Err(anyhow::anyhow!(
+                "API error: code={} {}",
+                code,
+                String::from_utf8_lossy(&response).trim()
+            ));
+        }
+
+        let channels = api::ChannelDescList::decode(response.as_slice())?;
+        Ok(channels
+            .channeldesc
+            .into_iter()
+            .map(Self::direct_channel_from_proto)
+            .collect())
+    }
+
     /// List roles in a clan.
     pub async fn list_roles(
         &self,
@@ -991,9 +1152,17 @@ impl MezonTransport {
         channel_id: &str,
         content: &str,
         is_public: bool,
+        mode: i32,
     ) -> Result<ApiMessage> {
-        self.send_channel_message_with_attachments(clan_id, channel_id, content, is_public, vec![])
-            .await
+        self.send_channel_message_with_attachments(
+            clan_id,
+            channel_id,
+            content,
+            is_public,
+            mode,
+            vec![],
+        )
+        .await
     }
 
     pub async fn send_channel_message_with_attachments(
@@ -1002,6 +1171,7 @@ impl MezonTransport {
         channel_id: &str,
         content: &str,
         is_public: bool,
+        mode: i32,
         attachments: Vec<api::MessageAttachment>,
     ) -> Result<ApiMessage> {
         let cid = self.generate_cid();
@@ -1026,7 +1196,7 @@ impl MezonTransport {
             channel_id: parsed_channel_id,
             content: content_json,
             attachments,
-            mode: 2, // ChannelStreamMode::STREAM_MODE_CHANNEL (matches mezon-js writeChatMessage)
+            mode,
             is_public,
             ..Default::default()
         }
@@ -1095,18 +1265,24 @@ impl MezonTransport {
         )?)
     }
 
+    pub async fn list_clan_badge_count_typed(&self) -> Result<Vec<(String, i32, bool)>> {
+        let raw = self.list_clan_badge_count().await?;
+        Ok(raw
+            .list_badge
+            .into_iter()
+            .map(|b| (b.clan_id.to_string(), b.badge, b.has_unread))
+            .collect())
+    }
+
     /// List channel badge counts.
     pub async fn list_channel_badge_count(
         &self,
         clan_id: &str,
-        limit: i32,
-        page: i32,
     ) -> Result<api::ListChannelBadgeCountResponse> {
         let cid = self.generate_cid();
         let body = api::ListChannelBadgeCountRequest {
             clan_id: parse_id(clan_id)?,
-            limit,
-            page,
+            ..Default::default()
         }
         .encode_to_vec();
         let (code, response) = self
@@ -1175,6 +1351,39 @@ impl MezonTransport {
         Ok(api::CategoryDescList::decode(response.as_slice())?)
     }
 
+    pub async fn list_categories_typed(&self, clan_id: &str) -> Result<Vec<ApiCategoryDesc>> {
+        let raw = self.list_category_descs(clan_id).await?;
+        Ok(raw
+            .categorydesc
+            .into_iter()
+            .map(Self::category_desc_from_proto)
+            .collect())
+    }
+
+    pub async fn list_channel_badge_counts(&self, clan_id: &str) -> Result<Vec<ApiChannelDesc>> {
+        let raw = self.list_channel_badge_count(clan_id).await?;
+        Ok(raw
+            .channeldesc
+            .into_iter()
+            .map(Self::channel_desc_from_proto)
+            .collect())
+    }
+
+    pub async fn list_voice_channel_users(
+        &self,
+        clan_id: &str,
+    ) -> Result<Vec<ApiVoiceChannelUser>> {
+        let raw = self.list_channel_voice_users(clan_id).await?;
+        Ok(raw
+            .voice_channel_users
+            .into_iter()
+            .map(|u| ApiVoiceChannelUser {
+                channel_id: u.channel_id.to_string(),
+                user_ids: u.user_ids,
+            })
+            .collect())
+    }
+
     /// List channel description detail.
     pub async fn list_channel_detail(&self, channel_id: &str) -> Result<api::ChannelDescription> {
         let cid = self.generate_cid();
@@ -1233,15 +1442,15 @@ impl MezonTransport {
     }
 
     /// Get notification settings for a clan.
-    pub async fn get_notification_clan(&self, _clan_id: &str) -> Result<()> {
+    pub async fn get_notification_clan(&self, clan_id: &str) -> Result<i32> {
         let cid = self.generate_cid();
 
         let body = api::NotificationClan {
-            clan_id: parse_id(_clan_id)?,
+            clan_id: parse_id(clan_id)?,
         }
         .encode_to_vec();
 
-        let (code, _response) = self
+        let (code, response) = self
             .send_api_request(cid, "GetNotificationClan", body)
             .await?;
 
@@ -1249,7 +1458,8 @@ impl MezonTransport {
             return Err(anyhow::anyhow!("API error: code={}", code));
         }
 
-        Ok(())
+        let setting = api::NotificationSetting::decode(response.as_slice())?;
+        Ok(setting.notification_setting_type)
     }
 
     /// List events in a clan.
@@ -1278,8 +1488,7 @@ impl MezonTransport {
         Ok(api::ListUserActivity::decode(response.as_slice())?)
     }
 
-    /// List channel apps.
-    pub async fn list_channel_apps(&self, clan_id: &str) -> Result<api::ListChannelAppsResponse> {
+    pub async fn list_channel_apps(&self, clan_id: &str) -> Result<Vec<ApiChannelApp>> {
         let cid = self.generate_cid();
         let body = api::ListChannelAppsRequest {
             clan_id: parse_id(clan_id)?,
@@ -1287,9 +1496,20 @@ impl MezonTransport {
         .encode_to_vec();
         let (code, response) = self.send_api_request(cid, "ListChannelApps", body).await?;
         if code != 0 {
-            return Err(anyhow::anyhow!("API error: code={}", code));
+            return Err(anyhow::anyhow!("ListChannelApps code={}", code));
         }
-        Ok(api::ListChannelAppsResponse::decode(response.as_slice())?)
+        let resp = api::ListChannelAppsResponse::decode(response.as_slice())?;
+        Ok(resp
+            .channel_apps
+            .into_iter()
+            .map(|a| ApiChannelApp {
+                app_id: a.app_id.to_string(),
+                app_name: a.app_name,
+                app_logo: (!a.app_logo.is_empty()).then_some(a.app_logo),
+                app_url: a.app_url,
+                channel_id: a.channel_id.to_string(),
+            })
+            .collect())
     }
 
     /// List emoji recent by user ID.
@@ -1822,6 +2042,8 @@ impl MezonTransport {
         let cid = self.generate_cid();
         let body = api::ListChannelUsersRequest {
             clan_id: parse_id(clan_id)?,
+            limit: 100,
+            state: 1,
             ..Default::default()
         }
         .encode_to_vec();

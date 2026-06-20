@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use crate::chat::ReplyTarget;
-use crate::components::primitives::{Button, Input, InputState};
+use crate::components::primitives::{Button, Icon, IconName, Input, InputState};
 use crate::theme::Theme;
 use gpui::{App, ClickEvent, Window, div, prelude::*, px};
 
@@ -43,7 +43,7 @@ impl InputBar {
         self
     }
 
-    fn reply_preview_bar(theme: &Theme, target: &ReplyTarget) -> impl IntoElement {
+    fn reply_preview_bar(theme: &Theme, locale: &str, target: &ReplyTarget) -> impl IntoElement {
         div()
             .id("reply-preview-bar")
             .flex()
@@ -52,7 +52,7 @@ impl InputBar {
             .gap_2()
             .px_4()
             .py_2()
-            .bg(gpui::hsla(0., 0., 0., 0.02))
+            .bg(theme.bg_hover)
             .border_t_1()
             .border_color(theme.border)
             .child(
@@ -61,7 +61,7 @@ impl InputBar {
                     .h_full()
                     .min_h(px(20.))
                     .rounded(px(2.))
-                    .bg(gpui::hsla(0., 0., 0., 0.15)),
+                    .bg(theme.border),
             )
             .child(
                 div()
@@ -73,7 +73,11 @@ impl InputBar {
                             .text_xs()
                             .font_weight(gpui::FontWeight::SEMIBOLD)
                             .text_color(theme.text_primary)
-                            .child(format!("Replying to {}", target.sender_name)),
+                            .child(format!(
+                                "{} {}",
+                                mezon_i18n::t(locale, "chat.replyingTo"),
+                                target.sender_name
+                            )),
                     )
                     .child(
                         div()
@@ -83,15 +87,15 @@ impl InputBar {
                     ),
             )
             .child(
-                div()
-                    .text_sm()
-                    .text_color(theme.text_muted)
-                    .cursor_pointer()
-                    .child("×"),
+                div().cursor_pointer().child(
+                    Icon::new(IconName::Close)
+                        .size_4()
+                        .text_color(theme.text_muted),
+                ),
             )
     }
 
-    pub fn render(&self, theme: &Theme) -> impl IntoElement {
+    pub fn render(&self, theme: &Theme, locale: &str) -> impl IntoElement {
         let on_send = self.on_send.clone();
 
         let on_click = move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
@@ -104,7 +108,7 @@ impl InputBar {
             .flex()
             .flex_col()
             .when_some(self.replying_to.as_ref(), |d, target| {
-                d.child(Self::reply_preview_bar(theme, target))
+                d.child(Self::reply_preview_bar(theme, locale, target))
             })
             .child(
                 div()
@@ -122,7 +126,11 @@ impl InputBar {
                             .flex_1()
                             .child(Input::new(self.input_state.as_ref().unwrap())),
                     )
-                    .child(Button::new("send-btn").label("Send").on_click(on_click)),
+                    .child(
+                        Button::new("send-btn")
+                            .label(mezon_i18n::t(locale, "chat.send"))
+                            .on_click(on_click),
+                    ),
             )
     }
 }
