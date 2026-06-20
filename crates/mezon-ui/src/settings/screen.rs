@@ -1,8 +1,7 @@
-use crate::components::primitives::{
-    Button as GpuiButton, ButtonVariants, Icon, IconName, Label, h_flex, v_flex,
-};
-use gpui::{Context, Entity, Window, div, prelude::*, px};
+use crate::components::primitives::{Icon, IconName, h_flex, v_flex};
+use gpui::{Context, Entity, ScrollHandle, Window, div, prelude::*, px};
 use mezon_store::{AccountStore, AuthState, ClanList, Settings};
+use ui::{ScrollAxes, Scrollbars, WithScrollbar};
 
 use super::account_page::AccountPage;
 use super::activity_page::ActivityPage;
@@ -43,6 +42,7 @@ pub struct SettingsScreen {
     voice_page: Option<Entity<VoicePage>>,
     advanced_page: Option<Entity<AdvancedPage>>,
     prev_page: SettingsPage,
+    scroll: ScrollHandle,
 }
 
 impl SettingsScreen {
@@ -68,6 +68,7 @@ impl SettingsScreen {
             voice_page: None,
             advanced_page: None,
             prev_page: SettingsPage::Account,
+            scroll: ScrollHandle::new(),
         }
     }
 
@@ -77,7 +78,7 @@ impl SettingsScreen {
 }
 
 impl Render for SettingsScreen {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
         let locale = self.settings.read(cx).language.clone();
         let auth_state = self.auth_state.clone();
@@ -170,238 +171,274 @@ impl Render for SettingsScreen {
 
         fn nav_item(
             id: &str,
-            label: String,
+            label: &'static str,
             is_active: bool,
             theme: &Theme,
             path: &str,
         ) -> impl IntoElement {
             let id = id.to_string();
             let path = path.to_string();
-            let active_bg = gpui::Rgba {
-                r: 233.0 / 255.0,
-                g: 233.0 / 255.0,
-                b: 233.0 / 255.0,
-                a: 0.08,
-            };
-            let hover_bg = gpui::Rgba {
-                r: 1.0,
-                g: 1.0,
-                b: 1.0,
-                a: 0.08,
-            };
+            let active_bg = theme.bg_hover;
+            let hover_bg = theme.bg_hover;
             div()
                 .id(id)
                 .flex()
                 .items_center()
-                .w_full()
-                .px_2()
-                .py_1()
+                .w(px(170.0))
+                .ml(px(-8.0))
+                .p_2()
+                .rounded(px(5.0))
+                .text_base()
+                .font_weight(gpui::FontWeight::MEDIUM)
                 .cursor_pointer()
                 .hover(|s| s.bg(hover_bg))
                 .when(is_active, |el| {
                     el.bg(active_bg).text_color(theme.text_primary)
                 })
-                .when(!is_active, |el| el.text_color(theme.text_primary))
+                .when(!is_active, |el| {
+                    el.text_color(theme.tokens.text_theme_primary)
+                })
                 .child(label)
                 .on_click(move |_, _, cx| {
                     crate::router::replace(cx, crate::router::Route::from_path(&path));
                 })
         }
 
+        fn section_title(text: String, theme: &Theme) -> gpui::Div {
+            div()
+                .text_sm()
+                .font_weight(gpui::FontWeight::BOLD)
+                .text_color(theme.text_primary)
+                .child(text)
+        }
+
         h_flex()
             .flex_1()
-            .size_full()
+            .min_h_0()
+            .w_full()
+            .h_full()
             .bg(theme.bg_primary)
             .child(
                 div()
-                    .flex()
-                    .flex_col()
-                    .w(px(250.0))
+                    .id("settings-nav-scroll")
+                    .flex_shrink_0()
+                    .w(gpui::relative(0.25))
+                    .min_w(px(224.0))
                     .h_full()
                     .bg(theme.bg_secondary)
-                    .border_r_1()
-                    .border_color(theme.border)
+                    .overflow_y_scroll()
                     .child(
-                        h_flex().items_center().gap_2().px_3().py_3().child(
-                            Label::new(mezon_i18n::t(&locale, "common.settings"))
-                                .text_color(theme.text_primary),
-                        ),
-                    )
-                    .child(
-                        div().flex_1().px_2().py_2().child(
-                            v_flex()
-                                .gap_1()
-                                // ACCOUNT SETTINGS section
-                                .child(
-                                    div()
-                                        .text_sm()
-                                        .font_weight(gpui::FontWeight::BOLD)
-                                        .text_color(theme.text_primary)
-                                        .px_2()
-                                        .py_1()
-                                        .child(
-                                            mezon_i18n::t(&locale, "setting.accountSettings.title")
-                                                .to_uppercase(),
-                                        ),
-                                )
-                                .child(nav_item(
-                                    "account-page",
-                                    mezon_i18n::t(&locale, "setting.accountSettings.account"),
-                                    is_account,
-                                    &theme,
-                                    "/settings/account",
-                                ))
-                                .child(nav_item(
-                                    "device-page",
-                                    mezon_i18n::t(&locale, "setting.accountSettings.devices"),
-                                    is_device,
-                                    &theme,
-                                    "/settings/devices",
-                                ))
-                                .child(nav_item(
-                                    "profile-page",
-                                    mezon_i18n::t(&locale, "setting.accountSettings.profiles"),
-                                    is_profile,
-                                    &theme,
-                                    "/settings/profile",
-                                ))
-                                // APP SETTINGS section
-                                .child(
-                                    div()
-                                        .text_sm()
-                                        .font_weight(gpui::FontWeight::BOLD)
-                                        .text_color(theme.text_primary)
-                                        .px_2()
-                                        .py_1()
-                                        .mt_4()
-                                        .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .justify_end()
+                            .w_full()
+                            .pt(px(96.0))
+                            .pr_2()
+                            .child(
+                                v_flex()
+                                    .w(px(170.0))
+                                    .gap_1()
+                                    .child(section_title(
+                                        mezon_i18n::t(&locale, "setting.accountSettings.title")
+                                            .to_string(),
+                                        &theme,
+                                    ))
+                                    .child(nav_item(
+                                        "account-page",
+                                        mezon_i18n::t(&locale, "setting.accountSettings.account"),
+                                        is_account,
+                                        &theme,
+                                        "/settings/account",
+                                    ))
+                                    .child(nav_item(
+                                        "device-page",
+                                        mezon_i18n::t(&locale, "setting.accountSettings.devices"),
+                                        is_device,
+                                        &theme,
+                                        "/settings/devices",
+                                    ))
+                                    .child(nav_item(
+                                        "profile-page",
+                                        mezon_i18n::t(&locale, "setting.accountSettings.profiles"),
+                                        is_profile,
+                                        &theme,
+                                        "/settings/profile",
+                                    ))
+                                    .child(
+                                        section_title(
                                             mezon_i18n::t(&locale, "setting.appSettings.title")
-                                                .to_uppercase(),
-                                        ),
-                                )
-                                .child(nav_item(
-                                    "appearance-page",
-                                    mezon_i18n::t(&locale, "setting.appSettings.appearance"),
-                                    is_appearance,
-                                    &theme,
-                                    "/settings/appearance",
-                                ))
-                                .child(nav_item(
-                                    "activity-page",
-                                    mezon_i18n::t(&locale, "setting.appSettings.activity"),
-                                    is_activity,
-                                    &theme,
-                                    "/settings/activity",
-                                ))
-                                .child(nav_item(
-                                    "notifications-page",
-                                    mezon_i18n::t(&locale, "setting.appSettings.notifications"),
-                                    is_notifications,
-                                    &theme,
-                                    "/settings/notifications",
-                                ))
-                                .child(nav_item(
-                                    "language-page",
-                                    mezon_i18n::t(&locale, "setting.appSettings.language"),
-                                    is_language,
-                                    &theme,
-                                    "/settings/language",
-                                ))
-                                .child(nav_item(
-                                    "voice-page",
-                                    mezon_i18n::t(&locale, "setting.appSettings.voice"),
-                                    is_voice,
-                                    &theme,
-                                    "/settings/voice",
-                                ))
-                                .child(nav_item(
-                                    "advanced-page",
-                                    mezon_i18n::t(&locale, "setting.appSettings.advanced"),
-                                    is_advanced,
-                                    &theme,
-                                    "/settings/advanced",
-                                )),
-                        ),
-                    )
-                    .child(div().h(px(1.0)).w_full().bg(theme.border))
-                    .child(
-                        div().px_3().py_2().child(
-                            v_flex()
-                                .child(
-                                    GpuiButton::new("logout-btn")
-                                        .label(mezon_i18n::t(&locale, "setting.logOut"))
-                                        .text_color(theme.status_dnd)
-                                        .ghost()
-                                        .w_full()
-                                        .on_click({
-                                            let auth_state = auth_state.clone();
-                                            move |_, _, cx| {
-                                                let auth = auth_state.read(cx);
-                                                if let AuthState::Authenticated(session) = auth {
-                                                    let token = session.token.clone();
-                                                    let refresh_token =
-                                                        session.refresh_token.clone();
-                                                    let auth_state = auth_state.clone();
-                                                    AccountStore::global(cx).update(
-                                                        cx,
-                                                        |store, cx| {
-                                                            store.logout(token, refresh_token, cx);
-                                                        },
-                                                    );
-                                                    auth_state.update(cx, |state, cx| {
-                                                        *state = AuthState::NotAuthenticated;
-                                                        cx.notify();
-                                                    });
+                                                .to_string(),
+                                            &theme,
+                                        )
+                                        .mt_4(),
+                                    )
+                                    .child(nav_item(
+                                        "appearance-page",
+                                        mezon_i18n::t(&locale, "setting.appSettings.appearance"),
+                                        is_appearance,
+                                        &theme,
+                                        "/settings/appearance",
+                                    ))
+                                    .child(nav_item(
+                                        "activity-page",
+                                        mezon_i18n::t(&locale, "setting.appSettings.activity"),
+                                        is_activity,
+                                        &theme,
+                                        "/settings/activity",
+                                    ))
+                                    .child(nav_item(
+                                        "notifications-page",
+                                        mezon_i18n::t(&locale, "setting.appSettings.notifications"),
+                                        is_notifications,
+                                        &theme,
+                                        "/settings/notifications",
+                                    ))
+                                    .child(nav_item(
+                                        "language-page",
+                                        mezon_i18n::t(&locale, "setting.appSettings.language"),
+                                        is_language,
+                                        &theme,
+                                        "/settings/language",
+                                    ))
+                                    .child(nav_item(
+                                        "voice-page",
+                                        mezon_i18n::t(&locale, "setting.appSettings.voice"),
+                                        is_voice,
+                                        &theme,
+                                        "/settings/voice",
+                                    ))
+                                    .child(nav_item(
+                                        "advanced-page",
+                                        mezon_i18n::t(&locale, "setting.appSettings.advanced"),
+                                        is_advanced,
+                                        &theme,
+                                        "/settings/advanced",
+                                    ))
+                                    .child(div().h(px(1.0)).w_full().bg(theme.border).mt_4())
+                                    .child(
+                                        div()
+                                            .id("logout-btn")
+                                            .flex()
+                                            .items_center()
+                                            .w(px(170.0))
+                                            .ml(px(-8.0))
+                                            .p_2()
+                                            .rounded(px(5.0))
+                                            .text_base()
+                                            .font_weight(gpui::FontWeight::MEDIUM)
+                                            .text_color(gpui::rgb(0xef4444))
+                                            .cursor_pointer()
+                                            .child(mezon_i18n::t(&locale, "setting.logOut"))
+                                            .on_click({
+                                                let auth_state = auth_state.clone();
+                                                move |_, _, cx| {
+                                                    let auth = auth_state.read(cx);
+                                                    if let AuthState::Authenticated(session) = auth
+                                                    {
+                                                        let token = session.token.clone();
+                                                        let refresh_token =
+                                                            session.refresh_token.clone();
+                                                        let auth_state = auth_state.clone();
+                                                        AccountStore::global(cx).update(
+                                                            cx,
+                                                            |store, cx| {
+                                                                store.logout(
+                                                                    token,
+                                                                    refresh_token,
+                                                                    cx,
+                                                                );
+                                                            },
+                                                        );
+                                                        auth_state.update(cx, |state, cx| {
+                                                            *state = AuthState::NotAuthenticated;
+                                                            cx.notify();
+                                                        });
+                                                    }
                                                 }
-                                            }
-                                        }),
-                                )
-                                .child(div().h(px(1.0)).w_full().bg(theme.border).my_1())
-                                .child(
-                                    GpuiButton::new("quit-app-btn")
-                                        .label("Quit Mezon Desktop")
-                                        .text_color(theme.status_dnd)
-                                        .ghost()
-                                        .w_full()
-                                        .on_click(move |_, _, cx| {
-                                            cx.quit();
-                                        }),
-                                )
-                                .child(
-                                    div()
-                                        .text_xs()
-                                        .text_color(theme.text_muted)
-                                        .px_2()
-                                        .child(env!("CARGO_PKG_VERSION")),
-                                ),
-                        ),
+                                            }),
+                                    )
+                                    .child(
+                                        div()
+                                            .id("quit-app-btn")
+                                            .flex()
+                                            .items_center()
+                                            .w(px(170.0))
+                                            .ml(px(-8.0))
+                                            .p_2()
+                                            .rounded(px(5.0))
+                                            .text_base()
+                                            .font_weight(gpui::FontWeight::MEDIUM)
+                                            .text_color(gpui::rgb(0xef4444))
+                                            .cursor_pointer()
+                                            .child(mezon_i18n::t(&locale, "setting.quit"))
+                                            .on_click(move |_, _, cx| {
+                                                cx.quit();
+                                            }),
+                                    )
+                                    .child(
+                                        div()
+                                            .mt_4()
+                                            .text_xs()
+                                            .text_color(theme.text_muted)
+                                            .child(format!("v{}", env!("CARGO_PKG_VERSION"))),
+                                    ),
+                            ),
                     ),
             )
             .child(
-                div()
-                    .id("settings-scroll")
-                    .flex()
-                    .flex_1()
-                    .min_h_0()
-                    .overflow_y_scroll()
-                    .pt(px(94.0))
-                    .pb(px(28.0))
-                    .pl(px(40.0))
-                    .pr(px(10.0))
-                    .bg(theme.bg_secondary)
-                    .child(div().max_w(px(740.0)).child(content)),
+                div().flex_1().h_full().relative().child(
+                    div()
+                        .id("settings-scroll")
+                        .size_full()
+                        .overflow_y_scroll()
+                        .track_scroll(&self.scroll)
+                        .pt(px(94.0))
+                        .pb(px(28.0))
+                        .pl(px(40.0))
+                        .pr(px(10.0))
+                        .bg(theme.bg_primary)
+                        .child(div().max_w(px(740.0)).child(content))
+                        .custom_scrollbars(
+                            Scrollbars::new(ScrollAxes::Vertical)
+                                .tracked_scroll_handle(&self.scroll),
+                            window,
+                            cx,
+                        ),
+                ),
             )
             .child(
                 div()
                     .id("settings-close-btn")
                     .absolute()
-                    .top_4()
-                    .right_4()
+                    .top(px(94.0))
+                    .right(px(40.0))
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .gap_2()
                     .cursor_pointer()
                     .child(
-                        Icon::new(IconName::Close)
-                            .size_6()
-                            .text_color(theme.text_secondary),
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .size(px(36.0))
+                            .rounded_full()
+                            .border_1()
+                            .border_color(theme.border)
+                            .child(
+                                Icon::new(IconName::Close)
+                                    .size(px(18.0))
+                                    .text_color(theme.text_secondary),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .text_color(theme.text_secondary)
+                            .child("ESC"),
                     )
                     .on_click(move |_, _, cx| {
                         crate::router::go_back(cx);

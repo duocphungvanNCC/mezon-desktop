@@ -16,14 +16,14 @@ impl NotificationsPage {
 
 impl Render for NotificationsPage {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = cx.theme();
+        let theme = cx.theme().clone();
+        let locale = self.settings.read(cx).language.clone();
         let hide_content = self.settings.read(cx).notifications_hide_content;
-        let settings = self.settings.clone();
 
         v_flex()
             .gap_6()
             .child(
-                Label::new("Notifications")
+                Label::new(mezon_i18n::t(&locale, "setting.notifications.title"))
                     .text_xl()
                     .text_color(theme.text_primary)
                     .font_weight(FontWeight::SEMIBOLD),
@@ -39,26 +39,30 @@ impl Render for NotificationsPage {
                             .justify_between()
                             .items_center()
                             .child(
-                                Label::new("Hide Notification Content")
-                                    .text_color(theme.text_primary),
+                                Label::new(mezon_i18n::t(
+                                    &locale,
+                                    "setting.notifications.hideContent",
+                                ))
+                                .text_color(theme.text_primary),
                             )
                             .child(
                                 Switch::new("hide-notification-content")
                                     .checked(hide_content)
-                                    .on_click(move |_, _window, cx| {
-                                        settings.update(cx, |s, _| {
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.settings.update(cx, |s, _| {
                                             s.notifications_hide_content =
                                                 !s.notifications_hide_content;
                                             s.save_sync();
                                         });
-                                    }),
+                                        cx.notify();
+                                    })),
                             ),
                     )
                     .child(
-                        Label::new(
-                            "When enabled, message content will be hidden \
-                             from notification popups and the lock screen.",
-                        )
+                        Label::new(mezon_i18n::t(
+                            &locale,
+                            "setting.notifications.hideContentDesc",
+                        ))
                         .text_sm()
                         .text_color(theme.text_muted),
                     ),

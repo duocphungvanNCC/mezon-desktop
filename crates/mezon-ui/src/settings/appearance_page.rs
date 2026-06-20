@@ -70,9 +70,10 @@ fn theme_swatch(
         .gap_2()
         .cursor_pointer()
         .on_click(move |_, _, cx| {
-            settings.update(cx, |s, _| {
+            settings.update(cx, |s, cx| {
                 s.theme = key.clone();
                 s.save_sync();
+                cx.notify();
             });
         })
         .child(
@@ -122,27 +123,38 @@ impl Render for AppearancePage {
             (
                 "dark",
                 mezon_i18n::t(&locale, "appThemeSetting.fields.dark"),
-                rgba(49, 51, 56, 1.0),
             ),
             (
                 "light",
                 mezon_i18n::t(&locale, "appThemeSetting.fields.light"),
-                rgba(255, 255, 255, 1.0),
             ),
             (
                 "purple",
                 mezon_i18n::t(&locale, "appThemeSetting.fields.purpleHaze"),
-                rgba(120, 90, 200, 1.0),
             ),
             (
                 "abyss",
                 mezon_i18n::t(&locale, "appThemeSetting.fields.abyssDark"),
-                rgba(13, 15, 22, 1.0),
             ),
             (
                 "red_dark",
                 mezon_i18n::t(&locale, "appThemeSetting.fields.redDark"),
-                rgba(210, 80, 80, 1.0),
+            ),
+            (
+                "sunrise",
+                mezon_i18n::t(&locale, "appThemeSetting.fields.sunrise"),
+            ),
+            (
+                "sunset",
+                mezon_i18n::t(&locale, "appThemeSetting.fields.sunset"),
+            ),
+            (
+                "cisher",
+                mezon_i18n::t(&locale, "appThemeSetting.fields.cisher"),
+            ),
+            (
+                "berrynade",
+                mezon_i18n::t(&locale, "appThemeSetting.fields.berrynade"),
             ),
         ];
 
@@ -187,23 +199,27 @@ impl Render for AppearancePage {
                     })),
             )
             .child(
-                Label::new("Theme")
+                Label::new(mezon_i18n::t(&locale, "setting.appearance.theme"))
                     .text_sm()
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(theme.text_primary),
             )
-            .child(h_flex().flex_wrap().gap(px(30.0)).children(themes.map(
-                |(key, label, swatch_color)| {
-                    let is_selected = current_theme == key;
-                    theme_swatch(
-                        key.to_string(),
-                        label.to_string(),
-                        swatch_color,
-                        is_selected,
-                        theme,
-                        settings.clone(),
-                    )
-                },
-            )))
+            .child(
+                h_flex()
+                    .flex_wrap()
+                    .gap(px(30.0))
+                    .children(themes.map(|(key, label)| {
+                        let is_selected = current_theme == key;
+                        let swatch_color = crate::theme::resolve_theme(key).bg_primary;
+                        theme_swatch(
+                            key.to_string(),
+                            label.to_string(),
+                            swatch_color,
+                            is_selected,
+                            theme,
+                            settings.clone(),
+                        )
+                    })),
+            )
     }
 }

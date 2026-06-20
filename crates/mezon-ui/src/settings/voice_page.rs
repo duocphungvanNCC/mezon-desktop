@@ -122,6 +122,7 @@ impl VoicePage {
 impl Render for VoicePage {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
+        let locale = self.settings.read(cx).language.clone();
 
         let mic_vol_pct = (self.mic_slider.read(cx).value().end() * 100.0) as u32;
         let speaker_vol_pct = (self.speaker_slider.read(cx).value().end() * 100.0) as u32;
@@ -141,7 +142,7 @@ impl Render for VoicePage {
         v_flex()
             .gap_6()
             .child(
-                Label::new("Voice & Video")
+                Label::new(mezon_i18n::t(&locale, "setting.voice.title"))
                     .text_xl()
                     .text_color(theme.text_primary)
                     .font_weight(FontWeight::SEMIBOLD),
@@ -164,13 +165,16 @@ impl Render for VoicePage {
                                     .flex_1()
                                     .gap_2()
                                     // Input Device
-                                    .child(Label::new("Input Device").text_color(theme.text_primary))
+                                    .child(
+                                        Label::new(mezon_i18n::t(&locale, "setting.voice.inputDevice"))
+                                            .text_color(theme.text_primary),
+                                    )
                                     .child({
                                         Self::render_selector(
                                             &input_devices,
                                             &selected_input_id,
                                             self.input_dropdown_open,
-                                            "No input devices",
+                                            mezon_i18n::t(&locale, "setting.voice.noInputDevices"),
                                             theme,
                                             this_handle.clone(),
                                             settings.clone(),
@@ -184,7 +188,10 @@ impl Render for VoicePage {
                                             .child(
                                                 h_flex()
                                                     .justify_between()
-                                                    .child(Label::new("Mic Volume").text_color(theme.text_primary))
+                                                    .child(
+                                                        Label::new(mezon_i18n::t(&locale, "setting.voice.micVolume"))
+                                                            .text_color(theme.text_primary),
+                                                    )
                                                     .child(
                                                         Label::new(format!("{mic_vol_pct}%"))
                                                             .text_sm()
@@ -208,13 +215,16 @@ impl Render for VoicePage {
                                     .flex_1()
                                     .gap_2()
                                     // Output Device
-                                    .child(Label::new("Output Device").text_color(theme.text_primary))
+                                    .child(
+                                        Label::new(mezon_i18n::t(&locale, "setting.voice.outputDevice"))
+                                            .text_color(theme.text_primary),
+                                    )
                                     .child({
                                         Self::render_selector(
                                             &output_devices,
                                             &selected_output_id,
                                             self.output_dropdown_open,
-                                            "No output devices",
+                                            mezon_i18n::t(&locale, "setting.voice.noOutputDevices"),
                                             theme,
                                             this_handle.clone(),
                                             settings.clone(),
@@ -228,7 +238,10 @@ impl Render for VoicePage {
                                             .child(
                                                 h_flex()
                                                     .justify_between()
-                                                    .child(Label::new("Speaker Volume").text_color(theme.text_primary))
+                                                    .child(
+                                                        Label::new(mezon_i18n::t(&locale, "setting.voice.speakerVolume"))
+                                                            .text_color(theme.text_primary),
+                                                    )
                                                     .child(
                                                         Label::new(format!("{speaker_vol_pct}%"))
                                                             .text_sm()
@@ -273,7 +286,11 @@ impl Render for VoicePage {
                                                     .bg(if is_testing { theme.status_dnd } else { theme.brand })
                                                     .cursor_pointer()
                                                     .child(
-                                                        Label::new(if is_testing { "Stop" } else { "Let's Check" })
+                                                        Label::new(if is_testing {
+                                                            mezon_i18n::t(&locale, "setting.voice.stop")
+                                                        } else {
+                                                            mezon_i18n::t(&locale, "setting.voice.letsCheck")
+                                                        })
                                                             .text_sm()
                                                             .text_color(theme.text_primary),
                                                     )
@@ -287,7 +304,7 @@ impl Render for VoicePage {
                                                     }),
                                             )
                                             .child(
-                                                Label::new("Mic Test")
+                                                Label::new(mezon_i18n::t(&locale, "setting.voice.micTest"))
                                                     .text_sm()
                                                     .text_color(theme.text_muted),
                                             ),
@@ -322,8 +339,16 @@ impl Render for VoicePage {
                                         el.child(
                                             h_flex()
                                                 .gap_2()
-                                                .child(Label::new("Silent").text_xs().text_color(theme.text_muted))
-                                                .child(Label::new("Loud").text_xs().text_color(theme.text_muted)),
+                                                .child(
+                                                    Label::new(mezon_i18n::t(&locale, "setting.voice.silent"))
+                                                        .text_xs()
+                                                        .text_color(theme.text_muted),
+                                                )
+                                                .child(
+                                                    Label::new(mezon_i18n::t(&locale, "setting.voice.loud"))
+                                                        .text_xs()
+                                                        .text_color(theme.text_muted),
+                                                ),
                                         )
                                     })
                                     // Error text
@@ -338,7 +363,7 @@ impl Render for VoicePage {
                     ),
             )
             .child(
-                Label::new("Audio input/output requires native integration.")
+                Label::new(mezon_i18n::t(&locale, "setting.voice.nativeRequired"))
                     .text_sm()
                     .text_color(theme.text_muted),
             )
@@ -351,7 +376,7 @@ impl VoicePage {
         devices: &[AudioDeviceInfo],
         selected_id: &Option<String>,
         is_open: bool,
-        empty_label: &str,
+        empty_label: &'static str,
         theme: &Theme,
         entity: Entity<VoicePage>,
         settings: Entity<Settings>,

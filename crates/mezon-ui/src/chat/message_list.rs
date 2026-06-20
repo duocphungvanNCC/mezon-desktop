@@ -1,6 +1,6 @@
 use gpui::{
-    AnyElement, Context, Entity, FollowMode, ListAlignment, ListState, Window, div, list,
-    prelude::*, px,
+    AnyElement, Context, Entity, FollowMode, ListAlignment, ListState, SharedString, Window, div,
+    list, prelude::*, px,
 };
 
 use mezon_store::{ChannelList, Message, MessagesEvent, MessagesStore, Settings};
@@ -13,7 +13,7 @@ const LOAD_MORE_ITEM_THRESHOLD: usize = 6;
 
 pub struct MessageTimeline {
     pub(crate) list_state: ListState,
-    scroll_installed: bool,
+    settings: Entity<Settings>,
     image_cache: Entity<LruImageCache>,
     cached_for_channel: Option<String>,
 }
@@ -44,10 +44,15 @@ impl MessageTimeline {
 
         let list_state = ListState::new(0, ListAlignment::Bottom, px(200.));
         list_state.set_follow_mode(FollowMode::Tail);
+        list_state.set_scroll_handler(move |event, _window, cx| {
+            if event.visible_range.start < LOAD_MORE_ITEM_THRESHOLD {
+                MessagesStore::global(cx).update(cx, |store, cx| store.load_more(cx));
+            }
+        });
         let image_cache = cx.new(|cx| LruImageCache::new(MESSAGE_IMAGE_CACHE_CAPACITY, cx));
         Self {
             list_state,
-            scroll_installed: false,
+            settings,
             image_cache,
             cached_for_channel: None,
         }
@@ -73,31 +78,23 @@ impl Render for MessageTimeline {
         crate::trace_render!("MessageTimeline");
         self.clear_image_cache_if_channel_changed(window, cx);
 
-        if !self.scroll_installed {
-            self.scroll_installed = true;
-            let list_state = self.list_state.clone();
-            list_state.set_scroll_handler(move |event, _window, cx| {
-                if event.visible_range.start < LOAD_MORE_ITEM_THRESHOLD {
-                    MessagesStore::global(cx).update(cx, |store, cx| store.load_more(cx));
-                }
-            });
-        }
-
         let store = MessagesStore::global(cx);
         let count = store.read(cx).messages().len();
         if self.list_state.item_count() != count {
             self.list_state.reset(count);
+            self.list_state.set_follow_mode(FollowMode::Tail);
         }
 
+        let locale = self.settings.read(cx).language.clone();
+        let reply_label: SharedString = mezon_i18n::t(&locale, "chat.replyingToSomeone").into();
         let list_state = self.list_state.clone();
         let list_element = list(list_state, move |ix, _window, cx| {
-            render_row(store.read(cx).messages(), ix, cx, "")
+            render_row(store.read(cx).messages(), ix, cx, "", &reply_label)
         })
         .size_full();
 
         div()
-            .flex_1()
-            .min_h_0()
+            .size_full()
             .image_cache(self.image_cache.clone())
             .child(list_element)
     }
@@ -108,6 +105,7 @@ fn render_row(
     ix: usize,
     cx: &gpui::App,
     current_user_id: &str,
+    reply_label: &SharedString,
 ) -> AnyElement {
     let theme = cx.theme();
     let Some(msg) = messages.get(ix) else {
@@ -119,10 +117,10 @@ fn render_row(
     let show_separator = prev.map(|p| p.day_label.as_str()) != Some(day_label);
     let combined = !show_separator && msg.combined_with_prev;
 
-    let attachment_views = attachment_views(msg, cx);
-    let message_row = MessageRow::new(msg, theme, current_user_id)
+    let attachment_views = attachment_views(msg);
+    let message_row = MessageRow::new(msg, theme, current_user_id, reply_label.clone())
         .combined(combined)
-        .avatar_src(crate::imgproxy::avatar_url(cx, &msg.avatar_url))
+        .avatar_src(msg.avatar_proxied.clone())
         .attachments(attachment_views);
 
     let mut column = div().flex().flex_col().w_full();
@@ -132,7 +130,7 @@ fn render_row(
     column.child(message_row.render()).into_any_element()
 }
 
-fn attachment_views(msg: &Message, cx: &gpui::App) -> Vec<MessageAttachmentView> {
+fn attachment_views(msg: &Message) -> Vec<MessageAttachmentView> {
     msg.attachments
         .iter()
         .map(|att| {
@@ -142,12 +140,10 @@ fn attachment_views(msg: &Message, cx: &gpui::App) -> Vec<MessageAttachmentView>
                 } else {
                     att.filename.clone()
                 };
-                let (src, width, height) =
-                    crate::imgproxy::attachment_image(cx, &att.url, att.width, att.height);
                 MessageAttachmentView::Image {
-                    src,
-                    width,
-                    height,
+                    src: att.proxied_src.clone(),
+                    width: px(att.display_width),
+                    height: px(att.display_height),
                     label,
                 }
             } else {
@@ -172,12 +168,12 @@ fn date_separator(theme: &Theme, label: &str) -> impl IntoElement {
         .px_4()
         .py_2()
         .w_full()
-        .child(div().flex_1().h(px(1.)).bg(gpui::hsla(0., 0., 0., 0.08)))
+        .child(div().flex_1().h(px(1.)).bg(theme.border))
         .child(
             div()
                 .text_xs()
                 .text_color(theme.text_muted)
                 .child(label.to_string()),
         )
-        .child(div().flex_1().h(px(1.)).bg(gpui::hsla(0., 0., 0., 0.08)))
+        .child(div().flex_1().h(px(1.)).bg(theme.border))
 }

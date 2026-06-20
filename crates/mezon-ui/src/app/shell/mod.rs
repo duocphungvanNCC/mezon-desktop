@@ -7,11 +7,14 @@
 use std::time::Duration;
 
 use gpui::{
-    AnyView, App, AppContext, Context, Entity, Global, MouseButton, SharedString, deferred, div,
-    hsla, prelude::*, px,
+    AnyView, App, AppContext, Context, Entity, Global, MouseButton, SharedString, Window, deferred,
+    div, hsla, prelude::*, px,
 };
 
 use crate::components::primitives::{Toast, ToastKind};
+
+mod coming_soon_modal;
+use coming_soon_modal::ComingSoonModal;
 
 const TOAST_TTL: Duration = Duration::from_secs(4);
 
@@ -89,6 +92,31 @@ impl Shell {
         cx.notify();
     }
 
+    /// Open a placeholder modal for a not-yet-implemented feature: the given `title` plus a
+    /// "coming soon" body and a close button.
+    pub fn show_coming_soon(
+        &mut self,
+        title: impl Into<SharedString>,
+        locale: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let message: SharedString = mezon_i18n::t(locale, "common.comingSoon")
+            .to_string()
+            .into();
+        let close_label: SharedString = mezon_i18n::t(locale, "common.close").to_string().into();
+        let title = title.into();
+        let view = cx.new(|cx| ComingSoonModal {
+            focus_handle: cx.focus_handle(),
+            title,
+            message,
+            close_label,
+        });
+        let focus_handle = view.read(cx).focus_handle.clone();
+        window.focus(&focus_handle, cx);
+        self.show_modal(view.into(), cx);
+    }
+
     pub fn close_modal(&mut self, cx: &mut Context<Self>) {
         if self.modal.take().is_some() {
             cx.notify();
@@ -109,6 +137,10 @@ impl Shell {
             .collect();
 
         div()
+            .absolute()
+            .top_0()
+            .left_0()
+            .size_full()
             .when_some(modal, |el, view| {
                 el.child(deferred(
                     div()

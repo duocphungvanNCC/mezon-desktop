@@ -4,9 +4,11 @@ use gpui::{App, AppContext, Context, Entity, EventEmitter, Global, Subscription,
 use mezon_client::transport::ApiMessage;
 use mezon_client::{AppApi, ConnectionStatus, MezonTransport, RealtimeEvent};
 
+use crate::AppConfig;
 use crate::KeyedCache;
 use crate::channel::{
-    Channel, ChannelEvent, ChannelList, Message, MessageAttachment, recompute_message_grouping,
+    ChannelEvent, ChannelList, Message, MessageAttachment, message_combined_with_prev,
+    recompute_message_grouping,
 };
 use crate::realtime::{RealtimeDispatch, RealtimeKind};
 
@@ -28,11 +30,15 @@ struct ChannelMessages {
     has_more: bool,
 }
 
+const STREAM_MODE_CHANNEL: i32 = 2;
+
 pub struct MessagesStore {
     cache: KeyedCache<String, ChannelMessages>,
     active_channel_id: Option<String>,
     active_clan_id: Option<String>,
     is_public: bool,
+    is_dm: bool,
+    mode: i32,
     loading: bool,
     loading_more: bool,
     api: Arc<AppApi>,
@@ -76,6 +82,8 @@ impl MessagesStore {
             active_channel_id: None,
             active_clan_id: None,
             is_public: true,
+            is_dm: false,
+            mode: STREAM_MODE_CHANNEL,
             loading: false,
             loading_more: false,
             api,
@@ -176,12 +184,13 @@ impl MessagesStore {
                 let Some(channel) = this.cache.get_mut(&channel_id) else {
                     return;
                 };
-                let existing: std::collections::HashSet<String> =
-                    channel.messages.iter().map(|m| m.id.clone()).collect();
+                let existing: std::collections::HashSet<&str> =
+                    channel.messages.iter().map(|m| m.id.as_str()).collect();
+                let cfg = AppConfig::try_global(cx);
                 let mut older: Vec<Message> = msgs
                     .into_iter()
-                    .filter(|m| !existing.contains(&m.message_id))
-                    .map(message_from_api)
+                    .filter(|m| !existing.contains(m.message_id.as_str()))
+                    .map(|m| message_from_api(m, cfg))
                     .collect();
                 if older.is_empty() {
                     channel.has_more = false;
@@ -217,6 +226,7 @@ impl MessagesStore {
             return;
         };
         let is_public = self.is_public;
+        let mode = self.mode;
 
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -242,12 +252,13 @@ impl MessagesStore {
         let api = self.api.clone();
         cx.spawn(async move |this, cx| {
             match api
-                .send_channel_message(&clan_id, &channel_id, &content, is_public)
+                .send_channel_message(&clan_id, &channel_id, &content, is_public, mode)
                 .await
             {
                 Ok(sent) => {
                     let _ = this.update(cx, |this, cx| {
-                        this.reconcile_temp(&channel_id, &temp_id, message_from_api(sent));
+                        let confirmed = message_from_api(sent, AppConfig::try_global(cx));
+                        this.reconcile_temp(&channel_id, &temp_id, confirmed);
                         if this.active_channel_id.as_deref() == Some(channel_id.as_str()) {
                             cx.emit(MessagesEvent::Appended);
                             cx.notify();
@@ -264,17 +275,21 @@ impl MessagesStore {
         let Some(channel_id) = channel_id else {
             self.active_channel_id = None;
             self.active_clan_id = None;
+            self.is_dm = false;
             self.loading = false;
             self.loading_more = false;
             cx.emit(MessagesEvent::Reset { count: 0 });
             cx.notify();
             return;
         };
+        self.open_channel(channel_id, cx);
+    }
 
-        if self.active_channel_id.as_deref() == Some(channel_id.as_str()) {
+    /// Open a clan channel as the active conversation (looks up clan/privacy from `ChannelList`).
+    pub fn open_channel(&mut self, channel_id: String, cx: &mut Context<Self>) {
+        if self.active_channel_id.as_deref() == Some(channel_id.as_str()) && !self.is_dm {
             return;
         }
-
         let Some(channel) = ChannelList::global(cx)
             .read(cx)
             .find_channel(&channel_id)
@@ -282,16 +297,56 @@ impl MessagesStore {
         else {
             return;
         };
+        self.activate(
+            channel.clan_id.clone(),
+            channel_id,
+            !channel.private,
+            false,
+            CHANNEL_TYPE_CHANNEL,
+            STREAM_MODE_CHANNEL,
+            cx,
+        );
+    }
 
+    /// Open a direct message / group conversation (clan_id = 0) as the active conversation.
+    /// `channel_type` is the raw DM type (3 = DM, 2 = group).
+    pub fn open_direct(&mut self, channel_id: String, channel_type: i32, cx: &mut Context<Self>) {
+        if self.active_channel_id.as_deref() == Some(channel_id.as_str()) && self.is_dm {
+            return;
+        }
+        let mode = if channel_type == 2 { 3 } else { 4 };
+        self.activate(
+            "0".to_string(),
+            channel_id,
+            false,
+            true,
+            channel_type,
+            mode,
+            cx,
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn activate(
+        &mut self,
+        clan_id: String,
+        channel_id: String,
+        is_public: bool,
+        is_dm: bool,
+        join_type: i32,
+        mode: i32,
+        cx: &mut Context<Self>,
+    ) {
         self.active_channel_id = Some(channel_id.clone());
-        self.active_clan_id = Some(channel.clan_id.clone());
-        self.is_public = !channel.private;
+        self.active_clan_id = Some(clan_id.clone());
+        self.is_public = is_public;
+        self.is_dm = is_dm;
+        self.mode = mode;
         self.loading_more = false;
 
-        self.spawn_join(&channel, cx);
+        self.spawn_join(&clan_id, &channel_id, join_type, is_public, cx);
 
-        let fresh = self.cache.is_fresh(&channel_id, crate::CACHE_TTL);
-        if fresh {
+        if self.cache.is_fresh(&channel_id, crate::CACHE_TTL) {
             self.cache.touch(&channel_id);
             self.loading = false;
             let count = self.messages().len();
@@ -301,31 +356,40 @@ impl MessagesStore {
         }
 
         self.loading = true;
-        cx.emit(MessagesEvent::Reset { count: 0 });
+        if self.cache.contains(&channel_id) {
+            self.cache.touch(&channel_id);
+            let count = self.messages().len();
+            cx.emit(MessagesEvent::Reset { count });
+        } else {
+            cx.emit(MessagesEvent::Reset { count: 0 });
+        }
         cx.notify();
-        self.spawn_initial_fetch(&channel, cx);
+        self.spawn_initial_fetch(&clan_id, &channel_id, cx);
     }
 
-    fn spawn_join(&self, channel: &Channel, cx: &mut Context<Self>) {
+    fn spawn_join(
+        &self,
+        clan_id: &str,
+        channel_id: &str,
+        join_type: i32,
+        is_public: bool,
+        cx: &mut Context<Self>,
+    ) {
         let api = self.api.clone();
-        let clan_id = channel.clan_id.clone();
-        let ch_id = channel.id.clone();
-        let is_public = !channel.private;
+        let clan_id = clan_id.to_string();
+        let ch_id = channel_id.to_string();
         cx.spawn(async move |_this, _cx| {
-            if let Err(e) = api
-                .join_chat(&clan_id, &ch_id, CHANNEL_TYPE_CHANNEL, is_public)
-                .await
-            {
+            if let Err(e) = api.join_chat(&clan_id, &ch_id, join_type, is_public).await {
                 tracing::warn!("join_chat failed: {e}");
             }
         })
         .detach();
     }
 
-    fn spawn_initial_fetch(&self, channel: &Channel, cx: &mut Context<Self>) {
+    fn spawn_initial_fetch(&self, clan_id: &str, channel_id: &str, cx: &mut Context<Self>) {
         let api = self.api.clone();
-        let clan_id = channel.clan_id.clone();
-        let ch_id = channel.id.clone();
+        let clan_id = clan_id.to_string();
+        let ch_id = channel_id.to_string();
         cx.spawn(async move |this, cx| {
             let result = api
                 .list_channel_messages(&clan_id, &ch_id, "", 0, MESSAGE_PAGE_LIMIT)
@@ -337,7 +401,7 @@ impl MessagesStore {
                 this.loading = false;
                 match result {
                     Ok(msgs) => {
-                        let messages = prepare_messages(msgs);
+                        let messages = prepare_messages(msgs, AppConfig::try_global(cx));
                         let count = messages.len();
                         this.set_channel(&ch_id, messages);
                         cx.emit(MessagesEvent::Reset { count });
@@ -359,10 +423,11 @@ impl MessagesStore {
         };
         let channel_id = m.channel_id.to_string();
         let is_active = self.active_channel_id.as_deref() == Some(channel_id.as_str());
+        let cfg = AppConfig::try_global(cx);
         let Some(channel) = self.cache.get_mut(&channel_id) else {
             return;
         };
-        let msg = message_from_api(MezonTransport::message_from_proto(m.clone()));
+        let msg = message_from_api(MezonTransport::message_from_proto(m.clone()), cfg);
         if channel.messages.iter().any(|x| x.id == msg.id) {
             return;
         }
@@ -370,12 +435,12 @@ impl MessagesStore {
             x.id.starts_with("temp-") && x.sender_id == msg.sender_id && x.content == msg.content
         }) {
             *slot = msg;
+            channel.messages.sort_by_key(|m| m.create_time);
+            trim_messages(&mut channel.messages);
+            recompute_message_grouping(&mut channel.messages);
         } else {
-            channel.messages.push(msg);
+            push_message_grouped(&mut channel.messages, msg);
         }
-        channel.messages.sort_by_key(|m| m.create_time);
-        trim_messages(&mut channel.messages);
-        recompute_message_grouping(&mut channel.messages);
         if is_active {
             cx.emit(MessagesEvent::Appended);
             cx.notify();
@@ -399,8 +464,8 @@ impl MessagesStore {
     }
 
     fn resync(&mut self, cx: &mut Context<Self>) {
-        tracing::info!("MessagesStore resync — clearing message cache");
-        self.cache.clear();
+        tracing::info!("MessagesStore resync — marking message cache stale");
+        self.cache.mark_all_stale();
         self.refetch_current_messages(cx);
     }
 
@@ -433,7 +498,7 @@ impl MessagesStore {
                 this.loading = false;
                 match result {
                     Ok(msgs) => {
-                        let messages = prepare_messages(msgs);
+                        let messages = prepare_messages(msgs, AppConfig::try_global(cx));
                         let count = messages.len();
                         this.set_channel(&channel_id, messages);
                         cx.emit(MessagesEvent::Reset { count });
@@ -461,12 +526,33 @@ impl MessagesStore {
     }
 }
 
-fn prepare_messages(msgs: Vec<ApiMessage>) -> Vec<Message> {
-    let mut messages: Vec<Message> = msgs.into_iter().map(message_from_api).collect();
+fn prepare_messages(msgs: Vec<ApiMessage>, cfg: Option<&AppConfig>) -> Vec<Message> {
+    let mut messages: Vec<Message> = msgs.into_iter().map(|m| message_from_api(m, cfg)).collect();
     messages.sort_by_key(|m| m.create_time);
     trim_messages(&mut messages);
     recompute_message_grouping(&mut messages);
     messages
+}
+
+fn push_message_grouped(messages: &mut Vec<Message>, msg: Message) {
+    let in_order = messages
+        .last()
+        .map(|last| last.create_time <= msg.create_time)
+        .unwrap_or(true);
+    messages.push(msg);
+    if in_order {
+        trim_messages(messages);
+        let last = messages.len() - 1;
+        let combined = {
+            let prev = last.checked_sub(1).map(|i| &messages[i]);
+            message_combined_with_prev(prev, &messages[last])
+        };
+        messages[last].combined_with_prev = combined;
+    } else {
+        messages.sort_by_key(|m| m.create_time);
+        trim_messages(messages);
+        recompute_message_grouping(messages);
+    }
 }
 
 fn trim_messages(messages: &mut Vec<Message>) {
@@ -477,7 +563,10 @@ fn trim_messages(messages: &mut Vec<Message>) {
     messages.drain(0..drop);
 }
 
-fn message_from_api(m: ApiMessage) -> Message {
+fn message_from_api(m: ApiMessage, cfg: Option<&AppConfig>) -> Message {
+    let avatar_proxied = cfg
+        .map(|c| c.avatar_proxy(&m.avatar))
+        .unwrap_or_else(|| m.avatar.clone());
     Message::new(
         m.message_id,
         m.content,
@@ -486,22 +575,37 @@ fn message_from_api(m: ApiMessage) -> Message {
         m.create_time,
     )
     .with_avatar(m.avatar)
+    .with_avatar_proxied(avatar_proxied)
     .with_attachments(
         m.attachments
             .into_iter()
-            .map(MessageAttachment::from_api)
+            .map(|a| MessageAttachment::from_api(a, cfg))
             .collect(),
     )
 }
 
 impl MessageAttachment {
-    pub(crate) fn from_api(a: mezon_client::transport::ApiAttachment) -> Self {
+    pub(crate) fn from_api(
+        a: mezon_client::transport::ApiAttachment,
+        cfg: Option<&AppConfig>,
+    ) -> Self {
+        let width = a.width.max(0) as u32;
+        let height = a.height.max(0) as u32;
+        let (proxied_src, display_width, display_height) = cfg
+            .map(|c| c.attachment_proxy(&a.url, width, height))
+            .unwrap_or_else(|| {
+                let (w, h) = crate::config::attachment_display_dimensions(width, height);
+                (a.url.clone(), w, h)
+            });
         Self {
             url: a.url,
             filename: a.filename,
             filetype: a.filetype,
-            width: a.width.max(0) as u32,
-            height: a.height.max(0) as u32,
+            width,
+            height,
+            proxied_src: proxied_src.into(),
+            display_width,
+            display_height,
         }
     }
 }
@@ -512,19 +616,56 @@ mod tests {
 
     #[test]
     fn message_from_api_maps_fields() {
-        let m = message_from_api(ApiMessage {
-            message_id: "1".into(),
-            content: "hi".into(),
-            sender_id: "u1".into(),
-            sender_name: "Alice".into(),
-            avatar: "av.png".into(),
-            create_time: 100,
-            attachments: vec![],
-        });
+        let m = message_from_api(
+            ApiMessage {
+                message_id: "1".into(),
+                content: "hi".into(),
+                sender_id: "u1".into(),
+                sender_name: "Alice".into(),
+                avatar: "av.png".into(),
+                create_time: 100,
+                attachments: vec![],
+            },
+            None,
+        );
         assert_eq!(m.id, "1");
         assert_eq!(m.content, "hi");
         assert_eq!(m.sender_name, "Alice");
         assert_eq!(m.avatar_url, "av.png");
+        assert_eq!(m.avatar_proxied, "av.png");
+    }
+
+    #[test]
+    fn push_message_grouped_appends_in_order() {
+        let mut msgs = vec![
+            Message::new("1", "a", "u1", "U1", 100),
+            Message::new("2", "b", "u1", "U1", 110),
+        ];
+        recompute_message_grouping(&mut msgs);
+        push_message_grouped(&mut msgs, Message::new("3", "c", "u1", "U1", 120));
+        assert_eq!(msgs.len(), 3);
+        assert_eq!(msgs[2].id, "3");
+        assert!(msgs[2].combined_with_prev);
+    }
+
+    #[test]
+    fn push_message_grouped_resorts_when_out_of_order() {
+        let mut msgs = vec![
+            Message::new("1", "a", "u1", "U1", 100),
+            Message::new("3", "c", "u1", "U1", 120),
+        ];
+        recompute_message_grouping(&mut msgs);
+        push_message_grouped(&mut msgs, Message::new("2", "b", "u1", "U1", 110));
+        let ids: Vec<&str> = msgs.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(ids, ["1", "2", "3"]);
+    }
+
+    #[test]
+    fn push_message_grouped_breaks_group_for_different_sender() {
+        let mut msgs = vec![Message::new("1", "a", "u1", "U1", 100)];
+        recompute_message_grouping(&mut msgs);
+        push_message_grouped(&mut msgs, Message::new("2", "b", "u2", "U2", 105));
+        assert!(!msgs[1].combined_with_prev);
     }
 
     #[test]

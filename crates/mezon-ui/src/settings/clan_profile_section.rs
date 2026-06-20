@@ -1,8 +1,8 @@
 use std::time::Duration;
 
 use crate::components::primitives::{
-    Avatar, Button as GpuiButton, ButtonVariants, Input, InputEvent, InputState, Label, Sizable,
-    Size, h_flex, v_flex,
+    Avatar, Button as GpuiButton, ButtonVariants, Icon, IconName, Input, InputEvent, InputState,
+    Label, Sizable, Size, h_flex, v_flex,
 };
 use gpui::{
     Context, Entity, FontWeight, PathPromptOptions, SharedString, Subscription, Window, div,
@@ -26,6 +26,7 @@ struct ClanProfileState {
 }
 
 pub struct ClanProfileSection {
+    settings: Entity<Settings>,
     clan_list: Entity<ClanList>,
     profile: Option<ClanProfileState>,
     display_name: SharedString,
@@ -74,16 +75,33 @@ impl ClanProfileSection {
                         state.original_avatar_url = state.avatar_url.clone();
                         state.saving = false;
                     }
-                    this.show_toast("Clan profile saved", cx);
+                    let locale = this.settings.read(cx).language.clone();
+                    this.show_toast(mezon_i18n::t(&locale, "setting.clanProfile.saved"), cx);
                 }
                 AccountEvent::ClanProfileSaveFailed(msg) => {
                     if let Some(state) = &mut this.profile {
                         state.saving = false;
                     }
-                    this.show_toast(format!("Failed to save clan profile: {}", msg), cx);
+                    let locale = this.settings.read(cx).language.clone();
+                    this.show_toast(
+                        format!(
+                            "{} {}",
+                            mezon_i18n::t(&locale, "setting.clanProfile.saveFailed"),
+                            msg
+                        ),
+                        cx,
+                    );
                 }
                 AccountEvent::ClanProfileLoadFailed(msg) => {
-                    this.show_toast(format!("Failed to load clan profile: {}", msg), cx);
+                    let locale = this.settings.read(cx).language.clone();
+                    this.show_toast(
+                        format!(
+                            "{} {}",
+                            mezon_i18n::t(&locale, "setting.clanProfile.loadFailed"),
+                            msg
+                        ),
+                        cx,
+                    );
                 }
                 AccountEvent::NicknameDuplicateChecked(is_dup) => {
                     if let Some(state) = &mut this.profile {
@@ -98,13 +116,22 @@ impl ClanProfileSection {
                     cx.notify();
                 }
                 AccountEvent::AvatarUploadFailed(msg) => {
-                    this.show_toast(format!("Failed to upload avatar: {}", msg), cx);
+                    let locale = this.settings.read(cx).language.clone();
+                    this.show_toast(
+                        format!(
+                            "{} {}",
+                            mezon_i18n::t(&locale, "setting.clanProfile.avatarUploadFailed"),
+                            msg
+                        ),
+                        cx,
+                    );
                 }
                 _ => {}
             },
         )
         .detach();
         Self {
+            settings,
             clan_list,
             profile: None,
             display_name: SharedString::default(),
@@ -137,7 +164,9 @@ impl ClanProfileSection {
     }
 
     fn init_inputs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let nick = cx.new(|cx| InputState::new(window, cx).placeholder("Clan nickname"));
+        let locale = self.settings.read(cx).language.clone();
+        let nick_ph = mezon_i18n::t(&locale, "setting.clanProfile.nicknamePlaceholder");
+        let nick = cx.new(|cx| InputState::new(window, cx).placeholder(nick_ph));
 
         if let Some(state) = &self.profile {
             nick.update(cx, |input, cx| {
@@ -256,6 +285,7 @@ impl ClanProfileSection {
 impl Render for ClanProfileSection {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
+        let locale = self.settings.read(cx).language.clone();
 
         if self.profile.as_ref().is_some_and(|p| !p.loading) && self.nick_name_input.is_none() {
             self.init_inputs(window, cx);
@@ -286,7 +316,7 @@ impl Render for ClanProfileSection {
         let avatar_url = self.profile.as_ref().and_then(|s| s.avatar_url.clone());
         let avatar_display = avatar_url
             .as_ref()
-            .map(|url| SharedString::from(crate::imgproxy::profile_url(cx, url.as_ref())));
+            .map(|url| SharedString::from(crate::util::imgproxy::profile_url(cx, url.as_ref())));
 
         let duplicate_error = self.profile.as_ref().is_some_and(|s| s.duplicate_error);
 
@@ -302,6 +332,7 @@ impl Render for ClanProfileSection {
         );
         let preview = Self::render_clan_preview(
             &theme,
+            &locale,
             &nick_name,
             avatar_display,
             &self.display_name,
@@ -316,20 +347,22 @@ impl Render for ClanProfileSection {
                     v_flex()
                         .gap_3()
                         .pt_4()
-                        .child(
-                            h_flex().gap_2().items_center().child(
-                                div()
-                                    .text_sm()
-                                    .text_color(theme.status_dnd)
-                                    .child("⚠ Careful — you have unsaved changes!"),
-                            ),
-                        )
+                        .child(h_flex().gap_2().items_center().child(
+                            div().text_sm().text_color(theme.status_dnd).child(format!(
+                                "⚠ {}",
+                                mezon_i18n::t(&locale, "setting.profile.unsavedWarning")
+                            )),
+                        ))
                         .child(
                             h_flex()
                                 .gap_3()
                                 .child(
                                     GpuiButton::new("clan-save-btn")
-                                        .label(if saving { "Saving…" } else { "Save Changes" })
+                                        .label(if saving {
+                                            mezon_i18n::t(&locale, "setting.profile.saving")
+                                        } else {
+                                            mezon_i18n::t(&locale, "setting.profile.saveChanges")
+                                        })
                                         .disabled(saving)
                                         .text_color(theme.text_secondary)
                                         .on_click({
@@ -343,7 +376,7 @@ impl Render for ClanProfileSection {
                                 )
                                 .child(
                                     GpuiButton::new("clan-discard-btn")
-                                        .label("Discard")
+                                        .label(mezon_i18n::t(&locale, "common.discard"))
                                         .disabled(saving)
                                         .text_color(theme.text_primary)
                                         .ghost()
@@ -388,6 +421,7 @@ impl ClanProfileSection {
         duplicate_error: bool,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
+        let locale = self.settings.read(cx).language.clone();
         v_flex()
             .gap_4()
             .child(
@@ -395,7 +429,7 @@ impl ClanProfileSection {
                     div()
                         .text_sm()
                         .text_color(theme.text_muted)
-                        .child("Customize how you appear in each clan."),
+                        .child(mezon_i18n::t(&locale, "setting.clanProfile.customize")),
                 ),
             )
             .child(
@@ -406,7 +440,7 @@ impl ClanProfileSection {
                             .text_xs()
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_color(theme.text_primary)
-                            .child("CHOOSE A CLAN"),
+                            .child(mezon_i18n::t(&locale, "setting.clanProfile.chooseClan")),
                     )
                     .child({
                         let entity = cx.entity().clone();
@@ -426,26 +460,16 @@ impl ClanProfileSection {
                                     .py_1()
                                     .rounded_md()
                                     .cursor_pointer()
-                                    .when(is_selected, |el| {
-                                        el.bg(gpui::Rgba {
-                                            r: 233.0 / 255.0,
-                                            g: 233.0 / 255.0,
-                                            b: 233.0 / 255.0,
-                                            a: 0.08,
-                                        })
-                                    })
-                                    .hover(|el| {
-                                        el.bg(gpui::Rgba {
-                                            r: 1.0,
-                                            g: 1.0,
-                                            b: 1.0,
-                                            a: 0.05,
-                                        })
-                                    })
+                                    .when(is_selected, |el| el.bg(theme.bg_hover))
+                                    .hover(|el| el.bg(theme.bg_hover))
                                     .child(name.clone())
                                     .child(div().flex_1())
                                     .when(is_selected, |el| {
-                                        el.child(Label::new("✓").text_color(theme.brand).text_sm())
+                                        el.child(
+                                            Icon::new(IconName::Check)
+                                                .size_4()
+                                                .text_color(theme.brand),
+                                        )
                                     })
                                     .on_click({
                                         let e = e.clone();
@@ -461,7 +485,7 @@ impl ClanProfileSection {
             )
             .when(loading, |el| {
                 el.child(
-                    Label::new("Loading clan profile...")
+                    Label::new(mezon_i18n::t(&locale, "setting.profile.loadingClan"))
                         .text_color(theme.text_muted)
                         .text_sm(),
                 )
@@ -482,18 +506,22 @@ impl ClanProfileSection {
                                 )
                                 .child(
                                     GpuiButton::new("clan-change-avatar-btn")
-                                        .label("Change Avatar")
+                                        .label(mezon_i18n::t(&locale, "common.changeAvatar"))
                                         .text_color(theme.text_primary)
                                         .ghost()
                                         .on_click({
                                             let entity = cx.entity().clone();
+                                            let choose_avatar = mezon_i18n::t(
+                                                &locale,
+                                                "setting.profile.chooseAvatar",
+                                            );
                                             move |_, _, cx| {
                                                 let entity = entity.clone();
                                                 let rx = cx.prompt_for_paths(PathPromptOptions {
                                                     files: true,
                                                     directories: false,
                                                     multiple: false,
-                                                    prompt: Some("Choose an avatar image".into()),
+                                                    prompt: Some(choose_avatar.into()),
                                                 });
                                                 cx.spawn(async move |cx| {
                                                     let paths = match rx.await {
@@ -519,7 +547,7 @@ impl ClanProfileSection {
                                 )
                                 .child(
                                     GpuiButton::new("clan-remove-avatar-btn")
-                                        .label("Remove Avatar")
+                                        .label(mezon_i18n::t(&locale, "common.removeAvatar"))
                                         .text_color(theme.text_muted)
                                         .ghost()
                                         .on_click({
@@ -543,7 +571,10 @@ impl ClanProfileSection {
                                         .text_xs()
                                         .font_weight(FontWeight::SEMIBOLD)
                                         .text_color(theme.text_primary)
-                                        .child("CLAN NICKNAME"),
+                                        .child(mezon_i18n::t(
+                                            &locale,
+                                            "setting.clanProfile.clanNickname",
+                                        )),
                                 )
                                 .child(Input::new(
                                     self.nick_name_input
@@ -551,12 +582,12 @@ impl ClanProfileSection {
                                         .expect("nick_name_input not initialized"),
                                 ))
                                 .when(duplicate_error, |el| {
-                                    el.child(
-                                        div()
-                                            .text_xs()
-                                            .text_color(theme.status_dnd)
-                                            .child("Nickname already exists"),
-                                    )
+                                    el.child(div().text_xs().text_color(theme.status_dnd).child(
+                                        mezon_i18n::t(
+                                            &locale,
+                                            "setting.clanProfile.nicknameExists",
+                                        ),
+                                    ))
                                 }),
                         ),
                 )
@@ -565,6 +596,7 @@ impl ClanProfileSection {
 
     fn render_clan_preview(
         theme: &Theme,
+        locale: &str,
         nick_name: &SharedString,
         avatar_url: Option<SharedString>,
         display_name: &SharedString,
@@ -579,7 +611,7 @@ impl ClanProfileSection {
         v_flex()
             .gap_4()
             .child(
-                Label::new("Preview")
+                Label::new(mezon_i18n::t(locale, "common.preview"))
                     .text_xl()
                     .text_color(theme.text_primary)
                     .font_weight(FontWeight::SEMIBOLD),
