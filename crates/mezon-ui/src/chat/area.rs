@@ -58,6 +58,7 @@ impl ChatArea {
         layout_entity: Entity<crate::ChatLayout>,
         channel_name: &str,
         is_dm: bool,
+        pin_popover: Option<gpui::AnyElement>,
     ) -> impl IntoElement {
         let on_send = {
             let handle = layout_entity.clone();
@@ -70,7 +71,10 @@ impl ChatArea {
             .with_input(self.input_state.clone().unwrap())
             .on_send(on_send);
 
-        let header = ChannelHeader::new(channel_name).dm(is_dm);
+        let header = ChannelHeader::new(channel_name)
+            .dm(is_dm)
+            .layout(layout_entity.clone())
+            .pin_popover(pin_popover);
 
         div()
             .flex()

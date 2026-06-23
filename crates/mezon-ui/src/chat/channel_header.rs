@@ -1,11 +1,14 @@
-use gpui::{div, prelude::*, px};
+use gpui::{AnyElement, Entity, deferred, div, prelude::*, px};
 
+use crate::chat::layout::ChatLayout;
 use crate::components::primitives::{Icon, IconName};
 use crate::theme::Theme;
 
 pub struct ChannelHeader {
     name: String,
     dm: bool,
+    layout: Option<Entity<ChatLayout>>,
+    pin_popover: Option<AnyElement>,
 }
 
 impl ChannelHeader {
@@ -13,6 +16,8 @@ impl ChannelHeader {
         Self {
             name: name.into(),
             dm: false,
+            layout: None,
+            pin_popover: None,
         }
     }
 
@@ -21,9 +26,23 @@ impl ChannelHeader {
         self
     }
 
-    pub fn render(&self, theme: &Theme) -> impl IntoElement {
+    /// The owning `ChatLayout`, used to toggle the pinned-messages popover from the pin icon.
+    pub fn layout(mut self, layout: Entity<ChatLayout>) -> Self {
+        self.layout = Some(layout);
+        self
+    }
+
+    /// The pinned-messages panel to anchor under the pin icon when open.
+    pub fn pin_popover(mut self, popover: Option<AnyElement>) -> Self {
+        self.pin_popover = popover;
+        self
+    }
+
+    pub fn render(mut self, theme: &Theme) -> impl IntoElement {
         let bg_hover = theme.bg_hover;
         let icon_color = theme.text_muted;
+        let layout = self.layout.clone();
+        let mut pin_popover = self.pin_popover.take();
         let actions = [
             ("hdr-canvas", IconName::CanvasIcon),
             ("hdr-timeline", IconName::History),
@@ -71,7 +90,7 @@ impl ChannelHeader {
             .child(div().flex_1())
             .child(div().flex().flex_row().items_center().gap_1().children(
                 actions.into_iter().map(move |(id, icon)| {
-                    div()
+                    let mut button = div()
                         .id(id)
                         .flex()
                         .items_center()
@@ -81,7 +100,28 @@ impl ChannelHeader {
                         .rounded_md()
                         .cursor_pointer()
                         .hover(move |s| s.bg(bg_hover))
-                        .child(Icon::new(icon).size(px(20.)).text_color(icon_color))
+                        .child(Icon::new(icon).size(px(20.)).text_color(icon_color));
+
+                    if id == "hdr-pin" {
+                        button = button.relative();
+                        if let Some(layout) = layout.clone() {
+                            button = button.on_click(move |_, _window, cx| {
+                                layout.update(cx, |layout, cx| layout.toggle_pin_popover(cx));
+                            });
+                        }
+                        if let Some(popover) = pin_popover.take() {
+                            button = button.child(deferred(
+                                div()
+                                    .absolute()
+                                    .top_full()
+                                    .right_0()
+                                    .mt(px(9.))
+                                    .child(popover),
+                            ));
+                        }
+                    }
+
+                    button
                 }),
             ))
     }

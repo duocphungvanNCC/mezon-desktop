@@ -7,6 +7,7 @@ pub mod connection;
 pub mod direct;
 pub mod login;
 pub mod messages;
+pub mod pinned;
 pub mod presence;
 pub mod realtime;
 
@@ -27,6 +28,7 @@ pub use connection::{ConnectionStore, resolve_initial_auth_state};
 pub use direct::{DirectChannel, DirectKind, DirectMessageStore};
 pub use login::LoginStore;
 pub use messages::*;
+pub use pinned::{PinnedMessage, PinnedMessagesStore};
 pub use presence::*;
 pub use realtime::{RealtimeDispatch, RealtimeKind};
 
