@@ -58,7 +58,20 @@ impl ChatArea {
         layout_entity: Entity<crate::ChatLayout>,
         channel_name: &str,
         is_dm: bool,
-    ) -> impl IntoElement {
+        typing_label: Option<gpui::SharedString>,
+    ) -> gpui::AnyElement {
+        let input_state = match self.input_state.clone() {
+            Some(s) => s,
+            None => {
+                return div()
+                    .flex()
+                    .flex_col()
+                    .flex_1()
+                    .min_h_0()
+                    .into_any_element();
+            }
+        };
+
         let on_send = {
             let handle = layout_entity.clone();
             Arc::new(move |window: &mut Window, cx: &mut App| {
@@ -67,8 +80,9 @@ impl ChatArea {
         };
 
         let input_bar = InputBar::new()
-            .with_input(self.input_state.clone().unwrap())
-            .on_send(on_send);
+            .with_input(input_state)
+            .on_send(on_send)
+            .typing_label(typing_label);
 
         let header = ChannelHeader::new(channel_name).dm(is_dm);
 
@@ -85,5 +99,6 @@ impl ChatArea {
                     .child(AnyView::from(self.timeline.clone())),
             )
             .child(input_bar.render(theme, locale))
+            .into_any_element()
     }
 }

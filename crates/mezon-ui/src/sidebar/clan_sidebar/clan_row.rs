@@ -5,7 +5,6 @@ use gpui::{
     div, img, prelude::*, px, rgb,
 };
 use mezon_store::ClanList;
-use ui::Tooltip;
 
 use crate::router::{Route, Router};
 use crate::theme::ActiveTheme;
@@ -99,7 +98,6 @@ pub(super) fn render_clan_row(
     let is_active = clan_list_handle.read(cx).is_active_clan(&clan.id) && !dm_active;
     let show_badge = clan.badge_count > 0 && !clan.muted;
     let show_nub = clan.has_unread && clan.badge_count == 0 && !clan.muted && !is_active;
-    let name = clan.name.clone();
     let badge_count = clan.badge_count;
     let muted = clan.muted;
     let pill_color = theme.tokens.text_theme_primary;
@@ -175,7 +173,6 @@ pub(super) fn render_clan_row(
         .items_center()
         .justify_center()
         .cursor_pointer()
-        .tooltip(Tooltip::text(name))
         .child(render_pill(is_active, clan.group_name.clone(), pill_color))
         .when(show_nub, |el| {
             el.child(

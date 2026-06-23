@@ -1,7 +1,7 @@
 use crate::components::primitives::Sizable;
 use gpui::{
     AnyView, App, ClickEvent, Context, Entity, FontWeight, MouseButton, NavigationDirection,
-    StyleRefinement, Window, div, prelude::*,
+    StyleRefinement, Window, div, img, prelude::*, px,
 };
 use mezon_store::{AuthState, ClanList, Settings};
 
@@ -21,6 +21,7 @@ pub struct RootView {
     settings_screen: Entity<SettingsScreen>,
     settings: Entity<Settings>,
     applied_theme: String,
+    initial_route_restored: bool,
 }
 
 impl RootView {
@@ -40,8 +41,8 @@ impl RootView {
             if name != this.applied_theme {
                 crate::theme::set_theme(resolve_theme(&name), cx);
                 this.applied_theme = name;
+                cx.notify();
             }
-            cx.notify();
         })
         .detach();
 
@@ -51,8 +52,53 @@ impl RootView {
             move |cx| LoginView::new(auth_state, settings, cx)
         });
 
-        cx.observe(&Router::global(cx), |this, _, cx| {
+        cx.observe(&Router::global(cx), |this, router, cx| {
             this.sync_settings_page(cx);
+            if let Route::Channel {
+                clan_id,
+                channel_id,
+            } = router.read(cx).route()
+            {
+                let clan_id = clan_id.clone();
+                let channel_id = channel_id.clone();
+                this.settings.update(cx, |s, cx| {
+                    s.last_clan_id = Some(clan_id);
+                    s.last_channel_id = Some(channel_id);
+                    let snapshot = s.clone();
+                    cx.background_executor()
+                        .spawn(async move {
+                            snapshot.save_sync();
+                        })
+                        .detach();
+                });
+            }
+            cx.notify();
+        })
+        .detach();
+
+        cx.observe(&auth_state, |this, auth, cx| {
+            if this.initial_route_restored {
+                cx.notify();
+                return;
+            }
+            if matches!(auth.read(cx), AuthState::Authenticated(_)) {
+                this.initial_route_restored = true;
+                let last = this
+                    .settings
+                    .read(cx)
+                    .last_clan_id
+                    .clone()
+                    .zip(this.settings.read(cx).last_channel_id.clone());
+                if let Some((clan_id, channel_id)) = last {
+                    crate::router::navigate(
+                        cx,
+                        Route::Channel {
+                            clan_id,
+                            channel_id,
+                        },
+                    );
+                }
+            }
             cx.notify();
         })
         .detach();
@@ -97,6 +143,7 @@ impl RootView {
             settings_screen,
             settings,
             applied_theme,
+            initial_route_restored: false,
         }
     }
 
@@ -113,7 +160,8 @@ impl RootView {
             Route::SettingsAccount => crate::settings::SettingsPage::Account,
             _ => return,
         };
-        self.settings_screen.update(cx, |s, _| s.set_page(page));
+        self.settings_screen
+            .update(cx, |s, cx| s.set_page(page, cx));
     }
 }
 
@@ -143,6 +191,8 @@ impl Render for RootView {
                     | Route::SettingsVoice
                     | Route::SettingsAdvanced => cached_fill(self.settings_screen.clone()),
                     Route::NotFound { .. } => render_not_found(theme, &locale),
+                    Route::AddFriend { .. } => render_placeholder(theme, "Add Friend"),
+                    Route::Invite { .. } => render_placeholder(theme, "Accept Invite"),
                     _ => cached_fill(self.chat_layout.clone()),
                 }
             }
@@ -194,7 +244,12 @@ fn render_awaiting_callback(theme: &Theme, locale: &str) -> gpui::AnyElement {
         .justify_center()
         .flex_col()
         .gap_4()
-        .child(div().size_16().bg(theme.brand).rounded_lg())
+        .child(
+            img(crate::util::assets::MEZON_LOGO)
+                .w(px(280.))
+                .h(px(50.))
+                .object_fit(gpui::ObjectFit::Contain),
+        )
         .child(
             div()
                 .text_xl()
@@ -230,6 +285,30 @@ fn render_connecting(theme: &Theme, locale: &str) -> gpui::AnyElement {
                 .font_weight(FontWeight::BOLD)
                 .text_color(theme.text_primary)
                 .child(mezon_i18n::t(locale, "root.loading")),
+        )
+        .into_any_element()
+}
+
+fn render_placeholder(theme: &Theme, label: &str) -> gpui::AnyElement {
+    div()
+        .flex()
+        .flex_1()
+        .items_center()
+        .justify_center()
+        .flex_col()
+        .gap_4()
+        .child(
+            div()
+                .text_xl()
+                .font_weight(FontWeight::BOLD)
+                .text_color(theme.text_primary)
+                .child(label.to_string()),
+        )
+        .child(
+            div()
+                .text_sm()
+                .text_color(theme.text_secondary)
+                .child("Coming soon"),
         )
         .into_any_element()
 }

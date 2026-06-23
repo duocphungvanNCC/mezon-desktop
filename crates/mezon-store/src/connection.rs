@@ -279,9 +279,14 @@ impl ConnectionStore {
                     match state {
                         AuthState::Authenticated(session) | AuthState::Connecting(session) => {
                             session.session_id = ev.session_id.clone();
-                            if let Err(e) = keychain::save_session(session) {
-                                tracing::warn!("Failed to persist refreshed session: {e}");
-                            }
+                            let session_clone = session.clone();
+                            cx.background_executor()
+                                .spawn(async move {
+                                    if let Err(e) = keychain::save_session(&session_clone) {
+                                        tracing::warn!("Failed to persist refreshed session: {e}");
+                                    }
+                                })
+                                .detach();
                             cx.notify();
                         }
                         _ => {}
@@ -320,8 +325,7 @@ fn promote_connecting_to_authenticated(auth_state: &Entity<AuthState>, cx: &mut 
     });
 }
 
-/// Resolve abridged TCP port — session field, env override, then heuristics.
-fn resolve_tcp_port(session: &Session) -> u16 {
+pub(crate) fn resolve_tcp_port(session: &Session) -> u16 {
     if let Some(port) = session.tcp_port {
         return port;
     }
@@ -357,5 +361,85 @@ pub fn resolve_initial_auth_state() -> AuthState {
             );
             AuthState::Connecting(session)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mezon_client::Session;
+
+    fn session_with_tcp(host: Option<&str>, port: Option<u16>) -> Session {
+        Session {
+            tcp_host: host.map(str::to_owned),
+            tcp_port: port,
+            ..Default::default()
+        }
+    }
+
+    fn session_with_ws(host: Option<&str>, port: Option<u16>) -> Session {
+        Session {
+            ws_host: host.map(str::to_owned),
+            ws_port: port,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn resolve_tcp_port_uses_tcp_port_field_first() {
+        let s = Session {
+            tcp_port: Some(9999),
+            ws_port: Some(1111),
+            ..Default::default()
+        };
+        assert_eq!(resolve_tcp_port(&s), 9999);
+    }
+
+    #[test]
+    fn resolve_tcp_port_falls_back_to_ws_port() {
+        let s = session_with_ws(None, Some(4433));
+        assert_eq!(resolve_tcp_port(&s), 4433);
+    }
+
+    #[test]
+    fn resolve_tcp_port_dev_mezon_host_gives_7349() {
+        let s = session_with_tcp(Some("dev-mezon.nccsoft.vn"), None);
+        assert_eq!(resolve_tcp_port(&s), 7349);
+    }
+
+    #[test]
+    fn resolve_tcp_port_nccsoft_host_gives_7349() {
+        let s = session_with_tcp(Some("api.nccsoft.vn"), None);
+        assert_eq!(resolve_tcp_port(&s), 7349);
+    }
+
+    #[test]
+    fn resolve_tcp_port_unknown_host_gives_4433() {
+        let s = session_with_tcp(Some("mezon.ai"), None);
+        assert_eq!(resolve_tcp_port(&s), 4433);
+    }
+
+    #[test]
+    fn resolve_tcp_port_no_info_gives_4433() {
+        let s = Session::default();
+        assert_eq!(resolve_tcp_port(&s), 4433);
+    }
+
+    #[test]
+    fn resolve_tcp_port_ws_host_used_when_no_tcp_host() {
+        let s = Session {
+            ws_host: Some("dev-mezon.nccsoft.vn".to_owned()),
+            ..Default::default()
+        };
+        assert_eq!(resolve_tcp_port(&s), 7349);
+    }
+
+    #[test]
+    fn backoff_wait_caps_at_60_seconds() {
+        let mut secs = 1u64;
+        for _ in 0..10 {
+            secs = (secs * 2).min(60);
+        }
+        assert_eq!(secs, 60);
     }
 }

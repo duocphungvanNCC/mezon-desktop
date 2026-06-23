@@ -1,52 +1,35 @@
-//! LoginView — Stage 1 auth screen.
-//!
-//! Two login modes:
-//!   • OTP (default) — two-step: email → OTP code entry
-//!   • Password — email + password form
-//!
-//! `LoginView` holds `Entity<AuthState>` and updates it on successful auth.
-//! API calls go through the global [`LoginStore`].
-
 use mezon_store::LoginMethod;
 
 use std::sync::Arc;
 
 use crate::components::primitives::{Button, ButtonVariants as _, Spinner};
-use gpui::{App, Context, Entity, FontWeight, MouseButton, Window, div, prelude::*};
+use gpui::{App, Context, Entity, FontWeight, MouseButton, Task, Window, div, prelude::*};
 use mezon_store::{AuthState, LoginStore, Session, Settings};
 
 use crate::components::compositions::{FormField, OtpInput};
 use crate::theme::ActiveTheme;
 
-// ─── LoginView state ──────────────────────────────────────────────────────────
-
 pub struct LoginView {
     auth_state: Entity<AuthState>,
     settings: Entity<Settings>,
 
-    /// Which login mode is active.
     method: LoginMethod,
 
-    /// OTP mode — step 0: email entry; step 1: OTP code entry.
     otp_step: u8,
-    /// The `req_id` returned by the server after a successful OTP request.
     otp_req_id: String,
-    /// The email used for OTP (shown in the "code sent to …" label).
     otp_email: String,
 
-    /// Shared email field (used by both modes on step 0).
     email_field: Option<Entity<FormField>>,
-    /// Password field (password mode only).
     password_field: Option<Entity<FormField>>,
-    /// OTP digit input with auto-advance.
     otp_input: Option<Entity<OtpInput>>,
 
-    /// `true` while an async API call is in-flight.
     loading: bool,
-    /// Displayed error message (None = hidden).
     error: Option<String>,
-    /// Countdown in seconds for OTP resend (0 = show "Resend" button).
     countdown: u32,
+
+    qr_login_id: Option<String>,
+    qr_expired: bool,
+    _qr_poll_task: Option<Task<()>>,
 }
 
 impl LoginView {
@@ -56,7 +39,24 @@ impl LoginView {
         cx: &mut Context<Self>,
     ) -> Self {
         cx.observe(&settings, |_, _, cx| cx.notify()).detach();
-        Self {
+        let qr_auth_state = auth_state.clone();
+        let qr_auth_state_for_observe = qr_auth_state.clone();
+        cx.observe(&auth_state, move |this, auth, cx| {
+            match auth.read(cx) {
+                AuthState::NotAuthenticated | AuthState::OtpRequested { .. } => {
+                    if this._qr_poll_task.is_none() {
+                        this._qr_poll_task =
+                            Some(Self::start_qr_flow(qr_auth_state_for_observe.clone(), cx));
+                    }
+                }
+                _ => {
+                    this._qr_poll_task = None;
+                }
+            }
+            cx.notify();
+        })
+        .detach();
+        let mut view = Self {
             auth_state,
             settings,
             method: LoginMethod::Otp,
@@ -69,7 +69,17 @@ impl LoginView {
             loading: false,
             error: None,
             countdown: 0,
+            qr_login_id: None,
+            qr_expired: false,
+            _qr_poll_task: None,
+        };
+        if matches!(
+            view.auth_state.read(cx),
+            AuthState::NotAuthenticated | AuthState::OtpRequested { .. }
+        ) {
+            view._qr_poll_task = Some(Self::start_qr_flow(qr_auth_state.clone(), cx));
         }
+        view
     }
 
     fn ensure_fields(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -97,9 +107,49 @@ impl LoginView {
         }
     }
 
-    // ── Action handlers ───────────────────────────────────────────────────────
+    fn start_qr_flow(auth_state: Entity<AuthState>, cx: &mut Context<LoginView>) -> Task<()> {
+        let client = LoginStore::global(cx).read(cx).client();
+        cx.spawn(async move |this, cx| {
+            let qr_result = client.create_qr_login().await;
+            let login_id = match qr_result {
+                Ok(qr) => qr.login_id,
+                Err(e) => {
+                    tracing::warn!("QR login create failed: {e}");
+                    let _ = this.update(cx, |this, cx| {
+                        this.qr_expired = true;
+                        cx.notify();
+                    });
+                    return;
+                }
+            };
+            let _ = this.update(cx, |this, cx| {
+                this.qr_login_id = Some(login_id.clone());
+                cx.notify();
+            });
 
-    /// Called when "Send OTP" is pressed.
+            let exec = cx.background_executor().clone();
+            let mut elapsed: u32 = 0;
+            loop {
+                exec.timer(std::time::Duration::from_secs(2)).await;
+                elapsed += 2;
+                if elapsed >= 60 {
+                    let _ = this.update(cx, |this, cx| {
+                        this.qr_expired = true;
+                        cx.notify();
+                    });
+                    break;
+                }
+                let result = client.confirm_qr_login(&login_id).await;
+                if let Ok(session) = result {
+                    let _ = this.update(cx, |_this, cx| {
+                        Self::on_auth_success(session, &auth_state, cx);
+                    });
+                    break;
+                }
+            }
+        })
+    }
+
     fn handle_send_otp(entity: &Entity<LoginView>, _window: &mut Window, cx: &mut App) {
         let email = entity
             .read(cx)
@@ -126,42 +176,37 @@ impl LoginView {
         let email_clone = email.clone();
         let entity_clone = entity.clone();
 
-        cx.spawn(async move |cx: &mut gpui::AsyncApp| {
+        cx.spawn(async move |cx| {
             let result = client.request_otp(&email_clone).await;
-            cx.update(|cx| {
-                entity_clone.update(cx, |this, cx| {
-                    this.loading = false;
-                    match result {
-                        Ok(req_id) => {
-                            this.otp_req_id = req_id.clone();
-                            this.otp_email = email_clone.clone();
-                            this.otp_step = 1;
-                            this.countdown = 60;
-                            this.error = None;
-                            // Sync store state so RootView knows OTP was sent.
-                            this.auth_state.update(cx, |state, cx| {
-                                *state = AuthState::OtpRequested {
-                                    req_id,
-                                    email: email_clone,
-                                };
-                                cx.notify();
-                            });
-                        }
-                        Err(e) => {
-                            this.error = Some(format!("{e}"));
-                        }
+            entity_clone.update(cx, |this, cx| {
+                this.loading = false;
+                match result {
+                    Ok(req_id) => {
+                        this.otp_req_id = req_id.clone();
+                        this.otp_email = email_clone.clone();
+                        this.otp_step = 1;
+                        this.countdown = 60;
+                        this.error = None;
+                        this.auth_state.update(cx, |state, cx| {
+                            *state = AuthState::OtpRequested {
+                                req_id,
+                                email: email_clone,
+                            };
+                            cx.notify();
+                        });
                     }
-                    cx.notify();
-                });
+                    Err(e) => {
+                        this.error = Some(format!("{e}"));
+                    }
+                }
+                cx.notify();
             });
         })
         .detach();
 
-        // Start countdown timer.
         Self::start_countdown(entity, cx);
     }
 
-    /// Called when the user has filled all 6 OTP digits.
     fn handle_confirm_otp(entity: &Entity<LoginView>, otp_code: String, cx: &mut App) {
         if entity.read(cx).loading {
             return;
@@ -179,27 +224,24 @@ impl LoginView {
         let auth_state = entity.read(cx).auth_state.clone();
         let entity_clone = entity.clone();
 
-        cx.spawn(async move |cx: &mut gpui::AsyncApp| {
+        cx.spawn(async move |cx| {
             let result = client.confirm_otp(&req_id, &otp_code).await;
-            cx.update(|cx| {
-                entity_clone.update(cx, |this, cx| {
-                    this.loading = false;
-                    match result {
-                        Ok(session) => {
-                            Self::on_auth_success(session, &auth_state, cx);
-                        }
-                        Err(e) => {
-                            this.error = Some(format!("{e}"));
-                        }
+            entity_clone.update(cx, |this, cx| {
+                this.loading = false;
+                match result {
+                    Ok(session) => {
+                        Self::on_auth_success(session, &auth_state, cx);
                     }
-                    cx.notify();
-                });
+                    Err(e) => {
+                        this.error = Some(format!("{e}"));
+                    }
+                }
+                cx.notify();
             });
         })
         .detach();
     }
 
-    /// Called when "Sign In" (password mode) is pressed.
     fn handle_sign_in(entity: &Entity<LoginView>, cx: &mut App) {
         let (email, password) = {
             let this = entity.read(cx);
@@ -235,35 +277,37 @@ impl LoginView {
         let auth_state = entity.read(cx).auth_state.clone();
         let entity_clone = entity.clone();
 
-        cx.spawn(async move |cx: &mut gpui::AsyncApp| {
+        cx.spawn(async move |cx| {
             let result = client.authenticate_email(&email, &password).await;
-            cx.update(|cx| {
-                entity_clone.update(cx, |this, cx| {
-                    this.loading = false;
-                    match result {
-                        Ok(session) => {
-                            Self::on_auth_success(session, &auth_state, cx);
-                        }
-                        Err(e) => {
-                            this.error = Some(format!("{e}"));
-                        }
+            entity_clone.update(cx, |this, cx| {
+                this.loading = false;
+                match result {
+                    Ok(session) => {
+                        Self::on_auth_success(session, &auth_state, cx);
                     }
-                    cx.notify();
-                });
+                    Err(e) => {
+                        this.error = Some(format!("{e}"));
+                    }
+                }
+                cx.notify();
             });
         })
         .detach();
     }
 
-    /// Shared post-auth success handler: save to keychain and transition state.
     fn on_auth_success(session: Session, auth_state: &Entity<AuthState>, cx: &mut App) {
-        if let Err(e) = LoginStore::persist_session(&session) {
-            tracing::warn!("Failed to save session to keychain: {e}");
-        }
-
         tracing::info!("Authentication successful");
-        tracing::info!("  User ID: {}", session.user_id);
-        tracing::info!("  Username: {}", session.username);
+        tracing::debug!("  User ID: {}", session.user_id);
+        tracing::debug!("  Username: {}", session.username);
+
+        let session_for_keychain = session.clone();
+        cx.background_executor()
+            .spawn(async move {
+                if let Err(e) = LoginStore::persist_session(&session_for_keychain) {
+                    tracing::warn!("Failed to save session to keychain: {e}");
+                }
+            })
+            .detach();
 
         auth_state.update(cx, |state, cx| {
             *state = AuthState::Connecting(session);
@@ -272,21 +316,18 @@ impl LoginView {
         });
     }
 
-    /// Start a 60-second countdown, ticking every second.
     fn start_countdown(entity: &Entity<LoginView>, cx: &mut App) {
         let entity_clone = entity.clone();
-        cx.spawn(async move |cx: &mut gpui::AsyncApp| {
+        cx.spawn(async move |cx| {
             let exec = cx.background_executor().clone();
             loop {
                 exec.timer(std::time::Duration::from_secs(1)).await;
-                let should_stop = cx.update(|cx| {
-                    entity_clone.update(cx, |this, cx| {
-                        if this.countdown > 0 {
-                            this.countdown -= 1;
-                            cx.notify();
-                        }
-                        this.countdown == 0
-                    })
+                let should_stop = entity_clone.update(cx, |this, cx| {
+                    if this.countdown > 0 {
+                        this.countdown -= 1;
+                        cx.notify();
+                    }
+                    this.countdown == 0
                 });
                 if should_stop {
                     break;
@@ -295,9 +336,17 @@ impl LoginView {
         })
         .detach();
     }
-}
 
-// ─── Render ──────────────────────────────────────────────────────────────────
+    fn reload_qr(entity: &Entity<LoginView>, cx: &mut App) {
+        entity.update(cx, |this, cx| {
+            this.qr_login_id = None;
+            this.qr_expired = false;
+            let auth_state = this.auth_state.clone();
+            this._qr_poll_task = Some(Self::start_qr_flow(auth_state, cx));
+            cx.notify();
+        });
+    }
+}
 
 impl Render for LoginView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -305,59 +354,54 @@ impl Render for LoginView {
         let locale = self.settings.read(cx).language.clone();
         let theme = cx.theme();
 
-        // Outer centered column.
-        let root = div()
+        let outer = div()
             .flex()
             .flex_1()
             .items_center()
             .justify_center()
             .size_full();
 
-        // Card container.
-        let mut card = div()
-            .flex()
-            .flex_col()
-            .gap_4()
-            .w(gpui::px(360.0))
-            .p_8()
-            .rounded_lg()
-            .bg(theme.bg_secondary);
+        let mut left_col = div().flex().flex_col().gap_4().w(gpui::px(360.0));
 
-        // Logo + wordmark.
-        card = card.child(
+        left_col = left_col.child(
             div()
                 .flex()
                 .flex_col()
                 .items_center()
                 .gap_3()
                 .mb_2()
-                .child(div().size_16().bg(theme.brand).rounded_lg())
                 .child(
                     div()
                         .text_xl()
                         .font_weight(FontWeight::BOLD)
                         .text_color(theme.text_primary)
-                        .child("Mezon"),
+                        .child(mezon_i18n::t(&locale, "common.login.welcomeBack")),
+                )
+                .child(
+                    div()
+                        .text_sm()
+                        .text_color(theme.text_secondary)
+                        .child(mezon_i18n::t(&locale, "common.login.gladToMeetAgain")),
                 ),
         );
 
         match self.method {
             LoginMethod::Otp => {
                 if self.otp_step == 0 {
-                    // Step 0: email entry.
-                    card = card
-                        .child(
-                            div()
-                                .text_sm()
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .text_color(theme.text_primary)
-                                .child(mezon_i18n::t(&locale, "login.signInWithOtp")),
-                        )
-                        .child(self.email_field.as_ref().expect("email field").clone());
+                    left_col = left_col.child(
+                        div()
+                            .text_sm()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(theme.text_primary)
+                            .child(mezon_i18n::t(&locale, "login.signInWithOtp")),
+                    );
+                    if let Some(field) = &self.email_field {
+                        left_col = left_col.child(field.clone());
+                    }
 
                     let loading = self.loading;
                     let entity = cx.entity().clone();
-                    card = card.child(
+                    left_col = left_col.child(
                         div().w_full().child(
                             Button::new("send-otp")
                                 .label(mezon_i18n::t(&locale, "login.sendOtp"))
@@ -372,8 +416,7 @@ impl Render for LoginView {
                         ),
                     );
                 } else {
-                    // Step 1: OTP code entry.
-                    card = card.child(
+                    left_col = left_col.child(
                         div()
                             .flex()
                             .flex_col()
@@ -394,18 +437,18 @@ impl Render for LoginView {
                             )),
                     );
 
-                    // OTP digit boxes with auto-advance.
-                    card = card.child(self.otp_input.as_ref().expect("otp_input").clone());
-
-                    // Loading spinner (shown while verifying code).
-                    if self.loading {
-                        card = card.child(div().flex().justify_center().child(Spinner::new()));
+                    if let Some(input) = &self.otp_input {
+                        left_col = left_col.child(input.clone());
                     }
 
-                    // Resend / countdown row.
+                    if self.loading {
+                        left_col =
+                            left_col.child(div().flex().justify_center().child(Spinner::new()));
+                    }
+
                     let countdown = self.countdown;
                     if countdown > 0 {
-                        card = card.child(
+                        left_col = left_col.child(
                             div()
                                 .flex()
                                 .justify_center()
@@ -418,7 +461,7 @@ impl Render for LoginView {
                         );
                     } else {
                         let entity = cx.entity().clone();
-                        card = card.child(
+                        left_col = left_col.child(
                             div()
                                 .flex()
                                 .justify_center()
@@ -427,7 +470,6 @@ impl Render for LoginView {
                                 .cursor_pointer()
                                 .hover(|s| s.opacity(0.8))
                                 .on_mouse_down(MouseButton::Left, move |_, _window, cx| {
-                                    // Go back to email step and resend.
                                     entity.update(cx, |this, cx| {
                                         this.otp_step = 0;
                                         cx.notify();
@@ -437,9 +479,8 @@ impl Render for LoginView {
                         );
                     }
 
-                    // Back link.
                     let entity_back = cx.entity().clone();
-                    card = card.child(
+                    left_col = left_col.child(
                         div()
                             .flex()
                             .justify_center()
@@ -461,25 +502,21 @@ impl Render for LoginView {
             }
 
             LoginMethod::Password => {
-                // Email + password form.
-                card = card
-                    .child(
-                        div()
-                            .text_sm()
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(theme.text_primary)
-                            .child(mezon_i18n::t(&locale, "login.signInWithPassword")),
-                    )
-                    .child(self.email_field.as_ref().expect("email field").clone())
-                    .child(
-                        self.password_field
-                            .as_ref()
-                            .expect("password field")
-                            .clone(),
-                    );
+                left_col = left_col.child(
+                    div()
+                        .text_sm()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(theme.text_primary)
+                        .child(mezon_i18n::t(&locale, "login.signInWithPassword")),
+                );
+                if let Some(field) = &self.email_field {
+                    left_col = left_col.child(field.clone());
+                }
+                if let Some(field) = &self.password_field {
+                    left_col = left_col.child(field.clone());
+                }
 
-                // Forgot password link.
-                card = card.child(
+                left_col = left_col.child(
                     div()
                         .flex()
                         .justify_end()
@@ -487,15 +524,19 @@ impl Render for LoginView {
                         .text_color(theme.brand)
                         .cursor_pointer()
                         .hover(|s| s.opacity(0.8))
-                        .on_mouse_down(MouseButton::Left, |_, _window, _cx| {
-                            let _ = mezon_native::open_url("https://mezon.ai/forgot-password");
+                        .on_mouse_down(MouseButton::Left, |_, _window, cx| {
+                            if let Some(store) = mezon_store::AudioStore::try_global(cx) {
+                                let _ = store
+                                    .read(cx)
+                                    .open_url_external("https://mezon.ai/forgot-password");
+                            }
                         })
                         .child(mezon_i18n::t(&locale, "login.forgotPassword")),
                 );
 
                 let loading = self.loading;
                 let entity = cx.entity().clone();
-                card = card.child(
+                left_col = left_col.child(
                     div().w_full().child(
                         Button::new("sign-in")
                             .label(mezon_i18n::t(&locale, "login.signIn"))
@@ -512,9 +553,8 @@ impl Render for LoginView {
             }
         }
 
-        // Error label.
         if let Some(err) = &self.error {
-            card = card.child(
+            left_col = left_col.child(
                 div()
                     .text_xs()
                     .text_color(theme.status_dnd)
@@ -522,8 +562,7 @@ impl Render for LoginView {
             );
         }
 
-        // Divider.
-        card = card.child(
+        left_col = left_col.child(
             div()
                 .flex()
                 .items_center()
@@ -538,13 +577,12 @@ impl Render for LoginView {
                 .child(div().flex_1().h(gpui::px(1.0)).bg(theme.border)),
         );
 
-        // Toggle login method link.
         let toggle_label = match self.method {
-            LoginMethod::Otp => mezon_i18n::t(&locale, "login.loginByPassword"),
-            LoginMethod::Password => mezon_i18n::t(&locale, "login.loginByOtp"),
+            LoginMethod::Otp => mezon_i18n::t(&locale, "common.login.loginByPassword"),
+            LoginMethod::Password => mezon_i18n::t(&locale, "common.login.loginByOTP"),
         };
         let entity_toggle = cx.entity().clone();
-        card = card.child(
+        left_col = left_col.child(
             div()
                 .flex()
                 .justify_center()
@@ -566,6 +604,90 @@ impl Render for LoginView {
                 .child(toggle_label),
         );
 
-        root.child(card)
+        let qr_expired = self.qr_expired;
+        let qr_login_id = self.qr_login_id.clone();
+        let entity_qr = cx.entity().clone();
+
+        let qr_inner = div()
+            .size(gpui::px(192.0))
+            .border_2()
+            .border_color(theme.border)
+            .rounded_lg()
+            .bg(gpui::white())
+            .flex()
+            .items_center()
+            .justify_center()
+            .relative();
+
+        let qr_box = if qr_expired {
+            qr_inner
+                .child(
+                    div()
+                        .absolute()
+                        .inset_0()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .bg(gpui::rgba(0x00000080))
+                        .rounded_lg()
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(gpui::white())
+                                .cursor_pointer()
+                                .hover(|s| s.opacity(0.7))
+                                .on_mouse_down(MouseButton::Left, move |_, _window, cx| {
+                                    Self::reload_qr(&entity_qr, cx);
+                                })
+                                .child(mezon_i18n::t(&locale, "common.errorBoundary.reload")),
+                        ),
+                )
+                .into_any_element()
+        } else if let Some(id) = qr_login_id {
+            qr_inner
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(theme.text_muted)
+                        .max_w(gpui::px(160.0))
+                        .text_ellipsis()
+                        .child(id),
+                )
+                .into_any_element()
+        } else {
+            qr_inner.child(Spinner::new()).into_any_element()
+        };
+
+        let right_col = div()
+            .flex()
+            .flex_col()
+            .items_center()
+            .gap_3()
+            .child(qr_box)
+            .child(
+                div()
+                    .text_sm()
+                    .text_color(theme.text_secondary)
+                    .child(mezon_i18n::t(&locale, "common.login.qr.signIn")),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(theme.text_muted)
+                    .child(mezon_i18n::t(&locale, "common.login.qr.useMobile")),
+            );
+
+        let card = div()
+            .flex()
+            .flex_row()
+            .gap_8()
+            .p_8()
+            .rounded_lg()
+            .bg(theme.bg_secondary)
+            .items_center()
+            .child(left_col)
+            .child(right_col);
+
+        outer.child(card)
     }
 }

@@ -3,7 +3,7 @@ use std::sync::Arc;
 use crate::chat::ReplyTarget;
 use crate::components::primitives::{Button, Icon, IconName, Input, InputState};
 use crate::theme::Theme;
-use gpui::{App, ClickEvent, Window, div, prelude::*, px};
+use gpui::{App, ClickEvent, SharedString, Window, div, prelude::*, px};
 
 type SendHandler = Arc<dyn Fn(&mut Window, &mut App) + Send + Sync>;
 
@@ -11,6 +11,7 @@ pub struct InputBar {
     input_state: Option<gpui::Entity<InputState>>,
     on_send: Option<SendHandler>,
     replying_to: Option<ReplyTarget>,
+    typing_label: Option<SharedString>,
 }
 
 impl Default for InputBar {
@@ -25,7 +26,13 @@ impl InputBar {
             input_state: None,
             on_send: None,
             replying_to: None,
+            typing_label: None,
         }
+    }
+
+    pub fn typing_label(mut self, label: Option<SharedString>) -> Self {
+        self.typing_label = label;
+        self
     }
 
     pub fn with_input(mut self, state: gpui::Entity<InputState>) -> Self {
@@ -112,6 +119,21 @@ impl InputBar {
             })
             .child(
                 div()
+                    .mx_3()
+                    .h(px(16.))
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_1p5()
+                    .overflow_hidden()
+                    .text_xs()
+                    .text_color(theme.text_primary)
+                    .when_some(self.typing_label.as_ref(), |d, label| {
+                        d.child(label.clone())
+                    }),
+            )
+            .child(
+                div()
                     .flex()
                     .flex_row()
                     .items_center()
@@ -121,11 +143,9 @@ impl InputBar {
                     .border_t_1()
                     .border_color(theme.border)
                     .bg(theme.bg_primary)
-                    .child(
-                        div()
-                            .flex_1()
-                            .child(Input::new(self.input_state.as_ref().unwrap())),
-                    )
+                    .when_some(self.input_state.as_ref(), |d, state| {
+                        d.child(div().flex_1().child(Input::new(state)))
+                    })
                     .child(
                         Button::new("send-btn")
                             .label(mezon_i18n::t(locale, "chat.send"))

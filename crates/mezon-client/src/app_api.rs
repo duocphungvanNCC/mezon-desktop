@@ -61,7 +61,7 @@ pub struct AppApi {
 
 impl AppApi {
     pub fn new(transport: Arc<TransportClient>) -> Self {
-        let (realtime_tx, _) = tokio::sync::broadcast::channel(256);
+        let (realtime_tx, _) = tokio::sync::broadcast::channel(1024);
         let (status_tx, _) = tokio::sync::watch::channel(ConnectionStatus::Disconnected);
         Self {
             transport,
@@ -97,7 +97,12 @@ impl AppApi {
         self.transport.get_account().await
     }
 
-    pub async fn list_channel_descs(&self, clan_id: &str) -> Result<Vec<ApiChannelDesc>> {
+    pub async fn list_channel_descs(
+        &self,
+        clan_id: &str,
+        channel_type: i32,
+    ) -> Result<Vec<ApiChannelDesc>> {
+        let _ = channel_type;
         self.transport.list_channel_descs(clan_id).await
     }
 
@@ -105,9 +110,20 @@ impl AppApi {
         self.transport.list_channel_by_user_id().await
     }
 
-    /// List the user's direct-message / group conversations (clan_id = 0).
-    pub async fn list_dm_channels(&self) -> Result<Vec<ApiDirectChannel>> {
+    pub async fn list_dm_channels(&self, page: i32) -> Result<Vec<ApiDirectChannel>> {
+        let _ = page;
         self.transport.list_dm_channel_descs().await
+    }
+
+    pub async fn mark_as_read(
+        &self,
+        channel_id: &str,
+        category_id: &str,
+        clan_id: &str,
+    ) -> Result<()> {
+        self.transport
+            .mark_as_read(channel_id, category_id, clan_id)
+            .await
     }
 
     pub async fn list_clan_descs(&self) -> Result<Vec<ApiClanDesc>> {
@@ -207,10 +223,15 @@ impl AppApi {
         mode: i32,
         media_urls: &[String],
     ) -> Result<ApiMessage> {
-        let attachments = futures::future::try_join_all(
-            media_urls.iter().map(|url| self.upload_media_from_url(url)),
-        )
-        .await?;
+        let attachments: Vec<_> = {
+            use futures::StreamExt as _;
+            futures::stream::iter(media_urls.iter().map(|url| self.upload_media_from_url(url)))
+                .buffer_unordered(4)
+                .collect::<Vec<_>>()
+                .await
+                .into_iter()
+                .collect::<Result<Vec<_>>>()?
+        };
         self.transport
             .send_channel_message_with_attachments(
                 clan_id,

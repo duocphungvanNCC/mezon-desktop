@@ -51,8 +51,13 @@ impl Render for AdvancedPage {
                                     .on_click(cx.listener(|this, _, _, cx| {
                                         this.settings.update(cx, |s, _| {
                                             s.hardware_acceleration = !s.hardware_acceleration;
-                                            s.save_sync();
                                         });
+                                        let snapshot = this.settings.read(cx).clone();
+                                        cx.background_executor()
+                                            .spawn(async move {
+                                                snapshot.save_sync();
+                                            })
+                                            .detach();
                                         cx.notify();
                                     })),
                             ),

@@ -13,4 +13,6 @@ serde_json.workspace = true
 anyhow.workspace = true
 tracing.workspace = true
 dirs.workspace = true
+flume.workspace = true
+url.workspace = true
 tokio.workspace = true

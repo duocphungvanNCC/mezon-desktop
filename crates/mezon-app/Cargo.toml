@@ -17,6 +17,7 @@ mezon-native.workspace = true
 mezon-updater.workspace = true
 mezon-client.workspace = true
 dotenvy = "0.15"
+flume.workspace = true
 reqwest_client.workspace = true
 tokio.workspace = true
 futures.workspace = true

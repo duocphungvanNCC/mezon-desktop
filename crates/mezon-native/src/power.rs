@@ -60,15 +60,15 @@ fn subscribe_macos(callback: PowerEventCallback) {
     // Transmit the raw address as a plain `usize` so it crosses the `Send` boundary.
     let raw: usize = Box::into_raw(Box::new(callback)) as usize;
 
-    std::thread::Builder::new()
+    match std::thread::Builder::new()
         .name("mezon-power-events".into())
         .spawn(move || unsafe {
             cf_register(trampoline, raw as *mut c_void);
             cf_run_loop_run();
-        })
-        .expect("Failed to spawn power-events thread");
-
-    tracing::debug!("macOS screen lock/unlock notifications registered");
+        }) {
+        Ok(_) => tracing::debug!("macOS screen lock/unlock notifications registered"),
+        Err(e) => tracing::warn!("Failed to spawn power-events thread: {e}"),
+    }
 }
 
 /// Register the trampoline with the distributed CFNotificationCenter for both
@@ -185,12 +185,13 @@ fn subscribe_windows(callback: PowerEventCallback) {
         .unwrap()
         .replace(callback);
 
-    std::thread::Builder::new()
+    match std::thread::Builder::new()
         .name("mezon-power-events".into())
         .spawn(|| unsafe { windows_message_loop() })
-        .expect("Failed to spawn power-events thread");
-
-    tracing::debug!("Windows screen lock/unlock notifications registered");
+    {
+        Ok(_) => tracing::debug!("Windows screen lock/unlock notifications registered"),
+        Err(e) => tracing::warn!("Failed to spawn power-events thread: {e}"),
+    }
 }
 
 #[cfg(target_os = "windows")]
@@ -244,7 +245,7 @@ unsafe fn windows_message_loop() {
     };
     unsafe { RegisterClassExW(&wc) };
 
-    let hwnd = unsafe {
+    let hwnd = match unsafe {
         CreateWindowExW(
             WINDOW_EX_STYLE::default(),
             PCWSTR(class_name.as_ptr()),
@@ -259,12 +260,17 @@ unsafe fn windows_message_loop() {
             None,
             None,
         )
-        .expect("CreateWindowExW failed for power-events HWND")
+    } {
+        Ok(h) => h,
+        Err(e) => {
+            tracing::warn!("CreateWindowExW failed for power-events HWND: {e}");
+            return;
+        }
     };
 
-    unsafe {
-        WTSRegisterSessionNotification(hwnd, NOTIFY_FOR_THIS_SESSION)
-            .expect("WTSRegisterSessionNotification failed");
+    if let Err(e) = unsafe { WTSRegisterSessionNotification(hwnd, NOTIFY_FOR_THIS_SESSION) } {
+        tracing::warn!("WTSRegisterSessionNotification failed: {e}");
+        return;
     }
 
     let mut msg = MSG::default();

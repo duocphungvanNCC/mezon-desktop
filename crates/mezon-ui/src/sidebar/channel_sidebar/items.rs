@@ -1,3 +1,4 @@
+use gpui::SharedString;
 use mezon_store::{AppChannel, ChannelType, VoiceMember};
 
 #[derive(Clone)]
@@ -38,11 +39,13 @@ pub(super) enum SidebarItem {
         app_channels: Vec<AppChannelSlot>,
     },
     Category {
+        elem_id: SharedString,
+        name_upper: String,
         id: String,
-        name: String,
         collapsed: bool,
     },
     Channel {
+        elem_id: SharedString,
         id: String,
         name: String,
         channel_type: ChannelType,
@@ -50,6 +53,7 @@ pub(super) enum SidebarItem {
         private: bool,
         selected: bool,
         badge_count: u32,
+        badge_label: SharedString,
         muted: bool,
         is_thread: bool,
         line_above: bool,

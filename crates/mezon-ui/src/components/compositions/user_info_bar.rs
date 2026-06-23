@@ -12,22 +12,36 @@ fn on_settings_click() -> impl Fn(&ClickEvent, &mut Window, &mut App) {
 
 pub struct UserInfoBar {
     auth_state: Entity<AuthState>,
-    presence: String,
+    username: SharedString,
+    presence: SharedString,
 }
 
 impl UserInfoBar {
-    pub fn new(auth_state: Entity<AuthState>) -> Self {
+    pub fn new(auth_state: Entity<AuthState>, cx: &App) -> Self {
+        let username = Self::read_username(&auth_state, cx);
         Self {
             auth_state,
-            presence: "Offline".to_string(),
+            username,
+            presence: SharedString::from("Offline"),
+        }
+    }
+
+    fn read_username(auth_state: &Entity<AuthState>, cx: &App) -> SharedString {
+        match auth_state.read(cx) {
+            AuthState::Authenticated(session) => SharedString::from(session.username.clone()),
+            _ => SharedString::from("Unknown"),
         }
     }
 
     pub fn sync_presence(&mut self, cx: &App) {
         let user_id = match self.auth_state.read(cx) {
-            AuthState::Authenticated(session) => session.user_id.clone(),
+            AuthState::Authenticated(session) => {
+                self.username = SharedString::from(session.username.clone());
+                session.user_id.clone()
+            }
             _ => {
-                self.presence = "Offline".to_string();
+                self.username = SharedString::from("Unknown");
+                self.presence = SharedString::from("Offline");
                 return;
             }
         };
@@ -35,20 +49,11 @@ impl UserInfoBar {
             .read(cx)
             .user_online
             .contains(&user_id);
-        self.presence = if online {
-            "Online".to_string()
-        } else {
-            "Offline".to_string()
-        };
+        self.presence = SharedString::from(if online { "Online" } else { "Offline" });
     }
 
-    pub fn render(&self, theme: &Theme, cx: &App) -> impl IntoElement {
-        let username = match self.auth_state.read(cx) {
-            AuthState::Authenticated(session) => session.username.clone(),
-            _ => "Unknown".to_string(),
-        };
-
-        let presence_color = match self.presence.as_str() {
+    pub fn render(&self, theme: &Theme, _cx: &App) -> impl IntoElement {
+        let presence_color = match self.presence.as_ref() {
             "Online" => theme.status_online,
             "Idle" => theme.status_idle,
             "Dnd" => theme.status_dnd,
@@ -105,7 +110,9 @@ impl UserInfoBar {
                                 div()
                                     .relative()
                                     .child(
-                                        Avatar::new().name(username.clone()).with_size(Size::Small),
+                                        Avatar::new()
+                                            .name(self.username.clone())
+                                            .with_size(Size::Small),
                                     )
                                     .child(
                                         div()
@@ -127,7 +134,7 @@ impl UserInfoBar {
                                             .text_sm()
                                             .font_weight(gpui::FontWeight::MEDIUM)
                                             .text_color(theme.text_primary)
-                                            .child(username),
+                                            .child(self.username.clone()),
                                     )
                                     .child(
                                         div()

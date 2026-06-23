@@ -17,6 +17,10 @@ pub struct Clan {
     pub has_unread: bool,
     pub muted: bool,
     pub welcome_channel_id: Option<String>,
+    pub status: i32,
+    pub is_onboarding: bool,
+    pub is_community: bool,
+    pub prevent_anonymous: bool,
 }
 
 impl From<ApiClanDesc> for Clan {
@@ -33,6 +37,10 @@ impl From<ApiClanDesc> for Clan {
             has_unread: false,
             muted: false,
             welcome_channel_id,
+            status: 0,
+            is_onboarding: false,
+            is_community: false,
+            prevent_anonymous: false,
         }
     }
 }
@@ -57,6 +65,7 @@ pub struct ClanList {
     pub clans: Vec<Clan>,
     pub active_clan_id: Option<String>,
     api: Arc<AppApi>,
+    loading: bool,
     _connection_watch: Task<()>,
 }
 
@@ -90,6 +99,7 @@ impl ClanList {
             clans: Vec::new(),
             active_clan_id: None,
             api,
+            loading: false,
             _connection_watch: connection_watch,
         }
     }
@@ -140,6 +150,10 @@ impl ClanList {
     }
 
     pub fn reload(&mut self, cx: &mut Context<Self>) {
+        if self.loading {
+            return;
+        }
+        self.loading = true;
         let api = self.api.clone();
         cx.spawn(async move |this, cx| {
             let (clans_result, badges_result) =
@@ -148,6 +162,9 @@ impl ClanList {
                 Ok(c) => c,
                 Err(e) => {
                     tracing::error!("Failed to load clans: {e}");
+                    let _ = this.update(cx, |this, _| {
+                        this.loading = false;
+                    });
                     return;
                 }
             };
@@ -170,7 +187,10 @@ impl ClanList {
                     clan
                 })
                 .collect();
-            let _ = this.update(cx, |this, cx| this.update_clans(mapped, cx));
+            let _ = this.update(cx, |this, cx| {
+                this.loading = false;
+                this.update_clans(mapped, cx);
+            });
         })
         .detach();
     }
@@ -194,12 +214,19 @@ impl ClanList {
             }
             RealtimeEvent::ClanUpdated(e) => {
                 let name = (!e.clan_name.is_empty()).then_some(e.clan_name.clone());
-                if update_clan(
-                    &mut self.clans,
-                    &e.clan_id.to_string(),
+                let welcome_channel_id =
+                    (e.welcome_channel_id != 0).then_some(e.welcome_channel_id.to_string());
+                let update = ClanUpdate {
                     name,
-                    e.logo.clone(),
-                ) {
+                    logo: e.logo.clone(),
+                    banner: e.banner.clone(),
+                    welcome_channel_id,
+                    status: e.status,
+                    is_onboarding: e.is_onboarding,
+                    is_community: e.is_community,
+                    prevent_anonymous: e.prevent_anonymous,
+                };
+                if update_clan(&mut self.clans, &e.clan_id.to_string(), update) {
                     cx.notify();
                 }
             }
@@ -332,18 +359,73 @@ impl ClanList {
     ) -> Task<anyhow::Result<String>> {
         let api = self.api.clone();
         let path = path.to_path_buf();
-        cx.spawn(async move |_this, _cx| api.upload_avatar(&path).await)
+        cx.spawn(async move |_this, cx| {
+            cx.background_executor()
+                .spawn(async move { api.upload_avatar(&path).await })
+                .await
+        })
+    }
+
+    pub fn reorder_clans(&mut self, order: Vec<String>, cx: &mut Context<Self>) {
+        apply_clan_order(&mut self.clans, &order);
+        cx.notify();
+        cx.background_executor()
+            .spawn(async move {
+                let mut settings = crate::Settings::load_sync();
+                settings.clan_order = order;
+                settings.save_sync();
+            })
+            .detach();
+    }
+
+    pub fn apply_saved_order(&mut self, order: &[String]) {
+        apply_clan_order(&mut self.clans, order);
     }
 }
 
-fn update_clan(clans: &mut [Clan], clan_id: &str, name: Option<String>, logo: String) -> bool {
+fn apply_clan_order(clans: &mut Vec<Clan>, order: &[String]) {
+    if order.is_empty() {
+        return;
+    }
+    let mut ordered: Vec<Clan> = Vec::with_capacity(clans.len());
+    for id in order {
+        if let Some(pos) = clans.iter().position(|c| &c.id == id) {
+            ordered.push(clans.remove(pos));
+        }
+    }
+    ordered.append(clans);
+    *clans = ordered;
+}
+
+struct ClanUpdate {
+    name: Option<String>,
+    logo: String,
+    banner: String,
+    welcome_channel_id: Option<String>,
+    status: i32,
+    is_onboarding: bool,
+    is_community: bool,
+    prevent_anonymous: bool,
+}
+
+fn update_clan(clans: &mut [Clan], clan_id: &str, update: ClanUpdate) -> bool {
     let Some(clan) = clans.iter_mut().find(|c| c.id == clan_id) else {
         return false;
     };
-    if let Some(name) = name {
+    if let Some(name) = update.name {
         clan.name = name;
     }
-    clan.avatar_url = (!logo.is_empty()).then_some(logo);
+    clan.avatar_url = (!update.logo.is_empty()).then_some(update.logo);
+    if !update.banner.is_empty() {
+        clan.banner_url = Some(update.banner);
+    }
+    if let Some(wc) = update.welcome_channel_id {
+        clan.welcome_channel_id = Some(wc);
+    }
+    clan.status = update.status;
+    clan.is_onboarding = update.is_onboarding;
+    clan.is_community = update.is_community;
+    clan.prevent_anonymous = update.prevent_anonymous;
     true
 }
 
@@ -383,6 +465,23 @@ mod tests {
             has_unread: false,
             muted: false,
             welcome_channel_id: None,
+            status: 0,
+            is_onboarding: false,
+            is_community: false,
+            prevent_anonymous: false,
+        }
+    }
+
+    fn make_update(name: Option<&str>, logo: &str) -> ClanUpdate {
+        ClanUpdate {
+            name: name.map(|s| s.into()),
+            logo: logo.into(),
+            banner: String::new(),
+            welcome_channel_id: None,
+            status: 0,
+            is_onboarding: false,
+            is_community: false,
+            prevent_anonymous: false,
         }
     }
 
@@ -399,8 +498,7 @@ mod tests {
         assert!(update_clan(
             &mut c,
             "1",
-            Some("NewName".into()),
-            "logo.png".into()
+            make_update(Some("NewName"), "logo.png")
         ));
         assert_eq!(c[0].name, "NewName");
         assert_eq!(c[0].avatar_url.as_deref(), Some("logo.png"));
@@ -409,7 +507,7 @@ mod tests {
     #[test]
     fn update_clan_blank_name_keeps_name_and_empty_logo_clears_avatar() {
         let mut c = clans();
-        assert!(update_clan(&mut c, "2", None, String::new()));
+        assert!(update_clan(&mut c, "2", make_update(None, "")));
         assert_eq!(c[1].name, "Two");
         assert_eq!(c[1].avatar_url, None);
     }
@@ -417,7 +515,31 @@ mod tests {
     #[test]
     fn update_clan_unknown_is_noop() {
         let mut c = clans();
-        assert!(!update_clan(&mut c, "999", Some("x".into()), "y".into()));
+        assert!(!update_clan(&mut c, "999", make_update(Some("x"), "y")));
+    }
+
+    #[test]
+    fn update_clan_applies_all_fields() {
+        let mut c = clans();
+        let update = ClanUpdate {
+            name: Some("NewName".into()),
+            logo: "logo.png".into(),
+            banner: "banner.png".into(),
+            welcome_channel_id: Some("ch-42".into()),
+            status: 1,
+            is_onboarding: true,
+            is_community: true,
+            prevent_anonymous: true,
+        };
+        assert!(update_clan(&mut c, "1", update));
+        assert_eq!(c[0].name, "NewName");
+        assert_eq!(c[0].avatar_url.as_deref(), Some("logo.png"));
+        assert_eq!(c[0].banner_url.as_deref(), Some("banner.png"));
+        assert_eq!(c[0].welcome_channel_id.as_deref(), Some("ch-42"));
+        assert_eq!(c[0].status, 1);
+        assert!(c[0].is_onboarding);
+        assert!(c[0].is_community);
+        assert!(c[0].prevent_anonymous);
     }
 
     #[test]
