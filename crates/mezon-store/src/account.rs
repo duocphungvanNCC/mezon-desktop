@@ -245,21 +245,27 @@ impl AccountStore {
     pub fn upload_avatar(&mut self, path: &Path, cx: &mut Context<Self>) {
         let api = self.api.clone();
         let path = path.to_path_buf();
-        cx.spawn(async move |this, cx| match api.upload_avatar(&path).await {
-            Ok(url) => {
-                let _ = this.update(cx, |this, cx| {
-                    if let Some(account) = &mut this.account {
-                        account.avatar_url = Some(url.clone());
-                    }
-                    cx.emit(AccountEvent::AvatarUploaded(url));
-                    cx.notify();
-                });
-            }
-            Err(e) => {
-                let _ = this.update(cx, |_, cx| {
-                    cx.emit(AccountEvent::AvatarUploadFailed(e.to_string()));
-                    cx.notify();
-                });
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move { api.upload_avatar(&path).await })
+                .await;
+            match result {
+                Ok(url) => {
+                    let _ = this.update(cx, |this, cx| {
+                        if let Some(account) = &mut this.account {
+                            account.avatar_url = Some(url.clone());
+                        }
+                        cx.emit(AccountEvent::AvatarUploaded(url));
+                        cx.notify();
+                    });
+                }
+                Err(e) => {
+                    let _ = this.update(cx, |_, cx| {
+                        cx.emit(AccountEvent::AvatarUploadFailed(e.to_string()));
+                        cx.notify();
+                    });
+                }
             }
         })
         .detach();
@@ -272,6 +278,39 @@ impl AccountStore {
         })
         .detach();
         cx.notify();
+    }
+
+    pub fn remove_device(
+        &mut self,
+        token: String,
+        refresh_token: String,
+        device_id: String,
+        cx: &mut Context<Self>,
+    ) {
+        let api = self.api.clone();
+        let device_id_clone = device_id.clone();
+        cx.spawn(async move |this, cx| {
+            match api
+                .logout_device(&token, &refresh_token, &device_id_clone)
+                .await
+            {
+                Ok(()) => {
+                    let _ = this.update(cx, |this, cx| {
+                        this.devices.retain(|d| d.device_id != device_id_clone);
+                        cx.emit(AccountEvent::DevicesLoaded);
+                        cx.notify();
+                    });
+                }
+                Err(e) => {
+                    tracing::error!("Failed to remove device {device_id_clone}: {e}");
+                    let _ = this.update(cx, |_, cx| {
+                        cx.emit(AccountEvent::DevicesLoadFailed);
+                        cx.notify();
+                    });
+                }
+            }
+        })
+        .detach();
     }
 
     pub fn fetch_clan_profile(&mut self, clan_id: &str, cx: &mut Context<Self>) {

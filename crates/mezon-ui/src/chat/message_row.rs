@@ -43,6 +43,7 @@ pub struct MessageRow<'a> {
     reply_label: SharedString,
     avatar_src: Option<SharedString>,
     attachments: Vec<MessageAttachmentView>,
+    suppress_hover: bool,
 }
 
 impl<'a> MessageRow<'a> {
@@ -60,6 +61,7 @@ impl<'a> MessageRow<'a> {
             reply_label,
             avatar_src: None,
             attachments: Vec::new(),
+            suppress_hover: false,
         }
     }
 
@@ -81,6 +83,11 @@ impl<'a> MessageRow<'a> {
 
     pub fn reply(mut self, reply: bool) -> Self {
         self.reply = reply;
+        self
+    }
+
+    pub fn suppress_hover(mut self, suppress_hover: bool) -> Self {
+        self.suppress_hover = suppress_hover;
         self
     }
 
@@ -109,7 +116,7 @@ impl<'a> MessageRow<'a> {
                     .text_sm()
                     .font_weight(gpui::FontWeight::SEMIBOLD)
                     .text_color(gpui::rgb(DEFAULT_DISPLAY_NAME_COLOR))
-                    .child(display_name.to_string()),
+                    .child(display_name.clone()),
             )
             .child(div().text_xs().text_color(theme.text_muted).child(time));
 
@@ -154,24 +161,34 @@ impl<'a> MessageRow<'a> {
             })
             .child(content)
             .when(!msg.reactions.is_empty(), |d| {
-                d.child(
-                    div()
-                        .id("reactions-placeholder")
-                        .flex()
-                        .flex_row()
-                        .gap_1()
-                        .mt_1()
-                        .child(
-                            div()
-                                .px_2()
-                                .py_0p5()
-                                .rounded_md()
-                                .bg(theme.bg_tertiary)
-                                .text_xs()
-                                .text_color(theme.text_muted)
-                                .child("[👍 ❤️]"),
-                        ),
-                )
+                let mut counts: Vec<(String, usize)> = Vec::new();
+                for emoji in &msg.reactions {
+                    if let Some(entry) = counts.iter_mut().find(|(e, _)| e == emoji) {
+                        entry.1 += 1;
+                    } else {
+                        counts.push((emoji.clone(), 1));
+                    }
+                }
+                let bg = theme.bg_tertiary;
+                let text_color = theme.text_muted;
+                d.child(div().flex().flex_row().flex_wrap().gap_1().mt_1().children(
+                    counts.into_iter().enumerate().map(|(i, (emoji, count))| {
+                        let label = if count > 1 {
+                            format!("{} {}", emoji, count)
+                        } else {
+                            emoji
+                        };
+                        div()
+                            .id(SharedString::from(format!("reaction-{}-{}", msg.id, i)))
+                            .px_2()
+                            .py_0p5()
+                            .rounded_md()
+                            .bg(bg)
+                            .text_xs()
+                            .text_color(text_color)
+                            .child(label)
+                    }),
+                ))
             })
             .when(!self.attachments.is_empty(), |d| {
                 d.child(div().flex().flex_col().gap_2().mt_1().children(
@@ -226,13 +243,17 @@ impl<'a> MessageRow<'a> {
                 ))
             });
 
+        let hover_bg = theme.bg_hover;
         div()
+            .id(SharedString::from(format!("msg-row-{}", msg.id)))
+            .relative()
             .flex()
             .flex_row()
             .w_full()
             .px_4()
             .py(px(2.))
-            .when(!self.combined, |d| d.pt_3())
+            .when(!self.combined, |d| d.mt(px(10.)).pt_3())
+            .when(!self.suppress_hover, |d| d.hover(|s| s.bg(hover_bg)))
             .child(if self.combined {
                 div().w(px(40.)).flex_none()
             } else {

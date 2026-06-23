@@ -21,6 +21,7 @@ pub struct ClanSidebar {
     rows: Rc<Vec<ClanRow>>,
     list_state: ListState,
     active_clan_id: Option<String>,
+    dm_active: bool,
     _clan_sub: Subscription,
     _settings_sub: Subscription,
     _router_sub: Subscription,
@@ -37,16 +38,28 @@ impl ClanSidebar {
             cx.notify();
         });
         let settings_sub = cx.observe(&settings, |_, _, cx| cx.notify());
-        let router_sub = cx.observe(&Router::global(cx), |_, _, cx| {
-            cx.notify();
+        let router_sub = cx.observe(&Router::global(cx), |this, router, cx| {
+            let new_dm_active = matches!(
+                router.read(cx).route(),
+                Route::Direct | Route::DirectMessage { .. } | Route::Friends
+            );
+            if new_dm_active != this.dm_active {
+                this.dm_active = new_dm_active;
+                cx.notify();
+            }
         });
 
+        let initial_dm_active = matches!(
+            Router::global(cx).read(cx).route(),
+            Route::Direct | Route::DirectMessage { .. } | Route::Friends
+        );
         let mut this = Self {
             clan_list,
             settings,
             rows: Rc::new(Vec::new()),
             list_state: ListState::new(0, gpui::ListAlignment::Top, px(48.)),
             active_clan_id: None,
+            dm_active: initial_dm_active,
             _clan_sub: clan_sub,
             _settings_sub: settings_sub,
             _router_sub: router_sub,
@@ -94,10 +107,7 @@ impl ClanSidebar {
 impl Render for ClanSidebar {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
-        let dm_active = matches!(
-            Router::global(cx).read(cx).route(),
-            Route::Direct | Route::DirectMessage { .. }
-        );
+        let dm_active = self.dm_active;
         let pill_color = theme.tokens.text_theme_primary;
         let rows = self.rows.clone();
         let clan_list_handle = self.clan_list.clone();

@@ -238,7 +238,12 @@ impl InputState {
 
     fn paste(&mut self, _: &Paste, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
-            self.replace_text_in_range(None, &text.replace('\n', " "), window, cx);
+            let sanitized = if self.multi_line {
+                text
+            } else {
+                text.replace('\n', " ")
+            };
+            self.replace_text_in_range(None, &sanitized, window, cx);
         }
     }
 
@@ -784,6 +789,8 @@ pub struct Input {
     state: Entity<InputState>,
     base: Div,
     mask_toggle: bool,
+    show_label: SharedString,
+    hide_label: SharedString,
 }
 
 impl Input {
@@ -792,11 +799,23 @@ impl Input {
             state: state.clone(),
             base: div().w_full(),
             mask_toggle: false,
+            show_label: "Show".into(),
+            hide_label: "Hide".into(),
         }
     }
 
     pub fn mask_toggle(mut self) -> Self {
         self.mask_toggle = true;
+        self
+    }
+
+    pub fn show_label(mut self, label: impl Into<SharedString>) -> Self {
+        self.show_label = label.into();
+        self
+    }
+
+    pub fn hide_label(mut self, label: impl Into<SharedString>) -> Self {
+        self.hide_label = label.into();
         self
     }
 }
@@ -813,6 +832,8 @@ impl RenderOnce for Input {
         let masked = state.read(cx).masked;
         let toggle_color = cx.theme().text_muted;
 
+        let show_label = self.show_label.clone();
+        let hide_label = self.hide_label.clone();
         let toggle = self.mask_toggle.then(|| {
             let state = state.clone();
             div()
@@ -821,7 +842,7 @@ impl RenderOnce for Input {
                 .cursor_pointer()
                 .text_xs()
                 .text_color(toggle_color)
-                .child(if masked { "Show" } else { "Hide" })
+                .child(if masked { show_label } else { hide_label })
                 .on_click(move |_, window, cx| {
                     state.update(cx, |input, cx| {
                         let next = !input.masked;

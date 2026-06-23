@@ -49,7 +49,7 @@ impl Session {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
-        self.expires_at > 0 && now >= self.expires_at
+        self.expires_at == 0 || now >= self.expires_at
     }
 
     /// Credential for `wss://…/ws?token=…` — matches mezon-js (`session_id` first, else JWT).
@@ -67,8 +67,8 @@ impl Session {
         if !token.is_empty() {
             let (user_id, username, expires_at) = decode_jwt_claims(token);
             self.token = token.to_string();
-            if expires_at > 0 {
-                self.expires_at = expires_at;
+            if let Some(exp) = expires_at {
+                self.expires_at = exp;
             }
             if !user_id.is_empty() {
                 self.user_id = user_id;
@@ -86,7 +86,7 @@ impl Session {
     }
 }
 
-fn decode_jwt_claims(token: &str) -> (String, String, u64) {
+pub(crate) fn decode_jwt_claims(token: &str) -> (String, String, Option<u64>) {
     let payload = token.split('.').nth(1).unwrap_or("");
     let decoded = URL_SAFE_NO_PAD.decode(payload).unwrap_or_default();
     let json: serde_json::Value = serde_json::from_slice(&decoded).unwrap_or_default();
@@ -104,7 +104,10 @@ fn decode_jwt_claims(token: &str) -> (String, String, u64) {
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .to_owned();
-    let expires_at = json.get("exp").and_then(|v| v.as_u64()).unwrap_or(0);
+    let expires_at = json
+        .get("exp")
+        .and_then(|v| v.as_u64())
+        .filter(|&exp| exp > 0);
 
     (user_id, username, expires_at)
 }
@@ -115,25 +118,26 @@ mod tests {
 
     #[test]
     fn test_session_is_expired() {
-        // No expiration set (expires_at = 0)
-        let session = Session {
-            expires_at: 0,
-            ..Default::default()
-        };
-        assert!(!session.is_expired());
-
-        // Far future expiration
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
+
+        let session = Session {
+            expires_at: 0,
+            ..Default::default()
+        };
+        assert!(
+            session.is_expired(),
+            "missing expiry (0) must be treated as expired"
+        );
+
         let session = Session {
             expires_at: now + 1000,
             ..Default::default()
         };
         assert!(!session.is_expired());
 
-        // Past expiration
         let session = Session {
             expires_at: now - 10,
             ..Default::default()

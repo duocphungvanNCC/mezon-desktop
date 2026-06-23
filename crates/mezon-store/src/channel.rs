@@ -322,6 +322,8 @@ impl ChannelList {
                 RealtimeKind::VoiceJoined,
                 RealtimeKind::VoiceLeaved,
                 RealtimeKind::MarkAsRead,
+                RealtimeKind::UserChannelAdded,
+                RealtimeKind::UserChannelRemoved,
             ] {
                 dispatch.on(kind, &entity, |this, event, cx| {
                     this.handle_event(event, cx)
@@ -397,7 +399,7 @@ impl ChannelList {
         clan_id: &str,
     ) -> anyhow::Result<(Vec<Category>, Vec<AppChannel>)> {
         let (channels_res, categories_res, badges_res, voice_res, favorites_res, apps_res) = tokio::join!(
-            api.list_channel_descs(clan_id),
+            api.list_channel_descs(clan_id, 1),
             api.list_categories_typed(clan_id),
             api.list_channel_badge_counts(clan_id),
             api.list_voice_channel_users(clan_id),
@@ -577,9 +579,14 @@ impl ChannelList {
                 let clan_id = e.clan_id.to_string();
                 let channel_id = e.voice_channel_id.to_string();
                 let user_id = e.user_id.to_string();
+                let display_name = if !e.participant.is_empty() {
+                    e.participant.clone()
+                } else {
+                    user_id.clone()
+                };
                 let member = VoiceMember {
                     user_id: user_id.clone(),
-                    display_name: user_id.clone(),
+                    display_name,
                     avatar_url: String::new(),
                 };
                 let changed = self
@@ -622,6 +629,67 @@ impl ChannelList {
                     })
                     .unwrap_or(false);
                 if changed {
+                    cx.notify();
+                }
+            }
+            RealtimeEvent::UserChannelAdded(e) => {
+                let Some(ref desc) = e.channel_desc else {
+                    return;
+                };
+                let channel_type = desc.r#type as u32;
+                if channel_type == 2 || channel_type == 3 {
+                    return;
+                }
+                let clan_id = e.clan_id.to_string();
+                let channel_id = desc.channel_id.to_string();
+                let Some(cats) = self.cache.get_mut(&clan_id) else {
+                    return;
+                };
+                let already_exists = cats
+                    .iter()
+                    .flat_map(|c| &c.channels)
+                    .any(|ch| ch.id == channel_id);
+                if already_exists {
+                    return;
+                }
+                let channel = Channel {
+                    id: channel_id,
+                    name: desc.channel_label.clone(),
+                    channel_type: ChannelType::from_raw(channel_type),
+                    private: desc.channel_private != 0,
+                    clan_id: clan_id.clone(),
+                    category_name: String::new(),
+                    category_id: Some(desc.category_id.to_string())
+                        .filter(|s| !s.is_empty() && s != "0"),
+                    member_count: 0,
+                    badge_count: 0,
+                    muted: false,
+                    parent_id: Some(desc.parent_id.to_string())
+                        .filter(|s| !s.is_empty() && s != "0"),
+                    last_seen_timestamp: 0,
+                    last_sent_timestamp: 0,
+                    voice_members: Vec::new(),
+                    is_favorite: false,
+                };
+                if insert_channel(cats, channel) {
+                    cx.notify();
+                }
+            }
+            RealtimeEvent::UserChannelRemoved(e) => {
+                let channel_id = e.channel_id.to_string();
+                let channel_type = e.channel_type as u32;
+                if channel_type == 2 || channel_type == 3 {
+                    return;
+                }
+                let mut removed = false;
+                for cats in self.cache.values_mut() {
+                    removed |= remove_channel(cats, &channel_id);
+                }
+                if removed {
+                    if self.active_channel_id.as_deref() == Some(channel_id.as_str()) {
+                        self.active_channel_id = None;
+                        cx.emit(ChannelEvent::ActiveChannelChanged(None));
+                    }
                     cx.notify();
                 }
             }
@@ -698,6 +766,19 @@ impl ChannelList {
             .iter()
             .flat_map(|category| &category.channels)
             .find(|channel| channel.id == channel_id)
+    }
+
+    pub fn clan_id_for_channel(&self, channel_id: &str) -> Option<&str> {
+        for (clan_id, cats) in self.cache.iter() {
+            let found = cats
+                .iter()
+                .flat_map(|c| &c.channels)
+                .any(|ch| ch.id == channel_id);
+            if found {
+                return Some(clan_id.as_str());
+            }
+        }
+        None
     }
 
     fn active_categories(&self) -> &[Category] {

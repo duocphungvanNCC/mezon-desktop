@@ -1,4 +1,4 @@
-use gpui::{FontWeight, div, prelude::*, px};
+use gpui::{FontWeight, SharedString, div, prelude::*, px};
 use mezon_store::ChannelType;
 
 use crate::components::primitives::Icon;
@@ -6,18 +6,19 @@ use crate::components::primitives::IconName;
 use crate::theme::Theme;
 
 pub struct ChannelRow {
-    name: String,
+    name: SharedString,
     channel_type: ChannelType,
     unread: bool,
     private: bool,
     selected: bool,
     badge_count: u32,
+    badge_label: SharedString,
     muted: bool,
     is_thread: bool,
 }
 
 impl ChannelRow {
-    pub fn new(name: impl Into<String>, channel_type: ChannelType) -> Self {
+    pub fn new(name: impl Into<SharedString>, channel_type: ChannelType) -> Self {
         Self {
             name: name.into(),
             channel_type,
@@ -25,6 +26,7 @@ impl ChannelRow {
             private: false,
             selected: false,
             badge_count: 0,
+            badge_label: SharedString::from(""),
             muted: false,
             is_thread: false,
         }
@@ -52,6 +54,11 @@ impl ChannelRow {
 
     pub fn badge_count(mut self, count: u32) -> Self {
         self.badge_count = count;
+        self.badge_label = if count > 99 {
+            SharedString::from("99+")
+        } else {
+            SharedString::from(count.to_string())
+        };
         self
     }
 
@@ -111,7 +118,7 @@ impl ChannelRow {
                             .bg(brand)
                             .text_color(text_primary)
                             .text_xs()
-                            .child(format!("{}", self.badge_count)),
+                            .child(self.badge_label.clone()),
                     )
                 })
                 .when(

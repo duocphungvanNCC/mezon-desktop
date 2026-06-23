@@ -55,13 +55,11 @@ impl ChatLayout {
         let settings_for_direct = settings.clone();
         let direct_sidebar = cx.new(move |cx| DirectSidebar::new(settings_for_direct, cx));
 
-        let user_info_bar = UserInfoBar::new(auth_state.clone());
+        let user_info_bar = UserInfoBar::new(auth_state.clone(), cx);
 
-        // The user bar only shows the current user's online status (`user_online`). Typing churns
-        // constantly and never touches `user_online`, so subscribe (not observe) and skip
-        // `TypingChanged` — keeping typing events from dirtying the shell.
         cx.subscribe(&PresenceStore::global(cx), |this, _, event, cx| {
             if matches!(event, PresenceEvent::TypingChanged { .. }) {
+                cx.notify();
                 return;
             }
             this.user_info_bar.sync_presence(cx);
@@ -76,9 +74,6 @@ impl ChatLayout {
 
         let direct_store = DirectMessageStore::global(cx);
         cx.observe(&direct_store, |_, _, cx| cx.notify()).detach();
-
-        let messages_store = MessagesStore::global(cx);
-        cx.observe(&messages_store, |_, _, cx| cx.notify()).detach();
 
         let chat_area = ChatArea::new(settings.clone(), cx);
         cx.observe(&channel_list, |this, _, cx| {
@@ -116,6 +111,16 @@ impl ChatLayout {
                 clan_id,
                 channel_id,
             } => self.sync_channel_route(clan_id, channel_id, cx),
+            Route::Thread {
+                clan_id,
+                channel_id,
+                ..
+            } => self.sync_channel_route(clan_id, channel_id, cx),
+            Route::Canvas {
+                clan_id,
+                channel_id,
+                ..
+            } => self.sync_channel_route(clan_id, channel_id, cx),
             Route::DirectMessage {
                 direct_id,
                 message_type,
@@ -123,12 +128,18 @@ impl ChatLayout {
                 self.pending_channel_id = None;
                 self.direct_store
                     .update(cx, |store, cx| store.ensure_loaded(cx));
-                let channel_type = message_type.parse::<i32>().unwrap_or(3);
+                let channel_type = message_type.parse::<i32>().unwrap_or_else(|_| {
+                    tracing::warn!(
+                        "DM route: non-numeric message_type {:?}, defaulting to 3",
+                        message_type
+                    );
+                    3
+                });
                 MessagesStore::global(cx).update(cx, |store, cx| {
                     store.open_direct(direct_id, channel_type, cx)
                 });
             }
-            Route::Direct => {
+            Route::Direct | Route::Friends => {
                 self.pending_channel_id = None;
                 self.direct_store
                     .update(cx, |store, cx| store.ensure_loaded(cx));
@@ -187,7 +198,7 @@ impl ChatLayout {
     fn ensure_active_channel_for_clan(&mut self, cx: &mut Context<Self>) {
         if matches!(
             Router::global(cx).read(cx).route(),
-            Route::Direct | Route::DirectMessage { .. }
+            Route::Direct | Route::Friends | Route::DirectMessage { .. }
         ) {
             return;
         }
@@ -313,7 +324,7 @@ impl ChatLayout {
     fn is_dm_route(&self, cx: &Context<Self>) -> bool {
         matches!(
             Router::global(cx).read(cx).route(),
-            Route::Direct | Route::DirectMessage { .. }
+            Route::Direct | Route::Friends | Route::DirectMessage { .. }
         )
     }
 
@@ -327,15 +338,31 @@ impl ChatLayout {
             .into_any_element()
     }
 
+    fn typing_label_for_channel(
+        &self,
+        channel_id: &str,
+        locale: &str,
+        cx: &Context<Self>,
+    ) -> Option<gpui::SharedString> {
+        let users = PresenceStore::global(cx).read(cx).typing_users(channel_id);
+        let label = match users.len() {
+            0 => return None,
+            1 => format!("{} {}", users[0], mezon_i18n::t(locale, "common.isTyping")),
+            _ => mezon_i18n::t(locale, "common.severalPeopleTyping").to_string(),
+        };
+        Some(gpui::SharedString::from(label))
+    }
+
     fn render_content(&self, cx: &Context<Self>) -> gpui::AnyElement {
         let theme = cx.theme();
         let locale = self.settings.read(cx).language.clone();
 
         if self.is_dm_route(cx) {
             if let Some(dm) = self.current_dm(cx) {
+                let typing = self.typing_label_for_channel(&dm.id, &locale, cx);
                 return self
                     .chat_area
-                    .render(theme, &locale, cx.entity(), &dm.label, true)
+                    .render(theme, &locale, cx.entity(), &dm.label, true, typing)
                     .into_any_element();
             }
             return div()
@@ -362,11 +389,16 @@ impl ChatLayout {
                 .into_any_element();
         }
 
-        let channels = self.channel_list.read(cx);
-        if let Some(ch) = channels.active_channel() {
+        let active = self
+            .channel_list
+            .read(cx)
+            .active_channel()
+            .map(|ch| (ch.id.clone(), ch.name.clone()));
+        if let Some((channel_id, channel_name)) = active {
+            let typing = self.typing_label_for_channel(&channel_id, &locale, cx);
             return self
                 .chat_area
-                .render(theme, &locale, cx.entity(), &ch.name, false)
+                .render(theme, &locale, cx.entity(), &channel_name, false, typing)
                 .into_any_element();
         }
 
@@ -403,6 +435,36 @@ impl ChatLayout {
                 theme,
                 crate::components::primitives::IconName::Hashtag,
                 &format!("#{channel_id}"),
+                &current_path,
+            ),
+            Route::Friends => self.render_placeholder(
+                theme,
+                crate::components::primitives::IconName::IconFriends,
+                mezon_i18n::t(&locale, "directMessage.friends"),
+                &current_path,
+            ),
+            Route::Thread { channel_id, .. } => self.render_placeholder(
+                theme,
+                crate::components::primitives::IconName::Hashtag,
+                &format!("Thread #{channel_id}"),
+                &current_path,
+            ),
+            Route::Canvas { channel_id, .. } => self.render_placeholder(
+                theme,
+                crate::components::primitives::IconName::Hashtag,
+                &format!("Canvas #{channel_id}"),
+                &current_path,
+            ),
+            Route::AddFriend { username } => self.render_placeholder(
+                theme,
+                crate::components::primitives::IconName::People,
+                &format!("Add Friend: {username}"),
+                &current_path,
+            ),
+            Route::Invite { invite_id } => self.render_placeholder(
+                theme,
+                crate::components::primitives::IconName::People,
+                &format!("Invite: {invite_id}"),
                 &current_path,
             ),
             Route::SettingsAccount
