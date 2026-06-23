@@ -504,6 +504,17 @@ pub struct ApiMessage {
     pub attachments: Vec<ApiAttachment>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ApiPinMessage {
+    pub id: String,
+    pub message_id: String,
+    pub content: String,
+    pub sender_id: String,
+    pub sender_name: String,
+    pub avatar: String,
+    pub create_time: i64,
+}
+
 impl MezonTransport {
     /// Build a protobuf-encoded API request envelope.
     ///
@@ -680,6 +691,23 @@ impl MezonTransport {
             avatar: message.avatar,
             create_time: i64::from(message.create_time_seconds),
             attachments,
+        }
+    }
+
+    fn pin_message_from_proto(pin: api::PinMessage) -> ApiPinMessage {
+        let content = serde_json::from_str::<serde_json::Value>(&pin.content)
+            .ok()
+            .and_then(|v| v.get("t").and_then(|t| t.as_str().map(|s| s.to_string())))
+            .unwrap_or_else(|| pin.content.clone());
+
+        ApiPinMessage {
+            id: pin.id.to_string(),
+            message_id: pin.message_id.to_string(),
+            content,
+            sender_id: pin.sender_id.to_string(),
+            sender_name: pin.username,
+            avatar: pin.avatar,
+            create_time: i64::from(pin.create_time_seconds),
         }
     }
 
@@ -1615,7 +1643,7 @@ impl MezonTransport {
         &self,
         channel_id: &str,
         clan_id: &str,
-    ) -> Result<api::PinMessagesList> {
+    ) -> Result<Vec<ApiPinMessage>> {
         let cid = self.generate_cid();
         let body = api::PinMessageRequest {
             channel_id: parse_id(channel_id)?,
@@ -1629,7 +1657,12 @@ impl MezonTransport {
         if code != 0 {
             return Err(anyhow::anyhow!("API error: code={}", code));
         }
-        Ok(api::PinMessagesList::decode(response.as_slice())?)
+        let list = api::PinMessagesList::decode(response.as_slice())?;
+        Ok(list
+            .pin_messages_list
+            .into_iter()
+            .map(Self::pin_message_from_proto)
+            .collect())
     }
 
     /// List channel timeline.

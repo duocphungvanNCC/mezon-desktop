@@ -350,6 +350,46 @@ impl TransportClient {
             .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
     }
 
+    /// Get pin messages list for a channel.
+    pub async fn get_pin_messages_list(
+        &self,
+        channel_id: &str,
+        clan_id: &str,
+    ) -> Result<Vec<crate::transport::ApiPinMessage>> {
+        let transport = self.inner.clone();
+        let channel_id = channel_id.to_string();
+        let clan_id = clan_id.to_string();
+
+        runtime()
+            .spawn(async move { transport.get_pin_messages_list(&channel_id, &clan_id).await })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
+    /// Unpin (delete) a pinned message.
+    pub async fn delete_pin_message(
+        &self,
+        id: &str,
+        message_id: &str,
+        channel_id: &str,
+        clan_id: &str,
+    ) -> Result<()> {
+        let transport = self.inner.clone();
+        let id = id.to_string();
+        let message_id = message_id.to_string();
+        let channel_id = channel_id.to_string();
+        let clan_id = clan_id.to_string();
+
+        runtime()
+            .spawn(async move {
+                transport
+                    .delete_pin_message(&id, &message_id, &channel_id, &clan_id)
+                    .await
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
     /// Send a message to a channel.
     pub async fn join_chat(
         &self,

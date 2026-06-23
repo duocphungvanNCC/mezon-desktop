@@ -1,7 +1,7 @@
-use gpui::{AnyView, Context, Entity, StyleRefinement, Window, div, prelude::*, px};
+use gpui::{AnyView, Context, Entity, ScrollHandle, StyleRefinement, Window, div, prelude::*, px};
 use mezon_store::{
     AuthState, ChannelList, ClanList, DirectChannel, DirectMessageStore, MessagesStore,
-    PresenceEvent, PresenceStore, Settings,
+    PinnedMessagesStore, PresenceEvent, PresenceStore, Settings,
 };
 
 use crate::chat::area::ChatArea;
@@ -22,6 +22,8 @@ pub struct ChatLayout {
     auth_state: Entity<AuthState>,
     settings: Entity<Settings>,
     pending_channel_id: Option<String>,
+    pin_open: bool,
+    pin_scroll: ScrollHandle,
 }
 
 impl ChatLayout {
@@ -80,6 +82,9 @@ impl ChatLayout {
         let messages_store = MessagesStore::global(cx);
         cx.observe(&messages_store, |_, _, cx| cx.notify()).detach();
 
+        let pinned_store = PinnedMessagesStore::global(cx);
+        cx.observe(&pinned_store, |_, _, cx| cx.notify()).detach();
+
         let chat_area = ChatArea::new(settings.clone(), cx);
         cx.observe(&channel_list, |this, _, cx| {
             this.apply_pending_channel(cx);
@@ -104,6 +109,8 @@ impl ChatLayout {
             chat_area,
             settings,
             pending_channel_id: None,
+            pin_open: false,
+            pin_scroll: ScrollHandle::new(),
         };
         this.user_info_bar.sync_presence(cx);
         this.sync_active_from_route(cx);
@@ -233,9 +240,9 @@ impl Render for ChatLayout {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         crate::trace_render!("ChatLayout");
         self.chat_area.ensure_input(window, cx);
-        let theme = cx.theme();
         let nav_body = self.render_nav_body(cx);
-        let content = self.render_content(cx);
+        let content = self.render_content(window, cx);
+        let theme = cx.theme();
 
         div()
             .flex()
@@ -303,6 +310,48 @@ impl ChatLayout {
         });
     }
 
+    /// Toggle the pinned-messages popover. Loads the pin list lazily when opening.
+    pub(crate) fn toggle_pin_popover(&mut self, cx: &mut Context<Self>) {
+        self.pin_open = !self.pin_open;
+        if self.pin_open {
+            PinnedMessagesStore::global(cx).update(cx, |store, cx| store.ensure_loaded(cx));
+        }
+        cx.notify();
+    }
+
+    pub(crate) fn close_pin_popover(&mut self, cx: &mut Context<Self>) {
+        if self.pin_open {
+            self.pin_open = false;
+            cx.notify();
+        }
+    }
+
+    fn build_pin_popover(
+        &self,
+        locale: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<gpui::AnyElement> {
+        if !self.pin_open {
+            return None;
+        }
+        let theme = cx.theme().clone();
+        let store = PinnedMessagesStore::global(cx);
+        let pinned = store.read(cx).pinned().to_vec();
+        let loading = store.read(cx).is_loading();
+        let layout = cx.entity();
+        Some(crate::chat::pinned_popover::render_pin_panel(
+            &pinned,
+            loading,
+            &theme,
+            locale,
+            layout,
+            &self.pin_scroll,
+            window,
+            cx,
+        ))
+    }
+
     fn current_dm(&self, cx: &Context<Self>) -> Option<DirectChannel> {
         let Route::DirectMessage { direct_id, .. } = Router::global(cx).read(cx).route() else {
             return None;
@@ -327,15 +376,16 @@ impl ChatLayout {
             .into_any_element()
     }
 
-    fn render_content(&self, cx: &Context<Self>) -> gpui::AnyElement {
-        let theme = cx.theme();
+    fn render_content(&self, window: &mut Window, cx: &mut Context<Self>) -> gpui::AnyElement {
         let locale = self.settings.read(cx).language.clone();
+        let pin_popover = self.build_pin_popover(&locale, window, cx);
+        let theme = cx.theme();
 
         if self.is_dm_route(cx) {
             if let Some(dm) = self.current_dm(cx) {
                 return self
                     .chat_area
-                    .render(theme, &locale, cx.entity(), &dm.label, true)
+                    .render(theme, &locale, cx.entity(), &dm.label, true, pin_popover)
                     .into_any_element();
             }
             return div()
@@ -364,9 +414,10 @@ impl ChatLayout {
 
         let channels = self.channel_list.read(cx);
         if let Some(ch) = channels.active_channel() {
+            let name = ch.name.clone();
             return self
                 .chat_area
-                .render(theme, &locale, cx.entity(), &ch.name, false)
+                .render(theme, &locale, cx.entity(), &name, false, pin_popover)
                 .into_any_element();
         }
 

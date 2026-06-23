@@ -5,6 +5,7 @@ pub mod input_bar;
 pub mod layout;
 pub mod message_list;
 pub mod message_row;
+pub mod pinned_popover;
 
 pub use area::ChatArea;
 pub use channel_header::ChannelHeader;

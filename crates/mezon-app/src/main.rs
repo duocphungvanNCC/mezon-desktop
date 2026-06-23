@@ -353,6 +353,7 @@ fn open_main_window(
     mezon_store::ChannelList::init(api.clone(), cx);
     mezon_store::DirectMessageStore::init(api.clone(), cx);
     mezon_store::MessagesStore::init(api.clone(), cx);
+    mezon_store::PinnedMessagesStore::init(api.clone(), cx);
     mezon_store::PresenceStore::init(api.clone(), cx);
     mezon_store::AccountStore::init(api, cx);
 
