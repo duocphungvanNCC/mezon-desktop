@@ -1,4 +1,9 @@
+#[path = "blink_manager.rs"]
+mod blink_manager;
+
 use std::ops::Range;
+
+use blink_manager::CaretBlink;
 
 use gpui::{
     App, Bounds, ClipboardItem, Context, CursorStyle, Div, Element, ElementId, ElementInputHandler,
@@ -83,14 +88,16 @@ pub struct InputState {
     padding_x: Option<Pixels>,
     padding_right: Option<Pixels>,
     show_border: bool,
+    pub(crate) caret_blink: CaretBlink,
 }
 
 impl EventEmitter<InputEvent> for InputState {}
 
 impl InputState {
-    pub fn new(_window: &mut Window, cx: &mut Context<Self>) -> Self {
-        Self {
-            focus_handle: cx.focus_handle(),
+    pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let focus_handle = cx.focus_handle();
+        let this = Self {
+            focus_handle: focus_handle.clone(),
             content: SharedString::default(),
             placeholder: SharedString::default(),
             selected_range: 0..0,
@@ -110,7 +117,20 @@ impl InputState {
             padding_x: None,
             padding_right: None,
             show_border: true,
-        }
+            caret_blink: CaretBlink::new(),
+        };
+
+        cx.on_focus(&focus_handle, window, |this, _window, cx| {
+            this.caret_blink.sync_focused(cx);
+        })
+        .detach();
+
+        cx.on_blur(&focus_handle, window, |this, _window, cx| {
+            this.caret_blink.sync_blurred(cx);
+        })
+        .detach();
+
+        this
     }
 
     pub fn placeholder(mut self, placeholder: impl Into<SharedString>) -> Self {
@@ -193,6 +213,7 @@ impl InputState {
 
     pub fn focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.focus_handle.focus(window, cx);
+        self.caret_blink.sync_focused(cx);
     }
 
     fn left(&mut self, _: &Left, _: &mut Window, cx: &mut Context<Self>) {
@@ -264,7 +285,9 @@ impl InputState {
         self.replace_text_in_range(None, "", window, cx)
     }
 
-    fn on_mouse_down(&mut self, event: &MouseDownEvent, _: &mut Window, cx: &mut Context<Self>) {
+    fn on_mouse_down(&mut self, event: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        window.focus(&self.focus_handle, cx);
+        self.caret_blink.sync_focused(cx);
         self.is_selecting = true;
         if event.modifiers.shift {
             self.select_to(self.index_for_mouse_position(event.position), cx);
@@ -324,7 +347,12 @@ impl InputState {
 
     fn move_to(&mut self, offset: usize, cx: &mut Context<Self>) {
         self.selected_range = offset..offset;
+        self.pause_caret_blink(cx);
         cx.notify()
+    }
+
+    fn pause_caret_blink(&mut self, cx: &mut Context<Self>) {
+        self.caret_blink.pause_blinking(cx);
     }
 
     fn cursor_offset(&self) -> usize {
@@ -397,6 +425,7 @@ impl InputState {
             self.selection_reversed = !self.selection_reversed;
             self.selected_range = self.selected_range.end..self.selected_range.start;
         }
+        self.pause_caret_blink(cx);
         cx.notify()
     }
 
@@ -516,6 +545,7 @@ impl EntityInputHandler for InputState {
         self.content = candidate.into();
         self.selected_range = range.start + new_text.len()..range.start + new_text.len();
         self.marked_range.take();
+        self.pause_caret_blink(cx);
         cx.notify();
         cx.emit(InputEvent::Change);
     }
@@ -548,6 +578,7 @@ impl EntityInputHandler for InputState {
             .map(|new_range| new_range.start + range.start..new_range.end + range.end)
             .unwrap_or_else(|| range.start + new_text.len()..range.start + new_text.len());
 
+        self.pause_caret_blink(cx);
         cx.notify();
         cx.emit(InputEvent::Change);
     }
@@ -595,6 +626,12 @@ impl Focusable for InputState {
 impl Render for InputState {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let focused = self.focus_handle.is_focused(window);
+        if focused {
+            self.caret_blink.sync_focused(cx);
+        } else {
+            self.caret_blink.sync_blurred(cx);
+        }
+
         let bg: Hsla = self.bg_override.unwrap_or(cx.theme().bg_tertiary.into());
         let text_color: Hsla = self
             .text_color_override
@@ -842,6 +879,7 @@ impl Element for TextElement {
         }
 
         if focus_handle.is_focused(window)
+            && self.input.read(cx).caret_blink.visible()
             && let Some(cursor) = prepaint.cursor.take()
         {
             window.paint_quad(cursor);
