@@ -15,6 +15,7 @@ pub mod transport_runtime;
 pub use abridged_tcp_adapter::AbridgedTcpAdapter;
 pub use app_api::{AppApi, ConnectionStatus};
 pub use auth::MezonClient;
+pub use auth::QrLoginId;
 pub use auth::{DEFAULT_API_HOST, DEFAULT_API_PORT, DEFAULT_API_SECURE, DEFAULT_SERVER_KEY};
 pub use network_monitor::NetworkMonitor;
 pub use session::Session;

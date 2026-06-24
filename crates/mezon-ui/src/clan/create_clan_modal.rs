@@ -1,6 +1,6 @@
 use gpui::{
     AnyElement, App, Context, Entity, FocusHandle, Focusable, PathPromptOptions, SharedString,
-    Subscription, Window, div, img, prelude::*, px, rgb,
+    Subscription, Task, Window, div, img, prelude::*, px, rgb,
 };
 use mezon_store::{ClanList, CreateClanError, Settings};
 
@@ -35,6 +35,23 @@ pub struct CreateClanModal {
     validation: Validation,
     creating: bool,
     _name_sub: Subscription,
+    _logo_task: Option<Task<()>>,
+    _create_task: Option<Task<()>>,
+}
+
+fn is_valid_clan_name_char(c: char) -> bool {
+    c.is_alphanumeric() || c == '_' || c == '-' || c == ' '
+}
+
+fn is_valid_clan_name(s: &str) -> bool {
+    if s.is_empty() || s.chars().count() > 64 {
+        return false;
+    }
+    let first = s.chars().next().unwrap();
+    if first == '_' || first == '-' || first == ' ' {
+        return false;
+    }
+    s.chars().all(|c| is_valid_clan_name_char(c) && c != '\'')
 }
 
 impl Focusable for CreateClanModal {
@@ -71,19 +88,18 @@ impl CreateClanModal {
             validation: Validation::InvalidName,
             creating: false,
             _name_sub: name_sub,
+            _logo_task: None,
+            _create_task: None,
         }
     }
 
     fn revalidate(&mut self, cx: &mut Context<Self>) {
-        let value = self.name_input.read(cx).value().trim().to_string();
-        self.validation = if value.is_empty()
-            || value.len() > 64
-            || value.starts_with(|c: char| c == '_' || c == '-' || c.is_whitespace())
-            || value.contains('\'')
-        {
-            Validation::InvalidName
-        } else {
+        let value = self.name_input.read(cx).value();
+        let value = value.trim();
+        self.validation = if is_valid_clan_name(value) {
             Validation::Validated
+        } else {
+            Validation::InvalidName
         };
         cx.notify();
     }
@@ -115,7 +131,10 @@ impl CreateClanModal {
             multiple: false,
             prompt: Some(prompt),
         });
-        cx.spawn(async move |this, cx| {
+        const ALLOWED_EXTENSIONS: &[&str] = &["jpg", "jpeg", "png", "gif", "webp"];
+        const MAX_LOGO_SIZE: u64 = 1_000_000;
+
+        self._logo_task = Some(cx.spawn(async move |this, cx| {
             let paths = match rx.await {
                 Ok(Ok(Some(p))) => p,
                 _ => return,
@@ -124,6 +143,33 @@ impl CreateClanModal {
                 Some(p) => p,
                 None => return,
             };
+
+            let ext = path
+                .extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or("")
+                .to_ascii_lowercase();
+            if !ALLOWED_EXTENSIONS.contains(&ext.as_str()) {
+                tracing::warn!("logo pick rejected: unsupported file type .{ext}");
+                return;
+            }
+
+            let file_size = match tokio::fs::metadata(&path).await {
+                Ok(m) => m.len(),
+                Err(e) => {
+                    tracing::warn!("logo pick: cannot read file metadata: {e}");
+                    return;
+                }
+            };
+            if file_size > MAX_LOGO_SIZE {
+                tracing::warn!(
+                    "logo pick rejected: file size {} > {} bytes",
+                    file_size,
+                    MAX_LOGO_SIZE
+                );
+                return;
+            }
+
             let task = match this.update(cx, |modal, cx| {
                 modal
                     .clan_list
@@ -143,8 +189,7 @@ impl CreateClanModal {
                     tracing::error!("logo upload failed: {e}");
                 }
             }
-        })
-        .detach();
+        }));
     }
 
     fn create_clan(&mut self, cx: &mut Context<Self>) {
@@ -159,7 +204,7 @@ impl CreateClanModal {
         let task = self
             .clan_list
             .update(cx, |store, cx| store.create_clan(name, logo, cx));
-        cx.spawn(async move |this, cx| match task.await {
+        self._create_task = Some(cx.spawn(async move |this, cx| match task.await {
             Ok(_clan_id) => {
                 cx.update(|cx| {
                     crate::router::navigate(cx, crate::router::Route::Chat);
@@ -185,8 +230,7 @@ impl CreateClanModal {
                     });
                 });
             }
-        })
-        .detach();
+        }));
     }
 
     fn render_template_step(&self, locale: &str, cx: &mut Context<Self>) -> AnyElement {

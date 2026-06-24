@@ -5,9 +5,9 @@ use crate::components::TextChangeHandler;
 use crate::theme::ActiveTheme;
 
 pub struct FormField {
-    label: Option<String>,
+    label: Option<SharedString>,
     input: Entity<InputState>,
-    error: Option<String>,
+    error: Option<SharedString>,
     masked: bool,
     on_change: Option<TextChangeHandler>,
     _subscriptions: Vec<Subscription>,
@@ -33,7 +33,7 @@ impl FormField {
         })];
 
         Self {
-            label: Some(label_str),
+            label: Some(SharedString::from(label_str.to_uppercase())),
             input,
             error: None,
             masked: false,
@@ -54,7 +54,7 @@ impl FormField {
     }
 
     pub fn set_error(&mut self, err: Option<String>, cx: &mut Context<Self>) {
-        self.error = err;
+        self.error = err.map(SharedString::from);
         cx.notify();
     }
 
@@ -79,7 +79,7 @@ impl Render for FormField {
                     .text_xs()
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(theme.text_secondary)
-                    .child(label.to_uppercase()),
+                    .child(label.clone()),
             );
         }
 
@@ -95,7 +95,7 @@ impl Render for FormField {
                 div()
                     .text_xs()
                     .text_color(theme.status_dnd)
-                    .child(SharedString::from(error.clone())),
+                    .child(error.clone()),
             );
         }
 

@@ -15,10 +15,9 @@ pub struct Notification {
 
 /// Show a desktop notification.  Fire-and-forget; errors are logged but not propagated.
 pub fn show(notification: &Notification) {
-    tracing::info!(
-        "Notification [{}]: {}",
-        notification.title,
-        notification.body
+    tracing::debug!(
+        channel_id = ?notification.channel_id,
+        "Showing desktop notification"
     );
 
     #[cfg(target_os = "macos")]
@@ -41,57 +40,53 @@ pub fn show(notification: &Notification) {
 fn show_macos(n: &Notification) {
     use objc::runtime::Object;
     use objc::{class, msg_send, sel, sel_impl};
+    use std::os::raw::c_void;
 
     let title = n.title.clone();
     let body = n.body.clone();
     let category = n.channel_id.clone().unwrap_or_default();
 
-    // UNUserNotificationCenter operations must happen on the main thread in
-    // a macOS app that has an NSApplication.  We dispatch to it asynchronously.
-    // GPUI's main thread is always the UI thread, so this is safe.
-    std::thread::spawn(move || unsafe {
-        // [UNUserNotificationCenter currentNotificationCenter]
+    unsafe extern "C" {
+        fn dispatch_get_main_queue() -> *mut c_void;
+        fn dispatch_async_f(
+            queue: *mut c_void,
+            context: *mut c_void,
+            work: unsafe extern "C" fn(*mut c_void),
+        );
+    }
+
+    unsafe extern "C" fn trampoline(ctx: *mut c_void) {
+        let work = unsafe { Box::from_raw(ctx as *mut Box<dyn FnOnce()>) };
+        (*work)();
+    }
+
+    let work: Box<dyn FnOnce()> = Box::new(move || unsafe {
         let center_cls = class!(UNUserNotificationCenter);
         let center: *mut Object = msg_send![center_cls, currentNotificationCenter];
 
-        // Request authorisation (alert + sound + badge).
-        // The block fires once the user responds; we ignore the result here.
-        // On subsequent calls the system returns the cached decision instantly.
-        let options: usize = 0b111; // UNAuthorizationOptionBadge|Sound|Alert
+        let options: usize = 0b111;
         let _: () = msg_send![
             center,
             requestAuthorizationWithOptions: options
             completionHandler: objc_block_noop()
         ];
 
-        // Build the notification content.
-        // [UNMutableNotificationContent new]
         let content_cls = class!(UNMutableNotificationContent);
         let content: *mut Object = msg_send![content_cls, new];
 
-        // content.title = title
         let ns_title = nsstring(&title);
         let _: () = msg_send![content, setTitle: ns_title];
 
-        // content.body = body
         let ns_body = nsstring(&body);
         let _: () = msg_send![content, setBody: ns_body];
 
-        // content.threadIdentifier = category (groups notifications per channel)
         if !category.is_empty() {
             let ns_cat = nsstring(&category);
             let _: () = msg_send![content, setThreadIdentifier: ns_cat];
         }
 
-        // [UNNotificationRequest requestWithIdentifier:content:trigger:]
-        // identifier = UUID string so each notification is independent
-        let uuid_str = format!(
-            "mezon-{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_nanos()
-        );
+        let counter = NOTIFICATION_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let uuid_str = format!("mezon-{counter}");
         let ns_uuid = nsstring(&uuid_str);
         let request_cls = class!(UNNotificationRequest);
         let request: *mut Object = msg_send![
@@ -101,14 +96,21 @@ fn show_macos(n: &Notification) {
             trigger: std::ptr::null::<Object>()
         ];
 
-        // [center addNotificationRequest:request withCompletionHandler:nil]
         let _: () = msg_send![
             center,
             addNotificationRequest: request
             withCompletionHandler: std::ptr::null::<Object>()
         ];
     });
+
+    let ctx = Box::into_raw(Box::new(work)) as *mut c_void;
+    unsafe {
+        dispatch_async_f(dispatch_get_main_queue(), ctx, trampoline);
+    }
 }
+
+#[cfg(target_os = "macos")]
+static NOTIFICATION_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// Create an Objective-C NSString from a Rust &str.
 #[cfg(target_os = "macos")]

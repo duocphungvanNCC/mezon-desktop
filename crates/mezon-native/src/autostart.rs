@@ -19,9 +19,12 @@ pub fn sync_auto_start(enabled: bool) {
 /// Enable or disable the login item.
 pub fn set_auto_start(enabled: bool) -> Result<()> {
     let exe = std::env::current_exe()?;
+    let exe_str = exe
+        .to_str()
+        .ok_or_else(|| anyhow::anyhow!("executable path is not valid UTF-8"))?;
     let auto = AutoLaunchBuilder::new()
         .set_app_name("Mezon")
-        .set_app_path(exe.to_str().unwrap_or("mezon"))
+        .set_app_path(exe_str)
         .build()?;
 
     if enabled {

@@ -73,7 +73,8 @@ impl SingleInstance {
                         tracing::info!("Another instance is already running");
                         if let Some(url) = forward_url {
                             let _ = stream.write_all(url.as_bytes());
-                            tracing::debug!("Forwarded URL to running instance: {url}");
+                            let safe = url.split(['?', '#']).next().unwrap_or_default();
+                            tracing::debug!("Forwarded URL to running instance: {safe}");
                         }
                         return Ok(None);
                     }
@@ -156,7 +157,8 @@ impl SingleInstance {
                 tracing::info!("Another instance is already running (Windows named pipe)");
                 if let Some(url) = forward_url {
                     let _ = pipe.write_all(url.as_bytes());
-                    tracing::debug!("Forwarded URL to running instance via named pipe: {url}");
+                    let safe = url.split(['?', '#']).next().unwrap_or_default();
+                    tracing::debug!("Forwarded URL to running instance via named pipe: {safe}");
                 }
                 return Ok(None);
             }
@@ -224,7 +226,6 @@ impl SingleInstance {
         std::thread::Builder::new()
             .name("mezon-single-instance".into())
             .spawn(move || {
-                // Reconstruct HANDLE from raw value (thread owns it now)
                 let h = windows::Win32::Foundation::HANDLE(raw as *mut std::ffi::c_void);
                 loop {
                     let connected =
@@ -243,12 +244,10 @@ impl SingleInstance {
                         };
                         if ok && bytes_read > 0 {
                             if let Ok(url) = std::str::from_utf8(&buf[..bytes_read as usize]) {
+                                let safe = url.split(['?', '#']).next().unwrap_or_default();
                                 tracing::debug!(
-                                    "Named pipe: received URL from secondary instance: {url}"
+                                    "Named pipe: received URL from secondary instance: {safe}"
                                 );
-                                // No GPUI context here — URL wiring is handled via
-                                // the mpsc channel in main.rs after the pipe listener
-                                // notifies via listen_for_urls().
                             }
                         }
                         unsafe {
@@ -257,7 +256,9 @@ impl SingleInstance {
                     }
                 }
             })
-            .expect("Failed to spawn single-instance pipe listener thread");
+            .map_err(|e| {
+                anyhow::anyhow!("Failed to spawn single-instance pipe listener thread: {e}")
+            })?;
 
         Ok(())
     }
@@ -298,15 +299,20 @@ impl SingleInstance {
         };
 
         std::thread::spawn(move || {
-            use std::io::Read as _;
+            use std::io::{BufReader, Read as _};
             for stream in listener.incoming() {
                 match stream {
-                    Ok(mut s) => {
+                    Ok(s) => {
                         let mut buf = String::new();
-                        if s.read_to_string(&mut buf).is_ok() && !buf.is_empty() {
+                        let ok = BufReader::new(s)
+                            .take(4096)
+                            .read_to_string(&mut buf)
+                            .is_ok();
+                        if ok && !buf.is_empty() {
                             let url = buf.trim().to_owned();
+                            let safe = url.split(['?', '#']).next().unwrap_or_default();
                             tracing::debug!(
-                                "Unix socket: received deep link from secondary instance: {url}"
+                                "Unix socket: received deep link from secondary instance: {safe}"
                             );
                             callback(url);
                         }
@@ -377,7 +383,8 @@ impl SingleInstance {
                         if ok && bytes_read > 0 {
                             if let Ok(url) = std::str::from_utf8(&buf[..bytes_read as usize]) {
                                 let url = url.trim().to_owned();
-                                tracing::debug!("Named pipe URL listener: received {url}");
+                                let safe = url.split(['?', '#']).next().unwrap_or_default();
+                                tracing::debug!("Named pipe URL listener: received {safe}");
                                 callback(url);
                             }
                         }
@@ -387,7 +394,9 @@ impl SingleInstance {
                     }
                 }
             })
-            .expect("Failed to spawn pipe URL listener thread");
+            .map_err(|e| {
+                tracing::warn!("Failed to spawn pipe URL listener thread: {e}");
+            });
     }
 }
 

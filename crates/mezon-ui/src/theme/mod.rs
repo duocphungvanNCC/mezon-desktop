@@ -86,6 +86,13 @@ fn apply_zed_palette(theme: &Theme, cx: &mut App) {
     colors.text_disabled = theme.text_muted.into();
     colors.text_accent = theme.brand.into();
 
+    let scroll = theme.tokens.thread_scroll.into();
+    colors.scrollbar_thumb_background = scroll;
+    colors.scrollbar_thumb_hover_background = theme.text_muted.into();
+    colors.scrollbar_thumb_active_background = theme.text_secondary.into();
+    colors.scrollbar_thumb_border = gpui::Hsla::transparent_black();
+    colors.scrollbar_track_background = gpui::Hsla::transparent_black();
+
     let status = &mut zed.styles.status;
     status.error = theme.status_dnd.into();
     status.success = theme.status_online.into();

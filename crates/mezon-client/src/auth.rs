@@ -18,7 +18,7 @@ use http_client::{AsyncBody, HttpClient, http};
 use reqwest_client::ReqwestClient;
 use serde::{Deserialize, Serialize};
 
-use crate::session::Session;
+use crate::session::{Session, decode_jwt_claims};
 
 // ─── Default connection constants (fallback when `.env` is absent) ───────────
 // Override via `.env` — loaded into [`mezon_store::AppConfig`] at startup.
@@ -97,6 +97,42 @@ struct ConfirmOtpBody<'a> {
 struct RefreshBody<'a> {
     token: &'a str,
     is_remember: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct MezonAuthBody<'a> {
+    account: MezonAccount<'a>,
+    create: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct MezonAccount<'a> {
+    token: &'a str,
+}
+
+#[derive(Debug, Serialize)]
+struct SmsOtpRequestBody<'a> {
+    account: SmsAccount<'a>,
+}
+
+#[derive(Debug, Serialize)]
+struct SmsAccount<'a> {
+    phoneno: &'a str,
+}
+
+#[derive(Debug, Deserialize)]
+struct OtpConfirmResponse {
+    req_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct QrLoginId {
+    pub login_id: String,
+}
+
+#[derive(Debug, Serialize)]
+struct QrConfirmBody<'a> {
+    login_id: &'a str,
 }
 
 // ─── Client ──────────────────────────────────────────────────────────────────
@@ -229,7 +265,7 @@ impl MezonClient {
             token: api.token,
             refresh_token: api.refresh_token,
             session_id: api.session_id.unwrap_or_default(),
-            expires_at,
+            expires_at: expires_at.unwrap_or(0),
             api_url: api.api_url,
             api_host,
             api_port,
@@ -300,6 +336,53 @@ impl MezonClient {
         let api: ApiSession = self.post_json("/v2/account/session/refresh", &body).await?;
         Ok(self.parse_session(api))
     }
+
+    pub async fn authenticate_mezon(&self, token: &str) -> Result<Session> {
+        let body = MezonAuthBody {
+            account: MezonAccount { token },
+            create: false,
+        };
+        let api: ApiSession = self
+            .post_json("/v2/account/authenticate/mezon", &body)
+            .await?;
+        Ok(self.parse_session(api))
+    }
+
+    pub async fn request_sms_otp(&self, phone: &str) -> Result<String> {
+        let body = SmsOtpRequestBody {
+            account: SmsAccount { phoneno: phone },
+        };
+        let resp: OtpConfirmResponse = self
+            .post_json("/v2/account/authenticate/smsotp", &body)
+            .await?;
+        resp.req_id
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| anyhow::anyhow!("SMS OTP request returned no req_id"))
+    }
+
+    pub async fn confirm_otp_sms(&self, req_id: &str, otp_code: &str) -> Result<Session> {
+        let body = ConfirmOtpBody { otp_code, req_id };
+        let api: ApiSession = self
+            .post_json("/v2/account/authenticate/confirmotp", &body)
+            .await?;
+        Ok(self.parse_session(api))
+    }
+
+    pub async fn create_qr_login(&self) -> Result<QrLoginId> {
+        let body = serde_json::json!({});
+        let resp: QrLoginId = self
+            .post_json("/v2/account/authenticate/createqrlogin", &body)
+            .await?;
+        Ok(resp)
+    }
+
+    pub async fn confirm_qr_login(&self, login_id: &str) -> Result<Session> {
+        let body = QrConfirmBody { login_id };
+        let api: ApiSession = self
+            .post_json("/v2/account/authenticate/checklogin", &body)
+            .await?;
+        Ok(self.parse_session(api))
+    }
 }
 
 fn parse_endpoint(endpoint: Option<&str>) -> (Option<String>, Option<u16>, Option<bool>) {
@@ -325,35 +408,6 @@ fn parse_endpoint(endpoint: Option<&str>) -> (Option<String>, Option<u16>, Optio
     };
 
     (parsed.host_str().map(str::to_owned), parsed.port(), secure)
-}
-
-// ─── JWT helpers ─────────────────────────────────────────────────────────────
-
-/// Decode the payload segment of a JWT and extract `exp`, `uid`, `usn` claims.
-/// Returns `(user_id, username, expires_at)`. Falls back to empty strings / 0 on error.
-fn decode_jwt_claims(token: &str) -> (String, String, u64) {
-    let payload = token.split('.').nth(1).unwrap_or("");
-    let decoded = base64::engine::general_purpose::URL_SAFE_NO_PAD
-        .decode(payload)
-        .unwrap_or_default();
-    let json: serde_json::Value = serde_json::from_slice(&decoded).unwrap_or_default();
-
-    let user_id = json
-        .get("uid")
-        .and_then(|v| {
-            v.as_str()
-                .map(str::to_owned)
-                .or_else(|| v.as_u64().map(|n| n.to_string()))
-        })
-        .unwrap_or_default();
-    let username = json
-        .get("usn")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_owned();
-    let expires_at = json.get("exp").and_then(|v| v.as_u64()).unwrap_or(0);
-
-    (user_id, username, expires_at)
 }
 
 #[cfg(test)]
@@ -387,19 +441,16 @@ mod tests {
 
     #[test]
     fn test_decode_jwt_claims() {
-        // Base64Url-encoded payload: {"uid":"user123","usn":"testuser","exp":1700000000}
-        // payload = eyJ1aWQiOiJ1c2VyMTIzIiwidXNuIjoidGVzdHVzZXIiLCJleHAiOjE3MDAwMDAwMDB9
         let token =
             "header.eyJ1aWQiOiJ1c2VyMTIzIiwidXNuIjoidGVzdHVzZXIiLCJleHAiOjE3MDAwMDAwMDB9.signature";
         let (user_id, username, expires_at) = decode_jwt_claims(token);
         assert_eq!(user_id, "user123");
         assert_eq!(username, "testuser");
-        assert_eq!(expires_at, 1700000000);
+        assert_eq!(expires_at, Some(1700000000));
 
-        // Fallbacks on invalid token
         let (user_id, username, expires_at) = decode_jwt_claims("invalid_token");
         assert_eq!(user_id, "");
         assert_eq!(username, "");
-        assert_eq!(expires_at, 0);
+        assert_eq!(expires_at, None);
     }
 }

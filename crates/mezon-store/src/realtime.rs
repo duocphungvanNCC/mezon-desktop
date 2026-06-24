@@ -33,6 +33,8 @@ pub enum RealtimeKind {
     VoiceJoined,
     VoiceLeaved,
     MarkAsRead,
+    UserChannelAdded,
+    UserChannelRemoved,
 }
 
 impl RealtimeKind {
@@ -55,6 +57,8 @@ impl RealtimeKind {
             RealtimeEvent::VoiceJoined(_) => Self::VoiceJoined,
             RealtimeEvent::VoiceLeaved(_) => Self::VoiceLeaved,
             RealtimeEvent::MarkAsRead(_) => Self::MarkAsRead,
+            RealtimeEvent::UserChannelAdded(_) => Self::UserChannelAdded,
+            RealtimeEvent::UserChannelRemoved(_) => Self::UserChannelRemoved,
             _ => return None,
         })
     }
@@ -198,6 +202,16 @@ mod tests {
         assert_eq!(
             RealtimeKind::of(&RealtimeEvent::MarkAsRead(realtime::MarkAsRead::default())),
             Some(RealtimeKind::MarkAsRead)
+        );
+    }
+
+    #[test]
+    fn kind_of_maps_user_channel_added() {
+        assert_eq!(
+            RealtimeKind::of(&RealtimeEvent::UserChannelAdded(
+                realtime::UserChannelAdded::default()
+            )),
+            Some(RealtimeKind::UserChannelAdded)
         );
     }
 

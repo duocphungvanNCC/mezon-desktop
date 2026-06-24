@@ -224,6 +224,26 @@ impl TransportClient {
             .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
     }
 
+    pub async fn mark_as_read(
+        &self,
+        channel_id: &str,
+        category_id: &str,
+        clan_id: &str,
+    ) -> Result<()> {
+        let transport = self.inner.clone();
+        let channel_id = channel_id.to_string();
+        let category_id = category_id.to_string();
+        let clan_id = clan_id.to_string();
+        runtime()
+            .spawn(async move {
+                transport
+                    .mark_as_read(&channel_id, &category_id, &clan_id)
+                    .await
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
     pub async fn list_categories_typed(
         &self,
         clan_id: &str,
