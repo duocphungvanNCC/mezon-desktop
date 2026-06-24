@@ -6,7 +6,7 @@ use gpui::{
     InspectorElementId, IntoElement, KeyBinding, LayoutId, MouseButton, MouseDownEvent,
     MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point, Render, RenderOnce, ShapedLine,
     SharedString, Style, StyleRefinement, Styled, TextRun, UTF16Selection, UnderlineStyle, Window,
-    actions, div, fill, point, prelude::*, px, size,
+    actions, div, fill, point, prelude::*, px, size, svg,
 };
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -75,6 +75,14 @@ pub struct InputState {
     masked: bool,
     multi_line: bool,
     validate: Option<ValidateFn>,
+    height: Option<Pixels>,
+    radius: Option<Pixels>,
+    bg_override: Option<Hsla>,
+    text_color_override: Option<Hsla>,
+    text_size_override: Option<Pixels>,
+    padding_x: Option<Pixels>,
+    padding_right: Option<Pixels>,
+    show_border: bool,
 }
 
 impl EventEmitter<InputEvent> for InputState {}
@@ -94,11 +102,59 @@ impl InputState {
             masked: false,
             multi_line: false,
             validate: None,
+            height: None,
+            radius: None,
+            bg_override: None,
+            text_color_override: None,
+            text_size_override: None,
+            padding_x: None,
+            padding_right: None,
+            show_border: true,
         }
     }
 
     pub fn placeholder(mut self, placeholder: impl Into<SharedString>) -> Self {
         self.placeholder = placeholder.into();
+        self
+    }
+
+    pub fn height(mut self, height: Pixels) -> Self {
+        self.height = Some(height);
+        self
+    }
+
+    pub fn radius(mut self, radius: Pixels) -> Self {
+        self.radius = Some(radius);
+        self
+    }
+
+    pub fn bg(mut self, bg: impl Into<Hsla>) -> Self {
+        self.bg_override = Some(bg.into());
+        self
+    }
+
+    pub fn text_color(mut self, color: impl Into<Hsla>) -> Self {
+        self.text_color_override = Some(color.into());
+        self
+    }
+
+    pub fn text_size(mut self, size: Pixels) -> Self {
+        self.text_size_override = Some(size);
+        self
+    }
+
+    pub fn padding_x(mut self, padding: Pixels) -> Self {
+        self.padding_x = Some(padding);
+        self
+    }
+
+    pub fn padding_right(mut self, padding: Pixels) -> Self {
+        self.padding_right = Some(padding);
+        self
+    }
+
+    pub fn borderless(mut self) -> Self {
+        self.show_border = false;
         self
     }
 
@@ -539,10 +595,20 @@ impl Focusable for InputState {
 impl Render for InputState {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let focused = self.focus_handle.is_focused(window);
-        let bg = cx.theme().bg_tertiary;
-        let text_color = cx.theme().text_primary;
+        let bg: Hsla = self.bg_override.unwrap_or(cx.theme().bg_tertiary.into());
+        let text_color: Hsla = self
+            .text_color_override
+            .unwrap_or(cx.theme().text_primary.into());
         let border = cx.theme().border;
         let focus_border = cx.theme().brand;
+        let height = self
+            .height
+            .unwrap_or(if self.multi_line { px(72.) } else { px(36.) });
+        let radius = self.radius;
+        let padding_x = self.padding_x.unwrap_or(px(10.));
+        let padding_right = self.padding_right;
+        let text_size = self.text_size_override.unwrap_or(px(14.));
+        let show_border = self.show_border;
 
         div()
             .key_context(KEY_CONTEXT)
@@ -570,14 +636,18 @@ impl Render for InputState {
             .when(self.multi_line, |el| el.items_start().py(px(8.)))
             .when(!self.multi_line, |el| el.items_center())
             .w_full()
-            .min_h(if self.multi_line { px(72.) } else { px(36.) })
-            .px(px(10.))
-            .rounded_md()
+            .min_h(height)
+            .px(padding_x)
+            .when_some(padding_right, |el, p| el.pr(p))
+            .when(radius.is_none(), |el| el.rounded_md())
+            .when_some(radius, |el, r| el.rounded(r))
             .bg(bg)
             .text_color(text_color)
-            .text_size(px(14.))
-            .border_1()
-            .border_color(if focused { focus_border } else { border })
+            .text_size(text_size)
+            .when(show_border, |el| {
+                el.border_1()
+                    .border_color(if focused { focus_border } else { border })
+            })
             .child(
                 div()
                     .flex_1()
@@ -789,8 +859,6 @@ pub struct Input {
     state: Entity<InputState>,
     base: Div,
     mask_toggle: bool,
-    show_label: SharedString,
-    hide_label: SharedString,
 }
 
 impl Input {
@@ -799,23 +867,11 @@ impl Input {
             state: state.clone(),
             base: div().w_full(),
             mask_toggle: false,
-            show_label: "Show".into(),
-            hide_label: "Hide".into(),
         }
     }
 
     pub fn mask_toggle(mut self) -> Self {
         self.mask_toggle = true;
-        self
-    }
-
-    pub fn show_label(mut self, label: impl Into<SharedString>) -> Self {
-        self.show_label = label.into();
-        self
-    }
-
-    pub fn hide_label(mut self, label: impl Into<SharedString>) -> Self {
-        self.hide_label = label.into();
         self
     }
 }
@@ -832,17 +888,28 @@ impl RenderOnce for Input {
         let masked = state.read(cx).masked;
         let toggle_color = cx.theme().text_muted;
 
-        let show_label = self.show_label.clone();
-        let hide_label = self.hide_label.clone();
         let toggle = self.mask_toggle.then(|| {
             let state = state.clone();
             div()
                 .id("mask-toggle")
-                .px(px(6.))
+                .absolute()
+                .top_0()
+                .bottom_0()
+                .right_0()
+                .px(px(16.))
+                .flex()
+                .items_center()
                 .cursor_pointer()
-                .text_xs()
-                .text_color(toggle_color)
-                .child(if masked { show_label } else { hide_label })
+                .child(
+                    svg()
+                        .path(if masked {
+                            "icons/eye-open.svg"
+                        } else {
+                            "icons/eye-close.svg"
+                        })
+                        .size(px(20.))
+                        .text_color(toggle_color),
+                )
                 .on_click(move |_, window, cx| {
                     state.update(cx, |input, cx| {
                         let next = !input.masked;
@@ -852,9 +919,8 @@ impl RenderOnce for Input {
         });
 
         self.base
-            .flex()
-            .items_center()
-            .child(div().flex_1().child(state))
+            .relative()
+            .child(state)
             .when_some(toggle, |el, toggle| el.child(toggle))
     }
 }

@@ -4303,5 +4303,7 @@
   "userProfile.userInfoDM.menu.removeSuccess": "Removed from Group",
   "userProfile.userInfoDM.mezonMemberSince": "MEZON MEMBER SINCE",
   "userProfile.voiceInfo.inVoice": "In voice",
-  "userProfile.voiceInfo.joinVoice": "Join Voice"
+  "userProfile.voiceInfo.joinVoice": "Join Voice",
+  "common.login.genericError": "Something went wrong. Please try again.",
+  "common.login.invalidEmail": "Please enter a valid email address."
 }

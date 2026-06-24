@@ -59,13 +59,14 @@ impl ChatLayout {
 
         cx.subscribe(&PresenceStore::global(cx), |this, _, event, cx| {
             if matches!(event, PresenceEvent::TypingChanged { .. }) {
-                cx.notify();
                 return;
             }
             this.user_info_bar.sync_presence(cx);
             cx.notify();
         })
         .detach();
+        cx.observe(&PresenceStore::global(cx), |_, _, cx| cx.notify())
+            .detach();
         cx.observe(&auth_state, |this, _, cx| {
             this.user_info_bar.sync_presence(cx);
             cx.notify();

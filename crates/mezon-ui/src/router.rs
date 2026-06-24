@@ -129,7 +129,7 @@ impl Route {
                 channel_id: (*channel_id).to_string(),
                 canvas_id: (*canvas_id).to_string(),
             },
-            ["chat", username] => Route::AddFriend {
+            ["chat", username] if !matches!(*username, "direct" | "clans") => Route::AddFriend {
                 username: (*username).to_string(),
             },
             ["invite", invite_id] => Route::Invite {
@@ -436,6 +436,17 @@ mod tests {
         };
         assert_eq!(route.to_path(), "/chat/alice");
         assert_eq!(Route::from_path(&route.to_path()), route);
+    }
+
+    #[test]
+    fn from_path_add_friend_skips_reserved_segments() {
+        assert_eq!(Route::from_path("/chat/direct"), Route::Direct);
+        assert_eq!(
+            Route::from_path("/chat/clans"),
+            Route::NotFound {
+                path: "/chat/clans".into(),
+            }
+        );
     }
 
     #[test]
