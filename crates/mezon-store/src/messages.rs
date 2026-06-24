@@ -315,14 +315,6 @@ impl MessagesStore {
                 .map(|c| c.messages.is_empty())
                 .unwrap_or(true);
             if !empty || self.cache.is_fresh(&channel_id, crate::CACHE_TTL) {
-                if let Some(channel) = ChannelList::global(cx).read(cx).find_channel(&channel_id) {
-                    self.spawn_mark_as_read(
-                        channel_id,
-                        channel.category_id.clone().unwrap_or_default(),
-                        channel.clan_id.clone(),
-                        cx,
-                    );
-                }
                 return;
             }
             self.refetch_current_messages(cx);
@@ -338,7 +330,6 @@ impl MessagesStore {
         self.activate(
             channel.clan_id.clone(),
             channel_id,
-            channel.category_id.clone().unwrap_or_default(),
             !channel.private,
             false,
             CHANNEL_TYPE_CHANNEL,
@@ -369,7 +360,6 @@ impl MessagesStore {
         self.activate(
             "0".to_string(),
             channel_id,
-            String::new(),
             false,
             true,
             channel_type,
@@ -383,7 +373,6 @@ impl MessagesStore {
         &mut self,
         clan_id: String,
         channel_id: String,
-        category_id: String,
         is_public: bool,
         is_dm: bool,
         join_type: i32,
@@ -398,10 +387,6 @@ impl MessagesStore {
         self.loading_more = false;
         self.fetch_generation = self.fetch_generation.wrapping_add(1);
         let generation = self.fetch_generation;
-
-        if !is_dm {
-            self.spawn_mark_as_read(channel_id.clone(), category_id.clone(), clan_id.clone(), cx);
-        }
 
         if !self.joined_channels.contains(&channel_id) {
             self.joined_channels.insert(channel_id.clone());
@@ -427,22 +412,6 @@ impl MessagesStore {
         }
         cx.notify();
         self.spawn_initial_fetch(&clan_id, &channel_id, generation, cx);
-    }
-
-    fn spawn_mark_as_read(
-        &self,
-        channel_id: String,
-        category_id: String,
-        clan_id: String,
-        cx: &mut Context<Self>,
-    ) {
-        let api = self.api.clone();
-        cx.spawn(async move |_, _| {
-            if let Err(e) = api.mark_as_read(&channel_id, &category_id, &clan_id).await {
-                tracing::warn!("mark_as_read failed: {e}");
-            }
-        })
-        .detach();
     }
 
     fn spawn_join(
