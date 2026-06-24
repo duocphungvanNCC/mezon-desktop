@@ -1,7 +1,7 @@
-use gpui::{App, ClickEvent, Entity, SharedString, Window, div, prelude::*, px};
+use gpui::{App, ClickEvent, Context, Entity, SharedString, Window, div, prelude::*, px};
 
 use crate::components::primitives::{Avatar, Icon, IconName, Sizable, Size};
-use crate::theme::Theme;
+use crate::theme::ActiveTheme;
 use mezon_store::{AuthState, PresenceStore};
 
 fn on_settings_click() -> impl Fn(&ClickEvent, &mut Window, &mut App) {
@@ -17,13 +17,25 @@ pub struct UserInfoBar {
 }
 
 impl UserInfoBar {
-    pub fn new(auth_state: Entity<AuthState>, cx: &App) -> Self {
+    pub fn new(auth_state: Entity<AuthState>, cx: &mut Context<Self>) -> Self {
+        cx.observe(&PresenceStore::global(cx), |this, _, cx| {
+            this.sync_presence(cx);
+            cx.notify();
+        })
+        .detach();
+        cx.observe(&auth_state, |this, _, cx| {
+            this.sync_presence(cx);
+            cx.notify();
+        })
+        .detach();
         let username = Self::read_username(&auth_state, cx);
-        Self {
+        let mut bar = Self {
             auth_state,
             username,
             presence: SharedString::from("Offline"),
-        }
+        };
+        bar.sync_presence(cx);
+        bar
     }
 
     fn read_username(auth_state: &Entity<AuthState>, cx: &App) -> SharedString {
@@ -51,8 +63,11 @@ impl UserInfoBar {
             .contains(&user_id);
         self.presence = SharedString::from(if online { "Online" } else { "Offline" });
     }
+}
 
-    pub fn render(&self, theme: &Theme, _cx: &App) -> impl IntoElement {
+impl Render for UserInfoBar {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme();
         let presence_color = match self.presence.as_ref() {
             "Online" => theme.status_online,
             "Idle" => theme.status_idle,
