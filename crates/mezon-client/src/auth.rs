@@ -133,6 +133,7 @@ pub struct QrLoginId {
 #[derive(Debug, Serialize)]
 struct QrConfirmBody<'a> {
     login_id: &'a str,
+    is_remember: bool,
 }
 
 // ─── Client ──────────────────────────────────────────────────────────────────
@@ -376,8 +377,11 @@ impl MezonClient {
         Ok(resp)
     }
 
-    pub async fn confirm_qr_login(&self, login_id: &str) -> Result<Session> {
-        let body = QrConfirmBody { login_id };
+    pub async fn confirm_qr_login(&self, login_id: &str, is_remember: bool) -> Result<Session> {
+        let body = QrConfirmBody {
+            login_id,
+            is_remember,
+        };
         let api: ApiSession = self
             .post_json("/v2/account/authenticate/checklogin", &body)
             .await?;
