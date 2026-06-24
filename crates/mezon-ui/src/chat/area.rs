@@ -2,12 +2,13 @@ use std::sync::Arc;
 
 use crate::components::primitives::{InputEvent, InputState};
 use gpui::{AnyView, App, Context, Entity, Window, div, prelude::*};
-use mezon_store::Settings;
+use ui::PopoverMenuHandle;
 
 use crate::chat::ReplyTarget;
 use crate::chat::channel_header::ChannelHeader;
 use crate::chat::input_bar::InputBar;
 use crate::chat::message_list::MessageTimeline;
+use crate::chat::pinned_popover::PinnedPopoverPanel;
 use crate::theme::Theme;
 
 pub struct ChatArea {
@@ -15,11 +16,11 @@ pub struct ChatArea {
     pub(crate) input_state: Option<Entity<InputState>>,
     #[allow(dead_code)]
     replying_to: Option<ReplyTarget>,
-    settings: Entity<Settings>,
+    settings: Entity<mezon_store::Settings>,
 }
 
 impl ChatArea {
-    pub fn new(settings: Entity<Settings>, cx: &mut Context<crate::ChatLayout>) -> Self {
+    pub fn new(settings: Entity<mezon_store::Settings>, cx: &mut Context<crate::ChatLayout>) -> Self {
         let timeline = cx.new({
             let settings = settings.clone();
             move |cx| MessageTimeline::new(settings, cx)
@@ -58,8 +59,10 @@ impl ChatArea {
         layout_entity: Entity<crate::ChatLayout>,
         channel_name: &str,
         is_dm: bool,
-        pin_popover: Option<gpui::AnyElement>,
-    ) -> impl IntoElement {
+        pin_handle: Option<PopoverMenuHandle<PinnedPopoverPanel>>,
+        window: &mut Window,
+        cx: &mut Context<crate::ChatLayout>,
+    ) -> impl IntoElement + use<> {
         let on_send = {
             let handle = layout_entity.clone();
             Arc::new(move |window: &mut Window, cx: &mut App| {
@@ -71,17 +74,17 @@ impl ChatArea {
             .with_input(self.input_state.clone().unwrap())
             .on_send(on_send);
 
-        let header = ChannelHeader::new(channel_name)
-            .dm(is_dm)
-            .layout(layout_entity.clone())
-            .pin_popover(pin_popover);
+        let mut header = ChannelHeader::new(channel_name).dm(is_dm);
+        if let Some(handle) = pin_handle {
+            header = header.pin_popover(handle, self.settings.clone());
+        }
 
         div()
             .flex()
             .flex_col()
             .flex_1()
             .min_h_0()
-            .child(header.render(theme))
+            .child(header.render(theme, window, cx))
             .child(
                 div()
                     .flex_1()

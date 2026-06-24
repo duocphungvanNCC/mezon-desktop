@@ -1,10 +1,12 @@
-use gpui::{AnyView, Context, Entity, ScrollHandle, StyleRefinement, Window, div, prelude::*, px};
+use gpui::{AnyView, Context, Entity, StyleRefinement, Window, div, prelude::*, px};
 use mezon_store::{
     AuthState, ChannelList, ClanList, DirectChannel, DirectMessageStore, MessagesStore,
     PinnedMessagesStore, PresenceEvent, PresenceStore, Settings,
 };
+use ui::PopoverMenuHandle;
 
 use crate::chat::area::ChatArea;
+use crate::chat::pinned_popover::PinnedPopoverPanel;
 use crate::components::compositions::user_info_bar::UserInfoBar;
 use crate::router::{Route, Router};
 use crate::theme::{ActiveTheme, Theme};
@@ -22,8 +24,7 @@ pub struct ChatLayout {
     auth_state: Entity<AuthState>,
     settings: Entity<Settings>,
     pending_channel_id: Option<String>,
-    pin_open: bool,
-    pin_scroll: ScrollHandle,
+    pin_popover_handle: PopoverMenuHandle<PinnedPopoverPanel>,
 }
 
 impl ChatLayout {
@@ -89,10 +90,17 @@ impl ChatLayout {
         cx.observe(&channel_list, |this, _, cx| {
             this.apply_pending_channel(cx);
             this.ensure_active_channel_for_clan(cx);
+            this.pin_popover_handle.hide(cx);
             cx.notify();
         })
         .detach();
         cx.observe(&Router::global(cx), |this, _, cx| {
+            if matches!(
+                Router::global(cx).read(cx).route(),
+                Route::Direct | Route::DirectMessage { .. }
+            ) {
+                this.pin_popover_handle.hide(cx);
+            }
             this.sync_active_from_route(cx);
             cx.notify();
         })
@@ -109,8 +117,7 @@ impl ChatLayout {
             chat_area,
             settings,
             pending_channel_id: None,
-            pin_open: false,
-            pin_scroll: ScrollHandle::new(),
+            pin_popover_handle: PopoverMenuHandle::default(),
         };
         this.user_info_bar.sync_presence(cx);
         this.sync_active_from_route(cx);
@@ -310,48 +317,6 @@ impl ChatLayout {
         });
     }
 
-    /// Toggle the pinned-messages popover. Loads the pin list lazily when opening.
-    pub(crate) fn toggle_pin_popover(&mut self, cx: &mut Context<Self>) {
-        self.pin_open = !self.pin_open;
-        if self.pin_open {
-            PinnedMessagesStore::global(cx).update(cx, |store, cx| store.ensure_loaded(cx));
-        }
-        cx.notify();
-    }
-
-    pub(crate) fn close_pin_popover(&mut self, cx: &mut Context<Self>) {
-        if self.pin_open {
-            self.pin_open = false;
-            cx.notify();
-        }
-    }
-
-    fn build_pin_popover(
-        &self,
-        locale: &str,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Option<gpui::AnyElement> {
-        if !self.pin_open {
-            return None;
-        }
-        let theme = cx.theme().clone();
-        let store = PinnedMessagesStore::global(cx);
-        let pinned = store.read(cx).pinned().to_vec();
-        let loading = store.read(cx).is_loading();
-        let layout = cx.entity();
-        Some(crate::chat::pinned_popover::render_pin_panel(
-            &pinned,
-            loading,
-            &theme,
-            locale,
-            layout,
-            &self.pin_scroll,
-            window,
-            cx,
-        ))
-    }
-
     fn current_dm(&self, cx: &Context<Self>) -> Option<DirectChannel> {
         let Route::DirectMessage { direct_id, .. } = Router::global(cx).read(cx).route() else {
             return None;
@@ -378,14 +343,22 @@ impl ChatLayout {
 
     fn render_content(&self, window: &mut Window, cx: &mut Context<Self>) -> gpui::AnyElement {
         let locale = self.settings.read(cx).language.clone();
-        let pin_popover = self.build_pin_popover(&locale, window, cx);
-        let theme = cx.theme();
+        let theme = cx.theme().clone();
 
         if self.is_dm_route(cx) {
             if let Some(dm) = self.current_dm(cx) {
                 return self
                     .chat_area
-                    .render(theme, &locale, cx.entity(), &dm.label, true, pin_popover)
+                    .render(
+                        &theme,
+                        &locale,
+                        cx.entity(),
+                        &dm.label,
+                        true,
+                        None,
+                        window,
+                        cx,
+                    )
                     .into_any_element();
             }
             return div()
@@ -417,7 +390,16 @@ impl ChatLayout {
             let name = ch.name.clone();
             return self
                 .chat_area
-                .render(theme, &locale, cx.entity(), &name, false, pin_popover)
+                .render(
+                    &theme,
+                    &locale,
+                    cx.entity(),
+                    &name,
+                    false,
+                    Some(self.pin_popover_handle.clone()),
+                    window,
+                    cx,
+                )
                 .into_any_element();
         }
 
@@ -427,13 +409,13 @@ impl ChatLayout {
 
         let placeholder = match route {
             Route::Chat => self.render_placeholder(
-                theme,
+                &theme,
                 crate::components::primitives::IconName::Inbox,
                 mezon_i18n::t(&locale, "nav.chat"),
                 &current_path,
             ),
             Route::Direct => self.render_placeholder(
-                theme,
+                &theme,
                 crate::components::primitives::IconName::People,
                 mezon_i18n::t(&locale, "dm.title"),
                 &current_path,
@@ -442,7 +424,7 @@ impl ChatLayout {
                 direct_id,
                 message_type: _,
             } => self.render_placeholder(
-                theme,
+                &theme,
                 crate::components::primitives::IconName::People,
                 &format!("Direct {direct_id}"),
                 &current_path,
@@ -451,7 +433,7 @@ impl ChatLayout {
                 clan_id: _,
                 channel_id,
             } => self.render_placeholder(
-                theme,
+                &theme,
                 crate::components::primitives::IconName::Hashtag,
                 &format!("#{channel_id}"),
                 &current_path,

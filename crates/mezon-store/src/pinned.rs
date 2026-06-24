@@ -3,9 +3,12 @@ use std::sync::Arc;
 use gpui::{App, AppContext, Context, Entity, Global, SharedString, Subscription};
 use mezon_client::AppApi;
 use mezon_client::transport::ApiPinMessage;
+use mezon_client::RealtimeEvent;
+use mezon_proto::realtime::LastPinMessageEvent;
 
 use crate::AppConfig;
 use crate::channel::{ChannelEvent, ChannelList};
+use crate::realtime::{RealtimeDispatch, RealtimeKind};
 
 /// A pinned message for the active channel, ready for the UI.
 #[derive(Debug, Clone)]
@@ -50,6 +53,8 @@ impl PinnedMessagesStore {
     }
 
     fn new(api: Arc<AppApi>, cx: &mut Context<Self>) -> Self {
+        Self::register_realtime(cx);
+
         let channel_sub = cx.subscribe(&ChannelList::global(cx), |this, _list, event, cx| {
             if let ChannelEvent::ActiveChannelChanged(channel_id) = event {
                 this.on_active_channel_changed(channel_id.clone(), cx);
@@ -69,6 +74,23 @@ impl PinnedMessagesStore {
             store.clan_id = Some(channel.clan_id.clone());
         }
         store
+    }
+
+    fn register_realtime(cx: &mut Context<Self>) {
+        let entity = cx.entity();
+        RealtimeDispatch::global(cx).update(cx, |dispatch, _| {
+            dispatch.on(RealtimeKind::LastPinMessage, &entity, |this, event, cx| {
+                this.handle_last_pin(event, cx);
+            });
+            dispatch.on(RealtimeKind::UnpinMessage, &entity, |this, event, cx| {
+                this.handle_unpin(event, cx);
+            });
+            dispatch.on_lagged(&entity, |this, cx| {
+                if this.loaded_channel.is_some() {
+                    this.refresh(cx);
+                }
+            });
+        });
     }
 
     pub fn pinned(&self) -> &[PinnedMessage] {
@@ -151,6 +173,52 @@ impl PinnedMessagesStore {
         .detach();
     }
 
+    fn handle_last_pin(&mut self, event: &RealtimeEvent, cx: &mut Context<Self>) {
+        let RealtimeEvent::LastPinMessage(pin) = event else {
+            return;
+        };
+        if pin.operation != 1 || pin.channel_id == 0 {
+            return;
+        }
+        let channel_id = pin.channel_id.to_string();
+        if self.channel_id.as_deref() != Some(channel_id.as_str()) {
+            return;
+        }
+        let message_id = pin.message_id.to_string();
+        if self
+            .messages
+            .iter()
+            .any(|m| m.message_id == message_id)
+        {
+            return;
+        }
+        let cfg = AppConfig::try_global(cx);
+        self.messages.insert(0, pinned_from_last_pin_event(pin, cfg));
+        cx.notify();
+    }
+
+    fn handle_unpin(&mut self, event: &RealtimeEvent, cx: &mut Context<Self>) {
+        let RealtimeEvent::UnpinMessage(ev) = event else {
+            return;
+        };
+        if ev.channel_id == 0 {
+            return;
+        }
+        let channel_id = ev.channel_id.to_string();
+        if self.channel_id.as_deref() != Some(channel_id.as_str()) {
+            return;
+        }
+        let message_id = ev.message_id.to_string();
+        let pin_id = ev.id.to_string();
+        let before = self.messages.len();
+        self.messages.retain(|m| {
+            m.message_id != message_id && m.id != pin_id && m.id != message_id
+        });
+        if self.messages.len() != before {
+            cx.notify();
+        }
+    }
+
     pub fn unpin(&mut self, pin_id: &str, message_id: &str, cx: &mut Context<Self>) {
         let Some(channel_id) = self.channel_id.clone() else {
             return;
@@ -190,5 +258,46 @@ fn pinned_from_api(m: ApiPinMessage, cfg: Option<&AppConfig>) -> PinnedMessage {
         avatar_proxied: avatar_proxied.into(),
         content: m.content,
         create_time: m.create_time,
+    }
+}
+
+fn pinned_from_last_pin_event(pin: &LastPinMessageEvent, cfg: Option<&AppConfig>) -> PinnedMessage {
+    let message_id = pin.message_id.to_string();
+    let avatar = pin.message_sender_avatar.clone();
+    let avatar_proxied = cfg
+        .map(|c| c.avatar_proxy(&avatar))
+        .unwrap_or_else(|| avatar.clone());
+    let create_time = parse_pin_create_time(&pin.message_created_time);
+    PinnedMessage {
+        id: message_id.clone(),
+        message_id,
+        sender_id: pin.message_sender_id.clone(),
+        sender_name: pin.message_sender_username.clone(),
+        avatar_url: avatar,
+        avatar_proxied: avatar_proxied.into(),
+        content: pin.message_content.clone(),
+        create_time,
+    }
+}
+
+fn parse_pin_create_time(raw: &str) -> i64 {
+    if raw.is_empty() {
+        return chrono::Utc::now().timestamp();
+    }
+    if let Ok(ts) = raw.parse::<i64>() {
+        return ts;
+    }
+    chrono::DateTime::parse_from_rfc3339(raw)
+        .map(|dt| dt.timestamp())
+        .unwrap_or_else(|_| chrono::Utc::now().timestamp())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_pin_create_time_unix() {
+        assert_eq!(parse_pin_create_time("1710000000"), 1710000000);
     }
 }

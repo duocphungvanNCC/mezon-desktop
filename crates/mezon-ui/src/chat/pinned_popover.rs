@@ -1,34 +1,96 @@
-use gpui::{
-    AnyElement, App, ClickEvent, Entity, FontWeight, MouseDownEvent, ScrollHandle, SharedString,
-    Window, div, point, prelude::*, px,
-};
-use mezon_store::{PinnedMessage, PinnedMessagesStore};
-use ui::{ScrollAxes, Scrollbars, WithScrollbar};
+use std::rc::Rc;
 
-use crate::chat::layout::ChatLayout;
-use crate::components::primitives::{Avatar, Icon, IconName, Sizable, Size, h_flex, v_flex};
-use crate::theme::Theme;
+use gpui::{
+    App, ClickEvent, Context, DismissEvent, Entity, EventEmitter, FocusHandle, Focusable, FontWeight,
+    ScrollHandle, SharedString, Window, div, point, prelude::*, px,
+};
+use mezon_store::{MessagesStore, PinnedMessage, PinnedMessagesStore, Settings};
+use ui::prelude::*;
+use ui::{Label, PopoverMenuHandle, ScrollAxes, Scrollbars, WithScrollbar};
+
+use crate::components::primitives::{Avatar, Button, ButtonVariants, Icon, IconName, Sizable, Size, h_flex, v_flex};
+use crate::theme::{ActiveTheme, Theme};
 
 const POPOVER_WIDTH: f32 = 420.;
 const HEADER_HEIGHT: f32 = 48.;
 const MIN_BODY_HEIGHT: f32 = 144.;
 const MAX_VH: f32 = 0.8;
 
-#[allow(clippy::too_many_arguments)]
-pub fn render_pin_panel(
-    pinned: &[PinnedMessage],
-    loading: bool,
-    theme: &Theme,
-    locale: &str,
-    layout: Entity<ChatLayout>,
-    scroll: &ScrollHandle,
-    window: &mut Window,
-    cx: &mut App,
-) -> AnyElement {
-    let tokens = &theme.tokens;
-    let close_layout = layout.clone();
+pub struct PinnedPopoverPanel {
+    settings: Entity<Settings>,
+    popover_handle: PopoverMenuHandle<PinnedPopoverPanel>,
+    scroll: ScrollHandle,
+    focus_handle: FocusHandle,
+}
 
-    let header = h_flex()
+impl PinnedPopoverPanel {
+    pub fn new(
+        settings: Entity<Settings>,
+        popover_handle: PopoverMenuHandle<PinnedPopoverPanel>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let focus_handle = cx.focus_handle();
+        cx.on_blur(&focus_handle, window, |_, _, cx| cx.emit(DismissEvent))
+            .detach();
+
+        cx.observe(&PinnedMessagesStore::global(cx), |_, _, cx| cx.notify())
+            .detach();
+        cx.observe(&settings, |_, _, cx| cx.notify()).detach();
+
+        Self {
+            settings,
+            popover_handle,
+            scroll: ScrollHandle::new(),
+            focus_handle,
+        }
+    }
+}
+
+impl Focusable for PinnedPopoverPanel {
+    fn focus_handle(&self, _: &App) -> FocusHandle {
+        self.focus_handle.clone()
+    }
+}
+
+impl EventEmitter<DismissEvent> for PinnedPopoverPanel {}
+
+impl Render for PinnedPopoverPanel {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme().clone();
+        let locale = self.settings.read(cx).language.clone();
+        let store = PinnedMessagesStore::global(cx);
+        let pinned = store.read(cx).pinned().to_vec();
+        let loading = store.read(cx).is_loading();
+        let handle = self.popover_handle.clone();
+        let scroll = self.scroll.clone();
+
+        v_flex()
+            .key_context("menu")
+            .track_focus(&self.focus_handle)
+            .on_action(cx.listener(|_, _: &::menu::Cancel, _window, cx| {
+                cx.emit(DismissEvent);
+            }))
+            .w(px(POPOVER_WIDTH))
+            .overflow_hidden()
+            .elevation_2(cx)
+            .child(render_header(&theme, &locale))
+            .child(render_body(
+                &pinned,
+                loading,
+                &theme,
+                &locale,
+                handle,
+                &scroll,
+                window,
+                cx,
+            ))
+    }
+}
+
+fn render_header(theme: &Theme, locale: &str) -> impl IntoElement {
+    let tokens = &theme.tokens;
+    h_flex()
         .w_full()
         .items_center()
         .gap_3()
@@ -43,29 +105,52 @@ pub fn render_pin_panel(
                 .text_color(tokens.text_theme_primary),
         )
         .child(
-            div()
-                .text_base()
-                .font_weight(FontWeight::MEDIUM)
-                .text_color(tokens.text_theme_primary)
-                .child(mezon_i18n::t(locale, "chat.pinnedMessages")),
-        );
+            Label::new(mezon_i18n::t(
+                locale,
+                "channelTopbar.modals.pinnedMessages.title",
+            ))
+            .size(LabelSize::Default),
+        )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_body(
+    pinned: &[PinnedMessage],
+    loading: bool,
+    theme: &Theme,
+    locale: &str,
+    popover_handle: PopoverMenuHandle<PinnedPopoverPanel>,
+    scroll: &ScrollHandle,
+    window: &mut Window,
+    cx: &mut Context<PinnedPopoverPanel>,
+) -> impl IntoElement {
+    let tokens = &theme.tokens;
 
     let content = if pinned.is_empty() {
-        let label = if loading {
-            mezon_i18n::t(locale, "chat.loadingPinned")
+        if loading {
+            div()
+                .flex()
+                .items_center()
+                .justify_center()
+                .size_full()
+                .min_h(px(MIN_BODY_HEIGHT))
+                .child(crate::components::primitives::Spinner::new().with_size(Size::Small))
+                .into_any_element()
         } else {
-            mezon_i18n::t(locale, "chat.noPinnedMessages")
-        };
-        div()
-            .flex()
-            .items_center()
-            .justify_center()
-            .size_full()
-            .min_h(px(MIN_BODY_HEIGHT))
-            .text_sm()
-            .text_color(tokens.text_theme_primary)
-            .child(label)
-            .into_any_element()
+            div()
+                .flex()
+                .items_center()
+                .justify_center()
+                .size_full()
+                .min_h(px(MIN_BODY_HEIGHT))
+                .text_sm()
+                .text_color(tokens.text_theme_primary)
+                .child(mezon_i18n::t(
+                    locale,
+                    "channelTopbar.pinnedMessages.emptyTitle",
+                ))
+                .into_any_element()
+        }
     } else {
         v_flex()
             .w_full()
@@ -75,7 +160,9 @@ pub fn render_pin_panel(
                 pinned
                     .iter()
                     .enumerate()
-                    .map(|(index, msg)| pin_card(index, msg, theme, locale)),
+                    .map(|(index, msg)| {
+                        pin_card(index, msg, theme, locale, popover_handle.clone())
+                    }),
             )
             .into_any_element()
     };
@@ -99,7 +186,7 @@ pub fn render_pin_panel(
         );
 
     let scrollable = f32::from(scroll.max_offset().y) > 0.5;
-    let mut body_children: Vec<AnyElement> = Vec::new();
+    let mut body_children: Vec<gpui::AnyElement> = Vec::new();
     if scrollable {
         body_children.push(scroll_arrow("pin-scroll-up", "⌃", true, scroll, theme));
     }
@@ -108,27 +195,11 @@ pub fn render_pin_panel(
         body_children.push(scroll_arrow("pin-scroll-down", "⌄", false, scroll, theme));
     }
 
-    let body_area = v_flex()
+    v_flex()
         .w_full()
         .min_h(px(MIN_BODY_HEIGHT))
         .max_h(max_body)
-        .children(body_children);
-
-    v_flex()
-        .w(px(POPOVER_WIDTH))
-        .rounded_md()
-        .overflow_hidden()
-        .border_1()
-        .border_color(tokens.border_primary)
-        .bg(tokens.theme_setting_primary)
-        .shadow_lg()
-        .occlude()
-        .on_mouse_down_out(move |_: &MouseDownEvent, _window, cx| {
-            close_layout.update(cx, |layout, cx| layout.close_pin_popover(cx));
-        })
-        .child(header)
-        .child(body_area)
-        .into_any_element()
+        .children(body_children)
 }
 
 fn scroll_arrow(
@@ -137,7 +208,7 @@ fn scroll_arrow(
     up: bool,
     scroll: &ScrollHandle,
     theme: &Theme,
-) -> AnyElement {
+) -> gpui::AnyElement {
     let tokens = &theme.tokens;
     let handle = scroll.clone();
     h_flex()
@@ -175,7 +246,13 @@ fn scroll_arrow(
         .into_any_element()
 }
 
-fn pin_card(index: usize, msg: &PinnedMessage, theme: &Theme, locale: &str) -> AnyElement {
+fn pin_card(
+    index: usize,
+    msg: &PinnedMessage,
+    theme: &Theme,
+    locale: &str,
+    popover_handle: PopoverMenuHandle<PinnedPopoverPanel>,
+) -> gpui::AnyElement {
     let tokens = &theme.tokens;
     let group_name = SharedString::from(format!("pin-card-{index}"));
 
@@ -208,36 +285,25 @@ fn pin_card(index: usize, msg: &PinnedMessage, theme: &Theme, locale: &str) -> A
         .text_color(tokens.text_theme_message)
         .child(msg.content.clone());
 
-    let jump = div()
-        .id(("pin-jump", index))
-        .px(px(6.))
-        .py(px(2.))
-        .rounded(px(6.))
-        .border_1()
-        .border_color(tokens.border_primary)
-        .text_xs()
-        .text_color(tokens.text_theme_primary)
-        .cursor_pointer()
-        .hover(|s| s.text_color(tokens.text_theme_primary_hover))
-        .child(mezon_i18n::t(locale, "chat.jump"));
+    let jump_message_id = msg.message_id.clone();
+    let jump_handle = popover_handle.clone();
+    let jump = Button::new(("pin-jump", index))
+        .label(mezon_i18n::t(locale, "channelTopbar.tooltips.jump"))
+        .ghost()
+        .with_size(Size::XSmall)
+        .on_click(move |_: &ClickEvent, _window, cx| {
+            MessagesStore::global(cx).update(cx, |store, cx| {
+                store.jump_to_message(jump_message_id.clone(), cx);
+            });
+            jump_handle.hide(cx);
+        });
 
     let pin_id = msg.id.clone();
     let message_id = msg.message_id.clone();
-    let delete = div()
-        .id(("pin-del", index))
-        .flex()
-        .items_center()
-        .justify_center()
-        .px(px(6.))
-        .py(px(2.))
-        .rounded(px(6.))
-        .border_1()
-        .border_color(tokens.border_primary)
-        .text_xs()
-        .text_color(tokens.text_theme_primary)
-        .cursor_pointer()
-        .hover(|s| s.text_color(tokens.text_theme_primary_hover))
-        .child("✕")
+    let delete = Button::new(("pin-del", index))
+        .label("✕")
+        .ghost()
+        .with_size(Size::XSmall)
         .on_click(move |_: &ClickEvent, _window, cx| {
             let pin_id = pin_id.clone();
             let message_id = message_id.clone();
@@ -246,13 +312,12 @@ fn pin_card(index: usize, msg: &PinnedMessage, theme: &Theme, locale: &str) -> A
             });
         });
 
-    // Actions are hidden until the card is hovered (named group per card).
     let actions = h_flex()
         .absolute()
         .top(px(8.))
         .right(px(8.))
         .items_center()
-        .gap_2()
+        .gap_1()
         .invisible()
         .group_hover(group_name.clone(), |s| s.visible())
         .child(jump)
@@ -295,10 +360,16 @@ fn format_pin_time(create_time: i64, locale: &str) -> String {
     let time = local.format("%H:%M").to_string();
 
     if date == today {
-        format!("{} {}", mezon_i18n::t(locale, "chat.todayAt"), time)
+        format!("{} {}", mezon_i18n::t(locale, "common.todayAt"), time)
     } else if Some(date) == today.pred_opt() {
-        format!("{} {}", mezon_i18n::t(locale, "chat.yesterdayAt"), time)
+        format!("{} {}", mezon_i18n::t(locale, "common.yesterdayAt"), time)
     } else {
         local.format("%d/%m/%Y, %H:%M").to_string()
     }
+}
+
+pub fn pin_popover_on_open() -> Rc<dyn Fn(&mut Window, &mut App)> {
+    Rc::new(|_window, cx| {
+        PinnedMessagesStore::global(cx).update(cx, |store, cx| store.ensure_loaded(cx));
+    })
 }

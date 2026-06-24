@@ -39,6 +39,13 @@ impl MessageTimeline {
                     this.list_state.reset(new_len);
                 }
             }
+            MessagesEvent::JumpTo { message_id } => {
+                let messages = store.read(cx).messages();
+                if let Some(ix) = messages.iter().position(|m| m.id == *message_id) {
+                    this.list_state.set_follow_mode(FollowMode::Normal);
+                    this.list_state.scroll_to_reveal_item(ix);
+                }
+            }
         })
         .detach();
 

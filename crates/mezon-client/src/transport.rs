@@ -73,6 +73,8 @@ pub enum RealtimeEvent {
     /// Server-pushed session refresh over the socket (`refresh_session_event`, field 96).
     /// The native equivalent of mezon-js `client.onrefreshsession`.
     SessionRefreshed(api::Session),
+    LastPinMessage(realtime::LastPinMessageEvent),
+    UnpinMessage(realtime::UnpinMessageEvent),
     Unhandled(realtime::envelope::Message),
 }
 
@@ -109,6 +111,8 @@ impl TryFrom<realtime::envelope::Message> for RealtimeEvent {
             realtime::envelope::Message::AddFriend(m) => Ok(Self::AddFriend(m)),
             realtime::envelope::Message::RemoveFriend(m) => Ok(Self::RemoveFriend(m)),
             realtime::envelope::Message::RefreshSessionEvent(s) => Ok(Self::SessionRefreshed(s)),
+            realtime::envelope::Message::LastPinMessageEvent(m) => Ok(Self::LastPinMessage(m)),
+            realtime::envelope::Message::UnpinMessageEvent(m) => Ok(Self::UnpinMessage(m)),
             other => Ok(Self::Unhandled(other)),
         }
     }
