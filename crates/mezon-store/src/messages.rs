@@ -14,6 +14,7 @@ use crate::realtime::{RealtimeDispatch, RealtimeKind};
 
 const MESSAGE_PAGE_LIMIT: u32 = 50;
 const DIRECTION_BEFORE: i32 = 3;
+const DIRECTION_AROUND: i32 = 2;
 const CHANNEL_TYPE_CHANNEL: i32 = 1;
 const MAX_MESSAGES_PER_CHANNEL: usize = 2_000;
 const MAX_CACHED_CHANNELS: usize = 30;
@@ -23,6 +24,7 @@ pub enum MessagesEvent {
     Reset { count: usize },
     Appended,
     OlderPrepended { count: usize },
+    JumpTo { message_id: String },
 }
 
 struct ChannelMessages {
@@ -472,6 +474,71 @@ impl MessagesStore {
     /// Force a refetch of the open channel ignoring the cache (cf. React `noCache: true`).
     pub fn refresh(&mut self, cx: &mut Context<Self>) {
         self.refetch_current_messages(cx);
+    }
+
+    /// Scroll the timeline to a message, fetching around it when not in the current viewport.
+    pub fn jump_to_message(&mut self, message_id: String, cx: &mut Context<Self>) {
+        let Some(channel_id) = self.active_channel_id.clone() else {
+            return;
+        };
+        let Some(clan_id) = self.active_clan_id.clone() else {
+            return;
+        };
+
+        if self.messages().iter().any(|m| m.id == message_id) {
+            cx.emit(MessagesEvent::JumpTo {
+                message_id: message_id.clone(),
+            });
+            cx.notify();
+            return;
+        }
+
+        self.loading = true;
+        self.loading_more = false;
+        cx.notify();
+
+        let api = self.api.clone();
+        cx.spawn(async move |this, cx| {
+            let result = api
+                .list_channel_messages(
+                    &clan_id,
+                    &channel_id,
+                    &message_id,
+                    DIRECTION_AROUND,
+                    MESSAGE_PAGE_LIMIT,
+                )
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                if this.active_channel_id.as_deref() != Some(channel_id.as_str()) {
+                    this.loading = false;
+                    cx.notify();
+                    return;
+                }
+                this.loading = false;
+                match result {
+                    Ok(msgs) => {
+                        let messages = prepare_messages(msgs, AppConfig::try_global(cx));
+                        let found = messages.iter().any(|m| m.id == message_id);
+                        let count = messages.len();
+                        this.set_channel(&channel_id, messages);
+                        if let Some(channel) = this.cache.get_mut(&channel_id) {
+                            channel.has_more = true;
+                        }
+                        cx.emit(MessagesEvent::Reset { count });
+                        if found {
+                            cx.emit(MessagesEvent::JumpTo {
+                                message_id: message_id.clone(),
+                            });
+                        }
+                    }
+                    Err(e) => {
+                        tracing::error!("jump_to_message failed for {message_id}: {e}");
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     fn refetch_current_messages(&mut self, cx: &mut Context<Self>) {

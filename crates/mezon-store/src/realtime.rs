@@ -33,6 +33,8 @@ pub enum RealtimeKind {
     VoiceJoined,
     VoiceLeaved,
     MarkAsRead,
+    LastPinMessage,
+    UnpinMessage,
 }
 
 impl RealtimeKind {
@@ -55,6 +57,8 @@ impl RealtimeKind {
             RealtimeEvent::VoiceJoined(_) => Self::VoiceJoined,
             RealtimeEvent::VoiceLeaved(_) => Self::VoiceLeaved,
             RealtimeEvent::MarkAsRead(_) => Self::MarkAsRead,
+            RealtimeEvent::LastPinMessage(_) => Self::LastPinMessage,
+            RealtimeEvent::UnpinMessage(_) => Self::UnpinMessage,
             _ => return None,
         })
     }
