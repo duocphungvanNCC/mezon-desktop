@@ -69,6 +69,8 @@ impl LoginView {
                 }
                 _ => {
                     this._qr_poll_task = None;
+                    this._countdown_task = None;
+                    this._loading_task = None;
                 }
             }
             cx.notify();
@@ -125,6 +127,7 @@ impl LoginView {
         self.signin_failed = false;
         self._loading_task = None;
         self._countdown_task = None;
+        self._qr_poll_task = None;
         self.pending_reset = true;
     }
 
@@ -255,13 +258,17 @@ impl LoginView {
                     return;
                 }
             };
+            let exec = cx.background_executor().clone();
+            let login_id_for_qr = login_id.clone();
+            let qr_image = exec
+                .spawn(async move { build_qr_image(&login_id_for_qr) })
+                .await;
             let _ = this.update(cx, |this, cx| {
-                this.qr_image = build_qr_image(&login_id);
+                this.qr_image = qr_image;
                 this.qr_login_id = Some(login_id.clone());
                 cx.notify();
             });
 
-            let exec = cx.background_executor().clone();
             let mut elapsed: u32 = 0;
             loop {
                 exec.timer(std::time::Duration::from_secs(2)).await;
@@ -273,7 +280,9 @@ impl LoginView {
                     });
                     break;
                 }
-                let is_remember = this.update(cx, |this, _| this.is_remember).unwrap_or(false);
+                let is_remember = this
+                    .read_with(cx, |this, _| this.is_remember)
+                    .unwrap_or(false);
                 let result = client.confirm_qr_login(&login_id, is_remember).await;
                 if let Ok(session) = result
                     && !session.token.is_empty()
@@ -964,7 +973,7 @@ const ERROR_SLOT_HEIGHT: f32 = 32.;
 const FORM_MIN_HEIGHT: f32 = 256.;
 const OTP_COOLDOWN_SECS: u32 = 60;
 const LOADING_SHOW_DELAY_MS: u64 = 200;
-const LOADING_TIMEOUT_SECS: u64 = 20;
+const LOADING_TIMEOUT_SECS: u64 = 30;
 
 fn is_rate_limited(err: &anyhow::Error) -> bool {
     let chain: String = err
