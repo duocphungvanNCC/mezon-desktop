@@ -40,7 +40,6 @@ pub struct ProfilePage {
     about_me_input: Option<Entity<InputState>>,
     _subscriptions: Vec<Subscription>,
     fetch_error: bool,
-    fetch_started: bool,
     account_loaded: bool,
     clan_section: Option<Entity<ClanProfileSection>>,
     toast_message: Option<SharedString>,
@@ -115,6 +114,8 @@ impl ProfilePage {
         )
         .detach();
 
+        AccountStore::global(cx).update(cx, |store, cx| store.fetch_account(cx));
+
         Self {
             settings,
             clan_list,
@@ -124,7 +125,6 @@ impl ProfilePage {
             about_me_input: None,
             _subscriptions: Vec::new(),
             fetch_error: false,
-            fetch_started: false,
             account_loaded: false,
             clan_section: None,
             toast_message: None,
@@ -373,11 +373,6 @@ impl ProfilePage {
 
 impl Render for ProfilePage {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        if !self.fetch_started && !self.account_loaded && !self.fetch_error {
-            self.fetch_started = true;
-            AccountStore::global(cx).update(cx, |store, cx| store.fetch_account(cx));
-        }
-
         if self.profile.as_ref().is_some_and(|p| !p.loading) && self.display_name_input.is_none() {
             self.init_inputs(window, cx);
         }

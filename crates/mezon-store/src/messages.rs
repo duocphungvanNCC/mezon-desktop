@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use gpui::{App, AppContext, Context, Entity, EventEmitter, Global, Subscription, Task};
@@ -41,6 +42,8 @@ pub struct MessagesStore {
     mode: i32,
     loading: bool,
     loading_more: bool,
+    fetch_generation: u64,
+    joined_channels: HashSet<String>,
     api: Arc<AppApi>,
     _channel_sub: Subscription,
     _conn_watch: Task<()>,
@@ -86,6 +89,8 @@ impl MessagesStore {
             mode: STREAM_MODE_CHANNEL,
             loading: false,
             loading_more: false,
+            fetch_generation: 0,
+            joined_channels: HashSet::new(),
             api,
             _channel_sub: channel_sub,
             _conn_watch: conn_watch,
@@ -130,6 +135,10 @@ impl MessagesStore {
             .and_then(|id| self.cache.get(id))
             .map(|c| c.messages.as_slice())
             .unwrap_or(&[])
+    }
+
+    pub fn is_loading(&self) -> bool {
+        self.loading
     }
 
     pub fn load_more(&mut self, cx: &mut Context<Self>) {
@@ -265,7 +274,16 @@ impl MessagesStore {
                         }
                     });
                 }
-                Err(e) => tracing::error!("send_channel_message failed: {e}"),
+                Err(e) => {
+                    tracing::error!("send_channel_message failed: {e}");
+                    let _ = this.update(cx, |this, cx| {
+                        this.remove_temp(&channel_id, &temp_id);
+                        if this.active_channel_id.as_deref() == Some(channel_id.as_str()) {
+                            cx.emit(MessagesEvent::Appended);
+                            cx.notify();
+                        }
+                    });
+                }
             }
         })
         .detach();
@@ -288,6 +306,18 @@ impl MessagesStore {
     /// Open a clan channel as the active conversation (looks up clan/privacy from `ChannelList`).
     pub fn open_channel(&mut self, channel_id: String, cx: &mut Context<Self>) {
         if self.active_channel_id.as_deref() == Some(channel_id.as_str()) && !self.is_dm {
+            if self.loading {
+                return;
+            }
+            let empty = self
+                .cache
+                .get(&channel_id)
+                .map(|c| c.messages.is_empty())
+                .unwrap_or(true);
+            if !empty || self.cache.is_fresh(&channel_id, crate::CACHE_TTL) {
+                return;
+            }
+            self.refetch_current_messages(cx);
             return;
         }
         let Some(channel) = ChannelList::global(cx)
@@ -312,6 +342,18 @@ impl MessagesStore {
     /// `channel_type` is the raw DM type (3 = DM, 2 = group).
     pub fn open_direct(&mut self, channel_id: String, channel_type: i32, cx: &mut Context<Self>) {
         if self.active_channel_id.as_deref() == Some(channel_id.as_str()) && self.is_dm {
+            if self.loading {
+                return;
+            }
+            let empty = self
+                .cache
+                .get(&channel_id)
+                .map(|c| c.messages.is_empty())
+                .unwrap_or(true);
+            if !empty || self.cache.is_fresh(&channel_id, crate::CACHE_TTL) {
+                return;
+            }
+            self.refetch_current_messages(cx);
             return;
         }
         let mode = if channel_type == 2 { 3 } else { 4 };
@@ -343,8 +385,13 @@ impl MessagesStore {
         self.is_dm = is_dm;
         self.mode = mode;
         self.loading_more = false;
+        self.fetch_generation = self.fetch_generation.wrapping_add(1);
+        let generation = self.fetch_generation;
 
-        self.spawn_join(&clan_id, &channel_id, join_type, is_public, cx);
+        if !self.joined_channels.contains(&channel_id) {
+            self.joined_channels.insert(channel_id.clone());
+            self.spawn_join(&clan_id, &channel_id, join_type, is_public, cx);
+        }
 
         if self.cache.is_fresh(&channel_id, crate::CACHE_TTL) {
             self.cache.touch(&channel_id);
@@ -364,7 +411,7 @@ impl MessagesStore {
             cx.emit(MessagesEvent::Reset { count: 0 });
         }
         cx.notify();
-        self.spawn_initial_fetch(&clan_id, &channel_id, cx);
+        self.spawn_initial_fetch(&clan_id, &channel_id, generation, cx);
     }
 
     fn spawn_join(
@@ -386,7 +433,13 @@ impl MessagesStore {
         .detach();
     }
 
-    fn spawn_initial_fetch(&self, clan_id: &str, channel_id: &str, cx: &mut Context<Self>) {
+    fn spawn_initial_fetch(
+        &self,
+        clan_id: &str,
+        channel_id: &str,
+        generation: u64,
+        cx: &mut Context<Self>,
+    ) {
         let api = self.api.clone();
         let clan_id = clan_id.to_string();
         let ch_id = channel_id.to_string();
@@ -395,26 +448,43 @@ impl MessagesStore {
                 .list_channel_messages(&clan_id, &ch_id, "", 0, MESSAGE_PAGE_LIMIT)
                 .await;
             let _ = this.update(cx, |this, cx| {
-                if this.active_channel_id.as_deref() != Some(ch_id.as_str()) {
-                    return;
-                }
-                this.loading = false;
-                match result {
-                    Ok(msgs) => {
-                        let messages = prepare_messages(msgs, AppConfig::try_global(cx));
-                        let count = messages.len();
-                        this.set_channel(&ch_id, messages);
-                        cx.emit(MessagesEvent::Reset { count });
-                    }
-                    Err(e) => {
-                        tracing::error!("Failed to fetch messages for {ch_id}: {e}");
-                        cx.emit(MessagesEvent::Reset { count: 0 });
-                    }
-                }
-                cx.notify();
+                this.apply_initial_fetch_result(&ch_id, generation, result, cx);
             });
         })
         .detach();
+    }
+
+    fn apply_initial_fetch_result(
+        &mut self,
+        channel_id: &str,
+        generation: u64,
+        result: Result<Vec<ApiMessage>, anyhow::Error>,
+        cx: &mut Context<Self>,
+    ) {
+        let is_active = self.active_channel_id.as_deref() == Some(channel_id);
+        let is_current = is_active && self.fetch_generation == generation;
+
+        match result {
+            Ok(msgs) => {
+                let messages = prepare_messages(msgs, AppConfig::try_global(cx));
+                let count = messages.len();
+                self.set_channel(channel_id, messages);
+                if is_current {
+                    self.loading = false;
+                    cx.emit(MessagesEvent::Reset { count });
+                    cx.notify();
+                }
+            }
+            Err(e) => {
+                tracing::error!("Failed to fetch messages for {channel_id}: {e}");
+                if is_current {
+                    self.loading = false;
+                    let count = self.messages().len();
+                    cx.emit(MessagesEvent::Reset { count });
+                    cx.notify();
+                }
+            }
+        }
     }
 
     fn handle_event(&mut self, event: &RealtimeEvent, cx: &mut Context<Self>) {
@@ -451,9 +521,7 @@ impl MessagesStore {
         let Some(channel) = self.cache.get_mut(channel_id) else {
             return;
         };
-        if let Some(slot) = channel.messages.iter_mut().find(|m| {
-            m.id == temp_id || (m.id.starts_with("temp-") && m.content == confirmed.content)
-        }) {
+        if let Some(slot) = channel.messages.iter_mut().find(|m| m.id == temp_id) {
             *slot = confirmed;
         } else if !channel.messages.iter().any(|m| m.id == confirmed.id) {
             channel.messages.push(confirmed);
@@ -463,9 +531,21 @@ impl MessagesStore {
         }
     }
 
+    fn remove_temp(&mut self, channel_id: &str, temp_id: &str) {
+        let Some(channel) = self.cache.get_mut(channel_id) else {
+            return;
+        };
+        let before = channel.messages.len();
+        channel.messages.retain(|m| m.id != temp_id);
+        if channel.messages.len() != before {
+            recompute_message_grouping(&mut channel.messages);
+        }
+    }
+
     fn resync(&mut self, cx: &mut Context<Self>) {
         tracing::info!("MessagesStore resync — marking message cache stale");
         self.cache.mark_all_stale();
+        self.joined_channels.clear();
         self.refetch_current_messages(cx);
     }
 
@@ -484,6 +564,8 @@ impl MessagesStore {
 
         self.loading = true;
         self.loading_more = false;
+        self.fetch_generation = self.fetch_generation.wrapping_add(1);
+        let generation = self.fetch_generation;
         cx.notify();
 
         let api = self.api.clone();
@@ -492,22 +574,7 @@ impl MessagesStore {
                 .list_channel_messages(&clan_id, &channel_id, "", 0, MESSAGE_PAGE_LIMIT)
                 .await;
             let _ = this.update(cx, |this, cx| {
-                if this.active_channel_id.as_deref() != Some(channel_id.as_str()) {
-                    return;
-                }
-                this.loading = false;
-                match result {
-                    Ok(msgs) => {
-                        let messages = prepare_messages(msgs, AppConfig::try_global(cx));
-                        let count = messages.len();
-                        this.set_channel(&channel_id, messages);
-                        cx.emit(MessagesEvent::Reset { count });
-                    }
-                    Err(e) => {
-                        tracing::error!("Failed to refetch messages for {channel_id}: {e}");
-                    }
-                }
-                cx.notify();
+                this.apply_initial_fetch_result(&channel_id, generation, result, cx);
             });
         })
         .detach();
@@ -677,5 +744,62 @@ mod tests {
         assert_eq!(msgs.len(), MAX_MESSAGES_PER_CHANNEL);
         assert_eq!(msgs.first().unwrap().id, "5");
         assert_eq!(msgs.last().unwrap().id, "2004");
+    }
+
+    fn channel_msgs(msgs: Vec<Message>) -> ChannelMessages {
+        ChannelMessages {
+            messages: msgs,
+            has_more: false,
+        }
+    }
+
+    fn remove_temp_in(ch: &mut ChannelMessages, temp_id: &str) {
+        let before = ch.messages.len();
+        ch.messages.retain(|m| m.id != temp_id);
+        if ch.messages.len() != before {
+            recompute_message_grouping(&mut ch.messages);
+        }
+    }
+
+    fn reconcile_temp_in(ch: &mut ChannelMessages, temp_id: &str, confirmed: Message) {
+        if let Some(slot) = ch.messages.iter_mut().find(|m| m.id == temp_id) {
+            *slot = confirmed;
+        } else if !ch.messages.iter().any(|m| m.id == confirmed.id) {
+            ch.messages.push(confirmed);
+            ch.messages.sort_by_key(|m| m.create_time);
+            trim_messages(&mut ch.messages);
+            recompute_message_grouping(&mut ch.messages);
+        }
+    }
+
+    #[test]
+    fn remove_temp_drops_message_by_id() {
+        let mut ch = channel_msgs(vec![
+            Message::new("temp-1", "hello", "u1", "U", 100),
+            Message::new("msg-2", "world", "u1", "U", 200),
+        ]);
+        remove_temp_in(&mut ch, "temp-1");
+        assert_eq!(ch.messages.len(), 1);
+        assert_eq!(ch.messages[0].id, "msg-2");
+    }
+
+    #[test]
+    fn remove_temp_noop_when_id_not_found() {
+        let mut ch = channel_msgs(vec![Message::new("msg-1", "hello", "u1", "U", 100)]);
+        remove_temp_in(&mut ch, "temp-999");
+        assert_eq!(ch.messages.len(), 1);
+    }
+
+    #[test]
+    fn reconcile_temp_matches_only_by_temp_id_not_content() {
+        let mut ch = channel_msgs(vec![
+            Message::new("temp-1", "same text", "u1", "U", 100),
+            Message::new("temp-2", "same text", "u1", "U", 110),
+        ]);
+        let confirmed = Message::new("server-42", "same text", "u1", "U", 120);
+        reconcile_temp_in(&mut ch, "temp-1", confirmed);
+        assert_eq!(ch.messages.len(), 2);
+        assert_eq!(ch.messages[0].id, "server-42");
+        assert_eq!(ch.messages[1].id, "temp-2");
     }
 }

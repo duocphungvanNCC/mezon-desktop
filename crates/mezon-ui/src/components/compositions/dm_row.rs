@@ -6,25 +6,40 @@ use crate::router::{Route, navigate};
 use crate::theme::Theme;
 
 pub struct DmRow {
-    id: String,
-    label: String,
+    id: SharedString,
+    label: SharedString,
     kind: DirectKind,
     selected: bool,
     online: bool,
-    avatar_src: String,
-    avatar_raw: String,
+    avatar_src: SharedString,
+    avatar_raw: SharedString,
+    elem_id: ElementId,
+    group_name: SharedString,
+    close_id: SharedString,
 }
 
 impl DmRow {
-    pub fn new(id: impl Into<String>, label: impl Into<String>, kind: DirectKind) -> Self {
+    pub fn new(
+        id: impl Into<SharedString>,
+        label: impl Into<SharedString>,
+        kind: DirectKind,
+    ) -> Self {
+        let id: SharedString = id.into();
+        let label: SharedString = label.into();
+        let elem_id: ElementId = SharedString::from(format!("dm-{}", id)).into();
+        let group_name: SharedString = SharedString::from(format!("dm-row-{}", id));
+        let close_id: SharedString = SharedString::from(format!("dm-close-{}", id));
         Self {
-            id: id.into(),
-            label: label.into(),
+            id,
+            label,
             kind,
             selected: false,
             online: false,
-            avatar_src: String::new(),
-            avatar_raw: String::new(),
+            avatar_src: SharedString::from(""),
+            avatar_raw: SharedString::from(""),
+            elem_id,
+            group_name,
+            close_id,
         }
     }
 
@@ -38,22 +53,19 @@ impl DmRow {
         self
     }
 
-    pub fn avatar_src(mut self, src: impl Into<String>) -> Self {
+    pub fn avatar_src(mut self, src: impl Into<SharedString>) -> Self {
         self.avatar_src = src.into();
         self
     }
 
-    pub fn avatar_raw(mut self, raw: impl Into<String>) -> Self {
+    pub fn avatar_raw(mut self, raw: impl Into<SharedString>) -> Self {
         self.avatar_raw = raw.into();
         self
     }
 
     pub fn render(self, theme: &Theme) -> impl IntoElement {
-        let elem_id: ElementId = SharedString::from(format!("dm-{}", self.id)).into();
-        let group_name: SharedString = format!("dm-row-{}", self.id).into();
-        let nav_id = self.id.clone();
+        let nav_id = self.id.to_string();
         let channel_type = self.kind.channel_type();
-        let label: SharedString = self.label.clone().into();
         let bg_hover = theme.bg_hover;
         let muted = theme.text_muted;
         let selected = self.selected;
@@ -66,7 +78,7 @@ impl DmRow {
         let avatar_slot = self.render_avatar(theme);
 
         let close_btn = div()
-            .id(SharedString::from(format!("dm-close-{}", self.id)))
+            .id(self.close_id.clone())
             .flex()
             .items_center()
             .justify_center()
@@ -75,14 +87,14 @@ impl DmRow {
             .opacity(0.)
             .text_color(muted)
             .cursor_pointer()
-            .group_hover(group_name.clone(), |this| this.opacity(1.))
+            .group_hover(self.group_name.clone(), |this| this.opacity(1.))
             .hover(move |this| this.text_color(gpui::rgb(0xef4444)))
             .on_click(|_, _window, cx| cx.stop_propagation())
             .child("×");
 
         div()
-            .id(elem_id)
-            .group(group_name)
+            .id(self.elem_id.clone())
+            .group(self.group_name.clone())
             .flex()
             .flex_row()
             .items_center()
@@ -111,7 +123,7 @@ impl DmRow {
                     .text_sm()
                     .text_color(name_color)
                     .truncate()
-                    .child(label),
+                    .child(self.label.clone()),
             )
             .child(close_btn)
     }
@@ -138,12 +150,12 @@ impl DmRow {
             let raw = self.avatar_raw.clone();
             if !src.is_empty() {
                 let proxied = src.clone();
-                avatar = avatar.src(src);
+                avatar = avatar.src(src.to_string());
                 if !raw.is_empty() && raw != proxied {
-                    avatar = avatar.fallback_src(raw);
+                    avatar = avatar.fallback_src(raw.to_string());
                 }
             } else if !raw.is_empty() {
-                avatar = avatar.src(raw);
+                avatar = avatar.src(raw.to_string());
             }
             avatar.into_any_element()
         };

@@ -1,4 +1,5 @@
 pub mod account;
+pub mod audio;
 pub mod cache;
 pub mod channel;
 pub mod clan;
@@ -19,13 +20,14 @@ use std::time::Duration;
 use tokio::fs;
 
 pub use account::*;
+pub use audio::{AudioDeviceInfo, AudioStore, MicCaptureFactory, MicCaptureHandle, OpenUrlFn};
 pub use cache::KeyedCache;
 pub use channel::*;
 pub use clan::*;
 pub use config::AppConfig;
 pub use connection::{ConnectionStore, resolve_initial_auth_state};
 pub use direct::{DirectChannel, DirectKind, DirectMessageStore};
-pub use login::LoginStore;
+pub use login::{LoginStore, token_from_oauth_callback_url};
 pub use messages::*;
 pub use presence::*;
 pub use realtime::{RealtimeDispatch, RealtimeKind};
@@ -62,6 +64,15 @@ pub struct Settings {
     pub input_device_id: Option<String>,
     /// Selected audio output device identifier
     pub output_device_id: Option<String>,
+    /// User-defined clan ordering: list of clan_ids in display order
+    #[serde(default)]
+    pub clan_order: Vec<String>,
+    /// Last active clan_id (restored on startup to resume where the user left off)
+    #[serde(default)]
+    pub last_clan_id: Option<String>,
+    /// Last active channel_id within the last clan (restored on startup)
+    #[serde(default)]
+    pub last_channel_id: Option<String>,
 }
 
 impl Default for Settings {
@@ -80,6 +91,9 @@ impl Default for Settings {
             speaker_volume: 0.8,
             input_device_id: None,
             output_device_id: None,
+            clan_order: Vec::new(),
+            last_clan_id: None,
+            last_channel_id: None,
         }
     }
 }
@@ -104,7 +118,13 @@ impl Settings {
             return Self::default();
         }
         match std::fs::read_to_string(&path) {
-            Ok(data) => serde_json::from_str(&data).unwrap_or_default(),
+            Ok(data) => match serde_json::from_str(&data) {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::warn!("Failed to parse settings, using defaults: {e}");
+                    Self::default()
+                }
+            },
             Err(e) => {
                 tracing::warn!("Failed to read settings: {}", e);
                 Self::default()
@@ -112,19 +132,26 @@ impl Settings {
         }
     }
 
-    /// Save settings to disk synchronously, creating the directory if needed.
     pub fn save_sync(&self) {
         let path = Self::path();
         if let Some(parent) = path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
-        match serde_json::to_string_pretty(self) {
-            Ok(data) => {
-                if let Err(e) = std::fs::write(&path, data) {
-                    tracing::warn!("Failed to save settings: {}", e);
-                }
+        let data = match serde_json::to_string_pretty(self) {
+            Ok(d) => d,
+            Err(e) => {
+                tracing::warn!("Failed to serialize settings: {e}");
+                return;
             }
-            Err(e) => tracing::warn!("Failed to serialize settings: {}", e),
+        };
+        let tmp = path.with_extension("json.tmp");
+        if let Err(e) = std::fs::write(&tmp, &data) {
+            tracing::warn!("Failed to write settings tmp file: {e}");
+            return;
+        }
+        if let Err(e) = std::fs::rename(&tmp, &path) {
+            tracing::warn!("Failed to rename settings tmp file: {e}");
+            let _ = std::fs::remove_file(&tmp);
         }
     }
 
@@ -147,7 +174,6 @@ impl Settings {
         Ok(settings)
     }
 
-    /// Save settings to disk, creating the directory if needed.
     pub async fn save(&self) -> Result<()> {
         let path = Self::path();
         if let Some(parent) = path.parent() {
@@ -156,9 +182,13 @@ impl Settings {
                 .with_context(|| format!("Failed to create config dir: {}", parent.display()))?;
         }
         let data = serde_json::to_string_pretty(self).context("Failed to serialize settings")?;
-        fs::write(&path, data)
+        let tmp = path.with_extension("json.tmp");
+        fs::write(&tmp, &data)
             .await
-            .with_context(|| format!("Failed to write settings to {}", path.display()))?;
+            .with_context(|| format!("Failed to write settings tmp to {}", tmp.display()))?;
+        fs::rename(&tmp, &path)
+            .await
+            .with_context(|| format!("Failed to rename settings tmp to {}", path.display()))?;
         tracing::debug!("Saved settings to {}", path.display());
         Ok(())
     }

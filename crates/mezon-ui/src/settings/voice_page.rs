@@ -4,10 +4,7 @@ use gpui::{
     App, ClickEvent, Context, Entity, FontWeight, Subscription, Task, WeakEntity, Window, deferred,
     div, prelude::*, px,
 };
-use mezon_native::audio::{
-    AudioDeviceInfo, MicCapture, enumerate_input_devices, enumerate_output_devices,
-};
-use mezon_store::Settings;
+use mezon_store::{AudioDeviceInfo, AudioStore, Settings};
 
 pub struct VoicePage {
     settings: Entity<Settings>,
@@ -23,7 +20,7 @@ pub struct VoicePage {
     is_testing: bool,
     mic_level: f32,
     error_text: Option<String>,
-    mic_capture: Option<MicCapture>,
+    mic_capture: Option<mezon_store::MicCaptureHandle>,
     _test_task: Option<Task<()>>,
 }
 
@@ -58,8 +55,13 @@ impl VoicePage {
                 let SliderEvent::Change(value) = event;
                 mic_settings.update(cx, |s, _| {
                     s.mic_volume = value.end();
-                    s.save_sync();
                 });
+                let snapshot = mic_settings.read(cx).clone();
+                cx.background_executor()
+                    .spawn(async move {
+                        snapshot.save_sync();
+                    })
+                    .detach();
             },
         ));
 
@@ -70,34 +72,68 @@ impl VoicePage {
                 let SliderEvent::Change(value) = event;
                 speaker_settings.update(cx, |s, _| {
                     s.speaker_volume = value.end();
-                    s.save_sync();
                 });
+                let snapshot = speaker_settings.read(cx).clone();
+                cx.background_executor()
+                    .spawn(async move {
+                        snapshot.save_sync();
+                    })
+                    .detach();
             },
         ));
 
         let saved_input = settings.read(cx).input_device_id.clone();
         let saved_output = settings.read(cx).output_device_id.clone();
 
-        let input_devices = enumerate_input_devices();
-        let output_devices = enumerate_output_devices();
-
-        let selected_input_id = if input_devices
-            .iter()
-            .any(|d| Some(d.id.as_str()) == saved_input.as_deref())
-        {
-            saved_input
-        } else {
-            None
-        };
-
-        let selected_output_id = if output_devices
-            .iter()
-            .any(|d| Some(d.id.as_str()) == saved_output.as_deref())
-        {
-            saved_output
-        } else {
-            None
-        };
+        let (input_devices, output_devices, selected_input_id, selected_output_id) =
+            if let Some(audio_store) = AudioStore::try_global(cx) {
+                subs.push(cx.observe(&audio_store, |this, store, cx| {
+                    let saved_in = this.settings.read(cx).input_device_id.clone();
+                    let saved_out = this.settings.read(cx).output_device_id.clone();
+                    let inputs = store.read(cx).input_devices.clone();
+                    let outputs = store.read(cx).output_devices.clone();
+                    this.selected_input_id = if inputs
+                        .iter()
+                        .any(|d| Some(d.id.as_str()) == saved_in.as_deref())
+                    {
+                        saved_in
+                    } else {
+                        None
+                    };
+                    this.selected_output_id = if outputs
+                        .iter()
+                        .any(|d| Some(d.id.as_str()) == saved_out.as_deref())
+                    {
+                        saved_out
+                    } else {
+                        None
+                    };
+                    this.input_devices = inputs;
+                    this.output_devices = outputs;
+                    cx.notify();
+                }));
+                let inputs = audio_store.read(cx).input_devices.clone();
+                let outputs = audio_store.read(cx).output_devices.clone();
+                let sel_in = if inputs
+                    .iter()
+                    .any(|d| Some(d.id.as_str()) == saved_input.as_deref())
+                {
+                    saved_input
+                } else {
+                    None
+                };
+                let sel_out = if outputs
+                    .iter()
+                    .any(|d| Some(d.id.as_str()) == saved_output.as_deref())
+                {
+                    saved_output
+                } else {
+                    None
+                };
+                (inputs, outputs, sel_in, sel_out)
+            } else {
+                (Vec::new(), Vec::new(), None, None)
+            };
 
         Self {
             settings,
@@ -505,8 +541,13 @@ impl VoicePage {
         self.input_dropdown_open = false;
         settings.update(cx, |s, _| {
             s.input_device_id = Some(id);
-            s.save_sync();
         });
+        let snapshot = settings.read(cx).clone();
+        cx.background_executor()
+            .spawn(async move {
+                snapshot.save_sync();
+            })
+            .detach();
     }
 
     fn select_output_device(
@@ -519,8 +560,13 @@ impl VoicePage {
         self.output_dropdown_open = false;
         settings.update(cx, |s, _| {
             s.output_device_id = Some(id);
-            s.save_sync();
         });
+        let snapshot = settings.read(cx).clone();
+        cx.background_executor()
+            .spawn(async move {
+                snapshot.save_sync();
+            })
+            .detach();
     }
 
     fn toggle_mic_test(&mut self, cx: &mut Context<Self>) {
@@ -543,7 +589,12 @@ impl VoicePage {
 
             let (tx, rx) = flume::unbounded();
 
-            match MicCapture::start(&device_id, tx) {
+            let capture_result = AudioStore::try_global(cx)
+                .and_then(|store| store.read(cx).mic_capture_factory.clone())
+                .map(|factory| factory(&device_id, tx))
+                .unwrap_or_else(|| Err("Mic capture not available".to_string()));
+
+            match capture_result {
                 Ok(capture) => {
                     self.mic_capture = Some(capture);
                     self.is_testing = true;

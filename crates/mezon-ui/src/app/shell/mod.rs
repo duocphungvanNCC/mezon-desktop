@@ -7,8 +7,8 @@
 use std::time::Duration;
 
 use gpui::{
-    AnyView, App, AppContext, Context, Entity, Global, MouseButton, SharedString, Window, deferred,
-    div, hsla, prelude::*, px,
+    AnyView, App, AppContext, Context, Entity, Global, MouseButton, SharedString, Task, Window,
+    deferred, div, hsla, prelude::*, px,
 };
 
 use crate::components::primitives::{Toast, ToastKind};
@@ -22,6 +22,7 @@ struct ToastItem {
     id: usize,
     message: SharedString,
     kind: ToastKind,
+    _ttl: Task<()>,
 }
 
 /// Owns the window-level overlay layers (toasts + active modal). Registered as a [`Global`].
@@ -58,19 +59,19 @@ impl Shell {
     ) {
         let id = self.next_id;
         self.next_id = self.next_id.wrapping_add(1);
-        self.toasts.push(ToastItem {
-            id,
-            message: message.into(),
-            kind,
-        });
-        cx.spawn(async move |this, cx| {
+        let ttl = cx.spawn(async move |this, cx| {
             cx.background_executor().timer(TOAST_TTL).await;
             let _ = this.update(cx, |this, cx| {
                 this.toasts.retain(|t| t.id != id);
                 cx.notify();
             });
-        })
-        .detach();
+        });
+        self.toasts.push(ToastItem {
+            id,
+            message: message.into(),
+            kind,
+            _ttl: ttl,
+        });
         cx.notify();
     }
 
@@ -130,6 +131,7 @@ impl Shell {
     /// The overlay (modal backdrop + toast stack), rendered on top by `RootView`.
     pub fn render_overlay(&self) -> impl IntoElement {
         let modal = self.modal.clone();
+        let has_toasts = !self.toasts.is_empty();
         let toasts: Vec<(SharedString, ToastKind)> = self
             .toasts
             .iter()
@@ -152,13 +154,17 @@ impl Shell {
                         .items_center()
                         .justify_center()
                         .bg(hsla(0., 0., 0., 0.5))
+                        .key_context("modal_backdrop")
+                        .on_action(|_: &::menu::Cancel, _window, cx| {
+                            Shell::global(cx).update(cx, |shell, cx| shell.close_modal(cx));
+                        })
                         .on_mouse_down(MouseButton::Left, |_, _, cx| {
                             Shell::global(cx).update(cx, |shell, cx| shell.close_modal(cx));
                         })
                         .child(div().occlude().child(view)),
                 ))
             })
-            .when(!toasts.is_empty(), |el| {
+            .when(has_toasts, |el| {
                 el.child(deferred(
                     div()
                         .absolute()

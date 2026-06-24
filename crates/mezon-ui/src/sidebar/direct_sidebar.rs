@@ -70,7 +70,7 @@ impl DirectSidebar {
             .cursor_pointer()
             .when(active, |this| this.bg(bg_hover))
             .hover(move |this| this.bg(bg_hover))
-            .on_click(|_, _window, cx| navigate(cx, Route::Direct))
+            .on_click(|_, _window, cx| navigate(cx, Route::Friends))
             .child(
                 Icon::new(IconName::IconFriends)
                     .size(px(20.))
@@ -161,7 +161,7 @@ impl Render for DirectSidebar {
         .min_h_0()
         .px_2();
 
-        let on_friends = matches!(Router::global(cx).read(cx).route(), Route::Direct);
+        let on_friends = matches!(Router::global(cx).read(cx).route(), Route::Friends);
 
         div()
             .flex()

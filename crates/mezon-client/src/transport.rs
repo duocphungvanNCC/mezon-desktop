@@ -665,13 +665,6 @@ impl MezonTransport {
 
         let attachments = parse_message_attachments(&message.attachments);
 
-        tracing::debug!(
-            "message_from_proto: id={} sender_name={:?} attachment_count={}",
-            message.message_id,
-            sender_name,
-            attachments.len(),
-        );
-
         ApiMessage {
             message_id: message.message_id.to_string(),
             content,
@@ -1147,7 +1140,7 @@ impl MezonTransport {
         }
 
         let messages = api::ChannelMessageList::decode(response.as_slice())?;
-        Ok(messages
+        let parsed: Vec<ApiMessage> = messages
             .messages
             .into_iter()
             .filter(|m| {
@@ -1159,7 +1152,13 @@ impl MezonTransport {
                 }
             })
             .map(Self::message_from_proto)
-            .collect())
+            .collect();
+        tracing::debug!(
+            "list_channel_messages: channel_id={channel_id} count={} response_bytes={}",
+            parsed.len(),
+            response.len(),
+        );
+        Ok(parsed)
     }
 
     /// Send a message to a channel.
