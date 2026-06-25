@@ -18,6 +18,8 @@ Cargo.lock
 .mcp-sessions.json
 
 # Local agent tooling (Claude Code / Cursor)
+.codebase-memory/
+.agents/
 .claude/
 .cursor/
 .claudeignore
