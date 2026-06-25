@@ -11,6 +11,7 @@ pub mod messages;
 pub mod platform;
 pub mod presence;
 pub mod realtime;
+pub mod voice;
 
 use anyhow::{Context, Result};
 use dirs::config_dir;
@@ -33,6 +34,12 @@ pub use messages::*;
 pub use platform::{OpenUrlFn, PlatformStore};
 pub use presence::*;
 pub use realtime::{RealtimeDispatch, RealtimeKind};
+pub use voice::{
+    PickedScreen, ScreenShareKind, ScreenShareOption, ScreenSharePreview, VideoFrameData,
+    VideoFrameStore, VoiceCallStatus, VoiceConnection, VoiceParticipant, VoiceStore,
+    capture_screen_share_preview, list_screen_share_options, peek_screen_share_options,
+    preload_screen_share_options,
+};
 
 pub const CACHE_TTL: Duration = Duration::from_secs(20 * 60);
 
