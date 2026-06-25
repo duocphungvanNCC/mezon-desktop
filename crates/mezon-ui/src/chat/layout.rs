@@ -1,7 +1,7 @@
 use gpui::{AnyView, Context, Entity, StyleRefinement, Window, div, prelude::*, px};
 use mezon_store::{
-    AuthState, ChannelList, ClanList, DirectChannel, DirectMessageStore, MessagesStore,
-    PresenceEvent, PresenceStore, Settings,
+    AuthState, ChannelList, ChannelType, ClanList, DirectChannel, DirectMessageStore,
+    MessagesStore, PresenceEvent, PresenceStore, Settings, VoiceStore,
 };
 
 use crate::chat::area::ChatArea;
@@ -21,6 +21,7 @@ pub struct ChatLayout {
     clan_list: Entity<ClanList>,
     auth_state: Entity<AuthState>,
     settings: Entity<Settings>,
+    voice_store: Entity<VoiceStore>,
     pending_channel_id: Option<String>,
 }
 
@@ -69,6 +70,12 @@ impl ChatLayout {
         let direct_store = DirectMessageStore::global(cx);
         cx.observe(&direct_store, |_, _, cx| cx.notify()).detach();
 
+        let messages_store = MessagesStore::global(cx);
+        cx.observe(&messages_store, |_, _, cx| cx.notify()).detach();
+
+        let voice_store = VoiceStore::global(cx);
+        cx.observe(&voice_store, |_, _, cx| cx.notify()).detach();
+
         let chat_area = ChatArea::new(settings.clone(), cx);
         cx.observe(&channel_list, |this, _, cx| {
             this.apply_pending_channel(cx);
@@ -92,6 +99,7 @@ impl ChatLayout {
             auth_state,
             chat_area,
             settings,
+            voice_store,
             pending_channel_id: None,
         };
         this.sync_active_from_route(cx);
@@ -237,9 +245,20 @@ impl Render for ChatLayout {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         crate::trace_render!("ChatLayout");
         self.chat_area.ensure_input(window, cx);
+
+        if let Some(ch) = self.channel_list.read(cx).active_channel()
+            && ch.channel_type == ChannelType::Voice
+        {
+            let channel_id = ch.id.clone();
+            self.voice_store.update(cx, |store, cx| {
+                store.prefetch_meet_token(channel_id.clone(), cx);
+            });
+        }
+
         let theme = cx.theme();
         let nav_body = self.render_nav_body(cx);
         let content = self.render_content(cx);
+        let voice_mini_bar = self.render_voice_mini_bar(cx);
 
         div()
             .flex()
@@ -270,6 +289,7 @@ impl Render for ChatLayout {
                             )
                             .child(div().w(px(272.0)).h_full().child(nav_body)),
                     )
+                    .children(voice_mini_bar)
                     .child(self.user_info_bar.clone()),
             )
             .child(
@@ -330,6 +350,20 @@ impl ChatLayout {
                 .active_channel()
                 .map(|ch| ch.id.clone())
         }
+    }
+
+    fn render_voice_mini_bar(&self, cx: &Context<Self>) -> Option<gpui::AnyElement> {
+        let store = self.voice_store.read(cx);
+        store.connection().connected_channel()?;
+        let theme = cx.theme();
+        let locale = self.settings.read(cx).language.clone();
+        Some(crate::chat::voice::render_mini_bar(
+            theme,
+            &locale,
+            store.channel_label(),
+            &self.voice_store,
+            store.mic_enabled(),
+        ))
     }
 
     fn render_nav_body(&self, cx: &Context<Self>) -> gpui::AnyElement {
@@ -393,13 +427,27 @@ impl ChatLayout {
                 .into_any_element();
         }
 
-        let active = self
-            .channel_list
-            .read(cx)
-            .active_channel()
-            .map(|ch| (ch.id.clone(), ch.name.clone()));
-        if let Some((channel_id, channel_name)) = active {
-            let typing = self.typing_label_for_channel(&channel_id, &locale, cx);
+        if let Some(ch) = self.channel_list.read(cx).active_channel() {
+            if ch.channel_type == ChannelType::Voice {
+                let channel = ch.clone();
+                let (input_device_id, output_device_id) = {
+                    let settings = self.settings.read(cx);
+                    (settings.input_device_id.clone(), settings.output_device_id.clone())
+                };
+                return crate::chat::voice::render_voice_channel(
+                    theme,
+                    &locale,
+                    &channel,
+                    &self.voice_store,
+                    &self.settings,
+                    input_device_id,
+                    output_device_id,
+                    cx,
+                );
+            }
+
+            let channel_name = ch.name.clone();
+            let typing = self.typing_label_for_channel(&ch.id, &locale, cx);
             return self
                 .chat_area
                 .render(theme, &locale, cx.entity(), &channel_name, false, typing)

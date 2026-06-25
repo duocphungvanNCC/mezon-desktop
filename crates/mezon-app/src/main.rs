@@ -409,6 +409,7 @@ fn open_main_window(
     mezon_store::DirectMessageStore::init(api.clone(), cx);
     mezon_store::MessagesStore::init(api.clone(), cx);
     mezon_store::PresenceStore::init(api.clone(), cx);
+    mezon_store::VoiceStore::init(api.clone(), cx);
     mezon_store::AccountStore::init(api, cx);
 
     let platform_store = mezon_store::PlatformStore::init(cx);

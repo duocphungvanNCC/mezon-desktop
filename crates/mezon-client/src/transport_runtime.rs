@@ -19,33 +19,26 @@ fn http_client() -> &'static ReqwestClient {
     HTTP_CLIENT.get_or_init(new_http_client)
 }
 
-/// Build a `ReqwestClient` bound to the shared transport runtime: constructing it inside the
-/// runtime context makes reqwest capture this runtime's `Handle` (via `Handle::try_current`)
-/// instead of spinning up its own — so all HTTP shares one tokio runtime with the socket transport.
 pub fn new_http_client() -> ReqwestClient {
     let _guard = runtime().enter();
     ReqwestClient::new()
 }
 
-/// Get or create the shared transport runtime.
 fn runtime() -> &'static Runtime {
     TRANSPORT_RUNTIME.get_or_init(|| {
         tokio::runtime::Builder::new_multi_thread()
             .enable_all()
-            .worker_threads(2) // Small dedicated pool for transport
+            .worker_threads(2)
             .thread_name("mezon-transport")
             .build()
             .expect("Failed to build transport runtime")
     })
 }
 
-/// A handle to the shared transport runtime, for spawning auxiliary background work
-/// (e.g. the tray's update check) without standing up a second process-wide runtime.
 pub fn handle() -> tokio::runtime::Handle {
     runtime().handle().clone()
 }
 
-/// HTTP PUT bytes to a pre-signed URL (e.g., S3 upload URL from upload_attachment_file).
 pub async fn put_bytes_to_url(url: &str, data: Vec<u8>) -> Result<()> {
     tracing::debug!("put_bytes_to_url: PUTting {} bytes", data.len());
     let client = http_client();
@@ -66,8 +59,6 @@ pub async fn put_bytes_to_url(url: &str, data: Vec<u8>) -> Result<()> {
 
 const MAX_FETCH_BYTES: u64 = 64 * 1024 * 1024;
 
-/// HTTP GET bytes from a public URL (e.g. a sample image/video to seed as an attachment).
-/// Returns the body bytes and the `Content-Type` header if present.
 pub async fn fetch_bytes(url: &str) -> Result<(Vec<u8>, Option<String>)> {
     let client = http_client();
     let request = http::Request::builder()
@@ -93,10 +84,6 @@ pub async fn fetch_bytes(url: &str) -> Result<(Vec<u8>, Option<String>)> {
     Ok((bytes, content_type))
 }
 
-/// Read a file without blocking the caller's async executor.
-///
-/// Callers run on GPUI's smol executor where there is no ambient tokio runtime, so the
-/// read is offloaded to the transport runtime's blocking pool.
 pub async fn read_file(path: std::path::PathBuf) -> Result<Vec<u8>> {
     runtime()
         .spawn_blocking(move || std::fs::read(&path))
@@ -105,18 +92,12 @@ pub async fn read_file(path: std::path::PathBuf) -> Result<Vec<u8>> {
         .map_err(Into::into)
 }
 
-/// Transport client wrapper that spawns all operations on a dedicated tokio runtime.
-///
-/// This allows transport operations (TCP connections, async I/O) to work correctly
-/// when called from GPUI's smol-based executor, without requiring a tokio context
-/// at the call site.
 #[derive(Clone)]
 pub struct TransportClient {
     inner: std::sync::Arc<MezonTransport>,
 }
 
 impl TransportClient {
-    /// Create a new transport client with the given base API path.
     pub fn new(base_path: String) -> Self {
         let adapter = Box::new(AbridgedTcpAdapter::new());
         let transport = MezonTransport::new(adapter, base_path);
@@ -125,9 +106,6 @@ impl TransportClient {
         }
     }
 
-    /// Connect to the Mezon backend.
-    ///
-    /// Spawns the connection task on the dedicated transport runtime.
     pub async fn connect(
         &self,
         host: &str,
@@ -166,9 +144,6 @@ impl TransportClient {
         Ok(())
     }
 
-    /// Get account data.
-    ///
-    /// Spawns the API call on the dedicated transport runtime.
     pub async fn get_account(&self) -> Result<crate::transport::ApiAccount> {
         tracing::debug!("TransportClient::get_account() called");
 
@@ -187,7 +162,6 @@ impl TransportClient {
         result
     }
 
-    /// List channel descriptions over the shared transport.
     pub async fn list_channel_descs(
         &self,
         clan_id: &str,
@@ -203,7 +177,6 @@ impl TransportClient {
             .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
     }
 
-    /// List channels for the current user over the shared transport.
     pub async fn list_channel_by_user_id(&self) -> Result<Vec<crate::transport::ApiChannelDesc>> {
         tracing::debug!("TransportClient::list_channel_by_user_id() called");
 
@@ -280,6 +253,21 @@ impl TransportClient {
             .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
     }
 
+    pub async fn generate_meet_token(&self, channel_id: &str, room_name: &str) -> Result<String> {
+        let transport = self.inner.clone();
+        let channel_id = channel_id.to_string();
+        let room_name = room_name.to_string();
+        runtime()
+            .spawn(async move {
+                transport
+                    .generate_meet_token(&channel_id, &room_name)
+                    .await
+                    .map(|resp| resp.token)
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
     pub async fn list_clan_badge_count(&self) -> Result<Vec<(String, i32, bool)>> {
         let transport = self.inner.clone();
         runtime()
@@ -297,7 +285,6 @@ impl TransportClient {
             .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
     }
 
-    /// List clan descriptions over the shared transport.
     pub async fn list_clan_descs(&self) -> Result<Vec<crate::transport::ApiClanDesc>> {
         tracing::debug!("TransportClient::list_clan_descs() called");
 
@@ -309,7 +296,6 @@ impl TransportClient {
             .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
     }
 
-    /// Create a new clan.
     pub async fn create_clan_desc(
         &self,
         clan_name: &str,
@@ -329,7 +315,6 @@ impl TransportClient {
             .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
     }
 
-    /// Ping server and wait for pong.
     pub async fn ping_roundtrip(&self) -> Result<()> {
         tracing::debug!("TransportClient::ping_roundtrip() called");
 
@@ -341,12 +326,10 @@ impl TransportClient {
             .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
     }
 
-    /// Check if the connection is open.
     pub async fn is_open(&self) -> bool {
         self.inner.is_open().await
     }
 
-    /// List channel messages.
     pub async fn list_channel_messages(
         &self,
         clan_id: &str,
@@ -370,7 +353,6 @@ impl TransportClient {
             .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
     }
 
-    /// Send a message to a channel.
     pub async fn join_chat(
         &self,
         clan_id: &str,
@@ -445,7 +427,6 @@ impl TransportClient {
             .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
     }
 
-    /// Create a new channel in a clan.
     pub async fn create_channel(
         &self,
         clan_id: &str,
@@ -476,7 +457,6 @@ impl TransportClient {
             .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
     }
 
-    /// Create a category in a clan.
     pub async fn create_category_desc(
         &self,
         category_name: &str,
@@ -496,7 +476,6 @@ impl TransportClient {
             .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
     }
 
-    /// Add users to a channel.
     pub async fn add_channel_users(&self, channel_id: &str, user_ids: Vec<String>) -> Result<()> {
         let transport = self.inner.clone();
         let channel_id = channel_id.to_string();
@@ -510,9 +489,6 @@ impl TransportClient {
             .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
     }
 
-    /// Close the connection.
-    ///
-    /// Spawns the close operation on the dedicated transport runtime.
     pub async fn close(&self) -> Result<()> {
         let transport = self.inner.clone();
 
@@ -524,7 +500,6 @@ impl TransportClient {
         Ok(())
     }
 
-    /// Update user profile (display name, avatar URL).
     pub async fn update_user(&self, display_name: &str, avatar_url: &str) -> Result<()> {
         let transport = self.inner.clone();
         let display_name = display_name.to_string();
@@ -536,7 +511,6 @@ impl TransportClient {
             .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
     }
 
-    /// List currently logged-in devices.
     pub async fn list_loged_device(&self) -> Result<Vec<mezon_proto::api::LogedDevice>> {
         let transport = self.inner.clone();
 
@@ -546,7 +520,6 @@ impl TransportClient {
             .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
     }
 
-    /// Update account profile (display name, avatar URL, about me).
     pub async fn update_account(
         &self,
         display_name: Option<&str>,
@@ -574,7 +547,6 @@ impl TransportClient {
             .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
     }
 
-    /// Upload an attachment file (used for avatar upload).
     pub async fn upload_attachment_file(
         &self,
         filename: &str,
@@ -597,7 +569,6 @@ impl TransportClient {
             .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
     }
 
-    /// Get user profile on a clan.
     pub async fn get_user_profile_on_clan(
         &self,
         clan_id: &str,
@@ -611,7 +582,6 @@ impl TransportClient {
             .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
     }
 
-    /// Update user profile by clan.
     pub async fn update_user_profile_by_clan(
         &self,
         clan_id: &str,
@@ -633,7 +603,6 @@ impl TransportClient {
             .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
     }
 
-    /// Check duplicate name.
     pub async fn check_duplicate_name(
         &self,
         name: &str,
@@ -653,7 +622,6 @@ impl TransportClient {
             .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
     }
 
-    /// Log out the current session.
     pub async fn session_logout(&self, token: &str, refresh_token: &str) -> Result<()> {
         let transport = self.inner.clone();
         let token = token.to_string();
