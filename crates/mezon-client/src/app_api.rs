@@ -441,7 +441,6 @@ impl AppApi {
         self.transport.list_voice_channel_users(clan_id).await
     }
 
-    /// Generate a LiveKit meet token (JWT) for joining a voice channel's room.
     pub async fn generate_meet_token(&self, channel_id: &str, room_name: &str) -> Result<String> {
         self.transport
             .generate_meet_token(channel_id, room_name)
