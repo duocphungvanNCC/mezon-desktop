@@ -1,3 +1,3 @@
 [submodule "mezon-protocol"]
 	path = mezon-protocol
-	url = https://github.com/mezonai/mezon-protocol
+	url = git@github.com:mezonai/mezon-protocol.git
