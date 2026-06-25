@@ -24,3 +24,4 @@ unicode-segmentation.workspace = true
 indexmap.workspace = true
 image.workspace = true
 qrcode.workspace = true
+smallvec.workspace = true

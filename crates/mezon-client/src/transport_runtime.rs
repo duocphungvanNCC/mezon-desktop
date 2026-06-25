@@ -280,6 +280,24 @@ impl TransportClient {
             .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
     }
 
+    /// Generate a LiveKit meet token for a voice channel.
+    ///
+    /// `room_name` is empty for clan voice channels (the server embeds the room in the JWT).
+    pub async fn generate_meet_token(&self, channel_id: &str, room_name: &str) -> Result<String> {
+        let transport = self.inner.clone();
+        let channel_id = channel_id.to_string();
+        let room_name = room_name.to_string();
+        runtime()
+            .spawn(async move {
+                transport
+                    .generate_meet_token(&channel_id, &room_name)
+                    .await
+                    .map(|resp| resp.token)
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
     pub async fn list_clan_badge_count(&self) -> Result<Vec<(String, i32, bool)>> {
         let transport = self.inner.clone();
         runtime()
