@@ -60,7 +60,7 @@ impl UserInfoBar {
         let online = PresenceStore::global(cx)
             .read(cx)
             .user_online
-            .contains(&user_id);
+            .contains(&user_id.parse().unwrap_or_default());
         self.presence = SharedString::from(if online { "Online" } else { "Offline" });
     }
 }

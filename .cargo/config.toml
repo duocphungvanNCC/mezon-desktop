@@ -4,9 +4,11 @@ incremental = false
 [target.aarch64-apple-darwin]
 rustflags = [
     "-C", "link-arg=-Wl,-rpath,@executable_path/../Frameworks",
+    "-C", "link-arg=-ObjC",
 ]
 
 [target.x86_64-apple-darwin]
 rustflags = [
     "-C", "link-arg=-Wl,-rpath,@executable_path/../Frameworks",
+    "-C", "link-arg=-ObjC",
 ]

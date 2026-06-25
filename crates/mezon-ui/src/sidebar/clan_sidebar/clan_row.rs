@@ -28,7 +28,7 @@ fn on_clan_click(
     move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
         let id = clan_id.to_string();
         clan_list.update(cx, |m, cx| {
-            m.select_clan(&id, cx);
+            m.select_clan(id.parse().unwrap_or_default(), cx);
         });
         if !matches!(
             Router::global(cx).read(cx).route(),
@@ -95,7 +95,10 @@ pub(super) fn render_clan_row(
     };
 
     let clan_id = clan.id.clone();
-    let is_active = clan_list_handle.read(cx).is_active_clan(&clan.id) && !dm_active;
+    let is_active = clan_list_handle
+        .read(cx)
+        .is_active_clan(clan.id.parse().unwrap_or_default())
+        && !dm_active;
     let show_badge = clan.badge_count > 0 && !clan.muted;
     let show_nub = clan.has_unread && clan.badge_count == 0 && !clan.muted && !is_active;
     let badge_count = clan.badge_count;

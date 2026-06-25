@@ -60,8 +60,6 @@ impl RootView {
                 channel_id,
             } = router.read(cx).route()
             {
-                let clan_id = clan_id.clone();
-                let channel_id = channel_id.clone();
                 this.settings.update(cx, |s, cx| {
                     s.last_clan_id = Some(clan_id);
                     s.last_channel_id = Some(channel_id);
@@ -88,8 +86,7 @@ impl RootView {
                     .settings
                     .read(cx)
                     .last_clan_id
-                    .clone()
-                    .zip(this.settings.read(cx).last_channel_id.clone());
+                    .zip(this.settings.read(cx).last_channel_id);
                 if let Some((clan_id, channel_id)) = last {
                     crate::router::navigate(
                         cx,

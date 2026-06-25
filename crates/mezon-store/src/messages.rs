@@ -1,3 +1,4 @@
+use crate::ids::{ChannelId, ClanId};
 use std::collections::HashSet;
 use std::sync::Arc;
 
@@ -34,16 +35,16 @@ struct ChannelMessages {
 const STREAM_MODE_CHANNEL: i32 = 2;
 
 pub struct MessagesStore {
-    cache: KeyedCache<String, ChannelMessages>,
-    active_channel_id: Option<String>,
-    active_clan_id: Option<String>,
+    cache: KeyedCache<ChannelId, ChannelMessages>,
+    active_channel_id: Option<ChannelId>,
+    active_clan_id: Option<ClanId>,
     is_public: bool,
     is_dm: bool,
     mode: i32,
     loading: bool,
     loading_more: bool,
     fetch_generation: u64,
-    joined_channels: HashSet<String>,
+    joined_channels: HashSet<ChannelId>,
     api: Arc<AppApi>,
     _channel_sub: Subscription,
     _conn_watch: Task<()>,
@@ -74,7 +75,7 @@ impl MessagesStore {
 
         let channel_sub = cx.subscribe(&ChannelList::global(cx), |this, _channel, event, cx| {
             if let ChannelEvent::ActiveChannelChanged(channel_id) = event {
-                this.on_active_channel_changed(channel_id.clone(), cx);
+                this.on_active_channel_changed(*channel_id, cx);
             }
         });
 
@@ -145,10 +146,10 @@ impl MessagesStore {
         if self.loading_more || self.loading {
             return;
         }
-        let Some(channel_id) = self.active_channel_id.clone() else {
+        let Some(channel_id) = self.active_channel_id else {
             return;
         };
-        let Some(clan_id) = self.active_clan_id.clone() else {
+        let Some(clan_id) = self.active_clan_id else {
             return;
         };
         let Some(channel) = self.cache.get(&channel_id) else {
@@ -173,9 +174,9 @@ impl MessagesStore {
         cx.spawn(async move |this, cx| {
             let result = api
                 .list_channel_messages(
-                    &clan_id,
-                    &channel_id,
-                    &oldest_id,
+                    clan_id.get(),
+                    channel_id.get(),
+                    oldest_id.parse::<i64>().unwrap_or(0),
                     DIRECTION_BEFORE,
                     MESSAGE_PAGE_LIMIT,
                 )
@@ -198,7 +199,7 @@ impl MessagesStore {
                 let cfg = AppConfig::try_global(cx);
                 let mut older: Vec<Message> = msgs
                     .into_iter()
-                    .filter(|m| !existing.contains(m.message_id.as_str()))
+                    .filter(|m| !existing.contains(m.message_id.to_string().as_str()))
                     .map(|m| message_from_api(m, cfg))
                     .collect();
                 if older.is_empty() {
@@ -212,7 +213,7 @@ impl MessagesStore {
                 trim_messages(&mut older);
                 channel.messages = older;
                 recompute_message_grouping(&mut channel.messages);
-                if this.active_channel_id.as_deref() == Some(channel_id.as_str()) {
+                if this.active_channel_id == Some(channel_id) {
                     cx.emit(MessagesEvent::OlderPrepended { count: prepended });
                 }
                 cx.notify();
@@ -228,10 +229,10 @@ impl MessagesStore {
         sender_name: String,
         cx: &mut Context<Self>,
     ) {
-        let Some(channel_id) = self.active_channel_id.clone() else {
+        let Some(channel_id) = self.active_channel_id else {
             return;
         };
-        let Some(clan_id) = self.active_clan_id.clone() else {
+        let Some(clan_id) = self.active_clan_id else {
             return;
         };
         let is_public = self.is_public;
@@ -261,14 +262,14 @@ impl MessagesStore {
         let api = self.api.clone();
         cx.spawn(async move |this, cx| {
             match api
-                .send_channel_message(&clan_id, &channel_id, &content, is_public, mode)
+                .send_channel_message(clan_id.get(), channel_id.get(), &content, is_public, mode)
                 .await
             {
                 Ok(sent) => {
                     let _ = this.update(cx, |this, cx| {
                         let confirmed = message_from_api(sent, AppConfig::try_global(cx));
-                        this.reconcile_temp(&channel_id, &temp_id, confirmed);
-                        if this.active_channel_id.as_deref() == Some(channel_id.as_str()) {
+                        this.reconcile_temp(channel_id, &temp_id, confirmed);
+                        if this.active_channel_id == Some(channel_id) {
                             cx.emit(MessagesEvent::Appended);
                             cx.notify();
                         }
@@ -277,8 +278,8 @@ impl MessagesStore {
                 Err(e) => {
                     tracing::error!("send_channel_message failed: {e}");
                     let _ = this.update(cx, |this, cx| {
-                        this.remove_temp(&channel_id, &temp_id);
-                        if this.active_channel_id.as_deref() == Some(channel_id.as_str()) {
+                        this.remove_temp(channel_id, &temp_id);
+                        if this.active_channel_id == Some(channel_id) {
                             cx.emit(MessagesEvent::Appended);
                             cx.notify();
                         }
@@ -289,7 +290,7 @@ impl MessagesStore {
         .detach();
     }
 
-    fn on_active_channel_changed(&mut self, channel_id: Option<String>, cx: &mut Context<Self>) {
+    fn on_active_channel_changed(&mut self, channel_id: Option<ChannelId>, cx: &mut Context<Self>) {
         let Some(channel_id) = channel_id else {
             self.active_channel_id = None;
             self.active_clan_id = None;
@@ -304,8 +305,8 @@ impl MessagesStore {
     }
 
     /// Open a clan channel as the active conversation (looks up clan/privacy from `ChannelList`).
-    pub fn open_channel(&mut self, channel_id: String, cx: &mut Context<Self>) {
-        if self.active_channel_id.as_deref() == Some(channel_id.as_str()) && !self.is_dm {
+    pub fn open_channel(&mut self, channel_id: ChannelId, cx: &mut Context<Self>) {
+        if self.active_channel_id == Some(channel_id) && !self.is_dm {
             if self.loading {
                 return;
             }
@@ -322,13 +323,13 @@ impl MessagesStore {
         }
         let Some(channel) = ChannelList::global(cx)
             .read(cx)
-            .find_channel(&channel_id)
+            .find_channel(channel_id)
             .cloned()
         else {
             return;
         };
         self.activate(
-            channel.clan_id.clone(),
+            channel.clan_id,
             channel_id,
             !channel.private,
             false,
@@ -340,8 +341,13 @@ impl MessagesStore {
 
     /// Open a direct message / group conversation (clan_id = 0) as the active conversation.
     /// `channel_type` is the raw DM type (3 = DM, 2 = group).
-    pub fn open_direct(&mut self, channel_id: String, channel_type: i32, cx: &mut Context<Self>) {
-        if self.active_channel_id.as_deref() == Some(channel_id.as_str()) && self.is_dm {
+    pub fn open_direct(
+        &mut self,
+        channel_id: ChannelId,
+        channel_type: i32,
+        cx: &mut Context<Self>,
+    ) {
+        if self.active_channel_id == Some(channel_id) && self.is_dm {
             if self.loading {
                 return;
             }
@@ -357,30 +363,22 @@ impl MessagesStore {
             return;
         }
         let mode = if channel_type == 2 { 3 } else { 4 };
-        self.activate(
-            "0".to_string(),
-            channel_id,
-            false,
-            true,
-            channel_type,
-            mode,
-            cx,
-        );
+        self.activate(ClanId(0), channel_id, false, true, channel_type, mode, cx);
     }
 
     #[allow(clippy::too_many_arguments)]
     fn activate(
         &mut self,
-        clan_id: String,
-        channel_id: String,
+        clan_id: ClanId,
+        channel_id: ChannelId,
         is_public: bool,
         is_dm: bool,
         join_type: i32,
         mode: i32,
         cx: &mut Context<Self>,
     ) {
-        self.active_channel_id = Some(channel_id.clone());
-        self.active_clan_id = Some(clan_id.clone());
+        self.active_channel_id = Some(channel_id);
+        self.active_clan_id = Some(clan_id);
         self.is_public = is_public;
         self.is_dm = is_dm;
         self.mode = mode;
@@ -389,8 +387,8 @@ impl MessagesStore {
         let generation = self.fetch_generation;
 
         if !self.joined_channels.contains(&channel_id) {
-            self.joined_channels.insert(channel_id.clone());
-            self.spawn_join(&clan_id, &channel_id, join_type, is_public, cx);
+            self.joined_channels.insert(channel_id);
+            self.spawn_join(clan_id, channel_id, join_type, is_public, cx);
         }
 
         if self.cache.is_fresh(&channel_id, crate::CACHE_TTL) {
@@ -411,22 +409,23 @@ impl MessagesStore {
             cx.emit(MessagesEvent::Reset { count: 0 });
         }
         cx.notify();
-        self.spawn_initial_fetch(&clan_id, &channel_id, generation, cx);
+        self.spawn_initial_fetch(clan_id, channel_id, generation, cx);
     }
 
     fn spawn_join(
         &self,
-        clan_id: &str,
-        channel_id: &str,
+        clan_id: ClanId,
+        channel_id: ChannelId,
         join_type: i32,
         is_public: bool,
         cx: &mut Context<Self>,
     ) {
         let api = self.api.clone();
-        let clan_id = clan_id.to_string();
-        let ch_id = channel_id.to_string();
         cx.spawn(async move |_this, _cx| {
-            if let Err(e) = api.join_chat(&clan_id, &ch_id, join_type, is_public).await {
+            if let Err(e) = api
+                .join_chat(clan_id.get(), channel_id.get(), join_type, is_public)
+                .await
+            {
                 tracing::warn!("join_chat failed: {e}");
             }
         })
@@ -435,20 +434,18 @@ impl MessagesStore {
 
     fn spawn_initial_fetch(
         &self,
-        clan_id: &str,
-        channel_id: &str,
+        clan_id: ClanId,
+        channel_id: ChannelId,
         generation: u64,
         cx: &mut Context<Self>,
     ) {
         let api = self.api.clone();
-        let clan_id = clan_id.to_string();
-        let ch_id = channel_id.to_string();
         cx.spawn(async move |this, cx| {
             let result = api
-                .list_channel_messages(&clan_id, &ch_id, "", 0, MESSAGE_PAGE_LIMIT)
+                .list_channel_messages(clan_id.get(), channel_id.get(), 0, 0, MESSAGE_PAGE_LIMIT)
                 .await;
             let _ = this.update(cx, |this, cx| {
-                this.apply_initial_fetch_result(&ch_id, generation, result, cx);
+                this.apply_initial_fetch_result(channel_id, generation, result, cx);
             });
         })
         .detach();
@@ -456,12 +453,12 @@ impl MessagesStore {
 
     fn apply_initial_fetch_result(
         &mut self,
-        channel_id: &str,
+        channel_id: ChannelId,
         generation: u64,
         result: Result<Vec<ApiMessage>, anyhow::Error>,
         cx: &mut Context<Self>,
     ) {
-        let is_active = self.active_channel_id.as_deref() == Some(channel_id);
+        let is_active = self.active_channel_id == Some(channel_id);
         let is_current = is_active && self.fetch_generation == generation;
 
         match result {
@@ -491,8 +488,8 @@ impl MessagesStore {
         let RealtimeEvent::ChannelMessage(m) = event else {
             return;
         };
-        let channel_id = m.channel_id.to_string();
-        let is_active = self.active_channel_id.as_deref() == Some(channel_id.as_str());
+        let channel_id = ChannelId(m.channel_id);
+        let is_active = self.active_channel_id == Some(channel_id);
         let cfg = AppConfig::try_global(cx);
         let Some(channel) = self.cache.get_mut(&channel_id) else {
             return;
@@ -517,8 +514,8 @@ impl MessagesStore {
         }
     }
 
-    fn reconcile_temp(&mut self, channel_id: &str, temp_id: &str, confirmed: Message) {
-        let Some(channel) = self.cache.get_mut(channel_id) else {
+    fn reconcile_temp(&mut self, channel_id: ChannelId, temp_id: &str, confirmed: Message) {
+        let Some(channel) = self.cache.get_mut(&channel_id) else {
             return;
         };
         if let Some(slot) = channel.messages.iter_mut().find(|m| m.id == temp_id) {
@@ -531,8 +528,8 @@ impl MessagesStore {
         }
     }
 
-    fn remove_temp(&mut self, channel_id: &str, temp_id: &str) {
-        let Some(channel) = self.cache.get_mut(channel_id) else {
+    fn remove_temp(&mut self, channel_id: ChannelId, temp_id: &str) {
+        let Some(channel) = self.cache.get_mut(&channel_id) else {
             return;
         };
         let before = channel.messages.len();
@@ -555,10 +552,10 @@ impl MessagesStore {
     }
 
     fn refetch_current_messages(&mut self, cx: &mut Context<Self>) {
-        let Some(channel_id) = self.active_channel_id.clone() else {
+        let Some(channel_id) = self.active_channel_id else {
             return;
         };
-        let Some(clan_id) = self.active_clan_id.clone() else {
+        let Some(clan_id) = self.active_clan_id else {
             return;
         };
 
@@ -571,19 +568,19 @@ impl MessagesStore {
         let api = self.api.clone();
         cx.spawn(async move |this, cx| {
             let result = api
-                .list_channel_messages(&clan_id, &channel_id, "", 0, MESSAGE_PAGE_LIMIT)
+                .list_channel_messages(clan_id.get(), channel_id.get(), 0, 0, MESSAGE_PAGE_LIMIT)
                 .await;
             let _ = this.update(cx, |this, cx| {
-                this.apply_initial_fetch_result(&channel_id, generation, result, cx);
+                this.apply_initial_fetch_result(channel_id, generation, result, cx);
             });
         })
         .detach();
     }
 
-    fn set_channel(&mut self, channel_id: &str, messages: Vec<Message>) {
-        let active = self.active_channel_id.clone();
+    fn set_channel(&mut self, channel_id: ChannelId, messages: Vec<Message>) {
+        let active = self.active_channel_id;
         self.cache.insert(
-            channel_id.to_string(),
+            channel_id,
             ChannelMessages {
                 messages,
                 has_more: true,
@@ -635,9 +632,9 @@ fn message_from_api(m: ApiMessage, cfg: Option<&AppConfig>) -> Message {
         .map(|c| c.avatar_proxy(&m.avatar))
         .unwrap_or_else(|| m.avatar.clone());
     Message::new(
-        m.message_id,
+        m.message_id.to_string(),
         m.content,
-        m.sender_id,
+        m.sender_id.to_string(),
         m.sender_name,
         m.create_time,
     )
@@ -685,9 +682,9 @@ mod tests {
     fn message_from_api_maps_fields() {
         let m = message_from_api(
             ApiMessage {
-                message_id: "1".into(),
+                message_id: 1,
                 content: "hi".into(),
-                sender_id: "u1".into(),
+                sender_id: 1,
                 sender_name: "Alice".into(),
                 avatar: "av.png".into(),
                 create_time: 100,
