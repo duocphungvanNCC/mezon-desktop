@@ -17,7 +17,7 @@ pub struct ChatLayout {
     channel_sidebar: Entity<ChannelSidebar>,
     direct_sidebar: Entity<DirectSidebar>,
     direct_store: Entity<DirectMessageStore>,
-    user_info_bar: UserInfoBar,
+    user_info_bar: Entity<UserInfoBar>,
     clan_list: Entity<ClanList>,
     auth_state: Entity<AuthState>,
     settings: Entity<Settings>,
@@ -55,20 +55,14 @@ impl ChatLayout {
         let settings_for_direct = settings.clone();
         let direct_sidebar = cx.new(move |cx| DirectSidebar::new(settings_for_direct, cx));
 
-        let user_info_bar = UserInfoBar::new(auth_state.clone(), cx);
+        let user_info_bar = cx.new(|cx| UserInfoBar::new(auth_state.clone(), cx));
 
         cx.subscribe(&PresenceStore::global(cx), |this, _, event, cx| {
-            if matches!(event, PresenceEvent::TypingChanged { .. }) {
+            if let PresenceEvent::TypingChanged { channel_id } = event
+                && this.active_typing_channel(cx).as_deref() == Some(channel_id.as_str())
+            {
                 cx.notify();
-                return;
             }
-            this.user_info_bar.sync_presence(cx);
-            cx.notify();
-        })
-        .detach();
-        cx.observe(&auth_state, |this, _, cx| {
-            this.user_info_bar.sync_presence(cx);
-            cx.notify();
         })
         .detach();
 
@@ -100,7 +94,6 @@ impl ChatLayout {
             settings,
             pending_channel_id: None,
         };
-        this.user_info_bar.sync_presence(cx);
         this.sync_active_from_route(cx);
         this
     }
@@ -277,7 +270,7 @@ impl Render for ChatLayout {
                             )
                             .child(div().w(px(272.0)).h_full().child(nav_body)),
                     )
-                    .child(self.user_info_bar.render(theme, cx)),
+                    .child(self.user_info_bar.clone()),
             )
             .child(
                 div()
@@ -326,6 +319,17 @@ impl ChatLayout {
             Router::global(cx).read(cx).route(),
             Route::Direct | Route::Friends | Route::DirectMessage { .. }
         )
+    }
+
+    fn active_typing_channel(&self, cx: &Context<Self>) -> Option<String> {
+        if self.is_dm_route(cx) {
+            self.current_dm(cx).map(|dm| dm.id)
+        } else {
+            self.channel_list
+                .read(cx)
+                .active_channel()
+                .map(|ch| ch.id.clone())
+        }
     }
 
     fn render_nav_body(&self, cx: &Context<Self>) -> gpui::AnyElement {

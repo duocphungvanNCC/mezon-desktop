@@ -75,8 +75,8 @@ impl LoginStore {
         self.client.create_qr_login().await
     }
 
-    pub async fn confirm_qr_login(&self, login_id: &str) -> Result<Session> {
-        self.client.confirm_qr_login(login_id).await
+    pub async fn confirm_qr_login(&self, login_id: &str, is_remember: bool) -> Result<Session> {
+        self.client.confirm_qr_login(login_id, is_remember).await
     }
 
     pub fn persist_session(session: &Session) -> Result<()> {

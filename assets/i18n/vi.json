@@ -4287,5 +4287,7 @@
   "userProfile.userInfoDM.menu.removeSuccess": "Đã xóa thành viên khỏi nhóm",
   "userProfile.userInfoDM.mezonMemberSince": "Thành viên Mezon từ",
   "userProfile.voiceInfo.inVoice": "Trong kênh thoại",
-  "userProfile.voiceInfo.joinVoice": "Tham gia thoại"
+  "userProfile.voiceInfo.joinVoice": "Tham gia thoại",
+  "common.login.genericError": "Đã có lỗi xảy ra. Vui lòng thử lại.",
+  "common.login.invalidEmail": "Vui lòng nhập địa chỉ email hợp lệ."
 }
