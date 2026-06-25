@@ -8,6 +8,7 @@ pub mod connection;
 pub mod direct;
 pub mod login;
 pub mod messages;
+pub mod platform;
 pub mod presence;
 pub mod realtime;
 
@@ -20,7 +21,7 @@ use std::time::Duration;
 use tokio::fs;
 
 pub use account::*;
-pub use audio::{AudioDeviceInfo, AudioStore, MicCaptureFactory, MicCaptureHandle, OpenUrlFn};
+pub use audio::{AudioDeviceInfo, AudioStore, MicCaptureFactory, MicCaptureHandle};
 pub use cache::KeyedCache;
 pub use channel::*;
 pub use clan::*;
@@ -29,6 +30,7 @@ pub use connection::{ConnectionStore, resolve_initial_auth_state};
 pub use direct::{DirectChannel, DirectKind, DirectMessageStore};
 pub use login::{LoginStore, token_from_oauth_callback_url};
 pub use messages::*;
+pub use platform::{OpenUrlFn, PlatformStore};
 pub use presence::*;
 pub use realtime::{RealtimeDispatch, RealtimeKind};
 

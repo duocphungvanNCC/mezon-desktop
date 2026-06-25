@@ -261,6 +261,35 @@ fn run_app(lock: SingleInstance, initial_url: Option<String>) {
                                 Ok(session) => {
                                     let session_kc = session.clone();
                                     cx.background_executor()
+            let settings_entity = cx.new(|_| settings.clone());
+
+            let (auth_state_handle, window_handle) = open_main_window(
+                cx,
+                &settings,
+                settings_entity,
+                client.clone(),
+                api.clone(),
+                initial_auth_state,
+            );
+
+            let deep_link_task = {
+                let auth_state = auth_state_handle.clone();
+                cx.spawn(async move |cx: &mut AsyncApp| {
+                    while let Some(url) = url_rx.next().await {
+                        tracing::info!(
+                            "Received deep link: {}",
+                            url.split(['?', '#']).next().unwrap_or_default()
+                        );
+                        if url.starts_with("mezonapp://callback") {
+                            if let Some(token) = mezon_store::token_from_oauth_callback_url(&url) {
+                                let client = cx.update(|cx| {
+                                    mezon_store::LoginStore::global(cx).read(cx).client()
+                                });
+                                let auth = auth_state.clone();
+                                match client.authenticate_mezon(&token).await {
+                                    Ok(session) if !session.token.is_empty() => {
+                                        let session_kc = session.clone();
+                                        cx.background_executor()
                                             .spawn(async move {
                                                 if let Err(e) =
                                                     mezon_store::LoginStore::persist_session(
@@ -277,6 +306,35 @@ fn run_app(lock: SingleInstance, initial_url: Option<String>) {
                                         auth.update(cx, |state, cx| {
                                             *state = AuthState::Connecting(session);
                                             cx.notify();
+                                        cx.update(|cx| {
+                                            auth.update(cx, |state, cx| {
+                                                *state = AuthState::Connecting(session);
+                                                cx.notify();
+                                            });
+                                            mezon_ui::router::replace(
+                                                cx,
+                                                mezon_ui::router::Route::Chat,
+                                            );
+                                        });
+                                    }
+                                    Ok(_) => {
+                                        tracing::warn!(
+                                            "OAuth callback returned a session without a token"
+                                        );
+                                        cx.update(|cx| {
+                                            auth.update(cx, |state, cx| {
+                                                *state = AuthState::NotAuthenticated;
+                                                cx.notify();
+                                            });
+                                        });
+                                    }
+                                    Err(e) => {
+                                        tracing::warn!("OAuth callback token exchange failed: {e}");
+                                        cx.update(|cx| {
+                                            auth.update(cx, |state, cx| {
+                                                *state = AuthState::NotAuthenticated;
+                                                cx.notify();
+                                            });
                                         });
                                         mezon_ui::router::replace(
                                             cx,
@@ -408,6 +466,13 @@ fn open_main_window(
     mezon_store::PresenceStore::init(api.clone(), cx);
     mezon_store::AccountStore::init(api, cx);
 
+    let platform_store = mezon_store::PlatformStore::init(cx);
+    mezon_store::PlatformStore::set_open_url(
+        &platform_store,
+        std::sync::Arc::new(|url: &str| mezon_native::open_url(url)),
+        cx,
+    );
+
     let audio_store = mezon_store::AudioStore::init(cx);
     let audio_store_weak = audio_store.downgrade();
     cx.spawn(async move |cx: &mut AsyncApp| {
@@ -445,11 +510,6 @@ fn open_main_window(
                 .map(|capture| Box::new(capture) as Box<dyn Send>)
                 .map_err(|e| e.to_string())
         }),
-        cx,
-    );
-    mezon_store::AudioStore::set_open_url(
-        &audio_store,
-        std::sync::Arc::new(|url: &str| mezon_native::open_url(url)),
         cx,
     );
 
