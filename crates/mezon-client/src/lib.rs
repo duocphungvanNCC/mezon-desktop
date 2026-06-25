@@ -4,6 +4,7 @@
 pub mod abridged_tcp_adapter;
 pub mod app_api;
 pub mod auth;
+pub mod image_disk_cache;
 pub mod keychain;
 pub mod network_monitor;
 pub mod session;

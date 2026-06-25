@@ -1,7 +1,8 @@
 use gpui::{AnyView, Context, Entity, StyleRefinement, Window, div, prelude::*, px};
 use mezon_store::{
-    AuthState, ChannelList, ChannelType, ClanList, DirectChannel, DirectMessageStore,
-    MessagesStore, PresenceEvent, PresenceStore, Settings, VoiceStore,
+    AuthState, ChannelId, ChannelList, ChannelType, ClanId, ClanList, DirectChannel, DirectKind,
+    DirectMessageStore, GroupMembersStore, MessagesStore, PresenceEvent, PresenceStore, Settings,
+    VoiceStore,
 };
 
 use crate::chat::area::ChatArea;
@@ -22,7 +23,8 @@ pub struct ChatLayout {
     auth_state: Entity<AuthState>,
     settings: Entity<Settings>,
     voice_store: Entity<VoiceStore>,
-    pending_channel_id: Option<String>,
+    pending_channel_id: Option<ChannelId>,
+    show_member_list: bool,
 }
 
 impl ChatLayout {
@@ -60,7 +62,7 @@ impl ChatLayout {
 
         cx.subscribe(&PresenceStore::global(cx), |this, _, event, cx| {
             if let PresenceEvent::TypingChanged { channel_id } = event
-                && this.active_typing_channel(cx).as_deref() == Some(channel_id.as_str())
+                && this.active_typing_channel(cx) == Some(*channel_id)
             {
                 cx.notify();
             }
@@ -101,9 +103,15 @@ impl ChatLayout {
             settings,
             voice_store,
             pending_channel_id: None,
+            show_member_list: true,
         };
         this.sync_active_from_route(cx);
         this
+    }
+
+    pub(crate) fn toggle_member_list(&mut self, cx: &mut Context<Self>) {
+        self.show_member_list = !self.show_member_list;
+        cx.notify();
     }
 
     fn sync_active_from_route(&mut self, cx: &mut Context<Self>) {
@@ -136,6 +144,14 @@ impl ChatLayout {
                     );
                     3
                 });
+                if channel_type == DirectKind::Group.channel_type() {
+                    self.chat_area.bind_group_members(cx);
+                    let group_id = direct_id;
+                    GroupMembersStore::global(cx)
+                        .update(cx, |store, cx| store.ensure_loaded(group_id, cx));
+                } else {
+                    self.chat_area.clear_member_panel();
+                }
                 MessagesStore::global(cx).update(cx, |store, cx| {
                     store.open_direct(direct_id, channel_type, cx)
                 });
@@ -144,30 +160,38 @@ impl ChatLayout {
                 self.pending_channel_id = None;
                 self.direct_store
                     .update(cx, |store, cx| store.ensure_loaded(cx));
+                self.chat_area.clear_member_panel();
             }
             _ => {
                 self.pending_channel_id = None;
+                self.chat_area.clear_member_panel();
             }
         }
     }
 
-    fn sync_channel_route(&mut self, clan_id: String, channel_id: String, cx: &mut Context<Self>) {
-        if self.clan_list.read(cx).active_clan_id.as_deref() != Some(clan_id.as_str()) {
+    fn sync_channel_route(
+        &mut self,
+        clan_id: ClanId,
+        channel_id: ChannelId,
+        cx: &mut Context<Self>,
+    ) {
+        self.chat_area.bind_channel_members(cx);
+        if self.clan_list.read(cx).active_clan_id != Some(clan_id) {
             self.clan_list
-                .update(cx, |clan_list, cx| clan_list.select_clan(&clan_id, cx));
+                .update(cx, |clan_list, cx| clan_list.select_clan(clan_id, cx));
         }
         let (present, already_active) = {
             let channels = self.channel_list.read(cx);
             (
-                channels.find_channel(&channel_id).is_some(),
-                channels.active_channel_id.as_deref() == Some(channel_id.as_str()),
+                channels.find_channel(channel_id).is_some(),
+                channels.active_channel_id == Some(channel_id),
             )
         };
         if present {
             self.pending_channel_id = None;
             if !already_active {
                 self.channel_list.update(cx, |channel_list, cx| {
-                    channel_list.select_channel(&channel_id, cx);
+                    channel_list.select_channel(channel_id, cx);
                 });
             }
             // Force the messages store onto this channel even when it's already the active
@@ -180,18 +204,18 @@ impl ChatLayout {
     }
 
     fn apply_pending_channel(&mut self, cx: &mut Context<Self>) {
-        let Some(channel_id) = self.pending_channel_id.clone() else {
+        let Some(channel_id) = self.pending_channel_id else {
             return;
         };
         if self
             .channel_list
             .read(cx)
-            .find_channel(&channel_id)
+            .find_channel(channel_id)
             .is_some()
         {
             self.pending_channel_id = None;
             self.channel_list.update(cx, |channel_list, cx| {
-                channel_list.select_channel(&channel_id, cx);
+                channel_list.select_channel(channel_id, cx);
             });
         }
     }
@@ -203,7 +227,7 @@ impl ChatLayout {
         ) {
             return;
         }
-        let Some(clan_id) = self.clan_list.read(cx).active_clan_id.clone() else {
+        let Some(clan_id) = self.clan_list.read(cx).active_clan_id else {
             return;
         };
 
@@ -215,17 +239,17 @@ impl ChatLayout {
             && self
                 .channel_list
                 .read(cx)
-                .channel_in_clan(&clan_id, &channel_id)
+                .channel_in_clan(clan_id, channel_id)
         {
             return;
         }
 
-        let welcome = self.clan_list.read(cx).welcome_channel_id(&clan_id);
+        let welcome = self.clan_list.read(cx).welcome_channel_id(clan_id);
         let target = {
             let channels = self.channel_list.read(cx);
             welcome
-                .filter(|w| channels.channel_in_clan(&clan_id, w))
-                .or_else(|| channels.default_channel_id(&clan_id))
+                .filter(|w| channels.channel_in_clan(clan_id, *w))
+                .or_else(|| channels.default_channel_id(clan_id))
         };
         let Some(channel_id) = target else {
             return;
@@ -251,7 +275,7 @@ impl Render for ChatLayout {
         {
             let channel_id = ch.id.clone();
             self.voice_store.update(cx, |store, cx| {
-                store.prefetch_meet_token(channel_id.clone(), cx);
+                store.prefetch_meet_token(channel_id.to_string(), cx);
             });
         }
 
@@ -331,7 +355,7 @@ impl ChatLayout {
         let Route::DirectMessage { direct_id, .. } = Router::global(cx).read(cx).route() else {
             return None;
         };
-        self.direct_store.read(cx).find(&direct_id).cloned()
+        self.direct_store.read(cx).find(direct_id).cloned()
     }
 
     fn is_dm_route(&self, cx: &Context<Self>) -> bool {
@@ -341,14 +365,11 @@ impl ChatLayout {
         )
     }
 
-    fn active_typing_channel(&self, cx: &Context<Self>) -> Option<String> {
+    fn active_typing_channel(&self, cx: &Context<Self>) -> Option<ChannelId> {
         if self.is_dm_route(cx) {
             self.current_dm(cx).map(|dm| dm.id)
         } else {
-            self.channel_list
-                .read(cx)
-                .active_channel()
-                .map(|ch| ch.id.clone())
+            self.channel_list.read(cx).active_channel().map(|ch| ch.id)
         }
     }
 
@@ -378,7 +399,7 @@ impl ChatLayout {
 
     fn typing_label_for_channel(
         &self,
-        channel_id: &str,
+        channel_id: ChannelId,
         locale: &str,
         cx: &Context<Self>,
     ) -> Option<gpui::SharedString> {
@@ -397,10 +418,20 @@ impl ChatLayout {
 
         if self.is_dm_route(cx) {
             if let Some(dm) = self.current_dm(cx) {
-                let typing = self.typing_label_for_channel(&dm.id, &locale, cx);
+                let typing = self.typing_label_for_channel(dm.id, &locale, cx);
+                let is_group = dm.kind == DirectKind::Group;
                 return self
                     .chat_area
-                    .render(theme, &locale, cx.entity(), &dm.label, true, typing)
+                    .render(
+                        theme,
+                        &locale,
+                        cx.entity(),
+                        &dm.label,
+                        true,
+                        typing,
+                        is_group,
+                        is_group && self.show_member_list,
+                    )
                     .into_any_element();
             }
             return div()
@@ -447,10 +478,19 @@ impl ChatLayout {
             }
 
             let channel_name = ch.name.clone();
-            let typing = self.typing_label_for_channel(&ch.id, &locale, cx);
+            let typing = self.typing_label_for_channel(ch.id, &locale, cx);
             return self
                 .chat_area
-                .render(theme, &locale, cx.entity(), &channel_name, false, typing)
+                .render(
+                    theme,
+                    &locale,
+                    cx.entity(),
+                    &channel_name,
+                    false,
+                    typing,
+                    true,
+                    self.show_member_list,
+                )
                 .into_any_element();
         }
 
@@ -480,15 +520,7 @@ impl ChatLayout {
                 &format!("Direct {direct_id}"),
                 &current_path,
             ),
-            Route::Channel {
-                clan_id: _,
-                channel_id,
-            } => self.render_placeholder(
-                theme,
-                crate::components::primitives::IconName::Hashtag,
-                &format!("#{channel_id}"),
-                &current_path,
-            ),
+            Route::Channel { .. } => div().into_any_element(),
             Route::Friends => self.render_placeholder(
                 theme,
                 crate::components::primitives::IconName::IconFriends,

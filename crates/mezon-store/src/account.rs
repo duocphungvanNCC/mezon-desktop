@@ -1,3 +1,4 @@
+use crate::ids::ClanId;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -33,7 +34,7 @@ pub struct LoggedDevice {
 
 #[derive(Debug, Clone)]
 pub struct UserClanProfile {
-    pub clan_id: String,
+    pub clan_id: ClanId,
     pub nick_name: String,
     pub avatar_url: Option<String>,
 }
@@ -117,7 +118,7 @@ impl AccountStore {
 
     fn handle_event(&mut self, event: &RealtimeEvent, cx: &mut Context<Self>) {
         if let RealtimeEvent::ClanProfileUpdated(e) = event {
-            let clan_id = e.clan_id.to_string();
+            let clan_id = ClanId(e.clan_id);
             if self
                 .clan_profile
                 .as_ref()
@@ -313,19 +314,18 @@ impl AccountStore {
         .detach();
     }
 
-    pub fn fetch_clan_profile(&mut self, clan_id: &str, cx: &mut Context<Self>) {
+    pub fn fetch_clan_profile(&mut self, clan_id: ClanId, cx: &mut Context<Self>) {
         self.clan_profile_loading = true;
         self.nickname_duplicate = false;
         cx.notify();
 
         let api = self.api.clone();
-        let clan_id = clan_id.to_string();
         cx.spawn(
-            async move |this, cx| match api.get_user_clan_profile(&clan_id).await {
+            async move |this, cx| match api.get_user_clan_profile(clan_id.get()).await {
                 Ok(profile) => {
                     let _ = this.update(cx, |this, cx| {
                         this.clan_profile = Some(UserClanProfile {
-                            clan_id: clan_id.clone(),
+                            clan_id,
                             nick_name: profile.nick_name,
                             avatar_url: (!profile.avatar.is_empty()).then_some(profile.avatar),
                         });
@@ -337,7 +337,7 @@ impl AccountStore {
                 Err(e) => {
                     let _ = this.update(cx, |this, cx| {
                         this.clan_profile = Some(UserClanProfile {
-                            clan_id: clan_id.clone(),
+                            clan_id,
                             nick_name: String::new(),
                             avatar_url: None,
                         });
@@ -353,22 +353,21 @@ impl AccountStore {
 
     pub fn save_clan_profile(
         &mut self,
-        clan_id: &str,
+        clan_id: ClanId,
         nick_name: String,
         avatar_url: Option<String>,
         cx: &mut Context<Self>,
     ) {
         let api = self.api.clone();
-        let clan_id = clan_id.to_string();
         cx.spawn(async move |this, cx| {
             match api
-                .update_user_clan_profile(&clan_id, &nick_name, avatar_url.as_deref())
+                .update_user_clan_profile(clan_id.get(), &nick_name, avatar_url.as_deref())
                 .await
             {
                 Ok(()) => {
                     let _ = this.update(cx, |this, cx| {
                         this.clan_profile = Some(UserClanProfile {
-                            clan_id: clan_id.clone(),
+                            clan_id,
                             nick_name: nick_name.clone(),
                             avatar_url: avatar_url.clone(),
                         });
@@ -387,13 +386,17 @@ impl AccountStore {
         .detach();
     }
 
-    pub fn check_clan_nickname(&mut self, clan_id: &str, nick_name: &str, cx: &mut Context<Self>) {
+    pub fn check_clan_nickname(
+        &mut self,
+        clan_id: ClanId,
+        nick_name: &str,
+        cx: &mut Context<Self>,
+    ) {
         let api = self.api.clone();
-        let clan_id = clan_id.to_string();
         let nick_name = nick_name.to_string();
         cx.spawn(async move |this, cx| {
             let is_dup = api
-                .check_duplicate_clan_nickname(&clan_id, &nick_name)
+                .check_duplicate_clan_nickname(clan_id.get(), &nick_name)
                 .await
                 .unwrap_or(false);
             let _ = this.update(cx, |this, cx| {
@@ -463,7 +466,7 @@ mod tests {
     #[test]
     fn user_account_from_api_uses_username_when_display_empty() {
         let acct = user_account_from_api(ApiAccount {
-            user_id: "1".into(),
+            user_id: 1,
             username: "alice".into(),
             email: Some("a@b.c".into()),
             display_name: None,

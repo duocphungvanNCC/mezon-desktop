@@ -99,7 +99,7 @@ impl AppApi {
 
     pub async fn list_channel_descs(
         &self,
-        clan_id: &str,
+        clan_id: i64,
         channel_type: i32,
     ) -> Result<Vec<ApiChannelDesc>> {
         let _ = channel_type;
@@ -117,9 +117,9 @@ impl AppApi {
 
     pub async fn mark_as_read(
         &self,
-        channel_id: &str,
-        category_id: &str,
-        clan_id: &str,
+        channel_id: i64,
+        category_id: i64,
+        clan_id: i64,
     ) -> Result<()> {
         self.transport
             .mark_as_read(channel_id, category_id, clan_id)
@@ -128,6 +128,42 @@ impl AppApi {
 
     pub async fn list_clan_descs(&self) -> Result<Vec<ApiClanDesc>> {
         self.transport.list_clan_descs().await
+    }
+
+    pub async fn list_clan_users(
+        &self,
+        clan_id: i64,
+    ) -> Result<Vec<mezon_proto::api::clan_user_list::ClanUser>> {
+        let lists = self.transport.list_clan_users(clan_id).await?;
+        Ok(lists.into_iter().flat_map(|list| list.clan_users).collect())
+    }
+
+    pub async fn list_channel_users(
+        &self,
+        clan_id: i64,
+        channel_id: i64,
+        channel_type: i32,
+    ) -> Result<Vec<mezon_proto::api::channel_user_list::ChannelUser>> {
+        let list = self
+            .transport
+            .list_channel_users(clan_id, channel_id, channel_type)
+            .await?;
+        Ok(list.channel_users)
+    }
+
+    pub async fn list_user_clans_by_user(&self) -> Result<Vec<mezon_proto::api::User>> {
+        let list = self.transport.list_user_clans_by_user_id().await?;
+        Ok(list.users)
+    }
+
+    pub async fn list_channel_users_uc(
+        &self,
+        channel_id: i64,
+        limit: i32,
+    ) -> Result<mezon_proto::api::AllUsersAddChannelResponse> {
+        self.transport
+            .list_channel_users_uc(channel_id, limit)
+            .await
     }
 
     pub async fn create_clan_desc(
@@ -151,9 +187,9 @@ impl AppApi {
 
     pub async fn list_channel_messages(
         &self,
-        clan_id: &str,
-        channel_id: &str,
-        message_id: &str,
+        clan_id: i64,
+        channel_id: i64,
+        message_id: i64,
         direction: i32,
         limit: u32,
     ) -> Result<Vec<ApiMessage>> {
@@ -164,8 +200,8 @@ impl AppApi {
 
     pub async fn join_chat(
         &self,
-        clan_id: &str,
-        channel_id: &str,
+        clan_id: i64,
+        channel_id: i64,
         channel_type: i32,
         is_public: bool,
     ) -> Result<()> {
@@ -176,8 +212,8 @@ impl AppApi {
 
     pub async fn send_channel_message(
         &self,
-        clan_id: &str,
-        channel_id: &str,
+        clan_id: i64,
+        channel_id: i64,
         content: &str,
         is_public: bool,
         mode: i32,
@@ -189,11 +225,11 @@ impl AppApi {
 
     pub async fn create_channel(
         &self,
-        clan_id: &str,
+        clan_id: i64,
         channel_label: &str,
         channel_type: u32,
-        category_id: Option<&str>,
-        parent_id: Option<&str>,
+        category_id: Option<i64>,
+        parent_id: Option<i64>,
     ) -> Result<ApiChannelDesc> {
         self.transport
             .create_channel(clan_id, channel_label, channel_type, category_id, parent_id)
@@ -201,7 +237,7 @@ impl AppApi {
     }
 
     /// Create a category in a clan; returns its id.
-    pub async fn create_category(&self, clan_id: &str, category_name: &str) -> Result<String> {
+    pub async fn create_category(&self, clan_id: i64, category_name: &str) -> Result<String> {
         let category = self
             .transport
             .create_category_desc(category_name, clan_id)
@@ -209,15 +245,15 @@ impl AppApi {
         Ok(category.category_id.to_string())
     }
 
-    pub async fn add_channel_users(&self, channel_id: &str, user_ids: Vec<String>) -> Result<()> {
+    pub async fn add_channel_users(&self, channel_id: i64, user_ids: Vec<String>) -> Result<()> {
         self.transport.add_channel_users(channel_id, user_ids).await
     }
 
     /// Send a channel message, uploading each `media_url` as an attachment first.
     pub async fn send_message_with_media(
         &self,
-        clan_id: &str,
-        channel_id: &str,
+        clan_id: i64,
+        channel_id: i64,
         content: &str,
         is_public: bool,
         mode: i32,
@@ -343,14 +379,14 @@ impl AppApi {
 
     pub async fn get_user_clan_profile(
         &self,
-        clan_id: &str,
+        clan_id: i64,
     ) -> Result<mezon_proto::api::ClanProfile> {
         self.transport.get_user_profile_on_clan(clan_id).await
     }
 
     pub async fn update_user_clan_profile(
         &self,
-        clan_id: &str,
+        clan_id: i64,
         nick_name: &str,
         avatar_url: Option<&str>,
     ) -> Result<()> {
@@ -369,15 +405,12 @@ impl AppApi {
 
     pub async fn check_duplicate_clan_nickname(
         &self,
-        clan_id: &str,
+        clan_id: i64,
         nick_name: &str,
     ) -> Result<bool> {
-        let condition_id: i64 = clan_id
-            .parse()
-            .map_err(|e| anyhow::anyhow!("invalid clan_id {clan_id:?}: {e}"))?;
         let resp = self
             .transport
-            .check_duplicate_name(nick_name, CHECK_NAME_TYPE_NICKNAME, condition_id)
+            .check_duplicate_name(nick_name, CHECK_NAME_TYPE_NICKNAME, clan_id)
             .await?;
         Ok(resp.is_duplicate)
     }
@@ -418,7 +451,7 @@ impl AppApi {
         Ok(permanent_url)
     }
 
-    pub async fn list_categories_typed(&self, clan_id: &str) -> Result<Vec<ApiCategoryDesc>> {
+    pub async fn list_categories_typed(&self, clan_id: i64) -> Result<Vec<ApiCategoryDesc>> {
         self.transport.list_categories_typed(clan_id).await
     }
 
@@ -426,18 +459,15 @@ impl AppApi {
         self.transport.list_clan_badge_count().await
     }
 
-    pub async fn get_notification_clan(&self, clan_id: &str) -> Result<i32> {
+    pub async fn get_notification_clan(&self, clan_id: i64) -> Result<i32> {
         self.transport.get_notification_clan(clan_id).await
     }
 
-    pub async fn list_channel_badge_counts(&self, clan_id: &str) -> Result<Vec<ApiChannelDesc>> {
+    pub async fn list_channel_badge_counts(&self, clan_id: i64) -> Result<Vec<ApiChannelDesc>> {
         self.transport.list_channel_badge_counts(clan_id).await
     }
 
-    pub async fn list_voice_channel_users(
-        &self,
-        clan_id: &str,
-    ) -> Result<Vec<ApiVoiceChannelUser>> {
+    pub async fn list_voice_channel_users(&self, clan_id: i64) -> Result<Vec<ApiVoiceChannelUser>> {
         self.transport.list_voice_channel_users(clan_id).await
     }
 
@@ -447,11 +477,11 @@ impl AppApi {
             .await
     }
 
-    pub async fn list_channel_apps(&self, clan_id: &str) -> Result<Vec<ApiChannelApp>> {
+    pub async fn list_channel_apps(&self, clan_id: i64) -> Result<Vec<ApiChannelApp>> {
         self.transport.list_channel_apps(clan_id).await
     }
 
-    pub async fn list_favorite_channels(&self, clan_id: &str) -> Result<Vec<String>> {
+    pub async fn list_favorite_channels(&self, clan_id: i64) -> Result<Vec<String>> {
         let resp = self.transport.get_list_favorite_channel(clan_id).await?;
         Ok(resp
             .channel_ids
@@ -460,13 +490,13 @@ impl AppApi {
             .collect())
     }
 
-    pub async fn add_channel_favorite(&self, channel_id: &str, clan_id: &str) -> Result<()> {
+    pub async fn add_channel_favorite(&self, channel_id: i64, clan_id: i64) -> Result<()> {
         self.transport
             .add_channel_favorite(channel_id, clan_id)
             .await
     }
 
-    pub async fn remove_channel_favorite(&self, channel_id: &str, clan_id: &str) -> Result<()> {
+    pub async fn remove_channel_favorite(&self, channel_id: i64, clan_id: i64) -> Result<()> {
         self.transport
             .remove_channel_favorite(channel_id, clan_id)
             .await

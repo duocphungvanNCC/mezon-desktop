@@ -1,11 +1,18 @@
-use gpui::{div, prelude::*, px};
+use std::sync::Arc;
+
+use gpui::{App, Window, div, prelude::*, px};
 
 use crate::components::primitives::{Icon, IconName};
 use crate::theme::Theme;
 
+type ToggleHandler = Arc<dyn Fn(&mut Window, &mut App)>;
+
 pub struct ChannelHeader {
     name: String,
     dm: bool,
+    members_action: bool,
+    members_active: bool,
+    on_toggle_members: Option<ToggleHandler>,
 }
 
 impl ChannelHeader {
@@ -13,6 +20,9 @@ impl ChannelHeader {
         Self {
             name: name.into(),
             dm: false,
+            members_action: true,
+            members_active: false,
+            on_toggle_members: None,
         }
     }
 
@@ -21,9 +31,26 @@ impl ChannelHeader {
         self
     }
 
+    pub fn members_action(mut self, show: bool) -> Self {
+        self.members_action = show;
+        self
+    }
+
+    pub fn members_active(mut self, active: bool) -> Self {
+        self.members_active = active;
+        self
+    }
+
+    pub fn on_toggle_members(mut self, handler: ToggleHandler) -> Self {
+        self.on_toggle_members = Some(handler);
+        self
+    }
+
     pub fn render(&self, theme: &Theme) -> impl IntoElement {
         let bg_hover = theme.bg_hover;
+        let bg_active = theme.bg_tertiary;
         let icon_color = theme.text_muted;
+        let icon_active = theme.text_primary;
         let actions = [
             ("hdr-canvas", IconName::CanvasIcon),
             ("hdr-timeline", IconName::History),
@@ -69,20 +96,35 @@ impl ChannelHeader {
                     ),
             )
             .child(div().flex_1())
-            .child(div().flex().flex_row().items_center().gap_1().children(
-                actions.into_iter().map(move |(id, icon)| {
-                    div()
-                        .id(id)
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .w(px(32.))
-                        .h(px(32.))
-                        .rounded_md()
-                        .cursor_pointer()
-                        .hover(move |s| s.bg(bg_hover))
-                        .child(Icon::new(icon).size(px(20.)).text_color(icon_color))
-                }),
-            ))
+            .child(
+                div().flex().flex_row().items_center().gap_1().children(
+                    actions
+                        .into_iter()
+                        .filter(move |(id, _)| *id != "hdr-members" || self.members_action)
+                        .map(move |(id, icon)| {
+                            let is_members = id == "hdr-members";
+                            let active = is_members && self.members_active;
+                            let tint = if active { icon_active } else { icon_color };
+                            let mut button = div()
+                                .id(id)
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .w(px(32.))
+                                .h(px(32.))
+                                .rounded_md()
+                                .cursor_pointer()
+                                .hover(move |s| s.bg(bg_hover))
+                                .child(Icon::new(icon).size(px(20.)).text_color(tint));
+                            if active {
+                                button = button.bg(bg_active);
+                            }
+                            if is_members && let Some(handler) = self.on_toggle_members.clone() {
+                                button = button.on_click(move |_, window, cx| handler(window, cx));
+                            }
+                            button
+                        }),
+                ),
+            )
     }
 }

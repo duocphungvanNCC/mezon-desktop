@@ -110,7 +110,7 @@ impl DmRow {
                 navigate(
                     cx,
                     Route::DirectMessage {
-                        direct_id: nav_id.clone(),
+                        direct_id: nav_id.parse().unwrap_or_default(),
                         message_type: channel_type.to_string(),
                     },
                 );
