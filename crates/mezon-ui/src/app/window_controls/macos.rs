@@ -5,7 +5,7 @@ use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
 use crate::theme::Theme;
 
-pub fn render_controls(_theme: &Theme) -> impl IntoElement {
+pub fn render_controls(_theme: &Theme, _window: &Window) -> impl IntoElement {
     div()
 }
 
@@ -60,7 +60,7 @@ fn disable_fullscreen(native_view: *mut std::ffi::c_void) {
     const FULLSCREEN_AUXILIARY: u64 = 1 << 8;
     const FULLSCREEN_NONE: u64 = 1 << 9;
     const FULLSCREEN_STYLE_MASK: u64 = 1 << 14;
-    
+
     with_ns_window(native_view, |window| unsafe {
         let style_mask: u64 = msg_send![window, styleMask];
         if style_mask & FULLSCREEN_STYLE_MASK != 0 {

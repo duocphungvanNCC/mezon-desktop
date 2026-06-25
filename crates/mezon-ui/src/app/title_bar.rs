@@ -1,19 +1,32 @@
 use crate::app::window_controls;
 use crate::theme::ActiveTheme;
-use gpui::{Context, Entity, MouseButton, Window, div, prelude::*};
+use gpui::{Context, Entity, FontWeight, MouseButton, Subscription, Window, div, prelude::*};
 use mezon_store::Settings;
 
-pub struct TitleBar {}
+pub struct TitleBar {
+    _bounds_observer: Option<Subscription>,
+}
 
 impl TitleBar {
     pub fn new(settings: Entity<Settings>, cx: &mut Context<Self>) -> Self {
         cx.observe(&settings, |_, _, cx| cx.notify()).detach();
-        Self {}
+        Self {
+            _bounds_observer: None,
+        }
+    }
+
+    fn ensure_bounds_observer(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self._bounds_observer.is_some() {
+            return;
+        }
+
+        self._bounds_observer = Some(cx.observe_window_bounds(window, |_, _, cx| cx.notify()));
     }
 }
 
 impl Render for TitleBar {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.ensure_bounds_observer(window, cx);
         let theme = cx.theme();
 
         div()
@@ -30,7 +43,16 @@ impl Render for TitleBar {
                     window.start_window_move();
                 }
             })
+            .child(
+                div().flex().items_center().px_3().child(
+                    div()
+                        .text_sm()
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(theme.text_secondary)
+                        .child(window_controls::APP_NAME),
+                ),
+            )
             .child(div().flex_1())
-            .child(window_controls::render_controls(theme))
+            .child(window_controls::render_controls(theme, window))
     }
 }

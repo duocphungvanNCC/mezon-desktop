@@ -222,7 +222,7 @@ impl Render for RootView {
                 MouseButton::Navigate(NavigationDirection::Forward),
                 |_, _, cx| crate::router::go_forward(cx),
             )
-            .when(cfg!(not(target_os = "macos")), |this| {
+            .when(window_controls::HAS_CUSTOM_TITLE_BAR, |this| {
                 this.child(
                     AnyView::from(self.title_bar.clone())
                         .cached(StyleRefinement::default().w_full().h_8()),
