@@ -1,6 +1,3 @@
-// This program is just a testing application
-// Refer to `lib.rs` for the library source code
-
 use std::process;
 use zed_scap::{
     capturer::{Area, Capturer, Options, Point, Size},
@@ -8,26 +5,18 @@ use zed_scap::{
 };
 
 fn main() {
-    // Check if the platform is supported
     if !zed_scap::is_supported() {
-        println!("❌ Platform not supported");
+        println!("Platform not supported");
         return;
     }
 
-    // Check if we have permission to capture screen
-    // If we don't, request it.
     if !zed_scap::has_permission() {
-        println!("❌ Permission not granted. Requesting permission...");
+        println!("Permission not granted. Requesting permission...");
         if !zed_scap::request_permission() {
-            println!("❌ Permission denied");
+            println!("Permission denied");
             return;
         }
     }
-
-    // // Get recording targets
-    // let targets = zed_scap::get_all_targets();
-
-    // Create Options
     let options = Options {
         fps: 60,
         show_cursor: true,
@@ -45,16 +34,13 @@ fn main() {
         ..Default::default()
     };
 
-    // Create Recorder with options
     let mut recorder = Capturer::build(options).unwrap_or_else(|err| {
         println!("Problem with building Capturer: {err}");
         process::exit(1);
     });
 
-    // Start Capture
     recorder.start_capture();
-
-    // Capture 100 frames
+Capture 100 frames
     let mut start_time: u64 = 0;
     for i in 0..100 {
         let frame = recorder.get_next_frame().expect("Error");
@@ -117,6 +103,5 @@ fn main() {
         }
     }
 
-    // Stop Capture
     recorder.stop_capture();
 }

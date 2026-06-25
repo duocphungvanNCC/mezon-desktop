@@ -65,7 +65,6 @@ pub fn create_capturer(
     tx: mpsc::Sender<anyhow::Result<ChannelItem>>,
     error_flag: Arc<AtomicBool>,
 ) -> (SCStream, Target) {
-    // If no target is specified, capture the main display
     let target = options
         .target
         .clone()
@@ -75,19 +74,15 @@ pub fn create_capturer(
 
     let params = match &target {
         Target::Window(window) => {
-            // Get SCWindow from window id
             let sc_window = sc_shareable_content
                 .windows
                 .into_iter()
                 .find(|sc_win| sc_win.window_id == window.id)
                 .unwrap();
 
-            // Return a DesktopIndependentWindow
-            // https://developer.apple.com/documentation/screencapturekit/sccontentfilter/3919804-init
             InitParams::DesktopIndependentWindow(sc_window)
         }
         Target::Display(display) => {
-            // Get SCDisplay from display id
             let sc_display = sc_shareable_content
                 .displays
                 .into_iter()
@@ -172,18 +167,14 @@ pub fn get_output_frame_size(options: &Options) -> [u32; 2] {
     let scale_factor = targets::get_scale_factor(&target);
     let source_rect = get_crop_area(options);
 
-    // Calculate the output height & width based on the required resolution
-    // Output width and height need to be multiplied by scale (or dpi)
     let mut output_width = (source_rect.size.width as u32) * (scale_factor as u32);
     let mut output_height = (source_rect.size.height as u32) * (scale_factor as u32);
-    // 1200x800
     match options.output_resolution {
         Resolution::Captured => {}
         _ => {
             let [resolved_width, resolved_height] = options
                 .output_resolution
                 .value((source_rect.size.width as f32) / (source_rect.size.height as f32));
-            // 1280 x 853
             output_width = cmp::min(output_width, resolved_width);
             output_height = cmp::min(output_height, resolved_height);
         }
@@ -260,7 +251,6 @@ pub fn process_sample_buffer(
                 });
             },
             SCFrameStatus::Idle => {
-                // Quick hack - just send an empty frame, and the caller can figure out how to handle it
                 if let FrameType::BGRAFrame = output_type {
                     return Some(Frame::BGRA(BGRAFrame {
                         display_time: get_pts_in_nanoseconds(&sample),

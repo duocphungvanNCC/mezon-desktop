@@ -1,8 +1,6 @@
 [build]
 incremental = false
 
-# `-ObjC` is required by LiveKit's libwebrtc on macOS (incl. macOS 26 "Tahoe"),
-# otherwise PeerConnectionFactory init crashes with an NSInvalidArgumentException.
 [target.aarch64-apple-darwin]
 rustflags = [
     "-C", "link-arg=-Wl,-rpath,@executable_path/../Frameworks",

@@ -13,7 +13,6 @@ use super::{Display, Target};
 
 fn get_display_name(display_id: CGDirectDisplayID) -> String {
     unsafe {
-        // Get all screens
         let screens: id = NSScreen::screens(nil);
         let count: u64 = msg_send![screens, count];
 
@@ -41,7 +40,6 @@ pub fn get_all_targets() -> Result<Vec<Target>> {
 
     let content = SCShareableContent::current();
 
-    // Add displays to targets
     for display in content.displays {
         let id: CGDirectDisplayID = display.display_id;
         let raw_handle = CGDisplay::new(id);
@@ -56,7 +54,6 @@ pub fn get_all_targets() -> Result<Vec<Target>> {
         targets.push(target);
     }
 
-    // Add windows to targets
     for window in content.windows {
         if window.title.is_some() {
             let id = window.window_id;

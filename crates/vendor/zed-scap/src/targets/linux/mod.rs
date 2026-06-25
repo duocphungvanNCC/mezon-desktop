@@ -190,7 +190,6 @@ fn get_x11_targets() -> Result<Vec<Target>, xcb::Error> {
 pub fn get_all_targets() -> anyhow::Result<Vec<Target>> {
     #[cfg(feature = "wayland")]
     if std::env::var("WAYLAND_DISPLAY").is_ok() {
-        // On Wayland, the target is selected when a Recorder is instanciated because it requires user interaction
         return Ok(Vec::new());
     }
 
