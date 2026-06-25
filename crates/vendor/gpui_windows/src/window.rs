@@ -1014,6 +1014,37 @@ impl PlatformWindow for WindowsWindow {
     fn a11y_update_window_bounds(&self) {
         // Windows UIA handles window bounds tracking automatically.
     }
+
+    fn start_window_resize(&self, edge: ResizeEdge) {
+        let hwnd = self.0.hwnd;
+        let hit_size = resize_window_edge(edge);
+        unsafe {
+            ReleaseCapture().log_err();
+            let mut point = POINT { x: 0, y: 0 };
+            GetCursorPos(&mut point).log_err();
+            let packed = ((point.y as u32) << 16) | (point.x as u16 as u32);
+            SendMessageW(
+                hwnd,
+                WM_NCLBUTTONDOWN,
+                WPARAM(hit_size as usize),
+                LPARAM(packed as isize),
+            )
+            .log_err();
+        }
+    }
+}
+
+fn resize_window_edge(edge: ResizeEdge) -> u32 {
+    match edge {
+        ResizeEdge::Left => HTLEFT.0 as u32,
+        ResizeEdge::Right => HTRIGHT.0 as u32,
+        ResizeEdge::Top => HTTOP.0 as u32,
+        ResizeEdge::TopLeft => HTTOPLEFT.0 as u32,
+        ResizeEdge::TopRight => HTTOPRIGHT.0 as u32,
+        ResizeEdge::Bottom => HTBOTTOM.0 as u32,
+        ResizeEdge::BottomLeft => HTBOTTOMLEFT.0 as u32,
+        ResizeEdge::BottomRight => HTBOTTOMRIGHT.0 as u32,
+    }
 }
 
 pub(crate) struct A11yState {

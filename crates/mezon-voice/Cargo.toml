@@ -20,8 +20,13 @@ futures = { workspace = true }
 
 nokhwa = { version = "0.10", default-features = false, features = ["input-avfoundation"] }
 
-scap = { workspace = true }
 image = { workspace = true }
+
+[target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies]
+scap = { workspace = true, features = ["wayland", "x11"] }
+
+[target.'cfg(not(any(target_os = "linux", target_os = "freebsd")))'.dependencies]
+scap = { workspace = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 screencapturekit = "0.2.8"

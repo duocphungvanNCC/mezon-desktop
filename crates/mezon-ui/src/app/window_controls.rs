@@ -1,4 +1,7 @@
-use gpui::{Div, TitlebarOptions, Window, WindowDecorations, div, prelude::*};
+use gpui::{
+    CursorStyle, Decorations, Div, MouseButton, ResizeEdge, Tiling, TitlebarOptions, Window,
+    WindowDecorations, div, prelude::*, px,
+};
 
 use crate::theme::Theme;
 
@@ -28,6 +31,7 @@ pub const MACOS_TRAFFIC_LIGHT_CLEARANCE: f32 = 34.0;
 pub const NAV_ARROW_ICON_SIZE: f32 = 20.0;
 pub const NAV_ARROW_BUTTON_PADDING: f32 = 4.0;
 pub const APP_HEADER_HEIGHT: f32 = 50.0;
+pub const RESIZE_BORDER_SIZE: f32 = 8.0;
 
 #[cfg(target_os = "macos")]
 pub const NAV_TOP_INSET: f32 = MACOS_TRAFFIC_LIGHT_CLEARANCE;
@@ -75,6 +79,135 @@ pub fn main_window_decorations() -> Option<WindowDecorations> {
     }
 }
 
+pub fn is_edge_resizable() -> bool {
+    cfg!(any(target_os = "linux", target_os = "windows"))
+}
+
+pub fn render_resize_edges(window: &mut Window) -> impl IntoElement {
+    if !is_edge_resizable() || window.is_maximized() {
+        return div().id("window-resize-edges-disabled");
+    }
+
+    let decorations = window.window_decorations();
+    let tiling = match decorations {
+        Decorations::Client { tiling } => tiling,
+        Decorations::Server => Tiling::default(),
+    };
+
+    if matches!(decorations, Decorations::Client { .. }) {
+        window.set_client_inset(px(RESIZE_BORDER_SIZE));
+    }
+
+    let border = px(RESIZE_BORDER_SIZE);
+    let mut layer = div()
+        .id("window-resize-edges")
+        .absolute()
+        .top_0()
+        .left_0()
+        .size_full();
+
+    if !tiling.top {
+        layer = layer.child(
+            resize_strip(
+                ResizeEdge::Top,
+                div().absolute().top_0().left_0().right_0().h(border),
+                CursorStyle::ResizeUp,
+            ),
+        );
+    }
+    if !tiling.bottom {
+        layer = layer.child(
+            resize_strip(
+                ResizeEdge::Bottom,
+                div().absolute().bottom_0().left_0().right_0().h(border),
+                CursorStyle::ResizeDown,
+            ),
+        );
+    }
+    if !tiling.left {
+        layer = layer.child(
+            resize_strip(
+                ResizeEdge::Left,
+                div().absolute().top_0().bottom_0().left_0().w(border),
+                CursorStyle::ResizeLeft,
+            ),
+        );
+    }
+    if !tiling.right {
+        layer = layer.child(
+            resize_strip(
+                ResizeEdge::Right,
+                div().absolute().top_0().bottom_0().right_0().w(border),
+                CursorStyle::ResizeRight,
+            ),
+        );
+    }
+
+    if !tiling.top && !tiling.left {
+        layer = layer.child(
+            resize_strip(
+                ResizeEdge::TopLeft,
+                div()
+                    .absolute()
+                    .top_0()
+                    .left_0()
+                    .size(border),
+                CursorStyle::ResizeUpLeftDownRight,
+            ),
+        );
+    }
+    if !tiling.top && !tiling.right {
+        layer = layer.child(
+            resize_strip(
+                ResizeEdge::TopRight,
+                div()
+                    .absolute()
+                    .top_0()
+                    .right_0()
+                    .size(border),
+                CursorStyle::ResizeUpRightDownLeft,
+            ),
+        );
+    }
+    if !tiling.bottom && !tiling.left {
+        layer = layer.child(
+            resize_strip(
+                ResizeEdge::BottomLeft,
+                div()
+                    .absolute()
+                    .bottom_0()
+                    .left_0()
+                    .size(border),
+                CursorStyle::ResizeUpRightDownLeft,
+            ),
+        );
+    }
+    if !tiling.bottom && !tiling.right {
+        layer = layer.child(
+            resize_strip(
+                ResizeEdge::BottomRight,
+                div()
+                    .absolute()
+                    .bottom_0()
+                    .right_0()
+                    .size(border),
+                CursorStyle::ResizeUpLeftDownRight,
+            ),
+        );
+    }
+
+    layer
+}
+
+fn resize_strip(edge: ResizeEdge, strip: Div, cursor: CursorStyle) -> Div {
+    strip
+        .cursor(cursor)
+        .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+            cx.stop_propagation();
+            window.start_window_resize(edge);
+        })
+}
+
 /// Invisible full-width strip at the top of the window for macOS window dragging
 pub fn render_app_drag_header() -> impl IntoElement {
     #[cfg(target_os = "macos")]
@@ -99,7 +232,6 @@ pub fn render_app_drag_header() -> impl IntoElement {
 pub fn window_drag_handle(header: Div) -> Div {
     #[cfg(target_os = "macos")]
     {
-        use gpui::MouseButton;
         header.on_mouse_down(MouseButton::Left, |event, window, _| {
             if event.click_count >= 2 {
                 window.zoom_window();
