@@ -53,7 +53,6 @@ pub enum Target {
     Display(Display),
 }
 
-// Both `HWND` and `HMONITOR` are `Send` and `Sync`, so we can safely implement these traits for `Target`
 #[cfg(target_os = "windows")]
 unsafe impl Send for Display {}
 #[cfg(target_os = "windows")]

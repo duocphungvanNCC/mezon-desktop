@@ -18,8 +18,6 @@ use core_video_sys::{
     CVPixelBufferUnlockBaseAddress,
 };
 
-// Returns a frame's presentation timestamp in nanoseconds since an arbitrary start time.
-// This is typically yielded from a monotonic clock started on system boot.
 pub fn get_pts_in_nanoseconds(sample_buffer: &CMSampleBuffer) -> u64 {
     let pts = sample_buffer.sys_ref.get_presentation_timestamp();
 
@@ -29,7 +27,6 @@ pub fn get_pts_in_nanoseconds(sample_buffer: &CMSampleBuffer) -> u64 {
 }
 
 pub unsafe fn create_yuv_frame(sample_buffer: CMSampleBuffer) -> Option<YUVFrame> {
-    // Check that the frame status is complete
     let buffer_ref = &(*sample_buffer.sys_ref);
     {
         let attachments = CMSampleBufferGetSampleAttachmentsArray(buffer_ref, 0);
@@ -125,7 +122,7 @@ pub unsafe fn create_bgr_frame(sample_buffer: CMSampleBuffer) -> Option<BGRFrame
 
     Some(BGRFrame {
         display_time,
-        width: width as i32, // width does not give accurate results - https://stackoverflow.com/questions/19587185/cvpixelbuffergetbytesperrow-for-cvimagebufferref-returns-unexpected-wrong-valu
+        width: width as i32,
         height: height as i32,
         data: remove_alpha_channel(cropped_data),
     })
@@ -156,7 +153,7 @@ pub unsafe fn create_bgra_frame(sample_buffer: CMSampleBuffer) -> Option<BGRAFra
 
     Some(BGRAFrame {
         display_time,
-        width: width as i32, // width does not give accurate results - https://stackoverflow.com/questions/19587185/cvpixelbuffergetbytesperrow-for-cvimagebufferref-returns-unexpected-wrong-valu
+        width: width as i32,
         height: height as i32,
         data,
     })
@@ -189,7 +186,7 @@ pub unsafe fn create_rgb_frame(sample_buffer: CMSampleBuffer) -> Option<RGBFrame
 
     Some(RGBFrame {
         display_time,
-        width: width as i32, // width does not give accurate results - https://stackoverflow.com/questions/19587185/cvpixelbuffergetbytesperrow-for-cvimagebufferref-returns-unexpected-wrong-valu
+        width: width as i32,
         height: height as i32,
         data: convert_bgra_to_rgb(cropped_data),
     })

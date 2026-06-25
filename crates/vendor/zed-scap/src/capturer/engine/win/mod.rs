@@ -51,18 +51,15 @@ impl GraphicsCaptureApiHandler for Capturer {
         let color_format = frame.color_format();
         let (width, height, data) = match &self.crop {
             Some(cropped_area) => {
-                // get the cropped area
                 let start_x = cropped_area.origin.x as u32;
                 let start_y = cropped_area.origin.y as u32;
                 let end_x = (cropped_area.origin.x + cropped_area.size.width) as u32;
                 let end_y = (cropped_area.origin.y + cropped_area.size.height) as u32;
 
-                // crop the frame
                 let mut cropped_buffer = frame
                     .buffer_crop(start_x, start_y, end_x, end_y)
                     .expect("Failed to crop buffer");
 
-                // get raw frame buffer
                 let raw_frame_buffer = match cropped_buffer.as_nopadding_buffer() {
                     Ok(buffer) => buffer,
                     Err(_) => return Err(("Failed to get raw buffer").into()),
@@ -75,7 +72,6 @@ impl GraphicsCaptureApiHandler for Capturer {
                 )
             }
             None => {
-                // get raw frame buffer
                 let width = frame.width() as i32;
                 let height = frame.height() as i32;
                 let mut frame_buffer = frame.buffer().unwrap();
@@ -192,7 +188,6 @@ pub fn get_output_frame_size(options: &Options) -> [u32; 2] {
             let [resolved_width, resolved_height] = options
                 .output_resolution
                 .value((crop_area.size.width as f32) / (crop_area.size.height as f32));
-            // 1280 x 853
             output_width = cmp::min(output_width, resolved_width);
             output_height = cmp::min(output_height, resolved_height);
         }
@@ -221,7 +216,6 @@ pub fn get_crop_area(options: &Options) -> Area {
         .crop_area
         .as_ref()
         .map(|val| {
-            // WINDOWS: limit values [input-width, input-height] = [146, 50]
             Area {
                 origin: Point {
                     x: get_absolute_value(val.origin.x, scale_factor),

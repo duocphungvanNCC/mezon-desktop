@@ -60,7 +60,6 @@ pub struct Area {
     pub size: Size,
 }
 
-/// Options passed to the screen capturer
 #[derive(Debug, Default, Clone)]
 pub struct Options {
     pub fps: u32,
@@ -70,11 +69,9 @@ pub struct Options {
     pub crop_area: Option<Area>,
     pub output_type: FrameType,
     pub output_resolution: Resolution,
-    // excluded targets will only work on macOS
     pub excluded_targets: Option<Vec<Target>>,
 }
 
-/// Screen capturer class
 pub struct Capturer {
     engine: engine::Engine,
     rx: mpsc::Receiver<anyhow::Result<ChannelItem>>,
@@ -100,7 +97,6 @@ impl std::fmt::Display for CapturerBuildError {
 impl Error for CapturerBuildError {}
 
 impl Capturer {
-    /// Create a new capturer instance with the provided options
     #[deprecated(
         since = "0.0.6",
         note = "Use `build` instead of `new` to create a new capturer instance."
@@ -112,7 +108,6 @@ impl Capturer {
         Ok(Capturer { engine, rx })
     }
 
-    /// Build a new [Capturer] instance with the provided options
     pub fn build(options: Options) -> anyhow::Result<Capturer> {
         if !is_supported() {
             return Err(anyhow!(CapturerBuildError::NotSupported));
@@ -128,19 +123,14 @@ impl Capturer {
         Ok(Capturer { engine, rx })
     }
 
-    // TODO
-    // Prevent starting capture if already started
-    /// Start capturing the frames
     pub fn start_capture(&mut self) {
         self.engine.start();
     }
 
-    /// Stop the capturer
     pub fn stop_capture(&mut self) {
         self.engine.stop();
     }
 
-    /// Get the next captured frame
     pub fn get_next_frame(&self) -> anyhow::Result<Frame> {
         loop {
             let res = self.rx.recv()??;
@@ -151,7 +141,6 @@ impl Capturer {
         }
     }
 
-    /// Get the dimensions the frames will be captured in
     pub fn get_output_frame_size(&mut self) -> [u32; 2] {
         self.engine.get_output_frame_size()
     }

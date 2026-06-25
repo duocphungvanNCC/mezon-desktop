@@ -13,7 +13,6 @@ use windows_capture::{
 pub fn get_all_targets() -> Result<Vec<Target>> {
     let mut targets: Vec<Target> = Vec::new();
 
-    // Add displays to targets
     let displays = Monitor::enumerate().context("Failed to enumerate monitors")?;
     for display in displays {
         let id = display.as_raw_hmonitor() as u32;
@@ -29,7 +28,6 @@ pub fn get_all_targets() -> Result<Vec<Target>> {
         targets.push(target);
     }
 
-    // Add windows to targets
     let windows = Window::enumerate().context("Failed to enumerate windows")?;
     for window in windows {
         let id = window.as_raw_hwnd() as u32;
@@ -69,7 +67,6 @@ fn monitor_title(monitor: &Monitor) -> Result<String, MonitorError> {
         .or_else(|_| monitor.device_name())
 }
 
-// Referred to: https://github.com/tauri-apps/tao/blob/ab792dbd6c5f0a708c818b20eaff1d9a7534c7c1/src/platform_impl/windows/dpi.rs#L50
 pub fn get_scale_factor(target: &Target) -> f64 {
     const BASE_DPI: u32 = 96;
 
@@ -103,7 +100,6 @@ pub fn get_target_dimensions(target: &Target) -> (u64, u64) {
         Target::Window(window) => unsafe {
             let hwnd = window.raw_handle;
 
-            // get width and height of the window
             let mut rect = RECT::default();
             let _ = windows::Win32::UI::WindowsAndMessaging::GetWindowRect(hwnd, &mut rect);
             let width = rect.right - rect.left;

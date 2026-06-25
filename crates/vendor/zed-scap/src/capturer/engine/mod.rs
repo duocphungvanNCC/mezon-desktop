@@ -35,7 +35,6 @@ pub fn get_output_frame_size(options: &Options) -> [u32; 2] {
 
     #[cfg(any(target_os = "linux", target_os = "freebsd"))]
     {
-        // TODO: How to calculate this on Linux?
         return [0, 0];
     }
 }
@@ -96,7 +95,6 @@ impl Engine {
     pub fn start(&mut self) {
         #[cfg(target_os = "macos")]
         {
-            // self.mac.add_output(Capturer::new(tx));
             self.mac.start_capture().expect("Failed to start capture");
         }
 
