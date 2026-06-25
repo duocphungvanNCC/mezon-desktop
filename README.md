@@ -42,8 +42,11 @@ sudo apt install libxdo-dev libxkbcommon-x11-dev
 cargo install just
 
 # Clone the repository
-git clone https://github.com/mezonai/mezon-desktop
+git clone --recurse-submodules https://github.com/mezonai/mezon-desktop
 cd mezon-desktop
+
+# If you already cloned without submodules, initialize them:
+git submodule update --init --recursive
 
 # Install development tools used by the just recipes
 just install

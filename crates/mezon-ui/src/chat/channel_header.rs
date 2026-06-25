@@ -1,5 +1,6 @@
 use gpui::{div, prelude::*, px};
 
+use crate::app::window_controls;
 use crate::components::primitives::{Icon, IconName};
 use crate::theme::Theme;
 
@@ -36,7 +37,7 @@ impl ChannelHeader {
             ("hdr-inbox", IconName::Inbox),
         ];
 
-        div()
+        let header = div()
             .flex()
             .flex_row()
             .items_center()
@@ -83,6 +84,8 @@ impl ChannelHeader {
                         .hover(move |s| s.bg(bg_hover))
                         .child(Icon::new(icon).size(px(20.)).text_color(icon_color))
                 }),
-            ))
+            ));
+
+        window_controls::window_drag_handle(header)
     }
 }
