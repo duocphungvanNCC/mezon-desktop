@@ -5,6 +5,7 @@ use gpui_platform::application;
 use mezon_client::{AppApi, MezonClient, TransportClient};
 use mezon_native::instance::SingleInstance;
 use mezon_store::{AppConfig, AuthState, Settings};
+use mezon_ui::app::window_controls::{main_window_decorations, window_title_options};
 use mezon_ui::{RootView, TitleBar, init as init_ui};
 use std::borrow::Cow;
 use std::sync::Arc;
@@ -258,7 +259,7 @@ fn run_app(lock: SingleInstance, initial_url: Option<String>) {
                                 .update(|cx| mezon_store::LoginStore::global(cx).read(cx).client());
                             let auth = auth_state.clone();
                             match client.authenticate_mezon(&token).await {
-                                Ok(session) => {
+                                Ok(session) if !session.token.is_empty() => {
                                     let session_kc = session.clone();
                                     cx.background_executor()
                                         .spawn(async move {
@@ -282,6 +283,17 @@ fn run_app(lock: SingleInstance, initial_url: Option<String>) {
                                             cx,
                                             mezon_ui::router::Route::Chat,
                                         );
+                                    });
+                                }
+                                Ok(_) => {
+                                    tracing::warn!(
+                                        "OAuth callback returned a session without a token"
+                                    );
+                                    cx.update(|cx| {
+                                        auth.update(cx, |state, cx| {
+                                            *state = AuthState::NotAuthenticated;
+                                            cx.notify();
+                                        });
                                     });
                                 }
                                 Err(e) => {
@@ -335,7 +347,6 @@ fn run_app(lock: SingleInstance, initial_url: Option<String>) {
     });
 }
 
-/// Open the main window and return a cloneable handle to the `AuthState` entity.
 fn open_dev_gallery_window(cx: &mut App) {
     let options = WindowOptions {
         titlebar: Some(gpui::TitlebarOptions {
@@ -380,19 +391,13 @@ fn open_main_window(
     };
 
     let options = WindowOptions {
-        titlebar: Some(gpui::TitlebarOptions {
-            title: None,
-            appears_transparent: true,
-            traffic_light_position: Some(gpui::point(
-                px(mezon_ui::app::window_controls::MACOS_TRAFFIC_LIGHT_X),
-                px(mezon_ui::app::window_controls::MACOS_TRAFFIC_LIGHT_Y),
-            )),
-        }),
+        titlebar: Some(window_title_options()),
         window_bounds: Some(window_bounds),
         window_min_size: Some(size(px(950.0), px(500.0))),
         kind: gpui::WindowKind::Normal,
         focus: true,
         show: true,
+        window_decorations: main_window_decorations(),
         ..Default::default()
     };
 

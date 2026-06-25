@@ -19,6 +19,7 @@ help:
     @echo "  Development"
     @echo "  ---------------------------------------------"
     @echo "  install           Install development tools (via cargo-binstall)"
+    @echo "  install-linux-deps Install Linux system libraries for GPUI/GTK"
     @echo "  run             Build (debug) and run the app"
     @echo "  watch           Hot-reload development (requires cargo-watch)"
     @echo "  check           Fast clippy checks"
@@ -54,6 +55,10 @@ install:
     @echo "Installing development tools..."
     cargo install cargo-binstall || true
     cargo binstall -y cargo-watch cargo-nextest cargo-deny cargo-outdated cargo-llvm-cov
+
+# Install Linux system libraries required to build GPUI, GTK tray, and accessibility
+install-linux-deps:
+    @bash scripts/linux-deps
 
 # Run the project with optional arguments
 run *args:
