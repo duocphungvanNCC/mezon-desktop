@@ -226,6 +226,9 @@ impl Render for RootView {
                 )
             })
             .child(content)
+            .when(window_controls::is_edge_resizable(), |this| {
+                this.child(window_controls::render_resize_edges(_window))
+            })
             .child(overlay)
     }
 }

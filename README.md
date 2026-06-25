@@ -39,7 +39,9 @@ On Debian/Ubuntu you can also install manually:
 sudo apt install -y build-essential pkg-config libgtk-3-dev libatk1.0-dev \
   libpango1.0-dev libcairo2-dev libgdk-pixbuf2.0-dev libasound2-dev \
   libfontconfig-dev libfreetype-dev libwayland-dev libxkbcommon-x11-dev \
-  libxdo-dev libsecret-1-dev libssl-dev libvulkan-dev
+  libxdo-dev libsecret-1-dev libssl-dev libvulkan-dev \
+  libpipewire-0.3-dev libdbus-1-dev libxcb1-dev libxcb-randr0-dev \
+  libxcb-xfixes0-dev libxcb-xkb-dev libxcb-cursor-dev libx11-dev libx11-xcb-dev
 ```
 
 ## Quick Start
