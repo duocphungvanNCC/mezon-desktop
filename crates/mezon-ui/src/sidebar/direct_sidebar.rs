@@ -137,14 +137,14 @@ impl Render for DirectSidebar {
 
         let list = uniform_list("dm-list", count, move |range, _window, cx| {
             let theme = cx.theme().clone();
-            let active_id = active_id.clone();
+            let active_id = active_id;
             let store = store.read(cx);
             range
                 .map(|ix| match store.channels().get(ix) {
                     Some(channel) => {
-                        let selected = active_id.as_deref() == Some(channel.id.as_str());
+                        let selected = active_id == Some(channel.id);
                         let avatar_src = crate::util::imgproxy::avatar_url(cx, &channel.avatar);
-                        DmRow::new(channel.id.clone(), channel.label.clone(), channel.kind)
+                        DmRow::new(channel.id.to_string(), channel.label.clone(), channel.kind)
                             .selected(selected)
                             .online(channel.online)
                             .avatar_src(avatar_src)

@@ -9,6 +9,7 @@ use gpui::{
 use indexmap::IndexMap;
 
 pub const MESSAGE_IMAGE_CACHE_CAPACITY: usize = 96;
+pub const AVATAR_IMAGE_CACHE_CAPACITY: usize = 256;
 
 struct CacheEntry {
     item: ImageCacheItem,

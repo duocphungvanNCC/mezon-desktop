@@ -27,6 +27,7 @@ unicode-segmentation.workspace = true
 indexmap.workspace = true
 image.workspace = true
 qrcode.workspace = true
+smallvec.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc.workspace = true

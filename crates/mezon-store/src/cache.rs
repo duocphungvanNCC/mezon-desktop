@@ -1,5 +1,5 @@
 use std::borrow::Borrow;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::hash::Hash;
 use std::time::{Duration, Instant};
 
@@ -13,7 +13,7 @@ struct Entry<V> {
 /// + entity adapter). The store owns the value type and decides what each key means.
 pub struct KeyedCache<K, V> {
     entries: HashMap<K, Entry<V>>,
-    order: Vec<K>,
+    order: VecDeque<K>,
     max: Option<usize>,
 }
 
@@ -21,7 +21,7 @@ impl<K: Eq + Hash + Clone, V> KeyedCache<K, V> {
     pub fn new(max: Option<usize>) -> Self {
         Self {
             entries: HashMap::new(),
-            order: Vec::new(),
+            order: VecDeque::new(),
             max,
         }
     }
@@ -81,7 +81,7 @@ impl<K: Eq + Hash + Clone, V> KeyedCache<K, V> {
                 fetched_at: Some(Instant::now()),
             },
         );
-        self.order.push(key);
+        self.order.push_back(key);
         self.evict(protect);
     }
 
@@ -91,9 +91,10 @@ impl<K: Eq + Hash + Clone, V> KeyedCache<K, V> {
         K: Borrow<Q>,
         Q: Hash + Eq + ?Sized,
     {
-        if let Some(pos) = self.order.iter().position(|k| k.borrow() == key) {
-            let k = self.order.remove(pos);
-            self.order.push(k);
+        if let Some(pos) = self.order.iter().position(|k| k.borrow() == key)
+            && let Some(k) = self.order.remove(pos)
+        {
+            self.order.push_back(k);
         }
     }
 
@@ -116,13 +117,13 @@ impl<K: Eq + Hash + Clone, V> KeyedCache<K, V> {
             return;
         };
         while self.entries.len() > max {
-            let Some(victim) = self.order.first().cloned() else {
+            let Some(victim) = self.order.front().cloned() else {
                 break;
             };
             if protect == Some(&victim) {
                 break;
             }
-            self.order.remove(0);
+            self.order.pop_front();
             self.entries.remove(&victim);
         }
     }

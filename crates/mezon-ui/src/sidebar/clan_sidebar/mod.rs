@@ -4,7 +4,7 @@ use gpui::{
     AnyElement, App, Context, Entity, ListState, SharedString, Subscription, Window, div, img,
     list, prelude::*, px,
 };
-use mezon_store::{ClanList, Settings};
+use mezon_store::{ClanId, ClanList, Settings};
 use ui::Tooltip;
 
 use crate::app::shell::Shell;
@@ -21,7 +21,7 @@ pub struct ClanSidebar {
     settings: Entity<Settings>,
     rows: Rc<Vec<ClanRow>>,
     list_state: ListState,
-    active_clan_id: Option<String>,
+    active_clan_id: Option<ClanId>,
     dm_active: bool,
     can_go_back: bool,
     can_go_forward: bool,
@@ -90,7 +90,7 @@ impl ClanSidebar {
             .clans
             .iter()
             .map(|clan| {
-                let id = SharedString::from(clan.id.clone());
+                let id = SharedString::from(clan.id.to_string());
                 let row_id = SharedString::from(format!("clan-{}", clan.id));
                 let group_name = SharedString::from(format!("clan-group-{}", clan.id));
                 ClanRow {
@@ -110,7 +110,7 @@ impl ClanSidebar {
             .collect();
         let count = rows.len();
         let item_count = count + 1;
-        let new_active = clan_list_view.active_clan_id.clone();
+        let new_active = clan_list_view.active_clan_id;
         let needs_reset =
             self.list_state.item_count() != item_count || self.active_clan_id != new_active;
         self.rows = Rc::new(rows);
