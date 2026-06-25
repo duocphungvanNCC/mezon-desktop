@@ -76,7 +76,7 @@ theme              = { path = "crates/vendor/theme" }
 syntax_theme       = { path = "crates/vendor/syntax_theme" }
 menu               = { path = "crates/vendor/menu" }
 # ---------- Vendored GPUI internal crates ----------
-gpui               = { path = "crates/vendor/gpui", default-features = false }
+gpui               = { path = "crates/vendor/gpui", default-features = false, features = ["x11", "wayland"] }
 gpui-component     = { path = "crates/vendor/gpui-component/crates/ui", default-features = false }
 gpui-component-macros = { path = "crates/vendor/gpui-component/crates/macros" }
 gpui-component-assets = { path = "crates/vendor/gpui-component/crates/assets" }
