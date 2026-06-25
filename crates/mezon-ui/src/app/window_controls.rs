@@ -1,4 +1,4 @@
-use gpui::{Div, prelude::*};
+use gpui::{Div, div, prelude::*, px};
 
 use crate::theme::Theme;
 
@@ -25,6 +25,7 @@ pub const MACOS_TRAFFIC_LIGHT_Y: f32 = 11.0;
 pub const MACOS_TRAFFIC_LIGHT_CLEARANCE: f32 = 34.0;
 pub const NAV_ARROW_ICON_SIZE: f32 = 20.0;
 pub const NAV_ARROW_BUTTON_PADDING: f32 = 4.0;
+pub const APP_HEADER_HEIGHT: f32 = 50.0;
 
 #[cfg(target_os = "macos")]
 pub const NAV_TOP_INSET: f32 = MACOS_TRAFFIC_LIGHT_CLEARANCE;
@@ -35,6 +36,25 @@ pub const NAV_TOP_INSET: f32 = 0.0;
 /// Returns an empty element on macOS, where the native traffic lights are used.
 pub fn render_controls(theme: &Theme) -> impl IntoElement {
     platform::render_controls(theme)
+}
+
+/// Invisible full-width strip at the top of the window for macOS window dragging
+pub fn render_app_drag_header() -> impl IntoElement {
+    #[cfg(target_os = "macos")]
+    {
+        window_drag_handle(
+            div()
+                .absolute()
+                .top_0()
+                .left_0()
+                .right_0()
+                .h(px(APP_HEADER_HEIGHT)),
+        )
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        div().hidden()
+    }
 }
 
 pub fn window_drag_handle(header: Div) -> Div {

@@ -6,6 +6,7 @@ use gpui::{
 use mezon_store::{AuthState, ClanList, Settings};
 
 use crate::app::title_bar::TitleBar;
+use crate::app::window_controls;
 use crate::auth::login_view::LoginView;
 use crate::chat::layout::ChatLayout;
 use crate::components::primitives::{Button, Icon, IconName, Size, Spinner};
@@ -203,11 +204,13 @@ impl Render for RootView {
             .render_overlay();
 
         div()
+            .relative()
             .flex()
             .flex_col()
             .size_full()
             .bg(theme.bg_primary)
             .text_color(theme.text_primary)
+            .child(window_controls::render_app_drag_header())
             .on_action(cx.listener(|_, _: &crate::ToggleInspector, window, cx| {
                 window.toggle_inspector(cx);
             }))
