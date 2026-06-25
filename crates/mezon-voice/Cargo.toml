@@ -18,9 +18,8 @@ anyhow = { workspace = true }
 tracing = { workspace = true }
 futures = { workspace = true }
 
-# Camera capture (AVFoundation on macOS).
 nokhwa = { version = "0.10", default-features = false, features = ["input-avfoundation"] }
-# Screen capture (ScreenCaptureKit on macOS).
+
 scap = { workspace = true }
 image = { workspace = true }
 

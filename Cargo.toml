@@ -255,7 +255,7 @@ uuid                 = { version = "1.1.2", features = ["v4", "v5", "v7", "serde
 bitflags             = "2.6.0"
 backtrace            = "0.3"
 bytemuck             = "1"
-ctor                 = "0.4.0"
+ctor                 = "1.0.6"
 inventory             = "0.3.19"
 slotmap              = "1.0.6"
 stacksafe            = "0.1"
@@ -338,7 +338,8 @@ zed-scap = { path = "crates/vendor/zed-scap" }
 
 [profile.dev]
 opt-level = 0
-debug = true
+debug = "line-tables-only"
+split-debuginfo = "unpacked"
 
 [profile.dev.package.gpui_macros]
 opt-level = 3
