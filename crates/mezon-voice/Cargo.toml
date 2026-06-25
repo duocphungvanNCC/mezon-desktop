@@ -1,0 +1,34 @@
+[package]
+name = "mezon-voice"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+livekit = { workspace = true }
+cpal = { workspace = true }
+tokio = { workspace = true }
+flume = { workspace = true }
+parking_lot = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+futures = { workspace = true }
+
+# Camera capture (AVFoundation on macOS).
+nokhwa = { version = "0.10", default-features = false, features = ["input-avfoundation"] }
+# Screen capture (ScreenCaptureKit on macOS).
+scap = { workspace = true }
+image = { workspace = true }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+screencapturekit = "0.2.8"
+core-graphics-helmer-fork = "0.24.0"
+cocoa = "0.25.0"
+objc = "0.2.7"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-capture = "2.0"

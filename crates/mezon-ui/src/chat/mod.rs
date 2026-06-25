@@ -5,6 +5,8 @@ pub mod input_bar;
 pub mod layout;
 pub mod message_list;
 pub mod message_row;
+pub mod screen_share_modal;
+pub mod voice;
 
 pub use area::ChatArea;
 pub use channel_header::ChannelHeader;

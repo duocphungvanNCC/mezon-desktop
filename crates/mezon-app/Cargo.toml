@@ -3,6 +3,9 @@ name = "mezon-app"
 version.workspace = true
 edition = "2024"
 default-run = "mezon"
+authors.workspace = true
+license.workspace = true
+description = "Mezon desktop - voice, video and text chat"
 
 [[bin]]
 name = "mezon"
@@ -30,3 +33,16 @@ serde.workspace = true
 
 [build-dependencies]
 woff2-patched = "0.4.0"
+
+[package.metadata.deb]
+name = "mezon"
+maintainer = "Mezon Team"
+section = "net"
+priority = "optional"
+extended-description = "Mezon desktop client (Rust/GPUI) for voice, video and text chat."
+assets = [
+    ["target/release/mezon", "usr/bin/", "755"],
+    ["../../scripts/linux/mezon.desktop", "usr/share/applications/", "644"],
+    ["../../scripts/linux/mezon.png", "usr/share/icons/hicolor/512x512/apps/mezon.png", "644"],
+]
+
