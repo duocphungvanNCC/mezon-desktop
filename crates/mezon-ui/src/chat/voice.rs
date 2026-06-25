@@ -25,15 +25,15 @@ pub fn render_voice_channel(
     let store = voice.read(cx);
     let connecting = matches!(
         store.connection(),
-        VoiceConnection::Connecting { channel_id, .. } if channel_id == &channel.id
+        VoiceConnection::Connecting { channel_id, .. } if *channel_id == channel.id.to_string()
     );
 
-    if store.is_connected_to(&channel.id) || connecting {
+    if store.is_connected_to(&channel.id.to_string()) || connecting {
         return render_in_call(theme, locale, channel, voice, settings, store, connecting);
     }
 
     let error = match store.connection() {
-        VoiceConnection::Failed { channel_id, message } if channel_id == &channel.id => {
+        VoiceConnection::Failed { channel_id, message } if *channel_id == channel.id.to_string() => {
             Some(message.clone())
         }
         _ => None,
@@ -249,8 +249,8 @@ fn render_pre_join(
 
     let join = {
         let voice = voice.clone();
-        let channel_id = channel.id.clone();
-        let clan_id = channel.clan_id.clone();
+        let channel_id = channel.id.to_string();
+        let clan_id = channel.clan_id.to_string();
         let channel_label = channel.name.clone();
         let green = theme.status_online;
         let green_hover = darken(theme.status_online, 0.12);
