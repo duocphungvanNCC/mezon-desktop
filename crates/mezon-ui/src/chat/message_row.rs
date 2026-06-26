@@ -1,7 +1,8 @@
-use gpui::{AnyElement, Pixels, Rgba, SharedString, div, img, prelude::*, px};
+use gpui::{AnyElement, Entity, Pixels, Rgba, SharedString, div, img, prelude::*, px};
 use mezon_store::Message;
 
 use crate::components::primitives::{Avatar, Icon, IconName, Sizable, Size};
+use crate::image_cache::LruImageCache;
 use crate::theme::Theme;
 
 const DEFAULT_DISPLAY_NAME_COLOR: u32 = 0x17ac86;
@@ -44,6 +45,7 @@ pub struct MessageRow<'a> {
     avatar_src: Option<SharedString>,
     attachments: Vec<MessageAttachmentView>,
     suppress_hover: bool,
+    avatar_image_cache: Option<Entity<LruImageCache>>,
 }
 
 impl<'a> MessageRow<'a> {
@@ -62,6 +64,7 @@ impl<'a> MessageRow<'a> {
             avatar_src: None,
             attachments: Vec::new(),
             suppress_hover: false,
+            avatar_image_cache: None,
         }
     }
 
@@ -91,6 +94,11 @@ impl<'a> MessageRow<'a> {
         self
     }
 
+    pub fn avatar_image_cache(mut self, cache: Entity<LruImageCache>) -> Self {
+        self.avatar_image_cache = Some(cache);
+        self
+    }
+
     pub fn render(&self) -> impl IntoElement {
         crate::trace_render!("MessageRow {}", self.message.id);
         let msg = self.message;
@@ -100,8 +108,14 @@ impl<'a> MessageRow<'a> {
         let display_name = &msg.sender_name;
 
         let mut avatar = Avatar::new().name(display_name).with_size(Size::Small);
+        if let Some(cache) = self.avatar_image_cache.clone() {
+            avatar = avatar.image_cache(cache);
+        }
         if let Some(src) = self.avatar_src.as_deref().filter(|s| !s.is_empty()) {
             avatar = avatar.src(src);
+            if !msg.avatar_url.is_empty() && msg.avatar_url != *src {
+                avatar = avatar.fallback_src(msg.avatar_url.as_str());
+            }
         } else if !msg.avatar_url.is_empty() {
             avatar = avatar.src(msg.avatar_url.as_str());
         }
@@ -147,8 +161,9 @@ impl<'a> MessageRow<'a> {
         let content_area = div()
             .flex()
             .flex_col()
-            .when(!self.combined, |d| d.pl(px(56.)))
-            .when(self.combined, |d| d.pl(px(16.)))
+            .flex_1()
+            .min_w_0()
+            .pl(px(16.))
             .child(if self.reply {
                 reply_placeholder.into_any_element()
             } else {
@@ -192,7 +207,7 @@ impl<'a> MessageRow<'a> {
             })
             .when(!self.attachments.is_empty(), |d| {
                 d.child(div().flex().flex_col().gap_2().mt_1().children(
-                    self.attachments.iter().map(|view| {
+                    self.attachments.iter().enumerate().map(|(i, view)| {
                         match view {
                             MessageAttachmentView::Image {
                                 src,
@@ -210,7 +225,12 @@ impl<'a> MessageRow<'a> {
                                     )
                                     .into_any_element()
                                 } else {
+                                    // A stable id makes the img stateful, which is
+                                    // what lets GPUI advance animated GIF/WebP
+                                    // frames (a stateless img only ever shows the
+                                    // first frame).
                                     img(src.clone())
+                                        .id(SharedString::from(format!("msg-img-{}-{}", msg.id, i)))
                                         .w(*width)
                                         .h(*height)
                                         .max_w(px(400.))
@@ -246,18 +266,25 @@ impl<'a> MessageRow<'a> {
         let hover_bg = theme.bg_hover;
         div()
             .id(SharedString::from(format!("msg-row-{}", msg.id)))
-            .relative()
             .flex()
             .flex_row()
+            .items_start()
             .w_full()
             .px_4()
             .py(px(2.))
             .when(!self.combined, |d| d.mt(px(10.)).pt_3())
             .when(!self.suppress_hover, |d| d.hover(|s| s.bg(hover_bg)))
-            .child(if self.combined {
-                div().w(px(40.)).flex_none()
-            } else {
-                div().absolute().left(px(16.)).top(px(10.)).child(avatar)
+            .child({
+                if self.combined {
+                    div().w(px(40.)).flex_shrink_0().into_any_element()
+                } else {
+                    div()
+                        .w(px(40.))
+                        .flex_shrink_0()
+                        .id(SharedString::from(format!("msg-avatar-{}", msg.sender_id)))
+                        .child(avatar)
+                        .into_any_element()
+                }
             })
             .child(content_area)
     }

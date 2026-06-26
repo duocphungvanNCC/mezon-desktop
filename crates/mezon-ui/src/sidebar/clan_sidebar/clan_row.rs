@@ -28,7 +28,7 @@ fn on_clan_click(
     move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
         let id = clan_id.to_string();
         clan_list.update(cx, |m, cx| {
-            m.select_clan(&id, cx);
+            m.select_clan(id.parse().unwrap_or_default(), cx);
         });
         if !matches!(
             Router::global(cx).read(cx).route(),
@@ -95,18 +95,22 @@ pub(super) fn render_clan_row(
     };
 
     let clan_id = clan.id.clone();
-    let is_active = clan_list_handle.read(cx).is_active_clan(&clan.id) && !dm_active;
-    let show_badge = clan.badge_count > 0 && !clan.muted;
+    let is_active = clan_list_handle
+        .read(cx)
+        .is_active_clan(clan.id.parse().unwrap_or_default())
+        && !dm_active;
+    let show_badge = crate::SHOW_UNREAD_BADGE_COUNT && clan.badge_count > 0 && !clan.muted;
     let show_nub = clan.has_unread && clan.badge_count == 0 && !clan.muted && !is_active;
     let badge_count = clan.badge_count;
     let muted = clan.muted;
     let pill_color = theme.tokens.text_theme_primary;
 
     let avatar: AnyElement = if let Some(ref url) = clan.avatar_url {
-        let proxied = crate::util::imgproxy::proxied(cx, url, 100, 100, "fill-down");
+        let proxied = crate::util::imgproxy::proxied(cx, url, 100, 100, "fill");
         let mut el = img(SharedString::from(proxied))
             .size(px(40.))
             .rounded(px(8.))
+            .overflow_hidden()
             .object_fit(gpui::ObjectFit::Cover);
         if muted {
             el = el.grayscale(true);

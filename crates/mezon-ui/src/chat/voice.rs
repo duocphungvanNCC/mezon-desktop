@@ -29,10 +29,10 @@ pub fn render_voice_channel(
     let store = voice.read(cx);
     let connecting = matches!(
         store.connection(),
-        VoiceConnection::Connecting { channel_id, .. } if channel_id == &channel.id
+        VoiceConnection::Connecting { channel_id, .. } if *channel_id == channel.id.to_string()
     );
 
-    if store.is_connected_to(&channel.id) || connecting {
+    if store.is_connected_to(&channel.id.to_string()) || connecting {
         return render_in_call(theme, locale, channel, voice, settings, store, connecting);
     }
 
@@ -40,7 +40,7 @@ pub fn render_voice_channel(
         VoiceConnection::Failed {
             channel_id,
             message,
-        } if channel_id == &channel.id => Some(message.clone()),
+        } if *channel_id == channel.id.to_string() => Some(message.clone()),
         _ => None,
     };
 
@@ -256,8 +256,8 @@ fn render_pre_join(
     // button and the error-state "Retry" button trigger the same (re)join.
     let make_join_action = {
         let voice = voice.clone();
-        let channel_id = channel.id.clone();
-        let clan_id = channel.clan_id.clone();
+        let channel_id = channel.id.to_string();
+        let clan_id = channel.clan_id.to_string();
         let channel_label = channel.name.clone();
         let input_device_id = input_device_id.clone();
         let output_device_id = output_device_id.clone();
@@ -328,28 +328,7 @@ fn render_pre_join(
                 .child(subtitle.to_string()),
         )
         .when_some(error, |this, message| {
-            let retry_hover = darken(theme.bg_hover, 0.08);
             this.child(div().text_color(theme.status_dnd).text_sm().child(message))
-                .child(
-                    div()
-                        .id("voice-retry-btn")
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .gap_2()
-                        .px_4()
-                        .py(px(8.))
-                        .rounded_full()
-                        .bg(theme.bg_hover)
-                        .cursor_pointer()
-                        .hover(move |s| s.bg(retry_hover))
-                        .text_color(theme.text_primary)
-                        .text_sm()
-                        .font_weight(FontWeight::MEDIUM)
-                        .child(Icon::new(IconName::ReloadIcon).size(px(16.)))
-                        .child(mezon_i18n::t(locale, "channelVoice.retry").to_string())
-                        .on_click(make_join_action()),
-                )
         })
         .child(join);
 

@@ -198,7 +198,7 @@ impl ScreenShareModal {
             let still_valid = self
                 .options
                 .iter()
-                .any(|option| option.kind == selected.kind && option.id == selected.id);
+                .any(|option| option_kind(option) == selected.kind && option.id == selected.id);
             if !still_valid {
                 self.selected = None;
             }
@@ -213,7 +213,7 @@ impl ScreenShareModal {
         let Some(option) = self
             .options
             .iter()
-            .find(|option| option.kind == selected.kind && option.id == selected.id)
+            .find(|option| option_kind(option) == selected.kind && option.id == selected.id)
         else {
             return;
         };
@@ -240,6 +240,10 @@ fn preview_to_render_image(preview: ScreenSharePreview) -> Option<Arc<RenderImag
     Some(Arc::new(RenderImage::new(smallvec::smallvec![
         image::Frame::new(buffer,)
     ])))
+}
+
+fn option_kind(option: &ScreenShareOption) -> ScreenShareKind {
+    option.kind
 }
 
 impl Render for ScreenShareModal {
