@@ -80,24 +80,40 @@ impl AudioIo {
         std::thread::Builder::new()
             .name("mezon-voice-audio".into())
             .spawn(move || {
-                let built = build_streams(
+                let prepared = prepare_streams(
                     input_device_id.as_deref(),
                     output_device_id.as_deref(),
-                    mic_tx,
                     mixer_for_thread,
                 );
-                match built {
-                    Ok((in_stream, out_stream, in_fmt, out_fmt)) => {
+                match prepared {
+                    Ok((out_stream, out_fmt, input, in_supported, in_fmt)) => {
                         let _ = fmt_tx.send(Ok((in_fmt, out_fmt)));
+                        // The input stream is built lazily so the macOS microphone
+                        // permission prompt only appears when the user first turns
+                        // their mic on, not when they join the channel.
+                        let mut in_stream: Option<cpal::Stream> = None;
                         while let Ok(cmd) = ctrl_rx.recv() {
                             match cmd {
                                 AudioCmd::SetInputActive(true) => {
-                                    if let Err(e) = in_stream.play() {
+                                    if in_stream.is_none() {
+                                        request_macos_microphone_permission();
+                                        match build_input(&input, &in_supported, mic_tx.clone()) {
+                                            Ok(stream) => in_stream = Some(stream),
+                                            Err(e) => {
+                                                tracing::warn!("voice mic stream build failed: {e}")
+                                            }
+                                        }
+                                    }
+                                    if let Some(stream) = &in_stream
+                                        && let Err(e) = stream.play()
+                                    {
                                         tracing::warn!("voice mic stream play failed: {e}");
                                     }
                                 }
                                 AudioCmd::SetInputActive(false) => {
-                                    if let Err(e) = in_stream.pause() {
+                                    if let Some(stream) = &in_stream
+                                        && let Err(e) = stream.pause()
+                                    {
                                         tracing::warn!("voice mic stream pause failed: {e}");
                                     }
                                 }
@@ -212,14 +228,19 @@ fn i16_to_f32(s: i16) -> f32 {
     s as f32 / -(i16::MIN as f32)
 }
 
-fn build_streams(
+type PreparedStreams = (
+    cpal::Stream,
+    AudioFormat,
+    cpal::Device,
+    cpal::SupportedStreamConfig,
+    AudioFormat,
+);
+
+fn prepare_streams(
     input_device_id: Option<&str>,
     output_device_id: Option<&str>,
-    mic_tx: flume::Sender<Vec<i16>>,
     mixer: Arc<PlaybackMixer>,
-) -> Result<(cpal::Stream, cpal::Stream, AudioFormat, AudioFormat)> {
-    request_macos_microphone_permission();
-
+) -> Result<PreparedStreams> {
     let host = cpal::default_host();
 
     let input = select_input(&host, input_device_id)?;
@@ -237,12 +258,10 @@ fn build_streams(
         channels: out_supported.channels() as u32,
     };
 
-    let in_stream = build_input(&input, &in_supported, mic_tx)?;
     let out_stream = build_output(&output, &out_supported, mixer)?;
-
     out_stream.play()?;
 
-    Ok((in_stream, out_stream, in_fmt, out_fmt))
+    Ok((out_stream, out_fmt, input, in_supported, in_fmt))
 }
 
 fn select_input(host: &cpal::Host, id: Option<&str>) -> Result<cpal::Device> {

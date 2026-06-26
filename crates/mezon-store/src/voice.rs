@@ -329,7 +329,6 @@ impl VoiceStore {
         self.mic_enabled = false;
         self.mic_permission_denied = false;
         self.participants.clear();
-        preload_screen_share_options();
         cx.notify();
 
         let api = self.api.clone();
