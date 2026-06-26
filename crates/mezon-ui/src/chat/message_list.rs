@@ -4,10 +4,13 @@ use gpui::{
 };
 use ui::{ScrollAxes, Scrollbars, WithScrollbar};
 
-use mezon_store::{ChannelList, Message, MessagesEvent, MessagesStore, Settings};
+use mezon_store::{ChannelId, ChannelList, Message, MessagesEvent, MessagesStore, Settings};
 
 use crate::chat::message_row::{MessageAttachmentView, MessageRow};
-use crate::image_cache::{LruImageCache, MESSAGE_IMAGE_CACHE_CAPACITY};
+use crate::image_cache::{
+    AVATAR_ENTRY_MAX_BYTES, AVATAR_IMAGE_CACHE_BYTES, AVATAR_IMAGE_CACHE_CAPACITY, LruImageCache,
+    MESSAGE_ENTRY_MAX_BYTES, MESSAGE_IMAGE_CACHE_BYTES, MESSAGE_IMAGE_CACHE_CAPACITY,
+};
 use crate::theme::{ActiveTheme, Theme};
 
 const LOAD_MORE_ITEM_THRESHOLD: usize = 6;
@@ -17,9 +20,10 @@ pub struct MessageTimeline {
     pub(crate) list_state: ListState,
     settings: Entity<Settings>,
     image_cache: Entity<LruImageCache>,
-    cached_for_channel: Option<String>,
+    avatar_image_cache: Entity<LruImageCache>,
+    cached_for_channel: Option<ChannelId>,
     skeleton_armed: bool,
-    skeleton_channel: Option<String>,
+    skeleton_channel: Option<ChannelId>,
     _skeleton_timer: Option<Task<()>>,
     suppress_hover: bool,
     _hover_release_task: Option<Task<()>>,
@@ -61,11 +65,10 @@ impl MessageTimeline {
                 MessagesStore::global(cx).update(cx, |store, cx| store.load_more(cx));
             }
             let _ = timeline.update(cx, |this, cx| {
-                let was_suppressed = this.suppress_hover;
                 this.suppress_hover = true;
-                if !was_suppressed {
-                    cx.notify();
-                }
+                // Re-render on every scroll tick so the image cache sweep runs
+                // and releases attachments that just left the viewport.
+                cx.notify();
                 this._hover_release_task = Some(cx.spawn(async move |this, cx| {
                     cx.background_executor()
                         .timer(std::time::Duration::from_millis(SCROLL_HOVER_RELEASE_MS))
@@ -79,11 +82,29 @@ impl MessageTimeline {
                 }));
             });
         });
-        let image_cache = cx.new(|cx| LruImageCache::new(MESSAGE_IMAGE_CACHE_CAPACITY, cx));
+        let image_cache = cx.new(|cx| {
+            LruImageCache::labeled(
+                "msg-image",
+                MESSAGE_IMAGE_CACHE_CAPACITY,
+                MESSAGE_IMAGE_CACHE_BYTES,
+                MESSAGE_ENTRY_MAX_BYTES,
+                cx,
+            )
+        });
+        let avatar_image_cache = cx.new(|cx| {
+            LruImageCache::avatar_thumbnail(
+                "msg-avatar",
+                AVATAR_IMAGE_CACHE_CAPACITY,
+                AVATAR_IMAGE_CACHE_BYTES,
+                AVATAR_ENTRY_MAX_BYTES,
+                cx,
+            )
+        });
         Self {
             list_state,
             settings,
             image_cache,
+            avatar_image_cache,
             cached_for_channel: None,
             skeleton_armed: false,
             skeleton_channel: None,
@@ -98,12 +119,14 @@ impl MessageTimeline {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let channel_id = ChannelList::global(cx).read(cx).active_channel_id.clone();
-        if self.cached_for_channel.as_ref() == channel_id.as_ref() {
+        let channel_id = ChannelList::global(cx).read(cx).active_channel_id;
+        if self.cached_for_channel == channel_id {
             return;
         }
         self.cached_for_channel = channel_id;
         self.image_cache
+            .update(cx, |cache, cx| cache.clear(window, cx));
+        self.avatar_image_cache
             .update(cx, |cache, cx| cache.clear(window, cx));
     }
 }
@@ -112,14 +135,18 @@ impl Render for MessageTimeline {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         crate::trace_render!("MessageTimeline");
         self.clear_image_cache_if_channel_changed(window, cx);
+        // Keep only the images visible this frame; anything scrolled out of the
+        // viewport stops being requested and is dropped here on the next render.
+        self.image_cache
+            .update(cx, |cache, cx| cache.sweep(window, cx));
 
         let store = MessagesStore::global(cx);
-        let channel_id = ChannelList::global(cx).read(cx).active_channel_id.clone();
+        let channel_id = ChannelList::global(cx).read(cx).active_channel_id;
         let is_empty = store.read(cx).messages().is_empty();
         let loading = store.read(cx).is_loading() && is_empty;
         if loading {
             if self.skeleton_channel != channel_id {
-                self.skeleton_channel = channel_id.clone();
+                self.skeleton_channel = channel_id;
                 self.skeleton_armed = false;
                 self._skeleton_timer = Some(cx.spawn(async move |this, cx| {
                     cx.background_executor()
@@ -143,6 +170,7 @@ impl Render for MessageTimeline {
         let reply_label: SharedString = mezon_i18n::t(&locale, "chat.replyingToSomeone").into();
         let list_state = self.list_state.clone();
         let suppress_hover = self.suppress_hover;
+        let avatar_image_cache = self.avatar_image_cache.clone();
 
         if show_skeleton {
             return div()
@@ -165,6 +193,7 @@ impl Render for MessageTimeline {
                         "",
                         &reply_label,
                         suppress_hover,
+                        avatar_image_cache.clone(),
                     )
                 })
                 .flex_1()
@@ -221,6 +250,7 @@ fn render_row(
     current_user_id: &str,
     reply_label: &SharedString,
     suppress_hover: bool,
+    avatar_image_cache: Entity<LruImageCache>,
 ) -> AnyElement {
     let theme = cx.theme();
     let Some(msg) = messages.get(ix) else {
@@ -236,6 +266,7 @@ fn render_row(
     let message_row = MessageRow::new(msg, theme, current_user_id, reply_label.clone())
         .combined(combined)
         .avatar_src(msg.avatar_proxied.clone())
+        .avatar_image_cache(avatar_image_cache)
         .attachments(attachment_views)
         .suppress_hover(suppress_hover);
 

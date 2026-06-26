@@ -9,6 +9,9 @@ use crate::app::title_bar::TitleBar;
 use crate::auth::login_view::LoginView;
 use crate::chat::layout::ChatLayout;
 use crate::components::primitives::{Button, Icon, IconName, Size, Spinner};
+use crate::image_cache::{
+    LruImageCache, SHARED_ENTRY_MAX_BYTES, SHARED_IMAGE_CACHE_BYTES, SHARED_IMAGE_CACHE_CAPACITY,
+};
 use crate::router::{Route, Router};
 use crate::settings::SettingsScreen;
 use crate::theme::{ActiveTheme, Theme, resolve_theme};
@@ -22,6 +25,7 @@ pub struct RootView {
     settings: Entity<Settings>,
     applied_theme: String,
     initial_route_restored: bool,
+    image_cache: Entity<LruImageCache>,
 }
 
 impl RootView {
@@ -59,8 +63,6 @@ impl RootView {
                 channel_id,
             } = router.read(cx).route()
             {
-                let clan_id = clan_id.clone();
-                let channel_id = channel_id.clone();
                 this.settings.update(cx, |s, cx| {
                     s.last_clan_id = Some(clan_id);
                     s.last_channel_id = Some(channel_id);
@@ -87,8 +89,7 @@ impl RootView {
                     .settings
                     .read(cx)
                     .last_clan_id
-                    .clone()
-                    .zip(this.settings.read(cx).last_channel_id.clone());
+                    .zip(this.settings.read(cx).last_channel_id);
                 if let Some((clan_id, channel_id)) = last {
                     crate::router::navigate(
                         cx,
@@ -135,6 +136,15 @@ impl RootView {
         });
 
         let applied_theme = settings.read(cx).theme.clone();
+        let image_cache = cx.new(|cx| {
+            LruImageCache::labeled(
+                "shared",
+                SHARED_IMAGE_CACHE_CAPACITY,
+                SHARED_IMAGE_CACHE_BYTES,
+                SHARED_ENTRY_MAX_BYTES,
+                cx,
+            )
+        });
         Self {
             title_bar,
             auth_state,
@@ -144,6 +154,7 @@ impl RootView {
             settings,
             applied_theme,
             initial_route_restored: false,
+            image_cache,
         }
     }
 
@@ -208,6 +219,7 @@ impl Render for RootView {
             .size_full()
             .bg(theme.bg_primary)
             .text_color(theme.text_primary)
+            .image_cache(self.image_cache.clone())
             .on_action(cx.listener(|_, _: &crate::ToggleInspector, window, cx| {
                 window.toggle_inspector(cx);
             }))

@@ -60,7 +60,7 @@ impl UserInfoBar {
         let online = PresenceStore::global(cx)
             .read(cx)
             .user_online
-            .contains(&user_id);
+            .contains(&user_id.parse().unwrap_or_default());
         self.presence = SharedString::from(if online { "Online" } else { "Offline" });
     }
 }
@@ -88,11 +88,11 @@ impl Render for UserInfoBar {
             );
         settings_btn.interactivity().on_click(on_settings_click());
 
+        // Positioning (absolute / insets) is applied by the cached wrapper in
+        // the chat layout so this view can be `.cached()`; keep only the visual
+        // box here.
         div()
-            .absolute()
-            .left(px(12.0))
-            .right(px(8.0))
-            .bottom(px(12.0))
+            .w_full()
             .min_h(px(56.0))
             .overflow_hidden()
             .rounded(px(12.0))

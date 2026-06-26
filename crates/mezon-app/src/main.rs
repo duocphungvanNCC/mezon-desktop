@@ -160,7 +160,11 @@ fn run_app(lock: SingleInstance, initial_url: Option<String>) {
 
     let app_config_handle = app_config.clone();
     application()
-        .with_http_client(Arc::new(mezon_client::transport_runtime::new_http_client()))
+        .with_http_client(Arc::new(
+            mezon_client::image_disk_cache::DiskImageCacheClient::new(
+                mezon_client::transport_runtime::new_http_client(),
+            ),
+        ))
         .with_assets(mezon_ui::util::assets::Assets)
         .run(move |cx: &mut App| {
             tracing::debug!("App started");
@@ -410,6 +414,10 @@ fn open_main_window(
     mezon_store::MessagesStore::init(api.clone(), cx);
     mezon_store::PresenceStore::init(api.clone(), cx);
     mezon_store::VoiceStore::init(api.clone(), cx);
+    mezon_store::ClanMembersStore::init(api.clone(), cx);
+    mezon_store::ChannelMembersStore::init(api.clone(), cx);
+    mezon_store::GroupMembersStore::init(api.clone(), cx);
+    mezon_store::UsersByUserStore::init(api.clone(), cx);
     mezon_store::AccountStore::init(api, cx);
 
     let platform_store = mezon_store::PlatformStore::init(cx);
