@@ -23,8 +23,8 @@ pub struct ChatLayout {
     auth_state: Entity<AuthState>,
     settings: Entity<Settings>,
     voice_store: Entity<VoiceStore>,
-    pending_channel_id: Option<String>,
-    prefetched_voice_channel: Option<String>,
+    pending_channel_id: Option<ChannelId>,
+    prefetched_voice_channel: Option<ChannelId>,
     show_member_list: bool,
 }
 
@@ -278,7 +278,7 @@ impl ChatLayout {
 
         if let Some(channel_id) = active_voice_channel {
             self.voice_store.update(cx, |store, cx| {
-                store.prefetch_meet_token(channel_id, cx);
+                store.prefetch_meet_token(channel_id.to_string(), cx);
             });
         }
     }
