@@ -6,6 +6,7 @@ use gpui::{
 use mezon_store::{AuthState, ClanList, Settings};
 
 use crate::app::title_bar::TitleBar;
+use crate::app::window_controls;
 use crate::auth::login_view::LoginView;
 use crate::chat::layout::ChatLayout;
 use crate::components::primitives::{Button, Icon, IconName, Size, Spinner};
@@ -214,11 +215,13 @@ impl Render for RootView {
             .render_overlay();
 
         div()
+            .relative()
             .flex()
             .flex_col()
             .size_full()
             .bg(theme.bg_primary)
             .text_color(theme.text_primary)
+            .child(window_controls::render_app_drag_header())
             .image_cache(self.image_cache.clone())
             .on_action(cx.listener(|_, _: &crate::ToggleInspector, window, cx| {
                 window.toggle_inspector(cx);
@@ -231,15 +234,23 @@ impl Render for RootView {
                 MouseButton::Navigate(NavigationDirection::Forward),
                 |_, _, cx| crate::router::go_forward(cx),
             )
-            .when(cfg!(not(target_os = "macos")), |this| {
-                this.child(
-                    AnyView::from(self.title_bar.clone())
-                        .cached(StyleRefinement::default().w_full().h_8()),
-                )
+            .when(window_controls::HAS_CUSTOM_TITLE_BAR, |this| {
+                this.child(render_title_bar(self.title_bar.clone()))
             })
             .child(content)
+            .when(window_controls::is_edge_resizable(), |this| {
+                this.child(window_controls::render_resize_edges(_window))
+            })
             .child(overlay)
     }
+}
+
+fn render_title_bar(title_bar: Entity<TitleBar>) -> AnyView {
+    let view = AnyView::from(title_bar);
+    #[cfg(not(target_os = "windows"))]
+    return view.cached(StyleRefinement::default().w_full().h_8());
+    #[cfg(target_os = "windows")]
+    view
 }
 
 fn cached_fill(view: impl Into<AnyView>) -> gpui::AnyElement {
