@@ -10,6 +10,9 @@ use crate::app::window_controls;
 use crate::auth::login_view::LoginView;
 use crate::chat::layout::ChatLayout;
 use crate::components::primitives::{Button, Icon, IconName, Size, Spinner};
+use crate::image_cache::{
+    LruImageCache, SHARED_ENTRY_MAX_BYTES, SHARED_IMAGE_CACHE_BYTES, SHARED_IMAGE_CACHE_CAPACITY,
+};
 use crate::router::{Route, Router};
 use crate::settings::SettingsScreen;
 use crate::theme::{ActiveTheme, Theme, resolve_theme};
@@ -23,6 +26,7 @@ pub struct RootView {
     settings: Entity<Settings>,
     applied_theme: String,
     initial_route_restored: bool,
+    image_cache: Entity<LruImageCache>,
 }
 
 impl RootView {
@@ -133,6 +137,15 @@ impl RootView {
         });
 
         let applied_theme = settings.read(cx).theme.clone();
+        let image_cache = cx.new(|cx| {
+            LruImageCache::labeled(
+                "shared",
+                SHARED_IMAGE_CACHE_CAPACITY,
+                SHARED_IMAGE_CACHE_BYTES,
+                SHARED_ENTRY_MAX_BYTES,
+                cx,
+            )
+        });
         Self {
             title_bar,
             auth_state,
@@ -142,6 +155,7 @@ impl RootView {
             settings,
             applied_theme,
             initial_route_restored: false,
+            image_cache,
         }
     }
 
@@ -208,6 +222,7 @@ impl Render for RootView {
             .bg(theme.bg_primary)
             .text_color(theme.text_primary)
             .child(window_controls::render_app_drag_header())
+            .image_cache(self.image_cache.clone())
             .on_action(cx.listener(|_, _: &crate::ToggleInspector, window, cx| {
                 window.toggle_inspector(cx);
             }))
