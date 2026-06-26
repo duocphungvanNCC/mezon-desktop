@@ -23,6 +23,7 @@ pub struct ChatLayout {
     settings: Entity<Settings>,
     voice_store: Entity<VoiceStore>,
     pending_channel_id: Option<String>,
+    prefetched_voice_channel: Option<String>,
 }
 
 impl ChatLayout {
@@ -101,6 +102,7 @@ impl ChatLayout {
             settings,
             voice_store,
             pending_channel_id: None,
+            prefetched_voice_channel: None,
         };
         this.sync_active_from_route(cx);
         this
@@ -170,9 +172,6 @@ impl ChatLayout {
                     channel_list.select_channel(&channel_id, cx);
                 });
             }
-            // Force the messages store onto this channel even when it's already the active
-            // `ChannelList` selection — covers returning from a DM (where `ChannelList` never
-            // re-emits) so the timeline switches back instead of showing the DM.
             MessagesStore::global(cx).update(cx, |store, cx| store.open_channel(channel_id, cx));
         } else {
             self.pending_channel_id = Some(channel_id);
@@ -239,21 +238,33 @@ impl ChatLayout {
             },
         );
     }
+
+    fn maybe_prefetch_voice_token(&mut self, cx: &mut Context<Self>) {
+        let active_voice_channel = self
+            .channel_list
+            .read(cx)
+            .active_channel()
+            .filter(|ch| ch.channel_type == ChannelType::Voice)
+            .map(|ch| ch.id.clone());
+
+        if active_voice_channel == self.prefetched_voice_channel {
+            return;
+        }
+        self.prefetched_voice_channel = active_voice_channel.clone();
+
+        if let Some(channel_id) = active_voice_channel {
+            self.voice_store.update(cx, |store, cx| {
+                store.prefetch_meet_token(channel_id, cx);
+            });
+        }
+    }
 }
 
 impl Render for ChatLayout {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         crate::trace_render!("ChatLayout");
         self.chat_area.ensure_input(window, cx);
-
-        if let Some(ch) = self.channel_list.read(cx).active_channel()
-            && ch.channel_type == ChannelType::Voice
-        {
-            let channel_id = ch.id.clone();
-            self.voice_store.update(cx, |store, cx| {
-                store.prefetch_meet_token(channel_id.clone(), cx);
-            });
-        }
+        self.maybe_prefetch_voice_token(cx);
 
         let theme = cx.theme();
         let nav_body = self.render_nav_body(cx);
@@ -432,7 +443,10 @@ impl ChatLayout {
                 let channel = ch.clone();
                 let (input_device_id, output_device_id) = {
                     let settings = self.settings.read(cx);
-                    (settings.input_device_id.clone(), settings.output_device_id.clone())
+                    (
+                        settings.input_device_id.clone(),
+                        settings.output_device_id.clone(),
+                    )
                 };
                 return crate::chat::voice::render_voice_channel(
                     theme,

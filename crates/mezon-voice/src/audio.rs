@@ -42,14 +42,20 @@ impl PlaybackMixer {
                 let Some(sample) = buf.pop_front() else {
                     break;
                 };
-                *slot = (*slot as i32 + sample as i32).clamp(i16::MIN as i32, i16::MAX as i32) as i16;
+                *slot =
+                    (*slot as i32 + sample as i32).clamp(i16::MIN as i32, i16::MAX as i32) as i16;
             }
         }
     }
 }
 
+enum AudioCmd {
+    SetInputActive(bool),
+    Shutdown,
+}
+
 pub struct AudioIo {
-    _shutdown: flume::Sender<()>,
+    ctrl_tx: flume::Sender<AudioCmd>,
     pub input_format: AudioFormat,
     pub output_format: AudioFormat,
     pub mic_rx: flume::Receiver<Vec<i16>>,
@@ -57,13 +63,17 @@ pub struct AudioIo {
 }
 
 impl AudioIo {
+    pub fn set_input_active(&self, active: bool) {
+        let _ = self.ctrl_tx.send(AudioCmd::SetInputActive(active));
+    }
+
     pub fn start(
         input_device_id: Option<String>,
         output_device_id: Option<String>,
     ) -> Result<Self> {
         let mixer = Arc::new(PlaybackMixer::default());
         let (mic_tx, mic_rx) = flume::bounded::<Vec<i16>>(128);
-        let (shutdown_tx, shutdown_rx) = flume::bounded::<()>(0);
+        let (ctrl_tx, ctrl_rx) = flume::unbounded::<AudioCmd>();
         let (fmt_tx, fmt_rx) = flume::bounded::<Result<(AudioFormat, AudioFormat), String>>(1);
 
         let mixer_for_thread = mixer.clone();
@@ -79,7 +89,21 @@ impl AudioIo {
                 match built {
                     Ok((in_stream, out_stream, in_fmt, out_fmt)) => {
                         let _ = fmt_tx.send(Ok((in_fmt, out_fmt)));
-                        let _ = shutdown_rx.recv();
+                        while let Ok(cmd) = ctrl_rx.recv() {
+                            match cmd {
+                                AudioCmd::SetInputActive(true) => {
+                                    if let Err(e) = in_stream.play() {
+                                        tracing::warn!("voice mic stream play failed: {e}");
+                                    }
+                                }
+                                AudioCmd::SetInputActive(false) => {
+                                    if let Err(e) = in_stream.pause() {
+                                        tracing::warn!("voice mic stream pause failed: {e}");
+                                    }
+                                }
+                                AudioCmd::Shutdown => break,
+                            }
+                        }
                         drop(in_stream);
                         drop(out_stream);
                     }
@@ -104,7 +128,7 @@ impl AudioIo {
         );
 
         Ok(Self {
-            _shutdown: shutdown_tx,
+            ctrl_tx,
             input_format,
             output_format,
             mic_rx,
@@ -113,9 +137,72 @@ impl AudioIo {
     }
 }
 
+impl Drop for AudioIo {
+    fn drop(&mut self) {
+        let _ = self.ctrl_tx.send(AudioCmd::Shutdown);
+    }
+}
+
 fn err_fn(e: cpal::StreamError) {
     tracing::warn!("voice audio stream error: {e}");
 }
+
+#[cfg(target_os = "macos")]
+fn mic_authorization_status() -> i64 {
+    use cocoa::base::{id, nil};
+    use cocoa::foundation::NSString;
+    use objc::runtime::Class;
+    use objc::{msg_send, sel, sel_impl};
+
+    unsafe {
+        let Some(cls) = Class::get("AVCaptureDevice") else {
+            return 3;
+        };
+        let media_type: id = NSString::alloc(nil).init_str("soun");
+        msg_send![cls, authorizationStatusForMediaType: media_type]
+    }
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn microphone_denied() -> bool {
+    matches!(mic_authorization_status(), 1 | 2)
+}
+
+#[cfg(not(target_os = "macos"))]
+pub(crate) fn microphone_denied() -> bool {
+    false
+}
+
+#[cfg(target_os = "macos")]
+fn request_macos_microphone_permission() {
+    use std::time::Duration;
+
+    use block::ConcreteBlock;
+    use cocoa::base::{BOOL, NO, id, nil};
+    use cocoa::foundation::NSString;
+    use objc::runtime::Class;
+    use objc::{msg_send, sel, sel_impl};
+
+    if mic_authorization_status() != 0 {
+        return;
+    }
+    let Some(cls) = Class::get("AVCaptureDevice") else {
+        return;
+    };
+    let media_type: id = unsafe { NSString::alloc(nil).init_str("soun") };
+    let (tx, rx) = flume::bounded::<bool>(1);
+    let handler = ConcreteBlock::new(move |granted: BOOL| {
+        let _ = tx.send(granted != NO);
+    });
+    let handler = handler.copy();
+    let _: () = unsafe {
+        msg_send![cls, requestAccessForMediaType: media_type completionHandler: &*handler]
+    };
+    let _ = rx.recv_timeout(Duration::from_secs(15));
+}
+
+#[cfg(not(target_os = "macos"))]
+fn request_macos_microphone_permission() {}
 
 fn f32_to_i16(s: f32) -> i16 {
     (s.clamp(-1.0, 1.0) * i16::MAX as f32) as i16
@@ -131,6 +218,8 @@ fn build_streams(
     mic_tx: flume::Sender<Vec<i16>>,
     mixer: Arc<PlaybackMixer>,
 ) -> Result<(cpal::Stream, cpal::Stream, AudioFormat, AudioFormat)> {
+    request_macos_microphone_permission();
+
     let host = cpal::default_host();
 
     let input = select_input(&host, input_device_id)?;
@@ -151,7 +240,6 @@ fn build_streams(
     let in_stream = build_input(&input, &in_supported, mic_tx)?;
     let out_stream = build_output(&output, &out_supported, mixer)?;
 
-    in_stream.play()?;
     out_stream.play()?;
 
     Ok((in_stream, out_stream, in_fmt, out_fmt))
@@ -160,8 +248,7 @@ fn build_streams(
 fn select_input(host: &cpal::Host, id: Option<&str>) -> Result<cpal::Device> {
     if let Some(id) = id
         && let Ok(mut devices) = host.input_devices()
-        && let Some(device) =
-            devices.find(|d| matches!(d.id(), Ok(did) if did.to_string() == id))
+        && let Some(device) = devices.find(|d| matches!(d.id(), Ok(did) if did.to_string() == id))
     {
         return Ok(device);
     }
@@ -172,8 +259,7 @@ fn select_input(host: &cpal::Host, id: Option<&str>) -> Result<cpal::Device> {
 fn select_output(host: &cpal::Host, id: Option<&str>) -> Result<cpal::Device> {
     if let Some(id) = id
         && let Ok(mut devices) = host.output_devices()
-        && let Some(device) =
-            devices.find(|d| matches!(d.id(), Ok(did) if did.to_string() == id))
+        && let Some(device) = devices.find(|d| matches!(d.id(), Ok(did) if did.to_string() == id))
     {
         return Ok(device);
     }
@@ -216,8 +302,7 @@ fn build_input(
             device.build_input_stream(
                 &config,
                 move |data: &[u16], _: &cpal::InputCallbackInfo| {
-                    let pcm: Vec<i16> =
-                        data.iter().map(|&u| (u as i32 - 32768) as i16).collect();
+                    let pcm: Vec<i16> = data.iter().map(|&u| (u as i32 - 32768) as i16).collect();
                     let _ = tx.try_send(pcm);
                 },
                 err_fn,
@@ -237,13 +322,14 @@ fn build_output(
     let config: cpal::StreamConfig = supported.config();
     let stream = match supported.sample_format() {
         cpal::SampleFormat::F32 => {
-            let mixer = mixer;
+            let mut tmp: Vec<i16> = Vec::new();
             device.build_output_stream(
                 &config,
                 move |out: &mut [f32], _: &cpal::OutputCallbackInfo| {
-                    let mut tmp = vec![0i16; out.len()];
+                    tmp.clear();
+                    tmp.resize(out.len(), 0);
                     mixer.mix_into(&mut tmp);
-                    for (o, s) in out.iter_mut().zip(tmp) {
+                    for (o, s) in out.iter_mut().zip(tmp.iter().copied()) {
                         *o = i16_to_f32(s);
                     }
                 },
@@ -251,25 +337,23 @@ fn build_output(
                 None,
             )?
         }
-        cpal::SampleFormat::I16 => {
-            let mixer = mixer;
-            device.build_output_stream(
-                &config,
-                move |out: &mut [i16], _: &cpal::OutputCallbackInfo| {
-                    mixer.mix_into(out);
-                },
-                err_fn,
-                None,
-            )?
-        }
+        cpal::SampleFormat::I16 => device.build_output_stream(
+            &config,
+            move |out: &mut [i16], _: &cpal::OutputCallbackInfo| {
+                mixer.mix_into(out);
+            },
+            err_fn,
+            None,
+        )?,
         cpal::SampleFormat::U16 => {
-            let mixer = mixer;
+            let mut tmp: Vec<i16> = Vec::new();
             device.build_output_stream(
                 &config,
                 move |out: &mut [u16], _: &cpal::OutputCallbackInfo| {
-                    let mut tmp = vec![0i16; out.len()];
+                    tmp.clear();
+                    tmp.resize(out.len(), 0);
                     mixer.mix_into(&mut tmp);
-                    for (o, s) in out.iter_mut().zip(tmp) {
+                    for (o, s) in out.iter_mut().zip(tmp.iter().copied()) {
                         *o = (s as i32 + 32768) as u16;
                     }
                 },
