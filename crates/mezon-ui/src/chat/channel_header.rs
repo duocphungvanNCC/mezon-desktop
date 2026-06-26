@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use gpui::{App, Window, div, prelude::*, px};
 
+use crate::app::window_controls;
 use crate::components::primitives::{Icon, IconName};
 use crate::theme::Theme;
 
@@ -70,7 +71,7 @@ impl ChannelHeader {
             .gap_2()
             .px_4()
             .py_2()
-            .h(px(50.))
+            .h(px(window_controls::APP_HEADER_HEIGHT))
             .border_b_1()
             .border_color(theme.border)
             .bg(theme.bg_primary)
@@ -115,6 +116,7 @@ impl ChannelHeader {
                                 .rounded_md()
                                 .cursor_pointer()
                                 .hover(move |s| s.bg(bg_hover))
+                                .occlude()
                                 .child(Icon::new(icon).size(px(20.)).text_color(tint));
                             if active {
                                 button = button.bg(bg_active);
