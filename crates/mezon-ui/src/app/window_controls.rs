@@ -3,6 +3,9 @@ use gpui::{
     WindowDecorations, div, prelude::*, px,
 };
 
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+use gpui::Rgba;
+
 use crate::theme::Theme;
 
 #[cfg(target_os = "linux")]
@@ -20,9 +23,8 @@ use macos as platform;
 use windows as platform;
 
 /// Whether the app paints its own title bar with custom window controls.
-/// macOS and Windows use native title bars.
-/// Linux uses client-side decorations.
-pub const HAS_CUSTOM_TITLE_BAR: bool = cfg!(target_os = "linux");
+/// macOS uses native traffic lights; Linux and Windows use client-side decorations.
+pub const HAS_CUSTOM_TITLE_BAR: bool = cfg!(any(target_os = "linux", target_os = "windows"));
 pub const APP_NAME: &str = "Mezon";
 
 pub const MACOS_TRAFFIC_LIGHT_X: f32 = 12.0;
@@ -62,7 +64,7 @@ pub fn window_title_options() -> TitlebarOptions {
     {
         TitlebarOptions {
             title: Some(APP_NAME.into()),
-            appears_transparent: cfg!(not(target_os = "windows")),
+            appears_transparent: true,
             ..Default::default()
         }
     }
@@ -80,7 +82,7 @@ pub fn main_window_decorations() -> Option<WindowDecorations> {
 }
 
 pub fn is_edge_resizable() -> bool {
-    cfg!(any(target_os = "linux", target_os = "windows"))
+    cfg!(target_os = "linux")
 }
 
 pub fn render_resize_edges(window: &mut Window) -> impl IntoElement {
@@ -227,6 +229,30 @@ pub fn render_app_drag_header() -> impl IntoElement {
     {
         div().hidden()
     }
+}
+
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+pub(crate) const CONTROL_BUTTON_SIZE: f32 = 28.0;
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+pub(crate) const CONTROL_ICON_SIZE: f32 = 12.0;
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+pub(crate) const CONTROL_CLOSE_HOVER: u32 = 0xc42b1c;
+
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+pub(crate) fn control_button(color: Rgba) -> Div {
+    div()
+        .flex()
+        .items_center()
+        .justify_center()
+        .size(px(CONTROL_BUTTON_SIZE))
+        .rounded_full()
+        .cursor_pointer()
+        .text_color(color)
+}
+
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+pub(crate) fn controls_row() -> Div {
+    div().flex().flex_row().items_center().gap_1().px_2().h_full()
 }
 
 pub fn window_drag_handle(header: Div) -> Div {

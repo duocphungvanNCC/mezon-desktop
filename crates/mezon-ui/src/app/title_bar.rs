@@ -1,6 +1,9 @@
 use crate::app::window_controls;
 use crate::theme::ActiveTheme;
-use gpui::{Context, Entity, FontWeight, MouseButton, Subscription, Window, div, prelude::*};
+use gpui::{
+    Context, Entity, FontWeight, MouseButton, Subscription, Window, WindowControlArea, div,
+    prelude::*,
+};
 use mezon_store::Settings;
 
 pub struct TitleBar {
@@ -36,23 +39,34 @@ impl Render for TitleBar {
             .w_full()
             .h_8()
             .bg(theme.title_bar_bg)
-            .on_mouse_down(MouseButton::Left, |event, window, _| {
-                if event.click_count >= 2 {
-                    window.zoom_window();
-                } else {
-                    window.start_window_move();
-                }
-            })
             .child(
-                div().flex().items_center().px_3().child(
-                    div()
-                        .text_sm()
-                        .font_weight(FontWeight::MEDIUM)
-                        .text_color(theme.text_secondary)
-                        .child(window_controls::APP_NAME),
-                ),
+                div()
+                    .flex()
+                    .flex_1()
+                    .items_center()
+                    .h_full()
+                    .when(cfg!(target_os = "windows"), |bar| {
+                        bar.window_control_area(WindowControlArea::Drag)
+                    })
+                    .when(cfg!(target_os = "linux"), |bar| {
+                        bar.on_mouse_down(MouseButton::Left, |event, window, _| {
+                            if event.click_count >= 2 {
+                                window.zoom_window();
+                            } else {
+                                window.start_window_move();
+                            }
+                        })
+                    })
+                    .child(
+                        div().flex().items_center().px_3().child(
+                            div()
+                                .text_sm()
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(theme.text_secondary)
+                                .child(window_controls::APP_NAME),
+                        ),
+                    ),
             )
-            .child(div().flex_1())
             .child(window_controls::render_controls(theme, window))
     }
 }

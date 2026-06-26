@@ -235,10 +235,7 @@ impl Render for RootView {
                 |_, _, cx| crate::router::go_forward(cx),
             )
             .when(window_controls::HAS_CUSTOM_TITLE_BAR, |this| {
-                this.child(
-                    AnyView::from(self.title_bar.clone())
-                        .cached(StyleRefinement::default().w_full().h_8()),
-                )
+                this.child(render_title_bar(self.title_bar.clone()))
             })
             .child(content)
             .when(window_controls::is_edge_resizable(), |this| {
@@ -246,6 +243,14 @@ impl Render for RootView {
             })
             .child(overlay)
     }
+}
+
+fn render_title_bar(title_bar: Entity<TitleBar>) -> AnyView {
+    let view = AnyView::from(title_bar);
+    #[cfg(not(target_os = "windows"))]
+    return view.cached(StyleRefinement::default().w_full().h_8());
+    #[cfg(target_os = "windows")]
+    view
 }
 
 fn cached_fill(view: impl Into<AnyView>) -> gpui::AnyElement {
