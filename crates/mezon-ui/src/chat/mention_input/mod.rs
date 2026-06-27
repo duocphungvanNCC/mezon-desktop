@@ -1000,7 +1000,7 @@ fn channel_suggest_pool(cx: &App) -> Vec<ChannelSuggestRaw> {
     let mut seen: std::collections::HashSet<ChannelId> = std::collections::HashSet::new();
     let mut out = Vec::new();
     for category in channel_list.categories_for_clan(clan_id) {
-        for channel in category.channels {
+        for channel in &category.channels {
             if channel.channel_type != ChannelType::Text || channel.parent_id.is_some() {
                 continue;
             }
