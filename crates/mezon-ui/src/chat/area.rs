@@ -1,39 +1,46 @@
 use std::sync::Arc;
 
-use crate::components::primitives::{InputEvent, InputState};
 use gpui::{AnyView, App, Context, Entity, StyleRefinement, Window, div, prelude::*, px};
+// composer: use gpui::{AnyView, App, Context, Entity, StyleRefinement, Subscription, Window, div, prelude::*, px};
 use mezon_store::Settings;
+// composer: use mezon_store::{MessagesStore, Settings};
 
 use crate::chat::ReplyTarget;
 use crate::chat::channel_header::ChannelHeader;
 use crate::chat::input_bar::InputBar;
 use crate::chat::member_list::{MemberListPanel, MemberSource};
-use crate::chat::message_list::MessageTimeline;
+// composer: use crate::chat::mention_input::{MentionInput, MentionInputEvent};
+use crate::chat::message::ChannelMessages;
+use crate::components::primitives::{InputEvent, InputState};
 use crate::theme::Theme;
 
 pub struct ChatArea {
-    pub(crate) timeline: Entity<MessageTimeline>,
+    pub(crate) timeline: Entity<ChannelMessages>,
     pub(crate) input_state: Option<Entity<InputState>>,
+    // composer: pub(crate) mention_input: Option<Entity<MentionInput>>,
     member_panel: Option<Entity<MemberListPanel>>,
     member_source: Option<MemberSource>,
     #[allow(dead_code)]
     replying_to: Option<ReplyTarget>,
     settings: Entity<Settings>,
+    // composer: _submit_sub: Option<Subscription>,
 }
 
 impl ChatArea {
     pub fn new(settings: Entity<Settings>, cx: &mut Context<crate::ChatLayout>) -> Self {
         let timeline = cx.new({
             let settings = settings.clone();
-            move |cx| MessageTimeline::new(settings, cx)
+            move |cx| ChannelMessages::new(settings, cx)
         });
         Self {
             timeline,
             input_state: None,
+            // composer: mention_input: None,
             member_panel: None,
             member_source: None,
             replying_to: None,
             settings,
+            // composer: _submit_sub: None,
         }
     }
 
@@ -84,6 +91,28 @@ impl ChatArea {
         }
     }
 
+    // composer: restore the MentionInput composer by swapping ensure_input for:
+    // pub fn ensure_input(&mut self, window: &mut Window, cx: &mut Context<crate::ChatLayout>) {
+    //     if self.mention_input.is_none() {
+    //         let locale = self.settings.read(cx).language.clone();
+    //         let placeholder = mezon_i18n::t(&locale, "chat.messagePlaceholder");
+    //         let settings = self.settings.clone();
+    //         let mention_input = cx.new(|cx| MentionInput::new(placeholder, settings, window, cx));
+    //         let submit_sub = cx.subscribe_in(
+    //             &mention_input,
+    //             window,
+    //             |this: &mut crate::ChatLayout, _, event: &MentionInputEvent, window, cx| match event {
+    //                 MentionInputEvent::Submit => this.send_current_message(window, cx),
+    //                 MentionInputEvent::SendSticker { url, filename } => {
+    //                     this.send_sticker(url.clone(), filename.clone(), cx)
+    //                 }
+    //             },
+    //         );
+    //         self._submit_sub = Some(submit_sub);
+    //         self.mention_input = Some(mention_input);
+    //     }
+    // }
+
     #[allow(clippy::too_many_arguments)]
     pub fn render(
         &self,
@@ -95,8 +124,10 @@ impl ChatArea {
         typing_label: Option<gpui::SharedString>,
         show_members_button: bool,
         show_member_panel: bool,
+        // composer: reply_preview: Option<ReplyTarget>,
     ) -> gpui::AnyElement {
         let input_state = match self.input_state.clone() {
+            // composer: let mention_input = match self.mention_input.clone() {
             Some(s) => s,
             None => {
                 return div()
@@ -115,10 +146,20 @@ impl ChatArea {
             })
         };
 
+        // composer: let on_cancel_reply = Arc::new(move |_window: &mut Window, cx: &mut App| {
+        // composer:     MessagesStore::global(cx).update(cx, |store, cx| store.clear_reply(cx));
+        // composer: });
+
         let input_bar = InputBar::new()
             .with_input(input_state)
             .on_send(on_send)
             .typing_label(typing_label);
+        // composer: let input_bar = InputBar::new()
+        // composer:     .with_mention_input(mention_input)
+        // composer:     .on_send(on_send)
+        // composer:     .on_cancel_reply(on_cancel_reply)
+        // composer:     .replying_to(reply_preview)
+        // composer:     .typing_label(typing_label);
 
         let header = ChannelHeader::new(channel_name)
             .dm(is_dm)

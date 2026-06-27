@@ -340,7 +340,8 @@ impl Render for ChatLayout {
                                 .absolute()
                                 .left(px(12.0))
                                 .right(px(8.0))
-                                .bottom(px(12.0)),
+                                .bottom(px(12.0))
+                                .h(px(56.0)),
                         ),
                     ),
             )
@@ -366,18 +367,38 @@ impl ChatLayout {
             return;
         }
         input.update(cx, |state, cx| state.set_value("", window, cx));
-
-        let (uid, uname) = match self.auth_state.read(cx) {
-            AuthState::Authenticated(session) => {
-                (session.user_id.clone(), session.username.clone())
-            }
-            _ => (String::new(), String::new()),
-        };
-
-        MessagesStore::global(cx).update(cx, |store, cx| {
-            store.send_message(content, uid, uname, cx);
-        });
+        crate::chat::ChatSending::send_text(
+            content,
+            mezon_store::OutgoingContent::default(),
+            Vec::new(),
+            &self.auth_state,
+            cx,
+        );
     }
+
+    // composer: restore by swapping send_current_message for the MentionInput payload
+    // path and re-adding send_sticker:
+    // pub(crate) fn send_current_message(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    //     let Some(mention_input) = self.chat_area.mention_input.clone() else {
+    //         return;
+    //     };
+    //     let Some((content, content_tokens, attachments)) = mention_input
+    //         .update(cx, |mention_input, cx| mention_input.take_payload(window, cx))
+    //     else {
+    //         return;
+    //     };
+    //     crate::chat::ChatSending::send_text(
+    //         content,
+    //         content_tokens,
+    //         attachments,
+    //         &self.auth_state,
+    //         cx,
+    //     );
+    // }
+    //
+    // pub(crate) fn send_sticker(&mut self, url: String, filename: String, cx: &mut Context<Self>) {
+    //     crate::chat::ChatSending::send_sticker(url, filename, &self.auth_state, cx);
+    // }
 
     fn current_dm(&self, cx: &Context<Self>) -> Option<DirectChannel> {
         let Route::DirectMessage { direct_id, .. } = Router::global(cx).read(cx).route() else {
@@ -443,6 +464,13 @@ impl ChatLayout {
     fn render_content(&self, cx: &Context<Self>) -> gpui::AnyElement {
         let theme = cx.theme();
         let locale = self.settings.read(cx).language.clone();
+        // composer: let reply_preview = MessagesStore::global(cx)
+        // composer:     .read(cx)
+        // composer:     .reply_target()
+        // composer:     .map(|draft| crate::chat::ReplyTarget {
+        // composer:         sender_name: draft.sender_name.clone(),
+        // composer:         content_preview: draft.content_preview.clone(),
+        // composer:     });
 
         if self.is_dm_route(cx) {
             if let Some(dm) = self.current_dm(cx) {
@@ -459,6 +487,7 @@ impl ChatLayout {
                         typing,
                         is_group,
                         is_group && self.show_member_list,
+                        // composer: reply_preview,
                     )
                     .into_any_element();
             }
@@ -521,6 +550,7 @@ impl ChatLayout {
                     typing,
                     true,
                     self.show_member_list,
+                    // composer: reply_preview,
                 )
                 .into_any_element();
         }
