@@ -43,6 +43,7 @@ pub enum RealtimeEvent {
     CustomStatus(realtime::CustomStatusEvent),
     MessageReaction(api::MessageReaction),
     MarkAsRead(realtime::MarkAsRead),
+    LastSeenUpdated(realtime::LastSeenMessageEvent),
     ChannelCreated(realtime::ChannelCreatedEvent),
     ChannelUpdated(realtime::ChannelUpdatedEvent),
     ChannelDeleted(realtime::ChannelDeletedEvent),
@@ -77,6 +78,7 @@ impl TryFrom<realtime::envelope::Message> for RealtimeEvent {
             realtime::envelope::Message::CustomStatusEvent(m) => Ok(Self::CustomStatus(m)),
             realtime::envelope::Message::MessageReactionEvent(m) => Ok(Self::MessageReaction(m)),
             realtime::envelope::Message::MarkAsRead(m) => Ok(Self::MarkAsRead(m)),
+            realtime::envelope::Message::LastSeenMessageEvent(m) => Ok(Self::LastSeenUpdated(m)),
             realtime::envelope::Message::ChannelCreatedEvent(m) => Ok(Self::ChannelCreated(m)),
             realtime::envelope::Message::ChannelUpdatedEvent(m) => Ok(Self::ChannelUpdated(m)),
             realtime::envelope::Message::ChannelDeletedEvent(m) => Ok(Self::ChannelDeleted(m)),
@@ -480,6 +482,104 @@ fn parse_message_attachments(bytes: &[u8]) -> Vec<ApiAttachment> {
             Vec::new()
         }
     }
+}
+
+fn parse_message_references(bytes: &[u8]) -> Vec<ApiMessageRef> {
+    if bytes.is_empty() {
+        return Vec::new();
+    }
+    match api::MessageRefList::decode(bytes) {
+        Ok(list) => list
+            .refs
+            .into_iter()
+            .map(|r| ApiMessageRef {
+                message_ref_id: r.message_ref_id,
+                content: r.content,
+                has_attachment: r.has_attachment,
+                message_sender_id: r.message_sender_id,
+                message_sender_username: r.message_sender_username,
+                message_sender_avatar: r.message_sender_avatar,
+                message_sender_clan_nick: r.message_sender_clan_nick,
+                message_sender_display_name: r.message_sender_display_name,
+            })
+            .collect(),
+        Err(e) => {
+            tracing::warn!(
+                "failed to decode message references ({} bytes): {e}",
+                bytes.len()
+            );
+            Vec::new()
+        }
+    }
+}
+
+/// A single inline content token from a message's JSON `content` payload.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ContentToken {
+    #[serde(default)]
+    pub s: Option<i64>,
+    #[serde(default)]
+    pub e: Option<i64>,
+    #[serde(default)]
+    pub user_id: Option<String>,
+    #[serde(default)]
+    pub role_id: Option<String>,
+}
+
+/// Parsed `content` JSON of a message (the mezon `IExtendedMessage` shape).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ApiMessageContent {
+    #[serde(default)]
+    pub t: String,
+    #[serde(default)]
+    pub mentions: Vec<ContentToken>,
+}
+
+/// A reply/reference attached to a message (mezon `MessageRef`).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ApiMessageRef {
+    pub message_ref_id: i64,
+    pub content: String,
+    pub has_attachment: bool,
+    pub message_sender_id: i64,
+    pub message_sender_username: String,
+    pub message_sender_avatar: String,
+    pub message_sender_clan_nick: String,
+    pub message_sender_display_name: String,
+}
+
+pub const MENTION_HERE_ID: &str = "here";
+
+pub fn is_mention_or_reply(
+    content: &str,
+    references: &[u8],
+    user_id: i64,
+    role_ids: &[i64],
+) -> bool {
+    if let Ok(parsed) = serde_json::from_str::<ApiMessageContent>(content)
+        && parsed
+            .mentions
+            .iter()
+            .any(|token| mention_targets_user(token, user_id, role_ids))
+    {
+        return true;
+    }
+    parse_message_references(references)
+        .iter()
+        .any(|reference| reference.message_sender_id == user_id)
+}
+
+fn mention_targets_user(token: &ContentToken, user_id: i64, role_ids: &[i64]) -> bool {
+    if let Some(uid) = token.user_id.as_deref()
+        && (uid == MENTION_HERE_ID || uid.parse::<i64>().is_ok_and(|id| id == user_id))
+    {
+        return true;
+    }
+    token
+        .role_id
+        .as_deref()
+        .and_then(|rid| rid.parse::<i64>().ok())
+        .is_some_and(|rid| role_ids.contains(&rid))
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -5169,5 +5269,54 @@ mod tests {
         assert_eq!(t.get_api_index("ListChannelMessages"), Some(30));
         assert_eq!(t.get_api_index("UploadBatchAttachmentFile"), Some(209));
         assert_eq!(t.get_api_index("DefinitelyNotAnApi"), None);
+    }
+
+    fn reply_reference_bytes(message_sender_id: i64) -> Vec<u8> {
+        api::MessageRefList {
+            refs: vec![api::MessageRef {
+                message_sender_id,
+                ..Default::default()
+            }],
+        }
+        .encode_to_vec()
+    }
+
+    #[test]
+    fn mention_or_reply_plain_message_is_false() {
+        let content = r#"{"t":"hello world"}"#;
+        assert!(!is_mention_or_reply(content, &[], 42, &[]));
+    }
+
+    #[test]
+    fn mention_or_reply_detects_here() {
+        let content = r#"{"t":"@here","mentions":[{"user_id":"here","s":0,"e":5}]}"#;
+        assert!(is_mention_or_reply(content, &[], 42, &[]));
+    }
+
+    #[test]
+    fn mention_or_reply_detects_current_user_only() {
+        let content = r#"{"t":"@bob","mentions":[{"user_id":"42","s":0,"e":4}]}"#;
+        assert!(is_mention_or_reply(content, &[], 42, &[]));
+        assert!(!is_mention_or_reply(content, &[], 7, &[]));
+    }
+
+    #[test]
+    fn mention_or_reply_detects_matching_role_only() {
+        let content = r#"{"t":"@mods","mentions":[{"role_id":"99","s":0,"e":5}]}"#;
+        assert!(is_mention_or_reply(content, &[], 42, &[99]));
+        assert!(!is_mention_or_reply(content, &[], 42, &[100]));
+    }
+
+    #[test]
+    fn mention_or_reply_detects_reply_to_user() {
+        let refs = reply_reference_bytes(42);
+        let content = r#"{"t":"re"}"#;
+        assert!(is_mention_or_reply(content, &refs, 42, &[]));
+        assert!(!is_mention_or_reply(content, &refs, 7, &[]));
+    }
+
+    #[test]
+    fn mention_or_reply_malformed_content_is_false() {
+        assert!(!is_mention_or_reply("not json", &[], 42, &[]));
     }
 }
