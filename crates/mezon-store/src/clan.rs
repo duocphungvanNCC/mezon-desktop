@@ -114,8 +114,6 @@ impl ClanList {
                 RealtimeKind::ClanDeleted,
                 RealtimeKind::AddClanUser,
                 RealtimeKind::UserClanRemoved,
-                RealtimeKind::ChannelMessage,
-                RealtimeKind::MarkAsRead,
             ] {
                 dispatch.on(kind, &entity, |this, event, cx| {
                     this.handle_event(event, cx)
@@ -252,27 +250,38 @@ impl ClanList {
                     cx.notify();
                 }
             }
-            RealtimeEvent::ChannelMessage(m) => {
-                let clan_id = ClanId(m.clan_id);
-                if let Some(clan) = self.clans.iter_mut().find(|c| c.id == clan_id)
-                    && !clan.muted
-                {
-                    clan.badge_count = clan.badge_count.saturating_add(1);
-                    clan.has_unread = true;
-                    cx.notify();
-                }
-            }
-            RealtimeEvent::MarkAsRead(m) => {
-                let clan_id = ClanId(m.clan_id);
-                if let Some(clan) = self.clans.iter_mut().find(|c| c.id == clan_id)
-                    && (clan.badge_count > 0 || clan.has_unread)
-                {
-                    clan.badge_count = 0;
-                    clan.has_unread = false;
-                    cx.notify();
-                }
-            }
             _ => {}
+        }
+    }
+
+    pub fn note_channel_message(
+        &mut self,
+        clan_id: ClanId,
+        is_mention: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(clan) = self.clans.iter_mut().find(|c| c.id == clan_id)
+            && !clan.muted
+        {
+            let was_unread = clan.has_unread;
+            let was_badge_zero = clan.badge_count == 0;
+            clan.has_unread = true;
+            if is_mention {
+                clan.badge_count = clan.badge_count.saturating_add(1);
+            }
+            if !was_unread || was_badge_zero != (clan.badge_count == 0) {
+                cx.notify();
+            }
+        }
+    }
+
+    pub fn apply_badge_read(&mut self, clan_id: ClanId, cx: &mut Context<Self>) {
+        if let Some(clan) = self.clans.iter_mut().find(|c| c.id == clan_id)
+            && (clan.badge_count > 0 || clan.has_unread)
+        {
+            clan.badge_count = 0;
+            clan.has_unread = false;
+            cx.notify();
         }
     }
 

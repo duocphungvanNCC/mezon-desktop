@@ -119,12 +119,7 @@ impl DirectMessageStore {
     fn register_realtime(cx: &mut Context<Self>) {
         let entity = cx.entity();
         RealtimeDispatch::global(cx).update(cx, |dispatch, _| {
-            for kind in [
-                RealtimeKind::ChannelMessage,
-                RealtimeKind::UserChannelAdded,
-                RealtimeKind::ChannelUpdated,
-                RealtimeKind::MarkAsRead,
-            ] {
+            for kind in [RealtimeKind::UserChannelAdded, RealtimeKind::ChannelUpdated] {
                 dispatch.on(kind, &entity, |this, event, cx| {
                     this.handle_event(event, cx)
                 });
@@ -240,18 +235,6 @@ impl DirectMessageStore {
 
     fn handle_event(&mut self, event: &RealtimeEvent, cx: &mut Context<Self>) {
         match event {
-            RealtimeEvent::ChannelMessage(m) => {
-                let id = ChannelId(m.channel_id);
-                let Some(pos) = self.channels.iter().position(|c| c.id == id) else {
-                    return;
-                };
-                if m.create_time_seconds > 0 {
-                    self.channels[pos].last_sent_timestamp = i64::from(m.create_time_seconds);
-                }
-                sort_by_recent(&mut self.channels);
-                cx.emit(DirectEvent::Changed);
-                cx.notify();
-            }
             RealtimeEvent::ChannelUpdated(e) => {
                 let id = ChannelId(e.channel_id);
                 let Some(ch) = self.channels.iter_mut().find(|c| c.id == id) else {
@@ -263,16 +246,6 @@ impl DirectMessageStore {
                 if !e.channel_avatar.is_empty() {
                     ch.avatar = e.channel_avatar.clone();
                 }
-                cx.emit(DirectEvent::Changed);
-                cx.notify();
-            }
-            RealtimeEvent::MarkAsRead(e) => {
-                let id = ChannelId(e.channel_id);
-                let Some(ch) = self.channels.iter_mut().find(|c| c.id == id) else {
-                    return;
-                };
-                ch.unread_count = 0;
-                ch.last_seen_timestamp = ch.last_sent_timestamp;
                 cx.emit(DirectEvent::Changed);
                 cx.notify();
             }
@@ -296,6 +269,44 @@ impl DirectMessageStore {
             }
             _ => {}
         }
+    }
+
+    pub fn note_message(
+        &mut self,
+        channel_id: ChannelId,
+        ts: i64,
+        from_me: bool,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(pos) = self.channels.iter().position(|c| c.id == channel_id) else {
+            return false;
+        };
+        let channel = &mut self.channels[pos];
+        if ts > 0 {
+            channel.last_sent_timestamp = ts;
+        }
+        if from_me {
+            if ts > 0 {
+                channel.last_seen_timestamp = ts;
+            }
+        } else {
+            channel.unread_count = channel.unread_count.saturating_add(1);
+        }
+        sort_by_recent(&mut self.channels);
+        cx.emit(DirectEvent::Changed);
+        cx.notify();
+        true
+    }
+
+    pub fn note_read(&mut self, channel_id: ChannelId, cx: &mut Context<Self>) -> bool {
+        let Some(ch) = self.channels.iter_mut().find(|c| c.id == channel_id) else {
+            return false;
+        };
+        ch.unread_count = 0;
+        ch.last_seen_timestamp = ch.last_sent_timestamp;
+        cx.emit(DirectEvent::Changed);
+        cx.notify();
+        true
     }
 }
 

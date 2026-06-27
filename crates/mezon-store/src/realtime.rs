@@ -33,6 +33,7 @@ pub enum RealtimeKind {
     VoiceJoined,
     VoiceLeaved,
     MarkAsRead,
+    LastSeenUpdated,
     UserChannelAdded,
     UserChannelRemoved,
 }
@@ -57,6 +58,7 @@ impl RealtimeKind {
             RealtimeEvent::VoiceJoined(_) => Self::VoiceJoined,
             RealtimeEvent::VoiceLeaved(_) => Self::VoiceLeaved,
             RealtimeEvent::MarkAsRead(_) => Self::MarkAsRead,
+            RealtimeEvent::LastSeenUpdated(_) => Self::LastSeenUpdated,
             RealtimeEvent::UserChannelAdded(_) => Self::UserChannelAdded,
             RealtimeEvent::UserChannelRemoved(_) => Self::UserChannelRemoved,
             _ => return None,

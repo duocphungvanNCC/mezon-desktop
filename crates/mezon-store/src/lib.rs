@@ -1,5 +1,6 @@
 pub mod account;
 pub mod audio;
+pub mod badge;
 pub mod cache;
 pub mod channel;
 pub mod channel_members;
@@ -29,6 +30,7 @@ use tokio::fs;
 
 pub use account::*;
 pub use audio::{AudioDeviceInfo, AudioStore, MicCaptureFactory, MicCaptureHandle};
+pub use badge::BadgeService;
 pub use cache::KeyedCache;
 pub use channel::*;
 pub use channel_members::{ChannelMember, ChannelMembersEvent, ChannelMembersStore};
