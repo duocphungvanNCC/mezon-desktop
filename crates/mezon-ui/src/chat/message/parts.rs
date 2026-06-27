@@ -1,5 +1,5 @@
 use gpui::{AnyElement, FontWeight, SharedString, div, img, prelude::*, px};
-use mezon_store::{Message, MessageReference, MessagesStore, Reaction, ReplyDraft};
+use mezon_store::{Message, MessageId, MessageReference, MessagesStore, Reaction, ReplyDraft};
 
 use super::context::{REPLY_USERNAME_COLOR, RowCtx};
 use crate::components::primitives::{Avatar, Icon, IconName, Sizable, Size};
@@ -73,7 +73,7 @@ pub fn render_reply(reference: &MessageReference, ctx: &RowCtx) -> AnyElement {
             .image_cache(ctx.avatar_cache.clone())
     };
 
-    let jump_target = reference.message_ref_id.clone();
+    let jump_target = reference.message_ref_id;
     div()
         .id(SharedString::from(format!(
             "reply-{}",
@@ -88,11 +88,10 @@ pub fn render_reply(reference: &MessageReference, ctx: &RowCtx) -> AnyElement {
         .pr(px(super::context::CONTENT_RIGHT_PAD))
         .text_size(px(14.))
         .cursor_pointer()
-        .when(!jump_target.is_empty() && jump_target != "0", |d| {
-            let target = jump_target.clone();
+        .when(!jump_target.is_zero(), |d| {
             d.on_click(move |_, _, cx| {
-                let target = target.clone();
-                MessagesStore::global(cx).update(cx, |store, cx| store.jump_to_message(target, cx));
+                MessagesStore::global(cx)
+                    .update(cx, |store, cx| store.jump_to_message(jump_target, cx));
             })
         })
         .child(
@@ -133,7 +132,7 @@ pub fn render_attachments(msg: &Message, theme: &Theme) -> Option<AnyElement> {
             } else {
                 col = col.child(
                     img(src)
-                        .id(SharedString::from(format!("msg-img-{}-{}", msg.id, i)))
+                        .id(SharedString::from(format!("msg-img-{}-{}", msg.id.0, i)))
                         .w(px(att.display_width))
                         .h(px(att.display_height))
                         .max_w(px(400.))
@@ -202,7 +201,7 @@ pub fn render_reactions(msg: &Message, ctx: &RowCtx) -> Option<AnyElement> {
     let mut row = div().flex().flex_row().flex_wrap().gap_2().mt_1().w_full();
     for (i, reaction) in msg.reactions.iter().enumerate() {
         row = row.child(reaction_pill(
-            &msg.id,
+            msg.id,
             i,
             reaction,
             ctx.current_user_id,
@@ -213,7 +212,7 @@ pub fn render_reactions(msg: &Message, ctx: &RowCtx) -> Option<AnyElement> {
 }
 
 fn reaction_pill(
-    msg_id: &str,
+    msg_id: MessageId,
     index: usize,
     reaction: &Reaction,
     current_user_id: &str,
@@ -227,7 +226,10 @@ fn reaction_pill(
         format!("{} {}", reaction.emoji, reaction.count)
     };
     let mut pill = div()
-        .id(SharedString::from(format!("reaction-{}-{}", msg_id, index)))
+        .id(SharedString::from(format!(
+            "reaction-{}-{}",
+            msg_id.0, index
+        )))
         .flex()
         .flex_row()
         .items_center()
@@ -258,7 +260,7 @@ pub fn render_hover_actions(msg: &Message, theme: &Theme, suppress_hover: bool) 
     if suppress_hover {
         return div().into_any_element();
     }
-    let group_name = SharedString::from(format!("msg-{}", msg.id));
+    let group_name = SharedString::from(format!("msg-{}", msg.id.0));
     let bg_hover = theme.bg_hover;
     let action = move |id: &str, icon: IconName| {
         div()
@@ -271,8 +273,8 @@ pub fn render_hover_actions(msg: &Message, theme: &Theme, suppress_hover: bool) 
     };
 
     let reply_draft = ReplyDraft {
-        message_ref_id: msg.id.clone(),
-        sender_id: msg.sender_id.clone(),
+        message_ref_id: msg.id,
+        sender_id: msg.sender_user_id.unwrap_or_default(),
         sender_name: msg.sender_name.clone(),
         sender_avatar: msg.avatar_url.clone(),
         content_preview: msg.content.clone(),

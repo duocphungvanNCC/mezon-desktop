@@ -40,8 +40,59 @@ pub enum GroupMembersEvent {
     Changed { channel_id: ChannelId },
 }
 
+#[derive(Default)]
+struct GroupBucket {
+    members: Vec<GroupMember>,
+    by_id: HashMap<UserId, usize>,
+}
+
+impl GroupBucket {
+    fn from_members(members: Vec<GroupMember>) -> Self {
+        let mut bucket = Self {
+            members,
+            by_id: HashMap::new(),
+        };
+        bucket.reindex();
+        bucket
+    }
+
+    fn reindex(&mut self) {
+        self.by_id.clear();
+        self.by_id.reserve(self.members.len());
+        for (i, m) in self.members.iter().enumerate() {
+            self.by_id.insert(m.user.id, i);
+        }
+    }
+
+    fn as_slice(&self) -> &[GroupMember] {
+        &self.members
+    }
+
+    fn get(&self, user_id: UserId) -> Option<&GroupMember> {
+        let idx = *self.by_id.get(&user_id)?;
+        self.members.get(idx)
+    }
+
+    fn upsert(&mut self, member: GroupMember) {
+        if let Some(&idx) = self.by_id.get(&member.user.id) {
+            self.members[idx] = member;
+        } else {
+            self.by_id.insert(member.user.id, self.members.len());
+            self.members.push(member);
+        }
+    }
+
+    fn remove_ids(&mut self, user_ids: &[UserId]) {
+        let before = self.members.len();
+        self.members.retain(|m| !user_ids.contains(&m.user.id));
+        if self.members.len() != before {
+            self.reindex();
+        }
+    }
+}
+
 pub struct GroupMembersStore {
-    by_channel: HashMap<ChannelId, Vec<GroupMember>>,
+    by_channel: HashMap<ChannelId, GroupBucket>,
     loading: HashSet<ChannelId>,
     api: Arc<AppApi>,
 }
@@ -93,15 +144,12 @@ impl GroupMembersStore {
     pub fn members(&self, channel_id: ChannelId) -> &[GroupMember] {
         self.by_channel
             .get(&channel_id)
-            .map(Vec::as_slice)
+            .map(GroupBucket::as_slice)
             .unwrap_or(&[])
     }
 
     pub fn member(&self, channel_id: ChannelId, user_id: UserId) -> Option<&GroupMember> {
-        self.by_channel
-            .get(&channel_id)?
-            .iter()
-            .find(|m| m.id() == user_id)
+        self.by_channel.get(&channel_id)?.get(user_id)
     }
 
     pub fn ensure_loaded(&mut self, channel_id: ChannelId, cx: &mut Context<Self>) {
@@ -128,7 +176,8 @@ impl GroupMembersStore {
                 match result {
                     Ok(resp) => {
                         let members = group_members_from_proto(&resp);
-                        this.by_channel.insert(channel_id, members);
+                        this.by_channel
+                            .insert(channel_id, GroupBucket::from_members(members));
                         cx.emit(GroupMembersEvent::Changed { channel_id });
                         cx.notify();
                     }
@@ -205,34 +254,31 @@ fn group_member_from_redis(user: &realtime::UserProfileRedis) -> Option<GroupMem
 }
 
 fn apply_add_members(
-    by_channel: &mut HashMap<ChannelId, Vec<GroupMember>>,
+    by_channel: &mut HashMap<ChannelId, GroupBucket>,
     channel_id: ChannelId,
     users: &[realtime::UserProfileRedis],
 ) -> bool {
-    let Some(members) = by_channel.get_mut(&channel_id) else {
+    let Some(bucket) = by_channel.get_mut(&channel_id) else {
         return false;
     };
     for user in users {
         let Some(member) = group_member_from_redis(user) else {
             continue;
         };
-        match members.iter_mut().find(|m| m.user.id == member.user.id) {
-            Some(existing) => *existing = member,
-            None => members.push(member),
-        }
+        bucket.upsert(member);
     }
     true
 }
 
 fn apply_remove_members(
-    by_channel: &mut HashMap<ChannelId, Vec<GroupMember>>,
+    by_channel: &mut HashMap<ChannelId, GroupBucket>,
     channel_id: ChannelId,
     user_ids: &[UserId],
 ) -> bool {
-    let Some(members) = by_channel.get_mut(&channel_id) else {
+    let Some(bucket) = by_channel.get_mut(&channel_id) else {
         return false;
     };
-    members.retain(|m| !user_ids.contains(&m.user.id));
+    bucket.remove_ids(user_ids);
     true
 }
 
@@ -286,22 +332,32 @@ mod tests {
         assert_eq!(members[0].id(), UserId(5));
     }
 
+    fn assert_index_consistent(bucket: &GroupBucket) {
+        assert_eq!(bucket.by_id.len(), bucket.members.len());
+        for (i, m) in bucket.members.iter().enumerate() {
+            assert_eq!(bucket.by_id.get(&m.user.id), Some(&i));
+        }
+    }
+
     #[test]
     fn add_members_applies_to_loaded_group() {
-        let mut by_channel = HashMap::from([(ChannelId(1), Vec::new())]);
+        let mut by_channel = HashMap::from([(ChannelId(1), GroupBucket::default())]);
         let users = vec![realtime::UserProfileRedis {
             user_id: 7,
             username: "bob".into(),
             ..Default::default()
         }];
         assert!(apply_add_members(&mut by_channel, ChannelId(1), &users));
-        assert_eq!(by_channel[&ChannelId(1)].len(), 1);
-        assert_eq!(by_channel[&ChannelId(1)][0].id(), UserId(7));
+        let bucket = &by_channel[&ChannelId(1)];
+        assert_eq!(bucket.members.len(), 1);
+        assert_eq!(bucket.members[0].id(), UserId(7));
+        assert_eq!(bucket.get(UserId(7)).map(GroupMember::id), Some(UserId(7)));
+        assert_index_consistent(bucket);
     }
 
     #[test]
     fn add_members_ignored_for_unloaded_group() {
-        let mut by_channel: HashMap<ChannelId, Vec<GroupMember>> = HashMap::new();
+        let mut by_channel: HashMap<ChannelId, GroupBucket> = HashMap::new();
         let users = vec![realtime::UserProfileRedis {
             user_id: 7,
             ..Default::default()
@@ -312,7 +368,7 @@ mod tests {
 
     #[test]
     fn add_members_dedupes_existing_user() {
-        let mut by_channel = HashMap::from([(ChannelId(1), Vec::new())]);
+        let mut by_channel = HashMap::from([(ChannelId(1), GroupBucket::default())]);
         let users = vec![realtime::UserProfileRedis {
             user_id: 7,
             username: "bob".into(),
@@ -320,24 +376,25 @@ mod tests {
         }];
         apply_add_members(&mut by_channel, ChannelId(1), &users);
         apply_add_members(&mut by_channel, ChannelId(1), &users);
-        assert_eq!(by_channel[&ChannelId(1)].len(), 1);
+        assert_eq!(by_channel[&ChannelId(1)].members.len(), 1);
+        assert_index_consistent(&by_channel[&ChannelId(1)]);
     }
 
     #[test]
     fn remove_members_drops_users() {
         let mut by_channel = HashMap::from([(
             ChannelId(1),
-            group_members_from_proto(&proto_response(&[1, 2, 3])),
+            GroupBucket::from_members(group_members_from_proto(&proto_response(&[1, 2, 3]))),
         )]);
         assert!(apply_remove_members(
             &mut by_channel,
             ChannelId(1),
             &[UserId(2)]
         ));
-        let ids: Vec<UserId> = by_channel[&ChannelId(1)]
-            .iter()
-            .map(GroupMember::id)
-            .collect();
+        let bucket = &by_channel[&ChannelId(1)];
+        let ids: Vec<UserId> = bucket.members.iter().map(GroupMember::id).collect();
         assert_eq!(ids, vec![UserId(1), UserId(3)]);
+        assert!(bucket.get(UserId(2)).is_none());
+        assert_index_consistent(bucket);
     }
 }

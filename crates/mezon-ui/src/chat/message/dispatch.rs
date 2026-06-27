@@ -17,10 +17,7 @@ pub fn render_message_item(messages: &[Message], ix: usize, ctx: &RowCtx) -> Any
     let prev = ix.checked_sub(1).and_then(|p| messages.get(p));
     let show_separator = prev.map(|p| p.day_label.as_str()) != Some(msg.day_label.as_str());
     let combined = !show_separator && msg.combined_with_prev;
-    let show_unread_break = ctx
-        .unread_boundary_id
-        .as_ref()
-        .is_some_and(|id| id.as_ref() == msg.id);
+    let show_unread_break = ctx.unread_boundary_id.is_some_and(|id| id == msg.id);
 
     let row = match msg.code {
         MessageCode::Indicator => render_welcome(msg, ctx),

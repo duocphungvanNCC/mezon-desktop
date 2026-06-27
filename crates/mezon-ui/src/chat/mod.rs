@@ -1,5 +1,6 @@
 pub mod area;
 pub mod channel_header;
+pub mod channel_typing;
 pub mod chat_sending;
 pub mod grouping;
 pub mod input_bar;
@@ -8,6 +9,7 @@ pub mod member_list;
 pub mod mention_input;
 pub mod message;
 pub mod screen_share_modal;
+pub mod user_profile_popover;
 pub mod voice;
 
 pub use area::ChatArea;

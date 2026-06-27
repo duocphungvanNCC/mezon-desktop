@@ -19,7 +19,7 @@ pub fn render_system_message(msg: &Message, ctx: &RowCtx) -> AnyElement {
     };
 
     div()
-        .id(SharedString::from(format!("msg-sys-{}", msg.id)))
+        .id(SharedString::from(format!("msg-sys-{}", msg.id.0)))
         .flex()
         .flex_row()
         .items_center()
@@ -61,7 +61,7 @@ pub fn render_system_message(msg: &Message, ctx: &RowCtx) -> AnyElement {
 pub fn render_welcome(msg: &Message, ctx: &RowCtx) -> AnyElement {
     let theme = ctx.theme;
     div()
-        .id(SharedString::from(format!("msg-welcome-{}", msg.id)))
+        .id(SharedString::from(format!("msg-welcome-{}", msg.id.0)))
         .flex()
         .flex_col()
         .gap_1()

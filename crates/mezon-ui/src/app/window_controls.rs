@@ -109,93 +109,61 @@ pub fn render_resize_edges(window: &mut Window) -> impl IntoElement {
         .size_full();
 
     if !tiling.top {
-        layer = layer.child(
-            resize_strip(
-                ResizeEdge::Top,
-                div().absolute().top_0().left_0().right_0().h(border),
-                CursorStyle::ResizeUp,
-            ),
-        );
+        layer = layer.child(resize_strip(
+            ResizeEdge::Top,
+            div().absolute().top_0().left_0().right_0().h(border),
+            CursorStyle::ResizeUp,
+        ));
     }
     if !tiling.bottom {
-        layer = layer.child(
-            resize_strip(
-                ResizeEdge::Bottom,
-                div().absolute().bottom_0().left_0().right_0().h(border),
-                CursorStyle::ResizeDown,
-            ),
-        );
+        layer = layer.child(resize_strip(
+            ResizeEdge::Bottom,
+            div().absolute().bottom_0().left_0().right_0().h(border),
+            CursorStyle::ResizeDown,
+        ));
     }
     if !tiling.left {
-        layer = layer.child(
-            resize_strip(
-                ResizeEdge::Left,
-                div().absolute().top_0().bottom_0().left_0().w(border),
-                CursorStyle::ResizeLeft,
-            ),
-        );
+        layer = layer.child(resize_strip(
+            ResizeEdge::Left,
+            div().absolute().top_0().bottom_0().left_0().w(border),
+            CursorStyle::ResizeLeft,
+        ));
     }
     if !tiling.right {
-        layer = layer.child(
-            resize_strip(
-                ResizeEdge::Right,
-                div().absolute().top_0().bottom_0().right_0().w(border),
-                CursorStyle::ResizeRight,
-            ),
-        );
+        layer = layer.child(resize_strip(
+            ResizeEdge::Right,
+            div().absolute().top_0().bottom_0().right_0().w(border),
+            CursorStyle::ResizeRight,
+        ));
     }
 
     if !tiling.top && !tiling.left {
-        layer = layer.child(
-            resize_strip(
-                ResizeEdge::TopLeft,
-                div()
-                    .absolute()
-                    .top_0()
-                    .left_0()
-                    .size(border),
-                CursorStyle::ResizeUpLeftDownRight,
-            ),
-        );
+        layer = layer.child(resize_strip(
+            ResizeEdge::TopLeft,
+            div().absolute().top_0().left_0().size(border),
+            CursorStyle::ResizeUpLeftDownRight,
+        ));
     }
     if !tiling.top && !tiling.right {
-        layer = layer.child(
-            resize_strip(
-                ResizeEdge::TopRight,
-                div()
-                    .absolute()
-                    .top_0()
-                    .right_0()
-                    .size(border),
-                CursorStyle::ResizeUpRightDownLeft,
-            ),
-        );
+        layer = layer.child(resize_strip(
+            ResizeEdge::TopRight,
+            div().absolute().top_0().right_0().size(border),
+            CursorStyle::ResizeUpRightDownLeft,
+        ));
     }
     if !tiling.bottom && !tiling.left {
-        layer = layer.child(
-            resize_strip(
-                ResizeEdge::BottomLeft,
-                div()
-                    .absolute()
-                    .bottom_0()
-                    .left_0()
-                    .size(border),
-                CursorStyle::ResizeUpRightDownLeft,
-            ),
-        );
+        layer = layer.child(resize_strip(
+            ResizeEdge::BottomLeft,
+            div().absolute().bottom_0().left_0().size(border),
+            CursorStyle::ResizeUpRightDownLeft,
+        ));
     }
     if !tiling.bottom && !tiling.right {
-        layer = layer.child(
-            resize_strip(
-                ResizeEdge::BottomRight,
-                div()
-                    .absolute()
-                    .bottom_0()
-                    .right_0()
-                    .size(border),
-                CursorStyle::ResizeUpLeftDownRight,
-            ),
-        );
+        layer = layer.child(resize_strip(
+            ResizeEdge::BottomRight,
+            div().absolute().bottom_0().right_0().size(border),
+            CursorStyle::ResizeUpLeftDownRight,
+        ));
     }
 
     layer
@@ -252,7 +220,13 @@ pub(crate) fn control_button(color: Rgba) -> Div {
 
 #[cfg(any(target_os = "linux", target_os = "windows"))]
 pub(crate) fn controls_row() -> Div {
-    div().flex().flex_row().items_center().gap_1().px_2().h_full()
+    div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap_1()
+        .px_2()
+        .h_full()
 }
 
 pub fn window_drag_handle(header: Div) -> Div {

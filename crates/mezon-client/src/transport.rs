@@ -1029,6 +1029,7 @@ impl MezonTransport {
         api_name: &str,
         body: Vec<u8>,
     ) -> Result<(u32, Vec<u8>)> {
+        tracing::debug!(target: "socket", "api_send: action={api_name} cid={cid}");
         self.send(cid, self.build_api_request(cid, api_name, body)?)
             .await
     }
@@ -1513,7 +1514,7 @@ impl MezonTransport {
     /// List the user's direct-message / group conversations (clan_id = 0). Mirrors mezon-react's
     /// `fetchDirectMessage` → `ListChannelDescs(clan_id="0", channel_type=GROUP)`, which returns
     /// both 1-1 DMs (type 3) and groups (type 2).
-    pub async fn list_dm_channel_descs(&self) -> Result<Vec<ApiDirectChannel>> {
+    pub async fn list_dm_channel_descs(&self, page: i32) -> Result<Vec<ApiDirectChannel>> {
         let cid = self.generate_cid();
 
         let api_name = "ListChannelDescs";
@@ -1522,7 +1523,7 @@ impl MezonTransport {
             limit: 500,
             state: 1,
             channel_type: 2,
-            page: 1,
+            page,
             ..Default::default()
         }
         .encode_to_vec();
@@ -1671,9 +1672,7 @@ impl MezonTransport {
         is_public: bool,
     ) -> Result<()> {
         let cid = self.generate_cid();
-        tracing::debug!(
-            "join_chat: clan_id={clan_id} channel_id={channel_id} type={channel_type} is_public={is_public}"
-        );
+        tracing::debug!(target: "socket", "realtime_send: action=ChannelJoin cid={} clan_id={clan_id} channel_id={channel_id}", i32::from(cid));
         let envelope = realtime::Envelope {
             cid: i32::from(cid),
             message: Some(realtime::envelope::Message::ChannelJoin(
@@ -1688,6 +1687,22 @@ impl MezonTransport {
         let (code, _response) = self.send(cid, envelope.encode_to_vec()).await?;
         if code != 0 {
             anyhow::bail!("join_chat error: code={code}");
+        }
+        Ok(())
+    }
+
+    pub async fn join_clan_chat(&self, clan_id: i64) -> Result<()> {
+        let cid = self.generate_cid();
+        tracing::debug!(target: "socket", "realtime_send: action=ClanJoin cid={} clan_id={clan_id}", i32::from(cid));
+        let envelope = realtime::Envelope {
+            cid: i32::from(cid),
+            message: Some(realtime::envelope::Message::ClanJoin(realtime::ClanJoin {
+                clan_id,
+            })),
+        };
+        let (code, _response) = self.send(cid, envelope.encode_to_vec()).await?;
+        if code != 0 {
+            anyhow::bail!("join_clan_chat error: code={code}");
         }
         Ok(())
     }
