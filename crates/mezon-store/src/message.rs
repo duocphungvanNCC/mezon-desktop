@@ -6,6 +6,8 @@
 use gpui::SharedString;
 use mezon_client::transport::{ApiMessageContent, ApiMessageReaction, ContentToken};
 
+use crate::ids::{MessageId, UserId};
+
 #[derive(Debug, Clone, Default)]
 pub struct MessageAttachment {
     pub url: String,
@@ -101,8 +103,8 @@ impl MessageCode {
 /// A reply/reference shown above a message ("replying to …").
 #[derive(Debug, Clone, Default)]
 pub struct MessageReference {
-    pub message_ref_id: String,
-    pub sender_id: String,
+    pub message_ref_id: MessageId,
+    pub sender_id: UserId,
     pub sender_name: String,
     pub sender_avatar: String,
     pub content: String,
@@ -151,14 +153,10 @@ pub enum MessageSpan {
 
 #[derive(Debug, Clone)]
 pub struct Message {
-    pub id: String,
-    /// Numeric Snowflake id straight from the backend (`ApiMessage.message_id`,
-    /// an `i64`). Used for ordering/pagination anchors without re-parsing `id`.
-    /// Optimistic `temp-…` rows have no backend id, so this is `i64::MAX` (they
-    /// are the just-sent, newest rows and sort last).
-    pub message_id: i64,
+    pub id: MessageId,
     pub content: String,
     pub sender_id: String,
+    pub sender_user_id: Option<UserId>,
     pub sender_name: String,
     pub avatar_url: String,
     pub avatar_proxied: SharedString,
@@ -179,7 +177,6 @@ pub struct Message {
 pub const COMBINE_TIME_WINDOW: i64 = 600;
 
 pub fn message_combined_with_prev(prev: Option<&Message>, msg: &Message) -> bool {
-    // System / welcome / non-chat rows always start their own group.
     if msg.code != MessageCode::Chat || !msg.references.is_empty() {
         return false;
     }
@@ -200,7 +197,7 @@ pub fn aggregate_reactions(raw: &[ApiMessageReaction]) -> Vec<Reaction> {
     let mut out: Vec<Reaction> = Vec::new();
     for r in raw {
         if r.action {
-            continue; // removal entry
+            continue;
         }
         let key = if !r.emoji_id.is_empty() && r.emoji_id != "0" {
             r.emoji_id.clone()
@@ -290,7 +287,6 @@ pub fn parse_spans(content: &ApiMessageContent) -> Vec<MessageSpan> {
     if text.is_empty() {
         return Vec::new();
     }
-    // Server `s`/`e` indices are JS string offsets (UTF-16 code units).
     let units: Vec<u16> = text.encode_utf16().collect();
     let total = units.len() as i64;
     let slice = |s: i64, e: i64| -> String {
@@ -333,7 +329,7 @@ pub fn parse_spans(content: &ApiMessageContent) -> Vec<MessageSpan> {
     let mut prev_end = i64::MIN;
     for (s, e, kind, tok) in toks {
         if s < prev_end {
-            continue; // overlaps a previously emitted token
+            continue;
         }
         if last < s {
             spans.push(MessageSpan::Text(slice(last, s)));
@@ -421,11 +417,11 @@ pub fn recompute_message_grouping(messages: &mut [Message]) {
 /// id ascending. Snowflake ids are monotonic in time, so this is stable and
 /// sub-second accurate — unlike `create_time`, which has only second
 /// granularity and can mis-order (and pick the wrong newest/oldest anchor for
-/// pagination). Optimistic `temp-…` ids have no numeric id, so they sort last
-/// (they are the just-sent, newest rows).
+/// pagination). Optimistic ids occupy the high band (>= `MessageId::OPTIMISTIC_BASE`)
+/// so they sort last — they are the just-sent, pending rows.
 pub fn message_sort_key(m: &Message) -> (u8, i64) {
     let not_first = u8::from(m.code != MessageCode::Indicator);
-    (not_first, m.message_id)
+    (not_first, m.id.get())
 }
 
 /// Sort a message buffer in place into React's id-ascending order.
@@ -435,7 +431,7 @@ pub fn sort_messages(messages: &mut [Message]) {
 
 impl Message {
     pub fn new(
-        id: impl Into<String>,
+        id: MessageId,
         content: impl Into<String>,
         sender_id: impl Into<String>,
         sender_name: impl Into<String>,
@@ -447,15 +443,13 @@ impl Message {
         } else {
             vec![MessageSpan::Text(content.clone())]
         };
-        let id: String = id.into();
-        // Default numeric id derived from the string form (covers `temp-…` and
-        // tests); the API path overrides it with the backend `message_id`.
-        let message_id = id.parse::<i64>().unwrap_or(i64::MAX);
+        let sender_id: String = sender_id.into();
+        let sender_user_id = sender_id.parse::<i64>().ok().map(UserId);
         Self {
             id,
-            message_id,
             content,
-            sender_id: sender_id.into(),
+            sender_id,
+            sender_user_id,
             sender_name: sender_name.into(),
             avatar_url: String::new(),
             avatar_proxied: SharedString::default(),
@@ -476,13 +470,6 @@ impl Message {
 
     pub fn with_attachments(mut self, attachments: Vec<MessageAttachment>) -> Self {
         self.attachments = attachments;
-        self
-    }
-
-    /// Set the numeric Snowflake id directly from the backend `message_id`
-    /// (avoids re-parsing the string `id`).
-    pub fn with_message_id(mut self, message_id: i64) -> Self {
-        self.message_id = message_id;
         self
     }
 
@@ -575,7 +562,6 @@ mod tests {
 
     #[test]
     fn parse_spans_interleaves_mention_and_text() {
-        // "hi @bob !" -> text "hi ", mention "@bob", text " !"
         let content = ApiMessageContent {
             t: "hi @bob !".into(),
             mentions: vec![ContentToken {
@@ -615,8 +601,6 @@ mod tests {
 
     #[test]
     fn parse_spans_handles_utf16_indices() {
-        // The emoji is 2 UTF-16 code units; the mention after it must still slice
-        // correctly using UTF-16 offsets.
         let content = ApiMessageContent {
             t: "😀 @x".into(),
             mentions: vec![ContentToken {
@@ -658,7 +642,7 @@ mod tests {
                 emoji: ":b:".into(),
                 count: 1,
                 sender_id: "u1".into(),
-                action: true, // removal, ignored
+                action: true,
             },
         ];
         let agg = aggregate_reactions(&raw);
@@ -670,22 +654,83 @@ mod tests {
 
     #[test]
     fn system_message_never_combines() {
-        let prev = Message::new("1", "a", "u1", "U1", 100);
-        let mut sys = Message::new("2", "joined", "u1", "U1", 110);
+        let prev = Message::new(MessageId(1), "a", "u1", "U1", 100);
+        let mut sys = Message::new(MessageId(2), "joined", "u1", "U1", 110);
         sys.code = MessageCode::Welcome;
         assert!(!message_combined_with_prev(Some(&prev), &sys));
     }
 
     #[test]
     fn message_precomputes_clock_and_day_labels() {
-        let msg = Message::new("1", "hi", "u", "User", 1_609_459_200 + 48_300);
+        let msg = Message::new(MessageId(1), "hi", "u", "User", 1_609_459_200 + 48_300);
         assert_eq!(msg.timestamp_label, "1:25 PM");
         assert_eq!(msg.day_label, "January 01, 2021");
     }
 
     #[test]
     fn message_clock_label_handles_midnight() {
-        let msg = Message::new("1", "hi", "u", "User", 1_609_459_200);
+        let msg = Message::new(MessageId(1), "hi", "u", "User", 1_609_459_200);
         assert_eq!(msg.timestamp_label, "12:00 AM");
+    }
+
+    #[test]
+    fn sender_user_id_parsed_from_numeric_sender_id() {
+        let msg = Message::new(MessageId(10), "hi", "42", "Alice", 0);
+        assert_eq!(msg.sender_id, "42");
+        assert_eq!(msg.sender_user_id, Some(UserId(42)));
+    }
+
+    #[test]
+    fn sender_user_id_none_for_non_numeric_sender_id() {
+        let msg = Message::new(MessageId::next_optimistic(), "hi", "u1", "Bob", 0);
+        assert_eq!(msg.sender_id, "u1");
+        assert_eq!(msg.sender_user_id, None);
+    }
+
+    #[test]
+    fn sender_user_id_none_for_optimistic_temp_sender() {
+        let msg = Message::new(
+            MessageId::next_optimistic(),
+            "hi",
+            "temp-user",
+            "Charlie",
+            0,
+        );
+        assert_eq!(msg.sender_user_id, None);
+    }
+
+    #[test]
+    fn optimistic_id_is_optimistic_real_id_is_not() {
+        let opt = MessageId::next_optimistic();
+        let real = MessageId(1_000_000_000_000_i64);
+        assert!(opt.is_optimistic());
+        assert!(!real.is_optimistic());
+    }
+
+    #[test]
+    fn optimistic_ids_sort_after_real_ids() {
+        let opt = MessageId::next_optimistic();
+        let real = MessageId(i64::MAX / 2);
+        assert!(real < opt);
+    }
+
+    #[test]
+    fn optimistic_ids_are_unique_and_monotonic() {
+        let a = MessageId::next_optimistic();
+        let b = MessageId::next_optimistic();
+        assert_ne!(a, b);
+        assert!(a < b);
+        assert!(a.is_optimistic() && b.is_optimistic());
+    }
+
+    #[test]
+    fn cursor_guard_skips_optimistic_ids() {
+        let optimistic = MessageId::next_optimistic();
+        assert!(Some(optimistic).filter(|id| !id.is_optimistic()).is_none());
+        let real = MessageId(123);
+        assert_eq!(
+            Some(real).filter(|id| !id.is_optimistic()),
+            Some(MessageId(123))
+        );
     }
 }

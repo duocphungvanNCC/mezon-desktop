@@ -187,11 +187,14 @@ impl TransportClient {
             .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
     }
 
-    pub async fn list_dm_channel_descs(&self) -> Result<Vec<crate::transport::ApiDirectChannel>> {
+    pub async fn list_dm_channel_descs(
+        &self,
+        page: i32,
+    ) -> Result<Vec<crate::transport::ApiDirectChannel>> {
         let transport = self.inner.clone();
 
         runtime()
-            .spawn(async move { transport.list_dm_channel_descs().await })
+            .spawn(async move { transport.list_dm_channel_descs(page).await })
             .await
             .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
     }
@@ -424,6 +427,39 @@ impl TransportClient {
                     .join_chat(clan_id, channel_id, channel_type, is_public)
                     .await
             })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
+    pub async fn join_clan_chat(&self, clan_id: i64) -> Result<()> {
+        let transport = self.inner.clone();
+        runtime()
+            .spawn(async move { transport.join_clan_chat(clan_id).await })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
+    pub async fn list_clan_users_status(
+        &self,
+        clan_id: i64,
+    ) -> Result<mezon_proto::api::ClanUserStatusList> {
+        let transport = self.inner.clone();
+        runtime()
+            .spawn(async move { transport.list_clan_users_status(clan_id).await })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
+    pub async fn list_roles(
+        &self,
+        clan_id: i64,
+        limit: i32,
+        cursor: &str,
+    ) -> Result<mezon_proto::api::RoleListEventResponse> {
+        let transport = self.inner.clone();
+        let cursor = cursor.to_string();
+        runtime()
+            .spawn(async move { transport.list_roles(clan_id, limit, &cursor).await })
             .await
             .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
     }

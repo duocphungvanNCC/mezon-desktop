@@ -24,23 +24,32 @@ pub enum ChannelMembersEvent {
 #[derive(Default)]
 struct ChannelBucket {
     members: Vec<ChannelMember>,
+    by_id: HashMap<UserId, usize>,
 }
 
 impl ChannelBucket {
     fn upsert(&mut self, member: ChannelMember) {
-        if let Some(existing) = self
-            .members
-            .iter_mut()
-            .find(|m| m.user_id == member.user_id)
-        {
-            *existing = member;
+        if let Some(&idx) = self.by_id.get(&member.user_id) {
+            self.members[idx] = member;
         } else {
+            self.by_id.insert(member.user_id, self.members.len());
             self.members.push(member);
         }
     }
 
     fn remove(&mut self, user_id: UserId) {
-        self.members.retain(|m| m.user_id != user_id);
+        if let Some(idx) = self.by_id.get(&user_id).copied() {
+            self.members.remove(idx);
+            self.reindex();
+        }
+    }
+
+    fn reindex(&mut self) {
+        self.by_id.clear();
+        self.by_id.reserve(self.members.len());
+        for (i, m) in self.members.iter().enumerate() {
+            self.by_id.insert(m.user_id, i);
+        }
     }
 }
 
@@ -287,6 +296,30 @@ mod tests {
         bucket.remove(UserId(1));
         assert_eq!(bucket.members.len(), 1);
         assert_eq!(bucket.members[0].user_id, UserId(2));
+    }
+
+    fn assert_index_consistent(bucket: &ChannelBucket) {
+        assert_eq!(bucket.by_id.len(), bucket.members.len());
+        for (i, m) in bucket.members.iter().enumerate() {
+            assert_eq!(bucket.by_id.get(&m.user_id), Some(&i));
+        }
+    }
+
+    #[test]
+    fn bucket_index_stays_consistent_across_upsert_and_remove() {
+        let mut bucket = ChannelBucket::default();
+        for id in [1, 2, 3, 4] {
+            bucket.upsert(channel_member_from_proto(&proto_channel_user(id)));
+        }
+        assert_index_consistent(&bucket);
+        bucket.upsert(channel_member_from_proto(&proto_channel_user(2)));
+        assert_index_consistent(&bucket);
+        bucket.remove(UserId(1));
+        assert_index_consistent(&bucket);
+        bucket.remove(UserId(3));
+        assert_index_consistent(&bucket);
+        let ids: Vec<UserId> = bucket.members.iter().map(|m| m.user_id).collect();
+        assert_eq!(ids, vec![UserId(2), UserId(4)]);
     }
 
     #[test]

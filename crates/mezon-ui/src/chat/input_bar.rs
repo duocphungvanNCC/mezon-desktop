@@ -5,7 +5,7 @@ use crate::chat::ReplyTarget;
 use crate::components::primitives::{Button, Icon, IconName, Input, InputState};
 // composer: use crate::components::primitives::{Button, Icon, IconName};
 use crate::theme::Theme;
-use gpui::{App, ClickEvent, SharedString, Window, div, prelude::*, px};
+use gpui::{App, ClickEvent, Window, div, prelude::*, px};
 
 type SendHandler = Arc<dyn Fn(&mut Window, &mut App) + Send + Sync>;
 
@@ -15,7 +15,6 @@ pub struct InputBar {
     on_send: Option<SendHandler>,
     // composer: on_cancel_reply: Option<SendHandler>,
     replying_to: Option<ReplyTarget>,
-    typing_label: Option<SharedString>,
 }
 
 impl Default for InputBar {
@@ -32,7 +31,6 @@ impl InputBar {
             on_send: None,
             // composer: on_cancel_reply: None,
             replying_to: None,
-            typing_label: None,
         }
     }
 
@@ -40,11 +38,6 @@ impl InputBar {
     // composer:     self.on_cancel_reply = Some(handler);
     // composer:     self
     // composer: }
-
-    pub fn typing_label(mut self, label: Option<SharedString>) -> Self {
-        self.typing_label = label;
-        self
-    }
 
     pub fn with_input(mut self, state: gpui::Entity<InputState>) -> Self {
         self.input_state = Some(state);
@@ -150,21 +143,6 @@ impl InputBar {
                 d.child(Self::reply_preview_bar(theme, locale, target))
                 // composer: d.child(self.reply_preview_bar(theme, locale, target))
             })
-            .child(
-                div()
-                    .mx_3()
-                    .h(px(16.))
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap_1p5()
-                    .overflow_hidden()
-                    .text_xs()
-                    .text_color(theme.text_primary)
-                    .when_some(self.typing_label.as_ref(), |d, label| {
-                        d.child(label.clone())
-                    }),
-            )
             .child(
                 div()
                     .flex()

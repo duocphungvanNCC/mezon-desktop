@@ -396,8 +396,9 @@ impl ChannelList {
                 }
                 Err(e) => {
                     tracing::error!("Failed to load channels for clan {clan_id}: {e}");
-                    let _ = this.update(cx, |this, _| {
+                    let _ = this.update(cx, |this, cx| {
                         this.loading.remove(&clan_id);
+                        cx.notify();
                     });
                 }
             }
@@ -503,26 +504,25 @@ impl ChannelList {
         cx: &mut Context<Self>,
     ) {
         let mut visible_changed = false;
-        if let Some(categories) = self.cache.get_mut(&clan_id) {
-            if let Some(ch) = categories
+        if let Some(categories) = self.cache.get_mut(&clan_id)
+            && let Some(ch) = categories
                 .iter_mut()
                 .flat_map(|c| &mut c.channels)
                 .find(|ch| ch.id == channel_id)
-            {
-                let was_unread = ch.is_unread();
-                let was_badge_zero = ch.badge_count == 0;
-                if ts > 0 {
-                    ch.last_sent_timestamp = ts;
-                    if seen {
-                        ch.last_seen_timestamp = ts;
-                    }
+        {
+            let was_unread = ch.is_unread();
+            let was_badge_zero = ch.badge_count == 0;
+            if ts > 0 {
+                ch.last_sent_timestamp = ts;
+                if seen {
+                    ch.last_seen_timestamp = ts;
                 }
-                if is_mention && !seen {
-                    ch.badge_count = ch.badge_count.saturating_add(1);
-                }
-                visible_changed =
-                    was_unread != ch.is_unread() || was_badge_zero != (ch.badge_count == 0);
             }
+            if is_mention && !seen {
+                ch.badge_count = ch.badge_count.saturating_add(1);
+            }
+            visible_changed =
+                was_unread != ch.is_unread() || was_badge_zero != (ch.badge_count == 0);
         }
         if visible_changed {
             self.notify_if_active(clan_id, cx);
@@ -531,16 +531,15 @@ impl ChannelList {
 
     pub fn apply_read(&mut self, clan_id: ClanId, channel_id: ChannelId, cx: &mut Context<Self>) {
         let mut became_read = false;
-        if let Some(categories) = self.cache.get_mut(&clan_id) {
-            if let Some(ch) = categories
+        if let Some(categories) = self.cache.get_mut(&clan_id)
+            && let Some(ch) = categories
                 .iter_mut()
                 .flat_map(|c| &mut c.channels)
                 .find(|ch| ch.id == channel_id)
-            {
-                became_read = ch.is_unread();
-                ch.badge_count = 0;
-                ch.last_seen_timestamp = ch.last_sent_timestamp;
-            }
+        {
+            became_read = ch.is_unread();
+            ch.badge_count = 0;
+            ch.last_seen_timestamp = ch.last_sent_timestamp;
         }
         if became_read {
             self.notify_if_active(clan_id, cx);
@@ -556,19 +555,18 @@ impl ChannelList {
         cx: &mut Context<Self>,
     ) {
         let mut visible_changed = false;
-        if let Some(categories) = self.cache.get_mut(&clan_id) {
-            if let Some(ch) = categories
+        if let Some(categories) = self.cache.get_mut(&clan_id)
+            && let Some(ch) = categories
                 .iter_mut()
                 .flat_map(|c| &mut c.channels)
                 .find(|ch| ch.id == channel_id)
-            {
-                let was_unread = ch.is_unread();
-                ch.badge_count = new_badge;
-                if seen_ts > ch.last_seen_timestamp {
-                    ch.last_seen_timestamp = seen_ts;
-                }
-                visible_changed = was_unread != ch.is_unread();
+        {
+            let was_unread = ch.is_unread();
+            ch.badge_count = new_badge;
+            if seen_ts > ch.last_seen_timestamp {
+                ch.last_seen_timestamp = seen_ts;
             }
+            visible_changed = was_unread != ch.is_unread();
         }
         if visible_changed {
             self.notify_if_active(clan_id, cx);
@@ -770,6 +768,10 @@ impl ChannelList {
 
     pub fn categories_for_clan(&self, clan_id: ClanId) -> &[Category] {
         self.cache.get(&clan_id).map_or(&[], Vec::as_slice)
+    }
+
+    pub fn is_loading_clan(&self, clan_id: ClanId) -> bool {
+        self.loading.contains(&clan_id)
     }
 
     pub fn app_channels_for_clan(&self, clan_id: ClanId) -> &[AppChannel] {
