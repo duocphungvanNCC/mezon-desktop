@@ -18,6 +18,7 @@ anyhow = { workspace = true }
 tracing = { workspace = true }
 futures = { workspace = true }
 
+scap = { workspace = true }
 nokhwa = { version = "0.10", default-features = false, features = ["input-avfoundation"] }
 
 image = { workspace = true }
@@ -29,10 +30,16 @@ scap = { workspace = true, features = ["wayland", "x11"] }
 scap = { workspace = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
+nokhwa = { version = "0.10", default-features = false, features = ["input-avfoundation"] }
 screencapturekit = "0.2.8"
 core-graphics-helmer-fork = "0.24.0"
 cocoa = "0.25.0"
 objc = "0.2.7"
+block = "0.1.6"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+nokhwa = { version = "0.10", default-features = false, features = ["input-v4l"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
+nokhwa = { version = "0.10", default-features = false, features = ["input-msmf"] }
 windows-capture = "2.0"

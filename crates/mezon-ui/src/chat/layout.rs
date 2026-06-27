@@ -24,6 +24,7 @@ pub struct ChatLayout {
     settings: Entity<Settings>,
     voice_store: Entity<VoiceStore>,
     pending_channel_id: Option<ChannelId>,
+    prefetched_voice_channel: Option<ChannelId>,
     show_member_list: bool,
 }
 
@@ -103,6 +104,7 @@ impl ChatLayout {
             settings,
             voice_store,
             pending_channel_id: None,
+            prefetched_voice_channel: None,
             show_member_list: true,
         };
         this.sync_active_from_route(cx);
@@ -194,9 +196,6 @@ impl ChatLayout {
                     channel_list.select_channel(channel_id, cx);
                 });
             }
-            // Force the messages store onto this channel even when it's already the active
-            // `ChannelList` selection — covers returning from a DM (where `ChannelList` never
-            // re-emits) so the timeline switches back instead of showing the DM.
             MessagesStore::global(cx).update(cx, |store, cx| store.open_channel(channel_id, cx));
         } else {
             self.pending_channel_id = Some(channel_id);
@@ -263,12 +262,33 @@ impl ChatLayout {
             },
         );
     }
+
+    fn maybe_prefetch_voice_token(&mut self, cx: &mut Context<Self>) {
+        let active_voice_channel = self
+            .channel_list
+            .read(cx)
+            .active_channel()
+            .filter(|ch| ch.channel_type == ChannelType::Voice)
+            .map(|ch| ch.id.clone());
+
+        if active_voice_channel == self.prefetched_voice_channel {
+            return;
+        }
+        self.prefetched_voice_channel = active_voice_channel.clone();
+
+        if let Some(channel_id) = active_voice_channel {
+            self.voice_store.update(cx, |store, cx| {
+                store.prefetch_meet_token(channel_id.to_string(), cx);
+            });
+        }
+    }
 }
 
 impl Render for ChatLayout {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         crate::trace_render!("ChatLayout");
         self.chat_area.ensure_input(window, cx);
+        self.maybe_prefetch_voice_token(cx);
 
         if let Some(ch) = self.channel_list.read(cx).active_channel()
             && ch.channel_type == ChannelType::Voice
