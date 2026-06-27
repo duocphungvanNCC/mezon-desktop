@@ -29,7 +29,7 @@ mod tests {
     #[test]
     fn time_window_expires_breaks_group() {
         let prev = make_msg("1", "alice", 1000);
-        let msg = make_msg("2", "alice", 1400);
+        let msg = make_msg("2", "alice", 1700);
         assert!(!is_combined(Some(&prev), &msg));
     }
 

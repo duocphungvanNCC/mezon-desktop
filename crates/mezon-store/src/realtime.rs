@@ -18,6 +18,7 @@ use mezon_client::{AppApi, RealtimeEvent};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum RealtimeKind {
     ChannelMessage,
+    MessageReaction,
     MessageTyping,
     ChannelPresence,
     StatusPresence,
@@ -26,6 +27,7 @@ pub enum RealtimeKind {
     ChannelDeleted,
     ClanUpdated,
     ClanDeleted,
+    ClanEmoji,
     AddClanUser,
     UserClanRemoved,
     ClanProfileUpdated,
@@ -43,6 +45,7 @@ impl RealtimeKind {
     fn of(event: &RealtimeEvent) -> Option<Self> {
         Some(match event {
             RealtimeEvent::ChannelMessage(_) => Self::ChannelMessage,
+            RealtimeEvent::MessageReaction(_) => Self::MessageReaction,
             RealtimeEvent::MessageTyping(_) => Self::MessageTyping,
             RealtimeEvent::ChannelPresence(_) => Self::ChannelPresence,
             RealtimeEvent::StatusPresence(_) => Self::StatusPresence,
@@ -51,6 +54,7 @@ impl RealtimeKind {
             RealtimeEvent::ChannelDeleted(_) => Self::ChannelDeleted,
             RealtimeEvent::ClanUpdated(_) => Self::ClanUpdated,
             RealtimeEvent::ClanDeleted(_) => Self::ClanDeleted,
+            RealtimeEvent::ClanEmoji(_) => Self::ClanEmoji,
             RealtimeEvent::AddClanUser(_) => Self::AddClanUser,
             RealtimeEvent::UserClanRemoved(_) => Self::UserClanRemoved,
             RealtimeEvent::ClanProfileUpdated(_) => Self::ClanProfileUpdated,
