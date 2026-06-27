@@ -418,6 +418,8 @@ fn open_main_window(
     mezon_store::PresenceStore::init(api.clone(), cx);
     mezon_store::VoiceStore::init(api.clone(), cx);
     mezon_store::ClanMembersStore::init(api.clone(), cx);
+    mezon_store::EmojiStore::init(api.clone(), cx);
+    mezon_store::StickerStore::init(api.clone(), cx);
     mezon_store::ChannelMembersStore::init(api.clone(), cx);
     mezon_store::GroupMembersStore::init(api.clone(), cx);
     mezon_store::UsersByUserStore::init(api.clone(), cx);

@@ -280,6 +280,51 @@ fn group_raw_members(cx: &App, direct_id: ChannelId) -> Vec<RawMember> {
         .collect()
 }
 
+#[derive(Clone)]
+pub(crate) struct MentionMemberRaw {
+    pub user_id: String,
+    pub display: String,
+    pub username: String,
+    pub avatar_raw: String,
+}
+
+pub(crate) fn mention_member_pool(cx: &App) -> Vec<MentionMemberRaw> {
+    if let Some(direct_id) = active_group_dm(cx) {
+        let store = GroupMembersStore::global(cx);
+        let store = store.read(cx);
+        return store
+            .members(direct_id)
+            .iter()
+            .map(|m| MentionMemberRaw {
+                user_id: m.id().to_string(),
+                display: m.name().to_string(),
+                username: m.user.username.clone(),
+                avatar_raw: m.avatar().to_string(),
+            })
+            .collect();
+    }
+    let Some(ctx) = active_channel_context(cx) else {
+        return Vec::new();
+    };
+    let store = ClanMembersStore::global(cx);
+    let store = store.read(cx);
+    let pool: Vec<&ClanMember> = match &ctx.filter_ids {
+        Some(ids) => ids
+            .iter()
+            .filter_map(|id| store.member(ctx.clan_id, *id))
+            .collect(),
+        None => store.members(ctx.clan_id),
+    };
+    pool.iter()
+        .map(|m| MentionMemberRaw {
+            user_id: m.user.id.to_string(),
+            display: m.name().to_string(),
+            username: m.user.username.clone(),
+            avatar_raw: m.avatar().to_string(),
+        })
+        .collect()
+}
+
 fn make_member_row(cx: &App, raw: RawMember) -> Row {
     // The dev image proxy 404s on avatar source URLs, forcing a fallback to the
     // raw (full-resolution) file. For the member list we skip the proxy on dev
