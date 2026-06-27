@@ -1,12 +1,10 @@
-use crate::ids::{ChannelId, ClanId};
-use std::collections::HashSet;
+use crate::ids::{ChannelId, ClanId, MessageId, UserId};
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use gpui::{
-    App, AppContext, Context, Entity, EventEmitter, Global, SharedString, Subscription, Task,
-};
+use gpui::{App, AppContext, Context, Entity, EventEmitter, Global, Subscription, Task};
 use mezon_client::transport::{
     ApiMessage, ApiMessageContent, OutgoingEmoji as TransportEmoji,
     OutgoingHashtag as TransportHashtag, OutgoingMention as TransportMention, OutgoingReply,
@@ -58,15 +56,15 @@ pub enum MessagesEvent {
     /// (cf. React `idMessageToJump`). Emitted by [`MessagesStore::jump_to_message`]
     /// once the target is loaded — either it was already present, or an
     /// AROUND fetch (which emits `Reset` first) just brought it in.
-    JumpTo { message_id: SharedString },
+    JumpTo { message_id: MessageId },
 }
 
 /// The message currently being replied to (composer state), mirroring React's
 /// reply reference draft in `references.slice`.
 #[derive(Debug, Clone)]
 pub struct ReplyDraft {
-    pub message_ref_id: String,
-    pub sender_id: String,
+    pub message_ref_id: MessageId,
+    pub sender_id: UserId,
     pub sender_name: String,
     pub sender_avatar: String,
     pub content_preview: String,
@@ -148,8 +146,198 @@ pub struct OutgoingAttachment {
     pub filetype: String,
 }
 
+#[derive(Default)]
+struct MessageList {
+    items: Vec<Message>,
+    index: HashMap<MessageId, usize>,
+    temp_ids: Vec<MessageId>,
+}
+
+impl MessageList {
+    fn from_messages(items: Vec<Message>) -> Self {
+        let mut list = Self {
+            items,
+            index: HashMap::new(),
+            temp_ids: Vec::new(),
+        };
+        list.reindex();
+        list
+    }
+
+    fn reindex(&mut self) {
+        self.index.clear();
+        self.index.reserve(self.items.len());
+        self.temp_ids.clear();
+        for (i, m) in self.items.iter().enumerate() {
+            self.index.insert(m.id, i);
+            if m.id.is_optimistic() {
+                self.temp_ids.push(m.id);
+            }
+        }
+    }
+
+    fn as_slice(&self) -> &[Message] {
+        &self.items
+    }
+
+    fn len(&self) -> usize {
+        self.items.len()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.items.is_empty()
+    }
+
+    fn first(&self) -> Option<&Message> {
+        self.items.first()
+    }
+
+    fn last(&self) -> Option<&Message> {
+        self.items.last()
+    }
+
+    fn contains_id(&self, id: MessageId) -> bool {
+        self.index.contains_key(&id)
+    }
+
+    fn position(&self, id: MessageId) -> Option<usize> {
+        self.index.get(&id).copied()
+    }
+
+    fn get_mut_by_id(&mut self, id: MessageId) -> Option<&mut Message> {
+        let idx = *self.index.get(&id)?;
+        self.items.get_mut(idx)
+    }
+
+    fn temp_match_position(&self, sender_id: &str, content: &str) -> Option<usize> {
+        self.temp_ids.iter().find_map(|temp_id| {
+            let idx = *self.index.get(temp_id)?;
+            let candidate = &self.items[idx];
+            (candidate.sender_id == sender_id && candidate.content == content).then_some(idx)
+        })
+    }
+
+    fn replace(&mut self, items: Vec<Message>) {
+        self.items = items;
+        self.reindex();
+    }
+
+    fn push_trim_regroup(&mut self, msg: Message) {
+        self.items.push(msg);
+        trim_messages(&mut self.items);
+        recompute_message_grouping(&mut self.items);
+        self.reindex();
+    }
+
+    fn push_sorted(&mut self, msg: Message) {
+        self.items.push(msg);
+        sort_messages(&mut self.items);
+        trim_messages(&mut self.items);
+        recompute_message_grouping(&mut self.items);
+        self.reindex();
+    }
+
+    fn push_grouped(&mut self, msg: Message) {
+        let in_order = self
+            .items
+            .last()
+            .map(|last| message_sort_key(last) <= message_sort_key(&msg))
+            .unwrap_or(true);
+        if !in_order {
+            self.items.push(msg);
+            sort_messages(&mut self.items);
+            trim_messages(&mut self.items);
+            recompute_message_grouping(&mut self.items);
+            self.reindex();
+            return;
+        }
+        self.items.push(msg);
+        let dropped = self.items.len().saturating_sub(MAX_MESSAGES_PER_CHANNEL);
+        if dropped > 0 {
+            let evicted_temp_ids: Vec<MessageId> = self.items[..dropped]
+                .iter()
+                .filter(|m| m.id.is_optimistic())
+                .map(|m| m.id)
+                .collect();
+            for evicted in self.items[..dropped].iter() {
+                self.index.remove(&evicted.id);
+            }
+            self.items.drain(0..dropped);
+            for position in self.index.values_mut() {
+                *position -= dropped;
+            }
+            self.temp_ids.retain(|t| !evicted_temp_ids.contains(t));
+        }
+        let last = self.items.len() - 1;
+        let combined = {
+            let prev = last.checked_sub(1).map(|i| &self.items[i]);
+            message_combined_with_prev(prev, &self.items[last])
+        };
+        self.items[last].combined_with_prev = combined;
+        let id = self.items[last].id;
+        if id.is_optimistic() {
+            self.temp_ids.push(id);
+        }
+        self.index.insert(id, last);
+    }
+
+    fn replace_at(&mut self, idx: usize, msg: Message) {
+        let old_id = self.items[idx].id;
+        let new_id = msg.id;
+        self.items[idx] = msg;
+        if old_id == new_id {
+            return;
+        }
+        self.index.remove(&old_id);
+        self.index.insert(new_id, idx);
+        if old_id.is_optimistic() {
+            self.temp_ids.retain(|t| *t != old_id);
+        }
+        if new_id.is_optimistic() {
+            self.temp_ids.push(new_id);
+        }
+    }
+
+    fn replace_resort(&mut self, idx: usize, msg: Message) {
+        self.items[idx] = msg;
+        sort_messages(&mut self.items);
+        trim_messages(&mut self.items);
+        recompute_message_grouping(&mut self.items);
+        self.reindex();
+    }
+
+    fn prepend_older(&mut self, mut older: Vec<Message>) -> usize {
+        older.append(&mut self.items);
+        sort_messages(&mut older);
+        let dropped_bottom = trim_messages_back(&mut older);
+        self.items = older;
+        recompute_message_grouping(&mut self.items);
+        self.reindex();
+        dropped_bottom
+    }
+
+    fn append_newer(&mut self, mut newer: Vec<Message>) -> usize {
+        self.items.append(&mut newer);
+        sort_messages(&mut self.items);
+        let dropped = trim_messages(&mut self.items);
+        recompute_message_grouping(&mut self.items);
+        self.reindex();
+        dropped
+    }
+
+    fn remove_id(&mut self, id: MessageId) -> bool {
+        let Some(idx) = self.index.get(&id).copied() else {
+            return false;
+        };
+        self.items.remove(idx);
+        recompute_message_grouping(&mut self.items);
+        self.reindex();
+        true
+    }
+}
+
 struct ChannelMessages {
-    messages: Vec<Message>,
+    messages: MessageList,
     /// More history exists above (older). Mirrors React `hasMoreTop`.
     has_more: bool,
     /// More messages exist below (newer) that are not loaded — only true after
@@ -295,13 +483,10 @@ impl MessagesStore {
     fn emit_appended(&mut self, old_len: usize, cx: &mut Context<Self>) {
         let new_len = self.messages().len();
         if new_len <= old_len {
-            // Not a real append (replace / no-op).
             cx.emit(MessagesEvent::Updated);
             cx.notify();
             return;
         }
-        // Exactly one row was pushed; the cap may have dropped some off the
-        // front. removed_top = old + 1 - new.
         let removed_top = (old_len + 1).saturating_sub(new_len);
         cx.emit(MessagesEvent::Shifted {
             added_top: 0,
@@ -347,6 +532,14 @@ impl MessagesStore {
 
     pub fn is_loading(&self) -> bool {
         self.loading
+    }
+
+    pub fn active_channel_id(&self) -> Option<ChannelId> {
+        self.active_channel_id
+    }
+
+    pub fn is_dm(&self) -> bool {
+        self.is_dm
     }
 
     /// True while an older-history (load-more) fetch is in flight.
@@ -396,8 +589,8 @@ impl MessagesStore {
         let Some(oldest_id) = channel
             .messages
             .first()
-            .map(|m| m.id.clone())
-            .filter(|id| !id.starts_with("temp-"))
+            .map(|m| m.id)
+            .filter(|id| !id.is_optimistic())
         else {
             return;
         };
@@ -424,7 +617,7 @@ impl MessagesStore {
         cx.notify();
         tracing::debug!(
             channel_id = channel_id.get(),
-            before_message_id = %oldest_id,
+            before_message_id = oldest_id.get(),
             backoff_ms = backoff.as_millis() as u64,
             "load_more: fetching older page"
         );
@@ -438,7 +631,7 @@ impl MessagesStore {
                 .list_channel_messages(
                     clan_id.get(),
                     channel_id.get(),
-                    oldest_id.parse::<i64>().unwrap_or(0),
+                    oldest_id.get(),
                     DIRECTION_BEFORE,
                     MESSAGE_PAGE_LIMIT,
                 )
@@ -463,11 +656,9 @@ impl MessagesStore {
                     let Some(channel) = this.cache.get_mut(&channel_id) else {
                         return;
                     };
-                    let existing: std::collections::HashSet<&str> =
-                        channel.messages.iter().map(|m| m.id.as_str()).collect();
-                    let mut older: Vec<Message> = msgs
+                    let older: Vec<Message> = msgs
                         .into_iter()
-                        .filter(|m| !existing.contains(m.message_id.to_string().as_str()))
+                        .filter(|m| !channel.messages.contains_id(MessageId(m.message_id)))
                         .map(|m| message_from_api(m, cfg))
                         .collect();
                     if older.is_empty() {
@@ -479,20 +670,13 @@ impl MessagesStore {
                         return;
                     }
                     let prepended = older.len();
-                    older.append(&mut channel.messages);
-                    sort_messages(&mut older);
-                    // Drop the NEWEST rows (back) to stay within the cap, so the
-                    // older rows we just loaded are kept. The dropped newest can
-                    // be re-fetched when scrolling back down.
-                    let dropped_bottom = trim_messages_back(&mut older);
-                    channel.messages = older;
-                    recompute_message_grouping(&mut channel.messages);
+                    let dropped_bottom = channel.messages.prepend_older(older);
                     if dropped_bottom > 0 {
                         channel.has_more_bottom = true;
                     }
                     // Reached the channel start once the oldest row is the
                     // FIRST_MESSAGE sentinel (cf. React `hasMore` check).
-                    channel.has_more = has_more_from_oldest(&channel.messages);
+                    channel.has_more = has_more_from_oldest(channel.messages.as_slice());
                     (prepended, dropped_bottom)
                 };
                 if this.active_channel_id == Some(channel_id) {
@@ -542,23 +726,19 @@ impl MessagesStore {
         let Some(newest_id) = channel
             .messages
             .last()
-            .map(|m| m.id.clone())
-            .filter(|id| !id.starts_with("temp-"))
+            .map(|m| m.id)
+            .filter(|id| !id.is_optimistic())
         else {
-            tracing::debug!("load_more_bottom skipped: no non-temp newest id");
+            tracing::debug!("load_more_bottom skipped: no non-optimistic newest id");
             return;
         };
 
         self.loading_more = true;
         cx.notify();
-        // Dump the whole buffer id list so we can verify the anchor is really the
-        // newest loaded row and the list is ordered ascending by id.
-        let buffer_ids: Vec<&str> = channel.messages.iter().map(|m| m.id.as_str()).collect();
         tracing::debug!(
             channel_id = channel_id.get(),
-            after_message_id = %newest_id,
-            buffer_len = buffer_ids.len(),
-            buffer_ids = ?buffer_ids,
+            after_message_id = newest_id.get(),
+            buffer_len = channel.messages.len(),
             "load_more_bottom: fetching newer page"
         );
 
@@ -568,7 +748,7 @@ impl MessagesStore {
                 .list_channel_messages(
                     clan_id.get(),
                     channel_id.get(),
-                    newest_id.parse::<i64>().unwrap_or(0),
+                    newest_id.get(),
                     DIRECTION_AFTER,
                     MESSAGE_PAGE_LIMIT,
                 )
@@ -585,7 +765,7 @@ impl MessagesStore {
                 };
                 tracing::debug!(
                     channel_id = channel_id.get(),
-                    anchor_after = %newest_id,
+                    anchor_after = newest_id.get(),
                     fetched = msgs.len(),
                     raw_first = msgs.first().map(|m| m.message_id).unwrap_or(0),
                     raw_last = msgs.last().map(|m| m.message_id).unwrap_or(0),
@@ -598,12 +778,10 @@ impl MessagesStore {
                     let Some(channel) = this.cache.get_mut(&channel_id) else {
                         return;
                     };
-                    let existing: std::collections::HashSet<&str> =
-                        channel.messages.iter().map(|m| m.id.as_str()).collect();
                     let fetched = msgs.len();
-                    let mut newer: Vec<Message> = msgs
+                    let newer: Vec<Message> = msgs
                         .into_iter()
-                        .filter(|m| !existing.contains(m.message_id.to_string().as_str()))
+                        .filter(|m| !channel.messages.contains_id(MessageId(m.message_id)))
                         .map(|m| message_from_api(m, cfg))
                         .collect();
                     // A short page means we've reached the newest message.
@@ -614,25 +792,22 @@ impl MessagesStore {
                         return;
                     }
                     let added = newer.len();
-                    channel.messages.append(&mut newer);
-                    sort_messages(&mut channel.messages);
                     // Appending newer drops the oldest (front) at the cap; those
                     // older rows then become re-fetchable from the top again.
-                    let dropped = trim_messages(&mut channel.messages);
+                    let dropped = channel.messages.append_newer(newer);
                     if dropped > 0 {
                         channel.has_more = true;
                     }
-                    recompute_message_grouping(&mut channel.messages);
                     (added, dropped)
                 };
                 if this.active_channel_id == Some(channel_id) {
                     if let Some(ch) = this.cache.get(&channel_id) {
                         tracing::debug!(
-                            anchor_after = %newest_id,
+                            anchor_after = newest_id.get(),
                             added,
                             dropped,
-                            buffer_oldest = ch.messages.first().map(|m| m.id.as_str()).unwrap_or(""),
-                            buffer_newest = ch.messages.last().map(|m| m.id.as_str()).unwrap_or(""),
+                            buffer_oldest = ch.messages.first().map(|m| m.id.get()).unwrap_or(0),
+                            buffer_newest = ch.messages.last().map(|m| m.id.get()).unwrap_or(0),
                             "load_more_bottom: appended newer page"
                         );
                     }
@@ -657,15 +832,16 @@ impl MessagesStore {
     /// If the target is already in the buffer, emit [`MessagesEvent::JumpTo`] so
     /// the UI scrolls to it. Otherwise fetch a window centered on it
     /// (`AROUND_TIMESTAMP`), replace the buffer, and emit `Reset` then `JumpTo`.
-    pub fn jump_to_message(&mut self, message_id: String, cx: &mut Context<Self>) {
+    pub fn jump_to_message(&mut self, message_id: MessageId, cx: &mut Context<Self>) {
         let Some(channel_id) = self.active_channel_id else {
             return;
         };
-        // Already loaded → just scroll to it.
-        if self.messages().iter().any(|m| m.id == message_id) {
-            cx.emit(MessagesEvent::JumpTo {
-                message_id: message_id.into(),
-            });
+        if self
+            .cache
+            .get(&channel_id)
+            .is_some_and(|c| c.messages.contains_id(message_id))
+        {
+            cx.emit(MessagesEvent::JumpTo { message_id });
             return;
         }
         if self.loading_more || self.loading {
@@ -674,15 +850,13 @@ impl MessagesStore {
         let Some(clan_id) = self.active_clan_id else {
             return;
         };
-        let Ok(anchor) = message_id.parse::<i64>() else {
-            return;
-        };
+        let anchor = message_id.get();
 
         self.loading_more = true;
         cx.notify();
         tracing::debug!(
             channel_id = channel_id.get(),
-            %message_id,
+            message_id = anchor,
             "jump_to_message: fetching AROUND window"
         );
 
@@ -725,14 +899,17 @@ impl MessagesStore {
                 }
                 let found = window.iter().any(|m| m.id == message_id);
                 if !found {
-                    tracing::warn!(%message_id, "jump_to_message: target not in AROUND window");
+                    tracing::warn!(
+                        message_id = anchor,
+                        "jump_to_message: target not in AROUND window"
+                    );
                     cx.notify();
                     return;
                 }
                 recompute_message_grouping(&mut window);
                 let has_more = has_more_from_oldest(&window);
                 if let Some(channel) = this.cache.get_mut(&channel_id) {
-                    channel.messages = window;
+                    channel.messages.replace(window);
                     channel.has_more = has_more;
                     // We landed on an older window, so newer messages exist that
                     // are not loaded yet (scroll down pages them in). This
@@ -742,9 +919,7 @@ impl MessagesStore {
                 if this.active_channel_id == Some(channel_id) {
                     let count = this.messages().len();
                     cx.emit(MessagesEvent::Reset { count });
-                    cx.emit(MessagesEvent::JumpTo {
-                        message_id: message_id.into(),
-                    });
+                    cx.emit(MessagesEvent::JumpTo { message_id });
                 }
                 cx.notify();
             });
@@ -788,14 +963,13 @@ impl MessagesStore {
         let is_public = self.is_public;
         let mode = self.mode;
         let has_attachments = !attachments.is_empty();
-        // Consume the active reply target (one reply per sent message).
         let reply = self.reply_target.take();
 
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs() as i64)
             .unwrap_or_default();
-        let temp_id = format!("temp-{now}");
+        let temp_id = MessageId::next_optimistic();
 
         let Some(channel) = self.cache.get_mut(&channel_id) else {
             return;
@@ -818,13 +992,7 @@ impl MessagesStore {
             .map(OutgoingEmoji::into_transport)
             .collect();
         let markdowns = detect_markdown(&content);
-        let mut optimistic = Message::new(
-            temp_id.clone(),
-            content.clone(),
-            sender_id,
-            sender_name,
-            now,
-        );
+        let mut optimistic = Message::new(temp_id, content.clone(), sender_id, sender_name, now);
         if !transport_mentions.is_empty()
             || !transport_hashtags.is_empty()
             || !transport_emojis.is_empty()
@@ -842,8 +1010,8 @@ impl MessagesStore {
         }
         if let Some(draft) = &reply {
             optimistic = optimistic.with_references(vec![MessageReference {
-                message_ref_id: draft.message_ref_id.clone(),
-                sender_id: draft.sender_id.clone(),
+                message_ref_id: draft.message_ref_id,
+                sender_id: draft.sender_id,
                 sender_name: draft.sender_name.clone(),
                 sender_avatar: draft.sender_avatar.clone(),
                 content: draft.content_preview.clone(),
@@ -851,17 +1019,15 @@ impl MessagesStore {
             }]);
         }
         let old_len = channel.messages.len();
-        channel.messages.push(optimistic);
-        trim_messages(&mut channel.messages);
-        recompute_message_grouping(&mut channel.messages);
+        channel.messages.push_trim_regroup(optimistic);
         self.emit_appended(old_len, cx);
 
         let api = self.api.clone();
         let reply_ref = reply.map(|draft| OutgoingReply {
-            message_ref_id: draft.message_ref_id.parse::<i64>().unwrap_or(0),
+            message_ref_id: draft.message_ref_id.get(),
             content: draft.content_preview,
             has_attachment: draft.has_attachment,
-            message_sender_id: draft.sender_id.parse::<i64>().unwrap_or(0),
+            message_sender_id: draft.sender_id.get(),
             message_sender_username: draft.sender_name.clone(),
             message_sender_avatar: draft.sender_avatar,
             message_sender_clan_nick: String::new(),
@@ -930,13 +1096,13 @@ impl MessagesStore {
                 Ok(sent) => {
                     let _ = this.update(cx, |this, cx| {
                         let confirmed = message_from_api(sent, AppConfig::try_global(cx));
-                        this.reconcile_temp(channel_id, &temp_id, confirmed, cx);
+                        this.reconcile_temp(channel_id, temp_id, confirmed, cx);
                     });
                 }
                 Err(e) => {
                     tracing::error!("send_channel_message failed: {e}");
                     let _ = this.update(cx, |this, cx| {
-                        this.remove_temp(channel_id, &temp_id, cx);
+                        this.remove_temp(channel_id, temp_id, cx);
                     });
                 }
             }
@@ -967,7 +1133,7 @@ impl MessagesStore {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs() as i64)
             .unwrap_or_default();
-        let temp_id = format!("temp-{now}");
+        let temp_id = MessageId::next_optimistic();
 
         let optimistic_attachment = MessageAttachment::from_api(
             mezon_client::transport::ApiAttachment {
@@ -983,12 +1149,10 @@ impl MessagesStore {
         let Some(channel) = self.cache.get_mut(&channel_id) else {
             return;
         };
-        let optimistic = Message::new(temp_id.clone(), String::new(), sender_id, sender_name, now)
+        let optimistic = Message::new(temp_id, String::new(), sender_id, sender_name, now)
             .with_attachments(vec![optimistic_attachment]);
         let old_len = channel.messages.len();
-        channel.messages.push(optimistic);
-        trim_messages(&mut channel.messages);
-        recompute_message_grouping(&mut channel.messages);
+        channel.messages.push_trim_regroup(optimistic);
         self.emit_appended(old_len, cx);
 
         let api = self.api.clone();
@@ -1010,13 +1174,13 @@ impl MessagesStore {
                 Ok(sent) => {
                     let _ = this.update(cx, |this, cx| {
                         let confirmed = message_from_api(sent, AppConfig::try_global(cx));
-                        this.reconcile_temp(channel_id, &temp_id, confirmed, cx);
+                        this.reconcile_temp(channel_id, temp_id, confirmed, cx);
                     });
                 }
                 Err(e) => {
                     tracing::error!("send sticker failed: {e}");
                     let _ = this.update(cx, |this, cx| {
-                        this.remove_temp(channel_id, &temp_id, cx);
+                        this.remove_temp(channel_id, temp_id, cx);
                     });
                 }
             }
@@ -1231,21 +1395,22 @@ impl MessagesStore {
             return;
         };
         let msg = message_from_api(MezonTransport::message_from_proto(m.clone()), cfg);
-        if channel.messages.iter().any(|x| x.id == msg.id) {
+        if channel.messages.contains_id(msg.id) {
             return;
         }
         let old_len = channel.messages.len();
-        let appended = if let Some(slot) = channel.messages.iter_mut().find(|x| {
-            x.id.starts_with("temp-") && x.sender_id == msg.sender_id && x.content == msg.content
-        }) {
-            *slot = msg;
-            sort_messages(&mut channel.messages);
-            trim_messages(&mut channel.messages);
-            recompute_message_grouping(&mut channel.messages);
-            false
-        } else {
-            push_message_grouped(&mut channel.messages, msg);
-            true
+        let appended = match channel
+            .messages
+            .temp_match_position(&msg.sender_id, &msg.content)
+        {
+            Some(idx) => {
+                channel.messages.replace_resort(idx, msg);
+                false
+            }
+            None => {
+                channel.messages.push_grouped(msg);
+                true
+            }
         };
         if is_active {
             if appended {
@@ -1266,8 +1431,7 @@ impl MessagesStore {
         let Some(channel) = self.cache.get_mut(&channel_id) else {
             return;
         };
-        let msg_id = r.message_id.to_string();
-        let Some(msg) = channel.messages.iter_mut().find(|m| m.id == msg_id) else {
+        let Some(msg) = channel.messages.get_mut_by_id(MessageId(r.message_id)) else {
             return;
         };
         apply_reaction_event(
@@ -1286,7 +1450,7 @@ impl MessagesStore {
     fn reconcile_temp(
         &mut self,
         channel_id: ChannelId,
-        temp_id: &str,
+        temp_id: MessageId,
         confirmed: Message,
         cx: &mut Context<Self>,
     ) {
@@ -1295,14 +1459,11 @@ impl MessagesStore {
                 return;
             };
             let old_len = channel.messages.len();
-            if let Some(slot) = channel.messages.iter_mut().find(|m| m.id == temp_id) {
-                *slot = confirmed;
+            if let Some(idx) = channel.messages.position(temp_id) {
+                channel.messages.replace_at(idx, confirmed);
                 (false, old_len)
-            } else if !channel.messages.iter().any(|m| m.id == confirmed.id) {
-                channel.messages.push(confirmed);
-                sort_messages(&mut channel.messages);
-                trim_messages(&mut channel.messages);
-                recompute_message_grouping(&mut channel.messages);
+            } else if !channel.messages.contains_id(confirmed.id) {
+                channel.messages.push_sorted(confirmed);
                 (true, old_len)
             } else {
                 (false, old_len)
@@ -1314,27 +1475,19 @@ impl MessagesStore {
         if pushed {
             self.emit_appended(old_len, cx);
         } else {
-            // In-place swap of the temp row for the confirmed one.
             cx.emit(MessagesEvent::Updated);
             cx.notify();
         }
     }
 
-    fn remove_temp(&mut self, channel_id: ChannelId, temp_id: &str, cx: &mut Context<Self>) {
+    fn remove_temp(&mut self, channel_id: ChannelId, temp_id: MessageId, cx: &mut Context<Self>) {
         let removed = {
             let Some(channel) = self.cache.get_mut(&channel_id) else {
                 return;
             };
-            let before = channel.messages.len();
-            channel.messages.retain(|m| m.id != temp_id);
-            let removed = before != channel.messages.len();
-            if removed {
-                recompute_message_grouping(&mut channel.messages);
-            }
-            removed
+            channel.messages.remove_id(temp_id)
         };
         if removed && self.active_channel_id == Some(channel_id) {
-            // The optimistic row left the bottom of the window.
             cx.emit(MessagesEvent::Shifted {
                 added_top: 0,
                 removed_top: 0,
@@ -1389,7 +1542,7 @@ impl MessagesStore {
         self.cache.insert(
             channel_id,
             ChannelMessages {
-                messages,
+                messages: MessageList::from_messages(messages),
                 has_more,
                 // Normal open loads the newest page, so nothing newer exists yet.
                 // Jump-to-message will set this when it loads an older window.
@@ -1418,30 +1571,6 @@ fn prepare_messages(msgs: Vec<ApiMessage>, cfg: Option<&AppConfig>) -> Vec<Messa
     trim_messages(&mut messages);
     recompute_message_grouping(&mut messages);
     messages
-}
-
-fn push_message_grouped(messages: &mut Vec<Message>, msg: Message) {
-    // Ordered by id (React id-ascending): a newly received row whose id is >=
-    // the current newest goes straight to the back (the common case); otherwise
-    // re-sort.
-    let in_order = messages
-        .last()
-        .map(|last| message_sort_key(last) <= message_sort_key(&msg))
-        .unwrap_or(true);
-    messages.push(msg);
-    if in_order {
-        trim_messages(messages);
-        let last = messages.len() - 1;
-        let combined = {
-            let prev = last.checked_sub(1).map(|i| &messages[i]);
-            message_combined_with_prev(prev, &messages[last])
-        };
-        messages[last].combined_with_prev = combined;
-    } else {
-        sort_messages(messages);
-        trim_messages(messages);
-        recompute_message_grouping(messages);
-    }
 }
 
 /// Cap the buffer to `MAX_MESSAGES_PER_CHANNEL`, dropping the oldest rows.
@@ -1481,13 +1610,12 @@ fn message_from_api(m: ApiMessage, cfg: Option<&AppConfig>) -> Message {
         .collect();
     let reactions = aggregate_reactions(&m.reactions);
     Message::new(
-        m.message_id.to_string(),
+        MessageId(m.message_id),
         m.content,
         m.sender_id.to_string(),
         m.sender_name,
         m.create_time,
     )
-    .with_message_id(m.message_id)
     .with_code(MessageCode::from_raw(m.code))
     .with_spans(spans)
     .with_references(references)
@@ -1522,8 +1650,8 @@ fn message_reference_from_api(
         .map(|c| c.avatar_proxy(&r.message_sender_avatar))
         .unwrap_or_else(|| r.message_sender_avatar.clone());
     MessageReference {
-        message_ref_id: r.message_ref_id.to_string(),
-        sender_id: r.message_sender_id.to_string(),
+        message_ref_id: MessageId(r.message_ref_id),
+        sender_id: UserId(r.message_sender_id),
         sender_name,
         sender_avatar,
         content,
@@ -1560,6 +1688,7 @@ impl MessageAttachment {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ids::UserId;
     use crate::message::MessageSpan;
 
     #[test]
@@ -1654,115 +1783,271 @@ mod tests {
             },
             None,
         );
-        assert_eq!(m.id, "1");
+        assert_eq!(m.id, MessageId(1));
         assert_eq!(m.content, "hi");
+        assert_eq!(m.sender_id, "1");
+        assert_eq!(m.sender_user_id, Some(UserId(1)));
         assert_eq!(m.sender_name, "Alice");
         assert_eq!(m.avatar_url, "av.png");
         assert_eq!(m.avatar_proxied, "av.png");
     }
 
+    fn assert_list_consistent(list: &MessageList) {
+        assert_eq!(list.index.len(), list.items.len());
+        for (i, m) in list.items.iter().enumerate() {
+            assert_eq!(list.index.get(&m.id), Some(&i));
+        }
+        let mut expected_temps: Vec<MessageId> = list
+            .items
+            .iter()
+            .filter(|m| m.id.is_optimistic())
+            .map(|m| m.id)
+            .collect();
+        let mut actual_temps: Vec<MessageId> = list.temp_ids.clone();
+        actual_temps.sort();
+        expected_temps.sort();
+        assert_eq!(actual_temps, expected_temps);
+    }
+
     #[test]
     fn push_message_grouped_appends_in_order() {
-        let mut msgs = vec![
-            Message::new("1", "a", "u1", "U1", 100),
-            Message::new("2", "b", "u1", "U1", 110),
-        ];
-        recompute_message_grouping(&mut msgs);
-        push_message_grouped(&mut msgs, Message::new("3", "c", "u1", "U1", 120));
-        assert_eq!(msgs.len(), 3);
-        assert_eq!(msgs[2].id, "3");
-        assert!(msgs[2].combined_with_prev);
+        let mut list = MessageList::from_messages(vec![
+            Message::new(MessageId(1), "a", "u1", "U1", 100),
+            Message::new(MessageId(2), "b", "u1", "U1", 110),
+        ]);
+        list.push_grouped(Message::new(MessageId(3), "c", "u1", "U1", 120));
+        assert_eq!(list.len(), 3);
+        assert_eq!(list.as_slice()[2].id, MessageId(3));
+        assert!(list.as_slice()[2].combined_with_prev);
+        assert_list_consistent(&list);
     }
 
     #[test]
     fn push_message_grouped_resorts_when_out_of_order() {
-        let mut msgs = vec![
-            Message::new("1", "a", "u1", "U1", 100),
-            Message::new("3", "c", "u1", "U1", 120),
-        ];
-        recompute_message_grouping(&mut msgs);
-        push_message_grouped(&mut msgs, Message::new("2", "b", "u1", "U1", 110));
-        let ids: Vec<&str> = msgs.iter().map(|m| m.id.as_str()).collect();
-        assert_eq!(ids, ["1", "2", "3"]);
+        let mut list = MessageList::from_messages(vec![
+            Message::new(MessageId(1), "a", "u1", "U1", 100),
+            Message::new(MessageId(3), "c", "u1", "U1", 120),
+        ]);
+        list.push_grouped(Message::new(MessageId(2), "b", "u1", "U1", 110));
+        let ids: Vec<MessageId> = list.as_slice().iter().map(|m| m.id).collect();
+        assert_eq!(ids, [MessageId(1), MessageId(2), MessageId(3)]);
+        assert_list_consistent(&list);
     }
 
     #[test]
     fn push_message_grouped_breaks_group_for_different_sender() {
-        let mut msgs = vec![Message::new("1", "a", "u1", "U1", 100)];
-        recompute_message_grouping(&mut msgs);
-        push_message_grouped(&mut msgs, Message::new("2", "b", "u2", "U2", 105));
-        assert!(!msgs[1].combined_with_prev);
+        let mut list =
+            MessageList::from_messages(vec![Message::new(MessageId(1), "a", "u1", "U1", 100)]);
+        list.push_grouped(Message::new(MessageId(2), "b", "u2", "U2", 105));
+        assert!(!list.as_slice()[1].combined_with_prev);
+        assert_list_consistent(&list);
     }
 
     #[test]
     fn trim_messages_drops_oldest() {
         let mut msgs: Vec<Message> = (0..MAX_MESSAGES_PER_CHANNEL + 5)
-            .map(|i| Message::new(i.to_string(), format!("m{i}"), "u", "User", i as i64))
+            .map(|i| Message::new(MessageId(i as i64), format!("m{i}"), "u", "User", i as i64))
             .collect();
         trim_messages(&mut msgs);
         assert_eq!(msgs.len(), MAX_MESSAGES_PER_CHANNEL);
-        assert_eq!(msgs.first().unwrap().id, "5");
+        assert_eq!(msgs.first().unwrap().id, MessageId(5));
         assert_eq!(
             msgs.last().unwrap().id,
-            (MAX_MESSAGES_PER_CHANNEL + 4).to_string()
+            MessageId((MAX_MESSAGES_PER_CHANNEL + 4) as i64)
         );
     }
 
     fn channel_msgs(msgs: Vec<Message>) -> ChannelMessages {
         ChannelMessages {
-            messages: msgs,
+            messages: MessageList::from_messages(msgs),
             has_more: false,
             has_more_bottom: false,
         }
     }
 
-    fn remove_temp_in(ch: &mut ChannelMessages, temp_id: &str) {
-        let before = ch.messages.len();
-        ch.messages.retain(|m| m.id != temp_id);
-        if ch.messages.len() != before {
-            recompute_message_grouping(&mut ch.messages);
-        }
+    fn remove_temp_in(ch: &mut ChannelMessages, temp_id: MessageId) {
+        ch.messages.remove_id(temp_id);
     }
 
-    fn reconcile_temp_in(ch: &mut ChannelMessages, temp_id: &str, confirmed: Message) {
-        if let Some(slot) = ch.messages.iter_mut().find(|m| m.id == temp_id) {
-            *slot = confirmed;
-        } else if !ch.messages.iter().any(|m| m.id == confirmed.id) {
-            ch.messages.push(confirmed);
-            sort_messages(&mut ch.messages);
-            trim_messages(&mut ch.messages);
-            recompute_message_grouping(&mut ch.messages);
+    fn reconcile_temp_in(ch: &mut ChannelMessages, temp_id: MessageId, confirmed: Message) {
+        if let Some(idx) = ch.messages.position(temp_id) {
+            ch.messages.replace_at(idx, confirmed);
+        } else if !ch.messages.contains_id(confirmed.id) {
+            ch.messages.push_sorted(confirmed);
         }
     }
 
     #[test]
     fn remove_temp_drops_message_by_id() {
+        let temp1 = MessageId::next_optimistic();
         let mut ch = channel_msgs(vec![
-            Message::new("temp-1", "hello", "u1", "U", 100),
-            Message::new("msg-2", "world", "u1", "U", 200),
+            Message::new(temp1, "hello", "u1", "U", 100),
+            Message::new(MessageId(2), "world", "u1", "U", 200),
         ]);
-        remove_temp_in(&mut ch, "temp-1");
+        remove_temp_in(&mut ch, temp1);
         assert_eq!(ch.messages.len(), 1);
-        assert_eq!(ch.messages[0].id, "msg-2");
+        assert_eq!(ch.messages.as_slice()[0].id, MessageId(2));
+        assert_list_consistent(&ch.messages);
     }
 
     #[test]
     fn remove_temp_noop_when_id_not_found() {
-        let mut ch = channel_msgs(vec![Message::new("msg-1", "hello", "u1", "U", 100)]);
-        remove_temp_in(&mut ch, "temp-999");
+        let non_existent = MessageId::next_optimistic();
+        let mut ch = channel_msgs(vec![Message::new(MessageId(1), "hello", "u1", "U", 100)]);
+        remove_temp_in(&mut ch, non_existent);
         assert_eq!(ch.messages.len(), 1);
     }
 
     #[test]
     fn reconcile_temp_matches_only_by_temp_id_not_content() {
+        let temp1 = MessageId::next_optimistic();
+        let temp2 = MessageId::next_optimistic();
         let mut ch = channel_msgs(vec![
-            Message::new("temp-1", "same text", "u1", "U", 100),
-            Message::new("temp-2", "same text", "u1", "U", 110),
+            Message::new(temp1, "same text", "u1", "U", 100),
+            Message::new(temp2, "same text", "u1", "U", 110),
         ]);
-        let confirmed = Message::new("server-42", "same text", "u1", "U", 120);
-        reconcile_temp_in(&mut ch, "temp-1", confirmed);
+        let confirmed = Message::new(MessageId(42), "same text", "u1", "U", 120);
+        reconcile_temp_in(&mut ch, temp1, confirmed);
         assert_eq!(ch.messages.len(), 2);
-        assert_eq!(ch.messages[0].id, "server-42");
-        assert_eq!(ch.messages[1].id, "temp-2");
+        assert_eq!(ch.messages.as_slice()[0].id, MessageId(42));
+        assert_eq!(ch.messages.as_slice()[1].id, temp2);
+        assert_list_consistent(&ch.messages);
+    }
+
+    #[test]
+    fn temp_match_reconciles_optimistic_row_in_place() {
+        let temp1 = MessageId::next_optimistic();
+        let mut list = MessageList::from_messages(vec![
+            Message::new(MessageId(100), "earlier", "u1", "U", 100),
+            Message::new(temp1, "hello world", "u9", "Me", 200),
+        ]);
+        assert_eq!(list.temp_match_position("u9", "hello world"), Some(1));
+        assert_eq!(list.temp_match_position("u9", "other"), None);
+        let idx = list.temp_match_position("u9", "hello world").unwrap();
+        list.replace_resort(
+            idx,
+            Message::new(MessageId(250), "hello world", "u9", "Me", 200),
+        );
+        let ids: Vec<MessageId> = list.as_slice().iter().map(|m| m.id).collect();
+        assert_eq!(ids, [MessageId(100), MessageId(250)]);
+        assert!(list.temp_ids.is_empty());
+        assert_list_consistent(&list);
+    }
+
+    #[test]
+    fn append_update_remove_keep_index_and_order() {
+        let mut list = MessageList::from_messages(vec![
+            Message::new(MessageId(10), "a", "u1", "U", 100),
+            Message::new(MessageId(20), "b", "u1", "U", 110),
+        ]);
+        list.push_grouped(Message::new(MessageId(30), "c", "u1", "U", 120));
+        assert_eq!(list.position(MessageId(30)), Some(2));
+        list.get_mut_by_id(MessageId(20)).unwrap().content = "edited".into();
+        assert_eq!(list.as_slice()[1].content, "edited");
+        assert!(list.remove_id(MessageId(10)));
+        let ids: Vec<MessageId> = list.as_slice().iter().map(|m| m.id).collect();
+        assert_eq!(ids, [MessageId(20), MessageId(30)]);
+        assert_eq!(list.position(MessageId(10)), None);
+        assert_list_consistent(&list);
+    }
+
+    #[test]
+    fn prepend_older_and_append_newer_preserve_order_and_index() {
+        let mut list = MessageList::from_messages(vec![
+            Message::new(MessageId(50), "e", "u1", "U", 150),
+            Message::new(MessageId(60), "f", "u1", "U", 160),
+        ]);
+        let dropped = list.prepend_older(vec![
+            Message::new(MessageId(30), "c", "u1", "U", 130),
+            Message::new(MessageId(40), "d", "u1", "U", 140),
+        ]);
+        assert_eq!(dropped, 0);
+        let ids: Vec<MessageId> = list.as_slice().iter().map(|m| m.id).collect();
+        assert_eq!(
+            ids,
+            [MessageId(30), MessageId(40), MessageId(50), MessageId(60)]
+        );
+        assert_list_consistent(&list);
+        list.append_newer(vec![Message::new(MessageId(70), "g", "u1", "U", 170)]);
+        let ids: Vec<MessageId> = list.as_slice().iter().map(|m| m.id).collect();
+        assert_eq!(
+            ids,
+            [
+                MessageId(30),
+                MessageId(40),
+                MessageId(50),
+                MessageId(60),
+                MessageId(70)
+            ]
+        );
+        assert_eq!(list.position(MessageId(70)), Some(4));
+        assert_list_consistent(&list);
+    }
+
+    #[test]
+    fn window_replace_rebuilds_index() {
+        let mut list =
+            MessageList::from_messages(vec![Message::new(MessageId(1), "a", "u1", "U", 100)]);
+        list.replace(vec![
+            Message::new(MessageId(8), "h", "u1", "U", 180),
+            Message::new(MessageId(9), "i", "u1", "U", 190),
+        ]);
+        assert_eq!(list.position(MessageId(1)), None);
+        assert_eq!(list.position(MessageId(8)), Some(0));
+        assert_eq!(list.position(MessageId(9)), Some(1));
+        assert_list_consistent(&list);
+    }
+
+    #[test]
+    fn append_at_cap_evicts_front_and_reindexes() {
+        let mut list = MessageList::from_messages(
+            (0..MAX_MESSAGES_PER_CHANNEL)
+                .map(|i| Message::new(MessageId(i as i64), "m", "u", "U", i as i64))
+                .collect(),
+        );
+        list.push_grouped(Message::new(
+            MessageId(MAX_MESSAGES_PER_CHANNEL as i64),
+            "newest",
+            "u",
+            "U",
+            MAX_MESSAGES_PER_CHANNEL as i64,
+        ));
+        assert_eq!(list.len(), MAX_MESSAGES_PER_CHANNEL);
+        assert_eq!(list.position(MessageId(0)), None);
+        assert_eq!(list.as_slice()[0].id, MessageId(1));
+        assert_eq!(
+            list.as_slice().last().unwrap().id,
+            MessageId(MAX_MESSAGES_PER_CHANNEL as i64)
+        );
+        assert_list_consistent(&list);
+    }
+
+    #[test]
+    fn incremental_in_order_append_at_cap_matches_full_reindex() {
+        let temp_old = MessageId::next_optimistic();
+        let mut items = vec![Message::new(temp_old, "x", "u", "U", 0)];
+        items.extend(
+            (1..MAX_MESSAGES_PER_CHANNEL)
+                .map(|i| Message::new(MessageId(i as i64), "m", "u", "U", i as i64)),
+        );
+        let mut list = MessageList::from_messages(items);
+        assert_eq!(list.len(), MAX_MESSAGES_PER_CHANNEL);
+        assert_eq!(list.temp_ids, vec![temp_old]);
+
+        let temp_new = MessageId::next_optimistic();
+        list.push_grouped(Message::new(temp_new, "y", "u", "U", 999));
+
+        let incremental_index = list.index.clone();
+        let incremental_temp_ids = list.temp_ids.clone();
+        list.reindex();
+        assert_eq!(list.index, incremental_index);
+        assert_eq!(list.temp_ids, incremental_temp_ids);
+
+        assert_eq!(list.len(), MAX_MESSAGES_PER_CHANNEL);
+        assert_eq!(list.position(temp_old), None);
+        assert_eq!(list.temp_ids, vec![temp_new]);
+        assert_eq!(list.as_slice()[0].id, MessageId(1));
+        assert_eq!(list.as_slice().last().unwrap().id, temp_new);
+        assert_list_consistent(&list);
     }
 }

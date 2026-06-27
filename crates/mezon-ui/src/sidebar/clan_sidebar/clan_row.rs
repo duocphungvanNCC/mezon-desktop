@@ -124,6 +124,7 @@ pub(super) fn render_clan_row(
             .map(|c| c.to_uppercase().to_string())
             .unwrap_or_default();
         div()
+            .id(SharedString::from(format!("clan-avatar-{}", clan.id)))
             .size(px(40.))
             .rounded(px(12.))
             .bg(theme.tokens.theme_base_color)

@@ -27,7 +27,10 @@ pub use theme::tokens::ThemeTokens;
 
 pub(crate) const SHOW_UNREAD_BADGE_COUNT: bool = false;
 
-gpui::actions!(mezon, [ToggleInspector, Quit, HideWindow, MinimizeWindow, HideApp]);
+gpui::actions!(
+    mezon,
+    [ToggleInspector, Quit, HideWindow, MinimizeWindow, HideApp]
+);
 
 #[macro_export]
 macro_rules! trace_render {

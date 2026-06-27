@@ -190,6 +190,9 @@ impl ClanList {
             let _ = this.update(cx, |this, cx| {
                 this.loading = false;
                 this.update_clans(mapped, cx);
+                if let Some(clan_id) = this.active_clan_id {
+                    this.fire_join_clan_chat(clan_id, cx);
+                }
             });
         })
         .detach();
@@ -306,11 +309,23 @@ impl ClanList {
             .and_then(|c| c.welcome_channel_id)
     }
 
+    fn fire_join_clan_chat(&self, clan_id: ClanId, cx: &mut Context<Self>) {
+        let api = self.api.clone();
+        let id = clan_id.get();
+        cx.spawn(async move |_, _| {
+            if let Err(e) = api.join_clan_chat(id).await {
+                tracing::error!("join_clan_chat failed for clan {id}: {e}");
+            }
+        })
+        .detach();
+    }
+
     pub fn select_clan(&mut self, id: ClanId, cx: &mut Context<Self>) {
         if self.active_clan_id == Some(id) {
             return;
         }
         self.active_clan_id = Some(id);
+        self.fire_join_clan_chat(id, cx);
         cx.emit(ClanEvent::ActiveClanChanged(self.active_clan_id));
         cx.notify();
     }

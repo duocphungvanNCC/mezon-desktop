@@ -125,8 +125,7 @@ impl AppApi {
     }
 
     pub async fn list_dm_channels(&self, page: i32) -> Result<Vec<ApiDirectChannel>> {
-        let _ = page;
-        self.transport.list_dm_channel_descs().await
+        self.transport.list_dm_channel_descs(page).await
     }
 
     pub async fn mark_as_read(
@@ -224,6 +223,17 @@ impl AppApi {
             .await
     }
 
+    pub async fn join_clan_chat(&self, clan_id: i64) -> Result<()> {
+        self.transport.join_clan_chat(clan_id).await
+    }
+
+    pub async fn list_clan_users_status(
+        &self,
+        clan_id: i64,
+    ) -> Result<mezon_proto::api::ClanUserStatusList> {
+        self.transport.list_clan_users_status(clan_id).await
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub async fn send_channel_message(
         &self,
@@ -267,6 +277,15 @@ impl AppApi {
     pub async fn list_emojis_by_user_id(&self) -> Result<Vec<mezon_proto::api::ClanEmoji>> {
         let resp = self.transport.list_emojis_by_user_id().await?;
         Ok(resp.emoji_list)
+    }
+
+    pub async fn list_roles(
+        &self,
+        clan_id: i64,
+        limit: i32,
+        cursor: &str,
+    ) -> Result<mezon_proto::api::RoleListEventResponse> {
+        self.transport.list_roles(clan_id, limit, cursor).await
     }
 
     pub async fn list_stickers_by_user_id(&self) -> Result<Vec<mezon_proto::api::ClanSticker>> {
