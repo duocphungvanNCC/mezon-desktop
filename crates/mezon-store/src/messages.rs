@@ -209,8 +209,9 @@ impl MessagesStore {
         Self::register_realtime(cx);
 
         let channel_sub = cx.subscribe(&ChannelList::global(cx), |this, _channel, event, cx| {
-            let ChannelEvent::ActiveChannelChanged(channel_id) = event;
-            this.on_active_channel_changed(*channel_id, cx);
+            if let ChannelEvent::ActiveChannelChanged(channel_id) = event {
+                this.on_active_channel_changed(*channel_id, cx);
+            }
         });
 
         let conn_watch = Self::spawn_connection_watch(api.clone(), cx);

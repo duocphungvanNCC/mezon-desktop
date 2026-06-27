@@ -50,6 +50,10 @@ pub use group_members::{GroupMember, GroupMembersEvent, GroupMembersStore};
 pub use ids::{ChannelId, ClanId, ParseIdError, RoleId, UserId};
 pub use login::{LoginStore, token_from_oauth_callback_url};
 pub use message::*;
+pub use message::{
+    COMBINE_TIME_WINDOW, Message, MessageAttachment, message_combined_with_prev,
+    recompute_message_grouping,
+};
 pub use messages::*;
 pub use platform::{OpenUrlFn, PlatformStore};
 pub use presence::*;
