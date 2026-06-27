@@ -59,6 +59,7 @@ pub fn init(cx: &mut gpui::App) {
     #[cfg(debug_assertions)]
     cx.bind_keys([gpui::KeyBinding::new("cmd-alt-i", ToggleInspector, None)]);
     components::primitives::init_input(cx);
+    chat::mention_input::init(cx);
     router::Router::init(cx);
     init_menus(cx);
 }
