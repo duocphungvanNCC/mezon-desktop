@@ -1,4 +1,4 @@
-use gpui::{AnyElement, SharedString, div, prelude::*, px};
+use gpui::{Anchor, AnyElement, SharedString, div, prelude::*, px};
 use mezon_store::Message;
 
 use super::content::render_message_content;
@@ -9,16 +9,14 @@ use super::parts::{
     avatar_element, render_attachments, render_head, render_hover_actions, render_reactions,
     render_reply,
 };
+use crate::chat::user_profile_popover::{ClickableContainer, profile_popover_menu};
 use crate::components::primitives::{Icon, IconName};
 
-/// Render a normal user message row (React `MessageWithUser`), including reply
-/// quote, avatar/head (unless grouped), rich-text body, attachments and
-/// reactions. `combined` collapses the avatar/head for consecutive messages.
 pub fn render_user_message(msg: &Message, combined: bool, ctx: &RowCtx) -> AnyElement {
     let theme = ctx.theme;
     let has_reply = !msg.references.is_empty();
     let show_head = !combined;
-    let group_name = SharedString::from(format!("msg-{}", msg.id));
+    let group_name = SharedString::from(format!("msg-{}", msg.id.0));
 
     let mut body_column = div()
         .flex()
@@ -62,27 +60,26 @@ pub fn render_user_message(msg: &Message, combined: bool, ctx: &RowCtx) -> AnyEl
     let body = div()
         .relative()
         .w_full()
-        .when(show_head, |d| {
-            d.child(
-                div()
-                    .absolute()
-                    .left(px(AVATAR_LEFT))
-                    .top(px(2.))
-                    .w(px(AVATAR_SIZE))
-                    .h(px(AVATAR_SIZE))
-                    .id(SharedString::from(format!("msg-avatar-{}", msg.sender_id)))
-                    .child(avatar_element(msg, ctx)),
-            )
-        })
+        .when_some(
+            show_head.then(|| build_avatar_element(msg, ctx)),
+            |d, avatar_element| {
+                d.child(
+                    div()
+                        .absolute()
+                        .left(px(AVATAR_LEFT))
+                        .top(px(2.))
+                        .w(px(AVATAR_SIZE))
+                        .h(px(AVATAR_SIZE))
+                        .child(avatar_element),
+                )
+            },
+        )
         .child(body_column);
 
     let hover_bg = theme.bg_hover;
-    let highlighted = ctx
-        .highlight_id
-        .as_ref()
-        .is_some_and(|id| id.as_ref() == msg.id);
+    let highlighted = ctx.highlight_id.is_some_and(|id| id == msg.id);
     div()
-        .id(SharedString::from(format!("msg-row-{}", msg.id)))
+        .id(SharedString::from(format!("msg-row-{}", msg.id.0)))
         .group(group_name.clone())
         .relative()
         .w_full()
@@ -100,5 +97,28 @@ pub fn render_user_message(msg: &Message, combined: bool, ctx: &RowCtx) -> AnyEl
         })
         .child(body)
         .child(render_hover_actions(msg, theme, ctx.suppress_hover))
+        .into_any_element()
+}
+
+fn build_avatar_element(msg: &Message, ctx: &RowCtx) -> AnyElement {
+    let plain = avatar_element(msg, ctx);
+    let Some(profile_ctx) = ctx.profile_context else {
+        return plain;
+    };
+    let Some(user_id) = msg.sender_user_id else {
+        return plain;
+    };
+    let settings = ctx.settings.clone();
+    let trigger_id = SharedString::from(format!("msg-avatar-trigger-{}", msg.sender_id));
+    let popover_id = SharedString::from(format!("msg-avatar-popover-{}", msg.sender_id));
+    profile_popover_menu(popover_id, user_id, profile_ctx, settings)
+        .anchor(Anchor::TopLeft)
+        .attach(Anchor::TopRight)
+        .trigger(
+            ClickableContainer::new(trigger_id)
+                .size_full()
+                .cursor_pointer()
+                .child(plain),
+        )
         .into_any_element()
 }

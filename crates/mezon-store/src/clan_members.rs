@@ -25,6 +25,7 @@ pub struct ClanMember {
     pub clan_nick: String,
     pub clan_avatar: String,
     pub role_ids: Vec<RoleId>,
+    pub online: bool,
 }
 
 impl ClanMember {
@@ -209,14 +210,26 @@ impl ClanMembersStore {
         }
         let api = self.api.clone();
         cx.spawn(async move |this, cx| {
-            let result = api.list_clan_users(clan_id.get()).await;
+            let (users_result, status_result) = tokio::join!(
+                api.list_clan_users(clan_id.get()),
+                api.list_clan_users_status(clan_id.get()),
+            );
             let _ = this.update(cx, |this, cx| {
                 this.loading.remove(&clan_id);
-                match result {
+                match users_result {
                     Ok(users) => {
+                        let online_ids: std::collections::HashSet<i64> = status_result
+                            .map(|s| {
+                                s.clan_user_statuses
+                                    .into_iter()
+                                    .map(|e| e.user_id)
+                                    .collect()
+                            })
+                            .unwrap_or_default();
                         let mut bucket = ClanBucket::default();
                         for cu in users {
-                            if let Some(member) = clan_member_from_proto(cu) {
+                            if let Some(mut member) = clan_member_from_proto(cu) {
+                                member.online = online_ids.contains(&member.user.id.0);
                                 bucket.upsert(member);
                             }
                         }
@@ -337,6 +350,7 @@ fn clan_member_from_proto(cu: api::clan_user_list::ClanUser) -> Option<ClanMembe
         clan_nick: cu.clan_nick,
         clan_avatar: cu.clan_avatar,
         role_ids: cu.role_id.iter().map(|id| RoleId(*id)).collect(),
+        online: false,
     })
 }
 
@@ -357,6 +371,7 @@ fn clan_member_from_redis(user: Option<&realtime::UserProfileRedis>) -> Option<C
         clan_nick: String::new(),
         clan_avatar: String::new(),
         role_ids: Vec::new(),
+        online: false,
     })
 }
 

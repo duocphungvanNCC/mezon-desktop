@@ -389,8 +389,13 @@ impl VoiceStore {
         }
 
         let ice_servers = Self::ice_servers(cx);
-        let session =
-            VoiceSession::connect(ws_url, token, input_device_id, output_device_id, ice_servers);
+        let session = VoiceSession::connect(
+            ws_url,
+            token,
+            input_device_id,
+            output_device_id,
+            ice_servers,
+        );
         let events = session.events();
         self.frame_store = Some(session.frame_store());
         self.session = Some(session);

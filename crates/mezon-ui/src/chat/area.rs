@@ -1,18 +1,21 @@
 use std::sync::Arc;
 
-use gpui::{AnyView, App, Context, Entity, StyleRefinement, Window, div, prelude::*, px};
+use gpui::{
+    AnyView, App, Context, Entity, SharedString, StyleRefinement, Window, div, prelude::*, px,
+};
 // composer: use gpui::{AnyView, App, Context, Entity, StyleRefinement, Subscription, Window, div, prelude::*, px};
-use mezon_store::Settings;
+use mezon_store::{ChannelId, Settings};
 // composer: use mezon_store::{MessagesStore, Settings};
 
 use crate::chat::ReplyTarget;
-use crate::chat::channel_header::ChannelHeader;
+use crate::chat::channel_header::ChatHeader;
+use crate::chat::channel_typing::ChannelTyping;
 use crate::chat::input_bar::InputBar;
 use crate::chat::member_list::{MemberListPanel, MemberSource};
 // composer: use crate::chat::mention_input::{MentionInput, MentionInputEvent};
 use crate::chat::message::ChannelMessages;
 use crate::components::primitives::{InputEvent, InputState};
-use crate::theme::Theme;
+use crate::theme::ActiveTheme;
 
 pub struct ChatArea {
     pub(crate) timeline: Entity<ChannelMessages>,
@@ -23,6 +26,8 @@ pub struct ChatArea {
     #[allow(dead_code)]
     replying_to: Option<ReplyTarget>,
     settings: Entity<Settings>,
+    header: Entity<ChatHeader>,
+    typing: Entity<ChannelTyping>,
     // composer: _submit_sub: Option<Subscription>,
 }
 
@@ -32,6 +37,9 @@ impl ChatArea {
             let settings = settings.clone();
             move |cx| ChannelMessages::new(settings, cx)
         });
+        let layout = cx.weak_entity();
+        let header = cx.new(|cx| ChatHeader::new(layout, &settings, cx));
+        let typing = cx.new(|cx| ChannelTyping::new(&settings, cx));
         Self {
             timeline,
             input_state: None,
@@ -40,6 +48,8 @@ impl ChatArea {
             member_source: None,
             replying_to: None,
             settings,
+            header,
+            typing,
             // composer: _submit_sub: None,
         }
     }
@@ -116,14 +126,13 @@ impl ChatArea {
     #[allow(clippy::too_many_arguments)]
     pub fn render(
         &self,
-        theme: &Theme,
         locale: &str,
-        layout_entity: Entity<crate::ChatLayout>,
-        channel_name: &str,
+        channel_name: Option<&str>,
         is_dm: bool,
-        typing_label: Option<gpui::SharedString>,
+        channel_id: Option<ChannelId>,
         show_members_button: bool,
         show_member_panel: bool,
+        cx: &mut Context<crate::ChatLayout>,
         // composer: reply_preview: Option<ReplyTarget>,
     ) -> gpui::AnyElement {
         let input_state = match self.input_state.clone() {
@@ -139,6 +148,22 @@ impl ChatArea {
             }
         };
 
+        self.header.update(cx, |header, cx| {
+            header.sync(
+                channel_name.map(SharedString::from),
+                is_dm,
+                show_members_button,
+                show_member_panel,
+                cx,
+            );
+        });
+
+        self.typing
+            .update(cx, |typing, cx| typing.sync(channel_id, cx));
+
+        let layout_entity = cx.entity();
+        let theme = cx.theme();
+
         let on_send = {
             let handle = layout_entity.clone();
             Arc::new(move |window: &mut Window, cx: &mut App| {
@@ -150,27 +175,19 @@ impl ChatArea {
         // composer:     MessagesStore::global(cx).update(cx, |store, cx| store.clear_reply(cx));
         // composer: });
 
-        let input_bar = InputBar::new()
-            .with_input(input_state)
-            .on_send(on_send)
-            .typing_label(typing_label);
+        let input_bar = InputBar::new().with_input(input_state).on_send(on_send);
         // composer: let input_bar = InputBar::new()
         // composer:     .with_mention_input(mention_input)
         // composer:     .on_send(on_send)
         // composer:     .on_cancel_reply(on_cancel_reply)
-        // composer:     .replying_to(reply_preview)
-        // composer:     .typing_label(typing_label);
+        // composer:     .replying_to(reply_preview);
 
-        let header = ChannelHeader::new(channel_name)
-            .dm(is_dm)
-            .members_action(show_members_button)
-            .members_active(show_member_panel)
-            .on_toggle_members({
-                let handle = layout_entity.clone();
-                Arc::new(move |_window: &mut Window, cx: &mut App| {
-                    handle.update(cx, |this, cx| this.toggle_member_list(cx));
-                })
-            });
+        let header = AnyView::from(self.header.clone()).cached(
+            StyleRefinement::default()
+                .w_full()
+                .h(px(crate::app::window_controls::APP_HEADER_HEIGHT))
+                .flex_shrink_0(),
+        );
 
         let message_column = div()
             .flex()
@@ -187,6 +204,7 @@ impl ChatArea {
                 // is unchanged — only redundant re-renders are skipped.
                 AnyView::from(self.timeline.clone()).cached(StyleRefinement::default().size_full()),
             ))
+            .child(self.typing.clone())
             .child(input_bar.render(theme, locale));
 
         let body = div()
@@ -210,7 +228,7 @@ impl ChatArea {
                             .flex_shrink_0(),
                     ),
                 ),
-                None => row,
+                None => row.child(div().w(px(245.)).h_full().flex_shrink_0()),
             });
 
         div()
@@ -218,7 +236,7 @@ impl ChatArea {
             .flex_col()
             .flex_1()
             .min_h_0()
-            .child(header.render(theme))
+            .child(header)
             .child(body)
             .into_any_element()
     }
