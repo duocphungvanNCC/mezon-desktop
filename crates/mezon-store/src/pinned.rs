@@ -8,6 +8,7 @@ use mezon_proto::realtime::LastPinMessageEvent;
 
 use crate::AppConfig;
 use crate::channel::{ChannelEvent, ChannelList};
+use crate::ids::{ChannelId, ClanId};
 use crate::realtime::{RealtimeDispatch, RealtimeKind};
 
 /// A pinned message for the active channel, ready for the UI.
@@ -57,7 +58,7 @@ impl PinnedMessagesStore {
 
         let channel_sub = cx.subscribe(&ChannelList::global(cx), |this, _list, event, cx| {
             if let ChannelEvent::ActiveChannelChanged(channel_id) = event {
-                this.on_active_channel_changed(channel_id.clone(), cx);
+                this.on_active_channel_changed(*channel_id, cx);
             }
         });
         let mut store = Self {
@@ -70,8 +71,8 @@ impl PinnedMessagesStore {
             _channel_sub: channel_sub,
         };
         if let Some(channel) = ChannelList::global(cx).read(cx).active_channel() {
-            store.channel_id = Some(channel.id.clone());
-            store.clan_id = Some(channel.clan_id.clone());
+            store.channel_id = Some(channel.id.to_string());
+            store.clan_id = Some(channel.clan_id.to_string());
         }
         store
     }
@@ -101,7 +102,13 @@ impl PinnedMessagesStore {
         self.loading
     }
 
-    fn on_active_channel_changed(&mut self, channel_id: Option<String>, cx: &mut Context<Self>) {
+    pub fn clan_id(&self) -> Option<ClanId> {
+        self.clan_id
+            .as_ref()
+            .and_then(|id| id.parse::<ClanId>().ok())
+    }
+
+    fn on_active_channel_changed(&mut self, channel_id: Option<ChannelId>, cx: &mut Context<Self>) {
         match channel_id {
             None => {
                 self.channel_id = None;
@@ -110,11 +117,12 @@ impl PinnedMessagesStore {
             Some(id) => {
                 let clan_id = ChannelList::global(cx)
                     .read(cx)
-                    .find_channel(&id)
-                    .map(|c| c.clan_id.clone())
-                    .unwrap_or_else(|| "0".to_string());
-                self.channel_id = Some(id);
-                self.clan_id = Some(clan_id);
+                    .find_channel(id)
+                    .map(|c| c.clan_id)
+                    .filter(|clan_id| !clan_id.is_zero())
+                    .unwrap_or(ClanId(0));
+                self.channel_id = Some(id.to_string());
+                self.clan_id = Some(clan_id.to_string());
             }
         }
         self.messages.clear();
