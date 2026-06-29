@@ -208,16 +208,13 @@ impl MezonTransport {
     pub async fn connect(
         &self,
         host: &str,
-        port: Option<u16>,
+        port: u16,
         token: &str,
         on_event: impl Fn(RealtimeEvent) + Send + Sync + 'static,
         on_disconnected: impl Fn(bool) + Send + Sync + 'static,
     ) -> Result<()> {
         tracing::debug!("MezonTransport::connect() starting");
-        tracing::debug!(
-            "  Target: {}",
-            crate::socket_connect_label(host, port)
-        );
+        tracing::debug!("  Target: {host}:{port}");
 
         // Set up message handler
         tracing::debug!("Setting up message handler...");
@@ -280,12 +277,7 @@ impl MezonTransport {
         self.adapter
             .connect(host, port, token)
             .await
-            .with_context(|| {
-                format!(
-                    "Failed to connect adapter to {}",
-                    crate::socket_connect_label(host, port)
-                )
-            })?;
+            .with_context(|| format!("Failed to connect adapter to {host}:{port}"))?;
 
         tracing::debug!("MezonTransport::connect() completed successfully");
         Ok(())
@@ -475,6 +467,8 @@ pub struct ApiAttachment {
     pub filetype: String,
     pub width: i32,
     pub height: i32,
+    pub thumbnail: String,
+    pub duration: i32,
 }
 
 fn parse_message_attachments(bytes: &[u8]) -> Vec<ApiAttachment> {
@@ -492,6 +486,8 @@ fn parse_message_attachments(bytes: &[u8]) -> Vec<ApiAttachment> {
                 filetype: a.filetype,
                 width: a.width,
                 height: a.height,
+                thumbnail: a.thumbnail,
+                duration: a.duration,
             })
             .collect(),
         Err(e) => {
@@ -987,6 +983,13 @@ fn build_message_content_json(
         obj.insert("mk".into(), arr.into());
     }
     serde_json::Value::Object(obj).to_string()
+}
+
+/// One page from `ListChannelMessages`, including read-position metadata.
+#[derive(Debug, Clone)]
+pub struct ListChannelMessagesResult {
+    pub messages: Vec<ApiMessage>,
+    pub last_seen_message_id: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1632,7 +1635,7 @@ impl MezonTransport {
         message_id: i64,
         direction: i32,
         limit: u32,
-    ) -> Result<Vec<ApiMessage>> {
+    ) -> Result<ListChannelMessagesResult> {
         let cid = self.generate_cid();
 
         let api_name = "ListChannelMessages";
@@ -1652,8 +1655,9 @@ impl MezonTransport {
             return Err(anyhow::anyhow!("API error: code={}", code));
         }
 
-        let messages = api::ChannelMessageList::decode(response.as_slice())?;
-        let parsed: Vec<ApiMessage> = messages
+        let page = api::ChannelMessageList::decode(response.as_slice())?;
+        let last_seen_message_id = page.last_seen_message.as_ref().map(|h| h.id).unwrap_or(0);
+        let parsed: Vec<ApiMessage> = page
             .messages
             .into_iter()
             // Skip pure store-mutation / transient codes that are not renderable
@@ -1668,7 +1672,10 @@ impl MezonTransport {
             parsed.len(),
             response.len(),
         );
-        Ok(parsed)
+        Ok(ListChannelMessagesResult {
+            messages: parsed,
+            last_seen_message_id,
+        })
     }
 
     /// Send a message to a channel.
@@ -1695,6 +1702,42 @@ impl MezonTransport {
         let (code, _response) = self.send(cid, envelope.encode_to_vec()).await?;
         if code != 0 {
             anyhow::bail!("join_chat error: code={code}");
+        }
+        Ok(())
+    }
+
+    /// Report the user's read position (cf. React `writeLastSeenMessage`).
+    pub async fn write_last_seen_message(
+        &self,
+        clan_id: i64,
+        channel_id: i64,
+        message_id: i64,
+        mode: i32,
+        timestamp_seconds: u32,
+        badge_count: i32,
+    ) -> Result<()> {
+        let cid = self.generate_cid();
+        tracing::debug!(
+            target: "socket",
+            "realtime_send: action=LastSeenMessageEvent cid={} clan_id={clan_id} channel_id={channel_id} message_id={message_id}",
+            i32::from(cid)
+        );
+        let envelope = realtime::Envelope {
+            cid: i32::from(cid),
+            message: Some(realtime::envelope::Message::LastSeenMessageEvent(
+                realtime::LastSeenMessageEvent {
+                    clan_id,
+                    channel_id,
+                    message_id,
+                    mode,
+                    timestamp_seconds,
+                    badge_count,
+                },
+            )),
+        };
+        let (code, _response) = self.send(cid, envelope.encode_to_vec()).await?;
+        if code != 0 {
+            anyhow::bail!("write_last_seen_message error: code={code}");
         }
         Ok(())
     }
@@ -5974,7 +6017,7 @@ mod tests {
 
     #[async_trait::async_trait]
     impl TransportAdapter for MockAdapter {
-        async fn connect(&self, _host: &str, _port: Option<u16>, _token: &str) -> Result<()> {
+        async fn connect(&self, _host: &str, _port: u16, _token: &str) -> Result<()> {
             Ok(())
         }
         async fn send(&self, _message: Vec<u8>) -> Result<()> {
