@@ -68,6 +68,10 @@ run *args:
 watch:
     cargo watch -x run
 
+# Profile with Tracy (open Tracy 0.11.x GUI to connect; CPU + memory + frames)
+tracy:
+    cargo run --profile profiling --features tracy
+
 # Fast check for errors during development
 check:
     cargo clippy {{pkgs}} -- -D warnings
