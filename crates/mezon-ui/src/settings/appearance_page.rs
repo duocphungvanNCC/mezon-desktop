@@ -1,15 +1,35 @@
 use crate::components::primitives::{Icon, IconName, Label, h_flex, v_flex};
-use crate::theme::{ActiveTheme, Theme};
+use crate::theme::{ActiveTheme, Theme, resolve_theme, set_theme};
 use gpui::{Context, Entity, FontWeight, Rgba, Window, div, prelude::*, px};
 use mezon_store::Settings;
 
+const THEME_KEYS: &[&str] = &[
+    "dark",
+    "light",
+    "purple",
+    "abyss",
+    "red_dark",
+    "sunrise",
+    "sunset",
+    "cisher",
+    "berrynade",
+];
+
 pub struct AppearancePage {
     settings: Entity<Settings>,
+    swatch_colors: Vec<Rgba>,
 }
 
 impl AppearancePage {
     pub fn new(settings: Entity<Settings>, _cx: &mut Context<Self>) -> Self {
-        Self { settings }
+        let swatch_colors = THEME_KEYS
+            .iter()
+            .map(|k| resolve_theme(k).bg_primary)
+            .collect();
+        Self {
+            settings,
+            swatch_colors,
+        }
     }
 }
 
@@ -70,11 +90,17 @@ fn theme_swatch(
         .gap_2()
         .cursor_pointer()
         .on_click(move |_, _, cx| {
+            set_theme(resolve_theme(&key), cx);
             settings.update(cx, |s, cx| {
                 s.theme = key.clone();
-                s.save_sync();
                 cx.notify();
             });
+            let snapshot = settings.read(cx).clone();
+            cx.background_executor()
+                .spawn(async move {
+                    snapshot.save_sync();
+                })
+                .detach();
         })
         .child(
             div()
@@ -204,13 +230,10 @@ impl Render for AppearancePage {
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(theme.text_primary),
             )
-            .child(
-                h_flex()
-                    .flex_wrap()
-                    .gap(px(30.0))
-                    .children(themes.map(|(key, label)| {
-                        let is_selected = current_theme == key;
-                        let swatch_color = crate::theme::resolve_theme(key).bg_primary;
+            .child(h_flex().flex_wrap().gap(px(30.0)).children(
+                themes.iter().zip(self.swatch_colors.iter().copied()).map(
+                    |((key, label), swatch_color)| {
+                        let is_selected = current_theme == *key;
                         theme_swatch(
                             key.to_string(),
                             label.to_string(),
@@ -219,7 +242,8 @@ impl Render for AppearancePage {
                             theme,
                             settings.clone(),
                         )
-                    })),
-            )
+                    },
+                ),
+            ))
     }
 }

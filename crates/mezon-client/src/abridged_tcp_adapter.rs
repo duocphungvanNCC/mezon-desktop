@@ -1,11 +1,13 @@
 use crate::tls_crypto;
-use anyhow::Result;
+use crate::{resolve_connect_port, socket_connect_label};
+use anyhow::{Context as _, Result, bail};
+use base64::{Engine as _, engine::general_purpose::STANDARD as B64};
+use rand::Rng as _;
 use async_trait::async_trait;
 use prost::Message;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::{Mutex, mpsc, oneshot};
@@ -97,10 +99,12 @@ fn build_client_config() -> tokio_rustls::rustls::ClientConfig {
 const CODE_FIN: u16 = 0xff;
 const PREFIX_RAW: u8 = 0xff;
 const PREFIX_EXTENDED: u8 = 0x7f;
-const RAW_HEADER_LENGTH: usize = 7;
-const RAW_CHUNK_PAYLOAD_LEN: usize = 4096;
+const RAW_HEADER_LENGTH: usize = 11;
 const MAX_REALTIME_FRAME_LEN: usize = 1 << 20;
 const RESPONSE_CODE_TOO_LARGE: u32 = u16::MAX as u32;
+const WS_OPCODE_BINARY: u8 = 0x82;
+const LINK_ABRIDGED: u8 = 0;
+const LINK_WEBSOCKET: u8 = 1;
 
 fn read_varint(buf: &[u8]) -> Option<(u64, usize)> {
     let mut value = 0u64;
@@ -150,28 +154,6 @@ fn protobuf_message_len(buf: &[u8]) -> Option<usize> {
         pos = value_end;
     }
     Some(pos)
-}
-
-fn frame_is_valid_envelope(framed: &[u8]) -> bool {
-    match protobuf_message_len(framed) {
-        Some(len) => mezon_proto::realtime::Envelope::decode(&framed[..len]).is_ok(),
-        None => false,
-    }
-}
-
-fn envelope_prefix_plausible(payload: &[u8]) -> bool {
-    match read_varint(payload) {
-        None => true,
-        Some((tag, _)) => {
-            let field = tag >> 3;
-            let wire = tag & 7;
-            match field {
-                0 => false,
-                1 => wire == 0,
-                _ => wire == 2,
-            }
-        }
-    }
 }
 
 fn frame_kind(first: u8) -> &'static str {
@@ -257,7 +239,6 @@ struct IoLoopState {
     streams: Arc<Mutex<HashMap<u16, Vec<Vec<u8>>>>>,
     is_connected: Arc<AtomicBool>,
     read_buffer: Arc<Mutex<Vec<u8>>>,
-    pending_raw: Arc<Mutex<Option<Vec<u8>>>>,
 }
 
 pub struct AbridgedTcpAdapter {
@@ -265,6 +246,8 @@ pub struct AbridgedTcpAdapter {
     handlers: Arc<Mutex<AdapterHandlers>>,
     is_connected: Arc<AtomicBool>,
     io_task: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
+    /// [`LINK_ABRIDGED`] (dev TCP port) vs [`LINK_WEBSOCKET`] (prod WSS on 443).
+    link_mode: Arc<std::sync::atomic::AtomicU8>,
 }
 
 impl AbridgedTcpAdapter {
@@ -274,7 +257,143 @@ impl AbridgedTcpAdapter {
             handlers: Arc::new(Mutex::new(AdapterHandlers::default())),
             is_connected: Arc::new(AtomicBool::new(false)),
             io_task: Arc::new(Mutex::new(None)),
+            link_mode: Arc::new(std::sync::atomic::AtomicU8::new(LINK_ABRIDGED)),
         }
+    }
+
+    fn uses_websocket(&self) -> bool {
+        self.link_mode.load(Ordering::Acquire) == LINK_WEBSOCKET
+    }
+}
+
+enum Frame {
+    Ping(u16),
+    Raw {
+        cid: u16,
+        code: u32,
+        fin: bool,
+        payload: Vec<u8>,
+    },
+    Realtime(Vec<u8>),
+}
+
+enum FrameStep {
+    NeedMore,
+    Reset(&'static str),
+    Frame { consumed: usize, frame: Frame },
+}
+
+fn realtime_payload(framed: &[u8]) -> Vec<u8> {
+    let end = protobuf_message_len(framed).unwrap_or(framed.len());
+    framed[..end].to_vec()
+}
+
+fn decode_frame(buf: &[u8]) -> FrameStep {
+    let first = buf[0];
+    match first {
+        0x00 => {
+            if buf.len() < 3 {
+                return FrameStep::NeedMore;
+            }
+            let cid = u16::from_be_bytes([buf[1], buf[2]]);
+            FrameStep::Frame {
+                consumed: 3,
+                frame: Frame::Ping(cid),
+            }
+        }
+        PREFIX_RAW => {
+            if buf.len() < RAW_HEADER_LENGTH {
+                return FrameStep::NeedMore;
+            }
+            let cid = u16::from_be_bytes([buf[1], buf[2]]);
+            let code = u32::from_be_bytes([buf[3], buf[4], buf[5], buf[6]]);
+            let len = u32::from_be_bytes([buf[7], buf[8], buf[9], buf[10]]) as usize;
+            if len > MAX_REALTIME_FRAME_LEN {
+                return FrameStep::Reset("raw frame length too large");
+            }
+            let total = RAW_HEADER_LENGTH + len;
+            if buf.len() < total {
+                return FrameStep::NeedMore;
+            }
+            let response_code = (code >> 16) & 0xffff;
+            let fin = (code & 0xffff) as u16 == CODE_FIN;
+            FrameStep::Frame {
+                consumed: total,
+                frame: Frame::Raw {
+                    cid,
+                    code: response_code,
+                    fin,
+                    payload: buf[RAW_HEADER_LENGTH..total].to_vec(),
+                },
+            }
+        }
+        f if f < PREFIX_EXTENDED => {
+            let total = 1 + f as usize * 4;
+            if buf.len() < total {
+                return FrameStep::NeedMore;
+            }
+            FrameStep::Frame {
+                consumed: total,
+                frame: Frame::Realtime(realtime_payload(&buf[1..total])),
+            }
+        }
+        PREFIX_EXTENDED => {
+            if buf.len() < 4 {
+                return FrameStep::NeedMore;
+            }
+            let payload_len = u32::from_le_bytes([buf[1], buf[2], buf[3], 0]) as usize * 4;
+            if payload_len > MAX_REALTIME_FRAME_LEN {
+                return FrameStep::Reset("extended frame length too large");
+            }
+            let total = 4 + payload_len;
+            if buf.len() < total {
+                return FrameStep::NeedMore;
+            }
+            FrameStep::Frame {
+                consumed: total,
+                frame: Frame::Realtime(realtime_payload(&buf[4..total])),
+            }
+        }
+        0x82 => {
+            if buf.len() < 2 {
+                return FrameStep::NeedMore;
+            }
+            let b1 = buf[1];
+            if b1 & 0x80 != 0 {
+                return FrameStep::Reset("masked websocket frame");
+            }
+            let len7 = b1 as usize;
+            let (header, payload_len) = if len7 < 126 {
+                (2, len7)
+            } else if len7 == 126 {
+                if buf.len() < 4 {
+                    return FrameStep::NeedMore;
+                }
+                (4, u16::from_be_bytes([buf[2], buf[3]]) as usize)
+            } else {
+                if buf.len() < 10 {
+                    return FrameStep::NeedMore;
+                }
+                (
+                    10,
+                    u64::from_be_bytes([
+                        buf[2], buf[3], buf[4], buf[5], buf[6], buf[7], buf[8], buf[9],
+                    ]) as usize,
+                )
+            };
+            if payload_len > MAX_REALTIME_FRAME_LEN {
+                return FrameStep::Reset("websocket frame length too large");
+            }
+            let total = header + payload_len;
+            if buf.len() < total {
+                return FrameStep::NeedMore;
+            }
+            FrameStep::Frame {
+                consumed: total,
+                frame: Frame::Realtime(buf[header..total].to_vec()),
+            }
+        }
+        _ => FrameStep::Reset("unexpected lead byte"),
     }
 }
 
@@ -283,26 +402,6 @@ impl IoLoopState {
         if incoming.is_empty() {
             return Ok(());
         }
-
-        {
-            let mut pending = self.pending_raw.lock().await;
-            if let Some(header) = pending.take() {
-                if incoming[0] == PREFIX_RAW {
-                    let cid = u16::from_be_bytes([header[1], header[2]]);
-                    let code = u32::from_be_bytes([header[3], header[4], header[5], header[6]]);
-                    let response_code = (code >> 16) & 0xffff;
-                    let handlers = self.handlers.lock().await.clone();
-                    handlers.trigger_message(cid, response_code, vec![]);
-                } else {
-                    let mut combined = header;
-                    combined.extend(&incoming);
-                    drop(pending);
-                    self.read_buffer.lock().await.extend(combined);
-                    return self.process_raw_buffer().await;
-                }
-            }
-        }
-
         self.read_buffer.lock().await.extend(incoming);
         self.process_raw_buffer().await
     }
@@ -311,312 +410,89 @@ impl IoLoopState {
         let handlers = self.handlers.lock().await.clone();
 
         loop {
-            let msg_bytes = {
+            let frame = {
                 let mut buf = self.read_buffer.lock().await;
                 if buf.is_empty() {
                     return Ok(());
                 }
-
-                let first_byte = buf[0];
-                if first_byte == 0x00 {
-                    if buf.len() < 3 {
+                match decode_frame(&buf) {
+                    FrameStep::NeedMore => return Ok(()),
+                    FrameStep::Reset(reason) => {
+                        tracing::warn!("frame desync ({reason}), resetting read buffer");
+                        buf.clear();
+                        drop(buf);
+                        self.streams.lock().await.clear();
                         return Ok(());
                     }
-                    let msg = buf[..3].to_vec();
-                    buf.drain(..3);
-                    Some((msg, false))
-                } else if first_byte == PREFIX_RAW {
-                    if buf.len() < RAW_HEADER_LENGTH {
-                        return Ok(());
+                    FrameStep::Frame { consumed, frame } => {
+                        buf.drain(..consumed);
+                        frame
                     }
-                    let cid = u16::from_be_bytes([buf[1], buf[2]]);
-                    let code = u32::from_be_bytes([buf[3], buf[4], buf[5], buf[6]]);
-                    let response_code = (code >> 16) & 0xffff;
-                    let fin_flag = (code & 0xffff) as u16;
+                }
+            };
 
-                    if fin_flag != CODE_FIN {
-                        if buf.len() < RAW_HEADER_LENGTH + RAW_CHUNK_PAYLOAD_LEN {
-                            return Ok(());
-                        }
-                        let payload = buf
-                            [RAW_HEADER_LENGTH..RAW_HEADER_LENGTH + RAW_CHUNK_PAYLOAD_LEN]
-                            .to_vec();
-                        let buffered = {
+            match frame {
+                Frame::Ping(cid) => {
+                    tracing::trace!("PONG: cid={cid}");
+                    handlers.trigger_message(cid, 0, vec![]);
+                }
+                Frame::Raw {
+                    cid,
+                    code,
+                    fin,
+                    payload,
+                } => {
+                    if fin {
+                        let body = {
                             let mut streams = self.streams.lock().await;
-                            let chunks = streams.entry(cid).or_default();
-                            chunks.push(payload);
-                            chunks.iter().map(Vec::len).sum::<usize>()
+                            match streams.remove(&cid) {
+                                Some(chunks) => {
+                                    let mut combined: Vec<u8> = chunks.concat();
+                                    combined.extend_from_slice(&payload);
+                                    combined
+                                }
+                                None => payload,
+                            }
                         };
-                        if buffered > MAX_REALTIME_FRAME_LEN {
-                            tracing::warn!(
-                                "cid={cid} response {buffered} bytes exceeds {MAX_REALTIME_FRAME_LEN}-byte cap, failing request"
-                            );
-                            self.streams.lock().await.remove(&cid);
-                            handlers.trigger_message(cid, RESPONSE_CODE_TOO_LARGE, vec![]);
-                        }
-                        buf.drain(..RAW_HEADER_LENGTH + RAW_CHUNK_PAYLOAD_LEN);
-                        None
+                        tracing::debug!(
+                            "Complete API response: cid={cid} code={code} len={} bytes",
+                            body.len()
+                        );
+                        handlers.trigger_message(cid, code, body);
                     } else {
                         let mut streams = self.streams.lock().await;
-                        let prefix_len = streams
-                            .get(&cid)
-                            .map(|c| c.iter().map(Vec::len).sum::<usize>())
-                            .unwrap_or(0);
-                        if prefix_len == 0 {
+                        let chunks = streams.entry(cid).or_default();
+                        chunks.push(payload);
+                        let buffered: usize = chunks.iter().map(Vec::len).sum();
+                        if buffered > MAX_REALTIME_FRAME_LEN {
+                            streams.remove(&cid);
                             drop(streams);
-                            if buf.len() == RAW_HEADER_LENGTH {
-                                *self.pending_raw.lock().await = Some(buf.clone());
-                                buf.drain(..RAW_HEADER_LENGTH);
-                                let pending_raw = self.pending_raw.clone();
-                                let handlers = handlers.clone();
-                                tokio::spawn(async move {
-                                    tokio::time::sleep(Duration::from_millis(100)).await;
-                                    let mut pending = pending_raw.lock().await;
-                                    if let Some(header) = pending.take() {
-                                        let cid = u16::from_be_bytes([header[1], header[2]]);
-                                        let code = u32::from_be_bytes([
-                                            header[3], header[4], header[5], header[6],
-                                        ]);
-                                        let response_code = (code >> 16) & 0xffff;
-                                        handlers.trigger_message(cid, response_code, vec![]);
-                                    }
-                                });
-                                return Ok(());
-                            }
-                            let body_len = match protobuf_message_len(&buf[RAW_HEADER_LENGTH..]) {
-                                Some(n) => n,
-                                None => return Ok(()),
-                            };
-                            let total = RAW_HEADER_LENGTH + body_len;
-                            let msg = buf[..total].to_vec();
-                            buf.drain(..total);
-                            Some((msg, false))
-                        } else if let Some(chunks) = streams.get(&cid) {
-                            let mut combined = chunks.concat();
-                            combined.extend_from_slice(&buf[RAW_HEADER_LENGTH..]);
-                            match protobuf_message_len(&combined) {
-                                Some(total) if total >= prefix_len => {
-                                    let fin_bytes = total - prefix_len;
-                                    combined.truncate(total);
-                                    tracing::debug!(
-                                        "Complete API response (chunked): cid={cid} code={response_code} len={total} bytes"
-                                    );
-                                    handlers.trigger_message(cid, response_code, combined);
-                                    streams.remove(&cid);
-                                    drop(streams);
-                                    buf.drain(..RAW_HEADER_LENGTH + fin_bytes);
-                                    None
-                                }
-                                Some(_) => {
-                                    tracing::warn!(
-                                        "resync: cid={cid} chunked stream corrupt, dropping"
-                                    );
-                                    streams.remove(&cid);
-                                    drop(streams);
-                                    buf.drain(..1);
-                                    None
-                                }
-                                None => return Ok(()),
-                            }
-                        } else {
                             tracing::warn!(
-                                "chunked response missing stream for cid={cid}, dropping chunk"
+                                "cid={cid} response exceeds {MAX_REALTIME_FRAME_LEN}-byte cap, failing request"
                             );
-                            buf.drain(..RAW_HEADER_LENGTH);
-                            None
+                            handlers.trigger_message(cid, RESPONSE_CODE_TOO_LARGE, vec![]);
                         }
-                    }
-                } else if first_byte < 127 {
-                    let payload_len = first_byte as usize * 4;
-                    let total = 1 + payload_len;
-                    if buf.len() < total {
-                        if envelope_prefix_plausible(&buf[1..]) {
-                            return Ok(());
-                        }
-                        tracing::debug!("resync: implausible incomplete byte {first_byte:#x}");
-                        buf.drain(..1);
-                        None
-                    } else if frame_is_valid_envelope(&buf[1..total]) {
-                        let msg = buf[..total].to_vec();
-                        buf.drain(..total);
-                        Some((msg, false))
-                    } else {
-                        tracing::debug!("resync: skip misaligned byte {first_byte:#x}");
-                        buf.drain(..1);
-                        None
-                    }
-                } else if first_byte == PREFIX_EXTENDED {
-                    if buf.len() < 4 {
-                        return Ok(());
-                    }
-                    let payload_len = u32::from_le_bytes([buf[1], buf[2], buf[3], 0]) as usize * 4;
-                    let total = 4 + payload_len;
-                    if total > MAX_REALTIME_FRAME_LEN {
-                        tracing::debug!("resync: extended frame len {total} too large");
-                        buf.drain(..1);
-                        None
-                    } else if buf.len() < total {
-                        if envelope_prefix_plausible(&buf[4..]) {
-                            return Ok(());
-                        }
-                        tracing::debug!("resync: implausible incomplete extended frame");
-                        buf.drain(..1);
-                        None
-                    } else if frame_is_valid_envelope(&buf[4..total]) {
-                        let msg = buf[..total].to_vec();
-                        buf.drain(..total);
-                        Some((msg, false))
-                    } else {
-                        tracing::debug!("resync: skip misaligned extended byte");
-                        buf.drain(..1);
-                        None
-                    }
-                } else if first_byte == 0x82 {
-                    if buf.len() < 2 {
-                        return Ok(());
-                    }
-                    let b1 = buf[1];
-                    if b1 & 0x80 != 0 {
-                        tracing::debug!("resync: masked websocket frame, skipping byte");
-                        buf.drain(..1);
-                        None
-                    } else {
-                        let len7 = b1 as usize;
-                        let (header, payload_len) = if len7 < 126 {
-                            (2, len7)
-                        } else if len7 == 126 {
-                            if buf.len() < 4 {
-                                return Ok(());
-                            }
-                            (4, u16::from_be_bytes([buf[2], buf[3]]) as usize)
-                        } else {
-                            if buf.len() < 10 {
-                                return Ok(());
-                            }
-                            (
-                                10,
-                                u64::from_be_bytes([
-                                    buf[2], buf[3], buf[4], buf[5], buf[6], buf[7], buf[8], buf[9],
-                                ]) as usize,
-                            )
-                        };
-                        let total = header + payload_len;
-                        if payload_len > MAX_REALTIME_FRAME_LEN {
-                            tracing::debug!("resync: websocket frame len {payload_len} too large");
-                            buf.drain(..1);
-                            None
-                        } else if buf.len() < total {
-                            return Ok(());
-                        } else {
-                            let payload = buf[header..total].to_vec();
-                            buf.drain(..total);
-                            match mezon_proto::realtime::Envelope::decode(payload.as_slice()) {
-                                Ok(envelope) => {
-                                    tracing::trace!(
-                                        "ws-binary {} bytes -> Envelope cid={} {}",
-                                        payload.len(),
-                                        envelope.cid,
-                                        envelope_detail(&envelope)
-                                    );
-                                    match u16::try_from(envelope.cid) {
-                                        Ok(cid) => handlers.trigger_message(cid, 0, payload),
-                                        Err(_) => tracing::warn!(
-                                            "ws-binary envelope cid {} out of u16 range, dropping",
-                                            envelope.cid
-                                        ),
-                                    }
-                                }
-                                Err(e) => {
-                                    tracing::warn!(
-                                        "ws-binary {} bytes — decode failed: {e}",
-                                        payload.len()
-                                    )
-                                }
-                            }
-                            None
-                        }
-                    }
-                } else {
-                    tracing::warn!("Unexpected first byte: {:#x}, skipping", first_byte);
-                    buf.drain(..1);
-                    Some((vec![], true))
-                }
-            };
-
-            let (data, skipped) = match msg_bytes {
-                Some(v) => v,
-                None => continue,
-            };
-
-            if skipped {
-                continue;
-            }
-
-            tracing::trace!("process_message: {} bytes", data.len());
-
-            if data[0] == 0x00 {
-                let cid = u16::from_be_bytes([data[1], data[2]]);
-                tracing::trace!("PONG: cid={}", cid);
-                handlers.trigger_message(cid, 0, vec![]);
-                continue;
-            }
-
-            if data[0] == PREFIX_RAW {
-                let cid = u16::from_be_bytes([data[1], data[2]]);
-                let code = u32::from_be_bytes([data[3], data[4], data[5], data[6]]);
-                let response_code = (code >> 16) & 0xffff;
-                let payload = data[RAW_HEADER_LENGTH..].to_vec();
-                tracing::debug!(
-                    "Complete API response: cid={cid} code={response_code} len={} bytes",
-                    payload.len()
-                );
-                handlers.trigger_message(cid, response_code, payload);
-                continue;
-            }
-
-            let (header_size, payload_length) = if data[0] < 127 {
-                tracing::trace!(
-                    "Standard msg: 1-byte header ({}*4={}bytes)",
-                    data[0],
-                    data[0] as usize * 4
-                );
-                (1, data[0] as usize * 4)
-            } else {
-                let len = u32::from_le_bytes([data[1], data[2], data[3], 0]) as usize * 4;
-                tracing::trace!("Extended msg: len={}", len);
-                (4, len)
-            };
-
-            let framed = &data[header_size..header_size + payload_length];
-            let Some(payload_end) = protobuf_message_len(framed) else {
-                tracing::warn!("realtime frame: undecodable protobuf length, dropping frame");
-                continue;
-            };
-            let payload = &framed[..payload_end];
-            tracing::trace!(
-                "Std msg payload: {} bytes (framed {}) {:02x?}",
-                payload.len(),
-                framed.len(),
-                &payload[..payload.len().min(48)]
-            );
-
-            if let Ok(envelope) = mezon_proto::realtime::Envelope::decode(payload) {
-                tracing::trace!(
-                    "abridged -> Envelope cid={} {}",
-                    envelope.cid,
-                    envelope_detail(&envelope)
-                );
-                match u16::try_from(envelope.cid) {
-                    Ok(cid) => handlers.trigger_message(cid, 0, payload.to_vec()),
-                    Err(_) => {
-                        tracing::warn!("envelope cid {} out of u16 range, dropping", envelope.cid)
                     }
                 }
-            } else if let Some(cid) = decode_cid_field(payload) {
-                tracing::warn!("Failed to decode Envelope, passing raw cid={cid}");
-                handlers.trigger_message(cid, 0, payload.to_vec());
-            } else {
-                tracing::warn!("Failed to decode Envelope and could not extract cid");
+                Frame::Realtime(payload) => {
+                    match mezon_proto::realtime::Envelope::decode(payload.as_slice()) {
+                        Ok(envelope) => {
+                            tracing::trace!(
+                                "realtime -> Envelope cid={} {}",
+                                envelope.cid,
+                                envelope_detail(&envelope)
+                            );
+                            match u16::try_from(envelope.cid) {
+                                Ok(cid) => handlers.trigger_message(cid, 0, payload),
+                                Err(_) => tracing::warn!(
+                                    "envelope cid {} out of u16 range, dropping",
+                                    envelope.cid
+                                ),
+                            }
+                        }
+                        Err(e) => tracing::warn!("realtime frame decode failed: {e}"),
+                    }
+                }
             }
         }
     }
@@ -732,25 +608,105 @@ impl AbridgedTcpAdapter {
     }
 }
 
-fn decode_cid_field(payload: &[u8]) -> Option<u16> {
-    if payload.first().copied()? != 0x08 {
-        return None;
+fn build_ws_handshake_request(host: &str, token: &str) -> Result<String> {
+    let ws_key = B64.encode(rand::rng().random::<[u8; 16]>());
+    let mut url =
+        url::Url::parse(&format!("https://{host}/")).context("invalid WebSocket host")?;
+    {
+        let mut pairs = url.query_pairs_mut();
+        pairs.clear();
+        pairs.append_pair("lang", "en");
+        pairs.append_pair("status", "true");
+        pairs.append_pair("token", token);
+    }
+    let path = match url.query() {
+        Some(query) => format!("{}?{query}", url.path()),
+        None => url.path().to_string(),
+    };
+    Ok(format!(
+        "GET {path} HTTP/1.1\r\n\
+         Host: {host}\r\n\
+         Upgrade: websocket\r\n\
+         Connection: Upgrade\r\n\
+         Sec-WebSocket-Version: 13\r\n\
+         Sec-WebSocket-Key: {ws_key}\r\n\
+         \r\n"
+    ))
+}
+
+async fn perform_ws_upgrade(tls: &mut TlsStream, host: &str, token: &str) -> Result<()> {
+    let request = build_ws_handshake_request(host, token)?;
+    tracing::debug!("WebSocket upgrade request:\n{request}");
+    tls.write_all(request.as_bytes())
+        .await
+        .context("WebSocket upgrade write failed")?;
+    tls.flush().await.context("WebSocket upgrade flush failed")?;
+
+    let mut buf = Vec::new();
+    let mut tmp = [0u8; 4096];
+    loop {
+        let n = tls
+            .read(&mut tmp)
+            .await
+            .context("WebSocket upgrade read failed")?;
+        if n == 0 {
+            bail!("EOF during WebSocket upgrade");
+        }
+        buf.extend_from_slice(&tmp[..n]);
+        if buf.windows(4).any(|window| window == b"\r\n\r\n") {
+            break;
+        }
+        if buf.len() > 16_384 {
+            bail!("WebSocket upgrade response too large");
+        }
     }
 
-    let mut value = 0u32;
-    let mut shift = 0;
-    for byte in payload.iter().copied().skip(1) {
-        value |= u32::from(byte & 0x7f) << shift;
-        if byte & 0x80 == 0 {
-            return u16::try_from(value).ok();
-        }
-        shift += 7;
-        if shift >= 16 {
-            return None;
-        }
+    let response = String::from_utf8_lossy(&buf);
+    let status_line = response.lines().next().unwrap_or_default();
+    if !status_line.contains("101") {
+        bail!(
+            "WebSocket upgrade failed (expected 101): {}",
+            status_line.trim()
+        );
     }
+    tracing::debug!("WebSocket upgrade OK: {}", status_line.trim());
+    Ok(())
+}
 
-    None
+fn ws_binary_frame(payload: &[u8]) -> Vec<u8> {
+    let len = payload.len();
+    let mut frame = Vec::with_capacity(2 + len.min(8) + len);
+    frame.push(WS_OPCODE_BINARY);
+    if len < 126 {
+        frame.push(len as u8);
+    } else if len < 65_536 {
+        frame.push(126);
+        frame.extend_from_slice(&(len as u16).to_be_bytes());
+    } else {
+        frame.push(127);
+        frame.extend_from_slice(&(len as u64).to_be_bytes());
+    }
+    frame.extend_from_slice(payload);
+    frame
+}
+
+fn build_abridged_packet(message: &[u8]) -> Vec<u8> {
+    let padding_needed = (4 - (message.len() % 4)) % 4;
+    let mut final_payload = message.to_vec();
+    final_payload.extend(vec![0u8; padding_needed]);
+
+    let len_div4 = final_payload.len() / 4;
+    let header = if len_div4 < 127 {
+        vec![len_div4 as u8]
+    } else {
+        let mut h = vec![PREFIX_EXTENDED, 0, 0, 0];
+        h[1..4].copy_from_slice(&(len_div4 as u32).to_le_bytes()[..3]);
+        h
+    };
+
+    let mut packet = header;
+    packet.extend(&final_payload);
+    packet
 }
 
 fn frame_handshake(token: &str) -> Vec<u8> {
@@ -776,16 +732,40 @@ impl Default for AbridgedTcpAdapter {
     }
 }
 
+fn resolve_tls_handshake<T>(
+    outcome: std::result::Result<std::io::Result<T>, tokio::time::error::Elapsed>,
+) -> Result<T> {
+    match outcome {
+        Ok(Ok(stream)) => Ok(stream),
+        Ok(Err(e)) => Err(anyhow::anyhow!("TLS handshake failed: {e}")),
+        Err(_) => Err(anyhow::anyhow!("TLS handshake timed out after 15s")),
+    }
+}
+
 #[async_trait]
 impl TransportAdapter for AbridgedTcpAdapter {
-    async fn connect(&self, host: &str, port: u16, token: &str) -> Result<()> {
-        tracing::info!("=== CONNECT START: {}:{} ===", host, port);
+    async fn connect(&self, host: &str, port: Option<u16>, token: &str) -> Result<()> {
+        let use_websocket = port.is_none();
+        self.link_mode.store(
+            if use_websocket {
+                LINK_WEBSOCKET
+            } else {
+                LINK_ABRIDGED
+            },
+            Ordering::Release,
+        );
+
+        tracing::info!(
+            "=== CONNECT START: {} ===",
+            socket_connect_label(host, port)
+        );
 
         let config = build_client_config();
         let connector = tokio_rustls::TlsConnector::from(Arc::new(config));
 
-        let addr = format!("{}:{}", host, port);
-        tracing::debug!("TCP connecting...");
+        let connect_port = resolve_connect_port(port);
+        let addr = format!("{host}:{connect_port}");
+        tracing::debug!("TCP connecting to {addr}...");
         let tcp = tokio::time::timeout(
             std::time::Duration::from_secs(15),
             TcpStream::connect(&addr),
@@ -802,11 +782,18 @@ impl TransportAdapter for AbridgedTcpAdapter {
             .map_err(|e| anyhow::anyhow!("Invalid DNS name: {e}"))?;
 
         tracing::debug!("Starting TLS handshake...");
-        let tls = connector
-            .connect(domain, tcp)
-            .await
-            .map_err(|e| anyhow::anyhow!("TLS handshake failed: {e}"))?;
+        let mut tls = resolve_tls_handshake(
+            tokio::time::timeout(
+                std::time::Duration::from_secs(15),
+                connector.connect(domain, tcp),
+            )
+            .await,
+        )?;
         tracing::debug!("TLS handshake complete");
+
+        if use_websocket {
+            perform_ws_upgrade(&mut tls, host, token).await?;
+        }
 
         let (ready_tx, ready_rx) = oneshot::channel();
         let (write_tx, write_rx) = mpsc::unbounded_channel();
@@ -815,7 +802,6 @@ impl TransportAdapter for AbridgedTcpAdapter {
             streams: Arc::new(Mutex::new(HashMap::new())),
             is_connected: self.is_connected.clone(),
             read_buffer: Arc::new(Mutex::new(Vec::new())),
-            pending_raw: Arc::new(Mutex::new(None)),
         };
 
         let previous = self.io_task.lock().await.take();
@@ -836,13 +822,15 @@ impl TransportAdapter for AbridgedTcpAdapter {
         tracing::info!("I/O loop confirmed READY");
         *self.io_task.lock().await = Some(task);
 
-        let handshake = frame_handshake(token);
-
-        tracing::debug!("Sending handshake");
-        write_tx
-            .send(handshake)
-            .map_err(|_| anyhow::anyhow!("Write channel closed early"))?;
-        tracing::debug!("Handshake queued via mpsc channel");
+        if !use_websocket {
+            let handshake = frame_handshake(token);
+            tracing::debug!("Sending abridged TCP handshake");
+            write_tx
+                .send(handshake)
+                .map_err(|_| anyhow::anyhow!("Write channel closed early"))?;
+        } else {
+            tracing::debug!("WebSocket auth via query token — no abridged handshake");
+        }
 
         *self.write_tx.lock().await = Some(write_tx);
         self.is_connected.store(true, Ordering::Release);
@@ -879,30 +867,18 @@ impl TransportAdapter for AbridgedTcpAdapter {
         }
         tracing::trace!("Connection is open");
 
-        let padding_needed = (4 - (message.len() % 4)) % 4;
-        let mut final_payload = message;
-        final_payload.extend(vec![0u8; padding_needed]);
-        tracing::trace!(
-            "Padded to {} bytes (+{} padding)",
-            final_payload.len(),
-            padding_needed
-        );
-
-        let len_div4 = final_payload.len() / 4;
-        let header = if len_div4 < 127 {
-            tracing::trace!("Abridged header: 1-byte ({})", len_div4);
-            vec![len_div4 as u8]
+        let packet = if self.uses_websocket() {
+            ws_binary_frame(&message)
         } else {
-            let mut h = vec![PREFIX_EXTENDED, 0, 0, 0];
-            h[1..4].copy_from_slice(&(len_div4 as u32).to_le_bytes()[..3]);
-            tracing::trace!("Abridged header: 4-byte extended ({})", len_div4);
-            h
+            build_abridged_packet(&message)
         };
-
-        let mut packet = header;
-        packet.extend(&final_payload);
         tracing::trace!(
-            "Full abridged packet: {} bytes {:02x?}",
+            "Outbound {} frame: {} bytes {:02x?}",
+            if self.uses_websocket() {
+                "WebSocket"
+            } else {
+                "abridged"
+            },
             packet.len(),
             &packet[..packet.len().min(64)]
         );
@@ -930,11 +906,16 @@ impl TransportAdapter for AbridgedTcpAdapter {
             return Err(anyhow::anyhow!("Connection is not open"));
         }
         let mut buffer = vec![0x00];
-        buffer.extend(&cid.to_be_bytes());
+        buffer.extend_from_slice(&cid.to_be_bytes());
+        let packet = if self.uses_websocket() {
+            ws_binary_frame(&buffer)
+        } else {
+            buffer
+        };
         let guard = self.write_tx.lock().await;
         match *guard {
             Some(ref tx) => tx
-                .send(buffer)
+                .send(packet)
                 .map_err(|_| anyhow::anyhow!("Write channel closed"))?,
             None => return Err(anyhow::anyhow!("Write channel not available")),
         }
@@ -973,6 +954,31 @@ impl TransportAdapter for AbridgedTcpAdapter {
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn tls_handshake_timeout_maps_to_error() {
+        let elapsed = tokio::time::timeout(
+            std::time::Duration::from_millis(1),
+            std::future::pending::<std::io::Result<()>>(),
+        )
+        .await
+        .expect_err("future should time out");
+        let err = resolve_tls_handshake::<()>(Err(elapsed)).expect_err("should be an error");
+        assert!(err.to_string().contains("timed out after 15s"));
+    }
+
+    #[test]
+    fn tls_handshake_io_error_maps_to_error() {
+        let io_err = std::io::Error::new(std::io::ErrorKind::ConnectionReset, "reset");
+        let err = resolve_tls_handshake::<()>(Ok(Err(io_err))).expect_err("should be an error");
+        assert!(err.to_string().contains("TLS handshake failed"));
+    }
+
+    #[test]
+    fn tls_handshake_success_passes_through() {
+        let stream = resolve_tls_handshake::<u8>(Ok(Ok(7))).expect("should pass through");
+        assert_eq!(stream, 7);
+    }
+
     #[test]
     fn delimits_ack_body_before_next_frame() {
         let stream = [
@@ -1006,43 +1012,6 @@ mod tests {
     }
 
     #[test]
-    fn accepts_real_envelope_frame() {
-        let envelope = mezon_proto::realtime::Envelope {
-            cid: 5,
-            ..Default::default()
-        };
-        let mut bytes = Vec::new();
-        envelope.encode(&mut bytes).unwrap();
-        assert!(frame_is_valid_envelope(&bytes));
-    }
-
-    #[test]
-    fn rejects_misaligned_frame() {
-        let blob = [
-            0x18, 0x80, 0xa0, 0x80, 0xca, 0xa5, 0xcb, 0x89, 0xad, 0x19, 0x20, 0x02,
-        ];
-        assert!(!frame_is_valid_envelope(&blob));
-    }
-
-    #[test]
-    fn prefix_plausible_for_envelope_fields() {
-        assert!(envelope_prefix_plausible(&[0x32, 0x56, 0x08]));
-        assert!(envelope_prefix_plausible(&[0x08, 0x05]));
-        assert!(envelope_prefix_plausible(&[0xc2, 0x01, 0x2a]));
-    }
-
-    #[test]
-    fn prefix_implausible_for_misaligned_data() {
-        assert!(!envelope_prefix_plausible(&[0x18, 0x80, 0xa0]));
-        assert!(!envelope_prefix_plausible(&[0x1c, 0x10, 0x80]));
-    }
-
-    #[test]
-    fn prefix_plausible_when_empty() {
-        assert!(envelope_prefix_plausible(&[]));
-    }
-
-    #[test]
     fn caps_absurd_field_length() {
         let stream = [0x0a, 0xff, 0xff, 0xff, 0xff, 0x0f, 0x00, 0x00];
         assert_eq!(protobuf_message_len(&stream), Some(0));
@@ -1059,6 +1028,7 @@ mod tests {
         let mut frame = vec![PREFIX_RAW];
         frame.extend_from_slice(&cid.to_be_bytes());
         frame.extend_from_slice(&code.to_be_bytes());
+        frame.extend_from_slice(&(payload.len() as u32).to_be_bytes());
         frame.extend_from_slice(payload);
         frame
     }
@@ -1090,7 +1060,6 @@ mod tests {
             streams: Arc::new(Mutex::new(HashMap::new())),
             is_connected: Arc::new(AtomicBool::new(true)),
             read_buffer: Arc::new(Mutex::new(Vec::new())),
-            pending_raw: Arc::new(Mutex::new(None)),
         };
         (state, received)
     }
@@ -1098,19 +1067,17 @@ mod tests {
     #[tokio::test]
     async fn reassembles_chunked_api_response_split_across_frames() {
         let body = channel_messages_body(6000);
-        assert!(body.len() > RAW_CHUNK_PAYLOAD_LEN);
+        let chunk = 4096;
+        assert!(body.len() > chunk);
 
         let (state, received) = captured_state();
 
-        // Mirror the real capture: each 7-byte header and its payload arrive in
-        // separate TCP reads (chunk header, chunk payload, then the final frame).
-        state.handle_data(raw_frame(6, false, &[])).await.unwrap();
         state
-            .handle_data(body[..RAW_CHUNK_PAYLOAD_LEN].to_vec())
+            .handle_data(raw_frame(6, false, &body[..chunk]))
             .await
             .unwrap();
         state
-            .handle_data(raw_frame(6, true, &body[RAW_CHUNK_PAYLOAD_LEN..]))
+            .handle_data(raw_frame(6, true, &body[chunk..]))
             .await
             .unwrap();
 
@@ -1125,7 +1092,6 @@ mod tests {
     #[tokio::test]
     async fn delivers_single_frame_api_response() {
         let body = channel_messages_body(16);
-        assert!(body.len() < RAW_CHUNK_PAYLOAD_LEN);
 
         let (state, received) = captured_state();
 
@@ -1138,19 +1104,36 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn reassembles_fin_response_split_from_header() {
-        let body = channel_messages_body(16);
-        assert!(body.len() < RAW_CHUNK_PAYLOAD_LEN);
+    async fn raw_frame_split_header_and_payload_across_reads() {
+        let body = channel_messages_body(64);
+        let frame = raw_frame(8, true, &body);
 
         let (state, received) = captured_state();
 
-        state.handle_data(raw_frame(8, true, &[])).await.unwrap();
-        state.handle_data(body.clone()).await.unwrap();
+        state.handle_data(frame[..5].to_vec()).await.unwrap();
+        assert!(received.lock().unwrap().is_empty());
+        state.handle_data(frame[5..].to_vec()).await.unwrap();
 
         let received = received.lock().unwrap();
         assert_eq!(received.len(), 1);
         assert_eq!(received[0].0, 8);
         assert_eq!(received[0].2, body);
+    }
+
+    #[test]
+    fn ws_binary_frame_short_payload() {
+        let frame = ws_binary_frame(b"abc");
+        assert_eq!(frame, vec![0x82, 3, b'a', b'b', b'c']);
+    }
+
+    #[test]
+    fn ws_handshake_request_includes_ws_path_and_token() {
+        let req = build_ws_handshake_request("sock.mezon.ai", "tok/en+test").unwrap();
+        assert!(req.starts_with("GET /?"));
+        assert!(!req.starts_with("GET /ws"));
+        assert!(req.contains("Host: sock.mezon.ai"));
+        assert!(req.contains("Upgrade: websocket"));
+        assert!(req.contains("token=tok%2Fen%2Btest") || req.contains("token=tok/en+test"));
     }
 
     #[test]
@@ -1170,5 +1153,36 @@ mod tests {
         let len_div4 = u32::from_le_bytes([frame[2], frame[3], frame[4], 0]) as usize;
         assert_eq!(len_div4, 150);
         assert_eq!(frame.len(), 5 + 600);
+    }
+
+    #[tokio::test]
+    async fn empty_response_delivered_immediately() {
+        let (state, received) = captured_state();
+
+        state.handle_data(raw_frame(9, true, &[])).await.unwrap();
+
+        let received = received.lock().unwrap();
+        assert_eq!(received.len(), 1);
+        assert_eq!(received[0].0, 9);
+        assert_eq!(received[0].2, Vec::<u8>::new());
+    }
+
+    #[tokio::test]
+    async fn concurrent_responses_route_by_cid() {
+        let (state, received) = captured_state();
+
+        let a = channel_messages_body(16);
+        let b = channel_messages_body(32);
+        let mut burst = raw_frame(20, true, &a);
+        burst.extend_from_slice(&raw_frame(21, true, &[]));
+        burst.extend_from_slice(&raw_frame(22, true, &b));
+        state.handle_data(burst).await.unwrap();
+
+        let received = received.lock().unwrap();
+        let by: std::collections::HashMap<u16, Vec<u8>> =
+            received.iter().map(|m| (m.0, m.2.clone())).collect();
+        assert_eq!(by.get(&20), Some(&a));
+        assert_eq!(by.get(&21), Some(&Vec::<u8>::new()));
+        assert_eq!(by.get(&22), Some(&b));
     }
 }

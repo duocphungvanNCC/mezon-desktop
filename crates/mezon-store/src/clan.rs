@@ -1,3 +1,4 @@
+use crate::ids::{ChannelId, ClanId};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -9,23 +10,28 @@ use crate::realtime::{RealtimeDispatch, RealtimeKind};
 
 #[derive(Debug, Clone)]
 pub struct Clan {
-    pub id: String,
+    pub id: ClanId,
     pub name: String,
     pub avatar_url: Option<String>,
     pub banner_url: Option<String>,
     pub badge_count: u32,
     pub has_unread: bool,
     pub muted: bool,
-    pub welcome_channel_id: Option<String>,
+    pub welcome_channel_id: Option<ChannelId>,
+    pub status: i32,
+    pub is_onboarding: bool,
+    pub is_community: bool,
+    pub prevent_anonymous: bool,
 }
 
 impl From<ApiClanDesc> for Clan {
     fn from(c: ApiClanDesc) -> Self {
         let avatar_url = (!c.logo.is_empty()).then_some(c.logo);
         let banner_url = (!c.banner.is_empty()).then_some(c.banner);
-        let welcome_channel_id = (!c.welcome_channel_id.is_empty()).then_some(c.welcome_channel_id);
+        let welcome_channel_id =
+            (c.welcome_channel_id != 0).then_some(ChannelId(c.welcome_channel_id));
         Self {
-            id: c.clan_id,
+            id: ClanId(c.clan_id),
             name: c.clan_name,
             avatar_url,
             banner_url,
@@ -33,6 +39,10 @@ impl From<ApiClanDesc> for Clan {
             has_unread: false,
             muted: false,
             welcome_channel_id,
+            status: 0,
+            is_onboarding: false,
+            is_community: false,
+            prevent_anonymous: false,
         }
     }
 }
@@ -42,9 +52,9 @@ impl From<ApiClanDesc> for Clan {
 #[derive(Debug, Clone)]
 pub enum ClanEvent {
     /// The active clan changed (or was cleared).
-    ActiveClanChanged(Option<String>),
+    ActiveClanChanged(Option<ClanId>),
     /// A clan was removed (server push).
-    Deleted(String),
+    Deleted(ClanId),
 }
 
 /// Clan store — owns the clan list, fetches it over REST, and self-subscribes to realtime
@@ -55,8 +65,9 @@ pub enum ClanEvent {
 /// pushes in `handle_event`, holding its subscription `Task` so it cancels on drop.
 pub struct ClanList {
     pub clans: Vec<Clan>,
-    pub active_clan_id: Option<String>,
+    pub active_clan_id: Option<ClanId>,
     api: Arc<AppApi>,
+    loading: bool,
     _connection_watch: Task<()>,
 }
 
@@ -90,6 +101,7 @@ impl ClanList {
             clans: Vec::new(),
             active_clan_id: None,
             api,
+            loading: false,
             _connection_watch: connection_watch,
         }
     }
@@ -102,8 +114,6 @@ impl ClanList {
                 RealtimeKind::ClanDeleted,
                 RealtimeKind::AddClanUser,
                 RealtimeKind::UserClanRemoved,
-                RealtimeKind::ChannelMessage,
-                RealtimeKind::MarkAsRead,
             ] {
                 dispatch.on(kind, &entity, |this, event, cx| {
                     this.handle_event(event, cx)
@@ -140,6 +150,10 @@ impl ClanList {
     }
 
     pub fn reload(&mut self, cx: &mut Context<Self>) {
+        if self.loading {
+            return;
+        }
+        self.loading = true;
         let api = self.api.clone();
         cx.spawn(async move |this, cx| {
             let (clans_result, badges_result) =
@@ -148,6 +162,9 @@ impl ClanList {
                 Ok(c) => c,
                 Err(e) => {
                     tracing::error!("Failed to load clans: {e}");
+                    let _ = this.update(cx, |this, _| {
+                        this.loading = false;
+                    });
                     return;
                 }
             };
@@ -163,14 +180,20 @@ impl ClanList {
                 .into_iter()
                 .map(|c| {
                     let mut clan = Clan::from(c);
-                    if let Some(&(badge, has_unread)) = badge_map.get(&clan.id) {
+                    if let Some(&(badge, has_unread)) = badge_map.get(&clan.id.to_string()) {
                         clan.badge_count = badge.max(0) as u32;
                         clan.has_unread = has_unread;
                     }
                     clan
                 })
                 .collect();
-            let _ = this.update(cx, |this, cx| this.update_clans(mapped, cx));
+            let _ = this.update(cx, |this, cx| {
+                this.loading = false;
+                this.update_clans(mapped, cx);
+                if let Some(clan_id) = this.active_clan_id {
+                    this.fire_join_clan_chat(clan_id, cx);
+                }
+            });
         })
         .detach();
     }
@@ -179,14 +202,14 @@ impl ClanList {
     fn handle_event(&mut self, event: &RealtimeEvent, cx: &mut Context<Self>) {
         match event {
             RealtimeEvent::ClanDeleted(e) => {
-                let id = e.clan_id.to_string();
+                let id = ClanId(e.clan_id);
                 let before = self.clans.len();
                 self.clans.retain(|c| c.id != id);
                 if self.clans.len() != before {
-                    cx.emit(ClanEvent::Deleted(id.clone()));
-                    if self.active_clan_id.as_deref() == Some(id.as_str()) {
-                        let next = self.clans.first().map(|c| c.id.clone());
-                        self.active_clan_id = next.clone();
+                    cx.emit(ClanEvent::Deleted(id));
+                    if self.active_clan_id == Some(id) {
+                        let next = self.clans.first().map(|c| c.id);
+                        self.active_clan_id = next;
                         cx.emit(ClanEvent::ActiveClanChanged(next));
                     }
                     cx.notify();
@@ -194,52 +217,39 @@ impl ClanList {
             }
             RealtimeEvent::ClanUpdated(e) => {
                 let name = (!e.clan_name.is_empty()).then_some(e.clan_name.clone());
-                if update_clan(
-                    &mut self.clans,
-                    &e.clan_id.to_string(),
+                let welcome_channel_id =
+                    (e.welcome_channel_id != 0).then_some(ChannelId(e.welcome_channel_id));
+                let update = ClanUpdate {
                     name,
-                    e.logo.clone(),
-                ) {
+                    logo: e.logo.clone(),
+                    banner: e.banner.clone(),
+                    welcome_channel_id,
+                    status: e.status,
+                    is_onboarding: e.is_onboarding,
+                    is_community: e.is_community,
+                    prevent_anonymous: e.prevent_anonymous,
+                };
+                if update_clan(&mut self.clans, ClanId(e.clan_id), update) {
                     cx.notify();
                 }
             }
             RealtimeEvent::AddClanUser(e) => {
-                let id = e.clan_id.to_string();
+                let id = ClanId(e.clan_id);
                 if !self.clans.iter().any(|c| c.id == id) {
                     self.reload(cx);
                 }
             }
             RealtimeEvent::UserClanRemoved(e) => {
-                let id = e.clan_id.to_string();
+                let id = ClanId(e.clan_id);
                 let before = self.clans.len();
                 self.clans.retain(|c| c.id != id);
                 if self.clans.len() != before {
-                    cx.emit(ClanEvent::Deleted(id.clone()));
-                    if self.active_clan_id.as_deref() == Some(id.as_str()) {
-                        let next = self.clans.first().map(|c| c.id.clone());
-                        self.active_clan_id = next.clone();
+                    cx.emit(ClanEvent::Deleted(id));
+                    if self.active_clan_id == Some(id) {
+                        let next = self.clans.first().map(|c| c.id);
+                        self.active_clan_id = next;
                         cx.emit(ClanEvent::ActiveClanChanged(next));
                     }
-                    cx.notify();
-                }
-            }
-            RealtimeEvent::ChannelMessage(m) => {
-                let clan_id = m.clan_id.to_string();
-                if let Some(clan) = self.clans.iter_mut().find(|c| c.id == clan_id)
-                    && !clan.muted
-                {
-                    clan.badge_count = clan.badge_count.saturating_add(1);
-                    clan.has_unread = true;
-                    cx.notify();
-                }
-            }
-            RealtimeEvent::MarkAsRead(m) => {
-                let clan_id = m.clan_id.to_string();
-                if let Some(clan) = self.clans.iter_mut().find(|c| c.id == clan_id)
-                    && (clan.badge_count > 0 || clan.has_unread)
-                {
-                    clan.badge_count = 0;
-                    clan.has_unread = false;
                     cx.notify();
                 }
             }
@@ -247,50 +257,93 @@ impl ClanList {
         }
     }
 
+    pub fn note_channel_message(
+        &mut self,
+        clan_id: ClanId,
+        is_mention: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(clan) = self.clans.iter_mut().find(|c| c.id == clan_id)
+            && !clan.muted
+        {
+            let was_unread = clan.has_unread;
+            let was_badge_zero = clan.badge_count == 0;
+            clan.has_unread = true;
+            if is_mention {
+                clan.badge_count = clan.badge_count.saturating_add(1);
+            }
+            if !was_unread || was_badge_zero != (clan.badge_count == 0) {
+                cx.notify();
+            }
+        }
+    }
+
+    pub fn apply_badge_read(&mut self, clan_id: ClanId, cx: &mut Context<Self>) {
+        if let Some(clan) = self.clans.iter_mut().find(|c| c.id == clan_id)
+            && (clan.badge_count > 0 || clan.has_unread)
+        {
+            clan.badge_count = 0;
+            clan.has_unread = false;
+            cx.notify();
+        }
+    }
+
     pub fn active_clan(&self) -> Option<&Clan> {
         self.active_clan_id
             .as_ref()
-            .and_then(|id| self.clans.iter().find(|c| &c.id == id))
+            .and_then(|id| self.clans.iter().find(|c| c.id == *id))
     }
 
     pub fn active_clan_banner(&self) -> Option<&str> {
         self.active_clan().and_then(|c| c.banner_url.as_deref())
     }
 
-    pub fn is_active_clan(&self, clan_id: &str) -> bool {
-        self.active_clan_id.as_deref() == Some(clan_id)
+    pub fn is_active_clan(&self, clan_id: ClanId) -> bool {
+        self.active_clan_id == Some(clan_id)
     }
 
-    pub fn welcome_channel_id(&self, clan_id: &str) -> Option<String> {
+    pub fn welcome_channel_id(&self, clan_id: ClanId) -> Option<ChannelId> {
         self.clans
             .iter()
             .find(|c| c.id == clan_id)
-            .and_then(|c| c.welcome_channel_id.clone())
+            .and_then(|c| c.welcome_channel_id)
     }
 
-    pub fn select_clan(&mut self, id: &str, cx: &mut Context<Self>) {
-        if self.active_clan_id.as_deref() == Some(id) {
+    fn fire_join_clan_chat(&self, clan_id: ClanId, cx: &mut Context<Self>) {
+        let api = self.api.clone();
+        let id = clan_id.get();
+        cx.spawn(async move |_, _| {
+            if let Err(e) = api.join_clan_chat(id).await {
+                tracing::error!("join_clan_chat failed for clan {id}: {e}");
+            }
+        })
+        .detach();
+    }
+
+    pub fn select_clan(&mut self, id: ClanId, cx: &mut Context<Self>) {
+        if self.active_clan_id == Some(id) {
             return;
         }
-        self.active_clan_id = Some(id.to_string());
-        cx.emit(ClanEvent::ActiveClanChanged(self.active_clan_id.clone()));
+        self.active_clan_id = Some(id);
+        self.fire_join_clan_chat(id, cx);
+        cx.emit(ClanEvent::ActiveClanChanged(self.active_clan_id));
         cx.notify();
     }
 
     pub fn update_clans(&mut self, clans: Vec<Clan>, cx: &mut Context<Self>) {
-        let prev_active = self.active_clan_id.clone();
+        let prev_active = self.active_clan_id;
         self.clans = clans;
         if !self.clans.is_empty() {
             let active_still_valid = self
                 .active_clan_id
                 .as_ref()
-                .is_some_and(|id| self.clans.iter().any(|c| &c.id == id));
+                .is_some_and(|id| self.clans.iter().any(|c| c.id == *id));
             if !active_still_valid {
-                self.active_clan_id = Some(self.clans[0].id.clone());
+                self.active_clan_id = Some(self.clans[0].id);
             }
         }
         if self.active_clan_id != prev_active {
-            cx.emit(ClanEvent::ActiveClanChanged(self.active_clan_id.clone()));
+            cx.emit(ClanEvent::ActiveClanChanged(self.active_clan_id));
         }
         cx.notify();
     }
@@ -315,13 +368,13 @@ impl ClanList {
                 .create_clan_desc(&trimmed, &logo, "")
                 .await
                 .map_err(|e| CreateClanError::Other(e.to_string()))?;
-            let clan_id = desc.clan_id.clone();
+            let clan_id = desc.clan_id;
             this.update(cx, |this, cx| {
                 apply_created_clan(&mut this.clans, desc);
-                this.select_clan(&clan_id, cx);
+                this.select_clan(ClanId(clan_id), cx);
             })
             .map_err(|_| CreateClanError::Other("store dropped".into()))?;
-            Ok(clan_id)
+            Ok(clan_id.to_string())
         })
     }
 
@@ -332,18 +385,73 @@ impl ClanList {
     ) -> Task<anyhow::Result<String>> {
         let api = self.api.clone();
         let path = path.to_path_buf();
-        cx.spawn(async move |_this, _cx| api.upload_avatar(&path).await)
+        cx.spawn(async move |_this, cx| {
+            cx.background_executor()
+                .spawn(async move { api.upload_avatar(&path).await })
+                .await
+        })
+    }
+
+    pub fn reorder_clans(&mut self, order: Vec<ClanId>, cx: &mut Context<Self>) {
+        apply_clan_order(&mut self.clans, &order);
+        cx.notify();
+        cx.background_executor()
+            .spawn(async move {
+                let mut settings = crate::Settings::load_sync();
+                settings.clan_order = order;
+                settings.save_sync();
+            })
+            .detach();
+    }
+
+    pub fn apply_saved_order(&mut self, order: &[ClanId]) {
+        apply_clan_order(&mut self.clans, order);
     }
 }
 
-fn update_clan(clans: &mut [Clan], clan_id: &str, name: Option<String>, logo: String) -> bool {
+fn apply_clan_order(clans: &mut Vec<Clan>, order: &[ClanId]) {
+    if order.is_empty() {
+        return;
+    }
+    let mut ordered: Vec<Clan> = Vec::with_capacity(clans.len());
+    for id in order {
+        if let Some(pos) = clans.iter().position(|c| c.id == *id) {
+            ordered.push(clans.remove(pos));
+        }
+    }
+    ordered.append(clans);
+    *clans = ordered;
+}
+
+struct ClanUpdate {
+    name: Option<String>,
+    logo: String,
+    banner: String,
+    welcome_channel_id: Option<ChannelId>,
+    status: i32,
+    is_onboarding: bool,
+    is_community: bool,
+    prevent_anonymous: bool,
+}
+
+fn update_clan(clans: &mut [Clan], clan_id: ClanId, update: ClanUpdate) -> bool {
     let Some(clan) = clans.iter_mut().find(|c| c.id == clan_id) else {
         return false;
     };
-    if let Some(name) = name {
+    if let Some(name) = update.name {
         clan.name = name;
     }
-    clan.avatar_url = (!logo.is_empty()).then_some(logo);
+    clan.avatar_url = (!update.logo.is_empty()).then_some(update.logo);
+    if !update.banner.is_empty() {
+        clan.banner_url = Some(update.banner);
+    }
+    if let Some(wc) = update.welcome_channel_id {
+        clan.welcome_channel_id = Some(wc);
+    }
+    clan.status = update.status;
+    clan.is_onboarding = update.is_onboarding;
+    clan.is_community = update.is_community;
+    clan.prevent_anonymous = update.prevent_anonymous;
     true
 }
 
@@ -373,9 +481,9 @@ pub(crate) fn apply_created_clan(clans: &mut Vec<Clan>, desc: ApiClanDesc) {
 mod tests {
     use super::*;
 
-    fn make_clan(id: &str, name: &str, avatar_url: Option<&str>) -> Clan {
+    fn make_clan(id: i64, name: &str, avatar_url: Option<&str>) -> Clan {
         Clan {
-            id: id.into(),
+            id: ClanId(id),
             name: name.into(),
             avatar_url: avatar_url.map(|s| s.into()),
             banner_url: None,
@@ -383,13 +491,30 @@ mod tests {
             has_unread: false,
             muted: false,
             welcome_channel_id: None,
+            status: 0,
+            is_onboarding: false,
+            is_community: false,
+            prevent_anonymous: false,
+        }
+    }
+
+    fn make_update(name: Option<&str>, logo: &str) -> ClanUpdate {
+        ClanUpdate {
+            name: name.map(|s| s.into()),
+            logo: logo.into(),
+            banner: String::new(),
+            welcome_channel_id: None,
+            status: 0,
+            is_onboarding: false,
+            is_community: false,
+            prevent_anonymous: false,
         }
     }
 
     fn clans() -> Vec<Clan> {
         vec![
-            make_clan("1", "One", None),
-            make_clan("2", "Two", Some("old.png")),
+            make_clan(1, "One", None),
+            make_clan(2, "Two", Some("old.png")),
         ]
     }
 
@@ -398,9 +523,8 @@ mod tests {
         let mut c = clans();
         assert!(update_clan(
             &mut c,
-            "1",
-            Some("NewName".into()),
-            "logo.png".into()
+            ClanId(1),
+            make_update(Some("NewName"), "logo.png")
         ));
         assert_eq!(c[0].name, "NewName");
         assert_eq!(c[0].avatar_url.as_deref(), Some("logo.png"));
@@ -409,7 +533,7 @@ mod tests {
     #[test]
     fn update_clan_blank_name_keeps_name_and_empty_logo_clears_avatar() {
         let mut c = clans();
-        assert!(update_clan(&mut c, "2", None, String::new()));
+        assert!(update_clan(&mut c, ClanId(2), make_update(None, "")));
         assert_eq!(c[1].name, "Two");
         assert_eq!(c[1].avatar_url, None);
     }
@@ -417,19 +541,47 @@ mod tests {
     #[test]
     fn update_clan_unknown_is_noop() {
         let mut c = clans();
-        assert!(!update_clan(&mut c, "999", Some("x".into()), "y".into()));
+        assert!(!update_clan(
+            &mut c,
+            ClanId(999),
+            make_update(Some("x"), "y")
+        ));
+    }
+
+    #[test]
+    fn update_clan_applies_all_fields() {
+        let mut c = clans();
+        let update = ClanUpdate {
+            name: Some("NewName".into()),
+            logo: "logo.png".into(),
+            banner: "banner.png".into(),
+            welcome_channel_id: Some(ChannelId(42)),
+            status: 1,
+            is_onboarding: true,
+            is_community: true,
+            prevent_anonymous: true,
+        };
+        assert!(update_clan(&mut c, ClanId(1), update));
+        assert_eq!(c[0].name, "NewName");
+        assert_eq!(c[0].avatar_url.as_deref(), Some("logo.png"));
+        assert_eq!(c[0].banner_url.as_deref(), Some("banner.png"));
+        assert_eq!(c[0].welcome_channel_id, Some(ChannelId(42)));
+        assert_eq!(c[0].status, 1);
+        assert!(c[0].is_onboarding);
+        assert!(c[0].is_community);
+        assert!(c[0].prevent_anonymous);
     }
 
     #[test]
     fn clan_from_api_desc_zeroes_badge_and_muted() {
         use mezon_client::transport::ApiClanDesc;
         let desc = ApiClanDesc {
-            clan_id: "42".into(),
+            clan_id: 42,
             clan_name: "Alpha".into(),
-            creator_id: String::new(),
+            creator_id: 0,
             logo: "logo.png".into(),
             banner: String::new(),
-            welcome_channel_id: String::new(),
+            welcome_channel_id: 0,
         };
         let clan = Clan::from(desc);
         assert_eq!(clan.badge_count, 0);
@@ -449,7 +601,7 @@ mod tests {
         .into_iter()
         .collect();
         for clan in &mut c {
-            if let Some(&(badge, has_unread)) = badge_map.get(&clan.id) {
+            if let Some(&(badge, has_unread)) = badge_map.get(&clan.id.to_string()) {
                 clan.badge_count = badge.max(0) as u32;
                 clan.has_unread = has_unread;
             }
@@ -470,7 +622,7 @@ mod tests {
         };
         let event = RealtimeEvent::ChannelMessage(msg);
         if let RealtimeEvent::ChannelMessage(m) = &event {
-            let clan_id = m.clan_id.to_string();
+            let clan_id = ClanId(m.clan_id);
             if let Some(clan) = c.iter_mut().find(|c| c.id == clan_id)
                 && !clan.muted
             {
@@ -486,7 +638,7 @@ mod tests {
     fn channel_message_skipped_when_muted() {
         let mut c = clans();
         c[0].muted = true;
-        if let Some(clan) = c.iter_mut().find(|cl| cl.id == "1")
+        if let Some(clan) = c.iter_mut().find(|cl| cl.id == ClanId(1))
             && !clan.muted
         {
             clan.badge_count = clan.badge_count.saturating_add(1);
@@ -506,7 +658,7 @@ mod tests {
             clan_id: 1,
             ..Default::default()
         };
-        if let Some(clan) = c.iter_mut().find(|cl| cl.id == evt.clan_id.to_string())
+        if let Some(clan) = c.iter_mut().find(|cl| cl.id == ClanId(evt.clan_id))
             && (clan.badge_count > 0 || clan.has_unread)
         {
             clan.badge_count = 0;
@@ -525,7 +677,7 @@ mod tests {
             clan_id: 999,
             ..Default::default()
         };
-        if let Some(clan) = c.iter_mut().find(|cl| cl.id == evt.clan_id.to_string()) {
+        if let Some(clan) = c.iter_mut().find(|cl| cl.id == ClanId(evt.clan_id)) {
             clan.badge_count = 0;
             clan.has_unread = false;
         }
@@ -537,16 +689,16 @@ mod tests {
         use mezon_client::transport::ApiClanDesc;
         let mut clans = clans();
         let desc = ApiClanDesc {
-            clan_id: "99".into(),
+            clan_id: 99,
             clan_name: "NewClan".into(),
-            creator_id: String::new(),
+            creator_id: 0,
             logo: "logo.png".into(),
             banner: String::new(),
-            welcome_channel_id: String::new(),
+            welcome_channel_id: 0,
         };
         apply_created_clan(&mut clans, desc);
         assert_eq!(clans.len(), 3);
-        let inserted = clans.iter().find(|c| c.id == "99").unwrap();
+        let inserted = clans.iter().find(|c| c.id == ClanId(99)).unwrap();
         assert_eq!(inserted.name, "NewClan");
         assert_eq!(inserted.avatar_url.as_deref(), Some("logo.png"));
         assert_eq!(inserted.badge_count, 0);
@@ -558,12 +710,12 @@ mod tests {
         use mezon_client::transport::ApiClanDesc;
         let mut clans = clans();
         let desc = ApiClanDesc {
-            clan_id: "1".into(),
+            clan_id: 1,
             clan_name: "SameClan".into(),
-            creator_id: String::new(),
+            creator_id: 0,
             logo: String::new(),
             banner: String::new(),
-            welcome_channel_id: String::new(),
+            welcome_channel_id: 0,
         };
         apply_created_clan(&mut clans, desc);
         assert_eq!(clans.len(), 2);

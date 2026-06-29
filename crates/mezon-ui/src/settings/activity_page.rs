@@ -46,8 +46,13 @@ impl Render for ActivityPage {
                                 cx.listener(|this, _, _, cx| {
                                     this.settings.update(cx, |s, _| {
                                         s.activity_tracking = !s.activity_tracking;
-                                        s.save_sync();
                                     });
+                                    let snapshot = this.settings.read(cx).clone();
+                                    cx.background_executor()
+                                        .spawn(async move {
+                                            snapshot.save_sync();
+                                        })
+                                        .detach();
                                     cx.notify();
                                 }),
                             )),

@@ -1,37 +1,48 @@
 use crate::components::primitives::{Icon, IconName, Label, h_flex, v_flex};
-use gpui::{ClickEvent, Context, Entity, FontWeight, Window, div, prelude::*};
-use mezon_store::{AccountStore, Settings};
+use gpui::{Context, Entity, FontWeight, Window, div, prelude::*};
+use mezon_store::{AccountStore, AuthState, Settings};
 
 use crate::theme::ActiveTheme;
 
 pub struct DevicePage {
     settings: Entity<Settings>,
-    fetch_started: bool,
+    auth_state: Entity<AuthState>,
 }
 
 impl DevicePage {
-    pub fn new(settings: Entity<Settings>, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        settings: Entity<Settings>,
+        auth_state: Entity<AuthState>,
+        cx: &mut Context<Self>,
+    ) -> Self {
         cx.observe(&settings, |_, _, cx| cx.notify()).detach();
         cx.observe(&AccountStore::global(cx), |_, _, cx| cx.notify())
             .detach();
+        AccountStore::global(cx).update(cx, |store, cx| store.ensure_devices(cx));
         Self {
             settings,
-            fetch_started: false,
+            auth_state,
         }
     }
 
     pub fn refresh(&mut self, cx: &mut Context<Self>) {
         AccountStore::global(cx).update(cx, |store, cx| store.fetch_devices(cx));
     }
+
+    fn remove_device(&mut self, device_id: String, cx: &mut Context<Self>) {
+        let auth = self.auth_state.read(cx).clone();
+        let (token, refresh_token) = match auth {
+            AuthState::Authenticated(s) | AuthState::Connecting(s) => (s.token, s.refresh_token),
+            _ => return,
+        };
+        AccountStore::global(cx).update(cx, |store, cx| {
+            store.remove_device(token, refresh_token, device_id, cx);
+        });
+    }
 }
 
 impl Render for DevicePage {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        if !self.fetch_started {
-            self.fetch_started = true;
-            AccountStore::global(cx).update(cx, |store, cx| store.fetch_devices(cx));
-        }
-
         let theme = cx.theme();
         let locale = self.settings.read(cx).language.clone();
         let store = AccountStore::global(cx).read(cx);
@@ -169,13 +180,12 @@ impl Render for DevicePage {
                                                     .child(device.device_name.clone()),
                                             )
                                             .child(
-                                                div()
-                                                    .text_xs()
-                                                    .text_color(theme.text_muted)
-                                                    .child(format!(
+                                                div().text_xs().text_color(theme.text_muted).child(
+                                                    format!(
                                                         "{} · {}",
                                                         device.platform, device.location
-                                                    )),
+                                                    ),
+                                                ),
                                             ),
                                     )
                                     .child(div().flex_1())
@@ -195,13 +205,11 @@ impl Render for DevicePage {
                                                     .size_4()
                                                     .text_color(theme.status_dnd),
                                             )
-                                            .on_click(
-                                                move |_: &ClickEvent,
-                                                      _: &mut Window,
-                                                      _cx: &mut gpui::App| {
-                                                    tracing::info!("Remove device: {}", device_id);
+                                            .on_click(cx.listener(
+                                                move |this, _event, _window, cx| {
+                                                    this.remove_device(device_id.clone(), cx);
                                                 },
-                                            ),
+                                            )),
                                     )
                                     .into_any_element()
                             })),
