@@ -269,7 +269,9 @@ fn active_channel_context(cx: &App) -> Option<ChannelContext> {
 }
 
 fn channel_raw_members(cx: &App, ctx: ChannelContext) -> (Vec<RawMember>, Vec<RawMember>) {
-    let online = PresenceStore::global(cx).read(cx).user_online.clone();
+    let presence = PresenceStore::global(cx);
+    let presence = presence.read(cx);
+    let online = &presence.user_online;
     let store = ClanMembersStore::global(cx);
     let store = store.read(cx);
     let pool: Vec<&ClanMember> = match &ctx.filter_ids {
@@ -279,7 +281,7 @@ fn channel_raw_members(cx: &App, ctx: ChannelContext) -> (Vec<RawMember>, Vec<Ra
             .collect(),
         None => store.members(ctx.clan_id),
     };
-    let (online_ids, offline_ids) = split_members_by_status(&pool, &online);
+    let (online_ids, offline_ids) = split_members_by_status(&pool, online);
     let to_raw = |ids: &[UserId], is_online: bool| -> Vec<RawMember> {
         ids.iter()
             .filter_map(|id| store.member(ctx.clan_id, *id))
@@ -295,11 +297,13 @@ fn channel_raw_members(cx: &App, ctx: ChannelContext) -> (Vec<RawMember>, Vec<Ra
 }
 
 fn group_raw_members(cx: &App, direct_id: ChannelId) -> Vec<RawMember> {
-    let presence_online = PresenceStore::global(cx).read(cx).user_online.clone();
+    let presence = PresenceStore::global(cx);
+    let presence = presence.read(cx);
+    let presence_online = &presence.user_online;
     let store = GroupMembersStore::global(cx);
     let store = store.read(cx);
     let mut members: Vec<&GroupMember> = store.members(direct_id).iter().collect();
-    members.sort_by_key(|m| m.name().to_lowercase());
+    members.sort_by_cached_key(|m| m.name().to_lowercase());
     members
         .into_iter()
         .map(|member| RawMember {
@@ -357,13 +361,8 @@ pub(crate) fn mention_member_pool(cx: &App) -> Vec<MentionMemberRaw> {
 }
 
 fn make_member_row(cx: &App, raw: RawMember) -> Row {
-    let skip_proxy = mezon_store::AppConfig::try_global(cx)
-        .map(|cfg| cfg.is_dev_imgproxy())
-        .unwrap_or(false);
     let avatar_src = if raw.avatar_raw.is_empty() {
         SharedString::default()
-    } else if skip_proxy {
-        SharedString::from(raw.avatar_raw.clone())
     } else {
         SharedString::from(crate::util::imgproxy::avatar_url(cx, &raw.avatar_raw))
     };

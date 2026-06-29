@@ -6,6 +6,7 @@ use gpui::{App, AppContext, Context, Entity, EventEmitter, Global, Task};
 use mezon_client::transport::ApiDirectChannel;
 use mezon_client::{AppApi, ConnectionStatus, RealtimeEvent};
 
+use crate::Freshness;
 use crate::realtime::{RealtimeDispatch, RealtimeKind};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -86,10 +87,6 @@ impl DirectChannelList {
         &self.channels
     }
 
-    fn is_empty(&self) -> bool {
-        self.channels.is_empty()
-    }
-
     fn find(&self, id: ChannelId) -> Option<&DirectChannel> {
         let idx = *self.by_id.get(&id)?;
         self.channels.get(idx)
@@ -136,6 +133,7 @@ impl DirectChannelList {
 pub struct DirectMessageStore {
     channels: DirectChannelList,
     loading: bool,
+    freshness: Freshness,
     has_more: bool,
     current_page: u32,
     api: Arc<AppApi>,
@@ -169,6 +167,7 @@ impl DirectMessageStore {
         Self {
             channels: DirectChannelList::default(),
             loading: false,
+            freshness: Freshness::new(),
             has_more: true,
             current_page: 1,
             api,
@@ -203,7 +202,13 @@ impl DirectMessageStore {
                 let connected = *status_rx.borrow() == ConnectionStatus::Connected;
                 if connected && !was_connected {
                     was_connected = true;
-                    if this.update(cx, |this, cx| this.fetch(cx)).is_err() {
+                    if this
+                        .update(cx, |this, cx| {
+                            this.freshness.mark_stale();
+                            this.fetch(cx);
+                        })
+                        .is_err()
+                    {
                         break;
                     }
                 } else if !connected {
@@ -225,10 +230,8 @@ impl DirectMessageStore {
         self.fetch(cx);
     }
 
-    /// Fetch the DM list lazily on navigation: refetches while the list is still empty (covers a
-    /// missed/failed connect-time fetch) but stops once we have data.
     pub fn ensure_loaded(&mut self, cx: &mut Context<Self>) {
-        if !self.loading && self.channels.is_empty() {
+        if !self.loading && !self.freshness.is_fresh(crate::CACHE_TTL) {
             self.fetch(cx);
         }
     }
@@ -279,6 +282,7 @@ impl DirectMessageStore {
                         let channels: Vec<DirectChannel> =
                             list.into_iter().map(direct_from_api).collect();
                         this.channels.replace(channels);
+                        this.freshness.mark_fetched();
                         this.has_more = has_more;
                         this.current_page = 1;
                         cx.emit(DirectEvent::Changed);
@@ -673,7 +677,7 @@ mod tests {
         let mut channels = DirectChannelList::default();
         let event = make_user_channel_added(55, 1);
         upsert_user_channel_added(&mut channels, &event);
-        assert!(channels.is_empty());
+        assert!(channels.as_slice().is_empty());
     }
 
     #[test]

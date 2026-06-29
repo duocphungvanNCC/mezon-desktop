@@ -37,7 +37,7 @@ impl ClanSidebar {
         cx: &mut Context<Self>,
     ) -> Self {
         let clan_sub = cx.observe(&clan_list, |this, clan_list, cx| {
-            this.sync_rows(clan_list.read(cx));
+            this.sync_rows(clan_list.read(cx), cx);
             cx.notify();
         });
         let settings_sub = cx.observe(&settings, |_, _, cx| cx.notify());
@@ -81,11 +81,12 @@ impl ClanSidebar {
             _settings_sub: settings_sub,
             _router_sub: router_sub,
         };
-        this.sync_rows(this.clan_list.read(cx));
+        let clan_list_handle = this.clan_list.clone();
+        this.sync_rows(clan_list_handle.read(cx), cx);
         this
     }
 
-    fn sync_rows(&mut self, clan_list_view: &ClanList) {
+    fn sync_rows(&mut self, clan_list_view: &ClanList, cx: &App) {
         let rows: Vec<ClanRow> = clan_list_view
             .clans
             .iter()
@@ -93,15 +94,21 @@ impl ClanSidebar {
                 let id = SharedString::from(clan.id.to_string());
                 let row_id = SharedString::from(format!("clan-{}", clan.id));
                 let group_name = SharedString::from(format!("clan-group-{}", clan.id));
+                let avatar_id = SharedString::from(format!("clan-avatar-{}", clan.id));
+                let proxied_avatar_url: Option<SharedString> =
+                    clan.avatar_url.as_deref().map(|url| {
+                        SharedString::from(crate::util::imgproxy::proxied(
+                            cx, url, 100, 100, "fill",
+                        ))
+                    });
                 ClanRow {
                     id,
+                    id_num: clan.id,
                     row_id,
                     group_name,
                     name: SharedString::from(clan.name.clone()),
-                    avatar_url: clan
-                        .avatar_url
-                        .as_deref()
-                        .map(|s| SharedString::from(s.to_string())),
+                    proxied_avatar_url,
+                    avatar_id,
                     badge_count: clan.badge_count,
                     has_unread: clan.has_unread,
                     muted: clan.muted,

@@ -36,7 +36,7 @@ use tokio::fs;
 pub use account::*;
 pub use audio::{AudioDeviceInfo, AudioStore, MicCaptureFactory, MicCaptureHandle};
 pub use badge::BadgeService;
-pub use cache::KeyedCache;
+pub use cache::{Freshness, KeyedCache};
 pub use channel::*;
 pub use channel_members::{ChannelMember, ChannelMembersEvent, ChannelMembersStore};
 pub use clan::*;

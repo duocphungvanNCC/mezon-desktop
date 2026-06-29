@@ -5,6 +5,7 @@ use gpui::{App, AppContext, Context, Entity, EventEmitter, Global, Subscription,
 use mezon_client::{AppApi, ConnectionStatus};
 use mezon_proto::api;
 
+use crate::Freshness;
 use crate::clan::{ClanEvent, ClanList};
 
 const STICKER_MEDIA_TYPE: i32 = 0;
@@ -26,7 +27,7 @@ pub enum StickerEvent {
 pub struct StickerStore {
     by_id: HashMap<String, Sticker>,
     order: Vec<String>,
-    loaded: bool,
+    freshness: Freshness,
     loading: bool,
     api: Arc<AppApi>,
     _clan_sub: Subscription,
@@ -65,7 +66,7 @@ impl StickerStore {
         Self {
             by_id: HashMap::new(),
             order: Vec::new(),
-            loaded: false,
+            freshness: Freshness::new(),
             loading: false,
             api,
             _clan_sub: clan_sub,
@@ -84,7 +85,7 @@ impl StickerStore {
                 let connected = *status_rx.borrow() == ConnectionStatus::Connected;
                 if connected && !was_connected {
                     was_connected = true;
-                    if this.update(cx, |this, cx| this.refresh(cx)).is_err() {
+                    if this.update(cx, |this, _| this.invalidate()).is_err() {
                         break;
                     }
                 } else if !connected {
@@ -95,13 +96,17 @@ impl StickerStore {
     }
 
     pub fn ensure_loaded(&mut self, cx: &mut Context<Self>) {
-        if !self.loaded {
+        if !self.freshness.is_fresh(crate::CACHE_TTL) {
             self.fetch(cx);
         }
     }
 
     pub fn refresh(&mut self, cx: &mut Context<Self>) {
         self.fetch(cx);
+    }
+
+    fn invalidate(&mut self) {
+        self.freshness.mark_stale();
     }
 
     fn fetch(&mut self, cx: &mut Context<Self>) {
@@ -123,7 +128,7 @@ impl StickerStore {
                                 this.insert(sticker);
                             }
                         }
-                        this.loaded = true;
+                        this.freshness.mark_fetched();
                         tracing::info!("StickerStore: fetched {} stickers", this.order.len());
                         cx.emit(StickerEvent::Changed);
                         cx.notify();
