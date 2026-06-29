@@ -69,6 +69,8 @@ pub enum RealtimeEvent {
     /// Server-pushed session refresh over the socket (`refresh_session_event`, field 96).
     /// The native equivalent of mezon-js `client.onrefreshsession`.
     SessionRefreshed(api::Session),
+    LastPinMessage(realtime::LastPinMessageEvent),
+    UnpinMessage(realtime::UnpinMessageEvent),
     Unhandled(realtime::envelope::Message),
 }
 
@@ -112,6 +114,8 @@ impl TryFrom<realtime::envelope::Message> for RealtimeEvent {
             realtime::envelope::Message::AddFriend(m) => Ok(Self::AddFriend(m)),
             realtime::envelope::Message::RemoveFriend(m) => Ok(Self::RemoveFriend(m)),
             realtime::envelope::Message::RefreshSessionEvent(s) => Ok(Self::SessionRefreshed(s)),
+            realtime::envelope::Message::LastPinMessageEvent(m) => Ok(Self::LastPinMessage(m)),
+            realtime::envelope::Message::UnpinMessageEvent(m) => Ok(Self::UnpinMessage(m)),
             other => Ok(Self::Unhandled(other)),
         }
     }
@@ -1013,6 +1017,17 @@ pub struct ApiMessage {
     pub reactions: Vec<ApiMessageReaction>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ApiPinMessage {
+    pub id: String,
+    pub message_id: String,
+    pub content: String,
+    pub sender_id: String,
+    pub sender_name: String,
+    pub avatar: String,
+    pub create_time: i64,
+}
+
 impl MezonTransport {
     /// Build a protobuf-encoded API request envelope.
     ///
@@ -1188,6 +1203,23 @@ impl MezonTransport {
             attachments,
             references,
             reactions,
+        }
+    }
+
+    fn pin_message_from_proto(pin: api::PinMessage) -> ApiPinMessage {
+        let content = serde_json::from_str::<serde_json::Value>(&pin.content)
+            .ok()
+            .and_then(|v| v.get("t").and_then(|t| t.as_str().map(|s| s.to_string())))
+            .unwrap_or_else(|| pin.content.clone());
+
+        ApiPinMessage {
+            id: pin.id.to_string(),
+            message_id: pin.message_id.to_string(),
+            content,
+            sender_id: pin.sender_id.to_string(),
+            sender_name: pin.username,
+            avatar: pin.avatar,
+            create_time: i64::from(pin.create_time_seconds),
         }
     }
 
@@ -2269,9 +2301,15 @@ impl MezonTransport {
     /// Get pin messages list.
     pub async fn get_pin_messages_list(
         &self,
-        channel_id: i64,
-        clan_id: i64,
-    ) -> Result<api::PinMessagesList> {
+        channel_id: &str,
+        clan_id: &str,
+    ) -> Result<Vec<ApiPinMessage>> {
+        let channel_id = channel_id
+            .parse::<i64>()
+            .map_err(|e| anyhow::anyhow!("invalid channel_id {channel_id:?}: {e}"))?;
+        let clan_id = clan_id
+            .parse::<i64>()
+            .map_err(|e| anyhow::anyhow!("invalid clan_id {clan_id:?}: {e}"))?;
         let cid = self.generate_cid();
         let body = api::PinMessageRequest {
             channel_id,
@@ -2285,7 +2323,12 @@ impl MezonTransport {
         if code != 0 {
             return Err(anyhow::anyhow!("API error: code={}", code));
         }
-        Ok(api::PinMessagesList::decode(response.as_slice())?)
+        let list = api::PinMessagesList::decode(response.as_slice())?;
+        Ok(list
+            .pin_messages_list
+            .into_iter()
+            .map(Self::pin_message_from_proto)
+            .collect())
     }
 
     /// List channel timeline.
@@ -4335,11 +4378,23 @@ impl MezonTransport {
     /// Delete pin message.
     pub async fn delete_pin_message(
         &self,
-        id: i64,
-        message_id: i64,
-        channel_id: i64,
-        clan_id: i64,
+        id: &str,
+        message_id: &str,
+        channel_id: &str,
+        clan_id: &str,
     ) -> Result<()> {
+        let id = id
+            .parse::<i64>()
+            .map_err(|e| anyhow::anyhow!("invalid pin id {id:?}: {e}"))?;
+        let message_id = message_id
+            .parse::<i64>()
+            .map_err(|e| anyhow::anyhow!("invalid message_id {message_id:?}: {e}"))?;
+        let channel_id = channel_id
+            .parse::<i64>()
+            .map_err(|e| anyhow::anyhow!("invalid channel_id {channel_id:?}: {e}"))?;
+        let clan_id = clan_id
+            .parse::<i64>()
+            .map_err(|e| anyhow::anyhow!("invalid clan_id {clan_id:?}: {e}"))?;
         let cid = self.generate_cid();
         let body = api::DeletePinMessage {
             id,

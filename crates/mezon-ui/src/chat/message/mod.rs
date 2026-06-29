@@ -20,3 +20,4 @@ mod user_row;
 mod video_player;
 
 pub use channel_messages::ChannelMessages;
+pub use context::DEFAULT_DISPLAY_NAME_COLOR;
