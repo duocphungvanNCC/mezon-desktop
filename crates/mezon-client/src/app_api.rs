@@ -205,7 +205,7 @@ impl AppApi {
         message_id: i64,
         direction: i32,
         limit: u32,
-    ) -> Result<Vec<ApiMessage>> {
+    ) -> Result<crate::transport::ListChannelMessagesResult> {
         self.transport
             .list_channel_messages(clan_id, channel_id, message_id, direction, limit)
             .await
@@ -225,6 +225,27 @@ impl AppApi {
 
     pub async fn join_clan_chat(&self, clan_id: i64) -> Result<()> {
         self.transport.join_clan_chat(clan_id).await
+    }
+
+    pub async fn write_last_seen_message(
+        &self,
+        clan_id: i64,
+        channel_id: i64,
+        message_id: i64,
+        mode: i32,
+        timestamp_seconds: u32,
+        badge_count: i32,
+    ) -> Result<()> {
+        self.transport
+            .write_last_seen_message(
+                clan_id,
+                channel_id,
+                message_id,
+                mode,
+                timestamp_seconds,
+                badge_count,
+            )
+            .await
     }
 
     pub async fn list_clan_users_status(
@@ -376,6 +397,8 @@ impl AppApi {
                 filetype: a.filetype.clone(),
                 width: a.width,
                 height: a.height,
+                thumbnail: a.thumbnail.clone(),
+                duration: a.duration,
             })
             .collect();
         let mut sent = self
@@ -422,6 +445,8 @@ impl AppApi {
                 filetype: a.filetype,
                 width: 0,
                 height: 0,
+                thumbnail: String::new(),
+                duration: 0,
             })
             .collect();
         let mut sent = self
