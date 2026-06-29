@@ -1,7 +1,6 @@
 use crate::components::primitives::{Icon, IconName, h_flex, v_flex};
 use gpui::{Context, Entity, ScrollHandle, Window, div, prelude::*, px};
-use mezon_store::{AccountStore, AuthState, ClanList, Settings};
-use ui::{ScrollAxes, Scrollbars, WithScrollbar};
+use mezon_store::{AuthState, ClanList, LoginStore, Settings};
 
 use super::account_page::AccountPage;
 use super::activity_page::ActivityPage;
@@ -43,6 +42,8 @@ pub struct SettingsScreen {
     advanced_page: Option<Entity<AdvancedPage>>,
     prev_page: SettingsPage,
     scroll: ScrollHandle,
+    #[allow(dead_code)]
+    nav_scroll: ScrollHandle,
 }
 
 impl SettingsScreen {
@@ -53,12 +54,16 @@ impl SettingsScreen {
         cx: &mut Context<Self>,
     ) -> Self {
         cx.observe(&settings, |_, _, cx| cx.notify()).detach();
+        let account_page = {
+            let s = settings.clone();
+            Some(cx.new(|cx| AccountPage::new(s, cx)))
+        };
         Self {
             auth_state,
             settings,
             clan_list,
             current_page: SettingsPage::Account,
-            account_page: None,
+            account_page,
             profile_page: None,
             device_page: None,
             appearance_page: None,
@@ -69,95 +74,135 @@ impl SettingsScreen {
             advanced_page: None,
             prev_page: SettingsPage::Account,
             scroll: ScrollHandle::new(),
+            nav_scroll: ScrollHandle::new(),
         }
     }
 
-    pub fn set_page(&mut self, page: SettingsPage) {
+    pub fn set_page(&mut self, page: SettingsPage, cx: &mut Context<Self>) {
         self.current_page = page;
+        self.ensure_page(page, cx);
+        cx.notify();
+    }
+
+    fn ensure_page(&mut self, page: SettingsPage, cx: &mut Context<Self>) {
+        match page {
+            SettingsPage::Account => {
+                if self.account_page.is_none() {
+                    let s = self.settings.clone();
+                    self.account_page = Some(cx.new(|cx| AccountPage::new(s, cx)));
+                }
+            }
+            SettingsPage::Profile => {
+                if self.profile_page.is_none() {
+                    let s = self.settings.clone();
+                    let cl = self.clan_list.clone();
+                    self.profile_page = Some(cx.new(|cx| ProfilePage::new(s, cl, cx)));
+                }
+            }
+            SettingsPage::Device => {
+                if self.device_page.is_none() {
+                    let s = self.settings.clone();
+                    let a = self.auth_state.clone();
+                    self.device_page = Some(cx.new(|cx| DevicePage::new(s, a, cx)));
+                }
+            }
+            SettingsPage::Appearance => {
+                if self.appearance_page.is_none() {
+                    let s = self.settings.clone();
+                    self.appearance_page = Some(cx.new(|cx| AppearancePage::new(s, cx)));
+                }
+            }
+            SettingsPage::Activity => {
+                if self.activity_page.is_none() {
+                    let s = self.settings.clone();
+                    self.activity_page = Some(cx.new(|cx| ActivityPage::new(s, cx)));
+                }
+            }
+            SettingsPage::Notifications => {
+                if self.notifications_page.is_none() {
+                    let s = self.settings.clone();
+                    self.notifications_page = Some(cx.new(|cx| NotificationsPage::new(s, cx)));
+                }
+            }
+            SettingsPage::Language => {
+                if self.language_page.is_none() {
+                    let s = self.settings.clone();
+                    self.language_page = Some(cx.new(|cx| LanguagePage::new(s, cx)));
+                }
+            }
+            SettingsPage::Voice => {
+                if self.voice_page.is_none() {
+                    let s = self.settings.clone();
+                    self.voice_page = Some(cx.new(|cx| VoicePage::new(s, cx)));
+                }
+            }
+            SettingsPage::Advanced => {
+                if self.advanced_page.is_none() {
+                    let s = self.settings.clone();
+                    self.advanced_page = Some(cx.new(|cx| AdvancedPage::new(s, cx)));
+                }
+            }
+        }
+    }
+
+    fn current_page_view(&self) -> Option<gpui::AnyElement> {
+        match self.current_page {
+            SettingsPage::Account => self
+                .account_page
+                .as_ref()
+                .map(|p| p.clone().into_any_element()),
+            SettingsPage::Profile => self
+                .profile_page
+                .as_ref()
+                .map(|p| p.clone().into_any_element()),
+            SettingsPage::Device => self
+                .device_page
+                .as_ref()
+                .map(|p| p.clone().into_any_element()),
+            SettingsPage::Appearance => self
+                .appearance_page
+                .as_ref()
+                .map(|p| p.clone().into_any_element()),
+            SettingsPage::Activity => self
+                .activity_page
+                .as_ref()
+                .map(|p| p.clone().into_any_element()),
+            SettingsPage::Notifications => self
+                .notifications_page
+                .as_ref()
+                .map(|p| p.clone().into_any_element()),
+            SettingsPage::Language => self
+                .language_page
+                .as_ref()
+                .map(|p| p.clone().into_any_element()),
+            SettingsPage::Voice => self
+                .voice_page
+                .as_ref()
+                .map(|p| p.clone().into_any_element()),
+            SettingsPage::Advanced => self
+                .advanced_page
+                .as_ref()
+                .map(|p| p.clone().into_any_element()),
+        }
     }
 }
 
 impl Render for SettingsScreen {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
         let locale = self.settings.read(cx).language.clone();
-        let auth_state = self.auth_state.clone();
         let page = self.current_page;
 
-        // Lazy-init the active sub-page entity and return it (create-and-use, no unwrap).
-        let content: gpui::AnyElement = match page {
-            SettingsPage::Account => {
-                let settings = self.settings.clone();
-                self.account_page
-                    .get_or_insert_with(|| cx.new(|cx| AccountPage::new(settings, cx)))
-                    .clone()
-                    .into_any_element()
-            }
-            SettingsPage::Profile => {
-                let settings = self.settings.clone();
-                let clan_list = self.clan_list.clone();
-                self.profile_page
-                    .get_or_insert_with(|| cx.new(|cx| ProfilePage::new(settings, clan_list, cx)))
-                    .clone()
-                    .into_any_element()
-            }
-            SettingsPage::Device => {
-                let just_switched = self.prev_page != SettingsPage::Device;
-                let existed = self.device_page.is_some();
-                let settings = self.settings.clone();
-                let device = self
-                    .device_page
-                    .get_or_insert_with(|| cx.new(|cx| DevicePage::new(settings, cx)))
-                    .clone();
-                if existed && just_switched {
-                    device.update(cx, |d, view_cx| d.refresh(view_cx));
-                }
-                device.into_any_element()
-            }
-            SettingsPage::Appearance => {
-                let settings = self.settings.clone();
-                self.appearance_page
-                    .get_or_insert_with(|| cx.new(|cx| AppearancePage::new(settings, cx)))
-                    .clone()
-                    .into_any_element()
-            }
-            SettingsPage::Activity => {
-                let settings = self.settings.clone();
-                self.activity_page
-                    .get_or_insert_with(|| cx.new(|cx| ActivityPage::new(settings, cx)))
-                    .clone()
-                    .into_any_element()
-            }
-            SettingsPage::Notifications => {
-                let settings = self.settings.clone();
-                self.notifications_page
-                    .get_or_insert_with(|| cx.new(|cx| NotificationsPage::new(settings, cx)))
-                    .clone()
-                    .into_any_element()
-            }
-            SettingsPage::Language => {
-                let settings = self.settings.clone();
-                self.language_page
-                    .get_or_insert_with(|| cx.new(|cx| LanguagePage::new(settings, cx)))
-                    .clone()
-                    .into_any_element()
-            }
-            SettingsPage::Voice => {
-                let settings = self.settings.clone();
-                self.voice_page
-                    .get_or_insert_with(|| cx.new(|cx| VoicePage::new(settings, cx)))
-                    .clone()
-                    .into_any_element()
-            }
-            SettingsPage::Advanced => {
-                let settings = self.settings.clone();
-                self.advanced_page
-                    .get_or_insert_with(|| cx.new(|cx| AdvancedPage::new(settings, cx)))
-                    .clone()
-                    .into_any_element()
-            }
-        };
+        let just_switched_to_device =
+            page == SettingsPage::Device && self.prev_page != SettingsPage::Device;
+        if just_switched_to_device && let Some(d) = &self.device_page {
+            d.update(cx, |d, view_cx| d.refresh(view_cx));
+        }
         self.prev_page = page;
+
+        let content = self
+            .current_page_view()
+            .unwrap_or_else(|| div().flex_1().into_any_element());
 
         let is_account = page == SettingsPage::Account;
         let is_profile = page == SettingsPage::Profile;
@@ -227,6 +272,7 @@ impl Render for SettingsScreen {
                     .h_full()
                     .bg(theme.bg_secondary)
                     .overflow_y_scroll()
+                    .track_scroll(&self.nav_scroll)
                     .child(
                         div()
                             .flex()
@@ -330,32 +376,9 @@ impl Render for SettingsScreen {
                                             .text_color(gpui::rgb(0xef4444))
                                             .cursor_pointer()
                                             .child(mezon_i18n::t(&locale, "setting.logOut"))
-                                            .on_click({
-                                                let auth_state = auth_state.clone();
-                                                move |_, _, cx| {
-                                                    let auth = auth_state.read(cx);
-                                                    if let AuthState::Authenticated(session) = auth
-                                                    {
-                                                        let token = session.token.clone();
-                                                        let refresh_token =
-                                                            session.refresh_token.clone();
-                                                        let auth_state = auth_state.clone();
-                                                        AccountStore::global(cx).update(
-                                                            cx,
-                                                            |store, cx| {
-                                                                store.logout(
-                                                                    token,
-                                                                    refresh_token,
-                                                                    cx,
-                                                                );
-                                                            },
-                                                        );
-                                                        auth_state.update(cx, |state, cx| {
-                                                            *state = AuthState::NotAuthenticated;
-                                                            cx.notify();
-                                                        });
-                                                    }
-                                                }
+                                            .on_click(move |_, _, cx| {
+                                                LoginStore::global(cx)
+                                                    .update(cx, |store, cx| store.logout(cx));
                                             }),
                                     )
                                     .child(
@@ -398,13 +421,7 @@ impl Render for SettingsScreen {
                         .pl(px(40.0))
                         .pr(px(10.0))
                         .bg(theme.bg_primary)
-                        .child(div().max_w(px(740.0)).child(content))
-                        .custom_scrollbars(
-                            Scrollbars::new(ScrollAxes::Vertical)
-                                .tracked_scroll_handle(&self.scroll),
-                            window,
-                            cx,
-                        ),
+                        .child(div().max_w(px(740.0)).child(content)),
                 ),
             )
             .child(

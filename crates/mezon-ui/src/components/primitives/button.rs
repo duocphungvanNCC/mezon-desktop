@@ -14,6 +14,8 @@ pub enum ButtonVariant {
     Secondary,
     Ghost,
     Danger,
+    Warning,
+    Link,
 }
 
 pub trait ButtonVariants: Sized {
@@ -29,6 +31,14 @@ pub trait ButtonVariants: Sized {
 
     fn danger(self) -> Self {
         self.with_variant(ButtonVariant::Danger)
+    }
+
+    fn warning(self) -> Self {
+        self.with_variant(ButtonVariant::Warning)
+    }
+
+    fn link(self) -> Self {
+        self.with_variant(ButtonVariant::Link)
     }
 }
 
@@ -62,6 +72,14 @@ impl ButtonVariant {
                 background: theme.status_dnd.into(),
                 label_color: theme.text_primary.into(),
             },
+            ButtonVariant::Warning => ButtonLikeStyles {
+                background: theme.status_idle.into(),
+                label_color: theme.text_primary.into(),
+            },
+            ButtonVariant::Link => ButtonLikeStyles {
+                background: transparent_black(),
+                label_color: theme.text_link.into(),
+            },
         }
     }
 
@@ -84,6 +102,14 @@ impl ButtonVariant {
                 background: darken(theme.status_dnd.into(), 0.06),
                 label_color: theme.text_primary.into(),
             },
+            ButtonVariant::Warning => ButtonLikeStyles {
+                background: darken(theme.status_idle.into(), 0.06),
+                label_color: theme.text_primary.into(),
+            },
+            ButtonVariant::Link => ButtonLikeStyles {
+                background: theme.bg_hover.into(),
+                label_color: theme.text_link.into(),
+            },
         }
     }
 
@@ -94,12 +120,18 @@ impl ButtonVariant {
                 background: darken(theme.brand_hover.into(), 0.04),
                 label_color: theme.text_primary.into(),
             },
-            ButtonVariant::Secondary | ButtonVariant::Ghost => ButtonLikeStyles {
-                background: darken(theme.bg_hover.into(), 0.04),
-                label_color: theme.text_primary.into(),
-            },
+            ButtonVariant::Secondary | ButtonVariant::Ghost | ButtonVariant::Link => {
+                ButtonLikeStyles {
+                    background: darken(theme.bg_hover.into(), 0.04),
+                    label_color: theme.text_primary.into(),
+                }
+            }
             ButtonVariant::Danger => ButtonLikeStyles {
                 background: darken(theme.status_dnd.into(), 0.1),
+                label_color: theme.text_primary.into(),
+            },
+            ButtonVariant::Warning => ButtonLikeStyles {
+                background: darken(theme.status_idle.into(), 0.1),
                 label_color: theme.text_primary.into(),
             },
         }
@@ -189,8 +221,8 @@ fn height(size: Size) -> Pixels {
     match size {
         Size::XSmall => px(20.),
         Size::Small => px(24.),
-        Size::Medium => px(28.),
-        Size::Large => px(32.),
+        Size::Medium => px(34.),
+        Size::Large => px(40.),
     }
 }
 

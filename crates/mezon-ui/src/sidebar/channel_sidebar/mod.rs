@@ -1,17 +1,23 @@
+use std::collections::HashSet;
 use std::rc::Rc;
+use std::time::{Duration, Instant};
+
+const SCROLL_HOVER_RELEASE_MS: u64 = 150;
 
 use gpui::{
-    AnyElement, App, Context, Entity, ListState, MouseButton, MouseDownEvent, SharedString,
-    Subscription, WeakEntity, Window, div, list, prelude::*, px,
+    Animation, AnimationExt as _, AnyElement, App, Context, Entity, ListState, MouseButton,
+    MouseDownEvent, SharedString, Subscription, Task, WeakEntity, Window, div, ease_in_out, list,
+    prelude::*, px,
 };
-use mezon_store::{ChannelList, ClanList, FAVOR_CATE_ID, Settings};
+use mezon_store::{ChannelList, ClanId, ClanList, FAVOR_CATE_ID, Settings};
 
 use crate::components::compositions::channel_row::ChannelRow;
 use crate::components::primitives::{Avatar, Icon, IconName, Sizable, Size, context_menu_at};
-use crate::theme::ActiveTheme;
+use crate::theme::{ActiveTheme, Theme};
 
 mod items;
 mod menu;
+mod skeleton;
 use items::{AppChannelSlot, SidebarItem, VoiceMemberSlot};
 use menu::{OpenMenu, build_channel_menu, on_category_click, on_channel_click};
 
@@ -22,12 +28,20 @@ pub struct ChannelSidebar {
     items: Rc<Vec<SidebarItem>>,
     list_state: ListState,
     active_clan_name: String,
-    active_clan_id: Option<String>,
+    active_clan_id: Option<ClanId>,
+    loaded_clans: HashSet<ClanId>,
     channel_list_handle: Entity<ChannelList>,
     open_menu: Option<OpenMenu>,
+    skeleton_phase: skeleton::Phase,
+    skeleton_clan: Option<ClanId>,
+    _skeleton_timer: Option<Task<()>>,
+    suppress_hover: bool,
+    last_scroll_at: Option<Instant>,
+    _hover_release_task: Option<Task<()>>,
     _clan_observe: Subscription,
     _channel_observe: Subscription,
     _settings_observe: Subscription,
+    _router_observe: Subscription,
 }
 
 impl ChannelSidebar {
@@ -39,17 +53,57 @@ impl ChannelSidebar {
     ) -> Self {
         let channel_list_handle = channel_list.clone();
 
+        let list_state = ListState::new(0, gpui::ListAlignment::Top, px(32.));
+        let weak = cx.weak_entity();
+        list_state.set_scroll_handler(move |_event, _window, cx| {
+            weak.update(cx, |this, cx| {
+                this.last_scroll_at = Some(Instant::now());
+                if !this.suppress_hover {
+                    this.suppress_hover = true;
+                    cx.notify();
+                    this._hover_release_task = Some(cx.spawn(async move |this, cx| {
+                        let idle = Duration::from_millis(SCROLL_HOVER_RELEASE_MS);
+                        loop {
+                            cx.background_executor().timer(idle).await;
+                            let still_scrolling = this
+                                .update(cx, |this, _| {
+                                    this.last_scroll_at.is_some_and(|t| t.elapsed() < idle)
+                                })
+                                .unwrap_or(false);
+                            if still_scrolling {
+                                continue;
+                            }
+                            let _ = this.update(cx, |this, cx| {
+                                this.suppress_hover = false;
+                                cx.notify();
+                            });
+                            break;
+                        }
+                    }));
+                }
+            })
+            .ok();
+        });
+
         let clan_observe = cx.observe(&clan_list, |this, _, cx| {
-            this.rebuild_items(cx);
-            cx.notify();
+            if this.rebuild_items(cx) {
+                cx.notify();
+            }
         });
         let channel_observe = cx.observe(&channel_list, |this, _, cx| {
-            this.rebuild_items(cx);
-            cx.notify();
+            if this.rebuild_items(cx) {
+                cx.notify();
+            }
         });
         let settings_observe = cx.observe(&settings, |this, _, cx| {
-            this.rebuild_items(cx);
-            cx.notify();
+            if this.rebuild_items(cx) {
+                cx.notify();
+            }
+        });
+        let router_observe = cx.observe(&crate::router::Router::global(cx), |this, _, cx| {
+            if this.rebuild_items(cx) {
+                cx.notify();
+            }
         });
 
         let mut this = Self {
@@ -57,39 +111,57 @@ impl ChannelSidebar {
             channel_list,
             settings,
             items: Rc::new(Vec::new()),
-            list_state: ListState::new(0, gpui::ListAlignment::Top, px(32.)),
+            list_state,
             active_clan_name: String::new(),
             active_clan_id: None,
+            loaded_clans: HashSet::new(),
             channel_list_handle,
             open_menu: None,
+            skeleton_phase: skeleton::Phase::default(),
+            skeleton_clan: None,
+            _skeleton_timer: None,
+            suppress_hover: false,
+            last_scroll_at: None,
+            _hover_release_task: None,
             _clan_observe: clan_observe,
             _channel_observe: channel_observe,
             _settings_observe: settings_observe,
+            _router_observe: router_observe,
         };
         this.rebuild_items(cx);
         this
     }
 
-    fn rebuild_items(&mut self, cx: &mut Context<Self>) {
+    fn rebuild_items(&mut self, cx: &mut Context<Self>) -> bool {
         let locale = self.settings.read(cx).language.clone();
         let clans = self.clan_list.read(cx);
         let channels = self.channel_list.read(cx);
 
-        self.active_clan_name = clans
+        let new_clan_id = clans.active_clan_id;
+        let clan_changed = self.active_clan_id != new_clan_id;
+
+        let new_clan_name = clans
             .active_clan()
             .map(|c| c.name.clone())
             .unwrap_or_else(|| mezon_i18n::t(&locale, "sidebar.selectClan").to_string());
-        self.active_clan_id = clans.active_clan_id.clone();
+        let name_changed = new_clan_name != self.active_clan_name;
+        self.active_clan_name = new_clan_name;
+        self.active_clan_id = new_clan_id;
 
-        let active_channel_id = channels.active_channel_id.clone();
+        let active_channel_id = match crate::router::Router::global(cx).read(cx).route() {
+            crate::router::Route::Channel { channel_id, .. }
+            | crate::router::Route::Thread { channel_id, .. }
+            | crate::router::Route::Canvas { channel_id, .. } => Some(channel_id),
+            _ => None,
+        };
         let mut items = Vec::new();
 
         let app_channels: Vec<AppChannelSlot> = clans
             .active_clan_id
-            .as_deref()
+            .as_ref()
             .map(|cid| {
                 channels
-                    .app_channels_for_clan(cid)
+                    .app_channels_for_clan(*cid)
                     .iter()
                     .map(AppChannelSlot::from)
                     .collect()
@@ -101,22 +173,24 @@ impl ChannelSidebar {
             app_channels,
         });
 
-        if let Some(clan_id) = clans.active_clan_id.as_ref() {
-            let categories = channels.categories_for_clan(clan_id);
+        let cold_loading = if let Some(clan_id) = clans.active_clan_id.as_ref() {
+            let categories = channels.categories_for_clan(*clan_id);
             if categories.is_empty() {
-                items.push(SidebarItem::Skeleton);
+                !self.loaded_clans.contains(clan_id)
             } else {
+                self.loaded_clans.insert(*clan_id);
                 for category in categories {
                     let is_favorites = category.id == FAVOR_CATE_ID;
-                    let collapsed = channels.is_category_collapsed(clan_id, &category.id);
+                    let collapsed = channels.is_category_collapsed(*clan_id, &category.id);
                     let name = if is_favorites {
                         mezon_i18n::t(&locale, "channelList.favoriteChannel").to_string()
                     } else {
                         category.name.clone()
                     };
                     items.push(SidebarItem::Category {
+                        elem_id: SharedString::from(format!("cat-{}", &category.id)),
                         id: category.id.clone(),
-                        name,
+                        name_upper: name.to_uppercase(),
                         collapsed,
                     });
                     if !collapsed {
@@ -124,25 +198,35 @@ impl ChannelSidebar {
                         for (idx, ch) in ch_slice.iter().enumerate() {
                             let is_thread = !is_favorites && ch.parent_id.is_some();
                             let (line_above, line_below) = if is_thread {
-                                let pid = ch.parent_id.as_deref().unwrap_or("");
-                                let has_prev = ch_slice[..idx]
-                                    .iter()
-                                    .any(|c| c.parent_id.as_deref() == Some(pid));
-                                let has_next = ch_slice[idx + 1..]
-                                    .iter()
-                                    .any(|c| c.parent_id.as_deref() == Some(pid));
+                                let pid = ch.parent_id;
+                                let has_prev = ch_slice[..idx].iter().any(|c| c.parent_id == pid);
+                                let has_next =
+                                    ch_slice[idx + 1..].iter().any(|c| c.parent_id == pid);
                                 (has_prev, has_next)
                             } else {
                                 (false, false)
                             };
+                            let badge_count = ch.badge_count;
+                            let badge_label = if badge_count > 99 {
+                                SharedString::from("99+")
+                            } else if badge_count > 0 {
+                                SharedString::from(badge_count.to_string())
+                            } else {
+                                SharedString::from("")
+                            };
                             items.push(SidebarItem::Channel {
-                                id: ch.id.clone(),
+                                elem_id: SharedString::from(format!(
+                                    "ch-{}-{}",
+                                    &category.id, &ch.id
+                                )),
+                                id: ch.id.to_string(),
                                 name: truncate_channel_label(&ch.name),
                                 channel_type: ch.channel_type,
                                 unread: ch.is_unread(),
                                 private: ch.private,
-                                selected: active_channel_id.as_deref() == Some(ch.id.as_str()),
-                                badge_count: ch.badge_count,
+                                selected: active_channel_id == Some(ch.id),
+                                badge_count,
+                                badge_label,
                                 muted: ch.muted,
                                 is_thread,
                                 line_above,
@@ -156,16 +240,100 @@ impl ChannelSidebar {
                         }
                     }
                 }
+                false
             }
         } else {
-            items.push(SidebarItem::Skeleton);
+            true
+        };
+
+        let new_count = items.len();
+        let old_count = self.items.len();
+        let items_changed = *self.items != items;
+        self.items = Rc::new(items);
+
+        if clan_changed || old_count == 0 {
+            self.list_state.reset(new_count);
+        } else if new_count > old_count {
+            self.list_state
+                .splice(old_count..old_count, new_count - old_count);
+        } else if new_count < old_count {
+            self.list_state.splice(new_count..old_count, 0);
         }
 
-        let count = items.len();
-        let count_changed = self.items.len() != count;
-        self.items = Rc::new(items);
-        if count_changed {
-            self.list_state.reset(count);
+        let skeleton_changed = self.advance_skeleton(cold_loading, new_clan_id, cx);
+        items_changed || name_changed || clan_changed || skeleton_changed
+    }
+
+    fn advance_skeleton(
+        &mut self,
+        loading: bool,
+        clan: Option<ClanId>,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let same_clan = self.skeleton_clan == clan;
+        let (next, timer) = skeleton::transition(
+            self.skeleton_phase,
+            skeleton::Input::Sync { loading, same_clan },
+        );
+        self.skeleton_clan = clan;
+        let changed = next != self.skeleton_phase;
+        self.skeleton_phase = next;
+        self.arm_skeleton_timer(timer, clan, cx);
+        changed
+    }
+
+    fn arm_skeleton_timer(
+        &mut self,
+        timer: skeleton::Timer,
+        clan: Option<ClanId>,
+        cx: &mut Context<Self>,
+    ) {
+        match skeleton::timer_action(timer) {
+            skeleton::TimerAction::Keep => {}
+            skeleton::TimerAction::Clear => self._skeleton_timer = None,
+            skeleton::TimerAction::Arm(input, delay_ms) => {
+                self._skeleton_timer = Some(Self::spawn_skeleton_timer(input, delay_ms, clan, cx));
+            }
+        }
+    }
+
+    fn spawn_skeleton_timer(
+        input: skeleton::Input,
+        delay_ms: u64,
+        clan: Option<ClanId>,
+        cx: &mut Context<Self>,
+    ) -> Task<()> {
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis(delay_ms))
+                .await;
+            this.update(cx, |this, cx| this.on_skeleton_timer(input, clan, cx))
+                .ok();
+        })
+    }
+
+    fn on_skeleton_timer(
+        &mut self,
+        input: skeleton::Input,
+        clan: Option<ClanId>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.skeleton_clan != clan {
+            return;
+        }
+        let (next, timer) = skeleton::transition(self.skeleton_phase, input);
+        let changed = next != self.skeleton_phase;
+        self.skeleton_phase = next;
+        self.arm_skeleton_timer(timer, clan, cx);
+        if changed {
+            cx.notify();
+        }
+    }
+
+    fn skeleton_anim_id(&self, prefix: &'static str) -> SharedString {
+        match self.skeleton_clan {
+            Some(id) => SharedString::from(format!("{prefix}-{id}")),
+            None => SharedString::from(prefix),
         }
     }
 }
@@ -176,7 +344,8 @@ impl Render for ChannelSidebar {
         let theme = cx.theme();
         let items = self.items.clone();
         let channel_list_handle = self.channel_list_handle.clone();
-        let active_clan_id_for_nav = self.active_clan_id.clone();
+        let active_clan_id_for_nav = self.active_clan_id;
+        let suppress_hover = self.suppress_hover;
         let list_state = self.list_state.clone();
         let sidebar = cx.entity().downgrade();
         let menu_overlay = self.open_menu.as_ref().map(|menu| {
@@ -196,12 +365,38 @@ impl Render for ChannelSidebar {
                     ix,
                     cx,
                     channel_list_handle.clone(),
-                    active_clan_id_for_nav.clone(),
+                    active_clan_id_for_nav,
                     sidebar.clone(),
+                    suppress_hover,
                 )
             }
         })
         .size_full();
+
+        let skeleton_overlay = match self.skeleton_phase {
+            skeleton::Phase::Showing => Some(
+                sidebar_skeleton_layer(theme, cx)
+                    .with_animation(
+                        self.skeleton_anim_id("sidebar-skeleton-in"),
+                        Animation::new(Duration::from_millis(skeleton::FADE_IN_MS))
+                            .with_easing(ease_in_out),
+                        |el, delta| el.opacity(delta),
+                    )
+                    .into_any_element(),
+            ),
+            skeleton::Phase::Settling => Some(sidebar_skeleton_layer(theme, cx).into_any_element()),
+            skeleton::Phase::FadingOut => Some(
+                sidebar_skeleton_layer(theme, cx)
+                    .with_animation(
+                        self.skeleton_anim_id("sidebar-skeleton-out"),
+                        Animation::new(Duration::from_millis(skeleton::FADE_OUT_MS))
+                            .with_easing(ease_in_out),
+                        |el, delta| el.opacity(1.0 - delta),
+                    )
+                    .into_any_element(),
+            ),
+            skeleton::Phase::Hidden | skeleton::Phase::Pending => None,
+        };
 
         div()
             .flex()
@@ -228,7 +423,14 @@ impl Render for ChannelSidebar {
                             .child(self.active_clan_name.clone()),
                     ),
             )
-            .child(div().flex_1().min_h_0().child(list_element))
+            .child(
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .relative()
+                    .child(list_element)
+                    .children(skeleton_overlay),
+            )
             .when_some(
                 menu_overlay,
                 move |el, (position, channel_type, is_thread, locale)| {
@@ -241,42 +443,63 @@ impl Render for ChannelSidebar {
     }
 }
 
-fn render_skeleton(cx: &App) -> AnyElement {
-    let theme = cx.theme();
-    let skeleton_bg = theme.bg_tertiary;
-    let skeleton_row = || {
-        div()
-            .flex()
-            .flex_row()
-            .items_center()
-            .px_4()
-            .py_1()
-            .gap_2()
-            .child(div().size(px(14.)).rounded_sm().bg(skeleton_bg))
-            .child(div().h(px(12.)).w(px(80.)).rounded_sm().bg(skeleton_bg))
-    };
+fn sk_bar(sk: gpui::Rgba, w: gpui::Pixels, h: gpui::Pixels) -> gpui::Div {
+    div().w(w).h(h).rounded(px(4.)).bg(sk)
+}
+
+fn sk_channel_row(sk: gpui::Rgba, text_w: f32) -> gpui::Div {
+    div()
+        .h(px(34.))
+        .w_full()
+        .px_2()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap_2()
+        .child(sk_bar(sk, px(18.), px(18.)))
+        .child(sk_bar(sk, px(text_w), px(14.)))
+}
+
+fn sk_category(sk: gpui::Rgba, name_w: f32, widths: [f32; 4]) -> gpui::Div {
     div()
         .flex()
         .flex_col()
-        .gap_1()
-        .px_2()
-        .py_2()
         .child(
             div()
+                .pt(px(10.))
+                .pb(px(6.))
+                .px_2()
                 .flex()
                 .flex_row()
                 .items_center()
-                .px_2()
-                .py_1()
-                .gap_2()
-                .child(div().size(px(12.)).rounded_sm().bg(skeleton_bg))
-                .child(div().h(px(10.)).w(px(60.)).rounded_sm().bg(skeleton_bg)),
+                .gap_1()
+                .child(sk_bar(sk, px(18.), px(18.)))
+                .child(sk_bar(sk, px(name_w), px(12.))),
         )
-        .child(skeleton_row())
-        .child(skeleton_row())
-        .child(skeleton_row())
-        .child(skeleton_row())
+        .child(sk_channel_row(sk, widths[0]))
+        .child(sk_channel_row(sk, widths[1]))
+        .child(sk_channel_row(sk, widths[2]))
+        .child(sk_channel_row(sk, widths[3]))
+}
+
+fn render_skeleton(cx: &App) -> AnyElement {
+    let sk = cx.theme().bg_hover;
+    div()
+        .flex()
+        .flex_col()
+        .child(div().w_full().h(px(136.)).mb_2().rounded(px(4.)).bg(sk))
+        .child(sk_category(sk, 70., [88., 64., 100., 76.]))
+        .child(sk_category(sk, 92., [72., 96., 60., 84.]))
+        .child(sk_category(sk, 60., [92., 68., 80., 64.]))
         .into_any_element()
+}
+
+fn sidebar_skeleton_layer(theme: &Theme, cx: &App) -> gpui::Div {
+    div()
+        .absolute()
+        .inset_0()
+        .bg(theme.bg_secondary)
+        .child(render_skeleton(cx))
 }
 
 fn nav_row(icon: IconName, label: &'static str, theme: &crate::theme::Theme) -> gpui::Div {
@@ -329,7 +552,7 @@ fn render_banner_and_events(
 
     if let Some(url) = banner_url {
         col = col.child(
-            div().w_full().h(px(136.)).mb_2().child(
+            div().w_full().h(px(136.)).mb_2().overflow_hidden().child(
                 gpui::img(crate::util::imgproxy::proxied(cx, url, 300, 300, "fit"))
                     .w_full()
                     .h_full()
@@ -370,7 +593,7 @@ fn render_banner_and_events(
         };
 
         let mut app_row = app_row;
-        for slot in &show_list {
+        for (ix, slot) in show_list.iter().enumerate() {
             let icon_el: AnyElement = if let Some(logo) = &slot.app_logo {
                 gpui::img(logo.clone())
                     .w(px(24.))
@@ -386,6 +609,7 @@ fn render_banner_and_events(
             };
             app_row = app_row.child(
                 div()
+                    .id(SharedString::from(format!("app-channel-{ix}")))
                     .w(px(40.))
                     .h(px(40.))
                     .p_2()
@@ -401,6 +625,7 @@ fn render_banner_and_events(
         if has_more {
             app_row = app_row.child(
                 div()
+                    .id("app-channels-more")
                     .w(px(40.))
                     .h(px(40.))
                     .p_2()
@@ -431,8 +656,9 @@ fn render_sidebar_item(
     ix: usize,
     cx: &App,
     channel_list_handle: Entity<ChannelList>,
-    active_clan_id_for_nav: Option<String>,
+    active_clan_id_for_nav: Option<ClanId>,
     sidebar: WeakEntity<ChannelSidebar>,
+    suppress_hover: bool,
 ) -> AnyElement {
     let theme = cx.theme();
     let Some(item) = items.get(ix) else {
@@ -440,24 +666,23 @@ fn render_sidebar_item(
     };
 
     match item {
-        SidebarItem::Skeleton => render_skeleton(cx),
-
         SidebarItem::BannerAndEvents {
             banner_url,
             app_channels,
         } => render_banner_and_events(banner_url.as_deref(), app_channels, cx),
 
         SidebarItem::Category {
+            elem_id,
             id,
-            name,
+            name_upper,
             collapsed,
         } => {
             let category_id = id.clone();
-            let category_name = name.clone().to_uppercase();
-            let clan_id_for_toggle = active_clan_id_for_nav.clone().unwrap_or_default();
+            let category_name = name_upper.clone();
+            let clan_id_for_toggle = active_clan_id_for_nav.unwrap_or_default();
 
             let mut header = div()
-                .id(SharedString::from(format!("cat-{}", category_id)))
+                .id(elem_id.clone())
                 .flex()
                 .flex_row()
                 .items_center()
@@ -494,6 +719,7 @@ fn render_sidebar_item(
         }
 
         SidebarItem::Channel {
+            elem_id,
             id,
             name,
             channel_type,
@@ -501,6 +727,7 @@ fn render_sidebar_item(
             private,
             selected,
             badge_count,
+            badge_label,
             muted,
             is_thread,
             line_above,
@@ -509,8 +736,9 @@ fn render_sidebar_item(
         } => {
             let ch_id = id.clone();
             let row_handle = channel_list_handle.clone();
-            let clan_id_inner = active_clan_id_for_nav.clone();
+            let clan_id_inner = active_clan_id_for_nav;
             let selected_bg = theme.bg_primary;
+            let hover_bg = theme.bg_hover;
             let brand = theme.brand;
             let text_primary = theme.text_primary;
             let text_color = if *muted {
@@ -555,12 +783,17 @@ fn render_sidebar_item(
                 );
 
                 div()
+                    .id(SharedString::from(format!("thread-row-{ch_id}")))
                     .h(px(34.))
                     .w_full()
                     .flex()
                     .flex_row()
                     .items_stretch()
+                    .cursor_pointer()
                     .when(*selected, move |el| el.bg(selected_bg))
+                    .when(!*selected && !suppress_hover, move |el| {
+                        el.hover(move |s| s.bg(hover_bg))
+                    })
                     .child(div().flex_none().w(px(16.)))
                     .child(connector)
                     .child(
@@ -575,37 +808,42 @@ fn render_sidebar_item(
                                 el.font_weight(gpui::FontWeight::BOLD)
                             })
                             .child(div().flex_1().child(name.clone()))
-                            .when(*badge_count > 0 && !*muted, move |el| {
-                                el.child(
-                                    div()
-                                        .flex()
-                                        .items_center()
-                                        .justify_center()
-                                        .min_w(px(16.))
-                                        .h(px(16.))
-                                        .px_1()
-                                        .rounded_full()
-                                        .bg(brand)
-                                        .text_color(text_primary)
-                                        .text_xs()
-                                        .child(format!("{}", badge_count)),
-                                )
-                            }),
+                            .when(
+                                crate::SHOW_UNREAD_BADGE_COUNT && *badge_count > 0 && !*muted,
+                                move |el| {
+                                    el.child(
+                                        div()
+                                            .flex()
+                                            .items_center()
+                                            .justify_center()
+                                            .min_w(px(16.))
+                                            .h(px(16.))
+                                            .px_1()
+                                            .rounded_full()
+                                            .bg(brand)
+                                            .text_color(text_primary)
+                                            .text_xs()
+                                            .child(badge_label.clone()),
+                                    )
+                                },
+                            ),
                     )
                     .into_any_element()
             } else {
                 ChannelRow::new(name.clone(), *channel_type)
+                    .row_id(SharedString::from(format!("channel-row-{ch_id}")))
                     .selected(*selected)
                     .unread(*unread)
                     .private(*private)
                     .badge_count(*badge_count)
                     .muted(*muted)
+                    .suppress_hover(suppress_hover)
                     .render(theme)
                     .into_any_element()
             };
 
             let mut channel_col = div()
-                .id(SharedString::from(format!("ch-{}", id)))
+                .id(elem_id.clone())
                 .w_full()
                 .flex()
                 .flex_col()
@@ -627,8 +865,9 @@ fn render_sidebar_item(
                             let avatar = if m.avatar_url.is_empty() {
                                 Avatar::new().name(name_text.clone())
                             } else {
+                                let proxied = crate::util::imgproxy::avatar_url(cx, &m.avatar_url);
                                 Avatar::new()
-                                    .src(m.avatar_url.clone())
+                                    .src(SharedString::from(proxied))
                                     .name(name_text.clone())
                             };
                             div()

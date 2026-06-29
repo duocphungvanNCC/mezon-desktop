@@ -6,11 +6,17 @@ edition = "2024"
 [dependencies]
 mezon-client.workspace = true
 mezon-proto.workspace = true
+mezon-voice.workspace = true
 gpui.workspace = true
+image.workspace = true
+smallvec.workspace = true
+parking_lot.workspace = true
 chrono.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 anyhow.workspace = true
 tracing.workspace = true
 dirs.workspace = true
+flume.workspace = true
+url.workspace = true
 tokio.workspace = true

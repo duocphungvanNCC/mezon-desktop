@@ -52,8 +52,13 @@ impl Render for NotificationsPage {
                                         this.settings.update(cx, |s, _| {
                                             s.notifications_hide_content =
                                                 !s.notifications_hide_content;
-                                            s.save_sync();
                                         });
+                                        let snapshot = this.settings.read(cx).clone();
+                                        cx.background_executor()
+                                            .spawn(async move {
+                                                snapshot.save_sync();
+                                            })
+                                            .detach();
                                         cx.notify();
                                     })),
                             ),

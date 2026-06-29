@@ -56,7 +56,7 @@ impl RenderOnce for Spinner {
             .color
             .unwrap_or_else(|| cx.theme().text_secondary.into());
         let icon = svg()
-            .path("icons/loader.svg")
+            .path("icons/loading-spinner.svg")
             .size(diameter(self.size))
             .flex_none()
             .text_color(color)

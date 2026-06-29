@@ -1,14 +1,18 @@
 use crate::components::primitives::Sizable;
 use gpui::{
     AnyView, App, ClickEvent, Context, Entity, FontWeight, MouseButton, NavigationDirection,
-    StyleRefinement, Window, div, prelude::*,
+    StyleRefinement, Window, div, img, prelude::*, px,
 };
-use mezon_store::{AuthState, ClanList, Settings};
+use mezon_store::{AuthState, ClanList, ConnectionStore, Settings};
 
 use crate::app::title_bar::TitleBar;
+use crate::app::window_controls;
 use crate::auth::login_view::LoginView;
 use crate::chat::layout::ChatLayout;
 use crate::components::primitives::{Button, Icon, IconName, Size, Spinner};
+use crate::image_cache::{
+    LruImageCache, SHARED_ENTRY_MAX_BYTES, SHARED_IMAGE_CACHE_BYTES, SHARED_IMAGE_CACHE_CAPACITY,
+};
 use crate::router::{Route, Router};
 use crate::settings::SettingsScreen;
 use crate::theme::{ActiveTheme, Theme, resolve_theme};
@@ -21,6 +25,8 @@ pub struct RootView {
     settings_screen: Entity<SettingsScreen>,
     settings: Entity<Settings>,
     applied_theme: String,
+    initial_route_restored: bool,
+    image_cache: Entity<LruImageCache>,
 }
 
 impl RootView {
@@ -40,8 +46,8 @@ impl RootView {
             if name != this.applied_theme {
                 crate::theme::set_theme(resolve_theme(&name), cx);
                 this.applied_theme = name;
+                cx.notify();
             }
-            cx.notify();
         })
         .detach();
 
@@ -51,11 +57,56 @@ impl RootView {
             move |cx| LoginView::new(auth_state, settings, cx)
         });
 
-        cx.observe(&Router::global(cx), |this, _, cx| {
+        cx.observe(&Router::global(cx), |this, router, cx| {
             this.sync_settings_page(cx);
+            if let Route::Channel {
+                clan_id,
+                channel_id,
+            } = router.read(cx).route()
+            {
+                this.settings.update(cx, |s, cx| {
+                    s.last_clan_id = Some(clan_id);
+                    s.last_channel_id = Some(channel_id);
+                    let snapshot = s.clone();
+                    cx.background_executor()
+                        .spawn(async move {
+                            snapshot.save_sync();
+                        })
+                        .detach();
+                });
+            }
             cx.notify();
         })
         .detach();
+
+        cx.observe(&auth_state, |this, auth, cx| {
+            if this.initial_route_restored {
+                cx.notify();
+                return;
+            }
+            if matches!(auth.read(cx), AuthState::Authenticated(_)) {
+                this.initial_route_restored = true;
+                let last = this
+                    .settings
+                    .read(cx)
+                    .last_clan_id
+                    .zip(this.settings.read(cx).last_channel_id);
+                if let Some((clan_id, channel_id)) = last {
+                    crate::router::navigate(
+                        cx,
+                        Route::Channel {
+                            clan_id,
+                            channel_id,
+                        },
+                    );
+                }
+            }
+            cx.notify();
+        })
+        .detach();
+
+        cx.observe(&ConnectionStore::global(cx), |_, _, cx| cx.notify())
+            .detach();
 
         let clan_list: Entity<ClanList> = ClanList::global(cx);
 
@@ -89,6 +140,15 @@ impl RootView {
         });
 
         let applied_theme = settings.read(cx).theme.clone();
+        let image_cache = cx.new(|cx| {
+            LruImageCache::labeled(
+                "shared",
+                SHARED_IMAGE_CACHE_CAPACITY,
+                SHARED_IMAGE_CACHE_BYTES,
+                SHARED_ENTRY_MAX_BYTES,
+                cx,
+            )
+        });
         Self {
             title_bar,
             auth_state,
@@ -97,6 +157,8 @@ impl RootView {
             settings_screen,
             settings,
             applied_theme,
+            initial_route_restored: false,
+            image_cache,
         }
     }
 
@@ -113,7 +175,8 @@ impl RootView {
             Route::SettingsAccount => crate::settings::SettingsPage::Account,
             _ => return,
         };
-        self.settings_screen.update(cx, |s, _| s.set_page(page));
+        self.settings_screen
+            .update(cx, |s, cx| s.set_page(page, cx));
     }
 }
 
@@ -129,7 +192,10 @@ impl Render for RootView {
                 cached_fill(self.login_view.clone())
             }
             AuthState::AwaitingCallback => render_awaiting_callback(theme, &locale),
-            AuthState::Connecting(_) => render_connecting(theme, &locale),
+            AuthState::Connecting(_) => {
+                let attempt = ConnectionStore::global(cx).read(cx).connecting_attempt();
+                render_connecting(theme, &locale, attempt)
+            }
             AuthState::Authenticated(_) => {
                 let route = Router::global(cx).read(cx).route();
                 match route {
@@ -143,6 +209,8 @@ impl Render for RootView {
                     | Route::SettingsVoice
                     | Route::SettingsAdvanced => cached_fill(self.settings_screen.clone()),
                     Route::NotFound { .. } => render_not_found(theme, &locale),
+                    Route::AddFriend { .. } => render_placeholder(theme, "Add Friend"),
+                    Route::Invite { .. } => render_placeholder(theme, "Accept Invite"),
                     _ => cached_fill(self.chat_layout.clone()),
                 }
             }
@@ -153,11 +221,14 @@ impl Render for RootView {
             .render_overlay();
 
         div()
+            .relative()
             .flex()
             .flex_col()
             .size_full()
             .bg(theme.bg_primary)
             .text_color(theme.text_primary)
+            .child(window_controls::render_app_drag_header())
+            .image_cache(self.image_cache.clone())
             .on_action(cx.listener(|_, _: &crate::ToggleInspector, window, cx| {
                 window.toggle_inspector(cx);
             }))
@@ -169,15 +240,23 @@ impl Render for RootView {
                 MouseButton::Navigate(NavigationDirection::Forward),
                 |_, _, cx| crate::router::go_forward(cx),
             )
-            .when(cfg!(not(target_os = "macos")), |this| {
-                this.child(
-                    AnyView::from(self.title_bar.clone())
-                        .cached(StyleRefinement::default().w_full().h_8()),
-                )
+            .when(window_controls::HAS_CUSTOM_TITLE_BAR, |this| {
+                this.child(render_title_bar(self.title_bar.clone()))
             })
             .child(content)
+            .when(window_controls::is_edge_resizable(), |this| {
+                this.child(window_controls::render_resize_edges(_window))
+            })
             .child(overlay)
     }
+}
+
+fn render_title_bar(title_bar: Entity<TitleBar>) -> AnyView {
+    let view = AnyView::from(title_bar);
+    #[cfg(not(target_os = "windows"))]
+    return view.cached(StyleRefinement::default().w_full().h_8());
+    #[cfg(target_os = "windows")]
+    view
 }
 
 fn cached_fill(view: impl Into<AnyView>) -> gpui::AnyElement {
@@ -194,7 +273,12 @@ fn render_awaiting_callback(theme: &Theme, locale: &str) -> gpui::AnyElement {
         .justify_center()
         .flex_col()
         .gap_4()
-        .child(div().size_16().bg(theme.brand).rounded_lg())
+        .child(
+            img(crate::util::assets::MEZON_LOGO)
+                .w(px(280.))
+                .h(px(50.))
+                .object_fit(gpui::ObjectFit::Contain),
+        )
         .child(
             div()
                 .text_xl()
@@ -211,7 +295,12 @@ fn render_awaiting_callback(theme: &Theme, locale: &str) -> gpui::AnyElement {
         .into_any_element()
 }
 
-fn render_connecting(theme: &Theme, locale: &str) -> gpui::AnyElement {
+fn render_connecting(theme: &Theme, locale: &str, attempt: u32) -> gpui::AnyElement {
+    let label = if attempt > 0 {
+        mezon_i18n::t(locale, "root.reconnectingAttempt").replace("{{count}}", &attempt.to_string())
+    } else {
+        mezon_i18n::t(locale, "root.loading").to_string()
+    };
     div()
         .flex()
         .flex_1()
@@ -229,7 +318,31 @@ fn render_connecting(theme: &Theme, locale: &str) -> gpui::AnyElement {
                 .text_xl()
                 .font_weight(FontWeight::BOLD)
                 .text_color(theme.text_primary)
-                .child(mezon_i18n::t(locale, "root.loading")),
+                .child(label),
+        )
+        .into_any_element()
+}
+
+fn render_placeholder(theme: &Theme, label: &str) -> gpui::AnyElement {
+    div()
+        .flex()
+        .flex_1()
+        .items_center()
+        .justify_center()
+        .flex_col()
+        .gap_4()
+        .child(
+            div()
+                .text_xl()
+                .font_weight(FontWeight::BOLD)
+                .text_color(theme.text_primary)
+                .child(label.to_string()),
+        )
+        .child(
+            div()
+                .text_sm()
+                .text_color(theme.text_secondary)
+                .child("Coming soon"),
         )
         .into_any_element()
 }

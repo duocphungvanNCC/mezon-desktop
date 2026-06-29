@@ -138,9 +138,14 @@ fn language_row(
         .on_click(move |_, _, cx| {
             settings.update(cx, |s, cx| {
                 s.language = value.to_string();
-                s.save_sync();
                 cx.notify();
             });
+            let snapshot = settings.read(cx).clone();
+            cx.background_executor()
+                .spawn(async move {
+                    snapshot.save_sync();
+                })
+                .detach();
         })
 }
 

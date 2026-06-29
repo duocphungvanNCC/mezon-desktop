@@ -1,17 +1,35 @@
 use gpui::{App, AppContext, Entity, Global};
+use mezon_store::{ChannelId, ClanId};
 use std::collections::VecDeque;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Route {
     Chat,
     Direct,
+    Friends,
     DirectMessage {
-        direct_id: String,
+        direct_id: ChannelId,
         message_type: String,
     },
     Channel {
-        clan_id: String,
-        channel_id: String,
+        clan_id: ClanId,
+        channel_id: ChannelId,
+    },
+    Thread {
+        clan_id: ClanId,
+        channel_id: ChannelId,
+        thread_id: ChannelId,
+    },
+    Canvas {
+        clan_id: ClanId,
+        channel_id: ChannelId,
+        canvas_id: ChannelId,
+    },
+    AddFriend {
+        username: String,
+    },
+    Invite {
+        invite_id: String,
     },
     SettingsAccount,
     SettingsProfile,
@@ -32,6 +50,7 @@ impl Route {
         match self {
             Route::Chat => "/chat".to_string(),
             Route::Direct => "/chat/direct".to_string(),
+            Route::Friends => "/chat/direct/friends".to_string(),
             Route::DirectMessage {
                 direct_id,
                 message_type,
@@ -40,6 +59,18 @@ impl Route {
                 clan_id,
                 channel_id,
             } => format!("/chat/clans/{clan_id}/channels/{channel_id}"),
+            Route::Thread {
+                clan_id,
+                channel_id,
+                thread_id,
+            } => format!("/chat/clans/{clan_id}/channels/{channel_id}/threads/{thread_id}"),
+            Route::Canvas {
+                clan_id,
+                channel_id,
+                canvas_id,
+            } => format!("/chat/clans/{clan_id}/channels/{channel_id}/canvas/{canvas_id}"),
+            Route::AddFriend { username } => format!("/chat/{username}"),
+            Route::Invite { invite_id } => format!("/invite/{invite_id}"),
             Route::SettingsAccount => "/settings/account".to_string(),
             Route::SettingsProfile => "/settings/profile".to_string(),
             Route::SettingsDevices => "/settings/devices".to_string(),
@@ -61,16 +92,56 @@ impl Route {
             .filter(|segment| !segment.is_empty())
             .collect::<Vec<_>>();
 
-        match segments.as_slice() {
+        Self::route_from_segments(&segments).unwrap_or(Route::NotFound { path: normalized })
+    }
+
+    /// Map URL segments to a [`Route`]. Snowflake ids are parsed with `.parse().ok()?`, so a
+    /// malformed (non-numeric) id in an untrusted deep link yields `None` → `NotFound` — never a
+    /// panic.
+    fn route_from_segments(segments: &[&str]) -> Option<Route> {
+        Some(match *segments {
             ["chat"] => Route::Chat,
             ["chat", "direct"] => Route::Direct,
+            ["chat", "direct", "friends"] => Route::Friends,
             ["chat", "direct", "message", direct_id, message_type] => Route::DirectMessage {
-                direct_id: (*direct_id).to_string(),
-                message_type: (*message_type).to_string(),
+                direct_id: direct_id.parse().ok()?,
+                message_type: message_type.to_string(),
             },
             ["chat", "clans", clan_id, "channels", channel_id] => Route::Channel {
-                clan_id: (*clan_id).to_string(),
-                channel_id: (*channel_id).to_string(),
+                clan_id: clan_id.parse().ok()?,
+                channel_id: channel_id.parse().ok()?,
+            },
+            [
+                "chat",
+                "clans",
+                clan_id,
+                "channels",
+                channel_id,
+                "threads",
+                thread_id,
+            ] => Route::Thread {
+                clan_id: clan_id.parse().ok()?,
+                channel_id: channel_id.parse().ok()?,
+                thread_id: thread_id.parse().ok()?,
+            },
+            [
+                "chat",
+                "clans",
+                clan_id,
+                "channels",
+                channel_id,
+                "canvas",
+                canvas_id,
+            ] => Route::Canvas {
+                clan_id: clan_id.parse().ok()?,
+                channel_id: channel_id.parse().ok()?,
+                canvas_id: canvas_id.parse().ok()?,
+            },
+            ["chat", username] if !matches!(username, "direct" | "clans") => Route::AddFriend {
+                username: username.to_string(),
+            },
+            ["invite", invite_id] => Route::Invite {
+                invite_id: invite_id.to_string(),
             },
             ["settings"] | ["settings", "account"] => Route::SettingsAccount,
             ["settings", "profile"] => Route::SettingsProfile,
@@ -81,8 +152,8 @@ impl Route {
             ["settings", "language"] => Route::SettingsLanguage,
             ["settings", "voice"] => Route::SettingsVoice,
             ["settings", "advanced"] => Route::SettingsAdvanced,
-            _ => Route::NotFound { path: normalized },
-        }
+            _ => return None,
+        })
     }
 }
 
@@ -241,8 +312,8 @@ mod tests {
         assert_eq!(
             route,
             Route::Channel {
-                clan_id: "1".into(),
-                channel_id: "42".into(),
+                clan_id: ClanId(1),
+                channel_id: ChannelId(42),
             }
         );
     }
@@ -270,8 +341,8 @@ mod tests {
         assert_eq!(
             parse_link("mezonapp://chat/clans/9/channels/3"),
             Some(Route::Channel {
-                clan_id: "9".into(),
-                channel_id: "3".into(),
+                clan_id: ClanId(9),
+                channel_id: ChannelId(3),
             })
         );
     }
@@ -284,8 +355,8 @@ mod tests {
     #[test]
     fn to_path_roundtrip_channel() {
         let route = Route::Channel {
-            clan_id: "7".into(),
-            channel_id: "99".into(),
+            clan_id: ClanId(7),
+            channel_id: ChannelId(99),
         };
         assert_eq!(route.to_path(), "/chat/clans/7/channels/99");
         assert_eq!(Route::from_path(&route.to_path()), route);
@@ -294,5 +365,171 @@ mod tests {
     #[test]
     fn default_route_is_dm_view() {
         assert_eq!(Router::new().route(), Route::Direct);
+    }
+
+    #[test]
+    fn from_path_friends() {
+        assert_eq!(Route::from_path("/chat/direct/friends"), Route::Friends);
+    }
+
+    #[test]
+    fn to_path_roundtrip_friends() {
+        assert_eq!(Route::Friends.to_path(), "/chat/direct/friends");
+        assert_eq!(Route::from_path(&Route::Friends.to_path()), Route::Friends);
+    }
+
+    #[test]
+    fn from_path_thread() {
+        let route = Route::from_path("/chat/clans/1/channels/2/threads/3");
+        assert_eq!(
+            route,
+            Route::Thread {
+                clan_id: ClanId(1),
+                channel_id: ChannelId(2),
+                thread_id: ChannelId(3),
+            }
+        );
+    }
+
+    #[test]
+    fn to_path_roundtrip_thread() {
+        let route = Route::Thread {
+            clan_id: ClanId(1),
+            channel_id: ChannelId(2),
+            thread_id: ChannelId(3),
+        };
+        assert_eq!(route.to_path(), "/chat/clans/1/channels/2/threads/3");
+        assert_eq!(Route::from_path(&route.to_path()), route);
+    }
+
+    #[test]
+    fn from_path_canvas() {
+        let route = Route::from_path("/chat/clans/1/channels/2/canvas/4");
+        assert_eq!(
+            route,
+            Route::Canvas {
+                clan_id: ClanId(1),
+                channel_id: ChannelId(2),
+                canvas_id: ChannelId(4),
+            }
+        );
+    }
+
+    #[test]
+    fn to_path_roundtrip_canvas() {
+        let route = Route::Canvas {
+            clan_id: ClanId(1),
+            channel_id: ChannelId(2),
+            canvas_id: ChannelId(4),
+        };
+        assert_eq!(route.to_path(), "/chat/clans/1/channels/2/canvas/4");
+        assert_eq!(Route::from_path(&route.to_path()), route);
+    }
+
+    #[test]
+    fn from_path_add_friend() {
+        let route = Route::from_path("/chat/alice");
+        assert_eq!(
+            route,
+            Route::AddFriend {
+                username: "alice".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn to_path_roundtrip_add_friend() {
+        let route = Route::AddFriend {
+            username: "alice".into(),
+        };
+        assert_eq!(route.to_path(), "/chat/alice");
+        assert_eq!(Route::from_path(&route.to_path()), route);
+    }
+
+    #[test]
+    fn from_path_add_friend_skips_reserved_segments() {
+        assert_eq!(Route::from_path("/chat/direct"), Route::Direct);
+        assert_eq!(
+            Route::from_path("/chat/clans"),
+            Route::NotFound {
+                path: "/chat/clans".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn from_path_invite() {
+        let route = Route::from_path("/invite/abc123");
+        assert_eq!(
+            route,
+            Route::Invite {
+                invite_id: "abc123".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn to_path_roundtrip_invite() {
+        let route = Route::Invite {
+            invite_id: "abc123".into(),
+        };
+        assert_eq!(route.to_path(), "/invite/abc123");
+        assert_eq!(Route::from_path(&route.to_path()), route);
+    }
+
+    #[test]
+    fn parse_link_friends() {
+        assert_eq!(
+            parse_link("mezonapp://chat/direct/friends"),
+            Some(Route::Friends)
+        );
+    }
+
+    #[test]
+    fn parse_link_invite() {
+        assert_eq!(
+            parse_link("mezonapp://invite/abc123"),
+            Some(Route::Invite {
+                invite_id: "abc123".into(),
+            })
+        );
+    }
+
+    #[test]
+    fn go_back_at_boundary_is_noop() {
+        let mut router = Router::new();
+        router.go_back();
+        assert_eq!(router.route(), Route::Direct);
+    }
+
+    #[test]
+    fn go_forward_at_boundary_is_noop() {
+        let mut router = Router::new();
+        router.go_forward();
+        assert_eq!(router.route(), Route::Direct);
+    }
+
+    #[test]
+    fn navigate_then_back_then_forward() {
+        let mut router = Router::new();
+        router.navigate(Route::Chat);
+        router.navigate(Route::Friends);
+        assert_eq!(router.route(), Route::Friends);
+        router.go_back();
+        assert_eq!(router.route(), Route::Chat);
+        router.go_back();
+        assert_eq!(router.route(), Route::Direct);
+        router.go_forward();
+        assert_eq!(router.route(), Route::Chat);
+    }
+
+    #[test]
+    fn normalize_path_removes_trailing_slash() {
+        assert_eq!(Route::from_path("/chat/direct/"), Route::Direct);
+    }
+
+    #[test]
+    fn normalize_path_empty_becomes_chat() {
+        assert_eq!(Route::from_path(""), Route::Chat);
     }
 }
