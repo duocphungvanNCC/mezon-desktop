@@ -73,6 +73,8 @@ pub struct VoiceStore {
     camera_enabled: bool,
     screen_share_enabled: bool,
     focused_tile: Option<String>,
+    fullscreen_screen: Option<u64>,
+    pip: Option<PipWindow>,
     participants: Vec<VoiceParticipant>,
     session: Option<VoiceSession>,
     frame_store: Option<Arc<VideoFrameStore>>,
@@ -82,6 +84,11 @@ pub struct VoiceStore {
     last_repaint_seq: Option<u64>,
     _events_task: Option<Task<()>>,
     _repaint_task: Option<Task<()>>,
+}
+
+struct PipWindow {
+    key: u64,
+    handle: gpui::AnyWindowHandle,
 }
 
 struct GlobalVoiceStore(Entity<VoiceStore>);
@@ -113,6 +120,8 @@ impl VoiceStore {
             camera_enabled: false,
             screen_share_enabled: false,
             focused_tile: None,
+            fullscreen_screen: None,
+            pip: None,
             participants: Vec::new(),
             session: None,
             frame_store: None,
@@ -285,6 +294,60 @@ impl VoiceStore {
         }
     }
 
+    pub fn fullscreen_screen(&self) -> Option<u64> {
+        self.fullscreen_screen
+    }
+
+    pub fn toggle_fullscreen_screen(&mut self, key: u64, cx: &mut Context<Self>) {
+        self.fullscreen_screen = if self.fullscreen_screen == Some(key) {
+            None
+        } else {
+            Some(key)
+        };
+        cx.notify();
+    }
+
+    pub fn clear_fullscreen_screen(&mut self, cx: &mut Context<Self>) {
+        if self.fullscreen_screen.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    pub fn set_pip(&mut self, key: u64, handle: gpui::AnyWindowHandle, cx: &mut Context<Self>) {
+        if let Some(prev) = self.pip.take() {
+            let _ = prev.handle.update(cx, |_, window, _| window.remove_window());
+        }
+        self.pip = Some(PipWindow { key, handle });
+        cx.notify();
+    }
+
+    pub fn close_pip(&mut self, cx: &mut Context<Self>) {
+        if let Some(prev) = self.pip.take() {
+            let _ = prev.handle.update(cx, |_, window, _| window.remove_window());
+            cx.notify();
+        }
+    }
+
+    pub fn on_pip_closed(&mut self, key: u64, cx: &mut Context<Self>) {
+        if self.pip.as_ref().is_some_and(|p| p.key == key) {
+            self.pip = None;
+            cx.notify();
+        }
+    }
+
+    fn prune_screen_targets(&mut self, cx: &mut Context<Self>) {
+        if let Some(key) = self.fullscreen_screen
+            && !self.participants.iter().any(|p| p.screenshare == Some(key))
+        {
+            self.fullscreen_screen = None;
+        }
+        if let Some(key) = self.pip.as_ref().map(|p| p.key)
+            && !self.participants.iter().any(|p| p.screenshare == Some(key))
+        {
+            self.close_pip(cx);
+        }
+    }
+
     pub fn is_connected_to(&self, channel_id: &str) -> bool {
         matches!(self.connection.connected_channel(), Some((id, _)) if id == channel_id)
     }
@@ -307,7 +370,7 @@ impl VoiceStore {
             return;
         }
 
-        self.teardown();
+        self.teardown(cx);
         self.channel_label = channel_label;
 
         let ws_url = AppConfig::global(cx).meet_ws_url.clone();
@@ -502,10 +565,11 @@ impl VoiceStore {
                     self.screen_share_enabled = local.screenshare.is_some();
                 }
                 self.evict_stale_render_cache();
+                self.prune_screen_targets(cx);
             }
             VoiceEvent::Disconnected { reason } => {
                 tracing::info!("voice disconnected: {reason}");
-                self.teardown();
+                self.teardown(cx);
             }
             VoiceEvent::Error(message) => {
                 tracing::warn!("voice error: {message}");
@@ -525,7 +589,7 @@ impl VoiceStore {
     }
 
     pub fn leave(&mut self, cx: &mut Context<Self>) {
-        self.teardown();
+        self.teardown(cx);
         cx.notify();
     }
 
@@ -579,7 +643,9 @@ impl VoiceStore {
         cx.notify();
     }
 
-    fn teardown(&mut self) {
+    fn teardown(&mut self, cx: &mut Context<Self>) {
+        self.close_pip(cx);
+        self.fullscreen_screen = None;
         self.session = None;
         self.frame_store = None;
         self.render_cache.lock().clear();
