@@ -1,10 +1,13 @@
 use gpui::{AnyView, Context, Entity, StyleRefinement, Window, div, prelude::*, px};
 use mezon_store::{
     AuthState, ChannelId, ChannelList, ChannelType, ClanId, ClanList, DirectChannel, DirectKind,
-    DirectMessageStore, GroupMembersStore, MessagesStore, Settings, VoiceStore,
+    DirectMessageStore, GroupMembersStore, MessagesStore, PinnedMessagesStore, Settings,
+    VoiceStore,
 };
+use ui::PopoverMenuHandle;
 
 use crate::chat::area::ChatArea;
+use crate::chat::pinned_popover::PinnedPopoverPanel;
 use crate::components::compositions::user_info_bar::UserInfoBar;
 use crate::router::{Route, Router};
 use crate::theme::{ActiveTheme, Theme};
@@ -25,6 +28,7 @@ pub struct ChatLayout {
     pending_channel_id: Option<ChannelId>,
     prefetched_voice_channel: Option<ChannelId>,
     show_member_list: bool,
+    pin_popover_handle: PopoverMenuHandle<PinnedPopoverPanel>,
 }
 
 impl ChatLayout {
@@ -66,14 +70,24 @@ impl ChatLayout {
         let voice_store = VoiceStore::global(cx);
         cx.observe(&voice_store, |_, _, cx| cx.notify()).detach();
 
+        let pinned_store = PinnedMessagesStore::global(cx);
+        cx.observe(&pinned_store, |_, _, cx| cx.notify()).detach();
+
         let chat_area = ChatArea::new(settings.clone(), cx);
         cx.observe(&channel_list, |this, _, cx| {
             this.apply_pending_channel(cx);
             this.ensure_active_channel_for_clan(cx);
+            this.pin_popover_handle.hide(cx);
             cx.notify();
         })
         .detach();
         cx.observe(&Router::global(cx), |this, _, cx| {
+            if matches!(
+                Router::global(cx).read(cx).route(),
+                Route::Direct | Route::DirectMessage { .. }
+            ) {
+                this.pin_popover_handle.hide(cx);
+            }
             this.sync_active_from_route(cx);
             cx.notify();
         })
@@ -93,6 +107,7 @@ impl ChatLayout {
             pending_channel_id: None,
             prefetched_voice_channel: None,
             show_member_list: true,
+            pin_popover_handle: PopoverMenuHandle::default(),
         };
         this.sync_active_from_route(cx);
         this
@@ -277,15 +292,6 @@ impl Render for ChatLayout {
         self.chat_area.ensure_input(window, cx);
         self.maybe_prefetch_voice_token(cx);
 
-        if let Some(ch) = self.channel_list.read(cx).active_channel()
-            && ch.channel_type == ChannelType::Voice
-        {
-            let channel_id = ch.id;
-            self.voice_store.update(cx, |store, cx| {
-                store.prefetch_meet_token(channel_id.to_string(), cx);
-            });
-        }
-
         let nav_body = self.render_nav_body(cx);
         let content = self.render_content(cx);
         let voice_mini_bar = self.render_voice_mini_bar(cx);
@@ -428,13 +434,6 @@ impl ChatLayout {
     fn render_content(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let theme = cx.theme();
         let locale = self.settings.read(cx).language.clone();
-        // composer: let reply_preview = MessagesStore::global(cx)
-        // composer:     .read(cx)
-        // composer:     .reply_target()
-        // composer:     .map(|draft| crate::chat::ReplyTarget {
-        // composer:         sender_name: draft.sender_name.clone(),
-        // composer:         content_preview: draft.content_preview.clone(),
-        // composer:     });
 
         if self.is_dm_route(cx) {
             if let Some(dm) = self.current_dm(cx) {
@@ -448,8 +447,8 @@ impl ChatLayout {
                         Some(dm.id),
                         is_group,
                         is_group && self.show_member_list,
+                        None,
                         cx,
-                        // composer: reply_preview,
                     )
                     .into_any_element();
             }
@@ -459,7 +458,7 @@ impl ChatLayout {
             ) {
                 return self
                     .chat_area
-                    .render(&locale, None, true, None, false, false, cx)
+                    .render(&locale, None, true, None, false, false, None, cx)
                     .into_any_element();
             }
             return div()
@@ -519,8 +518,8 @@ impl ChatLayout {
                     Some(channel_id),
                     true,
                     self.show_member_list,
+                    Some(self.pin_popover_handle.clone()),
                     cx,
-                    // composer: reply_preview,
                 )
                 .into_any_element();
         }
@@ -534,7 +533,16 @@ impl ChatLayout {
         {
             return self
                 .chat_area
-                .render(&locale, None, false, None, true, self.show_member_list, cx)
+                .render(
+                    &locale,
+                    None,
+                    false,
+                    None,
+                    true,
+                    self.show_member_list,
+                    None,
+                    cx,
+                )
                 .into_any_element();
         }
 

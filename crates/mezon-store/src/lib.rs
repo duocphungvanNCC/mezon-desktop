@@ -17,6 +17,7 @@ pub mod login;
 pub mod message;
 pub mod message_time;
 pub mod messages;
+pub mod pinned;
 pub mod platform;
 pub mod presence;
 pub mod realtime;
@@ -60,6 +61,7 @@ pub use message::{
     recompute_message_grouping,
 };
 pub use messages::*;
+pub use pinned::{PinnedMessage, PinnedMessagesStore};
 pub use platform::{OpenUrlFn, PlatformStore};
 pub use presence::*;
 pub use realtime::{RealtimeDispatch, RealtimeKind};

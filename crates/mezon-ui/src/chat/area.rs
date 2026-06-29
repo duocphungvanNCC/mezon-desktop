@@ -3,24 +3,22 @@ use std::sync::Arc;
 use gpui::{
     AnyView, App, Context, Entity, SharedString, StyleRefinement, Window, div, prelude::*, px,
 };
-// composer: use gpui::{AnyView, App, Context, Entity, StyleRefinement, Subscription, Window, div, prelude::*, px};
 use mezon_store::{ChannelId, Settings};
-// composer: use mezon_store::{MessagesStore, Settings};
+use ui::PopoverMenuHandle;
 
 use crate::chat::ReplyTarget;
 use crate::chat::channel_header::ChatHeader;
 use crate::chat::channel_typing::ChannelTyping;
 use crate::chat::input_bar::InputBar;
 use crate::chat::member_list::{MemberListPanel, MemberSource};
-// composer: use crate::chat::mention_input::{MentionInput, MentionInputEvent};
 use crate::chat::message::ChannelMessages;
+use crate::chat::pinned_popover::PinnedPopoverPanel;
 use crate::components::primitives::{InputEvent, InputState};
 use crate::theme::ActiveTheme;
 
 pub struct ChatArea {
     pub(crate) timeline: Entity<ChannelMessages>,
     pub(crate) input_state: Option<Entity<InputState>>,
-    // composer: pub(crate) mention_input: Option<Entity<MentionInput>>,
     member_panel: Option<Entity<MemberListPanel>>,
     member_source: Option<MemberSource>,
     #[allow(dead_code)]
@@ -28,7 +26,6 @@ pub struct ChatArea {
     settings: Entity<Settings>,
     header: Entity<ChatHeader>,
     typing: Entity<ChannelTyping>,
-    // composer: _submit_sub: Option<Subscription>,
 }
 
 impl ChatArea {
@@ -43,14 +40,12 @@ impl ChatArea {
         Self {
             timeline,
             input_state: None,
-            // composer: mention_input: None,
             member_panel: None,
             member_source: None,
             replying_to: None,
             settings,
             header,
             typing,
-            // composer: _submit_sub: None,
         }
     }
 
@@ -101,28 +96,6 @@ impl ChatArea {
         }
     }
 
-    // composer: restore the MentionInput composer by swapping ensure_input for:
-    // pub fn ensure_input(&mut self, window: &mut Window, cx: &mut Context<crate::ChatLayout>) {
-    //     if self.mention_input.is_none() {
-    //         let locale = self.settings.read(cx).language.clone();
-    //         let placeholder = mezon_i18n::t(&locale, "chat.messagePlaceholder");
-    //         let settings = self.settings.clone();
-    //         let mention_input = cx.new(|cx| MentionInput::new(placeholder, settings, window, cx));
-    //         let submit_sub = cx.subscribe_in(
-    //             &mention_input,
-    //             window,
-    //             |this: &mut crate::ChatLayout, _, event: &MentionInputEvent, window, cx| match event {
-    //                 MentionInputEvent::Submit => this.send_current_message(window, cx),
-    //                 MentionInputEvent::SendSticker { url, filename } => {
-    //                     this.send_sticker(url.clone(), filename.clone(), cx)
-    //                 }
-    //             },
-    //         );
-    //         self._submit_sub = Some(submit_sub);
-    //         self.mention_input = Some(mention_input);
-    //     }
-    // }
-
     #[allow(clippy::too_many_arguments)]
     pub fn render(
         &self,
@@ -132,11 +105,10 @@ impl ChatArea {
         channel_id: Option<ChannelId>,
         show_members_button: bool,
         show_member_panel: bool,
+        pin_handle: Option<PopoverMenuHandle<PinnedPopoverPanel>>,
         cx: &mut Context<crate::ChatLayout>,
-        // composer: reply_preview: Option<ReplyTarget>,
     ) -> gpui::AnyElement {
         let input_state = match self.input_state.clone() {
-            // composer: let mention_input = match self.mention_input.clone() {
             Some(s) => s,
             None => {
                 return div()
@@ -154,6 +126,7 @@ impl ChatArea {
                 is_dm,
                 show_members_button,
                 show_member_panel,
+                pin_handle,
                 cx,
             );
         });
@@ -171,16 +144,7 @@ impl ChatArea {
             })
         };
 
-        // composer: let on_cancel_reply = Arc::new(move |_window: &mut Window, cx: &mut App| {
-        // composer:     MessagesStore::global(cx).update(cx, |store, cx| store.clear_reply(cx));
-        // composer: });
-
         let input_bar = InputBar::new().with_input(input_state).on_send(on_send);
-        // composer: let input_bar = InputBar::new()
-        // composer:     .with_mention_input(mention_input)
-        // composer:     .on_send(on_send)
-        // composer:     .on_cancel_reply(on_cancel_reply)
-        // composer:     .replying_to(reply_preview);
 
         let header = AnyView::from(self.header.clone()).cached(
             StyleRefinement::default()
@@ -196,12 +160,6 @@ impl ChatArea {
             .min_w_0()
             .min_h_0()
             .child(div().flex_1().min_h_0().child(
-                // Cache the message list so an unrelated sibling/parent notify
-                // (presence in the member panel, typing indicator, user info
-                // bar, theme change…) does not force a full re-layout of every
-                // row. It self-invalidates whenever the timeline itself
-                // notifies (scroll, new message, GIF animation), so behaviour
-                // is unchanged — only redundant re-renders are skipped.
                 AnyView::from(self.timeline.clone()).cached(StyleRefinement::default().size_full()),
             ))
             .child(self.typing.clone())
@@ -214,12 +172,6 @@ impl ChatArea {
             .min_h_0()
             .child(message_column)
             .when(show_member_panel, |row| match &self.member_panel {
-                // Cache the member panel so it is not re-rendered (and its avatars
-                // re-painted) every frame the message timeline notifies during
-                // scroll/load-more. GPUI marks the whole ancestor chain of a
-                // notified view dirty, so the timeline's churn forces chat_layout
-                // to re-render its subtree; caching keeps the panel reused unless
-                // the panel itself is notified (member/presence change or scroll).
                 Some(panel) => row.child(
                     AnyView::from(panel.clone()).cached(
                         StyleRefinement::default()

@@ -7,7 +7,7 @@ use crate::{
     TransportClient,
     transport::{
         ApiAccount, ApiCategoryDesc, ApiChannelApp, ApiChannelDesc, ApiClanDesc, ApiDirectChannel,
-        ApiMessage, ApiVoiceChannelUser, RealtimeEvent,
+        ApiMessage, ApiPinMessage, ApiVoiceChannelUser, RealtimeEvent,
     },
 };
 
@@ -208,6 +208,28 @@ impl AppApi {
     ) -> Result<crate::transport::ListChannelMessagesResult> {
         self.transport
             .list_channel_messages(clan_id, channel_id, message_id, direction, limit)
+            .await
+    }
+
+    pub async fn get_pin_messages_list(
+        &self,
+        channel_id: &str,
+        clan_id: &str,
+    ) -> Result<Vec<ApiPinMessage>> {
+        self.transport
+            .get_pin_messages_list(channel_id, clan_id)
+            .await
+    }
+
+    pub async fn delete_pin_message(
+        &self,
+        id: &str,
+        message_id: &str,
+        channel_id: &str,
+        clan_id: &str,
+    ) -> Result<()> {
+        self.transport
+            .delete_pin_message(id, message_id, channel_id, clan_id)
             .await
     }
 
