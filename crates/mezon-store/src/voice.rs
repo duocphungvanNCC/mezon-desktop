@@ -15,7 +15,6 @@ pub use mezon_voice::{
 
 use crate::AppConfig;
 
-const VIDEO_REPAINT_INTERVAL: Duration = Duration::from_millis(33);
 const MEET_TOKEN_CACHE_TTL: Duration = Duration::from_secs(45);
 
 struct CachedMeetToken {
@@ -397,7 +396,8 @@ impl VoiceStore {
             ice_servers,
         );
         let events = session.events();
-        self.frame_store = Some(session.frame_store());
+        let frame_store = session.frame_store();
+        self.frame_store = Some(frame_store.clone());
         self.session = Some(session);
 
         let task = cx.spawn(async move |this, cx| {
@@ -414,7 +414,7 @@ impl VoiceStore {
 
         let repaint = cx.spawn(async move |this, cx| {
             loop {
-                cx.background_executor().timer(VIDEO_REPAINT_INTERVAL).await;
+                frame_store.frame_changed().await;
                 let keep_going = this.update(cx, |this, cx| {
                     if this.has_active_video() {
                         let seq = this.current_max_frame_seq();
@@ -487,8 +487,8 @@ impl VoiceStore {
                 }
             }
             VoiceEvent::Participants(list) => {
-                self.participants = list.clone();
-                if let Some(local) = list.iter().find(|p| p.is_local) {
+                self.participants = list;
+                if let Some(local) = self.participants.iter().find(|p| p.is_local) {
                     self.camera_enabled = local.camera.is_some();
                     self.screen_share_enabled = local.screenshare.is_some();
                 }

@@ -5,6 +5,7 @@ use gpui::{App, AppContext, Context, Entity, EventEmitter, Global, Subscription,
 use mezon_client::{AppApi, ConnectionStatus, RealtimeEvent};
 use mezon_proto::{api, realtime};
 
+use crate::Freshness;
 use crate::clan::{ClanEvent, ClanList};
 use crate::realtime::{RealtimeDispatch, RealtimeKind};
 
@@ -29,7 +30,7 @@ pub enum EmojiEvent {
 pub struct EmojiStore {
     by_id: HashMap<String, Emoji>,
     order: Vec<String>,
-    loaded: bool,
+    freshness: Freshness,
     loading: bool,
     api: Arc<AppApi>,
     _clan_sub: Subscription,
@@ -70,7 +71,7 @@ impl EmojiStore {
         Self {
             by_id: HashMap::new(),
             order: Vec::new(),
-            loaded: false,
+            freshness: Freshness::new(),
             loading: false,
             api,
             _clan_sub: clan_sub,
@@ -99,7 +100,7 @@ impl EmojiStore {
                 let connected = *status_rx.borrow() == ConnectionStatus::Connected;
                 if connected && !was_connected {
                     was_connected = true;
-                    if this.update(cx, |this, cx| this.refresh(cx)).is_err() {
+                    if this.update(cx, |this, _| this.invalidate()).is_err() {
                         break;
                     }
                 } else if !connected {
@@ -110,13 +111,17 @@ impl EmojiStore {
     }
 
     pub fn ensure_loaded(&mut self, cx: &mut Context<Self>) {
-        if !self.loaded {
+        if !self.freshness.is_fresh(crate::CACHE_TTL) {
             self.fetch(cx);
         }
     }
 
     pub fn refresh(&mut self, cx: &mut Context<Self>) {
         self.fetch(cx);
+    }
+
+    fn invalidate(&mut self) {
+        self.freshness.mark_stale();
     }
 
     fn fetch(&mut self, cx: &mut Context<Self>) {
@@ -138,7 +143,7 @@ impl EmojiStore {
                                 this.insert(emoji);
                             }
                         }
-                        this.loaded = true;
+                        this.freshness.mark_fetched();
                         tracing::info!("EmojiStore: fetched {} emojis", this.order.len());
                         cx.emit(EmojiEvent::Changed);
                         cx.notify();

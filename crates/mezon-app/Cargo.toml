@@ -19,7 +19,6 @@ mezon-store.workspace = true
 mezon-native.workspace = true
 mezon-updater.workspace = true
 mezon-client.workspace = true
-dotenvy = "0.15"
 flume.workspace = true
 reqwest_client.workspace = true
 tokio.workspace = true
@@ -28,8 +27,13 @@ anyhow.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 tracing-appender.workspace = true
+tracing-tracy = { version = "0.11.4", features = ["enable", "ondemand"], optional = true }
+tracy-client = { version = "0.18.2", features = ["enable", "ondemand"], optional = true }
 dirs.workspace = true
 serde.workspace = true
+
+[features]
+tracy = ["dep:tracing-tracy", "dep:tracy-client"]
 
 [build-dependencies]
 woff2-patched = "0.4.0"

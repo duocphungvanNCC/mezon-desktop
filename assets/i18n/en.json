@@ -3627,6 +3627,7 @@
   "root.loading": "Loading...",
   "root.pageNotFound": "Page Not Found",
   "root.pageNotFoundDesc": "This path is not registered in the local Mezon router.",
+  "root.reconnectingAttempt": "Reconnecting… attempt {{count}}",
   "screen.headerRight.addFriends": "Add Friends",
   "screen.headerTitle.Friends": "Friends",
   "screen.headerTitle.addFriends": "Add Friends",

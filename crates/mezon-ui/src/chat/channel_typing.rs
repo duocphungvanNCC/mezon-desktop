@@ -38,11 +38,16 @@ impl ChannelTyping {
 
     fn label(&self, cx: &Context<Self>) -> Option<SharedString> {
         let channel_id = self.channel_id?;
-        let users = PresenceStore::global(cx).read(cx).typing_users(channel_id);
+        let presence = PresenceStore::global(cx);
+        let presence = presence.read(cx);
+        let users = presence.typing_users(channel_id);
         let locale = self.settings.read(cx).language.clone();
         let label = match users.len() {
             0 => return None,
-            1 => format!("{} {}", users[0], mezon_i18n::t(&locale, "common.isTyping")),
+            1 => {
+                let name = users.iter().next()?;
+                format!("{name} {}", mezon_i18n::t(&locale, "common.isTyping"))
+            }
             _ => mezon_i18n::t(&locale, "common.severalPeopleTyping").to_string(),
         };
         Some(SharedString::from(label))

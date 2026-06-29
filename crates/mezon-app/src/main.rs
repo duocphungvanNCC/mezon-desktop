@@ -13,9 +13,39 @@ use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::{EnvFilter, fmt};
 
-fn main() -> Result<()> {
-    load_dotenv();
+#[cfg(feature = "tracy")]
+#[global_allocator]
+static GLOBAL: tracy_client::ProfiledAllocator<std::alloc::System> =
+    tracy_client::ProfiledAllocator::new(std::alloc::System, 16);
 
+#[cfg(feature = "tracy")]
+#[derive(Default)]
+struct TracyConfig {
+    fmt: tracing_subscriber::fmt::format::DefaultFields,
+}
+
+#[cfg(feature = "tracy")]
+impl tracing_tracy::Config for TracyConfig {
+    type Formatter = tracing_subscriber::fmt::format::DefaultFields;
+
+    fn formatter(&self) -> &Self::Formatter {
+        &self.fmt
+    }
+
+    fn stack_depth(&self, _: &tracing::Metadata<'_>) -> u16 {
+        16
+    }
+
+    fn format_fields_in_zone_name(&self) -> bool {
+        true
+    }
+
+    fn on_error(&self, client: &tracy_client::Client, error: &'static str) {
+        client.color_message(error, 0xFF000000, 0);
+    }
+}
+
+fn main() -> Result<()> {
     init_logging();
     install_panic_hook();
 
@@ -43,15 +73,6 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-/// Load `.env` from the current working directory or workspace root.
-fn load_dotenv() {
-    if dotenvy::dotenv().is_ok() {
-        return;
-    }
-    let workspace_env = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.env");
-    let _ = dotenvy::from_path(workspace_env);
-}
-
 /// Directory for rotated log files (alongside the app's config dir).
 fn log_dir() -> std::path::PathBuf {
     dirs::config_dir()
@@ -64,28 +85,31 @@ fn log_dir() -> std::path::PathBuf {
 /// (not `non_blocking`) so a panic is flushed to disk before the process aborts.
 fn init_logging() {
     let env_filter =
-        || EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("mezon=debug,info"));
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("mezon=debug,info"));
 
     let dir = log_dir();
-    if let Err(e) = std::fs::create_dir_all(&dir) {
-        tracing_subscriber::registry()
-            .with(env_filter())
-            .with(fmt::layer())
-            .init();
+    let dir_err = std::fs::create_dir_all(&dir).err();
+    let file_layer = dir_err.is_none().then(|| {
+        let file_appender = tracing_appender::rolling::daily(&dir, "mezon.log");
+        fmt::layer().with_ansi(false).with_writer(file_appender)
+    });
+
+    let subscriber = tracing_subscriber::registry()
+        .with(env_filter)
+        .with(fmt::layer().with_writer(std::io::stdout))
+        .with(file_layer);
+
+    #[cfg(feature = "tracy")]
+    let subscriber = subscriber.with(tracing_tracy::TracyLayer::new(TracyConfig::default()));
+
+    subscriber.init();
+
+    if let Some(e) = dir_err {
         tracing::warn!(
             "File logging disabled (cannot create {}): {e}",
             dir.display()
         );
-        return;
     }
-
-    let file_appender = tracing_appender::rolling::daily(&dir, "mezon.log");
-
-    tracing_subscriber::registry()
-        .with(env_filter())
-        .with(fmt::layer().with_writer(std::io::stdout))
-        .with(fmt::layer().with_ansi(false).with_writer(file_appender))
-        .init();
 }
 
 /// Log panics (location + backtrace) before delegating to the default hook, so a crash leaves
@@ -244,6 +268,7 @@ fn run_app(lock: SingleInstance, initial_url: Option<String>) {
             settings_entity,
             client.clone(),
             api.clone(),
+            transport.clone(),
             initial_auth_state,
         );
 
@@ -330,13 +355,6 @@ fn run_app(lock: SingleInstance, initial_url: Option<String>) {
             })
         };
 
-        mezon_store::ConnectionStore::init(
-            transport.clone(),
-            api.clone(),
-            auth_state_handle.clone(),
-            cx,
-        );
-
         if let Some((tray, tray_tasks)) = setup_tray(cx, rt_handle.clone()) {
             cx.set_global(TrayGlobal(tray));
             cx.set_global(TrayTasksGlobal {
@@ -383,6 +401,7 @@ fn open_main_window(
     settings_entity: Entity<Settings>,
     client: Arc<MezonClient>,
     api: Arc<AppApi>,
+    transport: Arc<TransportClient>,
     initial_auth: AuthState,
 ) -> (Entity<AuthState>, gpui::AnyWindowHandle) {
     let window_bounds = if let Some([x, y, w, h]) = settings.window_bounds {
@@ -410,6 +429,7 @@ fn open_main_window(
 
     mezon_store::LoginStore::init(client, api.clone(), auth_state.clone(), cx);
     mezon_store::RealtimeDispatch::init(api.clone(), cx);
+    mezon_store::ConnectionStore::init(transport, api.clone(), auth_state.clone(), cx);
     mezon_store::ClanList::init(api.clone(), cx);
     mezon_store::ChannelList::init(api.clone(), cx);
     mezon_store::DirectMessageStore::init(api.clone(), cx);

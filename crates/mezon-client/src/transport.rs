@@ -208,13 +208,16 @@ impl MezonTransport {
     pub async fn connect(
         &self,
         host: &str,
-        port: u16,
+        port: Option<u16>,
         token: &str,
         on_event: impl Fn(RealtimeEvent) + Send + Sync + 'static,
         on_disconnected: impl Fn(bool) + Send + Sync + 'static,
     ) -> Result<()> {
         tracing::debug!("MezonTransport::connect() starting");
-        tracing::debug!("  Host: {}, Port: {}", host, port);
+        tracing::debug!(
+            "  Target: {}",
+            crate::socket_connect_label(host, port)
+        );
 
         // Set up message handler
         tracing::debug!("Setting up message handler...");
@@ -277,7 +280,12 @@ impl MezonTransport {
         self.adapter
             .connect(host, port, token)
             .await
-            .with_context(|| format!("Failed to connect adapter to {host}:{port}"))?;
+            .with_context(|| {
+                format!(
+                    "Failed to connect adapter to {}",
+                    crate::socket_connect_label(host, port)
+                )
+            })?;
 
         tracing::debug!("MezonTransport::connect() completed successfully");
         Ok(())
@@ -5966,7 +5974,7 @@ mod tests {
 
     #[async_trait::async_trait]
     impl TransportAdapter for MockAdapter {
-        async fn connect(&self, _host: &str, _port: u16, _token: &str) -> Result<()> {
+        async fn connect(&self, _host: &str, _port: Option<u16>, _token: &str) -> Result<()> {
             Ok(())
         }
         async fn send(&self, _message: Vec<u8>) -> Result<()> {
