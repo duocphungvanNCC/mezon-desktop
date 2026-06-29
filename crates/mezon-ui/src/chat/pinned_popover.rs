@@ -2,13 +2,21 @@ use std::rc::Rc;
 
 use gpui::{
     App, ClickEvent, Context, DismissEvent, Entity, EventEmitter, FocusHandle, Focusable, FontWeight,
-    ScrollHandle, SharedString, Window, div, point, prelude::*, px,
+    Hsla, MouseDownEvent, ScrollHandle, SharedString, Window, div, point, prelude::*, px,
 };
-use mezon_store::{MessagesStore, PinnedMessage, PinnedMessagesStore, Settings};
-use ui::prelude::*;
-use ui::{Label, PopoverMenuHandle, ScrollAxes, Scrollbars, WithScrollbar};
+use mezon_store::{
+    ClanMembersStore, MessageId, MessagesStore, PinnedMessage, PinnedMessagesStore, ProfileContext,
+    Settings, UserId, resolve_user_profile,
+};
+use ui::{PopoverMenuHandle, ScrollAxes, Scrollbars, WithScrollbar};
 
-use crate::components::primitives::{Avatar, Button, ButtonVariants, Icon, IconName, Sizable, Size, h_flex, v_flex};
+use crate::chat::message::DEFAULT_DISPLAY_NAME_COLOR;
+use crate::components::primitives::{
+    Avatar, Button, ButtonVariants, Icon, IconName, Sizable, Size, Spinner, h_flex, v_flex,
+};
+use crate::image_cache::{
+    AVATAR_ENTRY_MAX_BYTES, AVATAR_IMAGE_CACHE_BYTES, AVATAR_IMAGE_CACHE_CAPACITY, LruImageCache,
+};
 use crate::theme::{ActiveTheme, Theme};
 
 const POPOVER_WIDTH: f32 = 420.;
@@ -21,6 +29,7 @@ pub struct PinnedPopoverPanel {
     popover_handle: PopoverMenuHandle<PinnedPopoverPanel>,
     scroll: ScrollHandle,
     focus_handle: FocusHandle,
+    avatar_image_cache: Entity<LruImageCache>,
 }
 
 impl PinnedPopoverPanel {
@@ -36,13 +45,26 @@ impl PinnedPopoverPanel {
 
         cx.observe(&PinnedMessagesStore::global(cx), |_, _, cx| cx.notify())
             .detach();
+        cx.observe(&ClanMembersStore::global(cx), |_, _, cx| cx.notify())
+            .detach();
         cx.observe(&settings, |_, _, cx| cx.notify()).detach();
+
+        let avatar_image_cache = cx.new(|cx| {
+            LruImageCache::avatar_thumbnail(
+                "pin-avatar",
+                AVATAR_IMAGE_CACHE_CAPACITY,
+                AVATAR_IMAGE_CACHE_BYTES,
+                AVATAR_ENTRY_MAX_BYTES,
+                cx,
+            )
+        });
 
         Self {
             settings,
             popover_handle,
             scroll: ScrollHandle::new(),
             focus_handle,
+            avatar_image_cache,
         }
     }
 }
@@ -62,8 +84,17 @@ impl Render for PinnedPopoverPanel {
         let store = PinnedMessagesStore::global(cx);
         let pinned = store.read(cx).pinned().to_vec();
         let loading = store.read(cx).is_loading();
+        let clan_id = store.read(cx).clan_id();
         let handle = self.popover_handle.clone();
         let scroll = self.scroll.clone();
+        let avatar_cache = self.avatar_image_cache.clone();
+        let tokens = &theme.tokens;
+
+        if let Some(clan_id) = clan_id {
+            ClanMembersStore::global(cx).update(cx, |members, cx| {
+                members.ensure_loaded(clan_id, cx);
+            });
+        }
 
         v_flex()
             .key_context("menu")
@@ -71,17 +102,26 @@ impl Render for PinnedPopoverPanel {
             .on_action(cx.listener(|_, _: &::menu::Cancel, _window, cx| {
                 cx.emit(DismissEvent);
             }))
+            .on_mouse_down_out(cx.listener(|_, _: &MouseDownEvent, _window, cx| {
+                cx.emit(DismissEvent);
+            }))
             .w(px(POPOVER_WIDTH))
             .overflow_hidden()
-            .elevation_2(cx)
+            .rounded_md()
+            .border_1()
+            .border_color(tokens.border_primary)
+            .bg(tokens.theme_setting_primary)
+            .text_color(tokens.text_theme_message)
             .child(render_header(&theme, &locale))
             .child(render_body(
                 &pinned,
                 loading,
+                clan_id,
                 &theme,
                 &locale,
                 handle,
                 &scroll,
+                avatar_cache,
                 window,
                 cx,
             ))
@@ -95,21 +135,24 @@ fn render_header(theme: &Theme, locale: &str) -> impl IntoElement {
         .items_center()
         .gap_3()
         .px(px(16.))
-        .h(px(48.))
+        .h(px(HEADER_HEIGHT))
         .border_b_1()
         .border_color(tokens.border_primary)
         .bg(tokens.theme_setting_nav)
         .child(
             Icon::new(IconName::PinRight)
                 .size_4()
-                .text_color(tokens.text_theme_primary),
+                .text_color(tokens.bg_icon_theme),
         )
         .child(
-            Label::new(mezon_i18n::t(
-                locale,
-                "channelTopbar.modals.pinnedMessages.title",
-            ))
-            .size(LabelSize::Default),
+            div()
+                .text_base()
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(tokens.text_theme_message)
+                .child(mezon_i18n::t(
+                    locale,
+                    "channelTopbar.modals.pinnedMessages.title",
+                )),
         )
 }
 
@@ -117,10 +160,12 @@ fn render_header(theme: &Theme, locale: &str) -> impl IntoElement {
 fn render_body(
     pinned: &[PinnedMessage],
     loading: bool,
+    clan_id: Option<mezon_store::ClanId>,
     theme: &Theme,
     locale: &str,
     popover_handle: PopoverMenuHandle<PinnedPopoverPanel>,
     scroll: &ScrollHandle,
+    avatar_cache: Entity<LruImageCache>,
     window: &mut Window,
     cx: &mut Context<PinnedPopoverPanel>,
 ) -> impl IntoElement {
@@ -134,7 +179,7 @@ fn render_body(
                 .justify_center()
                 .size_full()
                 .min_h(px(MIN_BODY_HEIGHT))
-                .child(crate::components::primitives::Spinner::new().with_size(Size::Small))
+                .child(Spinner::new().with_size(Size::Small))
                 .into_any_element()
         } else {
             div()
@@ -144,7 +189,7 @@ fn render_body(
                 .size_full()
                 .min_h(px(MIN_BODY_HEIGHT))
                 .text_sm()
-                .text_color(tokens.text_theme_primary)
+                .text_color(tokens.text_secondary)
                 .child(mezon_i18n::t(
                     locale,
                     "channelTopbar.pinnedMessages.emptyTitle",
@@ -161,7 +206,16 @@ fn render_body(
                     .iter()
                     .enumerate()
                     .map(|(index, msg)| {
-                        pin_card(index, msg, theme, locale, popover_handle.clone())
+                        pin_card(
+                            index,
+                            msg,
+                            clan_id,
+                            theme,
+                            locale,
+                            popover_handle.clone(),
+                            avatar_cache.clone(),
+                            cx,
+                        )
                     }),
             )
             .into_any_element()
@@ -178,6 +232,7 @@ fn render_body(
         .pr(px(6.))
         .overflow_y_scroll()
         .track_scroll(scroll)
+        .bg(tokens.theme_setting_primary)
         .child(content)
         .custom_scrollbars(
             Scrollbars::new(ScrollAxes::Vertical).tracked_scroll_handle(scroll),
@@ -199,6 +254,7 @@ fn render_body(
         .w_full()
         .min_h(px(MIN_BODY_HEIGHT))
         .max_h(max_body)
+        .bg(tokens.theme_setting_primary)
         .children(body_children)
 }
 
@@ -217,6 +273,7 @@ fn scroll_arrow(
         .flex_shrink_0()
         .justify_end()
         .pr(px(2.))
+        .bg(tokens.theme_setting_primary)
         .child(
             div()
                 .id(id)
@@ -226,9 +283,9 @@ fn scroll_arrow(
                 .w(px(13.))
                 .h(px(13.))
                 .text_size(px(8.))
-                .text_color(tokens.text_theme_primary)
+                .text_color(tokens.text_secondary)
                 .cursor_pointer()
-                .hover(|s| s.text_color(tokens.text_theme_primary_hover))
+                .hover(|s| s.text_color(tokens.text_theme_primary))
                 .child(glyph)
                 .on_click(move |_: &ClickEvent, _window, _cx| {
                     let off = handle.offset();
@@ -246,37 +303,72 @@ fn scroll_arrow(
         .into_any_element()
 }
 
+fn resolve_pin_sender(
+    msg: &PinnedMessage,
+    clan_id: Option<mezon_store::ClanId>,
+    cx: &App,
+) -> (String, String) {
+    if let (Some(user_id), Some(clan_id)) = (
+        msg.sender_id.parse::<UserId>().ok(),
+        clan_id,
+    ) && let Some(profile) = resolve_user_profile(user_id, ProfileContext::Clan(clan_id), cx)
+    {
+        return (profile.display_name, profile.avatar_url);
+    }
+
+    (msg.sender_name.clone(), msg.avatar_url.clone())
+}
+
 fn pin_card(
     index: usize,
     msg: &PinnedMessage,
+    clan_id: Option<mezon_store::ClanId>,
     theme: &Theme,
     locale: &str,
     popover_handle: PopoverMenuHandle<PinnedPopoverPanel>,
+    avatar_cache: Entity<LruImageCache>,
+    cx: &App,
 ) -> gpui::AnyElement {
     let tokens = &theme.tokens;
     let group_name = SharedString::from(format!("pin-card-{index}"));
+    let (sender_label, avatar_raw) = resolve_pin_sender(msg, clan_id, cx);
+    let sender_color = Hsla::from(gpui::rgb(DEFAULT_DISPLAY_NAME_COLOR));
 
-    let mut avatar = Avatar::new().name(&msg.sender_name).with_size(Size::Small);
-    if !msg.avatar_proxied.is_empty() {
+    let mut avatar = Avatar::new()
+        .name(&sender_label)
+        .with_size(Size::Small)
+        .image_cache(avatar_cache);
+    if !avatar_raw.is_empty() {
+        let proxied = crate::util::imgproxy::avatar_url(cx, &avatar_raw);
+        avatar = avatar
+            .src(proxied)
+            .fallback_src(avatar_raw);
+    } else if !msg.avatar_proxied.is_empty() {
         avatar = avatar.src(msg.avatar_proxied.clone());
-    } else if !msg.avatar_url.is_empty() {
-        avatar = avatar.src(msg.avatar_url.as_str());
+        if !msg.avatar_url.is_empty() && msg.avatar_url != msg.avatar_proxied.as_ref() {
+            avatar = avatar.fallback_src(msg.avatar_url.clone());
+        }
     }
 
     let name_row = h_flex()
         .items_center()
         .gap_2()
+        .min_w_0()
         .child(
             div()
                 .text_sm()
-                .font_weight(FontWeight::MEDIUM)
-                .text_color(tokens.text_theme_primary)
-                .child(msg.sender_name.clone()),
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(sender_color)
+                .overflow_hidden()
+                .text_ellipsis()
+                .child(sender_label),
         )
         .child(
             div()
-                .text_size(px(10.))
-                .text_color(tokens.text_theme_primary)
+                .flex_shrink_0()
+                .text_xs()
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(tokens.text_secondary)
                 .child(format_pin_time(msg.create_time, locale)),
         );
 
@@ -292,9 +384,11 @@ fn pin_card(
         .ghost()
         .with_size(Size::XSmall)
         .on_click(move |_: &ClickEvent, _window, cx| {
-            MessagesStore::global(cx).update(cx, |store, cx| {
-                store.jump_to_message(jump_message_id.clone(), cx);
-            });
+            if let Ok(jump_target) = jump_message_id.parse::<MessageId>() {
+                MessagesStore::global(cx).update(cx, |store, cx| {
+                    store.jump_to_message(jump_target, cx);
+                });
+            }
             jump_handle.hide(cx);
         });
 
@@ -370,6 +464,13 @@ fn format_pin_time(create_time: i64, locale: &str) -> String {
 
 pub fn pin_popover_on_open() -> Rc<dyn Fn(&mut Window, &mut App)> {
     Rc::new(|_window, cx| {
-        PinnedMessagesStore::global(cx).update(cx, |store, cx| store.ensure_loaded(cx));
+        PinnedMessagesStore::global(cx).update(cx, |store, cx| {
+            store.ensure_loaded(cx);
+            if let Some(clan_id) = store.clan_id() {
+                ClanMembersStore::global(cx).update(cx, |members, cx| {
+                    members.ensure_loaded(clan_id, cx);
+                });
+            }
+        });
     })
 }
