@@ -32,7 +32,6 @@ pub use screen_picker::PickedScreen;
 pub use screen_previews::{ScreenSharePreview, capture_screen_share_preview};
 pub use screen_targets::{
     ScreenShareKind, ScreenShareOption, list_screen_share_options, peek_screen_share_options,
-    preload_screen_share_options,
 };
 pub use video::{VideoFrameData, VideoFrameStore};
 
