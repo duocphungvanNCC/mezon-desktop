@@ -10,7 +10,7 @@ use parking_lot::Mutex;
 pub use mezon_voice::{
     PickedScreen, ScreenShareKind, ScreenShareOption, ScreenSharePreview, VideoFrameData,
     VideoFrameStore, VoiceParticipant, capture_screen_share_preview, list_screen_share_options,
-    peek_screen_share_options, preload_screen_share_options,
+    peek_screen_share_options,
 };
 
 use crate::AppConfig;
@@ -437,6 +437,15 @@ impl VoiceStore {
     fn ice_servers(cx: &App) -> Vec<IceServerConfig> {
         let config = AppConfig::global(cx);
         if config.webrtc_ice_servers_url.is_empty() {
+            return Vec::new();
+        }
+        if config.webrtc_ice_servers_url.starts_with("turn")
+            && config.webrtc_ice_servers_credential.is_empty()
+        {
+            tracing::warn!(
+                "skipping TURN server {}: missing credential",
+                config.webrtc_ice_servers_url
+            );
             return Vec::new();
         }
         vec![IceServerConfig {
