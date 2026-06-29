@@ -7,7 +7,7 @@ use gpui::{
     deferred, div, img, prelude::*, px, uniform_list,
 };
 use mezon_store::{
-    AppConfig, ChannelId, ChannelList, ChannelType, ClanList, EmojiEvent, EmojiStore,
+    ChannelId, ChannelList, ChannelType, ClanList, EmojiEvent, EmojiStore,
     MENTION_HERE_ID, OutgoingAttachment, OutgoingContent, OutgoingEmoji, OutgoingHashtag,
     OutgoingMention, Settings, StickerEvent, StickerStore,
 };
@@ -750,7 +750,6 @@ impl MentionInput {
         &self,
         index: usize,
         suggestion: &Suggestion,
-        skip_proxy: bool,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let theme = cx.theme();
@@ -769,8 +768,6 @@ impl MentionInput {
                 Suggestion::Member(member) => {
                     let src = if member.avatar_raw.is_empty() {
                         SharedString::default()
-                    } else if skip_proxy {
-                        member.avatar_raw.clone().into()
                     } else {
                         imgproxy::avatar_url(cx, &member.avatar_raw).into()
                     };
@@ -1138,15 +1135,12 @@ impl Render for MentionInput {
         let has_pending = !self.pending_attachments.is_empty();
 
         let popup = open.then(|| {
-            let skip_proxy = AppConfig::try_global(cx)
-                .map(|cfg| cfg.is_dev_imgproxy())
-                .unwrap_or(false);
             let rows: Vec<_> = self
                 .suggestions
                 .iter()
                 .enumerate()
                 .map(|(index, suggestion)| {
-                    self.render_suggestion(index, suggestion, skip_proxy, cx)
+                    self.render_suggestion(index, suggestion, cx)
                         .into_any_element()
                 })
                 .collect();

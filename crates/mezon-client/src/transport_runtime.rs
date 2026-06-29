@@ -15,7 +15,7 @@ use tokio::runtime::Runtime;
 static TRANSPORT_RUNTIME: OnceLock<Runtime> = OnceLock::new();
 static HTTP_CLIENT: OnceLock<ReqwestClient> = OnceLock::new();
 
-fn http_client() -> &'static ReqwestClient {
+pub(crate) fn http_client() -> &'static ReqwestClient {
     HTTP_CLIENT.get_or_init(new_http_client)
 }
 
@@ -109,7 +109,7 @@ impl TransportClient {
     pub async fn connect(
         &self,
         host: &str,
-        port: u16,
+        port: Option<u16>,
         token: &str,
         on_event: impl Fn(crate::transport::RealtimeEvent) + Send + Sync + 'static,
         on_disconnected: impl Fn(bool) + Send + Sync + 'static,

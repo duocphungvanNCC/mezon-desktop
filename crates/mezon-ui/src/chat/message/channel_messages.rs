@@ -159,6 +159,7 @@ pub struct ChannelMessages {
     skeleton_key: SkeletonKey,
     last_cold_inputs: (Option<ClanId>, bool, bool),
     _channel_list_observe: Subscription,
+    _clan_list_observe: Subscription,
     _skeleton_timer: Option<Task<()>>,
     suppress_hover: bool,
     _hover_release_task: Option<Task<()>>,
@@ -194,13 +195,10 @@ impl ChannelMessages {
         cx.observe(&settings, |_, _, cx| cx.notify()).detach();
 
         let channel_list = ChannelList::global(cx);
-        let channel_list_observe = cx.observe(&channel_list, |this, _, cx| {
-            let inputs = Self::cold_inputs(cx);
-            if inputs != this.last_cold_inputs {
-                this.last_cold_inputs = inputs;
-                cx.notify();
-            }
-        });
+        let channel_list_observe = cx.observe(&channel_list, |this, _, cx| this.reconcile_cold(cx));
+
+        let clan_list = ClanList::global(cx);
+        let clan_list_observe = cx.observe(&clan_list, |this, _, cx| this.reconcile_cold(cx));
 
         let store = MessagesStore::global(cx);
         cx.subscribe(&store, |this, _store, event, cx| {
@@ -290,6 +288,14 @@ impl ChannelMessages {
                         });
                     }));
                 }
+            }
+            {
+                let (is_empty, has_more_top, is_dm, dm_channel, conversation_loading) = {
+                    let s = _store.read(cx);
+                    Self::read_store_inputs(s)
+                };
+                this.sync_header(is_empty, has_more_top);
+                this.sync_skeleton(is_dm, dm_channel, conversation_loading, is_empty, cx);
             }
             cx.notify();
         })
@@ -412,6 +418,7 @@ impl ChannelMessages {
             skeleton_key: SkeletonKey::None,
             last_cold_inputs,
             _channel_list_observe: channel_list_observe,
+            _clan_list_observe: clan_list_observe,
             _skeleton_timer: None,
             suppress_hover: false,
             _hover_release_task: None,
@@ -424,6 +431,68 @@ impl ChannelMessages {
             highlight_id: None,
             _highlight_timer: None,
         }
+    }
+
+    fn reconcile_cold(&mut self, cx: &mut Context<Self>) {
+        let inputs = Self::cold_inputs(cx);
+        if inputs != self.last_cold_inputs {
+            self.last_cold_inputs = inputs;
+            let store = MessagesStore::global(cx);
+            let (is_empty, has_more_top, is_dm, dm_channel, conversation_loading) = {
+                let s = store.read(cx);
+                Self::read_store_inputs(s)
+            };
+            self.sync_header(is_empty, has_more_top);
+            self.sync_skeleton(is_dm, dm_channel, conversation_loading, is_empty, cx);
+            cx.notify();
+        }
+    }
+
+    fn sync_header(&mut self, is_empty: bool, has_more_top: bool) {
+        let want_header = !is_empty && has_more_top;
+        if want_header && !self.header_shown {
+            self.list_state.splice(0..0, 1);
+            self.header_shown = true;
+        } else if !want_header && self.header_shown {
+            self.list_state.splice(0..1, 0);
+            self.header_shown = false;
+        }
+    }
+
+    fn sync_skeleton(
+        &mut self,
+        is_dm: bool,
+        dm_channel: Option<ChannelId>,
+        conversation_loading: bool,
+        is_empty: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let (active_clan, has_clan_channel, clan_loading) = Self::cold_inputs(cx);
+        let has_conversation = has_clan_channel || is_dm;
+        let cold_clan = !has_conversation && clan_loading;
+        let loading_conversation = has_conversation && conversation_loading && is_empty;
+        let loading = cold_clan || loading_conversation;
+        let skeleton_key = if is_dm {
+            dm_channel.map_or(SkeletonKey::None, SkeletonKey::Conversation)
+        } else {
+            active_clan.map_or(SkeletonKey::None, SkeletonKey::Clan)
+        };
+        self.advance_skeleton(loading, skeleton_key, cx);
+    }
+
+    fn read_store_inputs(store: &MessagesStore) -> (bool, bool, bool, Option<ChannelId>, bool) {
+        let is_empty = store.viewport_messages().is_empty();
+        let has_more_top = store.has_more_top();
+        let is_dm = store.is_dm();
+        let dm_channel = store.active_channel_id();
+        let conversation_loading = store.is_loading();
+        (
+            is_empty,
+            has_more_top,
+            is_dm,
+            dm_channel,
+            conversation_loading,
+        )
     }
 
     fn cold_inputs(cx: &mut Context<Self>) -> (Option<ClanId>, bool, bool) {
@@ -566,46 +635,14 @@ impl Render for ChannelMessages {
             .update(cx, |cache, cx| cache.sweep(window, cx));
 
         let store = MessagesStore::global(cx);
-        let (active_clan, has_clan_channel, clan_loading) = Self::cold_inputs(cx);
-        let (is_dm, dm_channel, conversation_loading, is_empty) = {
-            let store = store.read(cx);
-            (
-                store.is_dm(),
-                store.active_channel_id(),
-                store.is_loading(),
-                store.viewport_messages().is_empty(),
-            )
+        let active_clan = ClanList::global(cx).read(cx).active_clan_id;
+        let (is_dm, dm_channel) = {
+            let s = store.read(cx);
+            (s.is_dm(), s.active_channel_id())
         };
-        let has_conversation = has_clan_channel || is_dm;
-        let cold_clan = !has_conversation && clan_loading;
-        let loading_conversation = has_conversation && conversation_loading && is_empty;
-        let loading = cold_clan || loading_conversation;
-
-        let skeleton_key = if is_dm {
-            dm_channel.map_or(SkeletonKey::None, SkeletonKey::Conversation)
-        } else {
-            active_clan.map_or(SkeletonKey::None, SkeletonKey::Clan)
-        };
-        self.advance_skeleton(loading, skeleton_key, cx);
         let skeleton_overlay = self.skeleton_overlay(cx.theme());
-
-        // Reconcile the persistent top loading skeleton at list index 0 (React
-        // `LoadingSkeletonMessages`, shown while `hasMoreTop` AND there is at
-        // least one message — React guards on `messageIds?.[0]`). It scrolls
-        // with the content and is only visible at the top, where load-more
-        // triggers.
-        let want_header = !is_empty && store.read(cx).has_more_top();
-        if want_header && !self.header_shown {
-            self.list_state.splice(0..0, 1);
-            self.header_shown = true;
-        } else if !want_header && self.header_shown {
-            self.list_state.splice(0..1, 0);
-            self.header_shown = false;
-        }
         let header_shown = self.header_shown;
 
-        // Deferred jump-to-message: now that the row count + header are settled,
-        // scroll the target into view (React `scrollIntoView`).
         if let Some(target) = self.pending_jump.take()
             && let Some(pos) = store
                 .read(cx)

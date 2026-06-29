@@ -3,7 +3,7 @@ use gpui::{
     AnyView, App, ClickEvent, Context, Entity, FontWeight, MouseButton, NavigationDirection,
     StyleRefinement, Window, div, img, prelude::*, px,
 };
-use mezon_store::{AuthState, ClanList, Settings};
+use mezon_store::{AuthState, ClanList, ConnectionStore, Settings};
 
 use crate::app::title_bar::TitleBar;
 use crate::app::window_controls;
@@ -105,6 +105,9 @@ impl RootView {
         })
         .detach();
 
+        cx.observe(&ConnectionStore::global(cx), |_, _, cx| cx.notify())
+            .detach();
+
         let clan_list: Entity<ClanList> = ClanList::global(cx);
 
         let clan_list_for_chat = clan_list.clone();
@@ -189,7 +192,10 @@ impl Render for RootView {
                 cached_fill(self.login_view.clone())
             }
             AuthState::AwaitingCallback => render_awaiting_callback(theme, &locale),
-            AuthState::Connecting(_) => render_connecting(theme, &locale),
+            AuthState::Connecting(_) => {
+                let attempt = ConnectionStore::global(cx).read(cx).connecting_attempt();
+                render_connecting(theme, &locale, attempt)
+            }
             AuthState::Authenticated(_) => {
                 let route = Router::global(cx).read(cx).route();
                 match route {
@@ -289,7 +295,12 @@ fn render_awaiting_callback(theme: &Theme, locale: &str) -> gpui::AnyElement {
         .into_any_element()
 }
 
-fn render_connecting(theme: &Theme, locale: &str) -> gpui::AnyElement {
+fn render_connecting(theme: &Theme, locale: &str, attempt: u32) -> gpui::AnyElement {
+    let label = if attempt > 0 {
+        mezon_i18n::t(locale, "root.reconnectingAttempt").replace("{{count}}", &attempt.to_string())
+    } else {
+        mezon_i18n::t(locale, "root.loading").to_string()
+    };
     div()
         .flex()
         .flex_1()
@@ -307,7 +318,7 @@ fn render_connecting(theme: &Theme, locale: &str) -> gpui::AnyElement {
                 .text_xl()
                 .font_weight(FontWeight::BOLD)
                 .text_color(theme.text_primary)
-                .child(mezon_i18n::t(locale, "root.loading")),
+                .child(label),
         )
         .into_any_element()
 }

@@ -4,6 +4,7 @@ use std::sync::Arc;
 use gpui::{App, AppContext, Context, Entity, EventEmitter, Global, Subscription, Task};
 use mezon_client::{AppApi, ConnectionStatus};
 
+use crate::KeyedCache;
 use crate::clan::{ClanEvent, ClanList};
 use crate::ids::{ClanId, RoleId};
 use crate::realtime::RealtimeDispatch;
@@ -20,7 +21,7 @@ pub enum RolesEvent {
 }
 
 pub struct RolesStore {
-    by_clan: HashMap<ClanId, HashMap<RoleId, Role>>,
+    cache: KeyedCache<ClanId, HashMap<RoleId, Role>>,
     loading: std::collections::HashSet<ClanId>,
     api: Arc<AppApi>,
     _clan_sub: Subscription,
@@ -51,7 +52,7 @@ impl RolesStore {
         let entity = cx.entity();
         RealtimeDispatch::global(cx).update(cx, |dispatch, _| {
             dispatch.on_lagged(&entity, |this, cx| {
-                this.by_clan.clear();
+                this.cache.mark_all_stale();
                 this.refresh_active(cx);
             });
         });
@@ -69,7 +70,7 @@ impl RolesStore {
         let conn_watch = Self::spawn_connection_watch(api.clone(), cx);
 
         Self {
-            by_clan: HashMap::new(),
+            cache: KeyedCache::new(None),
             loading: std::collections::HashSet::new(),
             api,
             _clan_sub: clan_sub,
@@ -88,7 +89,7 @@ impl RolesStore {
                 let connected = *status_rx.borrow() == ConnectionStatus::Connected;
                 if connected && !was_connected {
                     was_connected = true;
-                    if this.update(cx, |this, cx| this.refresh_active(cx)).is_err() {
+                    if this.update(cx, |this, _| this.invalidate()).is_err() {
                         break;
                     }
                 } else if !connected {
@@ -104,8 +105,12 @@ impl RolesStore {
         }
     }
 
+    fn invalidate(&mut self) {
+        self.cache.mark_all_stale();
+    }
+
     pub fn ensure_loaded(&mut self, clan_id: ClanId, cx: &mut Context<Self>) {
-        if !self.by_clan.contains_key(&clan_id) {
+        if !self.cache.is_fresh(&clan_id, crate::CACHE_TTL) {
             self.fetch(clan_id, cx);
         }
     }
@@ -127,7 +132,7 @@ impl RolesStore {
                             "RolesStore: fetched {} roles for clan {clan_id}",
                             roles.len()
                         );
-                        this.by_clan.insert(clan_id, roles);
+                        this.cache.insert(clan_id, roles, None);
                         cx.emit(RolesEvent::Changed { clan_id });
                         cx.notify();
                     }
@@ -139,14 +144,14 @@ impl RolesStore {
     }
 
     pub fn roles_for(&self, clan_id: ClanId, role_ids: &[RoleId]) -> Vec<&Role> {
-        let Some(map) = self.by_clan.get(&clan_id) else {
+        let Some(map) = self.cache.get(&clan_id) else {
             return Vec::new();
         };
         role_ids.iter().filter_map(|id| map.get(id)).collect()
     }
 
     pub fn role(&self, clan_id: ClanId, role_id: RoleId) -> Option<&Role> {
-        self.by_clan.get(&clan_id)?.get(&role_id)
+        self.cache.get(&clan_id)?.get(&role_id)
     }
 }
 
@@ -236,5 +241,27 @@ mod tests {
     fn roles_for_returns_empty_for_unknown_clan() {
         let by_clan: HashMap<ClanId, HashMap<RoleId, Role>> = HashMap::new();
         assert!(roles_for_in(&by_clan, ClanId(99), &[RoleId(1)]).is_empty());
+    }
+
+    #[test]
+    fn keyed_cache_reconnect_marks_stale_without_dropping_values_then_refetches() {
+        let mut cache: KeyedCache<ClanId, HashMap<RoleId, Role>> = KeyedCache::new(None);
+        cache.insert(
+            ClanId(1),
+            roles_map_from_proto(vec![make_role(10, "Admin", "#f00")]),
+            None,
+        );
+        assert!(cache.is_fresh(&ClanId(1), crate::CACHE_TTL));
+
+        cache.mark_all_stale();
+        assert!(!cache.is_fresh(&ClanId(1), crate::CACHE_TTL));
+        assert!(cache.get(&ClanId(1)).is_some());
+
+        cache.insert(
+            ClanId(1),
+            roles_map_from_proto(vec![make_role(10, "Admin", "#f00")]),
+            None,
+        );
+        assert!(cache.is_fresh(&ClanId(1), crate::CACHE_TTL));
     }
 }
