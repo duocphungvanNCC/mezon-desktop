@@ -79,6 +79,7 @@ pub struct VoiceStore {
     session: Option<VoiceSession>,
     frame_store: Option<Arc<VideoFrameStore>>,
     render_cache: Mutex<HashMap<u64, CachedRenderImage>>,
+    pending_texture_drops: Mutex<Vec<Arc<RenderImage>>>,
     cached_meet_token: Option<CachedMeetToken>,
     meet_token_prefetching: Option<String>,
     last_repaint_seq: Option<u64>,
@@ -126,6 +127,7 @@ impl VoiceStore {
             session: None,
             frame_store: None,
             render_cache: Mutex::new(HashMap::new()),
+            pending_texture_drops: Mutex::new(Vec::new()),
             cached_meet_token: None,
             meet_token_prefetching: None,
             last_repaint_seq: None,
@@ -241,13 +243,17 @@ impl VoiceStore {
         let image = Arc::new(RenderImage::new(smallvec::smallvec![image::Frame::new(
             buffer,
         )]));
-        cache.insert(
+        let previous = cache.insert(
             key,
             CachedRenderImage {
                 seq: frame.seq,
                 image: image.clone(),
             },
         );
+        drop(cache);
+        if let Some(previous) = previous {
+            self.pending_texture_drops.lock().push(previous.image);
+        }
         Some(image)
     }
 
@@ -265,7 +271,23 @@ impl VoiceStore {
                 live_keys.insert(key);
             }
         }
-        cache.retain(|key, _| live_keys.contains(key));
+        let mut drops = self.pending_texture_drops.lock();
+        cache.retain(|key, entry| {
+            if live_keys.contains(key) {
+                true
+            } else {
+                drops.push(entry.image.clone());
+                false
+            }
+        });
+    }
+
+    fn flush_texture_drops(&self, cx: &mut App) {
+        let drops: Vec<Arc<RenderImage>> =
+            std::mem::take(&mut *self.pending_texture_drops.lock());
+        for image in drops {
+            cx.drop_image(image, None);
+        }
     }
 
     pub fn focused_tile(&self) -> Option<&str> {
@@ -479,6 +501,7 @@ impl VoiceStore {
             loop {
                 frame_store.frame_changed().await;
                 let keep_going = this.update(cx, |this, cx| {
+                    this.flush_texture_drops(cx);
                     if this.has_active_video() {
                         let seq = this.current_max_frame_seq();
                         if seq.is_some() && seq != this.last_repaint_seq {
@@ -565,6 +588,7 @@ impl VoiceStore {
                     self.screen_share_enabled = local.screenshare.is_some();
                 }
                 self.evict_stale_render_cache();
+                self.flush_texture_drops(cx);
                 self.prune_screen_targets(cx);
             }
             VoiceEvent::Disconnected { reason } => {
@@ -648,7 +672,14 @@ impl VoiceStore {
         self.fullscreen_screen = None;
         self.session = None;
         self.frame_store = None;
-        self.render_cache.lock().clear();
+        let stale: Vec<Arc<RenderImage>> = {
+            let mut cache = self.render_cache.lock();
+            cache.drain().map(|(_, entry)| entry.image).collect()
+        };
+        for image in stale {
+            cx.drop_image(image, None);
+        }
+        self.flush_texture_drops(cx);
         self._events_task = None;
         self._repaint_task = None;
         self.connection = VoiceConnection::Idle;
