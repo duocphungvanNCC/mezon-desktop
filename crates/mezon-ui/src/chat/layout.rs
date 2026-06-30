@@ -306,6 +306,14 @@ impl Render for ChatLayout {
         let nav_body = self.render_nav_body(cx);
         let content = self.render_content(cx);
         let voice_mini_bar = self.render_voice_mini_bar(cx);
+        let locale = self.settings.read(cx).language.clone();
+        let fullscreen = crate::chat::voice::render_screen_fullscreen_overlay(
+            cx.theme(),
+            &locale,
+            &self.voice_store,
+            &self.settings,
+            self.voice_store.read(cx),
+        );
         let theme = cx.theme();
 
         div()
@@ -315,6 +323,7 @@ impl Render for ChatLayout {
             .w_full()
             .h_full()
             .min_h_0()
+            .relative()
             .bg(theme.bg_primary)
             .child(
                 div()
@@ -358,6 +367,7 @@ impl Render for ChatLayout {
                     .bg(theme.bg_primary)
                     .child(content),
             )
+            .children(fullscreen)
     }
 }
 
