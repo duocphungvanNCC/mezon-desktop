@@ -244,6 +244,9 @@ impl Render for RootView {
                 this.child(render_title_bar(self.title_bar.clone()))
             })
             .child(content)
+            .when(cfg!(target_os = "macos"), |this| {
+                this.child(window_controls::render_controls(theme, _window))
+            })
             .when(window_controls::is_edge_resizable(), |this| {
                 this.child(window_controls::render_resize_edges(_window))
             })

@@ -1,11 +1,10 @@
 use std::cell::RefCell;
 use std::rc::Rc;
-use std::time::Duration;
 
 use gpui::{
-    AnyElement, App, Bounds, ClickEvent, Context, DragMoveEvent, Empty, Entity, EntityId,
-    FocusHandle, KeyDownEvent, MouseButton, MouseDownEvent, ObjectFit, Pixels, Rgba, SharedString,
-    Subscription, Task, Window, canvas, div, img, prelude::*, px, relative,
+    AnyElement, App, Bounds, ClickEvent, Context, DragMoveEvent, Empty, EntityId, FocusHandle,
+    KeyDownEvent, MouseButton, MouseDownEvent, ObjectFit, Pixels, Rgba, SharedString, Window,
+    canvas, div, img, prelude::*, px, relative,
 };
 use mezon_store::PlatformStore;
 use mezon_video::{VideoFrame, VideoPlayer};
@@ -14,7 +13,6 @@ use crate::app::shell::Shell;
 use crate::components::primitives::{Icon, IconName, h_flex};
 use crate::theme::ActiveTheme;
 
-const FRAME_INTERVAL_MS: u64 = 16;
 const SEEK_STEP_SECONDS: f64 = 5.0;
 const END_EPSILON_SECONDS: f64 = 0.25;
 const THEATER_FILL: f32 = 0.92;
@@ -87,8 +85,6 @@ pub struct VideoPlayerView {
     player: Option<Rc<VideoPlayer>>,
     shared: Shared,
     track_bounds: Bounds<Pixels>,
-    _pump: Option<Task<()>>,
-    _observe: Option<Subscription>,
 }
 
 impl VideoPlayerView {
@@ -99,7 +95,7 @@ impl VideoPlayerView {
             width,
             height,
         } = activation;
-        let player = VideoPlayer::open(url.as_ref()).ok().map(Rc::new);
+        let player = VideoPlayer::open(url.as_ref(), None).ok().map(Rc::new);
         if let Some(player) = player.as_ref() {
             player.play();
         }
@@ -107,7 +103,6 @@ impl VideoPlayerView {
             playing: player.is_some(),
             ..SharedPlayback::default()
         }));
-        let pump = player.as_ref().map(|_| Self::spawn_pump(cx));
         Self::register_teardown(cx);
         Self {
             theater: false,
@@ -119,55 +114,33 @@ impl VideoPlayerView {
             player,
             shared,
             track_bounds: Bounds::default(),
-            _pump: pump,
-            _observe: None,
         }
     }
 
     fn open_theater(
         player: Rc<VideoPlayer>,
         shared: Shared,
-        inline: Entity<Self>,
         poster: SharedString,
         window: &mut Window,
         cx: &mut App,
     ) {
-        let view = cx.new(|cx| {
-            let observe = cx.observe(&inline, |_, _, cx| cx.notify());
-            Self {
-                theater: true,
-                focus_handle: cx.focus_handle(),
-                url: SharedString::default(),
-                poster,
-                width: 0.0,
-                height: 0.0,
-                player: Some(player),
-                shared,
-                track_bounds: Bounds::default(),
-                _pump: None,
-                _observe: Some(observe),
-            }
+        let view = cx.new(|cx| Self {
+            theater: true,
+            focus_handle: cx.focus_handle(),
+            url: SharedString::default(),
+            poster,
+            width: 0.0,
+            height: 0.0,
+            player: Some(player),
+            shared,
+            track_bounds: Bounds::default(),
         });
         let focus_handle = view.read(cx).focus_handle.clone();
         window.focus(&focus_handle, cx);
         Shell::global(cx).update(cx, |shell, cx| shell.show_modal(view.into(), cx));
     }
 
-    fn spawn_pump(cx: &mut Context<Self>) -> Task<()> {
-        cx.spawn(async move |this, cx| {
-            loop {
-                cx.background_executor()
-                    .timer(Duration::from_millis(FRAME_INTERVAL_MS))
-                    .await;
-                let alive = this.update(cx, |view, cx| view.tick(cx));
-                if alive.is_err() {
-                    break;
-                }
-            }
-        })
-    }
-
-    fn tick(&mut self, cx: &mut Context<Self>) {
+    fn poll_frame(&mut self, cx: &mut Context<Self>) {
         let Some(player) = self.player.clone() else {
             return;
         };
@@ -177,37 +150,25 @@ impl VideoPlayerView {
         let duration = player.duration();
         let muted = player.is_muted();
         let failed = player.failed();
-        let changed = {
+        let previous = {
             let mut shared = self.shared.borrow_mut();
-            let mut changed = false;
-            if failed != shared.failed {
-                shared.failed = failed;
-                changed = true;
-            }
-            if playing != shared.playing {
-                shared.playing = playing;
-                changed = true;
-            }
-            if (current_time - shared.current_time).abs() > 0.05 {
-                shared.current_time = current_time;
-                changed = true;
-            }
-            if (duration - shared.duration).abs() > 0.05 {
-                shared.duration = duration;
-                changed = true;
-            }
-            if muted != shared.muted {
-                shared.muted = muted;
-                changed = true;
-            }
-            if let Some(frame) = new_frame {
-                let previous = shared.frame.replace(frame);
-                Self::release_frame(previous, cx);
-                changed = true;
-            }
-            changed
+            shared.failed = failed;
+            shared.playing = playing;
+            shared.current_time = current_time;
+            shared.duration = duration;
+            shared.muted = muted;
+            new_frame.and_then(|frame| shared.frame.replace(frame))
         };
-        if changed {
+        Self::release_frame(previous, cx);
+    }
+
+    pub fn pause_for_background(&mut self, cx: &mut Context<Self>) {
+        let Some(player) = self.player.clone() else {
+            return;
+        };
+        if self.shared.borrow().playing {
+            player.pause();
+            self.shared.borrow_mut().playing = false;
             cx.notify();
         }
     }
@@ -282,14 +243,7 @@ impl VideoPlayerView {
 
     fn open_fullscreen(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(player) = self.player.clone() {
-            Self::open_theater(
-                player,
-                self.shared.clone(),
-                cx.entity(),
-                self.poster.clone(),
-                window,
-                cx,
-            );
+            Self::open_theater(player, self.shared.clone(), self.poster.clone(), window, cx);
         }
     }
 
@@ -502,9 +456,13 @@ impl VideoPlayerView {
 
 impl Render for VideoPlayerView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.poll_frame(cx);
         let theme = cx.theme();
         let has_frame = self.has_frame();
-        let failed = self.shared.borrow().failed;
+        let (playing, failed) = {
+            let shared = self.shared.borrow();
+            (shared.playing, shared.failed)
+        };
         let mut root = div()
             .id("video-player")
             .group("video-player")
@@ -539,6 +497,10 @@ impl Render for VideoPlayerView {
                 .child(play_circle())
                 .on_click(cx.listener(|view, _, _window, cx| view.open_external(cx)))
                 .into_any_element();
+        }
+
+        if playing && window.is_window_active() {
+            window.request_animation_frame();
         }
 
         root.children(self.frame_child())
