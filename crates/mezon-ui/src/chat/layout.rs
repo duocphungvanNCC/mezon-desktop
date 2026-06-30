@@ -89,6 +89,7 @@ impl ChatLayout {
                 this.pin_popover_handle.hide(cx);
             }
             this.sync_active_from_route(cx);
+            this.ensure_active_channel_for_clan(cx);
             cx.notify();
         })
         .detach();
@@ -148,6 +149,8 @@ impl ChatLayout {
                     );
                     3
                 });
+                self.direct_store
+                    .update(cx, |store, _| store.set_current(direct_id, channel_type));
                 if channel_type == DirectKind::Group.channel_type() {
                     self.chat_area.bind_group_members(cx);
                     let group_id = direct_id;
@@ -165,6 +168,11 @@ impl ChatLayout {
                 self.direct_store
                     .update(cx, |store, cx| store.ensure_loaded(cx));
                 self.chat_area.clear_member_panel();
+            }
+            Route::Chat => {
+                self.pending_channel_id = None;
+                self.chat_area.clear_member_panel();
+                MessagesStore::global(cx).update(cx, |store, cx| store.close(cx));
             }
             _ => {
                 self.pending_channel_id = None;
@@ -248,8 +256,10 @@ impl ChatLayout {
         let welcome = self.clan_list.read(cx).welcome_channel_id(clan_id);
         let target = {
             let channels = self.channel_list.read(cx);
-            welcome
-                .filter(|w| channels.channel_in_clan(clan_id, *w))
+            channels
+                .remembered_channel(clan_id)
+                .filter(|c| channels.channel_in_clan(clan_id, *c))
+                .or_else(|| welcome.filter(|w| channels.channel_in_clan(clan_id, *w)))
                 .or_else(|| channels.default_channel_id(clan_id))
         };
         let Some(channel_id) = target else {
@@ -290,6 +300,7 @@ impl Render for ChatLayout {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         crate::trace_render!("ChatLayout");
         self.chat_area.ensure_input(window, cx);
+        self.chat_area.bind_window(window, cx);
         self.maybe_prefetch_voice_token(cx);
 
         let nav_body = self.render_nav_body(cx);

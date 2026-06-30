@@ -1,8 +1,9 @@
 use std::rc::Rc;
 
 use gpui::{
-    App, ClickEvent, Context, DismissEvent, Entity, EventEmitter, FocusHandle, Focusable, FontWeight,
-    Hsla, MouseDownEvent, ScrollHandle, SharedString, Window, div, point, prelude::*, px,
+    App, ClickEvent, Context, DismissEvent, Entity, EventEmitter, FocusHandle, Focusable,
+    FontWeight, Hsla, MouseDownEvent, ScrollHandle, SharedString, Window, div, point, prelude::*,
+    px,
 };
 use mezon_store::{
     ClanMembersStore, MessageId, MessagesStore, PinnedMessage, PinnedMessagesStore, ProfileContext,
@@ -201,23 +202,18 @@ fn render_body(
             .w_full()
             .gap_2()
             .py(px(8.))
-            .children(
-                pinned
-                    .iter()
-                    .enumerate()
-                    .map(|(index, msg)| {
-                        pin_card(
-                            index,
-                            msg,
-                            clan_id,
-                            theme,
-                            locale,
-                            popover_handle.clone(),
-                            avatar_cache.clone(),
-                            cx,
-                        )
-                    }),
-            )
+            .children(pinned.iter().enumerate().map(|(index, msg)| {
+                pin_card(
+                    index,
+                    msg,
+                    clan_id,
+                    theme,
+                    locale,
+                    popover_handle.clone(),
+                    avatar_cache.clone(),
+                    cx,
+                )
+            }))
             .into_any_element()
     };
 
@@ -308,10 +304,8 @@ fn resolve_pin_sender(
     clan_id: Option<mezon_store::ClanId>,
     cx: &App,
 ) -> (String, String) {
-    if let (Some(user_id), Some(clan_id)) = (
-        msg.sender_id.parse::<UserId>().ok(),
-        clan_id,
-    ) && let Some(profile) = resolve_user_profile(user_id, ProfileContext::Clan(clan_id), cx)
+    if let (Some(user_id), Some(clan_id)) = (msg.sender_id.parse::<UserId>().ok(), clan_id)
+        && let Some(profile) = resolve_user_profile(user_id, ProfileContext::Clan(clan_id), cx)
     {
         return (profile.display_name, profile.avatar_url);
     }
@@ -340,9 +334,7 @@ fn pin_card(
         .image_cache(avatar_cache);
     if !avatar_raw.is_empty() {
         let proxied = crate::util::imgproxy::avatar_url(cx, &avatar_raw);
-        avatar = avatar
-            .src(proxied)
-            .fallback_src(avatar_raw);
+        avatar = avatar.src(proxied).fallback_src(avatar_raw);
     } else if !msg.avatar_proxied.is_empty() {
         avatar = avatar.src(msg.avatar_proxied.clone());
         if !msg.avatar_url.is_empty() && msg.avatar_url != msg.avatar_proxied.as_ref() {
