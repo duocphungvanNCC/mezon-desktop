@@ -240,7 +240,16 @@ impl ChannelSidebar {
                                 voice_members: ch
                                     .voice_members
                                     .iter()
-                                    .map(VoiceMemberSlot::from)
+                                    .map(|m| {
+                                        let mut slot = VoiceMemberSlot::from(m);
+                                        if !slot.avatar_url.is_empty() {
+                                            slot.avatar_url = crate::util::imgproxy::avatar_url(
+                                                cx,
+                                                &slot.avatar_url,
+                                            );
+                                        }
+                                        slot
+                                    })
                                     .collect(),
                             });
                         }
@@ -860,9 +869,8 @@ fn render_sidebar_item(
                             let avatar = if m.avatar_url.is_empty() {
                                 Avatar::new().name(name_text.clone())
                             } else {
-                                let proxied = crate::util::imgproxy::avatar_url(cx, &m.avatar_url);
                                 Avatar::new()
-                                    .src(SharedString::from(proxied))
+                                    .src(SharedString::from(m.avatar_url.clone()))
                                     .name(name_text.clone())
                             };
                             div()

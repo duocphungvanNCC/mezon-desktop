@@ -103,6 +103,34 @@ impl DirectChannelList {
         self.reindex();
     }
 
+    fn resort_after_bump(&mut self, id: ChannelId) {
+        let Some(&idx) = self.by_id.get(&id) else {
+            return;
+        };
+        let new_ts = self.channels[idx].last_sent_timestamp;
+        let mut target = idx;
+        while target > 0 && self.channels[target - 1].last_sent_timestamp < new_ts {
+            target -= 1;
+        }
+        while target + 1 < self.channels.len()
+            && self.channels[target + 1].last_sent_timestamp > new_ts
+        {
+            target += 1;
+        }
+        if target == idx {
+            return;
+        }
+        if target < idx {
+            self.channels[target..=idx].rotate_right(1);
+        } else {
+            self.channels[idx..=target].rotate_left(1);
+        }
+        let (lo, hi) = (target.min(idx), target.max(idx));
+        for i in lo..=hi {
+            self.by_id.insert(self.channels[i].id, i);
+        }
+    }
+
     fn replace(&mut self, mut channels: Vec<DirectChannel>, badge_map: &HashMap<ChannelId, i32>) {
         let local_counts: HashMap<ChannelId, u32> = self
             .channels
@@ -383,7 +411,7 @@ impl DirectMessageStore {
         } else if increment_unread {
             channel.unread_count = channel.unread_count.saturating_add(1);
         }
-        self.channels.sort_by_recent();
+        self.channels.resort_after_bump(channel_id);
         cx.emit(DirectEvent::Changed);
         cx.notify();
         true
@@ -801,5 +829,41 @@ mod tests {
         local.insert(ChannelId(1), 3);
         merge_dm_unread_counts(&mut channels, &badge_map, &local);
         assert_eq!(channels[0].unread_count, 5);
+    }
+
+    fn dm(id: i64, ts: i64) -> DirectChannel {
+        DirectChannel {
+            last_sent_timestamp: ts,
+            ..direct_from_api(api_dm(id, "x", 3))
+        }
+    }
+
+    #[test]
+    fn resort_after_bump_matches_full_sort() {
+        let base = vec![dm(1, 500), dm(2, 400), dm(3, 400), dm(4, 300), dm(5, 200)];
+        let scenarios = [
+            (ChannelId(5), 600),
+            (ChannelId(5), 400),
+            (ChannelId(1), 100),
+            (ChannelId(3), 400),
+            (ChannelId(3), 450),
+            (ChannelId(2), 350),
+        ];
+        for (id, new_ts) in scenarios {
+            let mut list = list_from(base.clone());
+            let mut expected = list.channels.clone();
+            if let Some(c) = expected.iter_mut().find(|c| c.id == id) {
+                c.last_sent_timestamp = new_ts;
+            }
+            sort_by_recent(&mut expected);
+            if let Some(c) = list.find_mut(id) {
+                c.last_sent_timestamp = new_ts;
+            }
+            list.resort_after_bump(id);
+            let got: Vec<ChannelId> = list.channels.iter().map(|c| c.id).collect();
+            let want: Vec<ChannelId> = expected.iter().map(|c| c.id).collect();
+            assert_eq!(got, want, "id={id:?} new_ts={new_ts}");
+            assert_index_consistent(&list);
+        }
     }
 }

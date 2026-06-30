@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use gpui::{
@@ -187,11 +188,19 @@ pub struct ChannelMessages {
     _window_activation: Option<Subscription>,
     mention_popover: Option<(Entity<UserProfilePopover>, Point<Pixels>)>,
     _mention_popover_sub: Option<Subscription>,
+    cached_locale: SharedString,
+    cached_current_user_id: SharedString,
+    cached_role_ids: Rc<Vec<i64>>,
+    identity_inputs: (Option<ClanId>, Option<UserId>),
 }
 
 impl ChannelMessages {
     pub fn new(settings: Entity<Settings>, cx: &mut Context<Self>) -> Self {
-        cx.observe(&settings, |_, _, cx| cx.notify()).detach();
+        cx.observe(&settings, |this, settings, cx| {
+            this.cached_locale = settings.read(cx).language.clone().into();
+            cx.notify();
+        })
+        .detach();
 
         let channel_list = ChannelList::global(cx);
         let channel_list_observe = cx.observe(&channel_list, |this, _, cx| this.reconcile_cold(cx));
@@ -201,6 +210,7 @@ impl ChannelMessages {
 
         let clan_members = ClanMembersStore::global(cx);
         let clan_members_observe = cx.observe(&clan_members, |this, _, cx| {
+            this.store_identity(Self::compute_identity(cx));
             if this.refresh_derived_state(cx) {
                 cx.notify();
             }
@@ -456,6 +466,8 @@ impl ChannelMessages {
         let last_cold_inputs = Self::cold_inputs(cx);
         let (welcome, onboarding) = Self::compute_indicator_contexts(cx);
         let cached_unread_boundary = unread_boundary(&MessagesStore::global(cx), None, cx);
+        let cached_locale: SharedString = settings.read(cx).language.clone().into();
+        let (identity_inputs, cached_current_user_id, cached_role_ids) = Self::compute_identity(cx);
         Self {
             list_state,
             settings,
@@ -493,6 +505,10 @@ impl ChannelMessages {
             _window_activation: None,
             mention_popover: None,
             _mention_popover_sub: None,
+            cached_locale,
+            cached_current_user_id,
+            cached_role_ids,
+            identity_inputs,
         }
     }
 
@@ -556,17 +572,68 @@ impl ChannelMessages {
         cx.notify();
     }
 
+    fn compute_identity(
+        cx: &gpui::App,
+    ) -> ((Option<ClanId>, Option<UserId>), SharedString, Rc<Vec<i64>>) {
+        let active_clan = ClanList::global(cx).read(cx).active_clan_id;
+        let current_user = BadgeService::global(cx).read(cx).current_user_id(cx);
+        let current_user_id: SharedString = current_user
+            .map(|u| u.0.to_string())
+            .unwrap_or_default()
+            .into();
+        let role_ids: Vec<i64> = active_clan
+            .and_then(|clan_id| {
+                current_user.and_then(|uid| {
+                    ClanMembersStore::global(cx)
+                        .read(cx)
+                        .member(clan_id, uid)
+                        .map(|member| member.role_ids.iter().map(|role| role.get()).collect())
+                })
+            })
+            .unwrap_or_default();
+        (
+            (active_clan, current_user),
+            current_user_id,
+            Rc::new(role_ids),
+        )
+    }
+
+    fn store_identity(
+        &mut self,
+        identity: ((Option<ClanId>, Option<UserId>), SharedString, Rc<Vec<i64>>),
+    ) {
+        let (inputs, current_user_id, role_ids) = identity;
+        self.identity_inputs = inputs;
+        self.cached_current_user_id = current_user_id;
+        self.cached_role_ids = role_ids;
+    }
+
+    fn sync_render_identity(&mut self, cx: &gpui::App) {
+        let key = (
+            ClanList::global(cx).read(cx).active_clan_id,
+            BadgeService::global(cx).read(cx).current_user_id(cx),
+        );
+        if key != self.identity_inputs {
+            self.store_identity(Self::compute_identity(cx));
+        }
+    }
+
     fn apply_gif_reconcile(&mut self, cx: &mut Context<Self>) {
         let header = usize::from(self.header_shown);
         let count = self.list_state.item_count();
+        let start = self.list_state.logical_scroll_top().item_ix.max(header);
         let mut wanted: Vec<PendingGif> = Vec::new();
         {
             let store = MessagesStore::global(cx);
             let store = store.read(cx);
             let messages = store.viewport_messages();
-            for list_ix in header..count {
+            for list_ix in start..count {
+                let below = self.list_state.item_is_below_viewport(list_ix);
+                if below == Some(true) {
+                    break;
+                }
                 if self.list_state.item_is_above_viewport(list_ix) != Some(false)
-                    || self.list_state.item_is_below_viewport(list_ix) != Some(false)
+                    || below != Some(false)
                 {
                     continue;
                 }
@@ -1020,6 +1087,7 @@ impl Render for ChannelMessages {
         self.image_cache
             .update(cx, |cache, cx| cache.sweep(window, cx));
         cx.defer_in(window, |this, _window, cx| this.apply_gif_reconcile(cx));
+        self.sync_render_identity(cx);
 
         let store = MessagesStore::global(cx);
         let active_clan = ClanList::global(cx).read(cx).active_clan_id;
@@ -1041,7 +1109,7 @@ impl Render for ChannelMessages {
                 .scroll_to_reveal_item(usize::from(header_shown) + pos);
         }
 
-        let locale = self.settings.read(cx).language.clone();
+        let locale = self.cached_locale.clone();
         let frame_now = chrono::Local::now();
         let list_state = self.list_state.clone();
         let suppress_hover = self.suppress_hover;
@@ -1053,18 +1121,8 @@ impl Render for ChannelMessages {
         let active_videos = self.active_videos.clone();
         let gif_videos = self.gif_videos.clone();
         let video_host = cx.entity().downgrade();
-        let current_user = BadgeService::global(cx).read(cx).current_user_id(cx);
-        let current_user_id = current_user.map(|u| u.0.to_string()).unwrap_or_default();
-        let role_ids: Vec<i64> = active_clan
-            .and_then(|clan_id| {
-                current_user.and_then(|uid| {
-                    ClanMembersStore::global(cx)
-                        .read(cx)
-                        .member(clan_id, uid)
-                        .map(|member| member.role_ids.iter().map(|role| role.get()).collect())
-                })
-            })
-            .unwrap_or_default();
+        let current_user_id = self.cached_current_user_id.clone();
+        let role_ids = self.cached_role_ids.clone();
         let welcome = self.welcome.clone();
         let onboarding = self.onboarding.clone();
         let has_more_bottom = store.read(cx).has_more_bottom();

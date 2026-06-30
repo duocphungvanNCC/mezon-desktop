@@ -309,7 +309,7 @@ fn jump_to_message(message_id: MessageId, cx: &mut App) {
 fn navigate_to_channel(channel_id: ChannelId, label: String, cx: &mut App) {
     if let Some(clan_id) = ChannelList::global(cx)
         .read(cx)
-        .find_channel(channel_id)
+        .find_channel_in_active_clan(channel_id)
         .map(|channel| channel.clan_id)
     {
         navigate(
@@ -775,7 +775,7 @@ pub fn build_welcome_context(
     let channel = channels
         .active_channel()
         .filter(|ch| ch.id == channel_id)
-        .or_else(|| channels.find_channel(channel_id))?;
+        .or_else(|| channels.find_channel_in_active_clan(channel_id))?;
 
     let name = SharedString::from(channel.name.clone());
     if channel.channel_type == ChannelType::Thread {

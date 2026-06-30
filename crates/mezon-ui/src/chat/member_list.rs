@@ -4,10 +4,10 @@ use gpui::{
     uniform_list,
 };
 use mezon_store::{
-    ChannelId, ChannelList, ChannelMembersEvent, ChannelMembersStore, ClanId, ClanList, ClanMember,
-    ClanMembersEvent, ClanMembersStore, DirectKind, DirectMessageStore, GroupMember,
-    GroupMembersEvent, GroupMembersStore, PresenceEvent, PresenceStore, ProfileContext, Settings,
-    UserId, split_members_by_status,
+    ChannelEvent, ChannelId, ChannelList, ChannelMembersEvent, ChannelMembersStore, ClanId,
+    ClanList, ClanMember, ClanMembersEvent, ClanMembersStore, DirectKind, DirectMessageStore,
+    GroupMember, GroupMembersEvent, GroupMembersStore, PresenceEvent, PresenceStore,
+    ProfileContext, Settings, UserId, split_members_by_status,
 };
 
 use crate::app::shell::Shell;
@@ -108,8 +108,12 @@ impl MemberListPanel {
                     }
                 })
                 .detach();
-                cx.observe(&ChannelList::global(cx), |this, _, cx| this.rebuild(cx))
-                    .detach();
+                cx.subscribe(&ChannelList::global(cx), |this, _, event, cx| {
+                    if let ChannelEvent::ActiveChannelChanged(_) = event {
+                        this.rebuild(cx);
+                    }
+                })
+                .detach();
             }
             MemberSource::Group => {
                 cx.subscribe(&GroupMembersStore::global(cx), |this, _, event, cx| {
@@ -342,6 +346,17 @@ pub(crate) struct MentionMemberRaw {
     pub display: String,
     pub username: String,
     pub avatar_raw: String,
+    pub display_lc: String,
+    pub username_lc: String,
+    pub avatar_src: SharedString,
+}
+
+fn mention_avatar_src(cx: &App, avatar: &str) -> SharedString {
+    if avatar.is_empty() {
+        SharedString::default()
+    } else {
+        SharedString::from(crate::util::imgproxy::avatar_url(cx, avatar))
+    }
 }
 
 pub(crate) fn mention_member_pool(cx: &App) -> Vec<MentionMemberRaw> {
@@ -356,6 +371,9 @@ pub(crate) fn mention_member_pool(cx: &App) -> Vec<MentionMemberRaw> {
                 display: m.name().to_string(),
                 username: m.user.username.clone(),
                 avatar_raw: m.avatar().to_string(),
+                display_lc: m.name().to_lowercase(),
+                username_lc: m.user.username.to_lowercase(),
+                avatar_src: mention_avatar_src(cx, m.avatar()),
             })
             .collect();
     }
@@ -377,6 +395,9 @@ pub(crate) fn mention_member_pool(cx: &App) -> Vec<MentionMemberRaw> {
             display: m.name().to_string(),
             username: m.user.username.clone(),
             avatar_raw: m.avatar().to_string(),
+            display_lc: m.name().to_lowercase(),
+            username_lc: m.user.username.to_lowercase(),
+            avatar_src: mention_avatar_src(cx, m.avatar()),
         })
         .collect()
 }

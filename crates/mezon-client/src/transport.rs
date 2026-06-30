@@ -5,6 +5,7 @@
 pub use crate::transport_adapter::TransportAdapter;
 use anyhow::{Context, Result};
 use mezon_proto::{api, realtime};
+use parking_lot::Mutex;
 use prost::Message;
 use serde::{Deserialize, Serialize};
 use serde_json;
@@ -12,7 +13,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU16, Ordering};
 use std::time::Duration;
-use tokio::sync::{RwLock, oneshot, watch};
+use tokio::sync::{oneshot, watch};
 
 const DEFAULT_SEND_TIMEOUT_MS: u64 = 10000;
 const DEFAULT_CONNECT_GATE_MS: u64 = 5000;
@@ -149,7 +150,7 @@ fn dispatch_realtime_push(
 pub struct MezonTransport {
     adapter: Arc<dyn TransportAdapter>,
     cid_counter: Arc<AtomicU16>,
-    pending_requests: Arc<RwLock<HashMap<u16, PromiseExecutor>>>,
+    pending_requests: Arc<Mutex<HashMap<u16, PromiseExecutor>>>,
     send_timeout_ms: Duration,
     connect_gate: Duration,
     connected_tx: watch::Sender<bool>,
@@ -165,7 +166,7 @@ impl MezonTransport {
         Self {
             adapter: Arc::from(adapter),
             cid_counter: Arc::new(AtomicU16::new(1)),
-            pending_requests: Arc::new(RwLock::new(HashMap::new())),
+            pending_requests: Arc::new(Mutex::new(HashMap::new())),
             send_timeout_ms: Duration::from_millis(DEFAULT_SEND_TIMEOUT_MS),
             connect_gate: Duration::from_millis(DEFAULT_CONNECT_GATE_MS),
             connected_tx,
@@ -231,17 +232,13 @@ impl MezonTransport {
                 tracing::trace!("on_message: cid={cid} code={code} len={}", message.len());
 
                 if cid != 0 {
-                    let pending = pending_requests.clone();
-                    let on_event = on_event.clone();
-                    tokio::spawn(async move {
-                        let executor = pending.write().await.remove(&cid);
-                        match executor {
-                            Some(executor) => {
-                                let _ = executor.sender.send((code, message));
-                            }
-                            None => dispatch_realtime_push(cid, &message, on_event.as_ref()),
+                    let executor = pending_requests.lock().remove(&cid);
+                    match executor {
+                        Some(executor) => {
+                            let _ = executor.sender.send((code, message));
                         }
-                    });
+                        None => dispatch_realtime_push(cid, &message, on_event.as_ref()),
+                    }
                 } else {
                     dispatch_realtime_push(cid, &message, on_event.as_ref());
                 }
@@ -263,10 +260,7 @@ impl MezonTransport {
         self.adapter
             .set_on_close(Arc::new(move |was_clean| {
                 let _ = connected_for_close.send(false);
-                let pending = pending_for_close.clone();
-                tokio::spawn(async move {
-                    pending.write().await.clear();
-                });
+                pending_for_close.lock().clear();
                 on_disconnected(was_clean);
             }))
             .await;
@@ -293,21 +287,17 @@ impl MezonTransport {
     pub async fn send(&self, cid: u16, message: Vec<u8>) -> Result<(u32, Vec<u8>)> {
         self.wait_connected(self.connect_gate).await?;
         let (tx, rx) = oneshot::channel();
-        {
-            let mut pending = self.pending_requests.write().await;
-            pending.insert(cid, PromiseExecutor { sender: tx });
-        }
+        self.pending_requests
+            .lock()
+            .insert(cid, PromiseExecutor { sender: tx });
         if let Err(e) = self.adapter.send(message).await {
-            self.pending_requests.write().await.remove(&cid);
+            self.pending_requests.lock().remove(&cid);
             return Err(e);
         }
         let result = tokio::time::timeout(self.send_timeout_ms, rx)
             .await
             .map_err(|_| {
-                let pending = self.pending_requests.clone();
-                tokio::spawn(async move {
-                    pending.write().await.remove(&cid);
-                });
+                self.pending_requests.lock().remove(&cid);
                 anyhow::anyhow!("Request timed out")
             })?
             .map_err(|_| anyhow::anyhow!("Response channel closed"))?;
@@ -322,7 +312,7 @@ impl MezonTransport {
     /// Close the connection.
     pub async fn close(&self) -> Result<()> {
         let _ = self.connected_tx.send(false);
-        self.pending_requests.write().await.clear();
+        self.pending_requests.lock().clear();
         self.adapter.close().await
     }
 
@@ -338,7 +328,7 @@ impl MezonTransport {
 
         let (tx, rx) = oneshot::channel();
         {
-            let mut pending = self.pending_requests.write().await;
+            let mut pending = self.pending_requests.lock();
             pending.insert(cid, PromiseExecutor { sender: tx });
             tracing::debug!(
                 "  Registered ping pending request. Total pending: {}",
@@ -348,7 +338,7 @@ impl MezonTransport {
 
         tracing::debug!("Sending ping cid={}", cid);
         if let Err(e) = self.adapter.send_ping(cid).await {
-            self.pending_requests.write().await.remove(&cid);
+            self.pending_requests.lock().remove(&cid);
             return Err(e);
         }
 
@@ -356,10 +346,7 @@ impl MezonTransport {
             .await
             .map_err(|_| {
                 tracing::error!("Ping timed out after {} ms", DEFAULT_PING_TIMEOUT_MS);
-                let pending = self.pending_requests.clone();
-                tokio::spawn(async move {
-                    pending.write().await.remove(&cid);
-                });
+                self.pending_requests.lock().remove(&cid);
                 anyhow::anyhow!("Ping timed out")
             })?
             .map_err(|_| anyhow::anyhow!("Ping response channel closed"))?;
@@ -6403,7 +6390,7 @@ mod tests {
         let cid = t.generate_cid();
         let err = t.send(cid, vec![1, 2, 3, 4]).await.unwrap_err();
         assert!(err.to_string().contains("not connected"));
-        assert!(t.pending_requests.read().await.is_empty());
+        assert!(t.pending_requests.lock().is_empty());
     }
 
     #[tokio::test]
@@ -6414,7 +6401,7 @@ mod tests {
         let cid = t.generate_cid();
         let err = t.send(cid, vec![1, 2, 3, 4]).await.unwrap_err();
         assert!(err.to_string().contains("mock send failed"));
-        assert!(t.pending_requests.read().await.is_empty());
+        assert!(t.pending_requests.lock().is_empty());
     }
 
     #[test]

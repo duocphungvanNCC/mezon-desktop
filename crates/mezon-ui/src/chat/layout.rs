@@ -1,7 +1,7 @@
 use gpui::{AnyView, Context, Entity, StyleRefinement, Window, div, prelude::*, px};
 use mezon_store::{
-    AuthState, ChannelId, ChannelList, ChannelType, ClanId, ClanList, DirectChannel, DirectKind,
-    DirectMessageStore, GroupMembersStore, MessagesStore, PinnedMessagesStore, Settings,
+    AuthState, Channel, ChannelId, ChannelList, ChannelType, ClanId, ClanList, DirectChannel,
+    DirectKind, DirectMessageStore, GroupMembersStore, MessagesStore, Settings, VoiceMember,
     VoiceStore,
 };
 use ui::PopoverMenuHandle;
@@ -29,6 +29,40 @@ pub struct ChatLayout {
     prefetched_voice_channel: Option<ChannelId>,
     show_member_list: bool,
     pin_popover_handle: PopoverMenuHandle<PinnedPopoverPanel>,
+    displayed_active_channel: Option<ActiveChannelSlice>,
+    displayed_voice_mini: Option<VoiceMiniSlice>,
+}
+
+struct ActiveChannelSlice {
+    id: ChannelId,
+    name: String,
+    channel_type: ChannelType,
+    voice_members: Vec<VoiceMember>,
+}
+
+impl ActiveChannelSlice {
+    fn from_channel(channel: &Channel) -> Self {
+        Self {
+            id: channel.id,
+            name: channel.name.clone(),
+            channel_type: channel.channel_type,
+            voice_members: channel.voice_members.clone(),
+        }
+    }
+
+    fn differs_from(&self, channel: &Channel) -> bool {
+        self.id != channel.id
+            || self.channel_type != channel.channel_type
+            || self.name != channel.name
+            || self.voice_members != channel.voice_members
+    }
+}
+
+#[derive(PartialEq, Eq)]
+struct VoiceMiniSlice {
+    channel_id: String,
+    label: String,
+    mic_enabled: bool,
 }
 
 impl ChatLayout {
@@ -65,20 +99,36 @@ impl ChatLayout {
         let user_info_bar = cx.new(|cx| UserInfoBar::new(auth_state.clone(), cx));
 
         let direct_store = DirectMessageStore::global(cx);
-        cx.observe(&direct_store, |_, _, cx| cx.notify()).detach();
+
+        // TODO: break global listener into smaller pieces
+        cx.observe(&direct_store, |_, _, cx| {
+            if matches!(
+                Router::global(cx).read(cx).route(),
+                Route::DirectMessage { .. }
+            ) {
+                cx.notify();
+            }
+        })
+        .detach();
 
         let voice_store = VoiceStore::global(cx);
-        cx.observe(&voice_store, |_, _, cx| cx.notify()).detach();
-
-        let pinned_store = PinnedMessagesStore::global(cx);
-        cx.observe(&pinned_store, |_, _, cx| cx.notify()).detach();
+        cx.observe(&voice_store, |this, _, cx| {
+            let mini_changed = this.voice_mini_display_changed(cx);
+            if mini_changed || this.is_voice_screen_visible(cx) {
+                cx.notify();
+            }
+        })
+        .detach();
 
         let chat_area = ChatArea::new(settings.clone(), cx);
         cx.observe(&channel_list, |this, _, cx| {
             this.apply_pending_channel(cx);
             this.ensure_active_channel_for_clan(cx);
-            this.pin_popover_handle.hide(cx);
-            cx.notify();
+            //TODO: recheck behaviour
+            if this.active_channel_display_changed(cx) {
+                this.pin_popover_handle.hide(cx);
+                cx.notify();
+            }
         })
         .detach();
         cx.observe(&Router::global(cx), |this, _, cx| {
@@ -109,6 +159,8 @@ impl ChatLayout {
             prefetched_voice_channel: None,
             show_member_list: true,
             pin_popover_handle: PopoverMenuHandle::default(),
+            displayed_active_channel: None,
+            displayed_voice_mini: None,
         };
         this.sync_active_from_route(cx);
         this
@@ -195,7 +247,7 @@ impl ChatLayout {
         let (present, already_active) = {
             let channels = self.channel_list.read(cx);
             (
-                channels.find_channel(channel_id).is_some(),
+                channels.find_channel_in_active_clan(channel_id).is_some(),
                 channels.active_channel_id == Some(channel_id),
             )
         };
@@ -219,7 +271,7 @@ impl ChatLayout {
         if self
             .channel_list
             .read(cx)
-            .find_channel(channel_id)
+            .find_channel_in_active_clan(channel_id)
             .is_some()
         {
             self.pending_channel_id = None;
@@ -230,9 +282,9 @@ impl ChatLayout {
     }
 
     fn ensure_active_channel_for_clan(&mut self, cx: &mut Context<Self>) {
-        if matches!(
+        if !matches!(
             Router::global(cx).read(cx).route(),
-            Route::Direct | Route::Friends | Route::DirectMessage { .. }
+            Route::Chat | Route::Channel { .. }
         ) {
             return;
         }
@@ -292,6 +344,55 @@ impl ChatLayout {
             self.voice_store.update(cx, |store, cx| {
                 store.prefetch_meet_token(channel_id.to_string(), cx);
             });
+        }
+    }
+
+    fn active_channel_display_changed(&mut self, cx: &Context<Self>) -> bool {
+        let changed = {
+            let channels = self.channel_list.read(cx);
+            match (&self.displayed_active_channel, channels.active_channel()) {
+                (None, None) => false,
+                (Some(slice), Some(channel)) => slice.differs_from(channel),
+                _ => true,
+            }
+        };
+        if changed {
+            let next = self
+                .channel_list
+                .read(cx)
+                .active_channel()
+                .map(ActiveChannelSlice::from_channel);
+            self.displayed_active_channel = next;
+        }
+        changed
+    }
+
+    fn is_voice_screen_visible(&self, cx: &Context<Self>) -> bool {
+        !self.is_dm_route(cx)
+            && self
+                .channel_list
+                .read(cx)
+                .active_channel()
+                .is_some_and(|ch| ch.channel_type == ChannelType::Voice)
+    }
+
+    fn current_voice_mini_slice(&self, cx: &Context<Self>) -> Option<VoiceMiniSlice> {
+        let store = self.voice_store.read(cx);
+        let (channel_id, _) = store.connection().connected_channel()?;
+        Some(VoiceMiniSlice {
+            channel_id: channel_id.to_string(),
+            label: store.channel_label().to_string(),
+            mic_enabled: store.mic_enabled(),
+        })
+    }
+
+    fn voice_mini_display_changed(&mut self, cx: &Context<Self>) -> bool {
+        let next = self.current_voice_mini_slice(cx);
+        if next != self.displayed_voice_mini {
+            self.displayed_voice_mini = next;
+            true
+        } else {
+            false
         }
     }
 }

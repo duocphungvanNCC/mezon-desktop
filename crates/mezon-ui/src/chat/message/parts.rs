@@ -162,7 +162,6 @@ pub fn render_attachments(msg: &Message, ctx: &RowCtx) -> Option<AnyElement> {
         && let Some(layout) = msg.album_layout.as_ref()
     {
         col = col.child(render_album(
-            msg.id,
             &images,
             layout,
             &msg.viewer_media,
@@ -175,7 +174,6 @@ pub fn render_attachments(msg: &Message, ctx: &RowCtx) -> Option<AnyElement> {
             .as_ref()
             .and_then(|_| ctx.gif_videos.get(&(msg.id, att_index)).cloned());
         col = col.child(render_photo(
-            msg.id,
             0,
             att,
             theme,
@@ -198,7 +196,6 @@ struct Uploader {
 }
 
 fn render_album(
-    msg_id: MessageId,
     images: &[(usize, &MessageAttachment)],
     layout: &AlbumLayout,
     _gallery: &Arc<[ViewerMedia]>,
@@ -221,10 +218,7 @@ fn render_album(
         // let uploader_name = uploader.name.clone();
         // let uploader_avatar = uploader.avatar.clone();
         let tile_element = div()
-            .id(SharedString::from(format!(
-                "msg-album-{}-{}",
-                msg_id.0, index
-            )))
+            .id(("msg-album", index))
             .absolute()
             .left(px(tile.x))
             .top(px(tile.y))
@@ -253,7 +247,6 @@ fn render_album(
 }
 
 fn render_photo(
-    msg_id: MessageId,
     index: usize,
     att: &MessageAttachment,
     theme: &Theme,
@@ -267,10 +260,7 @@ fn render_photo(
     }
     if let Some(player) = gif_player {
         return div()
-            .id(SharedString::from(format!(
-                "msg-gif-{}-{}",
-                msg_id.0, index
-            )))
+            .id(("msg-gif", index))
             .w(px(att.display_width))
             .h(px(att.display_height))
             .max_w_full()
@@ -290,10 +280,7 @@ fn render_photo(
     // let uploader_name = uploader.name.clone();
     // let uploader_avatar = uploader.avatar.clone();
     div()
-        .id(SharedString::from(format!(
-            "msg-img-{}-{}",
-            msg_id.0, index
-        )))
+        .id(("msg-img", index))
         .w(px(att.display_width))
         .h(px(att.display_height))
         .rounded_md()
@@ -396,10 +383,7 @@ fn render_video_poster(
                 ),
         );
     div()
-        .id(SharedString::from(format!(
-            "msg-video-{}-{}",
-            msg_id.0, index
-        )))
+        .id(("msg-video", index))
         .relative()
         .flex()
         .items_center()
@@ -493,19 +477,12 @@ pub fn render_reactions(msg: &Message, ctx: &RowCtx) -> Option<AnyElement> {
     let theme = ctx.theme;
     let mut row = div().flex().flex_row().flex_wrap().gap_2().mt_1().w_full();
     for (i, reaction) in msg.reactions.iter().enumerate() {
-        row = row.child(reaction_pill(
-            msg.id,
-            i,
-            reaction,
-            ctx.current_user_id,
-            theme,
-        ));
+        row = row.child(reaction_pill(i, reaction, ctx.current_user_id, theme));
     }
     Some(row.into_any_element())
 }
 
 fn reaction_pill(
-    msg_id: MessageId,
     index: usize,
     reaction: &Reaction,
     current_user_id: &str,
@@ -519,10 +496,7 @@ fn reaction_pill(
         format!("{} {}", reaction.emoji, reaction.count)
     };
     let mut pill = div()
-        .id(SharedString::from(format!(
-            "reaction-{}-{}",
-            msg_id.0, index
-        )))
+        .id(("reaction", index))
         .flex()
         .flex_row()
         .items_center()
