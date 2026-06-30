@@ -32,6 +32,7 @@ unsafe impl objc::Encode for CmTime {
 const CM_TIME_FLAG_VALID: u32 = 1;
 const CM_TIME_FLAG_INDEFINITE: u32 = 1 << 4;
 const SEEK_TIMESCALE: i32 = 600;
+const AV_PLAYER_ITEM_STATUS_FAILED: isize = 2;
 
 fn cm_time_to_seconds(time: CmTime) -> f64 {
     if time.flags & CM_TIME_FLAG_VALID == 0
@@ -68,7 +69,7 @@ pub struct PlayerImpl {
 }
 
 impl PlayerImpl {
-    pub fn open(url: &str) -> Result<Self, PlayerError> {
+    pub fn open(url: &str, _max_size: Option<(u32, u32)>) -> Result<Self, PlayerError> {
         let c_url = CString::new(url).map_err(|_| PlayerError::InvalidUrl)?;
         unsafe {
             let ns_string = class!(NSString);
@@ -230,7 +231,14 @@ impl PlayerImpl {
     }
 
     pub fn failed(&self) -> bool {
-        false
+        unsafe {
+            let item: *mut Object = msg_send![*self.player, currentItem];
+            if item.is_null() {
+                return false;
+            }
+            let status: isize = msg_send![item, status];
+            status == AV_PLAYER_ITEM_STATUS_FAILED
+        }
     }
 }
 

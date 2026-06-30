@@ -7,9 +7,9 @@ use gpui::{
     deferred, div, img, prelude::*, px, uniform_list,
 };
 use mezon_store::{
-    ChannelId, ChannelList, ChannelType, ClanList, EmojiEvent, EmojiStore,
-    MENTION_HERE_ID, OutgoingAttachment, OutgoingContent, OutgoingEmoji, OutgoingHashtag,
-    OutgoingMention, Settings, StickerEvent, StickerStore,
+    ChannelId, ChannelList, ChannelType, ClanList, EmojiEvent, EmojiStore, MENTION_HERE_ID,
+    OutgoingAttachment, OutgoingContent, OutgoingEmoji, OutgoingHashtag, OutgoingMention, Settings,
+    StickerEvent, StickerStore,
 };
 
 use attachments::{PendingAttachment, acceptable, build_pending};

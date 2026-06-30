@@ -47,6 +47,7 @@ pub struct DirectChannel {
     pub kind: DirectKind,
     pub avatar: String,
     pub peer_user_id: Option<UserId>,
+    pub creator_id: Option<UserId>,
     pub online: bool,
     pub member_count: u32,
     pub unread_count: u32,
@@ -142,6 +143,7 @@ pub struct DirectMessageStore {
     freshness: Freshness,
     has_more: bool,
     current_page: u32,
+    current: Option<(ChannelId, i32)>,
     api: Arc<AppApi>,
     _conn_watch: Task<()>,
 }
@@ -176,6 +178,7 @@ impl DirectMessageStore {
             freshness: Freshness::new(),
             has_more: true,
             current_page: 1,
+            current: None,
             api,
             _conn_watch: conn_watch,
         }
@@ -230,6 +233,14 @@ impl DirectMessageStore {
 
     pub fn find(&self, id: ChannelId) -> Option<&DirectChannel> {
         self.channels.find(id)
+    }
+
+    pub fn set_current(&mut self, id: ChannelId, channel_type: i32) {
+        self.current = Some((id, channel_type));
+    }
+
+    pub fn current(&self) -> Option<(ChannelId, i32)> {
+        self.current
     }
 
     pub fn refresh(&mut self, cx: &mut Context<Self>) {
@@ -446,6 +457,7 @@ fn direct_from_channel_desc(desc: &mezon_proto::api::ChannelDescription) -> ApiD
         count_mess_unread: desc.count_mess_unread,
         last_sent_timestamp,
         last_seen_timestamp,
+        creator_id: desc.creator_id,
     }
 }
 
@@ -488,6 +500,7 @@ fn direct_from_api(c: ApiDirectChannel) -> DirectChannel {
         kind,
         avatar,
         peer_user_id,
+        creator_id: (c.creator_id != 0).then_some(UserId(c.creator_id)),
         online,
         member_count: c.member_count.max(0) as u32,
         unread_count: c.count_mess_unread.max(0) as u32,
@@ -515,7 +528,21 @@ mod tests {
             count_mess_unread: 0,
             last_sent_timestamp: 0,
             last_seen_timestamp: 0,
+            creator_id: 0,
         }
+    }
+
+    #[test]
+    fn direct_from_api_maps_group_creator_id() {
+        let mut api = api_dm(1, "Group", 2);
+        api.creator_id = 99;
+        assert_eq!(direct_from_api(api).creator_id, Some(UserId(99)));
+    }
+
+    #[test]
+    fn direct_from_api_zero_creator_is_none() {
+        let api = api_dm(1, "Group", 2);
+        assert_eq!(direct_from_api(api).creator_id, None);
     }
 
     #[test]
@@ -625,6 +652,7 @@ mod tests {
                 kind: DirectKind::Dm,
                 avatar: String::new(),
                 peer_user_id: None,
+                creator_id: None,
                 online: false,
                 member_count: 0,
                 unread_count: 0,
@@ -637,6 +665,7 @@ mod tests {
                 kind: DirectKind::Dm,
                 avatar: String::new(),
                 peer_user_id: None,
+                creator_id: None,
                 online: false,
                 member_count: 0,
                 unread_count: 0,
