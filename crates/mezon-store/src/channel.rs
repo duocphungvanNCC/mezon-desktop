@@ -1,16 +1,14 @@
 use crate::ids::{ChannelId, ClanId, MessageId, UserId};
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use gpui::{
-    App, AppContext, Context, Entity, EventEmitter, Global, SharedString, Subscription, Task,
-};
+use gpui::{App, AppContext, Context, Entity, EventEmitter, Global, Subscription, Task};
 use mezon_client::transport::{ApiCategoryDesc, ApiChannelDesc};
 use mezon_client::{ApiChannelApp, AppApi, ConnectionStatus, RealtimeEvent};
 
 use crate::KeyedCache;
 use crate::clan::{ClanEvent, ClanList};
-use crate::message_time::local_day_key;
 use crate::messages::MessagesStore;
 use crate::realtime::{RealtimeDispatch, RealtimeKind};
 
@@ -111,107 +109,6 @@ impl Channel {
     }
 }
 
-#[derive(Debug, Clone, Default)]
-pub struct MessageAttachment {
-    pub url: String,
-    pub filename: String,
-    pub filetype: String,
-    pub width: u32,
-    pub height: u32,
-    pub proxied_src: SharedString,
-    pub display_width: f32,
-    pub display_height: f32,
-}
-
-impl MessageAttachment {
-    pub fn is_image(&self) -> bool {
-        self.filetype.starts_with("image/")
-            || matches!(
-                self.url
-                    .split(['?', '#'])
-                    .next()
-                    .and_then(|u| u.rsplit('.').next())
-                    .map(|ext| ext.to_ascii_lowercase())
-                    .as_deref(),
-                Some("png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "svg" | "avif")
-            )
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct Message {
-    pub id: String,
-    pub content: String,
-    pub sender_id: String,
-    pub sender_name: String,
-    pub avatar_url: String,
-    pub avatar_proxied: SharedString,
-    pub create_time: i64,
-    pub day_label: String,
-    pub combined_with_prev: bool,
-    pub reactions: Vec<String>,
-    pub attachments: Vec<MessageAttachment>,
-}
-
-pub const COMBINE_TIME_WINDOW: i64 = 300;
-
-pub fn message_combined_with_prev(prev: Option<&Message>, msg: &Message) -> bool {
-    match prev {
-        Some(prev) => {
-            prev.sender_id == msg.sender_id
-                && prev.day_label == msg.day_label
-                && (msg.create_time - prev.create_time).abs() < COMBINE_TIME_WINDOW
-        }
-        None => false,
-    }
-}
-
-pub fn recompute_message_grouping(messages: &mut [Message]) {
-    for i in 0..messages.len() {
-        let prev = if i > 0 { Some(&messages[i - 1]) } else { None };
-        messages[i].combined_with_prev = message_combined_with_prev(prev, &messages[i]);
-    }
-}
-
-impl Message {
-    pub fn new(
-        id: impl Into<String>,
-        content: impl Into<String>,
-        sender_id: impl Into<String>,
-        sender_name: impl Into<String>,
-        create_time: i64,
-    ) -> Self {
-        Self {
-            id: id.into(),
-            content: content.into(),
-            sender_id: sender_id.into(),
-            sender_name: sender_name.into(),
-            avatar_url: String::new(),
-            avatar_proxied: SharedString::default(),
-            create_time,
-            day_label: local_day_key(create_time),
-            combined_with_prev: false,
-            reactions: Vec::new(),
-            attachments: Vec::new(),
-        }
-    }
-
-    pub fn with_attachments(mut self, attachments: Vec<MessageAttachment>) -> Self {
-        self.attachments = attachments;
-        self
-    }
-
-    pub fn with_avatar(mut self, avatar_url: impl Into<String>) -> Self {
-        self.avatar_url = avatar_url.into();
-        self
-    }
-
-    pub fn with_avatar_proxied(mut self, proxied: impl Into<SharedString>) -> Self {
-        self.avatar_proxied = proxied.into();
-        self
-    }
-}
-
 #[derive(Debug, Clone)]
 pub struct Category {
     pub id: String,
@@ -252,8 +149,47 @@ pub struct ChannelList {
     api: Arc<AppApi>,
     collapsed: HashSet<(String, String)>,
     show_empty_categories: bool,
+    channel_index: RefCell<ChannelLocationCache>,
     _clan_sub: Subscription,
     _conn_watch: Task<()>,
+}
+
+#[derive(Default)]
+struct ChannelLocationCache {
+    by_clan: HashMap<ClanId, HashMap<ChannelId, (usize, usize)>>,
+}
+
+impl ChannelLocationCache {
+    fn invalidate(&mut self, clan_id: ClanId) {
+        self.by_clan.remove(&clan_id);
+    }
+
+    fn invalidate_all(&mut self) {
+        self.by_clan.clear();
+    }
+
+    fn location(
+        &mut self,
+        clan_id: ClanId,
+        categories: &[Category],
+        channel_id: ChannelId,
+    ) -> Option<(usize, usize)> {
+        self.by_clan
+            .entry(clan_id)
+            .or_insert_with(|| build_clan_channel_index(categories))
+            .get(&channel_id)
+            .copied()
+    }
+}
+
+fn build_clan_channel_index(categories: &[Category]) -> HashMap<ChannelId, (usize, usize)> {
+    let mut index = HashMap::new();
+    for (cat_idx, category) in categories.iter().enumerate() {
+        for (ch_idx, channel) in category.channels.iter().enumerate() {
+            index.entry(channel.id).or_insert((cat_idx, ch_idx));
+        }
+    }
+    index
 }
 
 struct GlobalChannelList(Entity<ChannelList>);
@@ -314,9 +250,25 @@ impl ChannelList {
             api,
             collapsed: HashSet::new(),
             show_empty_categories: true,
+            channel_index: RefCell::new(ChannelLocationCache::default()),
             _clan_sub: clan_sub,
             _conn_watch: conn_watch,
         }
+    }
+
+    fn invalidate_channel_index(&mut self, clan_id: ClanId) {
+        self.channel_index.get_mut().invalidate(clan_id);
+    }
+
+    fn invalidate_channel_index_all(&mut self) {
+        self.channel_index.get_mut().invalidate_all();
+    }
+
+    fn channel_location(&self, clan_id: ClanId, channel_id: ChannelId) -> Option<(usize, usize)> {
+        let categories = self.cache.get(&clan_id)?;
+        self.channel_index
+            .borrow_mut()
+            .location(clan_id, categories, channel_id)
     }
 
     fn register_realtime(cx: &mut Context<Self>) {
@@ -385,6 +337,7 @@ impl ChannelList {
                         this.loading.remove(&clan_id);
                         this.app_channels_cache.insert(clan_id, app_channels);
                         this.cache.insert(clan_id, categories, None);
+                        this.invalidate_channel_index(clan_id);
                         if let Some(store) = MessagesStore::try_global(cx) {
                             store.update(cx, |store, cx| {
                                 store.set_many_last_messages(last_messages);
@@ -606,11 +559,12 @@ impl ChannelList {
         cx: &mut Context<Self>,
     ) {
         let mut visible_changed = false;
-        if let Some(categories) = self.cache.get_mut(&clan_id)
-            && let Some(ch) = categories
-                .iter_mut()
-                .flat_map(|c| &mut c.channels)
-                .find(|ch| ch.id == channel_id)
+        if let Some((cat_idx, ch_idx)) = self.channel_location(clan_id, channel_id)
+            && let Some(ch) = self
+                .cache
+                .get_mut(&clan_id)
+                .and_then(|cats| cats.get_mut(cat_idx))
+                .and_then(|cat| cat.channels.get_mut(ch_idx))
         {
             let was_unread = ch.is_unread();
             let was_badge = ch.badge_count;
@@ -775,9 +729,13 @@ impl ChannelList {
                         voice_members: Vec::new(),
                         is_favorite: false,
                     };
-                    if let Some(cats) = self.cache.get_mut(&clan_id)
-                        && insert_channel(cats, channel)
-                    {
+                    let inserted = if let Some(cats) = self.cache.get_mut(&clan_id) {
+                        insert_channel(cats, channel)
+                    } else {
+                        false
+                    };
+                    if inserted {
+                        self.invalidate_channel_index(clan_id);
                         cx.notify();
                     }
                 }
@@ -803,6 +761,7 @@ impl ChannelList {
                     removed |= remove_channel(cats, id);
                 }
                 if removed {
+                    self.invalidate_channel_index_all();
                     if self.active_channel_id == Some(id) {
                         self.active_channel_id = None;
                         cx.emit(ChannelEvent::ActiveChannelChanged(None));
@@ -907,7 +866,9 @@ impl ChannelList {
                     voice_members: Vec::new(),
                     is_favorite: false,
                 };
-                if insert_channel(cats, channel) {
+                let inserted = insert_channel(cats, channel);
+                if inserted {
+                    self.invalidate_channel_index(clan_id);
                     cx.notify();
                 }
             }
@@ -922,6 +883,7 @@ impl ChannelList {
                     removed |= remove_channel(cats, channel_id);
                 }
                 if removed {
+                    self.invalidate_channel_index_all();
                     if self.active_channel_id == Some(channel_id) {
                         self.active_channel_id = None;
                         cx.emit(ChannelEvent::ActiveChannelChanged(None));
@@ -936,6 +898,7 @@ impl ChannelList {
     fn resync(&mut self, cx: &mut Context<Self>) {
         tracing::info!("ChannelList resync — invalidating channel cache");
         self.cache.mark_all_stale();
+        self.invalidate_channel_index_all();
         if let Some(clan_id) = self.active_clan_id {
             self.load_for_clan(clan_id, cx);
         }
@@ -944,7 +907,7 @@ impl ChannelList {
     pub fn active_channel(&self) -> Option<&Channel> {
         self.active_channel_id
             .as_ref()
-            .and_then(|id| self.find_channel(*id))
+            .and_then(|id| self.find_channel_in_active_clan(*id))
     }
 
     pub fn categories_for_clan(&self, clan_id: ClanId) -> &[Category] {
@@ -1008,11 +971,13 @@ impl ChannelList {
         }
     }
 
-    pub fn find_channel(&self, channel_id: ChannelId) -> Option<&Channel> {
-        self.active_categories()
-            .iter()
-            .flat_map(|category| &category.channels)
-            .find(|channel| channel.id == channel_id)
+    pub fn channel(&self, clan_id: ClanId, channel_id: ChannelId) -> Option<&Channel> {
+        let (cat_idx, ch_idx) = self.channel_location(clan_id, channel_id)?;
+        self.cache.get(&clan_id)?.get(cat_idx)?.channels.get(ch_idx)
+    }
+
+    pub fn find_channel_in_active_clan(&self, channel_id: ChannelId) -> Option<&Channel> {
+        self.channel(self.active_clan_id?, channel_id)
     }
 
     pub fn ensure_thread_channel(
@@ -1021,15 +986,19 @@ impl ChannelList {
         label: String,
         cx: &mut Context<Self>,
     ) -> Option<ClanId> {
-        if let Some(channel) = self.find_channel(thread_id) {
+        if let Some(channel) = self.find_channel_in_active_clan(thread_id) {
             return Some(channel.clan_id);
         }
         let clan_id = self.active_clan_id?;
         let parent_id = self.active_channel_id?;
         let channel = thread_channel_from_context(thread_id, label, clan_id, parent_id);
-        if let Some(categories) = self.cache.get_mut(&clan_id)
-            && insert_channel(categories, channel)
-        {
+        let inserted = if let Some(categories) = self.cache.get_mut(&clan_id) {
+            insert_channel(categories, channel)
+        } else {
+            false
+        };
+        if inserted {
+            self.invalidate_channel_index(clan_id);
             cx.notify();
         }
         Some(clan_id)
@@ -1043,13 +1012,17 @@ impl ChannelList {
         label: String,
         cx: &mut Context<Self>,
     ) {
-        if self.find_channel(thread_id).is_some() {
+        if self.channel(clan_id, thread_id).is_some() {
             return;
         }
         let channel = thread_channel_from_context(thread_id, label, clan_id, parent_id);
-        if let Some(categories) = self.cache.get_mut(&clan_id)
-            && insert_channel(categories, channel)
-        {
+        let inserted = if let Some(categories) = self.cache.get_mut(&clan_id) {
+            insert_channel(categories, channel)
+        } else {
+            false
+        };
+        if inserted {
+            self.invalidate_channel_index(clan_id);
             cx.notify();
         }
     }
@@ -1065,12 +1038,6 @@ impl ChannelList {
             }
         }
         None
-    }
-
-    fn active_categories(&self) -> &[Category] {
-        self.active_clan_id
-            .and_then(|c| self.cache.get(&c))
-            .map_or(&[], Vec::as_slice)
     }
 
     pub fn is_category_collapsed(&self, clan_id: ClanId, cat_id: &str) -> bool {
@@ -1109,6 +1076,7 @@ impl ChannelList {
         clan_id: ClanId,
         cx: &mut Context<Self>,
     ) {
+        let mut changed = false;
         if let Some(cats) = self.cache.get_mut(&clan_id) {
             let channel = cats
                 .iter()
@@ -1138,8 +1106,12 @@ impl ChannelList {
                         }
                     }
                 }
-                cx.notify();
+                changed = true;
             }
+        }
+        if changed {
+            self.invalidate_channel_index(clan_id);
+            cx.notify();
         }
 
         let api = self.api.clone();
@@ -1159,6 +1131,7 @@ impl ChannelList {
         clan_id: ClanId,
         cx: &mut Context<Self>,
     ) {
+        let mut changed = false;
         if let Some(cats) = self.cache.get_mut(&clan_id) {
             for cat in cats.iter_mut() {
                 for ch in cat.channels.iter_mut() {
@@ -1170,6 +1143,10 @@ impl ChannelList {
             if let Some(favor_cat) = cats.iter_mut().find(|c| c.id == FAVOR_CATE_ID) {
                 favor_cat.channels.retain(|ch| ch.id != channel_id);
             }
+            changed = true;
+        }
+        if changed {
+            self.invalidate_channel_index(clan_id);
             cx.notify();
         }
 
@@ -1632,6 +1609,48 @@ mod tests {
     }
 
     #[test]
+    fn clan_channel_index_maps_first_occurrence() {
+        let favorited = make_channel(10, "alpha", "cat1");
+        let cats = vec![
+            Category {
+                id: FAVOR_CATE_ID.into(),
+                clan_id: ClanId(1),
+                name: "favoriteChannel".into(),
+                order: i32::MIN,
+                channels: vec![favorited.clone()],
+            },
+            Category {
+                id: "cat1".into(),
+                clan_id: ClanId(1),
+                name: "General".into(),
+                order: 0,
+                channels: vec![make_channel(9, "z", "cat1"), favorited],
+            },
+        ];
+        let index = build_clan_channel_index(&cats);
+        assert_eq!(index.get(&ChannelId(10)), Some(&(0, 0)));
+        assert_eq!(index.get(&ChannelId(9)), Some(&(1, 0)));
+        assert_eq!(index.get(&ChannelId(999)), None);
+    }
+
+    #[test]
+    fn clan_channel_index_lookup_matches_linear_scan() {
+        let cats = categories();
+        let index = build_clan_channel_index(&cats);
+        for category in &cats {
+            for channel in &category.channels {
+                let (cat_idx, ch_idx) = index.get(&channel.id).copied().unwrap();
+                let linear = cats
+                    .iter()
+                    .flat_map(|c| &c.channels)
+                    .find(|c| c.id == channel.id)
+                    .unwrap();
+                assert_eq!(cats[cat_idx].channels[ch_idx].id, linear.id);
+            }
+        }
+    }
+
+    #[test]
     fn thread_channel_from_context_builds_thread_under_parent() {
         let thread = thread_channel_from_context(
             ChannelId(500),
@@ -1884,13 +1903,6 @@ mod tests {
         assert!(ch.voice_members.iter().any(|m| m.user_id == UserId(1)));
         ch.voice_members.retain(|m| m.user_id != UserId(1));
         assert!(ch.voice_members.is_empty());
-    }
-
-    #[test]
-    fn message_precomputes_local_day_key() {
-        let ts = 1_609_459_200 + 48_300;
-        let msg = Message::new("1", "hi", "u", "User", ts);
-        assert_eq!(msg.day_label, crate::message_time::local_day_key(ts));
     }
 
     #[test]

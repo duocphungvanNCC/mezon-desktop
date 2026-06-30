@@ -297,8 +297,24 @@ impl MessageList {
             }
             self.temp_ids.retain(|t| !evicted_temp_ids.contains(t));
         }
-        recompute_message_grouping(&mut self.items);
-        self.reindex();
+        let last_idx = self.items.len() - 1;
+        let new_id = self.items[last_idx].id;
+        self.index.insert(new_id, last_idx);
+        if new_id.is_optimistic() {
+            self.temp_ids.push(new_id);
+        }
+        self.regroup_row(last_idx);
+        if dropped > 0 {
+            self.regroup_row(0);
+        }
+    }
+
+    fn regroup_row(&mut self, idx: usize) {
+        let combined = {
+            let prev = idx.checked_sub(1).map(|p| &self.items[p]);
+            message_combined_with_prev(prev, &self.items[idx])
+        };
+        self.items[idx].combined_with_prev = combined;
     }
 
     fn replace_at(&mut self, idx: usize, msg: Message) {
@@ -672,13 +688,13 @@ impl MessagesStore {
             .or_else(|| {
                 ChannelList::global(cx)
                     .read(cx)
-                    .find_channel(channel_id)
+                    .find_channel_in_active_clan(channel_id)
                     .map(|ch| ch.last_seen_message_id)
             })
             .filter(|id| !id.is_zero())
     }
 
-    fn channel_badge_count(&self, channel_id: ChannelId, _clan_id: ClanId, cx: &App) -> u32 {
+    fn channel_badge_count(&self, channel_id: ChannelId, clan_id: ClanId, cx: &App) -> u32 {
         if self.is_dm {
             DirectMessageStore::global(cx)
                 .read(cx)
@@ -688,7 +704,7 @@ impl MessagesStore {
         } else {
             ChannelList::global(cx)
                 .read(cx)
-                .find_channel(channel_id)
+                .channel(clan_id, channel_id)
                 .map(|c| c.badge_count)
                 .unwrap_or(0)
         }
@@ -1567,7 +1583,7 @@ impl MessagesStore {
         }
         let Some(channel) = ChannelList::global(cx)
             .read(cx)
-            .find_channel(channel_id)
+            .find_channel_in_active_clan(channel_id)
             .cloned()
         else {
             return;
@@ -2054,7 +2070,7 @@ impl MessagesStore {
         }
         let Some(last_seen_id) = ChannelList::global(cx)
             .read(cx)
-            .find_channel(channel_id)
+            .find_channel_in_active_clan(channel_id)
             .map(|ch| ch.last_seen_message_id)
             .filter(|id| !id.is_zero())
         else {

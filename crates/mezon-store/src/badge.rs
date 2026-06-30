@@ -121,13 +121,18 @@ fn is_viewing_channel(cx: &App, channel_id: ChannelId) -> bool {
     messages.active_channel_id() == Some(channel_id)
 }
 
-fn is_message_already_seen(cx: &App, channel_id: ChannelId, msg_time: i64) -> bool {
+fn is_message_already_seen(
+    cx: &App,
+    clan_id: ClanId,
+    channel_id: ChannelId,
+    msg_time: i64,
+) -> bool {
     if msg_time <= 0 {
         return false;
     }
     let last_seen = ChannelList::global(cx)
         .read(cx)
-        .find_channel(channel_id)
+        .channel(clan_id, channel_id)
         .map(|channel| channel.last_seen_timestamp)
         .unwrap_or(0);
     last_seen > 0 && msg_time <= last_seen
@@ -233,7 +238,7 @@ impl BadgeService {
                     let clan_id = ClanId(m.clan_id);
                     let is_new_message = !is_content_mutation(m);
                     let seen = is_clan_message_seen(cx, m, from_me);
-                    let already_seen = is_message_already_seen(cx, channel_id, ts);
+                    let already_seen = is_message_already_seen(cx, clan_id, channel_id, ts);
                     let removed_by_other = is_chat_remove(m) && !from_me;
                     let needs_mention_check =
                         (is_new_message && !seen && !already_seen) || removed_by_other;
@@ -434,7 +439,7 @@ impl BadgeService {
         } else {
             channel_id
         };
-        if is_message_already_seen(cx, badge_channel, msg_time) {
+        if is_message_already_seen(cx, clan_id, badge_channel, msg_time) {
             tracing::debug!(
                 channel_id = badge_channel.get(),
                 msg_time,
