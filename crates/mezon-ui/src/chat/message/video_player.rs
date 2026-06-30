@@ -85,6 +85,8 @@ pub struct VideoPlayerView {
     player: Option<Rc<VideoPlayer>>,
     shared: Shared,
     track_bounds: Bounds<Pixels>,
+    time_label: SharedString,
+    last_label_seconds: (u64, u64),
 }
 
 impl VideoPlayerView {
@@ -114,6 +116,8 @@ impl VideoPlayerView {
             player,
             shared,
             track_bounds: Bounds::default(),
+            time_label: SharedString::new_static("00:00 / 00:00"),
+            last_label_seconds: (0, 0),
         }
     }
 
@@ -134,6 +138,8 @@ impl VideoPlayerView {
             player: Some(player),
             shared,
             track_bounds: Bounds::default(),
+            time_label: SharedString::new_static("00:00 / 00:00"),
+            last_label_seconds: (0, 0),
         });
         let focus_handle = view.read(cx).focus_handle.clone();
         window.focus(&focus_handle, cx);
@@ -160,6 +166,19 @@ impl VideoPlayerView {
             new_frame.and_then(|frame| shared.frame.replace(frame))
         };
         Self::release_frame(previous, cx);
+        self.refresh_time_label(current_time, duration);
+    }
+
+    fn refresh_time_label(&mut self, current_time: f64, duration: f64) {
+        let seconds = (whole_seconds(current_time), whole_seconds(duration));
+        if seconds != self.last_label_seconds {
+            self.last_label_seconds = seconds;
+            self.time_label = SharedString::from(format!(
+                "{} / {}",
+                format_seconds(current_time),
+                format_seconds(duration)
+            ));
+        }
     }
 
     pub fn pause_for_background(&mut self, cx: &mut Context<Self>) {
@@ -382,18 +401,11 @@ impl VideoPlayerView {
 
     fn render_controls(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theater = self.theater;
-        let (playing, muted, label) = {
+        let (playing, muted) = {
             let shared = self.shared.borrow();
-            (
-                shared.playing,
-                shared.muted,
-                SharedString::from(format!(
-                    "{} / {}",
-                    format_seconds(shared.current_time),
-                    format_seconds(shared.duration)
-                )),
-            )
+            (shared.playing, shared.muted)
         };
+        let label = self.time_label.clone();
         let play_icon = if playing {
             IconName::PauseButton
         } else {
@@ -566,11 +578,15 @@ fn fraction_from_position(bounds: Bounds<Pixels>, x: Pixels) -> f32 {
     ((x - bounds.left()) / width).clamp(0.0, 1.0)
 }
 
-fn format_seconds(total: f64) -> String {
-    let seconds = if total.is_finite() && total > 0.0 {
+fn whole_seconds(total: f64) -> u64 {
+    if total.is_finite() && total > 0.0 {
         total as u64
     } else {
         0
-    };
+    }
+}
+
+fn format_seconds(total: f64) -> String {
+    let seconds = whole_seconds(total);
     format!("{:02}:{:02}", seconds / 60, seconds % 60)
 }

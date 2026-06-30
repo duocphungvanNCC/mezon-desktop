@@ -29,6 +29,7 @@ pub(super) struct DirectUnreadItem {
 
 pub(super) struct DirectUnreadListState {
     live: Rc<Vec<DirectUnreadItem>>,
+    live_ids: HashSet<ChannelId>,
     render: Rc<Vec<DirectUnreadItem>>,
     defer_task: Option<Task<()>>,
 }
@@ -36,8 +37,10 @@ pub(super) struct DirectUnreadListState {
 impl DirectUnreadListState {
     pub(super) fn new(items: Vec<DirectUnreadItem>) -> Self {
         let items = Rc::new(items);
+        let live_ids = items.iter().map(|i| i.channel_id).collect();
         Self {
             live: items.clone(),
+            live_ids,
             render: items,
             defer_task: None,
         }
@@ -49,9 +52,11 @@ impl DirectUnreadListState {
         let new_len = live.len();
 
         let render_ids: HashSet<ChannelId> = self.render.iter().map(|i| i.channel_id).collect();
+        let live_ids: HashSet<ChannelId> = live.iter().map(|i| i.channel_id).collect();
         let has_new_ids = live.iter().any(|i| !render_ids.contains(&i.channel_id));
 
         self.live = live.clone();
+        self.live_ids = live_ids;
 
         if (self.render.is_empty() && new_len > 0) || new_len > prev_len || has_new_ids {
             self.defer_task = None;
@@ -64,8 +69,7 @@ impl DirectUnreadListState {
             return;
         }
 
-        let live_ids: HashSet<ChannelId> = live.iter().map(|i| i.channel_id).collect();
-        if render_ids == live_ids {
+        if render_ids == self.live_ids {
             self.defer_task = None;
             self.render = live;
             cx.notify();
@@ -94,7 +98,7 @@ impl DirectUnreadListState {
             return div().into_any_element();
         }
 
-        let live_ids: HashSet<ChannelId> = self.live.iter().map(|item| item.channel_id).collect();
+        let live_ids = &self.live_ids;
 
         div()
             .id("direct-unread-list")

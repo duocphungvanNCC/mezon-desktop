@@ -518,10 +518,12 @@ fn parse_channel_id(raw: &str) -> Option<ChannelId> {
 }
 
 fn navigate_to_channel(channel_id: ChannelId, cx: &mut App) {
-    let Some(channel) = ChannelList::global(cx).read(cx).find_channel(channel_id) else {
+    let Some(clan_id) = ChannelList::global(cx)
+        .read(cx)
+        .clan_id_for_channel(channel_id)
+    else {
         return;
     };
-    let clan_id = channel.clan_id;
     navigate(
         cx,
         Route::Channel {
