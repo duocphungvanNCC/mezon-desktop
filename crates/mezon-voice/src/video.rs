@@ -310,4 +310,30 @@ mod tests {
         assert!(store.take_new(1, Some(seq)).is_none());
         assert!(store.take_new(1, Some(seq + 1)).is_some());
     }
+
+    #[test]
+    fn take_new_round_trip_publish_take_republish_take() {
+        let store = VideoFrameStore::default();
+        let key = 42;
+
+        store.publish(key, 1, 1, vec![1]);
+        let first = store.take_new(key, None).expect("first frame");
+        let first_seq = first.seq;
+        assert_eq!(first.bgra, vec![1]);
+
+        store.publish(key, 1, 1, vec![2]);
+        let second = store
+            .take_new(key, Some(first_seq))
+            .expect("frame after republish");
+        assert_eq!(second.bgra, vec![2]);
+        assert_ne!(second.seq, first_seq);
+
+        store.publish(key, 1, 1, vec![3]);
+        let current_seq = store.get(key).unwrap().seq;
+        assert!(store.take_new(key, Some(current_seq)).is_none());
+        let third = store
+            .take_new(key, Some(current_seq.wrapping_sub(1)))
+            .expect("inequality not ordering");
+        assert_eq!(third.bgra, vec![3]);
+    }
 }
