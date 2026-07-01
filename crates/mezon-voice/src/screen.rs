@@ -13,8 +13,6 @@ use crate::screen_picker::{PickedScreen, scap_target_for_pick};
 use crate::video::{VideoFrameStore, bgra_to_i420, local_screen_key};
 
 const CAPTURE_FPS: u32 = 15;
-const PREVIEW_MAX_WIDTH: usize = 640;
-const PREVIEW_MAX_HEIGHT: usize = 400;
 
 pub struct ScreenStopper {
     stop: Arc<AtomicBool>,
@@ -86,6 +84,7 @@ pub fn start_screen(
             let mut src_w = 0u32;
             let mut src_h = 0u32;
             let mut sent_track = false;
+            let mut display_buf = Vec::new();
 
             while !thread_stop.load(Ordering::Relaxed) {
                 let frame = match capturer.get_next_frame() {
@@ -159,9 +158,11 @@ pub fn start_screen(
                     source.capture_frame(&frame);
                 }
 
-                let (pw, ph, preview) =
-                    downscale_bgra(&bgra.data, src_w as usize, src_h as usize, row_stride);
-                frame_store.publish(key, pw, ph, preview);
+                let w = src_w as usize;
+                let h = src_h as usize;
+                display_buf.resize(w * h * 4, 0);
+                pack_bgra(&mut display_buf, &bgra.data, w, h, row_stride);
+                frame_store.publish(key, src_w, src_h, std::mem::take(&mut display_buf));
             }
 
             capturer.stop_capture();
@@ -178,25 +179,13 @@ pub fn start_screen(
     (ScreenStopper { stop }, track_rx)
 }
 
-fn downscale_bgra(src: &[u8], width: usize, height: usize, row_stride: usize) -> (u32, u32, Vec<u8>) {
-    let scale = (PREVIEW_MAX_WIDTH as f32 / width.max(1) as f32)
-        .min(PREVIEW_MAX_HEIGHT as f32 / height.max(1) as f32)
-        .min(1.0);
-    let dw = ((width as f32 * scale) as usize).max(1);
-    let dh = ((height as f32 * scale) as usize).max(1);
-    let mut out = vec![0u8; dw * dh * 4];
-    for y in 0..dh {
-        let sy = y * height / dh;
-        let s_row = sy * row_stride;
-        let d_row = y * dw * 4;
-        for x in 0..dw {
-            let sx = x * width / dw;
-            let s = s_row + sx * 4;
-            let d = d_row + x * 4;
-            if s + 4 <= src.len() {
-                out[d..d + 4].copy_from_slice(&src[s..s + 4]);
-            }
+fn pack_bgra(dst: &mut [u8], src: &[u8], width: usize, height: usize, row_stride: usize) {
+    let row_bytes = width * 4;
+    for y in 0..height {
+        let s_row = y * row_stride;
+        let d_row = y * row_bytes;
+        if s_row + row_bytes <= src.len() && d_row + row_bytes <= dst.len() {
+            dst[d_row..d_row + row_bytes].copy_from_slice(&src[s_row..s_row + row_bytes]);
         }
     }
-    (dw as u32, dh as u32, out)
 }
