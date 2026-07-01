@@ -21,13 +21,11 @@ fn flush_capture(
     if frame == 0 {
         return;
     }
+    let mut guard = apm.lock();
+    let _ = guard.set_stream_delay_ms(delay_ms);
     while acc.len() >= frame {
         let mut chunk: Vec<i16> = acc.drain(..frame).collect();
-        {
-            let mut guard = apm.lock();
-            let _ = guard.set_stream_delay_ms(delay_ms);
-            let _ = guard.process_stream(&mut chunk, rate, channels);
-        }
+        let _ = guard.process_stream(&mut chunk, rate, channels);
         let _ = tx.try_send(chunk);
     }
 }
