@@ -71,6 +71,7 @@ pub struct MemberListPanel {
     avatar_image_cache: Entity<LruImageCache>,
     active_context: Option<ProfileContext>,
     open_menu: Option<(UserId, SharedString, Point<Pixels>)>,
+    rebuild_pending: bool,
 }
 
 impl MemberListPanel {
@@ -151,12 +152,27 @@ impl MemberListPanel {
             avatar_image_cache,
             active_context: None,
             open_menu: None,
+            rebuild_pending: false,
         };
-        this.rebuild(cx);
+        this.recompute(cx);
         this
     }
 
     fn rebuild(&mut self, cx: &mut Context<Self>) {
+        if self.rebuild_pending {
+            return;
+        }
+        self.rebuild_pending = true;
+        let handle = cx.weak_entity();
+        cx.defer(move |cx| {
+            let _ = handle.update(cx, |this, cx| {
+                this.rebuild_pending = false;
+                this.recompute(cx);
+            });
+        });
+    }
+
+    fn recompute(&mut self, cx: &mut Context<Self>) {
         self.active_context = match self.source {
             MemberSource::Channel => {
                 active_channel_context(cx).map(|ctx| ProfileContext::Clan(ctx.clan_id))
