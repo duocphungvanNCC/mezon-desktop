@@ -61,8 +61,12 @@ impl ActiveChannelSlice {
 #[derive(PartialEq, Eq)]
 struct VoiceMiniSlice {
     channel_id: String,
+    clan_id: String,
     label: String,
+    clan_name: String,
     mic_enabled: bool,
+    camera_enabled: bool,
+    screen_enabled: bool,
 }
 
 impl ChatLayout {
@@ -115,6 +119,13 @@ impl ChatLayout {
         cx.observe(&voice_store, |this, _, cx| {
             let mini_changed = this.voice_mini_display_changed(cx);
             if mini_changed || this.is_voice_screen_visible(cx) {
+                cx.notify();
+            }
+        })
+        .detach();
+
+        cx.observe(&mezon_store::ClanMembersStore::global(cx), |this, _, cx| {
+            if this.is_voice_screen_visible(cx) {
                 cx.notify();
             }
         })
@@ -378,11 +389,20 @@ impl ChatLayout {
 
     fn current_voice_mini_slice(&self, cx: &Context<Self>) -> Option<VoiceMiniSlice> {
         let store = self.voice_store.read(cx);
-        let (channel_id, _) = store.connection().connected_channel()?;
+        let (channel_id, clan_id) = store.connection().connected_channel()?;
+        let clan_name = clan_id
+            .parse::<ClanId>()
+            .ok()
+            .and_then(|cid| self.clan_list.read(cx).clan(cid).map(|c| c.name.clone()))
+            .unwrap_or_default();
         Some(VoiceMiniSlice {
             channel_id: channel_id.to_string(),
+            clan_id: clan_id.to_string(),
             label: store.channel_label().to_string(),
+            clan_name,
             mic_enabled: store.mic_enabled(),
+            camera_enabled: store.camera_enabled(),
+            screen_enabled: store.screen_share_enabled(),
         })
     }
 
@@ -447,16 +467,27 @@ impl Render for ChatLayout {
                             )
                             .child(div().w(px(272.0)).h_full().child(nav_body)),
                     )
-                    .children(voice_mini_bar)
                     .child(
-                        AnyView::from(self.user_info_bar.clone()).cached(
-                            StyleRefinement::default()
-                                .absolute()
-                                .left(px(12.0))
-                                .right(px(8.0))
-                                .bottom(px(12.0))
-                                .h(px(56.0)),
-                        ),
+                        div()
+                            .absolute()
+                            .left(px(12.0))
+                            .right(px(8.0))
+                            .bottom(px(12.0))
+                            .flex()
+                            .flex_col()
+                            .rounded(px(12.0))
+                            .overflow_hidden()
+                            .border_1()
+                            .border_color(theme.tokens.border_theme_primary)
+                            .shadow_lg()
+                            .bg(theme.tokens.bg_surface)
+                            .occlude()
+                            .children(voice_mini_bar)
+                            .child(
+                                AnyView::from(self.user_info_bar.clone()).cached(
+                                    StyleRefinement::default().w_full().h(px(56.0)),
+                                ),
+                            ),
                     ),
             )
             .child(
@@ -531,15 +562,34 @@ impl ChatLayout {
 
     fn render_voice_mini_bar(&self, cx: &Context<Self>) -> Option<gpui::AnyElement> {
         let store = self.voice_store.read(cx);
-        store.connection().connected_channel()?;
+        let (channel_id, clan_id) = store.connection().connected_channel()?;
+        let channel_id = channel_id.to_string();
+        let clan_id = clan_id.to_string();
+        let clan_name = clan_id
+            .parse::<ClanId>()
+            .ok()
+            .and_then(|cid| self.clan_list.read(cx).clan(cid).map(|c| c.name.clone()))
+            .unwrap_or_default();
+        let label = store.channel_label().to_string();
+        let mic_enabled = store.mic_enabled();
+        let camera_enabled = store.camera_enabled();
+        let screen_enabled = store.screen_share_enabled();
+        let link_copied = store.link_copied();
         let theme = cx.theme();
         let locale = self.settings.read(cx).language.clone();
         Some(crate::chat::voice::render_mini_bar(
             theme,
             &locale,
-            store.channel_label(),
+            &label,
+            &clan_name,
+            &channel_id,
+            &clan_id,
             &self.voice_store,
-            store.mic_enabled(),
+            &self.settings,
+            mic_enabled,
+            camera_enabled,
+            screen_enabled,
+            link_copied,
         ))
     }
 

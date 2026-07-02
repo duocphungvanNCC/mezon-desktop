@@ -146,10 +146,6 @@ impl Render for UserInfoBar {
             .w_full()
             .min_h(px(56.0))
             .overflow_hidden()
-            .rounded(px(12.0))
-            .border_1()
-            .border_color(theme.tokens.border_theme_primary)
-            .shadow_lg()
             .bg(theme.tokens.bg_surface)
             .child(
                 div()

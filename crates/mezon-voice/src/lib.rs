@@ -12,6 +12,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::Result;
 use futures::StreamExt;
+use parking_lot::Mutex;
 use livekit::options::{TrackPublishOptions, VideoEncoding};
 use livekit::prelude::*;
 use livekit::track::{
@@ -46,6 +47,15 @@ pub struct IceServerConfig {
     pub credential: String,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum NetworkQuality {
+    Excellent,
+    Good,
+    Poor,
+    #[default]
+    Unknown,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct VoiceParticipant {
     pub identity: String,
@@ -55,6 +65,7 @@ pub struct VoiceParticipant {
     pub muted: bool,
     pub camera: Option<u64>,
     pub screenshare: Option<u64>,
+    pub quality: NetworkQuality,
 }
 
 #[derive(Clone, Debug)]
@@ -200,6 +211,7 @@ async fn session_main(
     let _ = evt_tx.send(VoiceEvent::Connected);
 
     let mic_enabled = Arc::new(AtomicBool::new(false));
+    let mic_publication: Arc<Mutex<Option<LocalTrackPublication>>> = Arc::new(Mutex::new(None));
     let mut audio_mixer = None;
     let mut out_fmt = None;
     let mut audio_io: Option<audio::AudioIo> = None;
@@ -216,6 +228,7 @@ async fn session_main(
             out_fmt = Some(audio.output_format);
 
             let mic_enabled = mic_enabled.clone();
+            let mic_publication_task = mic_publication.clone();
             let mic_rx = audio.mic_rx.clone();
             let input_format_rx = audio.input_format_rx.clone();
             let room_for_mic = room.clone();
@@ -233,7 +246,7 @@ async fn session_main(
                     "microphone",
                     RtcAudioSource::Native(source.clone()),
                 );
-                if let Err(e) = room_for_mic
+                let publication = match room_for_mic
                     .local_participant()
                     .publish_track(
                         LocalTrack::Audio(mic_track),
@@ -244,9 +257,16 @@ async fn session_main(
                     )
                     .await
                 {
-                    tracing::warn!("failed to publish mic track: {e}");
-                    return;
+                    Ok(publication) => publication,
+                    Err(e) => {
+                        tracing::warn!("failed to publish mic track: {e}");
+                        return;
+                    }
+                };
+                if !mic_enabled.load(Ordering::Relaxed) {
+                    publication.mute();
                 }
+                *mic_publication_task.lock() = Some(publication);
 
                 let channels = in_fmt.channels.max(1);
                 let sample_rate = in_fmt.sample_rate;
@@ -323,17 +343,18 @@ async fn session_main(
                         frame_store.remove(key);
                         emit(&room, mic_on, &camera_session, &screen_session);
                     }
-                    RoomEvent::ConnectionQualityChanged { quality, participant }
-                        if participant.identity().as_str() == local_identity =>
-                    {
-                        match quality {
-                            ConnectionQuality::Excellent | ConnectionQuality::Good => {
-                                let _ = evt_tx.send(VoiceEvent::NetworkRecovered);
-                            }
-                            ConnectionQuality::Poor | ConnectionQuality::Lost => {
-                                let _ = evt_tx.send(VoiceEvent::NetworkWeak);
+                    RoomEvent::ConnectionQualityChanged { quality, participant } => {
+                        if participant.identity().as_str() == local_identity {
+                            match quality {
+                                ConnectionQuality::Excellent | ConnectionQuality::Good => {
+                                    let _ = evt_tx.send(VoiceEvent::NetworkRecovered);
+                                }
+                                ConnectionQuality::Poor | ConnectionQuality::Lost => {
+                                    let _ = evt_tx.send(VoiceEvent::NetworkWeak);
+                                }
                             }
                         }
+                        emit(&room, mic_on, &camera_session, &screen_session);
                     }
                     RoomEvent::Reconnecting => {
                         let _ = evt_tx.send(VoiceEvent::Reconnecting);
@@ -367,6 +388,13 @@ async fn session_main(
                         mic_enabled.store(enabled, Ordering::Relaxed);
                         if let Some(io) = &audio_io {
                             io.set_input_active(enabled);
+                        }
+                        if let Some(publication) = mic_publication.lock().as_ref() {
+                            if enabled {
+                                publication.unmute();
+                            } else {
+                                publication.mute();
+                            }
                         }
                         emit(&room, mic_on, &camera_session, &screen_session);
                     }
@@ -453,6 +481,10 @@ async fn start_camera_track(
             TrackPublishOptions {
                 source: TrackSource::Camera,
                 simulcast: false,
+                video_encoding: Some(VideoEncoding {
+                    max_bitrate: 1_200_000,
+                    max_framerate: 30.0,
+                }),
                 ..Default::default()
             },
         )
@@ -558,6 +590,7 @@ fn emit_participants(
         muted: !local_mic_enabled,
         camera: local_camera_on.then(|| local_camera_key(local_identity)),
         screenshare: local_screen_on.then(|| local_screen_key(local_identity)),
+        quality: network_quality(local.connection_quality()),
     });
 
     for participant in room.remote_participants().values() {
@@ -570,6 +603,7 @@ fn emit_participants(
             muted: remote_mic_muted(participant),
             camera,
             screenshare,
+            quality: network_quality(participant.connection_quality()),
             identity,
         });
     }
@@ -596,14 +630,28 @@ fn remote_video_keys(
     (camera, screenshare)
 }
 
+fn network_quality(quality: ConnectionQuality) -> NetworkQuality {
+    match quality {
+        ConnectionQuality::Excellent => NetworkQuality::Excellent,
+        ConnectionQuality::Good => NetworkQuality::Good,
+        ConnectionQuality::Poor => NetworkQuality::Poor,
+        ConnectionQuality::Lost => NetworkQuality::Unknown,
+    }
+}
+
 fn remote_mic_muted(participant: &RemoteParticipant) -> bool {
-    participant
-        .track_publications()
+    let publications = participant.track_publications();
+    let Some(publication) = publications
         .values()
-        .filter(|publication| publication.source() == TrackSource::Microphone)
-        .map(|publication| publication.is_muted())
-        .next()
-        .unwrap_or(false)
+        .find(|publication| publication.source() == TrackSource::Microphone)
+    else {
+        return true;
+    };
+    let enabled = match publication.track() {
+        Some(track) => !track.is_muted() && !publication.is_muted(),
+        None => !publication.is_muted() && publication.is_subscribed(),
+    };
+    !enabled
 }
 
 fn display_name(name: &str, identity: &str) -> String {

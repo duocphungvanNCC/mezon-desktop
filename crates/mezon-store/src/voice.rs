@@ -8,9 +8,9 @@ use mezon_voice::{IceServerConfig, VoiceEvent, VoiceSession};
 use parking_lot::Mutex;
 
 pub use mezon_voice::{
-    PickedScreen, ScreenShareKind, ScreenShareOption, ScreenSharePreview, VideoFrameData,
-    VideoFrameStore, VoiceParticipant, capture_screen_share_preview, list_screen_share_options,
-    peek_screen_share_options,
+    NetworkQuality, PickedScreen, ScreenShareKind, ScreenShareOption, ScreenSharePreview,
+    VideoFrameData, VideoFrameStore, VoiceParticipant, capture_screen_share_preview,
+    list_screen_share_options, peek_screen_share_options,
 };
 
 use crate::AppConfig;
@@ -83,8 +83,10 @@ pub struct VoiceStore {
     cached_meet_token: Option<CachedMeetToken>,
     meet_token_prefetching: Option<String>,
     last_repaint_seq: Option<u64>,
+    link_copied: bool,
     _events_task: Option<Task<()>>,
     _repaint_task: Option<Task<()>>,
+    _link_copied_reset: Option<Task<()>>,
 }
 
 struct PipWindow {
@@ -131,8 +133,10 @@ impl VoiceStore {
             cached_meet_token: None,
             meet_token_prefetching: None,
             last_repaint_seq: None,
+            link_copied: false,
             _events_task: None,
             _repaint_task: None,
+            _link_copied_reset: None,
         }
     }
 
@@ -281,6 +285,25 @@ impl VoiceStore {
 
     pub fn focused_tile(&self) -> Option<&str> {
         self.focused_tile.as_deref()
+    }
+
+    pub fn link_copied(&self) -> bool {
+        self.link_copied
+    }
+
+    pub fn mark_link_copied(&mut self, cx: &mut Context<Self>) {
+        self.link_copied = true;
+        cx.notify();
+        self._link_copied_reset = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis(1200))
+                .await;
+            this.update(cx, |this, cx| {
+                this.link_copied = false;
+                cx.notify();
+            })
+            .ok();
+        }));
     }
 
     pub fn toggle_focus(&mut self, id: String, cx: &mut Context<Self>) {
