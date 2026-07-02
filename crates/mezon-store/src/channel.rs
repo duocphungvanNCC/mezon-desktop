@@ -101,6 +101,7 @@ pub struct Channel {
     pub last_sent_timestamp: i64,
     pub voice_members: Vec<VoiceMember>,
     pub is_favorite: bool,
+    pub creator_id: UserId,
 }
 
 impl Channel {
@@ -758,6 +759,7 @@ impl ChannelList {
                         last_sent_timestamp: 0,
                         voice_members: Vec::new(),
                         is_favorite: false,
+                        creator_id: UserId(e.creator_id),
                     };
                     let inserted = if let Some(cats) = self.cache.get_mut(&clan_id) {
                         insert_channel(cats, channel)
@@ -895,6 +897,7 @@ impl ChannelList {
                     last_sent_timestamp: 0,
                     voice_members: Vec::new(),
                     is_favorite: false,
+                    creator_id: UserId(desc.creator_id),
                 };
                 let inserted = insert_channel(cats, channel);
                 if inserted {
@@ -1216,6 +1219,7 @@ fn thread_channel_from_context(
         last_sent_timestamp: 0,
         voice_members: Vec::new(),
         is_favorite: false,
+        creator_id: UserId(0),
     }
 }
 
@@ -1251,6 +1255,7 @@ fn channel_from_desc(
         last_sent_timestamp: c.last_sent_timestamp,
         voice_members,
         is_favorite,
+        creator_id: UserId(c.creator_id),
     }
 }
 
@@ -1629,6 +1634,7 @@ mod tests {
             last_sent_timestamp: 0,
             voice_members: Vec::new(),
             is_favorite: false,
+            creator_id: UserId(0),
         }
     }
 
@@ -1910,6 +1916,7 @@ mod tests {
             last_sent_message_id: 0,
             last_sent_timestamp: 0,
             badge_count: badge,
+            creator_id: 0,
         };
 
         let badge_descs = vec![
@@ -2032,6 +2039,7 @@ mod tests {
             last_sent_timestamp: 0,
             voice_members: Vec::new(),
             is_favorite: true,
+            creator_id: UserId(0),
         };
         assert!(ch.is_favorite);
     }
@@ -2057,6 +2065,7 @@ mod tests {
                 last_sent_timestamp: 0,
                 voice_members: Vec::new(),
                 is_favorite: false,
+                creator_id: UserId(0),
             },
             Channel {
                 id: ChannelId(2),
@@ -2076,6 +2085,7 @@ mod tests {
                 last_sent_timestamp: 0,
                 voice_members: Vec::new(),
                 is_favorite: true,
+                creator_id: UserId(0),
             },
         ];
 
