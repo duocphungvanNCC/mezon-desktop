@@ -62,6 +62,28 @@ pub fn render_head(msg: &Message, ctx: &RowCtx, name_color: u32) -> AnyElement {
         .into_any_element()
 }
 
+fn reply_preview_line(content: &str) -> String {
+    const MAX_CHARS: usize = 120;
+    let mut out = String::new();
+    let mut chars = 0usize;
+    let mut first = true;
+    for word in content.split_whitespace() {
+        if !first {
+            out.push(' ');
+            chars += 1;
+        }
+        first = false;
+        for ch in word.chars() {
+            if chars >= MAX_CHARS {
+                return out;
+            }
+            out.push(ch);
+            chars += 1;
+        }
+    }
+    out
+}
+
 pub fn render_reply(reference: &MessageReference, ctx: &RowCtx) -> AnyElement {
     let theme = ctx.theme;
     let preview = if reference.content.is_empty() {
@@ -71,11 +93,7 @@ pub fn render_reply(reference: &MessageReference, ctx: &RowCtx) -> AnyElement {
             String::new()
         }
     } else {
-        reference
-            .content
-            .split_whitespace()
-            .collect::<Vec<_>>()
-            .join(" ")
+        reply_preview_line(&reference.content)
     };
 
     let avatar = if reference.sender_avatar.is_empty() {
