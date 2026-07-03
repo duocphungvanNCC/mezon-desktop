@@ -114,7 +114,7 @@ impl ChatLayout {
         let voice_store = VoiceStore::global(cx);
         cx.observe(&voice_store, |this, _, cx| {
             let mini_changed = this.voice_mini_display_changed(cx);
-            if mini_changed || this.is_voice_screen_visible(cx) {
+            if mini_changed || this.is_voice_frame_relevant(cx) {
                 cx.notify();
             }
         })
@@ -367,13 +367,36 @@ impl ChatLayout {
         changed
     }
 
-    fn is_voice_screen_visible(&self, cx: &Context<Self>) -> bool {
-        !self.is_dm_route(cx)
-            && self
-                .channel_list
-                .read(cx)
-                .active_channel()
-                .is_some_and(|ch| ch.channel_type == ChannelType::Voice)
+    fn is_voice_frame_relevant(&self, cx: &Context<Self>) -> bool {
+        if self.is_dm_route(cx) {
+            return false;
+        }
+        let Some(active) = self.channel_list.read(cx).active_channel() else {
+            return false;
+        };
+        if active.channel_type != ChannelType::Voice {
+            return false;
+        }
+        match self.voice_store.read(cx).connection().active_channel_id() {
+            Some(id) => active.id.to_string() == id,
+            None => true,
+        }
+    }
+
+    fn connected_call_is_active(&self, cx: &Context<Self>) -> bool {
+        if self.is_dm_route(cx) {
+            return false;
+        }
+        let Some((connected_id, _)) = self.voice_store.read(cx).connection().connected_channel()
+        else {
+            return false;
+        };
+        self.channel_list
+            .read(cx)
+            .active_channel()
+            .is_some_and(|ch| {
+                ch.channel_type == ChannelType::Voice && ch.id.to_string() == connected_id
+            })
     }
 
     fn current_voice_mini_slice(&self, cx: &Context<Self>) -> Option<VoiceMiniSlice> {
@@ -408,13 +431,17 @@ impl Render for ChatLayout {
         let content = self.render_content(cx);
         let voice_mini_bar = self.render_voice_mini_bar(cx);
         let locale = self.settings.read(cx).language.clone();
-        let fullscreen = crate::chat::voice::render_screen_fullscreen_overlay(
-            cx.theme(),
-            &locale,
-            &self.voice_store,
-            &self.settings,
-            self.voice_store.read(cx),
-        );
+        let fullscreen = if self.connected_call_is_active(cx) {
+            crate::chat::voice::render_screen_fullscreen_overlay(
+                cx.theme(),
+                &locale,
+                &self.voice_store,
+                &self.settings,
+                self.voice_store.read(cx),
+            )
+        } else {
+            None
+        };
         let theme = cx.theme();
 
         div()

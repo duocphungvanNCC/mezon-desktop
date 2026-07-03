@@ -89,6 +89,7 @@ pub fn render_user_message(
     let body = div()
         .relative()
         .w_full()
+        .when(msg.send_failed, |d| d.opacity(0.5))
         .when(msg.is_forwarded, |d| {
             d.child(
                 div()
@@ -243,6 +244,7 @@ fn build_avatar_element(msg: &Message, ctx: &RowCtx) -> AnyElement {
         user_id,
         profile_ctx,
         settings,
+        ctx.avatar_cache.clone(),
     )
     .anchor(Anchor::TopLeft)
     .attach(Anchor::TopRight)
