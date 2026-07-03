@@ -62,7 +62,7 @@ pub use message::{
 };
 pub use messages::*;
 pub use pinned::{PinnedMessage, PinnedMessagesStore};
-pub use platform::{OpenUrlFn, PlatformStore};
+pub use platform::{DesktopNotification, NotifyFn, OpenUrlFn, PlatformStore};
 pub use presence::*;
 pub use realtime::{RealtimeDispatch, RealtimeKind};
 pub use roles::{Role, RolesEvent, RolesStore};
@@ -236,7 +236,18 @@ impl Settings {
         tracing::debug!("Saved settings to {}", path.display());
         Ok(())
     }
+
+    pub fn init_global(entity: &gpui::Entity<Self>, cx: &mut gpui::App) {
+        cx.set_global(GlobalSettings(entity.clone()));
+    }
+
+    pub fn try_global(cx: &gpui::App) -> Option<gpui::Entity<Self>> {
+        cx.try_global::<GlobalSettings>().map(|g| g.0.clone())
+    }
 }
+
+struct GlobalSettings(gpui::Entity<Settings>);
+impl gpui::Global for GlobalSettings {}
 
 /// Which login method is currently shown in the `LoginView`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]

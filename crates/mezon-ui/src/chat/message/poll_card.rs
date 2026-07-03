@@ -74,25 +74,48 @@ pub fn render_poll_card(msg: &Message, ctx: &RowCtx) -> AnyElement {
         .mb_3()
         .child(subtitle_text);
 
-    let mut answers_col = div().flex().flex_col().gap_2().mb_3();
-    if poll.answers.len() > ANSWERS_SCROLL_AFTER {
-        answers_col = answers_col.max_h(px(280.)).overflow_hidden().pr_1();
-    }
-    for (i, answer) in poll.answers.iter().enumerate() {
-        answers_col = answers_col.child(render_answer_row(
-            i,
-            answer,
-            poll,
-            ctx,
-            msg_id,
-            allow_multiple,
-            selected,
-            voted,
-            should_show_results,
-            can_select,
-            has_voted,
-        ));
-    }
+    let answer_rows: Vec<AnyElement> = poll
+        .answers
+        .iter()
+        .enumerate()
+        .map(|(i, answer)| {
+            render_answer_row(
+                i,
+                answer,
+                poll,
+                ctx,
+                msg_id,
+                allow_multiple,
+                selected,
+                voted,
+                should_show_results,
+                can_select,
+                has_voted,
+            )
+        })
+        .collect();
+    let answers_col = if poll.answers.len() > ANSWERS_SCROLL_AFTER {
+        div()
+            .id(("poll-answers", msg_id.get() as usize))
+            .flex()
+            .flex_col()
+            .gap_2()
+            .mb_3()
+            .max_h(px(280.))
+            .overflow_y_scroll()
+            .pr_1()
+            .children(answer_rows)
+            .into_any_element()
+    } else {
+        div()
+            .id(("poll-answers", msg_id.get() as usize))
+            .flex()
+            .flex_col()
+            .gap_2()
+            .mb_3()
+            .children(answer_rows)
+            .into_any_element()
+    };
 
     let footer = render_footer(
         poll,
@@ -158,10 +181,7 @@ fn render_answer_row(
     };
 
     let mut row = div()
-        .id(SharedString::from(format!(
-            "poll-answer-{}-{position}",
-            msg_id.get()
-        )))
+        .id(("poll-answer", position))
         .relative()
         .flex()
         .flex_row()
@@ -302,7 +322,7 @@ fn render_footer(
 ) -> AnyElement {
     let theme = ctx.theme;
     let total_label = format!("{total_votes} {}", vote_word(ctx, total_votes));
-    let modal_locale = SharedString::from(ctx.locale.to_string());
+    let modal_settings = ctx.settings.clone();
 
     let mut left = div()
         .flex()
@@ -315,11 +335,12 @@ fn render_footer(
         .text_color(theme.tokens.text_theme_primary)
         .child(
             div()
-                .id(SharedString::from(format!("poll-total-{}", msg_id.get())))
+                .id(("poll-total", msg_id.get() as usize))
                 .cursor_pointer()
                 .hover(|s| s.underline())
                 .on_click(move |_, window, cx| {
-                    PollDetailModal::open(poll_id, msg_id, modal_locale.clone(), window, cx);
+                    let locale = SharedString::from(modal_settings.read(cx).language.clone());
+                    PollDetailModal::open(poll_id, msg_id, locale, window, cx);
                 })
                 .child(total_label),
         );
@@ -342,7 +363,7 @@ fn render_footer(
         };
         buttons = buttons.child(
             div()
-                .id(SharedString::from(format!("poll-toggle-{}", msg_id.get())))
+                .id(("poll-toggle", msg_id.get() as usize))
                 .px_1()
                 .py(px(6.))
                 .text_sm()
@@ -363,7 +384,7 @@ fn render_footer(
     if !has_voted && !show_results && !is_closed && !is_expired {
         let disabled = selected.is_empty() || voting;
         let mut btn = div()
-            .id(SharedString::from(format!("poll-vote-{}", msg_id.get())))
+            .id(("poll-vote", msg_id.get() as usize))
             .px_4()
             .py(px(6.))
             .text_sm()
@@ -387,7 +408,7 @@ fn render_footer(
     }
     if has_voted && !is_closed && !is_expired {
         let mut btn = div()
-            .id(SharedString::from(format!("poll-remove-{}", msg_id.get())))
+            .id(("poll-remove", msg_id.get() as usize))
             .px_4()
             .py(px(6.))
             .text_sm()

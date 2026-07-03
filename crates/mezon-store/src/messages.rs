@@ -477,6 +477,34 @@ impl MessagesStore {
         cx.try_global::<GlobalMessagesStore>().map(|g| g.0.clone())
     }
 
+    pub fn reset(&mut self, cx: &mut Context<Self>) {
+        self.close(cx);
+        self.cache.clear();
+        self.last_message_by_channel.clear();
+        self.last_read_message_by_channel.clear();
+        self.viewing_older_by_channel.clear();
+        self.active_channel_id = None;
+        self.active_clan_id = None;
+        self.is_public = true;
+        self.is_dm = false;
+        self.mode = STREAM_MODE_CHANNEL;
+        self.loading = false;
+        self.loading_more = false;
+        self.last_load_more = None;
+        self.consecutive_loads = 0;
+        self.fetch_generation = self.fetch_generation.wrapping_add(1);
+        self.reply_target = None;
+        self.editing = None;
+        self.joined_channels.clear();
+        self.pending_self_adds.clear();
+        self.pending_last_seen = None;
+        self.last_seen_fingerprint.clear();
+        self.queued_last_seen.clear();
+        self.poll_ui.clear();
+        self.poll_my_vote.clear();
+        cx.notify();
+    }
+
     fn new(api: Arc<AppApi>, cx: &mut Context<Self>) -> Self {
         Self::register_realtime(cx);
 
@@ -607,7 +635,7 @@ impl MessagesStore {
     /// cap. `old_len` is the buffer length before the push.
     fn emit_appended(&mut self, old_len: usize, cx: &mut Context<Self>) {
         let new_len = self.messages().len();
-        if new_len <= old_len {
+        if new_len < old_len {
             cx.emit(MessagesEvent::Updated { message_id: None });
             cx.notify();
             return;
@@ -837,6 +865,7 @@ impl MessagesStore {
                     "write_last_seen_message failed: {e}"
                 );
                 this.update(cx, |this, _| {
+                    this.last_seen_fingerprint.remove(&ChannelId(channel_id));
                     this.queued_last_seen.push(PendingLastSeen {
                         clan_id: ClanId(clan_id),
                         channel_id: ChannelId(channel_id),
@@ -1586,7 +1615,7 @@ impl MessagesStore {
                 Err(e) => {
                     tracing::error!("send_channel_message failed: {e}");
                     let _ = this.update(cx, |this, cx| {
-                        this.remove_temp(channel_id, temp_id, cx);
+                        this.mark_temp_failed(channel_id, temp_id, cx);
                     });
                 }
             }
@@ -1668,7 +1697,7 @@ impl MessagesStore {
                 Err(e) => {
                     tracing::error!("send sticker failed: {e}");
                     let _ = this.update(cx, |this, cx| {
-                        this.remove_temp(channel_id, temp_id, cx);
+                        this.mark_temp_failed(channel_id, temp_id, cx);
                     });
                 }
             }
@@ -1930,6 +1959,16 @@ impl MessagesStore {
                     return;
                 }
                 if self.is_viewing_older(storage_id) {
+                    self.set_last_message(parent_id, message_id);
+                    return;
+                }
+                let tail_loaded = self.cache.get(&storage_id).is_some_and(|channel| {
+                    !has_more_bottom_for(
+                        self.last_message_by_channel.get(&storage_id).copied(),
+                        &channel.messages,
+                    )
+                });
+                if !tail_loaded {
                     self.set_last_message(parent_id, message_id);
                     return;
                 }
@@ -2454,20 +2493,26 @@ impl MessagesStore {
         }
     }
 
-    fn remove_temp(&mut self, channel_id: ChannelId, temp_id: MessageId, cx: &mut Context<Self>) {
-        let removed = {
+    fn mark_temp_failed(
+        &mut self,
+        channel_id: ChannelId,
+        temp_id: MessageId,
+        cx: &mut Context<Self>,
+    ) {
+        let marked = {
             let Some(channel) = self.cache.get_mut(&channel_id) else {
                 return;
             };
-            channel.messages.remove_id(temp_id)
+            match channel.messages.get_mut_by_id(temp_id) {
+                Some(message) => {
+                    message.send_failed = true;
+                    true
+                }
+                None => false,
+            }
         };
-        if removed && self.active_channel_id == Some(channel_id) {
-            cx.emit(MessagesEvent::Shifted {
-                added_top: 0,
-                removed_top: 0,
-                added_bottom: 0,
-                removed_bottom: 1,
-            });
+        if marked && self.active_channel_id == Some(channel_id) {
+            cx.emit(MessagesEvent::Updated { message_id: None });
             cx.notify();
         }
     }
@@ -3140,7 +3185,7 @@ fn build_media_presentation(
         .iter()
         .map(|a| {
             let viewer_src = cfg
-                .map(|c| c.imgproxy_url(&a.url, 0, 0, "force"))
+                .map(|c| c.imgproxy_url(&a.url, 1600, 900, "fit"))
                 .unwrap_or_else(|| a.url.clone());
             ViewerMedia {
                 url: a.url.clone().into(),
@@ -3228,5 +3273,672 @@ impl MessageAttachment {
             display_height,
             tenor_mp4,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ids::UserId;
+    use crate::message::MessageSpan;
+
+    #[test]
+    fn poll_percentage_rounds_ratio_and_guards_zero_total() {
+        assert_eq!(poll_percentage(1, 4), 25);
+        assert_eq!(poll_percentage(1, 3), 33);
+        assert_eq!(poll_percentage(2, 3), 67);
+        assert_eq!(poll_percentage(0, 0), 0);
+        assert_eq!(poll_percentage(-5, 10), 0);
+    }
+
+    #[test]
+    fn normalise_answer_counts_pads_and_clamps_negatives() {
+        assert_eq!(normalise_answer_counts(&[5, -2], 3), vec![5, 0, 0]);
+        assert_eq!(normalise_answer_counts(&[1, 2, 3], 2), vec![1, 2]);
+    }
+
+    #[test]
+    fn parse_poll_markdown_extracts_question_answers_and_multiple_flag() {
+        let text = "📊 **Favourite colour?**\n1. Red\n2. Blue\n☑️ Multiple answers allowed";
+        let parsed = parse_poll_markdown(text).expect("poll markdown");
+        assert_eq!(parsed.question, "Favourite colour?");
+        assert_eq!(parsed.answers, vec!["Red".to_string(), "Blue".to_string()]);
+        assert!(parsed.allow_multiple);
+    }
+
+    #[test]
+    fn parse_poll_markdown_rejects_non_poll_text() {
+        assert!(parse_poll_markdown("just a normal message").is_none());
+    }
+
+    #[test]
+    fn build_poll_data_from_structured_content_computes_percentages() {
+        let content = ApiMessageContent {
+            question: Some("Q?".into()),
+            answers: vec![
+                mezon_client::transport::ApiPollAnswer {
+                    index: Some(0),
+                    label: "A".into(),
+                },
+                mezon_client::transport::ApiPollAnswer {
+                    index: Some(1),
+                    label: "B".into(),
+                },
+            ],
+            answer_counts: vec![3, 1],
+            total_votes: Some(4),
+            poll_id: Some(77),
+            poll_type: Some(1),
+            ..Default::default()
+        };
+        let poll = build_poll_data(&content, "", None).expect("poll data");
+        assert_eq!(poll.poll_id, 77);
+        assert_eq!(poll.total_votes, 4);
+        assert_eq!(poll.percentages, vec![75, 25]);
+        assert_eq!(poll.answer_counts, vec![3, 1]);
+        assert_eq!(poll.answers.len(), 2);
+        assert!(poll.allow_multiple);
+    }
+
+    #[test]
+    fn build_poll_data_falls_back_to_markdown_content() {
+        let text = "📊 Pick one\n1. Yes\n2. No";
+        let poll =
+            build_poll_data(&ApiMessageContent::default(), text, None).expect("markdown poll");
+        assert_eq!(poll.question, "Pick one");
+        assert_eq!(poll.answers.len(), 2);
+        assert!(!poll.allow_multiple);
+    }
+
+    #[test]
+    fn build_poll_data_none_without_answers() {
+        assert!(build_poll_data(&ApiMessageContent::default(), "no poll here", None).is_none());
+    }
+
+    #[test]
+    fn channel_join_params_thread_by_type_joins_as_thread() {
+        assert_eq!(
+            channel_join_params(ChannelType::Thread, None, false),
+            (false, CHANNEL_TYPE_THREAD, STREAM_MODE_THREAD)
+        );
+    }
+
+    #[test]
+    fn channel_join_params_thread_by_parent_joins_as_thread() {
+        assert_eq!(
+            channel_join_params(ChannelType::Text, Some(ChannelId(99)), true),
+            (false, CHANNEL_TYPE_THREAD, STREAM_MODE_THREAD)
+        );
+    }
+
+    #[test]
+    fn channel_join_params_public_channel_keeps_channel_type() {
+        assert_eq!(
+            channel_join_params(ChannelType::Text, None, false),
+            (true, CHANNEL_TYPE_CHANNEL, STREAM_MODE_CHANNEL)
+        );
+    }
+
+    #[test]
+    fn channel_join_params_private_channel_is_not_public() {
+        assert_eq!(
+            channel_join_params(ChannelType::Text, None, true),
+            (false, CHANNEL_TYPE_CHANNEL, STREAM_MODE_CHANNEL)
+        );
+    }
+
+    #[test]
+    fn outgoing_mention_maps_to_transport_with_utf16_offsets() {
+        let mention = OutgoingMention {
+            user_id: "42".into(),
+            role_id: String::new(),
+            display: "@bob".into(),
+            s: 2,
+            e: 6,
+        };
+        let transport = mention.into_transport();
+        assert_eq!(transport.user_id, "42");
+        assert_eq!(transport.username, "@bob");
+        assert_eq!(transport.s, 2);
+        assert_eq!(transport.e, 6);
+    }
+
+    #[test]
+    fn sticker_attachment_is_recognized_as_image() {
+        let attachment = MessageAttachment::from_api(
+            mezon_client::transport::ApiAttachment {
+                url: "https://cdn/1.webp".into(),
+                filename: "1".into(),
+                filetype: STICKER_FILETYPE.into(),
+                width: 0,
+                height: 0,
+                thumbnail: String::new(),
+                duration: 0,
+            },
+            None,
+        );
+        assert_eq!(attachment.filetype, "sticker");
+        assert_eq!(attachment.url, "https://cdn/1.webp");
+        assert!(attachment.is_image());
+        assert_eq!(
+            (attachment.display_width, attachment.display_height),
+            (100.0, 100.0)
+        );
+    }
+
+    #[test]
+    fn video_attachment_maps_thumbnail_and_duration() {
+        let attachment = MessageAttachment::from_api(
+            mezon_client::transport::ApiAttachment {
+                url: "https://cdn/clip.mp4".into(),
+                filename: "clip.mp4".into(),
+                filetype: "video/mp4".into(),
+                width: 1280,
+                height: 720,
+                thumbnail: "https://cdn/clip-thumb.jpg".into(),
+                duration: 42,
+            },
+            None,
+        );
+        assert!(attachment.is_video());
+        assert!(!attachment.is_image());
+        assert_eq!(attachment.duration, 42);
+        assert_eq!(attachment.thumbnail, "https://cdn/clip-thumb.jpg");
+        assert_eq!(attachment.thumbnail_proxied, "https://cdn/clip-thumb.jpg");
+    }
+
+    #[test]
+    fn optimistic_mention_tokens_round_trip_to_a_coloured_span() {
+        let mentions = vec![OutgoingMention {
+            user_id: "42".into(),
+            role_id: String::new(),
+            display: "@bob".into(),
+            s: 0,
+            e: 4,
+        }];
+        let transport: Vec<TransportMention> = mentions
+            .into_iter()
+            .map(OutgoingMention::into_transport)
+            .collect();
+        let tokens = ApiMessageContent {
+            t: "@bob hi".into(),
+            mentions: mention_content_tokens(&transport),
+            ..Default::default()
+        };
+        let spans = parse_spans(&tokens);
+        assert_eq!(
+            spans,
+            vec![
+                MessageSpan::Mention {
+                    display: "@bob".into(),
+                    user_id: Some("42".into()),
+                    role_id: None,
+                },
+                MessageSpan::Text(" hi".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn message_from_api_maps_fields() {
+        let m = message_from_api(
+            ApiMessage {
+                message_id: 1,
+                content: "hi".into(),
+                content_tokens: mezon_client::transport::ApiMessageContent {
+                    t: "hi".into(),
+                    ..Default::default()
+                },
+                code: 0,
+                sender_id: 1,
+                sender_name: "Alice".into(),
+                avatar: "av.png".into(),
+                create_time: 100,
+                update_time: 0,
+                hide_editted: false,
+                attachments: vec![],
+                references: vec![],
+                reactions: vec![],
+                entity_mentions: vec![],
+            },
+            None,
+        );
+        assert_eq!(m.id, MessageId(1));
+        assert_eq!(m.content, "hi");
+        assert_eq!(m.sender_id, "1");
+        assert_eq!(m.sender_user_id, Some(UserId(1)));
+        assert_eq!(m.sender_name, "Alice");
+        assert_eq!(m.avatar_url, "av.png");
+        assert_eq!(m.avatar_proxied, "av.png");
+    }
+
+    #[test]
+    fn message_from_api_precomputes_album_and_viewer_media() {
+        let image = |url: &str| mezon_client::transport::ApiAttachment {
+            url: url.into(),
+            filename: "a.png".into(),
+            filetype: "image/png".into(),
+            width: 800,
+            height: 600,
+            thumbnail: String::new(),
+            duration: 0,
+        };
+        let m = message_from_api(
+            ApiMessage {
+                message_id: 5,
+                content: String::new(),
+                content_tokens: mezon_client::transport::ApiMessageContent::default(),
+                code: 0,
+                sender_id: 1,
+                sender_name: "Alice".into(),
+                avatar: String::new(),
+                create_time: 0,
+                update_time: 0,
+                hide_editted: false,
+                attachments: vec![image("https://cdn/1.png"), image("https://cdn/2.png")],
+                references: vec![],
+                reactions: vec![],
+                entity_mentions: vec![],
+            },
+            None,
+        );
+        assert!(m.album_layout.is_some());
+        assert_eq!(m.viewer_media.len(), 2);
+        assert_eq!(m.viewer_media[0].url, "https://cdn/1.png");
+        assert_eq!(m.viewer_media[0].viewer_src, "https://cdn/1.png");
+    }
+
+    #[test]
+    fn merge_sparse_sender_keeps_optimistic_avatar_and_name() {
+        let optimistic = Message::new(MessageId::next_optimistic(), "2", "42", "huy.lexuan", 100)
+            .with_avatar("avatar.png");
+        let ack = Message::new(MessageId(99), "2", "0", String::new(), 500);
+        let merged = merge_sparse_sender(&optimistic, ack);
+        assert_eq!(merged.sender_id, "42");
+        assert_eq!(merged.sender_name, "huy.lexuan");
+        assert_eq!(merged.avatar_url, "avatar.png");
+        assert_eq!(merged.create_time, 100);
+        assert_eq!(merged.row_anchor_id, optimistic.row_anchor_id);
+    }
+
+    #[test]
+    fn optimistic_create_time_increments_within_same_sender_burst() {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        let mut list =
+            MessageList::from_messages(vec![Message::new(MessageId(1), "a", "42", "Me", now - 5)]);
+        assert_eq!(optimistic_create_time(&list, "42"), now + 1);
+        list.push_trim_regroup(Message::new(
+            MessageId::next_optimistic(),
+            "b",
+            "42",
+            "Me",
+            now + 1,
+        ));
+        assert_eq!(optimistic_create_time(&list, "42"), now + 2);
+    }
+
+    #[test]
+    fn optimistic_create_time_resets_after_combine_window() {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        let list = MessageList::from_messages(vec![Message::new(
+            MessageId(1),
+            "a",
+            "42",
+            "Me",
+            now - 700,
+        )]);
+        assert_eq!(optimistic_create_time(&list, "42"), now);
+    }
+
+    fn assert_list_consistent(list: &MessageList) {
+        assert_eq!(list.index.len(), list.items.len());
+        for (i, m) in list.items.iter().enumerate() {
+            assert_eq!(list.index.get(&m.id), Some(&i));
+        }
+        let mut expected_temps: Vec<MessageId> = list
+            .items
+            .iter()
+            .filter(|m| m.id.is_optimistic())
+            .map(|m| m.id)
+            .collect();
+        let mut actual_temps: Vec<MessageId> = list.temp_ids.clone();
+        actual_temps.sort();
+        expected_temps.sort();
+        assert_eq!(actual_temps, expected_temps);
+    }
+
+    #[test]
+    fn push_message_grouped_appends_in_order() {
+        let mut list = MessageList::from_messages(vec![
+            Message::new(MessageId(1), "a", "u1", "U1", 100),
+            Message::new(MessageId(2), "b", "u1", "U1", 110),
+        ]);
+        list.push_grouped(Message::new(MessageId(3), "c", "u1", "U1", 120));
+        assert_eq!(list.len(), 3);
+        assert_eq!(list.as_slice()[2].id, MessageId(3));
+        assert!(list.as_slice()[2].combined_with_prev);
+        assert_list_consistent(&list);
+    }
+
+    #[test]
+    fn push_message_grouped_resorts_when_out_of_order() {
+        let mut list = MessageList::from_messages(vec![
+            Message::new(MessageId(1), "a", "u1", "U1", 100),
+            Message::new(MessageId(3), "c", "u1", "U1", 120),
+        ]);
+        list.push_grouped(Message::new(MessageId(2), "b", "u1", "U1", 110));
+        let ids: Vec<MessageId> = list.as_slice().iter().map(|m| m.id).collect();
+        assert_eq!(ids, [MessageId(1), MessageId(2), MessageId(3)]);
+        assert_list_consistent(&list);
+    }
+
+    #[test]
+    fn push_message_grouped_breaks_group_for_different_sender() {
+        let mut list =
+            MessageList::from_messages(vec![Message::new(MessageId(1), "a", "u1", "U1", 100)]);
+        list.push_grouped(Message::new(MessageId(2), "b", "u2", "U2", 105));
+        assert!(!list.as_slice()[1].combined_with_prev);
+        assert_list_consistent(&list);
+    }
+
+    #[test]
+    fn trim_messages_drops_oldest() {
+        let mut msgs: Vec<Message> = (0..MAX_MESSAGES_PER_CHANNEL + 5)
+            .map(|i| Message::new(MessageId(i as i64), format!("m{i}"), "u", "User", i as i64))
+            .collect();
+        trim_messages(&mut msgs);
+        assert_eq!(msgs.len(), MAX_MESSAGES_PER_CHANNEL);
+        assert_eq!(msgs.first().unwrap().id, MessageId(5));
+        assert_eq!(
+            msgs.last().unwrap().id,
+            MessageId((MAX_MESSAGES_PER_CHANNEL + 4) as i64)
+        );
+    }
+
+    fn channel_msgs(msgs: Vec<Message>) -> ChannelMessages {
+        ChannelMessages {
+            messages: MessageList::from_messages(msgs),
+            has_more: false,
+        }
+    }
+
+    fn remove_temp_in(ch: &mut ChannelMessages, temp_id: MessageId) {
+        ch.messages.remove_id(temp_id);
+    }
+
+    fn reconcile_temp_in(ch: &mut ChannelMessages, temp_id: MessageId, confirmed: Message) {
+        if let Some(idx) = ch.messages.position(temp_id) {
+            ch.messages.replace_at(idx, confirmed);
+        } else if !ch.messages.contains_id(confirmed.id) {
+            ch.messages.push_sorted(confirmed);
+        }
+    }
+
+    #[test]
+    fn remove_temp_drops_message_by_id() {
+        let temp1 = MessageId::next_optimistic();
+        let mut ch = channel_msgs(vec![
+            Message::new(temp1, "hello", "u1", "U", 100),
+            Message::new(MessageId(2), "world", "u1", "U", 200),
+        ]);
+        remove_temp_in(&mut ch, temp1);
+        assert_eq!(ch.messages.len(), 1);
+        assert_eq!(ch.messages.as_slice()[0].id, MessageId(2));
+        assert_list_consistent(&ch.messages);
+    }
+
+    #[test]
+    fn remove_temp_noop_when_id_not_found() {
+        let non_existent = MessageId::next_optimistic();
+        let mut ch = channel_msgs(vec![Message::new(MessageId(1), "hello", "u1", "U", 100)]);
+        remove_temp_in(&mut ch, non_existent);
+        assert_eq!(ch.messages.len(), 1);
+    }
+
+    #[test]
+    fn reconcile_temp_matches_only_by_temp_id_not_content() {
+        let temp1 = MessageId::next_optimistic();
+        let temp2 = MessageId::next_optimistic();
+        let mut ch = channel_msgs(vec![
+            Message::new(temp1, "same text", "u1", "U", 100),
+            Message::new(temp2, "same text", "u1", "U", 110),
+        ]);
+        let confirmed = Message::new(MessageId(42), "same text", "u1", "U", 120);
+        reconcile_temp_in(&mut ch, temp1, confirmed);
+        assert_eq!(ch.messages.len(), 2);
+        assert_eq!(ch.messages.as_slice()[0].id, MessageId(42));
+        assert_eq!(ch.messages.as_slice()[1].id, temp2);
+        assert_list_consistent(&ch.messages);
+    }
+
+    #[test]
+    fn temp_match_reconciles_optimistic_row_in_place() {
+        let temp1 = MessageId::next_optimistic();
+        let mut list = MessageList::from_messages(vec![
+            Message::new(MessageId(100), "earlier", "u1", "U", 100),
+            Message::new(temp1, "hello world", "u9", "Me", 200),
+        ]);
+        assert_eq!(list.temp_match_position("u9", "hello world"), Some(1));
+        assert_eq!(list.temp_match_position("u9", "other"), None);
+        let idx = list.temp_match_position("u9", "hello world").unwrap();
+        list.replace_resort(
+            idx,
+            Message::new(MessageId(250), "hello world", "u9", "Me", 200),
+        );
+        let ids: Vec<MessageId> = list.as_slice().iter().map(|m| m.id).collect();
+        assert_eq!(ids, [MessageId(100), MessageId(250)]);
+        assert!(list.temp_ids.is_empty());
+        assert_list_consistent(&list);
+    }
+
+    #[test]
+    fn server_echo_merge_preserves_message_grouping() {
+        let mut list = MessageList::from_messages(vec![
+            Message::new(MessageId(100), "first", "u9", "Me", 200),
+            Message::new(MessageId(101), "second", "u9", "Me", 201),
+        ]);
+        let echo = Message::new(MessageId(101), "second", "0", "", 201);
+        assert!(list.merge_existing(MessageId(101), echo));
+        assert!(
+            list.as_slice()[1].combined_with_prev,
+            "echo merge must recompute grouping, else the head re-appears until the next send"
+        );
+        assert_list_consistent(&list);
+    }
+
+    #[test]
+    fn append_update_remove_keep_index_and_order() {
+        let mut list = MessageList::from_messages(vec![
+            Message::new(MessageId(10), "a", "u1", "U", 100),
+            Message::new(MessageId(20), "b", "u1", "U", 110),
+        ]);
+        list.push_grouped(Message::new(MessageId(30), "c", "u1", "U", 120));
+        assert_eq!(list.position(MessageId(30)), Some(2));
+        list.get_mut_by_id(MessageId(20)).unwrap().content = "edited".into();
+        assert_eq!(list.as_slice()[1].content, "edited");
+        assert!(list.remove_id(MessageId(10)));
+        let ids: Vec<MessageId> = list.as_slice().iter().map(|m| m.id).collect();
+        assert_eq!(ids, [MessageId(20), MessageId(30)]);
+        assert_eq!(list.position(MessageId(10)), None);
+        assert_list_consistent(&list);
+    }
+
+    #[test]
+    fn prepend_older_and_append_newer_preserve_order_and_index() {
+        let mut list = MessageList::from_messages(vec![
+            Message::new(MessageId(50), "e", "u1", "U", 150),
+            Message::new(MessageId(60), "f", "u1", "U", 160),
+        ]);
+        let dropped = list.prepend_older(vec![
+            Message::new(MessageId(30), "c", "u1", "U", 130),
+            Message::new(MessageId(40), "d", "u1", "U", 140),
+        ]);
+        assert_eq!(dropped, 0);
+        let ids: Vec<MessageId> = list.as_slice().iter().map(|m| m.id).collect();
+        assert_eq!(
+            ids,
+            [MessageId(30), MessageId(40), MessageId(50), MessageId(60)]
+        );
+        assert_list_consistent(&list);
+        list.append_newer(vec![Message::new(MessageId(70), "g", "u1", "U", 170)]);
+        let ids: Vec<MessageId> = list.as_slice().iter().map(|m| m.id).collect();
+        assert_eq!(
+            ids,
+            [
+                MessageId(30),
+                MessageId(40),
+                MessageId(50),
+                MessageId(60),
+                MessageId(70)
+            ]
+        );
+        assert_eq!(list.position(MessageId(70)), Some(4));
+        assert_list_consistent(&list);
+    }
+
+    #[test]
+    fn window_replace_rebuilds_index() {
+        let mut list =
+            MessageList::from_messages(vec![Message::new(MessageId(1), "a", "u1", "U", 100)]);
+        list.replace(vec![
+            Message::new(MessageId(8), "h", "u1", "U", 180),
+            Message::new(MessageId(9), "i", "u1", "U", 190),
+        ]);
+        assert_eq!(list.position(MessageId(1)), None);
+        assert_eq!(list.position(MessageId(8)), Some(0));
+        assert_eq!(list.position(MessageId(9)), Some(1));
+        assert_list_consistent(&list);
+    }
+
+    #[test]
+    fn append_at_cap_evicts_front_and_reindexes() {
+        let mut list = MessageList::from_messages(
+            (0..MAX_MESSAGES_PER_CHANNEL)
+                .map(|i| Message::new(MessageId(i as i64), "m", "u", "U", i as i64))
+                .collect(),
+        );
+        list.push_grouped(Message::new(
+            MessageId(MAX_MESSAGES_PER_CHANNEL as i64),
+            "newest",
+            "u",
+            "U",
+            MAX_MESSAGES_PER_CHANNEL as i64,
+        ));
+        assert_eq!(list.len(), MAX_MESSAGES_PER_CHANNEL);
+        assert_eq!(list.position(MessageId(0)), None);
+        assert_eq!(list.as_slice()[0].id, MessageId(1));
+        assert_eq!(
+            list.as_slice().last().unwrap().id,
+            MessageId(MAX_MESSAGES_PER_CHANNEL as i64)
+        );
+        assert_list_consistent(&list);
+    }
+
+    #[test]
+    fn incremental_in_order_append_at_cap_matches_full_reindex() {
+        let temp_old = MessageId::next_optimistic();
+        let mut items = vec![Message::new(temp_old, "x", "u", "U", 0)];
+        items.extend(
+            (1..MAX_MESSAGES_PER_CHANNEL)
+                .map(|i| Message::new(MessageId(i as i64), "m", "u", "U", i as i64)),
+        );
+        let mut list = MessageList::from_messages(items);
+        assert_eq!(list.len(), MAX_MESSAGES_PER_CHANNEL);
+        assert_eq!(list.temp_ids, vec![temp_old]);
+
+        let temp_new = MessageId::next_optimistic();
+        list.push_grouped(Message::new(temp_new, "y", "u", "U", 999));
+
+        let incremental_index = list.index.clone();
+        let incremental_temp_ids = list.temp_ids.clone();
+        list.reindex();
+        assert_eq!(list.index, incremental_index);
+        assert_eq!(list.temp_ids, incremental_temp_ids);
+
+        assert_eq!(list.len(), MAX_MESSAGES_PER_CHANNEL);
+        assert_eq!(list.position(temp_old), None);
+        assert_eq!(list.temp_ids, vec![temp_new]);
+        assert_eq!(list.as_slice()[0].id, MessageId(1));
+        assert_eq!(list.as_slice().last().unwrap().id, temp_new);
+        assert_list_consistent(&list);
+    }
+
+    #[test]
+    fn has_more_bottom_false_when_tail_in_buffer() {
+        let list = MessageList::from_messages(vec![
+            Message::new(MessageId(1), "a", "u1", "U", 100),
+            Message::new(MessageId(99), "z", "u1", "U", 200),
+        ]);
+        assert!(!has_more_bottom_for(Some(MessageId(99)), &list));
+    }
+
+    #[test]
+    fn has_more_bottom_true_when_tail_not_in_buffer() {
+        let list = MessageList::from_messages(vec![
+            Message::new(MessageId(1), "a", "u1", "U", 100),
+            Message::new(MessageId(50), "m", "u1", "U", 150),
+        ]);
+        assert!(has_more_bottom_for(Some(MessageId(99)), &list));
+    }
+
+    #[test]
+    fn has_more_bottom_false_without_tail_or_empty_buffer() {
+        let list =
+            MessageList::from_messages(vec![Message::new(MessageId(1), "a", "u1", "U", 100)]);
+        assert!(!has_more_bottom_for(None, &list));
+        assert!(!has_more_bottom_for(
+            Some(MessageId(1)),
+            &MessageList::default()
+        ));
+    }
+
+    #[test]
+    fn storage_channel_id_uses_topic_bucket() {
+        let mut m = mezon_proto::api::ChannelMessage {
+            channel_id: 10,
+            topic_id: 99,
+            ..Default::default()
+        };
+        assert_eq!(storage_channel_id(&m), ChannelId(99));
+        m.topic_id = 0;
+        assert_eq!(storage_channel_id(&m), ChannelId(10));
+    }
+
+    #[test]
+    fn patch_reply_previews_after_delete_marks_reference() {
+        let mut list = MessageList::from_messages(vec![
+            Message::new(MessageId(1), "reply", "u1", "U", 100).with_references(vec![
+                MessageReference {
+                    message_ref_id: MessageId(42),
+                    sender_id: UserId(1),
+                    sender_name: "x".into(),
+                    sender_avatar: String::new(),
+                    content: "orig".into(),
+                    has_attachment: false,
+                },
+            ]),
+        ]);
+        patch_reply_previews_after_delete(&mut list, MessageId(42));
+        assert_eq!(
+            list.as_slice()[0].references[0].content,
+            DELETED_REPLY_PREVIEW
+        );
+        assert!(list.as_slice()[0].references[0].message_ref_id.is_zero());
+    }
+
+    #[test]
+    fn should_write_last_seen_matches_react_rules() {
+        let seen = MessageId(10_i64 << 22);
+        let newer = MessageId(12_i64 << 22);
+        let tail = MessageId(15_i64 << 22);
+        assert!(should_write_last_seen(Some(seen), Some(tail), newer));
+        assert!(should_write_last_seen(Some(seen), Some(tail), tail));
+        assert!(!should_write_last_seen(Some(newer), Some(tail), seen));
     }
 }
