@@ -42,6 +42,9 @@ fn set_badge_macos(count: u32) {
         };
 
         let _: () = msg_send![dock_tile, setBadgeLabel: label];
+        if !label.is_null() {
+            let _: () = msg_send![label, release];
+        }
     }
 }
 
