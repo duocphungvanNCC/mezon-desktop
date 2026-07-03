@@ -371,6 +371,7 @@ pub struct ApiAccount {
     pub about_me: Option<String>,
     pub phone_number: Option<String>,
     pub password_setted: bool,
+    pub logo: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -398,6 +399,8 @@ pub struct ApiChannelDesc {
     pub last_sent_message_id: i64,
     pub last_sent_timestamp: i64,
     pub badge_count: i32,
+    #[serde(default)]
+    pub creator_id: i64,
 }
 
 /// A direct-message / group conversation descriptor (clan_id = 0 namespace). Unlike
@@ -540,10 +543,7 @@ fn entity_mention_targets_user(m: &ApiEntityMention, user_id: i64, role_ids: &[i
     m.role_id != 0 && role_ids.contains(&m.role_id)
 }
 
-pub fn enrich_content_tokens(
-    tokens: &mut ApiMessageContent,
-    entity_mentions: &[ApiEntityMention],
-) {
+pub fn enrich_content_tokens(tokens: &mut ApiMessageContent, entity_mentions: &[ApiEntityMention]) {
     for m in entity_mentions {
         if m.e <= m.s {
             continue;
@@ -568,9 +568,7 @@ pub fn enrich_content_tokens(
             ..Default::default()
         });
     }
-    tokens
-        .mentions
-        .sort_by_key(|tok| tok.s.unwrap_or(i64::MAX));
+    tokens.mentions.sort_by_key(|tok| tok.s.unwrap_or(i64::MAX));
 }
 
 fn parse_message_references(bytes: &[u8]) -> Vec<ApiMessageRef> {
@@ -712,7 +710,11 @@ pub struct ContentToken {
     pub role_id: Option<String>,
     #[serde(default)]
     pub username: Option<String>,
-    #[serde(default, rename = "channelId", deserialize_with = "string_or_number::deserialize")]
+    #[serde(
+        default,
+        rename = "channelId",
+        deserialize_with = "string_or_number::deserialize"
+    )]
     pub channel_id: Option<String>,
     #[serde(default)]
     pub emojiid: Option<String>,
@@ -720,6 +722,124 @@ pub struct ContentToken {
     pub kind: Option<String>,
     #[serde(default)]
     pub url: Option<String>,
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub image: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ApiPollAnswer {
+    #[serde(default)]
+    pub index: Option<i64>,
+    #[serde(default)]
+    pub label: String,
+}
+
+mod opt_i64_flex {
+    use serde::{Deserialize, Deserializer};
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Option<i64>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        match Option::<serde_json::Value>::deserialize(deserializer)? {
+            None | Some(serde_json::Value::Null) => Ok(None),
+            Some(serde_json::Value::Number(n)) => Ok(n.as_i64()),
+            Some(serde_json::Value::String(s)) => {
+                if s.is_empty() {
+                    Ok(None)
+                } else {
+                    Ok(s.parse::<i64>().ok())
+                }
+            }
+            Some(_) => Ok(None),
+        }
+    }
+}
+
+mod opt_i32_flex {
+    use serde::{Deserialize, Deserializer};
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Option<i32>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        match Option::<serde_json::Value>::deserialize(deserializer)? {
+            Some(serde_json::Value::Number(n)) => Ok(n.as_i64().map(|v| v as i32)),
+            Some(serde_json::Value::String(s)) if !s.is_empty() => Ok(s.parse::<i32>().ok()),
+            _ => Ok(None),
+        }
+    }
+}
+
+mod bool_flex {
+    use serde::{Deserialize, Deserializer};
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<bool, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        match Option::<serde_json::Value>::deserialize(deserializer)? {
+            Some(serde_json::Value::Bool(b)) => Ok(b),
+            Some(serde_json::Value::String(s)) => Ok(s == "true" || s == "1"),
+            Some(serde_json::Value::Number(n)) => Ok(n.as_i64() == Some(1)),
+            _ => Ok(false),
+        }
+    }
+}
+
+mod vec_i32_flex {
+    use serde::{Deserialize, Deserializer};
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Vec<i32>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        match Option::<serde_json::Value>::deserialize(deserializer)? {
+            Some(serde_json::Value::Array(arr)) => Ok(arr
+                .into_iter()
+                .filter_map(|v| match v {
+                    serde_json::Value::Number(n) => n.as_i64().map(|x| x as i32),
+                    serde_json::Value::String(s) => s.parse::<i32>().ok(),
+                    _ => None,
+                })
+                .collect()),
+            _ => Ok(Vec::new()),
+        }
+    }
+}
+
+mod poll_answers {
+    use super::ApiPollAnswer;
+    use serde::{Deserialize, Deserializer};
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Vec<ApiPollAnswer>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let raw = match Option::<serde_json::Value>::deserialize(deserializer)? {
+            Some(serde_json::Value::Array(arr)) => arr,
+            _ => return Ok(Vec::new()),
+        };
+        Ok(raw
+            .into_iter()
+            .map(|value| match value {
+                serde_json::Value::String(label) => ApiPollAnswer { index: None, label },
+                serde_json::Value::Object(map) => ApiPollAnswer {
+                    index: map.get("index").and_then(serde_json::Value::as_i64),
+                    label: map
+                        .get("label")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or_default()
+                        .to_string(),
+                },
+                _ => ApiPollAnswer::default(),
+            })
+            .collect())
+    }
 }
 
 /// Parsed `content` JSON of a message (the mezon `IExtendedMessage` shape).
@@ -738,6 +858,26 @@ pub struct ApiMessageContent {
     pub mk: Vec<ContentToken>,
     #[serde(default)]
     pub lk: Vec<ContentToken>,
+    /// `true` when this message is a forward (rides inside the content JSON as
+    /// `fwd` in mezon-react `IMessageSendPayload`).
+    #[serde(default)]
+    pub fwd: bool,
+    #[serde(default, alias = "id", deserialize_with = "opt_i64_flex::deserialize")]
+    pub poll_id: Option<i64>,
+    #[serde(default)]
+    pub question: Option<String>,
+    #[serde(default, deserialize_with = "poll_answers::deserialize")]
+    pub answers: Vec<ApiPollAnswer>,
+    #[serde(default, deserialize_with = "vec_i32_flex::deserialize")]
+    pub answer_counts: Vec<i32>,
+    #[serde(default, deserialize_with = "opt_i64_flex::deserialize")]
+    pub expire_at: Option<i64>,
+    #[serde(default, deserialize_with = "bool_flex::deserialize")]
+    pub is_closed: bool,
+    #[serde(default, deserialize_with = "opt_i32_flex::deserialize")]
+    pub total_votes: Option<i32>,
+    #[serde(default, rename = "type")]
+    pub poll_type: Option<i64>,
 }
 
 /// A reply/reference attached to a message (mezon `MessageRef`).
@@ -1221,6 +1361,7 @@ impl MezonTransport {
         user: api::User,
         email: Option<String>,
         password_setted: bool,
+        logo: Option<String>,
     ) -> ApiAccount {
         ApiAccount {
             user_id: user.id,
@@ -1231,6 +1372,7 @@ impl MezonTransport {
             about_me: (!user.about_me.is_empty()).then_some(user.about_me),
             phone_number: (!user.phone_number.is_empty()).then_some(user.phone_number),
             password_setted,
+            logo,
         }
     }
 
@@ -1272,6 +1414,7 @@ impl MezonTransport {
             last_sent_message_id,
             last_sent_timestamp,
             badge_count: channel.count_mess_unread,
+            creator_id: channel.creator_id,
         }
     }
 
@@ -1661,6 +1804,7 @@ impl MezonTransport {
                     user,
                     (!account.email.is_empty()).then_some(account.email),
                     account.password_setted,
+                    (!account.logo.is_empty()).then_some(account.logo),
                 );
                 tracing::debug!("Decoded account response: {} bytes", response.len());
                 Ok(account)
@@ -2160,7 +2304,7 @@ impl MezonTransport {
             .filter_map(|friend| {
                 friend
                     .user
-                    .map(|user| Self::account_from_user(user, None, false))
+                    .map(|user| Self::account_from_user(user, None, false, None))
             })
             .collect())
     }
@@ -5626,13 +5770,14 @@ impl MezonTransport {
         poll_id: i64,
         message_id: i64,
         channel_id: i64,
+        answer_indices: Vec<i32>,
     ) -> Result<api::VotePollResponse> {
         let cid = self.generate_cid();
         let body = api::VotePollRequest {
             poll_id,
             message_id,
             channel_id,
-            ..Default::default()
+            answer_indices,
         }
         .encode_to_vec();
         let (code, response) = self.send_api_request(cid, "VotePoll", body).await?;
@@ -5988,459 +6133,5 @@ impl MezonTransport {
             return Err(anyhow::anyhow!("API error: code={}", code));
         }
         Ok(())
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn user_mention(user_id: &str, s: i32, e: i32) -> OutgoingMention {
-        OutgoingMention {
-            user_id: user_id.into(),
-            role_id: String::new(),
-            username: "@bob".into(),
-            s,
-            e,
-        }
-    }
-
-    fn here_mention(s: i32, e: i32) -> OutgoingMention {
-        OutgoingMention {
-            user_id: MENTION_HERE_ID.into(),
-            role_id: String::new(),
-            username: "@here".into(),
-            s,
-            e,
-        }
-    }
-
-    #[test]
-    fn here_mention_sets_everyone_and_is_excluded_from_proto() {
-        let mentions = [user_mention("42", 0, 4), here_mention(5, 10)];
-        let everyone = mentions.iter().any(OutgoingMention::is_here);
-        let proto: Vec<_> = mentions
-            .iter()
-            .filter_map(OutgoingMention::to_proto)
-            .collect();
-        assert!(everyone);
-        assert_eq!(proto.len(), 1);
-        assert_eq!(proto[0].user_id, 42);
-        assert_eq!(proto[0].s, 0);
-        assert_eq!(proto[0].e, 4);
-        assert_eq!(proto[0].username, "@bob");
-    }
-
-    #[test]
-    fn no_here_mention_leaves_everyone_unset() {
-        let mentions = [user_mention("7", 0, 4)];
-        assert!(!mentions.iter().any(OutgoingMention::is_here));
-    }
-
-    #[test]
-    fn non_numeric_user_id_is_dropped_not_zeroed() {
-        let bad = user_mention("not-a-number", 0, 4);
-        assert!(bad.to_proto().is_none());
-    }
-
-    #[test]
-    fn content_json_plain_has_no_mentions_key() {
-        let json = build_message_content_json("hello", &[], &[], &[], &[]);
-        assert_eq!(json, r#"{"t":"hello"}"#);
-    }
-
-    #[test]
-    fn content_json_includes_mentions_with_utf16_offsets() {
-        let json =
-            build_message_content_json("@bob hi", &[user_mention("42", 0, 4)], &[], &[], &[]);
-        let parsed: ApiMessageContent = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed.t, "@bob hi");
-        assert_eq!(parsed.mentions.len(), 1);
-        assert_eq!(parsed.mentions[0].user_id.as_deref(), Some("42"));
-        assert_eq!(parsed.mentions[0].s, Some(0));
-        assert_eq!(parsed.mentions[0].e, Some(4));
-    }
-
-    #[test]
-    fn content_json_keeps_here_mention_for_receive_colouring() {
-        let json = build_message_content_json("@here", &[here_mention(0, 5)], &[], &[], &[]);
-        let parsed: ApiMessageContent = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed.mentions.len(), 1);
-        assert_eq!(parsed.mentions[0].user_id.as_deref(), Some("here"));
-    }
-
-    fn role_mention(role_id: &str, s: i32, e: i32) -> OutgoingMention {
-        OutgoingMention {
-            user_id: String::new(),
-            role_id: role_id.into(),
-            username: "@mods".into(),
-            s,
-            e,
-        }
-    }
-
-    #[test]
-    fn content_json_includes_hashtags_with_channel_id() {
-        let hashtags = [OutgoingHashtag {
-            channel_id: "777".into(),
-            s: 0,
-            e: 8,
-        }];
-        let json = build_message_content_json("#general hi", &[], &hashtags, &[], &[]);
-        let parsed: ApiMessageContent = serde_json::from_str(&json).unwrap();
-        assert!(parsed.mentions.is_empty());
-        assert_eq!(parsed.hg.len(), 1);
-        assert_eq!(parsed.hg[0].channel_id.as_deref(), Some("777"));
-        assert_eq!(parsed.hg[0].s, Some(0));
-        assert_eq!(parsed.hg[0].e, Some(8));
-    }
-
-    #[test]
-    fn content_json_includes_emojis_with_emojiid() {
-        let emojis = [OutgoingEmoji {
-            emoji_id: "55".into(),
-            s: 0,
-            e: 7,
-        }];
-        let json = build_message_content_json(":smile:", &[], &[], &emojis, &[]);
-        let parsed: ApiMessageContent = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed.ej.len(), 1);
-        assert_eq!(parsed.ej[0].emojiid.as_deref(), Some("55"));
-        assert_eq!(parsed.ej[0].s, Some(0));
-        assert_eq!(parsed.ej[0].e, Some(7));
-    }
-
-    fn md(kind: &str, s: i32, e: i32) -> OutgoingMarkdown {
-        OutgoingMarkdown {
-            kind: kind.into(),
-            s,
-            e,
-        }
-    }
-
-    #[test]
-    fn detect_markdown_bold_keeps_markers_in_offsets() {
-        assert_eq!(detect_markdown("**hi**"), vec![md("b", 0, 6)]);
-    }
-
-    #[test]
-    fn detect_markdown_inline_code() {
-        assert_eq!(detect_markdown("`x`"), vec![md("c", 0, 3)]);
-    }
-
-    #[test]
-    fn detect_markdown_code_block_takes_precedence_over_inline() {
-        assert_eq!(detect_markdown("```code```"), vec![md("pre", 0, 10)]);
-        assert_eq!(detect_markdown("```a```"), vec![md("pre", 0, 7)]);
-    }
-
-    #[test]
-    fn detect_markdown_link_has_no_trailing_punctuation_trim() {
-        assert_eq!(detect_markdown("see https://a.com."), vec![md("lk", 4, 18)]);
-    }
-
-    #[test]
-    fn detect_markdown_link_inside_code_block_is_not_separately_detected() {
-        assert_eq!(
-            detect_markdown("```http://x.com```"),
-            vec![md("pre", 0, 18)]
-        );
-    }
-
-    #[test]
-    fn detect_markdown_uses_utf16_offsets() {
-        assert_eq!(detect_markdown("😀 **b**"), vec![md("b", 3, 8)]);
-    }
-
-    #[test]
-    fn detect_markdown_ignores_unclosed_and_blank() {
-        assert!(detect_markdown("**hi").is_empty());
-        assert!(detect_markdown("``").is_empty());
-        assert!(detect_markdown("** **").is_empty());
-    }
-
-    #[test]
-    fn content_json_includes_markdown_mk() {
-        let json = build_message_content_json("**hey**", &[], &[], &[], &[md("b", 0, 7)]);
-        let parsed: ApiMessageContent = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed.t, "**hey**");
-        assert_eq!(parsed.mk.len(), 1);
-        assert_eq!(parsed.mk[0].kind.as_deref(), Some("b"));
-        assert_eq!(parsed.mk[0].s, Some(0));
-        assert_eq!(parsed.mk[0].e, Some(7));
-    }
-
-    #[test]
-    fn content_json_markdown_keeps_other_token_offsets_unshifted() {
-        let json = build_message_content_json(
-            "**hi** @bob",
-            &[user_mention("42", 7, 11)],
-            &[],
-            &[],
-            &[md("b", 0, 6)],
-        );
-        let parsed: ApiMessageContent = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed.t, "**hi** @bob");
-        assert_eq!(parsed.mentions[0].s, Some(7));
-        assert_eq!(parsed.mentions[0].e, Some(11));
-        assert_eq!(parsed.mk[0].s, Some(0));
-        assert_eq!(parsed.mk[0].e, Some(6));
-    }
-
-    fn reply_reference_bytes(message_sender_id: i64) -> Vec<u8> {
-        api::MessageRefList {
-            refs: vec![api::MessageRef {
-                message_sender_id,
-                ..Default::default()
-            }],
-        }
-        .encode_to_vec()
-    }
-
-    #[test]
-    fn mention_or_reply_plain_message_is_false() {
-        let content = build_message_content_json("hello world", &[], &[], &[], &[]);
-        assert!(!is_mention_or_reply(&content, &[], &[], 42, &[]));
-    }
-
-    #[test]
-    fn mention_or_reply_detects_here() {
-        let content = build_message_content_json("@here", &[here_mention(0, 5)], &[], &[], &[]);
-        assert!(is_mention_or_reply(&content, &[], &[], 42, &[]));
-    }
-
-    #[test]
-    fn mention_or_reply_detects_current_user_only() {
-        let content =
-            build_message_content_json("@bob", &[user_mention("42", 0, 4)], &[], &[], &[]);
-        assert!(is_mention_or_reply(&content, &[], &[], 42, &[]));
-        assert!(!is_mention_or_reply(&content, &[], &[], 7, &[]));
-    }
-
-    #[test]
-    fn mention_or_reply_detects_matching_role_only() {
-        let content =
-            build_message_content_json("@mods", &[role_mention("99", 0, 5)], &[], &[], &[]);
-        assert!(is_mention_or_reply(&content, &[], &[], 42, &[99]));
-        assert!(!is_mention_or_reply(&content, &[], &[], 42, &[100]));
-    }
-
-    #[test]
-    fn mention_or_reply_detects_reply_to_user() {
-        let refs = reply_reference_bytes(42);
-        let content = build_message_content_json("re", &[], &[], &[], &[]);
-        assert!(is_mention_or_reply(&content, &refs, &[], 42, &[]));
-        assert!(!is_mention_or_reply(&content, &refs, &[], 7, &[]));
-    }
-
-    #[test]
-    fn mention_or_reply_malformed_content_is_false() {
-        assert!(!is_mention_or_reply("not json", &[], &[], 42, &[]));
-    }
-
-    #[test]
-    fn mention_or_reply_detects_proto_entity_mentions() {
-        let list = api::MessageMentionList {
-            mentions: vec![api::MessageMention {
-                user_id: 42,
-                username: "@bob".into(),
-                s: 0,
-                e: 4,
-                ..Default::default()
-            }],
-        };
-        let bytes = list.encode_to_vec();
-        let content = build_message_content_json("hello", &[], &[], &[], &[]);
-        assert!(is_mention_or_reply(&content, &[], &bytes, 42, &[]));
-        assert!(!is_mention_or_reply(&content, &[], &bytes, 7, &[]));
-    }
-
-    #[test]
-    fn mention_or_reply_detects_proto_role_mention() {
-        let bytes = api::MessageMentionList {
-            mentions: vec![api::MessageMention {
-                role_id: 99,
-                rolename: "@mods".into(),
-                s: 0,
-                e: 5,
-                ..Default::default()
-            }],
-        }
-        .encode_to_vec();
-        let content = build_message_content_json("hello", &[], &[], &[], &[]);
-        assert!(is_mention_or_reply(&content, &[], &bytes, 42, &[99]));
-        assert!(!is_mention_or_reply(&content, &[], &bytes, 42, &[100]));
-    }
-
-    #[test]
-    fn mention_or_reply_detects_proto_here_mention() {
-        let here_user_id = MENTION_HERE_USER_ID.parse::<i64>().unwrap();
-        let bytes = api::MessageMentionList {
-            mentions: vec![api::MessageMention {
-                user_id: here_user_id,
-                username: "@here".into(),
-                s: 0,
-                e: 5,
-                ..Default::default()
-            }],
-        }
-        .encode_to_vec();
-        let content = build_message_content_json("@here", &[], &[], &[], &[]);
-        assert!(is_mention_or_reply(&content, &[], &bytes, 7, &[]));
-    }
-
-    #[test]
-    fn mention_or_reply_malformed_proto_mentions_is_false() {
-        let content = build_message_content_json("hello", &[], &[], &[], &[]);
-        assert!(!is_mention_or_reply(
-            &content,
-            &[],
-            &[0xff, 0xff, 0xff, 0xff],
-            42,
-            &[]
-        ));
-    }
-
-    #[test]
-    fn notification_content_extracts_message_id_and_time() {
-        let json = br#"{"message_id":"12345","create_time_seconds":1700000000}"#;
-        assert_eq!(parse_notification_content(json), (12345, 1700000000));
-    }
-
-    #[test]
-    fn notification_content_missing_fields_is_zero() {
-        let json = br#"{"t":"hi @bob"}"#;
-        assert_eq!(parse_notification_content(json), (0, 0));
-    }
-
-    #[test]
-    fn notification_content_malformed_is_zero() {
-        assert_eq!(parse_notification_content(&[0xff, 0x00, 0x12]), (0, 0));
-        assert_eq!(parse_notification_content(&[]), (0, 0));
-    }
-
-    #[test]
-    fn notification_content_decodes_direct_fcm_protobuf() {
-        let fcm = api::DirectFcmProto {
-            message_id: 987654321,
-            create_time_seconds: 1700000000,
-            content: "hi @bob".into(),
-            ..Default::default()
-        };
-        let bytes = fcm.encode_to_vec();
-        assert_eq!(parse_notification_content(&bytes), (987654321, 1700000000));
-    }
-
-    #[test]
-    fn notification_content_accepts_numeric_message_id() {
-        let json = br#"{"message_id":12345,"create_time_seconds":1700000000}"#;
-        assert_eq!(parse_notification_content(json), (12345, 1700000000));
-    }
-
-    #[test]
-    fn notification_content_keeps_message_id_when_time_is_unexpected_type() {
-        let json = br#"{"message_id":"12345","create_time_seconds":"1700000000"}"#;
-        assert_eq!(parse_notification_content(json), (12345, 1700000000));
-    }
-
-    #[test]
-    fn notification_content_keeps_message_id_when_time_missing() {
-        let json = br#"{"message_id":"98765","content":"{\"t\":\"hi\"}"}"#;
-        assert_eq!(parse_notification_content(json), (98765, 0));
-    }
-
-    struct MockAdapter {
-        send_ok: bool,
-    }
-
-    #[async_trait::async_trait]
-    impl TransportAdapter for MockAdapter {
-        async fn connect(&self, _host: &str, _port: u16, _token: &str) -> Result<()> {
-            Ok(())
-        }
-        async fn send(&self, _message: Vec<u8>) -> Result<()> {
-            if self.send_ok {
-                Ok(())
-            } else {
-                Err(anyhow::anyhow!("mock send failed"))
-            }
-        }
-        async fn send_ping(&self, _cid: u16) -> Result<()> {
-            Ok(())
-        }
-        fn is_open(&self) -> bool {
-            true
-        }
-        async fn close(&self) -> Result<()> {
-            Ok(())
-        }
-        async fn set_on_message(&self, _handler: crate::transport_adapter::MessageHandler) {}
-        async fn set_on_open(&self, _handler: crate::transport_adapter::OpenHandler) {}
-        async fn set_on_close(&self, _handler: crate::transport_adapter::CloseHandler) {}
-        async fn set_on_error(&self, _handler: crate::transport_adapter::ErrorHandler) {}
-    }
-
-    fn transport(send_ok: bool) -> MezonTransport {
-        MezonTransport::new(Box::new(MockAdapter { send_ok }), String::new())
-    }
-
-    #[tokio::test]
-    async fn gate_passes_immediately_when_connected() {
-        let t = transport(true);
-        t.connected_tx.send(true).unwrap();
-        t.wait_connected(Duration::from_secs(5)).await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn gate_times_out_when_never_connected() {
-        let t = transport(true);
-        let err = t
-            .wait_connected(Duration::from_millis(50))
-            .await
-            .unwrap_err();
-        assert!(err.to_string().contains("not connected"));
-    }
-
-    #[tokio::test]
-    async fn gate_resolves_when_connection_arrives_mid_wait() {
-        let t = transport(true);
-        let tx = t.connected_tx.clone();
-        tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(30)).await;
-            let _ = tx.send(true);
-        });
-        t.wait_connected(Duration::from_secs(5)).await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn send_gate_times_out_and_inserts_no_pending_when_disconnected() {
-        let mut t = transport(true);
-        t.connect_gate = Duration::from_millis(50);
-        let cid = t.generate_cid();
-        let err = t.send(cid, vec![1, 2, 3, 4]).await.unwrap_err();
-        assert!(err.to_string().contains("not connected"));
-        assert!(t.pending_requests.lock().is_empty());
-    }
-
-    #[tokio::test]
-    async fn send_removes_pending_when_adapter_send_fails() {
-        let mut t = transport(false);
-        t.connect_gate = Duration::from_millis(50);
-        t.connected_tx.send(true).unwrap();
-        let cid = t.generate_cid();
-        let err = t.send(cid, vec![1, 2, 3, 4]).await.unwrap_err();
-        assert!(err.to_string().contains("mock send failed"));
-        assert!(t.pending_requests.lock().is_empty());
-    }
-
-    #[test]
-    fn api_index_pins_known_names_and_rejects_unknown() {
-        let t = transport(true);
-        assert_eq!(t.get_api_index("ListChannelDescs"), Some(0));
-        assert_eq!(t.get_api_index("GetAccount"), Some(1));
-        assert_eq!(t.get_api_index("ListClanDescs"), Some(2));
-        assert_eq!(t.get_api_index("ListChannelMessages"), Some(30));
-        assert_eq!(t.get_api_index("UploadBatchAttachmentFile"), Some(209));
-        assert_eq!(t.get_api_index("DefinitelyNotAnApi"), None);
     }
 }

@@ -624,6 +624,19 @@ impl TransportClient {
             .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
     }
 
+    pub async fn list_user_online(
+        &self,
+        clan_id: i64,
+        limit: i32,
+        page: i32,
+    ) -> Result<mezon_proto::api::ListUserOnlineResponse> {
+        let transport = self.inner.clone();
+        runtime()
+            .spawn(async move { transport.list_user_online(clan_id, limit, page).await })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
     pub async fn list_roles(
         &self,
         clan_id: i64,
@@ -977,6 +990,45 @@ impl TransportClient {
         let transport = self.inner.clone();
         runtime()
             .spawn(async move { transport.remove_channel_favorite(channel_id, clan_id).await })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
+    pub async fn vote_poll(
+        &self,
+        poll_id: i64,
+        message_id: i64,
+        channel_id: i64,
+        answer_indices: Vec<i32>,
+    ) -> Result<mezon_proto::api::VotePollResponse> {
+        let transport = self.inner.clone();
+        runtime()
+            .spawn(async move {
+                transport
+                    .vote_poll(poll_id, message_id, channel_id, answer_indices)
+                    .await
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
+    pub async fn get_poll(
+        &self,
+        poll_id: i64,
+        message_id: i64,
+        channel_id: i64,
+    ) -> Result<mezon_proto::api::GetPollResponse> {
+        let transport = self.inner.clone();
+        runtime()
+            .spawn(async move { transport.get_poll(poll_id, message_id, channel_id).await })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
+    pub async fn close_poll(&self, poll_id: i64, message_id: i64, channel_id: i64) -> Result<()> {
+        let transport = self.inner.clone();
+        runtime()
+            .spawn(async move { transport.close_poll(poll_id, message_id, channel_id).await })
             .await
             .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
     }
