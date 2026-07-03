@@ -40,27 +40,12 @@ pub fn show(notification: &Notification) {
 fn show_macos(n: &Notification) {
     use objc::runtime::Object;
     use objc::{class, msg_send, sel, sel_impl};
-    use std::os::raw::c_void;
 
     let title = n.title.clone();
     let body = n.body.clone();
     let category = n.channel_id.clone().unwrap_or_default();
 
-    unsafe extern "C" {
-        fn dispatch_get_main_queue() -> *mut c_void;
-        fn dispatch_async_f(
-            queue: *mut c_void,
-            context: *mut c_void,
-            work: unsafe extern "C" fn(*mut c_void),
-        );
-    }
-
-    unsafe extern "C" fn trampoline(ctx: *mut c_void) {
-        let work = unsafe { Box::from_raw(ctx as *mut Box<dyn FnOnce()>) };
-        (*work)();
-    }
-
-    let work: Box<dyn FnOnce()> = Box::new(move || unsafe {
+    unsafe {
         let center_cls = class!(UNUserNotificationCenter);
         let center: *mut Object = msg_send![center_cls, currentNotificationCenter];
 
@@ -101,11 +86,6 @@ fn show_macos(n: &Notification) {
             addNotificationRequest: request
             withCompletionHandler: std::ptr::null::<Object>()
         ];
-    });
-
-    let ctx = Box::into_raw(Box::new(work)) as *mut c_void;
-    unsafe {
-        dispatch_async_f(dispatch_get_main_queue(), ctx, trampoline);
     }
 }
 

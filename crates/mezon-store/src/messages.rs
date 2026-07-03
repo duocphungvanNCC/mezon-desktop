@@ -477,6 +477,34 @@ impl MessagesStore {
         cx.try_global::<GlobalMessagesStore>().map(|g| g.0.clone())
     }
 
+    pub fn reset(&mut self, cx: &mut Context<Self>) {
+        self.close(cx);
+        self.cache.clear();
+        self.last_message_by_channel.clear();
+        self.last_read_message_by_channel.clear();
+        self.viewing_older_by_channel.clear();
+        self.active_channel_id = None;
+        self.active_clan_id = None;
+        self.is_public = true;
+        self.is_dm = false;
+        self.mode = STREAM_MODE_CHANNEL;
+        self.loading = false;
+        self.loading_more = false;
+        self.last_load_more = None;
+        self.consecutive_loads = 0;
+        self.fetch_generation = self.fetch_generation.wrapping_add(1);
+        self.reply_target = None;
+        self.editing = None;
+        self.joined_channels.clear();
+        self.pending_self_adds.clear();
+        self.pending_last_seen = None;
+        self.last_seen_fingerprint.clear();
+        self.queued_last_seen.clear();
+        self.poll_ui.clear();
+        self.poll_my_vote.clear();
+        cx.notify();
+    }
+
     fn new(api: Arc<AppApi>, cx: &mut Context<Self>) -> Self {
         Self::register_realtime(cx);
 
@@ -607,7 +635,7 @@ impl MessagesStore {
     /// cap. `old_len` is the buffer length before the push.
     fn emit_appended(&mut self, old_len: usize, cx: &mut Context<Self>) {
         let new_len = self.messages().len();
-        if new_len <= old_len {
+        if new_len < old_len {
             cx.emit(MessagesEvent::Updated { message_id: None });
             cx.notify();
             return;
@@ -837,6 +865,7 @@ impl MessagesStore {
                     "write_last_seen_message failed: {e}"
                 );
                 this.update(cx, |this, _| {
+                    this.last_seen_fingerprint.remove(&ChannelId(channel_id));
                     this.queued_last_seen.push(PendingLastSeen {
                         clan_id: ClanId(clan_id),
                         channel_id: ChannelId(channel_id),
@@ -1586,7 +1615,7 @@ impl MessagesStore {
                 Err(e) => {
                     tracing::error!("send_channel_message failed: {e}");
                     let _ = this.update(cx, |this, cx| {
-                        this.remove_temp(channel_id, temp_id, cx);
+                        this.mark_temp_failed(channel_id, temp_id, cx);
                     });
                 }
             }
@@ -1668,7 +1697,7 @@ impl MessagesStore {
                 Err(e) => {
                     tracing::error!("send sticker failed: {e}");
                     let _ = this.update(cx, |this, cx| {
-                        this.remove_temp(channel_id, temp_id, cx);
+                        this.mark_temp_failed(channel_id, temp_id, cx);
                     });
                 }
             }
@@ -1930,6 +1959,16 @@ impl MessagesStore {
                     return;
                 }
                 if self.is_viewing_older(storage_id) {
+                    self.set_last_message(parent_id, message_id);
+                    return;
+                }
+                let tail_loaded = self.cache.get(&storage_id).is_some_and(|channel| {
+                    !has_more_bottom_for(
+                        self.last_message_by_channel.get(&storage_id).copied(),
+                        &channel.messages,
+                    )
+                });
+                if !tail_loaded {
                     self.set_last_message(parent_id, message_id);
                     return;
                 }
@@ -2454,20 +2493,26 @@ impl MessagesStore {
         }
     }
 
-    fn remove_temp(&mut self, channel_id: ChannelId, temp_id: MessageId, cx: &mut Context<Self>) {
-        let removed = {
+    fn mark_temp_failed(
+        &mut self,
+        channel_id: ChannelId,
+        temp_id: MessageId,
+        cx: &mut Context<Self>,
+    ) {
+        let marked = {
             let Some(channel) = self.cache.get_mut(&channel_id) else {
                 return;
             };
-            channel.messages.remove_id(temp_id)
+            match channel.messages.get_mut_by_id(temp_id) {
+                Some(message) => {
+                    message.send_failed = true;
+                    true
+                }
+                None => false,
+            }
         };
-        if removed && self.active_channel_id == Some(channel_id) {
-            cx.emit(MessagesEvent::Shifted {
-                added_top: 0,
-                removed_top: 0,
-                added_bottom: 0,
-                removed_bottom: 1,
-            });
+        if marked && self.active_channel_id == Some(channel_id) {
+            cx.emit(MessagesEvent::Updated { message_id: None });
             cx.notify();
         }
     }
@@ -3140,7 +3185,7 @@ fn build_media_presentation(
         .iter()
         .map(|a| {
             let viewer_src = cfg
-                .map(|c| c.imgproxy_url(&a.url, 0, 0, "force"))
+                .map(|c| c.imgproxy_url(&a.url, 1600, 900, "fit"))
                 .unwrap_or_else(|| a.url.clone());
             ViewerMedia {
                 url: a.url.clone().into(),
@@ -3698,8 +3743,6 @@ mod tests {
             Message::new(MessageId(100), "first", "u9", "Me", 200),
             Message::new(MessageId(101), "second", "u9", "Me", 201),
         ]);
-        // Server echo of the second message: a fresh row (so `combined_with_prev`
-        // defaults to false) with a sparse "0" sender, same id as the existing row.
         let echo = Message::new(MessageId(101), "second", "0", "", 201);
         assert!(list.merge_existing(MessageId(101), echo));
         assert!(
