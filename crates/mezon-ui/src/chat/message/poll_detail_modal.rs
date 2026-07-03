@@ -1,6 +1,6 @@
 use gpui::{
-    App, Context, FocusHandle, Focusable, SharedString, Task, Window, div, img, prelude::*, px,
-    relative, rgba,
+    App, Context, FocusHandle, Focusable, SharedString, Task, UniformListScrollHandle, Window, div,
+    img, prelude::*, px, relative, rgba, uniform_list,
 };
 use mezon_store::{MessageId, MessagesStore, PollAnswerView, PollVoter};
 
@@ -18,6 +18,7 @@ pub struct PollDetailModal {
     selected_index: usize,
     voters_by_answer: Option<Vec<Vec<PollVoter>>>,
     loading: bool,
+    voter_scroll: UniformListScrollHandle,
     _fetch: Task<()>,
 }
 
@@ -78,6 +79,7 @@ impl PollDetailModal {
                 selected_index: 0,
                 voters_by_answer: None,
                 loading: true,
+                voter_scroll: UniformListScrollHandle::new(),
                 _fetch: fetch,
             }
         });
@@ -147,11 +149,20 @@ impl Render for PollDetailModal {
                 .child(mezon_i18n::t(&locale, "message.poll.noVoterDetails"))
                 .into_any_element()
         } else {
-            let mut list = div().flex().flex_col().gap_3();
-            for voter in voters.into_iter().flatten() {
-                list = list.child(render_voter(voter, theme));
-            }
-            list.into_any_element()
+            let rows: Vec<PollVoter> = voters.cloned().unwrap_or_default();
+            let count = rows.len();
+            uniform_list("poll-detail-voters", count, move |range, _window, cx| {
+                let theme = cx.theme().clone();
+                range
+                    .map(|ix| match rows.get(ix) {
+                        Some(voter) => render_voter(voter, &theme),
+                        None => div().into_any_element(),
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .track_scroll(&self.voter_scroll)
+            .size_full()
+            .into_any_element()
         };
 
         let header = div()
@@ -212,6 +223,7 @@ impl Render for PollDetailModal {
                 div()
                     .flex_1()
                     .min_w_0()
+                    .min_h_0()
                     .overflow_hidden()
                     .child(voter_panel),
             );

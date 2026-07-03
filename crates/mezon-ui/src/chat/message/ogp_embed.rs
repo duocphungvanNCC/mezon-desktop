@@ -47,7 +47,7 @@ pub fn render_ogp_embed(msg: &Message, ctx: &RowCtx) -> Option<AnyElement> {
         .rounded(px(4.))
         .overflow_hidden()
         .bg(theme.tokens.theme_setting_primary)
-        .child(ogp_image(ogp.image_proxied.clone(), theme.text_muted, ctx));
+        .child(ogp_image(ogp.image_proxied.clone(), theme.text_muted));
 
     let card = div()
         .id(SharedString::from(format!(
@@ -79,7 +79,7 @@ pub fn render_ogp_embed(msg: &Message, ctx: &RowCtx) -> Option<AnyElement> {
     )
 }
 
-fn ogp_image(src: SharedString, fallback_fg: gpui::Rgba, ctx: &RowCtx) -> AnyElement {
+fn ogp_image(src: SharedString, fallback_fg: gpui::Rgba) -> AnyElement {
     if src.is_empty() {
         return ogp_image_fallback(fallback_fg);
     }
@@ -88,7 +88,6 @@ fn ogp_image(src: SharedString, fallback_fg: gpui::Rgba, ctx: &RowCtx) -> AnyEle
         .inset_0()
         .size_full()
         .object_fit(ObjectFit::Cover)
-        .image_cache(&ctx.avatar_cache)
         .with_fallback(move || ogp_image_fallback(fallback_fg))
         .into_any_element()
 }
