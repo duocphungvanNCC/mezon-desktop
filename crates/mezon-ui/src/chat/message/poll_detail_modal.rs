@@ -1,11 +1,16 @@
+use std::sync::Arc;
+
 use gpui::{
-    App, Context, FocusHandle, Focusable, SharedString, Task, Window, div, img, prelude::*, px,
-    relative, rgba,
+    App, Context, Entity, FocusHandle, Focusable, SharedString, Task, UniformListScrollHandle,
+    Window, div, img, prelude::*, px, relative, rgba, uniform_list,
 };
 use mezon_store::{MessageId, MessagesStore, PollAnswerView, PollVoter};
 
 use crate::app::shell::Shell;
 use crate::components::primitives::{Icon, IconName};
+use crate::image_cache::{
+    AVATAR_ENTRY_MAX_BYTES, AVATAR_IMAGE_CACHE_BYTES, AVATAR_IMAGE_CACHE_CAPACITY, LruImageCache,
+};
 use crate::theme::ActiveTheme;
 
 pub struct PollDetailModal {
@@ -16,8 +21,10 @@ pub struct PollDetailModal {
     answer_counts: Vec<i32>,
     total_votes: i32,
     selected_index: usize,
-    voters_by_answer: Option<Vec<Vec<PollVoter>>>,
+    voters_by_answer: Option<Vec<Arc<[PollVoter]>>>,
     loading: bool,
+    voter_scroll: UniformListScrollHandle,
+    image_cache: Entity<LruImageCache>,
     _fetch: Task<()>,
 }
 
@@ -56,6 +63,15 @@ impl PollDetailModal {
         });
 
         let view = cx.new(|cx| {
+            let image_cache = cx.new(|cx| {
+                LruImageCache::avatar_thumbnail(
+                    "poll-voter",
+                    AVATAR_IMAGE_CACHE_CAPACITY,
+                    AVATAR_IMAGE_CACHE_BYTES,
+                    AVATAR_ENTRY_MAX_BYTES,
+                    cx,
+                )
+            });
             let fetch = cx.spawn(async move |this: gpui::WeakEntity<Self>, cx| {
                 let result = fetch_task.await;
                 let _ = this.update(cx, |modal, cx| {
@@ -63,7 +79,8 @@ impl PollDetailModal {
                     if let Ok(detail) = result {
                         modal.answer_counts = detail.answer_counts;
                         modal.total_votes = detail.total_votes;
-                        modal.voters_by_answer = Some(detail.voters_by_answer);
+                        modal.voters_by_answer =
+                            Some(detail.voters_by_answer.into_iter().map(Arc::from).collect());
                     }
                     cx.notify();
                 });
@@ -78,6 +95,8 @@ impl PollDetailModal {
                 selected_index: 0,
                 voters_by_answer: None,
                 loading: true,
+                voter_scroll: UniformListScrollHandle::new(),
+                image_cache,
                 _fetch: fetch,
             }
         });
@@ -147,11 +166,20 @@ impl Render for PollDetailModal {
                 .child(mezon_i18n::t(&locale, "message.poll.noVoterDetails"))
                 .into_any_element()
         } else {
-            let mut list = div().flex().flex_col().gap_3();
-            for voter in voters.into_iter().flatten() {
-                list = list.child(render_voter(voter, theme));
-            }
-            list.into_any_element()
+            let rows: Arc<[PollVoter]> = voters.cloned().unwrap_or_default();
+            let count = rows.len();
+            uniform_list("poll-detail-voters", count, move |range, _window, cx| {
+                let theme = cx.theme().clone();
+                range
+                    .map(|ix| match rows.get(ix) {
+                        Some(voter) => render_voter(voter, &theme),
+                        None => div().into_any_element(),
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .track_scroll(&self.voter_scroll)
+            .size_full()
+            .into_any_element()
         };
 
         let header = div()
@@ -212,6 +240,7 @@ impl Render for PollDetailModal {
                 div()
                     .flex_1()
                     .min_w_0()
+                    .min_h_0()
                     .overflow_hidden()
                     .child(voter_panel),
             );
@@ -226,6 +255,7 @@ impl Render for PollDetailModal {
             .child(
                 div()
                     .occlude()
+                    .image_cache(self.image_cache.clone())
                     .min_w(px(600.))
                     .max_w(px(620.))
                     .max_h(relative(0.85))
