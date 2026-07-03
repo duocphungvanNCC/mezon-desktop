@@ -1062,12 +1062,9 @@ fn focus_main_tile(
 ) -> AnyElement {
     let voice = voice.clone();
     let inner = tile_inner(theme, store, cell, true);
-    let group = SharedString::from(format!("screen-ctl-{}", cell.id));
-    let screen_key = cell.key.filter(|_| cell.is_screen);
 
     div()
         .id(SharedString::from(format!("focus-main-{}", cell.id)))
-        .group(group.clone())
         .relative()
         .flex()
         .flex_1()
@@ -1082,9 +1079,6 @@ fn focus_main_tile(
         .child(inner)
         .child(tile_label(theme, locale, cell))
         .child(tile_quality(cell))
-        .when_some(screen_key, |this, key| {
-            this.child(screen_tile_controls(&voice, key, group.clone()))
-        })
         .on_click(move |_, _, cx| {
             voice.update(cx, |store, cx| store.clear_focus(cx));
         })
@@ -1145,8 +1139,6 @@ fn video_tile(
     let voice = voice.clone();
     let id = cell.id.clone();
     let inner = tile_inner(theme, store, cell, false);
-    let group = SharedString::from(format!("screen-ctl-{}", cell.id));
-    let screen_key = cell.key.filter(|_| cell.is_screen);
     let border_color: Hsla = if cell.speaking && !cell.is_screen {
         theme.status_online.into()
     } else {
@@ -1155,7 +1147,6 @@ fn video_tile(
 
     div()
         .id(SharedString::from(format!("tile-{}", cell.id)))
-        .group(group.clone())
         .relative()
         .flex()
         .items_center()
@@ -1171,9 +1162,6 @@ fn video_tile(
         .child(inner)
         .child(tile_label(theme, locale, cell))
         .child(tile_quality(cell))
-        .when_some(screen_key, |this, key| {
-            this.child(screen_tile_controls(&voice, key, group.clone()))
-        })
         .on_click(move |_, _, cx| {
             voice.update(cx, |store, cx| store.toggle_focus(id.clone(), cx));
         })
@@ -1409,6 +1397,63 @@ fn control_bar(
         .on_click(move |_, _, cx| voice.update(cx, |store, cx| store.leave(cx)))
     };
 
+    let mut right = div()
+        .flex()
+        .flex_row()
+        .flex_1()
+        .items_center()
+        .justify_end()
+        .gap_1();
+    if let Some(key) = store.primary_screen_key() {
+        let pip_active = store.pip_key() == Some(key);
+        let is_fullscreen = store.fullscreen_screen() == Some(key);
+        let pip_color: Hsla = if pip_active {
+            gpui::rgb(ACCENT_BLUE).into()
+        } else {
+            theme.text_secondary.into()
+        };
+
+        let pip_button = {
+            let voice = voice.clone();
+            circle_button(
+                "voice-pip-btn",
+                gpui::transparent_black(),
+                theme.bg_secondary.into(),
+                IconName::VoicePopOutIcon,
+                pip_color,
+            )
+            .on_click(move |_, _, cx| {
+                if pip_active {
+                    voice.update(cx, |store, cx| store.close_pip(cx));
+                } else if let Some(handle) =
+                    crate::chat::screen_share_pip::open_screen_share_pip(voice.clone(), key, cx)
+                {
+                    voice.update(cx, |store, cx| store.set_pip(key, handle, cx));
+                }
+            })
+        };
+
+        let fs_button = {
+            let voice = voice.clone();
+            circle_button(
+                "voice-fullscreen-btn",
+                gpui::transparent_black(),
+                theme.bg_secondary.into(),
+                if is_fullscreen {
+                    IconName::ExitFullScreen
+                } else {
+                    IconName::FullScreen
+                },
+                theme.text_secondary,
+            )
+            .on_click(move |_, _, cx| {
+                voice.update(cx, |store, cx| store.toggle_fullscreen_screen(key, cx));
+            })
+        };
+
+        right = right.child(pip_button).child(fs_button);
+    }
+
     let left = div()
         .flex()
         .flex_row()
@@ -1441,7 +1486,7 @@ fn control_bar(
         .border_color(theme.border)
         .child(left)
         .child(center)
-        .child(div().flex_1())
+        .child(right)
         .into_any_element()
 }
 
@@ -1458,72 +1503,6 @@ fn decorative_circle(theme: &Theme, icon: IconName) -> AnyElement {
         .cursor_default()
         .bg(theme.bg_secondary)
         .child(Icon::new(icon).size(px(20.)).text_color(theme.text_muted))
-        .into_any_element()
-}
-
-fn screen_tile_controls(voice: &Entity<VoiceStore>, key: u64, group: SharedString) -> AnyElement {
-    let pip_voice = voice.clone();
-    let fs_voice = voice.clone();
-    let btn_bg = gpui::rgba(0x000000a6);
-    let btn_hover = gpui::rgba(0x000000d9);
-    div()
-        .absolute()
-        .bottom_2()
-        .right_2()
-        .flex()
-        .gap_2()
-        .opacity(0.)
-        .group_hover(group, |s| s.opacity(1.))
-        .child(
-            div()
-                .id(SharedString::from(format!("screen-pip-{key}")))
-                .flex()
-                .items_center()
-                .justify_center()
-                .w(px(36.))
-                .h(px(36.))
-                .rounded_full()
-                .bg(btn_bg)
-                .cursor_pointer()
-                .hover(move |s| s.bg(btn_hover))
-                .child(
-                    Icon::new(IconName::VoicePopOutIcon)
-                        .size(px(18.))
-                        .text_color(gpui::rgb(0xffffff)),
-                )
-                .on_click(move |_, _, cx| {
-                    cx.stop_propagation();
-                    if let Some(handle) = crate::chat::screen_share_pip::open_screen_share_pip(
-                        pip_voice.clone(),
-                        key,
-                        cx,
-                    ) {
-                        pip_voice.update(cx, |store, cx| store.set_pip(key, handle, cx));
-                    }
-                }),
-        )
-        .child(
-            div()
-                .id(SharedString::from(format!("screen-fs-{key}")))
-                .flex()
-                .items_center()
-                .justify_center()
-                .w(px(36.))
-                .h(px(36.))
-                .rounded_full()
-                .bg(btn_bg)
-                .cursor_pointer()
-                .hover(move |s| s.bg(btn_hover))
-                .child(
-                    Icon::new(IconName::FullScreen)
-                        .size(px(18.))
-                        .text_color(gpui::rgb(0xffffff)),
-                )
-                .on_click(move |_, _, cx| {
-                    cx.stop_propagation();
-                    fs_voice.update(cx, |store, cx| store.toggle_fullscreen_screen(key, cx));
-                }),
-        )
         .into_any_element()
 }
 
