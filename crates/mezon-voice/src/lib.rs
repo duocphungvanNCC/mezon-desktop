@@ -442,24 +442,18 @@ async fn session_main(
                         }
                     }
                     Ok(Command::StartScreenShare(pick)) => {
-                        if screen_session.is_none() {
+                        if screen_session.is_none() && screen_task.is_none() {
                             screen_full_res.store(false, Ordering::Relaxed);
-                            match start_screen_track(
-                                &room,
-                                &local_identity,
-                                frame_store.clone(),
-                                screen_full_res.clone(),
-                                pick,
-                            )
-                            .await
-                            {
-                                Ok(session) => screen_session = Some(session),
-                                Err(e) => {
-                                    tracing::warn!("screen share enable failed: {e:#}");
-                                    let _ = evt_tx.send(VoiceEvent::Error(format!("screen: {e}")));
-                                }
-                            }
-                            emit(&room, mic_on, &camera_session, &screen_session);
+                            let room = room.clone();
+                            let identity = local_identity.clone();
+                            let store = frame_store.clone();
+                            let full_res = screen_full_res.clone();
+                            let tx = screen_tx.clone();
+                            screen_task = Some(runtime::runtime().spawn(async move {
+                                let result =
+                                    start_screen_track(&room, &identity, store, full_res, pick).await;
+                                let _ = tx.send_async(result).await;
+                            }));
                         }
                     }
                     Ok(Command::StopScreenShare) => {
