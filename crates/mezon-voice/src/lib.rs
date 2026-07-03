@@ -281,6 +281,10 @@ async fn session_main(
     let mut mic_on = false;
     let mut camera_session: Option<CameraSession> = None;
     let mut screen_session: Option<ScreenSession> = None;
+    let (cam_tx, cam_rx) = flume::bounded::<Result<CameraSession>>(1);
+    let (screen_tx, screen_rx) = flume::bounded::<Result<ScreenSession>>(1);
+    let mut camera_task: Option<tokio::task::JoinHandle<()>> = None;
+    let mut screen_task: Option<tokio::task::JoinHandle<()>> = None;
 
     let emit =
         |room: &Room, mic: bool, camera: &Option<CameraSession>, screen: &Option<ScreenSession>| {
@@ -371,53 +375,70 @@ async fn session_main(
                         emit(&room, mic_on, &camera_session, &screen_session);
                     }
                     Ok(Command::SetCameraEnabled(true)) => {
-                        if camera_session.is_none() {
-                            match start_camera_track(&room, &local_identity, frame_store.clone()).await {
-                                Ok(session) => camera_session = Some(session),
-                                Err(e) => {
-                                    tracing::warn!("camera enable failed: {e:#}");
-                                    let _ = evt_tx.send(VoiceEvent::Error(format!("camera: {e}")));
-                                }
-                            }
-                            emit(&room, mic_on, &camera_session, &screen_session);
+                        if camera_session.is_none() && camera_task.is_none() {
+                            let room = room.clone();
+                            let identity = local_identity.clone();
+                            let store = frame_store.clone();
+                            let tx = cam_tx.clone();
+                            camera_task = Some(runtime::runtime().spawn(async move {
+                                let result = start_camera_track(&room, &identity, store).await;
+                                let _ = tx.send_async(result).await;
+                            }));
                         }
                     }
                     Ok(Command::SetCameraEnabled(false)) => {
+                        let mut changed = false;
+                        if let Some(task) = camera_task.take() {
+                            task.abort();
+                            let _ = cam_rx.try_recv();
+                            changed = true;
+                        }
                         if let Some(session) = camera_session.take() {
                             session.stopper.stop();
                             let _ = room.local_participant().unpublish_track(&session.track.sid()).await;
                             frame_store.remove(local_camera_key(&local_identity));
+                            changed = true;
+                        }
+                        if changed {
                             emit(&room, mic_on, &camera_session, &screen_session);
                         }
                     }
                     Ok(Command::StartScreenShare(pick)) => {
-                        if screen_session.is_none() {
-                            match start_screen_track(
-                                &room,
-                                &local_identity,
-                                frame_store.clone(),
-                                pick,
-                            )
-                            .await
-                            {
-                                Ok(session) => screen_session = Some(session),
-                                Err(e) => {
-                                    tracing::warn!("screen share enable failed: {e:#}");
-                                    let _ = evt_tx.send(VoiceEvent::Error(format!("screen: {e}")));
-                                }
-                            }
-                            emit(&room, mic_on, &camera_session, &screen_session);
+                        if screen_session.is_none() && screen_task.is_none() {
+                            let room = room.clone();
+                            let identity = local_identity.clone();
+                            let store = frame_store.clone();
+                            let tx = screen_tx.clone();
+                            screen_task = Some(runtime::runtime().spawn(async move {
+                                let result = start_screen_track(&room, &identity, store, pick).await;
+                                let _ = tx.send_async(result).await;
+                            }));
                         }
                     }
                     Ok(Command::StopScreenShare) => {
+                        let mut changed = false;
+                        if let Some(task) = screen_task.take() {
+                            task.abort();
+                            let _ = screen_rx.try_recv();
+                            changed = true;
+                        }
                         if let Some(session) = screen_session.take() {
                             session.stopper.stop();
                             let _ = room.local_participant().unpublish_track(&session.track.sid()).await;
                             frame_store.remove(local_screen_key(&local_identity));
+                            changed = true;
+                        }
+                        if changed {
                             emit(&room, mic_on, &camera_session, &screen_session);
                         }
                     }
                     Ok(Command::Disconnect) | Err(_) => {
+                        if let Some(task) = camera_task.take() {
+                            task.abort();
+                        }
+                        if let Some(task) = screen_task.take() {
+                            task.abort();
+                        }
                         if let Some(session) = camera_session.take() {
                             session.stopper.stop();
                         }
@@ -428,6 +449,34 @@ async fn session_main(
                         let _ = evt_tx.send(VoiceEvent::Disconnected { reason: "left".into() });
                         break;
                     }
+                }
+            }
+            result = cam_rx.recv_async() => {
+                camera_task = None;
+                match result {
+                    Ok(Ok(session)) => {
+                        camera_session = Some(session);
+                        emit(&room, mic_on, &camera_session, &screen_session);
+                    }
+                    Ok(Err(e)) => {
+                        tracing::warn!("camera enable failed: {e:#}");
+                        let _ = evt_tx.send(VoiceEvent::Error(format!("camera: {e}")));
+                    }
+                    Err(_) => {}
+                }
+            }
+            result = screen_rx.recv_async() => {
+                screen_task = None;
+                match result {
+                    Ok(Ok(session)) => {
+                        screen_session = Some(session);
+                        emit(&room, mic_on, &camera_session, &screen_session);
+                    }
+                    Ok(Err(e)) => {
+                        tracing::warn!("screen share enable failed: {e:#}");
+                        let _ = evt_tx.send(VoiceEvent::Error(format!("screen: {e}")));
+                    }
+                    Err(_) => {}
                 }
             }
         }

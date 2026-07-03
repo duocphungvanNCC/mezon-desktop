@@ -1,4 +1,3 @@
-
 use std::sync::Arc;
 
 use gpui::SharedString;
@@ -162,13 +161,11 @@ pub struct MessageReference {
     pub has_attachment: bool,
 }
 
-
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ReactionSender {
     pub sender_id: String,
     pub count: u32,
 }
-
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Reaction {
@@ -320,7 +317,6 @@ pub struct PollVoter {
     pub avatar_proxied: SharedString,
 }
 
-
 #[derive(Debug, Clone)]
 pub struct PollDetail {
     pub total_votes: i32,
@@ -350,6 +346,7 @@ pub struct Message {
     pub show_forwarded_label: bool,
     pub combined_with_prev: bool,
     pub highlights_viewer_direct: bool,
+    pub send_failed: bool,
     pub ogp: Option<OgpPreview>,
     pub poll: Option<PollData>,
     pub spans: Vec<MessageSpan>,
@@ -732,7 +729,6 @@ fn compute_show_forwarded_label(prev: Option<&Message>, msg: &Message) -> bool {
     !same_message_sender(prev, msg) || (msg.create_time - prev.create_time).abs() > 600_000
 }
 
-
 pub fn message_sort_key(m: &Message) -> (u8, i64) {
     let not_first = u8::from(m.code != MessageCode::Indicator);
     (not_first, m.id.get())
@@ -778,6 +774,7 @@ impl Message {
             show_forwarded_label: false,
             combined_with_prev: false,
             highlights_viewer_direct: false,
+            send_failed: false,
             ogp: None,
             poll: None,
             spans,
@@ -864,5 +861,476 @@ impl Message {
     pub fn with_avatar_proxied(mut self, proxied: impl Into<SharedString>) -> Self {
         self.avatar_proxied = proxied.into();
         self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn forwarded(id: i64, sender: &str, time: i64) -> Message {
+        Message::new(MessageId(id), "m", sender, "U", time).with_forwarded(true)
+    }
+
+    #[test]
+    fn forwarded_label_hidden_for_non_forwarded_message() {
+        let msg = Message::new(MessageId(1), "m", "42", "U", 100);
+        assert!(!compute_show_forwarded_label(None, &msg));
+    }
+
+    #[test]
+    fn forwarded_label_shown_when_no_previous_row() {
+        assert!(compute_show_forwarded_label(None, &forwarded(2, "42", 100)));
+    }
+
+    #[test]
+    fn forwarded_label_shown_after_non_forwarded_previous() {
+        let prev = Message::new(MessageId(1), "m", "42", "U", 100);
+        assert!(compute_show_forwarded_label(
+            Some(&prev),
+            &forwarded(2, "42", 110)
+        ));
+    }
+
+    #[test]
+    fn forwarded_label_grouped_for_same_sender_burst() {
+        let prev = forwarded(1, "42", 100);
+        assert!(!compute_show_forwarded_label(
+            Some(&prev),
+            &forwarded(2, "42", 110)
+        ));
+    }
+
+    #[test]
+    fn forwarded_label_shown_for_different_sender() {
+        let prev = forwarded(1, "42", 100);
+        assert!(compute_show_forwarded_label(
+            Some(&prev),
+            &forwarded(2, "7", 110)
+        ));
+    }
+
+    fn token(s: i64, e: i64) -> ContentToken {
+        ContentToken {
+            s: Some(s),
+            e: Some(e),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn parse_spans_plain_text() {
+        let content = ApiMessageContent {
+            t: "hello world".into(),
+            ..Default::default()
+        };
+        assert_eq!(
+            parse_spans(&content),
+            vec![MessageSpan::Text("hello world".into())]
+        );
+    }
+
+    #[test]
+    fn parse_spans_interleaves_mention_and_text() {
+        let content = ApiMessageContent {
+            t: "hi @bob !".into(),
+            mentions: vec![ContentToken {
+                user_id: Some("42".into()),
+                username: Some("bob".into()),
+                ..token(3, 7)
+            }],
+            ..Default::default()
+        };
+        let spans = parse_spans(&content);
+        assert_eq!(
+            spans,
+            vec![
+                MessageSpan::Text("hi ".into()),
+                MessageSpan::Mention {
+                    display: "@bob".into(),
+                    user_id: Some("42".into()),
+                    role_id: None,
+                },
+                MessageSpan::Text(" !".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_spans_strips_bold_markers() {
+        let content = ApiMessageContent {
+            t: "**hey**".into(),
+            mk: vec![ContentToken {
+                kind: Some("b".into()),
+                ..token(0, 7)
+            }],
+            ..Default::default()
+        };
+        assert_eq!(parse_spans(&content), vec![MessageSpan::Bold("hey".into())]);
+    }
+
+    #[test]
+    fn parse_spans_accepts_numeric_user_id_from_json() {
+        let content: ApiMessageContent = serde_json::from_str(
+            r#"{"t":"hi @bob","mentions":[{"s":3,"e":7,"user_id":42,"username":"bob"}]}"#,
+        )
+        .expect("mention token json");
+        let spans = parse_spans(&content);
+        assert_eq!(
+            spans,
+            vec![
+                MessageSpan::Text("hi ".into()),
+                MessageSpan::Mention {
+                    display: "@bob".into(),
+                    user_id: Some("42".into()),
+                    role_id: None,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn message_row_highlight_uses_entity_mention_targets() {
+        let mut msg = Message::new(MessageId(1), "hi", "7", "alice", 100);
+        msg.mention_targets = vec![MentionTarget {
+            user_id: Some("42".into()),
+            role_id: None,
+        }];
+        assert!(message_row_highlight(&msg, Some(UserId(42)), &[]));
+        assert!(!message_row_highlight(&msg, Some(UserId(7)), &[]));
+    }
+
+    #[test]
+    fn message_row_highlight_detects_user_mention_and_reply() {
+        let user = UserId(42);
+        let mut msg = Message::new(MessageId(1), "hi", "7", "alice", 100);
+        msg.spans = vec![MessageSpan::Mention {
+            display: "@bob".into(),
+            user_id: Some("42".into()),
+            role_id: None,
+        }];
+        assert!(message_row_highlight(&msg, Some(user), &[]));
+
+        let mut reply = Message::new(MessageId(2), "yo", "7", "alice", 101);
+        reply.references.push(MessageReference {
+            message_ref_id: MessageId(9),
+            sender_id: user,
+            ..Default::default()
+        });
+        assert!(message_row_highlight(&reply, Some(user), &[]));
+    }
+
+    #[test]
+    fn parse_spans_handles_utf16_indices() {
+        let content = ApiMessageContent {
+            t: "😀 @x".into(),
+            mentions: vec![ContentToken {
+                user_id: Some("1".into()),
+                ..token(3, 5)
+            }],
+            ..Default::default()
+        };
+        let spans = parse_spans(&content);
+        assert_eq!(
+            spans.last(),
+            Some(&MessageSpan::Mention {
+                display: "@x".into(),
+                user_id: Some("1".into()),
+                role_id: None,
+            })
+        );
+    }
+
+    #[test]
+    fn aggregate_reactions_groups_by_emoji() {
+        let raw = vec![
+            ApiMessageReaction {
+                emoji_id: "10".into(),
+                emoji: ":a:".into(),
+                count: 1,
+                sender_id: "u1".into(),
+                action: false,
+            },
+            ApiMessageReaction {
+                emoji_id: "10".into(),
+                emoji: ":a:".into(),
+                count: 1,
+                sender_id: "u2".into(),
+                action: false,
+            },
+            ApiMessageReaction {
+                emoji_id: "20".into(),
+                emoji: ":b:".into(),
+                count: 1,
+                sender_id: "u1".into(),
+                action: true,
+            },
+        ];
+        let agg = aggregate_reactions(&raw, None);
+        assert_eq!(agg.len(), 1);
+        assert_eq!(agg[0].key, "10");
+        assert_eq!(agg[0].count(), 2);
+        assert_eq!(agg[0].count_label, "2");
+        let senders: Vec<&str> = agg[0]
+            .senders
+            .iter()
+            .map(|s| s.sender_id.as_str())
+            .collect();
+        assert_eq!(senders, vec!["u1", "u2"]);
+    }
+
+    #[test]
+    fn apply_reaction_add_increments_same_sender_count() {
+        let mut reactions = vec![Reaction {
+            key: "10".into(),
+            emoji: ":a:".into(),
+            emoji_id: "10".into(),
+            count: 1,
+            senders: vec![ReactionSender {
+                sender_id: "u1".into(),
+                count: 1,
+            }],
+            ..Default::default()
+        }];
+        apply_reaction_event(&mut reactions, "10", ":a:", "u2", false, None);
+        assert_eq!(reactions[0].count(), 2);
+        apply_reaction_event(&mut reactions, "10", ":a:", "u1", false, None);
+        assert_eq!(reactions[0].count(), 3);
+        assert!(reactions[0].has_sender("u1"));
+        apply_reaction_event(&mut reactions, "10", ":a:", "u1", true, None);
+        assert_eq!(reactions[0].count(), 1);
+        assert!(!reactions[0].has_sender("u1"));
+        apply_reaction_event(&mut reactions, "10", ":a:", "u2", true, None);
+        assert!(reactions.is_empty());
+    }
+
+    #[test]
+    fn rollback_reaction_undoes_optimistic_add() {
+        let mut reactions = Vec::new();
+        apply_reaction_event(&mut reactions, "10", ":a:", "u1", false, None);
+        apply_reaction_event(&mut reactions, "10", ":a:", "u1", false, None);
+        assert_eq!(reactions[0].count(), 2);
+        rollback_reaction(&mut reactions, "10", ":a:", "u1", false, None);
+        assert_eq!(reactions[0].count(), 1);
+        rollback_reaction(&mut reactions, "10", ":a:", "u1", false, None);
+        assert!(reactions.is_empty());
+    }
+
+    #[test]
+    fn format_reaction_count_matches_react() {
+        assert_eq!(format_reaction_count(0), "0");
+        assert_eq!(format_reaction_count(999), "999");
+        assert_eq!(format_reaction_count(1000), "1.0K");
+        assert_eq!(format_reaction_count(1500), "1.5K");
+        assert_eq!(format_reaction_count(1_000_000), "1.0M");
+    }
+
+    #[test]
+    fn user_message_after_system_from_same_sender_combines() {
+        let mut sys = Message::new(MessageId(1), "thread", "u1", "U1", 100);
+        sys.code = MessageCode::CreateThread;
+        let next = Message::new(MessageId(2), "hello", "u1", "U1", 110);
+        assert!(message_combined_with_prev(Some(&sys), &next));
+    }
+
+    #[test]
+    fn system_message_never_combines() {
+        let prev = Message::new(MessageId(1), "a", "u1", "U1", 100);
+        let mut sys = Message::new(MessageId(2), "joined", "u1", "U1", 110);
+        sys.code = MessageCode::Welcome;
+        assert!(!message_combined_with_prev(Some(&prev), &sys));
+    }
+
+    #[test]
+    fn same_sender_matches_via_sender_user_id_when_ack_sender_id_is_zero() {
+        let mut ack = Message::new(MessageId(1), "a", "0", "U1", 100);
+        ack.sender_user_id = Some(UserId(42));
+        let mut next = Message::new(MessageId(2), "b", "42", "U1", 105);
+        next.sender_user_id = Some(UserId(42));
+        assert!(same_message_sender(&ack, &next));
+        assert!(message_combined_with_prev(Some(&ack), &next));
+    }
+
+    #[test]
+    fn reply_message_still_shows_head_when_combined() {
+        let prev = Message::new(MessageId(1), "a", "u1", "U1", 100);
+        let mut reply = Message::new(MessageId(2), "b", "u1", "U1", 110);
+        reply.references.push(MessageReference::default());
+        assert!(message_combined_with_prev(Some(&prev), &reply));
+        assert!(should_show_message_head(&reply, true));
+    }
+
+    #[test]
+    fn topic_message_can_combine_with_chat() {
+        let prev = Message::new(MessageId(1), "a", "u1", "U1", 100);
+        let mut topic = Message::new(MessageId(2), "b", "u1", "U1", 110);
+        topic.code = MessageCode::Topic;
+        assert!(message_combined_with_prev(Some(&prev), &topic));
+    }
+
+    #[test]
+    fn ack_server_time_ahead_of_next_optimistic_still_combines() {
+        let ack = Message::new(MessageId(1), "a", "42", "U1", 105);
+        let optimistic = Message::new(MessageId::next_optimistic(), "b", "42", "U1", 101);
+        assert!(message_combined_with_prev(Some(&ack), &optimistic));
+    }
+
+    #[test]
+    fn sparse_sender_id_zero_does_not_match_real_user() {
+        let sparse = Message::new(MessageId(1), "a", "0", "U1", 100);
+        let mine = Message::new(MessageId(2), "b", "42", "U1", 110);
+        assert!(!same_message_sender(&sparse, &mine));
+    }
+
+    fn attachment(filetype: &str, url: &str) -> MessageAttachment {
+        MessageAttachment {
+            filetype: filetype.into(),
+            url: url.into(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn is_video_detects_mp4_and_quicktime() {
+        assert!(attachment("video/mp4", "https://cdn.mezon.ai/clip.mp4").is_video());
+        assert!(attachment("video/quicktime", "https://cdn.mezon.ai/clip.mov").is_video());
+    }
+
+    #[test]
+    fn is_video_matches_video_prefix() {
+        assert!(attachment("video/webm", "https://cdn.mezon.ai/clip.webm").is_video());
+    }
+
+    #[test]
+    fn is_video_excludes_mpeg_ts_stream() {
+        assert!(!attachment("video/vnd.dlna.mpeg-tts", "https://cdn.mezon.ai/x.ts").is_video());
+    }
+
+    #[test]
+    fn is_video_false_for_image_and_bare_url() {
+        assert!(!attachment("image/png", "https://cdn.mezon.ai/x.png").is_video());
+        assert!(!attachment("", "https://cdn.mezon.ai/x.mp4").is_video());
+    }
+
+    #[test]
+    fn tenor_gif_url_derives_mp4_variant() {
+        assert_eq!(
+            tenor_mp4_url(
+                "https://media.tenor.com/rmtqGXO15tYAAAAC/may-day-flowers-happy-may-day.gif"
+            )
+            .as_deref(),
+            Some("https://media.tenor.com/rmtqGXO15tYAAAPo/may-day-flowers-happy-may-day.mp4")
+        );
+        assert_eq!(
+            tenor_mp4_url("https://media.tenor.com/lfDATg4Bhc0AAAAM/happy-cat.gif").as_deref(),
+            Some("https://media.tenor.com/lfDATg4Bhc0AAAPo/happy-cat.mp4")
+        );
+    }
+
+    #[test]
+    fn tenor_mp4_url_rejects_non_tenor_and_malformed() {
+        assert_eq!(tenor_mp4_url("https://cdn.mezon.ai/uploaded.gif"), None);
+        assert_eq!(
+            tenor_mp4_url("https://media.tenor.com/rmtqGXO15tYAAAAC/clip.mp4"),
+            None
+        );
+        assert_eq!(
+            tenor_mp4_url("https://media.tenor.com/short/clip.gif"),
+            None
+        );
+        assert_eq!(
+            tenor_mp4_url("https://media.tenor.com/rmtqGXO15tYAAAAC/.gif"),
+            None
+        );
+    }
+
+    #[test]
+    fn unsupported_media_takes_precedence_over_video_and_image() {
+        let avi = attachment("video/avi", "https://cdn.mezon.ai/x.avi");
+        assert!(avi.is_unsupported_media());
+        assert!(avi.is_video());
+
+        let bmp = attachment("image/bmp", "https://cdn.mezon.ai/x.bmp");
+        assert!(bmp.is_unsupported_media());
+        assert!(bmp.is_image());
+    }
+
+    #[test]
+    fn supported_video_and_image_are_not_unsupported() {
+        let mp4 = attachment("video/mp4", "https://cdn.mezon.ai/x.mp4");
+        assert!(!mp4.is_unsupported_media());
+        assert!(mp4.is_video());
+
+        let png = attachment("image/png", "https://cdn.mezon.ai/x.png");
+        assert!(!png.is_unsupported_media());
+        assert!(png.is_image());
+    }
+
+    #[test]
+    fn message_precomputes_local_day_key() {
+        let ts = 1_609_459_200 + 48_300;
+        let msg = Message::new(MessageId(1), "hi", "u", "User", ts);
+        assert_eq!(msg.day_label, crate::message_time::local_day_key(ts));
+    }
+
+    #[test]
+    fn sender_user_id_parsed_from_numeric_sender_id() {
+        let msg = Message::new(MessageId(10), "hi", "42", "Alice", 0);
+        assert_eq!(msg.sender_id, "42");
+        assert_eq!(msg.sender_user_id, Some(UserId(42)));
+    }
+
+    #[test]
+    fn sender_user_id_none_for_non_numeric_sender_id() {
+        let msg = Message::new(MessageId::next_optimistic(), "hi", "u1", "Bob", 0);
+        assert_eq!(msg.sender_id, "u1");
+        assert_eq!(msg.sender_user_id, None);
+    }
+
+    #[test]
+    fn sender_user_id_none_for_optimistic_temp_sender() {
+        let msg = Message::new(
+            MessageId::next_optimistic(),
+            "hi",
+            "temp-user",
+            "Charlie",
+            0,
+        );
+        assert_eq!(msg.sender_user_id, None);
+    }
+
+    #[test]
+    fn optimistic_id_is_optimistic_real_id_is_not() {
+        let opt = MessageId::next_optimistic();
+        let real = MessageId(1_000_000_000_000_i64);
+        assert!(opt.is_optimistic());
+        assert!(!real.is_optimistic());
+    }
+
+    #[test]
+    fn optimistic_ids_sort_after_real_ids() {
+        let opt = MessageId::next_optimistic();
+        let real = MessageId(i64::MAX / 2);
+        assert!(real < opt);
+    }
+
+    #[test]
+    fn optimistic_ids_are_unique_and_monotonic() {
+        let a = MessageId::next_optimistic();
+        let b = MessageId::next_optimistic();
+        assert_ne!(a, b);
+        assert!(a < b);
+        assert!(a.is_optimistic() && b.is_optimistic());
+    }
+
+    #[test]
+    fn cursor_guard_skips_optimistic_ids() {
+        let optimistic = MessageId::next_optimistic();
+        assert!(Some(optimistic).filter(|id| !id.is_optimistic()).is_none());
+        let real = MessageId(123);
+        assert_eq!(
+            Some(real).filter(|id| !id.is_optimistic()),
+            Some(MessageId(123))
+        );
     }
 }
