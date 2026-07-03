@@ -26,6 +26,12 @@ impl ScreenStopper {
     }
 }
 
+impl Drop for ScreenStopper {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
+
 pub fn start_screen(
     identity: String,
     frame_store: Arc<VideoFrameStore>,

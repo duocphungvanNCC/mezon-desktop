@@ -150,6 +150,10 @@ pub fn render_mini_bar(
                     cx.write_to_clipboard(ClipboardItem::new_string(link));
                     voice.update(cx, |store, cx| store.mark_link_copied(cx));
                 }
+        small_icon_button("voice-minibar-leave", IconName::PhoneOff, theme.bg_hover)
+            .text_color(theme.status_dnd)
+            .on_click(move |_, window, cx| {
+                voice.update(cx, |store, cx| store.leave(window, cx));
             })
     };
 
@@ -471,7 +475,7 @@ fn render_pre_join(
             let channel_label = channel_label.clone();
             let input_device_id = input_device_id.clone();
             let output_device_id = output_device_id.clone();
-            move |_: &gpui::ClickEvent, _: &mut gpui::Window, cx: &mut gpui::App| {
+            move |_: &gpui::ClickEvent, window: &mut gpui::Window, cx: &mut gpui::App| {
                 voice.update(cx, |store, cx| {
                     store.join(
                         channel_id.clone(),
@@ -479,6 +483,7 @@ fn render_pre_join(
                         channel_label.clone(),
                         input_device_id.clone(),
                         output_device_id.clone(),
+                        window,
                         cx,
                     );
                 });
@@ -641,8 +646,7 @@ fn render_in_call(
     connecting: bool,
     cx: &App,
 ) -> AnyElement {
-    let participants = store.participants();
-    let focused = store.focused_tile();
+    let fullscreen_active = store.fullscreen_screen().is_some();
 
     let mut cells: Vec<VideoCell> = Vec::new();
     for p in participants {
@@ -655,8 +659,21 @@ fn render_in_call(
         let (name, avatar) = resolve_voice_identity(cx, channel.clan_id, &p.identity, &p.name);
         cells.push(VideoCell::camera(p, name, avatar));
     }
+    let body = (!fullscreen_active).then(|| {
+        let participants = store.participants();
+        let focused = store.focused_tile();
 
-    let focused_idx = focused.and_then(|id| cells.iter().position(|c| c.id == id));
+        let mut cells: Vec<VideoCell> = Vec::new();
+        for p in participants {
+            if p.screenshare.is_some() {
+                cells.push(VideoCell::screen(p));
+            }
+        }
+        for p in participants {
+            cells.push(VideoCell::camera(p));
+        }
+
+        let focused_idx = focused.and_then(|id| cells.iter().position(|c| c.id == id));
 
     let body = match focused_idx {
         Some(idx) => render_focus_layout(theme, locale, store, voice, &cells, idx),
@@ -672,6 +689,19 @@ fn render_in_call(
             cx,
         ),
     };
+        match focused_idx {
+            Some(idx) => render_focus_layout(theme, locale, store, voice, &cells, idx),
+            None => render_grid(
+                theme,
+                locale,
+                store,
+                voice,
+                &cells,
+                &channel.voice_members,
+                connecting,
+            ),
+        }
+    });
 
     let status_badge = if connecting {
         Some((
@@ -706,8 +736,8 @@ fn render_in_call(
         .flex_1()
         .min_h_0()
         .child(voice_header(theme, &channel.name, true, status_badge))
-        .child(body)
-        .when(store.fullscreen_screen().is_none(), |this| {
+        .children(body)
+        .when(!fullscreen_active, |this| {
             this.child(control_bar(theme, locale, voice, settings, store))
         })
         .children(mic_modal)
@@ -1394,7 +1424,7 @@ fn control_bar(
             gpui::rgb(0xffffff),
         )
         .tooltip(Tooltip::text(leave_tooltip))
-        .on_click(move |_, _, cx| voice.update(cx, |store, cx| store.leave(cx)))
+        .on_click(move |_, window, cx| voice.update(cx, |store, cx| store.leave(window, cx)))
     };
 
     let mut right = div()

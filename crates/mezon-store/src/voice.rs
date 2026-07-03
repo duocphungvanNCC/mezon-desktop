@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use gpui::{App, AppContext, Context, Entity, Global, RenderImage, Task};
+use gpui::{App, AppContext, Context, Entity, Global, RenderImage, Task, Window};
 use mezon_client::AppApi;
 use mezon_voice::{IceServerConfig, VoiceEvent, VoiceSession};
 use parking_lot::Mutex;
@@ -283,11 +283,11 @@ impl VoiceStore {
         });
     }
 
-    fn flush_texture_drops(&self, cx: &mut App) {
+    fn flush_texture_drops(&self, mut window: Option<&mut Window>, cx: &mut App) {
         let drops: Vec<Arc<RenderImage>> =
             std::mem::take(&mut *self.pending_texture_drops.lock());
         for image in drops {
-            cx.drop_image(image, None);
+            cx.drop_image(image, window.as_deref_mut());
         }
     }
 
@@ -456,13 +456,14 @@ impl VoiceStore {
         channel_label: String,
         input_device_id: Option<String>,
         output_device_id: Option<String>,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         if self.is_active_in(&channel_id) {
             return;
         }
 
-        self.teardown(cx);
+        self.teardown(Some(window), cx);
         self.channel_label = channel_label;
 
         let ws_url = AppConfig::global(cx).meet_ws_url.clone();
@@ -571,7 +572,7 @@ impl VoiceStore {
             loop {
                 frame_store.frame_changed().await;
                 let keep_going = this.update(cx, |this, cx| {
-                    this.flush_texture_drops(cx);
+                    this.flush_texture_drops(None, cx);
                     if this.has_active_video() {
                         let seq = this.current_max_frame_seq();
                         if seq.is_some() && seq != this.last_repaint_seq {
@@ -658,13 +659,13 @@ impl VoiceStore {
                     self.screen_share_enabled = local.screenshare.is_some();
                 }
                 self.evict_stale_render_cache();
-                self.flush_texture_drops(cx);
+                self.flush_texture_drops(None, cx);
                 self.prune_screen_targets(cx);
                 self.sync_screen_full_res();
             }
             VoiceEvent::Disconnected { reason } => {
                 tracing::info!("voice disconnected: {reason}");
-                self.teardown(cx);
+                self.teardown(None, cx);
             }
             VoiceEvent::Error(message) => {
                 tracing::warn!("voice error: {message}");
@@ -683,8 +684,8 @@ impl VoiceStore {
         cx.notify();
     }
 
-    pub fn leave(&mut self, cx: &mut Context<Self>) {
-        self.teardown(cx);
+    pub fn leave(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.teardown(Some(window), cx);
         cx.notify();
     }
 
@@ -738,7 +739,7 @@ impl VoiceStore {
         cx.notify();
     }
 
-    fn teardown(&mut self, cx: &mut Context<Self>) {
+    fn teardown(&mut self, mut window: Option<&mut Window>, cx: &mut Context<Self>) {
         self.close_pip(cx);
         self.fullscreen_screen = None;
         self.session = None;
@@ -748,9 +749,9 @@ impl VoiceStore {
             cache.drain().map(|(_, entry)| entry.image).collect()
         };
         for image in stale {
-            cx.drop_image(image, None);
+            cx.drop_image(image, window.as_deref_mut());
         }
-        self.flush_texture_drops(cx);
+        self.flush_texture_drops(window, cx);
         self._events_task = None;
         self._repaint_task = None;
         self.connection = VoiceConnection::Idle;
