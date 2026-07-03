@@ -92,6 +92,7 @@ pub struct VoiceSession {
     cmd_tx: flume::Sender<Command>,
     events: flume::Receiver<VoiceEvent>,
     frame_store: Arc<VideoFrameStore>,
+    screen_full_res: Arc<AtomicBool>,
 }
 
 impl VoiceSession {
@@ -105,8 +106,10 @@ impl VoiceSession {
         let (cmd_tx, cmd_rx) = flume::unbounded();
         let (evt_tx, evt_rx) = flume::unbounded();
         let frame_store = Arc::new(VideoFrameStore::default());
+        let screen_full_res = Arc::new(AtomicBool::new(false));
 
         let store = frame_store.clone();
+        let screen_full_res_task = screen_full_res.clone();
         runtime::runtime().spawn(async move {
             if let Err(e) = session_main(
                 url,
@@ -117,6 +120,7 @@ impl VoiceSession {
                 cmd_rx,
                 &evt_tx,
                 store,
+                screen_full_res_task,
             )
             .await
             {
@@ -132,6 +136,7 @@ impl VoiceSession {
             cmd_tx,
             events: evt_rx,
             frame_store,
+            screen_full_res,
         }
     }
 
@@ -157,6 +162,10 @@ impl VoiceSession {
 
     pub fn stop_screen_share(&self) {
         let _ = self.cmd_tx.send(Command::StopScreenShare);
+    }
+
+    pub fn set_screen_full_res(&self, full_res: bool) {
+        self.screen_full_res.store(full_res, Ordering::Relaxed);
     }
 }
 
@@ -202,6 +211,7 @@ async fn session_main(
     cmd_rx: flume::Receiver<Command>,
     evt_tx: &flume::Sender<VoiceEvent>,
     frame_store: Arc<VideoFrameStore>,
+    screen_full_res: Arc<AtomicBool>,
 ) -> Result<()> {
     let options = room_options(ice_servers);
     let (room, mut room_events) = Room::connect(&url, &token, options).await?;
@@ -420,10 +430,12 @@ async fn session_main(
                     }
                     Ok(Command::StartScreenShare(pick)) => {
                         if screen_session.is_none() {
+                            screen_full_res.store(false, Ordering::Relaxed);
                             match start_screen_track(
                                 &room,
                                 &local_identity,
                                 frame_store.clone(),
+                                screen_full_res.clone(),
                                 pick,
                             )
                             .await
@@ -496,9 +508,11 @@ async fn start_screen_track(
     room: &Room,
     identity: &str,
     frame_store: Arc<VideoFrameStore>,
+    full_res: Arc<AtomicBool>,
     pick: PickedScreen,
 ) -> Result<ScreenSession> {
-    let (stopper, track_rx) = screen::start_screen(identity.to_string(), frame_store, pick);
+    let (stopper, track_rx) =
+        screen::start_screen(identity.to_string(), frame_store, full_res, pick);
     let track = track_rx
         .recv_async()
         .await

@@ -97,6 +97,14 @@ struct PipWindow {
 struct GlobalVoiceStore(Entity<VoiceStore>);
 impl Global for GlobalVoiceStore {}
 
+pub fn screen_tile_id(identity: &str) -> String {
+    format!("{identity}\u{1}screen")
+}
+
+pub fn camera_tile_id(identity: &str) -> String {
+    format!("{identity}\u{1}camera")
+}
+
 impl VoiceStore {
     pub fn init(api: Arc<AppApi>, cx: &mut App) -> Entity<Self> {
         let entity = cx.new(|_| Self::new(api));
@@ -306,24 +314,49 @@ impl VoiceStore {
         }));
     }
 
+    fn desired_screen_full_res(&self) -> bool {
+        let Some(local) = self.participants.iter().find(|p| p.is_local) else {
+            return false;
+        };
+        let Some(screen_key) = local.screenshare else {
+            return false;
+        };
+        let focused = self
+            .focused_tile
+            .as_deref()
+            .is_some_and(|id| id == screen_tile_id(&local.identity));
+        let fullscreen = self.fullscreen_screen == Some(screen_key);
+        let pip = self.pip.as_ref().is_some_and(|p| p.key == screen_key);
+        focused || fullscreen || pip
+    }
+
+    fn sync_screen_full_res(&self) {
+        if let Some(session) = &self.session {
+            session.set_screen_full_res(self.desired_screen_full_res());
+        }
+    }
+
     pub fn toggle_focus(&mut self, id: String, cx: &mut Context<Self>) {
         if self.focused_tile.as_deref() == Some(id.as_str()) {
             self.focused_tile = None;
         } else {
             self.focused_tile = Some(id);
         }
+        self.sync_screen_full_res();
         cx.notify();
     }
 
     pub fn set_focus(&mut self, id: String, cx: &mut Context<Self>) {
         if self.focused_tile.as_deref() != Some(id.as_str()) {
             self.focused_tile = Some(id);
+            self.sync_screen_full_res();
             cx.notify();
         }
     }
 
     pub fn clear_focus(&mut self, cx: &mut Context<Self>) {
         if self.focused_tile.take().is_some() {
+            self.sync_screen_full_res();
             cx.notify();
         }
     }
@@ -338,11 +371,13 @@ impl VoiceStore {
         } else {
             Some(key)
         };
+        self.sync_screen_full_res();
         cx.notify();
     }
 
     pub fn clear_fullscreen_screen(&mut self, cx: &mut Context<Self>) {
         if self.fullscreen_screen.take().is_some() {
+            self.sync_screen_full_res();
             cx.notify();
         }
     }
@@ -352,12 +387,14 @@ impl VoiceStore {
             let _ = prev.handle.update(cx, |_, window, _| window.remove_window());
         }
         self.pip = Some(PipWindow { key, handle });
+        self.sync_screen_full_res();
         cx.notify();
     }
 
     pub fn close_pip(&mut self, cx: &mut Context<Self>) {
         if let Some(prev) = self.pip.take() {
             let _ = prev.handle.update(cx, |_, window, _| window.remove_window());
+            self.sync_screen_full_res();
             cx.notify();
         }
     }
@@ -365,6 +402,7 @@ impl VoiceStore {
     pub fn on_pip_closed(&mut self, key: u64, cx: &mut Context<Self>) {
         if self.pip.as_ref().is_some_and(|p| p.key == key) {
             self.pip = None;
+            self.sync_screen_full_res();
             cx.notify();
         }
     }
@@ -602,6 +640,7 @@ impl VoiceStore {
                 self.evict_stale_render_cache();
                 self.flush_texture_drops(cx);
                 self.prune_screen_targets(cx);
+                self.sync_screen_full_res();
             }
             VoiceEvent::Disconnected { reason } => {
                 tracing::info!("voice disconnected: {reason}");
@@ -705,5 +744,7 @@ impl VoiceStore {
         self.participants.clear();
         self.meet_token_prefetching = None;
         self.last_repaint_seq = None;
+        self.link_copied = false;
+        self._link_copied_reset = None;
     }
 }

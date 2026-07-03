@@ -67,6 +67,7 @@ struct VoiceMiniSlice {
     mic_enabled: bool,
     camera_enabled: bool,
     screen_enabled: bool,
+    link_copied: bool,
 }
 
 impl ChatLayout {
@@ -124,11 +125,15 @@ impl ChatLayout {
         })
         .detach();
 
-        cx.observe(&mezon_store::ClanMembersStore::global(cx), |this, _, cx| {
-            if this.is_voice_screen_visible(cx) {
-                cx.notify();
-            }
-        })
+        cx.subscribe(
+            &mezon_store::ClanMembersStore::global(cx),
+            |this, _, event: &mezon_store::ClanMembersEvent, cx| {
+                let mezon_store::ClanMembersEvent::Changed { clan_id } = event;
+                if this.visible_voice_clan_id(cx) == Some(*clan_id) {
+                    cx.notify();
+                }
+            },
+        )
         .detach();
 
         let chat_area = ChatArea::new(settings.clone(), cx);
@@ -387,15 +392,55 @@ impl ChatLayout {
                 .is_some_and(|ch| ch.channel_type == ChannelType::Voice)
     }
 
-    fn current_voice_mini_slice(&self, cx: &Context<Self>) -> Option<VoiceMiniSlice> {
+    fn visible_voice_clan_id(&self, cx: &Context<Self>) -> Option<ClanId> {
+        if self.is_dm_route(cx) {
+            return None;
+        }
+        self.channel_list
+            .read(cx)
+            .active_channel()
+            .filter(|ch| ch.channel_type == ChannelType::Voice)
+            .map(|ch| ch.clan_id)
+    }
+
+    fn voice_mini_display_changed(&mut self, cx: &Context<Self>) -> bool {
         let store = self.voice_store.read(cx);
-        let (channel_id, clan_id) = store.connection().connected_channel()?;
+        let Some((channel_id, clan_id)) = store.connection().connected_channel() else {
+            return self.displayed_voice_mini.take().is_some();
+        };
+
+        if let Some(prev) = self.displayed_voice_mini.as_mut()
+            && prev.channel_id == channel_id
+            && prev.clan_id == clan_id
+        {
+            let label = store.channel_label();
+            let mic_enabled = store.mic_enabled();
+            let camera_enabled = store.camera_enabled();
+            let screen_enabled = store.screen_share_enabled();
+            let link_copied = store.link_copied();
+            let changed = prev.label != label
+                || prev.mic_enabled != mic_enabled
+                || prev.camera_enabled != camera_enabled
+                || prev.screen_enabled != screen_enabled
+                || prev.link_copied != link_copied;
+            if changed {
+                if prev.label != label {
+                    prev.label = label.to_string();
+                }
+                prev.mic_enabled = mic_enabled;
+                prev.camera_enabled = camera_enabled;
+                prev.screen_enabled = screen_enabled;
+                prev.link_copied = link_copied;
+            }
+            return changed;
+        }
+
         let clan_name = clan_id
             .parse::<ClanId>()
             .ok()
             .and_then(|cid| self.clan_list.read(cx).clan(cid).map(|c| c.name.clone()))
             .unwrap_or_default();
-        Some(VoiceMiniSlice {
+        self.displayed_voice_mini = Some(VoiceMiniSlice {
             channel_id: channel_id.to_string(),
             clan_id: clan_id.to_string(),
             label: store.channel_label().to_string(),
@@ -403,17 +448,9 @@ impl ChatLayout {
             mic_enabled: store.mic_enabled(),
             camera_enabled: store.camera_enabled(),
             screen_enabled: store.screen_share_enabled(),
-        })
-    }
-
-    fn voice_mini_display_changed(&mut self, cx: &Context<Self>) -> bool {
-        let next = self.current_voice_mini_slice(cx);
-        if next != self.displayed_voice_mini {
-            self.displayed_voice_mini = next;
-            true
-        } else {
-            false
-        }
+            link_copied: store.link_copied(),
+        });
+        true
     }
 }
 
