@@ -101,6 +101,7 @@ pub struct Channel {
     pub last_sent_timestamp: i64,
     pub voice_members: Vec<VoiceMember>,
     pub is_favorite: bool,
+    pub creator_id: UserId,
 }
 
 impl Channel {
@@ -409,7 +410,7 @@ impl ChannelList {
             .map(AppChannel::from)
             .collect();
 
-        let badge_map: HashMap<ChannelId, i32> = badge_descs
+        let badge_map: HashMap<ChannelId, ApiChannelDesc> = badge_descs
             .into_iter()
             .filter(|d| {
                 !matches!(
@@ -417,7 +418,7 @@ impl ChannelList {
                     ChannelType::App | ChannelType::Voice
                 )
             })
-            .map(|d| (ChannelId(d.channel_id), d.badge_count))
+            .map(|d| (ChannelId(d.channel_id), d))
             .collect();
 
         let voice_map: HashMap<ChannelId, Vec<UserId>> = voice_users
@@ -430,25 +431,34 @@ impl ChannelList {
             })
             .collect();
 
-        let last_messages: Vec<(ChannelId, MessageId)> = api_channels
-            .iter()
-            .filter_map(|c| {
-                (c.last_sent_message_id > 0).then_some((
-                    ChannelId(c.channel_id),
-                    MessageId(c.last_sent_message_id),
-                ))
-            })
-            .collect();
-
         let mut channels: Vec<Channel> = api_channels
             .into_iter()
-            .map(|c| {
+            .map(|mut c| {
                 let cid = ChannelId(c.channel_id);
-                let badge = badge_map.get(&cid).copied().unwrap_or(c.badge_count).max(0) as u32;
+                let badge = if let Some(b) = badge_map.get(&cid) {
+                    if b.last_seen_timestamp > 0 {
+                        c.last_seen_timestamp = b.last_seen_timestamp;
+                        c.last_seen_message_id = b.last_seen_message_id;
+                    }
+                    if b.last_sent_timestamp > 0 {
+                        c.last_sent_timestamp = b.last_sent_timestamp;
+                        c.last_sent_message_id = b.last_sent_message_id;
+                    }
+                    b.badge_count
+                } else {
+                    c.badge_count
+                };
+                let badge = badge.max(0) as u32;
                 let voice_ids = voice_map.get(&cid).cloned().unwrap_or_default();
                 let is_favorite = favorite_ids.contains(&cid);
                 channel_from_desc(c, badge, voice_ids, is_favorite)
             })
+            .collect();
+
+        let last_messages: Vec<(ChannelId, MessageId)> = channels
+            .iter()
+            .filter(|ch| !ch.last_sent_message_id.is_zero())
+            .map(|ch| (ch.id, ch.last_sent_message_id))
             .collect();
 
         let categories = build_categories(api_categories, &mut channels);
@@ -749,6 +759,7 @@ impl ChannelList {
                         last_sent_timestamp: 0,
                         voice_members: Vec::new(),
                         is_favorite: false,
+                        creator_id: UserId(e.creator_id),
                     };
                     let inserted = if let Some(cats) = self.cache.get_mut(&clan_id) {
                         insert_channel(cats, channel)
@@ -886,6 +897,7 @@ impl ChannelList {
                     last_sent_timestamp: 0,
                     voice_members: Vec::new(),
                     is_favorite: false,
+                    creator_id: UserId(desc.creator_id),
                 };
                 let inserted = insert_channel(cats, channel);
                 if inserted {
@@ -1207,6 +1219,7 @@ fn thread_channel_from_context(
         last_sent_timestamp: 0,
         voice_members: Vec::new(),
         is_favorite: false,
+        creator_id: UserId(0),
     }
 }
 
@@ -1242,6 +1255,7 @@ fn channel_from_desc(
         last_sent_timestamp: c.last_sent_timestamp,
         voice_members,
         is_favorite,
+        creator_id: UserId(c.creator_id),
     }
 }
 
@@ -1620,6 +1634,7 @@ mod tests {
             last_sent_timestamp: 0,
             voice_members: Vec::new(),
             is_favorite: false,
+            creator_id: UserId(0),
         }
     }
 
@@ -1901,6 +1916,7 @@ mod tests {
             last_sent_message_id: 0,
             last_sent_timestamp: 0,
             badge_count: badge,
+            creator_id: 0,
         };
 
         let badge_descs = vec![
@@ -2023,6 +2039,7 @@ mod tests {
             last_sent_timestamp: 0,
             voice_members: Vec::new(),
             is_favorite: true,
+            creator_id: UserId(0),
         };
         assert!(ch.is_favorite);
     }
@@ -2048,6 +2065,7 @@ mod tests {
                 last_sent_timestamp: 0,
                 voice_members: Vec::new(),
                 is_favorite: false,
+                creator_id: UserId(0),
             },
             Channel {
                 id: ChannelId(2),
@@ -2067,6 +2085,7 @@ mod tests {
                 last_sent_timestamp: 0,
                 voice_members: Vec::new(),
                 is_favorite: true,
+                creator_id: UserId(0),
             },
         ];
 

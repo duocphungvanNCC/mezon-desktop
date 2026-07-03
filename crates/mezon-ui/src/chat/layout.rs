@@ -542,46 +542,28 @@ impl Render for ChatLayout {
 
 impl ChatLayout {
     pub(crate) fn send_current_message(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(input) = self.chat_area.input_state.clone() else {
+        let Some(mention_input) = self.chat_area.mention_input.clone() else {
             return;
         };
-        let content = input.read(cx).value().trim().to_string();
-        if content.is_empty() {
+        let Some((content, content_tokens, attachments)) = mention_input
+            .update(cx, |mention_input, cx| {
+                mention_input.take_payload(window, cx)
+            })
+        else {
             return;
-        }
-        input.update(cx, |state, cx| state.set_value("", window, cx));
+        };
         crate::chat::ChatSending::send_text(
             content,
-            mezon_store::OutgoingContent::default(),
-            Vec::new(),
+            content_tokens,
+            attachments,
             &self.auth_state,
             cx,
         );
     }
 
-    // composer: restore by swapping send_current_message for the MentionInput payload
-    // path and re-adding send_sticker:
-    // pub(crate) fn send_current_message(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-    //     let Some(mention_input) = self.chat_area.mention_input.clone() else {
-    //         return;
-    //     };
-    //     let Some((content, content_tokens, attachments)) = mention_input
-    //         .update(cx, |mention_input, cx| mention_input.take_payload(window, cx))
-    //     else {
-    //         return;
-    //     };
-    //     crate::chat::ChatSending::send_text(
-    //         content,
-    //         content_tokens,
-    //         attachments,
-    //         &self.auth_state,
-    //         cx,
-    //     );
-    // }
-    //
-    // pub(crate) fn send_sticker(&mut self, url: String, filename: String, cx: &mut Context<Self>) {
-    //     crate::chat::ChatSending::send_sticker(url, filename, &self.auth_state, cx);
-    // }
+    pub(crate) fn send_sticker(&mut self, url: String, filename: String, cx: &mut Context<Self>) {
+        crate::chat::ChatSending::send_sticker(url, filename, &self.auth_state, cx);
+    }
 
     fn current_dm(&self, cx: &Context<Self>) -> Option<DirectChannel> {
         let Route::DirectMessage { direct_id, .. } = Router::global(cx).read(cx).route() else {

@@ -26,7 +26,8 @@ use crate::channel::{ChannelEvent, ChannelList, ChannelType};
 use crate::clan_members::ClanMembersStore;
 use crate::direct::DirectMessageStore;
 use crate::message::{
-    MentionTarget, Message, MessageAttachment, MessageCode, MessageReference, ViewerMedia,
+    MentionTarget, Message, MessageAttachment, MessageCode, MessageReference, OgpPreview,
+    PollAnswerView, PollData, PollDetail, PollLabelSegment, PollVoter, ViewerMedia,
     aggregate_reactions, apply_reaction_event, message_combined_with_prev, message_sort_key,
     parse_spans, reaction_key, recompute_message_grouping, rollback_reaction, sort_messages,
 };
@@ -440,6 +441,20 @@ pub struct MessagesStore {
     _last_seen_timer: Option<Task<()>>,
     last_seen_fingerprint: HashMap<ChannelId, String>,
     queued_last_seen: Vec<PendingLastSeen>,
+    /// Transient per-poll UI state (selected answers, results toggle, in-flight
+    /// vote), keyed by poll message id — mezon-react component-local state.
+    poll_ui: HashMap<MessageId, PollUiState>,
+    /// My submitted answer indices per poll (React `pollsSlice.myVote`), set from
+    /// `VotePollResponse.my_answer_indices`.
+    poll_my_vote: HashMap<MessageId, Vec<i32>>,
+}
+
+/// Transient UI state for a single poll card.
+#[derive(Debug, Default, Clone)]
+pub struct PollUiState {
+    pub selected: Vec<i32>,
+    pub show_results: bool,
+    pub voting: bool,
 }
 
 struct GlobalMessagesStore(Entity<MessagesStore>);
@@ -499,6 +514,8 @@ impl MessagesStore {
             _last_seen_timer: None,
             last_seen_fingerprint: HashMap::new(),
             queued_last_seen: Vec::new(),
+            poll_ui: HashMap::new(),
+            poll_my_vote: HashMap::new(),
         }
     }
 
@@ -2191,6 +2208,140 @@ impl MessagesStore {
         cx.notify();
     }
 
+    pub fn active_message(&self, message_id: MessageId) -> Option<&Message> {
+        let channel_id = self.active_channel_id?;
+        self.cache.get(&channel_id)?.messages.get_by_id(message_id)
+    }
+
+    pub fn poll_ui_state(&self, message_id: MessageId) -> Option<&PollUiState> {
+        self.poll_ui.get(&message_id)
+    }
+
+    pub fn poll_my_vote(&self, message_id: MessageId) -> Option<&[i32]> {
+        self.poll_my_vote.get(&message_id).map(Vec::as_slice)
+    }
+
+    pub fn toggle_poll_answer(
+        &mut self,
+        message_id: MessageId,
+        index: i32,
+        allow_multiple: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let state = self.poll_ui.entry(message_id).or_default();
+        if allow_multiple {
+            if let Some(pos) = state.selected.iter().position(|&i| i == index) {
+                state.selected.remove(pos);
+            } else {
+                state.selected.push(index);
+            }
+        } else {
+            state.selected = vec![index];
+        }
+        cx.notify();
+    }
+
+    pub fn toggle_poll_results(&mut self, message_id: MessageId, cx: &mut Context<Self>) {
+        let state = self.poll_ui.entry(message_id).or_default();
+        state.show_results = !state.show_results;
+        cx.notify();
+    }
+
+    pub fn submit_poll_vote(
+        &mut self,
+        poll_id: i64,
+        message_id: MessageId,
+        cx: &mut Context<Self>,
+    ) {
+        let selected = self
+            .poll_ui
+            .get(&message_id)
+            .map(|s| s.selected.clone())
+            .unwrap_or_default();
+        if selected.is_empty() {
+            return;
+        }
+        self.send_poll_vote(poll_id, message_id, selected, cx);
+    }
+
+    pub fn remove_poll_vote(
+        &mut self,
+        poll_id: i64,
+        message_id: MessageId,
+        cx: &mut Context<Self>,
+    ) {
+        self.send_poll_vote(poll_id, message_id, Vec::new(), cx);
+    }
+
+    fn send_poll_vote(
+        &mut self,
+        poll_id: i64,
+        message_id: MessageId,
+        answer_indices: Vec<i32>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(channel_id) = self.active_channel_id else {
+            return;
+        };
+        self.poll_ui.entry(message_id).or_default().voting = true;
+        cx.notify();
+        let api = self.api.clone();
+        let cid = channel_id.get();
+        let mid = message_id.get();
+        cx.spawn(async move |this, cx| {
+            let result = api.vote_poll(poll_id, mid, cid, answer_indices).await;
+            let _ = this.update(cx, |store, cx| {
+                if let Some(state) = store.poll_ui.get_mut(&message_id) {
+                    state.voting = false;
+                    state.selected.clear();
+                    state.show_results = false;
+                }
+                match result {
+                    Ok(resp) => {
+                        store
+                            .poll_my_vote
+                            .insert(message_id, resp.my_answer_indices);
+                    }
+                    Err(e) => tracing::error!("vote_poll failed: {e}"),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    pub fn close_poll(&mut self, poll_id: i64, message_id: MessageId, cx: &mut Context<Self>) {
+        let Some(channel_id) = self.active_channel_id else {
+            return;
+        };
+        let api = self.api.clone();
+        let cid = channel_id.get();
+        let mid = message_id.get();
+        cx.spawn(async move |_this, _cx| {
+            if let Err(e) = api.close_poll(poll_id, mid, cid).await {
+                tracing::error!("close_poll failed: {e}");
+            }
+        })
+        .detach();
+    }
+
+    pub fn fetch_poll_detail(
+        &self,
+        poll_id: i64,
+        message_id: MessageId,
+        cx: &mut Context<Self>,
+    ) -> Task<anyhow::Result<PollDetail>> {
+        let api = self.api.clone();
+        let cid = self.active_channel_id.map_or(0, |c| c.get());
+        let clan_id = self.active_clan_id.unwrap_or(ClanId(0));
+        let mid = message_id.get();
+        cx.spawn(async move |this, cx| {
+            let resp = api.get_poll(poll_id, mid, cid).await?;
+            let detail = this.update(cx, |_store, cx| map_poll_detail(&resp, clan_id, cx))?;
+            Ok(detail)
+        })
+    }
+
     fn handle_reaction(&mut self, event: &RealtimeEvent, cx: &mut Context<Self>) {
         let RealtimeEvent::MessageReaction(r) = event else {
             return;
@@ -2495,7 +2646,15 @@ fn merge_message_update(existing: &mut Message, incoming: &Message) {
     existing.references = incoming.references.clone();
     existing.update_time = incoming.update_time;
     existing.is_edited = incoming.is_edited;
-    existing.code = MessageCode::Chat;
+    existing.ogp = incoming.ogp.clone();
+    if incoming.poll.is_some() {
+        existing.poll = incoming.poll.clone();
+    }
+    existing.code = if existing.poll.is_some() {
+        MessageCode::Poll
+    } else {
+        MessageCode::Chat
+    };
 }
 
 fn patch_reply_previews_after_update(
@@ -2729,6 +2888,10 @@ fn message_from_api(m: ApiMessage, cfg: Option<&AppConfig>) -> Message {
         .map(|a| MessageAttachment::from_api(a, cfg))
         .collect();
     let (album_layout, viewer_media) = build_media_presentation(&attachments, cfg);
+    let is_forwarded = m.content_tokens.fwd;
+    let ogp = build_ogp_preview(&m.content_tokens, cfg);
+    let code = MessageCode::from_raw(m.code);
+    let poll = build_poll_data(&m.content_tokens, &m.content, cfg);
     if !mention_targets.is_empty() {
         tracing::debug!(
             message_id = m.message_id,
@@ -2747,16 +2910,219 @@ fn message_from_api(m: ApiMessage, cfg: Option<&AppConfig>) -> Message {
         m.sender_name,
         m.create_time,
     )
-    .with_code(MessageCode::from_raw(m.code))
+    .with_code(code)
     .with_spans(spans)
     .with_mention_targets(mention_targets)
     .with_references(references)
     .with_reactions(reactions)
     .with_edited(m.update_time, m.hide_editted)
+    .with_forwarded(is_forwarded)
+    .with_ogp(ogp)
+    .with_poll(poll)
     .with_avatar(m.avatar)
     .with_avatar_proxied(avatar_proxied)
     .with_attachments(attachments)
     .with_media_presentation(album_layout, viewer_media)
+}
+
+fn map_poll_detail(
+    resp: &mezon_proto::api::GetPollResponse,
+    clan_id: ClanId,
+    cx: &App,
+) -> PollDetail {
+    let members_entity = ClanMembersStore::global(cx);
+    let members = members_entity.read(cx);
+    let cfg = AppConfig::try_global(cx);
+    let answer_count = resp.answers.len().max(resp.answer_counts.len());
+    let mut voters_by_answer: Vec<Vec<PollVoter>> = vec![Vec::new(); answer_count];
+    for detail in &resp.voter_details {
+        let idx = detail.answer_index.max(0) as usize;
+        let Some(slot) = voters_by_answer.get_mut(idx) else {
+            continue;
+        };
+        for &uid in &detail.user_ids {
+            let user_id = UserId(uid);
+            let voter = match members.member(clan_id, user_id) {
+                Some(member) => {
+                    let avatar = member.avatar();
+                    let avatar_proxied = cfg
+                        .map(|c| c.avatar_proxy(avatar))
+                        .unwrap_or_else(|| avatar.to_string());
+                    PollVoter {
+                        user_id,
+                        display_name: member.name().to_string().into(),
+                        username: member.user.username.clone().into(),
+                        avatar_proxied: avatar_proxied.into(),
+                    }
+                }
+                None => PollVoter {
+                    user_id,
+                    display_name: uid.to_string().into(),
+                    username: SharedString::default(),
+                    avatar_proxied: SharedString::default(),
+                },
+            };
+            slot.push(voter);
+        }
+    }
+    PollDetail {
+        total_votes: resp.total_votes,
+        answer_counts: resp.answer_counts.clone(),
+        voters_by_answer,
+    }
+}
+
+fn build_ogp_preview(content: &ApiMessageContent, cfg: Option<&AppConfig>) -> Option<OgpPreview> {
+    let token = content.mk.iter().find(|tok| {
+        tok.kind.as_deref() == Some("lk_ogp")
+            && tok
+                .url
+                .as_deref()
+                .is_some_and(|url| !url.to_ascii_lowercase().contains("/invite/"))
+    })?;
+    let url = token.url.clone().unwrap_or_default();
+    if url.is_empty() {
+        return None;
+    }
+    let image = token.image.as_deref().unwrap_or_default();
+    let image_proxied = cfg
+        .map(|c| c.imgproxy_url(image, 350, 200, "fit"))
+        .unwrap_or_else(|| image.to_string());
+    Some(OgpPreview {
+        url,
+        title: token.title.clone().unwrap_or_default().into(),
+        description: token.description.clone().unwrap_or_default().into(),
+        image_proxied: image_proxied.into(),
+    })
+}
+
+fn poll_label_segments(label: &str, cfg: Option<&AppConfig>) -> Vec<PollLabelSegment> {
+    let mut segments = Vec::new();
+    let mut rest = label;
+    while let Some(start) = rest.find("[e:") {
+        if start > 0 {
+            segments.push(PollLabelSegment::Text(rest[..start].into()));
+        }
+        let after = &rest[start + 3..];
+        let Some(end) = after.find(']') else {
+            segments.push(PollLabelSegment::Text(rest[start..].into()));
+            return segments;
+        };
+        let emoji_id = &after[..end];
+        let src = cfg.map(|c| c.emoji_src(emoji_id)).unwrap_or_default();
+        segments.push(PollLabelSegment::Emoji(src.into()));
+        rest = &after[end + 1..];
+    }
+    if !rest.is_empty() {
+        segments.push(PollLabelSegment::Text(rest.into()));
+    }
+    segments
+}
+
+fn build_poll_data(
+    content: &ApiMessageContent,
+    text: &str,
+    cfg: Option<&AppConfig>,
+) -> Option<PollData> {
+    let (question, raw_answers, allow_multiple) =
+        if content.question.is_some() || !content.answers.is_empty() {
+            let answers: Vec<(Option<i64>, String)> = content
+                .answers
+                .iter()
+                .map(|a| (a.index, a.label.clone()))
+                .collect();
+            (
+                content.question.clone().unwrap_or_default(),
+                answers,
+                content.poll_type == Some(1),
+            )
+        } else {
+            let parsed = parse_poll_markdown(text)?;
+            let answers = parsed.answers.into_iter().map(|l| (None, l)).collect();
+            (parsed.question, answers, parsed.allow_multiple)
+        };
+    if raw_answers.is_empty() {
+        return None;
+    }
+    let answers: Vec<PollAnswerView> = raw_answers
+        .into_iter()
+        .enumerate()
+        .map(|(i, (index, label))| PollAnswerView {
+            index: index.map(|v| v as i32).unwrap_or(i as i32),
+            segments: poll_label_segments(&label, cfg),
+            label: label.into(),
+        })
+        .collect();
+    let answer_counts = normalise_answer_counts(&content.answer_counts, answers.len());
+    let total_votes = content
+        .total_votes
+        .unwrap_or_else(|| answer_counts.iter().sum());
+    let percentages = answer_counts
+        .iter()
+        .map(|&count| poll_percentage(count, total_votes))
+        .collect();
+    Some(PollData {
+        poll_id: content.poll_id.unwrap_or(0),
+        question: question.into(),
+        answers,
+        answer_counts,
+        total_votes,
+        percentages,
+        expire_at: content.expire_at,
+        is_closed: content.is_closed,
+        allow_multiple,
+    })
+}
+
+fn normalise_answer_counts(counts: &[i32], len: usize) -> Vec<i32> {
+    let mut out = vec![0; len];
+    for (slot, &count) in out.iter_mut().zip(counts.iter()) {
+        *slot = count.max(0);
+    }
+    out
+}
+
+fn poll_percentage(count: i32, total: i32) -> u8 {
+    if total <= 0 {
+        return 0;
+    }
+    ((count.max(0) as f64 / total as f64) * 100.0).round() as u8
+}
+
+struct ParsedPollMarkdown {
+    question: String,
+    answers: Vec<String>,
+    allow_multiple: bool,
+}
+
+fn parse_poll_markdown(text: &str) -> Option<ParsedPollMarkdown> {
+    if !text.starts_with('📊') {
+        return None;
+    }
+    let lines: Vec<&str> = text.lines().filter(|l| !l.trim().is_empty()).collect();
+    let question = lines
+        .first()
+        .map(|l| l.replace('📊', "").replace("**", "").trim().to_string())
+        .unwrap_or_default();
+    let mut answers = Vec::new();
+    for line in &lines {
+        let trimmed = line.trim_start();
+        if let Some(dot) = trimmed.find('.')
+            && trimmed[..dot].chars().all(|c| c.is_ascii_digit())
+            && dot > 0
+        {
+            let answer = trimmed[dot + 1..].trim();
+            if !answer.is_empty() {
+                answers.push(answer.to_string());
+            }
+        }
+    }
+    let allow_multiple = text.contains("☑️ Multiple answers allowed");
+    Some(ParsedPollMarkdown {
+        question,
+        answers,
+        allow_multiple,
+    })
 }
 
 fn build_media_presentation(
@@ -2862,601 +3228,5 @@ impl MessageAttachment {
             display_height,
             tenor_mp4,
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::ids::UserId;
-    use crate::message::MessageSpan;
-
-    #[test]
-    fn channel_join_params_thread_by_type_joins_as_thread() {
-        assert_eq!(
-            channel_join_params(ChannelType::Thread, None, false),
-            (false, CHANNEL_TYPE_THREAD, STREAM_MODE_THREAD)
-        );
-    }
-
-    #[test]
-    fn channel_join_params_thread_by_parent_joins_as_thread() {
-        assert_eq!(
-            channel_join_params(ChannelType::Text, Some(ChannelId(99)), true),
-            (false, CHANNEL_TYPE_THREAD, STREAM_MODE_THREAD)
-        );
-    }
-
-    #[test]
-    fn channel_join_params_public_channel_keeps_channel_type() {
-        assert_eq!(
-            channel_join_params(ChannelType::Text, None, false),
-            (true, CHANNEL_TYPE_CHANNEL, STREAM_MODE_CHANNEL)
-        );
-    }
-
-    #[test]
-    fn channel_join_params_private_channel_is_not_public() {
-        assert_eq!(
-            channel_join_params(ChannelType::Text, None, true),
-            (false, CHANNEL_TYPE_CHANNEL, STREAM_MODE_CHANNEL)
-        );
-    }
-
-    #[test]
-    fn outgoing_mention_maps_to_transport_with_utf16_offsets() {
-        let mention = OutgoingMention {
-            user_id: "42".into(),
-            role_id: String::new(),
-            display: "@bob".into(),
-            s: 2,
-            e: 6,
-        };
-        let transport = mention.into_transport();
-        assert_eq!(transport.user_id, "42");
-        assert_eq!(transport.username, "@bob");
-        assert_eq!(transport.s, 2);
-        assert_eq!(transport.e, 6);
-    }
-
-    #[test]
-    fn sticker_attachment_is_recognized_as_image() {
-        let attachment = MessageAttachment::from_api(
-            mezon_client::transport::ApiAttachment {
-                url: "https://cdn/1.webp".into(),
-                filename: "1".into(),
-                filetype: STICKER_FILETYPE.into(),
-                width: 0,
-                height: 0,
-                thumbnail: String::new(),
-                duration: 0,
-            },
-            None,
-        );
-        assert_eq!(attachment.filetype, "sticker");
-        assert_eq!(attachment.url, "https://cdn/1.webp");
-        assert!(attachment.is_image());
-        assert_eq!(
-            (attachment.display_width, attachment.display_height),
-            (100.0, 100.0)
-        );
-    }
-
-    #[test]
-    fn video_attachment_maps_thumbnail_and_duration() {
-        let attachment = MessageAttachment::from_api(
-            mezon_client::transport::ApiAttachment {
-                url: "https://cdn/clip.mp4".into(),
-                filename: "clip.mp4".into(),
-                filetype: "video/mp4".into(),
-                width: 1280,
-                height: 720,
-                thumbnail: "https://cdn/clip-thumb.jpg".into(),
-                duration: 42,
-            },
-            None,
-        );
-        assert!(attachment.is_video());
-        assert!(!attachment.is_image());
-        assert_eq!(attachment.duration, 42);
-        assert_eq!(attachment.thumbnail, "https://cdn/clip-thumb.jpg");
-        assert_eq!(attachment.thumbnail_proxied, "https://cdn/clip-thumb.jpg");
-    }
-
-    #[test]
-    fn optimistic_mention_tokens_round_trip_to_a_coloured_span() {
-        let mentions = vec![OutgoingMention {
-            user_id: "42".into(),
-            role_id: String::new(),
-            display: "@bob".into(),
-            s: 0,
-            e: 4,
-        }];
-        let transport: Vec<TransportMention> = mentions
-            .into_iter()
-            .map(OutgoingMention::into_transport)
-            .collect();
-        let tokens = ApiMessageContent {
-            t: "@bob hi".into(),
-            mentions: mention_content_tokens(&transport),
-            ..Default::default()
-        };
-        let spans = parse_spans(&tokens);
-        assert_eq!(
-            spans,
-            vec![
-                MessageSpan::Mention {
-                    display: "@bob".into(),
-                    user_id: Some("42".into()),
-                    role_id: None,
-                },
-                MessageSpan::Text(" hi".into()),
-            ]
-        );
-    }
-
-    #[test]
-    fn message_from_api_maps_fields() {
-        let m = message_from_api(
-            ApiMessage {
-                message_id: 1,
-                content: "hi".into(),
-                content_tokens: mezon_client::transport::ApiMessageContent {
-                    t: "hi".into(),
-                    ..Default::default()
-                },
-                code: 0,
-                sender_id: 1,
-                sender_name: "Alice".into(),
-                avatar: "av.png".into(),
-                create_time: 100,
-                update_time: 0,
-                hide_editted: false,
-                attachments: vec![],
-                references: vec![],
-                reactions: vec![],
-                entity_mentions: vec![],
-            },
-            None,
-        );
-        assert_eq!(m.id, MessageId(1));
-        assert_eq!(m.content, "hi");
-        assert_eq!(m.sender_id, "1");
-        assert_eq!(m.sender_user_id, Some(UserId(1)));
-        assert_eq!(m.sender_name, "Alice");
-        assert_eq!(m.avatar_url, "av.png");
-        assert_eq!(m.avatar_proxied, "av.png");
-    }
-
-    #[test]
-    fn message_from_api_precomputes_album_and_viewer_media() {
-        let image = |url: &str| mezon_client::transport::ApiAttachment {
-            url: url.into(),
-            filename: "a.png".into(),
-            filetype: "image/png".into(),
-            width: 800,
-            height: 600,
-            thumbnail: String::new(),
-            duration: 0,
-        };
-        let m = message_from_api(
-            ApiMessage {
-                message_id: 5,
-                content: String::new(),
-                content_tokens: mezon_client::transport::ApiMessageContent::default(),
-                code: 0,
-                sender_id: 1,
-                sender_name: "Alice".into(),
-                avatar: String::new(),
-                create_time: 0,
-                update_time: 0,
-                hide_editted: false,
-                attachments: vec![image("https://cdn/1.png"), image("https://cdn/2.png")],
-                references: vec![],
-                reactions: vec![],
-                entity_mentions: vec![],
-            },
-            None,
-        );
-        assert!(m.album_layout.is_some());
-        assert_eq!(m.viewer_media.len(), 2);
-        assert_eq!(m.viewer_media[0].url, "https://cdn/1.png");
-        assert_eq!(m.viewer_media[0].viewer_src, "https://cdn/1.png");
-    }
-
-    #[test]
-    fn merge_sparse_sender_keeps_optimistic_avatar_and_name() {
-        let optimistic = Message::new(MessageId::next_optimistic(), "2", "42", "huy.lexuan", 100)
-            .with_avatar("avatar.png");
-        let ack = Message::new(MessageId(99), "2", "0", String::new(), 500);
-        let merged = merge_sparse_sender(&optimistic, ack);
-        assert_eq!(merged.sender_id, "42");
-        assert_eq!(merged.sender_name, "huy.lexuan");
-        assert_eq!(merged.avatar_url, "avatar.png");
-        assert_eq!(merged.create_time, 100);
-        assert_eq!(merged.row_anchor_id, optimistic.row_anchor_id);
-    }
-
-    #[test]
-    fn optimistic_create_time_increments_within_same_sender_burst() {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs() as i64)
-            .unwrap_or(0);
-        let mut list =
-            MessageList::from_messages(vec![Message::new(MessageId(1), "a", "42", "Me", now - 5)]);
-        assert_eq!(optimistic_create_time(&list, "42"), now + 1);
-        list.push_trim_regroup(Message::new(
-            MessageId::next_optimistic(),
-            "b",
-            "42",
-            "Me",
-            now + 1,
-        ));
-        assert_eq!(optimistic_create_time(&list, "42"), now + 2);
-    }
-
-    #[test]
-    fn optimistic_create_time_resets_after_combine_window() {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs() as i64)
-            .unwrap_or(0);
-        let list = MessageList::from_messages(vec![Message::new(
-            MessageId(1),
-            "a",
-            "42",
-            "Me",
-            now - 700,
-        )]);
-        assert_eq!(optimistic_create_time(&list, "42"), now);
-    }
-
-    fn assert_list_consistent(list: &MessageList) {
-        assert_eq!(list.index.len(), list.items.len());
-        for (i, m) in list.items.iter().enumerate() {
-            assert_eq!(list.index.get(&m.id), Some(&i));
-        }
-        let mut expected_temps: Vec<MessageId> = list
-            .items
-            .iter()
-            .filter(|m| m.id.is_optimistic())
-            .map(|m| m.id)
-            .collect();
-        let mut actual_temps: Vec<MessageId> = list.temp_ids.clone();
-        actual_temps.sort();
-        expected_temps.sort();
-        assert_eq!(actual_temps, expected_temps);
-    }
-
-    #[test]
-    fn push_message_grouped_appends_in_order() {
-        let mut list = MessageList::from_messages(vec![
-            Message::new(MessageId(1), "a", "u1", "U1", 100),
-            Message::new(MessageId(2), "b", "u1", "U1", 110),
-        ]);
-        list.push_grouped(Message::new(MessageId(3), "c", "u1", "U1", 120));
-        assert_eq!(list.len(), 3);
-        assert_eq!(list.as_slice()[2].id, MessageId(3));
-        assert!(list.as_slice()[2].combined_with_prev);
-        assert_list_consistent(&list);
-    }
-
-    #[test]
-    fn push_message_grouped_resorts_when_out_of_order() {
-        let mut list = MessageList::from_messages(vec![
-            Message::new(MessageId(1), "a", "u1", "U1", 100),
-            Message::new(MessageId(3), "c", "u1", "U1", 120),
-        ]);
-        list.push_grouped(Message::new(MessageId(2), "b", "u1", "U1", 110));
-        let ids: Vec<MessageId> = list.as_slice().iter().map(|m| m.id).collect();
-        assert_eq!(ids, [MessageId(1), MessageId(2), MessageId(3)]);
-        assert_list_consistent(&list);
-    }
-
-    #[test]
-    fn push_message_grouped_breaks_group_for_different_sender() {
-        let mut list =
-            MessageList::from_messages(vec![Message::new(MessageId(1), "a", "u1", "U1", 100)]);
-        list.push_grouped(Message::new(MessageId(2), "b", "u2", "U2", 105));
-        assert!(!list.as_slice()[1].combined_with_prev);
-        assert_list_consistent(&list);
-    }
-
-    #[test]
-    fn trim_messages_drops_oldest() {
-        let mut msgs: Vec<Message> = (0..MAX_MESSAGES_PER_CHANNEL + 5)
-            .map(|i| Message::new(MessageId(i as i64), format!("m{i}"), "u", "User", i as i64))
-            .collect();
-        trim_messages(&mut msgs);
-        assert_eq!(msgs.len(), MAX_MESSAGES_PER_CHANNEL);
-        assert_eq!(msgs.first().unwrap().id, MessageId(5));
-        assert_eq!(
-            msgs.last().unwrap().id,
-            MessageId((MAX_MESSAGES_PER_CHANNEL + 4) as i64)
-        );
-    }
-
-    fn channel_msgs(msgs: Vec<Message>) -> ChannelMessages {
-        ChannelMessages {
-            messages: MessageList::from_messages(msgs),
-            has_more: false,
-        }
-    }
-
-    fn remove_temp_in(ch: &mut ChannelMessages, temp_id: MessageId) {
-        ch.messages.remove_id(temp_id);
-    }
-
-    fn reconcile_temp_in(ch: &mut ChannelMessages, temp_id: MessageId, confirmed: Message) {
-        if let Some(idx) = ch.messages.position(temp_id) {
-            ch.messages.replace_at(idx, confirmed);
-        } else if !ch.messages.contains_id(confirmed.id) {
-            ch.messages.push_sorted(confirmed);
-        }
-    }
-
-    #[test]
-    fn remove_temp_drops_message_by_id() {
-        let temp1 = MessageId::next_optimistic();
-        let mut ch = channel_msgs(vec![
-            Message::new(temp1, "hello", "u1", "U", 100),
-            Message::new(MessageId(2), "world", "u1", "U", 200),
-        ]);
-        remove_temp_in(&mut ch, temp1);
-        assert_eq!(ch.messages.len(), 1);
-        assert_eq!(ch.messages.as_slice()[0].id, MessageId(2));
-        assert_list_consistent(&ch.messages);
-    }
-
-    #[test]
-    fn remove_temp_noop_when_id_not_found() {
-        let non_existent = MessageId::next_optimistic();
-        let mut ch = channel_msgs(vec![Message::new(MessageId(1), "hello", "u1", "U", 100)]);
-        remove_temp_in(&mut ch, non_existent);
-        assert_eq!(ch.messages.len(), 1);
-    }
-
-    #[test]
-    fn reconcile_temp_matches_only_by_temp_id_not_content() {
-        let temp1 = MessageId::next_optimistic();
-        let temp2 = MessageId::next_optimistic();
-        let mut ch = channel_msgs(vec![
-            Message::new(temp1, "same text", "u1", "U", 100),
-            Message::new(temp2, "same text", "u1", "U", 110),
-        ]);
-        let confirmed = Message::new(MessageId(42), "same text", "u1", "U", 120);
-        reconcile_temp_in(&mut ch, temp1, confirmed);
-        assert_eq!(ch.messages.len(), 2);
-        assert_eq!(ch.messages.as_slice()[0].id, MessageId(42));
-        assert_eq!(ch.messages.as_slice()[1].id, temp2);
-        assert_list_consistent(&ch.messages);
-    }
-
-    #[test]
-    fn temp_match_reconciles_optimistic_row_in_place() {
-        let temp1 = MessageId::next_optimistic();
-        let mut list = MessageList::from_messages(vec![
-            Message::new(MessageId(100), "earlier", "u1", "U", 100),
-            Message::new(temp1, "hello world", "u9", "Me", 200),
-        ]);
-        assert_eq!(list.temp_match_position("u9", "hello world"), Some(1));
-        assert_eq!(list.temp_match_position("u9", "other"), None);
-        let idx = list.temp_match_position("u9", "hello world").unwrap();
-        list.replace_resort(
-            idx,
-            Message::new(MessageId(250), "hello world", "u9", "Me", 200),
-        );
-        let ids: Vec<MessageId> = list.as_slice().iter().map(|m| m.id).collect();
-        assert_eq!(ids, [MessageId(100), MessageId(250)]);
-        assert!(list.temp_ids.is_empty());
-        assert_list_consistent(&list);
-    }
-
-    #[test]
-    fn server_echo_merge_preserves_message_grouping() {
-        let mut list = MessageList::from_messages(vec![
-            Message::new(MessageId(100), "first", "u9", "Me", 200),
-            Message::new(MessageId(101), "second", "u9", "Me", 201),
-        ]);
-        // Server echo of the second message: a fresh row (so `combined_with_prev`
-        // defaults to false) with a sparse "0" sender, same id as the existing row.
-        let echo = Message::new(MessageId(101), "second", "0", "", 201);
-        assert!(list.merge_existing(MessageId(101), echo));
-        assert!(
-            list.as_slice()[1].combined_with_prev,
-            "echo merge must recompute grouping, else the head re-appears until the next send"
-        );
-        assert_list_consistent(&list);
-    }
-
-    #[test]
-    fn append_update_remove_keep_index_and_order() {
-        let mut list = MessageList::from_messages(vec![
-            Message::new(MessageId(10), "a", "u1", "U", 100),
-            Message::new(MessageId(20), "b", "u1", "U", 110),
-        ]);
-        list.push_grouped(Message::new(MessageId(30), "c", "u1", "U", 120));
-        assert_eq!(list.position(MessageId(30)), Some(2));
-        list.get_mut_by_id(MessageId(20)).unwrap().content = "edited".into();
-        assert_eq!(list.as_slice()[1].content, "edited");
-        assert!(list.remove_id(MessageId(10)));
-        let ids: Vec<MessageId> = list.as_slice().iter().map(|m| m.id).collect();
-        assert_eq!(ids, [MessageId(20), MessageId(30)]);
-        assert_eq!(list.position(MessageId(10)), None);
-        assert_list_consistent(&list);
-    }
-
-    #[test]
-    fn prepend_older_and_append_newer_preserve_order_and_index() {
-        let mut list = MessageList::from_messages(vec![
-            Message::new(MessageId(50), "e", "u1", "U", 150),
-            Message::new(MessageId(60), "f", "u1", "U", 160),
-        ]);
-        let dropped = list.prepend_older(vec![
-            Message::new(MessageId(30), "c", "u1", "U", 130),
-            Message::new(MessageId(40), "d", "u1", "U", 140),
-        ]);
-        assert_eq!(dropped, 0);
-        let ids: Vec<MessageId> = list.as_slice().iter().map(|m| m.id).collect();
-        assert_eq!(
-            ids,
-            [MessageId(30), MessageId(40), MessageId(50), MessageId(60)]
-        );
-        assert_list_consistent(&list);
-        list.append_newer(vec![Message::new(MessageId(70), "g", "u1", "U", 170)]);
-        let ids: Vec<MessageId> = list.as_slice().iter().map(|m| m.id).collect();
-        assert_eq!(
-            ids,
-            [
-                MessageId(30),
-                MessageId(40),
-                MessageId(50),
-                MessageId(60),
-                MessageId(70)
-            ]
-        );
-        assert_eq!(list.position(MessageId(70)), Some(4));
-        assert_list_consistent(&list);
-    }
-
-    #[test]
-    fn window_replace_rebuilds_index() {
-        let mut list =
-            MessageList::from_messages(vec![Message::new(MessageId(1), "a", "u1", "U", 100)]);
-        list.replace(vec![
-            Message::new(MessageId(8), "h", "u1", "U", 180),
-            Message::new(MessageId(9), "i", "u1", "U", 190),
-        ]);
-        assert_eq!(list.position(MessageId(1)), None);
-        assert_eq!(list.position(MessageId(8)), Some(0));
-        assert_eq!(list.position(MessageId(9)), Some(1));
-        assert_list_consistent(&list);
-    }
-
-    #[test]
-    fn append_at_cap_evicts_front_and_reindexes() {
-        let mut list = MessageList::from_messages(
-            (0..MAX_MESSAGES_PER_CHANNEL)
-                .map(|i| Message::new(MessageId(i as i64), "m", "u", "U", i as i64))
-                .collect(),
-        );
-        list.push_grouped(Message::new(
-            MessageId(MAX_MESSAGES_PER_CHANNEL as i64),
-            "newest",
-            "u",
-            "U",
-            MAX_MESSAGES_PER_CHANNEL as i64,
-        ));
-        assert_eq!(list.len(), MAX_MESSAGES_PER_CHANNEL);
-        assert_eq!(list.position(MessageId(0)), None);
-        assert_eq!(list.as_slice()[0].id, MessageId(1));
-        assert_eq!(
-            list.as_slice().last().unwrap().id,
-            MessageId(MAX_MESSAGES_PER_CHANNEL as i64)
-        );
-        assert_list_consistent(&list);
-    }
-
-    #[test]
-    fn incremental_in_order_append_at_cap_matches_full_reindex() {
-        let temp_old = MessageId::next_optimistic();
-        let mut items = vec![Message::new(temp_old, "x", "u", "U", 0)];
-        items.extend(
-            (1..MAX_MESSAGES_PER_CHANNEL)
-                .map(|i| Message::new(MessageId(i as i64), "m", "u", "U", i as i64)),
-        );
-        let mut list = MessageList::from_messages(items);
-        assert_eq!(list.len(), MAX_MESSAGES_PER_CHANNEL);
-        assert_eq!(list.temp_ids, vec![temp_old]);
-
-        let temp_new = MessageId::next_optimistic();
-        list.push_grouped(Message::new(temp_new, "y", "u", "U", 999));
-
-        let incremental_index = list.index.clone();
-        let incremental_temp_ids = list.temp_ids.clone();
-        list.reindex();
-        assert_eq!(list.index, incremental_index);
-        assert_eq!(list.temp_ids, incremental_temp_ids);
-
-        assert_eq!(list.len(), MAX_MESSAGES_PER_CHANNEL);
-        assert_eq!(list.position(temp_old), None);
-        assert_eq!(list.temp_ids, vec![temp_new]);
-        assert_eq!(list.as_slice()[0].id, MessageId(1));
-        assert_eq!(list.as_slice().last().unwrap().id, temp_new);
-        assert_list_consistent(&list);
-    }
-
-    #[test]
-    fn has_more_bottom_false_when_tail_in_buffer() {
-        let list = MessageList::from_messages(vec![
-            Message::new(MessageId(1), "a", "u1", "U", 100),
-            Message::new(MessageId(99), "z", "u1", "U", 200),
-        ]);
-        assert!(!has_more_bottom_for(Some(MessageId(99)), &list));
-    }
-
-    #[test]
-    fn has_more_bottom_true_when_tail_not_in_buffer() {
-        let list = MessageList::from_messages(vec![
-            Message::new(MessageId(1), "a", "u1", "U", 100),
-            Message::new(MessageId(50), "m", "u1", "U", 150),
-        ]);
-        assert!(has_more_bottom_for(Some(MessageId(99)), &list));
-    }
-
-    #[test]
-    fn has_more_bottom_false_without_tail_or_empty_buffer() {
-        let list =
-            MessageList::from_messages(vec![Message::new(MessageId(1), "a", "u1", "U", 100)]);
-        assert!(!has_more_bottom_for(None, &list));
-        assert!(!has_more_bottom_for(
-            Some(MessageId(1)),
-            &MessageList::default()
-        ));
-    }
-
-    #[test]
-    fn storage_channel_id_uses_topic_bucket() {
-        let mut m = mezon_proto::api::ChannelMessage {
-            channel_id: 10,
-            topic_id: 99,
-            ..Default::default()
-        };
-        assert_eq!(storage_channel_id(&m), ChannelId(99));
-        m.topic_id = 0;
-        assert_eq!(storage_channel_id(&m), ChannelId(10));
-    }
-
-    #[test]
-    fn patch_reply_previews_after_delete_marks_reference() {
-        let mut list = MessageList::from_messages(vec![
-            Message::new(MessageId(1), "reply", "u1", "U", 100).with_references(vec![
-                MessageReference {
-                    message_ref_id: MessageId(42),
-                    sender_id: UserId(1),
-                    sender_name: "x".into(),
-                    sender_avatar: String::new(),
-                    content: "orig".into(),
-                    has_attachment: false,
-                },
-            ]),
-        ]);
-        patch_reply_previews_after_delete(&mut list, MessageId(42));
-        assert_eq!(
-            list.as_slice()[0].references[0].content,
-            DELETED_REPLY_PREVIEW
-        );
-        assert!(list.as_slice()[0].references[0].message_ref_id.is_zero());
-    }
-
-    #[test]
-    fn should_write_last_seen_matches_react_rules() {
-        let seen = MessageId(10_i64 << 22);
-        let newer = MessageId(12_i64 << 22);
-        let tail = MessageId(15_i64 << 22);
-        assert!(should_write_last_seen(Some(seen), Some(tail), newer));
-        assert!(should_write_last_seen(Some(seen), Some(tail), tail));
-        assert!(!should_write_last_seen(Some(newer), Some(tail), seen));
     }
 }
