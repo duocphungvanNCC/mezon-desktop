@@ -57,8 +57,7 @@ pub use login::{LoginStore, token_from_oauth_callback_url};
 pub use message::*;
 pub use message::{
     COMBINE_TIME_WINDOW, Message, MessageAttachment, message_combined_with_prev,
-    same_message_sender, should_show_message_head,
-    recompute_message_grouping,
+    recompute_message_grouping, same_message_sender, should_show_message_head,
 };
 pub use messages::*;
 pub use pinned::{PinnedMessage, PinnedMessagesStore};

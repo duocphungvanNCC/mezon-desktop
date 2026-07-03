@@ -71,6 +71,7 @@ pub struct ClanList {
     pub active_clan_id: Option<ClanId>,
     api: Arc<AppApi>,
     loading: bool,
+    reset_generation: u64,
     _connection_watch: Task<()>,
 }
 
@@ -98,6 +99,7 @@ impl ClanList {
     }
 
     pub fn reset(&mut self, cx: &mut Context<Self>) {
+        self.reset_generation = self.reset_generation.wrapping_add(1);
         self.clans.clear();
         self.loading = false;
         if self.active_clan_id.take().is_some() {
@@ -114,6 +116,7 @@ impl ClanList {
             active_clan_id: None,
             api,
             loading: false,
+            reset_generation: 0,
             _connection_watch: connection_watch,
         }
     }
@@ -167,6 +170,7 @@ impl ClanList {
         }
         self.loading = true;
         let api = self.api.clone();
+        let generation = self.reset_generation;
         cx.spawn(async move |this, cx| {
             const MAX_RETRIES: u32 = 3;
             let mut attempt = 0u32;
@@ -185,7 +189,9 @@ impl ClanList {
                     Err(e) => {
                         tracing::error!("Failed to load clans after {attempt} retries: {e}");
                         let _ = this.update(cx, |this, _| {
-                            this.loading = false;
+                            if this.reset_generation == generation {
+                                this.loading = false;
+                            }
                         });
                         return;
                     }
@@ -211,6 +217,9 @@ impl ClanList {
                 })
                 .collect();
             let _ = this.update(cx, |this, cx| {
+                if this.reset_generation != generation {
+                    return;
+                }
                 this.loading = false;
                 this.update_clans(mapped, cx);
                 if let Some(clan_id) = this.active_clan_id {
@@ -337,11 +346,12 @@ impl ClanList {
     }
 
     pub fn set_badge_count(&mut self, clan_id: ClanId, count: u32, cx: &mut Context<Self>) {
-        if let Some(clan) = self.clans.iter_mut().find(|c| c.id == clan_id)
-            && clan.badge_count != count
-        {
-            clan.badge_count = count;
-            cx.notify();
+        if let Some(clan) = self.clans.iter_mut().find(|c| c.id == clan_id) {
+            let count = if clan.muted { 0 } else { count };
+            if clan.badge_count != count {
+                clan.badge_count = count;
+                cx.notify();
+            }
         }
     }
 
@@ -701,10 +711,14 @@ mod tests {
     #[test]
     fn set_has_unread_message_sets_flag() {
         let mut c = clans();
-        if let Some(clan) = c.iter_mut().find(|c| c.id == ClanId(1)) && !clan.muted {
+        if let Some(clan) = c.iter_mut().find(|c| c.id == ClanId(1))
+            && !clan.muted
+        {
             clan.has_unread = false;
         }
-        if let Some(clan) = c.iter_mut().find(|c| c.id == ClanId(1)) && !clan.muted {
+        if let Some(clan) = c.iter_mut().find(|c| c.id == ClanId(1))
+            && !clan.muted
+        {
             clan.has_unread = true;
         }
         assert!(c[0].has_unread);
@@ -714,7 +728,9 @@ mod tests {
     #[test]
     fn increment_clan_badge_when_not_muted() {
         let mut c = clans();
-        if let Some(clan) = c.iter_mut().find(|c| c.id == ClanId(1)) && !clan.muted {
+        if let Some(clan) = c.iter_mut().find(|c| c.id == ClanId(1))
+            && !clan.muted
+        {
             clan.badge_count = clan.badge_count.saturating_add(1);
         }
         assert_eq!(c[0].badge_count, 1);
@@ -724,7 +740,9 @@ mod tests {
     fn increment_clan_badge_skipped_when_muted() {
         let mut c = clans();
         c[0].muted = true;
-        if let Some(clan) = c.iter_mut().find(|cl| cl.id == ClanId(1)) && !clan.muted {
+        if let Some(clan) = c.iter_mut().find(|cl| cl.id == ClanId(1))
+            && !clan.muted
+        {
             clan.badge_count = clan.badge_count.saturating_add(1);
         }
         assert_eq!(c[0].badge_count, 0);

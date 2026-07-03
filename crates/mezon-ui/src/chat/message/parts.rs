@@ -86,10 +86,45 @@ fn reply_preview_line(content: &str) -> String {
 
 pub fn render_reply(reference: &MessageReference, ctx: &RowCtx) -> AnyElement {
     let theme = ctx.theme;
-    let is_deleted = reference.message_ref_id.is_zero();
-    let preview = if is_deleted {
-        mezon_i18n::t(ctx.locale, "message.messageDeleteReply").to_string()
-    } else if reference.content.is_empty() {
+    if reference.message_ref_id.is_zero() {
+        return div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_1()
+            .h(px(24.))
+            .pl(px(super::context::REPLY_INSET))
+            .pr(px(super::context::CONTENT_RIGHT_PAD))
+            .text_size(px(14.))
+            .child(
+                Icon::new(IconName::ReplyCorner)
+                    .size_4()
+                    .text_color(theme.text_muted),
+            )
+            .child(
+                div()
+                    .size_6()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded_full()
+                    .bg(theme.tokens.bg_icon_theme)
+                    .child(
+                        Icon::new(IconName::IconReplyMessDeletedWeb)
+                            .size_4()
+                            .text_color(theme.tokens.text_theme_primary),
+                    ),
+            )
+            .child(
+                div()
+                    .italic()
+                    .text_color(theme.tokens.text_theme_primary)
+                    .child(mezon_i18n::t(ctx.locale, "message.messageDeleteReply").to_string()),
+            )
+            .into_any_element();
+    }
+
+    let preview = if reference.content.is_empty() {
         if reference.has_attachment {
             mezon_i18n::t(ctx.locale, "chat.clickToSeeAttachment").to_string()
         } else {
@@ -148,7 +183,6 @@ pub fn render_reply(reference: &MessageReference, ctx: &RowCtx) -> AnyElement {
                 .min_w_0()
                 .truncate()
                 .text_color(theme.tokens.text_theme_message)
-                .when(is_deleted, |d| d.italic())
                 .child(preview),
         )
         .into_any_element()
