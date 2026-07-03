@@ -559,7 +559,7 @@ struct VideoCell {
 impl VideoCell {
     fn camera(p: &VoiceParticipant, name: String, avatar_url: String) -> Self {
         Self {
-            id: format!("{}\u{1}camera", p.identity),
+            id: mezon_store::camera_tile_id(&p.identity),
             name,
             avatar_url,
             key: p.camera,
@@ -572,7 +572,7 @@ impl VideoCell {
 
     fn screen(p: &VoiceParticipant, name: String, avatar_url: String) -> Self {
         Self {
-            id: format!("{}\u{1}screen", p.identity),
+            id: mezon_store::screen_tile_id(&p.identity),
             name,
             avatar_url,
             key: p.screenshare,
