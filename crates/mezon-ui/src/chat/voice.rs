@@ -150,10 +150,6 @@ pub fn render_mini_bar(
                     cx.write_to_clipboard(ClipboardItem::new_string(link));
                     voice.update(cx, |store, cx| store.mark_link_copied(cx));
                 }
-        small_icon_button("voice-minibar-leave", IconName::PhoneOff, theme.bg_hover)
-            .text_color(theme.status_dnd)
-            .on_click(move |_, window, cx| {
-                voice.update(cx, |store, cx| store.leave(window, cx));
             })
     };
 
@@ -303,7 +299,7 @@ pub fn render_mini_bar(
             locale,
             "channelVoice.disconnect",
         )))
-        .on_click(move |_, _, cx| voice.update(cx, |store, cx| store.leave(cx)))
+        .on_click(move |_, window, cx| voice.update(cx, |store, cx| store.leave(window, cx)))
     };
 
     div()
@@ -648,17 +644,6 @@ fn render_in_call(
 ) -> AnyElement {
     let fullscreen_active = store.fullscreen_screen().is_some();
 
-    let mut cells: Vec<VideoCell> = Vec::new();
-    for p in participants {
-        if p.screenshare.is_some() {
-            let (name, avatar) = resolve_voice_identity(cx, channel.clan_id, &p.identity, &p.name);
-            cells.push(VideoCell::screen(p, name, avatar));
-        }
-    }
-    for p in participants {
-        let (name, avatar) = resolve_voice_identity(cx, channel.clan_id, &p.identity, &p.name);
-        cells.push(VideoCell::camera(p, name, avatar));
-    }
     let body = (!fullscreen_active).then(|| {
         let participants = store.participants();
         let focused = store.focused_tile();
@@ -666,29 +651,18 @@ fn render_in_call(
         let mut cells: Vec<VideoCell> = Vec::new();
         for p in participants {
             if p.screenshare.is_some() {
-                cells.push(VideoCell::screen(p));
+                let (name, avatar) =
+                    resolve_voice_identity(cx, channel.clan_id, &p.identity, &p.name);
+                cells.push(VideoCell::screen(p, name, avatar));
             }
         }
         for p in participants {
-            cells.push(VideoCell::camera(p));
+            let (name, avatar) = resolve_voice_identity(cx, channel.clan_id, &p.identity, &p.name);
+            cells.push(VideoCell::camera(p, name, avatar));
         }
 
         let focused_idx = focused.and_then(|id| cells.iter().position(|c| c.id == id));
 
-    let body = match focused_idx {
-        Some(idx) => render_focus_layout(theme, locale, store, voice, &cells, idx),
-        None => render_grid(
-            theme,
-            locale,
-            store,
-            voice,
-            &cells,
-            &channel.voice_members,
-            connecting,
-            channel.clan_id,
-            cx,
-        ),
-    };
         match focused_idx {
             Some(idx) => render_focus_layout(theme, locale, store, voice, &cells, idx),
             None => render_grid(
@@ -699,6 +673,8 @@ fn render_in_call(
                 &cells,
                 &channel.voice_members,
                 connecting,
+                channel.clan_id,
+                cx,
             ),
         }
     });
