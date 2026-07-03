@@ -241,6 +241,9 @@ impl MessageList {
         self.temp_ids.iter().find_map(|temp_id| {
             let idx = *self.index.get(temp_id)?;
             let candidate = &self.items[idx];
+            if candidate.send_failed {
+                return None;
+            }
             if candidate.content != content {
                 return None;
             }
@@ -428,6 +431,7 @@ pub struct MessagesStore {
     last_load_more: Option<Instant>,
     consecutive_loads: u32,
     fetch_generation: u64,
+    reset_generation: u64,
     /// Active reply target for the composer, if any.
     reply_target: Option<ReplyDraft>,
     /// Message currently being edited inline in its row (self-only; one at a time).
@@ -493,6 +497,7 @@ impl MessagesStore {
         self.last_load_more = None;
         self.consecutive_loads = 0;
         self.fetch_generation = self.fetch_generation.wrapping_add(1);
+        self.reset_generation = self.reset_generation.wrapping_add(1);
         self.reply_target = None;
         self.editing = None;
         self.joined_channels.clear();
@@ -531,6 +536,7 @@ impl MessagesStore {
             last_load_more: None,
             consecutive_loads: 0,
             fetch_generation: 0,
+            reset_generation: 0,
             reply_target: None,
             editing: None,
             joined_channels: HashSet::new(),
@@ -846,6 +852,7 @@ impl MessagesStore {
         let ts = pending.create_time.max(0);
         let timestamp_seconds = u32::try_from(ts).unwrap_or(u32::MAX);
         let badge_count = i32::try_from(pending.badge_count).unwrap_or(i32::MAX);
+        let generation = self.reset_generation;
 
         cx.spawn(async move |this, cx| {
             let result = api
@@ -865,6 +872,9 @@ impl MessagesStore {
                     "write_last_seen_message failed: {e}"
                 );
                 this.update(cx, |this, _| {
+                    if this.reset_generation != generation {
+                        return;
+                    }
                     this.last_seen_fingerprint.remove(&ChannelId(channel_id));
                     this.queued_last_seen.push(PendingLastSeen {
                         clan_id: ClanId(clan_id),
@@ -1433,7 +1443,7 @@ impl MessagesStore {
         if self.editing == Some(message_id) {
             self.editing = None;
         }
-        self.apply_message_remove(channel_id, channel_id, message_id, cx);
+        self.apply_message_remove(channel_id, message_id, cx);
 
         let api = self.api.clone();
         let clan_id = self.active_clan_id.map_or(0, |c| c.get());
@@ -1951,15 +1961,15 @@ impl MessagesStore {
                 self.apply_message_update(storage_id, message_id, incoming, cx);
             }
             MessageCode::ChatRemove | MessageCode::DeleteEphemeralMsg => {
-                self.apply_message_remove(storage_id, parent_id, message_id, cx);
+                self.apply_message_remove(storage_id, message_id, cx);
             }
             _ => {
                 if !self.cache.contains(&storage_id) {
-                    self.set_last_message(parent_id, message_id);
+                    self.set_last_message(storage_id, message_id);
                     return;
                 }
                 if self.is_viewing_older(storage_id) {
-                    self.set_last_message(parent_id, message_id);
+                    self.set_last_message(storage_id, message_id);
                     return;
                 }
                 let tail_loaded = self.cache.get(&storage_id).is_some_and(|channel| {
@@ -1969,11 +1979,11 @@ impl MessagesStore {
                     )
                 });
                 if !tail_loaded {
-                    self.set_last_message(parent_id, message_id);
+                    self.set_last_message(storage_id, message_id);
                     return;
                 }
                 let incoming = message_from_channel_proto(m, message_id.get(), cfg);
-                self.apply_incoming_message(storage_id, parent_id, incoming, cx);
+                self.apply_incoming_message(storage_id, incoming, cx);
             }
         }
     }
@@ -1981,13 +1991,12 @@ impl MessagesStore {
     fn apply_incoming_message(
         &mut self,
         storage_id: ChannelId,
-        parent_id: ChannelId,
         msg: Message,
         cx: &mut Context<Self>,
     ) {
         let is_active = self.active_channel_id == Some(storage_id);
         let Some(channel) = self.cache.get_mut(&storage_id) else {
-            self.set_last_message(parent_id, msg.id);
+            self.set_last_message(storage_id, msg.id);
             return;
         };
         if channel.messages.contains_id(msg.id) {
@@ -2015,7 +2024,7 @@ impl MessagesStore {
             }
         };
         let last_id = channel.messages.last().map(|m| m.id).unwrap_or(tail_id);
-        self.set_last_message(parent_id, last_id);
+        self.set_last_message(storage_id, last_id);
         if is_active {
             if appended {
                 self.emit_appended(old_len, cx);
@@ -2052,7 +2061,6 @@ impl MessagesStore {
     fn apply_message_remove(
         &mut self,
         storage_id: ChannelId,
-        parent_id: ChannelId,
         message_id: MessageId,
         cx: &mut Context<Self>,
     ) {
@@ -2063,7 +2071,7 @@ impl MessagesStore {
         {
             self.reply_target = None;
         }
-        self.retreat_last_message(parent_id, storage_id, message_id);
+        self.retreat_last_message(storage_id, message_id);
 
         let is_active = self.active_channel_id == Some(storage_id);
         let Some(channel) = self.cache.get_mut(&storage_id) else {
@@ -2082,17 +2090,12 @@ impl MessagesStore {
         }
     }
 
-    fn retreat_last_message(
-        &mut self,
-        parent_id: ChannelId,
-        storage_id: ChannelId,
-        deleted_id: MessageId,
-    ) {
-        if self.last_message_by_channel.get(&parent_id) != Some(&deleted_id) {
+    fn retreat_last_message(&mut self, storage_id: ChannelId, deleted_id: MessageId) {
+        if self.last_message_by_channel.get(&storage_id) != Some(&deleted_id) {
             return;
         }
         if self.is_viewing_older(storage_id) {
-            self.last_message_by_channel.remove(&parent_id);
+            self.last_message_by_channel.remove(&storage_id);
             return;
         }
         if let Some(prev) = self.cache.get(&storage_id).and_then(|c| {
@@ -2102,9 +2105,9 @@ impl MessagesStore {
                 .rev()
                 .find(|m| m.id != deleted_id)
         }) {
-            self.set_last_message(parent_id, prev.id);
+            self.set_last_message(storage_id, prev.id);
         } else {
-            self.last_message_by_channel.remove(&parent_id);
+            self.last_message_by_channel.remove(&storage_id);
         }
     }
 
@@ -2897,6 +2900,10 @@ fn optimistic_create_time(messages: &MessageList, sender_id: &str) -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
+    optimistic_create_time_at(messages, sender_id, now)
+}
+
+fn optimistic_create_time_at(messages: &MessageList, sender_id: &str, now: i64) -> i64 {
     let Some(last) = messages.last() else {
         return now;
     };
@@ -3563,13 +3570,10 @@ mod tests {
 
     #[test]
     fn optimistic_create_time_increments_within_same_sender_burst() {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs() as i64)
-            .unwrap_or(0);
+        let now = 1_700_000_000i64;
         let mut list =
             MessageList::from_messages(vec![Message::new(MessageId(1), "a", "42", "Me", now - 5)]);
-        assert_eq!(optimistic_create_time(&list, "42"), now + 1);
+        assert_eq!(optimistic_create_time_at(&list, "42", now), now + 1);
         list.push_trim_regroup(Message::new(
             MessageId::next_optimistic(),
             "b",
@@ -3577,15 +3581,12 @@ mod tests {
             "Me",
             now + 1,
         ));
-        assert_eq!(optimistic_create_time(&list, "42"), now + 2);
+        assert_eq!(optimistic_create_time_at(&list, "42", now), now + 2);
     }
 
     #[test]
     fn optimistic_create_time_resets_after_combine_window() {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs() as i64)
-            .unwrap_or(0);
+        let now = 1_700_000_000i64;
         let list = MessageList::from_messages(vec![Message::new(
             MessageId(1),
             "a",
@@ -3593,7 +3594,7 @@ mod tests {
             "Me",
             now - 700,
         )]);
-        assert_eq!(optimistic_create_time(&list, "42"), now);
+        assert_eq!(optimistic_create_time_at(&list, "42", now), now);
     }
 
     fn assert_list_consistent(list: &MessageList) {
@@ -3906,8 +3907,50 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(storage_channel_id(&m), ChannelId(99));
+        assert_eq!(parent_channel_id(&m), ChannelId(10));
         m.topic_id = 0;
         assert_eq!(storage_channel_id(&m), ChannelId(10));
+        assert_eq!(parent_channel_id(&m), ChannelId(10));
+    }
+
+    #[test]
+    fn tail_keyed_by_storage_bucket_avoids_parent_poison() {
+        let parent_buffer = MessageList::from_messages(vec![
+            Message::new(MessageId(100), "a", "u1", "U", 1),
+            Message::new(MessageId(200), "b", "u1", "U", 2),
+        ]);
+
+        let topic_msg = mezon_proto::api::ChannelMessage {
+            channel_id: 10,
+            topic_id: 99,
+            message_id: 4242,
+            ..Default::default()
+        };
+        let topic_bucket = storage_channel_id(&topic_msg);
+        let parent_bucket = parent_channel_id(&topic_msg);
+        assert_ne!(topic_bucket, parent_bucket);
+
+        let topic_tail = MessageId(topic_msg.message_id);
+        assert!(has_more_bottom_for(Some(topic_tail), &parent_buffer));
+
+        let parent_tail = parent_buffer.last().map(|m| m.id);
+        assert!(!has_more_bottom_for(parent_tail, &parent_buffer));
+    }
+
+    #[test]
+    fn temp_match_position_skips_failed_temp() {
+        let mut failed = Message::new(MessageId::next_optimistic(), "hello", "42", "Me", 1);
+        failed.send_failed = true;
+        let pending = Message::new(MessageId::next_optimistic(), "hello", "42", "Me", 2);
+        let failed_id = failed.id;
+        let pending_id = pending.id;
+
+        let list = MessageList::from_messages(vec![failed, pending]);
+        let idx = list
+            .temp_match_position("42", "hello")
+            .expect("a non-failed temp should match");
+        assert_eq!(list.items[idx].id, pending_id);
+        assert_ne!(list.items[idx].id, failed_id);
     }
 
     #[test]
