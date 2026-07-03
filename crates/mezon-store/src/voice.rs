@@ -365,6 +365,26 @@ impl VoiceStore {
         self.fullscreen_screen
     }
 
+    pub fn pip_key(&self) -> Option<u64> {
+        self.pip.as_ref().map(|p| p.key)
+    }
+
+    pub fn primary_screen_key(&self) -> Option<u64> {
+        if let Some(key) = self.fullscreen_screen {
+            return Some(key);
+        }
+        if let Some(focused) = self.focused_tile.as_deref()
+            && let Some(key) = self
+                .participants
+                .iter()
+                .find(|p| p.screenshare.is_some() && screen_tile_id(&p.identity) == focused)
+                .and_then(|p| p.screenshare)
+        {
+            return Some(key);
+        }
+        self.participants.iter().find_map(|p| p.screenshare)
+    }
+
     pub fn toggle_fullscreen_screen(&mut self, key: u64, cx: &mut Context<Self>) {
         self.fullscreen_screen = if self.fullscreen_screen == Some(key) {
             None
