@@ -43,6 +43,8 @@ pub enum RealtimeKind {
     UserChannelAdded,
     UserChannelRemoved,
     Notifications,
+    AddFriend,
+    RemoveFriend,
 }
 
 impl RealtimeKind {
@@ -75,6 +77,8 @@ impl RealtimeKind {
             RealtimeEvent::UserChannelAdded(_) => Self::UserChannelAdded,
             RealtimeEvent::UserChannelRemoved(_) => Self::UserChannelRemoved,
             RealtimeEvent::Notifications(_) => Self::Notifications,
+            RealtimeEvent::AddFriend(_) => Self::AddFriend,
+            RealtimeEvent::RemoveFriend(_) => Self::RemoveFriend,
             _ => return None,
         })
     }
@@ -244,8 +248,24 @@ mod tests {
     #[test]
     fn kind_of_returns_none_for_unhandled() {
         assert_eq!(
-            RealtimeKind::of(&RealtimeEvent::AddFriend(realtime::AddFriend::default())),
+            RealtimeKind::of(&RealtimeEvent::CustomStatus(
+                realtime::CustomStatusEvent::default()
+            )),
             None
+        );
+    }
+
+    #[test]
+    fn kind_of_routes_friend_events() {
+        assert_eq!(
+            RealtimeKind::of(&RealtimeEvent::AddFriend(realtime::AddFriend::default())),
+            Some(RealtimeKind::AddFriend)
+        );
+        assert_eq!(
+            RealtimeKind::of(&RealtimeEvent::RemoveFriend(
+                realtime::RemoveFriend::default()
+            )),
+            Some(RealtimeKind::RemoveFriend)
         );
     }
 }
