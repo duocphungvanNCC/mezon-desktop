@@ -290,6 +290,49 @@ impl DirectMessageStore {
         })
     }
 
+    pub fn send_direct_text_to_user(
+        &self,
+        user_id: UserId,
+        content: String,
+        cx: &mut Context<Self>,
+    ) -> Task<anyhow::Result<()>> {
+        let api = self.api.clone();
+        let existing = self
+            .channels
+            .as_slice()
+            .iter()
+            .find(|channel| channel.kind == DirectKind::Dm && channel.peer_user_id == Some(user_id))
+            .map(|channel| (channel.id, channel.kind));
+
+        cx.spawn(async move |_this, _cx| {
+            let (channel_id, channel_type, mode) = match existing {
+                Some((channel_id, kind)) => {
+                    (channel_id.get(), kind.channel_type(), kind.stream_mode())
+                }
+                None => {
+                    let desc = api.create_direct_channel(&[user_id.get()]).await?;
+                    let kind = DirectKind::from_raw(desc.channel_type);
+                    (desc.channel_id, kind.channel_type(), kind.stream_mode())
+                }
+            };
+
+            api.join_chat(0, channel_id, channel_type, false).await?;
+            api.send_channel_message(
+                0,
+                channel_id,
+                &content,
+                false,
+                mode,
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+            )
+            .await?;
+
+            Ok(())
+        })
+    }
+
     pub fn set_current(&mut self, id: ChannelId, channel_type: i32) {
         self.current = Some((id, channel_type));
     }

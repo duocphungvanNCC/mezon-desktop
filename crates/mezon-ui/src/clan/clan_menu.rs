@@ -9,6 +9,7 @@ use mezon_store::{ChannelList, ClanId, PermissionStore};
 
 use crate::app::shell::Shell;
 use crate::clan::create_category_modal::CreateCategoryModal;
+use crate::clan::invite_people_modal::InvitePeopleModal;
 use crate::components::primitives::{Icon, IconName, Switch, h_flex, v_flex};
 use crate::theme::ActiveTheme;
 
@@ -248,6 +249,7 @@ pub fn build_clan_menu(
     sidebar: WeakEntity<crate::sidebar::channel_sidebar::ChannelSidebar>,
     channel_list: Entity<ChannelList>,
     clan_id: ClanId,
+    clan_name: String,
     locale: &str,
     show_empty_categories: bool,
     can_create_category: bool,
@@ -282,17 +284,18 @@ pub fn build_clan_menu(
         );
     }
 
+    let invite_label = t("clanMenu.modalPanel.invitePeople");
+    let invite_clan_name = clan_name.clone();
+    menu = menu.item_icon(invite_label, IconName::AddPerson, move |window, cx| {
+        let modal =
+            cx.new(|cx| InvitePeopleModal::new(clan_id, invite_clan_name.clone(), window, cx));
+        Shell::global(cx).update(cx, |shell, cx| shell.show_modal(modal.into(), cx));
+    });
+
     let channel_list_mark = channel_list.clone();
     menu = menu.item(t("clanMenu.modalPanel.markAsRead"), move |_window, cx| {
         channel_list_mark.update(cx, |list, cx| list.mark_clan_as_read(clan_id, cx));
     });
-
-    let invite_label = t("clanMenu.modalPanel.invitePeople");
-    menu = menu.item_icon(
-        invite_label.clone(),
-        IconName::AddPerson,
-        coming_soon_modal(invite_label, locale_owned.clone()),
-    );
 
     let settings_label = t("clanMenu.modalPanel.clanSettings");
     let settings_clan_id = clan_id;
