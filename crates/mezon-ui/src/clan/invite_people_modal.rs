@@ -1,6 +1,9 @@
-use std::collections::HashSet;
-use std::io::Cursor;
-use std::sync::Arc;
+use crate::app::shell::Shell;
+use crate::components::primitives::{
+    Avatar, Button, ButtonVariants, Icon, IconName, Input, InputEvent, InputState,
+};
+use crate::theme::{ActiveTheme, Theme};
+use crate::util::imgproxy;
 use gpui::{
     AnyElement, App, ClickEvent, ClipboardItem, Context, Entity, FocusHandle, Focusable,
     FontWeight, Image as ClipboardImage, ImageFormat, ObjectFit, RenderImage, SharedString,
@@ -10,15 +13,9 @@ use mezon_store::{
     AppConfig, ChannelId, ClanId, ClanInviteLink, ClanList, DirectMessageStore, Friend,
     FriendEvent, FriendState, FriendStore, UserId,
 };
-use crate::app::shell::Shell;
-use crate::components::primitives::{
-    Avatar, Button, ButtonVariants, Icon, IconName, Input, InputEvent, InputState,
-};
-use crate::theme::{ActiveTheme, Theme};
-use crate::util::imgproxy;
-
-// const ROW_HEIGHT: f32 = 74.;
-// const AVATAR_SIZE: f32 = 48.;
+use std::collections::HashSet;
+use std::io::Cursor;
+use std::sync::Arc;
 
 #[derive(Clone)]
 struct InviteFriendRow {
@@ -74,9 +71,10 @@ impl InvitePeopleModal {
         FriendStore::global(cx).update(cx, |store, cx| store.ensure_loaded(cx));
         DirectMessageStore::global(cx).update(cx, |store, cx| store.ensure_loaded(cx));
 
+        let search_placeholder = mezon_i18n::t(&locale, "invitation.searchPlaceholder").to_string();
         let search_input = cx.new(|cx| {
             InputState::new(window, cx)
-                .placeholder("Search for friends")
+                .placeholder(search_placeholder)
                 .height(px(40.))
                 .radius(px(8.))
         });
@@ -146,10 +144,12 @@ impl InvitePeopleModal {
     ) {
         let Some(clan_list) = ClanList::try_global(cx) else {
             self.invite_link_loading = false;
-            self.invite_link_error = Some("Unable to prepare invite link".to_string());
+            self.invite_link_error =
+                Some(tr(&self.locale, "inviteToChannel.share.errorCreateLink"));
             return;
         };
         let config = AppConfig::try_global(cx).cloned();
+        let locale = self.locale.clone();
         let task = clan_list.update(cx, |store, cx| {
             store.create_invite_link(clan_id, channel_id, cx)
         });
@@ -157,7 +157,7 @@ impl InvitePeopleModal {
         cx.spawn(async move |this, cx| match task.await {
             Ok(link) => {
                 let invite_link = invite_link_from_api(&link, config.as_ref())
-                    .ok_or_else(|| "Invite link response is empty".to_string());
+                    .ok_or_else(|| tr(&locale, "inviteToChannel.share.errorCreateLink"));
                 let _ = this.update(cx, |this, cx| match invite_link {
                     Ok(invite_link) => {
                         this.invite_link = invite_link;
@@ -181,7 +181,8 @@ impl InvitePeopleModal {
                     this.invite_link.clear();
                     this.qr_image = None;
                     this.invite_link_loading = false;
-                    this.invite_link_error = Some("Unable to create invite link".to_string());
+                    this.invite_link_error =
+                        Some(tr(&this.locale, "inviteToChannel.share.errorCreateLink"));
                     cx.notify();
                 });
             }
@@ -226,7 +227,7 @@ impl InvitePeopleModal {
 
         let Some(store) = DirectMessageStore::try_global(cx) else {
             Shell::global(cx).update(cx, |shell, cx| {
-                shell.error("Unable to open direct messages", cx);
+                shell.error(tr(&self.locale, "shareContact.card.messageError"), cx);
             });
             return;
         };
@@ -238,6 +239,7 @@ impl InvitePeopleModal {
         let task = store.update(cx, |store, cx| {
             store.send_direct_text_to_user(user_id, link, cx)
         });
+        let locale = self.locale.clone();
         cx.spawn(async move |this, cx| match task.await {
             Ok(()) => {
                 let _ = this.update(cx, |this, cx| {
@@ -248,7 +250,7 @@ impl InvitePeopleModal {
             }
             Err(err) => {
                 tracing::warn!("send clan invite failed: {err}");
-                let message = format!("Unable to send invite: {err}");
+                let message = format!("{}: {err}", tr(&locale, "inviteToChannel.share.error"));
                 let _ = this.update(cx, |this, cx| {
                     this.sending.remove(&user_id);
                     cx.notify();
@@ -309,20 +311,30 @@ impl Render for InvitePeopleModal {
 
         let theme = cx.theme().clone();
         let entity = cx.entity();
-        let title = SharedString::from(format!("Invite friends to {}", self.clan_name));
+        let title = SharedString::from(invite_modal_title(&self.locale, &self.clan_name));
         let invite_link = self.invite_link();
         let copied = self.copied;
         let invite_ready = self.invite_link_ready();
         let invite_loading = self.invite_link_loading;
         let invite_error = self.invite_link_error.clone();
+        let invite_label = SharedString::from(tr(&self.locale, "inviteToChannel.btnInvite"));
+        let sent_label = SharedString::from(tr(&self.locale, "inviteToChannel.btnSent"));
+        let sending_label = SharedString::from(tr(&self.locale, "forwardMessage.modal.sending"));
+
+        const ROW_HEIGHT: f32 = 56.;
+        const MAX_VISIBLE_ROWS: usize = 4;
 
         let rows = self.rows.clone();
         let sent = self.sent.clone();
         let sending = self.sending.clone();
         let list_entity = entity.clone();
+        let row_count = rows.len();
+        let visible_rows = row_count.min(MAX_VISIBLE_ROWS);
+        let list_height = px(ROW_HEIGHT * visible_rows as f32);
+
         let friend_list = uniform_list(
             "invite-friends-list",
-            rows.len(),
+            row_count,
             move |range, _window, cx| {
                 let theme = cx.theme().clone();
                 range
@@ -333,31 +345,32 @@ impl Render for InvitePeopleModal {
                             sent.contains(&row.id),
                             sending.contains(&row.id),
                             invite_ready,
+                            invite_label.clone(),
+                            sent_label.clone(),
+                            sending_label.clone(),
                             list_entity.clone(),
                         ),
-                        None => div().h(px(74.)).into_any_element(),
+                        None => div().h(px(ROW_HEIGHT)).into_any_element(),
                     })
                     .collect::<Vec<_>>()
             },
         )
         .track_scroll(&self.scroll)
-        .h(px(250.))
+        .w_full()
+        .h(list_height)
         .min_h_0();
 
         let qr_entity = entity.clone();
-        let list_body = if self.rows.is_empty() {
+        let list_body = if row_count == 0 {
             div()
-                .h(px(250.))
-                .flex()
-                .items_center()
-                .justify_center()
-                .text_sm()
-                .text_color(theme.tokens.text_theme_primary)
-                .child("No friends found")
+                .py(px(10.))
+                .text_size(px(13.))
+                .text_color(theme.text_secondary)
+                .child(mezon_i18n::t(&self.locale, "invitation.noResults"))
                 .into_any_element()
         } else {
             div()
-                .h(px(250.))
+                .h(list_height)
                 .min_h_0()
                 .overflow_hidden()
                 .child(friend_list)
@@ -393,7 +406,7 @@ impl Render for InvitePeopleModal {
                             .truncate()
                             .text_size(px(20.))
                             .font_weight(FontWeight::BOLD)
-                            .text_color(theme.tokens.text_theme_primary)
+                            .text_color(gpui::white())
                             .child(title),
                     )
                     .child(
@@ -441,8 +454,8 @@ impl Render for InvitePeopleModal {
                                 .mb(px(8.))
                                 .text_size(px(14.))
                                 .font_weight(FontWeight::BOLD)
-                                .text_color(theme.tokens.text_theme_primary)
-                                .child("OR, SEND A CLAN INVITE LINK TO A FRIEND")
+                                .text_color(gpui::white())
+                                .child(invite_send_link_label(&self.locale))
                                 .child(
                                     div()
                                         .id("invite-copy-qr")
@@ -456,7 +469,7 @@ impl Render for InvitePeopleModal {
                                             )
                                         })
                                         .when(!invite_ready, |el| el.opacity(0.55))
-                                        .child("COPY QR"),
+                                        .child(copy_qr_label(&self.locale)),
                                 ),
                         )
                         .child(render_copy_link(
@@ -466,6 +479,7 @@ impl Render for InvitePeopleModal {
                             invite_loading,
                             invite_error,
                             invite_ready,
+                            &self.locale,
                             entity.clone(),
                         )),
                 ),
@@ -473,7 +487,6 @@ impl Render for InvitePeopleModal {
             .into_any_element()
     }
 }
-
 fn render_qr_modal(
     theme: &Theme,
     entity: Entity<InvitePeopleModal>,
@@ -481,7 +494,7 @@ fn render_qr_modal(
 ) -> AnyElement {
     let mut clan_avatar = Avatar::new()
         .name(SharedString::from(modal.clan_name.clone()))
-        .size_px(px(44.));
+        .size_px(px(40.));
     if !modal.clan_avatar_src.is_empty() {
         clan_avatar = clan_avatar.src(modal.clan_avatar_src.clone());
         if !modal.clan_avatar_raw.is_empty() && modal.clan_avatar_raw != modal.clan_avatar_src {
@@ -495,11 +508,11 @@ fn render_qr_modal(
     let copy_entity = entity.clone();
     let qr_content = match &modal.qr_image {
         Some(qr) => img(qr.render.clone())
-            .size(px(320.))
+            .size(px(260.))
             .object_fit(ObjectFit::Contain)
             .into_any_element(),
         None => div()
-            .size(px(320.))
+            .size(px(260.))
             .flex()
             .items_center()
             .justify_center()
@@ -521,26 +534,26 @@ fn render_qr_modal(
                 entity.update(cx, |this, cx| this.close_qr(cx));
             }
         })
-        .w(px(410.))
-        .max_w(px(410.))
+        .w(px(340.))
+        .max_w(px(340.))
         .flex()
         .flex_col()
         .items_center()
         .rounded(px(12.))
         .bg(theme.tokens.theme_setting_primary)
         .shadow_lg()
-        .p(px(24.))
+        .p(px(22.))
         .child(
             div()
                 .relative()
-                .w(px(360.))
-                .pt(px(24.))
+                .w(px(290.))
+                .pt(px(20.))
                 .child(
                     div()
                         .w_full()
                         .rounded(px(6.))
                         .bg(gpui::white())
-                        .p(px(16.))
+                        .p(px(14.))
                         .flex()
                         .items_center()
                         .justify_center()
@@ -549,14 +562,14 @@ fn render_qr_modal(
                 .child(
                     div()
                         .absolute()
-                        .top(px(2.))
+                        .top(px(0.))
                         .left_0()
                         .right_0()
                         .flex()
                         .justify_center()
                         .child(
                             div()
-                                .size(px(50.))
+                                .size(px(46.))
                                 .rounded_full()
                                 .bg(gpui::white())
                                 .p(px(3.))
@@ -566,17 +579,17 @@ fn render_qr_modal(
         )
         .child(
             div()
-                .mt(px(24.))
+                .mt(px(20.))
                 .flex()
                 .items_center()
                 .justify_center()
-                .gap_4()
+                .gap_3()
                 .child(
                     Button::new("invite-qr-cancel")
-                        .label("Cancel")
+                        .label(mezon_i18n::t(&modal.locale, "invitation.buttons.cancel"))
                         .ghost()
-                        .h(px(50.))
-                        .min_w(px(100.))
+                        .h(px(40.))
+                        .min_w(px(88.))
                         .border_1()
                         .border_color(theme.tokens.border_theme_primary)
                         .on_click(move |_, _window, cx| {
@@ -585,11 +598,11 @@ fn render_qr_modal(
                 )
                 .child(
                     Button::new("invite-qr-copy")
-                        .label("Copy QR")
+                        .label(copy_qr_label(&modal.locale))
                         .primary()
-                        .h(px(50.))
-                        .min_w(px(114.))
-                        .text_size(px(18.))
+                        .h(px(40.))
+                        .min_w(px(96.))
+                        .text_size(px(15.))
                         .font_weight(FontWeight::BOLD)
                         .on_click(move |_, _window, cx| {
                             copy_entity.update(cx, |this, cx| this.copy_qr(cx));
@@ -598,25 +611,24 @@ fn render_qr_modal(
         )
         .into_any_element()
 }
-
 fn friend_matches_query(friend: &Friend, query: &str) -> bool {
     if query.is_empty() {
         return true;
     }
     friend.label().to_lowercase().contains(query) || friend.username.to_lowercase().contains(query)
 }
-
 fn render_friend_row(
     theme: &Theme,
     row: InviteFriendRow,
     sent: bool,
     sending: bool,
     invite_ready: bool,
+    invite_label: SharedString,
+    sent_label: SharedString,
+    sending_label: SharedString,
     entity: Entity<InvitePeopleModal>,
 ) -> AnyElement {
-    let mut avatar = Avatar::new()
-        .name(row.label.clone())
-        .size_px(px(48.));
+    let mut avatar = Avatar::new().name(row.label.clone()).size_px(px(36.));
     if !row.avatar_src.is_empty() {
         avatar = avatar.src(row.avatar_src.clone());
         if !row.avatar_raw.is_empty() && row.avatar_raw != row.avatar_src {
@@ -626,11 +638,24 @@ fn render_friend_row(
         avatar = avatar.src(row.avatar_raw.clone());
     }
 
-    let action = render_invite_action(theme, row.id, sent, sending, invite_ready, entity);
+    let action = render_invite_action(
+        theme,
+        row.id,
+        sent,
+        sending,
+        invite_ready,
+        invite_label,
+        sent_label,
+        sending_label,
+        entity,
+    );
+    let group_name = SharedString::from(format!("invite-row-{}", row.id));
 
     div()
         .id(SharedString::from(format!("invite-friend-row-{}", row.id)))
-        .h(px(74.))
+        .group(group_name)
+        .w_full()
+        .h(px(56.))
         .flex()
         .items_center()
         .justify_between()
@@ -649,9 +674,9 @@ fn render_friend_row(
                 .child(
                     div()
                         .truncate()
-                        .text_size(px(18.))
+                        .text_size(px(14.))
                         .font_weight(FontWeight::MEDIUM)
-                        .text_color(theme.tokens.text_theme_primary)
+                        .text_color(gpui::white())
                         .child(row.label),
                 ),
         )
@@ -665,39 +690,46 @@ fn render_invite_action(
     sent: bool,
     sending: bool,
     invite_ready: bool,
+    invite_label: SharedString,
+    sent_label: SharedString,
+    sending_label: SharedString,
     entity: Entity<InvitePeopleModal>,
 ) -> AnyElement {
     if sent {
         return div()
-            .min_w(px(88.))
-            .h(px(42.))
+            .min_w(px(72.))
+            .h(px(32.))
             .flex()
             .items_center()
             .justify_center()
-            .text_size(px(16.))
+            .text_size(px(13.))
             .font_weight(FontWeight::BOLD)
             .text_color(theme.text_secondary)
-            .child("Sent")
+            .child(sent_label)
             .into_any_element();
     }
 
-    let label = if sending { "Sending" } else { "Invite" };
+    let label = if sending { sending_label } else { invite_label };
+    let group_name = SharedString::from(format!("invite-row-{}", user_id));
+
     div()
         .id(SharedString::from(format!("invite-friend-{}", user_id)))
-        .min_w(px(88.))
-        .h(px(42.))
+        .min_w(px(72.))
+        .h(px(32.))
         .flex()
         .items_center()
         .justify_center()
-        .rounded_lg()
+        .rounded_md()
         .border_1()
         .border_color(theme.tokens.border_theme_primary)
-        .text_size(px(16.))
+        .text_size(px(13.))
         .font_weight(FontWeight::MEDIUM)
-        .text_color(theme.tokens.text_theme_primary)
+        .text_color(theme.text_secondary)
         .when(invite_ready && !sending, |el| {
             el.cursor_pointer()
-                .hover(|s| s.bg(theme.status_online))
+                .group_hover(group_name, |s| {
+                    s.bg(theme.status_online).text_color(gpui::white())
+                })
                 .on_click(move |_: &ClickEvent, _window, cx| {
                     entity.update(cx, |this, cx| this.invite_friend(user_id, cx));
                 })
@@ -706,7 +738,6 @@ fn render_invite_action(
         .child(label)
         .into_any_element()
 }
-
 fn render_copy_link(
     theme: &Theme,
     invite_link: String,
@@ -714,9 +745,14 @@ fn render_copy_link(
     loading: bool,
     error: Option<String>,
     invite_ready: bool,
+    locale: &str,
     entity: Entity<InvitePeopleModal>,
 ) -> AnyElement {
-    let button_label = if copied { "Copied" } else { "Copy" };
+    let button_label = if copied {
+        mezon_i18n::t(locale, "invitation.buttons.copied")
+    } else {
+        mezon_i18n::t(locale, "inviteToChannel.iconTitle.copyLink")
+    };
     let button_bg = if copied {
         theme.status_online
     } else {
@@ -725,13 +761,13 @@ fn render_copy_link(
     let display_text = if let Some(error) = error {
         error
     } else if loading {
-        "Generating invite link...".to_string()
+        tr(locale, "inviteToChannel.loadingInviteLink")
     } else {
         invite_link
     };
 
     div()
-        .h(px(56.))
+        .h(px(44.))
         .flex()
         .items_center()
         .overflow_hidden()
@@ -743,22 +779,23 @@ fn render_copy_link(
             div()
                 .min_w_0()
                 .flex_1()
-                .px(px(20.))
+                .px(px(16.))
                 .truncate()
-                .text_size(px(16.))
-                .text_color(theme.tokens.text_theme_primary)
+                .text_size(px(14.))
+                .text_color(gpui::white())
                 .child(display_text),
         )
         .child(
             div()
                 .id("invite-link-copy")
                 .h_full()
-                .w(px(150.))
+                .w(px(110.))
                 .flex()
                 .items_center()
                 .justify_center()
+                .rounded_r_lg()
                 .bg(button_bg)
-                .text_size(px(18.))
+                .text_size(px(14.))
                 .font_weight(FontWeight::BOLD)
                 .text_color(gpui::white())
                 .when(invite_ready, |el| {
@@ -774,9 +811,45 @@ fn render_copy_link(
         .into_any_element()
 }
 
+fn tr(locale: &str, key: &'static str) -> String {
+    mezon_i18n::t(locale, key).to_string()
+}
+
+fn replace_i18n_var(template: &str, key: &str, value: &str) -> String {
+    template.replace(&format!("{{{{{key}}}}}"), value)
+}
+
+fn invite_modal_title(locale: &str, clan_name: &str) -> String {
+    replace_i18n_var(
+        mezon_i18n::t(locale, "invitation.modal.title"),
+        "target",
+        clan_name,
+    )
+}
+
+fn invite_send_link_label(locale: &str) -> String {
+    replace_i18n_var(
+        mezon_i18n::t(locale, "invitation.modal.sendLinkText"),
+        "type",
+        mezon_i18n::t(locale, "invitation.modal.clanInvite"),
+    )
+}
+
+fn copy_qr_label(locale: &str) -> String {
+    format!(
+        "{} ",
+        mezon_i18n::t(locale, "invitation.buttons.copyQR"),
+        // mezon_i18n::t(locale, "inviteToChannel.qrModal.title")
+    )
+}
+
 fn invite_link_for_code(invite_code: &str, config: Option<&AppConfig>) -> String {
     let origin = invite_origin_from_config(config);
-    format!("{origin}/invite/{invite_code}")
+    if origin.is_empty() {
+        format!("/invite/{invite_code}")
+    } else {
+        format!("{origin}/invite/{invite_code}")
+    }
 }
 
 fn invite_link_from_api(link: &ClanInviteLink, config: Option<&AppConfig>) -> Option<String> {
@@ -811,34 +884,45 @@ fn invite_code_from_link(link: &str) -> Option<String> {
 }
 
 fn invite_origin_from_config(config: Option<&AppConfig>) -> String {
-    const DEV_ORIGIN: &str = "https://dev-mezon.nccsoft.vn";
-    const PROD_ORIGIN: &str = "https://mezon.ai";
-
     let Some(config) = config else {
-        return PROD_ORIGIN.to_string();
+        return String::new();
     };
 
-    let domain = config.domain_url.trim().trim_end_matches('/');
-    if is_dev_host(domain)
-        || is_dev_host(config.client_host())
-        || is_dev_host(&config.api_host)
-        || is_dev_host(&config.api_gw_host)
-        || is_dev_host(&config.redirect_uri)
-        || is_dev_host(&config.oauth2_redirect_uri)
-    {
-        return DEV_ORIGIN.to_string();
+    invite_origin_from_host(&config.api_host, config.api_secure)
+        .or_else(|| invite_origin_from_url_like(&config.domain_url))
+        .unwrap_or_default()
+}
+
+fn invite_origin_from_host(host: &str, secure: bool) -> Option<String> {
+    let trimmed = host.trim().trim_end_matches('/');
+    if trimmed.is_empty() {
+        return None;
     }
 
-    if domain.is_empty() {
-        PROD_ORIGIN.to_string()
+    let (scheme, host_part) = match trimmed.split_once("://") {
+        Some((scheme, rest)) => (scheme.to_ascii_lowercase(), rest),
+        None => (if secure { "https" } else { "http" }.to_string(), trimmed),
+    };
+    let host_part = host_part
+        .split('/')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .trim_end_matches('/');
+    if scheme.is_empty() || host_part.is_empty() {
+        None
     } else {
-        domain.to_string()
+        Some(format!("{scheme}://{host_part}"))
     }
 }
 
-fn is_dev_host(value: &str) -> bool {
-    let value = value.to_ascii_lowercase();
-    value.contains("dev-mezon") || value.contains("nccsoft")
+fn invite_origin_from_url_like(value: &str) -> Option<String> {
+    let trimmed = value.trim().trim_end_matches('/');
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    invite_origin_from_host(trimmed, true)
 }
 
 fn build_qr_invite_image(data: &str) -> Option<QrInviteImage> {
@@ -894,43 +978,11 @@ mod tests {
     }
 
     #[test]
-    fn invite_origin_uses_configured_production_domain() {
-        let cfg = AppConfig {
-            api_host: "api.mezon.ai".into(),
-            api_gw_host: "api.mezon.ai".into(),
-            redirect_uri: "https://mezon.ai".into(),
-            oauth2_redirect_uri: "https://mezon.ai/login/callback".into(),
-            domain_url: "https://mezon.ai/".into(),
-            ..AppConfig::dev_defaults()
-        };
-
-        assert_eq!(
-            invite_link_for_code("42", Some(&cfg)),
-            "https://mezon.ai/invite/42"
-        );
-    }
-
-    #[test]
     fn invite_link_uses_api_invite_id_instead_of_clan_id() {
         let cfg = AppConfig::dev_defaults();
         let link = ClanInviteLink {
             id: 2076277531916374016,
             invite_link: String::new(),
-            ..Default::default()
-        };
-
-        assert_eq!(
-            invite_link_from_api(&link, Some(&cfg)),
-            Some("https://dev-mezon.nccsoft.vn/invite/2076277531916374016".to_string())
-        );
-    }
-
-    #[test]
-    fn invite_link_normalizes_api_url_to_runtime_origin() {
-        let cfg = AppConfig::dev_defaults();
-        let link = ClanInviteLink {
-            invite_link: "https://mezon.ai/invite/2076277531916374016?utm=1".into(),
-            id: 2076277531916374016,
             ..Default::default()
         };
 
