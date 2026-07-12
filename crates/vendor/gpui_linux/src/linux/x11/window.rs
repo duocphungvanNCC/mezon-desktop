@@ -9,7 +9,7 @@ use gpui::{
     Tiling, WindowAppearance, WindowBackgroundAppearance, WindowBounds, WindowControlArea,
     WindowDecorations, WindowKind, WindowParams, px,
 };
-use gpui_wgpu::{CompositorGpuHint, WgpuRenderer, WgpuSurfaceConfig, wgpu};
+use gpui_wgpu::{CompositorGpuHint, WgpuRenderer, WgpuSurfaceConfig};
 
 use collections::FxHashSet;
 use raw_window_handle as rwh;
@@ -722,12 +722,7 @@ impl X11WindowState {
                     // If the window appearance changes, then the renderer will get updated
                     // too
                     transparent: false,
-                    // mezon vendor edit: match Wayland (window.rs:351). With None the
-                    // renderer falls back to blocking Fifo — get_current_texture() can
-                    // stall the single calloop thread (which also drains X11 input) for
-                    // a full vsync. Mailbox is filtered against surface caps and still
-                    // falls back to Fifo when unsupported.
-                    preferred_present_mode: Some(wgpu::PresentMode::Mailbox),
+                    preferred_present_mode: None,
                 };
                 WgpuRenderer::new(gpu_context, &raw_window, config, compositor_gpu)?
             };

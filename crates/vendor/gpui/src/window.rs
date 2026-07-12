@@ -860,9 +860,6 @@ pub(crate) struct PaintIndex {
     accessed_element_states_index: usize,
     tab_handle_index: usize,
     line_layout_index: LineLayoutIndex,
-    // mezon vendor edit: every other per-frame paint artifact is replayed by
-    // `reuse_paint`; upstream omits `window_control_hitboxes`, so a reused (cached)
-    // paint range drops them and the custom titlebar's buttons + drag area go dead.
     window_control_hitboxes_index: usize,
 }
 
@@ -1616,10 +1613,6 @@ impl Window {
         });
         platform_window.on_hit_test_window_control({
             let mut cx = cx.to_async();
-            // mezon vendor edit: hit-test the position the platform is asking about rather
-            // than the cached `mouse_hit_test`. Windows' WM_NCHITTEST queries arbitrary
-            // non-client points, which deliver no mouse-move, so the cached hit test is
-            // stale/empty there and the custom titlebar controls never match.
             Box::new(move |position| {
                 handle
                     .update(&mut cx, |_, window, _cx| {
@@ -2729,10 +2722,7 @@ impl Window {
             handle,
             // Try moving window invalidator into the Window
             self.invalidator.clone(),
-            // mezon vendor edit: `AccessedEntities` (see `app/entity_map.rs`) is now an
-            // insertion-ordered accumulator rather than a bare set, so hand
-            // `record_entities_accessed` its set view.
-            entities.set(),
+            &entities,
         );
         let mut entities_ref = cx.entities.accessed_entities.get_mut();
         mem::swap(&mut entities, entities_ref.deref_mut());
@@ -3117,7 +3107,6 @@ impl Window {
             accessed_element_states_index: self.next_frame.accessed_element_states.len(),
             tab_handle_index: self.next_frame.tab_stops.paint_index(),
             line_layout_index: self.text_system.layout_index(),
-            // mezon vendor edit: see `PaintIndex::window_control_hitboxes_index`.
             window_control_hitboxes_index: self.next_frame.window_control_hitboxes.len(),
         }
     }
@@ -3154,9 +3143,6 @@ impl Window {
 
         self.text_system
             .reuse_layouts(range.start.line_layout_index..range.end.line_layout_index);
-        // mezon vendor edit: replay the window-control hitboxes for a reused paint range —
-        // upstream `reuse_paint` never restores them, so a cached titlebar subtree loses
-        // its hitboxes and `on_hit_test_window_control` then matches nothing.
         self.next_frame.window_control_hitboxes.extend(
             self.rendered_frame.window_control_hitboxes[range.start.window_control_hitboxes_index
                 ..range.end.window_control_hitboxes_index]
@@ -4143,27 +4129,6 @@ impl Window {
             };
 
             self.sprite_atlas.remove(&params.clone().into());
-        }
-
-        Ok(())
-    }
-
-    /// mezon vendor edit: push fresh bytes for a streaming image (video/GIF frame)
-    /// whose [`ImageId`] is stable across frames. Backends that support it write the
-    /// existing atlas tile in place; others drop the tile so the next paint re-creates
-    /// it — either way the per-tick allocate/upload/remove churn of a fresh image id
-    /// is avoided.
-    pub fn update_render_image(&mut self, data: &Arc<RenderImage>) -> Result<()> {
-        for frame_index in 0..data.frame_count() {
-            let params = RenderImageParams {
-                image_id: data.id,
-                frame_index,
-            };
-            let bytes = data
-                .as_bytes(frame_index)
-                .context("invalid frame index in update_render_image")?;
-            self.sprite_atlas
-                .replace(&params.into(), data.size(frame_index), bytes)?;
         }
 
         Ok(())
@@ -5188,10 +5153,6 @@ impl Window {
         self.platform_window.minimize();
     }
 
-    /// mezon vendor edit: expose `PlatformWindow::hide` (upstream wraps only
-    /// activate/minimize/zoom/fullscreen) so hide-on-close-to-tray goes through the
-    /// platform's deferred path instead of calling AppKit `orderOut:` inline.
-    ///
     /// Hide the current window at the platform level without closing it.
     pub fn hide_window(&self) {
         self.platform_window.hide();

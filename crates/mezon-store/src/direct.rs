@@ -1,7 +1,6 @@
 use crate::ids::{ChannelId, UserId};
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Duration;
 
 use gpui::{App, AppContext, Context, Entity, EventEmitter, Global, Task};
 use mezon_client::transport::{ApiChannelDesc, ApiDirectChannel};
@@ -67,17 +66,10 @@ impl DirectChannel {
 
 #[derive(Debug, Clone, Copy)]
 pub enum DirectEvent {
-    /// `channel_id` is `Some` for a single-conversation update (incoming
-    /// message, read-state change) so consumers can skip irrelevant channels;
-    /// `None` means a bulk change (fetch page, reset) — treat as "anything".
-    Changed { channel_id: Option<ChannelId> },
+    Changed,
 }
 
 const DM_PAGE_SIZE: i32 = 500;
-/// Incoming DM traffic bumps last-message/unread state per message; the
-/// sidebar and unread rail only need to converge, not animate every packet,
-/// so per-message `Changed` notifies are coalesced into one flush.
-const CHANGED_NOTIFY_COALESCE: Duration = Duration::from_millis(100);
 
 #[derive(Default)]
 struct DirectChannelList {
@@ -221,8 +213,6 @@ pub struct DirectMessageStore {
     has_more: bool,
     current_page: u32,
     current: Option<(ChannelId, i32)>,
-    pending_changed: Vec<ChannelId>,
-    changed_notify_task: Option<Task<()>>,
     api: Arc<AppApi>,
     _conn_watch: Task<()>,
 }
@@ -255,9 +245,7 @@ impl DirectMessageStore {
         self.has_more = true;
         self.current_page = 1;
         self.current = None;
-        self.pending_changed.clear();
-        self.changed_notify_task = None;
-        cx.emit(DirectEvent::Changed { channel_id: None });
+        cx.emit(DirectEvent::Changed);
         cx.notify();
     }
 
@@ -271,8 +259,6 @@ impl DirectMessageStore {
             has_more: true,
             current_page: 1,
             current: None,
-            pending_changed: Vec::new(),
-            changed_notify_task: None,
             api,
             _conn_watch: conn_watch,
         }
@@ -376,10 +362,62 @@ impl DirectMessageStore {
                     direct_from_created(&desc, user_id, &label, &peer_avatar, &peer_username);
                 this.channels.upsert_created(channel);
                 this.freshness.mark_fetched();
-                cx.emit(DirectEvent::Changed { channel_id: None });
+                cx.emit(DirectEvent::Changed);
                 cx.notify();
             })?;
             Ok((channel_id, channel_type))
+        })
+    }
+
+    pub fn send_direct_text_to_user(
+        &self,
+        user_id: UserId,
+        content: String,
+        cx: &mut Context<Self>,
+    ) -> Task<anyhow::Result<()>> {
+        let api = self.api.clone();
+        let existing = self
+            .channels
+            .as_slice()
+            .iter()
+            .find(|channel| channel.kind == DirectKind::Dm && channel.peer_user_id == Some(user_id))
+            .map(|channel| (channel.id, channel.kind.stream_mode()));
+
+        cx.spawn(async move |this, cx| {
+            let (channel_id, mode) = match existing {
+                Some(existing) => existing,
+                None => {
+                    let desc = api.create_direct_channel(&[user_id.0]).await?;
+                    let channel_id = ChannelId(desc.channel_id);
+                    let kind = DirectKind::from_raw(desc.channel_type);
+                    let mode = kind.stream_mode();
+                    this.update(cx, |this, cx| {
+                        let channel = direct_from_created(&desc, user_id, "", "", "");
+                        this.channels.upsert_created(channel);
+                        this.freshness.mark_fetched();
+                        cx.emit(DirectEvent::Changed);
+                        cx.notify();
+                    })?;
+                    (channel_id, mode)
+                }
+            };
+
+            let sent = api
+                .send_channel_message(
+                    0,
+                    channel_id.get(),
+                    &content,
+                    false,
+                    mode,
+                    Vec::new(),
+                    Vec::new(),
+                    Vec::new(),
+                )
+                .await?;
+            this.update(cx, |this, cx| {
+                this.note_message(channel_id, sent.create_time, true, false, cx);
+            })?;
+            Ok(())
         })
     }
 
@@ -431,7 +469,7 @@ impl DirectMessageStore {
                         this.channels.extend_new(new_channels);
                         this.has_more = has_more;
                         this.current_page = next_page;
-                        cx.emit(DirectEvent::Changed { channel_id: None });
+                        cx.emit(DirectEvent::Changed);
                         cx.notify();
                     }
                     Err(e) => tracing::error!("list_dm_channels page {next_page} failed: {e}"),
@@ -463,7 +501,7 @@ impl DirectMessageStore {
                         this.freshness.mark_fetched();
                         this.has_more = has_more;
                         this.current_page = 1;
-                        cx.emit(DirectEvent::Changed { channel_id: None });
+                        cx.emit(DirectEvent::Changed);
                         cx.notify();
                     }
                     Err(e) => tracing::error!("list_dm_channels failed: {e}"),
@@ -486,7 +524,7 @@ impl DirectMessageStore {
                 if !e.channel_avatar.is_empty() {
                     ch.avatar = e.channel_avatar.clone();
                 }
-                cx.emit(DirectEvent::Changed { channel_id: None });
+                cx.emit(DirectEvent::Changed);
                 cx.notify();
             }
             RealtimeEvent::UserChannelAdded(e) => {
@@ -501,7 +539,7 @@ impl DirectMessageStore {
                 if !self.channels.push_new(direct_from_api(api_ch)) {
                     return;
                 }
-                cx.emit(DirectEvent::Changed { channel_id: None });
+                cx.emit(DirectEvent::Changed);
                 cx.notify();
             }
             _ => {}
@@ -530,7 +568,8 @@ impl DirectMessageStore {
             channel.unread_count = channel.unread_count.saturating_add(1);
         }
         self.channels.resort_after_bump(channel_id);
-        self.schedule_changed_notify(channel_id, cx);
+        cx.emit(DirectEvent::Changed);
+        cx.notify();
         true
     }
 
@@ -540,34 +579,9 @@ impl DirectMessageStore {
         };
         ch.unread_count = 0;
         ch.last_seen_timestamp = ch.last_sent_timestamp;
-        cx.emit(DirectEvent::Changed {
-            channel_id: Some(channel_id),
-        });
+        cx.emit(DirectEvent::Changed);
         cx.notify();
         true
-    }
-
-    fn schedule_changed_notify(&mut self, channel_id: ChannelId, cx: &mut Context<Self>) {
-        if !self.pending_changed.contains(&channel_id) {
-            self.pending_changed.push(channel_id);
-        }
-        if self.changed_notify_task.is_some() {
-            return;
-        }
-        self.changed_notify_task = Some(cx.spawn(async move |this, cx| {
-            cx.background_executor()
-                .timer(CHANGED_NOTIFY_COALESCE)
-                .await;
-            let _ = this.update(cx, |store, cx| {
-                store.changed_notify_task = None;
-                for channel_id in std::mem::take(&mut store.pending_changed) {
-                    cx.emit(DirectEvent::Changed {
-                        channel_id: Some(channel_id),
-                    });
-                }
-                cx.notify();
-            });
-        }));
     }
 }
 

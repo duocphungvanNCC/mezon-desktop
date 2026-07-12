@@ -15,7 +15,6 @@ pub mod direct;
 pub mod emoji;
 pub mod friend;
 pub mod gallery;
-pub mod gif;
 pub mod group_members;
 pub mod ids;
 pub mod inbox;
@@ -76,7 +75,6 @@ pub use gallery::{
     ChannelAttachment, GalleryEvent, GalleryStore, LoadDirection, MediaFilter, UploaderInfo,
     enrich_uploader, fetch_channel_attachments, resolve_attachment_uploader,
 };
-pub use gif::{Gif, GifCategory, GifEvent, GifStore};
 pub use group_members::{GroupMember, GroupMembersEvent, GroupMembersStore};
 pub use ids::{ChannelId, ClanId, MessageId, ParseIdError, RoleId, UserId};
 pub use inbox::{InboxEvent, InboxStore};
@@ -124,71 +122,12 @@ pub use users_by_user::{UsersByUserEvent, UsersByUserStore};
 pub use voice::{
     DisplayedReaction, NetworkQuality, PickedScreen, ScreenShareKind, ScreenShareListError,
     ScreenShareOption, ScreenSharePreview, VideoFrameData, VideoFrameStore, VoiceCallStatus,
-    VoiceConnection, VoiceModerationError, VoiceParticipant, VoiceRenderFrame, VoiceStore,
-    camera_tile_id, capture_screen_share_preview, list_screen_share_options,
-    peek_screen_share_options, screen_tile_id,
+    VoiceConnection, VoiceModerationError, VoiceParticipant, VoiceStore, camera_tile_id,
+    capture_screen_share_preview, list_screen_share_options, peek_screen_share_options,
+    screen_tile_id,
 };
 
 pub const CACHE_TTL: Duration = Duration::from_secs(20 * 60);
-
-const SETTINGS_SAVE_DEBOUNCE: Duration = Duration::from_millis(300);
-
-#[derive(Default)]
-struct SettingsSaver {
-    task: Option<gpui::Task<()>>,
-    dirty: bool,
-    entity_id: Option<gpui::EntityId>,
-}
-impl gpui::Global for SettingsSaver {}
-
-/// Persist [`Settings`] through one serialized, coalescing writer: burst
-/// changes (slider drags) collapse into a single debounced write, writes never
-/// overlap (so the shared tmp-file path cannot commit an older snapshot last),
-/// and the snapshot is taken at write time so the latest state always wins.
-pub fn schedule_settings_save(settings: &gpui::Entity<Settings>, cx: &mut gpui::App) {
-    let saver = cx.default_global::<SettingsSaver>();
-    debug_assert!(
-        saver.entity_id.is_none_or(|id| id == settings.entity_id()),
-        "schedule_settings_save called with a second Settings entity; the in-flight saver only snapshots the first"
-    );
-    saver.entity_id = Some(settings.entity_id());
-    saver.dirty = true;
-    if saver.task.is_some() {
-        return;
-    }
-    let weak = settings.downgrade();
-    let task = cx.spawn(async move |cx| {
-        loop {
-            cx.background_executor().timer(SETTINGS_SAVE_DEBOUNCE).await;
-            let snapshot = cx.update(|cx| {
-                cx.default_global::<SettingsSaver>().dirty = false;
-                weak.upgrade().map(|settings| settings.read(cx).clone())
-            });
-            let Some(snapshot) = snapshot else {
-                cx.update(|cx| {
-                    cx.default_global::<SettingsSaver>().task = None;
-                });
-                return;
-            };
-            cx.background_executor()
-                .spawn(async move { snapshot.save_sync() })
-                .await;
-            let idle = cx.update(|cx| {
-                let saver = cx.default_global::<SettingsSaver>();
-                if saver.dirty {
-                    false
-                } else {
-                    saver.task = None;
-                    true
-                }
-            });
-            if idle {
-                return;
-            }
-        }
-    });
-    cx.default_global::<SettingsSaver>().task = Some(task);
-}
 
 /// Persistent application settings — written to ~/.config/mezon/settings.json
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -55,51 +55,8 @@ impl Display for EntityId {
 
 pub(crate) struct EntityMap {
     entities: SecondaryMap<EntityId, Box<dyn Any>>,
-    pub accessed_entities: RefCell<AccessedEntities>,
+    pub accessed_entities: RefCell<FxHashSet<EntityId>>,
     ref_counts: Arc<RwLock<EntityRefCounts>>,
-}
-
-/// mezon vendor edit: insertion-ordered accessed-entity accumulator so
-/// `detect_accessed_entities` can slice "what this view touched" from a
-/// watermark instead of cloning + diffing the whole frame set per view.
-#[derive(Default)]
-pub(crate) struct AccessedEntities {
-    set: FxHashSet<EntityId>,
-    order: Vec<EntityId>,
-}
-
-impl AccessedEntities {
-    pub fn insert(&mut self, entity_id: EntityId) {
-        if self.set.insert(entity_id) {
-            self.order.push(entity_id);
-        }
-    }
-
-    pub fn watermark(&self) -> usize {
-        self.order.len()
-    }
-
-    pub fn since(&self, watermark: usize) -> &[EntityId] {
-        &self.order[watermark.min(self.order.len())..]
-    }
-
-    pub fn set(&self) -> &FxHashSet<EntityId> {
-        &self.set
-    }
-
-    pub fn remove(&mut self, entity_id: &EntityId) {
-        // Set-only removal: `order` may keep a stale id until the per-frame
-        // clear, but consumers read membership from `set` (record path) or
-        // slice ids captured while the entity was still alive (watermark
-        // path), and compacting `order` here would both shift live
-        // watermarks and make mass teardown O(N^2).
-        self.set.remove(entity_id);
-    }
-
-    pub fn clear(&mut self) {
-        self.set.clear();
-        self.order.clear();
-    }
 }
 
 #[doc(hidden)]
@@ -114,7 +71,7 @@ impl EntityMap {
     pub fn new() -> Self {
         Self {
             entities: SecondaryMap::new(),
-            accessed_entities: RefCell::new(AccessedEntities::default()),
+            accessed_entities: RefCell::new(FxHashSet::default()),
             ref_counts: Arc::new(RwLock::new(EntityRefCounts {
                 counts: SlotMap::with_key(),
                 dropped_entity_ids: Vec::new(),
@@ -215,10 +172,9 @@ impl EntityMap {
     }
 
     pub fn extend_accessed(&mut self, entities: &FxHashSet<EntityId>) {
-        let accessed = self.accessed_entities.get_mut();
-        for entity_id in entities.iter().copied() {
-            accessed.insert(entity_id);
-        }
+        self.accessed_entities
+            .get_mut()
+            .extend(entities.iter().copied());
     }
 
     pub fn clear_accessed(&mut self) {

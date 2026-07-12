@@ -68,7 +68,6 @@ pub struct BGRAFrame {
 pub enum FrameType {
     #[default]
     YUVFrame,
-    YUVFrameFullRange,
     BGR0,
     RGB, // Prefer BGR0 because RGB is slower
     BGRAFrame,

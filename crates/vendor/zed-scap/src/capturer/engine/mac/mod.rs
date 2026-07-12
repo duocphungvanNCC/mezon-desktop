@@ -45,24 +45,24 @@ impl StreamErrorHandler for ErrorHandler {
 }
 
 pub struct Capturer {
-    pub tx: mpsc::SyncSender<anyhow::Result<ChannelItem>>,
+    pub tx: mpsc::Sender<anyhow::Result<ChannelItem>>,
 }
 
 impl Capturer {
-    pub fn new(tx: mpsc::SyncSender<anyhow::Result<ChannelItem>>) -> Self {
+    pub fn new(tx: mpsc::Sender<anyhow::Result<ChannelItem>>) -> Self {
         Capturer { tx }
     }
 }
 
 impl StreamOutput for Capturer {
     fn did_output_sample_buffer(&self, sample: CMSampleBuffer, of_type: SCStreamOutputType) {
-        let _ = self.tx.try_send(Ok((sample, of_type)));
+        self.tx.send(Ok((sample, of_type))).unwrap_or(());
     }
 }
 
 pub fn create_capturer(
     options: &Options,
-    tx: mpsc::SyncSender<anyhow::Result<ChannelItem>>,
+    tx: mpsc::Sender<anyhow::Result<ChannelItem>>,
     error_flag: Arc<AtomicBool>,
 ) -> (SCStream, Target) {
     let target = options
@@ -130,7 +130,6 @@ pub fn create_capturer(
 
     let pixel_format = match options.output_type {
         FrameType::YUVFrame => PixelFormat::YCbCr420v,
-        FrameType::YUVFrameFullRange => PixelFormat::YCbCr420f,
         FrameType::BGR0 => PixelFormat::ARGB8888,
         FrameType::RGB => PixelFormat::ARGB8888,
         FrameType::BGRAFrame => PixelFormat::ARGB8888,
@@ -233,7 +232,7 @@ pub fn process_sample_buffer(
         match frame_status {
             SCFrameStatus::Complete | SCFrameStatus::Started => unsafe {
                 return Some(match output_type {
-                    FrameType::YUVFrame | FrameType::YUVFrameFullRange => {
+                    FrameType::YUVFrame => {
                         let yuvframe = pixelformat::create_yuv_frame(sample).unwrap();
                         Frame::YUVFrame(yuvframe)
                     }

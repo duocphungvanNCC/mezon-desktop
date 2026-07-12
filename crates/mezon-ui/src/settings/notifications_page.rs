@@ -42,7 +42,12 @@ impl Render for NotificationsPage {
                                         s.notifications_hide_content =
                                             !s.notifications_hide_content;
                                     });
-                                    mezon_store::schedule_settings_save(&this.settings, cx);
+                                    let snapshot = this.settings.read(cx).clone();
+                                    cx.background_executor()
+                                        .spawn(async move {
+                                            snapshot.save_sync();
+                                        })
+                                        .detach();
                                     cx.notify();
                                 })),
                         ),

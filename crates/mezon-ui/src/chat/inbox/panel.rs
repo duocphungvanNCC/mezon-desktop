@@ -377,8 +377,7 @@ impl Render for InboxPopoverPanel {
                     .size_full(),
                 )
                 .custom_scrollbars(
-                    Scrollbars::always_visible(ScrollAxes::Vertical)
-                        .tracked_scroll_handle(&self.list_state),
+                    Scrollbars::new(ScrollAxes::Vertical).tracked_scroll_handle(&self.list_state),
                     window,
                     cx,
                 )

@@ -28,19 +28,4 @@ allow = [
     "Unicode-3.0",
     "ISC",
     "CDLA-Permissive-2.0",
-    # File-level copyleft, used unmodified: cbindgen (build-only), dwrote,
-    # option-ext, symphonia (audio decode).
-    "MPL-2.0",
-    # Permissive: foldhash, nanorand, slotmap.
-    "Zlib",
-    # Public domain: hexf-parse, tiny-keccak.
-    "CC0-1.0",
-    # libfuzzer-sys: (MIT OR Apache-2.0) AND NCSA.
-    "NCSA",
-    # libbz2-rs-sys: the permissive BSD-style bzip2 license.
-    "bzip2-1.0.6",
-    # The vendored Zed UI cluster (ui, component, theme, icons, menu, ui_macros,
-    # zlog, ztracing, syntax_theme, gpui_util) is GPL-3.0-or-later, so this app is
-    # a GPL-3 derivative work. The workspace license matches.
-    "GPL-3.0-or-later",
 ]

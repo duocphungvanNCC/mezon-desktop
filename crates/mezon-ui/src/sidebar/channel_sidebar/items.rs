@@ -45,7 +45,6 @@ pub(super) enum SidebarItem {
     },
     Channel {
         elem_id: SharedString,
-        row_elem_id: SharedString,
         id: String,
         name: String,
         channel_type: ChannelType,

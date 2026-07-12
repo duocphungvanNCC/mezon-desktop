@@ -95,7 +95,12 @@ fn theme_swatch(
                 s.theme = key.clone();
                 cx.notify();
             });
-            mezon_store::schedule_settings_save(&settings, cx);
+            let snapshot = settings.read(cx).clone();
+            cx.background_executor()
+                .spawn(async move {
+                    snapshot.save_sync();
+                })
+                .detach();
         })
         .child(
             div()

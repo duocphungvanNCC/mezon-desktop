@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -53,16 +53,9 @@ struct CachedMeetToken {
     fetched_at: Instant,
 }
 
-#[derive(Clone)]
-pub enum VoiceRenderFrame {
-    Image(Arc<RenderImage>),
-    #[cfg(target_os = "macos")]
-    Surface(mezon_voice::VideoSurface),
-}
-
-struct CachedRenderFrame {
+struct CachedRenderImage {
     seq: u64,
-    frame: VoiceRenderFrame,
+    image: Arc<RenderImage>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -154,9 +147,8 @@ pub struct VoiceStore {
     last_emoji_at: Option<Instant>,
     session: Option<VoiceSession>,
     frame_store: Option<Arc<VideoFrameStore>>,
-    render_cache: Mutex<HashMap<u64, CachedRenderFrame>>,
+    render_cache: Mutex<HashMap<u64, CachedRenderImage>>,
     pending_texture_drops: Mutex<Vec<Arc<RenderImage>>>,
-    pending_texture_replaces: Mutex<Vec<Arc<RenderImage>>>,
     cached_meet_token: Option<CachedMeetToken>,
     meet_token_prefetching: Option<String>,
     link_copied: bool,
@@ -255,7 +247,6 @@ impl VoiceStore {
             frame_store: None,
             render_cache: Mutex::new(HashMap::new()),
             pending_texture_drops: Mutex::new(Vec::new()),
-            pending_texture_replaces: Mutex::new(Vec::new()),
             cached_meet_token: None,
             meet_token_prefetching: None,
             link_copied: false,
@@ -375,7 +366,7 @@ impl VoiceStore {
         self.frame_store.clone()
     }
 
-    pub fn render_frame(&self, key: u64) -> Option<VoiceRenderFrame> {
+    pub fn render_image(&self, key: u64) -> Option<Arc<RenderImage>> {
         let store = self.frame_store.as_ref()?;
         let cached_seq = self.render_cache.lock().get(&key).map(|entry| entry.seq);
         let Some(frame) = store.take_new(key, cached_seq) else {
@@ -383,72 +374,24 @@ impl VoiceStore {
                 .render_cache
                 .lock()
                 .get(&key)
-                .map(|entry| entry.frame.clone());
+                .map(|entry| entry.image.clone());
         };
         let seq = frame.seq;
-        #[cfg(target_os = "macos")]
-        if let Some(surface) = frame.surface {
-            let rendered = VoiceRenderFrame::Surface(surface);
-            let previous = self.render_cache.lock().insert(
-                key,
-                CachedRenderFrame {
-                    seq,
-                    frame: rendered.clone(),
-                },
-            );
-            if let Some(CachedRenderFrame {
-                frame: VoiceRenderFrame::Image(image),
-                ..
-            }) = previous
-            {
-                self.pending_texture_drops.lock().push(image);
-            }
-            return Some(rendered);
-        }
         let buffer = image::RgbaImage::from_raw(frame.width, frame.height, frame.bgra)?;
-        let weak_store = Arc::downgrade(store);
-        let recycler = Arc::new(move |buffer| {
-            if let Some(store) = weak_store.upgrade() {
-                store.recycle(key, buffer);
-            }
-        });
-        let mut render_image = RenderImage::new_recyclable(image::Frame::new(buffer), recycler);
-        let previous_id = self
-            .render_cache
-            .lock()
-            .get(&key)
-            .and_then(|entry| match &entry.frame {
-                VoiceRenderFrame::Image(image) => Some(image.id),
-                #[cfg(target_os = "macos")]
-                VoiceRenderFrame::Surface(_) => None,
-            });
-        if let Some(id) = previous_id {
-            render_image = render_image.with_id(id);
-        }
-        let image = Arc::new(render_image);
-        let rendered = VoiceRenderFrame::Image(image.clone());
+        let image = Arc::new(RenderImage::new(smallvec::smallvec![image::Frame::new(
+            buffer,
+        )]));
         let previous = self.render_cache.lock().insert(
             key,
-            CachedRenderFrame {
+            CachedRenderImage {
                 seq,
-                frame: rendered.clone(),
+                image: image.clone(),
             },
         );
-        if previous_id.is_some() {
-            let mut replaces = self.pending_texture_replaces.lock();
-            if let Some(existing) = replaces.iter_mut().find(|queued| queued.id == image.id) {
-                *existing = image.clone();
-            } else {
-                replaces.push(image.clone());
-            }
-        } else if let Some(CachedRenderFrame {
-            frame: VoiceRenderFrame::Image(previous),
-            ..
-        }) = previous
-        {
-            self.pending_texture_drops.lock().push(previous);
+        if let Some(previous) = previous {
+            self.pending_texture_drops.lock().push(previous.image);
         }
-        Some(rendered)
+        Some(image)
     }
 
     fn evict_stale_render_cache(&self) {
@@ -470,11 +413,7 @@ impl VoiceStore {
             if live_keys.contains(key) {
                 true
             } else {
-                match &entry.frame {
-                    VoiceRenderFrame::Image(image) => drops.push(image.clone()),
-                    #[cfg(target_os = "macos")]
-                    VoiceRenderFrame::Surface(_) => {}
-                }
+                drops.push(entry.image.clone());
                 false
             }
         });
@@ -482,17 +421,8 @@ impl VoiceStore {
 
     pub fn flush_texture_drops(&self, mut window: Option<&mut Window>, cx: &mut App) {
         let drops: Vec<Arc<RenderImage>> = std::mem::take(&mut *self.pending_texture_drops.lock());
-        let replaces: Vec<Arc<RenderImage>> =
-            std::mem::take(&mut *self.pending_texture_replaces.lock());
-        let dropped: HashSet<_> = drops.iter().map(|image| image.id).collect();
         for image in drops {
             cx.drop_image(image, window.as_deref_mut());
-        }
-        for image in replaces {
-            if dropped.contains(&image.id) {
-                continue;
-            }
-            cx.update_render_image(&image, window.as_deref_mut());
         }
     }
 
@@ -661,7 +591,7 @@ impl VoiceStore {
         cx.spawn(async move |this, cx| {
             let decoded = cx
                 .background_executor()
-                .spawn(async move { mezon_audio::decode_audio(RAISE_HAND_SOUND.to_vec()) })
+                .spawn(async move { mezon_audio::decode_audio(RAISE_HAND_SOUND) })
                 .await;
             this.update(cx, |this, _| {
                 this.raising_hand_sound_loading = false;
@@ -734,7 +664,7 @@ impl VoiceStore {
             };
             let decoded = cx
                 .background_executor()
-                .spawn(async move { mezon_audio::decode_audio(bytes) })
+                .spawn(async move { mezon_audio::decode_audio(&bytes) })
                 .await;
             this.update(cx, |this, cx| {
                 if !this.active_sounds.contains_key(&key) {
@@ -968,7 +898,7 @@ impl VoiceStore {
             };
             let decoded = cx
                 .background_executor()
-                .spawn(async move { mezon_audio::decode_audio(bytes) })
+                .spawn(async move { mezon_audio::decode_audio(&bytes) })
                 .await;
             this.update(cx, |this, cx| {
                 if this.previewing_sound() != Some(fetch_url.as_str()) {
@@ -1366,33 +1296,7 @@ impl VoiceStore {
         self.sync_noise_suppression();
 
         let task = cx.spawn(async move |this, cx| {
-            let mut pending: Option<VoiceEvent> = None;
-            loop {
-                let event = match pending.take() {
-                    Some(event) => event,
-                    None => match events.recv_async().await {
-                        Ok(event) => event,
-                        Err(_) => break,
-                    },
-                };
-                let event = if matches!(event, VoiceEvent::Participants(_)) {
-                    let mut latest = event;
-                    loop {
-                        match events.try_recv() {
-                            Ok(VoiceEvent::Participants(participants)) => {
-                                latest = VoiceEvent::Participants(participants);
-                            }
-                            Ok(other) => {
-                                pending = Some(other);
-                                break;
-                            }
-                            Err(_) => break,
-                        }
-                    }
-                    latest
-                } else {
-                    event
-                };
+            while let Ok(event) = events.recv_async().await {
                 if this
                     .update(cx, |this, cx| this.handle_engine_event(event, cx))
                     .is_err()
@@ -1468,9 +1372,6 @@ impl VoiceStore {
                 }
             }
             VoiceEvent::Participants(list) => {
-                if self.participants == list {
-                    return;
-                }
                 self.participants = list;
                 if let Some(local) = self.participants.iter().find(|p| p.is_local) {
                     self.mic_enabled = !local.muted;
@@ -1575,14 +1476,7 @@ impl VoiceStore {
         self.frame_store = None;
         let stale: Vec<Arc<RenderImage>> = {
             let mut cache = self.render_cache.lock();
-            cache
-                .drain()
-                .filter_map(|(_, entry)| match entry.frame {
-                    VoiceRenderFrame::Image(image) => Some(image),
-                    #[cfg(target_os = "macos")]
-                    VoiceRenderFrame::Surface(_) => None,
-                })
-                .collect()
+            cache.drain().map(|(_, entry)| entry.image).collect()
         };
         for image in stale {
             cx.drop_image(image, window.as_deref_mut());
@@ -1622,11 +1516,6 @@ impl VoiceStore {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-
-    use gpui::RenderImage;
-    use parking_lot::Mutex;
-
     use super::parse_raise_token;
 
     #[test]
@@ -1636,16 +1525,5 @@ mod tests {
         assert_eq!(parse_raise_token("sound:https://x.mp3"), None);
         assert_eq!(parse_raise_token(":smile:"), None);
         assert_eq!(parse_raise_token(""), None);
-    }
-
-    #[test]
-    fn recyclable_render_image_returns_owned_pixels() {
-        let returned = Arc::new(Mutex::new(Vec::new()));
-        let sink = returned.clone();
-        let recycler = Arc::new(move |pixels| sink.lock().push(pixels));
-        let buffer = image::RgbaImage::from_raw(2, 2, vec![7; 16]).expect("rgba");
-        let image = RenderImage::new_recyclable(image::Frame::new(buffer), recycler);
-        drop(image);
-        assert_eq!(returned.lock().as_slice(), &[vec![7; 16]]);
     }
 }

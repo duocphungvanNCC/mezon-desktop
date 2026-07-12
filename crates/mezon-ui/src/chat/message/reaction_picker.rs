@@ -6,7 +6,6 @@ use gpui::{
     img, prelude::*, px, uniform_list,
 };
 use mezon_store::{ClanList, EmojiEvent, EmojiStore};
-use ui::{ScrollAxes, Scrollbars, WithScrollbar};
 
 use super::reaction_detail::emoji_error_fallback;
 use crate::components::primitives::{Icon, IconName, Input, InputEvent, InputState};
@@ -14,16 +13,12 @@ use crate::image_cache::LruImageCache;
 use crate::theme::{ActiveTheme, Theme};
 
 const RAIL_W: f32 = 44.;
-const RAIL_TILE_H: f32 = 34.;
-const RAIL_ICON_PX: f32 = 26.;
-const CELL_PX: f32 = 36.;
+const CELL_PX: f32 = 40.;
 const EMOJI_PX: f32 = 32.;
-const ROW_PX: f32 = 48.;
-const EMOJI_ROW_GAP: f32 = 12.;
+const ROW_PX: f32 = 44.;
 const PANEL_W: f32 = 468.;
 const LIST_H: f32 = 352.;
 const HOVER_BAR_PX: f32 = 36.;
-const HEADER_ICON_PX: f32 = 16.;
 const COLS: usize = 9;
 const SEARCH_PLACEHOLDER: &str = "Find the perfect reaction";
 
@@ -50,11 +45,7 @@ struct CategorySnapshot {
 }
 
 enum PickerRow {
-    Header {
-        name: SharedString,
-        icon: SharedString,
-        collapsed: bool,
-    },
+    Header { name: SharedString, collapsed: bool },
     Emojis(Vec<PickerEmoji>),
 }
 
@@ -174,10 +165,6 @@ impl ReactionPicker {
                 .map(|(category, emojis)| {
                     let name = SharedString::from(category);
                     let rail_id = SharedString::from(format!("rail-{name}"));
-                    let clan_logo = emojis
-                        .first()
-                        .map(|e| e.clan_logo.clone())
-                        .filter(|logo| !logo.is_empty());
                     let items: Vec<SnapshotEmoji> = emojis
                         .iter()
                         .map(|e| SnapshotEmoji {
@@ -190,15 +177,10 @@ impl ReactionPicker {
                             lower: e.shortname.to_lowercase(),
                         })
                         .collect();
-                    let icon = match clan_logo {
-                        Some(logo) => {
-                            SharedString::from(crate::util::imgproxy::avatar_url(cx, &logo))
-                        }
-                        None => items
-                            .first()
-                            .map(|e| e.emoji.src.clone())
-                            .unwrap_or_default(),
-                    };
+                    let icon = items
+                        .first()
+                        .map(|e| e.emoji.src.clone())
+                        .unwrap_or_default();
                     CategorySnapshot {
                         name,
                         rail_id,
@@ -252,7 +234,6 @@ impl ReactionPicker {
                 });
                 rows.push(PickerRow::Header {
                     name: cat.name.clone(),
-                    icon: cat.icon.clone(),
                     collapsed,
                 });
                 if collapsed {
@@ -296,34 +277,24 @@ impl ReactionPicker {
 }
 
 impl Render for ReactionPicker {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
-        let bg_tertiary = theme.bg_tertiary;
-        let bg_hover = theme.bg_hover;
-        let text_muted = theme.text_muted;
-        let text_primary = theme.text_primary;
-        let border_color = theme.border;
-        let bg_contexify = theme.tokens.bg_theme_contexify;
         let entity = cx.entity();
         let searching = !self.query.trim().is_empty();
-        let hosted = !self.embedded_search;
 
         let rail = (!self.nav.is_empty()).then(|| {
             let mut rail = div()
                 .id("reaction-rail")
                 .flex()
                 .flex_col()
-                .flex_shrink_0()
                 .gap_1()
                 .w(px(RAIL_W))
+                .h(px(LIST_H))
                 .py_1()
-                .bg(bg_tertiary)
+                .px_1()
+                .bg(theme.bg_tertiary)
+                .rounded_tl_lg()
                 .overflow_y_scroll();
-            rail = if hosted {
-                rail.h_full()
-            } else {
-                rail.h(px(LIST_H)).rounded_tl_lg()
-            };
             for nav in &self.nav {
                 let ent = entity.clone();
                 let idx = nav.row_index;
@@ -336,27 +307,20 @@ impl Render for ReactionPicker {
                     .flex()
                     .items_center()
                     .justify_center()
-                    .w_full()
-                    .h(px(RAIL_TILE_H))
-                    .rounded(px(8.))
+                    .size(px(36.))
+                    .rounded_md()
                     .cursor_pointer()
-                    .hover(|s| s.bg(bg_hover));
+                    .hover(|s| s.bg(theme.bg_hover));
                 if active {
-                    btn = btn.bg(bg_hover);
+                    btn = btn.bg(theme.bg_hover);
                 }
                 if let Some(icon) = rail_icon {
-                    btn = btn.child(
-                        Icon::new(icon)
-                            .size(px(RAIL_ICON_PX))
-                            .text_color(text_muted),
-                    );
+                    btn = btn.child(Icon::new(icon).size(px(24.)).text_color(theme.text_muted));
                 } else if !icon_src.is_empty() {
                     btn = btn.child(
                         img(icon_src)
-                            .size(px(RAIL_ICON_PX))
-                            .rounded_full()
-                            .object_fit(gpui::ObjectFit::Cover)
-                            .with_fallback(emoji_error_fallback(px(RAIL_ICON_PX), text_muted)),
+                            .size(px(24.))
+                            .with_fallback(emoji_error_fallback(px(24.), theme.text_muted)),
                     );
                 }
                 let btn = btn.on_click(move |_, _, cx| {
@@ -376,60 +340,31 @@ impl Render for ReactionPicker {
 
         let count = self.rows.len();
         let list_entity = entity.clone();
-        let track_hover = self.embedded_search;
         let list = uniform_list("reaction-picker-list", count, move |range, _window, cx| {
             let theme = cx.theme().clone();
             let this = list_entity.read(cx);
             range
                 .map(|ix| match this.rows.get(ix) {
-                    Some(PickerRow::Header {
-                        name,
-                        icon,
-                        collapsed,
-                    }) => render_header(&theme, name, icon, *collapsed, &list_entity),
+                    Some(PickerRow::Header { name, collapsed }) => {
+                        render_header(&theme, name, *collapsed, &list_entity)
+                    }
                     Some(PickerRow::Emojis(emojis)) => {
-                        render_emoji_row(&theme, emojis, &list_entity, track_hover)
+                        render_emoji_row(&theme, emojis, &list_entity)
                     }
                     None => div().h(px(ROW_PX)).into_any_element(),
                 })
                 .collect::<Vec<_>>()
         })
         .track_scroll(&self.scroll)
+        .h(px(LIST_H))
         .flex_1();
-        let list = if hosted { list } else { list.h(px(LIST_H)) };
 
-        let mut body = div().flex().flex_row().children(rail).child(
-            div()
-                .flex_1()
-                .min_w_0()
-                .h_full()
-                .flex()
-                .flex_col()
-                .pl_2()
-                .pr_1()
-                .child(list)
-                .custom_scrollbars(
-                    Scrollbars::always_visible(ScrollAxes::Vertical)
-                        .tracked_scroll_handle(&self.scroll),
-                    window,
-                    cx,
-                ),
-        );
-        body = if hosted {
-            body.flex_1().min_h_0()
-        } else {
-            body.h(px(LIST_H))
-        };
-
-        if !self.embedded_search {
-            return div()
-                .image_cache(self.image_cache.clone())
-                .size_full()
-                .flex()
-                .flex_col()
-                .child(body)
-                .into_any_element();
-        }
+        let body = div()
+            .flex()
+            .flex_row()
+            .h(px(LIST_H))
+            .children(rail)
+            .child(div().flex_1().child(list));
 
         let hover_bar = div()
             .w_full()
@@ -440,7 +375,7 @@ impl Render for ReactionPicker {
             .items_center()
             .gap_1()
             .pl_1()
-            .bg(bg_tertiary)
+            .bg(theme.bg_tertiary)
             .rounded_md()
             .when_some(self.hover_emoji.clone(), |el, (src, name)| {
                 el.when(!src.is_empty(), |el| {
@@ -448,18 +383,29 @@ impl Render for ReactionPicker {
                         img(src)
                             .max_w(px(28.))
                             .max_h(px(28.))
-                            .with_fallback(emoji_error_fallback(px(28.), text_muted)),
+                            .with_fallback(emoji_error_fallback(px(28.), theme.text_muted)),
                     )
                 })
                 .child(
                     div()
                         .flex_1()
                         .text_size(px(13.))
-                        .text_color(text_primary)
+                        .text_color(theme.text_primary)
                         .truncate()
                         .child(name),
                 )
             });
+
+        if !self.embedded_search {
+            return div()
+                .image_cache(self.image_cache.clone())
+                .w_full()
+                .flex()
+                .flex_col()
+                .child(body)
+                .child(hover_bar)
+                .into_any_element();
+        }
 
         div()
             .track_focus(&self.focus_handle)
@@ -473,8 +419,8 @@ impl Render for ReactionPicker {
             .flex_col()
             .rounded_lg()
             .border_1()
-            .border_color(border_color)
-            .bg(bg_contexify)
+            .border_color(theme.border)
+            .bg(theme.tokens.bg_theme_contexify)
             .shadow_lg()
             .p_2()
             .child(div().w_full().pb_2().child(Input::new(&self.search)))
@@ -503,7 +449,6 @@ fn category_rail_icon(name: &str) -> Option<IconName> {
 fn render_header(
     theme: &Theme,
     name: &SharedString,
-    icon: &SharedString,
     collapsed: bool,
     entity: &Entity<ReactionPicker>,
 ) -> AnyElement {
@@ -514,43 +459,27 @@ fn render_header(
     } else {
         IconName::ChevronDown
     };
-    let category_icon: AnyElement = match category_rail_icon(name.as_ref()) {
-        Some(icon) => Icon::new(icon)
-            .size(px(HEADER_ICON_PX))
-            .text_color(theme.text_muted)
-            .into_any_element(),
-        None if !icon.is_empty() => img(icon.clone())
-            .size(px(HEADER_ICON_PX))
-            .rounded_full()
-            .object_fit(gpui::ObjectFit::Cover)
-            .with_fallback(emoji_error_fallback(px(HEADER_ICON_PX), theme.text_muted))
-            .into_any_element(),
-        None => div().size(px(HEADER_ICON_PX)).into_any_element(),
-    };
     div()
         .id(SharedString::from(format!("reaction-cat-{}", name)))
         .h(px(ROW_PX))
         .flex()
         .flex_row()
         .items_center()
+        .gap_2()
         .px_1()
         .cursor_pointer()
-        .child(category_icon)
         .child(
-            div()
-                .ml_2()
-                .text_size(px(12.))
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_color(theme.text_muted)
-                .truncate()
-                .child(name.to_uppercase()),
+            Icon::new(chevron)
+                .size(px(16.))
+                .text_color(theme.text_muted),
         )
         .child(
-            div().ml_1().flex().items_center().child(
-                Icon::new(chevron)
-                    .size(px(16.))
-                    .text_color(theme.text_muted),
-            ),
+            div()
+                .flex_1()
+                .text_size(px(11.))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(theme.text_muted)
+                .child(name.to_uppercase()),
         )
         .on_click(move |_, _, cx| {
             ent.update(cx, |this, cx| this.toggle_collapse(cat.clone(), cx));
@@ -562,20 +491,17 @@ fn render_emoji_row(
     theme: &Theme,
     emojis: &[PickerEmoji],
     entity: &Entity<ReactionPicker>,
-    track_hover: bool,
 ) -> AnyElement {
     let hover_bg = theme.bg_hover;
     let text_muted = theme.text_muted;
-    let mut row = div()
-        .h(px(ROW_PX))
-        .flex()
-        .flex_row()
-        .items_center()
-        .gap(px(EMOJI_ROW_GAP));
+    let mut row = div().h(px(ROW_PX)).flex().flex_row().items_center().gap_1();
     for emoji in emojis {
         let emoji_id = emoji.emoji_id.clone();
         let shortname = emoji.emoji.clone();
         let ent = entity.clone();
+        let hover_ent = entity.clone();
+        let hover_name = emoji.emoji.clone();
+        let hover_src = emoji.src.clone();
         let mut cell = div()
             .id(emoji.cell_id.clone())
             .flex()
@@ -589,29 +515,24 @@ fn render_emoji_row(
             cell = cell.child(
                 img(emoji.src.clone())
                     .size(px(EMOJI_PX))
-                    .object_fit(gpui::ObjectFit::Contain)
                     .with_fallback(emoji_error_fallback(px(EMOJI_PX), text_muted)),
             );
         }
-        if track_hover {
-            let hover_ent = entity.clone();
-            let hover_name = emoji.emoji.clone();
-            let hover_src = emoji.src.clone();
-            cell = cell.on_hover(move |hovered, _window, cx| {
+        let cell = cell
+            .on_hover(move |hovered, _window, cx| {
                 if *hovered {
                     let name = hover_name.clone();
                     let src = hover_src.clone();
                     hover_ent.update(cx, |this, cx| this.set_hover_emoji(src, name, cx));
                 }
+            })
+            .on_click(move |_event, _window, cx| {
+                let emoji_id = emoji_id.to_string();
+                let emoji = shortname.to_string();
+                ent.update(cx, |_this, cx| {
+                    cx.emit(ReactionPickerEvent::Picked { emoji_id, emoji });
+                });
             });
-        }
-        let cell = cell.on_click(move |_event, _window, cx| {
-            let emoji_id = emoji_id.to_string();
-            let emoji = shortname.to_string();
-            ent.update(cx, |_this, cx| {
-                cx.emit(ReactionPickerEvent::Picked { emoji_id, emoji });
-            });
-        });
         row = row.child(cell);
     }
     row.into_any_element()

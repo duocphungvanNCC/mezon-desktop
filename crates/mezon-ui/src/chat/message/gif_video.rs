@@ -16,8 +16,6 @@ const THUMB_POLL_INTERVAL: Duration = Duration::from_millis(50);
 struct GifPlayback {
     frame: Option<VideoFrame>,
     failed: bool,
-    #[cfg(not(target_os = "macos"))]
-    stream_image_id: Option<gpui::ImageId>,
 }
 
 pub struct VideoThumbView {
@@ -241,7 +239,6 @@ impl GifVideoView {
         }
         let new_frame = player.copy_frame();
         let advanced = new_frame.is_some();
-        let new_frame = new_frame.map(|frame| Self::adopt_frame(&self.shared, frame, cx));
         let (previous, failed_changed) = {
             let mut shared = self.shared.borrow_mut();
             let failed_changed = failed != shared.failed;
@@ -251,7 +248,7 @@ impl GifVideoView {
                 failed_changed,
             )
         };
-        Self::queue_release(previous, &self.shared, cx);
+        Self::queue_release(previous, cx);
         if advanced || failed_changed {
             cx.notify();
         }
@@ -259,57 +256,11 @@ impl GifVideoView {
     }
 
     #[cfg(target_os = "macos")]
-    fn adopt_frame(
-        _shared: &Rc<RefCell<GifPlayback>>,
-        frame: VideoFrame,
-        _cx: &mut Context<Self>,
-    ) -> VideoFrame {
-        frame
-    }
+    fn queue_release(_previous: Option<VideoFrame>, _cx: &mut Context<Self>) {}
 
     #[cfg(not(target_os = "macos"))]
-    fn adopt_frame(
-        shared: &Rc<RefCell<GifPlayback>>,
-        frame: VideoFrame,
-        cx: &mut Context<Self>,
-    ) -> VideoFrame {
-        let stream_id = shared.borrow().stream_image_id;
-        match stream_id {
-            None => {
-                shared.borrow_mut().stream_image_id = Some(frame.id);
-                frame
-            }
-            Some(id) => match std::sync::Arc::try_unwrap(frame) {
-                Ok(image) => {
-                    let rebranded = std::sync::Arc::new(image.with_id(id));
-                    crate::image_cache::queue_atlas_replace(cx, rebranded.clone());
-                    rebranded
-                }
-                Err(still_shared) => {
-                    shared.borrow_mut().stream_image_id = Some(still_shared.id);
-                    still_shared
-                }
-            },
-        }
-    }
-
-    #[cfg(target_os = "macos")]
-    fn queue_release(
-        _previous: Option<VideoFrame>,
-        _shared: &Rc<RefCell<GifPlayback>>,
-        _cx: &mut Context<Self>,
-    ) {
-    }
-
-    #[cfg(not(target_os = "macos"))]
-    fn queue_release(
-        previous: Option<VideoFrame>,
-        shared: &Rc<RefCell<GifPlayback>>,
-        cx: &mut Context<Self>,
-    ) {
-        if let Some(previous) = previous
-            && shared.borrow().stream_image_id != Some(previous.id)
-        {
+    fn queue_release(previous: Option<VideoFrame>, cx: &mut Context<Self>) {
+        if let Some(previous) = previous {
             crate::image_cache::queue_atlas_drop(cx, previous);
         }
     }

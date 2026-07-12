@@ -10,8 +10,6 @@ use crate::KeyedCache;
 use crate::clan_members::User;
 use crate::realtime::{RealtimeDispatch, RealtimeKind};
 
-const MAX_CACHED_GROUPS: usize = 64;
-
 const GROUP_MEMBER_FETCH_LIMIT: i32 = 500;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -132,7 +130,7 @@ impl GroupMembersStore {
         Self::register_realtime(cx);
         let conn_watch = Self::spawn_connection_watch(api.clone(), cx);
         Self {
-            cache: KeyedCache::new(Some(MAX_CACHED_GROUPS)),
+            cache: KeyedCache::new(None),
             loading: HashSet::new(),
             api,
             _conn_watch: conn_watch,
@@ -191,7 +189,6 @@ impl GroupMembersStore {
     }
 
     pub fn ensure_loaded(&mut self, channel_id: ChannelId, cx: &mut Context<Self>) {
-        self.cache.touch(&channel_id);
         if !self.cache.is_fresh(&channel_id, crate::CACHE_TTL) {
             self.fetch(channel_id, cx);
         }

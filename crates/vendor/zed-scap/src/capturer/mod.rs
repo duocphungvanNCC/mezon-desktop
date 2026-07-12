@@ -4,7 +4,7 @@ use std::{error::Error, sync::mpsc};
 
 use anyhow::anyhow;
 
-use engine::{ChannelItem, ChannelSender};
+use engine::ChannelItem;
 
 use crate::{
     frame::{Frame, FrameType},
@@ -102,7 +102,7 @@ impl Capturer {
         note = "Use `build` instead of `new` to create a new capturer instance."
     )]
     pub fn new(options: Options) -> anyhow::Result<Capturer> {
-        let (tx, rx) = capture_channel();
+        let (tx, rx) = mpsc::channel();
         let engine = engine::Engine::new(&options, tx)?;
 
         Ok(Capturer { engine, rx })
@@ -117,7 +117,7 @@ impl Capturer {
             return Err(anyhow!(CapturerBuildError::PermissionNotGranted));
         }
 
-        let (tx, rx) = capture_channel();
+        let (tx, rx) = mpsc::channel();
         let engine = engine::Engine::new(&options, tx)?;
 
         Ok(Capturer { engine, rx })
@@ -152,22 +152,6 @@ impl Capturer {
     pub fn target(&self) -> Option<&Target> {
         self.engine.target()
     }
-}
-
-#[cfg(target_os = "macos")]
-fn capture_channel() -> (
-    ChannelSender,
-    mpsc::Receiver<anyhow::Result<ChannelItem>>,
-) {
-    mpsc::sync_channel(2)
-}
-
-#[cfg(not(target_os = "macos"))]
-fn capture_channel() -> (
-    ChannelSender,
-    mpsc::Receiver<anyhow::Result<ChannelItem>>,
-) {
-    mpsc::channel()
 }
 
 pub struct RawCapturer<'a> {

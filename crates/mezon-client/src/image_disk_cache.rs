@@ -17,7 +17,6 @@ use crate::transport_runtime::handle;
 const MEMORY_BUDGET_BYTES: usize = 8 * 1024 * 1024;
 const DISK_BUDGET_BYTES: usize = 256 * 1024 * 1024;
 const MAX_ENTRY_BYTES: usize = 16 * 1024 * 1024;
-const MAX_TRANSFER_BYTES: u64 = 64 * 1024 * 1024;
 const STATS_LOG_INTERVAL: u64 = 256;
 
 type ImageHybridCache = HybridCache<u64, Vec<u8>>;
@@ -154,25 +153,12 @@ enum FetchResult {
     Passthrough(Response<AsyncBody>),
 }
 
-async fn read_limited(response: &mut Response<AsyncBody>) -> anyhow::Result<Vec<u8>> {
-    let mut body = Vec::new();
-    response
-        .body_mut()
-        .take(MAX_TRANSFER_BYTES + 1)
-        .read_to_end(&mut body)
-        .await?;
-    anyhow::ensure!(
-        body.len() as u64 <= MAX_TRANSFER_BYTES,
-        "image body exceeds the {MAX_TRANSFER_BYTES} byte transfer limit"
-    );
-    Ok(body)
-}
-
 async fn buffered_response(
     network: BoxFuture<'static, anyhow::Result<Response<AsyncBody>>>,
 ) -> anyhow::Result<Response<AsyncBody>> {
     let mut response = network.await?;
-    let body = read_limited(&mut response).await?;
+    let mut body = Vec::new();
+    response.body_mut().read_to_end(&mut body).await?;
     let (parts, _) = response.into_parts();
     Ok(Response::from_parts(parts, AsyncBody::from(body)))
 }
@@ -233,7 +219,8 @@ impl HttpClient for DiskImageCacheClient {
                             ran_flag.store(true, Ordering::Relaxed);
                             let mut response = network.await?;
                             if !response.status().is_success() {
-                                let body = read_limited(&mut response).await?;
+                                let mut body = Vec::new();
+                                response.body_mut().read_to_end(&mut body).await?;
                                 let (parts, _) = response.into_parts();
                                 if let Ok(mut held) = slot.lock() {
                                     *held =
@@ -241,7 +228,8 @@ impl HttpClient for DiskImageCacheClient {
                                 }
                                 anyhow::bail!("image fetch returned non-success status");
                             }
-                            let body = read_limited(&mut response).await?;
+                            let mut body = Vec::new();
+                            response.body_mut().read_to_end(&mut body).await?;
                             if body.is_empty() || body.len() > MAX_ENTRY_BYTES {
                                 if let Ok(mut held) = slot.lock() {
                                     *held = Some(ok_response(body));

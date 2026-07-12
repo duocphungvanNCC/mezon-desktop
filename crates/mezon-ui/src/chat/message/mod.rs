@@ -29,9 +29,9 @@ mod user_row;
 mod video_player;
 
 pub use channel_messages::ChannelMessages;
-pub(crate) use content::open_message_link;
 pub use context::DEFAULT_DISPLAY_NAME_COLOR;
 pub use gif_video::VideoThumbView;
+pub(crate) use content::open_message_link;
 pub(crate) use ogp_embed::render_ogp_preview;
 pub(crate) use reaction_picker::{ReactionPicker, ReactionPickerEvent};
 pub(crate) use time::format_message_time;

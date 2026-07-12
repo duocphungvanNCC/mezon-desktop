@@ -2,7 +2,7 @@ use gpui::{
     AnyWindowHandle, App, Bounds, Context, Entity, MouseButton, ObjectFit, Window, WindowBounds,
     WindowKind, WindowOptions, div, img, prelude::*, px, rgb, rgba, size,
 };
-use mezon_store::{VoiceRenderFrame, VoiceStore};
+use mezon_store::VoiceStore;
 
 use crate::app::window_controls::linux_app_id;
 use crate::components::primitives::{Icon, IconName};
@@ -10,7 +10,6 @@ use crate::components::primitives::{Icon, IconName};
 pub struct ScreenSharePipView {
     voice: Entity<VoiceStore>,
     key: u64,
-    _frame_pump: Option<gpui::Task<()>>,
 }
 
 impl ScreenSharePipView {
@@ -21,53 +20,20 @@ impl ScreenSharePipView {
             release_voice.update(cx, |store, cx| store.on_pip_closed(key, cx));
         })
         .detach();
-        let mut this = Self {
-            voice,
-            key,
-            _frame_pump: None,
-        };
-        this.start_frame_pump(cx);
-        this
-    }
-
-    fn start_frame_pump(&mut self, cx: &mut Context<Self>) {
-        const PIP_FRAME_INTERVAL: std::time::Duration = std::time::Duration::from_millis(33);
-        self._frame_pump = Some(cx.spawn(async move |this, cx| {
-            let mut last_seq = 0u64;
-            loop {
-                cx.background_executor().timer(PIP_FRAME_INTERVAL).await;
-                let stepped = this.update(cx, |this, cx| {
-                    let seq = this
-                        .voice
-                        .read(cx)
-                        .frame_store()
-                        .map(|store| store.publish_seq())
-                        .unwrap_or(0);
-                    if seq != last_seq {
-                        last_seq = seq;
-                        cx.notify();
-                    }
-                });
-                if stepped.is_err() {
-                    break;
-                }
-            }
-        }));
+        Self { voice, key }
     }
 }
 
 impl Render for ScreenSharePipView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let frame = self.voice.read(cx).render_frame(self.key);
+        let image = self.voice.read(cx).render_image(self.key);
         self.voice
             .update(cx, |store, cx| store.flush_texture_drops(Some(window), cx));
-        let content = match frame {
-            Some(VoiceRenderFrame::Image(image)) => img(image)
-                .size_full()
-                .object_fit(ObjectFit::Contain)
-                .into_any_element(),
-            #[cfg(target_os = "macos")]
-            Some(VoiceRenderFrame::Surface(surface)) => gpui::surface(surface.into_inner())
+        if image.is_some() {
+            window.request_animation_frame();
+        }
+        let content = match image {
+            Some(image) => img(image)
                 .size_full()
                 .object_fit(ObjectFit::Contain)
                 .into_any_element(),

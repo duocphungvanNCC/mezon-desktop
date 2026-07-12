@@ -265,13 +265,6 @@ impl WindowsWindowInner {
     }
 
     fn handle_close_msg(&self) -> Option<isize> {
-        // mezon vendor edit: Windows window-lifecycle crash diagnostic — WM_CLOSE /
-        // WM_DESTROY ordering is the trail for a field-reported crash on window close.
-        // Kept deliberately, but gated so release builds don't spam stderr; see
-        // `window_lifecycle_log_enabled`.
-        if window_lifecycle_log_enabled() {
-            eprintln!("[gpui_window_lifecycle] WM_CLOSE");
-        }
         let mut callback = self.state.callbacks.should_close.take()?;
         let should_close = callback();
         self.state.callbacks.should_close.set(Some(callback));
@@ -279,10 +272,6 @@ impl WindowsWindowInner {
     }
 
     fn handle_destroy_msg(&self, handle: HWND) -> Option<isize> {
-        // mezon vendor edit: see `handle_close_msg` — gated crash diagnostic.
-        if window_lifecycle_log_enabled() {
-            eprintln!("[gpui_window_lifecycle] WM_DESTROY hwnd={handle:?}");
-        }
         let callback = { self.state.callbacks.close.take() };
         // Re-enable parent window if this was a modal dialog
         if let Some(parent_hwnd) = self.parent_hwnd {
@@ -1653,17 +1642,6 @@ pub(crate) fn current_modifiers() -> Modifiers {
 pub(crate) fn current_capslock() -> Capslock {
     let on = unsafe { GetKeyState(VK_CAPITAL.0 as i32) & 1 } > 0;
     Capslock { on }
-}
-
-// mezon vendor edit: gate for the `[gpui_window_lifecycle]` traces. They are the
-// diagnostics for a field-reported crash on window close, so they stay — but an
-// unconditional `eprintln!` per WM_CLOSE/WM_DESTROY also shipped to release stderr.
-// On by default in debug; in release, opt in with `GPUI_WINDOW_LIFECYCLE_LOG=1`.
-// `eprintln!` rather than `log::*` because vendored gpui has no log bridge in mezon.
-fn window_lifecycle_log_enabled() -> bool {
-    cfg!(debug_assertions)
-        || std::env::var("GPUI_WINDOW_LIFECYCLE_LOG")
-            .is_ok_and(|value| value == "true" || value == "1")
 }
 
 fn hit_test_custom_titlebar_controls(

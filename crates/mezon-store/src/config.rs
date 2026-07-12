@@ -348,10 +348,6 @@ impl AppConfig {
         cx.try_global::<GlobalAppConfig>().map(|g| g.0.as_ref())
     }
 
-    pub fn global_arc(cx: &App) -> Option<Arc<AppConfig>> {
-        cx.try_global::<GlobalAppConfig>().map(|g| g.0.clone())
-    }
-
     pub fn imgproxy_url(
         &self,
         source_image_url: &str,
@@ -383,7 +379,7 @@ impl AppConfig {
     }
 
     pub fn avatar_proxy(&self, source: &str) -> String {
-        self.imgproxy_url(source, 100, 100, "fit")
+        self.imgproxy_url(source, 100, 100, "fill")
     }
 
     pub fn profile_proxy(&self, source: &str) -> String {

@@ -4,10 +4,9 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use gpui::{
-    Anchor, Animation, AnimationExt as _, Context, DismissEvent, Entity, FocusHandle, Focusable,
-    KeyDownEvent, ListAlignment, ListState, MouseButton, MouseDownEvent, Pixels, Point,
-    SharedString, Subscription, Task, Window, anchored, deferred, div, ease_in_out, list,
-    prelude::*, px,
+    Anchor, Animation, AnimationExt as _, Context, DismissEvent, Entity, Focusable, ListAlignment,
+    ListState, Pixels, Point, SharedString, Subscription, Task, Window, anchored, deferred, div,
+    ease_in_out, list, prelude::*, px,
 };
 use ui::{ScrollAxes, Scrollbars, WithScrollbar};
 
@@ -38,14 +37,10 @@ use crate::theme::{ActiveTheme, Theme};
 const LOAD_MORE_ITEM_THRESHOLD: usize = 12;
 const LIST_OVERDRAW: f32 = 1024.;
 const LIST_BOTTOM_PADDING: f32 = 20.;
-const KEY_SCROLL_DURATION: Duration = Duration::from_millis(150);
-const KEY_SCROLL_BEZIER_X1: f32 = 0.42;
-const KEY_SCROLL_BEZIER_X2: f32 = 0.58;
-const SCROLL_CACHE_SWEEP_INTERVAL: Duration = Duration::from_millis(100);
-const SCROLL_ACTIVITY_GRACE: Duration = Duration::from_millis(150);
 const SCROLL_HOVER_RELEASE_MS: u64 = 150;
 const HOVER_SHOW_DELAY_MS: u64 = 200;
 const HOVER_HIDE_DELAY_MS: u64 = 100;
+const PAGINATE_THROTTLE: Duration = Duration::from_millis(250);
 const SCROLL_RELIEF_DELAY: Duration = Duration::from_millis(1500);
 const MAX_GIF_VIDEOS: usize = 6;
 const MAX_AUDIO_PLAYERS: usize = 8;
@@ -165,155 +160,14 @@ fn skeleton_transition(
     }
 }
 
-#[derive(Clone, Copy, Debug)]
-struct KeyboardScrollAnimation {
-    start: f32,
-    target: f32,
-    started_at: Instant,
-    initial_slope: f32,
-}
-
-impl KeyboardScrollAnimation {
-    fn new(start: f32, target: f32, initial_velocity: f32, started_at: Instant) -> Self {
-        let delta = target - start;
-        let duration = KEY_SCROLL_DURATION.as_secs_f32();
-        let initial_slope = if delta.abs() <= f32::EPSILON {
-            0.
-        } else {
-            let slope = initial_velocity * duration / delta;
-            if slope.is_finite() && slope > 0. {
-                // Keeping y1 in [0, 1] makes the retargeted curve monotonic.
-                // Opposite-direction velocity is intentionally discarded so a
-                // quick direction reversal remains responsive.
-                slope.min(1. / KEY_SCROLL_BEZIER_X1)
-            } else {
-                0.
-            }
-        };
-        Self {
-            start,
-            target,
-            started_at,
-            initial_slope,
-        }
-    }
-
-    fn sample(self, now: Instant) -> (f32, f32, bool) {
-        let duration = KEY_SCROLL_DURATION.as_secs_f32();
-        let elapsed = now.saturating_duration_since(self.started_at).as_secs_f32();
-        if elapsed >= duration {
-            return (self.target, 0., true);
-        }
-
-        let progress = (elapsed / duration).clamp(0., 1.);
-        let parameter = solve_keyboard_scroll_bezier(progress);
-        let y1 = KEY_SCROLL_BEZIER_X1 * self.initial_slope;
-        let eased = cubic_bezier_coordinate(parameter, y1, 1.);
-        let delta = self.target - self.start;
-        let position = self.start + delta * eased;
-
-        let dx = cubic_bezier_derivative(parameter, KEY_SCROLL_BEZIER_X1, KEY_SCROLL_BEZIER_X2);
-        let dy = cubic_bezier_derivative(parameter, y1, 1.);
-        let velocity = if dx.abs() <= f32::EPSILON {
-            0.
-        } else {
-            delta * (dy / dx) / duration
-        };
-        (position, velocity, false)
-    }
-}
-
-fn cubic_bezier_coordinate(t: f32, p1: f32, p2: f32) -> f32 {
-    let inverse = 1. - t;
-    3. * inverse * inverse * t * p1 + 3. * inverse * t * t * p2 + t * t * t
-}
-
-fn cubic_bezier_derivative(t: f32, p1: f32, p2: f32) -> f32 {
-    let inverse = 1. - t;
-    3. * inverse * inverse * p1 + 6. * inverse * t * (p2 - p1) + 3. * t * t * (1. - p2)
-}
-
-fn solve_keyboard_scroll_bezier(progress: f32) -> f32 {
-    if progress <= 0. || progress >= 1. {
-        return progress.clamp(0., 1.);
-    }
-
-    // The x control points are monotonic, so a small fixed bisection is
-    // deterministic and accurate enough for sub-pixel scrolling.
-    let mut lower = 0.;
-    let mut upper = 1.;
-    for _ in 0..12 {
-        let parameter = (lower + upper) * 0.5;
-        let x = cubic_bezier_coordinate(parameter, KEY_SCROLL_BEZIER_X1, KEY_SCROLL_BEZIER_X2);
-        if x < progress {
-            lower = parameter;
-        } else {
-            upper = parameter;
-        }
-    }
-    (lower + upper) * 0.5
-}
-
-#[cfg(test)]
-mod keyboard_scroll_animation_tests {
-    use super::*;
-
-    #[test]
-    fn curve_is_time_based_and_finishes_at_constant_duration() {
-        let started_at = Instant::now();
-        let animation = KeyboardScrollAnimation::new(0., 48., 0., started_at);
-
-        let (midpoint, midpoint_velocity, midpoint_finished) =
-            animation.sample(started_at + KEY_SCROLL_DURATION / 2);
-        assert!((midpoint - 24.).abs() < 0.05);
-        assert!(midpoint_velocity > 0.);
-        assert!(!midpoint_finished);
-
-        let (end, end_velocity, end_finished) = animation.sample(started_at + KEY_SCROLL_DURATION);
-        assert_eq!(end, 48.);
-        assert_eq!(end_velocity, 0.);
-        assert!(end_finished);
-    }
-
-    #[test]
-    fn same_direction_retarget_preserves_position_and_velocity() {
-        let started_at = Instant::now();
-        let animation = KeyboardScrollAnimation::new(0., 48., 0., started_at);
-        let retargeted_at = started_at + Duration::from_millis(60);
-        let (position, velocity, _) = animation.sample(retargeted_at);
-
-        let retargeted = KeyboardScrollAnimation::new(position, 96., velocity, retargeted_at);
-        let (new_position, new_velocity, finished) = retargeted.sample(retargeted_at);
-
-        assert!((new_position - position).abs() < 0.01);
-        assert!((new_velocity - velocity).abs() < 0.1);
-        assert!(!finished);
-    }
-
-    #[test]
-    fn direction_reversal_does_not_continue_with_stale_velocity() {
-        let started_at = Instant::now();
-        let animation = KeyboardScrollAnimation::new(0., 48., 0., started_at);
-        let retargeted_at = started_at + Duration::from_millis(60);
-        let (position, velocity, _) = animation.sample(retargeted_at);
-        assert!(velocity > 0.);
-
-        let reversed = KeyboardScrollAnimation::new(position, -48., velocity, retargeted_at);
-        let (_, reversed_velocity, _) = reversed.sample(retargeted_at);
-        assert_eq!(reversed_velocity, 0.);
-    }
-}
-
 pub struct ChannelMessages {
     pub(crate) list_state: ListState,
-    focus_handle: FocusHandle,
-    keyboard_scroll: Option<KeyboardScrollAnimation>,
     settings: Entity<Settings>,
     image_cache: Entity<LruImageCache>,
     avatar_image_cache: Entity<LruImageCache>,
     small_avatar_image_cache: Entity<LruImageCache>,
     active_videos: HashMap<(MessageId, usize), Entity<VideoPlayerView>>,
-    active_audios: indexmap::IndexMap<(MessageId, usize), Entity<AudioPlayerView>>,
+    active_audios: HashMap<(MessageId, usize), Entity<AudioPlayerView>>,
     gif_videos: HashMap<(MessageId, usize), Entity<GifVideoView>>,
     cached_for_channel: Option<ChannelId>,
     skeleton_phase: SkeletonPhase,
@@ -328,15 +182,8 @@ pub struct ChannelMessages {
     _hover_show_task: Option<Task<()>>,
     _hover_hide_task: Option<Task<()>>,
     scroll_relief_armed: bool,
-    paginate_armed_top: bool,
-    paginate_armed_bottom: bool,
-    last_paginate_count: usize,
-    last_paginate_edges: (
-        Option<mezon_store::MessageId>,
-        Option<mezon_store::MessageId>,
-    ),
+    last_paginate: Option<Instant>,
     last_scroll_at: Option<Instant>,
-    scroll_idle_armed: bool,
     at_bottom: bool,
     last_visible_start: usize,
     header_shown: bool,
@@ -374,7 +221,6 @@ pub struct ChannelMessages {
     _emoji_observe: Subscription,
     gif_reconcile_fingerprint: Option<(Option<ChannelId>, usize, usize)>,
     last_gif_reconcile: Option<Instant>,
-    last_image_cache_sweep: Option<Instant>,
     row_memo: Rc<RefCell<RowMemo>>,
     row_memo_day: Option<chrono::NaiveDate>,
 }
@@ -407,10 +253,9 @@ impl ChannelMessages {
 
         let direct_messages = DirectMessageStore::global(cx);
         let direct_messages_observe = cx.observe(&direct_messages, |this, _, cx| {
-            if !MessagesStore::global(cx).read(cx).is_dm() {
-                return;
+            if MessagesStore::global(cx).read(cx).is_dm() {
+                this.row_memo.borrow_mut().avatars.clear();
             }
-            this.row_memo.borrow_mut().avatars.clear();
             if this.refresh_derived_state(cx) {
                 cx.notify();
             }
@@ -584,7 +429,11 @@ impl ChannelMessages {
                         cx.notify();
                         return;
                     };
-                    let vp_index = _store.read(cx).viewport_position(*id);
+                    let vp_index = _store
+                        .read(cx)
+                        .viewport_messages()
+                        .iter()
+                        .position(|m| m.id == *id);
                     if let Some(vp_index) = vp_index {
                         let at = usize::from(this.header_shown) + vp_index;
                         if at < this.list_state.item_count() {
@@ -636,8 +485,7 @@ impl ChannelMessages {
         })
         .detach();
 
-        let list_state =
-            ListState::new(0, ListAlignment::Bottom, px(LIST_OVERDRAW)).smooth_line_scroll();
+        let list_state = ListState::new(0, ListAlignment::Bottom, px(LIST_OVERDRAW));
         let timeline = cx.weak_entity();
         list_state.set_scroll_handler(move |event, _window, cx| {
             let near_top = event.visible_range.start < LOAD_MORE_ITEM_THRESHOLD
@@ -647,11 +495,6 @@ impl ChannelMessages {
             let at_bottom = event.visible_range.end + LOAD_MORE_ITEM_THRESHOLD >= event.count;
             let visible_start = event.visible_range.start;
             let _ = timeline.update(cx, |this, cx| {
-                // Direct wheel/trackpad input must take ownership from an in-flight
-                // keyboard scroll animation. Otherwise the next RAF moves the list
-                // back toward the stale keyboard target and makes wheel deltas feel
-                // shorter than they actually are.
-                this.keyboard_scroll = None;
                 let range_moved = this.last_visible_start != visible_start;
                 this.at_bottom = at_bottom;
                 this.last_visible_start = visible_start;
@@ -695,7 +538,7 @@ impl ChannelMessages {
                     this.sync_channel_seen(cx);
                 }
 
-                this.mark_scroll_activity(cx);
+                this.last_scroll_at = Some(Instant::now());
                 if !this.suppress_hover {
                     this.suppress_hover = true;
                     this.hovered_row = None;
@@ -705,49 +548,31 @@ impl ChannelMessages {
                     cx.notify();
                 }
 
-                let edges = {
-                    let messages = MessagesStore::global(cx).read(cx).messages();
-                    (
-                        messages.first().map(|m| m.id),
-                        messages.last().map(|m| m.id),
-                    )
-                };
-                if event.count != this.last_paginate_count || edges != this.last_paginate_edges {
-                    this.last_paginate_count = event.count;
-                    this.last_paginate_edges = edges;
-                    this.paginate_armed_top = true;
-                    this.paginate_armed_bottom = true;
-                }
-                if !near_top {
-                    this.paginate_armed_top = true;
-                }
-                if !near_bottom {
-                    this.paginate_armed_bottom = true;
-                }
                 if !(near_top || near_bottom) {
                     return;
                 }
-                let store = MessagesStore::global(cx);
-                if near_top && this.paginate_armed_top {
-                    this.paginate_armed_top = false;
-                    tracing::debug!(
-                        start = event.visible_range.start,
-                        end = event.visible_range.end,
-                        count = event.count,
-                        "timeline pagination trigger: top"
-                    );
-                    store.update(cx, |store, cx| store.scroll_reached_top(cx));
-                } else if near_bottom
-                    && this.paginate_armed_bottom
-                    && store.read(cx).has_more_bottom()
+                let now = Instant::now();
+                if this
+                    .last_paginate
+                    .is_some_and(|t| now.duration_since(t) < PAGINATE_THROTTLE)
                 {
-                    this.paginate_armed_bottom = false;
-                    tracing::debug!(
-                        start = event.visible_range.start,
-                        end = event.visible_range.end,
-                        count = event.count,
-                        "timeline pagination trigger: bottom"
-                    );
+                    return;
+                }
+                let store = MessagesStore::global(cx);
+                tracing::debug!(
+                    near_top,
+                    near_bottom,
+                    start = event.visible_range.start,
+                    end = event.visible_range.end,
+                    count = event.count,
+                    has_more_bottom = store.read(cx).has_more_bottom(),
+                    "timeline pagination trigger"
+                );
+                if near_top {
+                    this.last_paginate = Some(now);
+                    store.update(cx, |store, cx| store.scroll_reached_top(cx));
+                } else if store.read(cx).has_more_bottom() {
+                    this.last_paginate = Some(now);
                     store.update(cx, |store, cx| store.scroll_reached_bottom(cx));
                 }
             });
@@ -802,14 +627,12 @@ impl ChannelMessages {
         });
         Self {
             list_state,
-            focus_handle: cx.focus_handle(),
-            keyboard_scroll: None,
             settings,
             image_cache,
             avatar_image_cache,
             small_avatar_image_cache,
             active_videos: HashMap::new(),
-            active_audios: indexmap::IndexMap::new(),
+            active_audios: HashMap::new(),
             gif_videos: HashMap::new(),
             cached_for_channel: None,
             skeleton_phase: SkeletonPhase::Hidden,
@@ -824,12 +647,8 @@ impl ChannelMessages {
             _hover_show_task: None,
             _hover_hide_task: None,
             scroll_relief_armed: false,
-            paginate_armed_top: true,
-            paginate_armed_bottom: true,
-            last_paginate_count: 0,
-            last_paginate_edges: (None, None),
+            last_paginate: None,
             last_scroll_at: None,
-            scroll_idle_armed: false,
             at_bottom: true,
             last_visible_start: 0,
             header_shown: false,
@@ -867,7 +686,6 @@ impl ChannelMessages {
             _emoji_observe: emoji_observe,
             gif_reconcile_fingerprint: None,
             last_gif_reconcile: None,
-            last_image_cache_sweep: None,
             row_memo: Rc::new(RefCell::new(RowMemo::default())),
             row_memo_day: None,
         }
@@ -957,7 +775,7 @@ impl ChannelMessages {
             move |this, _input, event: &MentionInputEvent, window, cx| match event {
                 MentionInputEvent::Submit => this.save_edit(window, cx),
                 MentionInputEvent::Cancel => this.cancel_edit(cx),
-                MentionInputEvent::SendSticker { .. } | MentionInputEvent::SendSound { .. } => {}
+                MentionInputEvent::SendSticker { .. } => {}
             },
         ));
         self.edit_input = Some((message_id, input));
@@ -1019,7 +837,9 @@ impl ChannelMessages {
             let store = MessagesStore::global(cx);
             let store = store.read(cx);
             store
-                .viewport_message_by_id(message_id)
+                .messages()
+                .iter()
+                .find(|m| m.id == message_id)
                 .map(|m| (m.sender_id.clone(), m.code == MessageCode::Poll))
         };
         self.context_menu_forward_all = match sender_and_poll {
@@ -1146,10 +966,10 @@ impl ChannelMessages {
         if self.active_audios.contains_key(&key) {
             return;
         }
-        while self.active_audios.len() >= MAX_AUDIO_PLAYERS {
-            if self.active_audios.shift_remove_index(0).is_none() {
-                break;
-            }
+        if self.active_audios.len() >= MAX_AUDIO_PLAYERS
+            && let Some(evicted) = self.active_audios.keys().next().copied()
+        {
+            self.active_audios.remove(&evicted);
         }
         let view = cx.new(|cx| AudioPlayerView::new(activation, cx));
         self.active_audios.insert(key, view);
@@ -1711,130 +1531,6 @@ impl ChannelMessages {
     }
 }
 
-impl ChannelMessages {
-    fn mark_scroll_activity(&mut self, cx: &mut Context<Self>) {
-        self.last_scroll_at = Some(Instant::now());
-        if self.scroll_idle_armed {
-            return;
-        }
-
-        self.scroll_idle_armed = true;
-        cx.spawn(async move |this, cx| {
-            let mut remaining = SCROLL_ACTIVITY_GRACE;
-            loop {
-                cx.background_executor().timer(remaining).await;
-                let next = this
-                    .update(cx, |this, cx| {
-                        let elapsed = this.last_scroll_at.map_or(SCROLL_ACTIVITY_GRACE, |at| {
-                            at.elapsed().min(SCROLL_ACTIVITY_GRACE)
-                        });
-                        if elapsed >= SCROLL_ACTIVITY_GRACE {
-                            this.scroll_idle_armed = false;
-                            cx.notify();
-                            None
-                        } else {
-                            Some(SCROLL_ACTIVITY_GRACE - elapsed)
-                        }
-                    })
-                    .ok()
-                    .flatten();
-                let Some(next) = next else {
-                    break;
-                };
-                remaining = next;
-            }
-        })
-        .detach();
-    }
-
-    fn scroll_messages_by(&mut self, delta: Pixels, cx: &mut Context<Self>) {
-        let now = Instant::now();
-        let current = self.list_state.scroll_px_offset_for_scrollbar().y.as_f32();
-        let max = self.list_state.max_offset_for_scrollbar().y.as_f32();
-        let previous = self.keyboard_scroll;
-        let base = previous.map_or(current, |animation| animation.target);
-        let target = (base + delta.as_f32()).clamp(-max, 0.);
-
-        // Repeated input at a boundary must not restart and prolong the curve.
-        if (target - base).abs() <= f32::EPSILON {
-            return;
-        }
-
-        let (start, velocity) = previous.map_or((current, 0.), |animation| {
-            let (position, velocity, _) = animation.sample(now);
-            (position, velocity)
-        });
-        self.keyboard_scroll = Some(KeyboardScrollAnimation::new(start, target, velocity, now));
-        cx.notify();
-    }
-
-    fn drive_scroll_anim(&mut self, window: &mut Window) {
-        if self.list_state.is_scrollbar_dragging() || self.list_state.is_smooth_wheel_scrolling() {
-            self.keyboard_scroll = None;
-            return;
-        }
-        let Some(animation) = self.keyboard_scroll else {
-            return;
-        };
-
-        let (position, _, finished) = animation.sample(Instant::now());
-        self.list_state
-            .set_offset_from_scrollbar(Point::new(px(0.), px(position)));
-        if finished {
-            self.keyboard_scroll = None;
-        } else {
-            window.request_animation_frame();
-        }
-    }
-
-    fn on_messages_key(
-        &mut self,
-        event: &KeyDownEvent,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let step = window.line_height() * 3.;
-        let page = self.list_state.viewport_bounds().size.height * 0.9;
-        let handled = match event.keystroke.key.as_str() {
-            "up" => {
-                self.scroll_messages_by(step, cx);
-                true
-            }
-            "down" => {
-                self.scroll_messages_by(-step, cx);
-                true
-            }
-            "pageup" => {
-                self.scroll_messages_by(page, cx);
-                true
-            }
-            "pagedown" => {
-                self.scroll_messages_by(-page, cx);
-                true
-            }
-            "home" => {
-                self.keyboard_scroll = None;
-                self.list_state.scroll_to(gpui::ListOffset {
-                    item_ix: 0,
-                    offset_in_item: px(0.),
-                });
-                cx.notify();
-                true
-            }
-            "end" => {
-                self.keyboard_scroll = None;
-                self.list_state.scroll_to_end();
-                cx.notify();
-                true
-            }
-            _ => false,
-        };
-        if handled {
-            cx.stop_propagation();
-        }
-    }
-}
-
 impl Render for ChannelMessages {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         crate::trace_render!(
@@ -1842,28 +1538,12 @@ impl Render for ChannelMessages {
             MessagesStore::global(cx).read(cx).active_channel_id()
         );
         self.clear_image_cache_if_channel_changed(window, cx);
+        self.image_cache
+            .update(cx, |cache, cx| cache.sweep(window, cx));
+        cx.defer_in(window, |this, window, cx| {
+            this.apply_gif_reconcile(window, cx)
+        });
         self.sync_render_identity(cx);
-        self.drive_scroll_anim(window);
-        let scroll_active = self.keyboard_scroll.is_some()
-            || self.list_state.is_smooth_wheel_scrolling()
-            || self.list_state.is_scrollbar_dragging()
-            || self
-                .last_scroll_at
-                .is_some_and(|at| at.elapsed() < SCROLL_ACTIVITY_GRACE);
-        if !scroll_active
-            || self
-                .last_image_cache_sweep
-                .is_none_or(|at| at.elapsed() >= SCROLL_CACHE_SWEEP_INTERVAL)
-        {
-            self.image_cache
-                .update(cx, |cache, cx| cache.sweep(window, cx));
-            self.last_image_cache_sweep = Some(Instant::now());
-        }
-        if !scroll_active {
-            cx.defer_in(window, |this, window, cx| {
-                this.apply_gif_reconcile(window, cx)
-            });
-        }
 
         let store = MessagesStore::global(cx);
         let active_clan = ClanList::global(cx).read(cx).active_clan_id;
@@ -1938,12 +1618,6 @@ impl Render for ChannelMessages {
                 .rev()
                 .map(|m| m.id),
         );
-        let key_listener = cx.listener(Self::on_messages_key);
-        let focus_on_click = cx.listener(|this, _: &MouseDownEvent, window, cx| {
-            if !this.focus_handle.is_focused(window) {
-                window.focus(&this.focus_handle, cx);
-            }
-        });
         let scroll_down_fab = self.scroll_down_fab(show_scroll_down, unread_count, cx);
 
         div()
@@ -1951,9 +1625,6 @@ impl Render for ChannelMessages {
             .relative()
             .overflow_hidden()
             .image_cache(self.image_cache.clone())
-            .track_focus(&self.focus_handle)
-            .on_key_down(key_listener)
-            .on_mouse_down(MouseButton::Left, focus_on_click)
             .child(
                 list(list_state, move |ix, _window, cx| {
                     if header_shown && ix == 0 {
@@ -2050,7 +1721,11 @@ impl Render for ChannelMessages {
             .when_some(self.context_menu_target, |el, (message_id, position)| {
                 let store = MessagesStore::global(cx);
                 let store_ref = store.read(cx);
-                let Some(target_msg) = store_ref.viewport_message_by_id(message_id) else {
+                let Some(target_msg) = store_ref
+                    .viewport_messages()
+                    .iter()
+                    .find(|m| m.id == message_id)
+                else {
                     return el;
                 };
                 let menu = message_context_menu::build(

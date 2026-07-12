@@ -41,7 +41,6 @@ where
     UniformList {
         item_count,
         item_to_measure_index: 0,
-        measured_item_size: None,
         render_items: Box::new(render_range),
         decorations: Vec::new(),
         interactivity: Interactivity {
@@ -59,7 +58,6 @@ where
 pub struct UniformList {
     item_count: usize,
     item_to_measure_index: usize,
-    measured_item_size: Option<Size<Pixels>>,
     render_items: Box<
         dyn for<'a> Fn(Range<usize>, &'a mut Window, &'a mut App) -> SmallVec<[AnyElement; 64]>,
     >,
@@ -283,10 +281,6 @@ impl Element for UniformList {
     ) -> (LayoutId, Self::RequestLayoutState) {
         let max_items = self.item_count;
         let item_size = self.measure_item(None, window, cx);
-        // mezon vendor edit: keep the measurement (see `measured_item_size`) — upstream
-        // re-ran `measure_item` in `prepaint`, laying out a throwaway sample row a
-        // second time on every frame of every uniform_list.
-        self.measured_item_size = Some(item_size);
         let layout_id = self.interactivity.request_layout(
             global_id,
             inspector_id,
@@ -362,11 +356,7 @@ impl Element for UniformList {
             ListHorizontalSizingBehavior::Unconstrained
         );
 
-        // mezon vendor edit: reuse the size already measured in `request_layout`;
-        // only measure here if prepaint somehow runs without one.
-        let longest_item_size = self
-            .measured_item_size
-            .unwrap_or_else(|| self.measure_item(None, window, cx));
+        let longest_item_size = self.measure_item(None, window, cx);
         let content_width = if can_scroll_horizontally {
             padded_bounds.size.width.max(longest_item_size.width)
         } else {

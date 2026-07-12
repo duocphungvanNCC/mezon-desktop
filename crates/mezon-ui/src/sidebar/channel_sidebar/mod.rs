@@ -10,10 +10,9 @@ use gpui::{
     prelude::*, px,
 };
 use mezon_store::{
-    ChannelId, ChannelList, ClanId, ClanList, ClanMembersStore, FAVOR_CATE_ID,
-    PERMISSION_MANAGE_CLAN, PermissionStore, Settings, VoiceMember,
+    ChannelList, ClanId, ClanList, ClanMembersStore, FAVOR_CATE_ID, PERMISSION_MANAGE_CLAN,
+    PermissionStore, Settings, VoiceMember,
 };
-use ui::{ScrollAxes, Scrollbars, WithScrollbar};
 
 use crate::clan::clan_menu::{build_clan_menu, clan_menu_overlay};
 use crate::components::compositions::channel_row::{channel_type_icon, shows_left_unread_nub};
@@ -72,9 +71,6 @@ pub struct ChannelSidebar {
     _skeleton_timer: Option<Task<()>>,
     suppress_hover: bool,
     last_scroll_at: Option<Instant>,
-    last_locale: String,
-    last_route_channel: Option<ChannelId>,
-    last_clan_inputs: (Option<ClanId>, u64),
     _clan_observe: Subscription,
     _channel_observe: Subscription,
     _settings_observe: Subscription,
@@ -91,7 +87,7 @@ impl ChannelSidebar {
     ) -> Self {
         let channel_list_handle = channel_list.clone();
 
-        let list_state = ListState::new(0, gpui::ListAlignment::Top, px(32.)).measure_all();
+        let list_state = ListState::new(0, gpui::ListAlignment::Top, px(32.));
         let weak = cx.weak_entity();
         list_state.set_scroll_handler(move |_event, _window, cx| {
             weak.update(cx, |this, cx| {
@@ -104,12 +100,7 @@ impl ChannelSidebar {
             .ok();
         });
 
-        let clan_observe = cx.observe(&clan_list, |this, clan_list, cx| {
-            let inputs = clan_inputs_fingerprint(clan_list.read(cx));
-            if inputs == this.last_clan_inputs {
-                return;
-            }
-            this.last_clan_inputs = inputs;
+        let clan_observe = cx.observe(&clan_list, |this, _, cx| {
             if this.rebuild_items(cx) {
                 cx.notify();
             }
@@ -119,40 +110,22 @@ impl ChannelSidebar {
                 cx.notify();
             }
         });
-        let settings_observe = cx.observe(&settings, |this, settings, cx| {
-            if settings.read(cx).language == this.last_locale {
-                return;
-            }
-            this.last_locale = settings.read(cx).language.clone();
+        let settings_observe = cx.observe(&settings, |this, _, cx| {
             if this.rebuild_items(cx) {
                 cx.notify();
             }
         });
         let router_observe = cx.observe(&crate::router::Router::global(cx), |this, _, cx| {
-            let active = route_active_channel(cx);
-            if active == this.last_route_channel {
-                return;
-            }
-            this.last_route_channel = active;
             if this.rebuild_items(cx) {
                 cx.notify();
             }
         });
         let members_observe = cx.observe(&ClanMembersStore::global(cx), |this, _, cx| {
-            let resolves_members = this.items.iter().any(|item| {
-                matches!(item, SidebarItem::Channel { voice_members, .. } if !voice_members.is_empty())
-            });
-            if !resolves_members {
-                return;
-            }
             if this.rebuild_items(cx) {
                 cx.notify();
             }
         });
 
-        let initial_locale = settings.read(cx).language.clone();
-        let initial_route_channel = route_active_channel(cx);
-        let initial_clan_inputs = clan_inputs_fingerprint(clan_list.read(cx));
         let mut this = Self {
             clan_list,
             channel_list,
@@ -171,9 +144,6 @@ impl ChannelSidebar {
             _skeleton_timer: None,
             suppress_hover: false,
             last_scroll_at: None,
-            last_locale: initial_locale,
-            last_route_channel: initial_route_channel,
-            last_clan_inputs: initial_clan_inputs,
             _clan_observe: clan_observe,
             _channel_observe: channel_observe,
             _settings_observe: settings_observe,
@@ -186,8 +156,6 @@ impl ChannelSidebar {
 
     fn rebuild_items(&mut self, cx: &mut Context<Self>) -> bool {
         let locale = self.settings.read(cx).language.clone();
-        self.last_locale = locale.clone();
-        self.last_clan_inputs = clan_inputs_fingerprint(self.clan_list.read(cx));
         let clans = self.clan_list.read(cx);
         let channels = self.channel_list.read(cx);
 
@@ -209,8 +177,12 @@ impl ChannelSidebar {
         self.active_clan_name = new_clan_name;
         self.active_clan_id = new_clan_id;
 
-        let active_channel_id = route_active_channel(cx);
-        self.last_route_channel = active_channel_id;
+        let active_channel_id = match crate::router::Router::global(cx).read(cx).route() {
+            crate::router::Route::Channel { channel_id, .. }
+            | crate::router::Route::Thread { channel_id, .. }
+            | crate::router::Route::Canvas { channel_id, .. } => Some(channel_id),
+            _ => None,
+        };
         let mut items = Vec::new();
 
         let app_channels: Vec<AppChannelSlot> = clans
@@ -258,24 +230,14 @@ impl ChannelSidebar {
                     });
                     if !collapsed {
                         let ch_slice = &category.channels;
-                        let mut seen_parents: HashSet<ChannelId> = HashSet::new();
-                        let mut has_prev_sibling = vec![false; ch_slice.len()];
-                        for (idx, ch) in ch_slice.iter().enumerate() {
-                            if let Some(pid) = ch.parent_id {
-                                has_prev_sibling[idx] = !seen_parents.insert(pid);
-                            }
-                        }
-                        let mut remaining_parents: HashSet<ChannelId> = HashSet::new();
-                        let mut has_next_sibling = vec![false; ch_slice.len()];
-                        for (idx, ch) in ch_slice.iter().enumerate().rev() {
-                            if let Some(pid) = ch.parent_id {
-                                has_next_sibling[idx] = !remaining_parents.insert(pid);
-                            }
-                        }
                         for (idx, ch) in ch_slice.iter().enumerate() {
                             let is_thread = !is_favorites && ch.parent_id.is_some();
                             let (line_above, line_below) = if is_thread {
-                                (has_prev_sibling[idx], has_next_sibling[idx])
+                                let pid = ch.parent_id;
+                                let has_prev = ch_slice[..idx].iter().any(|c| c.parent_id == pid);
+                                let has_next =
+                                    ch_slice[idx + 1..].iter().any(|c| c.parent_id == pid);
+                                (has_prev, has_next)
                             } else {
                                 (false, false)
                             };
@@ -292,11 +254,6 @@ impl ChannelSidebar {
                                     "ch-{}-{}",
                                     &category.id, &ch.id
                                 )),
-                                row_elem_id: SharedString::from(if is_thread {
-                                    format!("thread-row-{}", ch.id)
-                                } else {
-                                    format!("channel-row-{}", ch.id)
-                                }),
                                 id: ch.id.to_string(),
                                 name: truncate_channel_label(&ch.name),
                                 channel_type: ch.channel_type,
@@ -424,7 +381,7 @@ impl ChannelSidebar {
 }
 
 impl Render for ChannelSidebar {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         crate::trace_render!("ChannelSidebar");
         let theme = cx.theme();
         let items = self.items.clone();
@@ -437,14 +394,15 @@ impl Render for ChannelSidebar {
         let sidebar_for_clan_menu = sidebar.clone();
         let channel_list_for_clan_menu = self.channel_list_handle.clone();
         let locale = self.settings.read(cx).language.clone();
-        let can_create_category = self.clan_menu_open
-            && self.active_clan_id.is_some_and(|clan_id| {
-                PermissionStore::try_global(cx).is_some_and(|store| {
-                    store
-                        .read(cx)
-                        .check_permission(clan_id, PERMISSION_MANAGE_CLAN, cx)
-                })
-            });
+        let can_create_category = if let Some(clan_id) = self.active_clan_id {
+            PermissionStore::try_global(cx).is_some_and(|store| {
+                store
+                    .read(cx)
+                    .check_permission(clan_id, PERMISSION_MANAGE_CLAN, cx)
+            })
+        } else {
+            false
+        };
         let menu_overlay = self.open_menu.as_ref().map(|menu| {
             (
                 menu.position,
@@ -453,9 +411,23 @@ impl Render for ChannelSidebar {
                 locale.clone(),
             )
         });
+        let active_clan_for_menu = self.clan_list.read(cx).active_clan().map(|clan| {
+            (
+                clan.name.clone(),
+                clan.avatar_url.clone().unwrap_or_default(),
+            )
+        });
         let clan_menu_data = self.clan_menu_open.then(|| {
             (
                 self.active_clan_id,
+                active_clan_for_menu
+                    .as_ref()
+                    .map(|(name, _)| name.clone())
+                    .unwrap_or_else(|| self.active_clan_name.clone()),
+                active_clan_for_menu
+                    .as_ref()
+                    .map(|(_, avatar)| avatar.clone())
+                    .unwrap_or_default(),
                 self.channel_list
                     .read(cx)
                     .is_show_empty_category(self.active_clan_id.unwrap_or(ClanId(0))),
@@ -577,7 +549,15 @@ impl Render for ChannelSidebar {
                     })
                     .when_some(
                         clan_menu_data,
-                        move |el, (clan_id, show_empty, can_create_category, locale)| {
+                        move |el,
+                              (
+                            clan_id,
+                            clan_name,
+                            clan_avatar_url,
+                            show_empty,
+                            can_create_category,
+                            locale,
+                        )| {
                             let Some(clan_id) = clan_id else {
                                 return el;
                             };
@@ -586,6 +566,8 @@ impl Render for ChannelSidebar {
                                     sidebar_for_menu.clone(),
                                     channel_list_for_menu.clone(),
                                     clan_id,
+                                    clan_name,
+                                    clan_avatar_url,
                                     &locale,
                                     show_empty,
                                     can_create_category,
@@ -612,13 +594,7 @@ impl Render for ChannelSidebar {
                         }
                     }))
                     .child(list_element)
-                    .children(skeleton_overlay)
-                    .custom_scrollbars(
-                        Scrollbars::always_visible(ScrollAxes::Vertical)
-                            .tracked_scroll_handle(&self.list_state),
-                        window,
-                        cx,
-                    ),
+                    .children(skeleton_overlay),
             )
             .when_some(
                 menu_overlay,
@@ -723,33 +699,6 @@ fn nav_row(icon: IconName, label: &'static str, theme: &crate::theme::Theme) -> 
 
 const NUMBER_APPS_SHOW_OFF: usize = 4;
 const MAX_CHANNEL_LABEL_CHARS: usize = 20;
-
-fn route_active_channel(cx: &gpui::App) -> Option<ChannelId> {
-    match crate::router::Router::global(cx).read(cx).route() {
-        crate::router::Route::Channel { channel_id, .. }
-        | crate::router::Route::Thread { channel_id, .. }
-        | crate::router::Route::Canvas { channel_id, .. } => Some(channel_id),
-        _ => None,
-    }
-}
-
-fn clan_inputs_fingerprint(clans: &ClanList) -> (Option<ClanId>, u64) {
-    const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
-    const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
-    fn fold(hash: u64, bytes: &[u8]) -> u64 {
-        bytes
-            .iter()
-            .fold(hash, |h, b| (h ^ u64::from(*b)).wrapping_mul(FNV_PRIME))
-    }
-    let mut hash = FNV_OFFSET;
-    if let Some(clan) = clans.active_clan() {
-        hash = fold(hash, clan.name.as_bytes());
-    }
-    if let Some(banner) = clans.active_clan_banner() {
-        hash = fold(hash, banner.as_bytes());
-    }
-    (clans.active_clan_id, hash)
-}
 
 fn truncate_channel_label(name: &str) -> String {
     if name.chars().count() > MAX_CHANNEL_LABEL_CHARS {
@@ -940,7 +889,6 @@ fn render_sidebar_item(
 
         SidebarItem::Channel {
             elem_id,
-            row_elem_id,
             id,
             name,
             channel_type,
@@ -984,34 +932,38 @@ fn render_sidebar_item(
                 let hoverable = !*selected && !suppress_hover;
                 let show_channel_nub = *unread && !*selected && highlight_type;
                 let show_channel_badge = crate::SHOW_UNREAD_BADGE_COUNT && *badge_count > 0;
-                ChannelRowElement::new(row_elem_id.clone(), icon, name.clone().into())
-                    .icon_color(icon_base, icon_hover)
-                    .name_style(name_base, name_hover, weight)
-                    .selected_bg(if *selected {
-                        Some(theme.tokens.bg_active_member_channel.into())
-                    } else {
-                        None
+                ChannelRowElement::new(
+                    SharedString::from(format!("channel-row-{ch_id}")),
+                    icon,
+                    name.clone().into(),
+                )
+                .icon_color(icon_base, icon_hover)
+                .name_style(name_base, name_hover, weight)
+                .selected_bg(if *selected {
+                    Some(theme.tokens.bg_active_member_channel.into())
+                } else {
+                    None
+                })
+                .hover_bg(if hoverable {
+                    Some(theme.bg_hover.into())
+                } else {
+                    None
+                })
+                .muted(*muted)
+                .unread_nub(if show_channel_nub {
+                    Some(theme.tokens.text_secondary.into())
+                } else {
+                    None
+                })
+                .badge(if show_channel_badge {
+                    Some(ChannelRowBadge {
+                        count: *badge_count,
+                        bg: gpui::rgb(0xda_37_3c).into(),
+                        text_color: gpui::white(),
                     })
-                    .hover_bg(if hoverable {
-                        Some(theme.bg_hover.into())
-                    } else {
-                        None
-                    })
-                    .muted(*muted)
-                    .unread_nub(if show_channel_nub {
-                        Some(theme.tokens.text_secondary.into())
-                    } else {
-                        None
-                    })
-                    .badge(if show_channel_badge {
-                        Some(ChannelRowBadge {
-                            count: *badge_count,
-                            bg: gpui::rgb(0xda_37_3c).into(),
-                            text_color: gpui::white(),
-                        })
-                    } else {
-                        None
-                    })
+                } else {
+                    None
+                })
             };
 
             let make_thread_element = || {
@@ -1029,37 +981,41 @@ fn render_sidebar_item(
                 };
                 let hoverable = !*selected && !suppress_hover;
                 let show_thread_badge = crate::SHOW_UNREAD_BADGE_COUNT && *badge_count > 0;
-                ChannelRowElement::new(row_elem_id.clone(), IconName::Hashtag, name.clone().into())
-                    .name_style(name_base, name_hover, weight)
-                    .selected_bg(if *selected {
-                        Some(theme.tokens.bg_active_member_channel.into())
-                    } else {
-                        None
+                ChannelRowElement::new(
+                    SharedString::from(format!("thread-row-{ch_id}")),
+                    IconName::Hashtag,
+                    name.clone().into(),
+                )
+                .name_style(name_base, name_hover, weight)
+                .selected_bg(if *selected {
+                    Some(theme.tokens.bg_active_member_channel.into())
+                } else {
+                    None
+                })
+                .hover_bg(if hoverable {
+                    Some(theme.bg_hover.into())
+                } else {
+                    None
+                })
+                .unread_nub(if *unread {
+                    Some(theme.tokens.text_secondary.into())
+                } else {
+                    None
+                })
+                .badge(if show_thread_badge {
+                    Some(ChannelRowBadge {
+                        count: *badge_count,
+                        bg: gpui::rgb(0xda_37_3c).into(),
+                        text_color: gpui::white(),
                     })
-                    .hover_bg(if hoverable {
-                        Some(theme.bg_hover.into())
-                    } else {
-                        None
-                    })
-                    .unread_nub(if *unread {
-                        Some(theme.tokens.text_secondary.into())
-                    } else {
-                        None
-                    })
-                    .badge(if show_thread_badge {
-                        Some(ChannelRowBadge {
-                            count: *badge_count,
-                            bg: gpui::rgb(0xda_37_3c).into(),
-                            text_color: gpui::white(),
-                        })
-                    } else {
-                        None
-                    })
-                    .connector(Some(ThreadConnector {
-                        line_above: *line_above,
-                        line_below: *line_below,
-                        color: theme.text_muted.into(),
-                    }))
+                } else {
+                    None
+                })
+                .connector(Some(ThreadConnector {
+                    line_above: *line_above,
+                    line_below: *line_below,
+                    color: theme.text_muted.into(),
+                }))
             };
 
             if *is_thread || voice_members.is_empty() {

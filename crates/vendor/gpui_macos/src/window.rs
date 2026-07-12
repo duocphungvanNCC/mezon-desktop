@@ -1069,23 +1069,9 @@ impl MacWindow {
     }
 }
 
-// mezon vendor edit: gate for the `[gpui_window_lifecycle]` traces. They are the
-// diagnostics for a field-reported crash on window close, so they stay — but an
-// unconditional `eprintln!` per window/view teardown also shipped to release stderr.
-// On by default in debug; in release, opt in with `GPUI_WINDOW_LIFECYCLE_LOG=1` — the
-// same switch as the Windows twin in `gpui_windows/src/events.rs`.
-// `eprintln!` rather than `log::*` because vendored gpui has no log bridge in mezon.
-fn window_lifecycle_log_enabled() -> bool {
-    cfg!(debug_assertions)
-        || std::env::var("GPUI_WINDOW_LIFECYCLE_LOG")
-            .is_ok_and(|value| value == "true" || value == "1")
-}
-
 impl Drop for MacWindow {
     fn drop(&mut self) {
-        if window_lifecycle_log_enabled() {
-            eprintln!("[gpui_window_lifecycle] MacWindow::drop");
-        }
+        eprintln!("[gpui_window_lifecycle] MacWindow::drop");
         let mut this = self.0.lock();
         let layer = this.renderer.layer_ptr() as *mut Object;
         if !layer.is_null() {
@@ -1921,10 +1907,7 @@ extern "C" fn yes(_: &Object, _: Sel) -> BOOL {
 }
 
 extern "C" fn dealloc_window(this: &Object, _: Sel) {
-    // mezon vendor edit: see `window_lifecycle_log_enabled` — gated crash diagnostic.
-    if window_lifecycle_log_enabled() {
-        eprintln!("[gpui_window_lifecycle] dealloc_window");
-    }
+    eprintln!("[gpui_window_lifecycle] dealloc_window");
     unsafe {
         drop_window_state(this);
         let _: () = msg_send![super(this, class!(NSWindow)), dealloc];
@@ -1932,10 +1915,7 @@ extern "C" fn dealloc_window(this: &Object, _: Sel) {
 }
 
 extern "C" fn dealloc_view(this: &Object, _: Sel) {
-    // mezon vendor edit: see `window_lifecycle_log_enabled` — gated crash diagnostic.
-    if window_lifecycle_log_enabled() {
-        eprintln!("[gpui_window_lifecycle] dealloc_view");
-    }
+    eprintln!("[gpui_window_lifecycle] dealloc_view");
     unsafe {
         drop_window_state(this);
         let _: () = msg_send![super(this, class!(NSView)), dealloc];
@@ -2105,14 +2085,6 @@ extern "C" fn handle_key_event(this: &Object, native_event: id, key_equivalent: 
 
             drop(lock);
 
-            // mezon vendor edit: only route non-printing keys (arrows/escape/etc.) through the
-            // IME when a text input handler is actually active. Without this, a window with no
-            // text input (e.g. the image viewer) has its arrow keys swallowed by the input
-            // context (handleEvent returns YES without doCommandBySelector) so they never reach
-            // on_key_down. Text inputs always set an input handler, so IME composition is
-            // unaffected. Re-apply on vendored gpui snapshot bump.
-            let has_input_handler = window_state.as_ref().lock().input_handler.is_some();
-
             let is_composing =
                 with_input_handler(this, |input_handler| input_handler.marked_text_range())
                     .flatten()
@@ -2148,25 +2120,9 @@ extern "C" fn handle_key_event(this: &Object, native_event: id, key_equivalent: 
                 })
                 .unwrap_or(false);
 
-            #[cfg(debug_assertions)]
-            if matches!(
-                key_down_event.keystroke.key.as_str(),
-                "up" | "down" | "left" | "right" | "escape"
-            ) {
-                eprintln!(
-                    "[gpui_key] {:?} equiv={} has_ih={} composing={} ime_printable={}",
-                    key_down_event.keystroke.key,
-                    key_equivalent,
-                    has_input_handler,
-                    is_composing,
-                    is_ime_printable_key
-                );
-            }
-
             if is_composing
                 || is_ime_printable_key
-                || (has_input_handler
-                    && key_down_event.keystroke.key_char.is_none()
+                || (key_down_event.keystroke.key_char.is_none()
                     && !key_down_event.keystroke.modifiers.control
                     && !key_down_event.keystroke.modifiers.function
                     && !key_down_event.keystroke.modifiers.platform)
@@ -2572,10 +2528,7 @@ extern "C" fn window_should_close(this: &Object, _: Sel, _: id) -> BOOL {
 }
 
 extern "C" fn close_window(this: &Object, _: Sel) {
-    // mezon vendor edit: see `window_lifecycle_log_enabled` — gated crash diagnostic.
-    if window_lifecycle_log_enabled() {
-        eprintln!("[gpui_window_lifecycle] close_window override");
-    }
+    eprintln!("[gpui_window_lifecycle] close_window override");
     unsafe {
         let close_callback = {
             let window_state = get_window_state(this);

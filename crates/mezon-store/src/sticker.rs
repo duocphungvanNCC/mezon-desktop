@@ -18,8 +18,6 @@ pub struct Sticker {
     pub src: String,
     pub category: String,
     pub clan_id: String,
-    pub clan_name: String,
-    pub logo: String,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -139,26 +137,19 @@ impl StickerStore {
             let result = api.list_stickers_by_user_id().await;
             let _ = this.update(cx, |this, cx| {
                 this.loading = false;
-                match result.map(|stickers| {
-                    let mut sounds = Vec::new();
-                    let mut mapped_stickers = Vec::new();
-                    for proto in stickers {
-                        if proto.media_type == AUDIO_MEDIA_TYPE {
-                            if let Some(sound) = sound_from_proto(proto) {
-                                sounds.push(sound);
-                            }
-                        } else if let Some(sticker) = sticker_from_proto(proto) {
-                            mapped_stickers.push(sticker);
-                        }
-                    }
-                    (mapped_stickers, sounds)
-                }) {
-                    Ok((mapped_stickers, sounds)) => {
+                match result {
+                    Ok(stickers) => {
                         this.by_id.clear();
                         this.order.clear();
-                        this.sounds = sounds;
-                        for sticker in mapped_stickers {
-                            this.insert(sticker);
+                        this.sounds.clear();
+                        for proto in stickers {
+                            if proto.media_type == AUDIO_MEDIA_TYPE {
+                                if let Some(sound) = sound_from_proto(proto) {
+                                    this.sounds.push(sound);
+                                }
+                            } else if let Some(sticker) = sticker_from_proto(proto) {
+                                this.insert(sticker);
+                            }
                         }
                         this.freshness.mark_fetched();
                         tracing::info!(
@@ -225,11 +216,10 @@ fn sticker_from_proto(s: api::ClanSticker) -> Option<Sticker> {
     if s.id == 0 || s.source.is_empty() || s.media_type != STICKER_MEDIA_TYPE {
         return None;
     }
-    let clan_name = s.clan_name;
     let category = if !s.category.is_empty() {
         s.category
     } else {
-        clan_name.clone()
+        s.clan_name
     };
     Some(Sticker {
         id: s.id.to_string(),
@@ -237,8 +227,6 @@ fn sticker_from_proto(s: api::ClanSticker) -> Option<Sticker> {
         src: s.source,
         category,
         clan_id: s.clan_id.to_string(),
-        clan_name,
-        logo: s.logo,
     })
 }
 
@@ -302,8 +290,6 @@ mod tests {
             src: format!("https://cdn/{id}.webp"),
             category: String::new(),
             clan_id: clan_id.into(),
-            clan_name: String::new(),
-            logo: String::new(),
         }
     }
 
@@ -319,7 +305,6 @@ mod tests {
         assert_eq!(mapped.src, "https://cdn/1.webp");
         assert_eq!(mapped.category, "MyClan");
         assert_eq!(mapped.clan_id, "7");
-        assert_eq!(mapped.clan_name, "MyClan");
     }
 
     #[test]

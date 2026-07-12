@@ -16,7 +16,6 @@ pub struct UserProfilePopover {
     context: ProfileContext,
     settings: gpui::Entity<Settings>,
     avatar_image_cache: gpui::Entity<LruImageCache>,
-    _roles_sub: Option<gpui::Subscription>,
 }
 
 impl UserProfilePopover {
@@ -31,15 +30,15 @@ impl UserProfilePopover {
         let focus_handle = cx.focus_handle();
         cx.on_blur(&focus_handle, window, |_, _, cx| cx.emit(DismissEvent))
             .detach();
-        let roles_sub = RolesStore::try_global(cx)
-            .map(|roles_store| cx.observe(&roles_store, |_, _, cx| cx.notify()));
+        if let Some(roles_store) = RolesStore::try_global(cx) {
+            cx.observe(&roles_store, |_, _, cx| cx.notify()).detach();
+        }
         Self {
             focus_handle,
             user_id,
             context,
             settings,
             avatar_image_cache,
-            _roles_sub: roles_sub,
         }
     }
 }

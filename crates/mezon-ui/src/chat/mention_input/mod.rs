@@ -2,7 +2,6 @@ mod attachments;
 mod text_field;
 
 use std::path::PathBuf;
-use std::rc::Rc;
 
 use gpui::{
     AnyElement, App, Context, DismissEvent, Entity, EventEmitter, Focusable, FontWeight, Image,
@@ -111,9 +110,9 @@ struct EmojiSuggestRaw {
 #[derive(Clone)]
 enum Suggestion {
     Here,
-    Member(Rc<MentionMemberRaw>),
-    Channel(Rc<ChannelSuggestRaw>),
-    Emoji(Rc<EmojiSuggestRaw>),
+    Member(MentionMemberRaw),
+    Channel(ChannelSuggestRaw),
+    Emoji(EmojiSuggestRaw),
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -121,7 +120,6 @@ pub enum MentionInputEvent {
     Submit,
     Cancel,
     SendSticker { url: String, filename: String },
-    SendSound { url: String, filename: String },
 }
 
 pub struct MentionInput {
@@ -134,9 +132,9 @@ pub struct MentionInput {
     suggestions: Vec<Suggestion>,
     selected: usize,
     suggestion_scroll: UniformListScrollHandle,
-    session_members: Vec<Rc<MentionMemberRaw>>,
-    session_channels: Vec<Rc<ChannelSuggestRaw>>,
-    session_emojis: Vec<Rc<EmojiSuggestRaw>>,
+    session_members: Vec<MentionMemberRaw>,
+    session_channels: Vec<ChannelSuggestRaw>,
+    session_emojis: Vec<EmojiSuggestRaw>,
     popup: Option<Entity<GifStickerEmojiPopup>>,
     _popup_subs: Vec<Subscription>,
     avatar_cache: Entity<LruImageCache>,
@@ -145,35 +143,10 @@ pub struct MentionInput {
     pending_attachments: Vec<PendingAttachment>,
     compact: bool,
     overflow_to_file: bool,
-    overflow_counter: Option<isize>,
-    last_content: SharedString,
     _input_sub: Subscription,
 }
 
 impl EventEmitter<MentionInputEvent> for MentionInput {}
-
-fn single_edit_region(old: &str, new: &str) -> (usize, usize, usize) {
-    let prefix = old
-        .as_bytes()
-        .iter()
-        .zip(new.as_bytes())
-        .take_while(|(a, b)| a == b)
-        .count();
-    let max_suffix = old.len().min(new.len()) - prefix;
-    let suffix = old
-        .as_bytes()
-        .iter()
-        .rev()
-        .zip(new.as_bytes().iter().rev())
-        .take_while(|(a, b)| a == b)
-        .count()
-        .min(max_suffix);
-    (
-        prefix,
-        old.len() - prefix - suffix,
-        new.len() - prefix - suffix,
-    )
-}
 
 fn json_string_utf16_len(s: &str) -> usize {
     serde_json::to_string(s)
@@ -314,8 +287,6 @@ impl MentionInput {
             pending_attachments: Vec::new(),
             compact,
             overflow_to_file: false,
-            overflow_counter: None,
-            last_content: SharedString::default(),
             _input_sub: input_sub,
         }
     }
@@ -684,50 +655,25 @@ impl MentionInput {
         let content = self.input.read(cx).value_shared();
         self.revalidate(&content, cx);
         self.check_trigger(&content, cx);
-        self.overflow_counter = {
-            let threshold = CONVERT_TO_FILE_THRESHOLD - CONVERT_PREFIX_LEN;
-            if self.overflow_to_file && content.len() > threshold {
-                let len = content.encode_utf16().count();
-                (len > threshold).then_some(threshold as isize - len as isize)
-            } else {
-                None
-            }
-        };
-        self.last_content = content;
     }
 
     fn revalidate(&mut self, content: &str, cx: &mut Context<Self>) {
         let before = self.committed.len();
-        let all_in_place = self
-            .committed
-            .iter()
-            .all(|token| content.get(token.start..token.end) == Some(token.display.as_str()));
-        if all_in_place {
-            return;
-        }
-        let (_, removed, inserted) = single_edit_region(&self.last_content, content);
-        let delta = inserted as isize - removed as isize;
-        self.committed.sort_by_key(|token| (token.start, token.end));
-        let mut min_next = 0usize;
         let mut reanchored = false;
         self.committed.retain_mut(|token| {
-            let candidates = [Some(token.start), token.start.checked_add_signed(delta)];
-            for start in candidates.into_iter().flatten() {
-                if start < min_next {
-                    continue;
-                }
-                let Some(end) = start.checked_add(token.display.len()) else {
-                    continue;
-                };
-                if content.get(start..end) == Some(token.display.as_str()) {
-                    reanchored |= token.start != start;
-                    token.start = start;
-                    token.end = end;
-                    min_next = end;
-                    return true;
-                }
+            if content.get(token.start..token.end) == Some(token.display.as_str()) {
+                return true;
             }
-            false
+            let mut matches = content.match_indices(token.display.as_str());
+            match (matches.next(), matches.next()) {
+                (Some((offset, _)), None) => {
+                    token.start = offset;
+                    token.end = offset + token.display.len();
+                    reanchored = true;
+                    true
+                }
+                _ => false,
+            }
         });
         if reanchored || self.committed.len() != before {
             self.sync_ranges(cx);
@@ -803,17 +749,13 @@ impl MentionInput {
 
     fn refresh_pool(&mut self, sigil: Sigil, cx: &mut Context<Self>) {
         match sigil {
-            Sigil::At => {
-                self.session_members = mention_member_pool(cx).into_iter().map(Rc::new).collect()
-            }
-            Sigil::Hash => {
-                self.session_channels = channel_suggest_pool(cx).into_iter().map(Rc::new).collect()
-            }
+            Sigil::At => self.session_members = mention_member_pool(cx),
+            Sigil::Hash => self.session_channels = channel_suggest_pool(cx),
             Sigil::Colon => {
                 if let Some(store) = EmojiStore::try_global(cx) {
                     store.update(cx, |store, cx| store.ensure_loaded(cx));
                 }
-                self.session_emojis = emoji_suggest_pool(cx).into_iter().map(Rc::new).collect();
+                self.session_emojis = emoji_suggest_pool(cx);
             }
         }
     }
@@ -892,20 +834,20 @@ impl MentionInput {
             Suggestion::Member(member) => (
                 format!("@{}", member.display),
                 TokenKind::Mention {
-                    user_id: member.user_id.clone(),
+                    user_id: member.user_id,
                     role_id: String::new(),
                 },
             ),
             Suggestion::Channel(channel) => (
                 format!("#{}", channel.name),
                 TokenKind::Hashtag {
-                    channel_id: channel.channel_id.clone(),
+                    channel_id: channel.channel_id,
                 },
             ),
             Suggestion::Emoji(emoji) => (
                 format!(":{}:", emoji.shortname),
                 TokenKind::Emoji {
-                    emoji_id: emoji.emoji_id.clone(),
+                    emoji_id: emoji.emoji_id,
                 },
             ),
         };
@@ -934,7 +876,7 @@ impl MentionInput {
             if popup.read(cx).active_tab() == tab {
                 self.close_popup();
             } else {
-                popup.update(cx, |popup, cx| popup.set_tab(tab, window, cx));
+                popup.update(cx, |popup, cx| popup.set_tab(tab, cx));
             }
             cx.notify();
             return;
@@ -945,8 +887,7 @@ impl MentionInput {
     }
 
     fn open_popup(&mut self, tab: SubPanel, window: &mut Window, cx: &mut Context<Self>) {
-        let locale = self.locale(cx);
-        let popup = cx.new(|cx| GifStickerEmojiPopup::new(tab, locale, window, cx));
+        let popup = cx.new(|cx| GifStickerEmojiPopup::new(tab, window, cx));
         let pick_sub = cx.subscribe_in(
             &popup,
             window,
@@ -964,22 +905,6 @@ impl MentionInput {
                 GifStickerEmojiEvent::Sticker { url, filename } => {
                     this.close_popup();
                     cx.emit(MentionInputEvent::SendSticker {
-                        url: url.clone(),
-                        filename: filename.clone(),
-                    });
-                    cx.notify();
-                }
-                GifStickerEmojiEvent::Gif { url } => {
-                    this.close_popup();
-                    cx.emit(MentionInputEvent::SendSticker {
-                        url: url.clone(),
-                        filename: String::new(),
-                    });
-                    cx.notify();
-                }
-                GifStickerEmojiEvent::Sound { url, filename } => {
-                    this.close_popup();
-                    cx.emit(MentionInputEvent::SendSound {
                         url: url.clone(),
                         filename: filename.clone(),
                     });
@@ -1209,7 +1134,7 @@ impl MentionInput {
                     .absolute()
                     .bottom_full()
                     .right_0()
-                    .mb(px(10.))
+                    .mb(px(8.))
                     .occlude()
                     .on_mouse_down_out(cx.listener(|this, _event, _window, cx| {
                         this.close_popup();
@@ -1415,7 +1340,16 @@ impl Render for MentionInput {
         };
         let plus_color = theme.text_muted;
         let has_pending = !self.pending_attachments.is_empty();
-        let overflow_counter = self.overflow_counter;
+        let overflow_counter = {
+            let raw = self.input.read(cx).value();
+            let threshold = CONVERT_TO_FILE_THRESHOLD - CONVERT_PREFIX_LEN;
+            if self.overflow_to_file && raw.len() > threshold {
+                let len = raw.encode_utf16().count();
+                (len > threshold).then_some(threshold as isize - len as isize)
+            } else {
+                None
+            }
+        };
 
         let popup = open.then(|| self.build_suggestion_popup(cx));
 

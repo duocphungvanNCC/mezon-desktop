@@ -509,8 +509,7 @@ impl Render for CommandPaletteModal {
                     .w_full(),
                 )
                 .custom_scrollbars(
-                    Scrollbars::always_visible(ScrollAxes::Vertical)
-                        .tracked_scroll_handle(&self.scroll),
+                    Scrollbars::new(ScrollAxes::Vertical).tracked_scroll_handle(&self.scroll),
                     window,
                     cx,
                 )

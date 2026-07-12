@@ -60,7 +60,6 @@ pub struct PinnedPopoverPanel {
     focus_handle: FocusHandle,
     avatar_image_cache: Entity<LruImageCache>,
     pin_cards: Vec<PinCardVm>,
-    _subs: Vec<gpui::Subscription>,
 }
 
 impl PinnedPopoverPanel {
@@ -74,17 +73,17 @@ impl PinnedPopoverPanel {
         cx.on_blur(&focus_handle, window, |_, _, cx| cx.emit(DismissEvent))
             .detach();
 
-        let subs = vec![
-            cx.observe(&PinnedMessagesStore::global(cx), |this, _, cx| {
-                this.pin_cards = Self::compute_pin_cards(cx);
-                cx.notify();
-            }),
-            cx.observe(&ClanMembersStore::global(cx), |this, _, cx| {
-                this.pin_cards = Self::compute_pin_cards(cx);
-                cx.notify();
-            }),
-            cx.observe(&settings, |_, _, cx| cx.notify()),
-        ];
+        cx.observe(&PinnedMessagesStore::global(cx), |this, _, cx| {
+            this.pin_cards = Self::compute_pin_cards(cx);
+            cx.notify();
+        })
+        .detach();
+        cx.observe(&ClanMembersStore::global(cx), |this, _, cx| {
+            this.pin_cards = Self::compute_pin_cards(cx);
+            cx.notify();
+        })
+        .detach();
+        cx.observe(&settings, |_, _, cx| cx.notify()).detach();
 
         let avatar_image_cache = crate::image_cache::shared_avatar_cache(cx);
 
@@ -98,7 +97,6 @@ impl PinnedPopoverPanel {
             focus_handle,
             avatar_image_cache,
             pin_cards,
-            _subs: subs,
         }
     }
 
@@ -281,7 +279,7 @@ fn render_body(
                 .size_full(),
             )
             .custom_scrollbars(
-                Scrollbars::always_visible(ScrollAxes::Vertical).tracked_scroll_handle(&list_state),
+                Scrollbars::new(ScrollAxes::Vertical).tracked_scroll_handle(&list_state),
                 window,
                 cx,
             )

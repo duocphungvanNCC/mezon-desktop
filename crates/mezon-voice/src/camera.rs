@@ -19,8 +19,6 @@ use crate::video::{VideoFrameStore, local_camera_key, rgb_to_i420, yuyv422_to_i4
 const TARGET_WIDTH: u32 = 640;
 const TARGET_HEIGHT: u32 = 480;
 const TARGET_FPS: u32 = 30;
-const MAX_CAMERA_WIDTH: u32 = 1280;
-const MAX_CAMERA_HEIGHT: u32 = 720;
 
 pub struct CameraStopper {
     stop: Arc<AtomicBool>,
@@ -171,11 +169,7 @@ pub fn start_camera(
                     buffer: i420,
                 };
                 source.capture_frame(&frame);
-                if let Some(recycled) =
-                    frame_store.publish(key, dw, dh, std::mem::take(&mut preview))
-                {
-                    preview = recycled;
-                }
+                frame_store.publish(key, dw, dh, std::mem::take(&mut preview));
             }
 
             frame_store.remove(local_camera_key(&identity));
@@ -213,21 +207,10 @@ fn open_camera() -> Result<Camera, String> {
             match try_open_camera(index, *requested) {
                 Ok(camera) => {
                     let format = camera.camera_format();
-                    let resolution = camera.resolution();
-                    if resolution.width() > MAX_CAMERA_WIDTH
-                        || resolution.height() > MAX_CAMERA_HEIGHT
-                    {
-                        last_err = format!(
-                            "camera format {}x{} exceeds {MAX_CAMERA_WIDTH}x{MAX_CAMERA_HEIGHT}",
-                            resolution.width(),
-                            resolution.height(),
-                        );
-                        continue;
-                    }
                     tracing::info!(
                         "camera opened: {}x{} {:?} @ {}fps",
-                        resolution.width(),
-                        resolution.height(),
+                        camera.resolution().width(),
+                        camera.resolution().height(),
                         format.format(),
                         format.frame_rate(),
                     );

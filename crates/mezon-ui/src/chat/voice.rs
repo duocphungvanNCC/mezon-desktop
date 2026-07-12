@@ -5,8 +5,7 @@ use gpui::{
 };
 use mezon_store::{
     AppConfig, Channel, ChannelId, ClanId, ClanMembersStore, DisplayedReaction, NetworkQuality,
-    Settings, UserId, VoiceCallStatus, VoiceConnection, VoiceMember, VoiceParticipant,
-    VoiceRenderFrame, VoiceStore,
+    Settings, UserId, VoiceCallStatus, VoiceConnection, VoiceMember, VoiceParticipant, VoiceStore,
 };
 
 use crate::ChatLayout;
@@ -905,8 +904,11 @@ pub(crate) fn render_screen_fullscreen_overlay(
     let exit_voice = voice.clone();
     let bg_voice = voice.clone();
 
-    let media = match store.render_frame(key) {
-        Some(frame) => render_voice_frame(frame, ObjectFit::Contain),
+    let media = match store.render_image(key) {
+        Some(image) => img(image)
+            .size_full()
+            .object_fit(ObjectFit::Contain)
+            .into_any_element(),
         None => Icon::new(IconName::VoiceScreenShareIcon)
             .size(px(64.))
             .text_color(theme.text_muted)
@@ -1542,14 +1544,14 @@ fn video_tile(
 
 fn tile_inner(theme: &Theme, store: &VoiceStore, cell: &VideoCell, large: bool) -> AnyElement {
     if let Some(key) = cell.key
-        && let Some(frame) = store.render_frame(key)
+        && let Some(image) = store.render_image(key)
     {
         let fit = if cell.is_screen {
             ObjectFit::Contain
         } else {
             ObjectFit::Cover
         };
-        return render_voice_frame(frame, fit);
+        return img(image).size_full().object_fit(fit).into_any_element();
     }
 
     if cell.is_screen {
@@ -1567,17 +1569,6 @@ fn tile_inner(theme: &Theme, store: &VoiceStore, cell: &VideoCell, large: bool) 
         avatar = avatar.src(cell.avatar_url.clone());
     }
     avatar.into_any_element()
-}
-
-fn render_voice_frame(frame: VoiceRenderFrame, fit: ObjectFit) -> AnyElement {
-    match frame {
-        VoiceRenderFrame::Image(image) => img(image).size_full().object_fit(fit).into_any_element(),
-        #[cfg(target_os = "macos")]
-        VoiceRenderFrame::Surface(surface) => gpui::surface(surface.into_inner())
-            .size_full()
-            .object_fit(fit)
-            .into_any_element(),
-    }
 }
 
 fn tile_label(locale: &str, cell: &VideoCell) -> AnyElement {

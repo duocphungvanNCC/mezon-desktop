@@ -7,9 +7,9 @@ use gpui::{
 };
 use mezon_store::{
     ChannelEvent, ChannelId, ChannelList, ChannelMembersEvent, ChannelMembersStore, ClanId,
-    ClanList, ClanMember, ClanMembersEvent, ClanMembersStore, DirectEvent, DirectKind,
-    DirectMessageStore, GroupMember, GroupMembersEvent, GroupMembersStore, PresenceEvent,
-    PresenceStore, ProfileContext, Settings, UserId, split_members_by_status,
+    ClanList, ClanMember, ClanMembersEvent, ClanMembersStore, DirectKind, DirectMessageStore,
+    GroupMember, GroupMembersEvent, GroupMembersStore, PresenceEvent, PresenceStore,
+    ProfileContext, Settings, UserId, split_members_by_status,
 };
 use ui::utils::ROUNDED_BORDER_WINDOW;
 
@@ -88,7 +88,6 @@ pub struct MemberListPanel {
     loading_channel: Option<ChannelId>,
     show_skeleton: bool,
     _skeleton_timer: Option<Task<()>>,
-    _subs: Vec<Subscription>,
 }
 
 #[derive(PartialEq, Eq)]
@@ -109,15 +108,15 @@ impl MemberListPanel {
         avatar_image_cache: Entity<LruImageCache>,
         cx: &mut Context<Self>,
     ) -> Self {
-        let mut subs = Vec::new();
-        subs.push(cx.observe(&Router::global(cx), |this, _, cx| {
+        cx.observe(&Router::global(cx), |this, _, cx| {
             let key = route_key(this.source, cx);
             if key != this.route_key {
                 this.route_key = key;
                 this.rebuild(cx);
             }
-        }));
-        subs.push(cx.subscribe(
+        })
+        .detach();
+        cx.subscribe(
             &PresenceStore::global(cx),
             |this, _, event, cx| match event {
                 PresenceEvent::TypingChanged { .. } => {}
@@ -132,56 +131,45 @@ impl MemberListPanel {
                 }
                 PresenceEvent::StatusChanged => this.rebuild(cx),
             },
-        ));
-        subs.push(cx.observe(&settings, |_, _, cx| cx.notify()));
+        )
+        .detach();
+        cx.observe(&settings, |_, _, cx| cx.notify()).detach();
 
         match source {
             MemberSource::Channel => {
-                subs.push(
-                    cx.subscribe(&ClanMembersStore::global(cx), |this, _, event, cx| {
-                        let ClanMembersEvent::Changed { clan_id } = event;
-                        if shows_clan(*clan_id, cx) {
-                            this.rebuild(cx);
-                        }
-                    }),
-                );
-                subs.push(
-                    cx.subscribe(&ChannelMembersStore::global(cx), |this, _, event, cx| {
-                        let ChannelMembersEvent::Changed { channel_id } = event;
-                        if shows_channel(*channel_id, cx) {
-                            this.rebuild(cx);
-                        }
-                    }),
-                );
-                subs.push(
-                    cx.subscribe(&ChannelList::global(cx), |this, _, event, cx| {
-                        if let ChannelEvent::ActiveChannelChanged(_) = event {
-                            this.rebuild(cx);
-                        }
-                    }),
-                );
+                cx.subscribe(&ClanMembersStore::global(cx), |this, _, event, cx| {
+                    let ClanMembersEvent::Changed { clan_id } = event;
+                    if shows_clan(*clan_id, cx) {
+                        this.rebuild(cx);
+                    }
+                })
+                .detach();
+                cx.subscribe(&ChannelMembersStore::global(cx), |this, _, event, cx| {
+                    let ChannelMembersEvent::Changed { channel_id } = event;
+                    if shows_channel(*channel_id, cx) {
+                        this.rebuild(cx);
+                    }
+                })
+                .detach();
+                cx.subscribe(&ChannelList::global(cx), |this, _, event, cx| {
+                    if let ChannelEvent::ActiveChannelChanged(_) = event {
+                        this.rebuild(cx);
+                    }
+                })
+                .detach();
             }
             MemberSource::Group => {
-                subs.push(
-                    cx.subscribe(&GroupMembersStore::global(cx), |this, _, event, cx| {
-                        let GroupMembersEvent::Changed { channel_id } = event;
-                        if shows_group(*channel_id, cx) {
-                            this.rebuild(cx);
-                        }
-                    }),
-                );
-                subs.push(
-                    cx.subscribe(&DirectMessageStore::global(cx), |this, _, event, cx| {
-                        let DirectEvent::Changed { channel_id } = event;
-                        let relevant = match channel_id {
-                            Some(id) => shows_group(*id, cx),
-                            None => true,
-                        };
-                        if relevant {
-                            this.rebuild(cx);
-                        }
-                    }),
-                );
+                cx.subscribe(&GroupMembersStore::global(cx), |this, _, event, cx| {
+                    let GroupMembersEvent::Changed { channel_id } = event;
+                    if shows_group(*channel_id, cx) {
+                        this.rebuild(cx);
+                    }
+                })
+                .detach();
+                cx.observe(&DirectMessageStore::global(cx), |this, _, cx| {
+                    this.rebuild(cx)
+                })
+                .detach();
             }
         }
 
@@ -208,7 +196,6 @@ impl MemberListPanel {
             loading_channel: None,
             show_skeleton: false,
             _skeleton_timer: None,
-            _subs: subs,
         };
         this.recompute(cx);
         this

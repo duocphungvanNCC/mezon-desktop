@@ -47,7 +47,6 @@ const DIRECTION_AROUND: i32 = 2;
 const CHANNEL_TYPE_CHANNEL: i32 = 1;
 const CHANNEL_TYPE_THREAD: i32 = 7;
 const STICKER_FILETYPE: &str = "sticker";
-const AUDIO_FILETYPE: &str = "audio/mpeg";
 const MAX_MESSAGES_PER_CHANNEL: usize = 200;
 const MAX_CACHED_CHANNELS: usize = 30;
 const LAST_SEEN_DEBOUNCE: Duration = Duration::from_millis(1000);
@@ -689,20 +688,6 @@ impl MessagesStore {
     /// `selectMessageViewportIdsByChannelId`).
     pub fn viewport_messages(&self) -> &[Message] {
         self.messages()
-    }
-
-    pub fn viewport_message_by_id(&self, id: MessageId) -> Option<&Message> {
-        self.active_channel_id
-            .as_ref()
-            .and_then(|channel| self.cache.get(channel))
-            .and_then(|channel| channel.messages.get_by_id(id))
-    }
-
-    pub fn viewport_position(&self, id: MessageId) -> Option<usize> {
-        self.active_channel_id
-            .as_ref()
-            .and_then(|channel| self.cache.get(channel))
-            .and_then(|channel| channel.messages.position(id))
     }
 
     pub fn message_in_channel(
@@ -2258,29 +2243,6 @@ impl MessagesStore {
         sender_name: String,
         cx: &mut Context<Self>,
     ) {
-        self.send_url_attachment(url, filename, STICKER_FILETYPE, sender_id, sender_name, cx);
-    }
-
-    pub fn send_sound(
-        &mut self,
-        url: String,
-        filename: String,
-        sender_id: String,
-        sender_name: String,
-        cx: &mut Context<Self>,
-    ) {
-        self.send_url_attachment(url, filename, AUDIO_FILETYPE, sender_id, sender_name, cx);
-    }
-
-    fn send_url_attachment(
-        &mut self,
-        url: String,
-        filename: String,
-        filetype: &'static str,
-        sender_id: String,
-        sender_name: String,
-        cx: &mut Context<Self>,
-    ) {
         if url.is_empty() {
             return;
         }
@@ -2303,7 +2265,7 @@ impl MessagesStore {
             mezon_client::transport::ApiAttachment {
                 url: url.clone(),
                 filename: filename.clone(),
-                filetype: filetype.to_string(),
+                filetype: STICKER_FILETYPE.to_string(),
                 width: 0,
                 height: 0,
                 thumbnail: String::new(),
@@ -2334,7 +2296,7 @@ impl MessagesStore {
                     vec![UrlAttachment {
                         url,
                         filename,
-                        filetype: filetype.to_string(),
+                        filetype: STICKER_FILETYPE.to_string(),
                     }],
                 )
                 .await;
@@ -2347,7 +2309,7 @@ impl MessagesStore {
                     });
                 }
                 Err(e) => {
-                    tracing::error!("send url attachment failed: {e}");
+                    tracing::error!("send sticker failed: {e}");
                     let _ = this.update(cx, |this, cx| {
                         this.mark_temp_failed(channel_id, temp_id, cx);
                     });
