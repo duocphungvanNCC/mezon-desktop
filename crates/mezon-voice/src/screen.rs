@@ -8,19 +8,30 @@ use livekit::webrtc::video_source::native::NativeVideoSource;
 use livekit::webrtc::video_source::{RtcVideoSource, VideoResolution};
 use parking_lot::{Condvar, Mutex};
 use scap::capturer::{Capturer, Options, Resolution};
-use scap::frame::{BGRAFrame, Frame, FrameType};
+use scap::frame::FrameType;
+#[cfg(any(not(target_os = "macos"), test))]
+use scap::frame::{BGRAFrame, Frame};
+
+#[cfg(target_os = "macos")]
+type CapturedScreenFrame = scap::capturer::engine::mac::PixelBuffer;
+#[cfg(not(target_os = "macos"))]
+type CapturedScreenFrame = BGRAFrame;
 
 use crate::screen_picker::{PickedScreen, scap_target_for_pick};
-use crate::video::{VideoFrameStore, bgra_to_i420, local_screen_key};
+#[cfg(not(target_os = "macos"))]
+use crate::video::bgra_to_i420;
+use crate::video::{VideoFrameStore, local_screen_key, nv12_full_to_i420};
 
 const CAPTURE_FPS: u32 = 15;
+#[cfg(not(target_os = "macos"))]
 const PREVIEW_MAX_WIDTH: u32 = 1280;
+#[cfg(not(target_os = "macos"))]
 const PREVIEW_MAX_HEIGHT: u32 = 800;
 const SLOT_WAIT: Duration = Duration::from_millis(250);
 
 #[derive(Default)]
 struct SlotState {
-    frame: Option<BGRAFrame>,
+    frame: Option<CapturedScreenFrame>,
     closed: bool,
     error: Option<String>,
 }
@@ -32,7 +43,7 @@ struct LatestFrameSlot {
 }
 
 impl LatestFrameSlot {
-    fn publish(&self, frame: BGRAFrame) {
+    fn publish(&self, frame: CapturedScreenFrame) {
         self.state.lock().frame = Some(frame);
         self.cond.notify_one();
     }
@@ -53,7 +64,7 @@ impl LatestFrameSlot {
         self.state.lock().error.take()
     }
 
-    fn take_latest(&self, stop: &AtomicBool) -> Option<BGRAFrame> {
+    fn take_latest(&self, stop: &AtomicBool) -> Option<CapturedScreenFrame> {
         let mut state = self.state.lock();
         loop {
             if stop.load(Ordering::Relaxed) {
@@ -89,7 +100,7 @@ impl Drop for ScreenStopper {
 pub fn start_screen(
     identity: String,
     frame_store: Arc<VideoFrameStore>,
-    full_res: Arc<AtomicBool>,
+    _full_res: Arc<AtomicBool>,
     pick: PickedScreen,
 ) -> (
     ScreenStopper,
@@ -127,6 +138,9 @@ pub fn start_screen(
                 show_cursor: true,
                 show_highlight: false,
                 excluded_targets: None,
+                #[cfg(target_os = "macos")]
+                output_type: FrameType::YUVFrameFullRange,
+                #[cfg(not(target_os = "macos"))]
                 output_type: FrameType::BGRAFrame,
                 output_resolution: Resolution::_1080p,
                 ..Default::default()
@@ -146,6 +160,17 @@ pub fn start_screen(
                         }
                     };
                     capturer.start_capture();
+                    #[cfg(target_os = "macos")]
+                    while !pump_stop.load(Ordering::Relaxed) {
+                        match capturer.raw().get_next_pixel_buffer() {
+                            Ok(frame) => pump_slot.publish(frame),
+                            Err(e) => {
+                                pump_slot.fail(format!("screen capture failed: {e}"));
+                                break;
+                            }
+                        }
+                    }
+                    #[cfg(not(target_os = "macos"))]
                     while !pump_stop.load(Ordering::Relaxed) {
                         match capturer.get_next_frame() {
                             Ok(frame) => {
@@ -175,12 +200,19 @@ pub fn start_screen(
             let mut src_w = 0u32;
             let mut src_h = 0u32;
             let mut sent_track = false;
+            #[cfg(not(target_os = "macos"))]
             let mut display_buf = Vec::new();
 
-            while let Some(bgra) = slot.take_latest(&thread_stop) {
-                let width = (bgra.width as u32 & !1).max(2);
-                let height = (bgra.height as u32 & !1).max(2);
-                if width == 0 || height == 0 || bgra.data.is_empty() {
+            while let Some(captured) = slot.take_latest(&thread_stop) {
+                #[cfg(target_os = "macos")]
+                let (width, height) = (captured.width() as u32 & !1, captured.height() as u32 & !1);
+                #[cfg(not(target_os = "macos"))]
+                let (width, height, row_stride) = (
+                    captured.width as u32 & !1,
+                    captured.height as u32 & !1,
+                    captured.data.len() / captured.height.max(1) as usize,
+                );
+                if width < 2 || height < 2 {
                     continue;
                 }
 
@@ -211,23 +243,48 @@ pub fn start_screen(
                     src_h = height;
                 }
 
-                let row_stride = bgra.data.len() / bgra.height.max(1) as usize;
                 let mut i420 = I420Buffer::new(src_w, src_h);
                 {
                     let (sy, su, sv) = i420.strides();
                     let (dy, du, dv) = i420.data_mut();
-                    bgra_to_i420(
-                        &bgra.data,
-                        src_w as usize,
-                        src_h as usize,
-                        row_stride,
-                        dy,
-                        du,
-                        dv,
-                        sy as usize,
-                        su as usize,
-                        sv as usize,
-                    );
+                    #[cfg(target_os = "macos")]
+                    {
+                        let planes = captured.planes();
+                        if planes.len() < 2 {
+                            continue;
+                        }
+                        let y = planes[0].data();
+                        let uv = planes[1].data();
+                        nv12_full_to_i420(
+                            &y,
+                            &uv,
+                            planes[0].bytes_per_row(),
+                            planes[1].bytes_per_row(),
+                            src_w as usize,
+                            src_h as usize,
+                            dy,
+                            du,
+                            dv,
+                            sy as usize,
+                            su as usize,
+                            sv as usize,
+                        );
+                    }
+                    #[cfg(not(target_os = "macos"))]
+                    {
+                        bgra_to_i420(
+                            &captured.data,
+                            src_w as usize,
+                            src_h as usize,
+                            row_stride,
+                            dy,
+                            du,
+                            dv,
+                            sy as usize,
+                            su as usize,
+                            sv as usize,
+                        );
+                    }
                 }
                 if let Some(source) = &source {
                     let frame = VideoFrame {
@@ -239,21 +296,28 @@ pub fn start_screen(
                     source.capture_frame(&frame);
                 }
 
-                let (pw, ph) = if full_res.load(Ordering::Relaxed) {
+                #[cfg(target_os = "macos")]
+                frame_store.publish_surface(key, src_w, src_h, captured.core_video_buffer());
+
+                #[cfg(not(target_os = "macos"))]
+                let (pw, ph) = if _full_res.load(Ordering::Relaxed) {
                     (src_w, src_h)
                 } else {
                     scaled_dims(src_w, src_h, PREVIEW_MAX_WIDTH, PREVIEW_MAX_HEIGHT)
                 };
+                #[cfg(not(target_os = "macos"))]
                 display_buf.resize((pw * ph * 4) as usize, 0);
+                #[cfg(not(target_os = "macos"))]
                 downscale_bgra_into(
                     &mut display_buf,
-                    &bgra.data,
+                    &captured.data,
                     src_w as usize,
                     src_h as usize,
                     row_stride,
                     pw as usize,
                     ph as usize,
                 );
+                #[cfg(not(target_os = "macos"))]
                 if let Some(recycled) =
                     frame_store.publish(key, pw, ph, std::mem::take(&mut display_buf))
                 {
@@ -277,6 +341,7 @@ pub fn start_screen(
     (ScreenStopper { stop }, track_rx)
 }
 
+#[cfg(any(not(target_os = "macos"), test))]
 fn frame_to_bgra(frame: Frame) -> Option<BGRAFrame> {
     match frame {
         Frame::BGRA(frame) => Some(frame),
@@ -346,6 +411,7 @@ fn frame_to_bgra(frame: Frame) -> Option<BGRAFrame> {
     }
 }
 
+#[cfg(not(target_os = "macos"))]
 fn scaled_dims(width: u32, height: u32, max_width: u32, max_height: u32) -> (u32, u32) {
     let scale = (max_width as f32 / width.max(1) as f32)
         .min(max_height as f32 / height.max(1) as f32)
@@ -356,6 +422,7 @@ fn scaled_dims(width: u32, height: u32, max_width: u32, max_height: u32) -> (u32
 }
 
 #[allow(clippy::too_many_arguments)]
+#[cfg(not(target_os = "macos"))]
 fn downscale_bgra_into(
     dst: &mut [u8],
     src: &[u8],

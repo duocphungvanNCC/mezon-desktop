@@ -5704,6 +5704,7 @@ dependencies = [
  "block",
  "cocoa 0.25.0",
  "core-graphics-helmer-fork",
+ "core-video",
  "cpal",
  "flume",
  "futures",
@@ -12094,7 +12095,9 @@ version = "0.0.8-zed"
 dependencies = [
  "anyhow",
  "cocoa 0.25.0",
+ "core-foundation 0.10.0",
  "core-graphics-helmer-fork",
+ "core-video",
  "dbus",
  "log",
  "objc",

@@ -2,7 +2,7 @@ use gpui::{
     AnyWindowHandle, App, Bounds, Context, Entity, MouseButton, ObjectFit, Window, WindowBounds,
     WindowKind, WindowOptions, div, img, prelude::*, px, rgb, rgba, size,
 };
-use mezon_store::VoiceStore;
+use mezon_store::{VoiceRenderFrame, VoiceStore};
 
 use crate::app::window_controls::linux_app_id;
 use crate::components::primitives::{Icon, IconName};
@@ -58,11 +58,16 @@ impl ScreenSharePipView {
 
 impl Render for ScreenSharePipView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let image = self.voice.read(cx).render_image(self.key);
+        let frame = self.voice.read(cx).render_frame(self.key);
         self.voice
             .update(cx, |store, cx| store.flush_texture_drops(Some(window), cx));
-        let content = match image {
-            Some(image) => img(image)
+        let content = match frame {
+            Some(VoiceRenderFrame::Image(image)) => img(image)
+                .size_full()
+                .object_fit(ObjectFit::Contain)
+                .into_any_element(),
+            #[cfg(target_os = "macos")]
+            Some(VoiceRenderFrame::Surface(surface)) => gpui::surface(surface.into_inner())
                 .size_full()
                 .object_fit(ObjectFit::Contain)
                 .into_any_element(),
