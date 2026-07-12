@@ -25,6 +25,7 @@ pub enum RealtimeKind {
     ChannelCreated,
     ChannelUpdated,
     ChannelDeleted,
+    CategoryEvent,
     ClanUpdated,
     ClanDeleted,
     ClanEmoji,
@@ -34,6 +35,7 @@ pub enum RealtimeKind {
     SessionRefreshed,
     VoiceJoined,
     VoiceLeaved,
+    VoiceReaction,
     MarkAsRead,
     LastPinMessage,
     UnpinMessage,
@@ -41,6 +43,10 @@ pub enum RealtimeKind {
     UserChannelAdded,
     UserChannelRemoved,
     Notifications,
+    AddFriend,
+    RemoveFriend,
+    BlockFriend,
+    UnblockFriend,
 }
 
 impl RealtimeKind {
@@ -55,6 +61,7 @@ impl RealtimeKind {
             RealtimeEvent::ChannelCreated(_) => Self::ChannelCreated,
             RealtimeEvent::ChannelUpdated(_) => Self::ChannelUpdated,
             RealtimeEvent::ChannelDeleted(_) => Self::ChannelDeleted,
+            RealtimeEvent::CategoryEvent(_) => Self::CategoryEvent,
             RealtimeEvent::ClanUpdated(_) => Self::ClanUpdated,
             RealtimeEvent::ClanDeleted(_) => Self::ClanDeleted,
             RealtimeEvent::ClanEmoji(_) => Self::ClanEmoji,
@@ -64,6 +71,7 @@ impl RealtimeKind {
             RealtimeEvent::SessionRefreshed(_) => Self::SessionRefreshed,
             RealtimeEvent::VoiceJoined(_) => Self::VoiceJoined,
             RealtimeEvent::VoiceLeaved(_) => Self::VoiceLeaved,
+            RealtimeEvent::VoiceReaction(_) => Self::VoiceReaction,
             RealtimeEvent::MarkAsRead(_) => Self::MarkAsRead,
             RealtimeEvent::LastPinMessage(_) => Self::LastPinMessage,
             RealtimeEvent::UnpinMessage(_) => Self::UnpinMessage,
@@ -71,6 +79,10 @@ impl RealtimeKind {
             RealtimeEvent::UserChannelAdded(_) => Self::UserChannelAdded,
             RealtimeEvent::UserChannelRemoved(_) => Self::UserChannelRemoved,
             RealtimeEvent::Notifications(_) => Self::Notifications,
+            RealtimeEvent::AddFriend(_) => Self::AddFriend,
+            RealtimeEvent::RemoveFriend(_) => Self::RemoveFriend,
+            RealtimeEvent::BlockFriend(_) => Self::BlockFriend,
+            RealtimeEvent::UnblockFriend(_) => Self::UnblockFriend,
             _ => return None,
         })
     }
@@ -228,10 +240,46 @@ mod tests {
     }
 
     #[test]
+    fn kind_of_maps_voice_reaction() {
+        assert_eq!(
+            RealtimeKind::of(&RealtimeEvent::VoiceReaction(
+                realtime::VoiceReactionSend::default()
+            )),
+            Some(RealtimeKind::VoiceReaction)
+        );
+    }
+
+    #[test]
     fn kind_of_returns_none_for_unhandled() {
         assert_eq!(
-            RealtimeKind::of(&RealtimeEvent::AddFriend(realtime::AddFriend::default())),
+            RealtimeKind::of(&RealtimeEvent::CustomStatus(
+                realtime::CustomStatusEvent::default()
+            )),
             None
+        );
+    }
+
+    #[test]
+    fn kind_of_routes_friend_events() {
+        assert_eq!(
+            RealtimeKind::of(&RealtimeEvent::AddFriend(realtime::AddFriend::default())),
+            Some(RealtimeKind::AddFriend)
+        );
+        assert_eq!(
+            RealtimeKind::of(&RealtimeEvent::RemoveFriend(
+                realtime::RemoveFriend::default()
+            )),
+            Some(RealtimeKind::RemoveFriend)
+        );
+        assert_eq!(
+            RealtimeKind::of(&RealtimeEvent::BlockFriend(realtime::BlockFriend::default())),
+            Some(RealtimeKind::BlockFriend)
+        );
+        assert_eq!(
+            RealtimeKind::of(&RealtimeEvent::UnblockFriend(
+                realtime::UnblockFriend::default()
+            )),
+            Some(RealtimeKind::UnblockFriend)
         );
     }
 }

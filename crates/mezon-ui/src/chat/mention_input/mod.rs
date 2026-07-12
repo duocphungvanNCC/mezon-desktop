@@ -1,19 +1,26 @@
 mod attachments;
 mod text_field;
 
+use std::path::PathBuf;
+
 use gpui::{
-    AnyElement, App, Context, Entity, EventEmitter, Focusable, FontWeight, IntoElement, KeyBinding,
-    PathPromptOptions, ScrollStrategy, SharedString, Subscription, UniformListScrollHandle, Window,
-    actions, deferred, div, img, prelude::*, px, uniform_list,
+    AnyElement, App, Context, DismissEvent, Entity, EventEmitter, Focusable, FontWeight, Image,
+    ImageFormat, IntoElement, KeyBinding, PathPromptOptions, ScrollStrategy, SharedString,
+    Subscription, UniformListScrollHandle, Window, actions, deferred, div, img, prelude::*, px,
+    uniform_list,
 };
 use mezon_store::{
-    ChannelId, ChannelList, ChannelType, ClanList, EmojiEvent, EmojiStore, MENTION_HERE_ID,
+    ChannelId, ChannelList, ChannelType, ClanList, EmojiStore, MENTION_HERE_ID, MessageSpan,
     OutgoingAttachment, OutgoingContent, OutgoingEmoji, OutgoingHashtag, OutgoingMention, Settings,
-    StickerEvent, StickerStore,
 };
 
-use attachments::{PendingAttachment, acceptable, build_pending};
+use attachments::{
+    AttachmentLimit, MAX_FILE_ATTACHMENTS, PendingAttachment, build_pending, mime_from_extension,
+    validate_batch,
+};
 
+use crate::app::shell::Shell;
+use crate::chat::gif_sticker_emoji::{GifStickerEmojiEvent, GifStickerEmojiPopup, SubPanel};
 use crate::chat::member_list::{MentionMemberRaw, mention_member_pool};
 use crate::components::primitives::{Avatar, Icon, IconName};
 use crate::image_cache::{
@@ -27,17 +34,10 @@ use text_field::{
 
 const KEY_CONTEXT: &str = "MezonMention";
 const MAX_SUGGESTIONS: usize = 50;
+const CONVERT_TO_FILE_THRESHOLD: usize = 3700;
+const CONVERT_PREFIX_LEN: usize = 8;
 const MENTION_ROW_PX: f32 = 36.;
 const MENTION_POPUP_MAX_PX: f32 = MENTION_ROW_PX * 6.;
-const PICKER_EMOJI_PX: f32 = 28.;
-const PICKER_CELL_PX: f32 = 34.;
-const PICKER_ROW_PX: f32 = 40.;
-const PICKER_COLS: usize = 7;
-const STICKER_PANEL_PX: f32 = 320.;
-const STICKER_COLS: usize = 3;
-const STICKER_CELL_PX: f32 = 92.;
-const STICKER_ROW_PX: f32 = 100.;
-const STICKER_IMG_PX: f32 = 80.;
 
 actions!(mezon_mention, [MentionAccept, MentionDismiss]);
 
@@ -115,20 +115,10 @@ enum Suggestion {
     Emoji(EmojiSuggestRaw),
 }
 
-enum PickerRow {
-    Header(SharedString),
-    Emojis(Vec<EmojiSuggestRaw>),
-}
-
-#[derive(Clone)]
-struct StickerCellRaw {
-    id: String,
-    src: String,
-}
-
 #[derive(Clone, PartialEq, Eq)]
 pub enum MentionInputEvent {
     Submit,
+    Cancel,
     SendSticker { url: String, filename: String },
 }
 
@@ -145,21 +135,72 @@ pub struct MentionInput {
     session_members: Vec<MentionMemberRaw>,
     session_channels: Vec<ChannelSuggestRaw>,
     session_emojis: Vec<EmojiSuggestRaw>,
-    picker_open: bool,
-    picker_rows: Vec<PickerRow>,
-    picker_scroll: UniformListScrollHandle,
-    sticker_picker_open: bool,
-    sticker_rows: Vec<Vec<StickerCellRaw>>,
-    sticker_scroll: UniformListScrollHandle,
+    popup: Option<Entity<GifStickerEmojiPopup>>,
+    _popup_subs: Vec<Subscription>,
     avatar_cache: Entity<LruImageCache>,
+    preview_cache: Entity<LruImageCache>,
     settings: Entity<Settings>,
     pending_attachments: Vec<PendingAttachment>,
+    compact: bool,
+    overflow_to_file: bool,
     _input_sub: Subscription,
-    _emoji_sub: Option<Subscription>,
-    _sticker_sub: Option<Subscription>,
 }
 
 impl EventEmitter<MentionInputEvent> for MentionInput {}
+
+fn json_string_utf16_len(s: &str) -> usize {
+    serde_json::to_string(s)
+        .map(|j| j.encode_utf16().count())
+        .unwrap_or_else(|_| s.encode_utf16().count() + 2)
+}
+
+fn content_payload_utf8_len(text: &str) -> usize {
+    serde_json::to_string(&serde_json::json!({ "t": text }))
+        .map(|j| j.len())
+        .unwrap_or(text.len() + CONVERT_PREFIX_LEN)
+}
+
+fn needs_png_transcode(format: ImageFormat) -> bool {
+    matches!(
+        format,
+        ImageFormat::Bmp | ImageFormat::Tiff | ImageFormat::Ico | ImageFormat::Pnm
+    )
+}
+
+fn image_format_extension(format: ImageFormat) -> &'static str {
+    match format {
+        ImageFormat::Png => "png",
+        ImageFormat::Jpeg => "jpg",
+        ImageFormat::Webp => "webp",
+        ImageFormat::Gif => "gif",
+        ImageFormat::Svg => "svg",
+        ImageFormat::Bmp => "bmp",
+        ImageFormat::Tiff => "tiff",
+        ImageFormat::Ico => "ico",
+        ImageFormat::Pnm => "pnm",
+    }
+}
+
+fn write_clipboard_image(image: &Image, base: i64, index: usize) -> Option<PathBuf> {
+    let dir = std::env::temp_dir();
+    if needs_png_transcode(image.format())
+        && let Ok(decoded) = image::load_from_memory(image.bytes())
+    {
+        let mut buffer = std::io::Cursor::new(Vec::new());
+        if decoded
+            .write_to(&mut buffer, image::ImageFormat::Png)
+            .is_ok()
+        {
+            let path = dir.join(format!("pasted-image-{base}-{index}.png"));
+            std::fs::write(&path, buffer.into_inner()).ok()?;
+            return Some(path);
+        }
+    }
+    let ext = image_format_extension(image.format());
+    let path = dir.join(format!("pasted-image-{base}-{index}.{ext}"));
+    std::fs::write(&path, image.bytes()).ok()?;
+    Some(path)
+}
 
 impl MentionInput {
     pub fn new(
@@ -168,8 +209,36 @@ impl MentionInput {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        let mut this = Self::build(placeholder, settings, false, window, cx);
+        this.overflow_to_file = true;
+        this
+    }
+
+    pub fn new_edit(
+        placeholder: impl Into<SharedString>,
+        settings: Entity<Settings>,
+        content: &str,
+        spans: &[MessageSpan],
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let mut this = Self::build(placeholder, settings, true, window, cx);
+        this.seed(content, spans, window, cx);
+        this
+    }
+
+    fn build(
+        placeholder: impl Into<SharedString>,
+        settings: Entity<Settings>,
+        compact: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let placeholder = placeholder.into();
-        let input = cx.new(|cx| MentionInputState::new(window, cx).placeholder(placeholder));
+        let input = cx.new(|cx| {
+            let state = MentionInputState::new(window, cx).placeholder(placeholder);
+            if compact { state.compact() } else { state }
+        });
         let input_sub = cx.subscribe_in(
             &input,
             window,
@@ -178,27 +247,19 @@ impl MentionInput {
                 MentionFieldEvent::PressEnter => this.on_enter(window, cx),
                 MentionFieldEvent::NavUp => this.on_nav_up(cx),
                 MentionFieldEvent::NavDown => this.on_nav_down(cx),
+                MentionFieldEvent::Paste(text) => this.on_paste(text.clone(), window, cx),
+                MentionFieldEvent::PasteImages(images) => {
+                    this.on_paste_images(images.clone(), window, cx)
+                }
+                MentionFieldEvent::PastePaths(paths) => {
+                    this.on_paste_paths(paths.clone(), window, cx)
+                }
             },
         );
-        let emoji_sub = EmojiStore::try_global(cx).map(|store| {
-            cx.subscribe(&store, |this, _store, _event: &EmojiEvent, cx| {
-                if this.picker_open {
-                    this.rebuild_picker(cx);
-                    cx.notify();
-                }
-            })
-        });
-        let sticker_sub = StickerStore::try_global(cx).map(|store| {
-            cx.subscribe(&store, |this, _store, _event: &StickerEvent, cx| {
-                if this.sticker_picker_open {
-                    this.rebuild_sticker_picker(cx);
-                    cx.notify();
-                }
-            })
-        });
-        let avatar_cache = cx.new(|cx| {
+        let avatar_cache = crate::image_cache::shared_avatar_cache(cx);
+        let preview_cache = cx.new(|cx| {
             LruImageCache::avatar_thumbnail(
-                "mention-avatar",
+                "composer-attachment-preview",
                 AVATAR_IMAGE_CACHE_CAPACITY,
                 AVATAR_IMAGE_CACHE_BYTES,
                 AVATAR_ENTRY_MAX_BYTES,
@@ -218,19 +279,35 @@ impl MentionInput {
             session_members: Vec::new(),
             session_channels: Vec::new(),
             session_emojis: Vec::new(),
-            picker_open: false,
-            picker_rows: Vec::new(),
-            picker_scroll: UniformListScrollHandle::new(),
-            sticker_picker_open: false,
-            sticker_rows: Vec::new(),
-            sticker_scroll: UniformListScrollHandle::new(),
+            popup: None,
+            _popup_subs: Vec::new(),
             avatar_cache,
+            preview_cache,
             settings,
             pending_attachments: Vec::new(),
+            compact,
+            overflow_to_file: false,
             _input_sub: input_sub,
-            _emoji_sub: emoji_sub,
-            _sticker_sub: sticker_sub,
         }
+    }
+
+    fn seed(
+        &mut self,
+        content: &str,
+        spans: &[MessageSpan],
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.committed = committed_from_spans(content, spans);
+        self.input.update(cx, |input, cx| {
+            input.set_value(content, window, cx);
+        });
+        self.sync_ranges(cx);
+    }
+
+    pub fn focus_input(&self, window: &mut Window, cx: &mut App) {
+        let handle = self.input.read(cx).focus_handle(cx);
+        window.focus(&handle, cx);
     }
 
     pub fn take_payload(
@@ -247,6 +324,20 @@ impl MentionInput {
         } else {
             raw.trim_end().to_string()
         };
+        if self.overflow_to_file
+            && !text.is_empty()
+            && content_payload_utf8_len(&text) > CONVERT_TO_FILE_THRESHOLD
+        {
+            self.convert_text_to_file(text, window, cx);
+            self.committed.clear();
+            self.reset_popup();
+            self.close_popup();
+            self.input.update(cx, |input, cx| {
+                input.set_mention_spans(Vec::new(), cx);
+                input.set_value("", window, cx);
+            });
+            return None;
+        }
         let mut content = OutgoingContent::default();
         for token in &self.committed {
             let s = byte_offset_to_utf16(&raw, token.start) as i32;
@@ -278,11 +369,14 @@ impl MentionInput {
                 path: p.path,
                 filename: p.filename,
                 filetype: p.filetype,
+                width: i32::try_from(p.width).unwrap_or(0),
+                height: i32::try_from(p.height).unwrap_or(0),
+                poster_jpeg: p.poster_jpeg,
             })
             .collect();
         self.committed.clear();
         self.reset_popup();
-        self.picker_open = false;
+        self.close_popup();
         self.input.update(cx, |input, cx| {
             input.set_mention_spans(Vec::new(), cx);
             input.set_value("", window, cx);
@@ -290,14 +384,14 @@ impl MentionInput {
         Some((text, content, attachments))
     }
 
-    fn open_file_picker(&mut self, cx: &mut Context<Self>) {
+    fn open_file_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let rx = cx.prompt_for_paths(PathPromptOptions {
             files: true,
             directories: false,
             multiple: true,
             prompt: None,
         });
-        cx.spawn(async move |this, cx| {
+        cx.spawn_in(window, async move |this, cx| {
             let Ok(Ok(Some(paths))) = rx.await else {
                 return;
             };
@@ -309,23 +403,149 @@ impl MentionInput {
                         .collect::<Vec<_>>()
                 })
                 .await;
-            this.update(cx, |this, cx| this.add_pending(pending, cx))
+            this.update_in(cx, |this, window, cx| this.add_pending(pending, window, cx))
                 .ok();
         })
         .detach();
     }
 
-    fn add_pending(&mut self, candidates: Vec<PendingAttachment>, cx: &mut Context<Self>) {
-        let mut changed = false;
-        for candidate in candidates {
-            if acceptable(self.pending_attachments.len(), &candidate) {
-                self.pending_attachments.push(candidate);
-                changed = true;
+    pub fn add_dropped_paths(
+        &mut self,
+        paths: Vec<PathBuf>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if paths.is_empty() {
+            return;
+        }
+        cx.spawn_in(window, async move |this, cx| {
+            let pending = cx
+                .background_spawn(async move {
+                    paths
+                        .into_iter()
+                        .filter_map(build_pending)
+                        .collect::<Vec<_>>()
+                })
+                .await;
+            this.update_in(cx, |this, window, cx| this.add_pending(pending, window, cx))
+                .ok();
+        })
+        .detach();
+    }
+
+    fn on_paste(&mut self, text: String, window: &mut Window, cx: &mut Context<Self>) {
+        if text.is_empty() {
+            return;
+        }
+        if self.overflow_to_file {
+            if json_string_utf16_len(&text) > CONVERT_TO_FILE_THRESHOLD {
+                self.convert_text_to_file(text, window, cx);
+                return;
+            }
+            let current = self.input.read(cx).value().to_string();
+            let combined = format!("{current}{text}");
+            if json_string_utf16_len(&combined) > CONVERT_TO_FILE_THRESHOLD {
+                self.committed.clear();
+                self.reset_popup();
+                self.input.update(cx, |input, cx| {
+                    input.set_mention_spans(Vec::new(), cx);
+                    input.set_value("", window, cx);
+                });
+                self.convert_text_to_file(combined, window, cx);
+                cx.notify();
+                return;
             }
         }
-        if changed {
-            cx.notify();
+        self.input
+            .update(cx, |input, cx| input.insert_text(&text, window, cx));
+    }
+
+    fn convert_text_to_file(&mut self, text: String, window: &mut Window, cx: &mut Context<Self>) {
+        let filename = format!("{}.txt", chrono::Utc::now().timestamp_millis());
+        cx.spawn_in(window, async move |this, cx| {
+            let pending = cx
+                .background_spawn(async move {
+                    let path = std::env::temp_dir().join(&filename);
+                    if let Err(err) = std::fs::write(&path, text.as_bytes()) {
+                        tracing::warn!("failed to write converted text attachment: {err}");
+                        return None;
+                    }
+                    build_pending(path)
+                })
+                .await;
+            if let Some(pending) = pending {
+                this.update_in(cx, |this, window, cx| {
+                    this.add_pending(vec![pending], window, cx)
+                })
+                .ok();
+            }
+        })
+        .detach();
+    }
+
+    fn on_paste_images(&mut self, images: Vec<Image>, window: &mut Window, cx: &mut Context<Self>) {
+        if images.is_empty() {
+            return;
         }
+        let base = chrono::Utc::now().timestamp_millis();
+        cx.spawn_in(window, async move |this, cx| {
+            let pending = cx
+                .background_spawn(async move {
+                    images
+                        .into_iter()
+                        .enumerate()
+                        .filter_map(|(index, image)| {
+                            build_pending(write_clipboard_image(&image, base, index)?)
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .await;
+            this.update_in(cx, |this, window, cx| this.add_pending(pending, window, cx))
+                .ok();
+        })
+        .detach();
+    }
+
+    fn on_paste_paths(&mut self, paths: Vec<PathBuf>, window: &mut Window, cx: &mut Context<Self>) {
+        let images: Vec<PathBuf> = paths
+            .into_iter()
+            .filter(|path| mime_from_extension(path).starts_with("image/"))
+            .collect();
+        self.add_dropped_paths(images, window, cx);
+    }
+
+    fn add_pending(
+        &mut self,
+        candidates: Vec<PendingAttachment>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if candidates.is_empty() {
+            return;
+        }
+        match validate_batch(self.pending_attachments.len(), &candidates) {
+            Ok(()) => {
+                self.pending_attachments.extend(candidates);
+                cx.notify();
+            }
+            Err(limit) => Self::show_upload_limit(limit, window, cx),
+        }
+    }
+
+    fn show_upload_limit(limit: AttachmentLimit, window: &mut Window, cx: &mut Context<Self>) {
+        let (title, content) = match limit {
+            AttachmentLimit::Count => (
+                "Upload limit exceeded!".to_string(),
+                format!("You can only upload up to {MAX_FILE_ATTACHMENTS} files at a time."),
+            ),
+            AttachmentLimit::Size(bytes) => (
+                "Upload size limit exceeded!".to_string(),
+                format!("Maximum allowed size is {}MB", bytes / (1024 * 1024)),
+            ),
+        };
+        Shell::global(cx).update(cx, |shell, cx| {
+            shell.show_upload_limit(title, content, window, cx)
+        });
     }
 
     fn remove_attachment(&mut self, index: usize, cx: &mut Context<Self>) {
@@ -347,14 +567,27 @@ impl MentionInput {
             .flex_wrap()
             .gap(px(8.))
             .px(px(8.))
-            .pt(px(8.));
+            .pt(px(8.))
+            .image_cache(self.preview_cache.clone());
         for (index, att) in self.pending_attachments.iter().enumerate() {
             let preview = if att.is_image {
-                img(att.path.clone())
+                div()
                     .size(px(64.))
                     .rounded(px(6.))
+                    .bg(chip_bg)
+                    .overflow_hidden()
+                    .child(
+                        img(att.path.clone())
+                            .size_full()
+                            .object_fit(gpui::ObjectFit::Cover),
+                    )
                     .into_any_element()
             } else {
+                let icon = if att.is_video {
+                    IconName::PlayButton
+                } else {
+                    IconName::FileIcon
+                };
                 div()
                     .size(px(64.))
                     .rounded(px(6.))
@@ -362,7 +595,7 @@ impl MentionInput {
                     .flex()
                     .items_center()
                     .justify_center()
-                    .child(Icon::new(IconName::FileIcon).size_5().text_color(muted))
+                    .child(Icon::new(icon).size_5().text_color(muted))
                     .into_any_element()
             };
             row = row.child(
@@ -419,16 +652,30 @@ impl MentionInput {
     }
 
     fn on_change(&mut self, cx: &mut Context<Self>) {
-        let content = self.input.read(cx).value().to_string();
+        let content = self.input.read(cx).value_shared();
         self.revalidate(&content, cx);
         self.check_trigger(&content, cx);
     }
 
     fn revalidate(&mut self, content: &str, cx: &mut Context<Self>) {
         let before = self.committed.len();
-        self.committed
-            .retain(|m| content.get(m.start..m.end) == Some(m.display.as_str()));
-        if self.committed.len() != before {
+        let mut reanchored = false;
+        self.committed.retain_mut(|token| {
+            if content.get(token.start..token.end) == Some(token.display.as_str()) {
+                return true;
+            }
+            let mut matches = content.match_indices(token.display.as_str());
+            match (matches.next(), matches.next()) {
+                (Some((offset, _)), None) => {
+                    token.start = offset;
+                    token.end = offset + token.display.len();
+                    reanchored = true;
+                    true
+                }
+                _ => false,
+            }
+        });
+        if reanchored || self.committed.len() != before {
             self.sync_ranges(cx);
         }
     }
@@ -620,95 +867,62 @@ impl MentionInput {
         cx.notify();
     }
 
-    fn toggle_picker(&mut self, cx: &mut Context<Self>) {
-        self.picker_open = !self.picker_open;
-        if self.picker_open {
-            self.sticker_picker_open = false;
-            self.reset_popup();
-            if let Some(store) = EmojiStore::try_global(cx) {
-                store.update(cx, |store, cx| store.ensure_loaded(cx));
-            }
-            self.rebuild_picker(cx);
-        }
-        cx.notify();
+    fn toggle_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.toggle_tab(SubPanel::Emoji, window, cx);
     }
 
-    fn toggle_sticker_picker(&mut self, cx: &mut Context<Self>) {
-        self.sticker_picker_open = !self.sticker_picker_open;
-        if self.sticker_picker_open {
-            self.picker_open = false;
-            self.reset_popup();
-            if let Some(store) = StickerStore::try_global(cx) {
-                store.update(cx, |store, cx| store.ensure_loaded(cx));
+    fn toggle_tab(&mut self, tab: SubPanel, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(popup) = &self.popup {
+            if popup.read(cx).active_tab() == tab {
+                self.close_popup();
+            } else {
+                popup.update(cx, |popup, cx| popup.set_tab(tab, cx));
             }
-            self.rebuild_sticker_picker(cx);
-        }
-        cx.notify();
-    }
-
-    fn rebuild_sticker_picker(&mut self, cx: &mut Context<Self>) {
-        let active = ClanList::global(cx)
-            .read(cx)
-            .active_clan_id
-            .map(|id| id.to_string());
-        let Some(store) = StickerStore::try_global(cx) else {
-            self.sticker_rows = Vec::new();
+            cx.notify();
             return;
-        };
-        let store = store.read(cx);
-        let rows = store
-            .active_clan_first(active.as_deref())
-            .chunks(STICKER_COLS)
-            .map(|chunk| {
-                chunk
-                    .iter()
-                    .map(|s| StickerCellRaw {
-                        id: s.id.clone(),
-                        src: s.src.clone(),
-                    })
-                    .collect()
-            })
-            .collect();
-        self.sticker_rows = rows;
+        }
+        self.reset_popup();
+        self.open_popup(tab, window, cx);
+        cx.notify();
     }
 
-    fn send_sticker(&mut self, cell: StickerCellRaw, cx: &mut Context<Self>) {
-        self.sticker_picker_open = false;
-        cx.emit(MentionInputEvent::SendSticker {
-            url: cell.src,
-            filename: cell.id,
+    fn open_popup(&mut self, tab: SubPanel, window: &mut Window, cx: &mut Context<Self>) {
+        let popup = cx.new(|cx| GifStickerEmojiPopup::new(tab, window, cx));
+        let pick_sub = cx.subscribe_in(
+            &popup,
+            window,
+            |this, _popup, event, window, cx| match event {
+                GifStickerEmojiEvent::Emoji { emoji_id, emoji } => this.insert_emoji(
+                    EmojiSuggestRaw {
+                        emoji_id: emoji_id.clone(),
+                        shortname: emoji.clone(),
+                        shortname_lc: emoji.to_lowercase(),
+                        src: String::new(),
+                    },
+                    window,
+                    cx,
+                ),
+                GifStickerEmojiEvent::Sticker { url, filename } => {
+                    this.close_popup();
+                    cx.emit(MentionInputEvent::SendSticker {
+                        url: url.clone(),
+                        filename: filename.clone(),
+                    });
+                    cx.notify();
+                }
+            },
+        );
+        let dismiss_sub = cx.subscribe(&popup, |this, _popup, _: &DismissEvent, cx| {
+            this.close_popup();
+            cx.notify();
         });
-        cx.notify();
+        self._popup_subs = vec![pick_sub, dismiss_sub];
+        self.popup = Some(popup);
     }
 
-    fn rebuild_picker(&mut self, cx: &mut Context<Self>) {
-        let active = ClanList::global(cx)
-            .read(cx)
-            .active_clan_id
-            .map(|id| id.to_string());
-        let Some(store) = EmojiStore::try_global(cx) else {
-            self.picker_rows = Vec::new();
-            return;
-        };
-        let store = store.read(cx);
-        let mut rows = Vec::new();
-        for (category, emojis) in store.by_category(active.as_deref()) {
-            rows.push(PickerRow::Header(SharedString::from(category)));
-            for chunk in emojis.chunks(PICKER_COLS) {
-                rows.push(PickerRow::Emojis(
-                    chunk
-                        .iter()
-                        .map(|e| EmojiSuggestRaw {
-                            emoji_id: e.id.clone(),
-                            shortname: e.shortname.clone(),
-                            shortname_lc: e.shortname.to_lowercase(),
-                            src: e.src.clone(),
-                        })
-                        .collect(),
-                ));
-            }
-        }
-        self.picker_rows = rows;
+    fn close_popup(&mut self) {
+        self.popup = None;
+        self._popup_subs.clear();
     }
 
     fn insert_emoji(
@@ -733,7 +947,6 @@ impl MentionInput {
             start: at,
             end,
         });
-        self.picker_open = false;
         self.sync_ranges(cx);
         let handle = self.input.read(cx).focus_handle(cx);
         window.focus(&handle, cx);
@@ -771,7 +984,14 @@ impl MentionInput {
     }
 
     fn on_dismiss(&mut self, _: &MentionDismiss, _window: &mut Window, cx: &mut Context<Self>) {
-        self.hide(cx);
+        if self.popup_open() {
+            self.hide(cx);
+        } else if self.popup.is_some() {
+            self.close_popup();
+            cx.notify();
+        } else {
+            cx.emit(MentionInputEvent::Cancel);
+        }
     }
 
     fn render_suggestion_row(
@@ -906,125 +1126,91 @@ impl MentionInput {
             .into_any_element()
     }
 
-    fn render_picker(&self, cx: &mut Context<Self>) -> AnyElement {
-        let theme = cx.theme();
-        let border = theme.border;
-        let panel_bg = theme.bg_floating;
-        let text_muted = theme.text_muted;
-        let locale = self.locale(cx);
-
-        let panel = div()
-            .id("emoji-picker")
-            .absolute()
-            .bottom_full()
-            .right_0()
-            .mb(px(8.))
-            .w(px(320.))
-            .rounded(px(8.))
-            .border_1()
-            .border_color(border)
-            .bg(panel_bg)
-            .shadow_lg()
-            .occlude()
-            .on_mouse_down_out(cx.listener(|this, _event, _window, cx| {
-                this.picker_open = false;
-                cx.notify();
-            }));
-
-        if self.picker_rows.is_empty() {
-            return panel
-                .p(px(12.))
-                .child(
-                    div()
-                        .text_size(px(13.))
-                        .text_color(text_muted)
-                        .child(mezon_i18n::t(&locale, "common.searchModal.noResults")),
-                )
-                .into_any_element();
-        }
-
-        let entity = cx.entity();
-        let count = self.picker_rows.len();
-        let list_h = (count as f32 * PICKER_ROW_PX).min(264.);
-        let list = uniform_list("emoji-picker-list", count, move |range, _window, cx| {
-            let theme = cx.theme().clone();
-            let this = entity.read(cx);
-            range
-                .map(|ix| match this.picker_rows.get(ix) {
-                    Some(PickerRow::Header(label)) => render_picker_header(&theme, label),
-                    Some(PickerRow::Emojis(emojis)) => {
-                        render_picker_emoji_row(&theme, emojis, &entity)
-                    }
-                    None => div().h(px(PICKER_ROW_PX)).into_any_element(),
-                })
-                .collect::<Vec<_>>()
-        })
-        .track_scroll(&self.picker_scroll)
-        .h(px(list_h))
-        .w_full();
-
-        panel.p(px(8.)).child(list).into_any_element()
-    }
-
-    fn render_sticker_picker(&self, cx: &mut Context<Self>) -> AnyElement {
-        let theme = cx.theme();
-        let border = theme.border;
-        let panel_bg = theme.bg_floating;
-        let text_muted = theme.text_muted;
-        let locale = self.locale(cx);
-
-        let panel = div()
-            .id("sticker-picker")
-            .absolute()
-            .bottom_full()
-            .right_0()
-            .mb(px(8.))
-            .w(px(STICKER_PANEL_PX))
-            .rounded(px(8.))
-            .border_1()
-            .border_color(border)
-            .bg(panel_bg)
-            .shadow_lg()
-            .occlude()
-            .on_mouse_down_out(cx.listener(|this, _event, _window, cx| {
-                this.sticker_picker_open = false;
-                cx.notify();
-            }));
-
-        if self.sticker_rows.is_empty() {
-            return panel
-                .p(px(12.))
-                .child(
-                    div()
-                        .text_size(px(13.))
-                        .text_color(text_muted)
-                        .child(mezon_i18n::t(&locale, "common.searchModal.noResults")),
-                )
-                .into_any_element();
-        }
-
-        let entity = cx.entity();
-        let count = self.sticker_rows.len();
-        let list_h = (count as f32 * STICKER_ROW_PX).min(STICKER_ROW_PX * 3.);
-        let list = uniform_list("sticker-picker-list", count, move |range, _window, cx| {
-            let theme = cx.theme().clone();
-            let this = entity.read(cx);
-            range
-                .map(|ix| match this.sticker_rows.get(ix) {
-                    Some(cells) => render_sticker_row(&theme, cells, &entity),
-                    None => div().h(px(STICKER_ROW_PX)).into_any_element(),
-                })
-                .collect::<Vec<_>>()
-        })
-        .track_scroll(&self.sticker_scroll)
-        .h(px(list_h))
-        .w_full();
-
-        panel.p(px(8.)).child(list).into_any_element()
+    fn render_popup(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let popup = self.popup.clone()?;
+        Some(
+            deferred(
+                div()
+                    .absolute()
+                    .bottom_full()
+                    .right_0()
+                    .mb(px(8.))
+                    .occlude()
+                    .on_mouse_down_out(cx.listener(|this, _event, _window, cx| {
+                        this.close_popup();
+                        cx.notify();
+                    }))
+                    .child(popup),
+            )
+            .into_any_element(),
+        )
     }
 
     fn locale(&self, cx: &App) -> String {
         self.settings.read(cx).language.clone()
+    }
+
+    fn build_suggestion_popup(&self, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme();
+        let popup_bg = theme.tokens.bg_ping_member;
+        let border = theme.border;
+        let entity = cx.entity();
+        let count = self.suggestions.len();
+        let list_h = (count as f32 * MENTION_ROW_PX).min(MENTION_POPUP_MAX_PX);
+        let locale = self.locale(cx);
+        let list = uniform_list(
+            "mention-suggestion-list",
+            count,
+            move |range, _window, cx| {
+                let theme = cx.theme();
+                let this = entity.read(cx);
+                range
+                    .map(|ix| match this.suggestions.get(ix) {
+                        Some(suggestion) => {
+                            this.render_suggestion_row(theme, &locale, ix, suggestion, &entity)
+                        }
+                        None => div().h(px(MENTION_ROW_PX)).into_any_element(),
+                    })
+                    .collect::<Vec<_>>()
+            },
+        )
+        .track_scroll(&self.suggestion_scroll)
+        .h(px(list_h))
+        .w_full();
+        deferred(
+            div()
+                .image_cache(self.avatar_cache.clone())
+                .id("mention-popup")
+                .absolute()
+                .bottom_full()
+                .left_0()
+                .right_0()
+                .mb(px(8.))
+                .p(px(4.))
+                .rounded(px(8.))
+                .border_1()
+                .border_color(border)
+                .bg(popup_bg)
+                .shadow_lg()
+                .occlude()
+                .on_mouse_down_out(cx.listener(|this, _event, _window, cx| this.hide(cx)))
+                .child(list),
+        )
+        .into_any_element()
+    }
+
+    fn render_compact(&self, cx: &mut Context<Self>) -> AnyElement {
+        let open = self.popup_open();
+        let popup = open.then(|| self.build_suggestion_popup(cx));
+        div()
+            .relative()
+            .w_full()
+            .key_context(KEY_CONTEXT)
+            .on_action(cx.listener(Self::on_accept))
+            .on_action(cx.listener(Self::on_dismiss))
+            .child(MentionInputField::new(&self.input))
+            .when_some(popup, |this, popup| this.child(popup))
+            .into_any_element()
     }
 }
 
@@ -1074,166 +1260,108 @@ fn emoji_suggest_pool(cx: &App) -> Vec<EmojiSuggestRaw> {
         .collect()
 }
 
-fn render_picker_header(theme: &Theme, label: &SharedString) -> AnyElement {
-    div()
-        .h(px(PICKER_ROW_PX))
-        .flex()
-        .items_center()
-        .px_1()
-        .text_size(px(11.))
-        .font_weight(FontWeight::SEMIBOLD)
-        .text_color(theme.text_muted)
-        .child(label.to_uppercase())
-        .into_any_element()
-}
-
-fn render_picker_emoji_row(
-    theme: &Theme,
-    emojis: &[EmojiSuggestRaw],
-    entity: &Entity<MentionInput>,
-) -> AnyElement {
-    let hover_bg = theme.bg_hover;
-    let mut row = div()
-        .h(px(PICKER_ROW_PX))
-        .flex()
-        .flex_row()
-        .items_center()
-        .gap_1();
-    for emoji in emojis {
-        let raw = emoji.clone();
-        let ent = entity.clone();
-        let cell = div()
-            .id(SharedString::from(format!("pick-{}", emoji.emoji_id)))
-            .flex()
-            .items_center()
-            .justify_center()
-            .size(px(PICKER_CELL_PX))
-            .rounded(px(6.))
-            .cursor_pointer()
-            .hover(|s| s.bg(hover_bg))
-            .when(!emoji.src.is_empty(), |s| {
-                s.child(img(SharedString::from(emoji.src.clone())).size(px(PICKER_EMOJI_PX)))
-            })
-            .on_click(move |_event, window, cx| {
-                ent.update(cx, |this, cx| this.insert_emoji(raw.clone(), window, cx));
-            });
-        row = row.child(cell);
+fn committed_from_spans(content: &str, spans: &[MessageSpan]) -> Vec<CommittedToken> {
+    let mut committed = Vec::new();
+    let mut search_from = 0usize;
+    for span in spans {
+        let (display, kind) = match span {
+            MessageSpan::Mention {
+                display,
+                user_id,
+                role_id,
+            } => (
+                display.to_string(),
+                TokenKind::Mention {
+                    user_id: user_id.clone().unwrap_or_default(),
+                    role_id: role_id.clone().unwrap_or_default(),
+                },
+            ),
+            MessageSpan::Hashtag {
+                display,
+                channel_id,
+            } => (
+                display.to_string(),
+                TokenKind::Hashtag {
+                    channel_id: channel_id.clone().unwrap_or_default(),
+                },
+            ),
+            MessageSpan::Emoji { name, emoji_id, .. } => (
+                name.to_string(),
+                TokenKind::Emoji {
+                    emoji_id: emoji_id.clone(),
+                },
+            ),
+            _ => continue,
+        };
+        if display.is_empty() {
+            continue;
+        }
+        let Some(rel) = content
+            .get(search_from..)
+            .and_then(|hay| hay.find(&display))
+        else {
+            continue;
+        };
+        let start = search_from + rel;
+        let end = start + display.len();
+        committed.push(CommittedToken {
+            kind,
+            display,
+            start,
+            end,
+        });
+        search_from = end;
     }
-    row.into_any_element()
-}
-
-fn render_sticker_row(
-    theme: &Theme,
-    cells: &[StickerCellRaw],
-    entity: &Entity<MentionInput>,
-) -> AnyElement {
-    let hover_bg = theme.bg_hover;
-    let mut row = div()
-        .h(px(STICKER_ROW_PX))
-        .flex()
-        .flex_row()
-        .items_center()
-        .gap_2();
-    for cell in cells {
-        let raw = cell.clone();
-        let ent = entity.clone();
-        let item = div()
-            .id(SharedString::from(format!("sticker-{}", cell.id)))
-            .flex()
-            .items_center()
-            .justify_center()
-            .size(px(STICKER_CELL_PX))
-            .rounded(px(8.))
-            .cursor_pointer()
-            .hover(|s| s.bg(hover_bg))
-            .when(!cell.src.is_empty(), |s| {
-                s.child(img(SharedString::from(cell.src.clone())).size(px(STICKER_IMG_PX)))
-            })
-            .on_click(move |_event, _window, cx| {
-                ent.update(cx, |this, cx| this.send_sticker(raw.clone(), cx));
-            });
-        row = row.child(item);
-    }
-    row.into_any_element()
+    committed
 }
 
 impl Render for MentionInput {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.compact {
+            return self.render_compact(cx);
+        }
         let open = self.popup_open();
         let theme = cx.theme();
-        let popup_bg = theme.tokens.bg_ping_member;
-        let border = theme.border;
-        let toggle_color = if self.picker_open {
+        let active_tab = self.popup.as_ref().map(|p| p.read(cx).active_tab());
+        let toggle_color = if active_tab == Some(SubPanel::Emoji) {
             theme.text_primary
         } else {
             theme.text_muted
         };
-        let sticker_color = if self.sticker_picker_open {
+        let sticker_color = if active_tab == Some(SubPanel::Stickers) {
+            theme.text_primary
+        } else {
+            theme.text_muted
+        };
+        let gif_color = if active_tab == Some(SubPanel::Gifs) {
             theme.text_primary
         } else {
             theme.text_muted
         };
         let plus_color = theme.text_muted;
         let has_pending = !self.pending_attachments.is_empty();
+        let overflow_counter = {
+            let raw = self.input.read(cx).value();
+            let threshold = CONVERT_TO_FILE_THRESHOLD - CONVERT_PREFIX_LEN;
+            if self.overflow_to_file && raw.len() > threshold {
+                let len = raw.encode_utf16().count();
+                (len > threshold).then_some(threshold as isize - len as isize)
+            } else {
+                None
+            }
+        };
 
-        let popup = open.then(|| {
-            let entity = cx.entity();
-            let count = self.suggestions.len();
-            let list_h = (count as f32 * MENTION_ROW_PX).min(MENTION_POPUP_MAX_PX);
-            let locale = self.locale(cx);
-            let list = uniform_list(
-                "mention-suggestion-list",
-                count,
-                move |range, _window, cx| {
-                    let theme = cx.theme().clone();
-                    let this = entity.read(cx);
-                    range
-                        .map(|ix| match this.suggestions.get(ix) {
-                            Some(suggestion) => {
-                                this.render_suggestion_row(&theme, &locale, ix, suggestion, &entity)
-                            }
-                            None => div().h(px(MENTION_ROW_PX)).into_any_element(),
-                        })
-                        .collect::<Vec<_>>()
-                },
-            )
-            .track_scroll(&self.suggestion_scroll)
-            .h(px(list_h))
-            .w_full();
-            deferred(
-                div()
-                    .id("mention-popup")
-                    .absolute()
-                    .bottom_full()
-                    .left_0()
-                    .right_0()
-                    .mb(px(8.))
-                    .p(px(4.))
-                    .rounded(px(8.))
-                    .border_1()
-                    .border_color(border)
-                    .bg(popup_bg)
-                    .shadow_lg()
-                    .occlude()
-                    .on_mouse_down_out(cx.listener(|this, _event, _window, cx| this.hide(cx)))
-                    .child(list),
-            )
-        });
+        let popup = open.then(|| self.build_suggestion_popup(cx));
 
-        let picker = self.picker_open.then(|| deferred(self.render_picker(cx)));
-        let sticker_picker = self
-            .sticker_picker_open
-            .then(|| deferred(self.render_sticker_picker(cx)));
+        let picker = self.render_popup(cx);
         let previews = has_pending.then(|| self.render_attachment_previews(cx));
 
         let input_area = div()
             .relative()
             .w_full()
-            .when(open, |this| {
-                this.key_context(KEY_CONTEXT)
-                    .on_action(cx.listener(Self::on_accept))
-                    .on_action(cx.listener(Self::on_dismiss))
-            })
+            .key_context(KEY_CONTEXT)
+            .on_action(cx.listener(Self::on_dismiss))
+            .when(open, |this| this.on_action(cx.listener(Self::on_accept)))
             .child(MentionInputField::new(&self.input))
             .child(
                 div()
@@ -1252,7 +1380,9 @@ impl Render for MentionInput {
                             .size_5()
                             .text_color(plus_color),
                     )
-                    .on_click(cx.listener(|this, _event, _window, cx| this.open_file_picker(cx))),
+                    .on_click(
+                        cx.listener(|this, _event, window, cx| this.open_file_picker(window, cx)),
+                    ),
             )
             .child(
                 div()
@@ -1282,7 +1412,11 @@ impl Render for MentionInput {
                     .justify_center()
                     .size(px(20.))
                     .rounded(px(4.))
-                    .child(Icon::new(IconName::Gif).size_5().text_color(plus_color)),
+                    .cursor_pointer()
+                    .child(Icon::new(IconName::Gif).size_5().text_color(gif_color))
+                    .on_click(cx.listener(|this, _event, window, cx| {
+                        this.toggle_tab(SubPanel::Gifs, window, cx)
+                    })),
             )
             .child(
                 div()
@@ -1301,9 +1435,9 @@ impl Render for MentionInput {
                             .size_5()
                             .text_color(sticker_color),
                     )
-                    .on_click(
-                        cx.listener(|this, _event, _window, cx| this.toggle_sticker_picker(cx)),
-                    ),
+                    .on_click(cx.listener(|this, _event, window, cx| {
+                        this.toggle_tab(SubPanel::Stickers, window, cx)
+                    })),
             )
             .child(
                 div()
@@ -1318,12 +1452,22 @@ impl Render for MentionInput {
                     .rounded(px(4.))
                     .cursor_pointer()
                     .child(Icon::new(IconName::Smile).size_5().text_color(toggle_color))
-                    .on_click(cx.listener(|this, _event, _window, cx| this.toggle_picker(cx))),
+                    .on_click(
+                        cx.listener(|this, _event, window, cx| this.toggle_picker(window, cx)),
+                    ),
             )
             .when_some(popup, |this, popup| this.child(popup))
             .when_some(picker, |this, picker| this.child(picker))
-            .when_some(sticker_picker, |this, sticker_picker| {
-                this.child(sticker_picker)
+            .when_some(overflow_counter, |this, remaining| {
+                this.child(
+                    div()
+                        .absolute()
+                        .bottom(px(4.))
+                        .right(px(8.))
+                        .text_xs()
+                        .text_color(gpui::rgb(0xfca5a5))
+                        .child(remaining.to_string()),
+                )
             });
 
         div()
@@ -1332,5 +1476,43 @@ impl Render for MentionInput {
             .w_full()
             .when_some(previews, |this, previews| this.child(previews))
             .child(input_area)
+            .into_any_element()
+    }
+}
+
+#[cfg(test)]
+mod convert_tests {
+    use super::{
+        CONVERT_PREFIX_LEN, CONVERT_TO_FILE_THRESHOLD, content_payload_utf8_len,
+        json_string_utf16_len,
+    };
+
+    #[test]
+    fn prefix_len_matches_empty_content_wrapper() {
+        assert_eq!(CONVERT_PREFIX_LEN, 8);
+        assert_eq!(content_payload_utf8_len(""), 8);
+    }
+
+    #[test]
+    fn json_utf16_len_counts_quotes_and_escapes_like_js() {
+        assert_eq!(json_string_utf16_len(""), 2);
+        assert_eq!(json_string_utf16_len("ab"), 4);
+        assert_eq!(json_string_utf16_len("\n"), 4);
+    }
+
+    #[test]
+    fn send_measures_utf8_bytes_paste_measures_utf16_units() {
+        let s = "é";
+        assert_eq!(json_string_utf16_len(s), 3);
+        assert_eq!(content_payload_utf8_len(s), 10);
+    }
+
+    #[test]
+    fn threshold_boundary_is_strict() {
+        let text = "a".repeat(CONVERT_TO_FILE_THRESHOLD - CONVERT_PREFIX_LEN);
+        assert_eq!(content_payload_utf8_len(&text), CONVERT_TO_FILE_THRESHOLD);
+        assert!(content_payload_utf8_len(&text) <= CONVERT_TO_FILE_THRESHOLD);
+        let over = "a".repeat(CONVERT_TO_FILE_THRESHOLD - CONVERT_PREFIX_LEN + 1);
+        assert!(content_payload_utf8_len(&over) > CONVERT_TO_FILE_THRESHOLD);
     }
 }

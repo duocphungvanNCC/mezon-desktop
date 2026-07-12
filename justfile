@@ -4,7 +4,7 @@
 
 # Crates we own — vendored Zed crates are excluded (we don't lint/test their code;
 # some of their test targets don't even compile against our pinned deps).
-pkgs := "-p mezon-app -p mezon-ui -p mezon-store -p mezon-client -p mezon-native -p mezon-proto -p mezon-i18n -p mezon-updater"
+pkgs := "-p mezon-app -p mezon-ui -p mezon-store -p mezon-client -p mezon-native -p mezon-proto -p mezon-i18n -p mezon-updater -p mezon-audio"
 
 # Formatting scope — pkgs plus mezon-voice (excluded from clippy/test above),
 # still excluding vendored crates (read-only, carry upstream fmt drift).
@@ -48,6 +48,11 @@ help:
     @echo "  audit           Audit dependencies for advisories"
     @echo "  outdated        Check for outdated dependencies"
     @echo "  update          Update Cargo dependencies"
+    @echo ""
+    @echo "  Packaging"
+    @echo "  ---------------------------------------------"
+    @echo "  bundle          Build macOS Mezon.app bundle"
+    @echo "  build-deb       Build Linux .deb package"
     @echo ""
 
 # ------------------------------------------------------------------------------
@@ -157,6 +162,10 @@ bundle: release
     codesign --force --deep --sign - "$app" >/dev/null 2>&1 || true
     echo "Built $app"
     echo "Run: open \"$app\"  (or double-click in Finder)"
+
+# Build a Linux .deb package (requires Linux; run install-linux-deps first)
+build-deb:
+    @bash scripts/build-deb.sh
 
 # Clean build artifacts
 clean:

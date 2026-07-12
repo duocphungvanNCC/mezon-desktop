@@ -2,17 +2,20 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use gpui::{
-    App, Context, Entity, FocusHandle, Focusable, ObjectFit, RenderImage, SharedString, Window,
-    div, img, prelude::*, px,
+    App, Context, Entity, FocusHandle, Focusable, ObjectFit, RenderImage, SharedString, Task,
+    Window, div, img, prelude::*, px,
 };
 use mezon_store::{
-    PickedScreen, ScreenShareKind, ScreenShareOption, ScreenSharePreview, Settings, VoiceStore,
-    capture_screen_share_preview, list_screen_share_options, peek_screen_share_options,
+    ScreenShareKind, ScreenShareListError, ScreenShareOption, ScreenSharePreview,
+    Settings, VoiceStore, capture_screen_share_preview, list_screen_share_options,
+    peek_screen_share_options,
 };
 
 use crate::app::shell::Shell;
 use crate::chat::voice::ACCENT_BLUE;
-use crate::components::primitives::{Button, ButtonVariants, Icon, IconName, h_flex, v_flex};
+use crate::components::primitives::{
+    Button, ButtonVariants, Icon, IconName, Switch, h_flex, v_flex,
+};
 use crate::theme::ActiveTheme;
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
@@ -42,9 +45,13 @@ pub struct ScreenShareModal {
     previews: HashMap<PreviewKey, Arc<RenderImage>>,
     preview_requests: HashSet<PreviewKey>,
     loading: bool,
-    load_error: Option<String>,
+    load_error: Option<ScreenShareListError>,
     selected: Option<SelectedTarget>,
+    share_audio: bool,
     load_started: bool,
+    list_task: Option<Task<()>>,
+    preview_task: Option<Task<()>>,
+    preview_loading: bool,
 }
 
 impl Focusable for ScreenShareModal {
@@ -65,7 +72,7 @@ impl ScreenShareModal {
 
         cx.on_release(|this, cx| {
             for (_, image) in this.previews.drain() {
-                cx.drop_image(image, None);
+                crate::image_cache::queue_atlas_drop(cx, image);
             }
         })
         .detach();
@@ -83,7 +90,11 @@ impl ScreenShareModal {
             loading: cached.is_none(),
             load_error: None,
             selected: None,
+            share_audio: false,
             load_started: false,
+            list_task: None,
+            preview_task: None,
+            preview_loading: false,
         }
     }
 
@@ -98,40 +109,42 @@ impl ScreenShareModal {
             self.loading = false;
         }
 
-        let this = cx.entity().clone();
-        cx.spawn(async move |_, cx| {
+        self.list_task = Some(cx.spawn(async move |this, cx| {
             let (tx, rx) = flume::bounded(1);
             std::thread::spawn(move || {
                 let _ = tx.send(list_screen_share_options());
             });
             let result = rx.recv_async().await;
-            this.update(cx, |this, cx| {
+            let _ = this.update(cx, |this, cx| {
                 match result {
                     Ok(Ok(options)) => {
                         this.options = options;
                         this.loading = false;
+                        this.preview_task = None;
+                        this.preview_loading = false;
                         for (_, image) in this.previews.drain() {
-                            cx.drop_image(image, None);
+                            crate::image_cache::queue_atlas_drop(cx, image);
                         }
                         this.preview_requests.clear();
                     }
-                    Ok(Err(message)) => {
-                        this.load_error = Some(message);
+                    Ok(Err(error)) => {
+                        this.load_error = Some(error);
                         this.loading = false;
                     }
                     Err(_) => {
-                        this.load_error = Some("failed to load share targets".into());
+                        this.load_error = Some(ScreenShareListError::Unavailable(
+                            "failed to load share targets".into(),
+                        ));
                         this.loading = false;
                     }
                 }
                 cx.notify();
             });
-        })
-        .detach();
+        }));
     }
 
     fn start_preview_loading(&mut self, cx: &mut Context<Self>) {
-        if self.loading || self.load_error.is_some() {
+        if self.loading || self.load_error.is_some() || self.preview_loading {
             return;
         }
 
@@ -161,15 +174,17 @@ impl ScreenShareModal {
                 .map(|(kind, id)| PreviewKey { kind, id }),
         );
 
-        let this = cx.entity().clone();
-        cx.spawn(async move |_, cx| {
+        self.preview_loading = true;
+        self.preview_task = Some(cx.spawn(async move |this, cx| {
             let (tx, rx) = flume::bounded(targets.len().max(1));
             std::thread::Builder::new()
                 .name("mezon-screen-previews".into())
                 .spawn(move || {
                     for (kind, id) in targets {
                         let preview = capture_screen_share_preview(kind, id);
-                        let _ = tx.send((kind, id, preview));
+                        if tx.send((kind, id, preview)).is_err() {
+                            break;
+                        }
                     }
                 })
                 .ok();
@@ -177,18 +192,27 @@ impl ScreenShareModal {
             while let Ok((kind, id, preview)) = rx.recv_async().await {
                 let key = PreviewKey { kind, id };
                 let image = preview.and_then(preview_to_render_image);
-                this.update(cx, |this, cx| match image {
+                let updated = this.update(cx, |this, cx| match image {
                     Some(image) => {
-                        this.previews.insert(key, image);
+                        if let Some(previous) = this.previews.insert(key, image) {
+                            cx.drop_image(previous, None);
+                        }
                         cx.notify();
                     }
                     None => {
                         this.preview_requests.remove(&key);
                     }
                 });
+                if updated.is_err() {
+                    return;
+                }
             }
-        })
-        .detach();
+
+            let _ = this.update(cx, |this, cx| {
+                this.preview_loading = false;
+                cx.notify();
+            });
+        }));
     }
 
     fn close(&mut self, cx: &mut Context<Self>) {
@@ -220,9 +244,11 @@ impl ScreenShareModal {
         else {
             return;
         };
-        let pick = PickedScreen::Target(option.target.clone());
-        self.voice
-            .update(cx, |store, cx| store.start_screen_share(pick, cx));
+        let pick = option.pick.clone();
+        let share_audio = self.share_audio;
+        self.voice.update(cx, |store, cx| {
+            store.start_screen_share(pick, share_audio, cx)
+        });
         self.close(cx);
     }
 
@@ -233,7 +259,7 @@ impl ScreenShareModal {
         };
         self.options
             .iter()
-            .filter(|option| option.kind == kind)
+            .filter(|option| option.is_portal() || option.kind == kind)
             .collect()
     }
 }
@@ -265,12 +291,16 @@ impl Render for ScreenShareModal {
         let status_dnd: gpui::Hsla = theme.status_dnd.into();
 
         let title: SharedString = mezon_i18n::t(&locale, "screenShare.chooseWhatToShare").into();
+        let share_audio_label: SharedString =
+            mezon_i18n::t(&locale, "screenShare.alsoShareSystemAudio").into();
         let window_tab: SharedString = mezon_i18n::t(&locale, "screenShare.window").into();
         let screen_tab: SharedString = mezon_i18n::t(&locale, "screenShare.entireScreen").into();
         let cancel_label: SharedString = mezon_i18n::t(&locale, "screenShare.cancel").into();
         let share_label: SharedString = mezon_i18n::t(&locale, "screenShare.share").into();
         let loading_label: SharedString = mezon_i18n::t(&locale, "screenShare.loading").into();
         let empty_label: SharedString = mezon_i18n::t(&locale, "screenShare.selectScreen").into();
+        let portal_label: SharedString =
+            mezon_i18n::t(&locale, "screenShare.linuxPortalOption").into();
 
         let filtered = self.filtered_options();
         let can_share = self.selected.is_some();
@@ -369,11 +399,20 @@ impl Render for ScreenShareModal {
                             .child(div().text_sm().text_color(text_muted).child(loading_label))
                     })
                     .when(!self.loading, |this| {
-                        this.when_some(self.load_error.clone(), |el, message| {
+                        this.when_some(self.load_error.clone(), |el, error| {
                             el.flex()
                                 .items_center()
                                 .justify_center()
-                                .child(div().text_sm().text_color(status_dnd).child(message))
+                                .child(match error {
+                                    ScreenShareListError::PermissionDenied => {
+                                        permission_denied_state(&locale, cx)
+                                    }
+                                    ScreenShareListError::Unavailable(message) => div()
+                                        .text_sm()
+                                        .text_color(status_dnd)
+                                        .child(message)
+                                        .into_any_element(),
+                                })
                         })
                         .when(self.load_error.is_none(), |el| {
                             el.when(filtered.is_empty(), |empty| {
@@ -396,6 +435,7 @@ impl Render for ScreenShareModal {
                                     text_primary,
                                     text_muted,
                                     tile_bg,
+                                    portal_label.clone(),
                                     cx,
                                 ))
                             })
@@ -403,20 +443,42 @@ impl Render for ScreenShareModal {
                     }),
             )
             .child(
-                h_flex()
+                v_flex()
                     .w_full()
                     .flex_none()
-                    .items_center()
-                    .justify_end()
+                    .gap(px(16.))
                     .px(px(20.))
                     .py(px(16.))
                     .border_t_1()
                     .border_color(border)
-                    // NOTE: the "also share system audio" toggle is intentionally hidden
-                    // until audio capture is wired into the screen-share engine. Re-add the
-                    // Switch here (and a `share_audio` field) once it is supported.
+                    .when(cfg!(target_os = "macos"), |footer| {
+                        footer.child(
+                            h_flex()
+                                .w_full()
+                                .items_center()
+                                .justify_between()
+                                .child(
+                                    div()
+                                        .text_sm()
+                                        .text_color(text_primary)
+                                        .child(share_audio_label),
+                                )
+                                .child(
+                                    Switch::new("screen-share-audio")
+                                        .checked(self.share_audio)
+                                        .on_click(cx.listener(
+                                            |this, checked: &bool, _window, cx| {
+                                                this.share_audio = *checked;
+                                                cx.notify();
+                                            },
+                                        )),
+                                ),
+                        )
+                    })
                     .child(
                         h_flex()
+                            .w_full()
+                            .justify_end()
                             .gap(px(8.))
                             .child(
                                 Button::new("screen-share-cancel")
@@ -477,6 +539,7 @@ fn target_grid(
     text_primary: gpui::Hsla,
     text_muted: gpui::Hsla,
     tile_bg: gpui::Hsla,
+    portal_label: SharedString,
     cx: &mut Context<ScreenShareModal>,
 ) -> impl IntoElement {
     div()
@@ -495,7 +558,11 @@ fn target_grid(
                     kind,
                     id: option.id,
                 });
-            let title = option.title.clone();
+            let title = if option.is_portal() {
+                portal_label.clone()
+            } else {
+                SharedString::from(option.title.clone())
+            };
             let id = option.id;
             let tile_id = SharedString::from(format!("screen-share-tile-{index}"));
             let preview = previews.get(&preview_key).cloned();
@@ -542,6 +609,79 @@ fn tile_icon(color: gpui::Hsla) -> impl IntoElement {
     Icon::new(IconName::VoiceScreenShareIcon)
         .size(px(40.))
         .text_color(color)
+}
+
+const MACOS_SCREEN_CAPTURE_SETTINGS_URL: &str =
+    "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture";
+
+fn permission_denied_state(locale: &str, cx: &mut Context<ScreenShareModal>) -> gpui::AnyElement {
+    let theme = cx.theme();
+    let text_primary: gpui::Hsla = theme.text_primary.into();
+    let text_muted: gpui::Hsla = theme.text_muted.into();
+    let icon_bg: gpui::Hsla = theme.bg_tertiary.into();
+
+    let title: SharedString = mezon_i18n::t(locale, "screenShare.permissionTitle").into();
+    let description: SharedString =
+        mezon_i18n::t(locale, "screenShare.permissionDescription").into();
+    let restart_hint: SharedString =
+        mezon_i18n::t(locale, "screenShare.permissionRestartHint").into();
+    let open_settings: SharedString =
+        mezon_i18n::t(locale, "screenShare.openSystemSettings").into();
+
+    v_flex()
+        .items_center()
+        .gap(px(12.))
+        .max_w(px(440.))
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .justify_center()
+                .size(px(64.))
+                .rounded_full()
+                .bg(icon_bg)
+                .child(
+                    Icon::new(IconName::VoiceScreenShareIcon)
+                        .size(px(28.))
+                        .text_color(text_muted),
+                ),
+        )
+        .child(
+            div()
+                .text_size(px(16.))
+                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .text_color(text_primary)
+                .text_center()
+                .child(title),
+        )
+        .child(
+            div()
+                .text_sm()
+                .text_color(text_muted)
+                .text_center()
+                .child(description),
+        )
+        .when(cfg!(target_os = "macos"), |el| {
+            el.child(
+                div().mt(px(4.)).child(
+                    Button::new("screen-share-open-settings")
+                        .label(open_settings)
+                        .primary()
+                        .on_click(|_, _, cx| {
+                            cx.open_url(MACOS_SCREEN_CAPTURE_SETTINGS_URL);
+                        }),
+                ),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(text_muted)
+                    .opacity(0.8)
+                    .text_center()
+                    .child(restart_hint),
+            )
+        })
+        .into_any_element()
 }
 
 pub fn open_screen_share_modal(

@@ -10,13 +10,16 @@ use gpui::{
     prelude::*, px,
 };
 use mezon_store::{
-    ChannelList, ClanId, ClanList, ClanMembersStore, FAVOR_CATE_ID, Settings, VoiceMember,
+    ChannelList, ClanId, ClanList, ClanMembersStore, FAVOR_CATE_ID, PERMISSION_MANAGE_CLAN,
+    PermissionStore, Settings, VoiceMember,
 };
 
-use crate::components::compositions::channel_row::ChannelRow;
-use crate::components::primitives::{
-    Avatar, Icon, IconName, Sizable, Size, context_menu_at, mention_count_badge_on_channel_row,
+use crate::clan::clan_menu::{build_clan_menu, clan_menu_overlay};
+use crate::components::compositions::channel_row::{channel_type_icon, shows_left_unread_nub};
+use crate::components::compositions::channel_row_element::{
+    ChannelRowBadge, ChannelRowElement, ThreadConnector,
 };
+use crate::components::primitives::{Avatar, Icon, IconName, Sizable, Size, context_menu_at};
 use crate::theme::{ActiveTheme, Theme};
 
 mod items;
@@ -25,7 +28,11 @@ mod skeleton;
 use items::{AppChannelSlot, SidebarItem, VoiceMemberSlot};
 use menu::{OpenMenu, build_channel_menu, on_category_click, on_channel_click};
 
-fn resolve_voice_member_slot(cx: &App, clan_id: Option<ClanId>, m: &VoiceMember) -> VoiceMemberSlot {
+fn resolve_voice_member_slot(
+    cx: &App,
+    clan_id: Option<ClanId>,
+    m: &VoiceMember,
+) -> VoiceMemberSlot {
     let mut slot = VoiceMemberSlot::from(m);
     if let Some(clan_id) = clan_id
         && let Some(store) = ClanMembersStore::try_global(cx)
@@ -53,16 +60,17 @@ pub struct ChannelSidebar {
     items: Rc<Vec<SidebarItem>>,
     list_state: ListState,
     active_clan_name: String,
+    active_clan_name_upper: String,
     active_clan_id: Option<ClanId>,
     loaded_clans: HashSet<ClanId>,
     channel_list_handle: Entity<ChannelList>,
     open_menu: Option<OpenMenu>,
+    pub(super) clan_menu_open: bool,
     skeleton_phase: skeleton::Phase,
     skeleton_clan: Option<ClanId>,
     _skeleton_timer: Option<Task<()>>,
     suppress_hover: bool,
     last_scroll_at: Option<Instant>,
-    _hover_release_task: Option<Task<()>>,
     _clan_observe: Subscription,
     _channel_observe: Subscription,
     _settings_observe: Subscription,
@@ -87,25 +95,6 @@ impl ChannelSidebar {
                 if !this.suppress_hover {
                     this.suppress_hover = true;
                     cx.notify();
-                    this._hover_release_task = Some(cx.spawn(async move |this, cx| {
-                        let idle = Duration::from_millis(SCROLL_HOVER_RELEASE_MS);
-                        loop {
-                            cx.background_executor().timer(idle).await;
-                            let still_scrolling = this
-                                .update(cx, |this, _| {
-                                    this.last_scroll_at.is_some_and(|t| t.elapsed() < idle)
-                                })
-                                .unwrap_or(false);
-                            if still_scrolling {
-                                continue;
-                            }
-                            let _ = this.update(cx, |this, cx| {
-                                this.suppress_hover = false;
-                                cx.notify();
-                            });
-                            break;
-                        }
-                    }));
                 }
             })
             .ok();
@@ -144,16 +133,17 @@ impl ChannelSidebar {
             items: Rc::new(Vec::new()),
             list_state,
             active_clan_name: String::new(),
+            active_clan_name_upper: String::new(),
             active_clan_id: None,
             loaded_clans: HashSet::new(),
             channel_list_handle,
             open_menu: None,
+            clan_menu_open: false,
             skeleton_phase: skeleton::Phase::default(),
             skeleton_clan: None,
             _skeleton_timer: None,
             suppress_hover: false,
             last_scroll_at: None,
-            _hover_release_task: None,
             _clan_observe: clan_observe,
             _channel_observe: channel_observe,
             _settings_observe: settings_observe,
@@ -171,12 +161,19 @@ impl ChannelSidebar {
 
         let new_clan_id = clans.active_clan_id;
         let clan_changed = self.active_clan_id != new_clan_id;
+        if clan_changed {
+            self.clan_menu_open = false;
+            self.suppress_hover = false;
+        }
 
         let new_clan_name = clans
             .active_clan()
             .map(|c| c.name.clone())
             .unwrap_or_else(|| mezon_i18n::t(&locale, "sidebar.selectClan").to_string());
         let name_changed = new_clan_name != self.active_clan_name;
+        if name_changed {
+            self.active_clan_name_upper = new_clan_name.to_uppercase();
+        }
         self.active_clan_name = new_clan_name;
         self.active_clan_id = new_clan_id;
 
@@ -211,12 +208,14 @@ impl ChannelSidebar {
                 !self.loaded_clans.contains(clan_id)
             } else {
                 self.loaded_clans.insert(*clan_id);
-                let show_empty = channels.show_empty_categories();
                 for category in categories {
-                    let is_favorites = category.id == FAVOR_CATE_ID;
-                    if !show_empty && !is_favorites && category.channels.is_empty() {
+                    if !channels.is_show_empty_category(*clan_id)
+                        && category.channels.is_empty()
+                        && category.id != FAVOR_CATE_ID
+                    {
                         continue;
                     }
+                    let is_favorites = category.id == FAVOR_CATE_ID;
                     let collapsed = channels.is_category_collapsed(*clan_id, &category.id);
                     let name = if is_favorites {
                         mezon_i18n::t(&locale, "channelList.favoriteChannel").to_string()
@@ -372,6 +371,13 @@ impl ChannelSidebar {
             None => SharedString::from(prefix),
         }
     }
+
+    pub(crate) fn dismiss_clan_menu(&mut self, cx: &mut Context<Self>) {
+        if self.clan_menu_open {
+            self.clan_menu_open = false;
+            cx.notify();
+        }
+    }
 }
 
 impl Render for ChannelSidebar {
@@ -384,12 +390,35 @@ impl Render for ChannelSidebar {
         let suppress_hover = self.suppress_hover;
         let list_state = self.list_state.clone();
         let sidebar = cx.entity().downgrade();
+        let sidebar_for_channel_menu = sidebar.clone();
+        let sidebar_for_clan_menu = sidebar.clone();
+        let channel_list_for_clan_menu = self.channel_list_handle.clone();
+        let locale = self.settings.read(cx).language.clone();
+        let can_create_category = if let Some(clan_id) = self.active_clan_id {
+            PermissionStore::try_global(cx).is_some_and(|store| {
+                store
+                    .read(cx)
+                    .check_permission(clan_id, PERMISSION_MANAGE_CLAN, cx)
+            })
+        } else {
+            false
+        };
         let menu_overlay = self.open_menu.as_ref().map(|menu| {
             (
                 menu.position,
                 menu.channel_type,
                 menu.is_thread,
-                self.settings.read(cx).language.clone(),
+                locale.clone(),
+            )
+        });
+        let clan_menu_data = self.clan_menu_open.then(|| {
+            (
+                self.active_clan_id,
+                self.channel_list
+                    .read(cx)
+                    .is_show_empty_category(self.active_clan_id.unwrap_or(ClanId(0))),
+                can_create_category,
+                locale.clone(),
             )
         });
 
@@ -441,29 +470,105 @@ impl Render for ChannelSidebar {
             .h_full()
             .pb(px(68.))
             .bg(theme.bg_secondary)
-            .child(
+            .child({
+                let sidebar = sidebar.clone();
+                let sidebar_for_menu = sidebar_for_clan_menu.clone();
+                let channel_list_for_menu = channel_list_for_clan_menu.clone();
+                let clan_name = self.active_clan_name_upper.clone();
+                let has_clan = self.active_clan_id.is_some();
                 div()
-                    .flex()
-                    .flex_row()
-                    .items_center()
+                    .relative()
                     .w_full()
                     .h(px(50.))
-                    .px_3()
                     .border_b_1()
                     .border_color(theme.border)
-                    .child(
-                        div()
-                            .text_base()
-                            .font_weight(gpui::FontWeight::BOLD)
-                            .text_color(theme.text_primary)
-                            .child(self.active_clan_name.clone()),
-                    ),
-            )
+                    .when(has_clan, |el| {
+                        el.child(
+                            div()
+                                .w_full()
+                                .h_full()
+                                .px_3()
+                                .flex()
+                                .flex_row()
+                                .items_center()
+                                .justify_between()
+                                .cursor_pointer()
+                                .hover(|s| s.bg(theme.bg_hover))
+                                .on_mouse_down(MouseButton::Left, {
+                                    let sidebar = sidebar.clone();
+                                    move |_: &MouseDownEvent, _window, cx| {
+                                        if let Some(view) = sidebar.upgrade() {
+                                            view.update(cx, |this, cx| {
+                                                this.clan_menu_open = !this.clan_menu_open;
+                                                cx.notify();
+                                            });
+                                        }
+                                    }
+                                })
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .text_base()
+                                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                                        .text_color(theme.text_primary)
+                                        .child(clan_name.clone()),
+                                )
+                                .child(
+                                    Icon::new(IconName::ChevronDownIcon)
+                                        .size(px(20.))
+                                        .text_color(theme.text_secondary),
+                                ),
+                        )
+                    })
+                    .when(!has_clan, |el| {
+                        el.child(
+                            div()
+                                .h_full()
+                                .px_3()
+                                .flex()
+                                .items_center()
+                                .text_base()
+                                .font_weight(gpui::FontWeight::SEMIBOLD)
+                                .text_color(theme.text_primary)
+                                .child(clan_name.clone()),
+                        )
+                    })
+                    .when_some(
+                        clan_menu_data,
+                        move |el, (clan_id, show_empty, can_create_category, locale)| {
+                            let Some(clan_id) = clan_id else {
+                                return el;
+                            };
+                            el.child(clan_menu_overlay(
+                                build_clan_menu(
+                                    sidebar_for_menu.clone(),
+                                    channel_list_for_menu.clone(),
+                                    clan_id,
+                                    &locale,
+                                    show_empty,
+                                    can_create_category,
+                                ),
+                                px(50.),
+                                px(8.),
+                            ))
+                        },
+                    )
+            })
             .child(
                 div()
                     .flex_1()
                     .min_h_0()
                     .relative()
+                    .on_mouse_move(cx.listener(|this, _event, _window, cx| {
+                        if this.suppress_hover
+                            && this.last_scroll_at.is_none_or(|t| {
+                                t.elapsed() >= Duration::from_millis(SCROLL_HOVER_RELEASE_MS)
+                            })
+                        {
+                            this.suppress_hover = false;
+                            cx.notify();
+                        }
+                    }))
                     .child(list_element)
                     .children(skeleton_overlay),
             )
@@ -472,7 +577,12 @@ impl Render for ChannelSidebar {
                 move |el, (position, channel_type, is_thread, locale)| {
                     el.child(context_menu_at(
                         position,
-                        build_channel_menu(sidebar, &locale, channel_type, is_thread),
+                        build_channel_menu(
+                            sidebar_for_channel_menu.clone(),
+                            &locale,
+                            channel_type,
+                            is_thread,
+                        ),
                     ))
                 },
             )
@@ -770,122 +880,163 @@ fn render_sidebar_item(
             voice_members,
         } => {
             let ch_id = id.clone();
-            let row_handle = channel_list_handle.clone();
             let clan_id_inner = active_clan_id_for_nav;
-            let selected_bg = theme.tokens.bg_active_member_channel;
-            let hover_bg = theme.bg_hover;
-            let thread_highlighted = *selected || *unread;
-            let text_color = if thread_highlighted {
-                theme.tokens.text_secondary
-            } else {
-                theme.tokens.text_theme_primary
-            };
-            let text_hover = theme.tokens.text_secondary;
-            let name_weight = if thread_highlighted {
-                gpui::FontWeight::SEMIBOLD
-            } else {
-                gpui::FontWeight::MEDIUM
-            };
-            let thread_nub = *unread;
-            let nub_color = theme.tokens.text_secondary;
 
-            let row_id = SharedString::from(format!("thread-row-{ch_id}"));
-            let show_badge = crate::SHOW_UNREAD_BADGE_COUNT && *badge_count > 0;
-            let row_content = if *is_thread {
-                let line_color = theme.text_muted;
-                let line_above_val = *line_above;
-                let line_below_val = *line_below;
-                const ELBOW_TOP: gpui::Pixels = px(12.);
-                const ELBOW_SIZE: gpui::Pixels = px(10.);
-
-                let mut connector = div().relative().flex_none().w(px(20.)).h_full();
-                if line_above_val || line_below_val {
-                    connector = connector.child(
-                        div()
-                            .absolute()
-                            .left(px(8.))
-                            .top(px(0.))
-                            .w(px(1.))
-                            .when(line_below_val, |el| el.bottom(px(0.)))
-                            .when(!line_below_val, |el| el.h(ELBOW_TOP))
-                            .bg(line_color),
-                    );
-                }
-                let connector = connector.child(
-                    div()
-                        .absolute()
-                        .left(px(8.))
-                        .top(ELBOW_TOP)
-                        .w(ELBOW_SIZE)
-                        .h(ELBOW_SIZE)
-                        .border_l_1()
-                        .border_b_1()
-                        .border_color(line_color)
-                        .rounded_bl_sm(),
-                );
-
-                div()
-                    .id(row_id.clone())
-                    .h(px(34.))
-                    .w_full()
-                    .relative()
-                    .group(row_id.clone())
-                    .flex()
-                    .flex_row()
-                    .items_stretch()
-                    .cursor_pointer()
-                    .when(*selected, move |el| el.bg(selected_bg))
-                    .when(!*selected && !suppress_hover, move |el| {
-                        el.hover(move |s| s.bg(hover_bg))
+            let make_channel_element = || {
+                let icon = channel_type_icon(*channel_type, *private);
+                let highlight_type = shows_left_unread_nub(*channel_type);
+                let text_bright = *selected || ((*unread || *badge_count > 0) && highlight_type);
+                let bold = (*selected || *unread) && highlight_type;
+                let icon_active = *selected || *unread || *badge_count > 0;
+                let name_base: gpui::Hsla = if text_bright {
+                    theme.tokens.text_secondary.into()
+                } else {
+                    theme.tokens.text_theme_primary.into()
+                };
+                let name_hover: gpui::Hsla = theme.tokens.text_secondary.into();
+                let icon_base: gpui::Hsla = if icon_active {
+                    theme.tokens.bg_icon_theme_active.into()
+                } else {
+                    theme.tokens.bg_icon_theme.into()
+                };
+                let icon_hover: gpui::Hsla = theme.tokens.bg_icon_theme_active.into();
+                let weight = if bold {
+                    gpui::FontWeight::SEMIBOLD
+                } else {
+                    gpui::FontWeight::MEDIUM
+                };
+                let hoverable = !*selected && !suppress_hover;
+                let show_channel_nub = *unread && !*selected && highlight_type;
+                let show_channel_badge = crate::SHOW_UNREAD_BADGE_COUNT && *badge_count > 0;
+                ChannelRowElement::new(
+                    SharedString::from(format!("channel-row-{ch_id}")),
+                    icon,
+                    name.clone().into(),
+                )
+                .icon_color(icon_base, icon_hover)
+                .name_style(name_base, name_hover, weight)
+                .selected_bg(if *selected {
+                    Some(theme.tokens.bg_active_member_channel.into())
+                } else {
+                    None
+                })
+                .hover_bg(if hoverable {
+                    Some(theme.bg_hover.into())
+                } else {
+                    None
+                })
+                .muted(*muted)
+                .unread_nub(if show_channel_nub {
+                    Some(theme.tokens.text_secondary.into())
+                } else {
+                    None
+                })
+                .badge(if show_channel_badge {
+                    Some(ChannelRowBadge {
+                        count: *badge_count,
+                        bg: gpui::rgb(0xda_37_3c).into(),
+                        text_color: gpui::white(),
                     })
-                    .when(show_badge, |el| {
-                        el.child(mention_count_badge_on_channel_row(
-                            *badge_count,
-                            row_id.clone(),
-                        ))
-                    })
-                    .when(thread_nub, |el| {
-                        el.child(
-                            div()
-                                .absolute()
-                                .left_0()
-                                .top(px(12.))
-                                .w(px(4.))
-                                .h(px(8.))
-                                .rounded_r(px(4.))
-                                .bg(nub_color),
-                        )
-                    })
-                    .child(div().flex_none().w(px(16.)))
-                    .child(connector)
-                    .child(
-                        div()
-                            .flex_1()
-                            .flex()
-                            .items_center()
-                            .pr_2()
-                            .mr_6()
-                            .text_base()
-                            .text_color(text_color)
-                            .font_weight(name_weight)
-                            .when(!*selected && !suppress_hover, |el| {
-                                el.group_hover(row_id.clone(), move |s| s.text_color(text_hover))
-                            })
-                            .child(div().flex_1().child(name.clone())),
-                    )
-                    .into_any_element()
-            } else {
-                ChannelRow::new(name.clone(), *channel_type)
-                    .row_id(SharedString::from(format!("channel-row-{ch_id}")))
-                    .selected(*selected)
-                    .unread(*unread)
-                    .private(*private)
-                    .badge_count(*badge_count)
-                    .muted(*muted)
-                    .suppress_hover(suppress_hover)
-                    .render(theme)
-                    .into_any_element()
+                } else {
+                    None
+                })
             };
+
+            let make_thread_element = || {
+                let thread_highlighted = *selected || *unread;
+                let name_base: gpui::Hsla = if thread_highlighted {
+                    theme.tokens.text_secondary.into()
+                } else {
+                    theme.tokens.text_theme_primary.into()
+                };
+                let name_hover: gpui::Hsla = theme.tokens.text_secondary.into();
+                let weight = if thread_highlighted {
+                    gpui::FontWeight::SEMIBOLD
+                } else {
+                    gpui::FontWeight::MEDIUM
+                };
+                let hoverable = !*selected && !suppress_hover;
+                let show_thread_badge = crate::SHOW_UNREAD_BADGE_COUNT && *badge_count > 0;
+                ChannelRowElement::new(
+                    SharedString::from(format!("thread-row-{ch_id}")),
+                    IconName::Hashtag,
+                    name.clone().into(),
+                )
+                .name_style(name_base, name_hover, weight)
+                .selected_bg(if *selected {
+                    Some(theme.tokens.bg_active_member_channel.into())
+                } else {
+                    None
+                })
+                .hover_bg(if hoverable {
+                    Some(theme.bg_hover.into())
+                } else {
+                    None
+                })
+                .unread_nub(if *unread {
+                    Some(theme.tokens.text_secondary.into())
+                } else {
+                    None
+                })
+                .badge(if show_thread_badge {
+                    Some(ChannelRowBadge {
+                        count: *badge_count,
+                        bg: gpui::rgb(0xda_37_3c).into(),
+                        text_color: gpui::white(),
+                    })
+                } else {
+                    None
+                })
+                .connector(Some(ThreadConnector {
+                    line_above: *line_above,
+                    line_below: *line_below,
+                    color: theme.text_muted.into(),
+                }))
+            };
+
+            if *is_thread || voice_members.is_empty() {
+                let element = if *is_thread {
+                    make_thread_element()
+                } else {
+                    make_channel_element()
+                };
+                let click_handle = channel_list_handle.clone();
+                let click_id = ch_id.clone();
+                let click_clan = clan_id_inner;
+                let menu_sidebar = sidebar.clone();
+                let menu_channel_type = *channel_type;
+                let menu_is_thread = *is_thread;
+                return element
+                    .on_click(move |_window, cx| {
+                        click_handle.update(cx, |m, cx| {
+                            m.select_channel(click_id.parse().unwrap_or_default(), cx);
+                        });
+                        if let Some(cid) = click_clan {
+                            crate::router::navigate(
+                                cx,
+                                crate::router::Route::Channel {
+                                    clan_id: cid,
+                                    channel_id: click_id.parse().unwrap_or_default(),
+                                },
+                            );
+                        }
+                    })
+                    .on_right_click(move |position, _window, cx| {
+                        if let Some(view) = menu_sidebar.upgrade() {
+                            view.update(cx, |this, cx| {
+                                this.open_menu = Some(OpenMenu {
+                                    channel_type: menu_channel_type,
+                                    is_thread: menu_is_thread,
+                                    position,
+                                });
+                                cx.notify();
+                            });
+                        }
+                    })
+                    .into_any_element();
+            }
+
+            let row_content = make_channel_element().into_any_element();
 
             let mut channel_col = div()
                 .id(elem_id.clone())
@@ -950,11 +1101,9 @@ fn render_sidebar_item(
                 }
             });
 
-            channel_col.interactivity().on_click(on_channel_click(
-                row_handle,
-                ch_id,
-                clan_id_inner,
-            ));
+            channel_col
+                .interactivity()
+                .on_click(on_channel_click(ch_id, clan_id_inner));
 
             channel_col.into_any_element()
         }

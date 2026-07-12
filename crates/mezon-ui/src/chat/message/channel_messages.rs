@@ -1,3 +1,4 @@
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
@@ -11,11 +12,12 @@ use ui::{ScrollAxes, Scrollbars, WithScrollbar};
 
 use mezon_store::{
     BadgeService, ChannelId, ChannelList, ClanId, ClanList, ClanMembersStore, DirectMessageStore,
-    Emoji, EmojiStore, MessageCode, MessageId, MessagesEvent, MessagesStore, ProfileContext,
-    Settings, UserId, message::Message,
+    Emoji, EmojiStore, GroupMembersStore, MessageCode, MessageId, MessagesEvent, MessagesStore,
+    ProfileContext, Settings, UserId, UsersByUserStore, message::Message,
 };
 
-use super::context::{OnboardingContext, RowCtx, WelcomeContext};
+use super::audio_player::{AudioActivation, AudioPlayerView};
+use super::context::{OnboardingContext, RowCtx, RowMemo, WelcomeContext};
 use super::dispatch::render_message_item;
 use super::gif_video::GifVideoView;
 use super::message_context_menu;
@@ -24,11 +26,11 @@ use super::skeleton::message_skeleton;
 use super::system_row::{build_onboarding_context, build_welcome_context};
 use super::video_player::{VideoActivation, VideoPlayerView};
 use crate::app::shell::Shell;
+use crate::chat::mention_input::{MentionInput, MentionInputEvent};
 use crate::chat::user_profile_popover::UserProfilePopover;
-use crate::components::primitives::{Icon, IconName, InputEvent, InputState, context_menu_at};
+use crate::components::primitives::{Icon, IconName, context_menu_at};
 use crate::image_cache::{
-    AVATAR_ENTRY_MAX_BYTES, AVATAR_IMAGE_CACHE_BYTES, AVATAR_IMAGE_CACHE_CAPACITY, LruImageCache,
-    MESSAGE_ENTRY_MAX_BYTES, MESSAGE_IMAGE_CACHE_BYTES, MESSAGE_IMAGE_CACHE_CAPACITY,
+    LruImageCache, MESSAGE_ENTRY_MAX_BYTES, MESSAGE_IMAGE_CACHE_BYTES, MESSAGE_IMAGE_CACHE_CAPACITY,
 };
 use crate::theme::{ActiveTheme, Theme};
 
@@ -39,7 +41,9 @@ const SCROLL_HOVER_RELEASE_MS: u64 = 150;
 const HOVER_SHOW_DELAY_MS: u64 = 200;
 const HOVER_HIDE_DELAY_MS: u64 = 100;
 const PAGINATE_THROTTLE: Duration = Duration::from_millis(250);
+const SCROLL_RELIEF_DELAY: Duration = Duration::from_millis(1500);
 const MAX_GIF_VIDEOS: usize = 6;
+const MAX_AUDIO_PLAYERS: usize = 8;
 
 struct PendingGif {
     key: (MessageId, usize),
@@ -161,7 +165,9 @@ pub struct ChannelMessages {
     settings: Entity<Settings>,
     image_cache: Entity<LruImageCache>,
     avatar_image_cache: Entity<LruImageCache>,
+    small_avatar_image_cache: Entity<LruImageCache>,
     active_videos: HashMap<(MessageId, usize), Entity<VideoPlayerView>>,
+    active_audios: HashMap<(MessageId, usize), Entity<AudioPlayerView>>,
     gif_videos: HashMap<(MessageId, usize), Entity<GifVideoView>>,
     cached_for_channel: Option<ChannelId>,
     skeleton_phase: SkeletonPhase,
@@ -171,11 +177,11 @@ pub struct ChannelMessages {
     _clan_list_observe: Subscription,
     _skeleton_timer: Option<Task<()>>,
     suppress_hover: bool,
-    _hover_release_task: Option<Task<()>>,
     hovered_row: Option<MessageId>,
     raw_hover: Option<MessageId>,
     _hover_show_task: Option<Task<()>>,
     _hover_hide_task: Option<Task<()>>,
+    scroll_relief_armed: bool,
     last_paginate: Option<Instant>,
     last_scroll_at: Option<Instant>,
     at_bottom: bool,
@@ -194,6 +200,8 @@ pub struct ChannelMessages {
     cached_unread_boundary: Option<MessageId>,
     _clan_members_observe: Subscription,
     _direct_messages_observe: Subscription,
+    _users_by_user_observe: Subscription,
+    _group_members_observe: Subscription,
     _window_activation: Option<Subscription>,
     mention_popover: Option<(Entity<UserProfilePopover>, Point<Pixels>)>,
     _mention_popover_sub: Option<Subscription>,
@@ -205,17 +213,23 @@ pub struct ChannelMessages {
     cached_role_ids: Rc<Vec<i64>>,
     cached_is_clan_owner: bool,
     identity_inputs: (Option<ClanId>, Option<UserId>),
-    edit_input: Option<(MessageId, Entity<InputState>)>,
+    edit_input: Option<(MessageId, Entity<MentionInput>)>,
     _edit_input_sub: Option<Subscription>,
     context_menu_target: Option<(MessageId, Point<Pixels>)>,
+    context_menu_forward_all: bool,
     emoji_recent: Rc<Vec<Emoji>>,
     _emoji_observe: Subscription,
+    gif_reconcile_fingerprint: Option<(Option<ChannelId>, usize, usize)>,
+    last_gif_reconcile: Option<Instant>,
+    row_memo: Rc<RefCell<RowMemo>>,
+    row_memo_day: Option<chrono::NaiveDate>,
 }
 
 impl ChannelMessages {
     pub fn new(settings: Entity<Settings>, cx: &mut Context<Self>) -> Self {
         cx.observe(&settings, |this, settings, cx| {
             this.cached_locale = settings.read(cx).language.clone().into();
+            this.row_memo.borrow_mut().time_labels.clear();
             cx.notify();
         })
         .detach();
@@ -228,6 +242,9 @@ impl ChannelMessages {
 
         let clan_members = ClanMembersStore::global(cx);
         let clan_members_observe = cx.observe(&clan_members, |this, _, cx| {
+            if !MessagesStore::global(cx).read(cx).is_dm() {
+                this.row_memo.borrow_mut().avatars.clear();
+            }
             this.store_identity(Self::compute_identity(cx));
             if this.refresh_derived_state(cx) {
                 cx.notify();
@@ -236,7 +253,30 @@ impl ChannelMessages {
 
         let direct_messages = DirectMessageStore::global(cx);
         let direct_messages_observe = cx.observe(&direct_messages, |this, _, cx| {
+            if MessagesStore::global(cx).read(cx).is_dm() {
+                this.row_memo.borrow_mut().avatars.clear();
+            }
             if this.refresh_derived_state(cx) {
+                cx.notify();
+            }
+        });
+
+        let users_by_user = UsersByUserStore::global(cx);
+        let users_by_user_observe = cx.observe(&users_by_user, |this, _, cx| {
+            if MessagesStore::global(cx).read(cx).is_dm()
+                && !this.row_memo.borrow().avatars.is_empty()
+            {
+                this.row_memo.borrow_mut().avatars.clear();
+                cx.notify();
+            }
+        });
+
+        let group_members = GroupMembersStore::global(cx);
+        let group_members_observe = cx.observe(&group_members, |this, _, cx| {
+            if MessagesStore::global(cx).read(cx).is_dm()
+                && !this.row_memo.borrow().avatars.is_empty()
+            {
+                this.row_memo.borrow_mut().avatars.clear();
                 cx.notify();
             }
         });
@@ -245,7 +285,9 @@ impl ChannelMessages {
         cx.subscribe(&store, |this, _store, event, cx| {
             let structural = matches!(
                 event,
-                MessagesEvent::Reset { .. } | MessagesEvent::Shifted { .. }
+                MessagesEvent::Reset { .. }
+                    | MessagesEvent::Shifted { .. }
+                    | MessagesEvent::RemovedAt { .. }
             );
             match event {
                 MessagesEvent::Reset { count } => {
@@ -255,6 +297,7 @@ impl ChannelMessages {
                     this.mention_popover = None;
                     this._mention_popover_sub = None;
                     this.context_menu_target = None;
+                    this.suppress_hover = false;
                     this.hovered_row = None;
                     this.raw_hover = None;
                     this._hover_show_task = None;
@@ -262,6 +305,7 @@ impl ChannelMessages {
                     this.edit_input = None;
                     this._edit_input_sub = None;
                     this.active_videos.clear();
+                    this.active_audios.clear();
                     this.gif_videos.clear();
                     this.list_state.reset(*count);
                     this.header_shown = false;
@@ -380,7 +424,37 @@ impl ChannelMessages {
                         });
                     }
                 }
-                MessagesEvent::Updated { .. } => {}
+                MessagesEvent::Updated { message_id } => {
+                    let Some(id) = message_id else {
+                        cx.notify();
+                        return;
+                    };
+                    let vp_index = _store
+                        .read(cx)
+                        .viewport_messages()
+                        .iter()
+                        .position(|m| m.id == *id);
+                    if let Some(vp_index) = vp_index {
+                        let at = usize::from(this.header_shown) + vp_index;
+                        if at < this.list_state.item_count() {
+                            this.list_state.remeasure_items(at..at + 1);
+                        }
+                        cx.notify();
+                    }
+                    return;
+                }
+                MessagesEvent::RemovedAt { index, message_id } => {
+                    this.active_videos.retain(|(id, _), _| id != message_id);
+                    this.active_audios.retain(|(id, _), _| id != message_id);
+                    this.gif_videos.retain(|(id, _), _| id != message_id);
+                    let at = usize::from(this.header_shown) + *index;
+                    if at < this.list_state.item_count() {
+                        this.list_state.splice(at..at + 1, 0);
+                        if at < this.list_state.item_count() {
+                            this.list_state.remeasure_items(at..at + 1);
+                        }
+                    }
+                }
                 MessagesEvent::JumpTo { message_id } => {
                     this.pending_jump = Some(*message_id);
                     this.highlight_id = Some(*message_id);
@@ -394,6 +468,7 @@ impl ChannelMessages {
                         });
                     }));
                 }
+                MessagesEvent::ReplyTargetChanged => return,
             }
             if structural {
                 {
@@ -433,6 +508,18 @@ impl ChannelMessages {
                         this._reaction_picker_dismiss_sub = None;
                         cx.notify();
                     }
+                    if !this.scroll_relief_armed {
+                        this.scroll_relief_armed = true;
+                        cx.spawn(async move |this, cx| {
+                            cx.background_executor().timer(SCROLL_RELIEF_DELAY).await;
+                            this.update(cx, |this, cx| {
+                                this.scroll_relief_armed = false;
+                                crate::image_cache::release_freed_memory_to_os(cx);
+                            })
+                            .ok();
+                        })
+                        .detach();
+                    }
                 }
 
                 let store_entity = MessagesStore::global(cx);
@@ -454,26 +541,11 @@ impl ChannelMessages {
                 this.last_scroll_at = Some(Instant::now());
                 if !this.suppress_hover {
                     this.suppress_hover = true;
+                    this.hovered_row = None;
+                    this.raw_hover = None;
+                    this._hover_show_task = None;
+                    this._hover_hide_task = None;
                     cx.notify();
-                    this._hover_release_task = Some(cx.spawn(async move |this, cx| {
-                        let idle = Duration::from_millis(SCROLL_HOVER_RELEASE_MS);
-                        loop {
-                            cx.background_executor().timer(idle).await;
-                            let still_scrolling = this
-                                .update(cx, |this, _| {
-                                    this.last_scroll_at.is_some_and(|t| t.elapsed() < idle)
-                                })
-                                .unwrap_or(false);
-                            if still_scrolling {
-                                continue;
-                            }
-                            let _ = this.update(cx, |this, cx| {
-                                this.suppress_hover = false;
-                                cx.notify();
-                            });
-                            break;
-                        }
-                    }));
                 }
 
                 if !(near_top || near_bottom) {
@@ -515,12 +587,13 @@ impl ChannelMessages {
                 cx,
             )
         });
-        let avatar_image_cache = cx.new(|cx| {
-            LruImageCache::avatar_thumbnail(
-                "msg-avatar",
-                AVATAR_IMAGE_CACHE_CAPACITY,
-                AVATAR_IMAGE_CACHE_BYTES,
-                AVATAR_ENTRY_MAX_BYTES,
+        let avatar_image_cache = crate::image_cache::shared_avatar_cache(cx);
+        let small_avatar_image_cache = cx.new(|cx| {
+            crate::image_cache::LruImageCache::avatar_thumbnail_small(
+                "message-authors",
+                512,
+                16 * 1024 * 1024,
+                4 * 1024 * 1024,
                 cx,
             )
         });
@@ -557,7 +630,9 @@ impl ChannelMessages {
             settings,
             image_cache,
             avatar_image_cache,
+            small_avatar_image_cache,
             active_videos: HashMap::new(),
+            active_audios: HashMap::new(),
             gif_videos: HashMap::new(),
             cached_for_channel: None,
             skeleton_phase: SkeletonPhase::Hidden,
@@ -567,11 +642,11 @@ impl ChannelMessages {
             _clan_list_observe: clan_list_observe,
             _skeleton_timer: None,
             suppress_hover: false,
-            _hover_release_task: None,
             hovered_row: None,
             raw_hover: None,
             _hover_show_task: None,
             _hover_hide_task: None,
+            scroll_relief_armed: false,
             last_paginate: None,
             last_scroll_at: None,
             at_bottom: true,
@@ -590,6 +665,8 @@ impl ChannelMessages {
             cached_unread_boundary,
             _clan_members_observe: clan_members_observe,
             _direct_messages_observe: direct_messages_observe,
+            _users_by_user_observe: users_by_user_observe,
+            _group_members_observe: group_members_observe,
             _window_activation: None,
             mention_popover: None,
             _mention_popover_sub: None,
@@ -604,8 +681,13 @@ impl ChannelMessages {
             edit_input: None,
             _edit_input_sub: None,
             context_menu_target: None,
+            context_menu_forward_all: false,
             emoji_recent,
             _emoji_observe: emoji_observe,
+            gif_reconcile_fingerprint: None,
+            last_gif_reconcile: None,
+            row_memo: Rc::new(RefCell::new(RowMemo::default())),
+            row_memo_day: None,
         }
     }
 
@@ -613,8 +695,11 @@ impl ChannelMessages {
         &mut self,
         popover: Entity<UserProfilePopover>,
         position: Point<Pixels>,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let focus_handle = popover.read(cx).focus_handle(cx);
+        window.focus(&focus_handle, cx);
         self._mention_popover_sub =
             Some(cx.subscribe(&popover, |this, _, _: &DismissEvent, cx| {
                 this.mention_popover = None;
@@ -665,27 +750,34 @@ impl ChannelMessages {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let initial_content = MessagesStore::global(cx)
+        let (initial_content, initial_spans) = MessagesStore::global(cx)
             .read(cx)
             .viewport_messages()
             .iter()
             .find(|m| m.id == message_id)
-            .map(|m| m.content.clone())
+            .map(|m| (m.content.clone(), m.spans.clone()))
             .unwrap_or_default();
+        let settings = self.settings.clone();
         let input = cx.new(|cx| {
-            let mut state = InputState::new(window, cx);
-            state.set_value(initial_content, window, cx);
-            state
+            MentionInput::new_edit(
+                "Edit message…",
+                settings,
+                &initial_content,
+                &initial_spans,
+                window,
+                cx,
+            )
         });
-        input.update(cx, |state, cx| state.focus(window, cx));
-        self._edit_input_sub =
-            Some(
-                cx.subscribe_in(&input, window, move |this, _input, event, window, cx| {
-                    if matches!(event, InputEvent::PressEnter) {
-                        this.save_edit(window, cx);
-                    }
-                }),
-            );
+        input.update(cx, |input, cx| input.focus_input(window, cx));
+        self._edit_input_sub = Some(cx.subscribe_in(
+            &input,
+            window,
+            move |this, _input, event: &MentionInputEvent, window, cx| match event {
+                MentionInputEvent::Submit => this.save_edit(window, cx),
+                MentionInputEvent::Cancel => this.cancel_edit(cx),
+                MentionInputEvent::SendSticker { .. } => {}
+            },
+        ));
         self.edit_input = Some((message_id, input));
         MessagesStore::global(cx).update(cx, |store, cx| store.start_edit(message_id, cx));
         cx.notify();
@@ -703,16 +795,10 @@ impl ChannelMessages {
             return;
         };
         self._edit_input_sub = None;
-        let content = input.read(cx).value().to_string();
+        let payload = input.update(cx, |input, cx| input.take_payload(window, cx));
         let store = MessagesStore::global(cx);
-        let original = store
-            .read(cx)
-            .viewport_messages()
-            .iter()
-            .find(|m| m.id == message_id)
-            .map(|m| m.content.clone());
 
-        if content.trim().is_empty() {
+        let Some((text, content_tokens, _attachments)) = payload else {
             store.update(cx, |store, cx| store.cancel_edit(cx));
             let locale = self.cached_locale.clone();
             Shell::global(cx).update(cx, |shell, cx| {
@@ -720,15 +806,24 @@ impl ChannelMessages {
             });
             cx.notify();
             return;
-        }
+        };
 
-        if original.as_deref() == Some(content.as_str()) {
+        let original = store
+            .read(cx)
+            .viewport_messages()
+            .iter()
+            .find(|m| m.id == message_id)
+            .map(|m| m.content.clone());
+
+        if original.as_deref() == Some(text.as_str()) {
             store.update(cx, |store, cx| store.cancel_edit(cx));
             cx.notify();
             return;
         }
 
-        store.update(cx, |store, cx| store.edit_message(message_id, content, cx));
+        store.update(cx, |store, cx| {
+            store.edit_message(message_id, text, content_tokens, cx)
+        });
         cx.notify();
     }
 
@@ -738,6 +833,23 @@ impl ChannelMessages {
         position: Point<Pixels>,
         cx: &mut Context<Self>,
     ) {
+        let sender_and_poll = {
+            let store = MessagesStore::global(cx);
+            let store = store.read(cx);
+            store
+                .messages()
+                .iter()
+                .find(|m| m.id == message_id)
+                .map(|m| (m.sender_id.clone(), m.code == MessageCode::Poll))
+        };
+        self.context_menu_forward_all = match sender_and_poll {
+            Some((sender_id, false)) => {
+                message_context_menu::resolve_forward_group(message_id, sender_id.as_str(), cx)
+                    .len()
+                    > 1
+            }
+            _ => false,
+        };
         self.context_menu_target = Some((message_id, position));
         cx.notify();
     }
@@ -817,8 +929,6 @@ impl ChannelMessages {
                 self.sync_channel_seen_when_focused(true, cx);
             }
         } else {
-            self.image_cache
-                .update(cx, |cache, cx| cache.shrink_to(0, window, cx));
             for view in self.gif_videos.values() {
                 view.update(cx, |gif, cx| gif.set_playing(false, cx));
             }
@@ -844,6 +954,25 @@ impl ChannelMessages {
         }
         let view = cx.new(|cx| VideoPlayerView::new(activation, window, cx));
         self.active_videos.insert(key, view);
+        cx.notify();
+    }
+
+    pub fn activate_audio(
+        &mut self,
+        key: (MessageId, usize),
+        activation: AudioActivation,
+        cx: &mut Context<Self>,
+    ) {
+        if self.active_audios.contains_key(&key) {
+            return;
+        }
+        if self.active_audios.len() >= MAX_AUDIO_PLAYERS
+            && let Some(evicted) = self.active_audios.keys().next().copied()
+        {
+            self.active_audios.remove(&evicted);
+        }
+        let view = cx.new(|cx| AudioPlayerView::new(activation, cx));
+        self.active_audios.insert(key, view);
         cx.notify();
     }
 
@@ -911,8 +1040,23 @@ impl ChannelMessages {
     }
 
     fn apply_gif_reconcile(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        const GIF_RECONCILE_INTERVAL: Duration = Duration::from_millis(250);
         let header = usize::from(self.header_shown);
         let count = self.list_state.item_count();
+        let fingerprint = (
+            self.cached_for_channel,
+            self.list_state.logical_scroll_top().item_ix,
+            count,
+        );
+        if self.gif_reconcile_fingerprint == Some(fingerprint)
+            && self
+                .last_gif_reconcile
+                .is_some_and(|at| at.elapsed() < GIF_RECONCILE_INTERVAL)
+        {
+            return;
+        }
+        self.gif_reconcile_fingerprint = Some(fingerprint);
+        self.last_gif_reconcile = Some(Instant::now());
         let start = self.list_state.logical_scroll_top().item_ix.max(header);
         let mut wanted: Vec<PendingGif> = Vec::new();
         {
@@ -982,6 +1126,9 @@ impl ChannelMessages {
             }
             let view =
                 cx.new(|cx| GifVideoView::new(gif.mp4, gif.fallback, gif.width, gif.height, cx));
+            if !window.is_window_active() {
+                view.update(cx, |gif, cx| gif.set_playing(false, cx));
+            }
             self.gif_videos.insert(gif.key, view);
             changed = true;
         }
@@ -1126,10 +1273,14 @@ impl ChannelMessages {
         self.cached_for_channel = channel_id;
         self.last_seen_at_bottom = None;
         self.fab_scroll_pending = false;
+        {
+            let mut memo = self.row_memo.borrow_mut();
+            memo.avatars.clear();
+            memo.time_labels.clear();
+        }
         self.image_cache
             .update(cx, |cache, cx| cache.clear(window, cx));
-        self.avatar_image_cache
-            .update(cx, |cache, cx| cache.clear(window, cx));
+        crate::image_cache::release_freed_memory_to_os(cx);
         self.refresh_derived_state(cx);
     }
 
@@ -1170,11 +1321,12 @@ impl ChannelMessages {
         else {
             return;
         };
+        let tail_changed = self.last_seen_at_bottom != Some(last_id);
         self.last_seen_at_bottom = Some(last_id);
         store_entity.update(cx, |store, cx| {
             store.note_viewport_seen(last_id, last_create_time, app_focused, cx);
         });
-        if self.refresh_derived_state(cx) {
+        if tail_changed && self.refresh_derived_state(cx) {
             cx.notify();
         }
     }
@@ -1425,19 +1577,26 @@ impl Render for ChannelMessages {
         }
 
         let locale = self.cached_locale.clone();
-        let coming_soon: SharedString = mezon_i18n::t(&locale, "common.comingSoon")
-            .to_string()
-            .into();
+        let coming_soon: SharedString = mezon_i18n::t(&locale, "common.comingSoon").into();
         let frame_now = chrono::Local::now();
+        let today = frame_now.date_naive();
+        if self.row_memo_day != Some(today) {
+            self.row_memo_day = Some(today);
+            self.row_memo.borrow_mut().time_labels.clear();
+        }
+        let row_memo = self.row_memo.clone();
         let list_state = self.list_state.clone();
         let suppress_hover = self.suppress_hover;
         let hovered_row = self.hovered_row;
         let avatar_image_cache = self.avatar_image_cache.clone();
+        let small_avatar_image_cache = self.small_avatar_image_cache.clone();
         let unread_boundary_id = self.cached_unread_boundary;
         let highlight_id = self.highlight_id;
+        let reply_highlight_id = store.read(cx).reply_target().map(|d| d.message_ref_id);
         let profile_context = channel_profile_context(is_dm, dm_channel, active_clan, cx);
         let settings = self.settings.clone();
         let active_videos = self.active_videos.clone();
+        let active_audios = self.active_audios.clone();
         let gif_videos = self.gif_videos.clone();
         let video_host = cx.entity().downgrade();
         let current_user_id = self.cached_current_user_id.clone();
@@ -1452,7 +1611,12 @@ impl Render for ChannelMessages {
                 .unwrap_or(self.at_bottom);
         let unread_count = fab_unread_count(
             self.last_seen_at_bottom,
-            store.read(cx).channel_tail_message_id(),
+            store
+                .read(cx)
+                .viewport_messages()
+                .iter()
+                .rev()
+                .map(|m| m.id),
         );
         let scroll_down_fab = self.scroll_down_fab(show_scroll_down, unread_count, cx);
 
@@ -1481,12 +1645,15 @@ impl Render for ChannelMessages {
                         onboarding: onboarding.clone(),
                         suppress_hover,
                         hovered_row,
-                        avatar_cache: avatar_image_cache.clone(),
+                        avatar_cache: small_avatar_image_cache.clone(),
+                        large_avatar_cache: avatar_image_cache.clone(),
                         unread_boundary_id,
                         highlight_id,
+                        reply_highlight_id,
                         profile_context,
                         settings: settings.clone(),
                         active_videos: &active_videos,
+                        active_audios: &active_audios,
                         gif_videos: &gif_videos,
                         video_host: video_host.clone(),
                         now: frame_now,
@@ -1498,8 +1665,9 @@ impl Render for ChannelMessages {
                         edit_input: edit_input.clone(),
                         emoji_recent: &emoji_recent,
                         coming_soon: coming_soon.clone(),
+                        row_memo: row_memo.clone(),
                     };
-                    render_message_item(store.read(cx).viewport_messages(), msg_ix, &ctx)
+                    render_message_item(store.read(cx).viewport_messages(), msg_ix, &ctx, cx)
                 })
                 .flex_1()
                 .size_full()
@@ -1507,6 +1675,16 @@ impl Render for ChannelMessages {
             )
             .children(skeleton_overlay)
             .child(scroll_down_fab)
+            .on_mouse_move(cx.listener(|this, _event, _window, cx| {
+                if this.suppress_hover
+                    && this.last_scroll_at.is_none_or(|t| {
+                        t.elapsed() >= Duration::from_millis(SCROLL_HOVER_RELEASE_MS)
+                    })
+                {
+                    this.suppress_hover = false;
+                    cx.notify();
+                }
+            }))
             .when_some(self.mention_popover.clone(), |el, (popover, position)| {
                 el.child(deferred(
                     anchored().position(position).snap_to_window().child(
@@ -1555,13 +1733,15 @@ impl Render for ChannelMessages {
                     &self.cached_current_user_id,
                     self.cached_is_clan_owner,
                     &self.cached_locale,
+                    self.context_menu_forward_all,
                     cx.entity().downgrade(),
                     cx,
                 );
                 el.child(context_menu_at(position, menu))
             })
             .custom_scrollbars(
-                Scrollbars::new(ScrollAxes::Vertical).tracked_scroll_handle(&self.list_state),
+                Scrollbars::always_visible(ScrollAxes::Vertical)
+                    .tracked_scroll_handle(&self.list_state),
                 window,
                 cx,
             )
@@ -1571,16 +1751,17 @@ impl Render for ChannelMessages {
 
 fn fab_unread_count(
     last_seen_at_bottom: Option<MessageId>,
-    channel_tail: Option<MessageId>,
+    ids_newest_first: impl IntoIterator<Item = MessageId>,
 ) -> u32 {
-    let (Some(seen), Some(tail)) = (last_seen_at_bottom, channel_tail) else {
+    let Some(seen) = last_seen_at_bottom else {
         return 0;
     };
-    if tail <= seen || tail.is_optimistic() {
-        return 0;
-    }
-    let diff = (tail.get() >> 22).saturating_sub(seen.get() >> 22);
-    diff.clamp(0, i64::from(u32::MAX)) as u32
+    ids_newest_first
+        .into_iter()
+        .take_while(|id| *id > seen)
+        .filter(|id| !id.is_optimistic())
+        .count()
+        .min(u32::MAX as usize) as u32
 }
 
 fn channel_profile_context(
@@ -1930,15 +2111,23 @@ mod skeleton_tests {
         use super::fab_unread_count;
         use mezon_store::MessageId;
 
-        let seen = MessageId(1 << 22);
-        let near = MessageId(6 << 22);
-        assert_eq!(fab_unread_count(Some(seen), Some(near)), 5);
+        let newest_first: Vec<MessageId> = (1..=5).rev().map(MessageId).collect();
+        assert_eq!(
+            fab_unread_count(Some(MessageId(0)), newest_first.iter().copied()),
+            5
+        );
+        assert_eq!(
+            fab_unread_count(Some(MessageId(3)), newest_first.iter().copied()),
+            2
+        );
+        assert_eq!(
+            fab_unread_count(Some(MessageId(5)), newest_first.iter().copied()),
+            0
+        );
+        assert_eq!(fab_unread_count(None, newest_first.iter().copied()), 0);
 
-        let far = MessageId(200 << 22);
-        assert!(fab_unread_count(Some(seen), Some(far)) > 99);
-
-        assert_eq!(fab_unread_count(None, Some(far)), 0);
-        assert_eq!(fab_unread_count(Some(far), Some(seen)), 0);
+        let many: Vec<MessageId> = (1..=150).rev().map(MessageId).collect();
+        assert!(fab_unread_count(Some(MessageId(0)), many.iter().copied()) > 99);
     }
 }
 

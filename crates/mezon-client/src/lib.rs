@@ -3,11 +3,14 @@
 
 pub mod abridged_tcp_adapter;
 pub mod app_api;
+pub mod attachment_download;
 pub mod auth;
 pub mod image_disk_cache;
+pub mod inbox;
 pub mod keychain;
 pub mod network_monitor;
 pub mod network_probe;
+pub mod search_message;
 pub mod session;
 pub mod tls_crypto;
 pub mod transport;
@@ -15,19 +18,43 @@ pub mod transport_adapter;
 pub mod transport_runtime;
 
 pub use abridged_tcp_adapter::AbridgedTcpAdapter;
-pub use app_api::{AppApi, ConnectionStatus, UploadFile, UrlAttachment};
+pub use app_api::{
+    AppApi, AttachmentUploadOutcome, ConnectionStatus, UploadFile, UploadThumbnail, UrlAttachment,
+};
+pub use attachment_download::{
+    clean_download_url, download_url_to_downloads, resolve_download_filename, sanitize_filename,
+    write_bytes_to_downloads,
+};
 pub use auth::MezonClient;
 pub use auth::QrLoginId;
 pub use auth::{DEFAULT_API_HOST, DEFAULT_API_PORT, DEFAULT_API_SECURE, DEFAULT_SERVER_KEY};
+pub use inbox::{
+    DIRECTION_AROUND_TIMESTAMP, DIRECTION_BEFORE_TIMESTAMP, INBOX_PAGE_LIMIT, InboxCategory,
+    InboxMentionSpan, InboxMessagePreview, InboxNotification, TopicDiscussion,
+    attachment_link_is_image, display_text_from_message_content, inbox_notification_from_api,
+    inbox_notifications_from_list, message_content_is_attachment, topic_discussion_from_api,
+    topics_from_list,
+};
 pub use network_monitor::NetworkMonitor;
 pub use network_probe::{
     RECONNECT_NETWORK_PROBE_TIMEOUT, favicon_probe_url, probe_network_reachability,
+};
+pub use search_message::{
+    SEARCH_PAGE_SIZE, SearchDropdownMode, SearchPageToken, active_search_trigger,
+    autocomplete_needle, build_clan_channel_content_search, build_direct_content_search,
+    build_search_request, clan_channel_scope, content_filter, direct_channel_scope,
+    expand_mention_name_tokens, filter, finalize_incomplete_filter_token, has_filter,
+    has_filter_options, insert_filter_markup, mention_user_filter, mention_user_filter_from_id,
+    parse_search_query, query_has_filter_tokens, search_content_highlight_terms,
+    search_dropdown_mode, search_filter_chip_ranges, search_page_count, search_page_numbers,
+    should_show_search_dropdown, username_filter,
 };
 pub use session::Session;
 pub use transport::MezonTransport;
 pub use transport::RealtimeEvent;
 pub use transport::{
-    ApiCategoryDesc, ApiChannelApp, ApiChannelDesc, ApiPinMessage, ApiVoiceChannelUser,
+    ApiCategoryDesc, ApiChannelApp, ApiChannelAttachment, ApiChannelDesc, ApiFriend, ApiPinMessage,
+    ApiThreadDesc, ApiVoiceChannelUser, parse_search_attachment_field, parse_search_mentions_field,
 };
 pub use transport_adapter::TransportAdapter;
 pub use transport_runtime::TransportClient;

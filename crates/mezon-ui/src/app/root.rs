@@ -3,12 +3,14 @@ use gpui::{
     AnyView, App, ClickEvent, Context, Entity, FontWeight, MouseButton, NavigationDirection,
     StyleRefinement, Window, div, img, prelude::*, px,
 };
-use mezon_store::{AuthState, ClanList, ConnectionStore, Settings};
+use mezon_store::{AuthState, ChannelList, ClanId, ClanList, ConnectionStore, Settings};
+use ui::utils::ROUNDED_BORDER_WINDOW;
 
 use crate::app::title_bar::TitleBar;
 use crate::app::window_controls;
 use crate::auth::login_view::LoginView;
 use crate::chat::layout::ChatLayout;
+use crate::clan::settings::{ClanSettingScreen, ClanSettingsPage};
 use crate::components::primitives::{Button, Icon, IconName, Size, Spinner};
 use crate::image_cache::{
     LruImageCache, SHARED_ENTRY_MAX_BYTES, SHARED_IMAGE_CACHE_BYTES, SHARED_IMAGE_CACHE_CAPACITY,
@@ -23,9 +25,9 @@ pub struct RootView {
     login_view: Entity<LoginView>,
     chat_layout: Entity<ChatLayout>,
     settings_screen: Entity<SettingsScreen>,
-    settings: Entity<Settings>,
+    clan_setting_screen: Entity<ClanSettingScreen>,
     applied_theme: String,
-    initial_route_restored: bool,
+    cached_locale: String,
     image_cache: Entity<LruImageCache>,
 }
 
@@ -42,7 +44,14 @@ impl RootView {
         cx.observe(&shell, |_, _, cx| cx.notify()).detach();
 
         cx.observe(&settings, |this, settings, cx| {
-            let name = settings.read(cx).theme.clone();
+            let (language, name) = {
+                let settings = settings.read(cx);
+                (settings.language.clone(), settings.theme.clone())
+            };
+            if language != this.cached_locale {
+                this.cached_locale = language;
+                cx.notify();
+            }
             if name != this.applied_theme {
                 crate::theme::set_theme(resolve_theme(&name), cx);
                 this.applied_theme = name;
@@ -57,49 +66,17 @@ impl RootView {
             move |cx| LoginView::new(auth_state, settings, cx)
         });
 
-        cx.observe(&Router::global(cx), |this, router, cx| {
+        cx.observe(&Router::global(cx), |this, _router, cx| {
             this.sync_settings_page(cx);
-            if let Route::Channel {
-                clan_id,
-                channel_id,
-            } = router.read(cx).route()
-            {
-                this.settings.update(cx, |s, cx| {
-                    s.last_clan_id = Some(clan_id);
-                    s.last_channel_id = Some(channel_id);
-                    let snapshot = s.clone();
-                    cx.background_executor()
-                        .spawn(async move {
-                            snapshot.save_sync();
-                        })
-                        .detach();
-                });
-            }
+            this.sync_clan_settings_page(cx);
             cx.notify();
         })
         .detach();
 
-        cx.observe(&auth_state, |this, auth, cx| {
-            if this.initial_route_restored {
-                cx.notify();
-                return;
-            }
-            if matches!(auth.read(cx), AuthState::Authenticated(_)) {
-                this.initial_route_restored = true;
-                let last = this
-                    .settings
-                    .read(cx)
-                    .last_clan_id
-                    .zip(this.settings.read(cx).last_channel_id);
-                if let Some((clan_id, channel_id)) = last {
-                    crate::router::navigate(
-                        cx,
-                        Route::Channel {
-                            clan_id,
-                            channel_id,
-                        },
-                    );
-                }
+        cx.observe(&auth_state, |_, auth_state, cx| {
+            if matches!(*auth_state.read(cx), AuthState::NotAuthenticated) {
+                crate::image_viewer::close_image_viewer(cx);
+                crate::image_cache::clear_all_image_caches(cx);
             }
             cx.notify();
         })
@@ -139,7 +116,27 @@ impl RootView {
             }
         });
 
+        let channel_list = ChannelList::global(cx);
+        let channel_list_for_clan_settings = channel_list.clone();
+        let clan_list_for_clan_settings = clan_list.clone();
+        let settings_for_clan_settings = settings.clone();
+        let clan_setting_screen = cx.new({
+            let settings = settings_for_clan_settings;
+            move |cx| {
+                ClanSettingScreen::new(
+                    ClanId(0),
+                    ClanSettingsPage::Overview,
+                    settings.clone(),
+                    clan_list_for_clan_settings.clone(),
+                    channel_list_for_clan_settings.clone(),
+                    cx,
+                )
+            }
+        });
+
         let applied_theme = settings.read(cx).theme.clone();
+        let cached_locale = settings.read(cx).language.clone();
+        crate::image_cache::start_idle_trim(cx);
         let image_cache = cx.new(|cx| {
             LruImageCache::labeled(
                 "shared",
@@ -155,9 +152,9 @@ impl RootView {
             login_view,
             chat_layout,
             settings_screen,
-            settings,
+            clan_setting_screen,
             applied_theme,
-            initial_route_restored: false,
+            cached_locale,
             image_cache,
         }
     }
@@ -178,24 +175,39 @@ impl RootView {
         self.settings_screen
             .update(cx, |s, cx| s.set_page(page, cx));
     }
+
+    fn sync_clan_settings_page(&mut self, cx: &mut Context<Self>) {
+        match Router::global(cx).read(cx).route() {
+            Route::ClanSettings { clan_id, page } => {
+                self.clan_setting_screen.update(cx, |screen, cx| {
+                    screen.set_clan_and_page(clan_id, page, cx);
+                });
+            }
+            _ => {
+                self.clan_setting_screen.update(cx, |screen, cx| {
+                    screen.release_active_page(cx);
+                });
+            }
+        }
+    }
 }
 
 impl Render for RootView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         crate::trace_render!("RootView");
-        let locale = self.settings.read(cx).language.clone();
+        crate::image_cache::flush_atlas_drops(window, cx);
+        let locale = self.cached_locale.as_str();
         let base_font_family = ::theme::theme_settings(cx).ui_font(cx).family.clone();
         let theme = cx.theme();
-        let state = self.auth_state.read(cx).clone();
 
-        let content: gpui::AnyElement = match state {
+        let content: gpui::AnyElement = match self.auth_state.read(cx) {
             AuthState::NotAuthenticated | AuthState::OtpRequested { .. } => {
                 cached_fill(self.login_view.clone())
             }
-            AuthState::AwaitingCallback => render_awaiting_callback(theme, &locale),
+            AuthState::AwaitingCallback => render_awaiting_callback(theme, locale),
             AuthState::Connecting(_) => {
                 let attempt = ConnectionStore::global(cx).read(cx).connecting_attempt();
-                render_connecting(theme, &locale, attempt)
+                render_connecting(theme, locale, attempt)
             }
             AuthState::Authenticated(_) => {
                 let route = Router::global(cx).read(cx).route();
@@ -209,7 +221,8 @@ impl Render for RootView {
                     | Route::SettingsLanguage
                     | Route::SettingsVoice
                     | Route::SettingsAdvanced => uncached_fill(self.settings_screen.clone()),
-                    Route::NotFound { .. } => render_not_found(theme, &locale),
+                    Route::ClanSettings { .. } => cached_fill(self.clan_setting_screen.clone()),
+                    Route::NotFound { .. } => render_not_found(theme, locale),
                     Route::AddFriend { .. } => render_placeholder(theme, "Add Friend"),
                     Route::Invite { .. } => render_placeholder(theme, "Accept Invite"),
                     _ => uncached_fill(self.chat_layout.clone()),
@@ -229,6 +242,8 @@ impl Render for RootView {
             .bg(theme.bg_primary)
             .font_family(base_font_family)
             .text_color(theme.text_primary)
+            .rounded(px(ROUNDED_BORDER_WINDOW))
+            .overflow_hidden()
             .child(window_controls::render_app_drag_header())
             .image_cache(self.image_cache.clone())
             .on_action(cx.listener(|_, _: &crate::ToggleInspector, window, cx| {
@@ -247,10 +262,10 @@ impl Render for RootView {
             })
             .child(content)
             .when(cfg!(target_os = "macos"), |this| {
-                this.child(window_controls::render_controls(theme, _window))
+                this.child(window_controls::render_controls(theme, window))
             })
             .when(window_controls::is_edge_resizable(), |this| {
-                this.child(window_controls::render_resize_edges(_window))
+                this.child(window_controls::render_resize_edges(window))
             })
             .child(overlay)
     }

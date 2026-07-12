@@ -1,20 +1,26 @@
 use gpui::{
-    AnyElement, App, ClipboardItem, Context, Entity, FontWeight, Hsla, ObjectFit, SharedString,
-    StyledImage, div, img, prelude::*, px,
+    Animation, AnimationExt, AnyElement, App, ClipboardItem, Context, Entity, FontWeight, Hsla,
+    MouseButton, MouseDownEvent, ObjectFit, SharedString, StyledImage, Window, div, img,
+    prelude::*, px, relative,
 };
 use mezon_store::{
-    AppConfig, Channel, ChannelId, ClanId, ClanMembersStore, NetworkQuality, Settings, UserId,
-    VoiceCallStatus, VoiceConnection, VoiceMember, VoiceParticipant, VoiceStore,
+    AppConfig, Channel, ChannelId, ClanId, ClanMembersStore, DisplayedReaction, NetworkQuality,
+    Settings, UserId, VoiceCallStatus, VoiceConnection, VoiceMember, VoiceParticipant, VoiceStore,
 };
 
 use crate::ChatLayout;
-use crate::components::primitives::{Avatar, Icon, IconName};
+use crate::components::primitives::{Avatar, ContextMenu, Icon, IconName, context_menu_at};
 use crate::theme::Theme;
 use ui::Tooltip;
 
 /// Shared brand accent (Discord-style blurple) used across the voice UI and
 /// the screen-share modal. Single source of truth — do not duplicate.
 pub(crate) const ACCENT_BLUE: u32 = 0x5865f2;
+
+const RAISE_HAND_GOLD: u32 = 0xefbc39;
+
+const LEAVE_RED: u32 = 0xda373c;
+const LEAVE_RED_HOVER: u32 = 0xa12829;
 
 #[allow(clippy::too_many_arguments)]
 pub fn render_voice_channel(
@@ -34,7 +40,10 @@ pub fn render_voice_channel(
     );
 
     if store.is_connected_to(&channel.id.to_string()) || connecting {
-        return render_in_call(theme, locale, channel, voice, settings, store, connecting, cx);
+        let chat = cx.entity();
+        return render_in_call(
+            theme, locale, channel, voice, settings, store, connecting, &chat, cx,
+        );
     }
 
     let error = match store.connection() {
@@ -71,6 +80,7 @@ pub fn render_mini_bar(
     camera_enabled: bool,
     screen_enabled: bool,
     link_copied: bool,
+    noise_control: AnyElement,
 ) -> AnyElement {
     let neutral_bg = theme.bg_secondary;
     let neutral_hover = darken(theme.bg_secondary, 0.1);
@@ -183,7 +193,15 @@ pub fn render_mini_bar(
                 )
                 .child(div().flex().flex_row().child(subtitle)),
         )
-        .child(copy_button);
+        .child(
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap_2()
+                .child(noise_control)
+                .child(copy_button),
+        );
 
     let mic_button = {
         let voice = voice.clone();
@@ -196,11 +214,7 @@ pub fn render_mini_bar(
             },
             neutral_bg,
             neutral_hover,
-            if mic_enabled {
-                theme.text_primary
-            } else {
-                theme.status_dnd
-            },
+            theme.text_primary,
         )
         .tooltip(Tooltip::text(mezon_i18n::t(
             locale,
@@ -224,11 +238,7 @@ pub fn render_mini_bar(
             },
             neutral_bg,
             neutral_hover,
-            if camera_enabled {
-                theme.text_primary
-            } else {
-                theme.status_dnd
-            },
+            theme.text_primary,
         )
         .tooltip(Tooltip::text(mezon_i18n::t(
             locale,
@@ -290,9 +300,9 @@ pub fn render_mini_bar(
         let voice = voice.clone();
         panel_control_button(
             "voice-panel-leave",
-            IconName::CancelCall,
-            theme.status_dnd,
-            darken(theme.status_dnd, 0.12),
+            IconName::EndCall,
+            gpui::rgb(LEAVE_RED),
+            gpui::rgb(LEAVE_RED_HOVER),
             gpui::rgb(0xffffff),
         )
         .tooltip(Tooltip::text(mezon_i18n::t(
@@ -548,6 +558,7 @@ fn render_pre_join(
 
 struct VideoCell {
     id: String,
+    identity: String,
     name: String,
     avatar_url: String,
     key: Option<u64>,
@@ -561,6 +572,7 @@ impl VideoCell {
     fn camera(p: &VoiceParticipant, name: String, avatar_url: String) -> Self {
         Self {
             id: mezon_store::camera_tile_id(&p.identity),
+            identity: p.identity.clone(),
             name,
             avatar_url,
             key: p.camera,
@@ -574,6 +586,7 @@ impl VideoCell {
     fn screen(p: &VoiceParticipant, name: String, avatar_url: String) -> Self {
         Self {
             id: mezon_store::screen_tile_id(&p.identity),
+            identity: p.identity.clone(),
             name,
             avatar_url,
             key: p.screenshare,
@@ -631,6 +644,139 @@ fn resolve_voice_member(cx: &App, clan_id: ClanId, m: &VoiceMember) -> (String, 
     (m.display_name.clone(), m.avatar_url.clone())
 }
 
+fn raised_hands_overlay(cx: &App, clan_id: ClanId, store: &VoiceStore) -> Option<AnyElement> {
+    let hands = store.raised_hands();
+    if hands.is_empty() {
+        return None;
+    }
+    Some(
+        div()
+            .absolute()
+            .top(px(68.))
+            .right(px(8.))
+            .w(px(320.))
+            .flex()
+            .flex_col()
+            .gap_1()
+            .items_end()
+            .children(hands.iter().map(|user_id| {
+                let (name, avatar_url) = resolve_voice_identity(cx, clan_id, user_id, "");
+                let name = SharedString::from(name);
+                let mut avatar = Avatar::new().name(name.clone()).size_px(px(32.));
+                if !avatar_url.is_empty() {
+                    avatar = avatar.src(avatar_url);
+                }
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_2()
+                    .p_1()
+                    .w(px(160.))
+                    .h(px(36.))
+                    .rounded_full()
+                    .bg(gpui::rgb(0xffffff))
+                    .child(avatar)
+                    .child(
+                        div()
+                            .flex_1()
+                            .text_sm()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(gpui::rgb(0x000000))
+                            .truncate()
+                            .child(name),
+                    )
+                    .child(
+                        Icon::new(IconName::VoiceRaiseHandIcon)
+                            .size(px(32.))
+                            .text_color(gpui::rgb(RAISE_HAND_GOLD)),
+                    )
+            }))
+            .into_any_element(),
+    )
+}
+
+fn reaction_opacity(delta: f32) -> f32 {
+    if delta < 0.1 {
+        delta / 0.1
+    } else if delta > 0.75 {
+        ((1.0 - delta) / 0.25).max(0.0)
+    } else {
+        1.0
+    }
+}
+
+fn reaction_float(r: &DisplayedReaction) -> AnyElement {
+    let name = r.display_name.as_str();
+    let left = r.left;
+    let drift = r.drift;
+    let seq = r.seq as usize;
+
+    div()
+        .absolute()
+        .bottom(relative(0.15))
+        .left(relative(left))
+        .flex()
+        .flex_col()
+        .items_center()
+        .gap_1()
+        .child(
+            div()
+                .w(px(56.))
+                .h(px(56.))
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(
+                    img(r.emoji_src.clone())
+                        .size(px(40.))
+                        .object_fit(ObjectFit::Contain)
+                        .with_animation(
+                            ("voice-reaction-scale", seq),
+                            Animation::new(r.duration),
+                            |el, delta| el.size(px(16.0 + delta * 40.0)),
+                        ),
+                ),
+        )
+        .when(!name.is_empty(), |this| {
+            this.child(
+                div()
+                    .px_2()
+                    .py(px(1.))
+                    .rounded_full()
+                    .bg(gpui::rgba(0x000000b0))
+                    .text_size(px(10.))
+                    .text_color(gpui::rgb(0xffffff))
+                    .child(SharedString::from(name.to_string())),
+            )
+        })
+        .with_animation(
+            ("voice-reaction-float", seq),
+            Animation::new(r.duration),
+            move |el, delta| {
+                el.bottom(relative(0.15 + delta))
+                    .left(relative(left + drift * delta))
+                    .opacity(reaction_opacity(delta))
+            },
+        )
+        .into_any_element()
+}
+
+fn reactions_overlay(store: &VoiceStore) -> Option<AnyElement> {
+    let reactions = store.displayed_reactions();
+    if reactions.is_empty() {
+        return None;
+    }
+    Some(
+        div()
+            .absolute()
+            .inset_0()
+            .overflow_hidden()
+            .children(reactions.iter().map(reaction_float))
+            .into_any_element(),
+    )
+}
+
 #[allow(clippy::too_many_arguments)]
 fn render_in_call(
     theme: &Theme,
@@ -640,6 +786,7 @@ fn render_in_call(
     settings: &Entity<Settings>,
     store: &VoiceStore,
     connecting: bool,
+    chat: &Entity<ChatLayout>,
     cx: &App,
 ) -> AnyElement {
     let fullscreen_active = store.fullscreen_screen().is_some();
@@ -705,6 +852,27 @@ fn render_in_call(
         .mic_permission_denied()
         .then(|| mic_permission_modal(theme, locale, voice));
 
+    let participant_menu = store.participant_menu().and_then(|(identity, position)| {
+        let participant = store
+            .participants()
+            .iter()
+            .find(|p| p.identity == identity)?;
+        let (name, _) = resolve_voice_identity(cx, channel.clan_id, identity, &participant.name);
+        let menu = build_participant_menu(
+            voice,
+            identity.to_string(),
+            name,
+            participant.is_local,
+            participant.muted,
+            locale,
+        );
+        Some(context_menu_at(position, menu).into_any_element())
+    });
+
+    let kick_modal = store
+        .pending_kick()
+        .map(|(_, name)| kick_confirm_modal(theme, locale, voice, name));
+
     div()
         .relative()
         .flex()
@@ -714,9 +882,13 @@ fn render_in_call(
         .child(voice_header(theme, &channel.name, true, status_badge))
         .children(body)
         .when(!fullscreen_active, |this| {
-            this.child(control_bar(theme, locale, voice, settings, store))
+            this.child(control_bar(theme, locale, voice, settings, store, chat))
         })
+        .children(reactions_overlay(store))
+        .children(raised_hands_overlay(cx, channel.clan_id, store))
         .children(mic_modal)
+        .children(participant_menu)
+        .children(kick_modal)
         .into_any_element()
 }
 
@@ -726,6 +898,7 @@ pub(crate) fn render_screen_fullscreen_overlay(
     voice: &Entity<VoiceStore>,
     settings: &Entity<Settings>,
     store: &VoiceStore,
+    chat: &Entity<ChatLayout>,
 ) -> Option<AnyElement> {
     let key = store.fullscreen_screen()?;
     let exit_voice = voice.clone();
@@ -797,7 +970,7 @@ pub(crate) fn render_screen_fullscreen_overlay(
                     .items_center()
                     .justify_center()
                     .py_4()
-                    .child(control_bar(theme, locale, voice, settings, store)),
+                    .child(control_bar(theme, locale, voice, settings, store, chat)),
             )
             .into_any_element(),
     )
@@ -832,6 +1005,7 @@ fn mic_permission_modal(theme: &Theme, locale: &str, voice: &Entity<VoiceStore>)
         .items_center()
         .justify_center()
         .bg(gpui::rgba(0x000000b3))
+        .occlude()
         .child(
             div()
                 .flex()
@@ -920,6 +1094,122 @@ fn mic_permission_modal(theme: &Theme, locale: &str, voice: &Entity<VoiceStore>)
         .into_any_element()
 }
 
+fn kick_confirm_modal(
+    theme: &Theme,
+    locale: &str,
+    voice: &Entity<VoiceStore>,
+    name: &str,
+) -> AnyElement {
+    let title =
+        SharedString::from(mezon_i18n::t(locale, "channelVoice.kickModal.title").to_string());
+    let body = SharedString::from(
+        mezon_i18n::t(locale, "channelVoice.kickModal.content").replace("{{userName}}", name),
+    );
+    let cancel_label = SharedString::from(mezon_i18n::t(locale, "common.cancel").to_string());
+    let kick_label =
+        SharedString::from(mezon_i18n::t(locale, "channelVoice.kickModal.kick").to_string());
+
+    let cancel_hover = darken(theme.bg_tertiary, 0.03);
+    let kick_hover = darken(theme.status_dnd, 0.12);
+    let voice_cancel = voice.clone();
+    let voice_confirm = voice.clone();
+
+    div()
+        .absolute()
+        .inset_0()
+        .flex()
+        .items_center()
+        .justify_center()
+        .bg(gpui::rgba(0x000000b3))
+        .occlude()
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .items_center()
+                .gap_4()
+                .w(px(380.))
+                .p_6()
+                .rounded_xl()
+                .bg(theme.bg_floating)
+                .border_1()
+                .border_color(theme.border)
+                .shadow_lg()
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .w(px(56.))
+                        .h(px(56.))
+                        .rounded_full()
+                        .bg(theme.bg_hover)
+                        .child(
+                            Icon::new(IconName::CloseIcon)
+                                .size(px(26.))
+                                .text_color(theme.status_dnd),
+                        ),
+                )
+                .child(
+                    div()
+                        .text_lg()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(theme.text_primary)
+                        .child(title),
+                )
+                .child(
+                    div()
+                        .text_sm()
+                        .text_center()
+                        .text_color(theme.text_muted)
+                        .child(body),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .gap_3()
+                        .w_full()
+                        .child(
+                            div()
+                                .id("kick-cancel")
+                                .flex_1()
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .py_2()
+                                .rounded_md()
+                                .cursor_pointer()
+                                .bg(theme.bg_tertiary)
+                                .text_color(theme.text_primary)
+                                .hover(move |s| s.bg(cancel_hover))
+                                .on_click(move |_, _, cx| {
+                                    voice_cancel.update(cx, |store, cx| store.cancel_kick(cx))
+                                })
+                                .child(cancel_label),
+                        )
+                        .child(
+                            div()
+                                .id("kick-confirm")
+                                .flex_1()
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .py_2()
+                                .rounded_md()
+                                .cursor_pointer()
+                                .bg(theme.status_dnd)
+                                .text_color(gpui::rgb(0xffffff))
+                                .hover(move |s| s.bg(kick_hover))
+                                .on_click(move |_, _, cx| {
+                                    voice_confirm.update(cx, |store, cx| store.confirm_kick(cx))
+                                })
+                                .child(kick_label),
+                        ),
+                ),
+        )
+        .into_any_element()
+}
+
 #[allow(clippy::too_many_arguments)]
 fn render_grid(
     theme: &Theme,
@@ -962,12 +1252,7 @@ fn render_grid(
                         .rounded_lg()
                         .bg(theme.bg_secondary)
                         .child(avatar)
-                        .child(
-                            div()
-                                .text_sm()
-                                .text_color(theme.text_primary)
-                                .child(name),
-                        )
+                        .child(div().text_sm().text_color(theme.text_primary).child(name))
                 }))
                 .into_any_element();
         }
@@ -1059,6 +1344,74 @@ fn render_focus_layout(
         .into_any_element()
 }
 
+fn participant_menu_trigger(
+    voice: &Entity<VoiceStore>,
+    identity: String,
+) -> impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static {
+    let voice = voice.clone();
+    move |event: &MouseDownEvent, _window: &mut Window, cx: &mut App| {
+        let position = event.position;
+        let identity = identity.clone();
+        voice.update(cx, |store, cx| {
+            store.open_participant_menu(identity, position, cx);
+        });
+    }
+}
+
+fn build_participant_menu(
+    voice: &Entity<VoiceStore>,
+    identity: String,
+    name: String,
+    is_local: bool,
+    muted: bool,
+    locale: &str,
+) -> ContextMenu {
+    let dismiss = {
+        let voice = voice.clone();
+        move |_window: &mut Window, cx: &mut App| {
+            voice.update(cx, |store, cx| store.close_participant_menu(cx));
+        }
+    };
+
+    let mut menu = ContextMenu::new().on_dismiss(dismiss);
+
+    if !is_local {
+        if !muted {
+            let voice = voice.clone();
+            let identity = identity.clone();
+            menu = menu.danger_item_icon(
+                mezon_i18n::t(locale, "contextMenu.muteMic").to_string(),
+                IconName::VoiceMicDisabledIcon,
+                move |_window, cx| {
+                    let identity = identity.clone();
+                    voice.update(cx, |store, cx| store.mute_participant(identity, cx));
+                },
+            );
+        }
+        let voice = voice.clone();
+        let identity = identity.clone();
+        menu = menu
+            .danger_item_icon(
+                mezon_i18n::t(locale, "contextMenu.member.kick").to_string(),
+                IconName::CloseIcon,
+                move |_window, cx| {
+                    let identity = identity.clone();
+                    let name = name.clone();
+                    voice.update(cx, |store, cx| store.request_kick(identity, name, cx));
+                },
+            )
+            .separator();
+    }
+
+    menu.item_icon(
+        mezon_i18n::t(locale, "contextMenu.copyUserId").to_string(),
+        IconName::CopyIcon,
+        move |_window, cx| {
+            cx.write_to_clipboard(ClipboardItem::new_string(identity.clone()));
+        },
+    )
+}
+
 fn focus_main_tile(
     theme: &Theme,
     locale: &str,
@@ -1083,8 +1436,13 @@ fn focus_main_tile(
         .bg(theme.bg_secondary)
         .cursor_pointer()
         .child(inner)
-        .child(tile_label(theme, locale, cell))
+        .child(tile_label(locale, cell))
         .child(tile_quality(cell))
+        .children(tile_sound_overlay(store, cell))
+        .on_mouse_down(
+            MouseButton::Right,
+            participant_menu_trigger(&voice, cell.identity.clone()),
+        )
         .on_click(move |_, _, cx| {
             voice.update(cx, |store, cx| store.clear_focus(cx));
         })
@@ -1125,8 +1483,13 @@ fn strip_tile(
         .border_2()
         .border_color(border_color)
         .child(inner)
-        .child(tile_label(theme, locale, cell))
+        .child(tile_label(locale, cell))
         .child(tile_quality(cell))
+        .children(tile_sound_overlay(store, cell))
+        .on_mouse_down(
+            MouseButton::Right,
+            participant_menu_trigger(&voice, cell.identity.clone()),
+        )
         .on_click(move |_, _, cx| {
             voice.update(cx, |store, cx| store.set_focus(id.clone(), cx));
         })
@@ -1166,8 +1529,13 @@ fn video_tile(
         .border_2()
         .border_color(border_color)
         .child(inner)
-        .child(tile_label(theme, locale, cell))
+        .child(tile_label(locale, cell))
         .child(tile_quality(cell))
+        .children(tile_sound_overlay(store, cell))
+        .on_mouse_down(
+            MouseButton::Right,
+            participant_menu_trigger(&voice, cell.identity.clone()),
+        )
         .on_click(move |_, _, cx| {
             voice.update(cx, |store, cx| store.toggle_focus(id.clone(), cx));
         })
@@ -1200,13 +1568,10 @@ fn tile_inner(theme: &Theme, store: &VoiceStore, cell: &VideoCell, large: bool) 
     if !cell.avatar_url.is_empty() {
         avatar = avatar.src(cell.avatar_url.clone());
     }
-    if cell.speaking {
-        avatar = avatar.border_color(theme.status_online);
-    }
     avatar.into_any_element()
 }
 
-fn tile_label(theme: &Theme, locale: &str, cell: &VideoCell) -> AnyElement {
+fn tile_label(locale: &str, cell: &VideoCell) -> AnyElement {
     let label = if cell.is_screen {
         mezon_i18n::t(locale, "channelVoice.usernameScreen").replace("{{username}}", &cell.name)
     } else {
@@ -1229,7 +1594,7 @@ fn tile_label(theme: &Theme, locale: &str, cell: &VideoCell) -> AnyElement {
             this.child(
                 Icon::new(IconName::VoiceMicDisabledIcon)
                     .size(px(14.))
-                    .text_color(theme.status_dnd),
+                    .text_color(gpui::rgba(0xffffff80)),
             )
         })
         .when(cell.is_screen, |this| {
@@ -1270,12 +1635,40 @@ fn tile_quality(cell: &VideoCell) -> AnyElement {
         .into_any_element()
 }
 
+fn tile_sound_overlay(store: &VoiceStore, cell: &VideoCell) -> Option<AnyElement> {
+    if !store.is_sound_active(&cell.identity) {
+        return None;
+    }
+    Some(
+        div()
+            .absolute()
+            .top_2()
+            .right_2()
+            .flex()
+            .items_center()
+            .justify_center()
+            .p(px(6.))
+            .rounded_full()
+            .bg(gpui::rgb(ACCENT_BLUE))
+            .border_1()
+            .border_color(gpui::rgba(0xffffff33))
+            .shadow_lg()
+            .child(
+                Icon::new(IconName::VoiceSoundControlIcon)
+                    .size(px(16.))
+                    .text_color(gpui::rgb(0xffffff)),
+            )
+            .into_any_element(),
+    )
+}
+
 fn control_bar(
     theme: &Theme,
     locale: &str,
     voice: &Entity<VoiceStore>,
     settings: &Entity<Settings>,
     store: &VoiceStore,
+    chat: &Entity<ChatLayout>,
 ) -> AnyElement {
     let mic_enabled = store.mic_enabled();
     let camera_enabled = store.camera_enabled();
@@ -1321,11 +1714,7 @@ fn control_bar(
             } else {
                 IconName::VoiceMicDisabledIcon
             },
-            if mic_enabled {
-                theme.text_primary
-            } else {
-                theme.status_dnd
-            },
+            theme.text_primary,
         )
         .tooltip(Tooltip::text(mic_tooltip))
         .on_click(move |_, _, cx| voice.update(cx, |store, cx| store.toggle_mic(cx)))
@@ -1342,11 +1731,7 @@ fn control_bar(
             } else {
                 IconName::VoiceCameraDisabledIcon
             },
-            if camera_enabled {
-                theme.text_primary
-            } else {
-                theme.status_dnd
-            },
+            theme.text_primary,
         )
         .tooltip(Tooltip::text(camera_tooltip))
         .on_click(move |_, _, cx| voice.update(cx, |store, cx| store.toggle_camera(cx)))
@@ -1394,13 +1779,40 @@ fn control_bar(
         let voice = voice.clone();
         circle_button(
             "voice-leave-btn",
-            theme.status_dnd,
-            darken(theme.status_dnd, 0.12),
-            IconName::CancelCall,
+            gpui::rgb(LEAVE_RED),
+            gpui::rgb(LEAVE_RED_HOVER).into(),
+            IconName::EndCall,
             gpui::rgb(0xffffff),
         )
         .tooltip(Tooltip::text(leave_tooltip))
         .on_click(move |_, window, cx| voice.update(cx, |store, cx| store.leave(window, cx)))
+    };
+
+    let raise_active = store.is_local_hand_raised();
+    let raise_tooltip = mezon_i18n::t(
+        locale,
+        if raise_active {
+            "channelVoice.lowerHand"
+        } else {
+            "channelVoice.raiseHand"
+        },
+    );
+    let raise_color: Hsla = if raise_active {
+        gpui::rgb(RAISE_HAND_GOLD).into()
+    } else {
+        theme.text_primary.into()
+    };
+    let raise_hand_button = {
+        let voice = voice.clone();
+        circle_button(
+            "voice-raise-hand-btn",
+            neutral_bg,
+            neutral_hover,
+            IconName::VoiceRaiseHandIcon,
+            raise_color,
+        )
+        .tooltip(Tooltip::text(raise_tooltip))
+        .on_click(move |_, _, cx| voice.update(cx, |store, cx| store.send_raising_hand(cx)))
     };
 
     let mut right = div()
@@ -1460,14 +1872,50 @@ fn control_bar(
         right = right.child(pip_button).child(fs_button);
     }
 
+    let emoji_button = {
+        let chat = chat.clone();
+        circle_button(
+            "voice-emoji-btn",
+            neutral_bg,
+            neutral_hover,
+            IconName::VoiceEmojiControlIcon,
+            theme.text_muted,
+        )
+        .tooltip(Tooltip::text(mezon_i18n::t(
+            locale,
+            "channelVoice.reactions",
+        )))
+        .on_click(move |_, window, cx| {
+            chat.update(cx, |layout, cx| {
+                layout.toggle_voice_emoji_picker(window, cx)
+            });
+        })
+    };
+
+    let sound_button = {
+        let chat = chat.clone();
+        circle_button(
+            "voice-sound-btn",
+            neutral_bg,
+            neutral_hover,
+            IconName::VoiceSoundControlIcon,
+            theme.text_muted,
+        )
+        .on_click(move |_, window, cx| {
+            chat.update(cx, |layout, cx| {
+                layout.toggle_voice_sound_picker(window, cx)
+            });
+        })
+    };
+
     let left = div()
         .flex()
         .flex_row()
         .flex_1()
         .items_center()
         .gap_3()
-        .child(decorative_circle(theme, IconName::VoiceEmojiControlIcon))
-        .child(decorative_circle(theme, IconName::VoiceSoundControlIcon));
+        .child(emoji_button)
+        .child(sound_button);
 
     let center = div()
         .flex()
@@ -1478,7 +1926,7 @@ fn control_bar(
         .child(mic_button)
         .child(camera_button)
         .child(screen_button)
-        .child(decorative_circle(theme, IconName::ShadowBotIcon))
+        .child(raise_hand_button)
         .child(leave_button);
 
     div()
@@ -1493,22 +1941,6 @@ fn control_bar(
         .child(left)
         .child(center)
         .child(right)
-        .into_any_element()
-}
-
-fn decorative_circle(theme: &Theme, icon: IconName) -> AnyElement {
-    // Purely decorative: same footprint as the real control buttons but with no
-    // id/on_click and an explicit default cursor so it never reads as clickable.
-    div()
-        .flex()
-        .items_center()
-        .justify_center()
-        .w(px(44.))
-        .h(px(44.))
-        .rounded_full()
-        .cursor_default()
-        .bg(theme.bg_secondary)
-        .child(Icon::new(icon).size(px(20.)).text_color(theme.text_muted))
         .into_any_element()
 }
 

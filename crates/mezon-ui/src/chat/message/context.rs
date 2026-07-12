@@ -1,12 +1,15 @@
+use std::cell::RefCell;
 use std::collections::HashMap;
+use std::rc::Rc;
 
 use gpui::{App, Entity, SharedString, WeakEntity};
-use mezon_store::{ChannelType, ClanId, Emoji, MessageId, ProfileContext, Settings};
+use mezon_store::{ChannelType, ClanId, Emoji, MessageId, ProfileContext, Settings, UserId};
 
+use super::audio_player::AudioPlayerView;
 use super::channel_messages::ChannelMessages;
 use super::gif_video::GifVideoView;
 use super::video_player::VideoPlayerView;
-use crate::components::primitives::InputState;
+use crate::chat::mention_input::MentionInput;
 use crate::image_cache::LruImageCache;
 use crate::theme::Theme;
 
@@ -54,11 +57,14 @@ pub struct RowCtx<'a> {
     /// delay (fast mouse sweeps never latch it). `None` = no toolbar visible.
     pub hovered_row: Option<MessageId>,
     pub avatar_cache: Entity<LruImageCache>,
+    pub large_avatar_cache: Entity<LruImageCache>,
     pub unread_boundary_id: Option<MessageId>,
     pub highlight_id: Option<MessageId>,
+    pub reply_highlight_id: Option<MessageId>,
     pub profile_context: Option<ProfileContext>,
     pub settings: Entity<Settings>,
     pub active_videos: &'a HashMap<(MessageId, usize), Entity<VideoPlayerView>>,
+    pub active_audios: &'a HashMap<(MessageId, usize), Entity<AudioPlayerView>>,
     pub gif_videos: &'a HashMap<(MessageId, usize), Entity<GifVideoView>>,
     pub video_host: WeakEntity<ChannelMessages>,
     pub now: chrono::DateTime<chrono::Local>,
@@ -71,11 +77,26 @@ pub struct RowCtx<'a> {
     pub is_clan_owner: bool,
     /// Message currently being edited inline, if any (shared across all rows).
     pub editing_id: Option<MessageId>,
-    pub edit_input: Option<Entity<InputState>>,
+    pub edit_input: Option<Entity<MentionInput>>,
     /// Up to 3 most-recently-used emoji for the hover toolbar's quick-react pills.
     pub emoji_recent: &'a [Emoji],
     /// `common.comingSoon`, resolved once per render pass (not per row).
     pub coming_soon: SharedString,
+    /// Cross-frame memo for per-row derived values that are expensive to
+    /// recompute every frame (live avatar resolution, formatted time labels).
+    /// Owned by the view; invalidated on member-store change, channel switch,
+    /// locale change and day rollover.
+    pub row_memo: Rc<RefCell<RowMemo>>,
+}
+
+#[derive(Default)]
+pub struct RowMemo {
+    /// sender -> live-resolved (raw, proxied) avatar urls; `None` caches a
+    /// failed resolution so the per-message fallback is used without a
+    /// store lookup every frame.
+    pub avatars: HashMap<UserId, Option<(SharedString, SharedString)>>,
+    /// message -> formatted head time label ("14:03" / "Yesterday at 14:03").
+    pub time_labels: HashMap<MessageId, SharedString>,
 }
 
 pub const DEFAULT_DISPLAY_NAME_COLOR: u32 = 0x17_ac_86;

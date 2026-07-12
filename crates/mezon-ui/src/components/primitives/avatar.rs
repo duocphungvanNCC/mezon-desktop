@@ -14,7 +14,10 @@ pub struct Avatar {
     grayscale: bool,
     fallback_src: Option<SharedString>,
     image_cache: Option<gpui::Entity<crate::image_cache::LruImageCache>>,
+    is_anonymous: bool,
 }
+
+const ANONYMOUS_AVATAR_ICON: &str = "icons/anonymous-avatar.svg";
 
 impl Avatar {
     pub fn new() -> Self {
@@ -28,6 +31,7 @@ impl Avatar {
             grayscale: false,
             fallback_src: None,
             image_cache: None,
+            is_anonymous: false,
         }
     }
 
@@ -44,6 +48,11 @@ impl Avatar {
 
     pub fn grayscale(mut self, grayscale: bool) -> Self {
         self.grayscale = grayscale;
+        self
+    }
+
+    pub fn anonymous(mut self, is_anonymous: bool) -> Self {
+        self.is_anonymous = is_anonymous;
         self
     }
 
@@ -110,6 +119,19 @@ fn initials_circle(d: Pixels, bg: Hsla, text_color: Hsla, initials: String) -> A
         .into_any_element()
 }
 
+fn anonymous_circle(d: Pixels) -> AnyElement {
+    div()
+        .flex()
+        .flex_shrink_0()
+        .items_center()
+        .justify_center()
+        .size(d)
+        .rounded_full()
+        .bg(Hsla::from(gpui::rgb(0xffffff)))
+        .child(img(ANONYMOUS_AVATAR_ICON).size(d * 0.8))
+        .into_any_element()
+}
+
 fn clipped_image(
     size: Pixels,
     src: SharedString,
@@ -147,11 +169,20 @@ impl RenderOnce for Avatar {
         let image_size = self.custom_size.unwrap_or_else(|| diameter(self.size));
         let container_size = image_size + border_width * 2.;
 
+        let avatar_cache = self.image_cache.clone().unwrap_or_else(|| {
+            if image_size <= px(40.) {
+                crate::image_cache::shared_small_avatar_cache(cx)
+            } else {
+                crate::image_cache::shared_avatar_cache(cx)
+            }
+        });
+
         let name = self.name.clone().unwrap_or_default();
         let bg = avatar_color(name.as_ref());
         let text_color = Hsla::from(gpui::rgb(0xffffff));
         let element_bg = Hsla::from(cx.theme().bg_tertiary);
         let initials = name_initials(name.as_ref());
+        let is_anonymous = self.is_anonymous;
 
         div()
             .size(container_size)
@@ -160,10 +191,9 @@ impl RenderOnce for Avatar {
             .when_some(self.border_color, |this, color| {
                 this.border(border_width).border_color(color)
             })
-            .when_some(self.image_cache.clone(), |this, cache| {
-                this.image_cache(cache)
-            })
+            .image_cache(avatar_cache)
             .child(match self.src {
+                _ if is_anonymous => anonymous_circle(image_size),
                 Some(src) => {
                     let loading_initials = initials.clone();
                     let fallback_initials = initials.clone();

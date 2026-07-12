@@ -1,7 +1,9 @@
+use std::time::Duration;
+
 use gpui::{
-    Anchor, AnyElement, App, Context, Entity, FontWeight, MouseButton, MouseDownEvent, Pixels,
-    Point, SharedString, UniformListScrollHandle, WeakEntity, Window, div, prelude::*, px, rgb,
-    uniform_list,
+    AnyElement, App, Context, DismissEvent, Entity, Focusable, FontWeight, Hsla, Pixels, Point,
+    SharedString, Subscription, Task, UniformListScrollHandle, WeakEntity, Window, anchored,
+    deferred, div, prelude::*, px, rgb, uniform_list,
 };
 use mezon_store::{
     ChannelEvent, ChannelId, ChannelList, ChannelMembersEvent, ChannelMembersStore, ClanId,
@@ -9,10 +11,12 @@ use mezon_store::{
     GroupMember, GroupMembersEvent, GroupMembersStore, PresenceEvent, PresenceStore,
     ProfileContext, Settings, UserId, split_members_by_status,
 };
+use ui::utils::ROUNDED_BORDER_WINDOW;
 
 use crate::app::shell::Shell;
-use crate::chat::user_profile_popover::{ClickableContainer, profile_popover_menu};
-use crate::components::primitives::{Avatar, ContextMenu, Icon, IconName, context_menu_at};
+use crate::chat::member_row_element::MemberRowElement;
+use crate::chat::user_profile_popover::UserProfilePopover;
+use crate::components::primitives::{Avatar, ContextMenu, context_menu_at};
 use crate::image_cache::LruImageCache;
 use crate::router::{Route, Router};
 use crate::theme::{ActiveTheme, Theme};
@@ -33,10 +37,14 @@ enum HeaderKind {
     Members,
 }
 
+const MEMBER_SKELETON_DELAY_MS: u64 = 400;
+const MEMBER_SKELETON_ROWS: usize = 10;
+
 #[derive(PartialEq)]
 enum Row {
     Header { kind: HeaderKind, count: usize },
     Member(MemberRow),
+    Skeleton,
 }
 
 #[derive(PartialEq)]
@@ -49,8 +57,6 @@ struct MemberRow {
     user_status: SharedString,
     is_owner: bool,
     rcm_id: SharedString,
-    popover_id: SharedString,
-    trigger_id: SharedString,
 }
 
 struct RawMember {
@@ -61,16 +67,27 @@ struct RawMember {
     user_status: String,
 }
 
+struct ProfilePopoverState {
+    popover: Entity<UserProfilePopover>,
+    position: Point<Pixels>,
+    _subscription: Subscription,
+}
+
 pub struct MemberListPanel {
     source: MemberSource,
     settings: Entity<Settings>,
     rows: Derived<Vec<Row>>,
     list_scroll: UniformListScrollHandle,
     avatar_image_cache: Entity<LruImageCache>,
+    small_avatar_image_cache: Entity<LruImageCache>,
     active_context: Option<ProfileContext>,
     route_key: RouteKey,
     open_menu: Option<(UserId, SharedString, Point<Pixels>)>,
+    open_profile: Option<ProfilePopoverState>,
     rebuild_pending: bool,
+    loading_channel: Option<ChannelId>,
+    show_skeleton: bool,
+    _skeleton_timer: Option<Task<()>>,
 }
 
 #[derive(PartialEq, Eq)]
@@ -161,11 +178,24 @@ impl MemberListPanel {
             settings,
             rows: Derived::default(),
             list_scroll: UniformListScrollHandle::new(),
+            small_avatar_image_cache: cx.new(|cx| {
+                crate::image_cache::LruImageCache::avatar_thumbnail_small(
+                    "member-list",
+                    512,
+                    16 * 1024 * 1024,
+                    4 * 1024 * 1024,
+                    cx,
+                )
+            }),
             avatar_image_cache,
             active_context: None,
             route_key: route_key(source, cx),
             open_menu: None,
+            open_profile: None,
             rebuild_pending: false,
+            loading_channel: None,
+            show_skeleton: false,
+            _skeleton_timer: None,
         };
         this.recompute(cx);
         this
@@ -186,6 +216,25 @@ impl MemberListPanel {
     }
 
     fn recompute(&mut self, cx: &mut Context<Self>) {
+        if matches!(self.source, MemberSource::Channel)
+            && let Some(pending_id) = pending_filter_channel(cx)
+        {
+            if self.loading_channel != Some(pending_id) {
+                self.loading_channel = Some(pending_id);
+                self.show_skeleton = false;
+                self.arm_skeleton_timer(pending_id, cx);
+            }
+            if self.show_skeleton {
+                self.rows.set(
+                    (0..MEMBER_SKELETON_ROWS).map(|_| Row::Skeleton).collect(),
+                    cx,
+                );
+            }
+            return;
+        }
+        self.loading_channel = None;
+        self.show_skeleton = false;
+        self._skeleton_timer = None;
         self.active_context = match self.source {
             MemberSource::Channel => {
                 active_channel_context(cx).map(|ctx| ProfileContext::Clan(ctx.clan_id))
@@ -195,6 +244,44 @@ impl MemberListPanel {
         let rows = compute_rows(self.source, cx);
         self.rows.set(rows, cx);
     }
+
+    fn arm_skeleton_timer(&mut self, channel_id: ChannelId, cx: &mut Context<Self>) {
+        self._skeleton_timer = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis(MEMBER_SKELETON_DELAY_MS))
+                .await;
+            this.update(cx, |this, cx| {
+                if this.loading_channel == Some(channel_id) && !this.show_skeleton {
+                    this.show_skeleton = true;
+                    this.recompute(cx);
+                }
+            })
+            .ok();
+        }));
+    }
+}
+
+fn pending_filter_channel(cx: &App) -> Option<ChannelId> {
+    if matches!(
+        Router::global(cx).read(cx).route(),
+        Route::DirectMessage { .. } | Route::Direct | Route::Friends
+    ) {
+        return None;
+    }
+    let channels = ChannelList::global(cx);
+    let channels = channels.read(cx);
+    let channel = channels.active_channel()?;
+    let is_thread = channel.parent_id.map(|p| !p.is_zero()).unwrap_or(false);
+    if !(channel.private || is_thread) {
+        return None;
+    }
+    let channel_id = channel.id;
+    let store = ChannelMembersStore::global(cx);
+    let store = store.read(cx);
+    if store.has_channel(channel_id) || !store.is_loading(channel_id) {
+        return None;
+    }
+    Some(channel_id)
 }
 
 fn shows_clan(clan_id: ClanId, cx: &App) -> bool {
@@ -482,6 +569,14 @@ pub(crate) fn mention_member_pool(cx: &App) -> Vec<MentionMemberRaw> {
         .collect()
 }
 
+fn single_line(s: String) -> String {
+    if s.contains(['\n', '\r']) {
+        s.replace(['\n', '\r'], " ")
+    } else {
+        s
+    }
+}
+
 fn make_member_row(cx: &App, raw: RawMember, owner_id: Option<UserId>) -> Row {
     let avatar_src = if raw.avatar_raw.is_empty() {
         SharedString::default()
@@ -491,14 +586,12 @@ fn make_member_row(cx: &App, raw: RawMember, owner_id: Option<UserId>) -> Row {
     let id = raw.user_id.0;
     Row::Member(MemberRow {
         rcm_id: SharedString::from(format!("member-rcm-{id}")),
-        popover_id: SharedString::from(format!("member-popover-{id}")),
-        trigger_id: SharedString::from(format!("member-trigger-{id}")),
         user_id: raw.user_id,
-        name: raw.name.into(),
+        name: single_line(raw.name).into(),
         avatar_src,
         avatar_raw: raw.avatar_raw.into(),
         online: raw.online,
-        user_status: raw.user_status.into(),
+        user_status: single_line(raw.user_status).into(),
         is_owner: owner_id == Some(raw.user_id),
     })
 }
@@ -534,10 +627,27 @@ fn render_header(theme: &Theme, locale: &str, kind: &HeaderKind, count: usize) -
         .into_any_element()
 }
 
+fn render_member_skeleton(theme: &Theme, ix: usize) -> AnyElement {
+    let fill = theme.bg_hover;
+    let widths = [70., 52., 84., 61., 45., 76., 58., 90., 66., 50.];
+    let name_width = widths[ix % widths.len()];
+    div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(9.))
+        .px_4()
+        .h(px(48.))
+        .child(div().size(px(32.)).rounded_full().bg(fill).flex_shrink_0())
+        .child(div().h(px(14.)).w(px(name_width)).rounded(px(4.)).bg(fill))
+        .into_any_element()
+}
+
 fn render_member(
     theme: &Theme,
     member: &MemberRow,
     avatar_image_cache: &Entity<LruImageCache>,
+    small_avatar_image_cache: &Entity<LruImageCache>,
     context: Option<ProfileContext>,
     settings: &Entity<Settings>,
     panel: WeakEntity<MemberListPanel>,
@@ -545,113 +655,50 @@ fn render_member(
     let mut avatar = Avatar::new()
         .name(member.name.clone())
         .size_px(px(32.))
-        .image_cache(avatar_image_cache.clone());
+        .image_cache(small_avatar_image_cache.clone());
     if !member.avatar_src.is_empty() {
         avatar = avatar
             .src(member.avatar_src.clone())
             .fallback_src(member.avatar_raw.clone());
     }
-
-    let dot_color = if member.online {
-        theme.status_online
+    let avatar: AnyElement = if member.online {
+        avatar.into_any_element()
     } else {
-        theme.text_muted
+        div().opacity(0.5).child(avatar).into_any_element()
     };
 
-    let row_content = div()
-        .flex()
-        .flex_row()
-        .items_center()
-        .gap(px(9.))
-        .px_4()
-        .h(px(48.))
-        .when(!member.online, |this| this.opacity(0.5))
-        .child(
-            div().relative().flex_shrink_0().child(avatar).child(
-                div()
-                    .absolute()
-                    .bottom(px(-1.))
-                    .right(px(-1.))
-                    .size(px(12.))
-                    .rounded_full()
-                    .border_2()
-                    .border_color(theme.bg_secondary)
-                    .bg(dot_color),
-            ),
-        )
-        .child(
-            div()
-                .flex()
-                .flex_col()
-                .min_w_0()
-                .child(
-                    div()
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .gap(px(4.))
-                        .child(
-                            div()
-                                .text_base()
-                                .font_weight(FontWeight::MEDIUM)
-                                .text_color(rgb(DEFAULT_ROLE_COLOR))
-                                .child(member.name.clone()),
-                        )
-                        .when(member.is_owner, |this| {
-                            this.child(
-                                Icon::new(IconName::OwnerIcon)
-                                    .size(px(14.))
-                                    .text_color(rgb(0xF0B132)),
-                            )
-                        }),
-                )
-                .when(!member.user_status.is_empty(), |this| {
-                    this.child(
-                        div()
-                            .max_w(px(100.))
-                            .text_xs()
-                            .text_color(theme.text_primary)
-                            .opacity(0.6)
-                            .truncate()
-                            .child(member.user_status.clone()),
-                    )
-                }),
-        );
+    let dim = |mut color: Hsla| {
+        if !member.online {
+            color.a *= 0.5;
+        }
+        color
+    };
+
+    let dot_fill = dim(if member.online {
+        theme.status_online.into()
+    } else {
+        theme.text_muted.into()
+    });
+    let dot_border = dim(theme.bg_secondary.into());
+    let name_color = dim(rgb(DEFAULT_ROLE_COLOR).into());
+    let owner_icon = member.is_owner.then(|| dim(rgb(0xF0B132).into()));
+    let status = (!member.user_status.is_empty()).then(|| {
+        let mut color: Hsla = theme.text_primary.into();
+        color.a *= 0.6;
+        (member.user_status.clone(), dim(color))
+    });
 
     let user_id = member.user_id;
-    let rcm_id = member.rcm_id.clone();
-
-    let inner = match context {
-        Some(ctx) => profile_popover_menu(
-            member.popover_id.clone(),
-            user_id,
-            ctx,
-            settings.clone(),
-            avatar_image_cache.clone(),
-        )
-        .anchor(Anchor::TopRight)
-        .attach(Anchor::TopLeft)
-        .trigger(
-            ClickableContainer::new(member.trigger_id.clone())
-                .flex()
-                .flex_1()
-                .cursor_pointer()
-                .child(row_content),
-        )
-        .into_any_element(),
-        None => row_content.into_any_element(),
-    };
-
     let display_name = member.name.clone();
-    div()
-        .id(rcm_id)
-        .flex()
-        .flex_1()
-        .on_mouse_down(MouseButton::Right, {
+
+    let mut row = MemberRowElement::new(member.rcm_id.clone(), member.name.clone(), avatar)
+        .name_color(name_color)
+        .dot(dot_fill, dot_border)
+        .owner_icon(owner_icon)
+        .status(status)
+        .on_right_click({
             let panel = panel.clone();
-            let display_name = display_name.clone();
-            move |event: &MouseDownEvent, _window, cx| {
-                let position = event.position;
+            move |position, _window, cx| {
                 if let Some(p) = panel.upgrade() {
                     p.update(cx, |this, cx| {
                         this.open_menu = Some((user_id, display_name.clone(), position));
@@ -659,9 +706,66 @@ fn render_member(
                     });
                 }
             }
-        })
-        .child(inner)
-        .into_any_element()
+        });
+
+    if let Some(ctx) = context {
+        let panel = panel.clone();
+        let settings = settings.clone();
+        let avatar_image_cache = avatar_image_cache.clone();
+        row = row.on_click(move |position, window, cx| {
+            open_profile_popover(
+                &panel,
+                user_id,
+                ctx,
+                position,
+                settings.clone(),
+                avatar_image_cache.clone(),
+                window,
+                cx,
+            );
+        });
+    }
+
+    row.into_any_element()
+}
+
+fn open_profile_popover(
+    panel: &WeakEntity<MemberListPanel>,
+    user_id: UserId,
+    context: ProfileContext,
+    position: Point<Pixels>,
+    settings: Entity<Settings>,
+    avatar_image_cache: Entity<LruImageCache>,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let Some(panel) = panel.upgrade() else {
+        return;
+    };
+    let popover = cx.new(|cx| {
+        UserProfilePopover::new(user_id, context, settings, avatar_image_cache, window, cx)
+    });
+    let handle = popover.read(cx).focus_handle(cx);
+    window.focus(&handle, cx);
+    let subscription = cx.subscribe(&popover, {
+        let panel = panel.downgrade();
+        move |_popover, _event: &DismissEvent, cx| {
+            if let Some(p) = panel.upgrade() {
+                p.update(cx, |this, cx| {
+                    this.open_profile = None;
+                    cx.notify();
+                });
+            }
+        }
+    });
+    panel.update(cx, |this, cx| {
+        this.open_profile = Some(ProfilePopoverState {
+            popover,
+            position,
+            _subscription: subscription,
+        });
+        cx.notify();
+    });
 }
 
 impl Render for MemberListPanel {
@@ -672,6 +776,7 @@ impl Render for MemberListPanel {
         let count = self.rows.get().len();
         let entity = cx.entity();
         let avatar_image_cache = self.avatar_image_cache.clone();
+        let small_avatar_image_cache = self.small_avatar_image_cache.clone();
         let context = self.active_context;
         let settings = self.settings.clone();
         let panel_weak = cx.entity().downgrade();
@@ -686,6 +791,10 @@ impl Render for MemberListPanel {
                 panel_weak.clone(),
             )
         });
+        let profile_overlay = self
+            .open_profile
+            .as_ref()
+            .map(|state| (state.popover.clone(), state.position));
 
         let list = uniform_list("member-list", count, move |range, _window, cx| {
             let theme = cx.theme().clone();
@@ -700,10 +809,12 @@ impl Render for MemberListPanel {
                         &theme,
                         member,
                         &avatar_image_cache,
+                        &small_avatar_image_cache,
                         context,
                         &settings,
                         panel_weak.clone(),
                     ),
+                    Some(Row::Skeleton) => render_member_skeleton(&theme, ix),
                     None => div().into_any_element(),
                 })
                 .collect::<Vec<_>>()
@@ -720,6 +831,7 @@ impl Render for MemberListPanel {
             .h_full()
             .flex_shrink_0()
             .bg(theme.bg_secondary)
+            .rounded_br(px(ROUNDED_BORDER_WINDOW))
             .border_l_1()
             .border_color(theme.border)
             .child(list)
@@ -732,6 +844,11 @@ impl Render for MemberListPanel {
                     ))
                 },
             )
+            .when_some(profile_overlay, |el, (popover, pos)| {
+                el.child(deferred(
+                    anchored().position(pos).snap_to_window().child(popover),
+                ))
+            })
     }
 }
 

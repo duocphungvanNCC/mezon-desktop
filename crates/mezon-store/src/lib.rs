@@ -1,28 +1,39 @@
 pub mod account;
+pub mod activity;
 pub mod album_layout;
 pub mod audio;
 pub mod badge;
 pub mod cache;
 pub mod channel;
 pub mod channel_members;
+pub mod channel_permissions;
 pub mod clan;
 pub mod clan_members;
 pub mod config;
 pub mod connection;
 pub mod direct;
 pub mod emoji;
+pub mod friend;
+pub mod gallery;
 pub mod group_members;
 pub mod ids;
+pub mod inbox;
 pub mod login;
 pub mod message;
+pub mod message_search;
 pub mod message_time;
 pub mod messages;
+pub mod permissions;
 pub mod pinned;
 pub mod platform;
 pub mod presence;
+pub mod presign;
 pub mod realtime;
 pub mod roles;
 pub mod sticker;
+pub mod threads;
+pub mod topic_badges;
+pub mod topics;
 pub mod user_profile;
 pub mod users_by_user;
 pub mod voice;
@@ -31,18 +42,26 @@ use anyhow::{Context, Result};
 use dirs::config_dir;
 pub use mezon_client::Session;
 pub use mezon_client::transport::{MENTION_HERE_ID, MENTION_HERE_USER_ID, is_here_user_id};
+pub use mezon_client::{
+    clean_download_url, download_url_to_downloads, resolve_download_filename, sanitize_filename,
+    write_bytes_to_downloads,
+};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::time::Duration;
 use tokio::fs;
 
 pub use account::*;
+pub use activity::{ActivityEvent, ActivityStore, UserActivity};
 pub use album_layout::{AlbumLayout, AlbumTile, calculate_album_layout};
 pub use audio::{AudioDeviceInfo, AudioStore, MicCaptureFactory, MicCaptureHandle};
 pub use badge::BadgeService;
 pub use cache::{Freshness, KeyedCache};
 pub use channel::*;
 pub use channel_members::{ChannelMember, ChannelMembersEvent, ChannelMembersStore};
+pub use channel_permissions::{
+    ChannelPermissionsEvent, ChannelPermissionsStore, PERMISSION_MANAGE_THREAD,
+};
 pub use clan::*;
 pub use clan_members::{
     ClanMember, ClanMembersEvent, ClanMembersStore, User, split_members_by_status,
@@ -51,28 +70,61 @@ pub use config::AppConfig;
 pub use connection::{ConnectionStore, resolve_initial_auth_state};
 pub use direct::{DirectChannel, DirectEvent, DirectKind, DirectMessageStore};
 pub use emoji::{Emoji, EmojiEvent, EmojiStore};
+pub use friend::{Friend, FriendEvent, FriendState, FriendStore};
+pub use gallery::{
+    ChannelAttachment, GalleryEvent, GalleryStore, LoadDirection, MediaFilter, UploaderInfo,
+    enrich_uploader, fetch_channel_attachments, resolve_attachment_uploader,
+};
 pub use group_members::{GroupMember, GroupMembersEvent, GroupMembersStore};
 pub use ids::{ChannelId, ClanId, MessageId, ParseIdError, RoleId, UserId};
+pub use inbox::{InboxEvent, InboxStore};
 pub use login::{LoginStore, token_from_oauth_callback_url};
 pub use message::*;
 pub use message::{
     COMBINE_TIME_WINDOW, Message, MessageAttachment, message_combined_with_prev,
     recompute_message_grouping, same_message_sender, should_show_message_head,
 };
+pub use message_search::{
+    ChannelSearchState, MessageSearchEvent, MessageSearchStore, SearchHit, SearchHitImage,
+    enrich_search_results_ogp, resolve_search_hit_ogp, search_hit_from_document,
+};
 pub use messages::*;
+pub use mezon_client::{
+    InboxCategory, InboxMentionSpan, InboxMessagePreview, InboxNotification, TopicDiscussion,
+    attachment_link_is_image, message_content_is_attachment,
+};
+pub use mezon_client::{
+    SearchDropdownMode, SearchPageToken, autocomplete_needle, expand_mention_name_tokens,
+    finalize_incomplete_filter_token, has_filter_options, insert_filter_markup,
+    search_content_highlight_terms, search_dropdown_mode, search_filter_chip_ranges,
+    search_page_count, search_page_numbers, should_show_search_dropdown,
+};
+pub use permissions::{
+    ClanSettingsPermissions, PERMISSION_ADMINISTRATOR, PERMISSION_CLAN_OWNER,
+    PERMISSION_MANAGE_CHANNEL, PERMISSION_MANAGE_CLAN, PermissionEvent, PermissionStore,
+};
 pub use pinned::{PinnedMessage, PinnedMessagesStore};
-pub use platform::{DesktopNotification, NotifyFn, OpenUrlFn, PlatformStore};
+pub use platform::{
+    DesktopNotification, NotifyFn, OpenUrlFn, PlatformStore, download_url_with_dialog,
+};
 pub use presence::*;
 pub use realtime::{RealtimeDispatch, RealtimeKind};
 pub use roles::{Role, RolesEvent, RolesStore};
-pub use sticker::{Sticker, StickerEvent, StickerStore};
-pub use user_profile::{ProfileContext, UserProfileView, resolve_user_profile};
+pub use sticker::{ClanSound, Sticker, StickerEvent, StickerStore};
+pub use threads::{THREAD_STATUS_JOINED, ThreadSummary, ThreadsEvent, ThreadsStore, group_threads};
+pub use topic_badges::{TopicBadgeEvent, TopicBadgeStore};
+pub use topics::{TopicsEvent, TopicsStore};
+pub use user_profile::{
+    ProfileContext, UserProfileView, active_clan_id, current_user_clan_avatar, resolve_avatar_url,
+    resolve_user_profile,
+};
 pub use users_by_user::{UsersByUserEvent, UsersByUserStore};
 pub use voice::{
-    NetworkQuality, PickedScreen, ScreenShareKind, ScreenShareOption, ScreenSharePreview,
-    VideoFrameData, VideoFrameStore, VoiceCallStatus, VoiceConnection, VoiceParticipant,
-    VoiceStore, camera_tile_id, capture_screen_share_preview, list_screen_share_options,
-    peek_screen_share_options, screen_tile_id,
+    DisplayedReaction, NetworkQuality, PickedScreen, ScreenShareKind, ScreenShareListError,
+    ScreenShareOption, ScreenSharePreview, VideoFrameData, VideoFrameStore, VoiceCallStatus,
+    VoiceConnection, VoiceModerationError, VoiceParticipant, VoiceStore, camera_tile_id,
+    capture_screen_share_preview, list_screen_share_options, peek_screen_share_options,
+    screen_tile_id,
 };
 
 pub const CACHE_TTL: Duration = Duration::from_secs(20 * 60);

@@ -2,13 +2,14 @@ use gpui::{
     AnyElement, App, Context, Entity, FocusHandle, Focusable, PathPromptOptions, SharedString,
     Subscription, Task, Window, div, img, prelude::*, px, rgb,
 };
-use mezon_store::{ClanList, CreateClanError, Settings};
+use mezon_store::{ClanImageMimeType, ClanList, CreateClanError, MAX_CLAN_LOGO_BYTES, Settings};
 
 use crate::app::shell::Shell;
 use crate::clan::templates::{TEMPLATES, TemplateId};
 use crate::components::primitives::{
     Button, ButtonVariants, Icon, IconName, Input, InputEvent, InputState, h_flex, v_flex,
 };
+use crate::image_cache::LruImageCache;
 use crate::theme::ActiveTheme;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -34,6 +35,7 @@ pub struct CreateClanModal {
     logo_url: Option<SharedString>,
     validation: Validation,
     creating: bool,
+    image_cache: Entity<LruImageCache>,
     _name_sub: Subscription,
     _logo_task: Option<Task<()>>,
     _create_task: Option<Task<()>>,
@@ -87,6 +89,15 @@ impl CreateClanModal {
             logo_url: None,
             validation: Validation::InvalidName,
             creating: false,
+            image_cache: cx.new(|cx| {
+                LruImageCache::avatar_thumbnail(
+                    "clan-logo-preview",
+                    2,
+                    4 * 1024 * 1024,
+                    4 * 1024 * 1024,
+                    cx,
+                )
+            }),
             _name_sub: name_sub,
             _logo_task: None,
             _create_task: None,
@@ -131,17 +142,25 @@ impl CreateClanModal {
             multiple: false,
             prompt: Some(prompt),
         });
-        const ALLOWED_EXTENSIONS: &[&str] = &["jpg", "jpeg", "png", "gif", "webp"];
-        const MAX_LOGO_SIZE: u64 = 1_000_000;
-
+        self._logo_task.take();
         self._logo_task = Some(cx.spawn(async move |this, cx| {
+            let finish = |this: &mut CreateClanModal| {
+                this._logo_task = None;
+            };
+
             let paths = match rx.await {
                 Ok(Ok(Some(p))) => p,
-                _ => return,
+                _ => {
+                    let _ = this.update(cx, |this, _| finish(this));
+                    return;
+                }
             };
             let path = match paths.into_iter().next() {
                 Some(p) => p,
-                None => return,
+                None => {
+                    let _ = this.update(cx, |this, _| finish(this));
+                    return;
+                }
             };
 
             let ext = path
@@ -149,44 +168,56 @@ impl CreateClanModal {
                 .and_then(|e| e.to_str())
                 .unwrap_or("")
                 .to_ascii_lowercase();
-            if !ALLOWED_EXTENSIONS.contains(&ext.as_str()) {
+            if !ClanImageMimeType::is_allowed_extension(&ext) {
                 tracing::warn!("logo pick rejected: unsupported file type .{ext}");
+                let _ = this.update(cx, |this, _| finish(this));
                 return;
             }
 
-            let file_size = match tokio::fs::metadata(&path).await {
-                Ok(m) => m.len(),
-                Err(e) => {
-                    tracing::warn!("logo pick: cannot read file metadata: {e}");
+            let path_buf = path.clone();
+            let file_size = match cx
+                .background_spawn(async move { std::fs::metadata(&path_buf).ok().map(|m| m.len()) })
+                .await
+            {
+                Some(size) => size,
+                None => {
+                    tracing::warn!("logo pick: cannot read file metadata");
+                    let _ = this.update(cx, |this, _| finish(this));
                     return;
                 }
             };
-            if file_size > MAX_LOGO_SIZE {
+            if file_size > MAX_CLAN_LOGO_BYTES {
                 tracing::warn!(
                     "logo pick rejected: file size {} > {} bytes",
                     file_size,
-                    MAX_LOGO_SIZE
+                    MAX_CLAN_LOGO_BYTES
                 );
+                let _ = this.update(cx, |this, _| finish(this));
                 return;
             }
 
             let task = match this.update(cx, |modal, cx| {
-                modal
-                    .clan_list
-                    .update(cx, |store, cx| store.upload_clan_logo(&path, cx))
+                modal.clan_list.update(cx, |store, cx| {
+                    store.upload_clan_image(&path, MAX_CLAN_LOGO_BYTES, cx)
+                })
             }) {
                 Ok(t) => t,
-                Err(_) => return,
+                Err(_) => {
+                    let _ = this.update(cx, |this, _| finish(this));
+                    return;
+                }
             };
             match task.await {
                 Ok(url) => {
                     let _ = this.update(cx, |modal, cx| {
                         modal.logo_url = Some(SharedString::from(url));
+                        finish(modal);
                         cx.notify();
                     });
                 }
                 Err(e) => {
                     tracing::error!("logo upload failed: {e}");
+                    let _ = this.update(cx, |this, _| finish(this));
                 }
             }
         }));
@@ -585,6 +616,7 @@ impl Render for CreateClanModal {
         v_flex()
             .track_focus(&self.focus_handle)
             .key_context("menu")
+            .image_cache(self.image_cache.clone())
             .on_action(cx.listener(|_, _: &::menu::Cancel, _window, cx| {
                 Shell::global(cx).update(cx, |shell, cx| shell.close_modal(cx));
             }))

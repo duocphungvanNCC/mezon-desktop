@@ -4,6 +4,7 @@ use gpui::{
 };
 use mezon_store::VoiceStore;
 
+use crate::app::window_controls::linux_app_id;
 use crate::components::primitives::{Icon, IconName};
 
 pub struct ScreenSharePipView {
@@ -24,8 +25,14 @@ impl ScreenSharePipView {
 }
 
 impl Render for ScreenSharePipView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let content = match self.voice.read(cx).render_image(self.key) {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let image = self.voice.read(cx).render_image(self.key);
+        self.voice
+            .update(cx, |store, cx| store.flush_texture_drops(Some(window), cx));
+        if image.is_some() {
+            window.request_animation_frame();
+        }
+        let content = match image {
             Some(image) => img(image)
                 .size_full()
                 .object_fit(ObjectFit::Contain)
@@ -86,6 +93,7 @@ pub fn open_screen_share_pip(
         window_min_size: Some(size(px(240.), px(150.))),
         focus: false,
         show: true,
+        app_id: linux_app_id(),
         ..Default::default()
     };
 

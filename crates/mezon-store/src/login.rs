@@ -43,6 +43,14 @@ impl LoginStore {
         cx.global::<GlobalLoginStore>().0.clone()
     }
 
+    pub fn try_global(cx: &App) -> Option<Entity<Self>> {
+        cx.try_global::<GlobalLoginStore>().map(|g| g.0.clone())
+    }
+
+    pub fn auth_state(&self) -> Entity<AuthState> {
+        self.auth_state.clone()
+    }
+
     pub fn client(&self) -> Arc<MezonClient> {
         self.client.clone()
     }
@@ -133,7 +141,25 @@ impl LoginStore {
         if let Some(e) = crate::direct::DirectMessageStore::try_global(cx) {
             e.update(cx, |s, cx| s.reset(cx));
         }
+        if let Some(e) = crate::friend::FriendStore::try_global(cx) {
+            e.update(cx, |s, cx| s.reset(cx));
+        }
+        if let Some(e) = crate::activity::ActivityStore::try_global(cx) {
+            e.update(cx, |s, cx| s.reset(cx));
+        }
         if let Some(e) = crate::messages::MessagesStore::try_global(cx) {
+            e.update(cx, |s, cx| s.reset(cx));
+        }
+        if let Some(e) = crate::gallery::GalleryStore::try_global(cx) {
+            e.update(cx, |s, cx| s.reset(cx));
+        }
+        if let Some(e) = crate::inbox::InboxStore::try_global(cx) {
+            e.update(cx, |s, cx| s.reset(cx));
+        }
+        if let Some(e) = crate::topic_badges::TopicBadgeStore::try_global(cx) {
+            e.update(cx, |s, cx| s.reset(cx));
+        }
+        if let Some(e) = crate::topics::TopicsStore::try_global(cx) {
             e.update(cx, |s, cx| s.reset(cx));
         }
         if let Some(e) = crate::clan::ClanList::try_global(cx) {
