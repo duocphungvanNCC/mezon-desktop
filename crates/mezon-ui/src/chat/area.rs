@@ -15,8 +15,9 @@ use crate::chat::input_bar::InputBar;
 use crate::chat::member_list::{MemberListPanel, MemberSource};
 use crate::chat::mention_input::{MentionInput, MentionInputEvent};
 use crate::chat::message::ChannelMessages;
+use crate::chat::message_search::{MESSAGE_SEARCH_PANEL_WIDTH, MessageSearchPanel};
 use crate::chat::pinned_popover::PinnedPopoverPanel;
-use crate::components::primitives::{Icon, IconName};
+use crate::components::primitives::{Icon, IconName, InputState};
 use crate::image_cache::LruImageCache;
 use crate::theme::ActiveTheme;
 
@@ -31,6 +32,7 @@ pub struct ChatArea {
     typing: Entity<ChannelTyping>,
     _submit_sub: Option<Subscription>,
     _reply_sub: Option<Subscription>,
+    drop_title_cache: Option<(SharedString, SharedString, SharedString)>,
 }
 
 impl ChatArea {
@@ -54,6 +56,7 @@ impl ChatArea {
             typing,
             _submit_sub: None,
             _reply_sub: None,
+            drop_title_cache: None,
         }
     }
 
@@ -134,7 +137,7 @@ impl ChatArea {
 
     #[allow(clippy::too_many_arguments)]
     pub fn render(
-        &self,
+        &mut self,
         locale: &str,
         channel_name: Option<&str>,
         is_dm: bool,
@@ -145,6 +148,12 @@ impl ChatArea {
         inbox_handle: Option<PopoverMenuHandle<InboxPopoverPanel>>,
         clan_id: Option<String>,
         pin_handle: Option<PopoverMenuHandle<PinnedPopoverPanel>>,
+        show_search_bar: bool,
+        search_expanded: bool,
+        show_search_options: bool,
+        search_input: Option<Entity<InputState>>,
+        show_results_panel: bool,
+        message_search_panel: Option<Entity<MessageSearchPanel>>,
         cx: &mut Context<crate::ChatLayout>,
     ) -> gpui::AnyElement {
         let mention_input = match self.mention_input.clone() {
@@ -169,6 +178,10 @@ impl ChatArea {
                 inbox_handle,
                 clan_id,
                 pin_handle,
+                show_search_bar,
+                search_expanded,
+                show_search_options,
+                search_input,
                 Some(locale.to_string()),
                 cx,
             );
@@ -197,8 +210,25 @@ impl ChatArea {
         );
 
         let drop_input = mention_input.clone();
-        let drop_title = mezon_i18n::t(locale, "common.uploadToChannel")
-            .replace("{{channelName}}", channel_name.unwrap_or_default());
+        let channel_label = channel_name.unwrap_or_default();
+        let drop_title = match &self.drop_title_cache {
+            Some((cached_locale, cached_channel, title))
+                if cached_locale.as_ref() == locale && cached_channel.as_ref() == channel_label =>
+            {
+                title.clone()
+            }
+            _ => {
+                let title: SharedString = mezon_i18n::t(locale, "common.uploadToChannel")
+                    .replace("{{channelName}}", channel_label)
+                    .into();
+                self.drop_title_cache = Some((
+                    SharedString::from(locale.to_string()),
+                    SharedString::from(channel_label.to_string()),
+                    title.clone(),
+                ));
+                title
+            }
+        };
         let drop_body = mezon_i18n::t(locale, "common.uploadInstructions");
         let drop_overlay = div()
             .absolute()
@@ -233,7 +263,7 @@ impl ChatArea {
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_size(px(18.))
                             .text_color(rgb(0xffffff))
-                            .child(SharedString::from(drop_title)),
+                            .child(drop_title),
                     )
                     .child(
                         div()
@@ -241,7 +271,7 @@ impl ChatArea {
                             .text_center()
                             .text_size(px(14.))
                             .text_color(rgb(0xffffff))
-                            .child(SharedString::from(drop_body)),
+                            .child(drop_body),
                     ),
             );
 
@@ -267,6 +297,7 @@ impl ChatArea {
             .child(self.typing.clone())
             .child(drop_overlay);
 
+        let has_search_panel = show_results_panel && message_search_panel.is_some();
         let body = div()
             .flex()
             .flex_row()
@@ -276,16 +307,28 @@ impl ChatArea {
             .min_h_0()
             .overflow_hidden()
             .child(message_column)
-            .when(show_member_panel, |row| match &self.member_panel {
-                Some(panel) => row.child(
-                    AnyView::from(panel.clone()).cached(
+            .when_some(message_search_panel, |row, panel| {
+                row.child(
+                    AnyView::from(panel).cached(
                         StyleRefinement::default()
-                            .w(px(245.))
+                            .w(px(MESSAGE_SEARCH_PANEL_WIDTH))
                             .h_full()
                             .flex_shrink_0(),
                     ),
-                ),
-                None => row.child(div().w(px(245.)).h_full().flex_shrink_0()),
+                )
+            })
+            .when(show_member_panel && !has_search_panel, |row| {
+                match &self.member_panel {
+                    Some(panel) => row.child(
+                        AnyView::from(panel.clone()).cached(
+                            StyleRefinement::default()
+                                .w(px(245.))
+                                .h_full()
+                                .flex_shrink_0(),
+                        ),
+                    ),
+                    None => row.child(div().w(px(245.)).h_full().flex_shrink_0()),
+                }
             });
 
         div()

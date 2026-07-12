@@ -178,15 +178,14 @@ pub fn resolve_attachment_uploader(
         ProfileContext::Clan(clan_id)
     };
     if let Some(profile) = resolve_user_profile(uid, context, cx)
-        && !profile.display_name.is_empty()
-    {
-        let (avatar, avatar_raw) = uploader_urls(&profile.avatar_url, cfg);
-        return UploaderInfo {
-            name: profile.display_name,
-            avatar,
-            avatar_raw,
-        };
-    }
+        && !profile.display_name.is_empty() {
+            let (avatar, avatar_raw) = uploader_urls(&profile.avatar_url, cfg);
+            return UploaderInfo {
+                name: profile.display_name,
+                avatar,
+                avatar_raw,
+            };
+        }
     if let Some(info) = uploader_from_message(channel_id, message_id, cfg, cx) {
         return info;
     }
@@ -543,6 +542,18 @@ impl GalleryStore {
             cx.emit(GalleryEvent::Changed(channel_id));
             cx.notify();
         }
+    }
+
+    pub fn reset(&mut self, cx: &mut Context<Self>) {
+        if self.by_channel.is_empty() {
+            return;
+        }
+        let channel_ids: Vec<ChannelId> = self.by_channel.keys().copied().collect();
+        self.by_channel.clear();
+        for channel_id in channel_ids {
+            cx.emit(GalleryEvent::Changed(channel_id));
+        }
+        cx.notify();
     }
 
     fn fetch(
