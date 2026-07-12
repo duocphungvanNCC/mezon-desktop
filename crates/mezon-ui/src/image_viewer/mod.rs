@@ -457,10 +457,8 @@ impl ImageViewer {
         select_url: Option<SharedString>,
         cx: &mut Context<Self>,
     ) {
-        let (Some(gallery), Some(cfg)) = (
-            GalleryStore::try_global(cx),
-            AppConfig::try_global(cx).cloned(),
-        ) else {
+        let (Some(gallery), Some(cfg)) = (GalleryStore::try_global(cx), AppConfig::global_arc(cx))
+        else {
             self.loading = false;
             return;
         };
@@ -510,10 +508,8 @@ impl ImageViewer {
             return;
         };
         let after = newest.create_time_seconds;
-        let (Some(gallery), Some(cfg)) = (
-            GalleryStore::try_global(cx),
-            AppConfig::try_global(cx).cloned(),
-        ) else {
+        let (Some(gallery), Some(cfg)) = (GalleryStore::try_global(cx), AppConfig::global_arc(cx))
+        else {
             return;
         };
         let api = gallery.read(cx).api();
@@ -569,10 +565,8 @@ impl ImageViewer {
             return;
         };
         let before = oldest.create_time_seconds;
-        let (Some(gallery), Some(cfg)) = (
-            GalleryStore::try_global(cx),
-            AppConfig::try_global(cx).cloned(),
-        ) else {
+        let (Some(gallery), Some(cfg)) = (GalleryStore::try_global(cx), AppConfig::global_arc(cx))
+        else {
             return;
         };
         let api = gallery.read(cx).api();

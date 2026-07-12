@@ -171,6 +171,7 @@ pub struct MessageSearchPanel {
     cached_rows: Rc<Vec<SearchListRow>>,
     cached_highlights: Rc<Vec<String>>,
     rows_cache_fp: Option<(u64, u64)>,
+    observed_store_fp: Option<(u64, u64)>,
     _subs: [Subscription; 1],
 }
 
@@ -195,9 +196,10 @@ impl MessageSearchPanel {
                     .read(cx)
                     .state_ref(this.channel_id)
                     .map(|state| (state.generation, state.revision));
-                if fp == this.rows_cache_fp {
+                if fp == this.observed_store_fp {
                     return;
                 }
+                this.observed_store_fp = fp;
                 this.list_state.remeasure();
                 cx.notify();
             }),
@@ -215,6 +217,7 @@ impl MessageSearchPanel {
             cached_rows: Rc::new(Vec::new()),
             cached_highlights: Rc::new(Vec::new()),
             rows_cache_fp: None,
+            observed_store_fp: None,
             avatar_image_cache: cx.new(|cx| {
                 LruImageCache::avatar_thumbnail(
                     "message-search-avatars",
@@ -956,10 +959,10 @@ fn render_search_message_content(
     {
         return render_search_spans(&hit.spans, theme);
     }
-    if let Some(layout) = hit.rich_layout.as_ref() {
-        if !layout.text.is_empty() {
-            return render_rich_search_content(layout, terms, theme);
-        }
+    if let Some(layout) = hit.rich_layout.as_ref()
+        && !layout.text.is_empty()
+    {
+        return render_rich_search_content(layout, terms, theme);
     }
     if !hit.content_preview.is_empty() {
         return render_highlighted_content(hit.content_preview.as_ref(), terms, theme);
@@ -1587,7 +1590,7 @@ fn render_default_search_options(
                 .map(|(prefix, content)| {
                     let selected = *item_index == selected_index;
                     *item_index += 1;
-                    render_prefix_option_row(theme, prefix, &content, layout.clone(), selected)
+                    render_prefix_option_row(theme, prefix, content, layout.clone(), selected)
                 })
                 .collect::<Vec<_>>(),
         )

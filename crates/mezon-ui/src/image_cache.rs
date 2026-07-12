@@ -609,31 +609,27 @@ impl LruImageCache {
     /// next sweep, so only the currently-visible images stay in RAM.
     pub fn sweep(&mut self, window: &mut Window, cx: &mut App) {
         let epoch = self.epoch;
-        let stale: Vec<u64> = self
-            .cache
-            .iter()
-            .filter(|(_, entry)| {
-                entry_is_stale(
-                    entry.touched_epoch,
-                    epoch,
-                    entry.last_used.elapsed(),
-                    GRACE_PERIOD,
-                )
-            })
-            .map(|(key, _)| *key)
-            .collect();
-        for key in stale {
-            if let Some(mut entry) = self.cache.shift_remove(&key) {
-                entry.abort.abort();
-                self.metrics.evictions.fetch_add(1, Ordering::Relaxed);
-                if let Some(bytes) = entry.bytes {
-                    self.total_bytes = self.total_bytes.saturating_sub(bytes);
-                }
-                if let Some(Ok(image)) = entry.item.get() {
-                    cx.drop_image(image, Some(window));
-                }
+        let metrics = &self.metrics;
+        let total_bytes = &mut self.total_bytes;
+        self.cache.retain(|_, entry| {
+            if !entry_is_stale(
+                entry.touched_epoch,
+                epoch,
+                entry.last_used.elapsed(),
+                GRACE_PERIOD,
+            ) {
+                return true;
             }
-        }
+            entry.abort.abort();
+            metrics.evictions.fetch_add(1, Ordering::Relaxed);
+            if let Some(bytes) = entry.bytes {
+                *total_bytes = total_bytes.saturating_sub(bytes);
+            }
+            if let Some(Ok(image)) = entry.item.get() {
+                cx.drop_image(image, Some(&mut *window));
+            }
+            false
+        });
         self.epoch = self.epoch.wrapping_add(1);
         self.sweeps = self.sweeps.wrapping_add(1);
         if self.sweeps.is_multiple_of(STATS_LOG_INTERVAL) {
@@ -652,24 +648,22 @@ impl LruImageCache {
     }
 
     fn evict_idle(&mut self, ttl: Duration, cx: &mut App) {
-        let idle: Vec<u64> = self
-            .cache
-            .iter()
-            .filter(|(_, entry)| entry.last_used.elapsed() > ttl)
-            .map(|(key, _)| *key)
-            .collect();
-        for key in idle {
-            if let Some(mut entry) = self.cache.shift_remove(&key) {
-                entry.abort.abort();
-                self.metrics.evictions.fetch_add(1, Ordering::Relaxed);
-                if let Some(bytes) = entry.bytes {
-                    self.total_bytes = self.total_bytes.saturating_sub(bytes);
-                }
-                if let Some(Ok(image)) = entry.item.get() {
-                    queue_atlas_drop(cx, image);
-                }
+        let metrics = &self.metrics;
+        let total_bytes = &mut self.total_bytes;
+        self.cache.retain(|_, entry| {
+            if entry.last_used.elapsed() <= ttl {
+                return true;
             }
-        }
+            entry.abort.abort();
+            metrics.evictions.fetch_add(1, Ordering::Relaxed);
+            if let Some(bytes) = entry.bytes {
+                *total_bytes = total_bytes.saturating_sub(bytes);
+            }
+            if let Some(Ok(image)) = entry.item.get() {
+                queue_atlas_drop(cx, image);
+            }
+            false
+        });
     }
 
     pub fn shrink_to(&mut self, max_bytes: u64, window: &mut Window, cx: &mut App) {
@@ -677,7 +671,7 @@ impl LruImageCache {
             let Some(victim) = self.lru_index() else {
                 break;
             };
-            let Some((_, mut evicted)) = self.cache.shift_remove_index(victim) else {
+            let Some((_, mut evicted)) = self.cache.swap_remove_index(victim) else {
                 break;
             };
             evicted.abort.abort();
@@ -711,7 +705,7 @@ impl LruImageCache {
             let Some(victim) = self.lru_index() else {
                 break;
             };
-            let Some((_, mut evicted)) = self.cache.shift_remove_index(victim) else {
+            let Some((_, mut evicted)) = self.cache.swap_remove_index(victim) else {
                 break;
             };
             evicted.abort.abort();
@@ -756,7 +750,7 @@ impl LruImageCache {
                 }
             };
             if retry_failed {
-                self.cache.shift_remove(&hash);
+                self.cache.swap_remove(&hash);
             }
         }
 

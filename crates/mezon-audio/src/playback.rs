@@ -95,8 +95,10 @@ impl Source for SharedSamplesSource {
 
     fn try_seek(&mut self, pos: Duration) -> Result<(), rodio::source::SeekError> {
         let channels = self.channels.get() as usize;
-        let frame = (pos.as_secs_f64() * self.sample_rate.get() as f64) as usize;
-        let sample = (frame * channels).min(self.samples.len());
+        let sample = (pos.as_secs_f64()
+            * self.sample_rate.get() as f64
+            * self.channels.get() as f64) as usize;
+        let sample = sample.min(self.samples.len());
         self.position = sample - sample % channels;
         Ok(())
     }

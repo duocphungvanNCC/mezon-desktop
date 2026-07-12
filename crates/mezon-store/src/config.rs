@@ -88,21 +88,21 @@ impl AppConfig {
     /// Development defaults (matches pre-env hardcoded values).
     pub fn dev_defaults() -> Self {
         Self {
-            api_host: "dev-mezon.nccsoft.vn".into(),
-            api_port: 8088,
+            api_host: "api.mezon.ai".into(),
+            api_port: 443,
             api_secure: true,
-            api_key: "defaultkey".into(),
-            api_gw_host: "dev-mezon.nccsoft.vn".into(),
-            api_gw_port: 8088,
+            api_key: "HTTP3m3zonPr0dkey".into(),
+            api_gw_host: "gw.mezon.ai".into(),
+            api_gw_port: 443,
 
-            tcp_port: Some(7349),
-            stream_ws_url: "wss://stn.nccsoft.vn".into(),
-            meet_ws_url: "wss://meet.nccsoft.vn".into(),
+            tcp_port: None,
+            stream_ws_url: "wss://stn.mezon.ai".into(),
+            meet_ws_url: "wss://meet.mezon.ai".into(),
             notification_ws_url: "wss://gotify.mezon.ai".into(),
 
             oauth2_authorize_url: "https://oauth2.mezon.ai/oauth2/auth".into(),
-            oauth2_client_id: "f049f29e-12a9-464c-938f-0a2f60c3210b".into(),
-            oauth2_redirect_uri: "https://dev-mezon.nccsoft.vn/login/callback".into(),
+            oauth2_client_id: "25f63a1f-16b8-488b-8b14-68520eeab77f".into(),
+            oauth2_redirect_uri: "http://127.0.0.1:4200/login/callback".into(),
             oauth2_response_type: "code".into(),
             oauth2_scope: "openid+offline".into(),
             oauth2_code_challenge_method: "S256".into(),
@@ -116,37 +116,39 @@ impl AppConfig {
             logo_mezon: "https://cdn.mezon.ai/images/mezon_logo.png".into(),
             base_img_url: "https://cdn.mezon.ai".into(),
             profile_img_url: "https://profile.mezon.ai".into(),
-            imgproxy_base_url: "https://dev-imgproxy.nccsoft.vn".into(),
-            imgproxy_key: "_AEhOrrckkG-NjqIdVLtzc-dtLFuE4u6ClM0P46ICEY".into(),
+            imgproxy_base_url: "https://imgproxy.mezon.ai".into(),
+            imgproxy_key: "K0YUZRIosDOcz5lY6qrgC6UIXmQgWzLjZv7VJ1RAA8c".into(),
 
-            tenor_key: String::new(),
+            tenor_key: "AIzaSyA7PmFsiGws1XF-t6jXsVuF6O2DQLa8BpE".into(),
             tenor_url_categories: "https://tenor.googleapis.com/v2/categories?key=".into(),
             tenor_url_search: "https://tenor.googleapis.com/v2/search?q=".into(),
             tenor_url_featured: "https://tenor.googleapis.com/v2/featured?key=".into(),
 
             mezon_treasury_url: "https://withdraw-api.nccsoft.vn".into(),
-            mezon_treasury_key: String::new(),
-            contract_address: String::new(),
-            mezon_treasury_url_network: "https://polygonscan.com".into(),
+            mezon_treasury_key: "WTGYB2AJSHUBPAXZULT2Y7LGR4GQ".into(),
+            contract_address: "0x4F17a94dD6E1B2D6241C4D1956C6c7a07ba2Ec50".into(),
+            mezon_treasury_url_network: "https://sepolia.etherscan.io".into(),
 
-            webrtc_ice_servers_url: "turn:relay.mezon.vn:5349".into(),
+            webrtc_ice_servers_url: "turn:relay.mezon.ai:5349".into(),
             webrtc_ice_servers_username: "turnmezon".into(),
-            webrtc_ice_servers_credential: String::new(),
+            webrtc_ice_servers_credential: "QuTs4zUEcbylWemXL7MK".into(),
 
-            fcm_api_key: String::new(),
+            fcm_api_key: "AIzaSyAzgF6LfHVWzlr9gGHWU7emix2768wSGHg".into(),
             fcm_auth_domain: "mezon-772fa.firebaseapp.com".into(),
             fcm_project_id: "mezon-772fa".into(),
             fcm_storage_bucket: "mezon-772fa.appspot.com".into(),
             fcm_messaging_sender_id: "285548761692".into(),
-            fcm_app_id: String::new(),
-            fcm_measurement_id: String::new(),
-            fcm_vapid_key: String::new(),
+            fcm_app_id: "1:285548761692:web:3ca531af1deecee74e0c99".into(),
+            fcm_measurement_id: "G-0WNQTXVMT3".into(),
+            fcm_vapid_key:
+                "BLHZ5mS8qWRxw4Psmpq9QEavz1B8rYgmkWeJ9CCSDR-g-NjfYWpmfi_t2IV4dJLx2X76p2sApyISytUVtD64nfs"
+                    .into(),
 
             api_client_key_custom: "mezon.ai".into(),
-            sentry_dsn: String::new(),
-            anonymous_user_id: String::new(),
+            sentry_dsn: "https://7aad12a70a52b6598fa5847153a13781@o4509763792404480.ingest.us.sentry.io/4509767257751552".into(),
+            anonymous_user_id: "1767478432163172999".into(),
             max_length_name_allowed: 64,
-            update_url: "https://cdn.mezon.ai/release/".into(),
+            update_url: "https://cdn.mezon.ai/release/".into()
         }
     }
 
@@ -348,6 +350,10 @@ impl AppConfig {
         cx.try_global::<GlobalAppConfig>().map(|g| g.0.as_ref())
     }
 
+    pub fn global_arc(cx: &App) -> Option<Arc<AppConfig>> {
+        cx.try_global::<GlobalAppConfig>().map(|g| g.0.clone())
+    }
+
     pub fn imgproxy_url(
         &self,
         source_image_url: &str,
@@ -379,7 +385,7 @@ impl AppConfig {
     }
 
     pub fn avatar_proxy(&self, source: &str) -> String {
-        self.imgproxy_url(source, 100, 100, "fill")
+        self.imgproxy_url(source, 100, 100, "fit")
     }
 
     pub fn profile_proxy(&self, source: &str) -> String {

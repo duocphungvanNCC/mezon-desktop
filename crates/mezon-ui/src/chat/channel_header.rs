@@ -335,7 +335,7 @@ impl ChannelHeader {
         icon_active: gpui::Rgba,
         bg_hover: gpui::Rgba,
         bg_active: gpui::Rgba,
-        cx: &App,
+        _cx: &App,
     ) -> Vec<AnyElement> {
         let members_action = self.members_action;
         let members_active = self.members_active;

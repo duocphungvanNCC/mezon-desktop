@@ -121,6 +121,7 @@ pub struct GifStore {
     search_generation: u64,
     config: TenorConfig,
     _base_task: Option<Task<()>>,
+    _search_task: Option<Task<()>>,
 }
 
 struct GlobalGifStore(Entity<GifStore>);
@@ -154,6 +155,7 @@ impl GifStore {
             search_generation: 0,
             config: TenorConfig::from_app(cx),
             _base_task: None,
+            _search_task: None,
         }
     }
 
@@ -204,7 +206,7 @@ impl GifStore {
         cx.notify();
         let generation = self.search_generation;
         let url = self.config.search_url(&trimmed);
-        cx.spawn(async move |this, cx| {
+        self._search_task = Some(cx.spawn(async move |this, cx| {
             cx.background_executor().timer(SEARCH_DEBOUNCE).await;
             if this
                 .update(cx, |this, _| this.search_generation != generation)
@@ -225,8 +227,7 @@ impl GifStore {
                 cx.emit(GifEvent::Changed);
                 cx.notify();
             });
-        })
-        .detach();
+        }));
     }
 
     pub fn categories(&self) -> &[GifCategory] {
@@ -253,8 +254,8 @@ impl GifStore {
 async fn fetch_categories(url: &str) -> Option<Vec<GifCategory>> {
     let bytes = match mezon_client::transport_runtime::fetch_bytes(url).await {
         Ok((bytes, _)) => bytes,
-        Err(e) => {
-            tracing::error!("tenor categories fetch failed: {e}");
+        Err(_) => {
+            tracing::error!("tenor categories fetch failed");
             return None;
         }
     };
@@ -276,8 +277,8 @@ async fn fetch_categories(url: &str) -> Option<Vec<GifCategory>> {
 async fn fetch_gifs(url: &str) -> Option<Vec<Gif>> {
     let bytes = match mezon_client::transport_runtime::fetch_bytes(url).await {
         Ok((bytes, _)) => bytes,
-        Err(e) => {
-            tracing::error!("tenor gifs fetch failed: {e}");
+        Err(_) => {
+            tracing::error!("tenor gifs fetch failed");
             return None;
         }
     };

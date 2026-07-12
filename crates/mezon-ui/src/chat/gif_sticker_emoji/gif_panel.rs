@@ -5,9 +5,7 @@ use gpui::{
 use mezon_store::{Gif, GifStore};
 
 use crate::components::primitives::{Icon, IconName};
-use crate::image_cache::{
-    AVATAR_ENTRY_MAX_BYTES, AVATAR_IMAGE_CACHE_BYTES, AVATAR_IMAGE_CACHE_CAPACITY, LruImageCache,
-};
+use crate::image_cache::{LruImageCache, VIEWER_IMAGE_ENTRY_MAX_BYTES};
 use crate::theme::{ActiveTheme, Theme};
 
 const PANEL_H: f32 = 400.;
@@ -17,20 +15,28 @@ const GIF_ROW_PX: f32 = 104.;
 const CAT_COLS: usize = 2;
 const CAT_TILE_PX: f32 = 128.;
 const CAT_ROW_PX: f32 = 136.;
+const GIF_CACHE_CAPACITY: usize = 64;
+const GIF_CACHE_BYTES: u64 = 64 * 1024 * 1024;
 
 #[derive(Clone)]
 struct GifCell {
     url: SharedString,
     preview: SharedString,
+    cell_id: SharedString,
+    img_id: SharedString,
 }
 
 #[derive(Clone)]
 enum CatCell {
-    Trending,
+    Trending {
+        label: SharedString,
+    },
     Category {
         name: SharedString,
         searchterm: SharedString,
         image: SharedString,
+        tile_id: SharedString,
+        img_id: SharedString,
     },
 }
 
@@ -45,10 +51,14 @@ pub enum GifPanelEvent {
 }
 
 pub struct GifPanel {
+    locale: String,
     query: String,
     show_featured: bool,
     rows: Vec<GridRow>,
     row_height: f32,
+    searching_label: SharedString,
+    no_gifs_label: SharedString,
+    categories_label: SharedString,
     scroll: UniformListScrollHandle,
     image_cache: Entity<LruImageCache>,
     _sub: Option<Subscription>,
@@ -57,7 +67,7 @@ pub struct GifPanel {
 impl EventEmitter<GifPanelEvent> for GifPanel {}
 
 impl GifPanel {
-    pub fn new(cx: &mut Context<Self>) -> Self {
+    pub fn new(locale: String, cx: &mut Context<Self>) -> Self {
         let sub = GifStore::try_global(cx).map(|store| {
             store.update(cx, |store, cx| store.ensure_loaded(cx));
             cx.observe(&store, |this, _store, cx| {
@@ -66,15 +76,28 @@ impl GifPanel {
             })
         });
         let image_cache = cx.new(|cx| {
-            LruImageCache::avatar_thumbnail(
+            LruImageCache::viewer(
                 "gse-gif-panel",
-                AVATAR_IMAGE_CACHE_CAPACITY,
-                AVATAR_IMAGE_CACHE_BYTES,
-                AVATAR_ENTRY_MAX_BYTES,
+                GIF_CACHE_CAPACITY,
+                GIF_CACHE_BYTES,
+                VIEWER_IMAGE_ENTRY_MAX_BYTES,
                 cx,
             )
         });
         let mut panel = Self {
+            searching_label: SharedString::new_static(mezon_i18n::t(
+                &locale,
+                "searchMessageChannel.searching",
+            )),
+            no_gifs_label: SharedString::new_static(mezon_i18n::t(
+                &locale,
+                "chat.gifPicker.noGifs",
+            )),
+            categories_label: SharedString::new_static(mezon_i18n::t(
+                &locale,
+                "chat.gifPicker.categories",
+            )),
+            locale,
             query: String::new(),
             show_featured: false,
             rows: Vec::new(),
@@ -128,11 +151,15 @@ impl GifPanel {
                 .collect();
             self.row_height = GIF_ROW_PX;
         } else {
-            let mut items: Vec<CatCell> = vec![CatCell::Trending];
+            let trending =
+                SharedString::new_static(mezon_i18n::t(&self.locale, "chat.gifPicker.trending"));
+            let mut items: Vec<CatCell> = vec![CatCell::Trending { label: trending }];
             items.extend(store.categories().iter().map(|category| CatCell::Category {
                 name: category.name.clone(),
                 searchterm: category.searchterm.clone(),
                 image: category.image.clone(),
+                tile_id: SharedString::from(format!("gse-gif-cat-{}", category.searchterm)),
+                img_id: SharedString::from(format!("gse-gif-cat-img-{}", category.searchterm)),
             }));
             self.rows = items
                 .chunks(CAT_COLS)
@@ -151,15 +178,13 @@ impl Render for GifPanel {
         let is_searching =
             GifStore::try_global(cx).is_some_and(|store| store.read(cx).is_searching());
 
-        let empty_label: Option<&str> = if self.rows.is_empty() {
-            Some(if searching && is_searching {
-                "Searching…"
+        let empty_label: Option<SharedString> = self.rows.is_empty().then(|| {
+            if searching && is_searching {
+                self.searching_label.clone()
             } else {
-                "No GIFs found"
-            })
-        } else {
-            None
-        };
+                self.no_gifs_label.clone()
+            }
+        });
 
         let back_bar = (searching || self.show_featured).then(|| {
             let ent = entity.clone();
@@ -182,7 +207,7 @@ impl Render for GifPanel {
                         .text_size(px(12.))
                         .font_weight(FontWeight::SEMIBOLD)
                         .text_color(theme.tokens.text_theme_primary)
-                        .child("Categories"),
+                        .child(self.categories_label.clone()),
                 )
                 .on_click(move |_, _, cx| {
                     ent.update(cx, |this, cx| {
@@ -206,7 +231,7 @@ impl Render for GifPanel {
                     div()
                         .text_size(px(13.))
                         .text_color(theme.tokens.text_secondary)
-                        .child(label.to_string()),
+                        .child(label),
                 )
                 .into_any_element()
         } else {
@@ -249,6 +274,8 @@ impl Render for GifPanel {
 
 fn gif_cell(gif: &Gif) -> GifCell {
     GifCell {
+        cell_id: SharedString::from(format!("gse-gif-{}", gif.url)),
+        img_id: SharedString::from(format!("gse-gif-img-{}", gif.url)),
         url: gif.url.clone(),
         preview: gif.preview_url.clone(),
     }
@@ -264,10 +291,10 @@ fn render_gif_row(theme: &Theme, cells: &[GifCell], entity: &Entity<GifPanel>) -
         .gap_1();
     for cell in cells {
         let ent = entity.clone();
-        let url = cell.url.to_string();
+        let url = cell.url.clone();
         row = row.child(
             div()
-                .id(SharedString::from(format!("gse-gif-{}", cell.url)))
+                .id(cell.cell_id.clone())
                 .flex_1()
                 .h(px(GIF_CELL_PX))
                 .rounded_lg()
@@ -276,11 +303,12 @@ fn render_gif_row(theme: &Theme, cells: &[GifCell], entity: &Entity<GifPanel>) -
                 .cursor_pointer()
                 .child(
                     img(cell.preview.clone())
+                        .id(cell.img_id.clone())
                         .size_full()
                         .object_fit(gpui::ObjectFit::Cover),
                 )
                 .on_click(move |_, _, cx| {
-                    let url = url.clone();
+                    let url = url.to_string();
                     ent.update(cx, |_this, cx| cx.emit(GifPanelEvent::Picked { url }));
                 }),
         );
@@ -307,27 +335,35 @@ fn render_category_row(theme: &Theme, cells: &[CatCell], entity: &Entity<GifPane
     row.into_any_element()
 }
 
+type CatTile = (
+    SharedString,
+    Option<(SharedString, SharedString)>,
+    SharedString,
+    CatAction,
+);
+
 fn render_category_tile(theme: &Theme, cell: &CatCell, entity: &Entity<GifPanel>) -> AnyElement {
     let ent = entity.clone();
-    let (label, image, id, action): (SharedString, Option<SharedString>, SharedString, CatAction) =
-        match cell {
-            CatCell::Trending => (
-                "Trending GIFs".into(),
-                None,
-                "gse-gif-cat-trending".into(),
-                CatAction::Trending,
-            ),
-            CatCell::Category {
-                name,
-                searchterm,
-                image,
-            } => (
-                name.clone(),
-                (!image.is_empty()).then(|| image.clone()),
-                SharedString::from(format!("gse-gif-cat-{searchterm}")),
-                CatAction::Search(searchterm.to_string()),
-            ),
-        };
+    let (label, image, id, action): CatTile = match cell {
+        CatCell::Trending { label } => (
+            label.clone(),
+            None,
+            SharedString::new_static("gse-gif-cat-trending"),
+            CatAction::Trending,
+        ),
+        CatCell::Category {
+            name,
+            searchterm,
+            image,
+            tile_id,
+            img_id,
+        } => (
+            name.clone(),
+            (!image.is_empty()).then(|| (img_id.clone(), image.clone())),
+            tile_id.clone(),
+            CatAction::Search(searchterm.clone()),
+        ),
+    };
     let mut tile = div()
         .id(id)
         .relative()
@@ -337,9 +373,10 @@ fn render_category_tile(theme: &Theme, cell: &CatCell, entity: &Entity<GifPanel>
         .overflow_hidden()
         .bg(theme.bg_tertiary)
         .cursor_pointer();
-    if let Some(image) = image {
+    if let Some((img_id, source)) = image {
         tile = tile.child(
-            img(image)
+            img(source)
+                .id(img_id)
                 .absolute()
                 .inset_0()
                 .size_full()
@@ -354,7 +391,7 @@ fn render_category_tile(theme: &Theme, cell: &CatCell, entity: &Entity<GifPanel>
         .items_center()
         .justify_center()
         .gap_2();
-    if matches!(cell, CatCell::Trending) {
+    if matches!(cell, CatCell::Trending { .. }) {
         label_row = label_row.child(
             Icon::new(IconName::TrendingGifs)
                 .size(px(20.))
@@ -382,7 +419,9 @@ fn render_category_tile(theme: &Theme, cell: &CatCell, entity: &Entity<GifPanel>
                 cx.notify();
             }
             CatAction::Search(term) => {
-                cx.emit(GifPanelEvent::SetSearch { term });
+                cx.emit(GifPanelEvent::SetSearch {
+                    term: term.to_string(),
+                });
             }
         });
     })
@@ -392,5 +431,5 @@ fn render_category_tile(theme: &Theme, cell: &CatCell, entity: &Entity<GifPanel>
 #[derive(Clone)]
 enum CatAction {
     Trending,
-    Search(String),
+    Search(SharedString),
 }

@@ -91,12 +91,7 @@ fn macos_traffic_button(
 }
 
 pub fn hide_window(window: &Window) {
-    let Some(view) = appkit_view(window) else {
-        return;
-    };
-    with_ns_window(view, |ns_window| unsafe {
-        order_out(ns_window);
-    });
+    window.hide_window();
 }
 
 pub fn hide_active_window(cx: &mut App) {
@@ -129,7 +124,7 @@ pub fn install_shortcuts(cx: &App) {
             #[cfg(debug_assertions)]
             unsafe {
                 let kc: u16 = msg_send![event, keyCode];
-                if matches!(kc, 123 | 124 | 125 | 126) {
+                if matches!(kc, 123..=126) {
                     eprintln!("[gpui_monitor] arrow keyCode={kc} (123=L 124=R 125=Down 126=Up)");
                 }
             }

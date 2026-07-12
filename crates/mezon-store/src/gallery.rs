@@ -128,7 +128,7 @@ impl ChannelAttachment {
 
 pub async fn fetch_channel_attachments(
     api: Arc<AppApi>,
-    cfg: AppConfig,
+    cfg: Arc<AppConfig>,
     clan_id: ClanId,
     channel_id: ChannelId,
     before: u32,
@@ -594,7 +594,7 @@ impl GalleryStore {
         cx.notify();
 
         let api = self.api.clone();
-        let mapping_cfg = AppConfig::try_global(cx).cloned();
+        let mapping_cfg = AppConfig::global_arc(cx);
         cx.spawn(async move |this, cx| {
             let result = api
                 .list_channel_attachments(

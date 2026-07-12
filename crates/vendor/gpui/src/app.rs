@@ -980,6 +980,11 @@ impl App {
         })
     }
 
+    // mezon vendor edit: call site of the insertion-ordered [`AccessedEntities`]
+    // accumulator (see `app/entity_map.rs`). This runs once per view per frame, and
+    // upstream CLONED the whole frame-wide accessed-entity set up front and diffed it
+    // afterwards. Slice the ids added during the callback off an order watermark
+    // instead — no clone, no set difference.
     pub(crate) fn detect_accessed_entities<R>(
         &mut self,
         callback: impl FnOnce(&mut App) -> R,

@@ -147,23 +147,13 @@ fn dispatch_realtime_push(
             None => tracing::warn!("server push (cid={cid}): envelope has no message"),
         },
         Err(e) => {
-            let prefix_len = payload.len().min(64);
-            let hex: String = payload[..prefix_len]
-                .iter()
-                .map(|byte| format!("{byte:02x}"))
-                .collect();
             if cid != 0 {
                 tracing::debug!(
-                    "late RPC response for cid={cid} (len={}) — request already timed out or \
-                     the connection was reset; dropping. Envelope parse said: {e}; first \
-                     {prefix_len} bytes: {hex}",
+                    "envelope decode failed for cid={cid} (len={}): {e}; dropping",
                     payload.len()
                 );
             } else {
-                tracing::warn!(
-                    "server push decode failed (len={}): {e}; first {prefix_len} bytes: {hex}",
-                    payload.len()
-                );
+                tracing::warn!("server push decode failed (len={}): {e}", payload.len());
             }
         }
     }
@@ -879,6 +869,13 @@ fn parse_references_json_value(value: &serde_json::Value) -> Vec<ApiMessageRef> 
             if message_ref_id == 0 {
                 return None;
             }
+            let message_sender_id = json_field_i64(item, "message_sender_id");
+            if message_sender_id == 0 {
+                tracing::warn!(
+                    "dropping reference {message_ref_id}: message_sender_id is missing or malformed"
+                );
+                return None;
+            }
             let avatar = match item.get("message_sender_avatar") {
                 Some(serde_json::Value::String(raw)) => raw.clone(),
                 _ => json_field_string(item, "mesages_sender_avatar"),
@@ -890,7 +887,7 @@ fn parse_references_json_value(value: &serde_json::Value) -> Vec<ApiMessageRef> 
                     .get("has_attachment")
                     .and_then(|v| v.as_bool())
                     .unwrap_or(false),
-                message_sender_id: json_field_i64(item, "message_sender_id"),
+                message_sender_id,
                 message_sender_username: json_field_string(item, "message_sender_username"),
                 message_sender_avatar: avatar,
                 message_sender_clan_nick: json_field_string(item, "message_sender_clan_nick"),

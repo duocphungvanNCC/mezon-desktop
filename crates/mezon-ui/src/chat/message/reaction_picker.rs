@@ -421,6 +421,16 @@ impl Render for ReactionPicker {
             body.h(px(LIST_H))
         };
 
+        if !self.embedded_search {
+            return div()
+                .image_cache(self.image_cache.clone())
+                .size_full()
+                .flex()
+                .flex_col()
+                .child(body)
+                .into_any_element();
+        }
+
         let hover_bar = div()
             .w_full()
             .h(px(HOVER_BAR_PX))
@@ -450,16 +460,6 @@ impl Render for ReactionPicker {
                         .child(name),
                 )
             });
-
-        if !self.embedded_search {
-            return div()
-                .image_cache(self.image_cache.clone())
-                .size_full()
-                .flex()
-                .flex_col()
-                .child(body)
-                .into_any_element();
-        }
 
         div()
             .track_focus(&self.focus_handle)

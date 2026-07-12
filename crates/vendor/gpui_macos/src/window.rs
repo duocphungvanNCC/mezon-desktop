@@ -1069,9 +1069,23 @@ impl MacWindow {
     }
 }
 
+// mezon vendor edit: gate for the `[gpui_window_lifecycle]` traces. They are the
+// diagnostics for a field-reported crash on window close, so they stay — but an
+// unconditional `eprintln!` per window/view teardown also shipped to release stderr.
+// On by default in debug; in release, opt in with `GPUI_WINDOW_LIFECYCLE_LOG=1` — the
+// same switch as the Windows twin in `gpui_windows/src/events.rs`.
+// `eprintln!` rather than `log::*` because vendored gpui has no log bridge in mezon.
+fn window_lifecycle_log_enabled() -> bool {
+    cfg!(debug_assertions)
+        || std::env::var("GPUI_WINDOW_LIFECYCLE_LOG")
+            .is_ok_and(|value| value == "true" || value == "1")
+}
+
 impl Drop for MacWindow {
     fn drop(&mut self) {
-        eprintln!("[gpui_window_lifecycle] MacWindow::drop");
+        if window_lifecycle_log_enabled() {
+            eprintln!("[gpui_window_lifecycle] MacWindow::drop");
+        }
         let mut this = self.0.lock();
         let layer = this.renderer.layer_ptr() as *mut Object;
         if !layer.is_null() {
@@ -1907,7 +1921,10 @@ extern "C" fn yes(_: &Object, _: Sel) -> BOOL {
 }
 
 extern "C" fn dealloc_window(this: &Object, _: Sel) {
-    eprintln!("[gpui_window_lifecycle] dealloc_window");
+    // mezon vendor edit: see `window_lifecycle_log_enabled` — gated crash diagnostic.
+    if window_lifecycle_log_enabled() {
+        eprintln!("[gpui_window_lifecycle] dealloc_window");
+    }
     unsafe {
         drop_window_state(this);
         let _: () = msg_send![super(this, class!(NSWindow)), dealloc];
@@ -1915,7 +1932,10 @@ extern "C" fn dealloc_window(this: &Object, _: Sel) {
 }
 
 extern "C" fn dealloc_view(this: &Object, _: Sel) {
-    eprintln!("[gpui_window_lifecycle] dealloc_view");
+    // mezon vendor edit: see `window_lifecycle_log_enabled` — gated crash diagnostic.
+    if window_lifecycle_log_enabled() {
+        eprintln!("[gpui_window_lifecycle] dealloc_view");
+    }
     unsafe {
         drop_window_state(this);
         let _: () = msg_send![super(this, class!(NSView)), dealloc];
@@ -2552,7 +2572,10 @@ extern "C" fn window_should_close(this: &Object, _: Sel, _: id) -> BOOL {
 }
 
 extern "C" fn close_window(this: &Object, _: Sel) {
-    eprintln!("[gpui_window_lifecycle] close_window override");
+    // mezon vendor edit: see `window_lifecycle_log_enabled` — gated crash diagnostic.
+    if window_lifecycle_log_enabled() {
+        eprintln!("[gpui_window_lifecycle] close_window override");
+    }
     unsafe {
         let close_callback = {
             let window_state = get_window_state(this);

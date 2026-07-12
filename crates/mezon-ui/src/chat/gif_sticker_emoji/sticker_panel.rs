@@ -8,9 +8,7 @@ use mezon_store::{ClanList, StickerEvent, StickerStore};
 use ui::{ScrollAxes, Scrollbars, WithScrollbar};
 
 use crate::components::primitives::{Icon, IconName};
-use crate::image_cache::{
-    AVATAR_ENTRY_MAX_BYTES, AVATAR_IMAGE_CACHE_BYTES, AVATAR_IMAGE_CACHE_CAPACITY, LruImageCache,
-};
+use crate::image_cache::{LruImageCache, SHARED_ENTRY_MAX_BYTES};
 use crate::theme::{ActiveTheme, Theme};
 
 const PANEL_H: f32 = 400.;
@@ -20,18 +18,24 @@ const STICKER_CELL_PX: f32 = 92.;
 const STICKER_IMG_PX: f32 = 80.;
 const STICKER_ROW_PX: f32 = 104.;
 const HEADER_PX: f32 = 40.;
+const STICKER_CACHE_CAPACITY: usize = 96;
+const STICKER_CACHE_BYTES: u64 = 48 * 1024 * 1024;
 
 #[derive(Clone)]
 struct StickerCell {
     id: SharedString,
     src: SharedString,
     shortname_lc: SharedString,
+    cell_id: SharedString,
+    img_id: SharedString,
 }
 
 struct StickerCategory {
     key: String,
-    name: SharedString,
+    name_upper: SharedString,
+    initial: SharedString,
     rail_id: SharedString,
+    header_id: SharedString,
     logo: SharedString,
     stickers: Vec<StickerCell>,
 }
@@ -52,6 +56,7 @@ pub struct StickerPanel {
     header_row: Vec<usize>,
     collapsed: HashSet<String>,
     selected: Option<String>,
+    empty_label: SharedString,
     list_state: ListState,
     list_dirty: bool,
     image_cache: Entity<LruImageCache>,
@@ -61,7 +66,7 @@ pub struct StickerPanel {
 impl EventEmitter<StickerPanelEvent> for StickerPanel {}
 
 impl StickerPanel {
-    pub fn new(cx: &mut Context<Self>) -> Self {
+    pub fn new(locale: String, cx: &mut Context<Self>) -> Self {
         let sub = StickerStore::try_global(cx).map(|store| {
             store.update(cx, |store, cx| store.ensure_loaded(cx));
             cx.subscribe(&store, |this, _store, _event: &StickerEvent, cx| {
@@ -70,11 +75,11 @@ impl StickerPanel {
             })
         });
         let image_cache = cx.new(|cx| {
-            LruImageCache::avatar_thumbnail(
+            LruImageCache::labeled(
                 "gse-sticker-panel",
-                AVATAR_IMAGE_CACHE_CAPACITY,
-                AVATAR_IMAGE_CACHE_BYTES,
-                AVATAR_ENTRY_MAX_BYTES,
+                STICKER_CACHE_CAPACITY,
+                STICKER_CACHE_BYTES,
+                SHARED_ENTRY_MAX_BYTES,
                 cx,
             )
         });
@@ -85,7 +90,11 @@ impl StickerPanel {
             header_row: Vec::new(),
             collapsed: HashSet::new(),
             selected: None,
-            list_state: ListState::new(0, ListAlignment::Top, px(200.)),
+            empty_label: SharedString::new_static(mezon_i18n::t(
+                &locale,
+                "chat.stickerPicker.noStickers",
+            )),
+            list_state: ListState::new(0, ListAlignment::Top, px(200.)).measure_all(),
             list_dirty: true,
             image_cache,
             _sub: sub,
@@ -118,6 +127,8 @@ impl StickerPanel {
                     id: sticker.id.clone().into(),
                     src: sticker.src.clone().into(),
                     shortname_lc: sticker.shortname.to_lowercase().into(),
+                    cell_id: SharedString::from(format!("gse-sticker-{}", sticker.id)),
+                    img_id: SharedString::from(format!("gse-sticker-img-{}", sticker.id)),
                 };
                 let label = if !sticker.clan_name.is_empty() {
                     sticker.clan_name.clone()
@@ -134,9 +145,14 @@ impl StickerPanel {
                         };
                         categories.push(StickerCategory {
                             key: sticker.clan_id.clone(),
-                            name: label.into(),
+                            name_upper: SharedString::from(label.to_uppercase()),
+                            initial: SharedString::from(initial_letter(&label)),
                             rail_id: SharedString::from(format!(
                                 "gse-sticker-rail-{}",
+                                sticker.clan_id
+                            )),
+                            header_id: SharedString::from(format!(
+                                "gse-sticker-cat-{}",
                                 sticker.clan_id
                             )),
                             logo,
@@ -242,7 +258,7 @@ impl Render for StickerPanel {
                 } else {
                     btn.hover(|s| s.bg(theme.bg_hover))
                 };
-                btn = btn.child(category_logo(&theme, &cat.logo, &cat.name, 28.));
+                btn = btn.child(category_logo(&theme, &cat.logo, &cat.initial, 28.));
                 let key = cat.key.clone();
                 let btn = btn.on_click(move |_, _, cx| {
                     ent.update(cx, |this, cx| {
@@ -286,7 +302,7 @@ impl Render for StickerPanel {
                     div()
                         .text_size(px(13.))
                         .text_color(theme.tokens.text_theme_primary)
-                        .child("No stickers"),
+                        .child(self.empty_label.clone()),
                 )
                 .into_any_element()
         } else {
@@ -331,14 +347,14 @@ fn render_header(
         IconName::ChevronDown
     };
     div()
-        .id(SharedString::from(format!("gse-sticker-cat-{}", cat.key)))
+        .id(cat.header_id.clone())
         .h(px(HEADER_PX))
         .flex()
         .flex_row()
         .items_center()
         .gap_2()
         .cursor_pointer()
-        .child(category_logo(theme, &cat.logo, &cat.name, 16.))
+        .child(category_logo(theme, &cat.logo, &cat.initial, 16.))
         .child(
             div()
                 .max_w(px(300.))
@@ -346,7 +362,7 @@ fn render_header(
                 .text_size(px(12.))
                 .font_weight(FontWeight::SEMIBOLD)
                 .text_color(theme.tokens.text_theme_primary)
-                .child(cat.name.to_uppercase()),
+                .child(cat.name_upper.clone()),
         )
         .child(
             Icon::new(chevron)
@@ -375,11 +391,11 @@ fn render_sticker_row(
         .gap_3();
     for cell in cells {
         let ent = entity.clone();
-        let url = cell.src.to_string();
-        let filename = cell.id.to_string();
+        let url = cell.src.clone();
+        let filename = cell.id.clone();
         row = row.child(
             div()
-                .id(SharedString::from(format!("gse-sticker-{}", cell.id)))
+                .id(cell.cell_id.clone())
                 .flex()
                 .items_center()
                 .justify_center()
@@ -392,13 +408,14 @@ fn render_sticker_row(
                 .when(!cell.src.is_empty(), |s| {
                     s.child(
                         img(cell.src.clone())
+                            .id(cell.img_id.clone())
                             .size(px(STICKER_IMG_PX))
                             .object_fit(gpui::ObjectFit::Contain),
                     )
                 })
                 .on_click(move |_, _, cx| {
-                    let url = url.clone();
-                    let filename = filename.clone();
+                    let url = url.to_string();
+                    let filename = filename.to_string();
                     ent.update(cx, |_this, cx| {
                         cx.emit(StickerPanelEvent::Picked { url, filename })
                     });
@@ -408,7 +425,12 @@ fn render_sticker_row(
     row.into_any_element()
 }
 
-fn category_logo(theme: &Theme, logo: &SharedString, name: &str, size: f32) -> AnyElement {
+fn category_logo(
+    theme: &Theme,
+    logo: &SharedString,
+    initial: &SharedString,
+    size: f32,
+) -> AnyElement {
     if !logo.is_empty() {
         return img(logo.clone())
             .size(px(size))
@@ -426,7 +448,7 @@ fn category_logo(theme: &Theme, logo: &SharedString, name: &str, size: f32) -> A
         .text_size(px(size * 0.42))
         .font_weight(FontWeight::BOLD)
         .text_color(theme.tokens.text_theme_primary)
-        .child(initial_letter(name))
+        .child(initial.clone())
         .into_any_element()
 }
 

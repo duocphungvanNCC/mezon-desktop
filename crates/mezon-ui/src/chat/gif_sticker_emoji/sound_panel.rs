@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use std::rc::Rc;
 
 use gpui::{
     AnyElement, App, Context, Entity, EventEmitter, FontWeight, ScrollStrategy, SharedString,
@@ -18,9 +19,10 @@ const RAIL_W: f32 = 44.;
 const ROW_PX: f32 = 52.;
 const ACCENT_BLUE: u32 = 0x5865f2;
 
-#[derive(Clone)]
 struct PickerSound {
     row_id: SharedString,
+    preview_id: SharedString,
+    send_id: SharedString,
     name: SharedString,
     name_lc: SharedString,
     url: SharedString,
@@ -28,15 +30,17 @@ struct PickerSound {
 
 struct SoundCategory {
     clan_id: SharedString,
-    name: SharedString,
+    name_upper: SharedString,
+    initial: SharedString,
     rail_id: SharedString,
+    header_id: SharedString,
     logo: SharedString,
-    sounds: Vec<PickerSound>,
+    sounds: Vec<Rc<PickerSound>>,
 }
 
 enum PickerRow {
     Header { cat_ix: usize, collapsed: bool },
-    Sounds(PickerSound, Option<PickerSound>),
+    Sounds(Rc<PickerSound>, Option<Rc<PickerSound>>),
 }
 
 pub enum SoundPanelEvent {
@@ -51,6 +55,7 @@ pub struct SoundPanel {
     collapsed: HashSet<String>,
     selected: Option<String>,
     last_preview: Option<String>,
+    empty_label: SharedString,
     scroll: UniformListScrollHandle,
     image_cache: Entity<LruImageCache>,
     _sticker_sub: Option<Subscription>,
@@ -60,7 +65,7 @@ pub struct SoundPanel {
 impl EventEmitter<SoundPanelEvent> for SoundPanel {}
 
 impl SoundPanel {
-    pub fn new(cx: &mut Context<Self>) -> Self {
+    pub fn new(locale: String, cx: &mut Context<Self>) -> Self {
         let sticker_sub = StickerStore::try_global(cx).map(|store| {
             store.update(cx, |store, cx| store.ensure_loaded(cx));
             cx.subscribe(&store, |this, _store, _event: &StickerEvent, cx| {
@@ -80,7 +85,7 @@ impl SoundPanel {
             }
         });
         let image_cache = cx.new(|cx| {
-            LruImageCache::avatar_thumbnail(
+            LruImageCache::avatar_thumbnail_small(
                 "gse-sound-panel",
                 AVATAR_IMAGE_CACHE_CAPACITY,
                 AVATAR_IMAGE_CACHE_BYTES,
@@ -96,6 +101,10 @@ impl SoundPanel {
             collapsed: HashSet::new(),
             selected: None,
             last_preview,
+            empty_label: SharedString::new_static(mezon_i18n::t(
+                &locale,
+                "chat.soundPicker.noSounds",
+            )),
             scroll: UniformListScrollHandle::new(),
             image_cache,
             _sticker_sub: sticker_sub,
@@ -121,24 +130,41 @@ impl SoundPanel {
         let mut categories: Vec<SoundCategory> = Vec::new();
         if let Some(store) = StickerStore::try_global(cx) {
             for sound in store.read(cx).sounds() {
-                let item = PickerSound {
+                let item = Rc::new(PickerSound {
                     row_id: SharedString::from(format!("gse-sound-{}", sound.id)),
+                    preview_id: SharedString::from(format!("gse-sound-{}-preview", sound.id)),
+                    send_id: SharedString::from(format!("gse-sound-{}-send", sound.id)),
                     name: sound.shortname.clone().into(),
                     name_lc: sound.shortname.to_lowercase().into(),
                     url: sound.src.clone().into(),
-                };
+                });
                 match categories
                     .iter_mut()
                     .find(|c| c.clan_id.as_ref() == sound.clan_id)
                 {
                     Some(cat) => cat.sounds.push(item),
-                    None => categories.push(SoundCategory {
-                        clan_id: sound.clan_id.clone().into(),
-                        name: sound.clan_name.clone().into(),
-                        rail_id: SharedString::from(format!("gse-sound-rail-{}", sound.clan_id)),
-                        logo: sound.logo.clone().into(),
-                        sounds: vec![item],
-                    }),
+                    None => {
+                        let logo = if sound.logo.is_empty() {
+                            SharedString::default()
+                        } else {
+                            SharedString::from(crate::util::imgproxy::avatar_url(cx, &sound.logo))
+                        };
+                        categories.push(SoundCategory {
+                            clan_id: sound.clan_id.clone().into(),
+                            name_upper: SharedString::from(sound.clan_name.to_uppercase()),
+                            initial: SharedString::from(initial_letter(&sound.clan_name)),
+                            rail_id: SharedString::from(format!(
+                                "gse-sound-rail-{}",
+                                sound.clan_id
+                            )),
+                            header_id: SharedString::from(format!(
+                                "gse-sound-cat-{}",
+                                sound.clan_id
+                            )),
+                            logo,
+                            sounds: vec![item],
+                        })
+                    }
                 }
             }
         }
@@ -164,7 +190,7 @@ impl SoundPanel {
                 }
                 continue;
             }
-            let matching: Vec<PickerSound> = cat
+            let matching: Vec<Rc<PickerSound>> = cat
                 .sounds
                 .iter()
                 .filter(|sound| sound.name_lc.contains(&needle))
@@ -208,7 +234,7 @@ impl Render for SoundPanel {
                 .overflow_y_scroll();
             for (cat_ix, cat) in self.categories.iter().enumerate() {
                 let ent = entity.clone();
-                let clan_id = cat.clan_id.to_string();
+                let clan_id = cat.clan_id.clone();
                 let active = self.selected.as_deref() == Some(cat.clan_id.as_ref());
                 let mut btn = div()
                     .id(cat.rail_id.clone())
@@ -242,12 +268,13 @@ impl Render for SoundPanel {
                             } else {
                                 theme.tokens.text_theme_primary.into()
                             })
-                            .child(initial_letter(&cat.name)),
+                            .child(cat.initial.clone()),
                     );
                 }
                 let btn = btn.on_click(move |_, _, cx| {
+                    let clan_id = clan_id.to_string();
                     ent.update(cx, |this, cx| {
-                        this.selected = Some(clan_id.clone());
+                        this.selected = Some(clan_id);
                         if let Some(&row) = this.header_row.get(cat_ix) {
                             this.scroll.scroll_to_item(row, ScrollStrategy::Top);
                         }
@@ -277,7 +304,7 @@ impl Render for SoundPanel {
                         }
                     }
                     Some(PickerRow::Sounds(left, right)) => {
-                        render_sound_row(&theme, left, right.as_ref(), &previewing, &list_entity)
+                        render_sound_row(&theme, left, right.as_deref(), &previewing, &list_entity)
                     }
                     None => div().h(px(ROW_PX)).into_any_element(),
                 })
@@ -306,7 +333,7 @@ impl Render for SoundPanel {
                         .text_size(px(12.))
                         .font_weight(FontWeight::MEDIUM)
                         .text_color(theme.tokens.text_theme_primary)
-                        .child("No sounds available"),
+                        .child(self.empty_label.clone()),
                 )
                 .into_any_element()
         } else {
@@ -351,7 +378,7 @@ fn render_header(
     entity: &Entity<SoundPanel>,
 ) -> AnyElement {
     let ent = entity.clone();
-    let clan_id = cat.clan_id.to_string();
+    let clan_id = cat.clan_id.clone();
     let chevron = if collapsed {
         IconName::ChevronRight
     } else {
@@ -374,11 +401,11 @@ fn render_header(
             .text_size(px(8.))
             .font_weight(FontWeight::BOLD)
             .text_color(theme.tokens.text_secondary)
-            .child(initial_letter(&cat.name))
+            .child(cat.initial.clone())
             .into_any_element()
     };
     div()
-        .id(SharedString::from(format!("gse-sound-cat-{}", cat.clan_id)))
+        .id(cat.header_id.clone())
         .h(px(ROW_PX))
         .flex()
         .flex_row()
@@ -393,7 +420,7 @@ fn render_header(
                 .text_size(px(12.))
                 .font_weight(FontWeight::BOLD)
                 .text_color(theme.tokens.text_secondary)
-                .child(cat.name.to_uppercase()),
+                .child(cat.name_upper.clone()),
         )
         .child(
             Icon::new(chevron)
@@ -402,7 +429,8 @@ fn render_header(
         )
         .child(div().h(px(1.)).flex_1().ml_2().bg(theme.border))
         .on_click(move |_, _, cx| {
-            ent.update(cx, |this, cx| this.toggle_collapse(clan_id.clone(), cx));
+            let clan_id = clan_id.to_string();
+            ent.update(cx, |this, cx| this.toggle_collapse(clan_id, cx));
         })
         .into_any_element()
 }
@@ -462,7 +490,7 @@ fn render_sound_cell(
         .hover(|s| s.border_color(gpui::rgb(ACCENT_BLUE)))
         .child(
             div()
-                .id(SharedString::from(format!("{}-preview", sound.row_id)))
+                .id(sound.preview_id.clone())
                 .flex()
                 .flex_shrink_0()
                 .items_center()
@@ -494,7 +522,7 @@ fn render_sound_cell(
         )
         .child(
             div()
-                .id(SharedString::from(format!("{}-send", sound.row_id)))
+                .id(sound.send_id.clone())
                 .flex()
                 .flex_shrink_0()
                 .items_center()

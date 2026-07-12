@@ -113,7 +113,8 @@ impl GifStickerEmojiPopup {
             }
             SubPanel::Stickers => {
                 if self.sticker.is_none() {
-                    let sticker = cx.new(StickerPanel::new);
+                    let locale = self.locale.clone();
+                    let sticker = cx.new(|cx| StickerPanel::new(locale, cx));
                     self._subs
                         .push(cx.subscribe(&sticker, |_this, _sticker, event, cx| {
                             let StickerPanelEvent::Picked { url, filename } = event;
@@ -127,7 +128,8 @@ impl GifStickerEmojiPopup {
             }
             SubPanel::Gifs => {
                 if self.gif.is_none() {
-                    let gif = cx.new(GifPanel::new);
+                    let locale = self.locale.clone();
+                    let gif = cx.new(|cx| GifPanel::new(locale, cx));
                     self._subs.push(cx.subscribe_in(
                         &gif,
                         window,
@@ -147,7 +149,8 @@ impl GifStickerEmojiPopup {
             }
             SubPanel::Sounds => {
                 if self.sound.is_none() {
-                    let sound = cx.new(SoundPanel::new);
+                    let locale = self.locale.clone();
+                    let sound = cx.new(|cx| SoundPanel::new(locale, cx));
                     self._subs
                         .push(cx.subscribe(&sound, |_this, _sound, event, cx| {
                             let SoundPanelEvent::Picked { url, filename } = event;

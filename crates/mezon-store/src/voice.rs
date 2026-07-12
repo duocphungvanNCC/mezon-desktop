@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -437,12 +437,16 @@ impl VoiceStore {
 
     pub fn flush_texture_drops(&self, mut window: Option<&mut Window>, cx: &mut App) {
         let drops: Vec<Arc<RenderImage>> = std::mem::take(&mut *self.pending_texture_drops.lock());
+        let replaces: Vec<Arc<RenderImage>> =
+            std::mem::take(&mut *self.pending_texture_replaces.lock());
+        let dropped: HashSet<_> = drops.iter().map(|image| image.id).collect();
         for image in drops {
             cx.drop_image(image, window.as_deref_mut());
         }
-        let replaces: Vec<Arc<RenderImage>> =
-            std::mem::take(&mut *self.pending_texture_replaces.lock());
         for image in replaces {
+            if dropped.contains(&image.id) {
+                continue;
+            }
             cx.update_render_image(&image, window.as_deref_mut());
         }
     }

@@ -11,7 +11,37 @@ use tokio::sync::{Mutex, mpsc, oneshot};
 use tokio_rustls::rustls::pki_types::ServerName;
 
 const WRITE_QUEUE_CAPACITY: usize = 256;
-const SOCK_HOST_IP_OVERRIDE: Option<&str> = Some("161.248.80.11");
+const WRITE_ENQUEUE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+const SOCKET_WRITE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
+const SOCK_HOST_IP_ENV: &str = "MEZON_SOCK_HOST_IP";
+const TCP_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+
+#[cfg(debug_assertions)]
+fn sock_host_ip_override(host: &str) -> Option<String> {
+    if host != crate::DEFAULT_WS_HOST {
+        return None;
+    }
+    std::env::var(SOCK_HOST_IP_ENV)
+        .ok()
+        .map(|ip| ip.trim().to_string())
+        .filter(|ip| !ip.is_empty())
+}
+
+#[cfg(not(debug_assertions))]
+fn sock_host_ip_override(_host: &str) -> Option<String> {
+    let _ = SOCK_HOST_IP_ENV;
+    None
+}
+
+async fn connect_tcp(host: &str, port: u16) -> Result<TcpStream> {
+    tokio::time::timeout(
+        TCP_CONNECT_TIMEOUT,
+        TcpStream::connect(format!("{host}:{port}")),
+    )
+    .await
+    .map_err(|_| anyhow::anyhow!("TCP connect timed out after 15s"))?
+    .map_err(|e| anyhow::anyhow!("TCP connect failed: {e}"))
+}
 
 #[cfg(debug_assertions)]
 use tokio_rustls::rustls::client::danger::{
@@ -612,18 +642,31 @@ impl AbridgedTcpAdapter {
                                     &packet[..packet.len().min(32)]
                                 );
                             }
-                            match tls.write_all(&packet).await {
-                                Ok(()) => tracing::trace!("write_all OK"),
-                                Err(e) => {
+                            match tokio::time::timeout(
+                                SOCKET_WRITE_TIMEOUT,
+                                tls.write_all(&packet),
+                            )
+                            .await
+                            {
+                                Ok(Ok(())) => tracing::trace!("write_all OK"),
+                                Ok(Err(e)) => {
                                     tracing::error!("write_all error: {}", e);
                                     break LoopExit::Error(e.to_string());
                                 }
+                                Err(_) => {
+                                    tracing::error!("write_all stalled; socket is not draining");
+                                    break LoopExit::Error("socket write timed out".to_string());
+                                }
                             }
-                            match tls.flush().await {
-                                Ok(()) => tracing::trace!("flush OK"),
-                                Err(e) => {
+                            match tokio::time::timeout(SOCKET_WRITE_TIMEOUT, tls.flush()).await {
+                                Ok(Ok(())) => tracing::trace!("flush OK"),
+                                Ok(Err(e)) => {
                                     tracing::error!("flush error: {}", e);
                                     break LoopExit::Error(e.to_string());
+                                }
+                                Err(_) => {
+                                    tracing::error!("flush stalled; socket is not draining");
+                                    break LoopExit::Error("socket flush timed out".to_string());
                                 }
                             }
                         }
@@ -684,19 +727,17 @@ impl TransportAdapter for AbridgedTcpAdapter {
         let config = build_client_config();
         let connector = tokio_rustls::TlsConnector::from(Arc::new(config));
 
-        let connect_host = match (host, SOCK_HOST_IP_OVERRIDE) {
-            (crate::DEFAULT_WS_HOST, Some(ip)) => ip,
-            _ => host,
-        };
-        let addr = format!("{}:{}", connect_host, port);
         tracing::debug!("TCP connecting...");
-        let tcp = tokio::time::timeout(
-            std::time::Duration::from_secs(15),
-            TcpStream::connect(&addr),
-        )
-        .await
-        .map_err(|_| anyhow::anyhow!("TCP connect timed out after 15s"))?
-        .map_err(|e| anyhow::anyhow!("TCP connect failed: {e}"))?;
+        let tcp = match sock_host_ip_override(host) {
+            Some(ip) => match connect_tcp(&ip, port).await {
+                Ok(tcp) => tcp,
+                Err(e) => {
+                    tracing::warn!("pinned socket host failed ({e}); falling back to DNS");
+                    connect_tcp(host, port).await?
+                }
+            },
+            None => connect_tcp(host, port).await?,
+        };
         let local = tcp
             .local_addr()
             .map_err(|e| anyhow::anyhow!("local_addr: {e}"))?;
@@ -823,10 +864,18 @@ impl TransportAdapter for AbridgedTcpAdapter {
                 }
             }
         };
-        tx.send(packet).await.map_err(|_| {
-            tracing::error!("mpsc send failed: channel closed");
-            anyhow::anyhow!("Write channel closed")
-        })?;
+        tx.send_timeout(packet, WRITE_ENQUEUE_TIMEOUT)
+            .await
+            .map_err(|err| match err {
+                mpsc::error::SendTimeoutError::Timeout(_) => {
+                    tracing::error!("write queue full; the socket is not draining");
+                    anyhow::anyhow!("Write queue full")
+                }
+                mpsc::error::SendTimeoutError::Closed(_) => {
+                    tracing::error!("mpsc send failed: channel closed");
+                    anyhow::anyhow!("Write channel closed")
+                }
+            })?;
         tracing::trace!("Packet queued via mpsc channel");
 
         Ok(())
@@ -845,9 +894,16 @@ impl TransportAdapter for AbridgedTcpAdapter {
                 None => return Err(anyhow::anyhow!("Write channel not available")),
             }
         };
-        tx.send(buffer)
+        tx.send_timeout(buffer, WRITE_ENQUEUE_TIMEOUT)
             .await
-            .map_err(|_| anyhow::anyhow!("Write channel closed"))?;
+            .map_err(|err| match err {
+                mpsc::error::SendTimeoutError::Timeout(_) => {
+                    anyhow::anyhow!("Write queue full")
+                }
+                mpsc::error::SendTimeoutError::Closed(_) => {
+                    anyhow::anyhow!("Write channel closed")
+                }
+            })?;
         Ok(())
     }
 

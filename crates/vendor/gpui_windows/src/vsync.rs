@@ -8,9 +8,10 @@ use util::ResultExt;
 use windows::Win32::{
     Foundation::HWND,
     Graphics::Dwm::{DWM_TIMING_INFO, DwmFlush, DwmGetCompositionTimingInfo},
-    Media::{timeBeginPeriod, timeEndPeriod},
     System::Performance::QueryPerformanceFrequency,
 };
+
+use crate::HighResTimerGuard;
 
 static QPC_TICKS_PER_SECOND: LazyLock<u64> = LazyLock::new(|| {
     let mut frequency = 0;
@@ -54,9 +55,10 @@ impl VSyncProvider {
             // mezon vendor edit: plain Sleep() quantizes to the ~15.6ms system tick and
             // overshoots (a hitch on the first frame after idle). Raise resolution to
             // 1ms around this fallback sleep so scroll-resume frames land on time.
-            unsafe { timeBeginPeriod(1) };
+            // The guard is the process-wide refcount shared with the dispatcher's short
+            // timers, so a sleep taken while one of those is pending costs no syscall at all.
+            let _resolution_guard = HighResTimerGuard::acquire();
             std::thread::sleep(self.interval);
-            unsafe { timeEndPeriod(1) };
         }
     }
 }

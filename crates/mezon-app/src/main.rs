@@ -138,10 +138,14 @@ fn install_foreground_watchdog(cx: &mut gpui::App) {
     static HEARTBEAT_MS: AtomicU64 = AtomicU64::new(0);
     let start = *START.get_or_init(Instant::now);
 
+    const WATCHDOG_HEARTBEAT_SECS: u64 = 5;
+
     let timer_executor = cx.background_executor().clone();
     cx.spawn(async move |_| {
         loop {
-            timer_executor.timer(Duration::from_secs(2)).await;
+            timer_executor
+                .timer(Duration::from_secs(WATCHDOG_HEARTBEAT_SECS))
+                .await;
             HEARTBEAT_MS.store(start.elapsed().as_millis() as u64, Ordering::Relaxed);
         }
     })
@@ -180,6 +184,7 @@ fn install_foreground_watchdog(cx: &mut gpui::App) {
                 }
             }
         })
+        .map_err(|e| tracing::error!("failed to start the foreground watchdog thread: {e}"))
         .ok();
 }
 

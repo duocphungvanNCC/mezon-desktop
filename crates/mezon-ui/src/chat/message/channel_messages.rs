@@ -36,15 +36,13 @@ use crate::image_cache::{
 use crate::theme::{ActiveTheme, Theme};
 
 const LOAD_MORE_ITEM_THRESHOLD: usize = 12;
-// Keep a modest symmetric measurement skirt, then grow only the active scroll
-// direction up to Zed's 2048px conversation-list budget.
-const LIST_BASE_OVERDRAW: f32 = 768.;
-const LIST_MAX_OVERDRAW: f32 = 2048.;
+const LIST_OVERDRAW: f32 = 1024.;
 const LIST_BOTTOM_PADDING: f32 = 20.;
 const KEY_SCROLL_DURATION: Duration = Duration::from_millis(150);
 const KEY_SCROLL_BEZIER_X1: f32 = 0.42;
 const KEY_SCROLL_BEZIER_X2: f32 = 0.58;
 const SCROLL_CACHE_SWEEP_INTERVAL: Duration = Duration::from_millis(100);
+const SCROLL_ACTIVITY_GRACE: Duration = Duration::from_millis(150);
 const SCROLL_HOVER_RELEASE_MS: u64 = 150;
 const HOVER_SHOW_DELAY_MS: u64 = 200;
 const HOVER_HIDE_DELAY_MS: u64 = 100;
@@ -338,6 +336,7 @@ pub struct ChannelMessages {
         Option<mezon_store::MessageId>,
     ),
     last_scroll_at: Option<Instant>,
+    scroll_idle_armed: bool,
     at_bottom: bool,
     last_visible_start: usize,
     header_shown: bool,
@@ -637,9 +636,8 @@ impl ChannelMessages {
         })
         .detach();
 
-        let list_state = ListState::new(0, ListAlignment::Bottom, px(LIST_BASE_OVERDRAW))
-            .adaptive_overdraw(px(LIST_MAX_OVERDRAW))
-            .smooth_line_scroll();
+        let list_state =
+            ListState::new(0, ListAlignment::Bottom, px(LIST_OVERDRAW)).smooth_line_scroll();
         let timeline = cx.weak_entity();
         list_state.set_scroll_handler(move |event, _window, cx| {
             let near_top = event.visible_range.start < LOAD_MORE_ITEM_THRESHOLD
@@ -697,7 +695,7 @@ impl ChannelMessages {
                     this.sync_channel_seen(cx);
                 }
 
-                this.last_scroll_at = Some(Instant::now());
+                this.mark_scroll_activity(cx);
                 if !this.suppress_hover {
                     this.suppress_hover = true;
                     this.hovered_row = None;
@@ -831,6 +829,7 @@ impl ChannelMessages {
             last_paginate_count: 0,
             last_paginate_edges: (None, None),
             last_scroll_at: None,
+            scroll_idle_armed: false,
             at_bottom: true,
             last_visible_start: 0,
             header_shown: false,
@@ -1713,8 +1712,42 @@ impl ChannelMessages {
 }
 
 impl ChannelMessages {
+    fn mark_scroll_activity(&mut self, cx: &mut Context<Self>) {
+        self.last_scroll_at = Some(Instant::now());
+        if self.scroll_idle_armed {
+            return;
+        }
+
+        self.scroll_idle_armed = true;
+        cx.spawn(async move |this, cx| {
+            let mut remaining = SCROLL_ACTIVITY_GRACE;
+            loop {
+                cx.background_executor().timer(remaining).await;
+                let next = this
+                    .update(cx, |this, cx| {
+                        let elapsed = this.last_scroll_at.map_or(SCROLL_ACTIVITY_GRACE, |at| {
+                            at.elapsed().min(SCROLL_ACTIVITY_GRACE)
+                        });
+                        if elapsed >= SCROLL_ACTIVITY_GRACE {
+                            this.scroll_idle_armed = false;
+                            cx.notify();
+                            None
+                        } else {
+                            Some(SCROLL_ACTIVITY_GRACE - elapsed)
+                        }
+                    })
+                    .ok()
+                    .flatten();
+                let Some(next) = next else {
+                    break;
+                };
+                remaining = next;
+            }
+        })
+        .detach();
+    }
+
     fn scroll_messages_by(&mut self, delta: Pixels, cx: &mut Context<Self>) {
-        self.list_state.prepare_scroll(delta);
         let now = Instant::now();
         let current = self.list_state.scroll_px_offset_for_scrollbar().y.as_f32();
         let max = self.list_state.max_offset_for_scrollbar().y.as_f32();
@@ -1811,9 +1844,13 @@ impl Render for ChannelMessages {
         self.clear_image_cache_if_channel_changed(window, cx);
         self.sync_render_identity(cx);
         self.drive_scroll_anim(window);
-        let scroll_animating =
-            self.keyboard_scroll.is_some() || self.list_state.is_smooth_wheel_scrolling();
-        if !scroll_animating
+        let scroll_active = self.keyboard_scroll.is_some()
+            || self.list_state.is_smooth_wheel_scrolling()
+            || self.list_state.is_scrollbar_dragging()
+            || self
+                .last_scroll_at
+                .is_some_and(|at| at.elapsed() < SCROLL_ACTIVITY_GRACE);
+        if !scroll_active
             || self
                 .last_image_cache_sweep
                 .is_none_or(|at| at.elapsed() >= SCROLL_CACHE_SWEEP_INTERVAL)
@@ -1822,7 +1859,7 @@ impl Render for ChannelMessages {
                 .update(cx, |cache, cx| cache.sweep(window, cx));
             self.last_image_cache_sweep = Some(Instant::now());
         }
-        if !scroll_animating {
+        if !scroll_active {
             cx.defer_in(window, |this, window, cx| {
                 this.apply_gif_reconcile(window, cx)
             });

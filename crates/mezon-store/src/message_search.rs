@@ -113,8 +113,19 @@ impl MessageSearchStore {
 
     pub fn clear_channel(&mut self, channel_id: ChannelId, cx: &mut Context<Self>) {
         self.cancel_pending();
-        self.states
-            .insert(channel_id, ChannelSearchState::default(), None);
+        let (generation, revision) = self
+            .state_ref(channel_id)
+            .map(|state| (state.generation, state.revision))
+            .unwrap_or_default();
+        self.states.insert(
+            channel_id,
+            ChannelSearchState {
+                generation,
+                revision: revision.wrapping_add(1),
+                ..Default::default()
+            },
+            None,
+        );
         cx.notify();
     }
 

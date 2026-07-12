@@ -25,6 +25,8 @@ use crate::*;
 use gpui::*;
 
 pub(crate) const DISABLE_DIRECT_COMPOSITION: &str = "GPUI_DISABLE_DIRECT_COMPOSITION";
+// mezon vendor edit: escape hatch for the FLIP_DISCARD swap effect — see `create_swap_chain`.
+const DISABLE_FLIP_DISCARD: &str = "GPUI_DISABLE_FLIP_DISCARD";
 const RENDER_TARGET_FORMAT: DXGI_FORMAT = DXGI_FORMAT_B8G8R8A8_UNORM;
 // This configuration is used for MSAA rendering on paths only, and it's guaranteed to be supported by DirectX 11.
 const PATH_MULTISAMPLE_COUNT: u32 = 4;
@@ -83,6 +85,9 @@ struct DirectXResources {
     swap_chain: IDXGISwapChain1,
     swap_chain_flags: u32,
     frame_latency_waitable: Option<FrameLatencyWaitable>,
+    // mezon vendor edit: a frame slot was taken from `frame_latency_waitable` and not yet
+    // handed back by a Present. See `draw`.
+    frame_latency_wait_pending: bool,
     render_target: Option<ID3D11Texture2D>,
     render_target_view: Option<ID3D11RenderTargetView>,
 
@@ -239,7 +244,14 @@ impl DirectXRenderer {
                 .swap_chain
                 .Present(0, DXGI_PRESENT(0))
         };
-        result.ok().context("Presenting swap chain failed")
+        result.ok().context("Presenting swap chain failed")?;
+        // mezon vendor edit: the frame slot taken by the wait in `draw` is only handed back by
+        // a Present that went through. A failed one leaves the wait pending, so the next frame
+        // reuses the slot it already holds instead of taking a second one.
+        if let Some(resources) = self.resources.as_mut() {
+            resources.frame_latency_wait_pending = false;
+        }
+        Ok(())
     }
 
     pub(crate) fn handle_device_lost(&mut self, directx_devices: &DirectXDevices) -> Result<()> {
@@ -329,9 +341,15 @@ impl DirectXRenderer {
         // mezon vendor edit: pace the CPU against the flip queue so present latency is
         // bounded by SetMaximumFrameLatency(2) instead of DXGI's default deep queue.
         // Bounded timeout keeps a wedged compositor from deadlocking the UI thread.
+        // The waitable is a semaphore of 2 frame slots: a satisfied wait takes one, only a
+        // Present that went through hands it back, and `draw` can bail out before `present`.
+        // Carry an unmatched slot to the next frame rather than taking a second one, or two
+        // failed frames drain the budget for good. The flag lives on `DirectXResources` so a
+        // device-lost rebuild resets it with the swap chain that owns the semaphore.
         let waitable_handle = self
             .resources
             .as_ref()
+            .filter(|resources| !resources.frame_latency_wait_pending)
             .and_then(|resources| resources.frame_latency_waitable.as_ref())
             .map(|waitable| waitable.0);
         if let Some(handle) = waitable_handle {
@@ -353,6 +371,8 @@ impl DirectXRenderer {
                         "[gpui_frame_pacing] frame latency wait timed out (occurrence {n}); GPU/compositor is >2 frames behind"
                     );
                 }
+            } else if let Some(resources) = self.resources.as_mut() {
+                resources.frame_latency_wait_pending = true;
             }
         }
         self.pre_draw(&match background_appearance {
@@ -850,6 +870,7 @@ impl DirectXResources {
             swap_chain,
             swap_chain_flags,
             frame_latency_waitable,
+            frame_latency_wait_pending: false,
             render_target: Some(render_target),
             render_target_view,
             path_intermediate_texture,
@@ -1290,6 +1311,20 @@ fn create_swap_chain(
 ) -> Result<(IDXGISwapChain1, u32)> {
     use windows::Win32::Graphics::Dxgi::DXGI_MWA_NO_ALT_ENTER;
 
+    // mezon vendor edit: FLIP_DISCARD lets DXGI drop the back buffer contents rather than
+    // preserve them; BUFFER_COUNT is 3 and `pre_draw` full-clears, so nothing here depends on
+    // them being kept. The fallback below only fires when creation FAILS, so a driver that
+    // creates a FLIP_DISCARD chain successfully but then misbehaves has no way out — this env
+    // var is that escape hatch, and it mirrors the DISABLE_DIRECT_COMPOSITION idiom in
+    // `platform.rs` (that path is itself a driver workaround, and it is the one that lands
+    // here, since composition swap chains can't take FLIP_DISCARD at all).
+    let disable_flip_discard =
+        std::env::var(DISABLE_FLIP_DISCARD).is_ok_and(|value| value == "true" || value == "1");
+    let preferred_swap_effect = if disable_flip_discard {
+        DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL
+    } else {
+        DXGI_SWAP_EFFECT_FLIP_DISCARD
+    };
     let preferred_flags = DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT.0 as u32;
     let mut desc = DXGI_SWAP_CHAIN_DESC1 {
         Width: width,
@@ -1303,7 +1338,7 @@ fn create_swap_chain(
         BufferUsage: DXGI_USAGE_RENDER_TARGET_OUTPUT,
         BufferCount: BUFFER_COUNT as u32,
         Scaling: DXGI_SCALING_NONE,
-        SwapEffect: DXGI_SWAP_EFFECT_FLIP_DISCARD,
+        SwapEffect: preferred_swap_effect,
         AlphaMode: DXGI_ALPHA_MODE_IGNORE,
         Flags: preferred_flags,
     };
@@ -1311,7 +1346,9 @@ fn create_swap_chain(
         match unsafe { dxgi_factory.CreateSwapChainForHwnd(device, hwnd, &desc, None, None) } {
             Ok(swap_chain) => (swap_chain, preferred_flags),
             Err(err) => {
-                log::warn!("waitable FLIP_DISCARD hwnd swap chain failed ({err}), falling back");
+                log::warn!(
+                    "waitable hwnd swap chain failed ({err}), falling back to plain FLIP_SEQUENTIAL"
+                );
                 desc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL;
                 desc.Flags = 0;
                 (

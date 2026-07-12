@@ -6,9 +6,8 @@ use gpui::{
     Window, div, img, prelude::*, px,
 };
 use mezon_store::{
-    ScreenShareKind, ScreenShareListError, ScreenShareOption, ScreenSharePreview,
-    Settings, VoiceStore, capture_screen_share_preview, list_screen_share_options,
-    peek_screen_share_options,
+    ScreenShareKind, ScreenShareListError, ScreenShareOption, ScreenSharePreview, Settings,
+    VoiceStore, capture_screen_share_preview, list_screen_share_options, peek_screen_share_options,
 };
 
 use crate::app::shell::Shell;
@@ -195,7 +194,7 @@ impl ScreenShareModal {
                 let updated = this.update(cx, |this, cx| match image {
                     Some(image) => {
                         if let Some(previous) = this.previews.insert(key, image) {
-                            cx.drop_image(previous, None);
+                            crate::image_cache::queue_atlas_drop(cx, previous);
                         }
                         cx.notify();
                     }

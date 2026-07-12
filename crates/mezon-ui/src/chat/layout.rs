@@ -205,6 +205,7 @@ impl ChatLayout {
                 Shell::global(cx).update(cx, |shell, cx| shell.error(msg, cx));
             }
             let mini_changed = this.voice_mini_display_changed(cx);
+            this.sync_voice_frame_pump(cx);
             if mini_changed || this.is_voice_frame_relevant(cx) {
                 cx.notify();
             }
@@ -251,6 +252,7 @@ impl ChatLayout {
             this.apply_pending_channel(cx);
             this.ensure_active_channel_for_clan(cx);
             this.sync_inbox_context(cx);
+            this.sync_voice_frame_pump(cx);
             if this.active_channel_display_changed(cx) {
                 this.dismiss_threads_popover(cx);
                 this.pin_popover_handle.hide(cx);
@@ -269,6 +271,7 @@ impl ChatLayout {
             this.reset_message_search(cx);
             this.sync_active_from_route(cx);
             this.ensure_active_channel_for_clan(cx);
+            this.sync_voice_frame_pump(cx);
             this.dismiss_inbox_popover(cx);
             cx.notify();
         })
@@ -355,6 +358,7 @@ impl ChatLayout {
         };
         this.sync_active_from_route(cx);
         this.sync_inbox_context(cx);
+        this.sync_voice_frame_pump(cx);
         register_chat_layout(cx.weak_entity(), cx);
         this
     }
@@ -986,10 +990,8 @@ impl ChatLayout {
         changed
     }
 
-    fn drive_voice_video(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn sync_voice_frame_pump(&mut self, cx: &mut Context<Self>) {
         const VOICE_FRAME_INTERVAL: std::time::Duration = std::time::Duration::from_millis(33);
-        self.voice_store
-            .update(cx, |store, cx| store.flush_texture_drops(Some(window), cx));
         let want_pump =
             self.is_voice_frame_relevant(cx) && self.voice_store.read(cx).has_active_video();
         if !want_pump {
@@ -1129,7 +1131,8 @@ impl Render for ChatLayout {
         self.chat_area.ensure_input(window, cx);
         self.chat_area.bind_window(window, cx);
         self.maybe_prefetch_voice_token(cx);
-        self.drive_voice_video(window, cx);
+        self.voice_store
+            .update(cx, |store, cx| store.flush_texture_drops(Some(window), cx));
 
         if std::mem::take(&mut self.pending_open_threads_popover) {
             let handle = self.thread_popover_handle.clone();
