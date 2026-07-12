@@ -549,7 +549,15 @@ impl Render for ChannelSidebar {
                     })
                     .when_some(
                         clan_menu_data,
-                        move |el, (clan_id, clan_name, clan_avatar_url, show_empty, can_create_category, locale)| {
+                        move |el,
+                              (
+                            clan_id,
+                            clan_name,
+                            clan_avatar_url,
+                            show_empty,
+                            can_create_category,
+                            locale,
+                        )| {
                             let Some(clan_id) = clan_id else {
                                 return el;
                             };

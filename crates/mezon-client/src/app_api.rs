@@ -1530,7 +1530,6 @@ impl AppApi {
             .create_link_invite_user(clan_id, channel_id, expiry_time)
             .await
     }
-
 }
 
 #[cfg(test)]
