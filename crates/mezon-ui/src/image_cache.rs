@@ -6,8 +6,8 @@ use std::time::{Duration, Instant};
 use futures::future::{AbortHandle, Abortable};
 use futures::{AsyncReadExt as _, FutureExt};
 use gpui::{
-    App, AppContext, Asset, AssetLogger, Context, Entity, Global, ImageAssetLoader, ImageCache,
-    ImageCacheError, ImageCacheItem, RenderImage, Resource, Window, hash,
+    App, AppContext, Asset, AssetLogger, Context, Entity, Global, ImageCache, ImageCacheError,
+    ImageCacheItem, RenderImage, Resource, Window, hash,
 };
 use indexmap::IndexMap;
 
@@ -17,6 +17,27 @@ impl Global for PendingAtlasDrops {}
 
 pub(crate) fn queue_atlas_drop(cx: &mut App, image: Arc<RenderImage>) {
     cx.default_global::<PendingAtlasDrops>().0.push(image);
+}
+
+#[derive(Default)]
+struct PendingAtlasReplaces(Vec<Arc<RenderImage>>);
+impl Global for PendingAtlasReplaces {}
+
+#[cfg_attr(target_os = "macos", expect(dead_code))]
+pub(crate) fn queue_atlas_replace(cx: &mut App, image: Arc<RenderImage>) {
+    let pending = &mut cx.default_global::<PendingAtlasReplaces>().0;
+    if let Some(existing) = pending.iter_mut().find(|queued| queued.id == image.id) {
+        *existing = image;
+    } else {
+        pending.push(image);
+    }
+}
+
+pub fn flush_atlas_replaces(window: &mut Window, cx: &mut App) {
+    let pending = std::mem::take(&mut cx.default_global::<PendingAtlasReplaces>().0);
+    for image in pending {
+        cx.update_render_image(&image, Some(window));
+    }
 }
 
 const RELIEF_FLUSH_THRESHOLD_BYTES: u64 = 8 * 1024 * 1024;
@@ -235,6 +256,40 @@ pub fn release_freed_memory_to_os(cx: &mut App) {
     let _ = cx;
 }
 
+pub(crate) const AVATAR_FETCH_MAX_BYTES: usize = 8 * 1024 * 1024;
+pub(crate) const GALLERY_FETCH_MAX_BYTES: usize = 16 * 1024 * 1024;
+pub(crate) const MESSAGE_FETCH_MAX_BYTES: usize = 64 * 1024 * 1024;
+pub(crate) const VIEWER_FETCH_MAX_BYTES: usize = 64 * 1024 * 1024;
+
+pub(crate) async fn read_body_limited(
+    response: &mut gpui::http_client::Response<gpui::http_client::AsyncBody>,
+    limit: usize,
+) -> std::io::Result<Vec<u8>> {
+    if let Some(length) = response
+        .headers()
+        .get("content-length")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<u64>().ok())
+        && length > limit as u64
+    {
+        return Err(std::io::Error::other(format!(
+            "response body of {length} bytes exceeds the {limit} byte transfer limit"
+        )));
+    }
+    let mut body = Vec::new();
+    response
+        .body_mut()
+        .take(limit as u64 + 1)
+        .read_to_end(&mut body)
+        .await?;
+    if body.len() > limit {
+        return Err(std::io::Error::other(format!(
+            "response body exceeds the {limit} byte transfer limit"
+        )));
+    }
+    Ok(body)
+}
+
 pub const MESSAGE_IMAGE_CACHE_CAPACITY: usize = 48;
 pub const MESSAGE_IMAGE_CACHE_BYTES: u64 = 48 * 1024 * 1024;
 pub const AVATAR_IMAGE_CACHE_CAPACITY: usize = 256;
@@ -268,6 +323,8 @@ const GRACE_PERIOD: Duration = Duration::from_secs(2);
 const STATS_LOG_INTERVAL: u64 = 600;
 const MESSAGE_ANIMATION_MAX_PX: u32 = 400;
 const MESSAGE_STATIC_MAX_PX: u32 = 1024;
+const SHARED_ANIMATION_MAX_PX: u32 = 400;
+const SHARED_STATIC_MAX_PX: u32 = 2048;
 /// Longest side (px) that an animated GIF/WebP is downscaled to for the image
 /// viewer. Larger than the message cap since the viewer shows media bigger,
 /// but still bounded so a long animation cannot expand to hundreds of MB.
@@ -298,7 +355,16 @@ struct CacheEntry {
     /// The sweep epoch in which this entry was last requested.
     touched_epoch: u64,
     last_used: Instant,
+    /// When a transient load failure was first observed. Deterministic
+    /// failures — oversized-image rejections (`bytes == Some(0)`), canvas/
+    /// dimension guards (`Asset`), decode/limits errors (`Image`), bad SVGs
+    /// (`Usvg`) — are never retried; only network-shaped failures (`Io`,
+    /// `BadStatus`, `Other`) are retried once per
+    /// [`NEGATIVE_CACHE_RETRY_TTL`] while the image keeps being requested.
+    failed_at: Option<Instant>,
 }
+
+const NEGATIVE_CACHE_RETRY_TTL: Duration = Duration::from_secs(15);
 
 /// Sum of the decoded byte size across all frames of an image.
 fn image_bytes(image: &RenderImage) -> u64 {
@@ -322,9 +388,11 @@ static CACHE_INSTANCE_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::Ato
 /// Which decoder a cache uses to turn a resource into a `RenderImage`.
 #[derive(Clone, Copy)]
 enum LoaderKind {
-    /// GPUI's stock loader: decodes the image at full resolution and keeps every
-    /// frame of animated GIF/WebP. Used for message attachments that must render
-    /// full-size and animated.
+    /// Bounded general-purpose loader for the app-wide fallback cache (OGP
+    /// embeds, misc `img()` without an explicit cache): static images capped at
+    /// [`SHARED_STATIC_MAX_PX`], animations at [`SHARED_ANIMATION_MAX_PX`] with
+    /// an in-decode byte budget so a pathological file cannot spike RAM while
+    /// decoding.
     Full,
     /// Decodes only the first frame and downscales to avatar size, so even an
     /// animated full-resolution source costs ~100 KB of RAM. Used for avatars.
@@ -332,11 +400,11 @@ enum LoaderKind {
     AvatarThumbnailSmall,
     GalleryThumbnail,
     Message,
-    /// Decodes only the first frame at full resolution. The image viewer paints
-    /// a single static frame (frame 0), so keeping every frame of an animated
-    /// GIF/WebP is wasted RAM: a large animation decodes to `w * h * 4 * frames`
-    /// bytes yet only the first frame is ever shown.
-    ViewerFirstFrame,
+    /// The image-viewer loader: still images keep near-full resolution
+    /// ([`VIEWER_STATIC_MAX_PX`]); animated GIF/WebP keep every frame so they
+    /// animate, but downscaled to [`VIEWER_ANIMATION_MAX_PX`] and bounded by an
+    /// in-decode byte budget.
+    Viewer,
 }
 
 pub struct LruImageCache {
@@ -461,7 +529,7 @@ impl LruImageCache {
     ) -> Self {
         Self::with_loader(
             label,
-            LoaderKind::ViewerFirstFrame,
+            LoaderKind::Viewer,
             max_items,
             max_bytes,
             max_entry_bytes,
@@ -541,31 +609,27 @@ impl LruImageCache {
     /// next sweep, so only the currently-visible images stay in RAM.
     pub fn sweep(&mut self, window: &mut Window, cx: &mut App) {
         let epoch = self.epoch;
-        let stale: Vec<u64> = self
-            .cache
-            .iter()
-            .filter(|(_, entry)| {
-                entry_is_stale(
-                    entry.touched_epoch,
-                    epoch,
-                    entry.last_used.elapsed(),
-                    GRACE_PERIOD,
-                )
-            })
-            .map(|(key, _)| *key)
-            .collect();
-        for key in stale {
-            if let Some(mut entry) = self.cache.shift_remove(&key) {
-                entry.abort.abort();
-                self.metrics.evictions.fetch_add(1, Ordering::Relaxed);
-                if let Some(bytes) = entry.bytes {
-                    self.total_bytes = self.total_bytes.saturating_sub(bytes);
-                }
-                if let Some(Ok(image)) = entry.item.get() {
-                    cx.drop_image(image, Some(window));
-                }
+        let metrics = &self.metrics;
+        let total_bytes = &mut self.total_bytes;
+        self.cache.retain(|_, entry| {
+            if !entry_is_stale(
+                entry.touched_epoch,
+                epoch,
+                entry.last_used.elapsed(),
+                GRACE_PERIOD,
+            ) {
+                return true;
             }
-        }
+            entry.abort.abort();
+            metrics.evictions.fetch_add(1, Ordering::Relaxed);
+            if let Some(bytes) = entry.bytes {
+                *total_bytes = total_bytes.saturating_sub(bytes);
+            }
+            if let Some(Ok(image)) = entry.item.get() {
+                cx.drop_image(image, Some(&mut *window));
+            }
+            false
+        });
         self.epoch = self.epoch.wrapping_add(1);
         self.sweeps = self.sweeps.wrapping_add(1);
         if self.sweeps.is_multiple_of(STATS_LOG_INTERVAL) {
@@ -584,29 +648,30 @@ impl LruImageCache {
     }
 
     fn evict_idle(&mut self, ttl: Duration, cx: &mut App) {
-        let idle: Vec<u64> = self
-            .cache
-            .iter()
-            .filter(|(_, entry)| entry.last_used.elapsed() > ttl)
-            .map(|(key, _)| *key)
-            .collect();
-        for key in idle {
-            if let Some(mut entry) = self.cache.shift_remove(&key) {
-                entry.abort.abort();
-                self.metrics.evictions.fetch_add(1, Ordering::Relaxed);
-                if let Some(bytes) = entry.bytes {
-                    self.total_bytes = self.total_bytes.saturating_sub(bytes);
-                }
-                if let Some(Ok(image)) = entry.item.get() {
-                    queue_atlas_drop(cx, image);
-                }
+        let metrics = &self.metrics;
+        let total_bytes = &mut self.total_bytes;
+        self.cache.retain(|_, entry| {
+            if entry.last_used.elapsed() <= ttl {
+                return true;
             }
-        }
+            entry.abort.abort();
+            metrics.evictions.fetch_add(1, Ordering::Relaxed);
+            if let Some(bytes) = entry.bytes {
+                *total_bytes = total_bytes.saturating_sub(bytes);
+            }
+            if let Some(Ok(image)) = entry.item.get() {
+                queue_atlas_drop(cx, image);
+            }
+            false
+        });
     }
 
     pub fn shrink_to(&mut self, max_bytes: u64, window: &mut Window, cx: &mut App) {
         while self.total_bytes > max_bytes {
-            let Some((_, mut evicted)) = self.cache.shift_remove_index(0) else {
+            let Some(victim) = self.lru_index() else {
+                break;
+            };
+            let Some((_, mut evicted)) = self.cache.swap_remove_index(victim) else {
                 break;
             };
             evicted.abort.abort();
@@ -621,13 +686,26 @@ impl LruImageCache {
     }
 
     /// Evict least-recently-used entries until both the item-count and
-    /// byte budgets are satisfied. The most-recently-used entry (back of the
-    /// map) is never evicted, so the image requested this frame stays resident.
+    /// byte budgets are satisfied. The victim is the entry with the oldest
+    /// `last_used` timestamp (map order no longer tracks recency); the final
+    /// remaining entry is never evicted, so the image requested this frame
+    /// stays resident.
+    fn lru_index(&self) -> Option<usize> {
+        self.cache
+            .values()
+            .enumerate()
+            .min_by_key(|(_, entry)| entry.last_used)
+            .map(|(index, _)| index)
+    }
+
     fn evict_to_budget(&mut self, window: &mut Window, cx: &mut App) {
         while self.cache.len() > self.max_items
             || (self.total_bytes > self.max_bytes && self.cache.len() > 1)
         {
-            let Some((_, mut evicted)) = self.cache.shift_remove_index(0) else {
+            let Some(victim) = self.lru_index() else {
+                break;
+            };
+            let Some((_, mut evicted)) = self.cache.swap_remove_index(victim) else {
                 break;
             };
             evicted.abort.abort();
@@ -649,8 +727,34 @@ impl LruImageCache {
     ) -> Option<Result<Arc<RenderImage>, ImageCacheError>> {
         let hash = hash(resource);
 
-        if let Some(entry) = self.cache.shift_remove(&hash) {
-            self.cache.insert(hash, entry);
+        if self.cache.contains_key(&hash) {
+            let retry_failed = {
+                let entry = self.cache.get_mut(&hash).expect("checked contains_key");
+                let transient_failure = entry.bytes.is_none()
+                    && matches!(
+                        entry.item.get(),
+                        Some(Err(ImageCacheError::Io(_)
+                            | ImageCacheError::BadStatus { .. }
+                            | ImageCacheError::Other(_)))
+                    );
+                if transient_failure {
+                    match entry.failed_at {
+                        Some(failed_at) => failed_at.elapsed() >= NEGATIVE_CACHE_RETRY_TTL,
+                        None => {
+                            entry.failed_at = Some(Instant::now());
+                            false
+                        }
+                    }
+                } else {
+                    false
+                }
+            };
+            if retry_failed {
+                self.cache.swap_remove(&hash);
+            }
+        }
+
+        if self.cache.contains_key(&hash) {
             self.metrics.hits.fetch_add(1, Ordering::Relaxed);
 
             enum Measured {
@@ -664,7 +768,7 @@ impl LruImageCache {
             }
 
             let (res, measured) = {
-                let entry = self.cache.get_mut(&hash).expect("just re-inserted");
+                let entry = self.cache.get_mut(&hash).expect("checked contains_key");
                 entry.touched_epoch = self.epoch;
                 entry.last_used = Instant::now();
                 let res = entry.item.get();
@@ -711,7 +815,9 @@ impl LruImageCache {
 
         self.metrics.misses.fetch_add(1, Ordering::Relaxed);
         let loader = match self.loader {
-            LoaderKind::Full => AssetLogger::<ImageAssetLoader>::load(resource.clone(), cx).boxed(),
+            LoaderKind::Full => {
+                AssetLogger::<SharedImageLoader>::load(resource.clone(), cx).boxed()
+            }
             LoaderKind::AvatarThumbnail => {
                 AssetLogger::<AvatarImageLoader>::load(resource.clone(), cx).boxed()
             }
@@ -724,7 +830,7 @@ impl LruImageCache {
             LoaderKind::Message => {
                 AssetLogger::<MessageImageLoader>::load(resource.clone(), cx).boxed()
             }
-            LoaderKind::ViewerFirstFrame => {
+            LoaderKind::Viewer => {
                 AssetLogger::<ViewerImageLoader>::load(resource.clone(), cx).boxed()
             }
         };
@@ -739,6 +845,7 @@ impl LruImageCache {
                 bytes: None,
                 touched_epoch: self.epoch,
                 last_used: Instant::now(),
+                failed_at: None,
             },
         );
         self.evict_to_budget(window, cx);
@@ -809,8 +916,7 @@ fn load_avatar_scaled(
                     .get(uri.as_ref(), ().into(), true)
                     .await
                     .with_context(|| format!("loading avatar from {uri:?}"))?;
-                let mut body = Vec::new();
-                response.body_mut().read_to_end(&mut body).await?;
+                let body = read_body_limited(&mut response, AVATAR_FETCH_MAX_BYTES).await?;
                 if !response.status().is_success() {
                     let mut body = String::from_utf8_lossy(&body).into_owned();
                     let first_line = body.lines().next().unwrap_or("").trim_end();
@@ -898,8 +1004,7 @@ impl Asset for GalleryImageLoader {
                         .get(uri.as_ref(), ().into(), true)
                         .await
                         .with_context(|| format!("loading gallery image from {uri:?}"))?;
-                    let mut body = Vec::new();
-                    response.body_mut().read_to_end(&mut body).await?;
+                    let body = read_body_limited(&mut response, GALLERY_FETCH_MAX_BYTES).await?;
                     if !response.status().is_success() {
                         let mut body = String::from_utf8_lossy(&body).into_owned();
                         let first_line = body.lines().next().unwrap_or("").trim_end();
@@ -978,21 +1083,32 @@ fn downscaled_static_frame(decoded: image::DynamicImage, max_px: u32) -> image::
     bgra_frame(decoded)
 }
 
+enum AnimationDecodeError {
+    BudgetExceeded,
+    Image(ImageCacheError),
+}
+
 fn downscaled_animation_frames<I>(
     frames: I,
     max_px: u32,
-) -> Result<Vec<image::Frame>, ImageCacheError>
+    byte_budget: u64,
+) -> Result<Vec<image::Frame>, AnimationDecodeError>
 where
     I: Iterator<Item = image::ImageResult<image::Frame>>,
 {
     let mut out: Vec<image::Frame> = Vec::new();
     let mut target: Option<(u32, u32)> = None;
+    let mut decoded_bytes: u64 = 0;
     for frame in frames {
-        let frame = frame?;
+        let frame = frame.map_err(|err| AnimationDecodeError::Image(err.into()))?;
         let delay = frame.delay();
         let buffer = frame.into_buffer();
         let (tw, th) = *target
             .get_or_insert_with(|| downscale_dimensions(buffer.width(), buffer.height(), max_px));
+        decoded_bytes = decoded_bytes.saturating_add(u64::from(tw) * u64::from(th) * 4);
+        if decoded_bytes > byte_budget {
+            return Err(AnimationDecodeError::BudgetExceeded);
+        }
         let mut buffer = if buffer.width() == tw && buffer.height() == th {
             buffer
         } else {
@@ -1004,9 +1120,9 @@ where
         out.push(image::Frame::from_parts(buffer, 0, 0, delay));
     }
     if out.is_empty() {
-        return Err(ImageCacheError::Other(Arc::new(anyhow::anyhow!(
-            "animation decoded to zero frames"
-        ))));
+        return Err(AnimationDecodeError::Image(ImageCacheError::Other(
+            Arc::new(anyhow::anyhow!("animation decoded to zero frames")),
+        )));
     }
     Ok(out)
 }
@@ -1050,22 +1166,83 @@ fn decode_static_image(
     Ok(image::load_from_memory_with_format(bytes, format)?)
 }
 
+const MAX_DECODE_PIXELS: u64 = 48_000_000;
+const MAX_DECODER_ALLOC_BYTES: u64 = 256 * 1024 * 1024;
+
+fn decoder_limits() -> image::Limits {
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(16_384);
+    limits.max_image_height = Some(16_384);
+    limits.max_alloc = Some(MAX_DECODER_ALLOC_BYTES);
+    limits
+}
+
+fn reject_oversized_canvas(
+    bytes: &[u8],
+    format: image::ImageFormat,
+) -> Result<(), ImageCacheError> {
+    let mut reader = image::ImageReader::new(std::io::Cursor::new(bytes));
+    reader.set_format(format);
+    let (width, height) = reader.into_dimensions()?;
+    if width > 16_384 || height > 16_384 {
+        return Err(ImageCacheError::Asset(
+            format!("image dimension too large to decode: {width}x{height}").into(),
+        ));
+    }
+    if width as u64 * height as u64 > MAX_DECODE_PIXELS {
+        return Err(ImageCacheError::Asset(
+            format!("image dimensions too large to decode: {width}x{height}").into(),
+        ));
+    }
+    Ok(())
+}
+
 fn decode_message_image(
     bytes: &[u8],
     animation_max_px: u32,
     static_max_px: u32,
+    animation_byte_budget: u64,
 ) -> Result<Arc<RenderImage>, ImageCacheError> {
     use image::AnimationDecoder as _;
     let format = image::guess_format(bytes)?;
+    reject_oversized_canvas(bytes, format)?;
     let frames = match format {
         image::ImageFormat::Gif => {
-            let decoder = image::codecs::gif::GifDecoder::new(std::io::Cursor::new(bytes))?;
-            downscaled_animation_frames(decoder.into_frames(), animation_max_px)?
+            let mut decoder = image::codecs::gif::GifDecoder::new(std::io::Cursor::new(bytes))?;
+            image::ImageDecoder::set_limits(&mut decoder, decoder_limits())?;
+            match downscaled_animation_frames(
+                decoder.into_frames(),
+                animation_max_px,
+                animation_byte_budget,
+            ) {
+                Ok(frames) => frames,
+                Err(AnimationDecodeError::BudgetExceeded) => {
+                    let mut decoder =
+                        image::codecs::gif::GifDecoder::new(std::io::Cursor::new(bytes))?;
+                    image::ImageDecoder::set_limits(&mut decoder, decoder_limits())?;
+                    first_frame_fallback(decoder, static_max_px)?
+                }
+                Err(AnimationDecodeError::Image(err)) => return Err(err),
+            }
         }
         image::ImageFormat::WebP => {
-            let decoder = image::codecs::webp::WebPDecoder::new(std::io::Cursor::new(bytes))?;
+            let mut decoder = image::codecs::webp::WebPDecoder::new(std::io::Cursor::new(bytes))?;
+            image::ImageDecoder::set_limits(&mut decoder, decoder_limits())?;
             if decoder.has_animation() {
-                downscaled_animation_frames(decoder.into_frames(), animation_max_px)?
+                match downscaled_animation_frames(
+                    decoder.into_frames(),
+                    animation_max_px,
+                    animation_byte_budget,
+                ) {
+                    Ok(frames) => frames,
+                    Err(AnimationDecodeError::BudgetExceeded) => {
+                        let mut decoder =
+                            image::codecs::webp::WebPDecoder::new(std::io::Cursor::new(bytes))?;
+                        image::ImageDecoder::set_limits(&mut decoder, decoder_limits())?;
+                        first_frame_fallback(decoder, static_max_px)?
+                    }
+                    Err(AnimationDecodeError::Image(err)) => return Err(err),
+                }
             } else {
                 vec![downscaled_static_frame(
                     decode_static_image(bytes, format, static_max_px)?,
@@ -1079,6 +1256,24 @@ fn decode_message_image(
         )],
     };
     Ok(Arc::new(RenderImage::new(frames)))
+}
+
+fn first_frame_fallback<'a, D>(
+    decoder: D,
+    static_max_px: u32,
+) -> Result<Vec<image::Frame>, ImageCacheError>
+where
+    D: image::AnimationDecoder<'a>,
+{
+    let frame = decoder
+        .into_frames()
+        .next()
+        .ok_or_else(|| ImageCacheError::Asset("animation has no frames".into()))??;
+    let downscaled = downscaled_static_frame(
+        image::DynamicImage::ImageRgba8(frame.into_buffer()),
+        static_max_px,
+    );
+    Ok(vec![downscaled])
 }
 
 fn message_path_maybe_animated(path: &std::path::Path) -> bool {
@@ -1129,8 +1324,7 @@ impl Asset for MessageImageLoader {
                         .get(uri.as_ref(), ().into(), true)
                         .await
                         .with_context(|| format!("loading image from {uri:?}"))?;
-                    let mut body = Vec::new();
-                    response.body_mut().read_to_end(&mut body).await?;
+                    let body = read_body_limited(&mut response, MESSAGE_FETCH_MAX_BYTES).await?;
                     if !response.status().is_success() {
                         let mut body = String::from_utf8_lossy(&body).into_owned();
                         let first_line = body.lines().next().unwrap_or("").trim_end();
@@ -1154,7 +1348,79 @@ impl Asset for MessageImageLoader {
             };
 
             if image::guess_format(&bytes).is_ok() {
-                decode_message_image(&bytes, MESSAGE_ANIMATION_MAX_PX, MESSAGE_STATIC_MAX_PX)
+                decode_message_image(
+                    &bytes,
+                    MESSAGE_ANIMATION_MAX_PX,
+                    MESSAGE_STATIC_MAX_PX,
+                    MESSAGE_ENTRY_MAX_BYTES,
+                )
+            } else {
+                svg_renderer
+                    .render_single_frame(&bytes, 1.0)
+                    .map_err(Into::into)
+            }
+        }
+    }
+}
+
+/// Bounded loader for the app-wide fallback cache (`LoaderKind::Full`).
+/// Replaces GPUI's stock `ImageAssetLoader`, which decodes at full resolution
+/// and keeps every animation frame: statics are capped at
+/// [`SHARED_STATIC_MAX_PX`], animations at [`SHARED_ANIMATION_MAX_PX`] with an
+/// in-decode byte budget of [`SHARED_ENTRY_MAX_BYTES`].
+pub enum SharedImageLoader {}
+
+impl Asset for SharedImageLoader {
+    type Source = Resource;
+    type Output = Result<Arc<RenderImage>, ImageCacheError>;
+
+    fn load(
+        source: Self::Source,
+        cx: &mut App,
+    ) -> impl Future<Output = Self::Output> + Send + 'static {
+        let client = cx.http_client();
+        let svg_renderer = cx.svg_renderer();
+        let asset_source = cx.asset_source().clone();
+        async move {
+            let bytes = match source.clone() {
+                Resource::Path(uri) => std::fs::read(uri.as_ref())?,
+                Resource::Uri(uri) => {
+                    use anyhow::Context as _;
+
+                    let mut response = client
+                        .get(uri.as_ref(), ().into(), true)
+                        .await
+                        .with_context(|| format!("loading image from {uri:?}"))?;
+                    let body = read_body_limited(&mut response, MESSAGE_FETCH_MAX_BYTES).await?;
+                    if !response.status().is_success() {
+                        let mut body = String::from_utf8_lossy(&body).into_owned();
+                        let first_line = body.lines().next().unwrap_or("").trim_end();
+                        body.truncate(first_line.len());
+                        return Err(ImageCacheError::BadStatus {
+                            uri,
+                            status: response.status(),
+                            body,
+                        });
+                    }
+                    body
+                }
+                Resource::Embedded(path) => match asset_source.load(&path).ok().flatten() {
+                    Some(data) => data.to_vec(),
+                    None => {
+                        return Err(ImageCacheError::Asset(
+                            format!("Embedded resource not found: {path}").into(),
+                        ));
+                    }
+                },
+            };
+
+            if image::guess_format(&bytes).is_ok() {
+                decode_message_image(
+                    &bytes,
+                    SHARED_ANIMATION_MAX_PX,
+                    SHARED_STATIC_MAX_PX,
+                    SHARED_ENTRY_MAX_BYTES,
+                )
             } else {
                 svg_renderer
                     .render_single_frame(&bytes, 1.0)
@@ -1192,8 +1458,7 @@ impl Asset for ViewerImageLoader {
                         .get(uri.as_ref(), ().into(), true)
                         .await
                         .with_context(|| format!("loading image from {uri:?}"))?;
-                    let mut body = Vec::new();
-                    response.body_mut().read_to_end(&mut body).await?;
+                    let body = read_body_limited(&mut response, VIEWER_FETCH_MAX_BYTES).await?;
                     if !response.status().is_success() {
                         let mut body = String::from_utf8_lossy(&body).into_owned();
                         let first_line = body.lines().next().unwrap_or("").trim_end();
@@ -1217,7 +1482,12 @@ impl Asset for ViewerImageLoader {
             };
 
             if image::guess_format(&bytes).is_ok() {
-                decode_message_image(&bytes, VIEWER_ANIMATION_MAX_PX, VIEWER_STATIC_MAX_PX)
+                decode_message_image(
+                    &bytes,
+                    VIEWER_ANIMATION_MAX_PX,
+                    VIEWER_STATIC_MAX_PX,
+                    VIEWER_IMAGE_ENTRY_MAX_BYTES,
+                )
             } else {
                 svg_renderer
                     .render_single_frame(&bytes, 1.0)

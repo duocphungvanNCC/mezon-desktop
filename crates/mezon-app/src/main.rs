@@ -122,6 +122,72 @@ fn init_logging() {
 
 /// Log panics (location + backtrace) before delegating to the default hook, so a crash leaves
 /// a record in the log file instead of vanishing on stderr (invisible in a bundled `.app`).
+/// Distinguishes a hard hang from a crash in field reports: a foreground task
+/// bumps a heartbeat every second; a detached OS thread checks it and logs
+/// (synchronously, so it survives a later abort) when the foreground thread has
+/// not run for [`WATCHDOG_STALL_SECS`]. A crashed process stops both sides;
+/// a wedged UI thread keeps the watchdog logging while the app is frozen.
+fn install_foreground_watchdog(cx: &mut gpui::App) {
+    use std::sync::OnceLock;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{Duration, Instant};
+
+    const WATCHDOG_STALL_SECS: u64 = 20;
+
+    static START: OnceLock<Instant> = OnceLock::new();
+    static HEARTBEAT_MS: AtomicU64 = AtomicU64::new(0);
+    let start = *START.get_or_init(Instant::now);
+
+    const WATCHDOG_HEARTBEAT_SECS: u64 = 5;
+
+    let timer_executor = cx.background_executor().clone();
+    cx.spawn(async move |_| {
+        loop {
+            timer_executor
+                .timer(Duration::from_secs(WATCHDOG_HEARTBEAT_SECS))
+                .await;
+            HEARTBEAT_MS.store(start.elapsed().as_millis() as u64, Ordering::Relaxed);
+        }
+    })
+    .detach();
+
+    std::thread::Builder::new()
+        .name("mezon-fg-watchdog".into())
+        .spawn(move || {
+            let mut stale_checks = 0u32;
+            let mut reported_stall = false;
+            loop {
+                std::thread::sleep(Duration::from_secs(10));
+                let now_ms = start.elapsed().as_millis() as u64;
+                let last = HEARTBEAT_MS.load(Ordering::Relaxed);
+                let stalled_ms = now_ms.saturating_sub(last);
+                if stalled_ms >= WATCHDOG_STALL_SECS * 1000 {
+                    // Two consecutive stale checks are required so a wake from
+                    // system sleep (heartbeat catches up within one interval)
+                    // never logs a false stall; one line per stall episode.
+                    stale_checks += 1;
+                    if stale_checks >= 2 && !reported_stall {
+                        reported_stall = true;
+                        let line = format!(
+                            "[watchdog] foreground thread has not run for {}s",
+                            stalled_ms / 1000
+                        );
+                        eprintln!("{line}");
+                        tracing::error!("{line}");
+                    }
+                } else {
+                    stale_checks = 0;
+                    if reported_stall {
+                        reported_stall = false;
+                        tracing::warn!("[watchdog] foreground thread recovered after a stall");
+                    }
+                }
+            }
+        })
+        .map_err(|e| tracing::error!("failed to start the foreground watchdog thread: {e}"))
+        .ok();
+}
+
 fn install_panic_hook() {
     let default_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
@@ -217,6 +283,7 @@ fn run_app(lock: SingleInstance, initial_url: Option<String>) {
 
     app.run(move |cx: &mut App| {
         tracing::debug!("App started");
+        install_foreground_watchdog(cx);
 
         // Register gg sans font (TTFs pre-decompressed by build.rs)
         let gg_sans_paths: &[(&[u8], &str)] = &[
@@ -517,6 +584,7 @@ fn open_main_window(
     mezon_store::ClanMembersStore::init(api.clone(), cx);
     mezon_store::EmojiStore::init(api.clone(), cx);
     mezon_store::StickerStore::init(api.clone(), cx);
+    mezon_store::GifStore::init(cx);
     mezon_store::ChannelMembersStore::init(api.clone(), cx);
     mezon_store::ChannelPermissionsStore::init(api.clone(), cx);
     mezon_store::GroupMembersStore::init(api.clone(), cx);

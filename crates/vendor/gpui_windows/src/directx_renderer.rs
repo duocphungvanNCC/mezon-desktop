@@ -7,7 +7,7 @@ use ::util::ResultExt;
 use anyhow::{Context, Result};
 use windows::{
     Win32::{
-        Foundation::HWND,
+        Foundation::{CloseHandle, GetLastError, HANDLE, HWND, WAIT_FAILED, WAIT_TIMEOUT},
         Graphics::{
             Direct3D::*,
             Direct3D11::*,
@@ -15,6 +15,7 @@ use windows::{
             DirectWrite::*,
             Dxgi::{Common::*, *},
         },
+        System::Threading::WaitForSingleObjectEx,
     },
     core::Interface,
 };
@@ -24,6 +25,8 @@ use crate::*;
 use gpui::*;
 
 pub(crate) const DISABLE_DIRECT_COMPOSITION: &str = "GPUI_DISABLE_DIRECT_COMPOSITION";
+// mezon vendor edit: escape hatch for the FLIP_DISCARD swap effect — see `create_swap_chain`.
+const DISABLE_FLIP_DISCARD: &str = "GPUI_DISABLE_FLIP_DISCARD";
 const RENDER_TARGET_FORMAT: DXGI_FORMAT = DXGI_FORMAT_B8G8R8A8_UNORM;
 // This configuration is used for MSAA rendering on paths only, and it's guaranteed to be supported by DirectX 11.
 const PATH_MULTISAMPLE_COUNT: u32 = 4;
@@ -65,9 +68,26 @@ pub(crate) struct DirectXRendererDevices {
     dxgi_device: Option<IDXGIDevice>,
 }
 
+struct FrameLatencyWaitable(HANDLE);
+
+unsafe impl Send for FrameLatencyWaitable {}
+
+impl Drop for FrameLatencyWaitable {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = CloseHandle(self.0);
+        }
+    }
+}
+
 struct DirectXResources {
     // Direct3D rendering objects
     swap_chain: IDXGISwapChain1,
+    swap_chain_flags: u32,
+    frame_latency_waitable: Option<FrameLatencyWaitable>,
+    // mezon vendor edit: a frame slot was taken from `frame_latency_waitable` and not yet
+    // handed back by a Present. See `draw`.
+    frame_latency_wait_pending: bool,
     render_target: Option<ID3D11Texture2D>,
     render_target_view: Option<ID3D11RenderTargetView>,
 
@@ -224,7 +244,14 @@ impl DirectXRenderer {
                 .swap_chain
                 .Present(0, DXGI_PRESENT(0))
         };
-        result.ok().context("Presenting swap chain failed")
+        result.ok().context("Presenting swap chain failed")?;
+        // mezon vendor edit: the frame slot taken by the wait in `draw` is only handed back by
+        // a Present that went through. A failed one leaves the wait pending, so the next frame
+        // reuses the slot it already holds instead of taking a second one.
+        if let Some(resources) = self.resources.as_mut() {
+            resources.frame_latency_wait_pending = false;
+        }
+        Ok(())
     }
 
     pub(crate) fn handle_device_lost(&mut self, directx_devices: &DirectXDevices) -> Result<()> {
@@ -311,6 +338,43 @@ impl DirectXRenderer {
             // and so likely do not have the textures anymore that are required for drawing
             return Ok(());
         }
+        // mezon vendor edit: pace the CPU against the flip queue so present latency is
+        // bounded by SetMaximumFrameLatency(2) instead of DXGI's default deep queue.
+        // Bounded timeout keeps a wedged compositor from deadlocking the UI thread.
+        // The waitable is a semaphore of 2 frame slots: a satisfied wait takes one, only a
+        // Present that went through hands it back, and `draw` can bail out before `present`.
+        // Carry an unmatched slot to the next frame rather than taking a second one, or two
+        // failed frames drain the budget for good. The flag lives on `DirectXResources` so a
+        // device-lost rebuild resets it with the swap chain that owns the semaphore.
+        let waitable_handle = self
+            .resources
+            .as_ref()
+            .filter(|resources| !resources.frame_latency_wait_pending)
+            .and_then(|resources| resources.frame_latency_waitable.as_ref())
+            .map(|waitable| waitable.0);
+        if let Some(handle) = waitable_handle {
+            let result = unsafe { WaitForSingleObjectEx(handle, 33, false) };
+            if result == WAIT_FAILED {
+                eprintln!(
+                    "[gpui_frame_pacing] frame latency wait failed ({:?}); disabling waitable",
+                    unsafe { GetLastError() }
+                );
+                if let Some(resources) = self.resources.as_mut() {
+                    resources.frame_latency_waitable = None;
+                }
+            } else if result == WAIT_TIMEOUT {
+                use std::sync::atomic::{AtomicU32, Ordering};
+                static TIMEOUTS: AtomicU32 = AtomicU32::new(0);
+                let n = TIMEOUTS.fetch_add(1, Ordering::Relaxed);
+                if n < 4 {
+                    eprintln!(
+                        "[gpui_frame_pacing] frame latency wait timed out (occurrence {n}); GPU/compositor is >2 frames behind"
+                    );
+                }
+            } else if let Some(resources) = self.resources.as_mut() {
+                resources.frame_latency_wait_pending = true;
+            }
+        }
         self.pre_draw(&match background_appearance {
             WindowBackgroundAppearance::Opaque => [1.0f32; 4],
             _ => [0.0f32; 4],
@@ -383,7 +447,7 @@ impl DirectXRenderer {
                     width,
                     height,
                     RENDER_TARGET_FORMAT,
-                    DXGI_SWAP_CHAIN_FLAG(0),
+                    DXGI_SWAP_CHAIN_FLAG(resources.swap_chain_flags as i32),
                 )
                 .context("Failed to resize swap chain")?;
         }
@@ -768,7 +832,7 @@ impl DirectXResources {
         hwnd: HWND,
         disable_direct_composition: bool,
     ) -> Result<Self> {
-        let swap_chain = if disable_direct_composition {
+        let (swap_chain, swap_chain_flags) = if disable_direct_composition {
             create_swap_chain(&devices.dxgi_factory, &devices.device, hwnd, width, height)?
         } else {
             create_swap_chain_for_composition(
@@ -777,6 +841,18 @@ impl DirectXResources {
                 width,
                 height,
             )?
+        };
+        let frame_latency_waitable = if swap_chain_flags
+            & DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT.0 as u32
+            != 0
+        {
+            swap_chain.cast::<IDXGISwapChain2>().ok().and_then(|sc2| {
+                unsafe { sc2.SetMaximumFrameLatency(2) }.log_err()?;
+                let handle = unsafe { sc2.GetFrameLatencyWaitableObject() };
+                (!handle.is_invalid()).then_some(FrameLatencyWaitable(handle))
+            })
+        } else {
+            None
         };
 
         let (
@@ -792,6 +868,9 @@ impl DirectXResources {
 
         Ok(Self {
             swap_chain,
+            swap_chain_flags,
+            frame_latency_waitable,
+            frame_latency_wait_pending: false,
             render_target: Some(render_target),
             render_target_view,
             path_intermediate_texture,
@@ -1187,8 +1266,13 @@ fn create_swap_chain_for_composition(
     device: &ID3D11Device,
     width: u32,
     height: u32,
-) -> Result<IDXGISwapChain1> {
-    let desc = DXGI_SWAP_CHAIN_DESC1 {
+) -> Result<(IDXGISwapChain1, u32)> {
+    // mezon vendor edit: add a frame latency waitable object. Composition swap
+    // chains MUST keep DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL (CreateSwapChainForComposition
+    // rejects FLIP_DISCARD per DXGI docs) — only the waitable flag is new here, and it
+    // is dropped (not the effect) if the driver refuses it.
+    let preferred_flags = DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT.0 as u32;
+    let mut desc = DXGI_SWAP_CHAIN_DESC1 {
         Width: width,
         Height: height,
         Format: RENDER_TARGET_FORMAT,
@@ -1203,9 +1287,19 @@ fn create_swap_chain_for_composition(
         Scaling: DXGI_SCALING_STRETCH,
         SwapEffect: DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL,
         AlphaMode: DXGI_ALPHA_MODE_PREMULTIPLIED,
-        Flags: 0,
+        Flags: preferred_flags,
     };
-    Ok(unsafe { dxgi_factory.CreateSwapChainForComposition(device, &desc, None)? })
+    match unsafe { dxgi_factory.CreateSwapChainForComposition(device, &desc, None) } {
+        Ok(swap_chain) => Ok((swap_chain, preferred_flags)),
+        Err(err) => {
+            log::warn!("waitable composition swap chain failed ({err}), falling back");
+            desc.Flags = 0;
+            Ok((
+                unsafe { dxgi_factory.CreateSwapChainForComposition(device, &desc, None)? },
+                0,
+            ))
+        }
+    }
 }
 
 fn create_swap_chain(
@@ -1214,10 +1308,25 @@ fn create_swap_chain(
     hwnd: HWND,
     width: u32,
     height: u32,
-) -> Result<IDXGISwapChain1> {
+) -> Result<(IDXGISwapChain1, u32)> {
     use windows::Win32::Graphics::Dxgi::DXGI_MWA_NO_ALT_ENTER;
 
-    let desc = DXGI_SWAP_CHAIN_DESC1 {
+    // mezon vendor edit: FLIP_DISCARD lets DXGI drop the back buffer contents rather than
+    // preserve them; BUFFER_COUNT is 3 and `pre_draw` full-clears, so nothing here depends on
+    // them being kept. The fallback below only fires when creation FAILS, so a driver that
+    // creates a FLIP_DISCARD chain successfully but then misbehaves has no way out — this env
+    // var is that escape hatch, and it mirrors the DISABLE_DIRECT_COMPOSITION idiom in
+    // `platform.rs` (that path is itself a driver workaround, and it is the one that lands
+    // here, since composition swap chains can't take FLIP_DISCARD at all).
+    let disable_flip_discard =
+        std::env::var(DISABLE_FLIP_DISCARD).is_ok_and(|value| value == "true" || value == "1");
+    let preferred_swap_effect = if disable_flip_discard {
+        DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL
+    } else {
+        DXGI_SWAP_EFFECT_FLIP_DISCARD
+    };
+    let preferred_flags = DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT.0 as u32;
+    let mut desc = DXGI_SWAP_CHAIN_DESC1 {
         Width: width,
         Height: height,
         Format: RENDER_TARGET_FORMAT,
@@ -1229,14 +1338,27 @@ fn create_swap_chain(
         BufferUsage: DXGI_USAGE_RENDER_TARGET_OUTPUT,
         BufferCount: BUFFER_COUNT as u32,
         Scaling: DXGI_SCALING_NONE,
-        SwapEffect: DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL,
+        SwapEffect: preferred_swap_effect,
         AlphaMode: DXGI_ALPHA_MODE_IGNORE,
-        Flags: 0,
+        Flags: preferred_flags,
     };
-    let swap_chain =
-        unsafe { dxgi_factory.CreateSwapChainForHwnd(device, hwnd, &desc, None, None) }?;
+    let (swap_chain, flags) =
+        match unsafe { dxgi_factory.CreateSwapChainForHwnd(device, hwnd, &desc, None, None) } {
+            Ok(swap_chain) => (swap_chain, preferred_flags),
+            Err(err) => {
+                log::warn!(
+                    "waitable hwnd swap chain failed ({err}), falling back to plain FLIP_SEQUENTIAL"
+                );
+                desc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL;
+                desc.Flags = 0;
+                (
+                    unsafe { dxgi_factory.CreateSwapChainForHwnd(device, hwnd, &desc, None, None) }?,
+                    0,
+                )
+            }
+        };
     unsafe { dxgi_factory.MakeWindowAssociation(hwnd, DXGI_MWA_NO_ALT_ENTER) }?;
-    Ok(swap_chain)
+    Ok((swap_chain, flags))
 }
 
 #[inline]

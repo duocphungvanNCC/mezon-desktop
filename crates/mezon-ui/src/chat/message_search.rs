@@ -4,10 +4,10 @@ use std::rc::Rc;
 
 use chrono::Local;
 use gpui::{
-    App, Context, Entity, FocusHandle, Focusable, FontWeight, Global, HighlightStyle, ListAlignment,
-    ListOffset, ListState, MouseButton, MouseDownEvent, ObjectFit, Render, SharedString,
-    StyledText, Transformation, WeakEntity, Window, deferred, div, img, list, prelude::*, px,
-    radians,
+    App, Context, Entity, FocusHandle, Focusable, FontWeight, Global, HighlightStyle,
+    ListAlignment, ListOffset, ListState, MouseButton, MouseDownEvent, ObjectFit, Render,
+    SharedString, StyledText, Subscription, Transformation, WeakEntity, Window, deferred, div, img,
+    list, prelude::*, px, radians,
 };
 use mezon_store::{
     ChannelId, ChannelList, ChannelType, ClanId, ClanMembersStore, MessageSearchStore, MessageSpan,
@@ -168,6 +168,11 @@ pub struct MessageSearchPanel {
     last_results_page: i32,
     avatar_image_cache: Entity<LruImageCache>,
     attachment_image_cache: Entity<LruImageCache>,
+    cached_rows: Rc<Vec<SearchListRow>>,
+    cached_highlights: Rc<Vec<String>>,
+    rows_cache_fp: Option<(u64, u64)>,
+    observed_store_fp: Option<(u64, u64)>,
+    _subs: [Subscription; 1],
 }
 
 impl Focusable for MessageSearchPanel {
@@ -185,16 +190,20 @@ impl MessageSearchPanel {
         locale: SharedString,
         cx: &mut Context<Self>,
     ) -> Self {
-        cx.observe(&MessageSearchStore::global(cx), |this, _, cx| {
-            this.list_state.remeasure();
-            cx.notify();
-        })
-        .detach();
-        cx.observe(&MessagesStore::global(cx), |this, _, cx| {
-            this.list_state.remeasure();
-            cx.notify();
-        })
-        .detach();
+        let subs = [
+            cx.observe(&MessageSearchStore::global(cx), |this, store, cx| {
+                let fp = store
+                    .read(cx)
+                    .state_ref(this.channel_id)
+                    .map(|state| (state.generation, state.revision));
+                if fp == this.observed_store_fp {
+                    return;
+                }
+                this.observed_store_fp = fp;
+                this.list_state.remeasure();
+                cx.notify();
+            }),
+        ];
         Self {
             focus_handle: cx.focus_handle(),
             layout,
@@ -205,6 +214,10 @@ impl MessageSearchPanel {
             list_state: ListState::new(0, ListAlignment::Top, px(SEARCH_LIST_OVERDRAW))
                 .measure_all(),
             last_results_page: 0,
+            cached_rows: Rc::new(Vec::new()),
+            cached_highlights: Rc::new(Vec::new()),
+            rows_cache_fp: None,
+            observed_store_fp: None,
             avatar_image_cache: cx.new(|cx| {
                 LruImageCache::avatar_thumbnail(
                     "message-search-avatars",
@@ -223,6 +236,7 @@ impl MessageSearchPanel {
                     cx,
                 )
             }),
+            _subs: subs,
         }
     }
 
@@ -351,20 +365,25 @@ impl Render for MessageSearchPanel {
                 )
                 .into_any_element()
         } else {
-            let flat = build_search_list_rows(&state.results);
+            let fp = (state.generation, state.revision);
+            if self.rows_cache_fp != Some(fp) {
+                self.rows_cache_fp = Some(fp);
+                self.cached_rows = Rc::new(build_search_list_rows(&state.results));
+                self.cached_highlights = Rc::new(search_content_highlight_terms(&state.query));
+            }
             let current_page = state.current_page;
             let panel = cx.weak_entity();
             let now = Local::now();
-            let highlight_terms = Rc::new(search_content_highlight_terms(&state.query));
+            let highlight_terms = self.cached_highlights.clone();
             let avatar_cache = self.avatar_image_cache.clone();
             let attachment_cache = self.attachment_image_cache.clone();
             let pagination = (page_count > 1)
                 .then(|| render_search_pagination(&theme, current_page, page_count, panel));
-            if self.list_state.item_count() != flat.len() {
-                self.list_state.reset(flat.len());
+            if self.list_state.item_count() != self.cached_rows.len() {
+                self.list_state.reset(self.cached_rows.len());
             }
             let list_state = self.list_state.clone();
-            let flat_rows = Rc::new(flat);
+            let flat_rows = self.cached_rows.clone();
             let theme_for_list = theme.clone();
             let locale_for_list = locale.clone();
             let entity_for_list = entity.clone();
@@ -390,11 +409,7 @@ impl Render for MessageSearchPanel {
                                     .w_full()
                                     .px_4()
                                     .pt(if ix == 0 { px(16.) } else { px(0.) })
-                                    .pb(if ix + 1 == row_count {
-                                        px(8.)
-                                    } else {
-                                        px(0.)
-                                    })
+                                    .pb(if ix + 1 == row_count { px(8.) } else { px(0.) })
                                     .child(render_search_row(
                                         &theme_for_list,
                                         &row.hit,
@@ -415,7 +430,7 @@ impl Render for MessageSearchPanel {
                             .size_full(),
                         )
                         .custom_scrollbars(
-                            Scrollbars::new(ScrollAxes::Vertical)
+                            Scrollbars::always_visible(ScrollAxes::Vertical)
                                 .tracked_scroll_handle(&list_state),
                             window,
                             cx,
@@ -689,9 +704,10 @@ fn render_search_row(
             .rich_layout
             .as_ref()
             .is_some_and(|layout| !layout.text.is_empty())
-        || hit.spans.iter().any(|span| {
-            !matches!(span, MessageSpan::CodeBlock { .. })
-        });
+        || hit
+            .spans
+            .iter()
+            .any(|span| !matches!(span, MessageSpan::CodeBlock { .. }));
     let sender_color = resolve_search_sender_color(hit, is_direct, cx);
     let resolved_channel_label = resolve_search_channel_label(hit, channel_label, cx);
     let leading = if hit.avatar_proxied.is_empty() {
@@ -943,10 +959,10 @@ fn render_search_message_content(
     {
         return render_search_spans(&hit.spans, theme);
     }
-    if let Some(layout) = hit.rich_layout.as_ref() {
-        if !layout.text.is_empty() {
-            return render_rich_search_content(layout, terms, theme);
-        }
+    if let Some(layout) = hit.rich_layout.as_ref()
+        && !layout.text.is_empty()
+    {
+        return render_rich_search_content(layout, terms, theme);
     }
     if !hit.content_preview.is_empty() {
         return render_highlighted_content(hit.content_preview.as_ref(), terms, theme);
@@ -976,11 +992,7 @@ fn render_search_spans(spans: &[MessageSpan], theme: &Theme) -> gpui::AnyElement
                 }
             }
             MessageSpan::Bold(text) => {
-                row = row.child(
-                    div()
-                        .font_weight(FontWeight::BOLD)
-                        .child(text.to_string()),
-                );
+                row = row.child(div().font_weight(FontWeight::BOLD).child(text.to_string()));
             }
             MessageSpan::Code(text) => {
                 row = row.child(
@@ -1578,7 +1590,7 @@ fn render_default_search_options(
                 .map(|(prefix, content)| {
                     let selected = *item_index == selected_index;
                     *item_index += 1;
-                    render_prefix_option_row(theme, prefix, &content, layout.clone(), selected)
+                    render_prefix_option_row(theme, prefix, content, layout.clone(), selected)
                 })
                 .collect::<Vec<_>>(),
         )
@@ -1955,8 +1967,16 @@ pub fn init(cx: &mut App) {
         gpui::KeyBinding::new("secondary-f", OpenMessageSearch, None),
         gpui::KeyBinding::new("ctrl-f", OpenMessageSearch, None),
         gpui::KeyBinding::new("escape", ::menu::Cancel, Some(KEY_CONTEXT)),
-        gpui::KeyBinding::new("up", SelectPrevSearchOption, None),
-        gpui::KeyBinding::new("down", SelectNextSearchOption, None),
+        gpui::KeyBinding::new(
+            "up",
+            SelectPrevSearchOption,
+            Some(SEARCH_DROPDOWN_KEY_CONTEXT),
+        ),
+        gpui::KeyBinding::new(
+            "down",
+            SelectNextSearchOption,
+            Some(SEARCH_DROPDOWN_KEY_CONTEXT),
+        ),
     ]);
     cx.on_action(|_: &OpenMessageSearch, cx: &mut App| {
         let Some(window_handle) =

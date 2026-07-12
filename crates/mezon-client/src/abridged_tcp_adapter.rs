@@ -10,7 +10,38 @@ use tokio::net::TcpStream;
 use tokio::sync::{Mutex, mpsc, oneshot};
 use tokio_rustls::rustls::pki_types::ServerName;
 
-const SOCK_HOST_IP_OVERRIDE: Option<&str> = Some("161.248.80.11");
+const WRITE_QUEUE_CAPACITY: usize = 256;
+const WRITE_ENQUEUE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+const SOCKET_WRITE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
+const SOCK_HOST_IP_ENV: &str = "MEZON_SOCK_HOST_IP";
+const TCP_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+
+#[cfg(debug_assertions)]
+fn sock_host_ip_override(host: &str) -> Option<String> {
+    if host != crate::DEFAULT_WS_HOST {
+        return None;
+    }
+    std::env::var(SOCK_HOST_IP_ENV)
+        .ok()
+        .map(|ip| ip.trim().to_string())
+        .filter(|ip| !ip.is_empty())
+}
+
+#[cfg(not(debug_assertions))]
+fn sock_host_ip_override(_host: &str) -> Option<String> {
+    let _ = SOCK_HOST_IP_ENV;
+    None
+}
+
+async fn connect_tcp(host: &str, port: u16) -> Result<TcpStream> {
+    tokio::time::timeout(
+        TCP_CONNECT_TIMEOUT,
+        TcpStream::connect(format!("{host}:{port}")),
+    )
+    .await
+    .map_err(|_| anyhow::anyhow!("TCP connect timed out after 15s"))?
+    .map_err(|e| anyhow::anyhow!("TCP connect failed: {e}"))
+}
 
 #[cfg(debug_assertions)]
 use tokio_rustls::rustls::client::danger::{
@@ -117,6 +148,29 @@ fn read_varint(buf: &[u8]) -> Option<(u64, usize)> {
         shift += 7;
     }
     None
+}
+
+/// A realtime frame that fails Envelope decode is either corrupt or not an
+/// Envelope at all (schema drift, stray JSON, misaligned framing). Log a capped
+/// hex prefix for the first few occurrences so a field report identifies the
+/// actual wire content instead of just prost's error string.
+fn log_undecodable_frame(kind: &str, payload: &[u8], err: &impl std::fmt::Display) {
+    use std::sync::atomic::{AtomicU32, Ordering};
+    static LOGGED: AtomicU32 = AtomicU32::new(0);
+    let n = LOGGED.fetch_add(1, Ordering::Relaxed);
+    if n < 4 {
+        let prefix_len = payload.len().min(64);
+        let hex: String = payload[..prefix_len]
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+        tracing::warn!(
+            "{kind} decode failed (len={}, occurrence {n}): {err}; first {prefix_len} bytes: {hex}",
+            payload.len()
+        );
+    } else {
+        tracing::warn!("{kind} decode failed (len={}): {err}", payload.len());
+    }
 }
 
 fn scan_realtime_cid(payload: &[u8]) -> Option<i32> {
@@ -262,7 +316,7 @@ struct IoLoopState {
 }
 
 pub struct AbridgedTcpAdapter {
-    write_tx: Arc<Mutex<Option<mpsc::UnboundedSender<Vec<u8>>>>>,
+    write_tx: Arc<Mutex<Option<mpsc::Sender<Vec<u8>>>>>,
     handlers: Arc<Mutex<AdapterHandlers>>,
     is_connected: Arc<AtomicBool>,
     io_task: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
@@ -490,7 +544,7 @@ impl IoLoopState {
                         None => match mezon_proto::realtime::Envelope::decode(payload.as_slice()) {
                             Ok(envelope) => envelope.cid,
                             Err(e) => {
-                                tracing::warn!("realtime frame decode failed: {e}");
+                                log_undecodable_frame("realtime frame", &payload, &e);
                                 continue;
                             }
                         },
@@ -517,7 +571,7 @@ enum LoopExit {
 impl AbridgedTcpAdapter {
     async fn io_loop(
         mut tls: TlsStream,
-        mut write_rx: mpsc::UnboundedReceiver<Vec<u8>>,
+        mut write_rx: mpsc::Receiver<Vec<u8>>,
         ready_tx: oneshot::Sender<()>,
         mut state: IoLoopState,
     ) {
@@ -588,18 +642,31 @@ impl AbridgedTcpAdapter {
                                     &packet[..packet.len().min(32)]
                                 );
                             }
-                            match tls.write_all(&packet).await {
-                                Ok(()) => tracing::trace!("write_all OK"),
-                                Err(e) => {
+                            match tokio::time::timeout(
+                                SOCKET_WRITE_TIMEOUT,
+                                tls.write_all(&packet),
+                            )
+                            .await
+                            {
+                                Ok(Ok(())) => tracing::trace!("write_all OK"),
+                                Ok(Err(e)) => {
                                     tracing::error!("write_all error: {}", e);
                                     break LoopExit::Error(e.to_string());
                                 }
+                                Err(_) => {
+                                    tracing::error!("write_all stalled; socket is not draining");
+                                    break LoopExit::Error("socket write timed out".to_string());
+                                }
                             }
-                            match tls.flush().await {
-                                Ok(()) => tracing::trace!("flush OK"),
-                                Err(e) => {
+                            match tokio::time::timeout(SOCKET_WRITE_TIMEOUT, tls.flush()).await {
+                                Ok(Ok(())) => tracing::trace!("flush OK"),
+                                Ok(Err(e)) => {
                                     tracing::error!("flush error: {}", e);
                                     break LoopExit::Error(e.to_string());
+                                }
+                                Err(_) => {
+                                    tracing::error!("flush stalled; socket is not draining");
+                                    break LoopExit::Error("socket flush timed out".to_string());
                                 }
                             }
                         }
@@ -660,19 +727,17 @@ impl TransportAdapter for AbridgedTcpAdapter {
         let config = build_client_config();
         let connector = tokio_rustls::TlsConnector::from(Arc::new(config));
 
-        let connect_host = match (host, SOCK_HOST_IP_OVERRIDE) {
-            (crate::DEFAULT_WS_HOST, Some(ip)) => ip,
-            _ => host,
-        };
-        let addr = format!("{}:{}", connect_host, port);
         tracing::debug!("TCP connecting...");
-        let tcp = tokio::time::timeout(
-            std::time::Duration::from_secs(15),
-            TcpStream::connect(&addr),
-        )
-        .await
-        .map_err(|_| anyhow::anyhow!("TCP connect timed out after 15s"))?
-        .map_err(|e| anyhow::anyhow!("TCP connect failed: {e}"))?;
+        let tcp = match sock_host_ip_override(host) {
+            Some(ip) => match connect_tcp(&ip, port).await {
+                Ok(tcp) => tcp,
+                Err(e) => {
+                    tracing::warn!("pinned socket host failed ({e}); falling back to DNS");
+                    connect_tcp(host, port).await?
+                }
+            },
+            None => connect_tcp(host, port).await?,
+        };
         let local = tcp
             .local_addr()
             .map_err(|e| anyhow::anyhow!("local_addr: {e}"))?;
@@ -689,7 +754,7 @@ impl TransportAdapter for AbridgedTcpAdapter {
         tracing::debug!("TLS handshake complete");
 
         let (ready_tx, ready_rx) = oneshot::channel();
-        let (write_tx, write_rx) = mpsc::unbounded_channel();
+        let (write_tx, write_rx) = mpsc::channel(WRITE_QUEUE_CAPACITY);
         let state = IoLoopState {
             handlers: self.handlers.clone(),
             streams: HashMap::new(),
@@ -720,6 +785,7 @@ impl TransportAdapter for AbridgedTcpAdapter {
         tracing::debug!("Sending handshake");
         write_tx
             .send(handshake)
+            .await
             .map_err(|_| anyhow::anyhow!("Write channel closed early"))?;
         tracing::debug!("Handshake queued via mpsc channel");
 
@@ -788,20 +854,29 @@ impl TransportAdapter for AbridgedTcpAdapter {
             &packet[..packet.len().min(64)]
         );
 
-        let guard = self.write_tx.lock().await;
-        match *guard {
-            Some(ref tx) => {
-                tx.send(packet).map_err(|_| {
+        let tx = {
+            let guard = self.write_tx.lock().await;
+            match *guard {
+                Some(ref tx) => tx.clone(),
+                None => {
+                    tracing::error!("Write channel not available (None)");
+                    return Err(anyhow::anyhow!("Write channel not available"));
+                }
+            }
+        };
+        tx.send_timeout(packet, WRITE_ENQUEUE_TIMEOUT)
+            .await
+            .map_err(|err| match err {
+                mpsc::error::SendTimeoutError::Timeout(_) => {
+                    tracing::error!("write queue full; the socket is not draining");
+                    anyhow::anyhow!("Write queue full")
+                }
+                mpsc::error::SendTimeoutError::Closed(_) => {
                     tracing::error!("mpsc send failed: channel closed");
                     anyhow::anyhow!("Write channel closed")
-                })?;
-                tracing::trace!("Packet queued via mpsc channel");
-            }
-            None => {
-                tracing::error!("Write channel not available (None)");
-                return Err(anyhow::anyhow!("Write channel not available"));
-            }
-        }
+                }
+            })?;
+        tracing::trace!("Packet queued via mpsc channel");
 
         Ok(())
     }
@@ -812,13 +887,23 @@ impl TransportAdapter for AbridgedTcpAdapter {
         }
         let mut buffer = vec![0x00];
         buffer.extend(&cid.to_be_bytes());
-        let guard = self.write_tx.lock().await;
-        match *guard {
-            Some(ref tx) => tx
-                .send(buffer)
-                .map_err(|_| anyhow::anyhow!("Write channel closed"))?,
-            None => return Err(anyhow::anyhow!("Write channel not available")),
-        }
+        let tx = {
+            let guard = self.write_tx.lock().await;
+            match *guard {
+                Some(ref tx) => tx.clone(),
+                None => return Err(anyhow::anyhow!("Write channel not available")),
+            }
+        };
+        tx.send_timeout(buffer, WRITE_ENQUEUE_TIMEOUT)
+            .await
+            .map_err(|err| match err {
+                mpsc::error::SendTimeoutError::Timeout(_) => {
+                    anyhow::anyhow!("Write queue full")
+                }
+                mpsc::error::SendTimeoutError::Closed(_) => {
+                    anyhow::anyhow!("Write channel closed")
+                }
+            })?;
         Ok(())
     }
 

@@ -83,8 +83,11 @@ impl ClanBucket {
     }
 }
 
+const MAX_CACHED_CLANS: usize = 16;
+
 pub struct ClanMembersStore {
     cache: KeyedCache<ClanId, ClanBucket>,
+    self_role_ids: HashMap<ClanId, Vec<i64>>,
     loading: HashSet<ClanId>,
     api: Arc<AppApi>,
     _clan_sub: Subscription,
@@ -114,8 +117,13 @@ impl ClanMembersStore {
 
     pub fn reset(&mut self, cx: &mut Context<Self>) {
         self.cache.clear();
+        self.self_role_ids.clear();
         self.loading.clear();
         cx.notify();
+    }
+
+    pub fn self_role_ids(&self, clan_id: ClanId) -> Option<&[i64]> {
+        self.self_role_ids.get(&clan_id).map(Vec::as_slice)
     }
 
     fn new(api: Arc<AppApi>, cx: &mut Context<Self>) -> Self {
@@ -130,7 +138,8 @@ impl ClanMembersStore {
         let conn_watch = Self::spawn_connection_watch(api.clone(), cx);
 
         Self {
-            cache: KeyedCache::new(None),
+            cache: KeyedCache::new(Some(MAX_CACHED_CLANS)),
+            self_role_ids: HashMap::new(),
             loading: HashSet::new(),
             api,
             _clan_sub: clan_sub,
@@ -205,6 +214,7 @@ impl ClanMembersStore {
     }
 
     pub fn ensure_loaded(&mut self, clan_id: ClanId, cx: &mut Context<Self>) {
+        self.cache.touch(&clan_id);
         if !self.cache.is_fresh(&clan_id, crate::CACHE_TTL) {
             self.fetch(clan_id, cx);
         }
@@ -246,7 +256,18 @@ impl ClanMembersStore {
                             "ClanMembersStore: fetched {} members for clan {clan_id}",
                             bucket.ids.len()
                         );
+                        if let Some(self_id) = self_id {
+                            let roles = bucket
+                                .by_id
+                                .get(&UserId(self_id))
+                                .map(|member| {
+                                    member.role_ids.iter().map(|role| role.get()).collect()
+                                })
+                                .unwrap_or_default();
+                            this.self_role_ids.insert(clan_id, roles);
+                        }
                         this.cache.insert(clan_id, bucket, None);
+                        prune_self_roles(&this.cache, &mut this.self_role_ids);
                         let online_uids: Vec<UserId> =
                             online_ids.iter().map(|id| UserId(*id)).collect();
                         let statuses = status_result
@@ -276,6 +297,12 @@ impl ClanMembersStore {
             RealtimeEvent::UserClanRemoved(e) => {
                 let clan_id = ClanId(e.clan_id);
                 let ids: Vec<UserId> = e.user_ids.iter().map(|id| UserId(*id)).collect();
+                let self_id = BadgeService::global(cx).read(cx).current_user_id(cx);
+                if let Some(self_id) = self_id
+                    && ids.contains(&self_id)
+                {
+                    self.self_role_ids.remove(&clan_id);
+                }
                 apply_remove_members(&mut self.cache, clan_id, &ids).then_some(clan_id)
             }
             RealtimeEvent::ClanProfileUpdated(e) => {
@@ -344,6 +371,13 @@ fn apply_profile_update(
     member.clan_nick = clan_nick.to_string();
     member.clan_avatar = clan_avatar.to_string();
     true
+}
+
+fn prune_self_roles(
+    cache: &KeyedCache<ClanId, ClanBucket>,
+    self_role_ids: &mut HashMap<ClanId, Vec<i64>>,
+) {
+    self_role_ids.retain(|clan_id, _| cache.contains(clan_id));
 }
 
 pub(crate) fn user_from_api(user: api::User) -> Option<User> {
@@ -658,6 +692,37 @@ mod tests {
             "x",
             "y"
         ));
+    }
+
+    #[test]
+    fn self_roles_are_dropped_when_their_clan_is_evicted_from_the_cache() {
+        let mut cache: KeyedCache<ClanId, ClanBucket> = KeyedCache::new(Some(MAX_CACHED_CLANS));
+        let mut self_role_ids: HashMap<ClanId, Vec<i64>> = HashMap::new();
+
+        let overflow = MAX_CACHED_CLANS as i64 + 1;
+        for i in 1..=overflow {
+            let clan_id = ClanId(i);
+            self_role_ids.insert(clan_id, vec![i]);
+            cache.insert(clan_id, ClanBucket::default(), None);
+            prune_self_roles(&cache, &mut self_role_ids);
+        }
+
+        assert_eq!(self_role_ids.len(), MAX_CACHED_CLANS);
+        assert!(cache.get(&ClanId(1)).is_none());
+        assert!(!self_role_ids.contains_key(&ClanId(1)));
+        assert_eq!(self_role_ids.get(&ClanId(overflow)), Some(&vec![overflow]));
+    }
+
+    #[test]
+    fn prune_keeps_self_roles_for_still_cached_clans() {
+        let mut cache: KeyedCache<ClanId, ClanBucket> = KeyedCache::new(Some(MAX_CACHED_CLANS));
+        let mut self_role_ids: HashMap<ClanId, Vec<i64>> = HashMap::new();
+        cache.insert(ClanId(1), ClanBucket::default(), None);
+        self_role_ids.insert(ClanId(1), vec![10, 20]);
+
+        prune_self_roles(&cache, &mut self_role_ids);
+
+        assert_eq!(self_role_ids.get(&ClanId(1)), Some(&vec![10, 20]));
     }
 
     #[test]

@@ -681,12 +681,13 @@ impl WindowTextSystem {
             }
         }
 
-        let layout = self.line_layout_cache.layout_line(
-            &SharedString::new(text),
-            font_size,
-            &font_runs,
-            force_width,
-        );
+        // mezon vendor edit: `LineLayoutCache::layout_line` is generic over
+        // `AsRef<str>`, but upstream passed `&SharedString::new(text)` — an `Arc<str>`
+        // copy of the whole line on EVERY call, including the common cache hit. Pass
+        // the `&str` straight through so only a genuine cache miss allocates.
+        let layout = self
+            .line_layout_cache
+            .layout_line(text, font_size, &font_runs, force_width);
 
         self.font_runs_pool.lock().push(font_runs);
 

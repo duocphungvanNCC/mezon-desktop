@@ -31,6 +31,7 @@ pub struct ChannelSearchState {
     pub is_searching: bool,
     pub has_error: bool,
     pub generation: u64,
+    pub revision: u64,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -102,14 +103,29 @@ impl MessageSearchStore {
         self.states.get(&channel_id).cloned().unwrap_or_default()
     }
 
+    pub fn state_ref(&self, channel_id: ChannelId) -> Option<&ChannelSearchState> {
+        self.states.get(&channel_id)
+    }
+
     pub fn cancel_pending(&mut self) {
         self.search_generation = self.search_generation.wrapping_add(1);
     }
 
     pub fn clear_channel(&mut self, channel_id: ChannelId, cx: &mut Context<Self>) {
         self.cancel_pending();
-        self.states
-            .insert(channel_id, ChannelSearchState::default(), None);
+        let (generation, revision) = self
+            .state_ref(channel_id)
+            .map(|state| (state.generation, state.revision))
+            .unwrap_or_default();
+        self.states.insert(
+            channel_id,
+            ChannelSearchState {
+                generation,
+                revision: revision.wrapping_add(1),
+                ..Default::default()
+            },
+            None,
+        );
         cx.notify();
     }
 
@@ -186,6 +202,7 @@ impl MessageSearchStore {
         self.cancel_pending();
         let store_generation = self.search_generation;
         let api = self.api.clone();
+        let mapping_cfg = AppConfig::try_global(cx).cloned();
         let query = self
             .states
             .get(&channel_id)
@@ -207,9 +224,26 @@ impl MessageSearchStore {
             };
 
             let result = api.search_message(request).await;
+            let mapped = match result {
+                Ok(response) => {
+                    let cfg = mapping_cfg.clone();
+                    let total = response.total;
+                    let results = cx
+                        .background_executor()
+                        .spawn(async move {
+                            response
+                                .messages
+                                .iter()
+                                .filter_map(|doc| search_hit_from_document(doc, cfg.as_ref()))
+                                .collect::<Vec<_>>()
+                        })
+                        .await;
+                    Ok((total, results))
+                }
+                Err(err) => Err(err),
+            };
 
             let _ = this.update(cx, |this, cx| {
-                let cfg = AppConfig::try_global(cx);
                 let missing_ogp = {
                     let Some(state) = this.states.get_mut(&channel_id) else {
                         return;
@@ -222,16 +256,13 @@ impl MessageSearchStore {
                         return;
                     }
                     state.is_searching = false;
-                    match result {
-                        Ok(response) => {
+                    state.revision = state.revision.wrapping_add(1);
+                    match mapped {
+                        Ok((total, results)) => {
                             state.has_error = false;
-                            state.total = response.total;
+                            state.total = total;
                             state.current_page = page;
-                            state.results = response
-                                .messages
-                                .iter()
-                                .filter_map(|doc| search_hit_from_document(doc, cfg))
-                                .collect();
+                            state.results = results;
                             enrich_search_results_ogp(&mut state.results, cx);
                             state
                                 .results
@@ -275,9 +306,12 @@ impl MessageSearchStore {
                         if state.generation != generation {
                             return None;
                         }
-                        Some(state.results.iter().any(|hit| {
-                            hit.message_id == message_id && hit.ogp.is_none()
-                        }))
+                        Some(
+                            state
+                                .results
+                                .iter()
+                                .any(|hit| hit.message_id == message_id && hit.ogp.is_none()),
+                        )
                     })
                     .ok()
                     .flatten()
@@ -328,6 +362,7 @@ impl MessageSearchStore {
                         .find(|hit| hit.message_id == message_id && hit.ogp.is_none())
                     {
                         hit.ogp = Some(ogp);
+                        state.revision = state.revision.wrapping_add(1);
                         cx.notify();
                     }
                 });

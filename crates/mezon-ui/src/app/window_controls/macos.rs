@@ -91,12 +91,7 @@ fn macos_traffic_button(
 }
 
 pub fn hide_window(window: &Window) {
-    let Some(view) = appkit_view(window) else {
-        return;
-    };
-    with_ns_window(view, |ns_window| unsafe {
-        order_out(ns_window);
-    });
+    window.hide_window();
 }
 
 pub fn hide_active_window(cx: &mut App) {
@@ -126,6 +121,13 @@ pub fn install_shortcuts(cx: &App) {
     INSTALL_SHORTCUTS.call_once(|| {
         let async_app = cx.to_async();
         let handler = ConcreteBlock::new(move |event: *mut Object| -> *mut Object {
+            #[cfg(debug_assertions)]
+            unsafe {
+                let kc: u16 = msg_send![event, keyCode];
+                if matches!(kc, 123..=126) {
+                    eprintln!("[gpui_monitor] arrow keyCode={kc} (123=L 124=R 125=Down 126=Up)");
+                }
+            }
             if unsafe { handle_shortcut(event, &async_app) } {
                 std::ptr::null_mut()
             } else {

@@ -980,17 +980,23 @@ impl App {
         })
     }
 
+    // mezon vendor edit: call site of the insertion-ordered [`AccessedEntities`]
+    // accumulator (see `app/entity_map.rs`). This runs once per view per frame, and
+    // upstream CLONED the whole frame-wide accessed-entity set up front and diffed it
+    // afterwards. Slice the ids added during the callback off an order watermark
+    // instead — no clone, no set difference.
     pub(crate) fn detect_accessed_entities<R>(
         &mut self,
         callback: impl FnOnce(&mut App) -> R,
     ) -> (R, FxHashSet<EntityId>) {
-        let accessed_entities_start = self.entities.accessed_entities.get_mut().clone();
+        let watermark = self.entities.accessed_entities.get_mut().watermark();
         let result = callback(self);
         let entities_accessed_in_callback = self
             .entities
             .accessed_entities
             .get_mut()
-            .difference(&accessed_entities_start)
+            .since(watermark)
+            .iter()
             .copied()
             .collect::<FxHashSet<EntityId>>();
         (result, entities_accessed_in_callback)
@@ -2442,6 +2448,25 @@ impl App {
         // remove the texture from the current window
         if let Some(window) = current_window {
             _ = window.drop_image(image);
+        }
+    }
+
+    /// mezon vendor edit: multi-window counterpart of
+    /// [`Window::update_render_image`]. Sprite atlases are per-window, so a
+    /// stable-id streaming frame must be pushed into EVERY live window that may
+    /// paint it (main call view + PIP), mirroring [`Self::drop_image`]'s
+    /// iteration. A window that is currently checked out is absent from
+    /// `self.windows` and must be passed as `current_window`.
+    pub fn update_render_image(
+        &mut self,
+        image: &Arc<RenderImage>,
+        current_window: Option<&mut Window>,
+    ) {
+        for window in self.windows.values_mut().flatten() {
+            _ = window.update_render_image(image);
+        }
+        if let Some(window) = current_window {
+            _ = window.update_render_image(image);
         }
     }
 
