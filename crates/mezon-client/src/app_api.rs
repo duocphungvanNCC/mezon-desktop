@@ -1519,6 +1519,18 @@ impl AppApi {
             .list_user_permission_in_channel(clan_id, channel_id)
             .await
     }
+
+    pub async fn create_link_invite_user(
+        &self,
+        clan_id: i64,
+        channel_id: i64,
+        expiry_time: i32,
+    ) -> Result<mezon_proto::api::LinkInviteUser> {
+        self.transport
+            .create_link_invite_user(clan_id, channel_id, expiry_time)
+            .await
+    }
+
 }
 
 #[cfg(test)]
