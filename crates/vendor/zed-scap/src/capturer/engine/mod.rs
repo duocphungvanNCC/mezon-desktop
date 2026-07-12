@@ -22,6 +22,11 @@ pub type ChannelItem = (
 #[cfg(not(target_os = "macos"))]
 pub type ChannelItem = Frame;
 
+#[cfg(target_os = "macos")]
+pub type ChannelSender = mpsc::SyncSender<Result<ChannelItem>>;
+#[cfg(not(target_os = "macos"))]
+pub type ChannelSender = mpsc::Sender<Result<ChannelItem>>;
+
 pub fn get_output_frame_size(options: &Options) -> [u32; 2] {
     #[cfg(target_os = "macos")]
     {
@@ -55,7 +60,7 @@ pub struct Engine {
 }
 
 impl Engine {
-    pub fn new(options: &Options, tx: mpsc::Sender<Result<ChannelItem>>) -> Result<Engine> {
+    pub fn new(options: &Options, tx: ChannelSender) -> Result<Engine> {
         #[cfg(target_os = "macos")]
         {
             let error_flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));

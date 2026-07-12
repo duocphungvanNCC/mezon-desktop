@@ -6,6 +6,7 @@ use std::{
     borrow::Cow,
     fmt,
     hash::Hash,
+    sync::Arc,
     sync::atomic::{AtomicUsize, Ordering::SeqCst},
 };
 
@@ -46,6 +47,7 @@ pub struct RenderImage {
     /// The scale factor of this image on render.
     pub(crate) scale_factor: f32,
     data: SmallVec<[Frame; 1]>,
+    recycler: Option<Arc<dyn Fn(Vec<u8>) + Send + Sync>>,
 }
 
 impl PartialEq for RenderImage {
@@ -75,7 +77,18 @@ impl RenderImage {
             id: ImageId(NEXT_ID.fetch_add(1, SeqCst)),
             scale_factor: 1.0,
             data: data.into(),
+            recycler: None,
         }
+    }
+
+    #[allow(missing_docs)]
+    pub fn new_recyclable(
+        frame: Frame,
+        recycler: Arc<dyn Fn(Vec<u8>) + Send + Sync>,
+    ) -> Self {
+        let mut image = Self::new(SmallVec::from_const([frame]));
+        image.recycler = Some(recycler);
+        image
     }
 
     /// Convert this image into a byte slice.
@@ -113,6 +126,17 @@ impl RenderImage {
     /// Get the number of frames for this image.
     pub fn frame_count(&self) -> usize {
         self.data.len()
+    }
+}
+
+impl Drop for RenderImage {
+    fn drop(&mut self) {
+        let Some(recycler) = self.recycler.take() else {
+            return;
+        };
+        for frame in self.data.drain(..) {
+            recycler(frame.into_buffer().into_raw());
+        }
     }
 }
 

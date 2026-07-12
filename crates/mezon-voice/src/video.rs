@@ -1,40 +1,98 @@
-use std::collections::HashMap;
 use std::collections::hash_map::DefaultHasher;
+use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use parking_lot::Mutex;
 
+#[cfg(target_os = "macos")]
+#[derive(Clone)]
+pub struct VideoSurface(core_video::pixel_buffer::CVPixelBuffer);
+
+#[cfg(target_os = "macos")]
+unsafe impl Send for VideoSurface {}
+#[cfg(target_os = "macos")]
+unsafe impl Sync for VideoSurface {}
+
+#[cfg(target_os = "macos")]
+impl VideoSurface {
+    #[allow(missing_docs)]
+    pub fn into_inner(self) -> core_video::pixel_buffer::CVPixelBuffer {
+        self.0
+    }
+}
+
 #[derive(Clone)]
 pub struct VideoFrameData {
     pub width: u32,
     pub height: u32,
     pub bgra: Vec<u8>,
+    #[cfg(target_os = "macos")]
+    pub surface: Option<VideoSurface>,
     pub seq: u64,
 }
 
 #[derive(Default)]
 pub struct VideoFrameStore {
-    frames: Mutex<HashMap<u64, Arc<VideoFrameData>>>,
+    state: Mutex<VideoFrameState>,
     seq: AtomicU64,
+}
+
+#[derive(Default)]
+struct VideoFrameState {
+    frames: HashMap<u64, Arc<VideoFrameData>>,
+    recycled: HashMap<u64, Vec<Vec<u8>>>,
+    active: HashSet<u64>,
 }
 
 impl VideoFrameStore {
     pub fn publish(&self, key: u64, width: u32, height: u32, bgra: Vec<u8>) -> Option<Vec<u8>> {
         let seq = self.seq.fetch_add(1, Ordering::Relaxed);
+        let required = bgra.len();
         let frame = Arc::new(VideoFrameData {
             width,
             height,
             bgra,
+            #[cfg(target_os = "macos")]
+            surface: None,
             seq,
         });
-        let prev = self.frames.lock().insert(key, frame)?;
-        Arc::try_unwrap(prev).ok().map(|f| f.bgra)
+        let mut state = self.state.lock();
+        state.active.insert(key);
+        let previous = state.frames.insert(key, frame);
+        if let Some(buffer) = previous
+            .and_then(|frame| Arc::try_unwrap(frame).ok())
+            .map(|frame| frame.bgra)
+        {
+            return Some(buffer);
+        }
+        take_recycled(&mut state, key, required)
+    }
+
+    #[cfg(target_os = "macos")]
+    pub fn publish_surface(
+        &self,
+        key: u64,
+        width: u32,
+        height: u32,
+        surface: core_video::pixel_buffer::CVPixelBuffer,
+    ) {
+        let seq = self.seq.fetch_add(1, Ordering::Relaxed);
+        let frame = Arc::new(VideoFrameData {
+            width,
+            height,
+            bgra: Vec::new(),
+            surface: Some(VideoSurface(surface)),
+            seq,
+        });
+        let mut state = self.state.lock();
+        state.active.insert(key);
+        state.frames.insert(key, frame);
     }
 
     pub fn get(&self, key: u64) -> Option<Arc<VideoFrameData>> {
-        self.frames.lock().get(&key).cloned()
+        self.state.lock().frames.get(&key).cloned()
     }
 
     pub fn publish_seq(&self) -> u64 {
@@ -42,21 +100,48 @@ impl VideoFrameStore {
     }
 
     pub fn take_new(&self, key: u64, since: Option<u64>) -> Option<VideoFrameData> {
-        let mut frames = self.frames.lock();
-        let is_new = match frames.get(&key) {
+        let mut state = self.state.lock();
+        let is_new = match state.frames.get(&key) {
             Some(frame) => Some(frame.seq) != since,
             None => false,
         };
         if !is_new {
             return None;
         }
-        let frame = frames.remove(&key)?;
+        let frame = state.frames.remove(&key)?;
         Some(Arc::try_unwrap(frame).unwrap_or_else(|frame| (*frame).clone()))
     }
 
-    pub fn remove(&self, key: u64) {
-        self.frames.lock().remove(&key);
+    pub fn recycle(&self, key: u64, mut buffer: Vec<u8>) {
+        let mut state = self.state.lock();
+        if !state.active.contains(&key) {
+            return;
+        }
+        buffer.clear();
+        let buffers = state.recycled.entry(key).or_default();
+        if buffers.len() < 3 {
+            buffers.push(buffer);
+        }
     }
+
+    pub fn remove(&self, key: u64) {
+        let mut state = self.state.lock();
+        state.frames.remove(&key);
+        state.recycled.remove(&key);
+        state.active.remove(&key);
+    }
+}
+
+fn take_recycled(state: &mut VideoFrameState, key: u64, required: usize) -> Option<Vec<u8>> {
+    let buffers = state.recycled.get_mut(&key)?;
+    let index = buffers
+        .iter()
+        .position(|buffer| buffer.capacity() >= required && buffer.capacity() <= required * 2)?;
+    let buffer = buffers.swap_remove(index);
+    if buffers.is_empty() {
+        state.recycled.remove(&key);
+    }
+    Some(buffer)
 }
 
 pub fn track_frame_key(identity: &str, track_sid: &str) -> u64 {
@@ -146,6 +231,7 @@ fn pack_to_i420(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[cfg(not(target_os = "macos"))]
 pub fn bgra_to_i420(
     bgra: &[u8],
     width: usize,
@@ -220,6 +306,55 @@ pub fn i420_to_bgra_into(
     i420_to_bgra_scalar(
         out, y_plane, u_plane, v_plane, stride_y, stride_u, stride_v, width, height,
     );
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn nv12_full_to_i420(
+    src_y: &[u8],
+    src_uv: &[u8],
+    src_stride_y: usize,
+    src_stride_uv: usize,
+    width: usize,
+    height: usize,
+    dst_y: &mut [u8],
+    dst_u: &mut [u8],
+    dst_v: &mut [u8],
+    dst_stride_y: usize,
+    dst_stride_u: usize,
+    dst_stride_v: usize,
+) {
+    for row in 0..height {
+        let src_start = row * src_stride_y;
+        let dst_start = row * dst_stride_y;
+        if src_start + width > src_y.len() || dst_start + width > dst_y.len() {
+            break;
+        }
+        for (dst, src) in dst_y[dst_start..dst_start + width]
+            .iter_mut()
+            .zip(&src_y[src_start..src_start + width])
+        {
+            *dst = 16 + ((*src as u16 * 219 + 127) / 255) as u8;
+        }
+    }
+
+    let chroma_width = width.div_ceil(2);
+    let chroma_height = height.div_ceil(2);
+    for row in 0..chroma_height {
+        let src_start = row * src_stride_uv;
+        let u_start = row * dst_stride_u;
+        let v_start = row * dst_stride_v;
+        if src_start + chroma_width * 2 > src_uv.len()
+            || u_start + chroma_width > dst_u.len()
+            || v_start + chroma_width > dst_v.len()
+        {
+            break;
+        }
+        for column in 0..chroma_width {
+            let src = src_start + column * 2;
+            dst_u[u_start + column] = 16 + ((src_uv[src] as u16 * 224 + 127) / 255) as u8;
+            dst_v[v_start + column] = 16 + ((src_uv[src + 1] as u16 * 224 + 127) / 255) as u8;
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -565,5 +700,33 @@ mod tests {
             .take_new(key, Some(current_seq.wrapping_sub(1)))
             .expect("inequality not ordering");
         assert_eq!(third.bgra, vec![3]);
+    }
+
+    #[test]
+    fn recycled_render_buffer_returns_to_producer() {
+        let store = VideoFrameStore::default();
+        let key = 9;
+        store.publish(key, 2, 2, vec![1; 16]);
+        let frame = store.take_new(key, None).expect("frame");
+        store.recycle(key, frame.bgra);
+
+        let recycled = store
+            .publish(key, 2, 2, vec![2; 16])
+            .expect("recycled buffer");
+        assert!(recycled.capacity() >= 16);
+        assert!(recycled.is_empty());
+    }
+
+    #[test]
+    fn nv12_full_range_converts_to_limited_i420() {
+        let src_y = [0, 255, 128, 64];
+        let src_uv = [0, 255];
+        let mut y = [0; 4];
+        let mut u = [0; 1];
+        let mut v = [0; 1];
+        nv12_full_to_i420(&src_y, &src_uv, 2, 2, 2, 2, &mut y, &mut u, &mut v, 2, 1, 1);
+        assert_eq!(y, [16, 235, 126, 71]);
+        assert_eq!(u, [16]);
+        assert_eq!(v, [240]);
     }
 }

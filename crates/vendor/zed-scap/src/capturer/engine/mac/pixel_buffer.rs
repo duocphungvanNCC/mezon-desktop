@@ -1,4 +1,6 @@
 use core::slice;
+use core_foundation::base::TCFType;
+use core_video::pixel_buffer::CVPixelBuffer as CoreVideoPixelBuffer;
 use core_video_sys::{
     CVPixelBufferGetBaseAddress, CVPixelBufferGetBaseAddressOfPlane, CVPixelBufferGetBytesPerRow,
     CVPixelBufferGetBytesPerRowOfPlane, CVPixelBufferGetHeight, CVPixelBufferGetHeightOfPlane,
@@ -40,6 +42,12 @@ impl PixelBuffer {
         self.bytes_per_row
     }
 
+    #[allow(missing_docs)]
+    pub fn core_video_buffer(&self) -> CoreVideoPixelBuffer {
+        let buffer = unsafe { sample_buffer_to_pixel_buffer(&self.buffer) };
+        unsafe { CoreVideoPixelBuffer::wrap_under_get_rule(buffer.cast()) }
+    }
+
     pub fn data(&self) -> PixelBufferData<'_> {
         unsafe {
             let pixel_buffer = sample_buffer_to_pixel_buffer(&self.buffer);
@@ -62,8 +70,6 @@ impl PixelBuffer {
         unsafe {
             let pixel_buffer = sample_buffer_to_pixel_buffer(&self.buffer);
             let count = CVPixelBufferGetPlaneCount(pixel_buffer);
-
-            CVPixelBufferLockBaseAddress(pixel_buffer, 0);
 
             (0..count)
                 .map(|i| Plane {

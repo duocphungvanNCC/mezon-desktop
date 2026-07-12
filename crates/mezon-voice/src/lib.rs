@@ -38,11 +38,16 @@ pub use screen_targets::{
     ScreenShareKind, ScreenShareListError, ScreenShareOption, list_screen_share_options,
     peek_screen_share_options,
 };
+#[cfg(target_os = "macos")]
+pub use video::VideoSurface;
 pub use video::{VideoFrameData, VideoFrameStore};
 
 use crate::camera::CameraStopper;
 use crate::screen::ScreenStopper;
 use crate::video::{i420_to_bgra_into, local_camera_key, local_screen_key, track_frame_key};
+
+const MAX_REMOTE_VIDEO_WIDTH: u32 = 1920;
+const MAX_REMOTE_VIDEO_HEIGHT: u32 = 1080;
 
 #[derive(Clone, Debug, Default)]
 pub struct IceServerConfig {
@@ -541,7 +546,8 @@ async fn session_main(
                     Ok(Command::SetCameraEnabled(false)) => {
                         let mut changed = false;
                         camera_gen = camera_gen.wrapping_add(1);
-                        if camera_task.take().is_some() {
+                        if let Some(task) = camera_task.take() {
+                            task.abort();
                             changed = true;
                         }
                         if let Some(session) = camera_session.take() {
@@ -579,7 +585,8 @@ async fn session_main(
                     Ok(Command::StopScreenShare) => {
                         let mut changed = false;
                         screen_gen = screen_gen.wrapping_add(1);
-                        if screen_task.take().is_some() {
+                        if let Some(task) = screen_task.take() {
+                            task.abort();
                             changed = true;
                         }
                         if let Some(session) = screen_session.take() {
@@ -935,12 +942,33 @@ fn spawn_video(
     let task = runtime::runtime().spawn(async move {
         let mut stream = NativeVideoStream::new(rtc_track);
         while let Some(frame) = stream.next().await {
-            task_slot.put(frame.buffer.to_i420());
+            let mut buffer = frame.buffer.to_i420();
+            let (width, height) = bounded_dimensions(
+                buffer.width(),
+                buffer.height(),
+                MAX_REMOTE_VIDEO_WIDTH,
+                MAX_REMOTE_VIDEO_HEIGHT,
+            );
+            if width != buffer.width() || height != buffer.height() {
+                buffer = buffer.scale(width as i32, height as i32);
+            }
+            task_slot.put(buffer);
         }
         task_slot.close();
     });
 
     VideoTrackHandle { task, slot }
+}
+
+fn bounded_dimensions(width: u32, height: u32, max_width: u32, max_height: u32) -> (u32, u32) {
+    if width <= max_width && height <= max_height {
+        return (width, height);
+    }
+    let scale =
+        (max_width as f64 / width.max(1) as f64).min(max_height as f64 / height.max(1) as f64);
+    let width = ((width as f64 * scale).floor() as u32 & !1).max(2);
+    let height = ((height as f64 * scale).floor() as u32 & !1).max(2);
+    (width, height)
 }
 
 fn emit_participants(
@@ -1044,5 +1072,21 @@ fn display_name(name: &str, identity: &str) -> String {
         identity.to_string()
     } else {
         name.to_string()
+    }
+}
+
+#[cfg(test)]
+mod remote_video_tests {
+    use super::bounded_dimensions;
+
+    #[test]
+    fn bounded_dimensions_preserve_small_frames() {
+        assert_eq!(bounded_dimensions(1280, 720, 1920, 1080), (1280, 720));
+    }
+
+    #[test]
+    fn bounded_dimensions_cap_large_frames_evenly() {
+        assert_eq!(bounded_dimensions(3840, 2160, 1920, 1080), (1920, 1080));
+        assert_eq!(bounded_dimensions(2560, 1600, 1920, 1080), (1728, 1080));
     }
 }
