@@ -149,6 +149,7 @@ pub struct VoiceStore {
     frame_store: Option<Arc<VideoFrameStore>>,
     render_cache: Mutex<HashMap<u64, CachedRenderImage>>,
     pending_texture_drops: Mutex<Vec<Arc<RenderImage>>>,
+    pending_texture_replaces: Mutex<Vec<Arc<RenderImage>>>,
     cached_meet_token: Option<CachedMeetToken>,
     meet_token_prefetching: Option<String>,
     link_copied: bool,
@@ -247,6 +248,7 @@ impl VoiceStore {
             frame_store: None,
             render_cache: Mutex::new(HashMap::new()),
             pending_texture_drops: Mutex::new(Vec::new()),
+            pending_texture_replaces: Mutex::new(Vec::new()),
             cached_meet_token: None,
             meet_token_prefetching: None,
             link_copied: false,
@@ -378,9 +380,16 @@ impl VoiceStore {
         };
         let seq = frame.seq;
         let buffer = image::RgbaImage::from_raw(frame.width, frame.height, frame.bgra)?;
-        let image = Arc::new(RenderImage::new(smallvec::smallvec![image::Frame::new(
-            buffer,
-        )]));
+        let mut render_image = RenderImage::new(smallvec::smallvec![image::Frame::new(buffer)]);
+        let previous_id = self
+            .render_cache
+            .lock()
+            .get(&key)
+            .map(|entry| entry.image.id);
+        if let Some(id) = previous_id {
+            render_image = render_image.with_id(id);
+        }
+        let image = Arc::new(render_image);
         let previous = self.render_cache.lock().insert(
             key,
             CachedRenderImage {
@@ -388,7 +397,14 @@ impl VoiceStore {
                 image: image.clone(),
             },
         );
-        if let Some(previous) = previous {
+        if previous_id.is_some() {
+            let mut replaces = self.pending_texture_replaces.lock();
+            if let Some(existing) = replaces.iter_mut().find(|queued| queued.id == image.id) {
+                *existing = image.clone();
+            } else {
+                replaces.push(image.clone());
+            }
+        } else if let Some(previous) = previous {
             self.pending_texture_drops.lock().push(previous.image);
         }
         Some(image)
@@ -423,6 +439,11 @@ impl VoiceStore {
         let drops: Vec<Arc<RenderImage>> = std::mem::take(&mut *self.pending_texture_drops.lock());
         for image in drops {
             cx.drop_image(image, window.as_deref_mut());
+        }
+        let replaces: Vec<Arc<RenderImage>> =
+            std::mem::take(&mut *self.pending_texture_replaces.lock());
+        for image in replaces {
+            cx.update_render_image(&image, window.as_deref_mut());
         }
     }
 
@@ -591,7 +612,7 @@ impl VoiceStore {
         cx.spawn(async move |this, cx| {
             let decoded = cx
                 .background_executor()
-                .spawn(async move { mezon_audio::decode_audio(RAISE_HAND_SOUND) })
+                .spawn(async move { mezon_audio::decode_audio(RAISE_HAND_SOUND.to_vec()) })
                 .await;
             this.update(cx, |this, _| {
                 this.raising_hand_sound_loading = false;
@@ -664,7 +685,7 @@ impl VoiceStore {
             };
             let decoded = cx
                 .background_executor()
-                .spawn(async move { mezon_audio::decode_audio(&bytes) })
+                .spawn(async move { mezon_audio::decode_audio(bytes) })
                 .await;
             this.update(cx, |this, cx| {
                 if !this.active_sounds.contains_key(&key) {
@@ -898,7 +919,7 @@ impl VoiceStore {
             };
             let decoded = cx
                 .background_executor()
-                .spawn(async move { mezon_audio::decode_audio(&bytes) })
+                .spawn(async move { mezon_audio::decode_audio(bytes) })
                 .await;
             this.update(cx, |this, cx| {
                 if this.previewing_sound() != Some(fetch_url.as_str()) {
@@ -1296,7 +1317,33 @@ impl VoiceStore {
         self.sync_noise_suppression();
 
         let task = cx.spawn(async move |this, cx| {
-            while let Ok(event) = events.recv_async().await {
+            let mut pending: Option<VoiceEvent> = None;
+            loop {
+                let event = match pending.take() {
+                    Some(event) => event,
+                    None => match events.recv_async().await {
+                        Ok(event) => event,
+                        Err(_) => break,
+                    },
+                };
+                let event = if matches!(event, VoiceEvent::Participants(_)) {
+                    let mut latest = event;
+                    loop {
+                        match events.try_recv() {
+                            Ok(VoiceEvent::Participants(participants)) => {
+                                latest = VoiceEvent::Participants(participants);
+                            }
+                            Ok(other) => {
+                                pending = Some(other);
+                                break;
+                            }
+                            Err(_) => break,
+                        }
+                    }
+                    latest
+                } else {
+                    event
+                };
                 if this
                     .update(cx, |this, cx| this.handle_engine_event(event, cx))
                     .is_err()
@@ -1372,6 +1419,9 @@ impl VoiceStore {
                 }
             }
             VoiceEvent::Participants(list) => {
+                if self.participants == list {
+                    return;
+                }
                 self.participants = list;
                 if let Some(local) = self.participants.iter().find(|p| p.is_local) {
                     self.mic_enabled = !local.muted;

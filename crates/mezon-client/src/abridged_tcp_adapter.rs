@@ -10,6 +10,7 @@ use tokio::net::TcpStream;
 use tokio::sync::{Mutex, mpsc, oneshot};
 use tokio_rustls::rustls::pki_types::ServerName;
 
+const WRITE_QUEUE_CAPACITY: usize = 256;
 const SOCK_HOST_IP_OVERRIDE: Option<&str> = Some("161.248.80.11");
 
 #[cfg(debug_assertions)]
@@ -117,6 +118,29 @@ fn read_varint(buf: &[u8]) -> Option<(u64, usize)> {
         shift += 7;
     }
     None
+}
+
+/// A realtime frame that fails Envelope decode is either corrupt or not an
+/// Envelope at all (schema drift, stray JSON, misaligned framing). Log a capped
+/// hex prefix for the first few occurrences so a field report identifies the
+/// actual wire content instead of just prost's error string.
+fn log_undecodable_frame(kind: &str, payload: &[u8], err: &impl std::fmt::Display) {
+    use std::sync::atomic::{AtomicU32, Ordering};
+    static LOGGED: AtomicU32 = AtomicU32::new(0);
+    let n = LOGGED.fetch_add(1, Ordering::Relaxed);
+    if n < 4 {
+        let prefix_len = payload.len().min(64);
+        let hex: String = payload[..prefix_len]
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+        tracing::warn!(
+            "{kind} decode failed (len={}, occurrence {n}): {err}; first {prefix_len} bytes: {hex}",
+            payload.len()
+        );
+    } else {
+        tracing::warn!("{kind} decode failed (len={}): {err}", payload.len());
+    }
 }
 
 fn scan_realtime_cid(payload: &[u8]) -> Option<i32> {
@@ -262,7 +286,7 @@ struct IoLoopState {
 }
 
 pub struct AbridgedTcpAdapter {
-    write_tx: Arc<Mutex<Option<mpsc::UnboundedSender<Vec<u8>>>>>,
+    write_tx: Arc<Mutex<Option<mpsc::Sender<Vec<u8>>>>>,
     handlers: Arc<Mutex<AdapterHandlers>>,
     is_connected: Arc<AtomicBool>,
     io_task: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
@@ -490,7 +514,7 @@ impl IoLoopState {
                         None => match mezon_proto::realtime::Envelope::decode(payload.as_slice()) {
                             Ok(envelope) => envelope.cid,
                             Err(e) => {
-                                tracing::warn!("realtime frame decode failed: {e}");
+                                log_undecodable_frame("realtime frame", &payload, &e);
                                 continue;
                             }
                         },
@@ -517,7 +541,7 @@ enum LoopExit {
 impl AbridgedTcpAdapter {
     async fn io_loop(
         mut tls: TlsStream,
-        mut write_rx: mpsc::UnboundedReceiver<Vec<u8>>,
+        mut write_rx: mpsc::Receiver<Vec<u8>>,
         ready_tx: oneshot::Sender<()>,
         mut state: IoLoopState,
     ) {
@@ -689,7 +713,7 @@ impl TransportAdapter for AbridgedTcpAdapter {
         tracing::debug!("TLS handshake complete");
 
         let (ready_tx, ready_rx) = oneshot::channel();
-        let (write_tx, write_rx) = mpsc::unbounded_channel();
+        let (write_tx, write_rx) = mpsc::channel(WRITE_QUEUE_CAPACITY);
         let state = IoLoopState {
             handlers: self.handlers.clone(),
             streams: HashMap::new(),
@@ -720,6 +744,7 @@ impl TransportAdapter for AbridgedTcpAdapter {
         tracing::debug!("Sending handshake");
         write_tx
             .send(handshake)
+            .await
             .map_err(|_| anyhow::anyhow!("Write channel closed early"))?;
         tracing::debug!("Handshake queued via mpsc channel");
 
@@ -788,20 +813,21 @@ impl TransportAdapter for AbridgedTcpAdapter {
             &packet[..packet.len().min(64)]
         );
 
-        let guard = self.write_tx.lock().await;
-        match *guard {
-            Some(ref tx) => {
-                tx.send(packet).map_err(|_| {
-                    tracing::error!("mpsc send failed: channel closed");
-                    anyhow::anyhow!("Write channel closed")
-                })?;
-                tracing::trace!("Packet queued via mpsc channel");
+        let tx = {
+            let guard = self.write_tx.lock().await;
+            match *guard {
+                Some(ref tx) => tx.clone(),
+                None => {
+                    tracing::error!("Write channel not available (None)");
+                    return Err(anyhow::anyhow!("Write channel not available"));
+                }
             }
-            None => {
-                tracing::error!("Write channel not available (None)");
-                return Err(anyhow::anyhow!("Write channel not available"));
-            }
-        }
+        };
+        tx.send(packet).await.map_err(|_| {
+            tracing::error!("mpsc send failed: channel closed");
+            anyhow::anyhow!("Write channel closed")
+        })?;
+        tracing::trace!("Packet queued via mpsc channel");
 
         Ok(())
     }
@@ -812,13 +838,16 @@ impl TransportAdapter for AbridgedTcpAdapter {
         }
         let mut buffer = vec![0x00];
         buffer.extend(&cid.to_be_bytes());
-        let guard = self.write_tx.lock().await;
-        match *guard {
-            Some(ref tx) => tx
-                .send(buffer)
-                .map_err(|_| anyhow::anyhow!("Write channel closed"))?,
-            None => return Err(anyhow::anyhow!("Write channel not available")),
-        }
+        let tx = {
+            let guard = self.write_tx.lock().await;
+            match *guard {
+                Some(ref tx) => tx.clone(),
+                None => return Err(anyhow::anyhow!("Write channel not available")),
+            }
+        };
+        tx.send(buffer)
+            .await
+            .map_err(|_| anyhow::anyhow!("Write channel closed"))?;
         Ok(())
     }
 
