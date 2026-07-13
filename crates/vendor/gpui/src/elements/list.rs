@@ -71,7 +71,7 @@ const WHEEL_SCROLL_BEZIER_X2: f32 = 0.58;
 const WHEEL_SCROLL_MIN_DELTA: f32 = 120.;
 const WHEEL_SCROLL_MAX_DELTA: f32 = 480.;
 const WHEEL_SCROLL_MIN_DURATION: f32 = 0.1;
-const WHEEL_SCROLL_MAX_DURATION: f32 = 0.2;
+const WHEEL_SCROLL_MAX_DURATION: f32 = 0.16;
 
 #[derive(Clone, Copy, Debug)]
 struct WheelScrollAnimation {
@@ -233,7 +233,7 @@ fn start_smooth_wheel_scroll(
             target,
             velocity,
             now,
-            wheel_scroll_duration(delta),
+            wheel_scroll_duration(px(target - start)),
         ));
         if state.wheel_frame_scheduled {
             false
