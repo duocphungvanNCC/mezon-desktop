@@ -386,6 +386,9 @@ impl DirectMessageStore {
     pub fn send_direct_text_to_user(
         &self,
         user_id: UserId,
+        member_label: String,
+        member_avatar: String,
+        member_username: String,
         content: String,
         cx: &mut Context<Self>,
     ) -> Task<anyhow::Result<()>> {
@@ -406,10 +409,16 @@ impl DirectMessageStore {
                     let kind = DirectKind::from_raw(desc.channel_type);
                     let mode = kind.stream_mode();
                     this.update(cx, |this, cx| {
-                        let channel = direct_from_created(&desc, user_id, "", "", "");
+                        let channel = direct_from_created(
+                            &desc,
+                            user_id,
+                            &member_label,
+                            &member_avatar,
+                            &member_username,
+                        );
                         this.channels.upsert_created(channel);
                         this.freshness.mark_fetched();
-                        // cx.emit(DirectEvent::Changed);
+                        cx.emit(DirectEvent::Changed { channel_id: None });
                         cx.notify();
                     })?;
                     (channel_id, mode)
@@ -434,7 +443,6 @@ impl DirectMessageStore {
             Ok(())
         })
     }
-
 
     pub fn set_current(&mut self, id: ChannelId, channel_type: i32) {
         self.current = Some((id, channel_type));

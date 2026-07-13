@@ -16,11 +16,13 @@ use mezon_store::{
 use std::collections::HashSet;
 use std::io::Cursor;
 use std::sync::Arc;
+use std::time::Duration;
 
 #[derive(Clone)]
 struct InviteFriendRow {
     id: UserId,
     label: SharedString,
+    username: SharedString,
     avatar_src: SharedString,
     avatar_raw: SharedString,
 }
@@ -187,7 +189,7 @@ impl InvitePeopleModal {
                 });
             }
         })
-            .detach();
+        .detach();
     }
 
     fn rebuild_rows(&mut self, cx: &mut Context<Self>) {
@@ -208,6 +210,7 @@ impl InvitePeopleModal {
                 InviteFriendRow {
                     id: friend.id,
                     label: SharedString::from(label),
+                    username: SharedString::from(friend.username.clone()),
                     avatar_src: SharedString::from(avatar_src),
                     avatar_raw: SharedString::from(friend.avatar_url.clone()),
                 }
@@ -235,9 +238,17 @@ impl InvitePeopleModal {
         self.sending.insert(user_id);
         cx.notify();
 
+        let Some(row) = self.rows.iter().find(|row| row.id == user_id) else {
+            self.sending.remove(&user_id);
+            cx.notify();
+            return;
+        };
         let link = self.invite_link();
+        let label = row.label.to_string();
+        let avatar = row.avatar_raw.to_string();
+        let username = row.username.to_string();
         let task = store.update(cx, |store, cx| {
-            store.send_direct_text_to_user(user_id, link, cx)
+            store.send_direct_text_to_user(user_id, label, avatar, username, link, cx)
         });
         let locale = self.locale.clone();
         cx.spawn(async move |this, cx| match task.await {
@@ -260,7 +271,7 @@ impl InvitePeopleModal {
                 });
             }
         })
-            .detach();
+        .detach();
     }
 
     fn copy_invite_link(&mut self, cx: &mut Context<Self>) {
@@ -270,6 +281,15 @@ impl InvitePeopleModal {
         cx.write_to_clipboard(ClipboardItem::new_string(self.invite_link()));
         self.copied = true;
         cx.notify();
+        let executor = cx.background_executor().clone();
+        cx.spawn(async move |this, cx| {
+            executor.timer(Duration::from_millis(1500)).await;
+            let _ = this.update(cx, |this, cx| {
+                this.copied = false;
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     fn open_qr(&mut self, cx: &mut Context<Self>) {
@@ -324,11 +344,8 @@ impl Render for InvitePeopleModal {
         const ROW_HEIGHT: f32 = 56.;
         const MAX_VISIBLE_ROWS: usize = 4;
 
-        let rows = self.rows.clone();
-        let sent = self.sent.clone();
-        let sending = self.sending.clone();
         let list_entity = entity.clone();
-        let row_count = rows.len();
+        let row_count = self.rows.len();
         let visible_rows = row_count.min(MAX_VISIBLE_ROWS);
         let list_height = px(ROW_HEIGHT * visible_rows as f32);
 
@@ -337,13 +354,14 @@ impl Render for InvitePeopleModal {
             row_count,
             move |range, _window, cx| {
                 let theme = cx.theme().clone();
+                let modal = list_entity.read(cx);
                 range
-                    .map(|ix| match rows.get(ix) {
+                    .map(|ix| match modal.rows.get(ix) {
                         Some(row) => render_friend_row(
                             &theme,
                             row.clone(),
-                            sent.contains(&row.id),
-                            sending.contains(&row.id),
+                            modal.sent.contains(&row.id),
+                            modal.sending.contains(&row.id),
                             invite_ready,
                             invite_label.clone(),
                             sent_label.clone(),
@@ -355,10 +373,10 @@ impl Render for InvitePeopleModal {
                     .collect::<Vec<_>>()
             },
         )
-            .track_scroll(&self.scroll)
-            .w_full()
-            .h(list_height)
-            .min_h_0();
+        .track_scroll(&self.scroll)
+        .w_full()
+        .h(list_height)
+        .min_h_0();
 
         let qr_entity = entity.clone();
         let list_body = if row_count == 0 {
@@ -815,32 +833,19 @@ fn tr(locale: &str, key: &'static str) -> String {
     mezon_i18n::t(locale, key).to_string()
 }
 
-fn replace_i18n_var(template: &str, key: &str, value: &str) -> String {
-    template.replace(&format!("{{{{{key}}}}}"), value)
-}
-
 fn invite_modal_title(locale: &str, clan_name: &str) -> String {
-    replace_i18n_var(
-        mezon_i18n::t(locale, "invitation.modal.title"),
-        "target",
-        clan_name,
-    )
+    mezon_i18n::t(locale, "invitation.modal.title").replace("{{target}}", clan_name)
 }
 
 fn invite_send_link_label(locale: &str) -> String {
-    replace_i18n_var(
-        mezon_i18n::t(locale, "invitation.modal.sendLinkText"),
-        "type",
+    mezon_i18n::t(locale, "invitation.modal.sendLinkText").replace(
+        "{{type}}",
         mezon_i18n::t(locale, "invitation.modal.clanInvite"),
     )
 }
 
 fn copy_qr_label(locale: &str) -> String {
-    format!(
-        "{} ",
-        mezon_i18n::t(locale, "invitation.buttons.copyQR"),
-        // mezon_i18n::t(locale, "inviteToChannel.qrModal.title")
-    )
+    mezon_i18n::t(locale, "invitation.buttons.copyQR").to_string()
 }
 
 fn invite_link_for_code(invite_code: &str, config: Option<&AppConfig>) -> String {
@@ -888,7 +893,7 @@ fn invite_origin_from_config(config: Option<&AppConfig>) -> String {
         return String::new();
     };
 
-    invite_origin_from_host(&config.api_host, config.api_secure)
+    invite_origin_from_url_like(&config.redirect_uri)
         .or_else(|| invite_origin_from_url_like(&config.domain_url))
         .unwrap_or_default()
 }
@@ -969,11 +974,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn invite_origin_uses_dev_when_runtime_hosts_are_dev() {
-        let cfg = AppConfig::dev_defaults();
+    fn invite_origin_uses_redirect_uri_web_origin() {
+        let mut cfg = AppConfig::dev_defaults();
+        cfg.api_host = "api.example.test".into();
+        cfg.redirect_uri = "https://chat.example.test/login/callback".into();
         assert_eq!(
             invite_link_for_code("42", Some(&cfg)),
-            "https://dev-mezon.nccsoft.vn/invite/42"
+            "https://chat.example.test/invite/42"
         );
     }
 
@@ -983,12 +990,11 @@ mod tests {
         let link = ClanInviteLink {
             id: 2076277531916374016,
             invite_link: String::new(),
-            ..Default::default()
         };
 
         assert_eq!(
             invite_link_from_api(&link, Some(&cfg)),
-            Some("https://dev-mezon.nccsoft.vn/invite/2076277531916374016".to_string())
+            Some("https://mezon.ai/invite/2076277531916374016".to_string())
         );
     }
 

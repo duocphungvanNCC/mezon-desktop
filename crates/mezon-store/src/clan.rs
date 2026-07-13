@@ -719,7 +719,7 @@ impl ClanList {
         let channel = channel_id.map(ChannelId::get).unwrap_or_default();
         cx.spawn(async move |_, _| {
             let link = api
-                .create_link_invite_user(clan, channel, 0)
+                .create_link_invite_user(clan, channel, 10)
                 .await
                 .map_err(|e| e.to_string())?;
             Ok(ClanInviteLink {

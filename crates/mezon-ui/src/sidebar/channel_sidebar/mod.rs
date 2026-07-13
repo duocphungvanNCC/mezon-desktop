@@ -453,13 +453,13 @@ impl Render for ChannelSidebar {
                 locale.clone(),
             )
         });
-        let active_clan_for_menu = self.clan_list.read(cx).active_clan().map(|clan| {
-            (
-                clan.name.clone(),
-                clan.avatar_url.clone().unwrap_or_default(),
-            )
-        });
         let clan_menu_data = self.clan_menu_open.then(|| {
+            let active_clan_for_menu = self.clan_list.read(cx).active_clan().map(|clan| {
+                (
+                    clan.name.clone(),
+                    clan.avatar_url.clone().unwrap_or_default(),
+                )
+            });
             (
                 self.active_clan_id,
                 active_clan_for_menu
@@ -593,13 +593,13 @@ impl Render for ChannelSidebar {
                         clan_menu_data,
                         move |el,
                               (
-                                  clan_id,
-                                  clan_name,
-                                  clan_avatar_url,
-                                  show_empty,
-                                  can_create_category,
-                                  locale,
-                              )| {
+                            clan_id,
+                            clan_name,
+                            clan_avatar_url,
+                            show_empty,
+                            can_create_category,
+                            locale,
+                        )| {
                             let Some(clan_id) = clan_id else {
                                 return el;
                             };
