@@ -543,7 +543,7 @@ pub struct ChatHeader {
     show_inbox: bool,
     inbox_handle: Option<PopoverMenuHandle<InboxPopoverPanel>>,
     clan_id: Option<String>,
-    locale: Option<String>,
+    locale: Option<SharedString>,
     show_threads: bool,
     pin_handle: Option<PopoverMenuHandle<PinnedPopoverPanel>>,
     layout: WeakEntity<ChatLayout>,
@@ -581,7 +581,7 @@ impl ChatHeader {
 
     pub fn sync(
         &mut self,
-        name: Option<SharedString>,
+        name: Option<&str>,
         dm: bool,
         members_action: bool,
         members_active: bool,
@@ -593,12 +593,13 @@ impl ChatHeader {
         search_expanded: bool,
         show_search_options: bool,
         search_input: Option<Entity<InputState>>,
-        locale: Option<String>,
+        locale: Option<&str>,
         cx: &mut Context<Self>,
     ) {
         let resolving = name.is_none();
         let name = match name {
-            Some(name) => name,
+            Some(name) if self.name.as_ref() == name => self.name.clone(),
+            Some(name) => SharedString::from(name.to_string()),
             None if dm => SharedString::default(),
             None => self.name.clone(),
         };
@@ -619,7 +620,7 @@ impl ChatHeader {
             && self.show_search_options == show_search_options
             && self.show_inbox == show_inbox
             && self.clan_id == clan_id
-            && self.locale == locale
+            && self.locale.as_deref() == locale
             && self.show_threads == show_threads
         {
             return;
@@ -633,7 +634,7 @@ impl ChatHeader {
         self.show_search_options = show_search_options;
         self.show_inbox = show_inbox;
         self.clan_id = clan_id;
-        self.locale = locale;
+        self.locale = locale.map(|locale| SharedString::from(locale.to_string()));
         self.show_threads = show_threads;
         cx.notify();
     }
@@ -649,7 +650,10 @@ impl Render for ChatHeader {
         let search_expanded = self.search_expanded;
         let show_search_options = self.show_search_options;
         let search_input = self.search_input.clone();
-        let locale = self.locale.clone().unwrap_or_else(|| "en".to_string());
+        let locale = self
+            .locale
+            .clone()
+            .unwrap_or_else(|| SharedString::from("en"));
 
         let gallery_trigger = PopoverMenu::new("hdr-gallery-popover")
             .anchor(Anchor::TopRight)
@@ -698,7 +702,9 @@ impl Render for ChatHeader {
             self.clan_id.clone(),
             self.locale.clone(),
         ) {
-            header = header.inbox_popover(handle).inbox_context(clan_id, locale);
+            header = header
+                .inbox_popover(handle)
+                .inbox_context(clan_id, locale.to_string());
         }
         if let Some(handle) = self.pin_handle.clone() {
             header = header.pin_popover(handle, settings);

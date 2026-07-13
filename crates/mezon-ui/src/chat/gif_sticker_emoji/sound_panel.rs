@@ -6,7 +6,6 @@ use gpui::{
     Subscription, UniformListScrollHandle, Window, div, img, prelude::*, px, uniform_list,
 };
 use mezon_store::{StickerEvent, StickerStore, VoiceStore};
-use ui::{ScrollAxes, Scrollbars, WithScrollbar};
 
 use crate::components::primitives::{Icon, IconName};
 use crate::image_cache::{
@@ -14,10 +13,15 @@ use crate::image_cache::{
 };
 use crate::theme::{ActiveTheme, Theme};
 
-const PANEL_H: f32 = 400.;
 const RAIL_W: f32 = 44.;
+const RAIL_TILE_PX: f32 = 36.;
+const RAIL_LOGO_PX: f32 = 28.;
 const ROW_PX: f32 = 52.;
+const CARD_H: f32 = 40.;
+const PANEL_RADIUS: f32 = 8.;
 const ACCENT_BLUE: u32 = 0x5865f2;
+const ACCENT_SOFT_BG: u32 = 0x5865f21a;
+const ACCENT_SOFT_BORDER: u32 = 0x5865f24d;
 
 struct PickerSound {
     row_id: SharedString,
@@ -204,6 +208,30 @@ impl SoundPanel {
         self.header_row = header_row;
     }
 
+    fn tail_spacer_rows(&self) -> usize {
+        if self.searching() {
+            return 0;
+        }
+        let Some(&last_header) = self.header_row.last() else {
+            return 0;
+        };
+        let Some(viewport) = self
+            .scroll
+            .0
+            .borrow()
+            .last_item_size
+            .map(|size| size.item.height)
+        else {
+            return 0;
+        };
+        let below_last_header = self.rows.len().saturating_sub(last_header) as f32 * ROW_PX;
+        let missing = viewport - px(below_last_header);
+        if missing <= px(0.) {
+            return 0;
+        }
+        (f32::from(missing) / ROW_PX).ceil() as usize
+    }
+
     fn toggle_collapse(&mut self, clan_id: String, cx: &mut Context<Self>) {
         if !self.collapsed.remove(&clan_id) {
             self.collapsed.insert(clan_id);
@@ -214,10 +242,10 @@ impl SoundPanel {
 }
 
 impl Render for SoundPanel {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
         let entity = cx.entity();
-        let show_rail = !self.searching() && !self.categories.is_empty();
+        let show_rail = !self.categories.is_empty();
 
         let rail = show_rail.then(|| {
             let mut rail = div()
@@ -225,12 +253,14 @@ impl Render for SoundPanel {
                 .flex()
                 .flex_col()
                 .items_center()
-                .gap_4()
+                .gap_2()
                 .w(px(RAIL_W))
                 .h_full()
-                .py_4()
+                .py_2()
+                .px_1()
                 .flex_shrink_0()
-                .bg(theme.bg_tertiary)
+                .rounded_l(px(PANEL_RADIUS))
+                .bg(theme.tokens.bg_active_member_channel)
                 .overflow_y_scroll();
             for (cat_ix, cat) in self.categories.iter().enumerate() {
                 let ent = entity.clone();
@@ -241,21 +271,20 @@ impl Render for SoundPanel {
                     .flex()
                     .items_center()
                     .justify_center()
-                    .size(px(28.))
+                    .size(px(RAIL_TILE_PX))
+                    .rounded_lg()
                     .cursor_pointer()
                     .overflow_hidden();
                 if active {
-                    btn = btn.rounded(px(16.)).bg(gpui::rgb(ACCENT_BLUE));
+                    btn = btn.bg(gpui::rgb(ACCENT_BLUE)).shadow_md();
                 } else {
-                    btn = btn
-                        .rounded(px(24.))
-                        .bg(theme.bg_secondary)
-                        .hover(|s| s.rounded(px(16.)).bg(gpui::rgb(ACCENT_BLUE)));
+                    btn = btn.hover(|s| s.bg(theme.tokens.bg_item_hover));
                 }
                 if !cat.logo.is_empty() {
                     btn = btn.child(
                         img(cat.logo.clone())
-                            .size_full()
+                            .size(px(RAIL_LOGO_PX))
+                            .rounded_full()
                             .object_fit(gpui::ObjectFit::Cover),
                     );
                 } else {
@@ -276,7 +305,7 @@ impl Render for SoundPanel {
                     ent.update(cx, |this, cx| {
                         this.selected = Some(clan_id);
                         if let Some(&row) = this.header_row.get(cat_ix) {
-                            this.scroll.scroll_to_item(row, ScrollStrategy::Top);
+                            this.scroll.scroll_to_item_strict(row, ScrollStrategy::Top);
                         }
                         cx.notify();
                     });
@@ -286,7 +315,7 @@ impl Render for SoundPanel {
             rail
         });
 
-        let count = self.rows.len();
+        let count = self.rows.len() + self.tail_spacer_rows();
         let list_entity = entity.clone();
         let previewing: Option<SharedString> = VoiceStore::global(cx)
             .read(cx)
@@ -314,26 +343,39 @@ impl Render for SoundPanel {
         .h_full()
         .flex_1();
 
-        let content: AnyElement = if self.categories.is_empty() {
+        let content: AnyElement = if self.rows.is_empty() {
             div()
                 .flex_1()
-                .flex()
-                .flex_col()
-                .items_center()
-                .justify_center()
-                .gap_2()
-                .opacity(0.5)
-                .child(
-                    Icon::new(IconName::Speaker)
-                        .size(px(32.))
-                        .text_color(theme.tokens.text_theme_primary),
-                )
+                .min_w_0()
+                .h_full()
+                .px_4()
+                .pb_4()
                 .child(
                     div()
-                        .text_size(px(12.))
-                        .font_weight(FontWeight::MEDIUM)
-                        .text_color(theme.tokens.text_theme_primary)
-                        .child(self.empty_label.clone()),
+                        .w_full()
+                        .flex()
+                        .flex_col()
+                        .items_center()
+                        .justify_center()
+                        .gap_2()
+                        .py_10()
+                        .rounded_lg()
+                        .border_2()
+                        .border_dashed()
+                        .border_color(theme.tokens.border_theme_primary)
+                        .opacity(0.5)
+                        .child(
+                            Icon::new(IconName::Speaker)
+                                .size(px(32.))
+                                .text_color(theme.tokens.text_theme_primary),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(12.))
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(theme.tokens.text_theme_primary)
+                                .child(self.empty_label.clone()),
+                        ),
                 )
                 .into_any_element()
         } else {
@@ -341,21 +383,17 @@ impl Render for SoundPanel {
                 .flex_1()
                 .min_w_0()
                 .h_full()
-                .px_2()
+                .px_4()
+                .pb_4()
                 .child(list)
-                .custom_scrollbars(
-                    Scrollbars::always_visible(ScrollAxes::Vertical)
-                        .tracked_scroll_handle(&self.scroll),
-                    window,
-                    cx,
-                )
                 .into_any_element()
         };
 
         div()
             .image_cache(self.image_cache.clone())
-            .w_full()
-            .h(px(PANEL_H))
+            .size_full()
+            .px_2()
+            .pt_2()
             .flex()
             .flex_row()
             .overflow_hidden()
@@ -397,7 +435,7 @@ fn render_header(
             .justify_center()
             .size(px(16.))
             .rounded_full()
-            .bg(theme.bg_secondary)
+            .bg(theme.tokens.bg_active_member_channel)
             .text_size(px(8.))
             .font_weight(FontWeight::BOLD)
             .text_color(theme.tokens.text_secondary)
@@ -427,7 +465,13 @@ fn render_header(
                 .size(px(12.))
                 .text_color(theme.tokens.text_secondary),
         )
-        .child(div().h(px(1.)).flex_1().ml_2().bg(theme.border))
+        .child(
+            div()
+                .h(px(1.))
+                .flex_1()
+                .ml_2()
+                .bg(theme.tokens.border_theme_primary),
+        )
         .on_click(move |_, _, cx| {
             let clan_id = clan_id.to_string();
             ent.update(cx, |this, cx| this.toggle_collapse(clan_id, cx));
@@ -442,11 +486,17 @@ fn render_sound_row(
     previewing: &Option<SharedString>,
     entity: &Entity<SoundPanel>,
 ) -> AnyElement {
-    let mut row = div().h(px(ROW_PX)).flex().flex_row().items_start().gap_3();
+    let mut row = div()
+        .w_full()
+        .h(px(ROW_PX))
+        .flex()
+        .flex_row()
+        .items_start()
+        .gap_3();
     row = row.child(render_sound_cell(theme, left, previewing, entity));
     match right {
         Some(sound) => row = row.child(render_sound_cell(theme, sound, previewing, entity)),
-        None => row = row.child(div().flex_1()),
+        None => row = row.child(div().flex_1().min_w_0()),
     }
     row.into_any_element()
 }
@@ -477,17 +527,20 @@ fn render_sound_cell(
         .id(sound.row_id.clone())
         .flex_1()
         .min_w_0()
-        .h(px(40.))
+        .h(px(CARD_H))
         .flex()
         .flex_row()
         .items_center()
         .gap_3()
         .p_2()
         .rounded_lg()
-        .bg(theme.bg_secondary)
+        .bg(theme.tokens.bg_active_member_channel)
         .border_1()
         .border_color(gpui::transparent_black())
-        .hover(|s| s.border_color(gpui::rgb(ACCENT_BLUE)))
+        .hover(|s| {
+            s.bg(gpui::rgba(ACCENT_SOFT_BG))
+                .border_color(gpui::rgba(ACCENT_SOFT_BORDER))
+        })
         .child(
             div()
                 .id(sound.preview_id.clone())
@@ -498,7 +551,7 @@ fn render_sound_cell(
                 .size(px(32.))
                 .rounded_full()
                 .cursor_pointer()
-                .hover(|s| s.bg(theme.bg_hover))
+                .hover(|s| s.bg(theme.tokens.bg_item_theme_hover))
                 .child(
                     Icon::new(preview_icon)
                         .size(px(16.))

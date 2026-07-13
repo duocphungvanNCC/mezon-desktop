@@ -5,14 +5,14 @@ use gpui::{
     SharedString, Subscription, Window, div, img, list, prelude::*, px,
 };
 use mezon_store::{ClanList, StickerEvent, StickerStore};
-use ui::{ScrollAxes, Scrollbars, WithScrollbar};
 
 use crate::components::primitives::{Icon, IconName};
 use crate::image_cache::{LruImageCache, SHARED_ENTRY_MAX_BYTES};
 use crate::theme::{ActiveTheme, Theme};
 
-const PANEL_H: f32 = 400.;
 const RAIL_W: f32 = 44.;
+const PANEL_RADIUS: f32 = 8.;
+const ACCENT_BLUE: u32 = 0x5865f2;
 const STICKER_COLS: usize = 3;
 const STICKER_CELL_PX: f32 = 92.;
 const STICKER_IMG_PX: f32 = 80.;
@@ -223,7 +223,7 @@ impl StickerPanel {
 }
 
 impl Render for StickerPanel {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
         let entity = cx.entity();
         let show_rail = !self.searching() && !self.categories.is_empty();
@@ -234,12 +234,14 @@ impl Render for StickerPanel {
                 .flex()
                 .flex_col()
                 .items_center()
-                .gap_1()
+                .gap_2()
                 .w(px(RAIL_W))
                 .h_full()
-                .py_1()
+                .py_2()
+                .px_1()
                 .flex_shrink_0()
-                .bg(theme.bg_tertiary)
+                .rounded_l(px(PANEL_RADIUS))
+                .bg(theme.tokens.bg_active_member_channel)
                 .overflow_y_scroll();
             for (cat_ix, cat) in self.categories.iter().enumerate() {
                 let ent = entity.clone();
@@ -250,13 +252,13 @@ impl Render for StickerPanel {
                     .items_center()
                     .justify_center()
                     .size(px(36.))
-                    .rounded_md()
+                    .rounded_lg()
                     .cursor_pointer()
                     .overflow_hidden();
                 btn = if active {
-                    btn.bg(theme.bg_hover)
+                    btn.bg(gpui::rgb(ACCENT_BLUE)).shadow_md()
                 } else {
-                    btn.hover(|s| s.bg(theme.bg_hover))
+                    btn.hover(|s| s.bg(theme.tokens.bg_item_hover))
                 };
                 btn = btn.child(category_logo(&theme, &cat.logo, &cat.initial, 28.));
                 let key = cat.key.clone();
@@ -264,7 +266,10 @@ impl Render for StickerPanel {
                     ent.update(cx, |this, cx| {
                         this.selected = Some(key.clone());
                         if let Some(&row) = this.header_row.get(cat_ix) {
-                            this.list_state.scroll_to_reveal_item(row);
+                            this.list_state.scroll_to(gpui::ListOffset {
+                                item_ix: row,
+                                offset_in_item: px(0.),
+                            });
                         }
                         cx.notify();
                     });
@@ -312,19 +317,14 @@ impl Render for StickerPanel {
                 .h_full()
                 .px_2()
                 .child(list)
-                .custom_scrollbars(
-                    Scrollbars::always_visible(ScrollAxes::Vertical)
-                        .tracked_scroll_handle(&self.list_state),
-                    window,
-                    cx,
-                )
                 .into_any_element()
         };
 
         div()
             .image_cache(self.image_cache.clone())
-            .w_full()
-            .h(px(PANEL_H))
+            .size_full()
+            .px_2()
+            .pt_2()
             .flex()
             .flex_row()
             .overflow_hidden()
@@ -444,7 +444,7 @@ fn category_logo(
         .justify_center()
         .size(px(size))
         .rounded_full()
-        .bg(theme.bg_secondary)
+        .bg(theme.tokens.bg_active_member_channel)
         .text_size(px(size * 0.42))
         .font_weight(FontWeight::BOLD)
         .text_color(theme.tokens.text_theme_primary)
