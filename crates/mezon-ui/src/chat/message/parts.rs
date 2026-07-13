@@ -9,6 +9,7 @@ use mezon_store::{
     MessageId, MessageReference, MessagesStore, PlatformStore, ProfileContext, Reaction,
     TopicsStore, ViewerMedia, resolve_avatar_url,
 };
+use smallvec::SmallVec;
 
 use super::audio_player::{
     AudioActivation, audio_failed_pill, audio_pill, audio_sending_pill, audio_time_label,
@@ -345,10 +346,10 @@ pub fn render_attachments(msg: &Message, ctx: &RowCtx) -> Option<AnyElement> {
         return None;
     }
     let theme = ctx.theme;
-    let mut videos = Vec::new();
-    let mut audios: Vec<&MessageAttachment> = Vec::new();
-    let mut images: Vec<(usize, &MessageAttachment)> = Vec::new();
-    let mut documents = Vec::new();
+    let mut videos: SmallVec<[&MessageAttachment; 2]> = SmallVec::new();
+    let mut audios: SmallVec<[&MessageAttachment; 2]> = SmallVec::new();
+    let mut images: SmallVec<[(usize, &MessageAttachment); 4]> = SmallVec::new();
+    let mut documents: SmallVec<[&MessageAttachment; 2]> = SmallVec::new();
     for (idx, att) in msg.attachments.iter().enumerate() {
         if att.is_unsupported_media() {
             documents.push(att);

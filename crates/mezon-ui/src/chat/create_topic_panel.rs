@@ -1,6 +1,6 @@
 use gpui::{
-    AnyView, ClickEvent, Context, Entity, FontWeight, KeyDownEvent, StyleRefinement, Subscription,
-    Window, div, prelude::*, px,
+    AnyView, ClickEvent, Context, Entity, FontWeight, KeyDownEvent, SharedString,
+    StyleRefinement, Subscription, Window, div, prelude::*, px,
 };
 use mezon_store::{ChannelId, MessagesStore, Settings, TopicsStore};
 
@@ -17,6 +17,7 @@ const PANEL_WIDTH: f32 = 510.;
 pub struct TopicPanel {
     settings: Entity<Settings>,
     mention_input: Entity<MentionInput>,
+    input_bar: Entity<InputBar>,
     typing: Entity<ChannelTyping>,
     topic_timeline: Entity<ChannelMessages>,
     _subs: Vec<Subscription>,
@@ -32,6 +33,14 @@ impl TopicPanel {
         let locale = settings.read(cx).language.clone();
         let placeholder = mezon_i18n::t(&locale, "messageBox.placeholder").to_string();
         let mention_input = cx.new(|cx| MentionInput::new(placeholder, settings.clone(), window, cx));
+        let input_bar = cx.new(|cx| {
+            InputBar::new(
+                mention_input.clone(),
+                SharedString::from(locale.clone()),
+                &settings,
+                cx,
+            )
+        });
         let typing = cx.new(|cx| ChannelTyping::new(&settings, cx));
         let topic_timeline =
             cx.new(|cx| ChannelMessages::new_topic_box(settings.clone(), align_timeline, cx));
@@ -58,6 +67,7 @@ impl TopicPanel {
         Self {
             settings,
             mention_input,
+            input_bar,
             typing,
             topic_timeline,
             _subs: subs,
@@ -109,9 +119,13 @@ impl Render for TopicPanel {
             typing.sync(topic_id.map(ChannelId), cx);
         });
 
+        let locale = self.settings.read(cx).language.clone();
+        self.input_bar.update(cx, |bar, cx| {
+            bar.sync(&locale, None, cx);
+        });
+
         let theme = cx.theme();
         let tokens = &theme.tokens;
-        let locale = self.settings.read(cx).language.clone();
 
         let header = h_flex()
             .items_center()
@@ -165,11 +179,7 @@ impl Render for TopicPanel {
                         .child(err),
                 )
             })
-            .child(
-                InputBar::new()
-                    .with_mention_input(self.mention_input.clone())
-                    .render(theme, &locale),
-            )
+            .child(self.input_bar.clone())
             .child(self.typing.clone());
 
         v_flex()

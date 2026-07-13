@@ -1,14 +1,15 @@
 mod attachments;
 mod text_field;
 
+use std::cell::Cell;
 use std::path::PathBuf;
 use std::rc::Rc;
 
 use gpui::{
-    AnyElement, App, Context, DismissEvent, Entity, EventEmitter, Focusable, FontWeight, Image,
-    ImageFormat, IntoElement, KeyBinding, PathPromptOptions, ScrollStrategy, SharedString,
-    Subscription, UniformListScrollHandle, Window, actions, deferred, div, img, prelude::*, px,
-    uniform_list,
+    AnyElement, App, Bounds, Context, DismissEvent, Div, Entity, EventEmitter, Focusable,
+    FontWeight, Image, ImageFormat, IntoElement, KeyBinding, PathPromptOptions, Pixels, Rgba,
+    ScrollStrategy, SharedString, Stateful, Subscription, UniformListScrollHandle, Window, actions,
+    canvas, deferred, div, img, prelude::*, px, uniform_list,
 };
 use mezon_store::{
     ChannelId, ChannelList, ChannelType, ClanList, EmojiStore, MENTION_HERE_ID, MessageSpan,
@@ -138,6 +139,7 @@ pub struct MentionInput {
     session_channels: Vec<Rc<ChannelSuggestRaw>>,
     session_emojis: Vec<Rc<EmojiSuggestRaw>>,
     popup: Option<Entity<GifStickerEmojiPopup>>,
+    toggle_bounds: Rc<Cell<Bounds<Pixels>>>,
     _popup_subs: Vec<Subscription>,
     avatar_cache: Entity<LruImageCache>,
     preview_cache: Entity<LruImageCache>,
@@ -307,6 +309,7 @@ impl MentionInput {
             session_channels: Vec::new(),
             session_emojis: Vec::new(),
             popup: None,
+            toggle_bounds: Rc::new(Cell::new(Bounds::default())),
             _popup_subs: Vec::new(),
             avatar_cache,
             preview_cache,
@@ -925,8 +928,16 @@ impl MentionInput {
         cx.notify();
     }
 
-    fn toggle_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.toggle_tab(SubPanel::Emoji, window, cx);
+    fn picker_toggle(&self, id: &'static str, icon: IconName, color: Rgba) -> Stateful<Div> {
+        div()
+            .id(id)
+            .flex()
+            .items_center()
+            .justify_center()
+            .size(px(20.))
+            .rounded(px(4.))
+            .cursor_pointer()
+            .child(Icon::new(icon).size_5().text_color(color))
     }
 
     fn toggle_tab(&mut self, tab: SubPanel, window: &mut Window, cx: &mut Context<Self>) {
@@ -1203,18 +1214,24 @@ impl MentionInput {
 
     fn render_popup(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let popup = self.popup.clone()?;
+        let toggle_bounds = self.toggle_bounds.clone();
         Some(
             deferred(
                 div()
                     .absolute()
                     .bottom_full()
-                    .right_0()
+                    .right(px(20.))
                     .mb(px(10.))
                     .occlude()
-                    .on_mouse_down_out(cx.listener(|this, _event, _window, cx| {
-                        this.close_popup();
-                        cx.notify();
-                    }))
+                    .on_mouse_down_out(cx.listener(
+                        move |this, event: &gpui::MouseDownEvent, _, cx| {
+                            if toggle_bounds.get().contains(&event.position) {
+                                return;
+                            }
+                            this.close_popup();
+                            cx.notify();
+                        },
+                    ))
                     .child(popup),
             )
             .into_any_element(),
@@ -1475,71 +1492,40 @@ impl Render for MentionInput {
             )
             .child(
                 div()
-                    .id("gif-toggle")
-                    .absolute()
-                    .right(px(68.))
-                    .top(px(12.))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .size(px(20.))
-                    .rounded(px(4.))
-                    .cursor_pointer()
-                    .hover(|s| s.bg(icon_bg_hover))
-                    .child(
-                        Icon::new(IconName::Gif)
-                            .size_5()
-                            .text_color(gif_color)
-                            .hover(|s| s.text_color(icon_hover)),
-                    )
-                    .on_click(cx.listener(|this, _event, window, cx| {
-                        this.toggle_tab(SubPanel::Gifs, window, cx)
-                    })),
-            )
-            .child(
-                div()
-                    .id("sticker-toggle")
-                    .absolute()
-                    .right(px(40.))
-                    .top(px(12.))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .size(px(20.))
-                    .rounded(px(4.))
-                    .cursor_pointer()
-                    .hover(|s| s.bg(icon_bg_hover))
-                    .child(
-                        Icon::new(IconName::Sticker)
-                            .size_5()
-                            .text_color(sticker_color)
-                            .hover(|s| s.text_color(icon_hover)),
-                    )
-                    .on_click(cx.listener(|this, _event, window, cx| {
-                        this.toggle_tab(SubPanel::Stickers, window, cx)
-                    })),
-            )
-            .child(
-                div()
-                    .id("emoji-toggle")
                     .absolute()
                     .right(px(12.))
                     .top(px(12.))
                     .flex()
                     .items_center()
-                    .justify_center()
-                    .size(px(20.))
-                    .rounded(px(4.))
-                    .cursor_pointer()
-                    .hover(|s| s.bg(icon_bg_hover))
+                    .gap(px(8.))
                     .child(
-                        Icon::new(IconName::Smile)
-                            .size_5()
-                            .text_color(toggle_color)
-                            .hover(|s| s.text_color(icon_hover)),
+                        canvas(
+                            {
+                                let toggle_bounds = self.toggle_bounds.clone();
+                                move |bounds, _, _| toggle_bounds.set(bounds)
+                            },
+                            |_, _, _, _| {},
+                        )
+                        .absolute()
+                        .size_full(),
                     )
-                    .on_click(
-                        cx.listener(|this, _event, window, cx| this.toggle_picker(window, cx)),
+                    .child(
+                        self.picker_toggle("gif-toggle", IconName::Gif, gif_color)
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.toggle_tab(SubPanel::Gifs, window, cx)
+                            })),
+                    )
+                    .child(
+                        self.picker_toggle("sticker-toggle", IconName::Sticker, sticker_color)
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.toggle_tab(SubPanel::Stickers, window, cx)
+                            })),
+                    )
+                    .child(
+                        self.picker_toggle("emoji-toggle", IconName::Smile, toggle_color)
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.toggle_tab(SubPanel::Emoji, window, cx)
+                            })),
                     ),
             )
             .when_some(popup, |this, popup| this.child(popup))

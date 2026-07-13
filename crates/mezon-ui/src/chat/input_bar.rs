@@ -1,36 +1,39 @@
 use crate::chat::{MentionInput, ReplyTarget};
 use crate::components::primitives::{Icon, IconName};
-use crate::theme::Theme;
-use gpui::{div, prelude::*, px};
-use mezon_store::MessagesStore;
+use crate::theme::{ActiveTheme, Theme};
+use gpui::{Context, Entity, Render, SharedString, Subscription, Window, div, prelude::*, px};
+use mezon_store::{MessagesStore, Settings};
 
 pub struct InputBar {
-    mention_input: Option<gpui::Entity<MentionInput>>,
+    mention_input: Entity<MentionInput>,
+    locale: SharedString,
     replying_to: Option<ReplyTarget>,
-}
-
-impl Default for InputBar {
-    fn default() -> Self {
-        Self::new()
-    }
+    _settings_observe: Subscription,
 }
 
 impl InputBar {
-    pub fn new() -> Self {
+    pub fn new(
+        mention_input: Entity<MentionInput>,
+        locale: SharedString,
+        settings: &Entity<Settings>,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let settings_observe = cx.observe(settings, |_, _, cx| cx.notify());
         Self {
-            mention_input: None,
+            mention_input,
+            locale,
             replying_to: None,
+            _settings_observe: settings_observe,
         }
     }
 
-    pub fn with_mention_input(mut self, mention_input: gpui::Entity<MentionInput>) -> Self {
-        self.mention_input = Some(mention_input);
-        self
-    }
-
-    pub fn replying_to(mut self, target: Option<ReplyTarget>) -> Self {
-        self.replying_to = target;
-        self
+    pub fn sync(&mut self, locale: &str, replying_to: Option<ReplyTarget>, cx: &mut Context<Self>) {
+        if self.locale.as_ref() == locale && self.replying_to == replying_to {
+            return;
+        }
+        self.locale = SharedString::from(locale.to_string());
+        self.replying_to = replying_to;
+        cx.notify();
     }
 
     fn reply_preview_bar(theme: &Theme, locale: &str, target: &ReplyTarget) -> impl IntoElement {
@@ -82,15 +85,17 @@ impl InputBar {
             )
     }
 
-    pub fn render(&self, theme: &Theme, locale: &str) -> impl IntoElement {
+    fn render_bar(&self, theme: &Theme) -> impl IntoElement {
         let replying = self.replying_to.is_some();
         div()
             .flex()
             .flex_col()
+            .flex_none()
+            .w_full()
             .px_3()
             .pb_1()
             .when_some(self.replying_to.as_ref(), |d, target| {
-                d.child(Self::reply_preview_bar(theme, locale, target))
+                d.child(Self::reply_preview_bar(theme, &self.locale, target))
             })
             .child(
                 div()
@@ -103,9 +108,13 @@ impl InputBar {
                     .border_color(theme.tokens.border_primary)
                     .bg(theme.tokens.bg_surface)
                     .shadow_md()
-                    .when_some(self.mention_input.clone(), |d, mention_input| {
-                        d.child(div().flex_1().child(mention_input))
-                    }),
+                    .child(div().flex_1().child(self.mention_input.clone())),
             )
+    }
+}
+
+impl Render for InputBar {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.render_bar(cx.theme())
     }
 }

@@ -800,6 +800,9 @@ impl MessagesStore {
     /// Mirrors React `setViewingOlder` — when true, live WS messages only update
     /// `lastMessageByChannel`, not the loaded buffer.
     pub fn set_viewing_older(&mut self, channel_id: ChannelId, viewing: bool) {
+        if self.is_viewing_older(channel_id) == viewing {
+            return;
+        }
         if viewing {
             self.viewing_older_by_channel.insert(channel_id, true);
         } else {
