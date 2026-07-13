@@ -2,6 +2,8 @@ use gpui::{AnyElement, div, prelude::*, px, relative};
 
 use crate::theme::Theme;
 
+const MESSAGE_SKELETON_HEIGHT: f32 = 1000.;
+
 const SKELETON_ITEMS: [([f32; 5], [f32; 5], f32); 5] = [
     ([75., 68., 82., 91., 77.], [88., 71., 94., 83., 69.], 180.),
     ([82., 95., 73., 87., 91.], [76., 89., 84., 78., 93.], 220.),
@@ -35,7 +37,9 @@ pub fn message_skeleton(theme: &Theme, rows: usize) -> AnyElement {
         .flex_col()
         .px_4()
         .py_2()
+        .h(px(MESSAGE_SKELETON_HEIGHT))
         .w(relative(0.6))
+        .flex_none()
         .overflow_hidden();
     for (line1, line2, image_w) in SKELETON_ITEMS.iter().take(rows).copied() {
         container = container.child(

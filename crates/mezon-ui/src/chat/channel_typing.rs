@@ -82,8 +82,8 @@ impl Render for ChannelTyping {
         };
         let bar = div()
             .mx_3()
-            .mt(px(-2.))
             .h(px(16.))
+            .flex_none()
             .flex()
             .flex_row()
             .items_center()

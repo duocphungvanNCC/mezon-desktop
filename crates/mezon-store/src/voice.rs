@@ -1,5 +1,8 @@
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 use std::time::{Duration, Instant};
 
 use gpui::{App, AppContext, Context, Entity, Global, RenderImage, Task, Window};
@@ -157,6 +160,7 @@ pub struct VoiceStore {
     render_cache: Mutex<HashMap<u64, CachedRenderFrame>>,
     pending_texture_drops: Mutex<Vec<Arc<RenderImage>>>,
     pending_texture_replaces: Mutex<Vec<Arc<RenderImage>>>,
+    pending_texture_work: AtomicBool,
     cached_meet_token: Option<CachedMeetToken>,
     meet_token_prefetching: Option<String>,
     link_copied: bool,
@@ -256,6 +260,7 @@ impl VoiceStore {
             render_cache: Mutex::new(HashMap::new()),
             pending_texture_drops: Mutex::new(Vec::new()),
             pending_texture_replaces: Mutex::new(Vec::new()),
+            pending_texture_work: AtomicBool::new(false),
             cached_meet_token: None,
             meet_token_prefetching: None,
             link_copied: false,
@@ -402,6 +407,7 @@ impl VoiceStore {
             }) = previous
             {
                 self.pending_texture_drops.lock().push(image);
+                self.pending_texture_work.store(true, Ordering::Release);
             }
             return Some(rendered);
         }
@@ -441,12 +447,14 @@ impl VoiceStore {
             } else {
                 replaces.push(image.clone());
             }
+            self.pending_texture_work.store(true, Ordering::Release);
         } else if let Some(CachedRenderFrame {
             frame: VoiceRenderFrame::Image(previous),
             ..
         }) = previous
         {
             self.pending_texture_drops.lock().push(previous);
+            self.pending_texture_work.store(true, Ordering::Release);
         }
         Some(rendered)
     }
@@ -466,6 +474,7 @@ impl VoiceStore {
             }
         }
         let mut drops = self.pending_texture_drops.lock();
+        let previous_drop_count = drops.len();
         cache.retain(|key, entry| {
             if live_keys.contains(key) {
                 true
@@ -478,9 +487,15 @@ impl VoiceStore {
                 false
             }
         });
+        if drops.len() != previous_drop_count {
+            self.pending_texture_work.store(true, Ordering::Release);
+        }
     }
 
     pub fn flush_texture_drops(&self, mut window: Option<&mut Window>, cx: &mut App) {
+        if !self.pending_texture_work.swap(false, Ordering::AcqRel) {
+            return;
+        }
         let drops: Vec<Arc<RenderImage>> = std::mem::take(&mut *self.pending_texture_drops.lock());
         let replaces: Vec<Arc<RenderImage>> =
             std::mem::take(&mut *self.pending_texture_replaces.lock());

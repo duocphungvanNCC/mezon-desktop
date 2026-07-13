@@ -124,6 +124,14 @@ pub fn start_screen(
                 return;
             }
 
+            #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+            if crate::pipewire_init::is_wayland_session()
+                && !crate::pipewire_init::ensure_pipewire_stubs_armed()
+            {
+                let _ = track_tx.send(Err("PipeWire unavailable for screen capture".into()));
+                return;
+            }
+
             let capture_target = match scap_target_for_pick(pick) {
                 Ok(target) => target,
                 Err(e) => {

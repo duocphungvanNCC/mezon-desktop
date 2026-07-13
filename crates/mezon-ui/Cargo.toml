@@ -33,6 +33,9 @@ image.workspace = true
 qrcode.workspace = true
 smallvec.workspace = true
 
+[dev-dependencies]
+gpui = { workspace = true, features = ["inspector", "test-support"] }
+
 [target.'cfg(target_os = "macos")'.dependencies]
 block = "0.1"
 objc.workspace = true

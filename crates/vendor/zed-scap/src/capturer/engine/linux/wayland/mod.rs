@@ -190,11 +190,19 @@ fn process_callback_impl(
     }
 }
 
+struct PipewireCapture {
+    _listener: pw::stream::StreamListener<ListenerUserData>,
+    _stream: pw::stream::Stream,
+    _core: pw::core::Core,
+    _context: Context,
+    mainloop: MainLoop,
+}
+
 fn start_pipewire_capturer(
     options: Options,
     tx: Sender<Result<Frame>>,
     stream_id: u32,
-) -> Result<MainLoop> {
+) -> Result<PipewireCapture> {
     pw::init();
 
     let mainloop = MainLoop::new(None)?;
@@ -216,8 +224,8 @@ fn start_pipewire_capturer(
         },
     )?;
 
-    let _listener = stream
-        .add_local_listener_with_user_data(user_data.clone())
+    let listener = stream
+        .add_local_listener_with_user_data(user_data)
         .state_changed(state_changed_callback)
         .param_changed(param_changed_callback)
         .process(process_callback)
@@ -316,7 +324,13 @@ fn start_pipewire_capturer(
         &mut params,
     )?;
 
-    Ok(mainloop)
+    Ok(PipewireCapture {
+        _listener: listener,
+        _stream: stream,
+        _core: core,
+        _context: context,
+        mainloop,
+    })
 }
 
 // TODO: Format negotiation
@@ -326,10 +340,10 @@ fn pipewire_capturer(
     ready_sender: &SyncSender<Result<()>>,
     stream_id: u32,
 ) {
-    let mainloop = match start_pipewire_capturer(options, tx, stream_id) {
-        Ok(mainloop) => {
+    let capture = match start_pipewire_capturer(options, tx, stream_id) {
+        Ok(capture) => {
             ready_sender.send(Ok(())).ok();
-            mainloop
+            capture
         }
         Err(err) => {
             ready_sender.send(Err(err)).ok();
@@ -341,7 +355,7 @@ fn pipewire_capturer(
         std::thread::sleep(Duration::from_millis(10));
     }
 
-    let pw_loop = mainloop.loop_();
+    let pw_loop = capture.mainloop.loop_();
 
     // User has called Capturer::start() and we start the main loop
     while CAPTURER_STATE.load(std::sync::atomic::Ordering::Relaxed) == 1

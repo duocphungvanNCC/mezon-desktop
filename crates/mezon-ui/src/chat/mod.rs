@@ -34,7 +34,7 @@ pub use mention_input::{MentionInput, MentionInputEvent};
 pub use message::ChannelMessages;
 pub use mezon_store::COMBINE_TIME_WINDOW;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReplyTarget {
-    pub sender_name: String,
+    pub sender_name: gpui::SharedString,
 }
