@@ -266,6 +266,23 @@ pub struct TransportClient {
 }
 
 impl TransportClient {
+    pub async fn send_channel_message_structured(
+        &self,
+        channel_id: i64,
+        content_json: &str,
+        mode: i32,
+    ) -> Result<crate::transport::ApiMessage> {
+        let transport = self.inner.clone();
+        let content_json = content_json.to_string();
+        runtime()
+            .spawn(async move {
+                transport
+                    .send_channel_message_structured(channel_id, &content_json, mode)
+                    .await
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
     pub fn new(base_path: String) -> Self {
         let adapter = Box::new(AbridgedTcpAdapter::new());
         let transport = MezonTransport::new(adapter, base_path);

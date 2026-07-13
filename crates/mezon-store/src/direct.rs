@@ -383,9 +383,10 @@ impl DirectMessageStore {
         })
     }
 
-    pub fn send_direct_text_to_user(
+    pub fn send_direct_text_to_target(
         &self,
-        user_id: UserId,
+        user_id: Option<UserId>,
+        existing_channel: Option<(ChannelId, i32)>,
         member_label: String,
         member_avatar: String,
         member_username: String,
@@ -393,17 +394,21 @@ impl DirectMessageStore {
         cx: &mut Context<Self>,
     ) -> Task<anyhow::Result<()>> {
         let api = self.api.clone();
-        let existing = self
-            .channels
-            .as_slice()
-            .iter()
-            .find(|channel| channel.kind == DirectKind::Dm && channel.peer_user_id == Some(user_id))
-            .map(|channel| (channel.id, channel.kind.stream_mode()));
+        let existing = existing_channel.or_else(|| {
+            user_id.and_then(|user_id| {
+                self.channels
+                    .as_slice()
+                    .iter()
+                    .find(|channel| { channel.kind == DirectKind::Dm && channel.peer_user_id == Some(user_id) })
+                    .map(|channel| (channel.id, channel.kind.stream_mode()))
+            })
+        });
 
         cx.spawn(async move |this, cx| {
             let (channel_id, mode) = match existing {
                 Some(existing) => existing,
                 None => {
+                    let user_id = user_id.ok_or_else(|| anyhow::anyhow!("invite target has no user or channel"))?;
                     let desc = api.create_direct_channel(&[user_id.0]).await?;
                     let channel_id = ChannelId(desc.channel_id);
                     let kind = DirectKind::from_raw(desc.channel_type);
@@ -426,16 +431,7 @@ impl DirectMessageStore {
             };
 
             let sent = api
-                .send_channel_message(
-                    0,
-                    channel_id.get(),
-                    &content,
-                    false,
-                    mode,
-                    Vec::new(),
-                    Vec::new(),
-                    Vec::new(),
-                )
+                .send_channel_message_structured(channel_id.get(), &content, mode)
                 .await?;
             this.update(cx, |this, cx| {
                 this.note_message(channel_id, sent.create_time, true, false, cx);

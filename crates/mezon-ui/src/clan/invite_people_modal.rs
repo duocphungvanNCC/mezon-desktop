@@ -10,8 +10,9 @@ use gpui::{
     Subscription, UniformListScrollHandle, Window, div, img, prelude::*, px, uniform_list,
 };
 use mezon_store::{
-    AppConfig, ChannelId, ClanId, ClanInviteLink, ClanList, DirectMessageStore, Friend,
-    FriendEvent, FriendState, FriendStore, UserId,
+    AppConfig, ChannelId, ClanId, ClanInviteLink, ClanList, ClanMembersEvent, ClanMembersStore,
+    DirectEvent, DirectKind, DirectMessageStore, Friend, FriendEvent, FriendState, FriendStore,
+    UserId,
 };
 use std::collections::HashSet;
 use std::io::Cursor;
@@ -20,7 +21,9 @@ use std::time::Duration;
 
 #[derive(Clone)]
 struct InviteFriendRow {
-    id: UserId,
+    key: SharedString,
+    user_id: Option<UserId>,
+    channel: Option<(ChannelId, i32)>,
     label: SharedString,
     username: SharedString,
     avatar_src: SharedString,
@@ -35,6 +38,7 @@ struct QrInviteImage {
 
 pub struct InvitePeopleModal {
     focus_handle: FocusHandle,
+    clan_id: ClanId,
     clan_name: String,
     clan_avatar_src: SharedString,
     clan_avatar_raw: SharedString,
@@ -46,12 +50,14 @@ pub struct InvitePeopleModal {
     show_qr: bool,
     search_input: Entity<InputState>,
     rows: Vec<InviteFriendRow>,
-    sent: HashSet<UserId>,
-    sending: HashSet<UserId>,
+    sent: HashSet<SharedString>,
+    sending: HashSet<SharedString>,
     copied: bool,
     scroll: UniformListScrollHandle,
     _input_sub: Subscription,
     _friend_sub: Subscription,
+    _direct_sub: Subscription,
+    _member_sub: Subscription,
 }
 
 impl Focusable for InvitePeopleModal {
@@ -72,6 +78,7 @@ impl InvitePeopleModal {
     ) -> Self {
         FriendStore::global(cx).update(cx, |store, cx| store.ensure_loaded(cx));
         DirectMessageStore::global(cx).update(cx, |store, cx| store.ensure_loaded(cx));
+        ClanMembersStore::global(cx).update(cx, |store, cx| store.ensure_loaded(clan_id, cx));
 
         let search_placeholder = mezon_i18n::t(&locale, "invitation.searchPlaceholder").to_string();
         let search_input = cx.new(|cx| {
@@ -96,6 +103,22 @@ impl InvitePeopleModal {
                 cx.notify();
             },
         );
+        let direct_sub = cx.subscribe(
+            &DirectMessageStore::global(cx),
+            |this: &mut Self, _store, _event: &DirectEvent, cx| {
+                this.rebuild_rows(cx);
+                cx.notify();
+            },
+        );
+        let member_sub = cx.subscribe(
+            &ClanMembersStore::global(cx),
+            move |this: &mut Self, _store, event: &ClanMembersEvent, cx| {
+                if matches!(event, ClanMembersEvent::Changed { clan_id: changed } if *changed == clan_id) {
+                    this.rebuild_rows(cx);
+                    cx.notify();
+                }
+            },
+        );
         search_input.update(cx, |input, cx| input.focus(window, cx));
 
         let clan_avatar_src = if clan_avatar_url.is_empty() {
@@ -105,6 +128,7 @@ impl InvitePeopleModal {
         };
         let mut modal = Self {
             focus_handle: cx.focus_handle(),
+            clan_id,
             clan_name,
             clan_avatar_src: SharedString::from(clan_avatar_src),
             clan_avatar_raw: SharedString::from(clan_avatar_url),
@@ -122,6 +146,8 @@ impl InvitePeopleModal {
             scroll: UniformListScrollHandle::new(),
             _input_sub: input_sub,
             _friend_sub: friend_sub,
+            _direct_sub: direct_sub,
+            _member_sub: member_sub,
         };
         modal.rebuild_rows(cx);
         modal.load_invite_link(clan_id, channel_id, cx);
@@ -194,34 +220,85 @@ impl InvitePeopleModal {
 
     fn rebuild_rows(&mut self, cx: &mut Context<Self>) {
         let query = self.search_input.read(cx).value().trim().to_lowercase();
-        let mut rows: Vec<InviteFriendRow> = FriendStore::global(cx)
+        let clan_members: HashSet<UserId> = ClanMembersStore::global(cx)
             .read(cx)
-            .friends()
-            .iter()
-            .filter(|friend| friend.state == FriendState::Friend)
-            .filter(|friend| friend_matches_query(friend, &query))
-            .map(|friend| {
-                let label = friend.label().to_string();
-                let avatar_src = if friend.avatar_url.is_empty() {
-                    String::new()
-                } else {
-                    imgproxy::avatar_url(cx, &friend.avatar_url)
-                };
-                InviteFriendRow {
-                    id: friend.id,
-                    label: SharedString::from(label),
-                    username: SharedString::from(friend.username.clone()),
-                    avatar_src: SharedString::from(avatar_src),
-                    avatar_raw: SharedString::from(friend.avatar_url.clone()),
-                }
-            })
+            .members(self.clan_id)
+            .into_iter()
+            .map(|member| member.id())
             .collect();
+        let friends = FriendStore::global(cx);
+        let friends = friends.read(cx);
+        let mut listed_users = HashSet::new();
+        let mut rows = Vec::new();
+
+        for direct in DirectMessageStore::global(cx).read(cx).channels() {
+            if direct.kind == DirectKind::Dm {
+                let Some(user_id) = direct.peer_user_id else {
+                    continue;
+                };
+                if clan_members.contains(&user_id)
+                    || friends
+                        .friends()
+                        .iter()
+                        .any(|friend| friend.id == user_id && friend.state == FriendState::Blocked)
+                    || !listed_users.insert(user_id)
+                {
+                    continue;
+                }
+            }
+            if !query.is_empty()
+                && !direct.label.to_lowercase().contains(&query)
+                && !direct.peer_username.to_lowercase().contains(&query)
+            {
+                continue;
+            }
+            let avatar_src = if direct.avatar.is_empty() {
+                String::new()
+            } else {
+                imgproxy::avatar_url(cx, &direct.avatar)
+            };
+            rows.push(InviteFriendRow {
+                key: format!("channel-{}", direct.id).into(),
+                user_id: direct.peer_user_id,
+                channel: Some((direct.id, direct.kind.stream_mode())),
+                label: direct.label.clone().into(),
+                username: direct.peer_username.clone().into(),
+                avatar_src: avatar_src.into(),
+                avatar_raw: direct.avatar.clone().into(),
+            });
+        }
+
+        for friend in friends.friends() {
+            if friend.state == FriendState::Blocked
+                || clan_members.contains(&friend.id)
+                || listed_users.contains(&friend.id)
+                || !friend_matches_query(friend, &query)
+            {
+                continue;
+            }
+            listed_users.insert(friend.id);
+            let label = friend.label().to_string();
+            let avatar_src = if friend.avatar_url.is_empty() {
+                String::new()
+            } else {
+                imgproxy::avatar_url(cx, &friend.avatar_url)
+            };
+            rows.push(InviteFriendRow {
+                key: format!("user-{}", friend.id).into(),
+                user_id: Some(friend.id),
+                channel: None,
+                label: SharedString::from(label),
+                username: SharedString::from(friend.username.clone()),
+                avatar_src: SharedString::from(avatar_src),
+                avatar_raw: SharedString::from(friend.avatar_url.clone()),
+            });
+        }
         rows.sort_by_key(|row| row.label.to_lowercase());
         self.rows = rows;
     }
 
-    fn invite_friend(&mut self, user_id: UserId, cx: &mut Context<Self>) {
-        if self.sent.contains(&user_id) || self.sending.contains(&user_id) {
+    fn invite_friend(&mut self, key: SharedString, cx: &mut Context<Self>) {
+        if self.sent.contains(&key) || self.sending.contains(&key) {
             return;
         }
         if !self.invite_link_ready() {
@@ -235,27 +312,29 @@ impl InvitePeopleModal {
             return;
         };
 
-        self.sending.insert(user_id);
+        self.sending.insert(key.clone());
         cx.notify();
 
-        let Some(row) = self.rows.iter().find(|row| row.id == user_id) else {
-            self.sending.remove(&user_id);
+        let Some(row) = self.rows.iter().find(|row| row.key == key) else {
+            self.sending.remove(&key);
             cx.notify();
             return;
         };
-        let link = self.invite_link();
         let label = row.label.to_string();
         let avatar = row.avatar_raw.to_string();
         let username = row.username.to_string();
+        let user_id = row.user_id;
+        let channel = row.channel;
+        let content = self.invite_message_content(cx);
         let task = store.update(cx, |store, cx| {
-            store.send_direct_text_to_user(user_id, label, avatar, username, link, cx)
+            store.send_direct_text_to_target(user_id, channel, label, avatar, username, content, cx)
         });
         let locale = self.locale.clone();
         cx.spawn(async move |this, cx| match task.await {
             Ok(()) => {
                 let _ = this.update(cx, |this, cx| {
-                    this.sending.remove(&user_id);
-                    this.sent.insert(user_id);
+                    this.sending.remove(&key);
+                    this.sent.insert(key.clone());
                     cx.notify();
                 });
             }
@@ -263,7 +342,7 @@ impl InvitePeopleModal {
                 tracing::warn!("send clan invite failed: {err}");
                 let message = format!("{}: {err}", tr(&locale, "inviteToChannel.share.error"));
                 let _ = this.update(cx, |this, cx| {
-                    this.sending.remove(&user_id);
+                    this.sending.remove(&key);
                     cx.notify();
                 });
                 cx.update(|cx| {
@@ -272,6 +351,32 @@ impl InvitePeopleModal {
             }
         })
         .detach();
+    }
+
+    fn invite_message_content(&self, cx: &App) -> String {
+        let Some(clan) = ClanList::global(cx)
+            .read(cx)
+            .clan_by_id(self.clan_id)
+            .cloned()
+        else {
+            return self.invite_link();
+        };
+        let url = self.invite_link();
+        let end = url.chars().count();
+        serde_json::json!({
+            "t": url,
+            "mk": [
+                { "s": 0, "e": end, "type": "lk" },
+                {
+                    "s": end, "e": end + 1, "type": "lk_ogp", "url": url,
+                    "title": clan.name, "image": clan.avatar_url.unwrap_or_default(),
+                    "banner": clan.banner_url.unwrap_or_default(), "clanId": clan.id.to_string(),
+                    "member_count": ClanMembersStore::global(cx).read(cx).count(self.clan_id),
+                    "is_community": clan.is_community
+                }
+            ]
+        })
+        .to_string()
     }
 
     fn copy_invite_link(&mut self, cx: &mut Context<Self>) {
@@ -360,8 +465,8 @@ impl Render for InvitePeopleModal {
                         Some(row) => render_friend_row(
                             &theme,
                             row.clone(),
-                            modal.sent.contains(&row.id),
-                            modal.sending.contains(&row.id),
+                            modal.sent.contains(&row.key),
+                            modal.sending.contains(&row.key),
                             invite_ready,
                             invite_label.clone(),
                             sent_label.clone(),
@@ -658,7 +763,7 @@ fn render_friend_row(
 
     let action = render_invite_action(
         theme,
-        row.id,
+        row.key.clone(),
         sent,
         sending,
         invite_ready,
@@ -667,10 +772,10 @@ fn render_friend_row(
         sending_label,
         entity,
     );
-    let group_name = SharedString::from(format!("invite-row-{}", row.id));
+    let group_name = SharedString::from(format!("invite-row-{}", row.key));
 
     div()
-        .id(SharedString::from(format!("invite-friend-row-{}", row.id)))
+        .id(SharedString::from(format!("invite-friend-row-{}", row.key)))
         .group(group_name)
         .w_full()
         .h(px(56.))
@@ -704,7 +809,7 @@ fn render_friend_row(
 
 fn render_invite_action(
     theme: &Theme,
-    user_id: UserId,
+    key: SharedString,
     sent: bool,
     sending: bool,
     invite_ready: bool,
@@ -728,10 +833,10 @@ fn render_invite_action(
     }
 
     let label = if sending { sending_label } else { invite_label };
-    let group_name = SharedString::from(format!("invite-row-{}", user_id));
+    let group_name = SharedString::from(format!("invite-row-{key}"));
 
     div()
-        .id(SharedString::from(format!("invite-friend-{}", user_id)))
+        .id(SharedString::from(format!("invite-friend-{key}")))
         .min_w(px(72.))
         .h(px(32.))
         .flex()
@@ -749,7 +854,7 @@ fn render_invite_action(
                     s.bg(theme.status_online).text_color(gpui::white())
                 })
                 .on_click(move |_: &ClickEvent, _window, cx| {
-                    entity.update(cx, |this, cx| this.invite_friend(user_id, cx));
+                    entity.update(cx, |this, cx| this.invite_friend(key.clone(), cx));
                 })
         })
         .when(!invite_ready || sending, |el| el.opacity(0.65))

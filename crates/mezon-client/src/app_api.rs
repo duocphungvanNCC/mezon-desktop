@@ -139,6 +139,16 @@ pub enum AttachmentUploadOutcome {
 }
 
 impl AppApi {
+    pub async fn send_channel_message_structured(
+        &self,
+        channel_id: i64,
+        content_json: &str,
+        mode: i32,
+    ) -> Result<ApiMessage> {
+        self.transport
+            .send_channel_message_structured(channel_id, content_json, mode)
+            .await
+    }
     pub fn new(transport: Arc<TransportClient>, base_img_url: String) -> Self {
         let (realtime_tx, _) = tokio::sync::broadcast::channel(1024);
         let (status_tx, _) = tokio::sync::watch::channel(ConnectionStatus::Disconnected);
