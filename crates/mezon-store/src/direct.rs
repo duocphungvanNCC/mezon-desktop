@@ -399,7 +399,9 @@ impl DirectMessageStore {
                 self.channels
                     .as_slice()
                     .iter()
-                    .find(|channel| { channel.kind == DirectKind::Dm && channel.peer_user_id == Some(user_id) })
+                    .find(|channel| {
+                        channel.kind == DirectKind::Dm && channel.peer_user_id == Some(user_id)
+                    })
                     .map(|channel| (channel.id, channel.kind.stream_mode()))
             })
         });
@@ -408,7 +410,8 @@ impl DirectMessageStore {
             let (channel_id, mode) = match existing {
                 Some(existing) => existing,
                 None => {
-                    let user_id = user_id.ok_or_else(|| anyhow::anyhow!("invite target has no user or channel"))?;
+                    let user_id = user_id
+                        .ok_or_else(|| anyhow::anyhow!("invite target has no user or channel"))?;
                     let desc = api.create_direct_channel(&[user_id.0]).await?;
                     let channel_id = ChannelId(desc.channel_id);
                     let kind = DirectKind::from_raw(desc.channel_type);
