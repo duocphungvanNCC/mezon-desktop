@@ -5938,6 +5938,30 @@ impl MezonTransport {
         Ok(())
     }
 
+    /// Add or remove one user from a clan role without changing the role metadata.
+    pub async fn update_role_member(
+        &self,
+        clan_id: i64,
+        role_id: i64,
+        user_id: i64,
+        assign: bool,
+    ) -> Result<()> {
+        let cid = self.generate_cid();
+        let body = api::UpdateRoleRequest {
+            role_id,
+            clan_id,
+            add_user_ids: if assign { vec![user_id] } else { Vec::new() },
+            remove_user_ids: if assign { Vec::new() } else { vec![user_id] },
+            ..Default::default()
+        }
+        .encode_to_vec();
+        let (code, _) = self.send_api_request(cid, "UpdateRole", body).await?;
+        if code != 0 {
+            return Err(anyhow::anyhow!("API error: code={code}"));
+        }
+        Ok(())
+    }
+
     /// Delete role channel desc.
     pub async fn delete_role_channel_desc(&self, role_id: i64) -> Result<()> {
         let cid = self.generate_cid();

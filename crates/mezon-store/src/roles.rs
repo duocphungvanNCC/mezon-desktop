@@ -162,6 +162,16 @@ impl RolesStore {
     pub fn role(&self, clan_id: ClanId, role_id: RoleId) -> Option<&Role> {
         self.cache.get(&clan_id)?.get(&role_id)
     }
+
+    pub fn all_roles(&self, clan_id: ClanId) -> Vec<(RoleId, Role)> {
+        let mut roles: Vec<_> = self
+            .cache
+            .get(&clan_id)
+            .map(|roles| roles.iter().map(|(id, role)| (*id, role.clone())).collect())
+            .unwrap_or_default();
+        roles.sort_by(|a, b| a.1.name.to_lowercase().cmp(&b.1.name.to_lowercase()));
+        roles
+    }
 }
 
 fn roles_map_from_proto(roles: Vec<mezon_proto::api::Role>) -> HashMap<RoleId, Role> {

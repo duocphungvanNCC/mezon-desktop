@@ -38,6 +38,7 @@ pub struct ChatLayout {
     channel_sidebar: Entity<ChannelSidebar>,
     direct_sidebar: Entity<DirectSidebar>,
     friends_page: Entity<crate::chat::FriendsPage>,
+    clan_members_page: Entity<crate::chat::clan_members_page::ClanMembersPage>,
     direct_store: Entity<DirectMessageStore>,
     user_info_bar: Entity<UserInfoBar>,
     clan_list: Entity<ClanList>,
@@ -172,6 +173,10 @@ impl ChatLayout {
         let settings_for_friends = settings.clone();
         let friends_page =
             cx.new(move |cx| crate::chat::FriendsPage::new(settings_for_friends, cx));
+        let members_settings = settings.clone();
+        let clan_members_page = cx.new(move |cx| {
+            crate::chat::clan_members_page::ClanMembersPage::new(members_settings, cx)
+        });
 
         let user_info_bar = cx.new(|cx| UserInfoBar::new(auth_state.clone(), cx));
 
@@ -309,6 +314,7 @@ impl ChatLayout {
             channel_sidebar,
             direct_sidebar,
             friends_page,
+            clan_members_page,
             direct_store,
             user_info_bar,
             clan_list,
@@ -1777,6 +1783,12 @@ impl ChatLayout {
             None
         };
 
+        if let Route::ClanMembers { clan_id } = Router::global(cx).read(cx).route() {
+            self.clan_members_page
+                .update(cx, |page, cx| page.set_clan(clan_id, cx));
+            return self.clan_members_page.clone().into_any_element();
+        }
+
         if self.is_dm_route(cx) {
             if matches!(
                 Router::global(cx).read(cx).route(),
@@ -1976,7 +1988,7 @@ impl ChatLayout {
                 &format!("Direct {direct_id}"),
                 &current_path,
             ),
-            Route::Channel { .. } => div().into_any_element(),
+            Route::Channel { .. } | Route::ClanMembers { .. } => div().into_any_element(),
             Route::Friends => self.render_placeholder(
                 theme,
                 crate::components::primitives::IconName::IconFriends,

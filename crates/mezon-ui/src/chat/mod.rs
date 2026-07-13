@@ -2,6 +2,7 @@ pub mod area;
 pub mod channel_header;
 pub mod channel_typing;
 pub mod chat_sending;
+pub mod clan_members_page;
 pub mod create_thread_panel;
 pub mod friends_page;
 pub mod gif_sticker_emoji;
