@@ -5,8 +5,9 @@ use gpui::{
     SharedString, Transformation, Window, div, img, prelude::*, px, radians, rems,
 };
 use mezon_store::{
-    AlbumLayout, AppConfig, ChannelType, Message, MessageAttachment, MessageCode, MessageId,
-    MessageReference, MessagesStore, PlatformStore, Reaction, ViewerMedia, resolve_avatar_url,
+    AlbumLayout, AppConfig, ChannelType, ClanMembersStore, Message, MessageAttachment, MessageCode,
+    MessageId, MessageReference, MessagesStore, PlatformStore, ProfileContext, Reaction,
+    TopicsStore, ViewerMedia, resolve_avatar_url,
 };
 
 use super::audio_player::{
@@ -26,6 +27,27 @@ use crate::theme::Theme;
 const DELETED_REPLY_PREVIEW: &str = "Original message was deleted";
 const FILE_NAME_COLOR: u32 = 0x3b_82_f6;
 
+pub fn resolve_message_display_name(msg: &Message, ctx: &RowCtx, cx: &App) -> SharedString {
+    if let Some(ProfileContext::Clan(clan_id)) = ctx.profile_context {
+        let user_id = msg
+            .sender_user_id
+            .or_else(|| msg.sender_id.parse().ok().map(mezon_store::UserId));
+        if let Some(user_id) = user_id
+            && let Some(member) = ClanMembersStore::global(cx).read(cx).member(clan_id, user_id)
+        {
+            let name = member.name();
+            if !name.is_empty() {
+                return name.into();
+            }
+        }
+    }
+    if msg.sender_name.is_empty() {
+        SharedString::default()
+    } else {
+        msg.sender_name.clone().into()
+    }
+}
+
 pub fn avatar_element(msg: &Message, ctx: &RowCtx, cx: &App) -> AnyElement {
     let is_anonymous = AppConfig::try_global(cx)
         .map(|config| {
@@ -33,8 +55,9 @@ pub fn avatar_element(msg: &Message, ctx: &RowCtx, cx: &App) -> AnyElement {
         })
         .unwrap_or(false);
     let (raw_url, proxied) = resolve_message_avatar_urls(msg, ctx, cx);
+    let display_name = resolve_message_display_name(msg, ctx, cx);
     let mut avatar = Avatar::new()
-        .name(msg.sender_name.clone())
+        .name(display_name)
         .with_size(Size::Small)
         .anonymous(is_anonymous)
         .image_cache(ctx.avatar_cache.clone());
@@ -110,11 +133,12 @@ pub fn render_head(msg: &Message, ctx: &RowCtx, name_color: u32) -> AnyElement {
             }
         }
     };
+    let display_name = resolve_message_display_name(msg, ctx, ctx.app);
     let name = div()
         .text_size(px(16.))
         .font_weight(FontWeight::MEDIUM)
         .text_color(gpui::rgb(name_color))
-        .child(msg.sender_name.clone());
+        .child(display_name);
     div()
         .flex()
         .flex_row()
@@ -1108,7 +1132,9 @@ pub fn render_reactions(msg: &Message, ctx: &RowCtx) -> Option<AnyElement> {
 }
 
 fn add_reaction_button(message_id: MessageId, ctx: &RowCtx) -> AnyElement {
-    let visible = !ctx.suppress_hover && ctx.hovered_row == Some(message_id);
+    let visible = !ctx.suppress_hover
+        && ctx.context_menu_message != Some(message_id)
+        && ctx.hovered_row == Some(message_id);
     let bg = ctx.theme.bg_tertiary;
     let bg_hover = ctx.theme.bg_hover;
     let icon_color = ctx.theme.text_muted;
@@ -1231,7 +1257,10 @@ pub fn render_hover_actions(
     is_different_day: bool,
     ctx: &RowCtx,
 ) -> AnyElement {
-    if ctx.suppress_hover || ctx.hovered_row != Some(msg.id) {
+    if ctx.suppress_hover
+        || ctx.context_menu_message == Some(msg.id)
+        || ctx.hovered_row != Some(msg.id)
+    {
         return div().into_any_element();
     }
     let theme = ctx.theme;
@@ -1272,13 +1301,19 @@ pub fn render_hover_actions(
     let sender_is_real = !msg.sender_id.is_empty() && msg.sender_id != "0";
     let is_own_message = ctx.current_user_id == msg.sender_id.as_str();
 
-    let show_topic = ctx.clan_id.is_some_and(|c| !c.is_zero()) && !is_topic_msg && !is_poll_msg;
+    let show_topic = !ctx.is_topic_box
+        && ctx.clan_id.is_some_and(|c| !c.is_zero())
+        && !is_topic_msg
+        && !is_poll_msg
+        && TopicsStore::can_create_topic(ctx.app)
+        && TopicsStore::message_allows_topic_discussion(msg);
     let show_edit = is_own_message
         && msg.code != MessageCode::SendToken
         && msg.code.is_user_timeline()
         && !is_poll_msg
         && !msg.is_forwarded;
-    let show_thread = ctx.channel_top_level
+    let show_thread = !ctx.is_topic_box
+        && ctx.channel_top_level
         && ctx.is_clan_owner
         && !is_poll_msg
         && ctx.channel_type != Some(ChannelType::Stream)
@@ -1350,11 +1385,11 @@ pub fn render_hover_actions(
         .bg(theme.tokens.bg_theme_contexify)
         .children(recent_emoji)
         .when(show_topic, |d| {
-            let coming_soon = coming_soon.clone();
+            let origin = msg.clone();
             d.child(
                 action("topic", IconName::TopicIcon, 24.).on_click(move |_, _, cx| {
-                    let coming_soon = coming_soon.clone();
-                    Shell::global(cx).update(cx, move |shell, cx| shell.info(coming_soon, cx));
+                    let origin = origin.clone();
+                    TopicsStore::global(cx).update(cx, |store, cx| store.start_create(origin, cx));
                 }),
             )
         })

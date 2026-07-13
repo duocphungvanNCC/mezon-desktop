@@ -10,8 +10,8 @@
 use crate::{
     AnyElement, App, AvailableSpace, Bounds, ContentMask, DispatchPhase, Edges, Element, EntityId,
     FocusHandle, GlobalElementId, Hitbox, HitboxBehavior, InspectorElementId, IntoElement,
-    Overflow, Pixels, Point, ScrollWheelEvent, Size, Style, StyleRefinement, Styled,
-    Window, point, px, size,
+    Overflow, Pixels, Point, ScrollWheelEvent, Size, Style, StyleRefinement, Styled, Window, point,
+    px, size,
 };
 use collections::VecDeque;
 use refineable::Refineable as _;
@@ -155,9 +155,7 @@ fn wheel_cubic_bezier_coordinate(t: f32, p1: f32, p2: f32) -> f32 {
 
 fn wheel_cubic_bezier_derivative(t: f32, p1: f32, p2: f32) -> f32 {
     let inverse = 1. - t;
-    3. * inverse * inverse * p1
-        + 6. * inverse * t * (p2 - p1)
-        + 3. * t * t * (1. - p2)
+    3. * inverse * inverse * p1 + 6. * inverse * t * (p2 - p1) + 3. * t * t * (1. - p2)
 }
 
 fn solve_wheel_scroll_bezier(progress: f32) -> f32 {
@@ -249,11 +247,7 @@ fn start_smooth_wheel_scroll(
     }
 }
 
-fn schedule_smooth_wheel_frame(
-    list_state: ListState,
-    current_view: EntityId,
-    window: &mut Window,
-) {
+fn schedule_smooth_wheel_frame(list_state: ListState, current_view: EntityId, window: &mut Window) {
     window.on_next_frame(move |window, cx| {
         let continue_animation = {
             let state = &mut *list_state.0.borrow_mut();
@@ -1105,9 +1099,7 @@ impl StateInner {
             } else {
                 self.scroll_top(&self.logical_scroll_top())
             };
-        let new_scroll_top = (current_scroll_top - delta.y)
-            .max(px(0.))
-            .min(scroll_max);
+        let new_scroll_top = (current_scroll_top - delta.y).max(px(0.)).min(scroll_max);
 
         if self.alignment == ListAlignment::Bottom && new_scroll_top == scroll_max {
             self.pending_scroll = None;
@@ -1768,24 +1760,11 @@ impl Element for List {
                 let pixel_delta = event.delta.pixel_delta(px(40.));
                 let smooth_line_scroll = list_state.0.borrow().smooth_line_scroll;
                 if !precise && smooth_line_scroll {
-                    start_smooth_wheel_scroll(
-                        &list_state,
-                        pixel_delta.y,
-                        current_view,
-                        window,
-                        cx,
-                    );
+                    start_smooth_wheel_scroll(&list_state, pixel_delta.y, current_view, window, cx);
                 } else {
                     let state = &mut *list_state.0.borrow_mut();
                     state.wheel_scroll_animation = None;
-                    state.scroll(
-                        height,
-                        pixel_delta,
-                        current_view,
-                        window,
-                        cx,
-                        true,
-                    );
+                    state.scroll(height, pixel_delta, current_view, window, cx, true);
                 }
             }
         });

@@ -298,6 +298,19 @@ impl AppApi {
             .await
     }
 
+    pub async fn list_topic_messages(
+        &self,
+        clan_id: i64,
+        channel_id: i64,
+        topic_id: i64,
+        direction: i32,
+        limit: u32,
+    ) -> Result<crate::transport::ListChannelMessagesResult> {
+        self.transport
+            .list_topic_messages(clan_id, channel_id, topic_id, direction, limit)
+            .await
+    }
+
     pub async fn list_thread_descs(
         &self,
         channel_id: &str,
@@ -409,11 +422,22 @@ impl AppApi {
         emojis: Vec<crate::transport::OutgoingEmoji>,
         mode: i32,
         is_public: bool,
+        topic_id: i64,
+        is_update_msg_topic: bool,
     ) -> Result<()> {
         self.transport
             .update_channel_message(
-                clan_id, channel_id, message_id, content, mentions, hashtags, emojis, mode,
+                clan_id,
+                channel_id,
+                message_id,
+                content,
+                mentions,
+                hashtags,
+                emojis,
+                mode,
                 is_public,
+                topic_id,
+                is_update_msg_topic,
             )
             .await
     }
@@ -447,14 +471,27 @@ impl AppApi {
             .await
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn delete_channel_message(
         &self,
         clan_id: i64,
         channel_id: i64,
         message_id: i64,
+        mode: i32,
+        is_public: bool,
+        has_attachment: bool,
+        topic_id: i64,
     ) -> Result<()> {
         self.transport
-            .delete_channel_message(clan_id, channel_id, message_id)
+            .delete_channel_message(
+                clan_id,
+                channel_id,
+                message_id,
+                mode,
+                is_public,
+                has_attachment,
+                topic_id,
+            )
             .await
     }
 
@@ -487,6 +524,7 @@ impl AppApi {
         mode: i32,
         is_public: bool,
         remove: bool,
+        topic_id: i64,
     ) -> Result<()> {
         self.transport
             .react_channel_message(
@@ -500,6 +538,7 @@ impl AppApi {
                 mode,
                 is_public,
                 remove,
+                topic_id,
             )
             .await
     }
@@ -562,6 +601,82 @@ impl AppApi {
                 clan_id, channel_id, content, is_public, mode, mentions, hashtags, emojis,
             )
             .await
+    }
+
+    /// Send a message into a discussion topic (mezon-js `writeChatMessage(..., topicId)`).
+    #[allow(clippy::too_many_arguments)]
+    pub async fn send_topic_message(
+        &self,
+        clan_id: i64,
+        channel_id: i64,
+        content: &str,
+        is_public: bool,
+        mode: i32,
+        topic_id: i64,
+        mentions: Vec<crate::transport::OutgoingMention>,
+        hashtags: Vec<crate::transport::OutgoingHashtag>,
+        emojis: Vec<crate::transport::OutgoingEmoji>,
+    ) -> Result<ApiMessage> {
+        self.transport
+            .send_topic_message(
+                clan_id, channel_id, content, is_public, mode, topic_id, mentions, hashtags, emojis,
+            )
+            .await
+    }
+
+    pub async fn send_topic_message_with_attachment_urls(
+        &self,
+        clan_id: i64,
+        channel_id: i64,
+        is_public: bool,
+        mode: i32,
+        topic_id: i64,
+        attachments: Vec<UrlAttachment>,
+    ) -> Result<ApiMessage> {
+        let proto: Vec<mezon_proto::api::MessageAttachment> = attachments
+            .iter()
+            .map(|a| mezon_proto::api::MessageAttachment {
+                filename: a.filename.clone(),
+                size: 0,
+                url: a.url.clone(),
+                filetype: a.filetype.clone(),
+                width: 0,
+                height: 0,
+                thumbnail: String::new(),
+                duration: 0,
+            })
+            .collect();
+        let echo: Vec<crate::transport::ApiAttachment> = attachments
+            .into_iter()
+            .map(|a| crate::transport::ApiAttachment {
+                url: a.url,
+                filename: a.filename,
+                filetype: a.filetype,
+                width: 0,
+                height: 0,
+                thumbnail: String::new(),
+                duration: 0,
+                size: 0,
+            })
+            .collect();
+        let mut sent = self
+            .transport
+            .send_topic_message_with_attachments(
+                clan_id,
+                channel_id,
+                "",
+                is_public,
+                mode,
+                topic_id,
+                proto,
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                None,
+            )
+            .await?;
+        sent.attachments = echo;
+        Ok(sent)
     }
 
     /// Send a message as a reply to another message.
@@ -1022,6 +1137,54 @@ impl AppApi {
                 mode,
                 attachments,
                 reply,
+                mentions,
+                hashtags,
+                emojis,
+                Some(presign_finish),
+            )
+            .await?;
+        sent.attachments = echo;
+        Ok(sent)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn send_topic_presigned_message(
+        &self,
+        clan_id: i64,
+        channel_id: i64,
+        content: &str,
+        is_public: bool,
+        mode: i32,
+        topic_id: i64,
+        attachments: Vec<mezon_proto::api::MessageAttachment>,
+        mentions: Vec<crate::transport::OutgoingMention>,
+        hashtags: Vec<crate::transport::OutgoingHashtag>,
+        emojis: Vec<crate::transport::OutgoingEmoji>,
+        presign_finish: Vec<String>,
+    ) -> Result<ApiMessage> {
+        let echo: Vec<crate::transport::ApiAttachment> = attachments
+            .iter()
+            .map(|a| crate::transport::ApiAttachment {
+                url: a.url.clone(),
+                filename: a.filename.clone(),
+                filetype: a.filetype.clone(),
+                width: a.width,
+                height: a.height,
+                thumbnail: a.thumbnail.clone(),
+                duration: a.duration,
+                size: a.size,
+            })
+            .collect();
+        let mut sent = self
+            .transport
+            .send_topic_message_with_attachments(
+                clan_id,
+                channel_id,
+                content,
+                is_public,
+                mode,
+                topic_id,
+                attachments,
                 mentions,
                 hashtags,
                 emojis,

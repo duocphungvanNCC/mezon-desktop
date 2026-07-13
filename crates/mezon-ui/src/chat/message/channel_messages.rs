@@ -4,7 +4,7 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use gpui::{
-    Anchor, Animation, AnimationExt as _, Context, DismissEvent, Entity, FocusHandle, Focusable,
+    Anchor, Animation, AnimationExt as _, App, Context, DismissEvent, Entity, FocusHandle, Focusable,
     KeyDownEvent, ListAlignment, ListState, MouseButton, MouseDownEvent, Pixels, Point,
     SharedString, Subscription, Task, Window, anchored, deferred, div, ease_in_out, list,
     prelude::*, px,
@@ -12,9 +12,10 @@ use gpui::{
 use ui::{ScrollAxes, Scrollbars, WithScrollbar};
 
 use mezon_store::{
-    BadgeService, ChannelId, ChannelList, ClanId, ClanList, ClanMembersStore, DirectMessageStore,
-    Emoji, EmojiStore, GroupMembersStore, MessageCode, MessageId, MessagesEvent, MessagesStore,
-    ProfileContext, Settings, UserId, UsersByUserStore, message::Message,
+    BadgeService, ChannelId, ChannelList, ChannelPermissionsStore, ClanId, ClanList,
+    ClanMembersStore, DirectMessageStore, Emoji, EmojiStore, GroupMembersStore, MessageCode,
+    MessageId, MessagesEvent, MessagesStore, ProfileContext, Settings, TopicsStore, UserId,
+    UsersByUserStore, message::Message,
 };
 
 use super::audio_player::{AudioActivation, AudioPlayerView};
@@ -372,11 +373,16 @@ pub struct ChannelMessages {
     context_menu_forward_all: bool,
     emoji_recent: Rc<Vec<Emoji>>,
     _emoji_observe: Subscription,
+    _channel_permissions_observe: Subscription,
     gif_reconcile_fingerprint: Option<(Option<ChannelId>, usize, usize)>,
     last_gif_reconcile: Option<Instant>,
     last_image_cache_sweep: Option<Instant>,
     row_memo: Rc<RefCell<RowMemo>>,
     row_memo_day: Option<chrono::NaiveDate>,
+    is_topic_box: bool,
+    topic_align_timeline: Option<gpui::WeakEntity<ChannelMessages>>,
+    topic_list_layout: Option<(usize, bool)>,
+    topic_spacer_h: Option<Pixels>,
 }
 
 impl ChannelMessages {
@@ -436,8 +442,24 @@ impl ChannelMessages {
             }
         });
 
+        cx.observe(&TopicsStore::global(cx), |this, _, cx| {
+            if !this.is_topic_box {
+                cx.notify();
+            }
+        })
+        .detach();
+
         let store = MessagesStore::global(cx);
         cx.subscribe(&store, |this, _store, event, cx| {
+            if this.is_topic_box {
+                match event {
+                    MessagesEvent::TopicUpdated { .. }
+                    | MessagesEvent::Updated { .. }
+                    | MessagesEvent::ReplyTargetChanged => cx.notify(),
+                    _ => {}
+                }
+                return;
+            }
             let structural = matches!(
                 event,
                 MessagesEvent::Reset { .. }
@@ -620,6 +642,7 @@ impl ChannelMessages {
                     }));
                 }
                 MessagesEvent::ReplyTargetChanged => return,
+                MessagesEvent::TopicUpdated { .. } => {}
             }
             if structural {
                 {
@@ -696,7 +719,7 @@ impl ChannelMessages {
                 }
 
                 this.mark_scroll_activity(cx);
-                if !this.suppress_hover {
+                if !this.suppress_hover && this.context_menu_target.is_none() {
                     this.suppress_hover = true;
                     this.hovered_row = None;
                     this.raw_hover = None;
@@ -800,6 +823,8 @@ impl ChannelMessages {
                 cx.notify();
             }
         });
+        let channel_permissions_observe =
+            cx.observe(&ChannelPermissionsStore::global(cx), |_, _, cx| cx.notify());
         Self {
             list_state,
             focus_handle: cx.focus_handle(),
@@ -865,11 +890,100 @@ impl ChannelMessages {
             context_menu_forward_all: false,
             emoji_recent,
             _emoji_observe: emoji_observe,
+            _channel_permissions_observe: channel_permissions_observe,
             gif_reconcile_fingerprint: None,
             last_gif_reconcile: None,
             last_image_cache_sweep: None,
             row_memo: Rc::new(RefCell::new(RowMemo::default())),
             row_memo_day: None,
+            is_topic_box: false,
+            topic_align_timeline: None,
+            topic_list_layout: None,
+            topic_spacer_h: None,
+        }
+    }
+
+    pub fn new_topic_box(
+        settings: Entity<Settings>,
+        align_timeline: Entity<ChannelMessages>,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let mut this = Self::new(settings, cx);
+        this.is_topic_box = true;
+        this.topic_align_timeline = Some(align_timeline.downgrade());
+        this.topic_list_layout = None;
+        this.topic_spacer_h = None;
+        cx.observe(&TopicsStore::global(cx), |_, _, cx| cx.notify()).detach();
+        this
+    }
+
+    pub fn message_viewport_top(&self, message_id: MessageId, cx: &App) -> Option<Pixels> {
+        let store = MessagesStore::global(cx);
+        let messages = store.read(cx).viewport_messages();
+        let msg_ix = messages.iter().position(|m| m.id == message_id)?;
+        let list_ix = usize::from(self.header_shown) + msg_ix;
+        self.list_state.bounds_for_item(list_ix).map(|b| b.top())
+    }
+
+    fn collect_topic_messages(cx: &App) -> Vec<Message> {
+        let topics = TopicsStore::global(cx).read(cx);
+        let store = MessagesStore::global(cx).read(cx);
+
+        let origin_id = topics.origin_message().map(|m| m.id).or_else(|| {
+            topics.active_topic_id().and_then(|topic_id| {
+                topics
+                    .topic_by_id(&topic_id.to_string())
+                    .and_then(|topic| topic.message_id.parse::<i64>().ok())
+                    .map(MessageId)
+            })
+        });
+
+        let origin = origin_id.and_then(|id| {
+            store
+                .viewport_message_by_id(id)
+                .cloned()
+                .or_else(|| topics.origin_message().cloned())
+        });
+
+        let mut replies = Vec::new();
+        if let Some(topic_id) = topics.active_topic_id() {
+            for msg in store.messages_in_channel(ChannelId(topic_id)) {
+                if origin_id != Some(msg.id) {
+                    replies.push(msg.clone());
+                }
+            }
+        }
+        mezon_store::sort_messages(&mut replies);
+        mezon_store::recompute_message_grouping(&mut replies);
+
+        let mut messages = Vec::new();
+        if let Some(mut origin) = origin {
+            origin.combined_with_prev = false;
+            messages.push(origin);
+        }
+        messages.extend(replies);
+        messages
+    }
+
+    pub(crate) fn resolve_topic_forward_group(
+        message_id: MessageId,
+        sender_id: &str,
+        cx: &App,
+    ) -> Vec<MessageId> {
+        let messages = Self::collect_topic_messages(cx);
+        message_context_menu::resolve_forward_group_in(&messages, message_id, sender_id)
+    }
+
+    fn find_local_message(&self, message_id: MessageId, cx: &App) -> Option<Message> {
+        if self.is_topic_box {
+            Self::collect_topic_messages(cx)
+                .into_iter()
+                .find(|m| m.id == message_id)
+        } else {
+            MessagesStore::global(cx)
+                .read(cx)
+                .viewport_message_by_id(message_id)
+                .cloned()
         }
     }
 
@@ -932,11 +1046,8 @@ impl ChannelMessages {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let (initial_content, initial_spans) = MessagesStore::global(cx)
-            .read(cx)
-            .viewport_messages()
-            .iter()
-            .find(|m| m.id == message_id)
+        let (initial_content, initial_spans) = self
+            .find_local_message(message_id, cx)
             .map(|m| (m.content.clone(), m.spans.clone()))
             .unwrap_or_default();
         let settings = self.settings.clone();
@@ -990,11 +1101,8 @@ impl ChannelMessages {
             return;
         };
 
-        let original = store
-            .read(cx)
-            .viewport_messages()
-            .iter()
-            .find(|m| m.id == message_id)
+        let original = self
+            .find_local_message(message_id, cx)
             .map(|m| m.content.clone());
 
         if original.as_deref() == Some(text.as_str()) {
@@ -1015,27 +1123,43 @@ impl ChannelMessages {
         position: Point<Pixels>,
         cx: &mut Context<Self>,
     ) {
-        let sender_and_poll = {
-            let store = MessagesStore::global(cx);
-            let store = store.read(cx);
-            store
-                .viewport_message_by_id(message_id)
-                .map(|m| (m.sender_id.clone(), m.code == MessageCode::Poll))
+        let sender_and_poll = self
+            .find_local_message(message_id, cx)
+            .map(|m| (m.sender_id.clone(), m.code == MessageCode::Poll));
+        let forward_messages = if self.is_topic_box {
+            Self::collect_topic_messages(cx)
+        } else {
+            MessagesStore::global(cx)
+                .read(cx)
+                .messages()
+                .to_vec()
         };
         self.context_menu_forward_all = match sender_and_poll {
             Some((sender_id, false)) => {
-                message_context_menu::resolve_forward_group(message_id, sender_id.as_str(), cx)
-                    .len()
+                message_context_menu::resolve_forward_group_in(
+                    &forward_messages,
+                    message_id,
+                    sender_id.as_str(),
+                )
+                .len()
                     > 1
             }
             _ => false,
         };
+        TopicsStore::ensure_create_permissions(cx);
+        self._hover_show_task = None;
+        self._hover_hide_task = None;
+        self.hovered_row = None;
+        self.raw_hover = None;
         self.context_menu_target = Some((message_id, position));
         cx.notify();
     }
 
     pub(crate) fn close_context_menu(&mut self, cx: &mut Context<Self>) {
         if self.context_menu_target.take().is_some() {
+            if self.raw_hover.is_none() {
+                self.hovered_row = None;
+            }
             cx.notify();
         }
     }
@@ -1072,6 +1196,12 @@ impl ChannelMessages {
 
         match self.hovered_row {
             Some(shown) if raw != Some(shown) => {
+                if self
+                    .context_menu_target
+                    .is_some_and(|(id, _)| id == shown)
+                {
+                    return;
+                }
                 self._hover_hide_task = Some(cx.spawn(async move |this, cx| {
                     cx.background_executor()
                         .timer(Duration::from_millis(HOVER_HIDE_DELAY_MS))
@@ -1833,10 +1963,219 @@ impl ChannelMessages {
             cx.stop_propagation();
         }
     }
+
+    fn render_topic_box(&mut self, window: &mut Window, cx: &mut Context<Self>) -> gpui::AnyElement {
+        self.sync_render_identity(cx);
+        self.drive_scroll_anim(window);
+        let store = MessagesStore::global(cx);
+        let active_clan = ClanList::global(cx).read(cx).active_clan_id;
+        let (is_dm, dm_channel) = {
+            let s = store.read(cx);
+            (s.is_dm(), s.active_channel_id())
+        };
+        let (channel_type, channel_top_level) = ChannelList::global(cx)
+            .read(cx)
+            .active_channel()
+            .map(|c| (Some(c.channel_type), c.parent_id.is_none()))
+            .unwrap_or((None, true));
+        let is_clan_owner = self.cached_is_clan_owner;
+        let emoji_recent = self.emoji_recent.clone();
+        let (editing_id, edit_input) = match &self.edit_input {
+            Some((id, input)) => (Some(*id), Some(input.clone())),
+            None => (None, None),
+        };
+        let messages = Self::collect_topic_messages(cx);
+        let origin_id = TopicsStore::global(cx)
+            .read(cx)
+            .origin_message()
+            .map(|m| m.id);
+        let channel_origin_top = origin_id.and_then(|id| {
+            self.topic_align_timeline
+                .as_ref()?
+                .upgrade()?
+                .read(cx)
+                .message_viewport_top(id, cx)
+        });
+        let use_align_spacer = channel_origin_top.is_some_and(|y| y > px(0.));
+        let align_spacer_h = channel_origin_top.unwrap_or(px(0.));
+        let list_count = messages.len() + usize::from(use_align_spacer);
+        let layout_key = (list_count, use_align_spacer);
+        if self.topic_list_layout != Some(layout_key) {
+            self.topic_list_layout = Some(layout_key);
+            self.list_state.reset(list_count);
+            if use_align_spacer {
+                self.list_state.scroll_to(gpui::ListOffset {
+                    item_ix: 0,
+                    offset_in_item: px(0.),
+                });
+            } else {
+                self.list_state.scroll_to_end();
+            }
+        } else if self.list_state.item_count() != list_count {
+            self.list_state.reset(list_count);
+        }
+        if use_align_spacer {
+            if self.topic_spacer_h != Some(align_spacer_h) {
+                self.topic_spacer_h = Some(align_spacer_h);
+                if self.list_state.item_count() > 0 {
+                    self.list_state.remeasure_items(0..1);
+                }
+            }
+        } else if self.topic_spacer_h.is_some() {
+            self.topic_spacer_h = None;
+        }
+
+        let locale = self.cached_locale.clone();
+        let coming_soon: SharedString = mezon_i18n::t(&locale, "common.comingSoon").into();
+        let frame_now = chrono::Local::now();
+        let today = frame_now.date_naive();
+        if self.row_memo_day != Some(today) {
+            self.row_memo_day = Some(today);
+            self.row_memo.borrow_mut().time_labels.clear();
+        }
+        let row_memo = self.row_memo.clone();
+        let list_state = self.list_state.clone();
+        let suppress_hover = self.suppress_hover;
+        let hovered_row = self.hovered_row;
+        let context_menu_message = self.context_menu_target.map(|(id, _)| id);
+        let avatar_image_cache = self.avatar_image_cache.clone();
+        let small_avatar_image_cache = self.small_avatar_image_cache.clone();
+        let reply_highlight_id = store.read(cx).reply_target().map(|d| d.message_ref_id);
+        let profile_context = channel_profile_context(is_dm, dm_channel, active_clan, cx);
+        let settings = self.settings.clone();
+        let active_videos = self.active_videos.clone();
+        let active_audios = self.active_audios.clone();
+        let gif_videos = self.gif_videos.clone();
+        let video_host = cx.entity().downgrade();
+        let current_user_id = self.cached_current_user_id.clone();
+        let role_ids = self.cached_role_ids.clone();
+
+        div()
+            .size_full()
+            .relative()
+            .overflow_hidden()
+            .image_cache(self.image_cache.clone())
+            .child(
+                list(list_state, move |ix, _window, cx| {
+                    if use_align_spacer && ix == 0 {
+                        return div()
+                            .id("topic-align-spacer")
+                            .w_full()
+                            .h(align_spacer_h)
+                            .flex_shrink_0()
+                            .into_any_element();
+                    }
+                    let msg_ix = ix - usize::from(use_align_spacer);
+                    let ctx = RowCtx {
+                        app: cx,
+                        theme: cx.theme(),
+                        locale: &locale,
+                        current_user_id: &current_user_id,
+                        current_role_ids: &role_ids,
+                        welcome: None,
+                        onboarding: None,
+                        suppress_hover,
+                        is_topic_box: true,
+                        hovered_row,
+                        context_menu_message,
+                        avatar_cache: small_avatar_image_cache.clone(),
+                        large_avatar_cache: avatar_image_cache.clone(),
+                        unread_boundary_id: None,
+                        highlight_id: None,
+                        reply_highlight_id,
+                        profile_context,
+                        settings: settings.clone(),
+                        active_videos: &active_videos,
+                        active_audios: &active_audios,
+                        gif_videos: &gif_videos,
+                        video_host: video_host.clone(),
+                        now: frame_now,
+                        clan_id: active_clan,
+                        channel_type,
+                        channel_top_level,
+                        is_clan_owner,
+                        editing_id,
+                        edit_input: edit_input.clone(),
+                        emoji_recent: &emoji_recent,
+                        coming_soon: coming_soon.clone(),
+                        row_memo: row_memo.clone(),
+                    };
+                    render_message_item(&messages, msg_ix, &ctx, cx)
+                })
+                .flex_1()
+                .size_full()
+                .pb(px(LIST_BOTTOM_PADDING)),
+            )
+            .on_mouse_move(cx.listener(|this, _event, _window, cx| {
+                if this.suppress_hover {
+                    this.suppress_hover = false;
+                    cx.notify();
+                }
+            }))
+            .when_some(self.mention_popover.clone(), |el, (popover, position)| {
+                el.child(deferred(
+                    anchored().position(position).snap_to_window().child(
+                        div()
+                            .occlude()
+                            .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                                this.mention_popover = None;
+                                this._mention_popover_sub = None;
+                                cx.notify();
+                            }))
+                            .child(popover),
+                    ),
+                ))
+            })
+            .when_some(self.reaction_picker.clone(), |el, (picker, position)| {
+                el.child(deferred(
+                    anchored()
+                        .position(position)
+                        .anchor(Anchor::TopRight)
+                        .snap_to_window()
+                        .child(
+                            div()
+                                .occlude()
+                                .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                                    this.reaction_picker = None;
+                                    this._reaction_picker_sub = None;
+                                    this._reaction_picker_dismiss_sub = None;
+                                    cx.notify();
+                                }))
+                                .child(picker),
+                        ),
+                ))
+            })
+            .when_some(self.context_menu_target, |el, (message_id, position)| {
+                let Some(target_msg) = self.find_local_message(message_id, cx) else {
+                    return el;
+                };
+                let menu = message_context_menu::build(
+                    &target_msg,
+                    &self.cached_current_user_id,
+                    self.cached_is_clan_owner,
+                    &self.cached_locale,
+                    self.context_menu_forward_all,
+                    true,
+                    cx.entity().downgrade(),
+                    cx,
+                );
+                el.child(context_menu_at(position, menu))
+            })
+            .custom_scrollbars(
+                Scrollbars::always_visible(ScrollAxes::Vertical)
+                    .tracked_scroll_handle(&self.list_state),
+                window,
+                cx,
+            )
+            .into_any_element()
+    }
 }
 
 impl Render for ChannelMessages {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.is_topic_box {
+            return self.render_topic_box(window, cx);
+        }
         crate::trace_render!(
             "ChannelMessages ch={:?}",
             MessagesStore::global(cx).read(cx).active_channel_id()
@@ -1908,6 +2247,7 @@ impl Render for ChannelMessages {
         let list_state = self.list_state.clone();
         let suppress_hover = self.suppress_hover;
         let hovered_row = self.hovered_row;
+        let context_menu_message = self.context_menu_target.map(|(id, _)| id);
         let avatar_image_cache = self.avatar_image_cache.clone();
         let small_avatar_image_cache = self.small_avatar_image_cache.clone();
         let unread_boundary_id = self.cached_unread_boundary;
@@ -1973,7 +2313,9 @@ impl Render for ChannelMessages {
                         welcome: welcome.clone(),
                         onboarding: onboarding.clone(),
                         suppress_hover,
+                        is_topic_box: false,
                         hovered_row,
+                        context_menu_message,
                         avatar_cache: small_avatar_image_cache.clone(),
                         large_avatar_cache: avatar_image_cache.clone(),
                         unread_boundary_id,
@@ -2059,6 +2401,7 @@ impl Render for ChannelMessages {
                     self.cached_is_clan_owner,
                     &self.cached_locale,
                     self.context_menu_forward_all,
+                    false,
                     cx.entity().downgrade(),
                     cx,
                 );

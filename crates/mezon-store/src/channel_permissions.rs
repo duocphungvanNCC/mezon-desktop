@@ -11,6 +11,7 @@ use crate::ids::{ChannelId, ClanId};
 const MAX_CACHED_CHANNEL_PERMISSIONS: usize = 64;
 
 pub const PERMISSION_MANAGE_THREAD: &str = "manage-thread";
+pub const PERMISSION_DELETE_MESSAGE: &str = "delete-message";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct ChannelPermissionKey {
@@ -85,6 +86,16 @@ impl ChannelPermissionsStore {
     }
 
     pub fn has_permission(&self, slug: &str, clan_id: ClanId, channel_id: ChannelId) -> bool {
+        self.permission_value(slug, clan_id, channel_id)
+            .unwrap_or(false)
+    }
+
+    pub fn permission_value(
+        &self,
+        slug: &str,
+        clan_id: ClanId,
+        channel_id: ChannelId,
+    ) -> Option<bool> {
         let key = ChannelPermissionKey {
             clan_id,
             channel_id,
@@ -92,7 +103,6 @@ impl ChannelPermissionsStore {
         self.cache
             .get(&key)
             .and_then(|perms| perms.get(slug).copied())
-            .unwrap_or(false)
     }
 
     pub fn ensure_loaded(

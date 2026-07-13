@@ -679,6 +679,26 @@ impl TransportClient {
             .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
     }
 
+    pub async fn list_topic_messages(
+        &self,
+        clan_id: i64,
+        channel_id: i64,
+        topic_id: i64,
+        direction: i32,
+        limit: u32,
+    ) -> Result<crate::transport::ListChannelMessagesResult> {
+        let transport = self.inner.clone();
+
+        runtime()
+            .spawn(async move {
+                transport
+                    .list_topic_messages(clan_id, channel_id, topic_id, direction, limit)
+                    .await
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
     /// List threads for a parent channel.
     pub async fn list_thread_descs(
         &self,
@@ -828,6 +848,7 @@ impl TransportClient {
         mode: i32,
         is_public: bool,
         remove: bool,
+        topic_id: i64,
     ) -> Result<()> {
         let transport = self.inner.clone();
         let emoji = emoji.to_string();
@@ -845,6 +866,7 @@ impl TransportClient {
                         mode,
                         is_public,
                         remove,
+                        topic_id,
                     )
                     .await
             })
@@ -865,6 +887,8 @@ impl TransportClient {
         emojis: Vec<crate::transport::OutgoingEmoji>,
         mode: i32,
         is_public: bool,
+        topic_id: i64,
+        is_update_msg_topic: bool,
     ) -> Result<()> {
         let transport = self.inner.clone();
         let content = content.to_string();
@@ -872,8 +896,17 @@ impl TransportClient {
             .spawn(async move {
                 transport
                     .update_channel_message(
-                        clan_id, channel_id, message_id, &content, mentions, hashtags, emojis,
-                        mode, is_public,
+                        clan_id,
+                        channel_id,
+                        message_id,
+                        &content,
+                        mentions,
+                        hashtags,
+                        emojis,
+                        mode,
+                        is_public,
+                        topic_id,
+                        is_update_msg_topic,
                     )
                     .await
             })
@@ -881,18 +914,30 @@ impl TransportClient {
             .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
     }
 
-    /// Delete a channel message.
+    #[allow(clippy::too_many_arguments)]
     pub async fn delete_channel_message(
         &self,
         clan_id: i64,
         channel_id: i64,
         message_id: i64,
+        mode: i32,
+        is_public: bool,
+        has_attachment: bool,
+        topic_id: i64,
     ) -> Result<()> {
         let transport = self.inner.clone();
         runtime()
             .spawn(async move {
                 transport
-                    .delete_channel_message(clan_id, channel_id, message_id)
+                    .delete_channel_message(
+                        clan_id,
+                        channel_id,
+                        message_id,
+                        mode,
+                        is_public,
+                        has_attachment,
+                        topic_id,
+                    )
                     .await
             })
             .await
@@ -1171,6 +1216,75 @@ impl TransportClient {
                 transport
                     .send_channel_message(
                         clan_id, channel_id, &content, is_public, mode, mentions, hashtags, emojis,
+                    )
+                    .await
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn send_topic_message(
+        &self,
+        clan_id: i64,
+        channel_id: i64,
+        content: &str,
+        is_public: bool,
+        mode: i32,
+        topic_id: i64,
+        mentions: Vec<crate::transport::OutgoingMention>,
+        hashtags: Vec<crate::transport::OutgoingHashtag>,
+        emojis: Vec<crate::transport::OutgoingEmoji>,
+    ) -> Result<crate::transport::ApiMessage> {
+        let transport = self.inner.clone();
+        let content = content.to_string();
+
+        runtime()
+            .spawn(async move {
+                transport
+                    .send_topic_message(
+                        clan_id, channel_id, &content, is_public, mode, topic_id, mentions,
+                        hashtags, emojis,
+                    )
+                    .await
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn send_topic_message_with_attachments(
+        &self,
+        clan_id: i64,
+        channel_id: i64,
+        content: &str,
+        is_public: bool,
+        mode: i32,
+        topic_id: i64,
+        attachments: Vec<mezon_proto::api::MessageAttachment>,
+        mentions: Vec<crate::transport::OutgoingMention>,
+        hashtags: Vec<crate::transport::OutgoingHashtag>,
+        emojis: Vec<crate::transport::OutgoingEmoji>,
+        presign_finish: Option<Vec<String>>,
+    ) -> Result<crate::transport::ApiMessage> {
+        let transport = self.inner.clone();
+        let content = content.to_string();
+
+        runtime()
+            .spawn(async move {
+                transport
+                    .send_topic_message_with_attachments(
+                        clan_id,
+                        channel_id,
+                        &content,
+                        is_public,
+                        mode,
+                        topic_id,
+                        attachments,
+                        mentions,
+                        hashtags,
+                        emojis,
+                        presign_finish,
                     )
                     .await
             })

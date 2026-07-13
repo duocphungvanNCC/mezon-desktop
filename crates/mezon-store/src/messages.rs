@@ -24,6 +24,7 @@ use crate::account::AccountStore;
 use crate::album_layout::{AlbumLayout, calculate_album_layout};
 use crate::badge::BadgeService;
 use crate::channel::{ChannelEvent, ChannelList, ChannelType};
+use crate::channel_permissions::ChannelPermissionsStore;
 use crate::clan_members::ClanMembersStore;
 use crate::direct::DirectMessageStore;
 use crate::message::{
@@ -37,6 +38,7 @@ use crate::message::{
 };
 use crate::presign;
 use crate::realtime::{RealtimeDispatch, RealtimeKind};
+use crate::topics::TopicsStore;
 
 const MESSAGE_PAGE_LIMIT: u32 = 50;
 const DIRECTION_BEFORE: i32 = 3;
@@ -96,6 +98,11 @@ pub enum MessagesEvent {
         message_id: MessageId,
     },
     ReplyTargetChanged,
+    /// A discussion topic's message bucket changed (loaded / new reply). Drives
+    /// the topic side panel to re-read `messages_in_channel(topic_id)`.
+    TopicUpdated {
+        topic_id: i64,
+    },
 }
 
 /// The message currently being replied to (composer state), mirroring React's
@@ -122,7 +129,7 @@ pub struct OutgoingMention {
 }
 
 impl OutgoingMention {
-    fn into_transport(self) -> TransportMention {
+    pub(crate) fn into_transport(self) -> TransportMention {
         TransportMention {
             user_id: self.user_id,
             role_id: self.role_id,
@@ -141,7 +148,7 @@ pub struct OutgoingHashtag {
 }
 
 impl OutgoingHashtag {
-    fn into_transport(self) -> TransportHashtag {
+    pub(crate) fn into_transport(self) -> TransportHashtag {
         TransportHashtag {
             channel_id: self.channel_id,
             s: self.s,
@@ -158,7 +165,7 @@ pub struct OutgoingEmoji {
 }
 
 impl OutgoingEmoji {
-    fn into_transport(self) -> TransportEmoji {
+    pub(crate) fn into_transport(self) -> TransportEmoji {
         TransportEmoji {
             emoji_id: self.emoji_id,
             s: self.s,
@@ -432,6 +439,9 @@ pub struct MessagesStore {
     viewing_older_by_channel: HashMap<ChannelId, bool>,
     active_channel_id: Option<ChannelId>,
     active_clan_id: Option<ClanId>,
+    /// Topic bucket currently shown in the discussion side panel, if any. Lets
+    /// realtime replies to a non-active topic bucket still notify the panel.
+    active_topic_id: Option<ChannelId>,
     pending_jump: Option<(ChannelId, MessageId)>,
     is_public: bool,
     is_dm: bool,
@@ -558,6 +568,7 @@ impl MessagesStore {
         self.viewing_older_by_channel.clear();
         self.active_channel_id = None;
         self.active_clan_id = None;
+        self.active_topic_id = None;
         self.is_public = true;
         self.is_dm = false;
         self.mode = STREAM_MODE_CHANNEL;
@@ -598,6 +609,7 @@ impl MessagesStore {
             viewing_older_by_channel: HashMap::new(),
             active_channel_id: None,
             active_clan_id: None,
+            active_topic_id: None,
             pending_jump: None,
             is_public: true,
             is_dm: false,
@@ -1050,6 +1062,19 @@ impl MessagesStore {
 
     pub fn active_channel_id(&self) -> Option<ChannelId> {
         self.active_channel_id
+    }
+
+    pub fn active_clan_id(&self) -> Option<ClanId> {
+        self.active_clan_id
+    }
+
+    /// Stream mode of the active channel (`STREAM_MODE_CHANNEL` / `STREAM_MODE_THREAD`).
+    pub fn mode(&self) -> i32 {
+        self.mode
+    }
+
+    pub fn is_public(&self) -> bool {
+        self.is_public
     }
 
     pub fn is_dm(&self) -> bool {
@@ -1559,14 +1584,15 @@ impl MessagesStore {
         content_tokens: OutgoingContent,
         cx: &mut Context<Self>,
     ) {
-        let Some(channel_id) = self.active_channel_id else {
+        if self.active_channel_id.is_none() {
             return;
         };
+        let storage_id = self.reaction_storage_channel(message_id);
         let mode = self.mode;
         let is_public = self.is_public;
         let (spans, transport_mentions, transport_hashtags, transport_emojis) =
             edit_content_spans(&content, content_tokens);
-        let Some(channel) = self.cache.get_mut(&channel_id) else {
+        let Some(channel) = self.cache.get_mut(&storage_id) else {
             return;
         };
         let Some(msg) = channel.messages.get_mut_by_id(message_id) else {
@@ -1579,20 +1605,31 @@ impl MessagesStore {
         msg.is_edited = true;
         patch_reply_previews_after_update(&mut channel.messages, message_id, &content);
         self.editing = None;
-        cx.emit(MessagesEvent::Updated {
-            message_id: Some(message_id),
-        });
+        if let Some(topic_id) = self.active_topic_id {
+            cx.emit(MessagesEvent::TopicUpdated {
+                topic_id: topic_id.get(),
+            });
+        } else {
+            cx.emit(MessagesEvent::Updated {
+                message_id: Some(message_id),
+            });
+        }
         cx.notify();
 
         let api = self.api.clone();
         let clan_id = self.active_clan_id.map_or(0, |c| c.get());
-        let channel_num = channel_id.get();
         let message_num = message_id.get();
+        let (api_channel_id, api_topic_id, is_update_msg_topic) =
+            if let Some(topic_id) = self.active_topic_id {
+                (topic_id.get(), topic_id.get(), true)
+            } else {
+                (storage_id.get(), 0, false)
+            };
         cx.spawn(async move |_this, _cx| {
             if let Err(e) = api
                 .update_channel_message(
                     clan_id,
-                    channel_num,
+                    api_channel_id,
                     message_num,
                     &content,
                     transport_mentions,
@@ -1600,6 +1637,8 @@ impl MessagesStore {
                     transport_emojis,
                     mode,
                     is_public,
+                    api_topic_id,
+                    is_update_msg_topic,
                 )
                 .await
             {
@@ -1612,21 +1651,41 @@ impl MessagesStore {
     /// Remove a message locally, then send the delete to the server.
     /// No rollback on network failure — a channel refresh reconciles true failures.
     pub fn delete_message(&mut self, message_id: MessageId, cx: &mut Context<Self>) {
-        let Some(channel_id) = self.active_channel_id else {
+        let Some(parent_channel_id) = self.active_channel_id else {
             return;
         };
+        let storage_id = self.reaction_storage_channel(message_id);
+        let has_attachment = self
+            .cache
+            .get(&storage_id)
+            .and_then(|channel| channel.messages.get_by_id(message_id))
+            .is_some_and(|msg| !msg.attachments.is_empty());
         if self.editing == Some(message_id) {
             self.editing = None;
         }
-        self.apply_message_remove(channel_id, message_id, cx);
+        self.apply_message_remove(storage_id, message_id, cx);
 
         let api = self.api.clone();
         let clan_id = self.active_clan_id.map_or(0, |c| c.get());
-        let channel_num = channel_id.get();
+        let mode = self.mode;
+        let is_public = self.is_public;
         let message_num = message_id.get();
+        let (api_channel_id, api_topic_id) = if let Some(topic_id) = self.active_topic_id {
+            (parent_channel_id.get(), topic_id.get())
+        } else {
+            (storage_id.get(), 0)
+        };
         cx.spawn(async move |_this, _cx| {
             if let Err(e) = api
-                .delete_channel_message(clan_id, channel_num, message_num)
+                .delete_channel_message(
+                    clan_id,
+                    api_channel_id,
+                    message_num,
+                    mode,
+                    is_public,
+                    has_attachment,
+                    api_topic_id,
+                )
                 .await
             {
                 tracing::error!("delete_channel_message failed: {e}");
@@ -1732,20 +1791,114 @@ impl MessagesStore {
         .detach();
     }
 
-    pub fn create_topic(&self, message_id: MessageId, cx: &mut Context<Self>) {
-        let Some(channel_id) = self.active_channel_id else {
+    /// Messages held in an arbitrary bucket (used by the discussion topic panel,
+    /// whose replies are stored under the topic id — mirroring mezon-react).
+    pub fn messages_in_channel(&self, channel_id: ChannelId) -> &[Message] {
+        self.cache
+            .get(&channel_id)
+            .map(|c| c.messages.as_slice())
+            .unwrap_or(&[])
+    }
+
+    /// Mark the topic bucket the discussion panel is watching so realtime replies
+    /// to it (a non-active channel) still notify the panel.
+    pub fn set_active_topic(&mut self, topic_id: Option<i64>, cx: &mut Context<Self>) {
+        let next = topic_id.map(ChannelId);
+        if self.active_topic_id == next {
             return;
-        };
-        let clan_id = self.active_clan_id.map_or(0, |c| c.get());
+        }
+        self.active_topic_id = next;
+        cx.notify();
+    }
+
+    /// Load a discussion topic's replies into their own bucket (keyed by topic id).
+    /// Mirrors mezon-js `listChannelMessages(clanId, channelId, undefined, dir, limit, topicId)`.
+    pub fn fetch_topic_messages(
+        &mut self,
+        clan_id: i64,
+        parent_channel_id: i64,
+        topic_id: i64,
+        cx: &mut Context<Self>,
+    ) {
+        let topic_key = ChannelId(topic_id);
         let api = self.api.clone();
-        let channel_num = channel_id.get();
-        let message_num = message_id.get();
-        cx.spawn(async move |_this, _cx| {
-            if let Err(e) = api.create_sd_topic(message_num, clan_id, channel_num).await {
-                tracing::error!("create_topic create_sd_topic failed: {e}");
-            }
+        let cfg = AppConfig::try_global(cx).cloned();
+        let viewer_id = viewer_user_id(cx);
+        cx.spawn(async move |this, cx| {
+            let result = api
+                .list_topic_messages(clan_id, parent_channel_id, topic_id, 0, MESSAGE_PAGE_LIMIT)
+                .await;
+            let msgs = match result {
+                Ok(page) => page.messages,
+                Err(e) => {
+                    tracing::error!("fetch_topic_messages failed for topic {topic_id}: {e}");
+                    return;
+                }
+            };
+            let parsed = prepare_messages(msgs, cfg.as_ref(), viewer_id);
+            let _ = this.update(cx, |this, cx| {
+                this.set_channel(topic_key, parsed);
+                cx.emit(MessagesEvent::TopicUpdated { topic_id });
+                cx.notify();
+            });
         })
         .detach();
+    }
+
+    /// Append a just-sent topic reply into its bucket (dedup by id; realtime echo
+    /// reconciles to the same server id).
+    pub fn append_topic_message(
+        &mut self,
+        topic_id: i64,
+        api_msg: mezon_client::transport::ApiMessage,
+        cx: &mut Context<Self>,
+    ) {
+        let topic_key = ChannelId(topic_id);
+        let cfg = AppConfig::try_global(cx);
+        let viewer_id = viewer_user_id(cx);
+        let msg = message_from_api(api_msg, cfg, viewer_id);
+        if self.cache.contains(&topic_key) {
+            if let Some(channel) = self.cache.get_mut(&topic_key) {
+                if channel.messages.contains_id(msg.id) {
+                    return;
+                }
+                channel.messages.push_grouped(msg);
+            }
+        } else {
+            self.set_channel(topic_key, vec![msg]);
+        }
+        cx.emit(MessagesEvent::TopicUpdated { topic_id });
+        cx.notify();
+    }
+
+    /// Turn an origin message into a topic anchor (mezon-react `updateToBeTopicMessage`):
+    /// `code = Topic`, `content.tp = topic_id`. Renders the "Topic" view button.
+    pub fn mark_message_as_topic(
+        &mut self,
+        parent_channel_id: ChannelId,
+        origin_message_id: MessageId,
+        topic_id: i64,
+        creator_id: Option<UserId>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(channel) = self.cache.get_mut(&parent_channel_id) else {
+            return;
+        };
+        let Some(msg) = channel.messages.get_mut_by_id(origin_message_id) else {
+            return;
+        };
+        if msg.code == MessageCode::Topic && msg.topic_id == Some(ChannelId(topic_id)) {
+            return;
+        }
+        msg.code = MessageCode::Topic;
+        msg.topic_id = Some(ChannelId(topic_id));
+        msg.topic_creator_id = creator_id;
+        if self.active_channel_id == Some(parent_channel_id) {
+            cx.emit(MessagesEvent::Updated {
+                message_id: Some(origin_message_id),
+            });
+        }
+        cx.notify();
     }
 
     #[allow(dead_code)]
@@ -2492,6 +2645,11 @@ impl MessagesStore {
         self.is_public = is_public;
         self.is_dm = is_dm;
         self.mode = mode;
+        if !is_dm && !clan_id.is_zero() {
+            ChannelPermissionsStore::global(cx).update(cx, |store, cx| {
+                store.ensure_loaded(clan_id, channel_id, cx);
+            });
+        }
         self.viewing_older_by_channel.insert(channel_id, false);
         self.loading_more = false;
         self.reply_target = None;
@@ -2635,6 +2793,11 @@ impl MessagesStore {
             }
             MessageCode::ChatRemove | MessageCode::DeleteEphemeralMsg => {
                 self.apply_message_remove(storage_id, message_id, cx);
+                if m.topic_id != 0 {
+                    TopicsStore::global(cx).update(cx, |store, cx| {
+                        store.decrement_topic_reply_count(m.topic_id, cx);
+                    });
+                }
             }
             _ => {
                 if !self.cache.contains(&storage_id) {
@@ -2710,6 +2873,11 @@ impl MessagesStore {
                 });
                 cx.notify();
             }
+        } else if self.active_topic_id == Some(storage_id) {
+            cx.emit(MessagesEvent::TopicUpdated {
+                topic_id: storage_id.get(),
+            });
+            cx.notify();
         }
     }
 
@@ -2742,7 +2910,12 @@ impl MessagesStore {
             );
         }
         patch_reply_previews_after_update(&mut channel.messages, message_id, &preview);
-        if is_active {
+        if let Some(topic_id) = self.active_topic_id {
+            cx.emit(MessagesEvent::TopicUpdated {
+                topic_id: topic_id.get(),
+            });
+            cx.notify();
+        } else if is_active {
             cx.emit(MessagesEvent::Updated {
                 message_id: Some(message_id),
             });
@@ -2767,16 +2940,59 @@ impl MessagesStore {
         self.retreat_last_message(storage_id, message_id);
 
         let is_active = self.active_channel_id == Some(storage_id);
+        let deleted_topic_id = self
+            .cache
+            .get(&storage_id)
+            .and_then(|channel| channel.messages.get_by_id(message_id))
+            .and_then(|msg| msg.topic_id);
         let Some(channel) = self.cache.get_mut(&storage_id) else {
+            self.on_message_deleted(message_id, deleted_topic_id, cx);
             return;
         };
         patch_reply_previews_after_delete(&mut channel.messages, message_id);
-        if let Some(index) = channel.messages.remove_id(message_id)
-            && is_active
-        {
-            cx.emit(MessagesEvent::RemovedAt { index, message_id });
+        if let Some(index) = channel.messages.remove_id(message_id) {
+            self.on_message_deleted(message_id, deleted_topic_id, cx);
+            if let Some(topic_id) = self.active_topic_id {
+                cx.emit(MessagesEvent::TopicUpdated {
+                    topic_id: topic_id.get(),
+                });
+            } else if is_active {
+                cx.emit(MessagesEvent::RemovedAt { index, message_id });
+            }
             cx.notify();
         }
+    }
+
+    fn on_message_deleted(
+        &mut self,
+        message_id: MessageId,
+        message_topic_id: Option<ChannelId>,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(topics) = TopicsStore::try_global(cx) {
+            topics.update(cx, |store, _| store.clear_init_topic_message_if(message_id));
+        }
+        self.close_topic_panel_if_origin_deleted(message_id, message_topic_id, cx);
+    }
+
+    fn close_topic_panel_if_origin_deleted(
+        &mut self,
+        message_id: MessageId,
+        message_topic_id: Option<ChannelId>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(topics) = TopicsStore::try_global(cx) else {
+            return;
+        };
+        let should_close = topics
+            .read(cx)
+            .should_close_on_message_deleted(message_id, message_topic_id);
+        if !should_close {
+            return;
+        }
+        self.active_topic_id = None;
+        cx.notify();
+        topics.update(cx, |store, cx| store.close_panel_from_messages(cx));
     }
 
     fn retreat_last_message(&mut self, storage_id: ChannelId, deleted_id: MessageId) {
@@ -2828,9 +3044,10 @@ impl MessagesStore {
         remove: bool,
         cx: &mut Context<Self>,
     ) {
-        let Some(channel_id) = self.active_channel_id else {
+        let Some(parent_channel_id) = self.active_channel_id else {
             return;
         };
+        let storage_id = self.reaction_storage_channel(message_id);
         let Some(current_uid) = BadgeService::global(cx).read(cx).current_user_id(cx) else {
             return;
         };
@@ -2839,7 +3056,7 @@ impl MessagesStore {
         let cfg = AppConfig::try_global(cx);
         let applied = self
             .cache
-            .get_mut(&channel_id)
+            .get_mut(&storage_id)
             .and_then(|channel| channel.messages.get_mut_by_id(message_id))
             .map(|msg| {
                 apply_reaction_event(&mut msg.reactions, &emoji_id, &emoji, &uid_str, remove, cfg);
@@ -2849,12 +3066,18 @@ impl MessagesStore {
             if !remove {
                 *self
                     .pending_self_adds
-                    .entry((channel_id, message_id, key))
+                    .entry((storage_id, message_id, key))
                     .or_insert(0) += 1;
             }
-            cx.emit(MessagesEvent::Updated {
-                message_id: Some(message_id),
-            });
+            if self.active_topic_id == Some(storage_id) {
+                cx.emit(MessagesEvent::TopicUpdated {
+                    topic_id: storage_id.get(),
+                });
+            } else {
+                cx.emit(MessagesEvent::Updated {
+                    message_id: Some(message_id),
+                });
+            }
             cx.notify();
         }
 
@@ -2864,13 +3087,19 @@ impl MessagesStore {
         let is_public = self.is_public;
         let message_sender_id = current_uid.get();
         let emoji_id_num = emoji_id.parse::<i64>().unwrap_or(0);
-        let channel = channel_id.get();
+        let api_channel = parent_channel_id.get();
+        let api_topic_id = self
+            .active_topic_id
+            .is_some()
+            .then_some(storage_id.get())
+            .unwrap_or(0);
         let message = message_id.get();
+        let storage_for_rollback = storage_id;
         cx.spawn(async move |this, cx| {
             if let Err(e) = api
                 .react_channel_message(
                     clan_id,
-                    channel,
+                    api_channel,
                     message,
                     emoji_id_num,
                     &emoji,
@@ -2879,6 +3108,7 @@ impl MessagesStore {
                     mode,
                     is_public,
                     remove,
+                    api_topic_id,
                 )
                 .await
             {
@@ -2886,13 +3116,41 @@ impl MessagesStore {
                 if applied {
                     let _ = this.update(cx, |store, cx| {
                         store.rollback_reaction_send(
-                            channel_id, message_id, &emoji_id, &emoji, &uid_str, remove, cx,
+                            storage_for_rollback,
+                            message_id,
+                            &emoji_id,
+                            &emoji,
+                            &uid_str,
+                            remove,
+                            cx,
                         );
                     });
                 }
             }
         })
         .detach();
+    }
+
+    fn reaction_storage_channel(&self, message_id: MessageId) -> ChannelId {
+        if let Some(topic_id) = self.active_topic_id {
+            if self
+                .cache
+                .get(&topic_id)
+                .is_some_and(|c| c.messages.contains_id(message_id))
+            {
+                return topic_id;
+            }
+            if let Some(parent) = self.active_channel_id
+                && self
+                    .cache
+                    .get(&parent)
+                    .is_some_and(|c| c.messages.contains_id(message_id))
+            {
+                return parent;
+            }
+            return topic_id;
+        }
+        self.active_channel_id.unwrap_or(ChannelId(0))
     }
 
     fn rollback_reaction_send(
@@ -3433,7 +3691,7 @@ fn synthesize_ws_message_id(
         .unwrap_or(1)
 }
 
-fn message_from_channel_proto(
+pub(crate) fn message_from_channel_proto(
     m: &mezon_proto::api::ChannelMessage,
     message_id: i64,
     cfg: Option<&AppConfig>,
@@ -3539,7 +3797,7 @@ fn has_more_from_oldest(messages: &[Message]) -> bool {
         .is_some_and(|m| m.code != MessageCode::Indicator)
 }
 
-fn prepare_messages(
+pub(crate) fn prepare_messages(
     msgs: Vec<ApiMessage>,
     cfg: Option<&AppConfig>,
     viewer_id: Option<UserId>,
@@ -3764,7 +4022,7 @@ fn optimistic_create_time_at(messages: &MessageList, sender_id: &str, now: i64) 
     }
 }
 
-fn viewer_user_id(cx: &App) -> Option<UserId> {
+pub(crate) fn viewer_user_id(cx: &App) -> Option<UserId> {
     BadgeService::try_global(cx)?.read(cx).current_user_id(cx)
 }
 
