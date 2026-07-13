@@ -67,6 +67,11 @@ pub struct Clan {
     pub prevent_anonymous: bool,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ClanInviteLink {
+    pub id: i64,
+    pub invite_link: String,
+}
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClanSystemMessage {
     pub channel_id: ChannelId,
@@ -702,6 +707,26 @@ impl ClanList {
                 .map_err(|e| e.to_string())
         })
     }
+}
+pub fn create_invite_link(
+    &self,
+    clan_id: ClanId,
+    channel_id: Option<ChannelId>,
+    cx: &mut Context<Self>,
+) -> Task<Result<ClanInviteLink, String>> {
+    let api = self.api.clone();
+    let clan = clan_id.get();
+    let channel = channel_id.map(ChannelId::get).unwrap_or_default();
+    cx.spawn(async move |_, _| {
+        let link = api
+            .create_link_invite_user(clan, channel, 0)
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(ClanInviteLink {
+            id: link.id,
+            invite_link: link.invite_link,
+        })
+    })
 }
 
 fn timestamped_upload_filename(original: &str) -> String {
