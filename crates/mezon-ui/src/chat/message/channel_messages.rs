@@ -234,6 +234,17 @@ struct SavedScrollAnchor {
     offset_in_item: Pixels,
 }
 
+fn saved_message_scroll_anchor(
+    anchor: SavedScrollAnchor,
+    message_ix: usize,
+    header_shown: bool,
+) -> gpui::ListOffset {
+    gpui::ListOffset {
+        item_ix: usize::from(header_shown) + message_ix,
+        offset_in_item: anchor.offset_in_item,
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum PaginationDirection {
     Top,
@@ -266,6 +277,15 @@ fn pagination_direction(
         Some(PaginationDirection::Top)
     } else if near_bottom && has_more_bottom && armed_bottom {
         Some(PaginationDirection::Bottom)
+    } else {
+        None
+    }
+}
+
+fn deadline_remaining(last_activity: Instant, now: Instant, delay: Duration) -> Option<Duration> {
+    let elapsed = now.saturating_duration_since(last_activity);
+    if elapsed < delay {
+        Some(delay - elapsed)
     } else {
         None
     }
@@ -497,6 +517,47 @@ mod pagination_tests {
     }
 }
 
+#[cfg(test)]
+mod scroll_idle_tests {
+    use super::*;
+
+    #[test]
+    fn memory_relief_waits_for_the_latest_scroll_activity() {
+        let started_at = Instant::now();
+        let before_idle = started_at + SCROLL_RELIEF_DELAY - Duration::from_millis(1);
+        assert_eq!(
+            deadline_remaining(started_at, before_idle, SCROLL_RELIEF_DELAY),
+            Some(Duration::from_millis(1))
+        );
+        assert_eq!(
+            deadline_remaining(
+                started_at,
+                started_at + SCROLL_RELIEF_DELAY,
+                SCROLL_RELIEF_DELAY
+            ),
+            None
+        );
+        assert_eq!(
+            deadline_remaining(
+                started_at,
+                started_at + SCROLL_RELIEF_DELAY + Duration::from_secs(1),
+                SCROLL_RELIEF_DELAY
+            ),
+            None
+        );
+
+        let latest_activity = started_at + Duration::from_millis(900);
+        assert_eq!(
+            deadline_remaining(
+                latest_activity,
+                started_at + SCROLL_RELIEF_DELAY,
+                SCROLL_RELIEF_DELAY
+            ),
+            Some(Duration::from_millis(900))
+        );
+    }
+}
+
 pub struct ChannelMessages {
     pub(crate) list_state: ListState,
     focus_handle: FocusHandle,
@@ -583,7 +644,9 @@ impl ChannelMessages {
             this.cached_locale = settings.read(cx).language.clone().into();
             this.cached_coming_soon =
                 mezon_i18n::t(&this.cached_locale, "common.comingSoon").into();
-            this.row_memo.borrow_mut().time_labels.clear();
+            let mut memo = this.row_memo.borrow_mut();
+            memo.time_labels.clear();
+            memo.rich_text.clear();
             cx.notify();
         })
         .detach();
@@ -739,6 +802,23 @@ impl ChannelMessages {
                 } => {
                     let prev_top = this.list_state.logical_scroll_top();
                     let prev_count = this.list_state.item_count();
+                    let preserved_message_anchor = {
+                        let store = _store.read(cx);
+                        store
+                            .active_channel_id()
+                            .and_then(|channel_id| this.scroll_anchors.get(&channel_id).copied())
+                            .and_then(|anchor| {
+                                store
+                                    .viewport_position(anchor.message_id)
+                                    .map(|message_ix| {
+                                        saved_message_scroll_anchor(
+                                            anchor,
+                                            message_ix,
+                                            this.header_shown,
+                                        )
+                                    })
+                            })
+                    };
                     let was_at_end = prev_top.item_ix >= prev_count;
                     let own_recent_send = *added_bottom > 0
                         && _store.read(cx).viewport_messages().last().is_some_and(|m| {
@@ -748,11 +828,17 @@ impl ChannelMessages {
                                     && chrono::Utc::now().timestamp() - m.create_time <= 1)
                         });
                     let h = usize::from(this.header_shown);
+                    let inserted_size_hint = this.list_state.average_measured_item_size();
                     if *removed_top > 0 {
                         this.list_state.splice(h..h + *removed_top, 0);
                     }
                     if *added_top > 0 {
-                        this.list_state.splice(h..h, *added_top);
+                        if let Some(size_hint) = inserted_size_hint {
+                            this.list_state
+                                .splice_with_size_hint(h..h, *added_top, size_hint);
+                        } else {
+                            this.list_state.splice(h..h, *added_top);
+                        }
                     }
                     if *removed_bottom > 0 {
                         let n = this.list_state.item_count();
@@ -761,7 +847,12 @@ impl ChannelMessages {
                     }
                     if *added_bottom > 0 {
                         let n = this.list_state.item_count();
-                        this.list_state.splice(n..n, *added_bottom);
+                        if let Some(size_hint) = inserted_size_hint {
+                            this.list_state
+                                .splice_with_size_hint(n..n, *added_bottom, size_hint);
+                        } else {
+                            this.list_state.splice(n..n, *added_bottom);
+                        }
                     }
                     let following_new = *added_bottom > 0
                         && (was_at_end || own_recent_send)
@@ -770,16 +861,19 @@ impl ChannelMessages {
                         this.list_state.scroll_to_end();
                         this.at_bottom = true;
                         this.sync_channel_seen(cx);
-                    } else if (*added_top > 0 || *removed_top > 0)
-                        && let Some(anchor) = shifted_scroll_anchor(
-                            prev_top,
-                            prev_count,
-                            this.header_shown,
-                            *added_top,
-                            *removed_top,
-                        )
-                    {
-                        this.list_state.scroll_to(anchor);
+                    } else if *added_top > 0 || *removed_top > 0 {
+                        let anchor = preserved_message_anchor.or_else(|| {
+                            shifted_scroll_anchor(
+                                prev_top,
+                                prev_count,
+                                this.header_shown,
+                                *added_top,
+                                *removed_top,
+                            )
+                        });
+                        if let Some(anchor) = anchor {
+                            this.list_state.scroll_to(anchor);
+                        }
                     } else if *added_bottom > 0 && prev_top.item_ix < prev_count {
                         this.list_state.scroll_to(prev_top);
                     }
@@ -850,6 +944,7 @@ impl ChannelMessages {
         let timeline = cx.weak_entity();
         list_state.set_scroll_handler(move |event, window, cx| {
             let at_bottom = !event.is_scrolled;
+            let scroll_top = event.scroll_top;
             let visible_start = event.visible_range.start;
             let visible_end = event.visible_range.end;
             let _ = timeline.update(cx, |this, cx| {
@@ -874,21 +969,26 @@ impl ChannelMessages {
                         this._reaction_picker_dismiss_sub = None;
                         cx.notify();
                     }
-                    if !this.scroll_relief_armed {
-                        this.scroll_relief_armed = true;
-                        cx.spawn(async move |this, cx| {
-                            cx.background_executor().timer(SCROLL_RELIEF_DELAY).await;
-                            this.update(cx, |this, cx| {
-                                this.scroll_relief_armed = false;
-                                crate::image_cache::release_freed_memory_to_os(cx);
-                            })
-                            .ok();
-                        })
-                        .detach();
-                    }
                 }
 
                 let store_entity = MessagesStore::global(cx);
+                let live_anchor = {
+                    let store = store_entity.read(cx);
+                    store.active_channel_id().map(|channel_id| {
+                        (
+                            channel_id,
+                            capture_anchor(
+                                store.viewport_messages(),
+                                at_bottom,
+                                scroll_top,
+                                this.header_shown,
+                            ),
+                        )
+                    })
+                };
+                if let Some((channel_id, anchor_update)) = live_anchor {
+                    this.apply_scroll_anchor(channel_id, anchor_update);
+                }
                 if at_bottom_changed {
                     if let Some(channel_id) = store_entity.read(cx).active_channel_id() {
                         store_entity.update(cx, |store, _cx| {
@@ -1649,6 +1749,7 @@ impl ChannelMessages {
             let mut memo = self.row_memo.borrow_mut();
             memo.avatars.clear();
             memo.time_labels.clear();
+            memo.rich_text.clear();
         }
         self.image_cache
             .update(cx, |cache, cx| cache.clear(window, cx));
@@ -1662,7 +1763,9 @@ impl ChannelMessages {
                 self.scroll_anchors.remove(&channel_id);
             }
             AnchorUpdate::Set(anchor) => {
-                self.scroll_anchors.insert(channel_id, anchor);
+                if self.scroll_anchors.get(&channel_id) != Some(&anchor) {
+                    self.scroll_anchors.insert(channel_id, anchor);
+                }
             }
             AnchorUpdate::Keep => {}
         }
@@ -2036,6 +2139,7 @@ impl ChannelMessages {
 impl ChannelMessages {
     fn mark_scroll_activity(&mut self, cx: &mut Context<Self>) {
         self.last_scroll_at = Some(Instant::now());
+        self.arm_scroll_memory_relief(cx);
         if self.scroll_idle_armed {
             return;
         }
@@ -2057,6 +2161,37 @@ impl ChannelMessages {
                         } else {
                             Some(SCROLL_ACTIVITY_GRACE - elapsed)
                         }
+                    })
+                    .ok()
+                    .flatten();
+                let Some(next) = next else {
+                    break;
+                };
+                remaining = next;
+            }
+        })
+        .detach();
+    }
+
+    fn arm_scroll_memory_relief(&mut self, cx: &mut Context<Self>) {
+        if self.scroll_relief_armed {
+            return;
+        }
+        self.scroll_relief_armed = true;
+        cx.spawn(async move |this, cx| {
+            let mut remaining = SCROLL_RELIEF_DELAY;
+            loop {
+                cx.background_executor().timer(remaining).await;
+                let next = this
+                    .update(cx, |this, cx| {
+                        let next = this.last_scroll_at.and_then(|last_activity| {
+                            deadline_remaining(last_activity, Instant::now(), SCROLL_RELIEF_DELAY)
+                        });
+                        if next.is_none() {
+                            this.scroll_relief_armed = false;
+                            crate::image_cache::release_freed_memory_to_os(cx);
+                        }
+                        next
                     })
                     .ok()
                     .flatten();
@@ -2289,6 +2424,7 @@ impl Render for ChannelMessages {
                         welcome: welcome.clone(),
                         onboarding: onboarding.clone(),
                         suppress_hover,
+                        scroll_active,
                         hovered_row,
                         avatar_cache: small_avatar_image_cache.clone(),
                         large_avatar_cache: avatar_image_cache.clone(),
@@ -2790,7 +2926,7 @@ mod skeleton_tests {
 mod scroll_restore_tests {
     use super::{
         AnchorUpdate, ResetScroll, ResetTransition, SavedScrollAnchor, capture_anchor,
-        decide_reset_scroll, reset_transition, shifted_scroll_anchor,
+        decide_reset_scroll, reset_transition, saved_message_scroll_anchor, shifted_scroll_anchor,
     };
     use gpui::{ListOffset, px};
     use mezon_store::{ChannelId, Message, MessageId};
@@ -2979,7 +3115,7 @@ mod scroll_restore_tests {
     }
 
     #[test]
-    fn prepend_keeps_old_first_row_when_loading_header_is_visible() {
+    fn prepend_fallback_keeps_old_first_row_when_loading_header_is_visible() {
         assert_offset(
             shifted_scroll_anchor(
                 ListOffset {
@@ -2994,6 +3130,25 @@ mod scroll_restore_tests {
             21,
             0.,
         );
+    }
+
+    #[test]
+    fn prepend_restores_the_same_message_id_and_offset() {
+        let before = rows(&[40, 41, 42, 43]);
+        let captured = capture_anchor(&before, false, list_offset(2, 9.), true);
+        let AnchorUpdate::Set(anchor) = captured else {
+            panic!("expected a message anchor");
+        };
+        let after = rows(&[20, 21, 22, 40, 41, 42, 43]);
+        let message_ix = after
+            .iter()
+            .position(|message| message.id == anchor.message_id)
+            .unwrap();
+        let restored = saved_message_scroll_anchor(anchor, message_ix, true);
+
+        assert_eq!(anchor.message_id, MessageId(41));
+        assert_eq!(restored.item_ix, 5);
+        assert_eq!(restored.offset_in_item, px(9.));
     }
 
     #[test]

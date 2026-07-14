@@ -337,19 +337,65 @@ fn build_options(cx: &App) -> Vec<ForwardOption> {
 /// rebuild when one of them actually gains or loses rows. DM traffic notifies
 /// the direct store on every incoming message — without this the modal would
 /// rebuild its whole option list on each one.
-fn rendered_rows_equal(a: &[ForwardOption], b: &[ForwardOption]) -> bool {
-    a.len() == b.len()
-        && a.iter().zip(b.iter()).all(|(new, old)| {
-            new.key == old.key
-                && new.label == old.label
-                && new.avatar == old.avatar
-                && new.avatar_raw == old.avatar_raw
-                && new.filter_key == old.filter_key
-                && new.sort_key == old.sort_key
-        })
+const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
+
+fn fold_bytes(hash: &mut u64, bytes: &[u8]) {
+    for byte in bytes {
+        *hash ^= u64::from(*byte);
+        *hash = hash.wrapping_mul(FNV_PRIME);
+    }
+}
+
+fn fold_str(hash: &mut u64, value: &str) {
+    fold_bytes(hash, value.as_bytes());
+    fold_bytes(hash, &[0xff]);
+}
+
+fn fold_u64(hash: &mut u64, value: u64) {
+    fold_bytes(hash, &value.to_le_bytes());
+}
+
+fn fold_i64(hash: &mut u64, value: i64) {
+    fold_bytes(hash, &value.to_le_bytes());
+}
+
+/// Everything `build_options` reads that can change a rendered row, folded without
+/// allocating. `build_options` itself costs a `format!` plus several `String`
+/// clones per row, so it must not run on every store notify just to be discarded.
+fn source_fingerprint(cx: &App) -> u64 {
+    let mut hash = FNV_OFFSET;
+    for dm in DirectMessageStore::global(cx).read(cx).channels() {
+        fold_i64(&mut hash, dm.id.get());
+        fold_str(&mut hash, &dm.label);
+        fold_str(&mut hash, &dm.avatar);
+        fold_str(&mut hash, &dm.peer_username);
+        fold_i64(&mut hash, dm.last_sent_timestamp);
+        fold_i64(&mut hash, dm.peer_user_id.map_or(0, |id| id.get()));
+    }
+    for friend in FriendStore::global(cx).read(cx).friends() {
+        fold_i64(&mut hash, friend.id.get());
+        fold_u64(&mut hash, u64::from(friend.state == FriendState::Friend));
+        fold_str(&mut hash, friend.label());
+        fold_str(&mut hash, &friend.username);
+        fold_str(&mut hash, &friend.avatar_url);
+    }
+    for channel in ChannelList::global(cx).read(cx).user_channels() {
+        fold_i64(&mut hash, channel.id.get());
+        fold_str(&mut hash, &channel.name);
+        fold_str(&mut hash, &channel.clan_name);
+        fold_i64(&mut hash, channel.clan_id.get());
+        fold_i64(&mut hash, channel.last_sent_timestamp);
+    }
+    for clan in &ClanList::global(cx).read(cx).clans {
+        fold_i64(&mut hash, clan.id.get());
+        fold_str(&mut hash, &clan.name);
+    }
+    hash
 }
 
 pub struct ForwardMessageModal {
+    fingerprint: u64,
     focus_handle: FocusHandle,
     locale: SharedString,
     message_ids: Vec<MessageId>,
@@ -466,6 +512,7 @@ impl ForwardMessageModal {
             let options = build_options(cx);
             let filtered = (0..options.len().min(MAX_RESULTS)).collect();
             Self {
+                fingerprint: source_fingerprint(cx),
                 focus_handle: cx.focus_handle(),
                 shared: build_shared_content(&message_ids, cx),
                 locale,
@@ -544,11 +591,12 @@ impl ForwardMessageModal {
     /// notifies (it emits no event) when `user_channels` arrive, hence observe
     /// rather than subscribe.
     fn refresh_options(&mut self, cx: &mut Context<Self>) {
-        let options = build_options(cx);
-        if rendered_rows_equal(&options, &self.options) {
+        let fingerprint = source_fingerprint(cx);
+        if fingerprint == self.fingerprint {
             return;
         }
-        self.options = options;
+        self.fingerprint = fingerprint;
+        self.options = build_options(cx);
         self.selected
             .retain(|key| self.options.iter().any(|o| o.key == *key));
         self.recompute_filtered(cx);

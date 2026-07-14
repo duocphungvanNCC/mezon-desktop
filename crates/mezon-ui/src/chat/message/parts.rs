@@ -1159,11 +1159,6 @@ fn reaction_pill(reaction: &Reaction, message_id: MessageId, ctx: &RowCtx) -> An
     let reacted = !ctx.current_user_id.is_empty() && reaction.has_sender(ctx.current_user_id);
     let count_label = reaction.count_label.clone();
     let src = reaction.emoji_proxied.clone();
-    let add_emoji_id = reaction.emoji_id.clone();
-    let add_emoji = reaction.emoji.clone();
-    let panel_emoji_id = reaction.emoji_id.clone();
-    let panel_emoji = reaction.emoji.clone();
-    let avatar_cache = ctx.avatar_cache.clone();
 
     let mut pill = div()
         .id(super::content::hashed_element_id(
@@ -1182,30 +1177,38 @@ fn reaction_pill(reaction: &Reaction, message_id: MessageId, ctx: &RowCtx) -> An
         .rounded_md()
         .text_sm()
         .font_weight(FontWeight::MEDIUM)
-        .cursor_pointer()
-        .text_color(theme.tokens.text_theme_primary)
-        .on_click(move |_, _, cx| {
-            MessagesStore::global(cx).update(cx, |store, cx| {
-                store.add_reaction(
-                    message_id,
-                    add_emoji_id.to_string(),
-                    add_emoji.to_string(),
-                    cx,
-                );
-            });
-        })
-        .hoverable_tooltip(move |_window, cx| {
-            cx.new(|cx| {
-                UserReactionPanel::new(
-                    message_id,
-                    panel_emoji_id.clone(),
-                    panel_emoji.clone(),
-                    avatar_cache.clone(),
-                    cx,
-                )
+        .text_color(theme.tokens.text_theme_primary);
+    if !ctx.scroll_active {
+        let add_emoji_id = reaction.emoji_id.clone();
+        let add_emoji = reaction.emoji.clone();
+        let panel_emoji_id = reaction.emoji_id.clone();
+        let panel_emoji = reaction.emoji.clone();
+        let avatar_cache = ctx.avatar_cache.clone();
+        pill = pill
+            .cursor_pointer()
+            .on_click(move |_, _, cx| {
+                MessagesStore::global(cx).update(cx, |store, cx| {
+                    store.add_reaction(
+                        message_id,
+                        add_emoji_id.to_string(),
+                        add_emoji.to_string(),
+                        cx,
+                    );
+                });
             })
-            .into()
-        });
+            .hoverable_tooltip(move |_window, cx| {
+                cx.new(|cx| {
+                    UserReactionPanel::new(
+                        message_id,
+                        panel_emoji_id.clone(),
+                        panel_emoji.clone(),
+                        avatar_cache.clone(),
+                        cx,
+                    )
+                })
+                .into()
+            });
+    }
     if reacted {
         pill = pill
             .bg(gpui::Rgba {
