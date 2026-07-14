@@ -8,7 +8,8 @@ use mezon_store::{
     AuthState, Channel, ChannelId, ChannelList, ChannelType, ClanId, ClanList, ClanMembersStore,
     DirectChannel, DirectKind, DirectMessageStore, GroupMembersStore, InboxStore,
     MessageSearchEvent, MessageSearchStore, MessagesStore, Settings, ThreadsEvent, ThreadsStore,
-    TopicsStore, VoiceMember, VoiceModerationError, VoiceStore, expand_mention_name_tokens,
+    TopicsEvent, TopicsStore, VoiceMember, VoiceModerationError, VoiceStore,
+    expand_mention_name_tokens,
 };
 use ui::PopoverMenuHandle;
 use ui::utils::ROUNDED_BORDER_WINDOW;
@@ -281,12 +282,14 @@ impl ChatLayout {
         .detach();
         cx.observe(&MessageSearchStore::global(cx), |_, _, cx| cx.notify())
             .detach();
-        cx.observe(&TopicsStore::global(cx), |this, store, cx| {
-            if store.read(cx).is_panel_open() {
+        cx.subscribe(&TopicsStore::global(cx), |this, _, event, cx| match event {
+            TopicsEvent::Opened => {
                 ThreadsStore::global(cx).update(cx, |threads, cx| threads.cancel_create(cx));
                 this.reset_message_search(cx);
+                cx.notify();
             }
-            cx.notify();
+            TopicsEvent::Closed => cx.notify(),
+            TopicsEvent::Updated | TopicsEvent::ReplySent => {}
         })
         .detach();
         cx.observe(&ThreadsStore::global(cx), |_, store, cx| {

@@ -236,7 +236,9 @@ impl WgpuAtlasState {
             AtlasTextureKind::Subpixel
             | AtlasTextureKind::Polychrome
             | AtlasTextureKind::Image
-            | AtlasTextureKind::ImageSmall => self.color_texture_format,
+            | AtlasTextureKind::ImageSmall => {
+                self.color_texture_format
+            }
         };
 
         let texture = self.device.create_texture(&wgpu::TextureDescriptor {

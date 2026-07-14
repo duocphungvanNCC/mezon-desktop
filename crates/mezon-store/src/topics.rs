@@ -1,5 +1,5 @@
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use gpui::{App, AppContext, Context, Entity, EventEmitter, Global, Task};
 use mezon_client::{
@@ -11,11 +11,11 @@ use mezon_proto::{api, realtime};
 use crate::channel::{ChannelList, ChannelType};
 use crate::channel_permissions::ChannelPermissionsStore;
 use crate::message::MessageCode;
+use crate::message_time::{normalize_unix_seconds, unix_now_seconds};
 use crate::messages::{
     MessagesStore, OutgoingAttachment, OutgoingContent, OutgoingEmoji, OutgoingHashtag,
-    OutgoingMention, viewer_user_id,
+    OutgoingMention, ReplyDraft, viewer_user_id,
 };
-use crate::message_time::{normalize_unix_seconds, unix_now_seconds};
 use crate::presign;
 use crate::realtime::{RealtimeDispatch, RealtimeKind};
 use crate::{CACHE_TTL, ChannelId, Message, MessageId, UserId};
@@ -23,6 +23,7 @@ use crate::{CACHE_TTL, ChannelId, Message, MessageId, UserId};
 const TOPICS_LIMIT: i32 = 50;
 const STREAM_MODE_CHANNEL: i32 = 2;
 const STREAM_MODE_THREAD: i32 = 6;
+const UPDATED_NOTIFY_COALESCE: Duration = Duration::from_millis(100);
 
 #[derive(Debug, Clone)]
 pub enum TopicsEvent {
@@ -63,8 +64,10 @@ pub struct TopicsStore {
     fetched_at: Option<Instant>,
     panel_open: bool,
     init_topic_message_id: Option<MessageId>,
+    reply_target: Option<ReplyDraft>,
     compose: TopicCompose,
     api: Arc<AppApi>,
+    updated_notify_task: Option<Task<()>>,
     _conn_watch: Task<()>,
 }
 
@@ -93,10 +96,28 @@ impl TopicsStore {
             fetched_at: None,
             panel_open: false,
             init_topic_message_id: None,
+            reply_target: None,
             compose: TopicCompose::default(),
             api,
+            updated_notify_task: None,
             _conn_watch: conn_watch,
         }
+    }
+
+    fn schedule_updated_notify(&mut self, cx: &mut Context<Self>) {
+        if self.updated_notify_task.is_some() {
+            return;
+        }
+        self.updated_notify_task = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(UPDATED_NOTIFY_COALESCE)
+                .await;
+            let _ = this.update(cx, |store, cx| {
+                store.updated_notify_task = None;
+                cx.emit(TopicsEvent::Updated);
+                cx.notify();
+            });
+        }));
     }
 
     fn spawn_connection_watch(api: Arc<AppApi>, cx: &mut Context<Self>) -> Task<()> {
@@ -147,6 +168,7 @@ impl TopicsStore {
         self.fetch_generation = self.fetch_generation.wrapping_add(1);
         self.fetched_at = None;
         self.init_topic_message_id = None;
+        self.updated_notify_task = None;
         self.close_panel(cx);
         cx.emit(TopicsEvent::Updated);
         cx.notify();
@@ -170,6 +192,27 @@ impl TopicsStore {
         }
     }
 
+    pub fn reply_target(&self) -> Option<&ReplyDraft> {
+        self.reply_target.as_ref()
+    }
+
+    pub fn set_reply_to(&mut self, message_id: MessageId, cx: &mut Context<Self>) {
+        let Some(draft) = MessagesStore::global(cx)
+            .read(cx)
+            .reply_draft_for(message_id)
+        else {
+            return;
+        };
+        self.reply_target = Some(draft);
+        cx.notify();
+    }
+
+    pub fn clear_reply(&mut self, cx: &mut Context<Self>) {
+        if self.reply_target.take().is_some() {
+            cx.notify();
+        }
+    }
+
     pub fn active_topic_id(&self) -> Option<i64> {
         self.compose.active_topic_id
     }
@@ -186,70 +229,25 @@ impl TopicsStore {
         self.topic_meta.get(&topic_id.to_string())
     }
 
-    pub fn topic_last_reply_timestamp(
-        &self,
-        topic_id: ChannelId,
-        origin_message_id: MessageId,
-        cx: &App,
-    ) -> Option<i64> {
-        let cache_ts = MessagesStore::try_global(cx).and_then(|store| {
-            store
-                .read(cx)
-                .messages_in_channel(topic_id)
-                .iter()
-                .filter(|m| m.id != origin_message_id)
-                .map(|m| normalize_unix_seconds(m.create_time))
-                .max()
-        }).filter(|ts| *ts > 0);
-
-        let meta_ts = self
-            .topic_meta_for_topic(topic_id)
+    pub fn topic_last_reply_timestamp(&self, topic_id: ChannelId) -> Option<i64> {
+        self.topic_meta_for_topic(topic_id)
             .map(|meta| normalize_unix_seconds(meta.lsnt))
-            .filter(|ts| *ts > 0);
-
-        match (cache_ts, meta_ts) {
-            (Some(a), Some(b)) => Some(a.max(b)),
-            (Some(a), None) => Some(a),
-            (None, Some(b)) => Some(b),
-            (None, None) => None,
-        }
+            .filter(|ts| *ts > 0)
     }
 
-    pub fn topic_display_reply_count(
-        &self,
-        topic_id: ChannelId,
-        origin_message_id: MessageId,
-        cx: &App,
-    ) -> i32 {
-        if let Some(store) = MessagesStore::try_global(cx) {
-            let store = store.read(cx);
-            let cached = store
-                .messages_in_channel(topic_id)
-                .iter()
-                .filter(|m| m.id != origin_message_id)
-                .count() as i32;
-            if cached > 0 {
-                return cached;
-            }
-        }
+    pub fn topic_display_reply_count(&self, topic_id: ChannelId) -> i32 {
         self.topic_meta_for_topic(topic_id)
             .map(|meta| meta.rpl)
             .unwrap_or(0)
     }
 
-    fn upsert_topic_meta(
-        &mut self,
-        topic_id: String,
-        rpl: i32,
-        lsnt: i64,
-        cx: &mut Context<Self>,
-    ) {
+    fn upsert_topic_meta(&mut self, topic_id: String, rpl: i32, lsnt: i64, cx: &mut Context<Self>) {
         let lsnt = normalize_unix_seconds(lsnt);
         let merged = self
             .topic_meta
             .get(&topic_id)
             .map(|existing| TopicMessageMeta {
-                rpl: existing.rpl.max(rpl),
+                rpl,
                 lsnt: existing.lsnt.max(lsnt),
                 tp_id: topic_id.clone(),
             })
@@ -265,8 +263,7 @@ impl TopicsStore {
         {
             topic.last_message_timestamp = lsnt.clamp(0, i64::from(u32::MAX)) as u32;
         }
-        cx.emit(TopicsEvent::Updated);
-        cx.notify();
+        self.schedule_updated_notify(cx);
     }
 
     pub fn touch_topic_last_sent(
@@ -284,7 +281,7 @@ impl TopicsStore {
         }
         let key = topic_id.to_string();
         if let Some(meta) = self.topic_meta.get_mut(&key) {
-            meta.lsnt = timestamp_sec;
+            meta.lsnt = meta.lsnt.max(timestamp_sec);
         } else {
             self.topic_meta.insert(
                 key.clone(),
@@ -298,11 +295,44 @@ impl TopicsStore {
         if let Some(idx) = self.topic_index.get(&topic_id.to_string()).copied()
             && let Some(topic) = self.topics.get_mut(idx)
         {
-            topic.last_message_timestamp =
-                timestamp_sec.clamp(0, i64::from(u32::MAX)) as u32;
+            topic.last_message_timestamp = timestamp_sec.clamp(0, i64::from(u32::MAX)) as u32;
         }
-        cx.emit(TopicsEvent::Updated);
-        cx.notify();
+        self.schedule_updated_notify(cx);
+    }
+
+    pub fn increment_topic_reply_count(
+        &mut self,
+        topic_id: i64,
+        timestamp_sec: i64,
+        cx: &mut Context<Self>,
+    ) {
+        if topic_id == 0 {
+            return;
+        }
+        let timestamp_sec = normalize_unix_seconds(timestamp_sec);
+        let key = topic_id.to_string();
+        if let Some(meta) = self.topic_meta.get_mut(&key) {
+            meta.rpl = meta.rpl.saturating_add(1);
+            if timestamp_sec > 0 {
+                meta.lsnt = meta.lsnt.max(timestamp_sec);
+            }
+        } else {
+            self.topic_meta.insert(
+                key.clone(),
+                TopicMessageMeta {
+                    rpl: 1,
+                    lsnt: timestamp_sec,
+                    tp_id: key,
+                },
+            );
+        }
+        if timestamp_sec > 0
+            && let Some(idx) = self.topic_index.get(&topic_id.to_string()).copied()
+            && let Some(topic) = self.topics.get_mut(idx)
+        {
+            topic.last_message_timestamp = timestamp_sec.clamp(0, i64::from(u32::MAX)) as u32;
+        }
+        self.schedule_updated_notify(cx);
     }
 
     pub fn decrement_topic_reply_count(&mut self, topic_id: i64, cx: &mut Context<Self>) {
@@ -312,8 +342,7 @@ impl TopicsStore {
         let key = topic_id.to_string();
         if let Some(meta) = self.topic_meta.get_mut(&key) {
             meta.rpl = meta.rpl.saturating_sub(1).max(0);
-            cx.emit(TopicsEvent::Updated);
-            cx.notify();
+            self.schedule_updated_notify(cx);
         }
     }
 
@@ -377,9 +406,11 @@ impl TopicsStore {
         ) {
             return false;
         }
-        ChannelPermissionsStore::global(cx)
-            .read(cx)
-            .has_permission("send-message", clan_id, channel_id)
+        ChannelPermissionsStore::global(cx).read(cx).has_permission(
+            "send-message",
+            clan_id,
+            channel_id,
+        )
     }
 
     pub fn message_allows_topic_discussion(msg: &Message) -> bool {
@@ -422,17 +453,18 @@ impl TopicsStore {
         };
         let topic = topic_discussion_from_api(sd_topic_from_event(ev));
         self.upsert_topic(topic);
-        let meta = TopicMessageMeta {
-            rpl: 1,
-            lsnt: normalize_unix_seconds(
-                ev.last_sent_message
-                    .as_ref()
-                    .map(|h| i64::from(h.timestamp_seconds))
-                    .unwrap_or_else(unix_now_seconds),
-            ),
-            tp_id: ev.id.to_string(),
-        };
-        self.upsert_topic_meta(ev.id.to_string(), meta.rpl, meta.lsnt, cx);
+        let lsnt = normalize_unix_seconds(
+            ev.last_sent_message
+                .as_ref()
+                .map(|h| i64::from(h.timestamp_seconds))
+                .unwrap_or_else(unix_now_seconds),
+        );
+        let topic_key = ev.id.to_string();
+        if self.topic_meta.contains_key(&topic_key) {
+            self.touch_topic_last_sent(ev.id, lsnt, cx);
+        } else {
+            self.upsert_topic_meta(topic_key, 0, lsnt, cx);
+        }
         MessagesStore::global(cx).update(cx, |store, cx| {
             store.mark_message_as_topic(
                 ChannelId(ev.channel_id),
@@ -463,7 +495,17 @@ impl TopicsStore {
     fn upsert_topic(&mut self, topic: TopicDiscussion) {
         let topic_id = topic.id.clone();
         if let Some(idx) = self.topic_index.get(&topic_id).copied() {
-            self.topics[idx] = topic;
+            let existing = &mut self.topics[idx];
+            if !topic.content.is_empty() {
+                existing.content = topic.content;
+            }
+            existing.last_message_timestamp = topic.last_message_timestamp;
+            if !topic.last_sender_id.is_empty() && topic.last_sender_id != "0" {
+                existing.last_sender_id = topic.last_sender_id;
+            }
+            if !topic.message_id.is_empty() && topic.message_id != "0" {
+                existing.message_id = topic.message_id;
+            }
         } else {
             let idx = self.topics.len();
             self.topic_index.insert(topic_id, idx);
@@ -471,9 +513,20 @@ impl TopicsStore {
         }
     }
 
+    pub fn start_create_for_message(&mut self, message_id: MessageId, cx: &mut Context<Self>) {
+        let Some(origin) = MessagesStore::global(cx)
+            .read(cx)
+            .viewport_message_by_id(message_id)
+            .cloned()
+        else {
+            return;
+        };
+        self.start_create(origin, cx);
+    }
+
     /// Open the discussion panel for `origin` (mezon-react `handleCreateTopic`).
-    /// If the origin message is already a topic anchor (`code == Topic`), the
-    /// existing topic is opened; otherwise the topic is created on first reply.
+    /// Reuses `origin.topic_id` when already set (topic button or card footer);
+    /// otherwise the topic is created on first reply.
     pub fn start_create(&mut self, origin: Message, cx: &mut Context<Self>) {
         let messages = MessagesStore::global(cx);
         let (parent_channel_id, clan_id, mode, is_public) = {
@@ -489,10 +542,7 @@ impl TopicsStore {
             return;
         };
 
-        let existing_topic_id = (origin.code == MessageCode::Topic)
-            .then(|| origin.topic_id.map(|t| t.get()))
-            .flatten()
-            .filter(|id| *id != 0);
+        let existing_topic_id = origin.topic_id.map(|t| t.get()).filter(|id| *id != 0);
 
         self.init_topic_message_id = Some(origin.id);
         self.compose = TopicCompose {
@@ -555,6 +605,8 @@ impl TopicsStore {
         }
         self.panel_open = false;
         self.compose = TopicCompose::default();
+        self.init_topic_message_id = None;
+        self.reply_target = None;
         cx.emit(TopicsEvent::Closed);
         cx.notify();
     }
@@ -595,6 +647,19 @@ impl TopicsStore {
         let is_public = self.compose.is_public;
         let existing_topic_id = self.compose.active_topic_id;
         let has_attachments = !attachments.is_empty();
+        let reply_ref =
+            self.reply_target
+                .take()
+                .map(|draft| mezon_client::transport::OutgoingReply {
+                    message_ref_id: draft.message_ref_id.get(),
+                    content: draft.content_preview,
+                    has_attachment: draft.has_attachment,
+                    message_sender_id: draft.sender_id.get(),
+                    message_sender_username: draft.sender_name.clone(),
+                    message_sender_avatar: draft.sender_avatar,
+                    message_sender_clan_nick: String::new(),
+                    message_sender_display_name: draft.sender_name,
+                });
 
         let transport_mentions: Vec<mezon_client::transport::OutgoingMention> = content_tokens
             .mentions
@@ -690,6 +755,7 @@ impl TopicsStore {
                         transport_hashtags,
                         transport_emojis,
                         keys.clone(),
+                        reply_ref.clone(),
                     )
                     .await
                 {
@@ -736,6 +802,7 @@ impl TopicsStore {
                         transport_mentions,
                         transport_hashtags,
                         transport_emojis,
+                        reply_ref,
                     )
                     .await
                 {
@@ -763,7 +830,7 @@ impl TopicsStore {
                     let ts = normalize_unix_seconds(ack.create_time);
                     if ts > 0 { ts } else { unix_now_seconds() }
                 };
-                this.touch_topic_last_sent(topic_id, reply_timestamp, cx);
+                this.increment_topic_reply_count(topic_id, reply_timestamp, cx);
                 let messages = MessagesStore::global(cx);
                 messages.update(cx, |store, cx| {
                     store.set_active_topic(Some(topic_id), cx);
@@ -806,6 +873,19 @@ impl TopicsStore {
         let mode = self.compose.mode;
         let is_public = self.compose.is_public;
         let existing_topic_id = self.compose.active_topic_id;
+        let reply_ref =
+            self.reply_target
+                .take()
+                .map(|draft| mezon_client::transport::OutgoingReply {
+                    message_ref_id: draft.message_ref_id.get(),
+                    content: draft.content_preview,
+                    has_attachment: draft.has_attachment,
+                    message_sender_id: draft.sender_id.get(),
+                    message_sender_username: draft.sender_name.clone(),
+                    message_sender_avatar: draft.sender_avatar,
+                    message_sender_clan_nick: String::new(),
+                    message_sender_display_name: draft.sender_name,
+                });
 
         self.compose.submitting = true;
         self.compose.creating = existing_topic_id.is_none();
@@ -847,6 +927,7 @@ impl TopicsStore {
                     mode,
                     topic_id,
                     vec![attachment],
+                    reply_ref,
                 )
                 .await
             {
@@ -873,7 +954,7 @@ impl TopicsStore {
                     let ts = normalize_unix_seconds(ack.create_time);
                     if ts > 0 { ts } else { unix_now_seconds() }
                 };
-                this.touch_topic_last_sent(topic_id, reply_timestamp, cx);
+                this.increment_topic_reply_count(topic_id, reply_timestamp, cx);
                 let messages = MessagesStore::global(cx);
                 messages.update(cx, |store, cx| {
                     store.set_active_topic(Some(topic_id), cx);
@@ -992,6 +1073,24 @@ impl TopicsStore {
 }
 
 fn sd_topic_from_event(ev: &realtime::SdTopicEvent) -> api::SdTopic {
+    let content = ev
+        .message
+        .as_ref()
+        .map(|m| m.content.clone())
+        .filter(|c| !c.is_empty())
+        .or_else(|| {
+            ev.last_sent_message
+                .as_ref()
+                .map(|h| h.content.clone())
+                .filter(|c| !c.is_empty())
+        })
+        .unwrap_or_default();
+    let create_time_seconds = ev
+        .message
+        .as_ref()
+        .map(|m| m.create_time_seconds)
+        .filter(|t| *t != 0)
+        .unwrap_or(0);
     api::SdTopic {
         id: ev.id,
         creator_id: ev.user_id,
@@ -999,13 +1098,13 @@ fn sd_topic_from_event(ev: &realtime::SdTopicEvent) -> api::SdTopic {
         clan_id: ev.clan_id,
         channel_id: ev.channel_id,
         status: 0,
-        create_time_seconds: 0,
+        create_time_seconds,
         update_time_seconds: ev
             .last_sent_message
             .as_ref()
             .map(|h| h.timestamp_seconds as u32)
             .unwrap_or(0),
-        content: String::new(),
+        content,
         last_sent_message: ev.last_sent_message.clone(),
     }
 }

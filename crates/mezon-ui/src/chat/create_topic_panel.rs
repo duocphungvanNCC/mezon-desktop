@@ -5,8 +5,9 @@ use gpui::{
 use mezon_store::{ChannelId, MessagesStore, Settings, TopicsStore};
 
 use crate::app::window_controls::APP_HEADER_HEIGHT;
+use crate::chat::ReplyTarget;
 use crate::chat::channel_typing::ChannelTyping;
-use crate::chat::input_bar::InputBar;
+use crate::chat::input_bar::{InputBar, ReplyClearSource};
 use crate::chat::mention_input::{MentionInput, MentionInputEvent};
 use crate::chat::message::ChannelMessages;
 use crate::components::primitives::{Icon, IconName, h_flex, v_flex};
@@ -60,7 +61,9 @@ impl TopicPanel {
                 MentionInputEvent::SendSound { url, filename } => {
                     this.send_sound(url.clone(), filename.clone(), cx);
                 }
-                MentionInputEvent::Cancel => {}
+                MentionInputEvent::Cancel => {
+                    TopicsStore::global(cx).update(cx, |store, cx| store.clear_reply(cx));
+                }
             },
         ));
 
@@ -120,8 +123,14 @@ impl Render for TopicPanel {
         });
 
         let locale = self.settings.read(cx).language.clone();
+        let replying_to = TopicsStore::global(cx)
+            .read(cx)
+            .reply_target()
+            .map(|draft| ReplyTarget {
+                sender_name: SharedString::from(draft.sender_name.clone()),
+            });
         self.input_bar.update(cx, |bar, cx| {
-            bar.sync(&locale, None, cx);
+            bar.sync(&locale, replying_to, ReplyClearSource::Topics, cx);
         });
 
         let theme = cx.theme();

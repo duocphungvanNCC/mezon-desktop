@@ -39,18 +39,13 @@ pub fn render_topic_view_button(msg: &Message, ctx: &RowCtx) -> AnyElement {
         .topic_id
         .map(|topic_id| {
             TopicsStore::try_global(ctx.app).map_or(0, |store| {
-                store
-                    .read(ctx.app)
-                    .topic_display_reply_count(topic_id, msg.id, ctx.app)
+                store.read(ctx.app).topic_display_reply_count(topic_id)
             })
         })
         .unwrap_or(0);
     let last_reply_timestamp = msg.topic_id.and_then(|topic_id| {
-        TopicsStore::try_global(ctx.app).and_then(|store| {
-            store
-                .read(ctx.app)
-                .topic_last_reply_timestamp(topic_id, msg.id, ctx.app)
-        })
+        TopicsStore::try_global(ctx.app)
+            .and_then(|store| store.read(ctx.app).topic_last_reply_timestamp(topic_id))
     });
 
     let reply_label = (reply_count > 0).then(|| format_topic_reply_count(reply_count, ctx.locale));
@@ -96,7 +91,7 @@ pub fn render_topic_view_button(msg: &Message, ctx: &RowCtx) -> AnyElement {
         ))
         .child(meta);
 
-    let origin = msg.clone();
+    let message_id = msg.id;
     let button = div()
         .id(("topic-view-button", msg.id.0 as usize))
         .flex()
@@ -113,8 +108,8 @@ pub fn render_topic_view_button(msg: &Message, ctx: &RowCtx) -> AnyElement {
         .text_color(theme.tokens.text_theme_primary)
         .cursor_pointer()
         .on_click(move |_, _, cx| {
-            let origin = origin.clone();
-            TopicsStore::global(cx).update(cx, |store, cx| store.start_create(origin, cx));
+            TopicsStore::global(cx)
+                .update(cx, |store, cx| store.start_create_for_message(message_id, cx));
         })
         .child(left)
         .child(

@@ -98,6 +98,8 @@ pub struct RowMemo {
     /// failed resolution so the per-message fallback is used without a
     /// store lookup every frame.
     pub avatars: HashMap<UserId, Option<(SharedString, SharedString)>>,
+    /// (clan, sender) -> resolved display name for head/avatar rows.
+    pub display_names: HashMap<(Option<ClanId>, UserId), SharedString>,
     /// message -> formatted head time label ("14:03" / "Yesterday at 14:03").
     pub time_labels: HashMap<MessageId, SharedString>,
 }

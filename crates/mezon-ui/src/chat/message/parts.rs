@@ -29,24 +29,37 @@ const DELETED_REPLY_PREVIEW: &str = "Original message was deleted";
 const FILE_NAME_COLOR: u32 = 0x3b_82_f6;
 
 pub fn resolve_message_display_name(msg: &Message, ctx: &RowCtx, cx: &App) -> SharedString {
-    if let Some(ProfileContext::Clan(clan_id)) = ctx.profile_context {
-        let user_id = msg
-            .sender_user_id
-            .or_else(|| msg.sender_id.parse().ok().map(mezon_store::UserId));
-        if let Some(user_id) = user_id
-            && let Some(member) = ClanMembersStore::global(cx).read(cx).member(clan_id, user_id)
-        {
-            let name = member.name();
-            if !name.is_empty() {
-                return name.into();
-            }
+    let user_id = msg
+        .sender_user_id
+        .or_else(|| msg.sender_id.parse().ok().map(mezon_store::UserId));
+    let clan_id = match ctx.profile_context {
+        Some(ProfileContext::Clan(clan_id)) => Some(clan_id),
+        _ => None,
+    };
+    if let Some(user_id) = user_id {
+        let key = (clan_id, user_id);
+        if let Some(cached) = ctx.row_memo.borrow().display_names.get(&key) {
+            return cached.clone();
         }
+        let resolved = if let Some(clan_id) = clan_id {
+            ClanMembersStore::global(cx)
+                .read(cx)
+                .member(clan_id, user_id)
+                .map(|member| member.name())
+                .filter(|name| !name.is_empty())
+                .map(SharedString::from)
+                .unwrap_or_else(|| msg.sender_name.clone())
+        } else {
+            msg.sender_name.clone()
+        };
+        let mut memo = ctx.row_memo.borrow_mut();
+        if memo.display_names.len() >= 4096 {
+            memo.display_names.clear();
+        }
+        memo.display_names.insert(key, resolved.clone());
+        return resolved;
     }
-    if msg.sender_name.is_empty() {
-        SharedString::default()
-    } else {
-        msg.sender_name.clone().into()
-    }
+    msg.sender_name.clone()
 }
 
 pub fn avatar_element(msg: &Message, ctx: &RowCtx, cx: &App) -> AnyElement {
@@ -122,14 +135,16 @@ pub fn render_head(msg: &Message, ctx: &RowCtx, name_color: u32) -> AnyElement {
     let time_label = {
         let mut memo = ctx.row_memo.borrow_mut();
         match memo.time_labels.get(&msg.id) {
-            Some(label) => label.clone(),
-            None => {
+            Some(label) if !label.is_empty() || msg.time_hhmm.is_empty() => label.clone(),
+            _ => {
                 let label =
                     format_message_time(&msg.time_hhmm, msg.local_date, ctx.locale, ctx.now);
-                if memo.time_labels.len() >= 4096 {
-                    memo.time_labels.clear();
+                if !label.is_empty() {
+                    if memo.time_labels.len() >= 4096 {
+                        memo.time_labels.clear();
+                    }
+                    memo.time_labels.insert(msg.id, label.clone());
                 }
-                memo.time_labels.insert(msg.id, label.clone());
                 label
             }
         }
@@ -1386,11 +1401,12 @@ pub fn render_hover_actions(
         .bg(theme.tokens.bg_theme_contexify)
         .children(recent_emoji)
         .when(show_topic, |d| {
-            let origin = msg.clone();
+            let message_id = msg.id;
             d.child(
                 action("topic", IconName::TopicIcon, 24.).on_click(move |_, _, cx| {
-                    let origin = origin.clone();
-                    TopicsStore::global(cx).update(cx, |store, cx| store.start_create(origin, cx));
+                    TopicsStore::global(cx).update(cx, |store, cx| {
+                        store.start_create_for_message(message_id, cx);
+                    });
                 }),
             )
         })
@@ -1403,10 +1419,16 @@ pub fn render_hover_actions(
             }),
         )
         .when(!is_own_message, |d| {
+            let is_topic = ctx.is_topic_box;
             d.child(
                 action("reply", IconName::Reply, 20.).on_click(move |_, _, cx| {
-                    MessagesStore::global(cx)
-                        .update(cx, |store, cx| store.set_reply_to(reply_id, cx));
+                    if is_topic {
+                        TopicsStore::global(cx)
+                            .update(cx, |store, cx| store.set_reply_to(reply_id, cx));
+                    } else {
+                        MessagesStore::global(cx)
+                            .update(cx, |store, cx| store.set_reply_to(reply_id, cx));
+                    }
                 }),
             )
         })

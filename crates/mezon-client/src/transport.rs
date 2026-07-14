@@ -2984,7 +2984,23 @@ impl MezonTransport {
         mentions: Vec<OutgoingMention>,
         hashtags: Vec<OutgoingHashtag>,
         emojis: Vec<OutgoingEmoji>,
+        reply: Option<OutgoingReply>,
     ) -> Result<ApiMessage> {
+        let references = reply
+            .map(|reply| api::MessageRef {
+                message_ref_id: reply.message_ref_id,
+                content: reply.content,
+                has_attachment: reply.has_attachment,
+                ref_type: 0,
+                message_sender_id: reply.message_sender_id,
+                message_sender_username: reply.message_sender_username,
+                message_sender_avatar: reply.message_sender_avatar,
+                message_sender_clan_nick: reply.message_sender_clan_nick,
+                message_sender_display_name: reply.message_sender_display_name,
+                ..Default::default()
+            })
+            .into_iter()
+            .collect();
         self.send_channel_message_inner(
             clan_id,
             channel_id,
@@ -2992,7 +3008,7 @@ impl MezonTransport {
             is_public,
             mode,
             Vec::new(),
-            Vec::new(),
+            references,
             mentions,
             hashtags,
             emojis,
@@ -3016,7 +3032,23 @@ impl MezonTransport {
         hashtags: Vec<OutgoingHashtag>,
         emojis: Vec<OutgoingEmoji>,
         presign_finish: Option<Vec<String>>,
+        reply: Option<OutgoingReply>,
     ) -> Result<ApiMessage> {
+        let references = reply
+            .map(|reply| api::MessageRef {
+                message_ref_id: reply.message_ref_id,
+                content: reply.content,
+                has_attachment: reply.has_attachment,
+                ref_type: 0,
+                message_sender_id: reply.message_sender_id,
+                message_sender_username: reply.message_sender_username,
+                message_sender_avatar: reply.message_sender_avatar,
+                message_sender_clan_nick: reply.message_sender_clan_nick,
+                message_sender_display_name: reply.message_sender_display_name,
+                ..Default::default()
+            })
+            .into_iter()
+            .collect();
         self.send_channel_message_inner(
             clan_id,
             channel_id,
@@ -3024,7 +3056,7 @@ impl MezonTransport {
             is_public,
             mode,
             attachments,
-            Vec::new(),
+            references,
             mentions,
             hashtags,
             emojis,

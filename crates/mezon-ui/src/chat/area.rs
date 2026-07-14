@@ -11,7 +11,7 @@ use crate::chat::ReplyTarget;
 use crate::chat::channel_header::ChatHeader;
 use crate::chat::channel_typing::ChannelTyping;
 use crate::chat::inbox::InboxPopoverPanel;
-use crate::chat::input_bar::InputBar;
+use crate::chat::input_bar::{InputBar, ReplyClearSource};
 use crate::chat::member_list::{MemberListPanel, MemberSource};
 use crate::chat::mention_input::{MentionInput, MentionInputEvent};
 use crate::chat::message::ChannelMessages;
@@ -218,7 +218,7 @@ impl ChatArea {
             .update(cx, |typing, cx| typing.sync(channel_id, cx));
 
         input_bar.update(cx, |input_bar, cx| {
-            input_bar.sync(locale, self.replying_to.clone(), cx)
+            input_bar.sync(locale, self.replying_to.clone(), ReplyClearSource::Messages, cx)
         });
 
         let header = AnyView::from(self.header.clone()).cached(

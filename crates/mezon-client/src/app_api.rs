@@ -616,10 +616,20 @@ impl AppApi {
         mentions: Vec<crate::transport::OutgoingMention>,
         hashtags: Vec<crate::transport::OutgoingHashtag>,
         emojis: Vec<crate::transport::OutgoingEmoji>,
+        reply: Option<crate::transport::OutgoingReply>,
     ) -> Result<ApiMessage> {
         self.transport
             .send_topic_message(
-                clan_id, channel_id, content, is_public, mode, topic_id, mentions, hashtags, emojis,
+                clan_id,
+                channel_id,
+                content,
+                is_public,
+                mode,
+                topic_id,
+                mentions,
+                hashtags,
+                emojis,
+                reply,
             )
             .await
     }
@@ -632,6 +642,7 @@ impl AppApi {
         mode: i32,
         topic_id: i64,
         attachments: Vec<UrlAttachment>,
+        reply: Option<crate::transport::OutgoingReply>,
     ) -> Result<ApiMessage> {
         let proto: Vec<mezon_proto::api::MessageAttachment> = attachments
             .iter()
@@ -673,6 +684,7 @@ impl AppApi {
                 Vec::new(),
                 Vec::new(),
                 None,
+                reply,
             )
             .await?;
         sent.attachments = echo;
@@ -1161,6 +1173,7 @@ impl AppApi {
         hashtags: Vec<crate::transport::OutgoingHashtag>,
         emojis: Vec<crate::transport::OutgoingEmoji>,
         presign_finish: Vec<String>,
+        reply: Option<crate::transport::OutgoingReply>,
     ) -> Result<ApiMessage> {
         let echo: Vec<crate::transport::ApiAttachment> = attachments
             .iter()
@@ -1189,6 +1202,7 @@ impl AppApi {
                 hashtags,
                 emojis,
                 Some(presign_finish),
+                reply,
             )
             .await?;
         sent.attachments = echo;

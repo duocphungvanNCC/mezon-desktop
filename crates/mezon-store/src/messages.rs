@@ -24,7 +24,6 @@ use crate::account::AccountStore;
 use crate::album_layout::{AlbumLayout, calculate_album_layout};
 use crate::badge::BadgeService;
 use crate::channel::{ChannelEvent, ChannelList, ChannelType};
-use crate::channel_permissions::ChannelPermissionsStore;
 use crate::clan_members::ClanMembersStore;
 use crate::direct::DirectMessageStore;
 use crate::message::{
@@ -35,6 +34,9 @@ use crate::message::{
     aggregate_reactions, apply_reaction_event, message_combined_with_prev, message_sort_key,
     parse_spans, reaction_key, recompute_message_grouping, rollback_reaction, sort_messages,
     spans_only_emoji, viewer_highlight_direct,
+};
+use crate::message_time::{
+    format_local_time_hhmm, local_datetime, local_day_key, unix_now_seconds,
 };
 use crate::presign;
 use crate::realtime::{RealtimeDispatch, RealtimeKind};
@@ -1529,12 +1531,16 @@ impl MessagesStore {
     }
 
     pub fn set_reply_to(&mut self, message_id: MessageId, cx: &mut Context<Self>) {
-        let Some(channel_id) = self.active_channel_id else {
+        let Some(draft) = self.reply_draft_for(message_id) else {
             return;
         };
-        let Some(draft) = self
-            .cache
-            .get(&channel_id)
+        self.set_reply(draft, cx);
+    }
+
+    pub fn reply_draft_for(&self, message_id: MessageId) -> Option<ReplyDraft> {
+        let storage_id = self.reaction_storage_channel(message_id);
+        self.cache
+            .get(&storage_id)
             .and_then(|c| c.messages.get_by_id(message_id))
             .map(|msg| ReplyDraft {
                 message_ref_id: msg.id,
@@ -1546,10 +1552,6 @@ impl MessagesStore {
                 has_embed: msg.content.is_empty() && !msg.embeds.is_empty(),
                 is_poll: msg.poll.is_some(),
             })
-        else {
-            return;
-        };
-        self.set_reply(draft, cx);
     }
 
     /// Clear the composer reply target.
@@ -1608,9 +1610,9 @@ impl MessagesStore {
         msg.is_edited = true;
         patch_reply_previews_after_update(&mut channel.messages, message_id, &content);
         self.editing = None;
-        if let Some(topic_id) = self.active_topic_id {
+        if self.active_topic_id == Some(storage_id) {
             cx.emit(MessagesEvent::TopicUpdated {
-                topic_id: topic_id.get(),
+                topic_id: storage_id.get(),
             });
         } else {
             cx.emit(MessagesEvent::Updated {
@@ -1623,8 +1625,8 @@ impl MessagesStore {
         let clan_id = self.active_clan_id.map_or(0, |c| c.get());
         let message_num = message_id.get();
         let (api_channel_id, api_topic_id, is_update_msg_topic) =
-            if let Some(topic_id) = self.active_topic_id {
-                (topic_id.get(), topic_id.get(), true)
+            if self.active_topic_id == Some(storage_id) {
+                (storage_id.get(), storage_id.get(), true)
             } else {
                 (storage_id.get(), 0, false)
             };
@@ -1673,8 +1675,8 @@ impl MessagesStore {
         let mode = self.mode;
         let is_public = self.is_public;
         let message_num = message_id.get();
-        let (api_channel_id, api_topic_id) = if let Some(topic_id) = self.active_topic_id {
-            (parent_channel_id.get(), topic_id.get())
+        let (api_channel_id, api_topic_id) = if self.active_topic_id == Some(storage_id) {
+            (parent_channel_id.get(), storage_id.get())
         } else {
             (storage_id.get(), 0)
         };
@@ -1804,11 +1806,17 @@ impl MessagesStore {
     }
 
     /// Mark the topic bucket the discussion panel is watching so realtime replies
-    /// to it (a non-active channel) still notify the panel.
+    /// to it (a non-active channel) still notify the panel. Closing (`None`) drops
+    /// the previous topic bucket so it does not permanently occupy channel-cache slots.
     pub fn set_active_topic(&mut self, topic_id: Option<i64>, cx: &mut Context<Self>) {
         let next = topic_id.map(ChannelId);
         if self.active_topic_id == next {
             return;
+        }
+        if let Some(prev) = self.active_topic_id
+            && next != Some(prev)
+        {
+            self.cache.remove(&prev);
         }
         self.active_topic_id = next;
         cx.notify();
@@ -1859,7 +1867,8 @@ impl MessagesStore {
         let topic_key = ChannelId(topic_id);
         let cfg = AppConfig::try_global(cx);
         let viewer_id = viewer_user_id(cx);
-        let msg = message_from_api(api_msg, cfg, viewer_id);
+        let mut msg = message_from_api(api_msg, cfg, viewer_id);
+        enrich_sparse_topic_ack(&mut msg, topic_id, viewer_id, self.active_clan_id, cx);
         if self.cache.contains(&topic_key) {
             if let Some(channel) = self.cache.get_mut(&topic_key) {
                 if channel.messages.contains_id(msg.id) {
@@ -2648,11 +2657,6 @@ impl MessagesStore {
         self.is_public = is_public;
         self.is_dm = is_dm;
         self.mode = mode;
-        if !is_dm && !clan_id.is_zero() {
-            ChannelPermissionsStore::global(cx).update(cx, |store, cx| {
-                store.ensure_loaded(clan_id, channel_id, cx);
-            });
-        }
         self.viewing_older_by_channel.insert(channel_id, false);
         self.loading_more = false;
         self.reply_target = None;
@@ -2822,7 +2826,8 @@ impl MessagesStore {
                     return;
                 }
                 let incoming = message_from_channel_proto(m, message_id.get(), cfg, viewer_id);
-                self.apply_incoming_message(storage_id, incoming, cx);
+                let topic_hint = (m.topic_id != 0).then_some(m.topic_id);
+                self.apply_incoming_message(storage_id, incoming, topic_hint, cx);
             }
         }
     }
@@ -2831,6 +2836,7 @@ impl MessagesStore {
         &mut self,
         storage_id: ChannelId,
         msg: Message,
+        topic_id_hint: Option<i64>,
         cx: &mut Context<Self>,
     ) {
         let is_active = self.active_channel_id == Some(storage_id);
@@ -2849,6 +2855,11 @@ impl MessagesStore {
             return;
         }
         let tail_id = msg.id;
+        let topic_reply = msg
+            .topic_id
+            .map(|id| id.get())
+            .or(topic_id_hint)
+            .map(|topic_id| (topic_id, msg.create_time));
         let old_len = channel.messages.len();
         let appended = match channel
             .messages
@@ -2882,6 +2893,13 @@ impl MessagesStore {
             });
             cx.notify();
         }
+        if appended
+            && let Some((topic_id, create_time)) = topic_reply
+        {
+            TopicsStore::global(cx).update(cx, |store, cx| {
+                store.increment_topic_reply_count(topic_id, create_time, cx);
+            });
+        }
     }
 
     fn apply_message_update(
@@ -2913,9 +2931,9 @@ impl MessagesStore {
             );
         }
         patch_reply_previews_after_update(&mut channel.messages, message_id, &preview);
-        if let Some(topic_id) = self.active_topic_id {
+        if self.active_topic_id == Some(storage_id) {
             cx.emit(MessagesEvent::TopicUpdated {
-                topic_id: topic_id.get(),
+                topic_id: storage_id.get(),
             });
             cx.notify();
         } else if is_active {
@@ -2955,9 +2973,9 @@ impl MessagesStore {
         patch_reply_previews_after_delete(&mut channel.messages, message_id);
         if let Some(index) = channel.messages.remove_id(message_id) {
             self.on_message_deleted(message_id, deleted_topic_id, cx);
-            if let Some(topic_id) = self.active_topic_id {
+            if self.active_topic_id == Some(storage_id) {
                 cx.emit(MessagesEvent::TopicUpdated {
-                    topic_id: topic_id.get(),
+                    topic_id: storage_id.get(),
                 });
             } else if is_active {
                 cx.emit(MessagesEvent::RemovedAt { index, message_id });
@@ -3091,11 +3109,11 @@ impl MessagesStore {
         let message_sender_id = current_uid.get();
         let emoji_id_num = emoji_id.parse::<i64>().unwrap_or(0);
         let api_channel = parent_channel_id.get();
-        let api_topic_id = self
-            .active_topic_id
-            .is_some()
-            .then_some(storage_id.get())
-            .unwrap_or(0);
+        let api_topic_id = if self.active_topic_id == Some(storage_id) {
+            storage_id.get()
+        } else {
+            0
+        };
         let message = message_id.get();
         let storage_for_rollback = storage_id;
         cx.spawn(async move |this, cx| {
@@ -3848,6 +3866,56 @@ fn trim_messages_back(messages: &mut Vec<Message>) -> usize {
     let drop = messages.len() - MAX_MESSAGES_PER_CHANNEL;
     messages.truncate(MAX_MESSAGES_PER_CHANNEL);
     drop
+}
+
+fn enrich_sparse_topic_ack(
+    msg: &mut Message,
+    topic_id: i64,
+    viewer_id: Option<UserId>,
+    clan_id: Option<ClanId>,
+    cx: &App,
+) {
+    if msg.topic_id.is_none() {
+        msg.topic_id = Some(ChannelId(topic_id));
+    }
+    let sparse_sender = msg.sender_id.is_empty() || msg.sender_id.as_str() == "0";
+    let sparse_name = msg.sender_name.is_empty();
+    let sparse_avatar = msg.avatar_url.is_empty();
+    let sparse_time = msg.create_time <= 0;
+    if !sparse_sender && !sparse_name && !sparse_avatar && !sparse_time {
+        return;
+    }
+    let sender_id = if sparse_sender {
+        viewer_id
+            .map(|id| id.to_string())
+            .unwrap_or_else(|| msg.sender_id.to_string())
+    } else {
+        msg.sender_id.to_string()
+    };
+    let (display_name, avatar_url, avatar_proxied) = outgoing_sender_profile(
+        &sender_id,
+        msg.sender_name.as_ref(),
+        clan_id.unwrap_or_default(),
+        cx,
+    );
+    if sparse_sender {
+        msg.sender_id = sender_id.into();
+        msg.sender_user_id = viewer_id.or_else(|| msg.sender_id.parse().ok().map(UserId));
+    }
+    if sparse_name && !display_name.is_empty() {
+        msg.sender_name = display_name.into();
+    }
+    if sparse_avatar && !avatar_url.is_empty() {
+        msg.avatar_url = avatar_url.into();
+        msg.avatar_proxied = avatar_proxied;
+    }
+    if sparse_time {
+        let create_time = unix_now_seconds();
+        msg.create_time = create_time;
+        msg.day_label = local_day_key(create_time);
+        msg.time_hhmm = format_local_time_hhmm(create_time).into();
+        msg.local_date = local_datetime(create_time).map(|dt| dt.date_naive());
+    }
 }
 
 /// Display name + avatar for an outgoing optimistic row (React `fakeItUntilYouMakeIt`).

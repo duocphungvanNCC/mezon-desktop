@@ -1,5 +1,6 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
@@ -12,10 +13,10 @@ use gpui::{
 use ui::{ScrollAxes, Scrollbars, WithScrollbar};
 
 use mezon_store::{
-    BadgeService, ChannelId, ChannelList, ChannelPermissionsStore, ClanId, ClanList,
-    ClanMembersStore, DirectMessageStore, Emoji, EmojiStore, GroupMembersStore, MessageCode,
-    MessageId, MessagesEvent, MessagesStore, ProfileContext, Settings, TopicsStore, UserId,
-    UsersByUserStore, message::Message,
+    BadgeService, ChannelId, ChannelList, ChannelPermissionsEvent, ChannelPermissionsStore, ClanId,
+    ClanList, ClanMembersStore, DirectMessageStore, Emoji, EmojiStore, GroupMembersStore,
+    MessageCode, MessageId, MessagesEvent, MessagesStore, PERMISSION_DELETE_MESSAGE,
+    ProfileContext, Settings, TopicsEvent, TopicsStore, UserId, UsersByUserStore, message::Message,
 };
 
 use super::audio_player::{AudioActivation, AudioPlayerView};
@@ -570,6 +571,7 @@ pub struct ChannelMessages {
     context_menu_forward_all: bool,
     emoji_recent: Rc<Vec<Emoji>>,
     _emoji_observe: Subscription,
+    channel_permissions_fp: Option<(bool, bool)>,
     _channel_permissions_observe: Subscription,
     gif_reconcile_fingerprint: Option<(Option<ChannelId>, usize, usize)>,
     last_gif_reconcile: Option<Instant>,
@@ -580,6 +582,9 @@ pub struct ChannelMessages {
     topic_align_timeline: Option<gpui::WeakEntity<ChannelMessages>>,
     topic_list_layout: Option<(usize, bool)>,
     topic_spacer_h: Option<Pixels>,
+    topic_messages: Rc<Vec<Message>>,
+    topics_viewport_fp: Option<u64>,
+    _topics_event_sub: Option<Subscription>,
 }
 
 impl ChannelMessages {
@@ -602,7 +607,9 @@ impl ChannelMessages {
         let clan_members = ClanMembersStore::global(cx);
         let clan_members_observe = cx.observe(&clan_members, |this, _, cx| {
             if !MessagesStore::global(cx).read(cx).is_dm() {
-                this.row_memo.borrow_mut().avatars.clear();
+                let mut memo = this.row_memo.borrow_mut();
+                memo.avatars.clear();
+                memo.display_names.clear();
             }
             this.store_identity(Self::compute_identity(cx));
             if this.refresh_derived_state(cx) {
@@ -615,7 +622,11 @@ impl ChannelMessages {
             if !MessagesStore::global(cx).read(cx).is_dm() {
                 return;
             }
-            this.row_memo.borrow_mut().avatars.clear();
+            {
+                let mut memo = this.row_memo.borrow_mut();
+                memo.avatars.clear();
+                memo.display_names.clear();
+            }
             if this.refresh_derived_state(cx) {
                 cx.notify();
             }
@@ -626,7 +637,9 @@ impl ChannelMessages {
             if MessagesStore::global(cx).read(cx).is_dm()
                 && !this.row_memo.borrow().avatars.is_empty()
             {
-                this.row_memo.borrow_mut().avatars.clear();
+                let mut memo = this.row_memo.borrow_mut();
+                memo.avatars.clear();
+                memo.display_names.clear();
                 cx.notify();
             }
         });
@@ -636,25 +649,53 @@ impl ChannelMessages {
             if MessagesStore::global(cx).read(cx).is_dm()
                 && !this.row_memo.borrow().avatars.is_empty()
             {
-                this.row_memo.borrow_mut().avatars.clear();
+                let mut memo = this.row_memo.borrow_mut();
+                memo.avatars.clear();
+                memo.display_names.clear();
                 cx.notify();
             }
         });
 
-        cx.observe(&TopicsStore::global(cx), |this, _, cx| {
-            if !this.is_topic_box {
-                cx.notify();
+        let topics_event_sub = cx.subscribe(&TopicsStore::global(cx), |this, store, event, cx| {
+            if this.is_topic_box || !matches!(event, TopicsEvent::Updated) {
+                return;
             }
-        })
-        .detach();
+            let topics = store.read(cx);
+            let messages = MessagesStore::global(cx).read(cx);
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            let mut any_topic = false;
+            for msg in messages.viewport_messages() {
+                let Some(topic_id) = msg.topic_id else {
+                    continue;
+                };
+                any_topic = true;
+                topic_id.hash(&mut hasher);
+                if let Some(meta) = topics.topic_meta_for_topic(topic_id) {
+                    meta.rpl.hash(&mut hasher);
+                    meta.lsnt.hash(&mut hasher);
+                }
+            }
+            if !any_topic {
+                return;
+            }
+            let fp = hasher.finish();
+            if this.topics_viewport_fp == Some(fp) {
+                return;
+            }
+            this.topics_viewport_fp = Some(fp);
+            cx.notify();
+        });
 
         let store = MessagesStore::global(cx);
         cx.subscribe(&store, |this, _store, event, cx| {
             if this.is_topic_box {
                 match event {
-                    MessagesEvent::TopicUpdated { .. }
-                    | MessagesEvent::Updated { .. }
-                    | MessagesEvent::ReplyTargetChanged => cx.notify(),
+                    MessagesEvent::TopicUpdated { .. } | MessagesEvent::Updated { .. } => {
+                        this.refresh_topic_messages(cx);
+                        this.row_memo.borrow_mut().time_labels.clear();
+                        cx.notify();
+                    }
+                    MessagesEvent::ReplyTargetChanged => cx.notify(),
                     _ => {}
                 }
                 return;
@@ -908,6 +949,20 @@ impl ChannelMessages {
                     }
                 }
 
+                this.mark_scroll_activity(cx);
+                if !this.suppress_hover && this.context_menu_target.is_none() {
+                    this.suppress_hover = true;
+                    this.hovered_row = None;
+                    this.raw_hover = None;
+                    this._hover_show_task = None;
+                    this._hover_hide_task = None;
+                    cx.notify();
+                }
+
+                if this.is_topic_box {
+                    return;
+                }
+
                 let store_entity = MessagesStore::global(cx);
                 if at_bottom_changed {
                     if let Some(channel_id) = store_entity.read(cx).active_channel_id() {
@@ -920,17 +975,8 @@ impl ChannelMessages {
                     }
                 }
 
-                this.mark_scroll_activity(cx);
                 if visible_range_changed {
                     this.schedule_pagination_check(window, cx);
-                }
-                if !this.suppress_hover && this.context_menu_target.is_none() {
-                    this.suppress_hover = true;
-                    this.hovered_row = None;
-                    this.raw_hover = None;
-                    this._hover_show_task = None;
-                    this._hover_hide_task = None;
-                    cx.notify();
                 }
             });
         });
@@ -983,8 +1029,31 @@ impl ChannelMessages {
                 cx.notify();
             }
         });
-        let channel_permissions_observe =
-            cx.observe(&ChannelPermissionsStore::global(cx), |_, _, cx| cx.notify());
+        let channel_permissions_observe = cx.subscribe(
+            &ChannelPermissionsStore::global(cx),
+            |this, store, event, cx| {
+                let ChannelPermissionsEvent::Changed {
+                    clan_id,
+                    channel_id,
+                } = event;
+                let messages = MessagesStore::global(cx).read(cx);
+                if messages.active_channel_id() != Some(*channel_id)
+                    || messages.active_clan_id() != Some(*clan_id)
+                {
+                    return;
+                }
+                let store = store.read(cx);
+                let fp = (
+                    store.has_permission("send-message", *clan_id, *channel_id),
+                    store.has_permission(PERMISSION_DELETE_MESSAGE, *clan_id, *channel_id),
+                );
+                if this.channel_permissions_fp == Some(fp) {
+                    return;
+                }
+                this.channel_permissions_fp = Some(fp);
+                cx.notify();
+            },
+        );
         Self {
             list_state,
             focus_handle: cx.focus_handle(),
@@ -1055,6 +1124,7 @@ impl ChannelMessages {
             context_menu_forward_all: false,
             emoji_recent,
             _emoji_observe: emoji_observe,
+            channel_permissions_fp: None,
             _channel_permissions_observe: channel_permissions_observe,
             gif_reconcile_fingerprint: None,
             last_gif_reconcile: None,
@@ -1065,6 +1135,9 @@ impl ChannelMessages {
             topic_align_timeline: None,
             topic_list_layout: None,
             topic_spacer_h: None,
+            topic_messages: Rc::new(Vec::new()),
+            topics_viewport_fp: None,
+            _topics_event_sub: Some(topics_event_sub),
         }
     }
 
@@ -1078,7 +1151,12 @@ impl ChannelMessages {
         this.topic_align_timeline = Some(align_timeline.downgrade());
         this.topic_list_layout = None;
         this.topic_spacer_h = None;
-        cx.observe(&TopicsStore::global(cx), |_, _, cx| cx.notify()).detach();
+        cx.observe(&TopicsStore::global(cx), |this, _, cx| {
+            this.refresh_topic_messages(cx);
+            cx.notify();
+        })
+        .detach();
+        this.refresh_topic_messages(cx);
         this
     }
 
@@ -1110,24 +1188,26 @@ impl ChannelMessages {
                 .or_else(|| topics.origin_message().cloned())
         });
 
-        let mut replies = Vec::new();
-        if let Some(topic_id) = topics.active_topic_id() {
-            for msg in store.messages_in_channel(ChannelId(topic_id)) {
-                if origin_id != Some(msg.id) {
-                    replies.push(msg.clone());
-                }
-            }
-        }
-        mezon_store::sort_messages(&mut replies);
-        mezon_store::recompute_message_grouping(&mut replies);
-
         let mut messages = Vec::new();
         if let Some(mut origin) = origin {
             origin.combined_with_prev = false;
             messages.push(origin);
         }
-        messages.extend(replies);
+        if let Some(topic_id) = topics.active_topic_id() {
+            for msg in store.messages_in_channel(ChannelId(topic_id)) {
+                if origin_id != Some(msg.id) {
+                    messages.push(msg.clone());
+                }
+            }
+        }
         messages
+    }
+
+    fn refresh_topic_messages(&mut self, cx: &App) {
+        if !self.is_topic_box {
+            return;
+        }
+        self.topic_messages = Rc::new(Self::collect_topic_messages(cx));
     }
 
     pub(crate) fn resolve_topic_forward_group(
@@ -1141,9 +1221,10 @@ impl ChannelMessages {
 
     fn find_local_message(&self, message_id: MessageId, cx: &App) -> Option<Message> {
         if self.is_topic_box {
-            Self::collect_topic_messages(cx)
-                .into_iter()
+            self.topic_messages
+                .iter()
                 .find(|m| m.id == message_id)
+                .cloned()
         } else {
             MessagesStore::global(cx)
                 .read(cx)
@@ -1288,26 +1369,31 @@ impl ChannelMessages {
         position: Point<Pixels>,
         cx: &mut Context<Self>,
     ) {
+        if self.is_topic_box {
+            self.refresh_topic_messages(cx);
+        }
         let sender_and_poll = self
             .find_local_message(message_id, cx)
             .map(|m| (m.sender_id.clone(), m.code == MessageCode::Poll));
-        let forward_messages = if self.is_topic_box {
-            Self::collect_topic_messages(cx)
-        } else {
-            MessagesStore::global(cx)
-                .read(cx)
-                .messages()
-                .to_vec()
-        };
         self.context_menu_forward_all = match sender_and_poll {
             Some((sender_id, false)) => {
-                message_context_menu::resolve_forward_group_in(
-                    &forward_messages,
-                    message_id,
-                    sender_id.as_str(),
-                )
-                .len()
-                    > 1
+                if self.is_topic_box {
+                    message_context_menu::resolve_forward_group_in(
+                        &self.topic_messages,
+                        message_id,
+                        sender_id.as_str(),
+                    )
+                    .len()
+                        > 1
+                } else {
+                    message_context_menu::resolve_forward_group(
+                        message_id,
+                        sender_id.as_str(),
+                        cx,
+                    )
+                    .len()
+                        > 1
+                }
             }
             _ => false,
         };
@@ -1336,6 +1422,7 @@ impl ChannelMessages {
         cx: &mut Context<Self>,
     ) {
         if entered {
+            TopicsStore::ensure_create_permissions(cx);
             self.raw_hover = Some(message_id);
         } else if self.raw_hover == Some(message_id) {
             self.raw_hover = None;
@@ -1769,8 +1856,10 @@ impl ChannelMessages {
         {
             let mut memo = self.row_memo.borrow_mut();
             memo.avatars.clear();
+            memo.display_names.clear();
             memo.time_labels.clear();
         }
+        self.channel_permissions_fp = None;
         self.image_cache
             .update(cx, |cache, cx| cache.clear(window, cx));
         crate::image_cache::release_freed_memory_to_os(cx);
@@ -2298,7 +2387,6 @@ impl ChannelMessages {
             Some((id, input)) => (Some(*id), Some(input.clone())),
             None => (None, None),
         };
-        let messages = Self::collect_topic_messages(cx);
         let origin_id = TopicsStore::global(cx)
             .read(cx)
             .origin_message()
@@ -2312,7 +2400,7 @@ impl ChannelMessages {
         });
         let use_align_spacer = channel_origin_top.is_some_and(|y| y > px(0.));
         let align_spacer_h = channel_origin_top.unwrap_or(px(0.));
-        let list_count = messages.len() + usize::from(use_align_spacer);
+        let list_count = self.topic_messages.len() + usize::from(use_align_spacer);
         let layout_key = (list_count, use_align_spacer);
         if self.topic_list_layout != Some(layout_key) {
             self.topic_list_layout = Some(layout_key);
@@ -2363,6 +2451,7 @@ impl ChannelMessages {
         let video_host = cx.entity().downgrade();
         let current_user_id = self.cached_current_user_id.clone();
         let role_ids = self.cached_role_ids.clone();
+        let entity = cx.entity();
 
         div()
             .size_full()
@@ -2414,7 +2503,7 @@ impl ChannelMessages {
                         coming_soon: coming_soon.clone(),
                         row_memo: row_memo.clone(),
                     };
-                    render_message_item(&messages, msg_ix, &ctx, cx)
+                    render_message_item(&entity.read(cx).topic_messages, msg_ix, &ctx, cx)
                 })
                 .flex_1()
                 .size_full()

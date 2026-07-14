@@ -171,9 +171,14 @@ fn build_topic_menu(
         .map(|emoji| (emoji.id.clone(), emoji.shortname.clone()))
         .collect::<Vec<_>>();
 
+    let react_message_id = msg.id;
     let mut menu = ContextMenu::new()
         .on_dismiss(dismiss)
-        .quick_reactions(msg.id, quick_emojis);
+        .quick_reactions(quick_emojis, move |emoji_id, shortname, _window, cx| {
+            MessagesStore::global(cx).update(cx, |store, cx| {
+                store.add_reaction(react_message_id, emoji_id, shortname, cx);
+            });
+        });
 
     {
         let host = host.clone();
@@ -225,7 +230,7 @@ fn build_topic_menu(
             t("contextMenu.reply"),
             IconName::ReplyRightClick,
             move |_, cx| {
-                MessagesStore::global(cx)
+                TopicsStore::global(cx)
                     .update(cx, |store, cx| store.set_reply_to(message_id, cx));
             },
         );
@@ -362,9 +367,14 @@ fn build_channel_menu(
         .map(|emoji| (emoji.id.clone(), emoji.shortname.clone()))
         .collect::<Vec<_>>();
 
+    let react_message_id = msg.id;
     let mut menu = ContextMenu::new()
         .on_dismiss(dismiss)
-        .quick_reactions(msg.id, quick_emojis);
+        .quick_reactions(quick_emojis, move |emoji_id, shortname, _window, cx| {
+            MessagesStore::global(cx).update(cx, |store, cx| {
+                store.add_reaction(react_message_id, emoji_id, shortname, cx);
+            });
+        });
 
     {
         let host = host.clone();
@@ -524,13 +534,13 @@ fn build_channel_menu(
         && TopicsStore::can_create_topic(cx)
         && TopicsStore::message_allows_topic_discussion(msg)
     {
-        let origin = msg.clone();
+        let message_id = msg.id;
         menu = menu.item_icon(
             t("contextMenu.topicDiscussion"),
             IconName::TopicIcon,
             move |_window, cx| {
-                let origin = origin.clone();
-                TopicsStore::global(cx).update(cx, |store, cx| store.start_create(origin, cx));
+                TopicsStore::global(cx)
+                    .update(cx, |store, cx| store.start_create_for_message(message_id, cx));
             },
         );
     }

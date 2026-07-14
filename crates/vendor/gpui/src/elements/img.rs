@@ -410,7 +410,9 @@ impl Element for Img {
                                                 Some(window.spawn(cx, async move |cx| {
                                                     let remaining = due_at
                                                         .saturating_duration_since(Instant::now());
-                                                    cx.background_executor().timer(remaining).await;
+                                                    cx.background_executor()
+                                                        .timer(remaining)
+                                                        .await;
                                                     cx.update(move |_, cx| {
                                                         cx.notify(current_view);
                                                     })

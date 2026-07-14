@@ -1235,6 +1235,7 @@ impl TransportClient {
         mentions: Vec<crate::transport::OutgoingMention>,
         hashtags: Vec<crate::transport::OutgoingHashtag>,
         emojis: Vec<crate::transport::OutgoingEmoji>,
+        reply: Option<crate::transport::OutgoingReply>,
     ) -> Result<crate::transport::ApiMessage> {
         let transport = self.inner.clone();
         let content = content.to_string();
@@ -1243,8 +1244,16 @@ impl TransportClient {
             .spawn(async move {
                 transport
                     .send_topic_message(
-                        clan_id, channel_id, &content, is_public, mode, topic_id, mentions,
-                        hashtags, emojis,
+                        clan_id,
+                        channel_id,
+                        &content,
+                        is_public,
+                        mode,
+                        topic_id,
+                        mentions,
+                        hashtags,
+                        emojis,
+                        reply,
                     )
                     .await
             })
@@ -1266,6 +1275,7 @@ impl TransportClient {
         hashtags: Vec<crate::transport::OutgoingHashtag>,
         emojis: Vec<crate::transport::OutgoingEmoji>,
         presign_finish: Option<Vec<String>>,
+        reply: Option<crate::transport::OutgoingReply>,
     ) -> Result<crate::transport::ApiMessage> {
         let transport = self.inner.clone();
         let content = content.to_string();
@@ -1285,6 +1295,7 @@ impl TransportClient {
                         hashtags,
                         emojis,
                         presign_finish,
+                        reply,
                     )
                     .await
             })

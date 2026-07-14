@@ -294,7 +294,7 @@ fn render_ephemeral_notice(ctx: &RowCtx) -> AnyElement {
 fn render_go_to_topic_footer(msg: &Message, ctx: &RowCtx) -> AnyElement {
     let theme = ctx.theme;
     let hover_bg = theme.bg_hover;
-    let origin = msg.clone();
+    let message_id = msg.id;
     div()
         .id(("go-to-topic", msg.id.0 as usize))
         .flex()
@@ -312,8 +312,8 @@ fn render_go_to_topic_footer(msg: &Message, ctx: &RowCtx) -> AnyElement {
         .cursor_pointer()
         .hover(move |s| s.bg(hover_bg))
         .on_click(move |_, _, cx| {
-            let origin = origin.clone();
-            TopicsStore::global(cx).update(cx, |store, cx| store.start_create(origin, cx));
+            TopicsStore::global(cx)
+                .update(cx, |store, cx| store.start_create_for_message(message_id, cx));
         })
         .child(
             div()
