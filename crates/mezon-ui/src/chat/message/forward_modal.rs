@@ -337,13 +337,16 @@ fn build_options(cx: &App) -> Vec<ForwardOption> {
 /// rebuild when one of them actually gains or loses rows. DM traffic notifies
 /// the direct store on every incoming message — without this the modal would
 /// rebuild its whole option list on each one.
-fn source_counts(cx: &App) -> (usize, usize, usize, usize) {
-    (
-        DirectMessageStore::global(cx).read(cx).channels().len(),
-        FriendStore::global(cx).read(cx).friends().len(),
-        ChannelList::global(cx).read(cx).user_channels().count(),
-        ClanList::global(cx).read(cx).clans.len(),
-    )
+fn rendered_rows_equal(a: &[ForwardOption], b: &[ForwardOption]) -> bool {
+    a.len() == b.len()
+        && a.iter().zip(b.iter()).all(|(new, old)| {
+            new.key == old.key
+                && new.label == old.label
+                && new.avatar == old.avatar
+                && new.avatar_raw == old.avatar_raw
+                && new.filter_key == old.filter_key
+                && new.sort_key == old.sort_key
+        })
 }
 
 pub struct ForwardMessageModal {
@@ -366,7 +369,6 @@ pub struct ForwardMessageModal {
     label_note: SharedString,
     label_members: SharedString,
     label_channels: SharedString,
-    counts: (usize, usize, usize, usize),
     _search_sub: Subscription,
     _note_sub: Subscription,
     _channel_obs: Subscription,
@@ -486,7 +488,6 @@ impl ForwardMessageModal {
                     "forwardMessage.modal.searchFriendsUsers",
                 ),
                 label_channels: upper(&locale_for_labels, "forwardMessage.modal.searchingChannel"),
-                counts: source_counts(cx),
                 _search_sub: search_sub,
                 _note_sub: note_sub,
                 _channel_obs: channel_obs,
@@ -543,20 +544,15 @@ impl ForwardMessageModal {
     /// notifies (it emits no event) when `user_channels` arrive, hence observe
     /// rather than subscribe.
     fn refresh_options(&mut self, cx: &mut Context<Self>) {
-        let counts = source_counts(cx);
-        if counts == self.counts {
+        let options = build_options(cx);
+        if rendered_rows_equal(&options, &self.options) {
             return;
         }
-        self.counts = counts;
-        self.rebuild_options(cx);
-        cx.notify();
-    }
-
-    fn rebuild_options(&mut self, cx: &App) {
-        self.options = build_options(cx);
+        self.options = options;
         self.selected
             .retain(|key| self.options.iter().any(|o| o.key == *key));
         self.recompute_filtered(cx);
+        cx.notify();
     }
 
     fn recompute_filtered(&mut self, cx: &App) {
@@ -868,7 +864,10 @@ impl Render for ForwardMessageModal {
             // Escape is only bound to `menu::Cancel` inside the "menu" key context
             // (see `mezon_ui::init`), so a modal that omits it never sees the action.
             .key_context("menu")
-            .on_action(cx.listener(|_, _: &::menu::Cancel, _window, cx| {
+            .on_action(cx.listener(|this, _: &::menu::Cancel, _window, cx| {
+                if this.submitting {
+                    return;
+                }
                 Shell::global(cx).update(cx, |shell, cx| shell.close_modal(cx));
             }))
             .occlude()

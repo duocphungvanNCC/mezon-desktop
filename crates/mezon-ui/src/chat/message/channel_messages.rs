@@ -14,7 +14,8 @@ use ui::{ScrollAxes, Scrollbars, WithScrollbar};
 use mezon_store::{
     BadgeService, ChannelId, ChannelList, ClanId, ClanList, ClanMembersStore, DirectMessageStore,
     Emoji, EmojiStore, GroupMembersStore, MessageCode, MessageId, MessagesEvent, MessagesStore,
-    ProfileContext, Settings, UserId, UsersByUserStore, message::Message,
+    ProfileContext, Settings, UserId, UsersByUserStore,
+    message::{Message, markdown_edit_source},
 };
 
 use super::audio_player::{AudioActivation, AudioPlayerView};
@@ -1104,7 +1105,11 @@ impl ChannelMessages {
             .viewport_messages()
             .iter()
             .find(|m| m.id == message_id)
-            .map(|m| (m.content.clone(), m.spans.clone()))
+            .map(|m| {
+                let source =
+                    markdown_edit_source(&m.content, &m.spans).unwrap_or_else(|| m.content.clone());
+                (source, m.spans.clone())
+            })
             .unwrap_or_default();
         let settings = self.settings.clone();
         let input = cx.new(|cx| {
@@ -2251,7 +2256,7 @@ impl Render for ChannelMessages {
         let unread_count = self.cached_fab_unread_count;
         let key_listener = cx.listener(Self::on_messages_key);
         let focus_on_click = cx.listener(|this, _: &MouseDownEvent, window, cx| {
-            if !this.focus_handle.is_focused(window) {
+            if !this.focus_handle.contains_focused(window, cx) {
                 window.focus(&this.focus_handle, cx);
             }
         });

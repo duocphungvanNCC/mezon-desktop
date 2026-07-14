@@ -772,19 +772,31 @@ fn render_hashtag_chip(
     ctx: &RowCtx,
 ) -> AnyElement {
     let display: SharedString = display.into();
-    let label: SharedString = display
-        .strip_prefix('#')
-        .map(|name| SharedString::from(name.to_owned()))
-        .unwrap_or(display);
     let theme = ctx.theme;
     let bg = theme.tokens.mention_primary;
     let color = theme.tokens.mention_color;
     let hover_bg = theme.tokens.bg_mention_hover;
     let hover_color = theme.tokens.color_mention_hover;
     let parsed_channel = channel_id.and_then(parse_channel_id);
-    let icon = parsed_channel
-        .map(|cid| hashtag_icon(cid, ctx.app))
-        .unwrap_or(IconName::Hashtag);
+    let (resolved_name, icon) = match parsed_channel {
+        Some(cid) => hashtag_channel(cid, ctx.app),
+        None => (None, IconName::Hashtag),
+    };
+    let from_channel_link = display.starts_with("http://") || display.starts_with("https://");
+    let (label, unresolved_link) = match resolved_name {
+        Some(name) => (name, false),
+        None if from_channel_link => (
+            SharedString::from(mezon_i18n::t(ctx.locale, "message.unknown")),
+            true,
+        ),
+        None => (
+            display
+                .strip_prefix('#')
+                .map(|name| SharedString::from(name.to_owned()))
+                .unwrap_or(display),
+            false,
+        ),
+    };
 
     let inner = div()
         .flex()
@@ -793,7 +805,7 @@ fn render_hashtag_chip(
         .items_center()
         .gap_0p5()
         .child(Icon::new(icon).size_4().text_color(color))
-        .child(label);
+        .child(div().when(unresolved_link, |d| d.italic()).child(label));
 
     match parsed_channel {
         Some(channel_id) => {
@@ -906,15 +918,16 @@ fn build_inline_content(msg: &Message, ctx: &RowCtx, body_color: gpui::Rgba) -> 
                 display,
                 channel_id,
             } => {
-                let label = display.strip_prefix('#').unwrap_or(display);
                 let parsed_channel = channel_id.as_deref().and_then(parse_channel_id);
-                let icon = parsed_channel
-                    .map(|cid| hashtag_icon(cid, ctx.app))
-                    .unwrap_or(IconName::Hashtag);
+                let (resolved_name, icon) = match parsed_channel {
+                    Some(cid) => hashtag_channel(cid, ctx.app),
+                    None => (None, IconName::Hashtag),
+                };
+                let label = hashtag_label(display, resolved_name, ctx.locale);
                 let icon_index = text.len();
                 text.push(INLINE_ICON_PLACEHOLDER);
                 let label_index = text.len();
-                text.push_str(label);
+                text.push_str(&label);
                 let end = text.len();
                 runs.push(StyledRun {
                     range: icon_index..label_index,
@@ -966,7 +979,17 @@ fn build_inline_content(msg: &Message, ctx: &RowCtx, body_color: gpui::Rgba) -> 
     )
 }
 
-fn hashtag_icon(channel_id: ChannelId, cx: &App) -> IconName {
+fn hashtag_label(display: &str, resolved_name: Option<SharedString>, locale: &str) -> SharedString {
+    if let Some(name) = resolved_name {
+        return name;
+    }
+    if display.starts_with("http://") || display.starts_with("https://") {
+        return SharedString::from(mezon_i18n::t(locale, "message.unknown"));
+    }
+    SharedString::from(display.strip_prefix('#').unwrap_or(display).to_owned())
+}
+
+fn hashtag_channel(channel_id: ChannelId, cx: &App) -> (Option<SharedString>, IconName) {
     let channels = ChannelList::global(cx);
     let store = channels.read(cx);
     let resolved = store
@@ -978,8 +1001,11 @@ fn hashtag_icon(channel_id: ChannelId, cx: &App) -> IconName {
         })
         .or_else(|| store.user_channel(channel_id));
     match resolved {
-        Some(channel) => channel_type_icon(channel.channel_type, channel.private),
-        None => IconName::Hashtag,
+        Some(channel) => (
+            (!channel.name.is_empty()).then(|| SharedString::from(channel.name.clone())),
+            channel_type_icon(channel.channel_type, channel.private),
+        ),
+        None => (None, IconName::Hashtag),
     }
 }
 
@@ -1255,5 +1281,32 @@ mod tests {
     fn parse_channel_id_rejects_zero() {
         assert_eq!(parse_channel_id("0"), None);
         assert_eq!(parse_channel_id("12345"), Some(ChannelId(12345)));
+    }
+}
+
+#[cfg(test)]
+mod hashtag_label_tests {
+    use super::hashtag_label;
+    use gpui::SharedString;
+
+    #[test]
+    fn resolved_channel_wins_over_the_raw_url() {
+        let label = hashtag_label(
+            "https://mezon.ai/chat/clans/1/channels/2",
+            Some(SharedString::from("general")),
+            "en",
+        );
+        assert_eq!(label, "general");
+    }
+
+    #[test]
+    fn unresolved_channel_link_never_shows_the_raw_url() {
+        let label = hashtag_label("https://mezon.ai/chat/clans/1/channels/2", None, "en");
+        assert_eq!(label, "unknown");
+    }
+
+    #[test]
+    fn typed_hashtag_falls_back_to_the_name_without_the_hash() {
+        assert_eq!(hashtag_label("#general", None, "en"), "general");
     }
 }

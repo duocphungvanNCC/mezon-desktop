@@ -199,6 +199,7 @@ pub struct ChannelList {
     user_channels: HashMap<ChannelId, Channel>,
     user_channels_order: Vec<ChannelId>,
     user_channels_loading: bool,
+    user_channels_loaded: bool,
     loading: HashSet<ClanId>,
     active_clan_id: Option<ClanId>,
     pub active_channel_id: Option<ChannelId>,
@@ -304,6 +305,7 @@ impl ChannelList {
         self.user_channels.clear();
         self.user_channels_order.clear();
         self.user_channels_loading = false;
+        self.user_channels_loaded = false;
         self.loading.clear();
         self.show_empty_categories.clear();
         self.remembered_channels.clear();
@@ -372,6 +374,7 @@ impl ChannelList {
             user_channels: HashMap::new(),
             user_channels_order: Vec::new(),
             user_channels_loading: false,
+            user_channels_loaded: false,
             loading: HashSet::new(),
             active_clan_id: None,
             active_channel_id: None,
@@ -527,6 +530,7 @@ impl ChannelList {
                                 this.user_channels_order.push(id);
                             }
                         }
+                        this.user_channels_loaded = true;
                         cx.emit(ChannelEvent::UserChannelsLoaded);
                         cx.notify();
                     }
@@ -550,7 +554,7 @@ impl ChannelList {
     }
 
     pub fn ensure_user_channels_loaded(&mut self, cx: &mut Context<Self>) {
-        if self.user_channels.is_empty() && !self.user_channels_loading {
+        if !self.user_channels_loaded && !self.user_channels_loading {
             self.fetch_user_channels(cx);
         }
     }

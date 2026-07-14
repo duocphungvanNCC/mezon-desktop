@@ -263,7 +263,7 @@ pub struct ImgLayoutState {
     replacement: Option<AnyElement>,
 }
 
-const MIN_ANIMATION_FRAME_DELAY: Duration = Duration::from_millis(20);
+const MIN_ANIMATION_FRAME_DELAY: Duration = Duration::from_millis(11);
 const CLAMPED_ANIMATION_FRAME_DELAY: Duration = Duration::from_millis(100);
 
 fn animation_frame_delay(data: &RenderImage, frame_index: usize) -> Duration {

@@ -546,10 +546,33 @@ fn attachment_to_api(a: &MessageAttachment) -> mezon_client::transport::ApiAttac
     }
 }
 
-/// Mentions carried by the source message's content payload. Only sent when the
-/// destination is the message's own channel — React passes
+/// Mentions carried by the source message. The server delivers them in the binary
+/// proto field, never in the content JSON, so they are read off the domain message
+/// rather than re-parsed out of `content_raw`. Only sent when the destination is the
 /// `message.channel_id === channel_id ? message.mentions : []`.
-fn forward_mentions(content_raw: &str) -> Vec<TransportMention> {
+fn forward_mentions(targets: &[MentionTarget]) -> Vec<TransportMention> {
+    targets
+        .iter()
+        .filter_map(|target| {
+            let user_id = target.user_id.clone().unwrap_or_default();
+            let role_id = target.role_id.clone().unwrap_or_default();
+            if user_id.is_empty() && role_id.is_empty() {
+                return None;
+            }
+            Some(TransportMention {
+                user_id,
+                role_id,
+                username: target.username.clone(),
+                s: target.s,
+                e: target.e,
+            })
+        })
+        .collect()
+}
+
+/// Fallback for content payloads that carry their own mention tokens (a message
+/// composed on web can), used only when the proto field delivered none.
+fn content_json_mentions(content_raw: &str) -> Vec<TransportMention> {
     let Ok(content) = serde_json::from_str::<ApiMessageContent>(content_raw) else {
         return Vec::new();
     };
@@ -576,7 +599,14 @@ fn forward_mentions(content_raw: &str) -> Vec<TransportMention> {
 fn forward_source(msg: &Message) -> ForwardSource {
     let content_raw = msg.raw_content.as_deref().unwrap_or_default().to_string();
     ForwardSource {
-        mentions: forward_mentions(&content_raw),
+        mentions: {
+            let proto = forward_mentions(&msg.mention_targets);
+            if proto.is_empty() {
+                content_json_mentions(&content_raw)
+            } else {
+                proto
+            }
+        },
         content_raw,
         text: msg.content.clone(),
         attachments: msg.attachments.iter().map(attachment_to_api).collect(),
@@ -648,26 +678,38 @@ async fn send_forward(
     )
     .await?;
     let same_channel = dest.channel_id == source_channel_id.get();
-    for (index, source) in sources.iter().enumerate() {
+    let mut failures = 0usize;
+    for source in sources {
         let mentions = if same_channel {
             source.mentions.clone()
         } else {
             Vec::new()
         };
-        api.forward_channel_message(
-            dest.clan_id,
-            dest.channel_id,
-            &source.content_raw,
-            &source.text,
-            dest.is_public,
-            dest.mode,
-            source.attachments.clone(),
-            mentions,
-        )
-        .await?;
-        let is_last = index + 1 == sources.len();
-        if is_last && let Some(note) = note {
-            api.send_channel_message(
+        if let Err(e) = api
+            .forward_channel_message(
+                dest.clan_id,
+                dest.channel_id,
+                &source.content_raw,
+                &source.text,
+                dest.is_public,
+                dest.mode,
+                source.attachments.clone(),
+                mentions,
+            )
+            .await
+        {
+            tracing::error!(
+                "forwarding one message to channel {} failed: {e}",
+                dest.channel_id
+            );
+            failures += 1;
+        }
+    }
+    let all_failed = failures == sources.len();
+    if let Some(note) = note
+        && !all_failed
+        && let Err(e) = api
+            .send_channel_message(
                 dest.clan_id,
                 dest.channel_id,
                 note,
@@ -677,8 +719,16 @@ async fn send_forward(
                 Vec::new(),
                 Vec::new(),
             )
-            .await?;
-        }
+            .await
+    {
+        tracing::error!("forward note to channel {} failed: {e}", dest.channel_id);
+        failures += 1;
+    }
+    if failures > 0 {
+        anyhow::bail!(
+            "{failures} of {} forwarded items failed",
+            sources.len() + usize::from(note.is_some())
+        );
     }
     Ok(())
 }
@@ -738,6 +788,8 @@ impl MessagesStore {
         self.poll_ui.clear();
         self.poll_my_vote.clear();
         self.select_ui.clear();
+        self.forward_task = None;
+        self.forward_in_flight = false;
         cx.notify();
     }
 
@@ -3688,6 +3740,8 @@ fn merge_message_update(existing: &mut Message, incoming: &Message) {
     existing.topic_id = incoming.topic_id;
     existing.topic_creator_id = incoming.topic_creator_id;
     existing.highlights_viewer_direct = incoming.highlights_viewer_direct;
+    existing.raw_content = incoming.raw_content.clone();
+    existing.mention_targets = incoming.mention_targets.clone();
     if incoming.poll.is_some() {
         existing.poll = incoming.poll.clone();
     }
@@ -4005,6 +4059,9 @@ fn message_from_api(m: ApiMessage, cfg: Option<&AppConfig>, viewer_id: Option<Us
         .map(|mention| MentionTarget {
             user_id: (mention.user_id != 0).then(|| mention.user_id.to_string()),
             role_id: (mention.role_id != 0).then(|| mention.role_id.to_string()),
+            username: mention.username.clone(),
+            s: mention.s,
+            e: mention.e,
         })
         .collect();
     let references: Vec<MessageReference> = m
@@ -4056,17 +4113,6 @@ fn message_from_api(m: ApiMessage, cfg: Option<&AppConfig>, viewer_id: Option<Us
         .and_then(|s| s.parse::<i64>().ok())
         .filter(|&id| id != 0)
         .map(UserId);
-    if !mention_targets.is_empty() {
-        tracing::debug!(
-            message_id = m.message_id,
-            entity = mention_targets.len(),
-            span_mentions = spans
-                .iter()
-                .filter(|s| matches!(s, crate::message::MessageSpan::Mention { .. }))
-                .count(),
-            "message mention targets parsed"
-        );
-    }
     Message::new(
         MessageId(m.message_id),
         m.content,
@@ -4868,13 +4914,50 @@ mod tests {
     }
 
     #[test]
-    fn forward_mentions_skips_tokens_without_a_target() {
-        let raw = r#"{"t":"x","mentions":[{"s":0,"e":1},{"s":2,"e":3,"role_id":"9"}]}"#;
+    fn forward_mentions_skips_targets_without_a_user_or_role() {
+        let targets = vec![
+            MentionTarget {
+                user_id: None,
+                role_id: None,
+                username: String::new(),
+                s: 0,
+                e: 1,
+            },
+            MentionTarget {
+                user_id: None,
+                role_id: Some("9".into()),
+                username: "@mods".into(),
+                s: 2,
+                e: 3,
+            },
+        ];
 
-        let mentions = forward_mentions(raw);
+        let mentions = forward_mentions(&targets);
 
         assert_eq!(mentions.len(), 1);
         assert_eq!(mentions[0].role_id, "9");
+        assert_eq!(mentions[0].username, "@mods");
+        assert_eq!((mentions[0].s, mentions[0].e), (2, 3));
+    }
+
+    #[test]
+    fn forward_mentions_come_from_the_proto_targets_not_the_content_json() {
+        let mut msg = Message::new(MessageId(1), "hey @bob", "7", "alice", 100);
+        msg.raw_content = Some(r#"{"t":"hey @bob"}"#.into());
+        msg.mention_targets = vec![MentionTarget {
+            user_id: Some("42".into()),
+            role_id: None,
+            username: "bob".into(),
+            s: 4,
+            e: 8,
+        }];
+
+        let source = forward_source(&msg);
+
+        assert_eq!(source.mentions.len(), 1);
+        assert_eq!(source.mentions[0].user_id, "42");
+        assert_eq!(source.mentions[0].username, "bob");
+        assert_eq!((source.mentions[0].s, source.mentions[0].e), (4, 8));
     }
 
     #[test]

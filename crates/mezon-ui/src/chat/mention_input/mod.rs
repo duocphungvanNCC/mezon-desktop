@@ -148,8 +148,22 @@ enum Suggestion {
 }
 
 impl Suggestion {
-    fn is_role(&self) -> bool {
-        matches!(self, Suggestion::Role(_))
+    fn group_order(&self) -> u8 {
+        match self {
+            Suggestion::Member(..) | Suggestion::Channel(_) | Suggestion::Emoji(..) => 0,
+            Suggestion::Role(_) => 1,
+            Suggestion::Here => 2,
+        }
+    }
+
+    fn item_key(&self) -> (u8, &str) {
+        match self {
+            Suggestion::Here => (0, MENTION_HERE_DISPLAY),
+            Suggestion::Member(member, _) => (1, member.user_id.as_str()),
+            Suggestion::Role(role) => (2, role.role_id.as_str()),
+            Suggestion::Channel(channel) => (3, channel.channel_id.as_str()),
+            Suggestion::Emoji(emoji, _) => (4, emoji.emoji_id.as_str()),
+        }
     }
 
     fn sort_keys(&self) -> (&str, &str) {
@@ -196,7 +210,7 @@ fn resolve_suggestion_media(items: &mut [Suggestion], cx: &App) {
 
 fn prioritize_and_limit(mut items: Vec<Suggestion>, query: &str) -> Vec<Suggestion> {
     let query_lc = query.to_lowercase();
-    items.sort_by_cached_key(|item| (u8::from(!item.is_role()), item.match_rank(&query_lc)));
+    items.sort_by_cached_key(|item| (item.group_order(), item.match_rank(&query_lc)));
     items.truncate(MAX_SUGGESTIONS);
     items
 }
@@ -1067,16 +1081,20 @@ impl MentionInput {
         };
         let mut suggestions = prioritize_and_limit(candidates, query);
         resolve_suggestion_media(&mut suggestions, cx);
-        self.selected = 0;
+        let same_items = suggestions.len() == self.suggestions.len()
+            && suggestions
+                .iter()
+                .zip(self.suggestions.iter())
+                .all(|(new, old)| new.item_key() == old.item_key());
+        if !same_items || self.selected >= suggestions.len() {
+            self.selected = 0;
+        }
         self.suggestions = suggestions;
         self.suggestion_scroll
             .scroll_to_item(self.selected, ScrollStrategy::Nearest);
     }
 
     fn at_candidates(&self, query: &str) -> Vec<Suggestion> {
-        if self.session_members.is_empty() {
-            return Vec::new();
-        }
         let mut out: Vec<Suggestion> = Vec::new();
         if query.is_empty() {
             out.reserve(self.session_members.len() + self.session_roles.len() + 1);
