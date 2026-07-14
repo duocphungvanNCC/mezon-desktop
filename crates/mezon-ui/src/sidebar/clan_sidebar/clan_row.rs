@@ -80,6 +80,7 @@ pub(super) fn render_clan_row(
     ix: usize,
     cx: &App,
     clan_list_handle: Entity<ClanList>,
+    suppress_hover: bool,
 ) -> AnyElement {
     let theme = cx.theme();
     let dm_active = matches!(
@@ -126,9 +127,11 @@ pub(super) fn render_clan_row(
             .justify_center()
             .text_color(theme.tokens.text_theme_primary)
             .text_size(px(20.))
-            .hover(|s| {
-                s.bg(theme.tokens.bg_button_add_friend)
-                    .text_color(gpui::white())
+            .when(!suppress_hover, |avatar| {
+                avatar.hover(|s| {
+                    s.bg(theme.tokens.bg_button_add_friend)
+                        .text_color(gpui::white())
+                })
             })
             .child(SharedString::from(first))
             .into_any_element()
@@ -176,12 +179,14 @@ pub(super) fn render_clan_row(
                     ),
             )
         })
-        .on_hover(move |hovered, _window, cx| {
-            if *hovered {
-                ChannelList::global(cx).update(cx, |channels, cx| {
-                    channels.load_for_clan(prefetch_clan_id, cx)
-                });
-            }
+        .when(!suppress_hover, |row| {
+            row.on_hover(move |hovered, _window, cx| {
+                if *hovered {
+                    ChannelList::global(cx).update(cx, |channels, cx| {
+                        channels.load_for_clan(prefetch_clan_id, cx)
+                    });
+                }
+            })
         })
         .on_click(on_clan_click(clan_list_handle, clan_id))
         .child(avatar_with_badge)

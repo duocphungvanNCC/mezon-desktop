@@ -45,8 +45,6 @@ const BOTTOM_THRESHOLD_PX: f32 = 100.;
 const KEY_SCROLL_BEZIER_X1: f32 = 0.42;
 const KEY_SCROLL_BEZIER_X2: f32 = 0.58;
 const IDLE_CACHE_SWEEP_INTERVAL: Duration = Duration::from_millis(100);
-const SCROLL_ACTIVITY_GRACE: Duration = Duration::from_millis(150);
-const SCROLL_HOVER_RELEASE_MS: u64 = 150;
 const HOVER_SHOW_DELAY_MS: u64 = 200;
 const HOVER_HIDE_DELAY_MS: u64 = 100;
 const SCROLL_RELIEF_DELAY: Duration = Duration::from_millis(1500);
@@ -576,7 +574,6 @@ pub struct ChannelMessages {
     _channel_list_observe: Subscription,
     _clan_list_observe: Subscription,
     _skeleton_timer: Option<Task<()>>,
-    suppress_hover: bool,
     hovered_row: Option<MessageId>,
     raw_hover: Option<MessageId>,
     _hover_show_task: Option<Task<()>>,
@@ -591,7 +588,6 @@ pub struct ChannelMessages {
         Option<mezon_store::MessageId>,
     ),
     last_scroll_at: Option<Instant>,
-    scroll_idle_armed: bool,
     at_bottom: bool,
     last_visible_start: usize,
     last_visible_end: usize,
@@ -718,7 +714,6 @@ impl ChannelMessages {
                     this.mention_popover = None;
                     this._mention_popover_sub = None;
                     this.context_menu_target = None;
-                    this.suppress_hover = false;
                     this.hovered_row = None;
                     this.raw_hover = None;
                     this._hover_show_task = None;
@@ -939,8 +934,9 @@ impl ChannelMessages {
         })
         .detach();
 
-        let list_state =
-            ListState::new(0, ListAlignment::Bottom, px(LIST_OVERDRAW)).smooth_line_scroll();
+        let list_state = ListState::new(0, ListAlignment::Bottom, px(LIST_OVERDRAW))
+            .smooth_line_scroll()
+            .suppress_hover_while_scrolling();
         let timeline = cx.weak_entity();
         list_state.set_scroll_handler(move |event, window, cx| {
             let at_bottom = !event.is_scrolled;
@@ -1004,13 +1000,15 @@ impl ChannelMessages {
                 if visible_range_changed {
                     this.schedule_pagination_check(window, cx);
                 }
-                if !this.suppress_hover {
-                    this.suppress_hover = true;
+                if this.hovered_row.is_some()
+                    || this.raw_hover.is_some()
+                    || this._hover_show_task.is_some()
+                    || this._hover_hide_task.is_some()
+                {
                     this.hovered_row = None;
                     this.raw_hover = None;
                     this._hover_show_task = None;
                     this._hover_hide_task = None;
-                    cx.notify();
                 }
             });
         });
@@ -1081,7 +1079,6 @@ impl ChannelMessages {
             _channel_list_observe: channel_list_observe,
             _clan_list_observe: clan_list_observe,
             _skeleton_timer: None,
-            suppress_hover: false,
             hovered_row: None,
             raw_hover: None,
             _hover_show_task: None,
@@ -1093,7 +1090,6 @@ impl ChannelMessages {
             last_paginate_count: 0,
             last_paginate_edges: (None, None),
             last_scroll_at: None,
-            scroll_idle_armed: false,
             at_bottom: true,
             last_visible_start: 0,
             last_visible_end: 0,
@@ -2140,37 +2136,6 @@ impl ChannelMessages {
     fn mark_scroll_activity(&mut self, cx: &mut Context<Self>) {
         self.last_scroll_at = Some(Instant::now());
         self.arm_scroll_memory_relief(cx);
-        if self.scroll_idle_armed {
-            return;
-        }
-
-        self.scroll_idle_armed = true;
-        cx.spawn(async move |this, cx| {
-            let mut remaining = SCROLL_ACTIVITY_GRACE;
-            loop {
-                cx.background_executor().timer(remaining).await;
-                let next = this
-                    .update(cx, |this, cx| {
-                        let elapsed = this.last_scroll_at.map_or(SCROLL_ACTIVITY_GRACE, |at| {
-                            at.elapsed().min(SCROLL_ACTIVITY_GRACE)
-                        });
-                        if elapsed >= SCROLL_ACTIVITY_GRACE {
-                            this.scroll_idle_armed = false;
-                            cx.notify();
-                            None
-                        } else {
-                            Some(SCROLL_ACTIVITY_GRACE - elapsed)
-                        }
-                    })
-                    .ok()
-                    .flatten();
-                let Some(next) = next else {
-                    break;
-                };
-                remaining = next;
-            }
-        })
-        .detach();
     }
 
     fn arm_scroll_memory_relief(&mut self, cx: &mut Context<Self>) {
@@ -2302,12 +2267,9 @@ impl Render for ChannelMessages {
         self.clear_image_cache_if_channel_changed(window, cx);
         self.sync_render_identity(cx);
         self.drive_scroll_anim(window);
-        let scroll_active = self.keyboard_scroll.is_some()
-            || self.list_state.is_smooth_wheel_scrolling()
-            || self.list_state.is_scrollbar_dragging()
-            || self
-                .last_scroll_at
-                .is_some_and(|at| at.elapsed() < SCROLL_ACTIVITY_GRACE);
+        let suppress_hover = self.list_state.is_scroll_hover_suppressed();
+        let scroll_active =
+            self.keyboard_scroll.is_some() || self.list_state.is_scroll_hover_active();
         if !scroll_active
             && self
                 .last_image_cache_sweep
@@ -2365,7 +2327,6 @@ impl Render for ChannelMessages {
         }
         let row_memo = self.row_memo.clone();
         let list_state = self.list_state.clone();
-        let suppress_hover = self.suppress_hover;
         let hovered_row = self.hovered_row;
         let avatar_image_cache = self.avatar_image_cache.clone();
         let small_avatar_image_cache = self.small_avatar_image_cache.clone();
@@ -2456,16 +2417,6 @@ impl Render for ChannelMessages {
             )
             .children(skeleton_overlay)
             .child(scroll_down_fab)
-            .on_mouse_move(cx.listener(|this, _event, _window, cx| {
-                if this.suppress_hover
-                    && this.last_scroll_at.is_none_or(|t| {
-                        t.elapsed() >= Duration::from_millis(SCROLL_HOVER_RELEASE_MS)
-                    })
-                {
-                    this.suppress_hover = false;
-                    cx.notify();
-                }
-            }))
             .when_some(self.mention_popover.clone(), |el, (popover, position)| {
                 el.child(deferred(
                     anchored().position(position).snap_to_window().child(
