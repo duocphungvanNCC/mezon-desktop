@@ -1779,8 +1779,8 @@ impl Render for MentionInput {
             return self.render_compact(cx);
         }
         let open = self.popup_open();
-        let theme = cx.theme();
         let active_tab = self.popup.as_ref().map(|p| p.read(cx).active_tab());
+        let theme = cx.theme().clone();
         let toggle_color = if active_tab == Some(SubPanel::Emoji) {
             theme.text_primary
         } else {
@@ -1796,7 +1796,8 @@ impl Render for MentionInput {
         } else {
             theme.text_muted
         };
-        let plus_color = theme.text_muted;
+        let icon_hover = theme.text_primary;
+        let icon_bg_hover = theme.bg_hover;
         let has_pending = !self.pending_attachments.is_empty();
         let overflow_counter = self.overflow_counter;
 
@@ -1824,10 +1825,12 @@ impl Render for MentionInput {
                     .size(px(24.))
                     .rounded(px(4.))
                     .cursor_pointer()
+                    .hover(|s| s.bg(icon_bg_hover))
                     .child(
                         Icon::new(IconName::AddCircle)
                             .size_5()
-                            .text_color(plus_color),
+                            .text_color(theme.text_muted)
+                            .hover(|s| s.text_color(icon_hover)),
                     )
                     .on_click(
                         cx.listener(|this, _event, window, cx| this.open_file_picker(window, cx)),
@@ -1844,10 +1847,13 @@ impl Render for MentionInput {
                     .justify_center()
                     .size(px(20.))
                     .rounded(px(4.))
+                    .cursor_pointer()
+                    .hover(|s| s.bg(icon_bg_hover))
                     .child(
                         Icon::new(IconName::MicEnable)
                             .size_5()
-                            .text_color(plus_color),
+                            .text_color(theme.text_muted)
+                            .hover(|s| s.text_color(icon_hover)),
                     ),
             )
             .child(

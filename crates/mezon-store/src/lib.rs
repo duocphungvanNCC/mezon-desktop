@@ -61,7 +61,8 @@ pub use cache::{Freshness, KeyedCache};
 pub use channel::*;
 pub use channel_members::{ChannelMember, ChannelMembersEvent, ChannelMembersStore};
 pub use channel_permissions::{
-    ChannelPermissionsEvent, ChannelPermissionsStore, PERMISSION_MANAGE_THREAD,
+    ChannelPermissionsEvent, ChannelPermissionsStore, PERMISSION_DELETE_MESSAGE,
+    PERMISSION_MANAGE_THREAD,
 };
 pub use clan::*;
 pub use clan_members::{

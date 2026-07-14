@@ -2,7 +2,7 @@ use std::rc::Rc;
 
 use gpui::{
     App, ClickEvent, MouseDownEvent, Pixels, Point, SharedString, Window, anchored, deferred, div,
-    prelude::*, px,
+    img, prelude::*, px,
 };
 
 use super::icon::{Icon, IconName};
@@ -11,11 +11,19 @@ use crate::theme::ActiveTheme;
 
 type MenuHandler = Rc<dyn Fn(&mut Window, &mut App) + 'static>;
 type DismissHandler = Rc<dyn Fn(&mut Window, &mut App) + 'static>;
+type QuickReactionHandler = Rc<dyn Fn(String, String, &mut Window, &mut App) + 'static>;
+
+#[derive(Clone)]
+struct QuickReaction {
+    emoji_id: String,
+    shortname: String,
+}
 
 enum Item {
     Entry {
         label: SharedString,
-        icon: Option<IconName>,
+        leading_icon: Option<IconName>,
+        trailing_icon: Option<IconName>,
         danger: bool,
         on_click: MenuHandler,
     },
@@ -25,6 +33,8 @@ enum Item {
 #[derive(IntoElement, Default)]
 pub struct ContextMenu {
     items: Vec<Item>,
+    quick_reactions: Vec<QuickReaction>,
+    on_quick_reaction: Option<QuickReactionHandler>,
     on_dismiss: Option<DismissHandler>,
 }
 
@@ -40,7 +50,8 @@ impl ContextMenu {
     ) -> Self {
         self.items.push(Item::Entry {
             label: label.into(),
-            icon: None,
+            leading_icon: None,
+            trailing_icon: None,
             danger: false,
             on_click: Rc::new(on_click),
         });
@@ -55,7 +66,24 @@ impl ContextMenu {
     ) -> Self {
         self.items.push(Item::Entry {
             label: label.into(),
-            icon: Some(icon),
+            leading_icon: Some(icon),
+            trailing_icon: None,
+            danger: false,
+            on_click: Rc::new(on_click),
+        });
+        self
+    }
+
+    pub fn item_trailing_icon(
+        mut self,
+        label: impl Into<SharedString>,
+        icon: IconName,
+        on_click: impl Fn(&mut Window, &mut App) + 'static,
+    ) -> Self {
+        self.items.push(Item::Entry {
+            label: label.into(),
+            leading_icon: None,
+            trailing_icon: Some(icon),
             danger: false,
             on_click: Rc::new(on_click),
         });
@@ -69,7 +97,8 @@ impl ContextMenu {
     ) -> Self {
         self.items.push(Item::Entry {
             label: label.into(),
-            icon: None,
+            leading_icon: None,
+            trailing_icon: None,
             danger: true,
             on_click: Rc::new(on_click),
         });
@@ -84,7 +113,8 @@ impl ContextMenu {
     ) -> Self {
         self.items.push(Item::Entry {
             label: label.into(),
-            icon: Some(icon),
+            leading_icon: Some(icon),
+            trailing_icon: None,
             danger: true,
             on_click: Rc::new(on_click),
         });
@@ -100,6 +130,24 @@ impl ContextMenu {
         self.on_dismiss = Some(Rc::new(on_dismiss));
         self
     }
+
+    pub fn quick_reactions(
+        mut self,
+        emojis: impl IntoIterator<Item = (String, String)>,
+        on_react: impl Fn(String, String, &mut Window, &mut App) + 'static,
+    ) -> Self {
+        self.quick_reactions = emojis
+            .into_iter()
+            .filter(|(id, _)| !id.is_empty())
+            .take(4)
+            .map(|(emoji_id, shortname)| QuickReaction {
+                emoji_id,
+                shortname,
+            })
+            .collect();
+        self.on_quick_reaction = Some(Rc::new(on_react));
+        self
+    }
 }
 
 impl RenderOnce for ContextMenu {
@@ -112,6 +160,7 @@ impl RenderOnce for ContextMenu {
         let hover = theme.bg_hover;
         let danger = theme.status_dnd;
         let dismiss = self.on_dismiss.clone();
+        let on_quick_reaction = self.on_quick_reaction;
 
         let mut panel = v_flex()
             .min_w(px(220.))
@@ -129,6 +178,57 @@ impl RenderOnce for ContextMenu {
             });
         }
 
+        if !self.quick_reactions.is_empty() {
+            let mut reaction_row = h_flex().gap_1().px(px(6.)).pt(px(4.)).pb(px(6.));
+            for (index, reaction) in self.quick_reactions.into_iter().enumerate() {
+                let emoji_id = reaction.emoji_id.clone();
+                let shortname = reaction.shortname.clone();
+                let src = crate::util::imgproxy::emoji_url(cx, &reaction.emoji_id);
+                let dismiss_click = dismiss.clone();
+                let on_react = on_quick_reaction.clone();
+                let mut cell = div()
+                    .id(("context-menu-reaction", index))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .p_1()
+                    .rounded(px(4.))
+                    .cursor_pointer()
+                    .hover(|s| s.bg(hover))
+                    .on_click(move |_: &ClickEvent, window, cx| {
+                        if let Some(on_react) = &on_react {
+                            on_react(emoji_id.clone(), shortname.clone(), window, cx);
+                        }
+                        if let Some(dismiss) = &dismiss_click {
+                            dismiss(window, cx);
+                        }
+                    });
+                if !src.is_empty() {
+                    let fallback_color = muted;
+                    cell = cell.child(img(SharedString::from(src)).size(px(24.)).with_fallback(
+                        move || {
+                            div()
+                                .size(px(24.))
+                                .rounded(px(4.))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .child(
+                                    Icon::new(IconName::ImageThumbnail)
+                                        .size(px(16.))
+                                        .text_color(fallback_color),
+                                )
+                                .into_any_element()
+                        },
+                    ));
+                }
+                reaction_row = reaction_row.child(cell);
+            }
+            panel = panel
+                .child(reaction_row)
+                .child(div().my(px(5.)).h(px(1.)).w_full().bg(border));
+        }
+
         for (index, item) in self.items.into_iter().enumerate() {
             match item {
                 Item::Separator => {
@@ -136,7 +236,8 @@ impl RenderOnce for ContextMenu {
                 }
                 Item::Entry {
                     label,
-                    icon,
+                    leading_icon,
+                    trailing_icon,
                     danger: is_danger,
                     on_click,
                 } => {
@@ -147,7 +248,6 @@ impl RenderOnce for ContextMenu {
                         h_flex()
                             .id(("context-menu-item", index))
                             .w_full()
-                            .gap_2()
                             .items_center()
                             .px(px(10.))
                             .py(px(8.))
@@ -156,10 +256,14 @@ impl RenderOnce for ContextMenu {
                             .text_color(label_color)
                             .cursor_pointer()
                             .hover(|s| s.bg(hover))
-                            .when_some(icon, |row, icon| {
+                            .when(leading_icon.is_some(), |row| row.gap_2())
+                            .when_some(leading_icon, |row, icon| {
                                 row.child(Icon::new(icon).size_4().text_color(icon_color))
                             })
-                            .child(label)
+                            .child(div().flex_1().child(label))
+                            .when_some(trailing_icon, |row, icon| {
+                                row.child(Icon::new(icon).size_4().text_color(icon_color))
+                            })
                             .on_click(move |_: &ClickEvent, window, cx| {
                                 on_click(window, cx);
                                 if let Some(dismiss) = &dismiss {
