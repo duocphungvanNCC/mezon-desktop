@@ -493,6 +493,8 @@ impl AppApi {
         is_public: bool,
         has_attachment: bool,
         topic_id: i64,
+        has_mentions: bool,
+        has_references: bool,
     ) -> Result<()> {
         self.transport
             .delete_channel_message(
@@ -503,6 +505,8 @@ impl AppApi {
                 is_public,
                 has_attachment,
                 topic_id,
+                has_mentions,
+                has_references,
             )
             .await
     }
@@ -656,8 +660,8 @@ impl AppApi {
                 size: 0,
                 url: a.url.clone(),
                 filetype: a.filetype.clone(),
-                width: 0,
-                height: 0,
+                width: a.width,
+                height: a.height,
                 thumbnail: String::new(),
                 duration: 0,
             })
@@ -668,8 +672,8 @@ impl AppApi {
                 url: a.url,
                 filename: a.filename,
                 filetype: a.filetype,
-                width: 0,
-                height: 0,
+                width: a.width,
+                height: a.height,
                 thumbnail: String::new(),
                 duration: 0,
                 size: 0,
@@ -814,6 +818,7 @@ impl AppApi {
     }
 
     #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments)]
     pub async fn update_channel_message_with_attachments(
         &self,
         clan_id: i64,
@@ -823,6 +828,8 @@ impl AppApi {
         attachments: Vec<ApiAttachment>,
         mode: i32,
         is_public: bool,
+        topic_id: i64,
+        is_update_msg_topic: bool,
     ) -> Result<()> {
         let proto = attachments
             .into_iter()
@@ -839,7 +846,15 @@ impl AppApi {
             .collect();
         self.transport
             .update_channel_message_with_attachments(
-                clan_id, channel_id, message_id, content, proto, mode, is_public,
+                clan_id,
+                channel_id,
+                message_id,
+                content,
+                proto,
+                mode,
+                is_public,
+                topic_id,
+                is_update_msg_topic,
             )
             .await
     }
@@ -1238,6 +1253,8 @@ impl AppApi {
         create_time_seconds: u32,
         mode: i32,
         is_public: bool,
+        topic_id: i64,
+        is_update_msg_topic: bool,
     ) -> Result<()> {
         self.transport
             .patch_message_presign_finish(
@@ -1250,6 +1267,8 @@ impl AppApi {
                 create_time_seconds,
                 mode,
                 is_public,
+                topic_id,
+                is_update_msg_topic,
             )
             .await
     }
@@ -1277,6 +1296,8 @@ impl AppApi {
         keys: Vec<String>,
         mode: i32,
         is_public: bool,
+        topic_id: i64,
+        is_update_msg_topic: bool,
         on_complete: tokio::sync::mpsc::UnboundedSender<AttachmentUploadOutcome>,
     ) {
         use futures::StreamExt as _;
@@ -1312,6 +1333,8 @@ impl AppApi {
                         create_time_seconds,
                         mode,
                         is_public,
+                        topic_id,
+                        is_update_msg_topic,
                     )
                     .await
                 {
@@ -1333,6 +1356,8 @@ impl AppApi {
                     create_time_seconds,
                     mode,
                     is_public,
+                    topic_id,
+                    is_update_msg_topic,
                 )
                 .await
         {
@@ -1367,8 +1392,8 @@ impl AppApi {
                 url: a.url,
                 filename: a.filename,
                 filetype: a.filetype,
-                width: 0,
-                height: 0,
+                width: a.width,
+                height: a.height,
                 thumbnail: String::new(),
                 duration: 0,
                 size: 0,

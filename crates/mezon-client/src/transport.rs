@@ -2077,6 +2077,10 @@ fn with_create_time_seconds(content_json: String, create_time_seconds: u32) -> S
     serde_json::to_string(&value).unwrap_or(content_json)
 }
 
+fn presence_marker_bytes(present: bool) -> Vec<u8> {
+    if present { vec![0u8] } else { Vec::new() }
+}
+
 fn build_message_content_json(
     text: &str,
     mentions: &[OutgoingMention],
@@ -3524,6 +3528,7 @@ impl MezonTransport {
                     .map(OutgoingEmoji::to_content_token)
                     .collect(),
                 mk: markdown_content_tokens(&sent.markdowns),
+                presign_finish: presign_finish.clone(),
                 ..Default::default()
             }
         };
@@ -4401,6 +4406,7 @@ impl MezonTransport {
     }
 
     #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments)]
     pub async fn update_channel_message_with_attachments(
         &self,
         clan_id: i64,
@@ -4410,6 +4416,8 @@ impl MezonTransport {
         attachments: Vec<api::MessageAttachment>,
         mode: i32,
         is_public: bool,
+        topic_id: i64,
+        is_update_msg_topic: bool,
     ) -> Result<()> {
         let cid = self.generate_cid();
         let content_json = build_send_content(content, &[], &[], &[]).json;
@@ -4421,6 +4429,8 @@ impl MezonTransport {
             attachments,
             mode,
             is_public,
+            topic_id,
+            is_update_msg_topic,
             ..Default::default()
         }
         .encode_to_vec();
@@ -4445,6 +4455,8 @@ impl MezonTransport {
         create_time_seconds: u32,
         mode: i32,
         is_public: bool,
+        topic_id: i64,
+        is_update_msg_topic: bool,
     ) -> Result<()> {
         let cid = self.generate_cid();
         let sent = build_send_content(content, &mentions, &[], &[]);
@@ -4465,6 +4477,8 @@ impl MezonTransport {
             is_public,
             hide_editted: true,
             create_time_seconds,
+            topic_id,
+            is_update_msg_topic,
             ..Default::default()
         }
         .encode_to_vec();
@@ -7165,6 +7179,8 @@ impl MezonTransport {
         is_public: bool,
         has_attachment: bool,
         topic_id: i64,
+        has_mentions: bool,
+        has_references: bool,
     ) -> Result<()> {
         let cid = self.generate_cid();
         let body = realtime::ChannelMessageRemove {
@@ -7175,7 +7191,8 @@ impl MezonTransport {
             is_public,
             has_attachment,
             topic_id,
-            ..Default::default()
+            mentions: presence_marker_bytes(has_mentions),
+            references: presence_marker_bytes(has_references),
         }
         .encode_to_vec();
         let (code, _) = self

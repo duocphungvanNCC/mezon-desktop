@@ -44,6 +44,7 @@ use crate::realtime::{RealtimeDispatch, RealtimeKind};
 use crate::topics::TopicsStore;
 
 const MESSAGE_PAGE_LIMIT: u32 = 50;
+const MAX_COUNTED_TOPIC_REPLIES: usize = 2048;
 const DIRECTION_BEFORE: i32 = 3;
 const DIRECTION_AFTER: i32 = 1;
 /// `Direction_Mode.AROUND_TIMESTAMP` — fetch a window centered on a message
@@ -65,6 +66,13 @@ struct PendingLastSeen {
     create_time: i64,
     mode: i32,
     badge_count: u32,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct TopicAppend {
+    pub appended: bool,
+    pub should_count_reply: bool,
+    pub create_time: i64,
 }
 
 #[derive(Debug, Clone)]
@@ -476,6 +484,8 @@ pub struct MessagesStore {
     editing: Option<MessageId>,
     joined_channels: HashSet<ChannelId>,
     pending_self_adds: HashMap<(ChannelId, MessageId, String), u32>,
+    counted_topic_replies: HashSet<MessageId>,
+    counted_topic_reply_order: std::collections::VecDeque<MessageId>,
     api: Arc<AppApi>,
     _channel_sub: Subscription,
     _conn_watch: Task<()>,
@@ -839,6 +849,8 @@ impl MessagesStore {
             editing: None,
             joined_channels: HashSet::new(),
             pending_self_adds: HashMap::new(),
+            counted_topic_replies: HashSet::new(),
+            counted_topic_reply_order: std::collections::VecDeque::new(),
             api,
             _channel_sub: channel_sub,
             _conn_watch: conn_watch,
@@ -948,10 +960,10 @@ impl MessagesStore {
         emoji_id: &str,
         emoji: &str,
     ) -> Option<(u32, Vec<(String, u32)>)> {
-        let channel_id = self.active_channel_id?;
+        let storage_id = self.reaction_storage_channel(message_id);
         let msg = self
             .cache
-            .get(&channel_id)?
+            .get(&storage_id)?
             .messages
             .get_by_id(message_id)?;
         let key = reaction_key(emoji_id, emoji);
@@ -1875,11 +1887,13 @@ impl MessagesStore {
             return;
         };
         let storage_id = self.reaction_storage_channel(message_id);
-        let has_attachment = self
+        let deleted = self
             .cache
             .get(&storage_id)
-            .and_then(|channel| channel.messages.get_by_id(message_id))
-            .is_some_and(|msg| !msg.attachments.is_empty());
+            .and_then(|channel| channel.messages.get_by_id(message_id));
+        let has_attachment = deleted.is_some_and(|msg| !msg.attachments.is_empty());
+        let has_mentions = deleted.is_some_and(|msg| !msg.mention_targets.is_empty());
+        let has_references = deleted.is_some_and(|msg| !msg.references.is_empty());
         if self.editing == Some(message_id) {
             self.editing = None;
         }
@@ -1905,6 +1919,8 @@ impl MessagesStore {
                     is_public,
                     has_attachment,
                     api_topic_id,
+                    has_mentions,
+                    has_references,
                 )
                 .await
             {
@@ -1963,13 +1979,13 @@ impl MessagesStore {
         .detach();
     }
 
-    #[allow(dead_code)]
     pub fn add_to_inbox(&mut self, message_id: MessageId, cx: &mut Context<Self>) {
         let Some(channel_id) = self.active_channel_id else {
             return;
         };
+        let storage_id = self.reaction_storage_channel(message_id);
         let clan_id = self.active_clan_id.map_or(0, |c| c.get());
-        let Some(channel) = self.cache.get(&channel_id) else {
+        let Some(channel) = self.cache.get(&storage_id) else {
             return;
         };
         let Some(msg) = channel.messages.get_by_id(message_id) else {
@@ -2032,6 +2048,9 @@ impl MessagesStore {
             && next != Some(prev)
         {
             self.cache.remove(&prev);
+            self.last_message_by_channel.remove(&prev);
+            self.pending_self_adds
+                .retain(|(channel_id, _, _), _| *channel_id != prev);
         }
         self.active_topic_id = next;
         cx.notify();
@@ -2063,6 +2082,9 @@ impl MessagesStore {
             };
             let parsed = prepare_messages(msgs, cfg.as_ref(), viewer_id);
             let _ = this.update(cx, |this, cx| {
+                if this.active_topic_id != Some(topic_key) {
+                    return;
+                }
                 this.set_channel(topic_key, parsed);
                 cx.emit(MessagesEvent::TopicUpdated { topic_id });
                 cx.notify();
@@ -2076,24 +2098,42 @@ impl MessagesStore {
         topic_id: i64,
         api_msg: mezon_client::transport::ApiMessage,
         cx: &mut Context<Self>,
-    ) {
+    ) -> TopicAppend {
         let topic_key = ChannelId(topic_id);
         let cfg = AppConfig::try_global(cx);
         let viewer_id = viewer_user_id(cx);
         let mut msg = message_from_api(api_msg, cfg, viewer_id);
-        enrich_sparse_topic_ack(&mut msg, topic_id, viewer_id, self.active_clan_id, cx);
+        enrich_sparse_topic_ack(&mut msg, viewer_id, self.active_clan_id, cx);
+        mark_pending_attachments_uploading(&mut msg.attachments);
+        let message_id = msg.id;
+        let create_time = if msg.create_time > 0 {
+            msg.create_time
+        } else {
+            unix_now_seconds()
+        };
         if self.cache.contains(&topic_key) {
             if let Some(channel) = self.cache.get_mut(&topic_key) {
                 if channel.messages.contains_id(msg.id) {
-                    return;
+                    return TopicAppend::default();
                 }
                 channel.messages.push_grouped(msg);
             }
         } else {
             self.set_channel(topic_key, vec![msg]);
         }
+        let should_count_reply = topic_id != 0
+            && mark_topic_reply_counted(
+                &mut self.counted_topic_replies,
+                &mut self.counted_topic_reply_order,
+                message_id,
+            );
         cx.emit(MessagesEvent::TopicUpdated { topic_id });
         cx.notify();
+        TopicAppend {
+            appended: true,
+            should_count_reply,
+            create_time,
+        }
     }
 
     pub fn mark_message_as_topic(
@@ -2148,7 +2188,8 @@ impl MessagesStore {
         let Some(source_channel_id) = self.active_channel_id else {
             return false;
         };
-        let Some(channel) = self.cache.get(&source_channel_id) else {
+        let storage_id = self.reaction_storage_channel(message_ids[0]);
+        let Some(channel) = self.cache.get(&storage_id) else {
             return false;
         };
         let sources: Vec<ForwardSource> = message_ids
@@ -2208,14 +2249,16 @@ impl MessagesStore {
         attachment_index: usize,
         cx: &mut Context<Self>,
     ) {
-        let Some(channel_id) = self.active_channel_id else {
+        if self.active_channel_id.is_none() {
             return;
-        };
+        }
+        let storage_id = self.reaction_storage_channel(message_id);
+        let is_topic = self.active_topic_id == Some(storage_id);
         let mode = self.mode;
         let is_public = self.is_public;
         let clan_id = self.active_clan_id.map_or(0, |c| c.get());
         let cfg = AppConfig::try_global(cx).cloned();
-        let Some(channel) = self.cache.get_mut(&channel_id) else {
+        let Some(channel) = self.cache.get_mut(&storage_id) else {
             return;
         };
         let Some(msg) = channel.messages.get_mut_by_id(message_id) else {
@@ -2231,24 +2274,36 @@ impl MessagesStore {
         let content = msg.content.clone();
         let remaining: Vec<mezon_client::transport::ApiAttachment> =
             msg.attachments.iter().map(attachment_to_api).collect();
-        cx.emit(MessagesEvent::Updated {
-            message_id: Some(message_id),
-        });
+        if is_topic {
+            cx.emit(MessagesEvent::TopicUpdated {
+                topic_id: storage_id.get(),
+            });
+        } else {
+            cx.emit(MessagesEvent::Updated {
+                message_id: Some(message_id),
+            });
+        }
         cx.notify();
 
         let api = self.api.clone();
-        let channel_num = channel_id.get();
+        let (api_channel_id, api_topic_id) = if is_topic {
+            (storage_id.get(), storage_id.get())
+        } else {
+            (storage_id.get(), 0)
+        };
         let message_num = message_id.get();
         cx.spawn(async move |_this, _cx| {
             if let Err(e) = api
                 .update_channel_message_with_attachments(
                     clan_id,
-                    channel_num,
+                    api_channel_id,
                     message_num,
                     &content,
                     remaining,
                     mode,
                     is_public,
+                    api_topic_id,
+                    is_topic,
                 )
                 .await
             {
@@ -2550,15 +2605,12 @@ impl MessagesStore {
                 cx.spawn(async move |cx: &mut gpui::AsyncApp| {
                     while let Some(outcome) = completions.recv().await {
                         let _ = drain_this.update(cx, |this, cx| {
-                            let message_id = MessageId(real_message_id);
-                            match outcome {
-                                AttachmentUploadOutcome::Uploaded(key) => {
-                                    this.mark_attachment_uploaded(channel_id, message_id, &key, cx);
-                                }
-                                AttachmentUploadOutcome::Failed(key) => {
-                                    this.mark_attachment_failed(channel_id, message_id, &key, cx);
-                                }
-                            }
+                            this.mark_channel_attachment_outcome(
+                                channel_id,
+                                MessageId(real_message_id),
+                                outcome,
+                                cx,
+                            );
                         });
                     }
                 })
@@ -2574,6 +2626,8 @@ impl MessagesStore {
                     keys,
                     mode,
                     is_public,
+                    0,
+                    false,
                     on_complete,
                 )
                 .await;
@@ -3044,17 +3098,23 @@ impl MessagesStore {
             parent_id,
             m.message_id,
         ));
-        let cfg = AppConfig::try_global(cx);
         let viewer_id = viewer_user_id(cx);
 
         match code {
             MessageCode::ChatUpdate | MessageCode::UpdateEphemeralMsg => {
-                let incoming = message_from_channel_proto(m, message_id.get(), cfg, viewer_id);
+                let target_id = self.mutation_storage_channel(m, message_id);
+                let incoming = message_from_channel_proto(
+                    m,
+                    message_id.get(),
+                    AppConfig::try_global(cx),
+                    viewer_id,
+                );
                 let presign_keys = presign::parse_presign_finish_keys(&m.content);
-                self.apply_message_update(storage_id, message_id, incoming, presign_keys, cx);
+                self.apply_message_update(target_id, message_id, incoming, presign_keys, cx);
             }
             MessageCode::ChatRemove | MessageCode::DeleteEphemeralMsg => {
-                self.apply_message_remove(storage_id, message_id, cx);
+                let target_id = self.mutation_storage_channel(m, message_id);
+                self.apply_message_remove(target_id, message_id, cx);
                 if m.topic_id != 0 {
                     TopicsStore::global(cx).update(cx, |store, cx| {
                         store.decrement_topic_reply_count(m.topic_id, cx);
@@ -3062,6 +3122,7 @@ impl MessagesStore {
                 }
             }
             _ => {
+                self.count_topic_reply(m, storage_id, message_id, cx);
                 if !self.cache.contains(&storage_id) {
                     self.set_last_message(storage_id, message_id);
                     return;
@@ -3080,41 +3141,79 @@ impl MessagesStore {
                     self.set_last_message(storage_id, message_id);
                     return;
                 }
-                let incoming = message_from_channel_proto(m, message_id.get(), cfg, viewer_id);
-                let topic_hint = (m.topic_id != 0).then_some(m.topic_id);
-                self.apply_incoming_message(storage_id, incoming, topic_hint, cx);
+                let incoming = message_from_channel_proto(
+                    m,
+                    message_id.get(),
+                    AppConfig::try_global(cx),
+                    viewer_id,
+                );
+                self.apply_incoming_message(storage_id, incoming, cx);
             }
         }
+    }
+
+    fn count_topic_reply(
+        &mut self,
+        m: &mezon_proto::api::ChannelMessage,
+        _storage_id: ChannelId,
+        message_id: MessageId,
+        cx: &mut Context<Self>,
+    ) {
+        self.note_topic_reply(m.topic_id, message_id, i64::from(m.create_time_seconds), cx);
+    }
+
+    fn note_topic_reply(
+        &mut self,
+        topic_id: i64,
+        message_id: MessageId,
+        create_time: i64,
+        cx: &mut Context<Self>,
+    ) {
+        if topic_id == 0 {
+            return;
+        }
+        if !mark_topic_reply_counted(
+            &mut self.counted_topic_replies,
+            &mut self.counted_topic_reply_order,
+            message_id,
+        ) {
+            return;
+        }
+        TopicsStore::global(cx).update(cx, |store, cx| {
+            store.increment_topic_reply_count(topic_id, create_time, cx);
+        });
     }
 
     fn apply_incoming_message(
         &mut self,
         storage_id: ChannelId,
         msg: Message,
-        topic_id_hint: Option<i64>,
         cx: &mut Context<Self>,
     ) {
         let is_active = self.active_channel_id == Some(storage_id);
+        let is_active_topic = self.active_topic_id == Some(storage_id);
         let incoming_id = msg.id;
         let Some(channel) = self.cache.get_mut(&storage_id) else {
             self.set_last_message(storage_id, msg.id);
             return;
         };
         if channel.messages.contains_id(msg.id) {
-            if channel.messages.merge_existing(msg.id, msg) && is_active {
-                cx.emit(MessagesEvent::Updated {
-                    message_id: Some(incoming_id),
-                });
-                cx.notify();
+            if channel.messages.merge_existing(msg.id, msg) {
+                if is_active_topic {
+                    cx.emit(MessagesEvent::TopicUpdated {
+                        topic_id: storage_id.get(),
+                    });
+                    cx.notify();
+                } else if is_active {
+                    cx.emit(MessagesEvent::Updated {
+                        message_id: Some(incoming_id),
+                    });
+                    cx.notify();
+                }
             }
             return;
         }
         let tail_id = msg.id;
-        let topic_reply = msg
-            .topic_id
-            .map(|id| id.get())
-            .or(topic_id_hint)
-            .map(|topic_id| (topic_id, msg.create_time));
         let old_len = channel.messages.len();
         let appended = match channel
             .messages
@@ -3142,16 +3241,11 @@ impl MessagesStore {
                 });
                 cx.notify();
             }
-        } else if self.active_topic_id == Some(storage_id) {
+        } else if is_active_topic {
             cx.emit(MessagesEvent::TopicUpdated {
                 topic_id: storage_id.get(),
             });
             cx.notify();
-        }
-        if appended && let Some((topic_id, create_time)) = topic_reply {
-            TopicsStore::global(cx).update(cx, |store, cx| {
-                store.increment_topic_reply_count(topic_id, create_time, cx);
-            });
         }
     }
 
@@ -3264,8 +3358,7 @@ impl MessagesStore {
         if !should_close {
             return;
         }
-        self.active_topic_id = None;
-        cx.notify();
+        self.set_active_topic(None, cx);
         topics.update(cx, |store, cx| store.close_panel_from_messages(cx));
     }
 
@@ -3405,26 +3498,35 @@ impl MessagesStore {
         .detach();
     }
 
+    fn bucket_contains(&self, bucket: ChannelId, message_id: MessageId) -> bool {
+        self.cache
+            .get(&bucket)
+            .is_some_and(|c| c.messages.contains_id(message_id))
+    }
+
     fn reaction_storage_channel(&self, message_id: MessageId) -> ChannelId {
         if let Some(topic_id) = self.active_topic_id {
-            if self
-                .cache
-                .get(&topic_id)
-                .is_some_and(|c| c.messages.contains_id(message_id))
-            {
+            if self.bucket_contains(topic_id, message_id) {
                 return topic_id;
             }
             if let Some(parent) = self.active_channel_id
-                && self
-                    .cache
-                    .get(&parent)
-                    .is_some_and(|c| c.messages.contains_id(message_id))
+                && self.bucket_contains(parent, message_id)
             {
                 return parent;
             }
             return topic_id;
         }
         self.active_channel_id.unwrap_or(ChannelId(0))
+    }
+
+    fn mutation_storage_channel(
+        &self,
+        m: &mezon_proto::api::ChannelMessage,
+        message_id: MessageId,
+    ) -> ChannelId {
+        mutation_bucket_for(m, self.active_topic_id, self.active_channel_id, |bucket| {
+            self.bucket_contains(bucket, message_id)
+        })
     }
 
     fn rollback_reaction_send(
@@ -3609,22 +3711,27 @@ impl MessagesStore {
         let RealtimeEvent::MessageReaction(r) = event else {
             return;
         };
-        let channel_id = ChannelId(r.channel_id);
+        let storage_id = if r.topic_id != 0 {
+            ChannelId(r.topic_id)
+        } else {
+            ChannelId(r.channel_id)
+        };
         let message_id = MessageId(r.message_id);
-        let is_active = self.active_channel_id == Some(channel_id);
+        let is_active = self.active_channel_id == Some(storage_id);
+        let is_active_topic = self.active_topic_id == Some(storage_id);
         let sender_id = r.sender_id.to_string();
         let emoji_id = r.emoji_id.to_string();
 
         if !r.action
             && self.consume_pending_self_add(
-                channel_id, message_id, &emoji_id, &r.emoji, &sender_id, cx,
+                storage_id, message_id, &emoji_id, &r.emoji, &sender_id, cx,
             )
         {
             return;
         }
 
         let cfg = AppConfig::try_global(cx);
-        let Some(channel) = self.cache.get_mut(&channel_id) else {
+        let Some(channel) = self.cache.get_mut(&storage_id) else {
             return;
         };
         let Some(msg) = channel.messages.get_mut_by_id(message_id) else {
@@ -3638,7 +3745,12 @@ impl MessagesStore {
             r.action,
             cfg,
         );
-        if is_active {
+        if is_active_topic {
+            cx.emit(MessagesEvent::TopicUpdated {
+                topic_id: storage_id.get(),
+            });
+            cx.notify();
+        } else if is_active {
             cx.emit(MessagesEvent::Updated {
                 message_id: Some(message_id),
             });
@@ -3745,30 +3857,45 @@ impl MessagesStore {
         }
     }
 
-    fn mark_attachment_uploaded(
+    fn apply_attachment_outcome(
+        &mut self,
+        bucket: ChannelId,
+        message_id: MessageId,
+        outcome: &AttachmentUploadOutcome,
+    ) -> bool {
+        let (key, failed) = match outcome {
+            AttachmentUploadOutcome::Uploaded(key) => (key.as_str(), false),
+            AttachmentUploadOutcome::Failed(key) => (key.as_str(), true),
+        };
+        let Some(channel) = self.cache.get_mut(&bucket) else {
+            return false;
+        };
+        let Some(message) = channel.messages.get_mut_by_id(message_id) else {
+            return false;
+        };
+        let mut changed = false;
+        for att in message.attachments.iter_mut() {
+            if att.uploading && presign::normalize_presign_key(&att.url) == key {
+                att.uploading = false;
+                if failed {
+                    att.upload_failed = true;
+                }
+                changed = true;
+            }
+        }
+        changed
+    }
+
+    fn mark_channel_attachment_outcome(
         &mut self,
         channel_id: ChannelId,
         message_id: MessageId,
-        key: &str,
+        outcome: AttachmentUploadOutcome,
         cx: &mut Context<Self>,
     ) {
-        let cleared = {
-            let Some(channel) = self.cache.get_mut(&channel_id) else {
-                return;
-            };
-            let Some(message) = channel.messages.get_mut_by_id(message_id) else {
-                return;
-            };
-            let mut cleared = false;
-            for att in message.attachments.iter_mut() {
-                if att.uploading && presign::normalize_presign_key(&att.url) == key {
-                    att.uploading = false;
-                    cleared = true;
-                }
-            }
-            cleared
-        };
-        if cleared && self.active_channel_id == Some(channel_id) {
+        if self.apply_attachment_outcome(channel_id, message_id, &outcome)
+            && self.active_channel_id == Some(channel_id)
+        {
             cx.emit(MessagesEvent::Updated {
                 message_id: Some(message_id),
             });
@@ -3776,34 +3903,18 @@ impl MessagesStore {
         }
     }
 
-    fn mark_attachment_failed(
+    pub fn apply_topic_attachment_outcome(
         &mut self,
-        channel_id: ChannelId,
+        topic_id: i64,
         message_id: MessageId,
-        key: &str,
+        outcome: AttachmentUploadOutcome,
         cx: &mut Context<Self>,
     ) {
-        let changed = {
-            let Some(channel) = self.cache.get_mut(&channel_id) else {
-                return;
-            };
-            let Some(message) = channel.messages.get_mut_by_id(message_id) else {
-                return;
-            };
-            let mut changed = false;
-            for att in message.attachments.iter_mut() {
-                if att.uploading && presign::normalize_presign_key(&att.url) == key {
-                    att.uploading = false;
-                    att.upload_failed = true;
-                    changed = true;
-                }
-            }
-            changed
-        };
-        if changed && self.active_channel_id == Some(channel_id) {
-            cx.emit(MessagesEvent::Updated {
-                message_id: Some(message_id),
-            });
+        let bucket = ChannelId(topic_id);
+        if self.apply_attachment_outcome(bucket, message_id, &outcome)
+            && self.active_topic_id == Some(bucket)
+        {
+            cx.emit(MessagesEvent::TopicUpdated { topic_id });
             cx.notify();
         }
     }
@@ -3933,6 +4044,74 @@ fn storage_channel_id(m: &mezon_proto::api::ChannelMessage) -> ChannelId {
 
 fn parent_channel_id(m: &mezon_proto::api::ChannelMessage) -> ChannelId {
     ChannelId(m.channel_id)
+}
+
+fn carries_topic_marker(m: &mezon_proto::api::ChannelMessage) -> bool {
+    serde_json::from_str::<ApiMessageContent>(&m.content)
+        .ok()
+        .and_then(|content| content.tp)
+        .and_then(|tp| tp.parse::<i64>().ok())
+        .is_some_and(|id| id != 0)
+}
+
+fn mark_pending_attachments_uploading(attachments: &mut [MessageAttachment]) {
+    for att in attachments.iter_mut() {
+        if att.presign_pending {
+            att.uploading = true;
+        }
+    }
+}
+
+fn named_mutation_channel(m: &mezon_proto::api::ChannelMessage) -> ChannelId {
+    if m.topic_id != 0 && !carries_topic_marker(m) {
+        ChannelId(m.topic_id)
+    } else {
+        ChannelId(m.channel_id)
+    }
+}
+
+fn mutation_bucket_for(
+    m: &mezon_proto::api::ChannelMessage,
+    active_topic_id: Option<ChannelId>,
+    active_channel_id: Option<ChannelId>,
+    bucket_contains: impl Fn(ChannelId) -> bool,
+) -> ChannelId {
+    let named = named_mutation_channel(m);
+    if bucket_contains(named) {
+        return named;
+    }
+    [
+        Some(ChannelId(m.channel_id)),
+        (m.topic_id != 0).then_some(ChannelId(m.topic_id)),
+        active_topic_id,
+        active_channel_id,
+    ]
+    .into_iter()
+    .flatten()
+    .find(|bucket| bucket_contains(*bucket))
+    .unwrap_or(named)
+}
+
+fn mark_topic_reply_counted(
+    seen: &mut HashSet<MessageId>,
+    order: &mut std::collections::VecDeque<MessageId>,
+    message_id: MessageId,
+) -> bool {
+    if message_id.is_zero() {
+        return false;
+    }
+    if !seen.insert(message_id) {
+        return false;
+    }
+    order.push_back(message_id);
+    if order.len() > MAX_COUNTED_TOPIC_REPLIES {
+        while order.len() > MAX_COUNTED_TOPIC_REPLIES / 2 {
+            if let Some(evicted) = order.pop_front() {
+                seen.remove(&evicted);
+            }
+        }
+    }
+    true
 }
 
 fn synthesize_ws_message_id(
@@ -4123,54 +4302,75 @@ fn trim_messages_back(messages: &mut Vec<Message>) -> usize {
     drop
 }
 
+#[derive(Clone, Copy)]
+struct SparseAckGaps {
+    sender: bool,
+    name: bool,
+    avatar: bool,
+    time: bool,
+}
+
+fn sparse_topic_ack_gaps(msg: &Message) -> Option<SparseAckGaps> {
+    let gaps = SparseAckGaps {
+        sender: msg.sender_id.is_empty() || msg.sender_id.as_str() == "0",
+        name: msg.sender_name.is_empty(),
+        avatar: msg.avatar_url.is_empty(),
+        time: msg.create_time <= 0,
+    };
+    (gaps.sender || gaps.name || gaps.avatar || gaps.time).then_some(gaps)
+}
+
+fn fill_sparse_topic_ack(
+    msg: &mut Message,
+    gaps: SparseAckGaps,
+    viewer_id: Option<UserId>,
+    sender_id: String,
+    profile: (String, String, SharedString),
+    now: i64,
+) {
+    let (display_name, avatar_url, avatar_proxied) = profile;
+    if gaps.sender {
+        msg.sender_id = sender_id;
+        msg.sender_user_id = viewer_id.or_else(|| msg.sender_id.parse().ok().map(UserId));
+    }
+    if gaps.name && !display_name.is_empty() {
+        msg.sender_name = display_name.into();
+    }
+    if gaps.avatar && !avatar_url.is_empty() {
+        msg.avatar_url = avatar_url.into();
+        msg.avatar_proxied = avatar_proxied;
+    }
+    if gaps.time {
+        msg.create_time = now;
+        msg.day_label = local_day_key(now);
+        msg.time_hhmm = format_local_time_hhmm(now).into();
+        msg.local_date = local_datetime(now).map(|dt| dt.date_naive());
+    }
+}
+
 fn enrich_sparse_topic_ack(
     msg: &mut Message,
-    topic_id: i64,
     viewer_id: Option<UserId>,
     clan_id: Option<ClanId>,
     cx: &App,
 ) {
-    if msg.topic_id.is_none() {
-        msg.topic_id = Some(ChannelId(topic_id));
-    }
-    let sparse_sender = msg.sender_id.is_empty() || msg.sender_id.as_str() == "0";
-    let sparse_name = msg.sender_name.is_empty();
-    let sparse_avatar = msg.avatar_url.is_empty();
-    let sparse_time = msg.create_time <= 0;
-    if !sparse_sender && !sparse_name && !sparse_avatar && !sparse_time {
+    let Some(gaps) = sparse_topic_ack_gaps(msg) else {
         return;
-    }
-    let sender_id = if sparse_sender {
+    };
+    let sender_id = if gaps.sender {
         viewer_id
             .map(|id| id.to_string())
             .unwrap_or_else(|| msg.sender_id.to_string())
     } else {
         msg.sender_id.to_string()
     };
-    let (display_name, avatar_url, avatar_proxied) = outgoing_sender_profile(
+    let profile = outgoing_sender_profile(
         &sender_id,
         msg.sender_name.as_ref(),
         clan_id.unwrap_or_default(),
         cx,
     );
-    if sparse_sender {
-        msg.sender_id = sender_id.into();
-        msg.sender_user_id = viewer_id.or_else(|| msg.sender_id.parse().ok().map(UserId));
-    }
-    if sparse_name && !display_name.is_empty() {
-        msg.sender_name = display_name.into();
-    }
-    if sparse_avatar && !avatar_url.is_empty() {
-        msg.avatar_url = avatar_url.into();
-        msg.avatar_proxied = avatar_proxied;
-    }
-    if sparse_time {
-        let create_time = unix_now_seconds();
-        msg.create_time = create_time;
-        msg.day_label = local_day_key(create_time);
-        msg.time_hhmm = format_local_time_hhmm(create_time).into();
-        msg.local_date = local_datetime(create_time).map(|dt| dt.date_naive());
-    }
+    fill_sparse_topic_ack(msg, gaps, viewer_id, sender_id, profile, unix_now_seconds());
 }
 
 /// Display name + avatar for an outgoing optimistic row (React `fakeItUntilYouMakeIt`).
@@ -4292,6 +4492,16 @@ fn apply_presign_gate(
     base_img: &str,
     create_time: i64,
 ) {
+    apply_presign_gate_at(attachments, keys, base_img, create_time, now_unix_seconds());
+}
+
+fn apply_presign_gate_at(
+    attachments: &mut Vec<MessageAttachment>,
+    keys: &[String],
+    base_img: &str,
+    create_time: i64,
+    now: i64,
+) {
     let presignable = attachments
         .iter()
         .filter(|a| presign::is_mezon_cdn(&a.url, base_img))
@@ -4302,7 +4512,6 @@ fn apply_presign_gate(
             a.presign_pending = false;
         }
     } else {
-        let now = now_unix_seconds();
         attachments.retain(|a| {
             !presign::is_expired_presign_attachment(&a.url, Some(keys), base_img, create_time, now)
         });
@@ -6282,5 +6491,429 @@ mod tests {
         assert!(should_write_last_seen(Some(seen), Some(tail), newer));
         assert!(should_write_last_seen(Some(seen), Some(tail), tail));
         assert!(!should_write_last_seen(Some(newer), Some(tail), seen));
+    }
+
+    fn topic_proto(
+        channel_id: i64,
+        topic_id: i64,
+        content: &str,
+    ) -> mezon_proto::api::ChannelMessage {
+        mezon_proto::api::ChannelMessage {
+            channel_id,
+            topic_id,
+            content: content.to_string(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn storage_channel_id_routes_topic_reply_to_topic_bucket_not_parent() {
+        let reply = topic_proto(10, 99, r#"{"t":"a reply"}"#);
+        assert_eq!(storage_channel_id(&reply), ChannelId(99));
+        assert_eq!(parent_channel_id(&reply), ChannelId(10));
+    }
+
+    #[test]
+    fn storage_channel_id_routes_plain_message_to_its_channel_bucket() {
+        let plain = topic_proto(10, 0, r#"{"t":"hello"}"#);
+        assert_eq!(storage_channel_id(&plain), ChannelId(10));
+        assert_eq!(parent_channel_id(&plain), ChannelId(10));
+    }
+
+    #[test]
+    fn carries_topic_marker_only_for_a_nonzero_numeric_tp() {
+        assert!(carries_topic_marker(&topic_proto(
+            10,
+            0,
+            r#"{"t":"origin","tp":"99"}"#
+        )));
+        assert!(!carries_topic_marker(&topic_proto(
+            10,
+            0,
+            r#"{"t":"origin","tp":"0"}"#
+        )));
+        assert!(!carries_topic_marker(&topic_proto(
+            10,
+            0,
+            r#"{"t":"plain"}"#
+        )));
+        assert!(!carries_topic_marker(&topic_proto(10, 0, "not json")));
+    }
+
+    #[test]
+    fn named_mutation_channel_sends_a_topic_reply_to_the_topic_bucket() {
+        let reply = topic_proto(10, 99, r#"{"t":"a reply"}"#);
+        assert_eq!(named_mutation_channel(&reply), ChannelId(99));
+    }
+
+    #[test]
+    fn named_mutation_channel_keeps_a_topic_origin_in_its_parent_channel() {
+        let origin = topic_proto(10, 99, r#"{"t":"origin","tp":"99"}"#);
+        assert_eq!(
+            named_mutation_channel(&origin),
+            ChannelId(10),
+            "a message that merely HAS a topic hanging off it lives in the parent channel"
+        );
+    }
+
+    #[test]
+    fn named_mutation_channel_sends_a_plain_message_to_its_channel() {
+        let plain = topic_proto(10, 0, r#"{"t":"hello"}"#);
+        assert_eq!(named_mutation_channel(&plain), ChannelId(10));
+    }
+
+    #[test]
+    fn mutation_bucket_for_prefers_the_named_bucket_over_the_parent_that_also_holds_the_id() {
+        let reply = topic_proto(10, 99, r#"{"t":"a reply"}"#);
+        let bucket = mutation_bucket_for(&reply, Some(ChannelId(99)), Some(ChannelId(10)), |b| {
+            b == ChannelId(99) || b == ChannelId(10)
+        });
+        assert_eq!(
+            bucket,
+            ChannelId(99),
+            "a topic reply edits the copy in the topic bucket, not a same-id row in the parent"
+        );
+    }
+
+    #[test]
+    fn mutation_bucket_for_falls_back_to_the_bucket_that_actually_holds_the_message() {
+        let reply = topic_proto(10, 99, r#"{"t":"a reply"}"#);
+        let bucket = mutation_bucket_for(&reply, Some(ChannelId(99)), Some(ChannelId(10)), |b| {
+            b == ChannelId(10)
+        });
+        assert_eq!(
+            bucket,
+            ChannelId(10),
+            "the edit must land in the bucket that really holds the row"
+        );
+    }
+
+    #[test]
+    fn mutation_bucket_for_falls_back_to_the_active_topic_panel() {
+        let orphan = topic_proto(0, 0, r#"{"t":"a reply"}"#);
+        let bucket = mutation_bucket_for(&orphan, Some(ChannelId(99)), Some(ChannelId(10)), |b| {
+            b == ChannelId(99)
+        });
+        assert_eq!(bucket, ChannelId(99));
+    }
+
+    #[test]
+    fn mutation_bucket_for_returns_the_named_bucket_when_nothing_holds_the_message() {
+        let reply = topic_proto(10, 99, r#"{"t":"a reply"}"#);
+        let bucket = mutation_bucket_for(&reply, Some(ChannelId(7)), Some(ChannelId(8)), |_| false);
+        assert_eq!(bucket, ChannelId(99));
+    }
+
+    #[test]
+    fn mark_topic_reply_counted_counts_the_same_message_id_only_once() {
+        let mut seen = HashSet::new();
+        let mut order = std::collections::VecDeque::new();
+        let id = MessageId(42);
+        assert!(mark_topic_reply_counted(&mut seen, &mut order, id));
+        assert!(
+            !mark_topic_reply_counted(&mut seen, &mut order, id),
+            "the realtime echo and our own send ack must not both bump the reply count"
+        );
+        assert!(!mark_topic_reply_counted(&mut seen, &mut order, id));
+    }
+
+    #[test]
+    fn mark_topic_reply_counted_counts_distinct_message_ids() {
+        let mut seen = HashSet::new();
+        let mut order = std::collections::VecDeque::new();
+        assert!(mark_topic_reply_counted(
+            &mut seen,
+            &mut order,
+            MessageId(42)
+        ));
+        assert!(mark_topic_reply_counted(
+            &mut seen,
+            &mut order,
+            MessageId(43)
+        ));
+        assert_eq!(seen.len(), 2);
+    }
+
+    #[test]
+    fn mark_topic_reply_counted_ignores_a_zero_message_id() {
+        let mut seen = HashSet::new();
+        let mut order = std::collections::VecDeque::new();
+        assert!(!mark_topic_reply_counted(
+            &mut seen,
+            &mut order,
+            MessageId(0)
+        ));
+        assert!(seen.is_empty());
+        assert!(order.is_empty());
+    }
+
+    #[test]
+    fn mark_topic_reply_counted_evicts_oldest_but_still_dedups_recent_ids() {
+        let mut seen = HashSet::new();
+        let mut order = std::collections::VecDeque::new();
+        for i in 1..=(MAX_COUNTED_TOPIC_REPLIES as i64 + 1) {
+            assert!(mark_topic_reply_counted(
+                &mut seen,
+                &mut order,
+                MessageId(i)
+            ));
+        }
+        assert!(seen.len() <= MAX_COUNTED_TOPIC_REPLIES);
+        assert_eq!(seen.len(), order.len());
+
+        let newest = MessageId(MAX_COUNTED_TOPIC_REPLIES as i64 + 1);
+        assert!(seen.contains(&newest));
+        assert!(
+            !mark_topic_reply_counted(&mut seen, &mut order, newest),
+            "eviction must not break dedup for recently counted replies"
+        );
+        assert!(!seen.contains(&MessageId(1)));
+    }
+
+    fn cdn_attachment(url: &str) -> MessageAttachment {
+        MessageAttachment {
+            url: url.into(),
+            presign_pending: false,
+            ..Default::default()
+        }
+    }
+
+    const TEST_CDN: &str = "https://cdn.mezon.ai";
+
+    #[test]
+    fn presign_gate_keeps_attachment_pending_when_the_finish_list_is_empty() {
+        let mut attachments = vec![cdn_attachment("https://cdn.mezon.ai/uploads/photo.png")];
+        apply_presign_gate_at(&mut attachments, &[], TEST_CDN, 1000, 1000);
+        assert_eq!(attachments.len(), 1);
+        assert!(
+            attachments[0].presign_pending,
+            "an ack with no finished keys must not advertise the upload as done"
+        );
+    }
+
+    #[test]
+    fn presign_gate_clears_pending_when_the_finish_list_contains_the_key() {
+        let mut attachments = vec![cdn_attachment("https://cdn.mezon.ai/uploads/photo.png")];
+        attachments[0].presign_pending = true;
+        apply_presign_gate_at(
+            &mut attachments,
+            &["photo".to_string()],
+            TEST_CDN,
+            1000,
+            1000,
+        );
+        assert_eq!(attachments.len(), 1);
+        assert!(!attachments[0].presign_pending);
+    }
+
+    #[test]
+    fn presign_gate_short_circuits_on_key_count_even_when_the_key_does_not_match() {
+        let mut attachments = vec![cdn_attachment("https://cdn.mezon.ai/uploads/photo.png")];
+        attachments[0].presign_pending = true;
+        apply_presign_gate_at(
+            &mut attachments,
+            &["some-other-key".to_string()],
+            TEST_CDN,
+            1000,
+            1000,
+        );
+        assert!(!attachments[0].presign_pending);
+    }
+
+    #[test]
+    fn presign_gate_keeps_second_attachment_pending_until_both_keys_arrive() {
+        let mut attachments = vec![
+            cdn_attachment("https://cdn.mezon.ai/uploads/a.png"),
+            cdn_attachment("https://cdn.mezon.ai/uploads/b.png"),
+        ];
+        apply_presign_gate_at(&mut attachments, &["a".to_string()], TEST_CDN, 1000, 1000);
+        assert_eq!(attachments.len(), 2);
+        assert!(!attachments[0].presign_pending);
+        assert!(attachments[1].presign_pending);
+    }
+
+    #[test]
+    fn presign_gate_drops_a_pending_attachment_that_never_finished_uploading() {
+        let mut attachments = vec![cdn_attachment("https://cdn.mezon.ai/uploads/photo.png")];
+        apply_presign_gate_at(
+            &mut attachments,
+            &[],
+            TEST_CDN,
+            1000,
+            1000 + presign::PRESIGN_PENDING_MAX_AGE_SEC,
+        );
+        assert!(
+            attachments.is_empty(),
+            "a stale never-uploaded attachment is dropped instead of rendering broken forever"
+        );
+    }
+
+    #[test]
+    fn presign_gate_leaves_a_non_cdn_attachment_alone() {
+        let mut attachments = vec![cdn_attachment("https://tenor.com/view/cat.gif")];
+        apply_presign_gate_at(
+            &mut attachments,
+            &[],
+            TEST_CDN,
+            1000,
+            1000 + presign::PRESIGN_PENDING_MAX_AGE_SEC,
+        );
+        assert_eq!(attachments.len(), 1);
+        assert!(!attachments[0].presign_pending);
+    }
+
+    #[test]
+    fn topic_ack_marks_only_presign_pending_attachments_as_uploading() {
+        let mut attachments = vec![
+            MessageAttachment {
+                url: "https://cdn.mezon.ai/uploads/pending.png".into(),
+                presign_pending: true,
+                ..Default::default()
+            },
+            MessageAttachment {
+                url: "https://cdn.mezon.ai/uploads/done.png".into(),
+                presign_pending: false,
+                ..Default::default()
+            },
+        ];
+        mark_pending_attachments_uploading(&mut attachments);
+        assert!(
+            attachments[0].uploading,
+            "a topic attachment still waiting on presign must render as uploading"
+        );
+        assert!(!attachments[1].uploading);
+    }
+
+    fn sparse_ack_message() -> Message {
+        let mut msg = Message::new(MessageId(7), "a topic reply", "", "", 0);
+        msg.avatar_url = "".into();
+        msg
+    }
+
+    fn test_profile() -> (String, String, SharedString) {
+        (
+            "Alice".to_string(),
+            "https://cdn.mezon.ai/alice.png".to_string(),
+            SharedString::from("https://proxy/alice.png"),
+        )
+    }
+
+    #[test]
+    fn sparse_topic_ack_gaps_detects_each_missing_field() {
+        assert!(sparse_topic_ack_gaps(&sparse_ack_message()).is_some());
+
+        let mut zero_sender = Message::new(MessageId(7), "hi", "0", "Alice", 100);
+        zero_sender.avatar_url = "https://cdn.mezon.ai/alice.png".into();
+        let gaps = sparse_topic_ack_gaps(&zero_sender).expect("sender id 0 is sparse");
+        assert!(gaps.sender);
+        assert!(!gaps.name);
+        assert!(!gaps.time);
+    }
+
+    #[test]
+    fn sparse_topic_ack_gaps_is_none_for_a_complete_ack() {
+        let mut complete = Message::new(MessageId(7), "hi", "42", "Alice", 100);
+        complete.avatar_url = "https://cdn.mezon.ai/alice.png".into();
+        assert!(
+            sparse_topic_ack_gaps(&complete).is_none(),
+            "a fully populated ack must not be rewritten"
+        );
+    }
+
+    #[test]
+    fn fill_sparse_topic_ack_fills_sender_name_avatar_and_time() {
+        let mut msg = sparse_ack_message();
+        let gaps = sparse_topic_ack_gaps(&msg).expect("the ack is sparse");
+        fill_sparse_topic_ack(
+            &mut msg,
+            gaps,
+            Some(UserId(42)),
+            "42".to_string(),
+            test_profile(),
+            1_700_000_000,
+        );
+
+        assert_eq!(msg.sender_id, "42");
+        assert_eq!(msg.sender_user_id, Some(UserId(42)));
+        assert_eq!(msg.sender_name, "Alice");
+        assert_eq!(msg.avatar_url, "https://cdn.mezon.ai/alice.png");
+        assert_eq!(msg.avatar_proxied, "https://proxy/alice.png");
+        assert_eq!(msg.create_time, 1_700_000_000);
+        assert!(!msg.day_label.is_empty());
+        assert!(!msg.time_hhmm.is_empty());
+    }
+
+    #[test]
+    fn fill_sparse_topic_ack_never_stamps_a_topic_id_on_a_reply() {
+        let mut msg = sparse_ack_message();
+        assert_eq!(msg.topic_id, None);
+        let gaps = sparse_topic_ack_gaps(&msg).expect("the ack is sparse");
+        fill_sparse_topic_ack(
+            &mut msg,
+            gaps,
+            Some(UserId(42)),
+            "42".to_string(),
+            test_profile(),
+            1_700_000_000,
+        );
+        assert_eq!(
+            msg.topic_id, None,
+            "topic_id marks a message as a topic ORIGIN; a reply that carries one masquerades as the anchor"
+        );
+        assert_ne!(msg.code, MessageCode::Topic);
+    }
+
+    #[test]
+    fn fill_sparse_topic_ack_keeps_fields_the_server_already_sent() {
+        let mut msg = Message::new(MessageId(7), "hi", "42", "Bob", 500);
+        let gaps = sparse_topic_ack_gaps(&msg).expect("the avatar is missing");
+        fill_sparse_topic_ack(
+            &mut msg,
+            gaps,
+            Some(UserId(99)),
+            "99".to_string(),
+            test_profile(),
+            1_700_000_000,
+        );
+
+        assert_eq!(
+            msg.sender_id, "42",
+            "a server-sent sender is never rewritten"
+        );
+        assert_eq!(msg.sender_name, "Bob");
+        assert_eq!(msg.create_time, 500);
+        assert_eq!(msg.avatar_url, "https://cdn.mezon.ai/alice.png");
+    }
+
+    #[test]
+    fn has_more_bottom_ignores_an_optimistic_tail_id() {
+        let list =
+            MessageList::from_messages(vec![Message::new(MessageId(1), "a", "u1", "U", 100)]);
+        assert!(
+            !has_more_bottom_for(Some(MessageId::next_optimistic()), &list),
+            "an un-acked optimistic row is not evidence of unloaded server history"
+        );
+    }
+
+    #[test]
+    fn removing_a_reply_in_the_middle_keeps_the_index_and_order() {
+        let mut list = MessageList::from_messages(vec![
+            Message::new(MessageId(1), "first", "u1", "U1", 100),
+            Message::new(MessageId(2), "second", "u2", "U2", 200),
+            Message::new(MessageId(3), "third", "u3", "U3", 300),
+        ]);
+
+        assert_eq!(list.remove_id(MessageId(2)), Some(1));
+        assert_list_consistent(&list);
+        assert_eq!(
+            list.as_slice().iter().map(|m| m.id).collect::<Vec<_>>(),
+            vec![MessageId(1), MessageId(3)]
+        );
+        assert_eq!(
+            list.position(MessageId(3)),
+            Some(1),
+            "a stale index after a mid-list delete renders the WRONG row"
+        );
+        assert_eq!(list.remove_id(MessageId(404)), None);
     }
 }

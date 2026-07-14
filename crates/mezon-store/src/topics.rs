@@ -18,7 +18,7 @@ use crate::messages::{
 };
 use crate::presign;
 use crate::realtime::{RealtimeDispatch, RealtimeKind};
-use crate::{CACHE_TTL, ChannelId, Message, MessageId, UserId};
+use crate::{CACHE_TTL, ChannelId, ClanId, Message, MessageId, UserId};
 
 const TOPICS_LIMIT: i32 = 50;
 const STREAM_MODE_CHANNEL: i32 = 2;
@@ -31,6 +31,7 @@ pub enum TopicsEvent {
     Opened,
     Closed,
     ReplySent,
+    ReplyTargetChanged,
 }
 
 #[derive(Debug, Clone)]
@@ -54,10 +55,204 @@ struct TopicCompose {
     error: Option<String>,
 }
 
-pub struct TopicsStore {
-    topics: Vec<mezon_client::TopicDiscussion>,
+#[derive(Default)]
+struct TopicsData {
+    topics: Vec<TopicDiscussion>,
     topic_index: std::collections::HashMap<String, usize>,
     topic_meta: std::collections::HashMap<String, TopicMessageMeta>,
+}
+
+impl TopicsData {
+    fn clear(&mut self) {
+        self.topics.clear();
+        self.topic_index.clear();
+        self.topic_meta.clear();
+    }
+
+    fn clear_topics(&mut self) {
+        self.topics.clear();
+        self.topic_index.clear();
+    }
+
+    fn topics(&self) -> &[TopicDiscussion] {
+        &self.topics
+    }
+
+    fn set_topics(&mut self, topics: Vec<TopicDiscussion>) {
+        self.topics = topics;
+        self.resort_topics();
+    }
+
+    fn topic_by_id(&self, id: &str) -> Option<&TopicDiscussion> {
+        self.topic_index
+            .get(id)
+            .and_then(|&index| self.topics.get(index))
+    }
+
+    fn topic_id_for_origin_message(&self, origin_message_key: &str) -> Option<String> {
+        self.topics
+            .iter()
+            .find(|t| t.message_id == origin_message_key)
+            .map(|t| t.id.clone())
+    }
+
+    fn topic_meta(&self, topic_key: &str) -> Option<&TopicMessageMeta> {
+        self.topic_meta.get(topic_key)
+    }
+
+    fn topic_reply_summary(&self, topic_key: &str) -> (i32, Option<i64>) {
+        let Some(meta) = self.topic_meta(topic_key) else {
+            return (0, None);
+        };
+        let lsnt = normalize_unix_seconds(meta.lsnt);
+        (meta.rpl, (lsnt > 0).then_some(lsnt))
+    }
+
+    fn has_topic_meta(&self, topic_key: &str) -> bool {
+        self.topic_meta.contains_key(topic_key)
+    }
+
+    fn rebuild_topic_index(&mut self) {
+        self.topic_index = self
+            .topics
+            .iter()
+            .enumerate()
+            .map(|(index, topic)| (topic.id.clone(), index))
+            .collect();
+    }
+
+    fn resort_topics(&mut self) {
+        self.topics
+            .sort_by_key(|t| std::cmp::Reverse(t.last_message_timestamp));
+        self.rebuild_topic_index();
+    }
+
+    fn advance_topic_timestamp(&mut self, topic_id: &str, timestamp_sec: i64) {
+        if timestamp_sec <= 0 {
+            return;
+        }
+        let next = timestamp_sec.clamp(0, i64::from(u32::MAX)) as u32;
+        let Some(idx) = self.topic_index.get(topic_id).copied() else {
+            return;
+        };
+        let Some(topic) = self.topics.get_mut(idx) else {
+            return;
+        };
+        if topic.last_message_timestamp >= next {
+            return;
+        }
+        topic.last_message_timestamp = next;
+        self.resort_topics();
+    }
+
+    fn upsert_topic(&mut self, topic: TopicDiscussion) {
+        let topic_id = topic.id.clone();
+        if let Some(idx) = self.topic_index.get(&topic_id).copied() {
+            let existing = &mut self.topics[idx];
+            if !topic.content.is_empty() {
+                existing.content = topic.content;
+            }
+            if topic.last_message_timestamp > 0 {
+                existing.last_message_timestamp = existing
+                    .last_message_timestamp
+                    .max(topic.last_message_timestamp);
+            }
+            if !topic.last_sender_id.is_empty() && topic.last_sender_id != "0" {
+                existing.last_sender_id = topic.last_sender_id;
+            }
+            if !topic.message_id.is_empty() && topic.message_id != "0" {
+                existing.message_id = topic.message_id;
+            }
+        } else {
+            self.topics.push(topic);
+        }
+        self.resort_topics();
+    }
+
+    fn upsert_topic_meta(&mut self, topic_id: String, rpl: i32, lsnt: i64) {
+        let lsnt = normalize_unix_seconds(lsnt);
+        match self.topic_meta.entry(topic_id.clone()) {
+            std::collections::hash_map::Entry::Occupied(mut entry) => {
+                let existing = entry.get_mut();
+                existing.rpl = rpl;
+                existing.lsnt = existing.lsnt.max(lsnt);
+            }
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                entry.insert(TopicMessageMeta {
+                    rpl,
+                    lsnt,
+                    tp_id: topic_id.clone(),
+                });
+            }
+        }
+        self.advance_topic_timestamp(&topic_id, lsnt);
+    }
+
+    fn touch_topic_last_sent(&mut self, topic_id: i64, timestamp_sec: i64) -> bool {
+        if topic_id == 0 {
+            return false;
+        }
+        let timestamp_sec = normalize_unix_seconds(timestamp_sec);
+        if timestamp_sec <= 0 {
+            return false;
+        }
+        let key = topic_id.to_string();
+        if let Some(meta) = self.topic_meta.get_mut(&key) {
+            meta.lsnt = meta.lsnt.max(timestamp_sec);
+        } else {
+            self.topic_meta.insert(
+                key.clone(),
+                TopicMessageMeta {
+                    rpl: 0,
+                    lsnt: timestamp_sec,
+                    tp_id: key.clone(),
+                },
+            );
+        }
+        self.advance_topic_timestamp(&key, timestamp_sec);
+        true
+    }
+
+    fn increment_topic_reply_count(&mut self, topic_id: i64, timestamp_sec: i64) -> bool {
+        if topic_id == 0 {
+            return false;
+        }
+        let timestamp_sec = normalize_unix_seconds(timestamp_sec);
+        let key = topic_id.to_string();
+        if let Some(meta) = self.topic_meta.get_mut(&key) {
+            meta.rpl = meta.rpl.saturating_add(1);
+            if timestamp_sec > 0 {
+                meta.lsnt = meta.lsnt.max(timestamp_sec);
+            }
+        } else {
+            self.topic_meta.insert(
+                key.clone(),
+                TopicMessageMeta {
+                    rpl: 1,
+                    lsnt: timestamp_sec,
+                    tp_id: key.clone(),
+                },
+            );
+        }
+        self.advance_topic_timestamp(&key, timestamp_sec);
+        true
+    }
+
+    fn decrement_topic_reply_count(&mut self, topic_id: i64) -> bool {
+        if topic_id == 0 {
+            return false;
+        }
+        let key = topic_id.to_string();
+        let Some(meta) = self.topic_meta.get_mut(&key) else {
+            return false;
+        };
+        meta.rpl = meta.rpl.saturating_sub(1).max(0);
+        true
+    }
+}
+
+pub struct TopicsStore {
+    data: TopicsData,
     clan_id: Option<String>,
     loading: bool,
     fetch_generation: u64,
@@ -66,6 +261,8 @@ pub struct TopicsStore {
     init_topic_message_id: Option<MessageId>,
     reply_target: Option<ReplyDraft>,
     compose: TopicCompose,
+    compose_generation: u64,
+    creating_topic_for: Option<MessageId>,
     api: Arc<AppApi>,
     updated_notify_task: Option<Task<()>>,
     _conn_watch: Task<()>,
@@ -87,9 +284,7 @@ impl TopicsStore {
         let conn_watch = Self::spawn_connection_watch(api.clone(), cx);
         Self::register_realtime(cx);
         Self {
-            topics: Vec::new(),
-            topic_index: std::collections::HashMap::new(),
-            topic_meta: std::collections::HashMap::new(),
+            data: TopicsData::default(),
             clan_id: None,
             loading: false,
             fetch_generation: 0,
@@ -98,6 +293,8 @@ impl TopicsStore {
             init_topic_message_id: None,
             reply_target: None,
             compose: TopicCompose::default(),
+            compose_generation: 0,
+            creating_topic_for: None,
             api,
             updated_notify_task: None,
             _conn_watch: conn_watch,
@@ -160,15 +357,15 @@ impl TopicsStore {
     }
 
     pub fn reset(&mut self, cx: &mut Context<Self>) {
-        self.topics.clear();
-        self.topic_index.clear();
-        self.topic_meta.clear();
+        self.data.clear();
         self.clan_id = None;
         self.loading = false;
         self.fetch_generation = self.fetch_generation.wrapping_add(1);
         self.fetched_at = None;
         self.init_topic_message_id = None;
         self.updated_notify_task = None;
+        self.compose_generation = self.compose_generation.wrapping_add(1);
+        self.creating_topic_for = None;
         self.close_panel(cx);
         cx.emit(TopicsEvent::Updated);
         cx.notify();
@@ -204,11 +401,13 @@ impl TopicsStore {
             return;
         };
         self.reply_target = Some(draft);
+        cx.emit(TopicsEvent::ReplyTargetChanged);
         cx.notify();
     }
 
     pub fn clear_reply(&mut self, cx: &mut Context<Self>) {
         if self.reply_target.take().is_some() {
+            cx.emit(TopicsEvent::ReplyTargetChanged);
             cx.notify();
         }
     }
@@ -226,43 +425,15 @@ impl TopicsStore {
     }
 
     pub fn topic_meta_for_topic(&self, topic_id: ChannelId) -> Option<&TopicMessageMeta> {
-        self.topic_meta.get(&topic_id.to_string())
+        self.data.topic_meta(&topic_id.to_string())
     }
 
-    pub fn topic_last_reply_timestamp(&self, topic_id: ChannelId) -> Option<i64> {
-        self.topic_meta_for_topic(topic_id)
-            .map(|meta| normalize_unix_seconds(meta.lsnt))
-            .filter(|ts| *ts > 0)
-    }
-
-    pub fn topic_display_reply_count(&self, topic_id: ChannelId) -> i32 {
-        self.topic_meta_for_topic(topic_id)
-            .map(|meta| meta.rpl)
-            .unwrap_or(0)
+    pub fn topic_reply_summary(&self, topic_id: ChannelId) -> (i32, Option<i64>) {
+        self.data.topic_reply_summary(&topic_id.to_string())
     }
 
     fn upsert_topic_meta(&mut self, topic_id: String, rpl: i32, lsnt: i64, cx: &mut Context<Self>) {
-        let lsnt = normalize_unix_seconds(lsnt);
-        let merged = self
-            .topic_meta
-            .get(&topic_id)
-            .map(|existing| TopicMessageMeta {
-                rpl,
-                lsnt: existing.lsnt.max(lsnt),
-                tp_id: topic_id.clone(),
-            })
-            .unwrap_or(TopicMessageMeta {
-                rpl,
-                lsnt,
-                tp_id: topic_id.clone(),
-            });
-        self.topic_meta.insert(topic_id.clone(), merged);
-        if lsnt > 0
-            && let Some(idx) = self.topic_index.get(&topic_id).copied()
-            && let Some(topic) = self.topics.get_mut(idx)
-        {
-            topic.last_message_timestamp = lsnt.clamp(0, i64::from(u32::MAX)) as u32;
-        }
+        self.data.upsert_topic_meta(topic_id, rpl, lsnt);
         self.schedule_updated_notify(cx);
     }
 
@@ -272,32 +443,9 @@ impl TopicsStore {
         timestamp_sec: i64,
         cx: &mut Context<Self>,
     ) {
-        if topic_id == 0 {
-            return;
+        if self.data.touch_topic_last_sent(topic_id, timestamp_sec) {
+            self.schedule_updated_notify(cx);
         }
-        let timestamp_sec = normalize_unix_seconds(timestamp_sec);
-        if timestamp_sec <= 0 {
-            return;
-        }
-        let key = topic_id.to_string();
-        if let Some(meta) = self.topic_meta.get_mut(&key) {
-            meta.lsnt = meta.lsnt.max(timestamp_sec);
-        } else {
-            self.topic_meta.insert(
-                key.clone(),
-                TopicMessageMeta {
-                    rpl: 0,
-                    lsnt: timestamp_sec,
-                    tp_id: key,
-                },
-            );
-        }
-        if let Some(idx) = self.topic_index.get(&topic_id.to_string()).copied()
-            && let Some(topic) = self.topics.get_mut(idx)
-        {
-            topic.last_message_timestamp = timestamp_sec.clamp(0, i64::from(u32::MAX)) as u32;
-        }
-        self.schedule_updated_notify(cx);
     }
 
     pub fn increment_topic_reply_count(
@@ -306,50 +454,24 @@ impl TopicsStore {
         timestamp_sec: i64,
         cx: &mut Context<Self>,
     ) {
-        if topic_id == 0 {
-            return;
-        }
-        let timestamp_sec = normalize_unix_seconds(timestamp_sec);
-        let key = topic_id.to_string();
-        if let Some(meta) = self.topic_meta.get_mut(&key) {
-            meta.rpl = meta.rpl.saturating_add(1);
-            if timestamp_sec > 0 {
-                meta.lsnt = meta.lsnt.max(timestamp_sec);
-            }
-        } else {
-            self.topic_meta.insert(
-                key.clone(),
-                TopicMessageMeta {
-                    rpl: 1,
-                    lsnt: timestamp_sec,
-                    tp_id: key,
-                },
-            );
-        }
-        if timestamp_sec > 0
-            && let Some(idx) = self.topic_index.get(&topic_id.to_string()).copied()
-            && let Some(topic) = self.topics.get_mut(idx)
+        if self
+            .data
+            .increment_topic_reply_count(topic_id, timestamp_sec)
         {
-            topic.last_message_timestamp = timestamp_sec.clamp(0, i64::from(u32::MAX)) as u32;
+            self.schedule_updated_notify(cx);
         }
-        self.schedule_updated_notify(cx);
     }
 
     pub fn decrement_topic_reply_count(&mut self, topic_id: i64, cx: &mut Context<Self>) {
-        if topic_id == 0 {
-            return;
-        }
-        let key = topic_id.to_string();
-        if let Some(meta) = self.topic_meta.get_mut(&key) {
-            meta.rpl = meta.rpl.saturating_sub(1).max(0);
+        if self.data.decrement_topic_reply_count(topic_id) {
             self.schedule_updated_notify(cx);
         }
     }
 
     fn resolve_topic_id_for_origin(&self, origin_message_id: i64, cx: &App) -> Option<String> {
         let origin_key = origin_message_id.to_string();
-        if let Some(topic) = self.topics.iter().find(|t| t.message_id == origin_key) {
-            return Some(topic.id.clone());
+        if let Some(topic_id) = self.data.topic_id_for_origin_message(&origin_key) {
+            return Some(topic_id);
         }
         MessagesStore::try_global(cx).and_then(|store| {
             store
@@ -414,9 +536,7 @@ impl TopicsStore {
     }
 
     pub fn message_allows_topic_discussion(msg: &Message) -> bool {
-        if matches!(msg.code, MessageCode::Topic | MessageCode::Poll) {
-            false
-        } else if msg.code.is_system() {
+        if matches!(msg.code, MessageCode::Topic | MessageCode::Poll) || msg.code.is_system() {
             false
         } else {
             !matches!(
@@ -444,23 +564,30 @@ impl TopicsStore {
                     this.handle_topic_in_message_event(event, cx);
                 },
             );
+            dispatch.on_lagged(&entity, |this, cx| this.resync(cx));
         });
+    }
+
+    fn resync(&mut self, cx: &mut Context<Self>) {
+        tracing::info!("TopicsStore resync — refetching topics for the active clan");
+        self.refetch_active_clan(cx);
+    }
+
+    fn is_active_clan(&self, clan_id: i64, cx: &App) -> bool {
+        MessagesStore::global(cx).read(cx).active_clan_id() == Some(ClanId(clan_id))
     }
 
     fn handle_sd_topic_event(&mut self, event: &RealtimeEvent, cx: &mut Context<Self>) {
         let RealtimeEvent::SdTopicEvent(ev) = event else {
             return;
         };
-        let topic = topic_discussion_from_api(sd_topic_from_event(ev));
-        self.upsert_topic(topic);
-        let lsnt = normalize_unix_seconds(
-            ev.last_sent_message
-                .as_ref()
-                .map(|h| i64::from(h.timestamp_seconds))
-                .unwrap_or_else(unix_now_seconds),
-        );
+        if self.is_active_clan(ev.clan_id, cx) {
+            let topic = topic_discussion_from_api(sd_topic_from_event(ev));
+            self.data.upsert_topic(topic);
+        }
+        let lsnt = sd_topic_event_last_sent_seconds(ev, unix_now_seconds());
         let topic_key = ev.id.to_string();
-        if self.topic_meta.contains_key(&topic_key) {
+        if self.data.has_topic_meta(&topic_key) {
             self.touch_topic_last_sent(ev.id, lsnt, cx);
         } else {
             self.upsert_topic_meta(topic_key, 0, lsnt, cx);
@@ -480,32 +607,14 @@ impl TopicsStore {
         let RealtimeEvent::TopicInMessageEvent(ev) = event else {
             return;
         };
-        let Some(tp_id) = self.resolve_topic_id_for_origin(ev.message_id, cx) else {
+        let event_tp_id = Some(ev.tp_id.clone()).filter(|id| !id.is_empty() && id != "0");
+        let Some(tp_id) =
+            event_tp_id.or_else(|| self.resolve_topic_id_for_origin(ev.message_id, cx))
+        else {
             return;
         };
         let lsnt = normalize_unix_seconds(ev.lsnt);
         self.upsert_topic_meta(tp_id, ev.rpl, lsnt, cx);
-    }
-
-    fn upsert_topic(&mut self, topic: TopicDiscussion) {
-        let topic_id = topic.id.clone();
-        if let Some(idx) = self.topic_index.get(&topic_id).copied() {
-            let existing = &mut self.topics[idx];
-            if !topic.content.is_empty() {
-                existing.content = topic.content;
-            }
-            existing.last_message_timestamp = topic.last_message_timestamp;
-            if !topic.last_sender_id.is_empty() && topic.last_sender_id != "0" {
-                existing.last_sender_id = topic.last_sender_id;
-            }
-            if !topic.message_id.is_empty() && topic.message_id != "0" {
-                existing.message_id = topic.message_id;
-            }
-        } else {
-            let idx = self.topics.len();
-            self.topic_index.insert(topic_id, idx);
-            self.topics.push(topic);
-        }
     }
 
     pub fn start_create_for_message(&mut self, message_id: MessageId, cx: &mut Context<Self>) {
@@ -539,6 +648,7 @@ impl TopicsStore {
 
         let existing_topic_id = origin.topic_id.map(|t| t.get()).filter(|id| *id != 0);
 
+        self.compose_generation = self.compose_generation.wrapping_add(1);
         self.init_topic_message_id = Some(origin.id);
         self.compose = TopicCompose {
             origin_message_id: Some(origin.id),
@@ -580,14 +690,13 @@ impl TopicsStore {
         message_id: MessageId,
         message_topic_id: Option<ChannelId>,
     ) -> bool {
-        if !self.panel_open {
-            return false;
-        }
-        let is_origin = self.compose.origin_message_id == Some(message_id);
-        let is_topic_anchor = message_topic_id
-            .zip(self.compose.active_topic_id.map(ChannelId))
-            .is_some_and(|(tid, active)| tid == active);
-        is_origin || is_topic_anchor
+        panel_should_close_on_message_deleted(
+            self.panel_open,
+            &self.compose,
+            &self.data,
+            message_id,
+            message_topic_id,
+        )
     }
 
     pub fn close_panel_from_messages(&mut self, cx: &mut Context<Self>) {
@@ -600,6 +709,7 @@ impl TopicsStore {
         }
         self.panel_open = false;
         self.compose = TopicCompose::default();
+        self.compose_generation = self.compose_generation.wrapping_add(1);
         self.init_topic_message_id = None;
         self.reply_target = None;
         cx.emit(TopicsEvent::Closed);
@@ -641,6 +751,9 @@ impl TopicsStore {
         let mode = self.compose.mode;
         let is_public = self.compose.is_public;
         let existing_topic_id = self.compose.active_topic_id;
+        if existing_topic_id.is_none() && !self.begin_topic_create(origin_message_id) {
+            return;
+        }
         let has_attachments = !attachments.is_empty();
         let reply_ref =
             self.reply_target
@@ -677,6 +790,7 @@ impl TopicsStore {
         self.compose.error = None;
         cx.notify();
 
+        let generation = self.compose_generation;
         let api = self.api.clone();
         cx.spawn(async move |this, cx| {
             let topic_id = match existing_topic_id {
@@ -689,6 +803,10 @@ impl TopicsStore {
                     Err(e) => {
                         tracing::error!("submit_reply create_sd_topic failed: {e}");
                         let _ = this.update(cx, |this, cx| {
+                            this.finish_topic_create(origin_message_id);
+                            if this.compose_generation != generation {
+                                return;
+                            }
                             this.compose.submitting = false;
                             this.compose.creating = false;
                             this.compose.error = Some(e.to_string());
@@ -699,6 +817,7 @@ impl TopicsStore {
                 },
             };
 
+            let mut upload_ctx = None;
             let ack = if has_attachments {
                 let files: Vec<UploadFile> = attachments
                     .into_iter()
@@ -722,6 +841,10 @@ impl TopicsStore {
                     Err(e) => {
                         tracing::error!("submit_reply presign failed: {e}");
                         let _ = this.update(cx, |this, cx| {
+                            this.finish_topic_create(origin_message_id);
+                            if this.compose_generation != generation {
+                                return;
+                            }
                             this.compose.submitting = false;
                             this.compose.creating = false;
                             this.compose.error = Some(e.to_string());
@@ -749,7 +872,7 @@ impl TopicsStore {
                         transport_mentions,
                         transport_hashtags,
                         transport_emojis,
-                        keys.clone(),
+                        Vec::new(),
                         reply_ref.clone(),
                     )
                     .await
@@ -758,6 +881,10 @@ impl TopicsStore {
                     Err(e) => {
                         tracing::error!("submit_reply send_topic_presigned_message failed: {e}");
                         let _ = this.update(cx, |this, cx| {
+                            this.finish_topic_create(origin_message_id);
+                            if this.compose_generation != generation {
+                                return;
+                            }
                             this.compose.submitting = false;
                             this.compose.creating = false;
                             this.compose.error = Some(e.to_string());
@@ -766,24 +893,13 @@ impl TopicsStore {
                         return;
                     }
                 };
-                let real_message_id = sent.message_id;
-                let create_time_seconds = sent.create_time.max(0) as u32;
-                let (on_complete, _completions) =
-                    tokio::sync::mpsc::unbounded_channel::<AttachmentUploadOutcome>();
-                api.upload_presigned_and_patch(
-                    clan_id,
-                    parent_channel_id,
-                    real_message_id,
-                    &content,
-                    update_mentions,
-                    create_time_seconds,
+                upload_ctx = Some((
                     presigned,
                     keys,
-                    mode,
-                    is_public,
-                    on_complete,
-                )
-                .await;
+                    update_mentions,
+                    sent.message_id,
+                    sent.create_time.max(0) as u32,
+                ));
                 sent
             } else {
                 match api
@@ -805,6 +921,10 @@ impl TopicsStore {
                     Err(e) => {
                         tracing::error!("submit_reply send_topic_message failed: {e}");
                         let _ = this.update(cx, |this, cx| {
+                            this.finish_topic_create(origin_message_id);
+                            if this.compose_generation != generation {
+                                return;
+                            }
                             this.compose.submitting = false;
                             this.compose.creating = false;
                             this.compose.error = Some(e.to_string());
@@ -816,43 +936,126 @@ impl TopicsStore {
             };
 
             let _ = this.update(cx, |this, cx| {
-                this.compose.submitting = false;
-                this.compose.creating = false;
-                let is_new_topic = existing_topic_id.is_none();
-                this.compose.active_topic_id = Some(topic_id);
-                let creator_id = viewer_user_id(cx);
-                let reply_timestamp = {
-                    let ts = normalize_unix_seconds(ack.create_time);
-                    if ts > 0 { ts } else { unix_now_seconds() }
-                };
-                this.increment_topic_reply_count(topic_id, reply_timestamp, cx);
-                let messages = MessagesStore::global(cx);
-                messages.update(cx, |store, cx| {
-                    store.set_active_topic(Some(topic_id), cx);
-                    store.append_topic_message(topic_id, ack, cx);
-                    if is_new_topic {
-                        store.mark_message_as_topic(
-                            ChannelId(parent_channel_id),
-                            origin_message_id,
-                            topic_id,
-                            creator_id,
-                            cx,
-                        );
-                    }
-                });
-                cx.emit(TopicsEvent::Updated);
-                cx.emit(TopicsEvent::ReplySent);
-                cx.notify();
+                this.finish_topic_create(origin_message_id);
+                this.apply_reply_sent(
+                    topic_id,
+                    parent_channel_id,
+                    origin_message_id,
+                    existing_topic_id.is_none(),
+                    generation,
+                    ack,
+                    cx,
+                );
             });
+
+            let Some((presigned, keys, update_mentions, real_message_id, create_time_seconds)) =
+                upload_ctx
+            else {
+                return;
+            };
+            let (on_complete, mut completions) =
+                tokio::sync::mpsc::unbounded_channel::<AttachmentUploadOutcome>();
+            let drain_this = this.clone();
+            cx.spawn(async move |cx: &mut gpui::AsyncApp| {
+                while let Some(outcome) = completions.recv().await {
+                    if drain_this.upgrade().is_none() {
+                        return;
+                    }
+                    cx.update(|cx| {
+                        MessagesStore::global(cx).update(cx, |store, cx| {
+                            store.apply_topic_attachment_outcome(
+                                topic_id,
+                                MessageId(real_message_id),
+                                outcome,
+                                cx,
+                            );
+                        });
+                    });
+                }
+            })
+            .detach();
+            api.upload_presigned_and_patch(
+                clan_id,
+                topic_id,
+                real_message_id,
+                &content,
+                update_mentions,
+                create_time_seconds,
+                presigned,
+                keys,
+                mode,
+                is_public,
+                topic_id,
+                true,
+                on_complete,
+            )
+            .await;
         })
         .detach();
     }
 
+    fn begin_topic_create(&mut self, origin_message_id: MessageId) -> bool {
+        if self.creating_topic_for == Some(origin_message_id) {
+            return false;
+        }
+        self.creating_topic_for = Some(origin_message_id);
+        true
+    }
+
+    fn finish_topic_create(&mut self, origin_message_id: MessageId) {
+        if self.creating_topic_for == Some(origin_message_id) {
+            self.creating_topic_for = None;
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn apply_reply_sent(
+        &mut self,
+        topic_id: i64,
+        parent_channel_id: i64,
+        origin_message_id: MessageId,
+        is_new_topic: bool,
+        generation: u64,
+        ack: mezon_client::transport::ApiMessage,
+        cx: &mut Context<Self>,
+    ) {
+        if self.compose_generation != generation {
+            return;
+        }
+        self.compose.submitting = false;
+        self.compose.creating = false;
+        self.compose.active_topic_id = Some(topic_id);
+        let creator_id = viewer_user_id(cx);
+        let append = MessagesStore::global(cx).update(cx, |store, cx| {
+            store.set_active_topic(Some(topic_id), cx);
+            let append = store.append_topic_message(topic_id, ack, cx);
+            if is_new_topic {
+                store.mark_message_as_topic(
+                    ChannelId(parent_channel_id),
+                    origin_message_id,
+                    topic_id,
+                    creator_id,
+                    cx,
+                );
+            }
+            append
+        });
+        if append.should_count_reply {
+            self.increment_topic_reply_count(topic_id, append.create_time, cx);
+        }
+        cx.emit(TopicsEvent::Updated);
+        cx.emit(TopicsEvent::ReplySent);
+        cx.notify();
+    }
+
+    #[allow(clippy::too_many_arguments)]
     pub fn submit_reply_url_attachment(
         &mut self,
         url: String,
         filename: String,
         filetype: String,
+        width: i32,
+        height: i32,
         cx: &mut Context<Self>,
     ) {
         if url.is_empty() || self.compose.submitting {
@@ -868,6 +1071,9 @@ impl TopicsStore {
         let mode = self.compose.mode;
         let is_public = self.compose.is_public;
         let existing_topic_id = self.compose.active_topic_id;
+        if existing_topic_id.is_none() && !self.begin_topic_create(origin_message_id) {
+            return;
+        }
         let reply_ref =
             self.reply_target
                 .take()
@@ -887,13 +1093,14 @@ impl TopicsStore {
         self.compose.error = None;
         cx.notify();
 
+        let generation = self.compose_generation;
         let api = self.api.clone();
         let attachment = UrlAttachment {
             url,
             filename,
             filetype,
-            width: 0,
-            height: 0,
+            width,
+            height,
         };
         cx.spawn(async move |this, cx| {
             let topic_id = match existing_topic_id {
@@ -906,6 +1113,10 @@ impl TopicsStore {
                     Err(e) => {
                         tracing::error!("submit_reply_url_attachment create_sd_topic failed: {e}");
                         let _ = this.update(cx, |this, cx| {
+                            this.finish_topic_create(origin_message_id);
+                            if this.compose_generation != generation {
+                                return;
+                            }
                             this.compose.submitting = false;
                             this.compose.creating = false;
                             this.compose.error = Some(e.to_string());
@@ -932,6 +1143,10 @@ impl TopicsStore {
                 Err(e) => {
                     tracing::error!("submit_reply_url_attachment send failed: {e}");
                     let _ = this.update(cx, |this, cx| {
+                        this.finish_topic_create(origin_message_id);
+                        if this.compose_generation != generation {
+                            return;
+                        }
                         this.compose.submitting = false;
                         this.compose.creating = false;
                         this.compose.error = Some(e.to_string());
@@ -942,51 +1157,32 @@ impl TopicsStore {
             };
 
             let _ = this.update(cx, |this, cx| {
-                this.compose.submitting = false;
-                this.compose.creating = false;
-                let is_new_topic = existing_topic_id.is_none();
-                this.compose.active_topic_id = Some(topic_id);
-                let creator_id = viewer_user_id(cx);
-                let reply_timestamp = {
-                    let ts = normalize_unix_seconds(ack.create_time);
-                    if ts > 0 { ts } else { unix_now_seconds() }
-                };
-                this.increment_topic_reply_count(topic_id, reply_timestamp, cx);
-                let messages = MessagesStore::global(cx);
-                messages.update(cx, |store, cx| {
-                    store.set_active_topic(Some(topic_id), cx);
-                    store.append_topic_message(topic_id, ack, cx);
-                    if is_new_topic {
-                        store.mark_message_as_topic(
-                            ChannelId(parent_channel_id),
-                            origin_message_id,
-                            topic_id,
-                            creator_id,
-                            cx,
-                        );
-                    }
-                });
-                cx.emit(TopicsEvent::Updated);
-                cx.emit(TopicsEvent::ReplySent);
-                cx.notify();
+                this.finish_topic_create(origin_message_id);
+                this.apply_reply_sent(
+                    topic_id,
+                    parent_channel_id,
+                    origin_message_id,
+                    existing_topic_id.is_none(),
+                    generation,
+                    ack,
+                    cx,
+                );
             });
         })
         .detach();
     }
 
     pub fn topics(&self) -> &[TopicDiscussion] {
-        &self.topics
+        self.data.topics()
     }
 
     pub fn topic_by_id(&self, id: &str) -> Option<&TopicDiscussion> {
-        self.topic_index
-            .get(id)
-            .and_then(|&index| self.topics.get(index))
+        self.data.topic_by_id(id)
     }
 
     pub fn topics_for(&self, clan_id: &str) -> &[TopicDiscussion] {
         if self.clan_id.as_deref() == Some(clan_id) {
-            &self.topics
+            self.data.topics()
         } else {
             &[]
         }
@@ -1013,8 +1209,7 @@ impl TopicsStore {
             return;
         }
         if self.clan_id.as_deref() != Some(clan_id) {
-            self.topics.clear();
-            self.topic_index.clear();
+            self.data.clear_topics();
             self.clan_id = Some(clan_id.to_string());
             self.fetched_at = None;
         }
@@ -1046,15 +1241,8 @@ impl TopicsStore {
         }
         self.loading = false;
         match result {
-            Ok(mut topics) => {
-                topics.sort_by_key(|t| std::cmp::Reverse(t.last_message_timestamp));
-                self.topics = topics;
-                self.topic_index = self
-                    .topics
-                    .iter()
-                    .enumerate()
-                    .map(|(index, topic)| (topic.id.clone(), index))
-                    .collect();
+            Ok(topics) => {
+                self.data.set_topics(topics);
                 self.clan_id = Some(clan_id.to_string());
                 self.fetched_at = Some(Instant::now());
                 cx.emit(TopicsEvent::Updated);
@@ -1067,6 +1255,40 @@ impl TopicsStore {
             }
         }
     }
+}
+
+fn sd_topic_event_last_sent_seconds(ev: &realtime::SdTopicEvent, now_seconds: i64) -> i64 {
+    normalize_unix_seconds(
+        ev.last_sent_message
+            .as_ref()
+            .map(|h| i64::from(h.timestamp_seconds))
+            .filter(|t| *t > 0)
+            .unwrap_or(now_seconds),
+    )
+}
+
+fn panel_should_close_on_message_deleted(
+    panel_open: bool,
+    compose: &TopicCompose,
+    data: &TopicsData,
+    message_id: MessageId,
+    message_topic_id: Option<ChannelId>,
+) -> bool {
+    if !panel_open {
+        return false;
+    }
+    if compose.origin_message_id == Some(message_id) {
+        return true;
+    }
+    let (Some(message_topic_id), Some(active_topic_id)) =
+        (message_topic_id, compose.active_topic_id)
+    else {
+        return false;
+    };
+    message_topic_id.get() == active_topic_id
+        && data
+            .topic_by_id(&active_topic_id.to_string())
+            .is_some_and(|topic| topic.message_id == message_id.get().to_string())
 }
 
 fn sd_topic_from_event(ev: &realtime::SdTopicEvent) -> api::SdTopic {
@@ -1099,7 +1321,7 @@ fn sd_topic_from_event(ev: &realtime::SdTopicEvent) -> api::SdTopic {
         update_time_seconds: ev
             .last_sent_message
             .as_ref()
-            .map(|h| h.timestamp_seconds as u32)
+            .map(|h| h.timestamp_seconds)
             .unwrap_or(0),
         content,
         last_sent_message: ev.last_sent_message.clone(),
@@ -1115,6 +1337,643 @@ mod tests {
         Message::new(MessageId(1), "hello", "1", "user", 0).with_code(code)
     }
 
+    fn header(
+        id: i64,
+        timestamp_seconds: u32,
+        sender_id: i64,
+        content: &str,
+    ) -> api::ChannelMessageHeader {
+        api::ChannelMessageHeader {
+            id,
+            timestamp_seconds,
+            sender_id,
+            content: content.to_string(),
+        }
+    }
+
+    fn channel_message(content: &str, create_time_seconds: u32) -> api::ChannelMessage {
+        api::ChannelMessage {
+            content: content.to_string(),
+            create_time_seconds,
+            ..Default::default()
+        }
+    }
+
+    fn sd_topic_event(
+        last_sent_message: Option<api::ChannelMessageHeader>,
+        message: Option<api::ChannelMessage>,
+    ) -> realtime::SdTopicEvent {
+        realtime::SdTopicEvent {
+            id: 77,
+            clan_id: 9,
+            channel_id: 5,
+            message_id: 42,
+            user_id: 3,
+            last_sent_message,
+            message,
+        }
+    }
+
+    fn topic(
+        id: i64,
+        message_id: i64,
+        last_sender_id: &str,
+        content: &str,
+        last_message_timestamp: u32,
+    ) -> TopicDiscussion {
+        TopicDiscussion {
+            id: id.to_string(),
+            message_id: message_id.to_string(),
+            clan_id: "9".to_string(),
+            channel_id: "5".to_string(),
+            creator_id: "3".to_string(),
+            last_sender_id: last_sender_id.to_string(),
+            content: content.to_string(),
+            last_message_timestamp,
+        }
+    }
+
+    fn assert_index_matches_topics(data: &TopicsData) {
+        assert_eq!(
+            data.topic_index.len(),
+            data.topics.len(),
+            "topic_index and topics have diverged in size"
+        );
+        for (id, &index) in &data.topic_index {
+            let Some(slot) = data.topics.get(index) else {
+                panic!("topic_index[{id}] = {index} is out of bounds");
+            };
+            assert_eq!(
+                &slot.id, id,
+                "topic_index[{id}] = {index} points at topic {}",
+                slot.id
+            );
+        }
+        for stored in &data.topics {
+            assert_eq!(
+                data.topic_by_id(&stored.id).map(|t| t.id.as_str()),
+                Some(stored.id.as_str())
+            );
+        }
+    }
+
+    fn assert_sorted_by_timestamp_desc(data: &TopicsData) {
+        let stamps: Vec<u32> = data
+            .topics
+            .iter()
+            .map(|t| t.last_message_timestamp)
+            .collect();
+        let mut expected = stamps.clone();
+        expected.sort_by(|a, b| b.cmp(a));
+        assert_eq!(stamps, expected, "topics are not sorted newest-first");
+    }
+
+    fn topic_ids(data: &TopicsData) -> Vec<String> {
+        data.topics.iter().map(|t| t.id.clone()).collect()
+    }
+
+    fn data_with_active_topic() -> TopicsData {
+        let mut data = TopicsData::default();
+        data.upsert_topic(topic(555, 100, "8", "origin", 500));
+        data
+    }
+
+    fn compose_for(origin_message_id: i64, active_topic_id: i64) -> TopicCompose {
+        TopicCompose {
+            origin_message_id: Some(MessageId(origin_message_id)),
+            active_topic_id: Some(active_topic_id),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn sd_topic_event_maps_every_field_when_fully_populated() {
+        let ev = sd_topic_event(
+            Some(header(4242, 1_700_000_500, 8, "last reply")),
+            Some(channel_message("origin body", 1_700_000_000)),
+        );
+
+        let sd = sd_topic_from_event(&ev);
+        assert_eq!(sd.id, 77);
+        assert_eq!(sd.creator_id, 3);
+        assert_eq!(sd.message_id, 42);
+        assert_eq!(sd.clan_id, 9);
+        assert_eq!(sd.channel_id, 5);
+        assert_eq!(sd.create_time_seconds, 1_700_000_000);
+        assert_eq!(sd.update_time_seconds, 1_700_000_500);
+        assert_eq!(sd.content, "origin body");
+
+        let discussion = topic_discussion_from_api(sd);
+        assert_eq!(discussion.id, "77");
+        assert_eq!(discussion.message_id, "42");
+        assert_eq!(discussion.clan_id, "9");
+        assert_eq!(discussion.channel_id, "5");
+        assert_eq!(discussion.creator_id, "3");
+        assert_eq!(discussion.last_sender_id, "8");
+        assert_eq!(discussion.content, "origin body");
+        assert_eq!(discussion.last_message_timestamp, 1_700_000_500);
+    }
+
+    #[test]
+    fn sd_topic_event_without_last_sent_message_falls_back_to_creator_and_zero_timestamp() {
+        let ev = sd_topic_event(None, Some(channel_message("origin body", 1_700_000_000)));
+
+        let discussion = topic_discussion_from_api(sd_topic_from_event(&ev));
+        assert_eq!(discussion.content, "origin body");
+        assert_eq!(discussion.last_sender_id, "3");
+        assert_eq!(discussion.last_message_timestamp, 0);
+    }
+
+    #[test]
+    fn sd_topic_event_content_falls_back_to_last_sent_message_when_message_is_missing() {
+        let ev = sd_topic_event(Some(header(4242, 1_700_000_500, 8, "last reply")), None);
+
+        let discussion = topic_discussion_from_api(sd_topic_from_event(&ev));
+        assert_eq!(discussion.content, "last reply");
+        assert_eq!(discussion.last_sender_id, "8");
+        assert_eq!(discussion.last_message_timestamp, 1_700_000_500);
+    }
+
+    #[test]
+    fn sd_topic_event_content_falls_back_when_message_content_is_empty() {
+        let ev = sd_topic_event(
+            Some(header(4242, 1_700_000_500, 8, "last reply")),
+            Some(channel_message("", 1_700_000_000)),
+        );
+
+        let discussion = topic_discussion_from_api(sd_topic_from_event(&ev));
+        assert_eq!(discussion.content, "last reply");
+    }
+
+    #[test]
+    fn sd_topic_event_last_sender_falls_back_to_creator_when_the_header_sender_is_zero() {
+        let ev = sd_topic_event(Some(header(4242, 1_700_000_500, 0, "last reply")), None);
+
+        let discussion = topic_discussion_from_api(sd_topic_from_event(&ev));
+        assert_eq!(discussion.last_sender_id, "3");
+    }
+
+    #[test]
+    fn sd_topic_event_with_zero_ids_and_empty_content_maps_without_panicking() {
+        let ev = realtime::SdTopicEvent {
+            id: 0,
+            clan_id: 0,
+            channel_id: 0,
+            message_id: 0,
+            user_id: 0,
+            last_sent_message: Some(header(0, 0, 0, "")),
+            message: Some(channel_message("", 0)),
+        };
+
+        let discussion = topic_discussion_from_api(sd_topic_from_event(&ev));
+        assert_eq!(discussion.id, "0");
+        assert_eq!(discussion.message_id, "0");
+        assert_eq!(discussion.creator_id, "0");
+        assert_eq!(discussion.last_sender_id, "0");
+        assert!(discussion.content.is_empty());
+        assert_eq!(discussion.last_message_timestamp, 0);
+    }
+
+    #[test]
+    fn sd_topic_event_last_sent_seconds_uses_the_header_timestamp_when_present() {
+        let ev = sd_topic_event(Some(header(4242, 1_700_000_500, 8, "last reply")), None);
+        assert_eq!(
+            sd_topic_event_last_sent_seconds(&ev, 1_800_000_000),
+            1_700_000_500
+        );
+    }
+
+    #[test]
+    fn sd_topic_event_last_sent_seconds_falls_back_to_now_when_the_header_is_absent() {
+        let ev = sd_topic_event(None, None);
+        assert_eq!(
+            sd_topic_event_last_sent_seconds(&ev, 1_800_000_000),
+            1_800_000_000
+        );
+    }
+
+    #[test]
+    fn sd_topic_event_last_sent_seconds_falls_back_to_now_when_the_header_timestamp_is_zero() {
+        let ev = sd_topic_event(Some(header(4242, 0, 8, "last reply")), None);
+        assert_eq!(
+            sd_topic_event_last_sent_seconds(&ev, 1_800_000_000),
+            1_800_000_000
+        );
+    }
+
+    #[test]
+    fn upsert_topic_does_not_clobber_stored_values_with_zero_ids_or_empty_content() {
+        let mut data = TopicsData::default();
+        data.upsert_topic(topic(10, 100, "8", "hello", 500));
+        data.upsert_topic(topic(10, 0, "0", "", 0));
+
+        let stored = data.topic_by_id("10").expect("topic 10");
+        assert_eq!(stored.message_id, "100");
+        assert_eq!(stored.last_sender_id, "8");
+        assert_eq!(stored.content, "hello");
+        assert_eq!(stored.last_message_timestamp, 500);
+        assert_eq!(data.topics().len(), 1);
+    }
+
+    #[test]
+    fn upsert_topic_does_not_clobber_stored_values_with_empty_ids() {
+        let mut data = TopicsData::default();
+        data.upsert_topic(topic(10, 100, "8", "hello", 500));
+        data.upsert_topic(TopicDiscussion {
+            message_id: String::new(),
+            last_sender_id: String::new(),
+            ..topic(10, 0, "", "", 0)
+        });
+
+        let stored = data.topic_by_id("10").expect("topic 10");
+        assert_eq!(stored.message_id, "100");
+        assert_eq!(stored.last_sender_id, "8");
+    }
+
+    #[test]
+    fn upsert_topic_merges_newer_values_and_keeps_the_newest_timestamp() {
+        let mut data = TopicsData::default();
+        data.upsert_topic(topic(10, 100, "8", "hello", 500));
+        data.upsert_topic(topic(10, 100, "9", "newer", 900));
+
+        let stored = data.topic_by_id("10").expect("topic 10");
+        assert_eq!(stored.content, "newer");
+        assert_eq!(stored.last_sender_id, "9");
+        assert_eq!(stored.last_message_timestamp, 900);
+
+        data.upsert_topic(topic(10, 100, "9", "stale", 100));
+        assert_eq!(
+            data.topic_by_id("10")
+                .expect("topic 10")
+                .last_message_timestamp,
+            900
+        );
+    }
+
+    #[test]
+    fn topics_are_sorted_newest_first_with_a_consistent_index_after_out_of_order_upserts() {
+        let mut data = TopicsData::default();
+        data.upsert_topic(topic(10, 1, "8", "a", 100));
+        data.upsert_topic(topic(20, 2, "8", "b", 300));
+        data.upsert_topic(topic(30, 3, "8", "c", 200));
+
+        assert_eq!(topic_ids(&data), vec!["20", "30", "10"]);
+        assert_sorted_by_timestamp_desc(&data);
+        assert_index_matches_topics(&data);
+    }
+
+    #[test]
+    fn set_topics_sorts_and_indexes_a_fetch_response() {
+        let mut data = TopicsData::default();
+        data.set_topics(vec![
+            topic(10, 1, "8", "a", 100),
+            topic(20, 2, "8", "b", 300),
+            topic(30, 3, "8", "c", 200),
+        ]);
+
+        assert_eq!(topic_ids(&data), vec!["20", "30", "10"]);
+        assert_index_matches_topics(&data);
+    }
+
+    #[test]
+    fn topic_index_is_rebuilt_when_a_touch_resorts_the_list() {
+        let mut data = TopicsData::default();
+        data.upsert_topic(topic(10, 1, "8", "a", 100));
+        data.upsert_topic(topic(20, 2, "8", "b", 300));
+        data.upsert_topic(topic(30, 3, "8", "c", 200));
+        assert_index_matches_topics(&data);
+
+        assert!(data.touch_topic_last_sent(10, 900));
+
+        assert_eq!(topic_ids(&data), vec!["10", "20", "30"]);
+        assert_sorted_by_timestamp_desc(&data);
+        assert_index_matches_topics(&data);
+        assert_eq!(data.topic_by_id("30").expect("topic 30").content, "c");
+        assert_eq!(data.topic_by_id("20").expect("topic 20").content, "b");
+        assert_eq!(
+            data.topic_by_id("10")
+                .expect("topic 10")
+                .last_message_timestamp,
+            900
+        );
+    }
+
+    #[test]
+    fn topic_index_is_rebuilt_when_a_meta_upsert_resorts_the_list() {
+        let mut data = TopicsData::default();
+        data.upsert_topic(topic(10, 1, "8", "a", 100));
+        data.upsert_topic(topic(20, 2, "8", "b", 300));
+        data.upsert_topic(topic(30, 3, "8", "c", 200));
+
+        data.upsert_topic_meta("30".to_string(), 4, 900);
+
+        assert_eq!(topic_ids(&data), vec!["30", "20", "10"]);
+        assert_eq!(
+            data.topic_by_id("30")
+                .expect("topic 30")
+                .last_message_timestamp,
+            900
+        );
+        assert_sorted_by_timestamp_desc(&data);
+        assert_index_matches_topics(&data);
+    }
+
+    #[test]
+    fn advance_topic_timestamp_never_moves_a_topic_backward() {
+        let mut data = TopicsData::default();
+        data.upsert_topic(topic(10, 1, "8", "a", 500));
+
+        data.advance_topic_timestamp("10", 100);
+
+        assert_eq!(
+            data.topic_by_id("10")
+                .expect("topic 10")
+                .last_message_timestamp,
+            500
+        );
+        assert_index_matches_topics(&data);
+    }
+
+    #[test]
+    fn upsert_topic_meta_overwrites_the_reply_count_verbatim() {
+        let mut data = TopicsData::default();
+        data.upsert_topic_meta("10".to_string(), 5, 500);
+        assert_eq!(data.topic_meta("10").expect("meta 10").rpl, 5);
+
+        data.upsert_topic_meta("10".to_string(), 2, 600);
+        assert_eq!(data.topic_meta("10").expect("meta 10").rpl, 2);
+
+        data.upsert_topic_meta("10".to_string(), 0, 700);
+        assert_eq!(data.topic_meta("10").expect("meta 10").rpl, 0);
+    }
+
+    #[test]
+    fn upsert_topic_meta_only_moves_lsnt_forward() {
+        let mut data = TopicsData::default();
+        data.upsert_topic_meta("10".to_string(), 1, 500);
+
+        data.upsert_topic_meta("10".to_string(), 2, 100);
+        assert_eq!(data.topic_meta("10").expect("meta 10").lsnt, 500);
+
+        data.upsert_topic_meta("10".to_string(), 3, 900);
+        assert_eq!(data.topic_meta("10").expect("meta 10").lsnt, 900);
+    }
+
+    #[test]
+    fn upsert_topic_meta_normalizes_millisecond_timestamps() {
+        let mut data = TopicsData::default();
+        data.upsert_topic_meta("10".to_string(), 1, 1_700_000_000_000);
+
+        assert_eq!(data.topic_meta("10").expect("meta 10").lsnt, 1_700_000_000);
+    }
+
+    #[test]
+    fn upsert_topic_meta_seeds_a_missing_entry_with_its_topic_id() {
+        let mut data = TopicsData::default();
+        data.upsert_topic_meta("10".to_string(), 7, 500);
+
+        let meta = data.topic_meta("10").expect("meta 10");
+        assert_eq!(meta.rpl, 7);
+        assert_eq!(meta.lsnt, 500);
+        assert_eq!(meta.tp_id, "10");
+    }
+
+    #[test]
+    fn increment_topic_reply_count_adds_one_to_the_stored_count() {
+        let mut data = TopicsData::default();
+        data.upsert_topic_meta("10".to_string(), 2, 500);
+
+        assert!(data.increment_topic_reply_count(10, 600));
+
+        let meta = data.topic_meta("10").expect("meta 10");
+        assert_eq!(meta.rpl, 3);
+        assert_eq!(meta.lsnt, 600);
+    }
+
+    #[test]
+    fn increment_topic_reply_count_seeds_a_missing_meta_with_one_reply() {
+        let mut data = TopicsData::default();
+
+        assert!(data.increment_topic_reply_count(10, 600));
+
+        let meta = data.topic_meta("10").expect("meta 10");
+        assert_eq!(meta.rpl, 1);
+        assert_eq!(meta.lsnt, 600);
+        assert_eq!(meta.tp_id, "10");
+    }
+
+    #[test]
+    fn increment_topic_reply_count_advances_the_topic_sort_key_and_reindexes() {
+        let mut data = TopicsData::default();
+        data.upsert_topic(topic(10, 1, "8", "a", 100));
+        data.upsert_topic(topic(20, 2, "8", "b", 300));
+
+        assert!(data.increment_topic_reply_count(10, 900));
+
+        assert_eq!(topic_ids(&data), vec!["10", "20"]);
+        assert_eq!(
+            data.topic_by_id("10")
+                .expect("topic 10")
+                .last_message_timestamp,
+            900
+        );
+        assert_sorted_by_timestamp_desc(&data);
+        assert_index_matches_topics(&data);
+    }
+
+    #[test]
+    fn increment_topic_reply_count_never_moves_lsnt_backward() {
+        let mut data = TopicsData::default();
+        data.upsert_topic_meta("10".to_string(), 2, 900);
+
+        assert!(data.increment_topic_reply_count(10, 100));
+
+        assert_eq!(data.topic_meta("10").expect("meta 10").lsnt, 900);
+    }
+
+    #[test]
+    fn increment_topic_reply_count_ignores_a_zero_topic_id() {
+        let mut data = TopicsData::default();
+
+        assert!(!data.increment_topic_reply_count(0, 600));
+
+        assert!(data.topic_meta("0").is_none());
+    }
+
+    #[test]
+    fn decrement_topic_reply_count_never_goes_negative() {
+        let mut data = TopicsData::default();
+        data.upsert_topic_meta("10".to_string(), 1, 500);
+
+        assert!(data.decrement_topic_reply_count(10));
+        assert_eq!(data.topic_meta("10").expect("meta 10").rpl, 0);
+
+        assert!(data.decrement_topic_reply_count(10));
+        assert_eq!(data.topic_meta("10").expect("meta 10").rpl, 0);
+    }
+
+    #[test]
+    fn decrement_topic_reply_count_ignores_unknown_and_zero_topics() {
+        let mut data = TopicsData::default();
+
+        assert!(!data.decrement_topic_reply_count(10));
+        assert!(!data.decrement_topic_reply_count(0));
+        assert!(data.topic_meta("10").is_none());
+    }
+
+    #[test]
+    fn touch_topic_last_sent_moves_lsnt_forward_and_keeps_the_reply_count() {
+        let mut data = TopicsData::default();
+        data.upsert_topic_meta("10".to_string(), 4, 500);
+
+        assert!(data.touch_topic_last_sent(10, 900));
+        let meta = data.topic_meta("10").expect("meta 10");
+        assert_eq!(meta.lsnt, 900);
+        assert_eq!(meta.rpl, 4);
+
+        assert!(data.touch_topic_last_sent(10, 100));
+        let meta = data.topic_meta("10").expect("meta 10");
+        assert_eq!(meta.lsnt, 900);
+        assert_eq!(meta.rpl, 4);
+    }
+
+    #[test]
+    fn touch_topic_last_sent_ignores_a_zero_topic_id_or_a_zero_timestamp() {
+        let mut data = TopicsData::default();
+
+        assert!(!data.touch_topic_last_sent(0, 900));
+        assert!(!data.touch_topic_last_sent(10, 0));
+
+        assert!(data.topic_meta("0").is_none());
+        assert!(data.topic_meta("10").is_none());
+    }
+
+    #[test]
+    fn topic_reply_summary_reports_nothing_for_an_unknown_topic() {
+        let data = TopicsData::default();
+
+        assert_eq!(data.topic_reply_summary("10"), (0, None));
+    }
+
+    #[test]
+    fn topic_reply_summary_hides_a_zero_last_sent_timestamp() {
+        let mut data = TopicsData::default();
+        data.upsert_topic_meta("10".to_string(), 3, 0);
+        assert_eq!(data.topic_reply_summary("10"), (3, None));
+
+        data.upsert_topic_meta("10".to_string(), 3, 700);
+        assert_eq!(data.topic_reply_summary("10"), (3, Some(700)));
+    }
+
+    #[test]
+    fn clear_topics_keeps_the_reply_meta_of_other_clans() {
+        let mut data = TopicsData::default();
+        data.upsert_topic(topic(10, 1, "8", "a", 100));
+        data.upsert_topic_meta("10".to_string(), 3, 500);
+
+        data.clear_topics();
+
+        assert!(data.topics().is_empty());
+        assert!(data.topic_by_id("10").is_none());
+        assert_eq!(data.topic_meta("10").expect("meta 10").rpl, 3);
+
+        data.clear();
+        assert!(data.topic_meta("10").is_none());
+    }
+
+    #[test]
+    fn topic_id_for_origin_message_finds_the_topic_of_an_origin_message() {
+        let mut data = TopicsData::default();
+        data.upsert_topic(topic(10, 100, "8", "a", 100));
+        data.upsert_topic(topic(20, 200, "8", "b", 300));
+
+        assert_eq!(
+            data.topic_id_for_origin_message("200"),
+            Some("20".to_string())
+        );
+        assert_eq!(data.topic_id_for_origin_message("999"), None);
+    }
+
+    #[test]
+    fn deleting_a_reply_inside_the_active_topic_does_not_close_the_panel() {
+        let data = data_with_active_topic();
+        let compose = compose_for(100, 555);
+
+        assert!(!panel_should_close_on_message_deleted(
+            true,
+            &compose,
+            &data,
+            MessageId(900),
+            Some(ChannelId(555)),
+        ));
+    }
+
+    #[test]
+    fn deleting_the_origin_message_closes_the_panel() {
+        let data = data_with_active_topic();
+        let compose = compose_for(100, 555);
+
+        assert!(panel_should_close_on_message_deleted(
+            true,
+            &compose,
+            &data,
+            MessageId(100),
+            None,
+        ));
+        assert!(panel_should_close_on_message_deleted(
+            true,
+            &compose,
+            &data,
+            MessageId(100),
+            Some(ChannelId(555)),
+        ));
+    }
+
+    #[test]
+    fn deleting_the_topic_origin_closes_the_panel_even_without_a_compose_origin() {
+        let data = data_with_active_topic();
+        let compose = TopicCompose {
+            active_topic_id: Some(555),
+            ..Default::default()
+        };
+
+        assert!(panel_should_close_on_message_deleted(
+            true,
+            &compose,
+            &data,
+            MessageId(100),
+            Some(ChannelId(555)),
+        ));
+    }
+
+    #[test]
+    fn deleting_a_message_from_another_topic_does_not_close_the_panel() {
+        let data = data_with_active_topic();
+        let compose = compose_for(100, 555);
+
+        assert!(!panel_should_close_on_message_deleted(
+            true,
+            &compose,
+            &data,
+            MessageId(700),
+            Some(ChannelId(777)),
+        ));
+    }
+
+    #[test]
+    fn a_closed_panel_never_closes_on_a_message_deletion() {
+        let data = data_with_active_topic();
+        let compose = compose_for(100, 555);
+
+        assert!(!panel_should_close_on_message_deleted(
+            false,
+            &compose,
+            &data,
+            MessageId(100),
+            None,
+        ));
+    }
+
     #[test]
     fn message_allows_topic_discussion_rejects_topic_and_poll() {
         assert!(!TopicsStore::message_allows_topic_discussion(
@@ -1126,15 +1985,45 @@ mod tests {
     }
 
     #[test]
-    fn message_allows_topic_discussion_rejects_system_codes() {
+    fn message_allows_topic_discussion_rejects_message_buzz_which_is_not_a_system_code() {
+        assert!(!MessageCode::MessageBuzz.is_system());
         assert!(!TopicsStore::message_allows_topic_discussion(
-            &sample_message(MessageCode::CreateThread)
+            &sample_message(MessageCode::MessageBuzz)
         ));
-        assert!(!TopicsStore::message_allows_topic_discussion(
-            &sample_message(MessageCode::Welcome)
-        ));
-        assert!(TopicsStore::message_allows_topic_discussion(
-            &sample_message(MessageCode::Chat)
-        ));
+    }
+
+    #[test]
+    fn message_allows_topic_discussion_rejects_every_system_code() {
+        for code in [
+            MessageCode::Welcome,
+            MessageCode::UpcomingEvent,
+            MessageCode::CreateThread,
+            MessageCode::CreatePin,
+            MessageCode::AuditLog,
+            MessageCode::DeleteThread,
+        ] {
+            assert!(code.is_system(), "{code:?} is expected to be a system code");
+            assert!(
+                !TopicsStore::message_allows_topic_discussion(&sample_message(code)),
+                "{code:?} must not allow a topic discussion"
+            );
+        }
+    }
+
+    #[test]
+    fn message_allows_topic_discussion_allows_regular_message_codes() {
+        for code in [
+            MessageCode::Chat,
+            MessageCode::SendToken,
+            MessageCode::Ephemeral,
+            MessageCode::ShareContact,
+            MessageCode::Location,
+            MessageCode::Unknown(99),
+        ] {
+            assert!(
+                TopicsStore::message_allows_topic_discussion(&sample_message(code)),
+                "{code:?} must allow a topic discussion"
+            );
+        }
     }
 }

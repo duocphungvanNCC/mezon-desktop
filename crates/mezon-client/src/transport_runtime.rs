@@ -941,6 +941,8 @@ impl TransportClient {
         is_public: bool,
         has_attachment: bool,
         topic_id: i64,
+        has_mentions: bool,
+        has_references: bool,
     ) -> Result<()> {
         let transport = self.inner.clone();
         runtime()
@@ -954,6 +956,8 @@ impl TransportClient {
                         is_public,
                         has_attachment,
                         topic_id,
+                        has_mentions,
+                        has_references,
                     )
                     .await
             })
@@ -1136,6 +1140,8 @@ impl TransportClient {
         attachments: Vec<mezon_proto::api::MessageAttachment>,
         mode: i32,
         is_public: bool,
+        topic_id: i64,
+        is_update_msg_topic: bool,
     ) -> Result<()> {
         let transport = self.inner.clone();
         let content = content.to_string();
@@ -1150,6 +1156,8 @@ impl TransportClient {
                         attachments,
                         mode,
                         is_public,
+                        topic_id,
+                        is_update_msg_topic,
                     )
                     .await
             })
@@ -1398,6 +1406,8 @@ impl TransportClient {
         create_time_seconds: u32,
         mode: i32,
         is_public: bool,
+        topic_id: i64,
+        is_update_msg_topic: bool,
     ) -> Result<()> {
         let transport = self.inner.clone();
         let content = content.to_string();
@@ -1415,6 +1425,8 @@ impl TransportClient {
                         create_time_seconds,
                         mode,
                         is_public,
+                        topic_id,
+                        is_update_msg_topic,
                     )
                     .await
             })

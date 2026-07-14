@@ -70,10 +70,11 @@ fn sender_allows_give_coffee(msg: &Message, current_user_id: &str, cx: &App) -> 
     if msg.sender_id.is_empty() || msg.sender_id.as_str() == "0" {
         return false;
     }
-    if let Some(config) = AppConfig::try_global(cx) {
-        if !config.anonymous_user_id.is_empty() && msg.sender_id == config.anonymous_user_id {
-            return false;
-        }
+    if let Some(config) = AppConfig::try_global(cx)
+        && !config.anonymous_user_id.is_empty()
+        && msg.sender_id == config.anonymous_user_id
+    {
+        return false;
     }
     true
 }
@@ -280,16 +281,6 @@ fn build_topic_menu(
         );
     }
 
-    {
-        let message_id = msg.id;
-        menu = menu.item_icon(
-            t("contextMenu.markUnread"),
-            IconName::MarkUnreadIcon,
-            move |_window, cx| {
-                MessagesStore::global(cx).update(cx, |store, cx| store.mark_unread(message_id, cx));
-            },
-        );
-    }
     {
         let message_id = msg.id;
         menu = menu.item_icon(
@@ -530,10 +521,7 @@ fn build_channel_menu(
         );
     }
 
-    if !TopicsStore::global(cx).read(cx).is_panel_open()
-        && TopicsStore::can_create_topic(cx)
-        && TopicsStore::message_allows_topic_discussion(msg)
-    {
+    if TopicsStore::can_create_topic(cx) && TopicsStore::message_allows_topic_discussion(msg) {
         let message_id = msg.id;
         menu = menu.item_icon(
             t("contextMenu.topicDiscussion"),

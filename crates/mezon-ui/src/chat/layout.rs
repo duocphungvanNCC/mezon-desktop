@@ -71,6 +71,7 @@ pub struct ChatLayout {
     displayed_active_channel: Option<ActiveChannelSlice>,
     displayed_voice_mini: Option<VoiceMiniSlice>,
     displayed_threads_panel: ThreadsPanelSlice,
+    threads_creating_gate: bool,
     displayed_inbox: InboxDisplaySlice,
     pending_open_threads_popover: bool,
     voice_emoji_picker: Option<Entity<ReactionPicker>>,
@@ -289,14 +290,18 @@ impl ChatLayout {
                 cx.notify();
             }
             TopicsEvent::Closed => cx.notify(),
-            TopicsEvent::Updated | TopicsEvent::ReplySent => {}
+            TopicsEvent::Updated | TopicsEvent::ReplySent | TopicsEvent::ReplyTargetChanged => {}
         })
         .detach();
-        cx.observe(&ThreadsStore::global(cx), |_, store, cx| {
-            if store.read(cx).is_creating() {
+        cx.observe(&ThreadsStore::global(cx), |this, store, cx| {
+            let creating = store.read(cx).is_creating();
+            if creating == this.threads_creating_gate {
+                return;
+            }
+            this.threads_creating_gate = creating;
+            if creating {
                 TopicsStore::global(cx).update(cx, |topics, cx| topics.close_panel(cx));
             }
-            cx.notify();
         })
         .detach();
         cx.observe(&clan_list, |this, _, cx| {
@@ -363,6 +368,7 @@ impl ChatLayout {
             displayed_active_channel: None,
             displayed_voice_mini: None,
             displayed_threads_panel: ThreadsPanelSlice::default(),
+            threads_creating_gate: false,
             displayed_inbox: InboxDisplaySlice::default(),
             pending_open_threads_popover: false,
             voice_emoji_picker: None,

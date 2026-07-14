@@ -2,7 +2,7 @@ use gpui::{
     AnyView, ClickEvent, Context, Entity, FontWeight, KeyDownEvent, SharedString, StyleRefinement,
     Subscription, Window, div, prelude::*, px,
 };
-use mezon_store::{ChannelId, MessagesStore, Settings, TopicsStore};
+use mezon_store::{ChannelId, MessageId, MessagesStore, Settings, TopicsEvent, TopicsStore};
 
 use crate::app::window_controls::APP_HEADER_HEIGHT;
 use crate::chat::ReplyTarget;
@@ -21,6 +21,7 @@ pub struct TopicPanel {
     input_bar: Entity<InputBar>,
     typing: Entity<ChannelTyping>,
     topic_timeline: Entity<ChannelMessages>,
+    reply_target_id: Option<MessageId>,
     _subs: Vec<Subscription>,
 }
 
@@ -47,10 +48,31 @@ impl TopicPanel {
         let topic_timeline =
             cx.new(|cx| ChannelMessages::new_topic_box(settings.clone(), align_timeline, cx));
         topic_timeline.update(cx, |timeline, cx| timeline.bind_window(window, cx));
+        mention_input.update(cx, |input, cx| input.focus_input(window, cx));
 
         let mut subs = Vec::new();
         subs.push(cx.observe(&MessagesStore::global(cx), |_, _, cx| cx.notify()));
-        subs.push(cx.observe(&TopicsStore::global(cx), |_, _, cx| cx.notify()));
+        subs.push(cx.observe(&TopicsStore::global(cx), |this, store, cx| {
+            if store.read(cx).reply_target().is_none() {
+                this.reply_target_id = None;
+            }
+            cx.notify();
+        }));
+        subs.push(cx.subscribe_in(
+            &TopicsStore::global(cx),
+            window,
+            |this, store, event: &TopicsEvent, window, cx| {
+                if !matches!(event, TopicsEvent::ReplyTargetChanged) {
+                    return;
+                }
+                let reply_id = store.read(cx).reply_target().map(|d| d.message_ref_id);
+                if reply_id.is_some() && reply_id != this.reply_target_id {
+                    this.mention_input
+                        .update(cx, |input, cx| input.focus_input(window, cx));
+                }
+                this.reply_target_id = reply_id;
+            },
+        ));
         subs.push(cx.subscribe_in(
             &mention_input,
             window,
@@ -59,14 +81,14 @@ impl TopicPanel {
                 MentionInputEvent::SendSticker { url, filename } => {
                     this.send_sticker(url.clone(), filename.clone(), cx);
                 }
-                MentionInputEvent::SendGif { url, .. } => {
-                    this.send_gif(url.clone(), cx);
+                MentionInputEvent::SendGif { url, width, height } => {
+                    this.send_gif(url.clone(), *width, *height, cx);
                 }
                 MentionInputEvent::SendSound { url, filename } => {
                     this.send_sound(url.clone(), filename.clone(), cx);
                 }
                 MentionInputEvent::Cancel => {
-                    TopicsStore::global(cx).update(cx, |store, cx| store.clear_reply(cx));
+                    TopicsStore::global(cx).update(cx, |store, cx| store.close_panel(cx));
                 }
             },
         ));
@@ -77,6 +99,7 @@ impl TopicPanel {
             input_bar,
             typing,
             topic_timeline,
+            reply_target_id: None,
             _subs: subs,
         }
     }
@@ -101,16 +124,23 @@ impl TopicPanel {
             return;
         }
         TopicsStore::global(cx).update(cx, |store, cx| {
-            store.submit_reply_url_attachment(url, filename, "sticker".to_string(), cx);
+            store.submit_reply_url_attachment(url, filename, "sticker".to_string(), 0, 0, cx);
         });
     }
 
-    fn send_gif(&mut self, url: String, cx: &mut Context<Self>) {
+    fn send_gif(&mut self, url: String, width: u32, height: u32, cx: &mut Context<Self>) {
         if TopicsStore::global(cx).read(cx).is_submitting() {
             return;
         }
         TopicsStore::global(cx).update(cx, |store, cx| {
-            store.submit_reply_url_attachment(url, String::new(), "sticker".to_string(), cx);
+            store.submit_reply_url_attachment(
+                url,
+                String::new(),
+                "sticker".to_string(),
+                width as i32,
+                height as i32,
+                cx,
+            );
         });
     }
 
@@ -119,7 +149,7 @@ impl TopicPanel {
             return;
         }
         TopicsStore::global(cx).update(cx, |store, cx| {
-            store.submit_reply_url_attachment(url, filename, "audio/mpeg".to_string(), cx);
+            store.submit_reply_url_attachment(url, filename, "audio/mpeg".to_string(), 0, 0, cx);
         });
     }
 }

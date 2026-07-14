@@ -638,16 +638,23 @@ pub struct ChannelMessages {
     row_memo_day: Option<chrono::NaiveDate>,
     is_topic_box: bool,
     topic_align_timeline: Option<gpui::WeakEntity<ChannelMessages>>,
-    topic_list_layout: Option<(usize, bool)>,
     topic_spacer_h: Option<Pixels>,
+    topic_spacer_active: bool,
+    topic_aligned: bool,
+    topic_align_probe: bool,
+    topic_list_topic: Option<i64>,
+    topic_row_ids: Vec<MessageId>,
     topic_messages: Rc<Vec<Message>>,
     topics_viewport_fp: Option<u64>,
+    permissions_ensured_for: Option<(ClanId, ChannelId)>,
     _topics_event_sub: Option<Subscription>,
+    _subs: Vec<Subscription>,
 }
 
 impl ChannelMessages {
     pub fn new(settings: Entity<Settings>, cx: &mut Context<Self>) -> Self {
-        cx.observe(&settings, |this, settings, cx| {
+        let mut subs: Vec<Subscription> = Vec::new();
+        subs.push(cx.observe(&settings, |this, settings, cx| {
             this.cached_locale = settings.read(cx).language.clone().into();
             this.cached_coming_soon =
                 mezon_i18n::t(&this.cached_locale, "common.comingSoon").into();
@@ -655,8 +662,7 @@ impl ChannelMessages {
             memo.time_labels.clear();
             memo.rich_text.clear();
             cx.notify();
-        })
-        .detach();
+        }));
 
         let channel_list = ChannelList::global(cx);
         let channel_list_observe = cx.observe(&channel_list, |this, _, cx| this.reconcile_cold(cx));
@@ -747,17 +753,9 @@ impl ChannelMessages {
         });
 
         let store = MessagesStore::global(cx);
-        cx.subscribe(&store, |this, _store, event, cx| {
+        subs.push(cx.subscribe(&store, |this, _store, event, cx| {
             if this.is_topic_box {
-                match event {
-                    MessagesEvent::TopicUpdated { .. } | MessagesEvent::Updated { .. } => {
-                        this.refresh_topic_messages(cx);
-                        this.row_memo.borrow_mut().time_labels.clear();
-                        cx.notify();
-                    }
-                    MessagesEvent::ReplyTargetChanged => cx.notify(),
-                    _ => {}
-                }
+                this.on_topic_store_event(event, cx);
                 return;
             }
             let structural = matches!(
@@ -995,8 +993,7 @@ impl ChannelMessages {
                 this.refresh_derived_state(cx);
             }
             cx.notify();
-        })
-        .detach();
+        }));
 
         let list_state = ListState::new(0, ListAlignment::Bottom, px(LIST_OVERDRAW))
             .smooth_line_scroll()
@@ -1232,11 +1229,17 @@ impl ChannelMessages {
             row_memo_day: None,
             is_topic_box: false,
             topic_align_timeline: None,
-            topic_list_layout: None,
             topic_spacer_h: None,
+            topic_spacer_active: false,
+            topic_aligned: false,
+            topic_align_probe: false,
+            topic_list_topic: None,
+            topic_row_ids: Vec::new(),
             topic_messages: Rc::new(Vec::new()),
             topics_viewport_fp: None,
+            permissions_ensured_for: None,
             _topics_event_sub: Some(topics_event_sub),
+            _subs: subs,
         }
     }
 
@@ -1248,21 +1251,25 @@ impl ChannelMessages {
         let mut this = Self::new(settings, cx);
         this.is_topic_box = true;
         this.topic_align_timeline = Some(align_timeline.downgrade());
-        this.topic_list_layout = None;
         this.topic_spacer_h = None;
-        cx.observe(&TopicsStore::global(cx), |this, _, cx| {
-            this.refresh_topic_messages(cx);
-            cx.notify();
-        })
-        .detach();
+        this._subs.push(
+            cx.subscribe(&TopicsStore::global(cx), |this, _, event, cx| match event {
+                TopicsEvent::Opened => {
+                    this.refresh_topic_messages(cx);
+                    cx.notify();
+                }
+                TopicsEvent::ReplyTargetChanged => cx.notify(),
+                _ => {}
+            }),
+        );
         this.refresh_topic_messages(cx);
         this
     }
 
     pub fn message_viewport_top(&self, message_id: MessageId, cx: &App) -> Option<Pixels> {
-        let store = MessagesStore::global(cx);
-        let messages = store.read(cx).viewport_messages();
-        let msg_ix = messages.iter().position(|m| m.id == message_id)?;
+        let msg_ix = MessagesStore::global(cx)
+            .read(cx)
+            .viewport_position(message_id)?;
         let list_ix = usize::from(self.header_shown) + msg_ix;
         self.list_state.bounds_for_item(list_ix).map(|b| b.top())
     }
@@ -1302,11 +1309,177 @@ impl ChannelMessages {
         messages
     }
 
-    fn refresh_topic_messages(&mut self, cx: &App) {
+    fn refresh_topic_messages(&mut self, cx: &App) -> bool {
         if !self.is_topic_box {
-            return;
+            return false;
         }
         self.topic_messages = Rc::new(Self::collect_topic_messages(cx));
+        self.sync_topic_rows(cx)
+    }
+
+    fn topic_rows_own_recent_send(&self) -> bool {
+        self.topic_messages.last().is_some_and(|m| {
+            m.id.is_optimistic()
+                || (!self.cached_current_user_id.is_empty()
+                    && m.sender_id.as_str() == self.cached_current_user_id.as_ref()
+                    && chrono::Utc::now().timestamp() - m.create_time <= 1)
+        })
+    }
+
+    fn reset_topic_rows(&mut self, topic_id: Option<i64>, ids: Vec<MessageId>) {
+        self.topic_list_topic = topic_id;
+        self.topic_row_ids = ids;
+        self.topic_spacer_active = false;
+        self.topic_spacer_h = None;
+        self.topic_aligned = false;
+        self.topic_align_probe = false;
+        self.list_state.reset(self.topic_row_ids.len());
+        self.list_state.scroll_to_end();
+        self.at_bottom = true;
+    }
+
+    fn sync_topic_rows(&mut self, cx: &App) -> bool {
+        let active_topic = TopicsStore::global(cx).read(cx).active_topic_id();
+        let new_ids: Vec<MessageId> = self.topic_messages.iter().map(|m| m.id).collect();
+
+        if active_topic != self.topic_list_topic {
+            self.reset_topic_rows(active_topic, new_ids);
+            return true;
+        }
+        if new_ids == self.topic_row_ids {
+            return false;
+        }
+
+        let base = usize::from(self.topic_spacer_active);
+        if self.list_state.item_count() != base + self.topic_row_ids.len() {
+            self.reset_topic_rows(active_topic, new_ids);
+            return true;
+        }
+
+        let old = &self.topic_row_ids;
+        let prefix = old
+            .iter()
+            .zip(new_ids.iter())
+            .take_while(|(a, b)| a == b)
+            .count();
+        let max_suffix = old.len().min(new_ids.len()) - prefix;
+        let suffix = old
+            .iter()
+            .rev()
+            .zip(new_ids.iter().rev())
+            .take(max_suffix)
+            .take_while(|(a, b)| a == b)
+            .count();
+        let old_end = old.len() - suffix;
+        let new_end = new_ids.len() - suffix;
+
+        let appended_at_tail = prefix == old.len() && suffix == 0;
+        let follow = appended_at_tail
+            && (self
+                .list_state
+                .is_scrolled_to_end()
+                .unwrap_or(self.at_bottom)
+                || self.topic_rows_own_recent_send());
+
+        self.list_state
+            .splice(base + prefix..base + old_end, new_end - prefix);
+        self.topic_row_ids = new_ids;
+
+        if follow {
+            self.list_state.scroll_to_end();
+            self.at_bottom = true;
+        }
+        true
+    }
+
+    fn sync_topic_spacer(&mut self, active: bool, height: Pixels) {
+        if active != self.topic_spacer_active {
+            if active {
+                self.list_state.splice(0..0, 1);
+                self.topic_spacer_active = true;
+                self.topic_spacer_h = Some(height);
+                if !self.topic_aligned {
+                    self.topic_aligned = true;
+                    self.list_state.scroll_to(gpui::ListOffset {
+                        item_ix: 0,
+                        offset_in_item: px(0.),
+                    });
+                }
+            } else {
+                self.list_state.splice(0..1, 0);
+                self.topic_spacer_active = false;
+                self.topic_spacer_h = None;
+            }
+            return;
+        }
+        if active && self.topic_spacer_h != Some(height) {
+            self.topic_spacer_h = Some(height);
+            self.list_state.remeasure_items(0..1);
+        }
+    }
+
+    fn remeasure_topic_rows(&self, range: std::ops::Range<usize>) {
+        let base = usize::from(self.topic_spacer_active);
+        let count = self.list_state.item_count();
+        let start = (base + range.start).min(count);
+        let end = (base + range.end).min(count);
+        if start < end {
+            self.list_state.remeasure_items(start..end);
+        }
+    }
+
+    fn on_topic_store_event(&mut self, event: &MessagesEvent, cx: &mut Context<Self>) {
+        let concerns_topic = match event {
+            MessagesEvent::TopicUpdated { topic_id } => {
+                TopicsStore::global(cx).read(cx).active_topic_id() == Some(*topic_id)
+            }
+            MessagesEvent::Updated {
+                message_id: Some(id),
+            }
+            | MessagesEvent::RemovedAt { message_id: id, .. } => self.topic_row_ids.contains(id),
+            _ => false,
+        };
+        if !concerns_topic {
+            return;
+        }
+
+        let changed_row = match event {
+            MessagesEvent::Updated {
+                message_id: Some(id),
+            } => self.topic_row_ids.iter().position(|row| row == id),
+            _ => None,
+        };
+
+        let structural = self.refresh_topic_messages(cx);
+        self.row_memo.borrow_mut().time_labels.clear();
+        if !structural {
+            match changed_row {
+                Some(ix) => self.remeasure_topic_rows(ix..ix + 1),
+                None => self.remeasure_topic_rows(0..self.topic_row_ids.len()),
+            }
+        }
+        cx.notify();
+    }
+
+    fn ensure_topic_create_permissions(&mut self, cx: &mut Context<Self>) {
+        let key = {
+            let messages = MessagesStore::global(cx).read(cx);
+            messages.active_clan_id().zip(messages.active_channel_id())
+        };
+        let Some(key) = key else {
+            return;
+        };
+        if self.permissions_ensured_for == Some(key) {
+            return;
+        }
+        TopicsStore::ensure_create_permissions(cx);
+        let loaded = ChannelPermissionsStore::global(cx)
+            .read(cx)
+            .permission_value("send-message", key.0, key.1)
+            .is_some();
+        if loaded {
+            self.permissions_ensured_for = Some(key);
+        }
     }
 
     pub(crate) fn resolve_topic_forward_group(
@@ -1505,7 +1678,7 @@ impl ChannelMessages {
             }
             _ => false,
         };
-        TopicsStore::ensure_create_permissions(cx);
+        self.ensure_topic_create_permissions(cx);
         self._hover_show_task = None;
         self._hover_hide_task = None;
         self.hovered_row = None;
@@ -1530,7 +1703,7 @@ impl ChannelMessages {
         cx: &mut Context<Self>,
     ) {
         if entered {
-            TopicsStore::ensure_create_permissions(cx);
+            self.ensure_topic_create_permissions(cx);
             self.raw_hover = Some(message_id);
         } else if self.raw_hover == Some(message_id) {
             self.raw_hover = None;
@@ -1587,6 +1760,9 @@ impl ChannelMessages {
         if window.is_window_active() {
             for view in self.gif_videos.values() {
                 view.update(cx, |gif, cx| gif.set_playing(true, cx));
+            }
+            if self.is_topic_box {
+                return;
             }
             if self
                 .list_state
@@ -1812,6 +1988,9 @@ impl ChannelMessages {
     }
 
     fn reconcile_cold(&mut self, cx: &mut Context<Self>) {
+        if self.is_topic_box {
+            return;
+        }
         let inputs = Self::cold_inputs(cx);
         if inputs != self.last_cold_inputs {
             self.last_cold_inputs = inputs;
@@ -2514,34 +2693,22 @@ impl ChannelMessages {
                 .read(cx)
                 .message_viewport_top(id, cx)
         });
-        let use_align_spacer = channel_origin_top.is_some_and(|y| y > px(0.));
-        let align_spacer_h = channel_origin_top.unwrap_or(px(0.));
-        let list_count = self.topic_messages.len() + usize::from(use_align_spacer);
-        let layout_key = (list_count, use_align_spacer);
-        if self.topic_list_layout != Some(layout_key) {
-            self.topic_list_layout = Some(layout_key);
-            self.list_state.reset(list_count);
-            if use_align_spacer {
-                self.list_state.scroll_to(gpui::ListOffset {
-                    item_ix: 0,
-                    offset_in_item: px(0.),
-                });
-            } else {
-                self.list_state.scroll_to_end();
-            }
-        } else if self.list_state.item_count() != list_count {
-            self.list_state.reset(list_count);
+        let own_bounds = self.list_state.viewport_bounds();
+        let align_delta = (own_bounds.size.height > px(0.))
+            .then(|| channel_origin_top.map(|y| y - own_bounds.top()))
+            .flatten()
+            .filter(|delta| *delta > px(0.));
+        if align_delta.is_none()
+            && channel_origin_top.is_some()
+            && own_bounds.size.height <= px(0.)
+            && !self.topic_align_probe
+        {
+            self.topic_align_probe = true;
+            cx.defer_in(window, |_, _, cx| cx.notify());
         }
-        if use_align_spacer {
-            if self.topic_spacer_h != Some(align_spacer_h) {
-                self.topic_spacer_h = Some(align_spacer_h);
-                if self.list_state.item_count() > 0 {
-                    self.list_state.remeasure_items(0..1);
-                }
-            }
-        } else if self.topic_spacer_h.is_some() {
-            self.topic_spacer_h = None;
-        }
+        let use_align_spacer = align_delta.is_some();
+        let align_spacer_h = align_delta.unwrap_or(px(0.));
+        self.sync_topic_spacer(use_align_spacer, align_spacer_h);
 
         let locale = self.cached_locale.clone();
         let coming_soon: SharedString = mezon_i18n::t(&locale, "common.comingSoon").into();
@@ -2557,7 +2724,10 @@ impl ChannelMessages {
         let context_menu_message = self.context_menu_target.map(|(id, _)| id);
         let avatar_image_cache = self.avatar_image_cache.clone();
         let small_avatar_image_cache = self.small_avatar_image_cache.clone();
-        let reply_highlight_id = store.read(cx).reply_target().map(|d| d.message_ref_id);
+        let reply_highlight_id = TopicsStore::global(cx)
+            .read(cx)
+            .reply_target()
+            .map(|d| d.message_ref_id);
         let profile_context = channel_profile_context(is_dm, dm_channel, active_clan, cx);
         let settings = self.settings.clone();
         let active_videos = self.active_videos.clone();

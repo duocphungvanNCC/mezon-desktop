@@ -35,18 +35,14 @@ pub fn render_topic_view_button(msg: &Message, ctx: &RowCtx) -> AnyElement {
         creator_avatar
     };
 
-    let reply_count = msg
+    let (reply_count, last_reply_timestamp) = msg
         .topic_id
         .map(|topic_id| {
-            TopicsStore::try_global(ctx.app).map_or(0, |store| {
-                store.read(ctx.app).topic_display_reply_count(topic_id)
+            TopicsStore::try_global(ctx.app).map_or((0, None), |store| {
+                store.read(ctx.app).topic_reply_summary(topic_id)
             })
         })
-        .unwrap_or(0);
-    let last_reply_timestamp = msg.topic_id.and_then(|topic_id| {
-        TopicsStore::try_global(ctx.app)
-            .and_then(|store| store.read(ctx.app).topic_last_reply_timestamp(topic_id))
-    });
+        .unwrap_or((0, None));
 
     let reply_label = (reply_count > 0).then(|| format_topic_reply_count(reply_count, ctx.locale));
     let time_label = last_reply_timestamp
