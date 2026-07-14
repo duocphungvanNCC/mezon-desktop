@@ -1270,6 +1270,10 @@ impl MessagesStore {
         self.active_channel_id
     }
 
+    pub fn active_clan_id(&self) -> Option<ClanId> {
+        self.active_clan_id
+    }
+
     pub fn is_dm(&self) -> bool {
         self.is_dm
     }
