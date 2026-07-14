@@ -8,6 +8,16 @@ fn decompress_woff2(src: &Path, dest: &Path) {
     fs::write(dest, ttf).expect("Failed to write TTF file");
 }
 
+fn embed_windows_icon() {
+    let rc_file = Path::new("resources/windows/app.rc");
+    let ico_file = Path::new("resources/windows/app.ico");
+    println!("cargo:rerun-if-changed={}", rc_file.display());
+    println!("cargo:rerun-if-changed={}", ico_file.display());
+    embed_resource::compile(rc_file, embed_resource::NONE)
+        .manifest_required()
+        .unwrap();
+}
+
 fn main() {
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
     let in_dir = manifest_dir.join("../../assets/fonts/gg-sans");
@@ -21,5 +31,9 @@ fn main() {
         if !dest.exists() {
             decompress_woff2(&src, &dest);
         }
+    }
+
+    if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
+        embed_windows_icon();
     }
 }
