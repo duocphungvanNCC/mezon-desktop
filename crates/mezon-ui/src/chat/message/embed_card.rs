@@ -12,6 +12,7 @@ const ACCENT_BAR_WIDTH: f32 = 4.0;
 const AUTHOR_ICON_SIZE: f32 = 24.0;
 const THUMBNAIL_SIZE: f32 = 64.0;
 const FOOTER_ICON_SIZE: f32 = 20.0;
+const EMBED_IMAGE_MAX_HEIGHT: f32 = 300.0;
 const SHARE_CONTACT_KEY: &str = "share_contact";
 
 pub fn render_embeds(msg: &Message, ctx: &RowCtx) -> AnyElement {
@@ -158,7 +159,12 @@ fn render_embed_thumbnail(url: &SharedString, ctx: &RowCtx) -> AnyElement {
 
 fn render_embed_image(image: &EmbedImage) -> AnyElement {
     let has_aspect = matches!((image.width, image.height), (Some(w), Some(h)) if w > 0 && h > 0);
-    let mut container = div().mt_2().w_full().rounded(px(4.)).overflow_hidden();
+    let mut container = div()
+        .mt_2()
+        .w_full()
+        .max_h(px(EMBED_IMAGE_MAX_HEIGHT))
+        .rounded(px(4.))
+        .overflow_hidden();
     if let (Some(w), Some(h)) = (image.width, image.height) {
         if w > 0 && h > 0 {
             container = container.aspect_ratio(w as f32 / h as f32);
@@ -173,6 +179,7 @@ fn render_embed_image(image: &EmbedImage) -> AnyElement {
     } else {
         img(image.url_proxied.clone())
             .w_full()
+            .max_h(px(EMBED_IMAGE_MAX_HEIGHT))
             .object_fit(ObjectFit::Contain)
     };
     container.child(image_element).into_any_element()

@@ -1125,12 +1125,14 @@ impl MentionInput {
         if MENTION_HERE_NORM.contains(&needle) {
             out.push(Suggestion::Here);
         }
-        out.sort_by_cached_key(|item| {
-            let display = item.norm_keys().0;
-            let exact = u8::from(display != needle);
-            let index = display.find(&needle).map_or(i64::MAX, |i| i as i64);
-            (exact, index)
-        });
+        if !needle.is_empty() {
+            out.sort_by_cached_key(|item| {
+                let display = item.norm_keys().0;
+                let exact = u8::from(display != needle);
+                let index = display.find(&needle).map_or(i64::MAX, |i| i as i64);
+                (exact, index)
+            });
+        }
         out
     }
 
