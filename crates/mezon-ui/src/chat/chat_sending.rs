@@ -45,6 +45,22 @@ impl ChatSending {
         });
     }
 
+    pub fn send_gif(
+        url: String,
+        width: u32,
+        height: u32,
+        auth_state: &Entity<AuthState>,
+        cx: &mut App,
+    ) {
+        if url.is_empty() {
+            return;
+        }
+        let (uid, uname) = Self::current_user(auth_state, cx);
+        MessagesStore::global(cx).update(cx, |store, cx| {
+            store.send_gif(url, width as i32, height as i32, uid, uname, cx);
+        });
+    }
+
     pub fn send_sound(url: String, filename: String, auth_state: &Entity<AuthState>, cx: &mut App) {
         if url.is_empty() {
             return;

@@ -19,6 +19,8 @@ pub struct GifCategory {
 pub struct Gif {
     pub url: SharedString,
     pub preview_url: SharedString,
+    pub width: u32,
+    pub height: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -27,86 +29,121 @@ pub enum GifEvent {
 }
 
 #[derive(Deserialize)]
-struct TenorCategoriesResponse {
+struct KlipyCategoriesResponse {
     #[serde(default)]
-    tags: Vec<TenorCategory>,
-}
-
-#[derive(Deserialize)]
-struct TenorCategory {
-    #[serde(default)]
-    name: String,
-    #[serde(default)]
-    searchterm: String,
-    #[serde(default)]
-    image: String,
-}
-
-#[derive(Deserialize)]
-struct TenorGifsResponse {
-    #[serde(default)]
-    results: Vec<TenorGif>,
-}
-
-#[derive(Deserialize)]
-struct TenorGif {
-    #[serde(default)]
-    media_formats: TenorMediaFormats,
+    data: KlipyCategoriesData,
 }
 
 #[derive(Deserialize, Default)]
-struct TenorMediaFormats {
-    gif: Option<TenorMedia>,
-    tinygif: Option<TenorMedia>,
+struct KlipyCategoriesData {
+    #[serde(default)]
+    categories: Vec<KlipyCategory>,
 }
 
 #[derive(Deserialize)]
-struct TenorMedia {
+struct KlipyCategory {
+    #[serde(default)]
+    category: String,
+    #[serde(default)]
+    query: String,
+    #[serde(default)]
+    preview_url: String,
+}
+
+#[derive(Deserialize)]
+struct KlipyGifsResponse {
+    #[serde(default)]
+    data: KlipyGifsData,
+}
+
+#[derive(Deserialize, Default)]
+struct KlipyGifsData {
+    #[serde(default)]
+    data: Vec<KlipyGif>,
+}
+
+#[derive(Deserialize)]
+struct KlipyGif {
+    #[serde(default)]
+    file: KlipyFile,
+}
+
+#[derive(Deserialize, Default)]
+struct KlipyFile {
+    xs: Option<KlipyVariant>,
+    sm: Option<KlipyVariant>,
+    md: Option<KlipyVariant>,
+    hd: Option<KlipyVariant>,
+}
+
+#[derive(Deserialize)]
+struct KlipyVariant {
+    gif: Option<KlipyMedia>,
+}
+
+#[derive(Deserialize)]
+struct KlipyMedia {
     #[serde(default)]
     url: String,
+    #[serde(default)]
+    width: u32,
+    #[serde(default)]
+    height: u32,
 }
 
-struct TenorConfig {
+impl KlipyFile {
+    fn gif_media(variant: Option<&KlipyVariant>) -> Option<&KlipyMedia> {
+        variant
+            .and_then(|v| v.gif.as_ref())
+            .filter(|media| !media.url.is_empty())
+    }
+
+    fn shareable(&self) -> Option<&KlipyMedia> {
+        Self::gif_media(self.xs.as_ref())
+            .or_else(|| Self::gif_media(self.sm.as_ref()))
+            .or_else(|| Self::gif_media(self.md.as_ref()))
+            .or_else(|| Self::gif_media(self.hd.as_ref()))
+    }
+}
+
+struct KlipyConfig {
     key: String,
-    client_key: String,
-    base_categories: String,
-    base_search: String,
-    base_featured: String,
+    base_url: String,
 }
 
-impl TenorConfig {
+impl KlipyConfig {
     fn from_app(cx: &App) -> Self {
         let config = AppConfig::global(cx);
         Self {
-            key: config.tenor_key.clone(),
-            client_key: config.api_client_key_custom.clone(),
-            base_categories: config.tenor_url_categories.clone(),
-            base_search: config.tenor_url_search.clone(),
-            base_featured: config.tenor_url_featured.clone(),
+            key: config.klipy_key.clone(),
+            base_url: config.klipy_base_url.clone(),
         }
     }
 
-    fn categories_url(&self) -> String {
+    fn endpoint(&self, path: &str) -> String {
         format!(
-            "{}{}&client_key={}&limit={GIF_LIMIT}",
-            self.base_categories, self.key, self.client_key
+            "{}/{}/gifs/{path}",
+            self.base_url.trim_end_matches('/'),
+            self.key
         )
+    }
+
+    fn categories_url(&self) -> String {
+        self.endpoint("categories")
     }
 
     fn featured_url(&self) -> String {
         format!(
-            "{}{}&client_key={}&limit={GIF_LIMIT}",
-            self.base_featured, self.key, self.client_key
+            "{}?page=1&per_page={GIF_LIMIT}&format_filter=gif",
+            self.endpoint("trending")
         )
     }
 
     fn search_url(&self, query: &str) -> String {
         format!(
-            "{}{}&key={}&client_key={}&limit={GIF_LIMIT}",
-            self.base_search,
-            encode_query(query),
-            self.key,
-            self.client_key
+            "{}?page=1&per_page={GIF_LIMIT}&q={}&format_filter=gif",
+            self.endpoint("search"),
+            encode_query(query)
         )
     }
 }
@@ -119,7 +156,7 @@ pub struct GifStore {
     loading: bool,
     searching: bool,
     search_generation: u64,
-    config: TenorConfig,
+    config: KlipyConfig,
     _base_task: Option<Task<()>>,
     _search_task: Option<Task<()>>,
 }
@@ -153,7 +190,7 @@ impl GifStore {
             loading: false,
             searching: false,
             search_generation: 0,
-            config: TenorConfig::from_app(cx),
+            config: KlipyConfig::from_app(cx),
             _base_task: None,
             _search_task: None,
         }
@@ -191,6 +228,14 @@ impl GifStore {
     }
 
     pub fn search(&mut self, query: String, cx: &mut Context<Self>) {
+        self.start_search(query, SEARCH_DEBOUNCE, cx);
+    }
+
+    pub fn search_now(&mut self, query: String, cx: &mut Context<Self>) {
+        self.start_search(query, Duration::ZERO, cx);
+    }
+
+    fn start_search(&mut self, query: String, debounce: Duration, cx: &mut Context<Self>) {
         let trimmed = query.trim().to_string();
         self.search_generation = self.search_generation.wrapping_add(1);
         if trimmed.is_empty() {
@@ -207,12 +252,14 @@ impl GifStore {
         let generation = self.search_generation;
         let url = self.config.search_url(&trimmed);
         self._search_task = Some(cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(SEARCH_DEBOUNCE).await;
-            if this
-                .update(cx, |this, _| this.search_generation != generation)
-                .unwrap_or(true)
-            {
-                return;
+            if !debounce.is_zero() {
+                cx.background_executor().timer(debounce).await;
+                if this
+                    .update(cx, |this, _| this.search_generation != generation)
+                    .unwrap_or(true)
+                {
+                    return;
+                }
             }
             let results = fetch_gifs(&url).await;
             let _ = this.update(cx, |this, cx| {
@@ -255,20 +302,21 @@ async fn fetch_categories(url: &str) -> Option<Vec<GifCategory>> {
     let bytes = match mezon_client::transport_runtime::fetch_bytes(url).await {
         Ok((bytes, _)) => bytes,
         Err(_) => {
-            tracing::error!("tenor categories fetch failed");
+            tracing::error!("klipy categories fetch failed");
             return None;
         }
     };
-    match serde_json::from_slice::<TenorCategoriesResponse>(&bytes) {
+    match serde_json::from_slice::<KlipyCategoriesResponse>(&bytes) {
         Ok(response) => Some(
             response
-                .tags
+                .data
+                .categories
                 .into_iter()
-                .filter_map(category_from_tenor)
+                .filter_map(category_from_klipy)
                 .collect(),
         ),
         Err(e) => {
-            tracing::error!("tenor categories parse failed: {e}");
+            tracing::error!("klipy categories parse failed: {e}");
             None
         }
     }
@@ -278,50 +326,50 @@ async fn fetch_gifs(url: &str) -> Option<Vec<Gif>> {
     let bytes = match mezon_client::transport_runtime::fetch_bytes(url).await {
         Ok((bytes, _)) => bytes,
         Err(_) => {
-            tracing::error!("tenor gifs fetch failed");
+            tracing::error!("klipy gifs fetch failed");
             return None;
         }
     };
-    match serde_json::from_slice::<TenorGifsResponse>(&bytes) {
+    match serde_json::from_slice::<KlipyGifsResponse>(&bytes) {
         Ok(response) => Some(
             response
-                .results
+                .data
+                .data
                 .into_iter()
-                .filter_map(gif_from_tenor)
+                .filter_map(gif_from_klipy)
                 .collect(),
         ),
         Err(e) => {
-            tracing::error!("tenor gifs parse failed: {e}");
+            tracing::error!("klipy gifs parse failed: {e}");
             None
         }
     }
 }
 
-fn category_from_tenor(category: TenorCategory) -> Option<GifCategory> {
-    if category.searchterm.is_empty() && category.name.is_empty() {
+fn category_from_klipy(category: KlipyCategory) -> Option<GifCategory> {
+    if category.category.is_empty() && category.query.is_empty() {
         return None;
     }
+    let searchterm = if category.query.is_empty() {
+        category.category.clone()
+    } else {
+        category.query
+    };
     Some(GifCategory {
-        name: category.name.into(),
-        searchterm: category.searchterm.into(),
-        image: category.image.into(),
+        name: category.category.into(),
+        searchterm: searchterm.into(),
+        image: category.preview_url.into(),
     })
 }
 
-fn gif_from_tenor(gif: TenorGif) -> Option<Gif> {
-    let url = gif.media_formats.gif?.url;
-    if url.is_empty() {
-        return None;
-    }
-    let preview = gif
-        .media_formats
-        .tinygif
-        .map(|media| media.url)
-        .filter(|url| !url.is_empty())
-        .unwrap_or_else(|| url.clone());
+fn gif_from_klipy(gif: KlipyGif) -> Option<Gif> {
+    let still = gif.file.shareable()?;
+    let url: SharedString = still.url.clone().into();
     Some(Gif {
-        url: url.into(),
-        preview_url: preview.into(),
+        preview_url: url.clone(),
+        url,
+        width: still.width,
+        height: still.height,
     })
 }
 
@@ -342,30 +390,39 @@ fn encode_query(query: &str) -> String {
 mod tests {
     use super::*;
 
-    fn config() -> TenorConfig {
-        TenorConfig {
+    fn config() -> KlipyConfig {
+        KlipyConfig {
             key: "KEY".into(),
-            client_key: "mezon.ai".into(),
-            base_categories: "https://tenor.googleapis.com/v2/categories?key=".into(),
-            base_search: "https://tenor.googleapis.com/v2/search?q=".into(),
-            base_featured: "https://tenor.googleapis.com/v2/featured?key=".into(),
+            base_url: "https://api.klipy.com/api/v1".into(),
         }
     }
 
     #[test]
-    fn builds_tenor_urls_with_expected_params() {
+    fn builds_klipy_urls_with_expected_params() {
         let config = config();
         assert_eq!(
             config.categories_url(),
-            "https://tenor.googleapis.com/v2/categories?key=KEY&client_key=mezon.ai&limit=30"
+            "https://api.klipy.com/api/v1/KEY/gifs/categories"
         );
         assert_eq!(
             config.featured_url(),
-            "https://tenor.googleapis.com/v2/featured?key=KEY&client_key=mezon.ai&limit=30"
+            "https://api.klipy.com/api/v1/KEY/gifs/trending?page=1&per_page=30&format_filter=gif"
         );
         assert_eq!(
             config.search_url("happy cat"),
-            "https://tenor.googleapis.com/v2/search?q=happy%20cat&key=KEY&client_key=mezon.ai&limit=30"
+            "https://api.klipy.com/api/v1/KEY/gifs/search?page=1&per_page=30&q=happy%20cat&format_filter=gif"
+        );
+    }
+
+    #[test]
+    fn trailing_slash_in_base_url_does_not_double_up() {
+        let config = KlipyConfig {
+            key: "KEY".into(),
+            base_url: "https://api.klipy.com/api/v1/".into(),
+        };
+        assert_eq!(
+            config.categories_url(),
+            "https://api.klipy.com/api/v1/KEY/gifs/categories"
         );
     }
 
@@ -376,39 +433,61 @@ mod tests {
     }
 
     #[test]
-    fn parses_gifs_and_prefers_tinygif_preview() {
-        let json = r#"{"results":[
-            {"media_formats":{"gif":{"url":"https://media.tenor.com/a.gif"},"tinygif":{"url":"https://media.tenor.com/a-tiny.gif"}}},
-            {"media_formats":{"gif":{"url":"https://media.tenor.com/b.gif"}}},
-            {"media_formats":{"tinygif":{"url":"https://media.tenor.com/c-tiny.gif"}}}
-        ]}"#;
-        let response: TenorGifsResponse = serde_json::from_str(json).unwrap();
+    fn sends_xs_gif_with_its_real_dimensions_like_react() {
+        let json = r#"{"result":true,"data":{"data":[
+            {"file":{
+                "xs":{"gif":{"url":"https://static.klipy.com/a-xs.gif","width":213,"height":90}},
+                "md":{"gif":{"url":"https://static.klipy.com/a-md.gif","width":500,"height":280}}
+            }}
+        ]}}"#;
+        let response: KlipyGifsResponse = serde_json::from_str(json).unwrap();
         let gifs: Vec<Gif> = response
-            .results
+            .data
+            .data
             .into_iter()
-            .filter_map(gif_from_tenor)
+            .filter_map(gif_from_klipy)
             .collect();
-        assert_eq!(gifs.len(), 2);
-        assert_eq!(gifs[0].url, "https://media.tenor.com/a.gif");
-        assert_eq!(gifs[0].preview_url, "https://media.tenor.com/a-tiny.gif");
-        assert_eq!(gifs[1].url, "https://media.tenor.com/b.gif");
-        assert_eq!(gifs[1].preview_url, "https://media.tenor.com/b.gif");
+        assert_eq!(gifs.len(), 1);
+        assert_eq!(gifs[0].url, "https://static.klipy.com/a-xs.gif");
+        assert_eq!(gifs[0].preview_url, "https://static.klipy.com/a-xs.gif");
+        assert_eq!((gifs[0].width, gifs[0].height), (213, 90));
+    }
+
+    #[test]
+    fn falls_back_upward_when_xs_missing_and_skips_items_without_a_gif() {
+        let json = r#"{"result":true,"data":{"data":[
+            {"file":{"sm":{"gif":{"url":"https://static.klipy.com/b-sm.gif","width":300,"height":200}}}},
+            {"file":{"xs":{"gif":{"url":""}}}},
+            {"file":{}}
+        ]}}"#;
+        let response: KlipyGifsResponse = serde_json::from_str(json).unwrap();
+        let gifs: Vec<Gif> = response
+            .data
+            .data
+            .into_iter()
+            .filter_map(gif_from_klipy)
+            .collect();
+        assert_eq!(gifs.len(), 1);
+        assert_eq!(gifs[0].url, "https://static.klipy.com/b-sm.gif");
+        assert_eq!((gifs[0].width, gifs[0].height), (300, 200));
     }
 
     #[test]
     fn parses_categories_and_skips_empty() {
-        let json = r##"{"tags":[
-            {"name":"#excited","searchterm":"excited","image":"https://img/excited.gif"},
-            {"name":"","searchterm":"","image":""}
-        ]}"##;
-        let response: TenorCategoriesResponse = serde_json::from_str(json).unwrap();
+        let json = r#"{"result":true,"data":{"locale":"en_US","categories":[
+            {"category":"hello","query":"hello","preview_url":"https://static.klipy.com/hello.gif"},
+            {"category":"","query":"","preview_url":""}
+        ]}}"#;
+        let response: KlipyCategoriesResponse = serde_json::from_str(json).unwrap();
         let categories: Vec<GifCategory> = response
-            .tags
+            .data
+            .categories
             .into_iter()
-            .filter_map(category_from_tenor)
+            .filter_map(category_from_klipy)
             .collect();
         assert_eq!(categories.len(), 1);
-        assert_eq!(categories[0].name, "#excited");
-        assert_eq!(categories[0].searchterm, "excited");
+        assert_eq!(categories[0].name, "hello");
+        assert_eq!(categories[0].searchterm, "hello");
+        assert_eq!(categories[0].image, "https://static.klipy.com/hello.gif");
     }
 }

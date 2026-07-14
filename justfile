@@ -24,8 +24,8 @@ help:
     @echo "  ---------------------------------------------"
     @echo "  install           Install development tools (via cargo-binstall)"
     @echo "  install-linux-deps Install Linux system libraries for GPUI/GTK"
-    @echo "  run             Build (debug) and run the app"
-    @echo "  watch           Hot-reload development (requires cargo-watch)"
+    @echo "  run             Build (debug) and run the app (loads .env)"
+    @echo "  watch           Hot-reload development (requires cargo-watch, loads .env)"
     @echo "  check           Fast clippy checks"
     @echo "  lint            Strict linting before commit"
     @echo "  fix             Auto-fix formatting and clippy suggestions"
@@ -69,17 +69,26 @@ install:
 install-linux-deps:
     @bash scripts/linux-deps
 
-# Run the project with optional arguments
+# Run the project with optional arguments (loads .env when present)
 run *args:
-    cargo run {{args}}
+    #!/usr/bin/env bash
+    set -euo pipefail
+    source scripts/load-env.sh
+    exec cargo run {{args}}
 
 # Hot-reload development (requires cargo-watch)
 watch:
-    cargo watch -x run
+    #!/usr/bin/env bash
+    set -euo pipefail
+    source scripts/load-env.sh
+    exec cargo watch -x run
 
 # Profile with Tracy (open Tracy 0.11.x GUI to connect; CPU + memory + frames)
 tracy:
-    cargo run --profile profiling --features tracy
+    #!/usr/bin/env bash
+    set -euo pipefail
+    source scripts/load-env.sh
+    exec cargo run --profile profiling --features tracy
 
 # Fast check for errors during development
 check:
@@ -142,9 +151,12 @@ update:
 # BUILD & CLEAN
 # ------------------------------------------------------------------------------
 
-# Build production release
+# Build production release (loads .env when present)
 release:
-    cargo build --release
+    #!/usr/bin/env bash
+    set -euo pipefail
+    source scripts/load-env.sh
+    exec cargo build --release
 
 # Bundle the release binary into a macOS Mezon.app
 bundle: release

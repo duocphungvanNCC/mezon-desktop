@@ -5,7 +5,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use gpui::{
-    App, AppContext, Context, Entity, EventEmitter, Global, Rgba, SharedString, Subscription, Task,
+    App, AppContext, AsyncApp, Context, Entity, EventEmitter, Global, Rgba, SharedString,
+    Subscription, Task,
 };
 use mezon_client::transport::{
     ApiActionRow, ApiComponentPayload, ApiEmbed, ApiMessage, ApiMessageComponent,
@@ -25,7 +26,7 @@ use crate::album_layout::{AlbumLayout, calculate_album_layout};
 use crate::badge::BadgeService;
 use crate::channel::{ChannelEvent, ChannelList, ChannelType};
 use crate::clan_members::ClanMembersStore;
-use crate::direct::DirectMessageStore;
+use crate::direct::{DirectKind, DirectMessageStore};
 use crate::message::{
     CallLog, CallLogType, Embed, EmbedAuthor, EmbedField, EmbedFooter, EmbedImage, InvitePreview,
     MentionTarget, Message, MessageAttachment, MessageButton, MessageCode, MessageComponent,
@@ -96,6 +97,18 @@ pub enum MessagesEvent {
         message_id: MessageId,
     },
     ReplyTargetChanged,
+    /// One forward destination finished (cf. React `sendingProgress`).
+    ForwardProgress {
+        current: usize,
+        total: usize,
+    },
+    /// Every forward destination has been attempted. `failed` names only the
+    /// destinations that did not go through — a partial failure must not be
+    /// reported as if the whole forward failed.
+    ForwardFinished {
+        sent: usize,
+        failed: Vec<SharedString>,
+    },
 }
 
 /// The message currently being replied to (composer state), mirroring React's
@@ -465,27 +478,59 @@ pub struct MessagesStore {
     /// `VotePollResponse.my_answer_indices`.
     poll_my_vote: HashMap<MessageId, Vec<i32>>,
     select_ui: HashMap<MessageId, HashMap<SharedString, Vec<SharedString>>>,
+    forward_task: Option<Task<()>>,
+    forward_in_flight: bool,
 }
 
+/// Longest additional note that may ride along with a forward
+/// (React `MAX_FORWARD_MESSAGE_LENGTH`).
+pub const MAX_FORWARD_MESSAGE_LENGTH: usize = 2000;
+
+/// A forward destination. A friend has no channel yet — the DM is created on
+/// send (React `createDirectMessageWithUser`).
 #[derive(Debug, Clone)]
-pub struct ForwardTarget {
-    pub clan_id: ClanId,
-    pub channel_id: ChannelId,
-    pub channel_type: i32,
-    pub mode: i32,
-    pub is_public: bool,
+pub enum ForwardTarget {
+    Channel {
+        clan_id: ClanId,
+        channel_id: ChannelId,
+        channel_type: i32,
+        mode: i32,
+        is_public: bool,
+        label: SharedString,
+    },
+    Friend {
+        user_id: UserId,
+        label: String,
+        avatar: String,
+        username: String,
+    },
 }
 
-#[derive(Debug, Clone)]
-struct ForwardPlan {
+impl ForwardTarget {
+    pub fn label(&self) -> SharedString {
+        match self {
+            Self::Channel { label, .. } => label.clone(),
+            Self::Friend { label, .. } => label.clone().into(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ResolvedTarget {
     clan_id: i64,
     channel_id: i64,
     channel_type: i32,
     mode: i32,
     is_public: bool,
-    content: String,
+}
+
+/// One source message, snapshotted off the store before the send task runs.
+#[derive(Debug, Clone)]
+struct ForwardSource {
+    content_raw: String,
+    text: String,
     attachments: Vec<mezon_client::transport::ApiAttachment>,
-    note: Option<String>,
+    mentions: Vec<TransportMention>,
 }
 
 fn attachment_to_api(a: &MessageAttachment) -> mezon_client::transport::ApiAttachment {
@@ -501,25 +546,141 @@ fn attachment_to_api(a: &MessageAttachment) -> mezon_client::transport::ApiAttac
     }
 }
 
-fn plan_forwards(
-    content: &str,
-    attachments: &[mezon_client::transport::ApiAttachment],
-    targets: &[ForwardTarget],
-    note: Option<&str>,
-) -> Vec<ForwardPlan> {
-    targets
+/// Mentions carried by the source message's content payload. Only sent when the
+/// destination is the message's own channel — React passes
+/// `message.channel_id === channel_id ? message.mentions : []`.
+fn forward_mentions(content_raw: &str) -> Vec<TransportMention> {
+    let Ok(content) = serde_json::from_str::<ApiMessageContent>(content_raw) else {
+        return Vec::new();
+    };
+    content
+        .mentions
         .iter()
-        .map(|target| ForwardPlan {
-            clan_id: target.clan_id.get(),
-            channel_id: target.channel_id.get(),
-            channel_type: target.channel_type,
-            mode: target.mode,
-            is_public: target.is_public,
-            content: content.to_string(),
-            attachments: attachments.to_vec(),
-            note: note.map(str::to_string),
+        .filter_map(|token| {
+            let user_id = token.user_id.clone().unwrap_or_default();
+            let role_id = token.role_id.clone().unwrap_or_default();
+            if user_id.is_empty() && role_id.is_empty() {
+                return None;
+            }
+            Some(TransportMention {
+                user_id,
+                role_id,
+                username: token.username.clone().unwrap_or_default(),
+                s: i32::try_from(token.s?).ok()?,
+                e: i32::try_from(token.e?).ok()?,
+            })
         })
         .collect()
+}
+
+fn forward_source(msg: &Message) -> ForwardSource {
+    let content_raw = msg.raw_content.as_deref().unwrap_or_default().to_string();
+    ForwardSource {
+        mentions: forward_mentions(&content_raw),
+        content_raw,
+        text: msg.content.clone(),
+        attachments: msg.attachments.iter().map(attachment_to_api).collect(),
+    }
+}
+
+/// Turn a picked destination into a real channel. A friend row has no DM yet,
+/// so one is created first (React `createDirectMessageWithUser`).
+async fn resolve_forward_target(
+    target: &ForwardTarget,
+    cx: &mut AsyncApp,
+) -> anyhow::Result<ResolvedTarget> {
+    match target {
+        ForwardTarget::Channel {
+            clan_id,
+            channel_id,
+            channel_type,
+            mode,
+            is_public,
+            ..
+        } => Ok(ResolvedTarget {
+            clan_id: clan_id.get(),
+            channel_id: channel_id.get(),
+            channel_type: *channel_type,
+            mode: *mode,
+            is_public: *is_public,
+        }),
+        ForwardTarget::Friend {
+            user_id,
+            label,
+            avatar,
+            username,
+        } => {
+            let create = cx.update(|cx| {
+                DirectMessageStore::global(cx).update(cx, |store, cx| {
+                    store.create_dm_with_user(
+                        *user_id,
+                        label.clone(),
+                        avatar.clone(),
+                        username.clone(),
+                        cx,
+                    )
+                })
+            });
+            let (channel_id, channel_type) = create.await?;
+            Ok(ResolvedTarget {
+                clan_id: 0,
+                channel_id: channel_id.get(),
+                channel_type,
+                mode: DirectKind::Dm.stream_mode(),
+                is_public: false,
+            })
+        }
+    }
+}
+
+async fn send_forward(
+    api: &AppApi,
+    dest: ResolvedTarget,
+    sources: &[ForwardSource],
+    source_channel_id: ChannelId,
+    note: Option<&str>,
+) -> anyhow::Result<()> {
+    api.join_chat(
+        dest.clan_id,
+        dest.channel_id,
+        dest.channel_type,
+        dest.is_public,
+    )
+    .await?;
+    let same_channel = dest.channel_id == source_channel_id.get();
+    for (index, source) in sources.iter().enumerate() {
+        let mentions = if same_channel {
+            source.mentions.clone()
+        } else {
+            Vec::new()
+        };
+        api.forward_channel_message(
+            dest.clan_id,
+            dest.channel_id,
+            &source.content_raw,
+            &source.text,
+            dest.is_public,
+            dest.mode,
+            source.attachments.clone(),
+            mentions,
+        )
+        .await?;
+        let is_last = index + 1 == sources.len();
+        if is_last && let Some(note) = note {
+            api.send_channel_message(
+                dest.clan_id,
+                dest.channel_id,
+                note,
+                dest.is_public,
+                dest.mode,
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+            )
+            .await?;
+        }
+    }
+    Ok(())
 }
 
 /// Transient UI state for a single poll card.
@@ -622,6 +783,8 @@ impl MessagesStore {
             poll_ui: HashMap::new(),
             poll_my_vote: HashMap::new(),
             select_ui: HashMap::new(),
+            forward_task: None,
+            forward_in_flight: false,
         }
     }
 
@@ -1751,80 +1914,81 @@ impl MessagesStore {
         .detach();
     }
 
-    #[allow(dead_code)]
+    pub fn is_forwarding(&self) -> bool {
+        self.forward_in_flight
+    }
+
+    /// Forward `message_ids` to every destination, one destination at a time so
+    /// the copies land in order (React awaits each `forwardToSingleDestination`).
+    /// The note rides along after the last message of each destination.
+    ///
+    /// Returns `false` when nothing was started — the caller must not enter a
+    /// "sending" state it would never be released from, since `ForwardProgress`
+    /// / `ForwardFinished` are only emitted for a send that actually began.
     pub fn forward(
         &mut self,
-        message_id: MessageId,
+        message_ids: Vec<MessageId>,
         targets: Vec<ForwardTarget>,
         note: Option<String>,
         cx: &mut Context<Self>,
-    ) {
-        if targets.is_empty() {
-            return;
+    ) -> bool {
+        if message_ids.is_empty() || targets.is_empty() || self.forward_in_flight {
+            return false;
         }
-        let Some(channel_id) = self.active_channel_id else {
-            return;
+        let Some(source_channel_id) = self.active_channel_id else {
+            return false;
         };
-        let Some(channel) = self.cache.get(&channel_id) else {
-            return;
+        let Some(channel) = self.cache.get(&source_channel_id) else {
+            return false;
         };
-        let Some(msg) = channel.messages.get_by_id(message_id) else {
-            return;
-        };
-        let content = msg.content.clone();
-        let attachments: Vec<mezon_client::transport::ApiAttachment> =
-            msg.attachments.iter().map(attachment_to_api).collect();
-        let plans = plan_forwards(&content, &attachments, &targets, note.as_deref());
+        let sources: Vec<ForwardSource> = message_ids
+            .iter()
+            .filter_map(|id| channel.messages.get_by_id(*id))
+            .map(forward_source)
+            .collect();
+        if sources.is_empty() {
+            return false;
+        }
+        let note = note
+            .map(|n| n.trim().to_string())
+            .filter(|n| !n.is_empty() && n.chars().count() <= MAX_FORWARD_MESSAGE_LENGTH);
 
         let api = self.api.clone();
-        cx.spawn(async move |_this, _cx| {
-            for plan in plans {
-                if let Err(e) = api
-                    .join_chat(
-                        plan.clan_id,
-                        plan.channel_id,
-                        plan.channel_type,
-                        plan.is_public,
-                    )
-                    .await
-                {
-                    tracing::error!("forward join_chat failed: {e}");
-                    continue;
+        let total = targets.len();
+        self.forward_in_flight = true;
+        let task = cx.spawn(async move |this, cx| {
+            let mut failed: Vec<SharedString> = Vec::new();
+            for (index, target) in targets.iter().enumerate() {
+                match resolve_forward_target(target, cx).await {
+                    Ok(dest) => {
+                        if let Err(e) =
+                            send_forward(&api, dest, &sources, source_channel_id, note.as_deref())
+                                .await
+                        {
+                            tracing::error!("forward to channel {} failed: {e}", dest.channel_id);
+                            failed.push(target.label());
+                        }
+                    }
+                    Err(e) => {
+                        tracing::error!("forward target could not be resolved: {e}");
+                        failed.push(target.label());
+                    }
                 }
-                if let Err(e) = api
-                    .forward_channel_message(
-                        plan.clan_id,
-                        plan.channel_id,
-                        &plan.content,
-                        plan.is_public,
-                        plan.mode,
-                        plan.attachments,
-                    )
-                    .await
-                {
-                    tracing::error!("forward_channel_message failed: {e}");
-                    continue;
-                }
-                if let Some(note) = plan.note
-                    && !note.is_empty()
-                    && let Err(e) = api
-                        .send_channel_message(
-                            plan.clan_id,
-                            plan.channel_id,
-                            &note,
-                            plan.is_public,
-                            plan.mode,
-                            Vec::new(),
-                            Vec::new(),
-                            Vec::new(),
-                        )
-                        .await
-                {
-                    tracing::error!("forward note send failed: {e}");
-                }
+                let _ = this.update(cx, |_, cx| {
+                    cx.emit(MessagesEvent::ForwardProgress {
+                        current: index + 1,
+                        total,
+                    });
+                });
             }
-        })
-        .detach();
+            let _ = this.update(cx, |this, cx| {
+                this.forward_in_flight = false;
+                let sent = total - failed.len();
+                cx.emit(MessagesEvent::ForwardFinished { sent, failed });
+            });
+        });
+        self.forward_task = Some(task);
+        true
     }
 
     #[allow(dead_code)]
@@ -2261,7 +2425,37 @@ impl MessagesStore {
         sender_name: String,
         cx: &mut Context<Self>,
     ) {
-        self.send_url_attachment(url, filename, STICKER_FILETYPE, sender_id, sender_name, cx);
+        self.send_url_attachment(
+            url,
+            filename,
+            STICKER_FILETYPE,
+            0,
+            0,
+            sender_id,
+            sender_name,
+            cx,
+        );
+    }
+
+    pub fn send_gif(
+        &mut self,
+        url: String,
+        width: i32,
+        height: i32,
+        sender_id: String,
+        sender_name: String,
+        cx: &mut Context<Self>,
+    ) {
+        self.send_url_attachment(
+            url,
+            String::new(),
+            STICKER_FILETYPE,
+            width,
+            height,
+            sender_id,
+            sender_name,
+            cx,
+        );
     }
 
     pub fn send_sound(
@@ -2272,7 +2466,16 @@ impl MessagesStore {
         sender_name: String,
         cx: &mut Context<Self>,
     ) {
-        self.send_url_attachment(url, filename, AUDIO_FILETYPE, sender_id, sender_name, cx);
+        self.send_url_attachment(
+            url,
+            filename,
+            AUDIO_FILETYPE,
+            0,
+            0,
+            sender_id,
+            sender_name,
+            cx,
+        );
     }
 
     fn send_url_attachment(
@@ -2280,6 +2483,8 @@ impl MessagesStore {
         url: String,
         filename: String,
         filetype: &'static str,
+        width: i32,
+        height: i32,
         sender_id: String,
         sender_name: String,
         cx: &mut Context<Self>,
@@ -2307,8 +2512,8 @@ impl MessagesStore {
                 url: url.clone(),
                 filename: filename.clone(),
                 filetype: filetype.to_string(),
-                width: 0,
-                height: 0,
+                width,
+                height,
                 thumbnail: String::new(),
                 duration: 0,
                 size: 0,
@@ -2338,6 +2543,8 @@ impl MessagesStore {
                         url,
                         filename,
                         filetype: filetype.to_string(),
+                        width,
+                        height,
                     }],
                 )
                 .await;
@@ -3867,6 +4074,7 @@ fn message_from_api(m: ApiMessage, cfg: Option<&AppConfig>, viewer_id: Option<Us
         m.sender_name,
         m.create_time,
     )
+    .with_raw_content(&m.content_raw)
     .with_code(code)
     .with_spans(spans)
     .with_mention_targets(mention_targets)
@@ -4598,43 +4806,75 @@ mod tests {
     }
 
     #[test]
-    fn plan_forwards_builds_one_send_per_target() {
-        let targets = vec![
-            ForwardTarget {
-                clan_id: ClanId(1),
-                channel_id: ChannelId(10),
-                channel_type: 1,
-                mode: 2,
-                is_public: true,
-            },
-            ForwardTarget {
-                clan_id: ClanId(0),
-                channel_id: ChannelId(20),
-                channel_type: 4,
-                mode: 3,
-                is_public: false,
-            },
-        ];
-        let attachment = mezon_client::transport::ApiAttachment {
-            url: "https://cdn.mezon.ai/a.png".to_string(),
-            filename: "a.png".to_string(),
-            filetype: "image/png".to_string(),
-            ..Default::default()
+    fn forward_target_label_names_the_destination() {
+        let channel = ForwardTarget::Channel {
+            clan_id: ClanId(1),
+            channel_id: ChannelId(2),
+            channel_type: 1,
+            mode: 2,
+            is_public: true,
+            label: "#general".into(),
         };
-        let plans = plan_forwards(
-            "hi",
-            std::slice::from_ref(&attachment),
-            &targets,
-            Some("note"),
+        let friend = ForwardTarget::Friend {
+            user_id: UserId(9),
+            label: "bob".into(),
+            avatar: String::new(),
+            username: "bob".into(),
+        };
+
+        assert_eq!(channel.label(), "#general");
+        assert_eq!(friend.label(), "bob");
+    }
+
+    #[test]
+    fn forward_source_carries_the_whole_content_payload() {
+        let raw = r#"{"t":"hey @bob","mentions":[{"s":4,"e":8,"user_id":"77","username":"bob"}],"mk":[{"s":0,"e":3,"type":"b"}]}"#;
+        let msg = Message::new(
+            MessageId(1),
+            "hey @bob".to_string(),
+            "5".to_string(),
+            "me",
+            100,
+        )
+        .with_raw_content(raw);
+
+        let source = forward_source(&msg);
+
+        assert_eq!(
+            source.content_raw, raw,
+            "the server content payload must be forwarded verbatim, not collapsed to plain text"
         );
-        assert_eq!(plans.len(), targets.len());
-        assert_eq!(plans[0].channel_id, 10);
-        assert_eq!(plans[0].content, "hi");
-        assert_eq!(plans[0].note.as_deref(), Some("note"));
-        assert_eq!(plans[0].attachments.len(), 1);
-        assert_eq!(plans[1].channel_id, 20);
-        assert_eq!(plans[1].mode, 3);
-        assert!(!plans[1].is_public);
+        assert_eq!(source.mentions.len(), 1);
+        assert_eq!(source.mentions[0].user_id, "77");
+        assert_eq!(source.mentions[0].s, 4);
+        assert_eq!(source.mentions[0].e, 8);
+    }
+
+    #[test]
+    fn forward_source_falls_back_to_plain_text_for_optimistic_messages() {
+        let msg = Message::new(
+            MessageId(1),
+            "hello".to_string(),
+            "5".to_string(),
+            "me",
+            100,
+        );
+
+        let source = forward_source(&msg);
+
+        assert!(source.content_raw.is_empty());
+        assert_eq!(source.text, "hello");
+        assert!(source.mentions.is_empty());
+    }
+
+    #[test]
+    fn forward_mentions_skips_tokens_without_a_target() {
+        let raw = r#"{"t":"x","mentions":[{"s":0,"e":1},{"s":2,"e":3,"role_id":"9"}]}"#;
+
+        let mentions = forward_mentions(raw);
+
+        assert_eq!(mentions.len(), 1);
+        assert_eq!(mentions[0].role_id, "9");
     }
 
     #[test]
@@ -4875,6 +5115,7 @@ mod tests {
             ApiMessage {
                 message_id: 1,
                 content: "hi".into(),
+                content_raw: String::new(),
                 content_tokens: mezon_client::transport::ApiMessageContent {
                     t: "hi".into(),
                     ..Default::default()
@@ -4919,6 +5160,7 @@ mod tests {
             ApiMessage {
                 message_id: 5,
                 content: String::new(),
+                content_raw: String::new(),
                 content_tokens: mezon_client::transport::ApiMessageContent::default(),
                 code: 0,
                 sender_id: 1,
@@ -4950,6 +5192,7 @@ mod tests {
         let msg = |finish: Option<Vec<String>>| ApiMessage {
             message_id: 5,
             content: "hi".into(),
+            content_raw: String::new(),
             content_tokens: mezon_client::transport::ApiMessageContent {
                 t: "hi".into(),
                 presign_finish: finish,
@@ -5028,6 +5271,7 @@ mod tests {
         ApiMessage {
             message_id: 11,
             content: "yo".into(),
+            content_raw: String::new(),
             content_tokens: mezon_client::transport::ApiMessageContent {
                 t: "yo".into(),
                 ..Default::default()

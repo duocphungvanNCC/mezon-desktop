@@ -24,6 +24,8 @@ struct GifCell {
     preview: SharedString,
     cell_id: SharedString,
     img_id: SharedString,
+    width: u32,
+    height: u32,
 }
 
 #[derive(Clone)]
@@ -46,8 +48,14 @@ enum GridRow {
 }
 
 pub enum GifPanelEvent {
-    Picked { url: String },
-    SetSearch { term: String },
+    Picked {
+        url: String,
+        width: u32,
+        height: u32,
+    },
+    SetSearch {
+        term: String,
+    },
 }
 
 pub struct GifPanel {
@@ -195,7 +203,8 @@ impl Render for GifPanel {
                 .items_center()
                 .gap_2()
                 .px_1()
-                .pb_1()
+                .pt_2()
+                .pb_2()
                 .cursor_pointer()
                 .child(
                     Icon::new(IconName::BackToCategoriesGif)
@@ -278,12 +287,15 @@ fn gif_cell(gif: &Gif) -> GifCell {
         img_id: SharedString::from(format!("gse-gif-img-{}", gif.url)),
         url: gif.url.clone(),
         preview: gif.preview_url.clone(),
+        width: gif.width,
+        height: gif.height,
     }
 }
 
 fn render_gif_row(theme: &Theme, cells: &[GifCell], entity: &Entity<GifPanel>) -> AnyElement {
     let hover_bg = theme.bg_hover;
     let mut row = div()
+        .w_full()
         .h(px(GIF_ROW_PX))
         .flex()
         .flex_row()
@@ -292,6 +304,7 @@ fn render_gif_row(theme: &Theme, cells: &[GifCell], entity: &Entity<GifPanel>) -
     for cell in cells {
         let ent = entity.clone();
         let url = cell.url.clone();
+        let (width, height) = (cell.width, cell.height);
         row = row.child(
             div()
                 .id(cell.cell_id.clone())
@@ -309,7 +322,9 @@ fn render_gif_row(theme: &Theme, cells: &[GifCell], entity: &Entity<GifPanel>) -
                 )
                 .on_click(move |_, _, cx| {
                     let url = url.to_string();
-                    ent.update(cx, |_this, cx| cx.emit(GifPanelEvent::Picked { url }));
+                    ent.update(cx, |_this, cx| {
+                        cx.emit(GifPanelEvent::Picked { url, width, height })
+                    });
                 }),
         );
     }
@@ -321,6 +336,7 @@ fn render_gif_row(theme: &Theme, cells: &[GifCell], entity: &Entity<GifPanel>) -
 
 fn render_category_row(theme: &Theme, cells: &[CatCell], entity: &Entity<GifPanel>) -> AnyElement {
     let mut row = div()
+        .w_full()
         .h(px(CAT_ROW_PX))
         .flex()
         .flex_row()
@@ -419,9 +435,15 @@ fn render_category_tile(theme: &Theme, cell: &CatCell, entity: &Entity<GifPanel>
                 cx.notify();
             }
             CatAction::Search(term) => {
-                cx.emit(GifPanelEvent::SetSearch {
-                    term: term.to_string(),
-                });
+                let term = term.to_string();
+                this.query = term.clone();
+                this.show_featured = false;
+                if let Some(store) = GifStore::try_global(cx) {
+                    store.update(cx, |store, cx| store.search_now(term.clone(), cx));
+                }
+                this.rebuild(cx);
+                cx.notify();
+                cx.emit(GifPanelEvent::SetSearch { term });
             }
         });
     })
