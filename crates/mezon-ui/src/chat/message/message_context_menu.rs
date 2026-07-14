@@ -1,7 +1,7 @@
 use gpui::{App, ClipboardItem, SharedString, WeakEntity, Window};
 use mezon_store::{
-    AppConfig, ChannelPermissionsStore, EmojiStore, Message, MessageCode, MessageId,
-    MessagesStore, PERMISSION_DELETE_MESSAGE, PinnedMessagesStore, ThreadsStore, TopicsStore,
+    AppConfig, ChannelPermissionsStore, EmojiStore, Message, MessageCode, MessageId, MessagesStore,
+    PERMISSION_DELETE_MESSAGE, PinnedMessagesStore, ThreadsStore, TopicsStore,
 };
 
 use super::channel_messages::ChannelMessages;
@@ -104,9 +104,11 @@ fn can_delete_message(
     else {
         return false;
     };
-    ChannelPermissionsStore::global(cx)
-        .read(cx)
-        .has_permission(PERMISSION_DELETE_MESSAGE, clan_id, channel_id)
+    ChannelPermissionsStore::global(cx).read(cx).has_permission(
+        PERMISSION_DELETE_MESSAGE,
+        clan_id,
+        channel_id,
+    )
 }
 
 pub(crate) fn build(
@@ -172,13 +174,14 @@ fn build_topic_menu(
         .collect::<Vec<_>>();
 
     let react_message_id = msg.id;
-    let mut menu = ContextMenu::new()
-        .on_dismiss(dismiss)
-        .quick_reactions(quick_emojis, move |emoji_id, shortname, _window, cx| {
+    let mut menu = ContextMenu::new().on_dismiss(dismiss).quick_reactions(
+        quick_emojis,
+        move |emoji_id, shortname, _window, cx| {
             MessagesStore::global(cx).update(cx, |store, cx| {
                 store.add_reaction(react_message_id, emoji_id, shortname, cx);
             });
-        });
+        },
+    );
 
     {
         let host = host.clone();
@@ -230,8 +233,7 @@ fn build_topic_menu(
             t("contextMenu.reply"),
             IconName::ReplyRightClick,
             move |_, cx| {
-                TopicsStore::global(cx)
-                    .update(cx, |store, cx| store.set_reply_to(message_id, cx));
+                TopicsStore::global(cx).update(cx, |store, cx| store.set_reply_to(message_id, cx));
             },
         );
     }
@@ -269,15 +271,13 @@ fn build_topic_menu(
 
     if !msg.content.is_empty() && !is_poll {
         let content = msg.content.clone();
-        menu = menu
-            .separator()
-            .item_icon(
-                t("contextMenu.copyText"),
-                IconName::CopyTextRightClick,
-                move |_, cx| {
-                    cx.write_to_clipboard(ClipboardItem::new_string(content.clone()));
-                },
-            );
+        menu = menu.separator().item_icon(
+            t("contextMenu.copyText"),
+            IconName::CopyTextRightClick,
+            move |_, cx| {
+                cx.write_to_clipboard(ClipboardItem::new_string(content.clone()));
+            },
+        );
     }
 
     {
@@ -348,8 +348,7 @@ fn build_channel_menu(
     let is_pinned = PinnedMessagesStore::global(cx)
         .read(cx)
         .is_pinned(&msg.id.to_string());
-    let can_create_thread =
-        !is_poll && ThreadsStore::global(cx).read(cx).can_create_thread(cx);
+    let can_create_thread = !is_poll && ThreadsStore::global(cx).read(cx).can_create_thread(cx);
 
     let dismiss = {
         let host = host.clone();
@@ -368,13 +367,14 @@ fn build_channel_menu(
         .collect::<Vec<_>>();
 
     let react_message_id = msg.id;
-    let mut menu = ContextMenu::new()
-        .on_dismiss(dismiss)
-        .quick_reactions(quick_emojis, move |emoji_id, shortname, _window, cx| {
+    let mut menu = ContextMenu::new().on_dismiss(dismiss).quick_reactions(
+        quick_emojis,
+        move |emoji_id, shortname, _window, cx| {
             MessagesStore::global(cx).update(cx, |store, cx| {
                 store.add_reaction(react_message_id, emoji_id, shortname, cx);
             });
-        });
+        },
+    );
 
     {
         let host = host.clone();
@@ -539,8 +539,9 @@ fn build_channel_menu(
             t("contextMenu.topicDiscussion"),
             IconName::TopicIcon,
             move |_window, cx| {
-                TopicsStore::global(cx)
-                    .update(cx, |store, cx| store.start_create_for_message(message_id, cx));
+                TopicsStore::global(cx).update(cx, |store, cx| {
+                    store.start_create_for_message(message_id, cx)
+                });
             },
         );
     }

@@ -1,3 +1,5 @@
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 use anyhow::Result;
 use futures::StreamExt;
 use gpui::{App, AppContext, AsyncApp, Bounds, Entity, WindowBounds, WindowOptions, px, size};
@@ -284,6 +286,9 @@ fn run_app(lock: SingleInstance, initial_url: Option<String>) {
     app.run(move |cx: &mut App| {
         tracing::debug!("App started");
         install_foreground_watchdog(cx);
+
+        #[cfg(target_os = "linux")]
+        cx.set_text_rendering_mode(gpui::TextRenderingMode::Grayscale);
 
         // Register gg sans font (TTFs pre-decompressed by build.rs)
         let gg_sans_paths: &[(&[u8], &str)] = &[

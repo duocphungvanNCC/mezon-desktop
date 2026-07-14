@@ -6,9 +6,8 @@
 # some of their test targets don't even compile against our pinned deps).
 pkgs := "-p mezon-app -p mezon-ui -p mezon-store -p mezon-client -p mezon-native -p mezon-proto -p mezon-i18n -p mezon-updater -p mezon-audio"
 
-# Formatting scope — pkgs plus mezon-voice (excluded from clippy/test above),
-# still excluding vendored crates (read-only, carry upstream fmt drift).
-fmt_pkgs := pkgs + " -p mezon-voice"
+# Formatting scope lives in scripts/fmt.sh — the one place the justfile, the
+# pre-commit hook and CI all read it from, so they cannot drift apart.
 
 # List available recipes
 default:
@@ -24,8 +23,8 @@ help:
     @echo "  ---------------------------------------------"
     @echo "  install           Install development tools (via cargo-binstall)"
     @echo "  install-linux-deps Install Linux system libraries for GPUI/GTK"
-    @echo "  run             Build (debug) and run the app"
-    @echo "  watch           Hot-reload development (requires cargo-watch)"
+    @echo "  run             Build (debug) and run the app (loads .env)"
+    @echo "  watch           Hot-reload development (requires cargo-watch, loads .env)"
     @echo "  check           Fast clippy checks"
     @echo "  lint            Strict linting before commit"
     @echo "  fix             Auto-fix formatting and clippy suggestions"
@@ -69,31 +68,61 @@ install:
 install-linux-deps:
     @bash scripts/linux-deps
 
-# Run the project with optional arguments
+# Run the project with optional arguments (loads .env when present)
 run *args:
-    cargo run {{args}}
+    #!/usr/bin/env bash
+    set -euo pipefail
+    source scripts/load-env.sh
+    exec cargo run {{args}}
 
 # Hot-reload development (requires cargo-watch)
 watch:
-    cargo watch -x run
+    #!/usr/bin/env bash
+    set -euo pipefail
+    source scripts/load-env.sh
+    exec cargo watch -x run
 
 # Profile with Tracy (open Tracy 0.11.x GUI to connect; CPU + memory + frames)
 tracy:
-    cargo run --profile profiling --features tracy
+    #!/usr/bin/env bash
+    set -euo pipefail
+    source scripts/load-env.sh
+    exec cargo run --profile profiling --features tracy
 
 # Fast check for errors during development
 check:
     cargo clippy {{pkgs}} -- -D warnings
 
+# Formatting gate — the single source of truth for the fmt scope.
+# The pre-commit hook and CI both call this, so they can never drift apart.
+fmt-check:
+    ./scripts/fmt.sh check
+
 # Strict linting (Use before commit/push)
-lint:
+lint: _ensure-hooks
     cargo clippy {{pkgs}} --all-targets --all-features --locked -- -D warnings
-    cargo fmt {{fmt_pkgs}} -- --check
+    @just fmt-check
 
 # Auto-fix formatting and clippy suggestions
 fix:
-    cargo fmt {{fmt_pkgs}}
+    ./scripts/fmt.sh fix
     cargo clippy {{pkgs}} --fix --allow-dirty --allow-staged
+
+# Point git at the repo's tracked hooks. Idempotent; every dev gets the same
+# pre-commit gate without having to remember to install anything.
+setup-hooks:
+    git config core.hooksPath .githooks
+    @echo "git hooks -> .githooks (pre-commit runs 'just fmt-check')"
+
+# Installs the hooks on first use of any common recipe, so a fresh clone is
+# formatted-by-default rather than only caught in CI.
+_ensure-hooks:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [ "$(git config --get core.hooksPath || true)" != ".githooks" ]; then
+        git config core.hooksPath .githooks
+        echo "installed git hooks -> .githooks"
+    fi
 
 # ------------------------------------------------------------------------------
 # TESTING (Nextest)
@@ -142,9 +171,12 @@ update:
 # BUILD & CLEAN
 # ------------------------------------------------------------------------------
 
-# Build production release
+# Build production release (loads .env when present)
 release:
-    cargo build --release
+    #!/usr/bin/env bash
+    set -euo pipefail
+    source scripts/load-env.sh
+    exec cargo build --release
 
 # Bundle the release binary into a macOS Mezon.app
 bundle: release

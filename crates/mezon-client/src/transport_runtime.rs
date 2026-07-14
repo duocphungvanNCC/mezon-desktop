@@ -266,6 +266,23 @@ pub struct TransportClient {
 }
 
 impl TransportClient {
+    pub async fn send_channel_message_structured(
+        &self,
+        channel_id: i64,
+        content_json: &str,
+        mode: i32,
+    ) -> Result<crate::transport::ApiMessage> {
+        let transport = self.inner.clone();
+        let content_json = content_json.to_string();
+        runtime()
+            .spawn(async move {
+                transport
+                    .send_channel_message_structured(channel_id, &content_json, mode)
+                    .await
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
     pub fn new(base_path: String) -> Self {
         let adapter = Box::new(AbridgedTcpAdapter::new());
         let transport = MezonTransport::new(adapter, base_path);
@@ -1075,27 +1092,33 @@ impl TransportClient {
             .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn forward_channel_message(
         &self,
         clan_id: i64,
         channel_id: i64,
-        content: &str,
+        content_raw: &str,
+        text: &str,
         is_public: bool,
         mode: i32,
         attachments: Vec<mezon_proto::api::MessageAttachment>,
+        mentions: Vec<crate::transport::OutgoingMention>,
     ) -> Result<()> {
         let transport = self.inner.clone();
-        let content = content.to_string();
+        let content_raw = content_raw.to_string();
+        let text = text.to_string();
         runtime()
             .spawn(async move {
                 transport
                     .forward_channel_message(
                         clan_id,
                         channel_id,
-                        &content,
+                        &content_raw,
+                        &text,
                         is_public,
                         mode,
                         attachments,
+                        mentions,
                     )
                     .await
             })
@@ -1244,16 +1267,8 @@ impl TransportClient {
             .spawn(async move {
                 transport
                     .send_topic_message(
-                        clan_id,
-                        channel_id,
-                        &content,
-                        is_public,
-                        mode,
-                        topic_id,
-                        mentions,
-                        hashtags,
-                        emojis,
-                        reply,
+                        clan_id, channel_id, &content, is_public, mode, topic_id, mentions,
+                        hashtags, emojis, reply,
                     )
                     .await
             })
@@ -1445,6 +1460,23 @@ impl TransportClient {
 
         runtime()
             .spawn(async move { transport.create_direct_channel(&user_ids).await })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
+    pub async fn create_link_invite_user(
+        &self,
+        clan_id: i64,
+        channel_id: i64,
+        expiry_time: i32,
+    ) -> Result<mezon_proto::api::LinkInviteUser> {
+        let transport = self.inner.clone();
+        runtime()
+            .spawn(async move {
+                transport
+                    .create_link_invite_user(clan_id, channel_id, expiry_time)
+                    .await
+            })
             .await
             .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
     }

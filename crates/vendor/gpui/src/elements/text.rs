@@ -12,7 +12,6 @@ use smallvec::SmallVec;
 use std::{
     borrow::Cow,
     cell::{Cell, RefCell},
-    mem,
     ops::{Deref, DerefMut, Range},
     rc::Rc,
     sync::Arc,
@@ -391,8 +390,8 @@ impl IntoElement for SharedString {
 pub struct StyledText {
     text: SharedString,
     runs: Option<Vec<TextRun>>,
-    delayed_highlights: Option<Vec<(Range<usize>, HighlightStyle)>>,
-    delayed_font_family_overrides: Option<Vec<(Range<usize>, SharedString)>>,
+    delayed_highlights: Option<Arc<[(Range<usize>, HighlightStyle)]>>,
+    delayed_font_family_overrides: Option<Arc<[(Range<usize>, SharedString)]>>,
     layout: TextLayout,
 }
 
@@ -445,8 +444,22 @@ impl StyledText {
                     debug_assert!(self.text.is_char_boundary(run.start));
                     debug_assert!(self.text.is_char_boundary(run.end));
                 })
-                .collect::<Vec<_>>(),
+                .collect::<Vec<_>>()
+                .into(),
         );
+        self
+    }
+
+    #[allow(missing_docs)]
+    pub fn with_shared_highlights(
+        mut self,
+        highlights: Arc<[(Range<usize>, HighlightStyle)]>,
+    ) -> Self {
+        debug_assert!(self.runs.is_none());
+        debug_assert!(highlights.iter().all(|(range, _)| {
+            self.text.is_char_boundary(range.start) && self.text.is_char_boundary(range.end)
+        }));
+        self.delayed_highlights = Some(highlights);
         self
     }
 
@@ -496,8 +509,21 @@ impl StyledText {
                     debug_assert!(self.text.is_char_boundary(range.start));
                     debug_assert!(self.text.is_char_boundary(range.end));
                 })
-                .collect(),
+                .collect::<Vec<_>>()
+                .into(),
         );
+        self
+    }
+
+    #[allow(missing_docs)]
+    pub fn with_shared_font_family_overrides(
+        mut self,
+        overrides: Arc<[(Range<usize>, SharedString)]>,
+    ) -> Self {
+        debug_assert!(overrides.iter().all(|(range, _)| {
+            self.text.is_char_boundary(range.start) && self.text.is_char_boundary(range.end)
+        }));
+        self.delayed_font_family_overrides = Some(overrides);
         self
     }
 
@@ -561,7 +587,11 @@ impl Element for StyledText {
         let font_family_overrides = self.delayed_font_family_overrides.take();
         let mut runs = self.runs.take().or_else(|| {
             self.delayed_highlights.take().map(|delayed_highlights| {
-                Self::compute_runs(&self.text, &window.text_style(), delayed_highlights)
+                Self::compute_runs(
+                    &self.text,
+                    &window.text_style(),
+                    delayed_highlights.iter().cloned(),
+                )
             })
         });
 
@@ -959,7 +989,7 @@ pub struct InteractiveText {
     hover_listener: Option<Box<dyn Fn(Option<usize>, MouseMoveEvent, &mut Window, &mut App)>>,
     tooltip_builder: Option<Rc<dyn Fn(usize, &mut Window, &mut App) -> Option<AnyView>>>,
     tooltip_id: Option<TooltipId>,
-    clickable_ranges: Vec<Range<usize>>,
+    clickable_ranges: Arc<[Range<usize>]>,
 }
 
 struct InteractiveTextClickEvent {
@@ -986,7 +1016,7 @@ impl InteractiveText {
             hover_listener: None,
             tooltip_builder: None,
             tooltip_id: None,
-            clickable_ranges: Vec::new(),
+            clickable_ranges: Arc::new([]),
         }
     }
 
@@ -995,6 +1025,24 @@ impl InteractiveText {
     pub fn on_click(
         mut self,
         ranges: Vec<Range<usize>>,
+        listener: impl Fn(usize, &mut Window, &mut App) + 'static,
+    ) -> Self {
+        self.click_listener = Some(Box::new(move |ranges, event, window, cx| {
+            for (range_ix, range) in ranges.iter().enumerate() {
+                if range.contains(&event.mouse_down_index) && range.contains(&event.mouse_up_index)
+                {
+                    listener(range_ix, window, cx);
+                }
+            }
+        }));
+        self.clickable_ranges = ranges.into();
+        self
+    }
+
+    #[allow(missing_docs)]
+    pub fn on_click_shared(
+        mut self,
+        ranges: Arc<[Range<usize>]>,
         listener: impl Fn(usize, &mut Window, &mut App) + 'static,
     ) -> Self {
         self.click_listener = Some(Box::new(move |ranges, event, window, cx| {
@@ -1123,7 +1171,7 @@ impl Element for InteractiveText {
                     let mouse_down = interactive_state.mouse_down_index.clone();
                     if let Some(mouse_down_index) = mouse_down.get() {
                         let hitbox = hitbox.clone();
-                        let clickable_ranges = mem::take(&mut self.clickable_ranges);
+                        let clickable_ranges = self.clickable_ranges.clone();
                         window.on_mouse_event(
                             move |event: &MouseUpEvent, phase, window: &mut Window, cx| {
                                 if phase == DispatchPhase::Bubble && hitbox.is_hovered(window) {

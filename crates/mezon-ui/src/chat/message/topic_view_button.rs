@@ -61,11 +61,7 @@ pub fn render_topic_view_button(msg: &Message, ctx: &RowCtx) -> AnyElement {
         .flex_1()
         .min_w_0()
         .when_some(reply_label, |d, label| {
-            d.child(
-                div()
-                    .text_color(theme.tokens.mention_color)
-                    .child(label),
-            )
+            d.child(div().text_color(theme.tokens.mention_color).child(label))
         })
         .when_some(time_label, |d, label| {
             d.child(
@@ -108,8 +104,9 @@ pub fn render_topic_view_button(msg: &Message, ctx: &RowCtx) -> AnyElement {
         .text_color(theme.tokens.text_theme_primary)
         .cursor_pointer()
         .on_click(move |_, _, cx| {
-            TopicsStore::global(cx)
-                .update(cx, |store, cx| store.start_create_for_message(message_id, cx));
+            TopicsStore::global(cx).update(cx, |store, cx| {
+                store.start_create_for_message(message_id, cx)
+            });
         })
         .child(left)
         .child(

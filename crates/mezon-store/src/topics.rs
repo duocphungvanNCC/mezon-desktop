@@ -480,13 +480,8 @@ impl TopicsStore {
         let RealtimeEvent::TopicInMessageEvent(ev) = event else {
             return;
         };
-        let tp_id = if !ev.tp_id.is_empty() {
-            ev.tp_id.clone()
-        } else {
-            let Some(resolved) = self.resolve_topic_id_for_origin(ev.message_id, cx) else {
-                return;
-            };
-            resolved
+        let Some(tp_id) = self.resolve_topic_id_for_origin(ev.message_id, cx) else {
+            return;
         };
         let lsnt = normalize_unix_seconds(ev.lsnt);
         self.upsert_topic_meta(tp_id, ev.rpl, lsnt, cx);
@@ -897,6 +892,8 @@ impl TopicsStore {
             url,
             filename,
             filetype,
+            width: 0,
+            height: 0,
         };
         cx.spawn(async move |this, cx| {
             let topic_id = match existing_topic_id {

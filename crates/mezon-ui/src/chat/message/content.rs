@@ -11,7 +11,7 @@ use mezon_store::{
 
 use ui::Clickable;
 
-use super::context::RowCtx;
+use super::context::{RichTextRenderPlan, RowCtx};
 use super::inline_content::{ClickRegion, IconOverlay, InlineContent, StyledRun};
 use crate::app::shell::Shell;
 use crate::chat::user_profile_popover::{ClickableContainer, UserProfilePopover};
@@ -31,6 +31,7 @@ const SOCIAL_CARD_BG: u32 = 0x2b_2d_31;
 const EMOJI_SIZE: f32 = 24.;
 const EMOJI_JUMBO_SIZE: f32 = 48.;
 const INLINE_ICON_PLACEHOLDER: char = '\u{2800}';
+const RICH_TEXT_PLAN_LIMIT: usize = 512;
 
 struct ContentRenderOptions {
     body_color: gpui::Rgba,
@@ -239,11 +240,13 @@ fn render_deleted_placeholder(msg: &Message, theme: &Theme) -> AnyElement {
         .into_any_element()
 }
 
-#[derive(Clone)]
-enum SpanAction {
-    Mention(UserId),
-    Channel(ChannelId),
-    Link(SharedString),
+fn rich_text_plan_matches(
+    plan: &RichTextRenderPlan,
+    layout: &std::sync::Arc<mezon_store::RichLayout>,
+    colors: [Hsla; 5],
+    edited: bool,
+) -> bool {
+    std::sync::Arc::ptr_eq(&plan.layout, layout) && plan.colors == colors && plan.edited == edited
 }
 
 fn render_rich_styled(msg: &Message, ctx: &RowCtx, body_color: gpui::Rgba) -> AnyElement {
@@ -252,109 +255,144 @@ fn render_rich_styled(msg: &Message, ctx: &RowCtx, body_color: gpui::Rgba) -> An
     let mention_bg: Hsla = theme.tokens.mention_primary.into();
     let code_bg: Hsla = theme.tokens.bg_markdown_code.into();
     let link_color: Hsla = theme.tokens.mention_color.into();
-
-    let layout = msg.rich_layout.as_deref();
-    let base_text: SharedString = layout.map(|l| l.text.clone()).unwrap_or_default();
-
-    let mut highlights: Vec<(Range<usize>, HighlightStyle)> = Vec::new();
-    let mut font_overrides: Vec<(Range<usize>, SharedString)> = Vec::new();
-    let mut click_ranges: Vec<Range<usize>> = Vec::new();
-    let mut actions: Vec<SpanAction> = Vec::new();
-
-    if let Some(layout) = layout {
-        for run in layout.runs.iter() {
-            match run.kind {
-                RichRunKind::Bold => highlights.push((
-                    run.range.clone(),
-                    HighlightStyle {
-                        font_weight: Some(FontWeight::BOLD),
-                        ..Default::default()
-                    },
-                )),
-                RichRunKind::Code => {
-                    highlights.push((
+    let colors = [
+        mention_color,
+        mention_bg,
+        code_bg,
+        link_color,
+        theme.text_muted.into(),
+    ];
+    let Some(layout) = msg.rich_layout.as_ref() else {
+        return div().into_any_element();
+    };
+    let cached = ctx.row_memo.borrow().rich_text.get(&msg.id).cloned();
+    let plan = match cached {
+        Some(plan) if rich_text_plan_matches(&plan, layout, colors, msg.is_edited) => plan,
+        _ => {
+            let mut highlights: Vec<(Range<usize>, HighlightStyle)> =
+                Vec::with_capacity(layout.runs.len() + usize::from(msg.is_edited));
+            let mut font_overrides: Vec<(Range<usize>, SharedString)> = Vec::new();
+            let mut click_ranges: Vec<Range<usize>> = Vec::new();
+            let mut actions: Vec<RichClick> = Vec::new();
+            for run in layout.runs.iter() {
+                match run.kind {
+                    RichRunKind::Bold => highlights.push((
                         run.range.clone(),
                         HighlightStyle {
-                            background_color: Some(code_bg),
+                            font_weight: Some(FontWeight::BOLD),
                             ..Default::default()
                         },
-                    ));
-                    font_overrides.push((run.range.clone(), "monospace".into()));
-                }
-                RichRunKind::Link => highlights.push((
-                    run.range.clone(),
-                    HighlightStyle {
-                        color: Some(link_color),
-                        underline: Some(UnderlineStyle {
-                            thickness: px(1.),
+                    )),
+                    RichRunKind::Code => {
+                        highlights.push((
+                            run.range.clone(),
+                            HighlightStyle {
+                                background_color: Some(code_bg),
+                                ..Default::default()
+                            },
+                        ));
+                        font_overrides.push((run.range.clone(), "monospace".into()));
+                    }
+                    RichRunKind::Link => highlights.push((
+                        run.range.clone(),
+                        HighlightStyle {
                             color: Some(link_color),
-                            wavy: false,
-                        }),
-                        ..Default::default()
-                    },
-                )),
-                RichRunKind::Mention | RichRunKind::Hashtag => highlights.push((
-                    run.range.clone(),
-                    HighlightStyle {
-                        color: Some(mention_color),
-                        background_color: Some(mention_bg),
-                        ..Default::default()
-                    },
-                )),
+                            underline: Some(UnderlineStyle {
+                                thickness: px(1.),
+                                color: Some(link_color),
+                                wavy: false,
+                            }),
+                            ..Default::default()
+                        },
+                    )),
+                    RichRunKind::Mention | RichRunKind::Hashtag => highlights.push((
+                        run.range.clone(),
+                        HighlightStyle {
+                            color: Some(mention_color),
+                            background_color: Some(mention_bg),
+                            ..Default::default()
+                        },
+                    )),
+                }
+                if let Some(click) = run.click.clone() {
+                    click_ranges.push(run.range.clone());
+                    actions.push(click);
+                }
             }
-            if let Some(click) = run.click.clone() {
-                click_ranges.push(run.range.clone());
-                actions.push(match click {
-                    RichClick::Link(url) => SpanAction::Link(url),
-                    RichClick::Mention(user_id) => SpanAction::Mention(user_id),
-                    RichClick::Channel(channel_id) => SpanAction::Channel(channel_id),
-                });
-            }
-        }
-    }
 
-    let text: SharedString = if msg.is_edited {
-        let marker = mezon_i18n::t(ctx.locale, "message.edited");
-        let mut edited = String::with_capacity(base_text.len() + 1 + marker.len());
-        edited.push_str(&base_text);
-        edited.push(' ');
-        let start = edited.len();
-        edited.push_str(marker);
-        highlights.push((
-            start..edited.len(),
-            HighlightStyle {
-                color: Some(theme.text_muted.into()),
-                ..Default::default()
-            },
-        ));
-        edited.into()
-    } else {
-        base_text
+            let text = if msg.is_edited {
+                let marker = mezon_i18n::t(ctx.locale, "message.edited");
+                let mut edited = String::with_capacity(layout.text.len() + 1 + marker.len());
+                edited.push_str(&layout.text);
+                edited.push(' ');
+                let start = edited.len();
+                edited.push_str(marker);
+                highlights.push((
+                    start..edited.len(),
+                    HighlightStyle {
+                        color: Some(colors[4]),
+                        ..Default::default()
+                    },
+                ));
+                edited.into()
+            } else {
+                layout.text.clone()
+            };
+            let plan = RichTextRenderPlan {
+                layout: layout.clone(),
+                colors,
+                edited: msg.is_edited,
+                text,
+                highlights: highlights.into(),
+                font_overrides: font_overrides.into(),
+                click_ranges: click_ranges.into(),
+                actions: actions.into(),
+                locale: SharedString::from(ctx.locale),
+            };
+            let mut memo = ctx.row_memo.borrow_mut();
+            if memo.rich_text.len() >= RICH_TEXT_PLAN_LIMIT && !memo.rich_text.contains_key(&msg.id)
+            {
+                memo.rich_text.clear();
+            }
+            memo.rich_text.insert(msg.id, plan.clone());
+            plan
+        }
     };
 
-    let mut styled = StyledText::new(text).with_highlights(highlights);
-    if !font_overrides.is_empty() {
-        styled = styled.with_font_family_overrides(font_overrides);
+    let mut styled =
+        StyledText::new(plan.text.clone()).with_shared_highlights(plan.highlights.clone());
+    if !plan.font_overrides.is_empty() {
+        styled = styled.with_shared_font_family_overrides(plan.font_overrides.clone());
+    }
+
+    if plan.actions.is_empty() {
+        return div()
+            .w_full()
+            .min_w_0()
+            .text_base()
+            .line_height(rems(1.375))
+            .text_color(body_color)
+            .child(styled)
+            .into_any_element();
     }
 
     let profile_context = ctx.profile_context;
     let settings = ctx.settings.clone();
     let host = ctx.video_host.clone();
     let avatar_cache = ctx.large_avatar_cache.clone();
-    let locale = if actions.iter().any(|a| matches!(a, SpanAction::Channel(_))) {
-        ctx.locale.to_string()
-    } else {
-        String::new()
-    };
+    let actions = plan.actions.clone();
+    let locale = plan.locale.clone();
     let interactive = InteractiveText::new(("msg-itext", msg.row_anchor_id.0 as usize), styled)
-        .on_click(click_ranges, move |range_ix, window, cx| {
+        .on_click_shared(plan.click_ranges.clone(), move |range_ix, window, cx| {
             let Some(action) = actions.get(range_ix) else {
                 return;
             };
             match action {
-                SpanAction::Link(url) => open_message_link(url.to_string(), cx),
-                SpanAction::Channel(channel_id) => navigate_to_channel(*channel_id, &locale, cx),
-                SpanAction::Mention(user_id) => {
+                RichClick::Link(url) => open_message_link(url.to_string(), cx),
+                RichClick::Channel(channel_id) => {
+                    navigate_to_channel(*channel_id, locale.as_ref(), cx)
+                }
+                RichClick::Mention(user_id) => {
                     let Some(context) = profile_context else {
                         return;
                     };
@@ -772,19 +810,31 @@ fn render_hashtag_chip(
     ctx: &RowCtx,
 ) -> AnyElement {
     let display: SharedString = display.into();
-    let label: SharedString = display
-        .strip_prefix('#')
-        .map(|name| SharedString::from(name.to_owned()))
-        .unwrap_or(display);
     let theme = ctx.theme;
     let bg = theme.tokens.mention_primary;
     let color = theme.tokens.mention_color;
     let hover_bg = theme.tokens.bg_mention_hover;
     let hover_color = theme.tokens.color_mention_hover;
     let parsed_channel = channel_id.and_then(parse_channel_id);
-    let icon = parsed_channel
-        .map(|cid| hashtag_icon(cid, ctx.app))
-        .unwrap_or(IconName::Hashtag);
+    let (resolved_name, icon) = match parsed_channel {
+        Some(cid) => hashtag_channel(cid, ctx.app),
+        None => (None, IconName::Hashtag),
+    };
+    let from_channel_link = display.starts_with("http://") || display.starts_with("https://");
+    let (label, unresolved_link) = match resolved_name {
+        Some(name) => (name, false),
+        None if from_channel_link => (
+            SharedString::from(mezon_i18n::t(ctx.locale, "message.unknown")),
+            true,
+        ),
+        None => (
+            display
+                .strip_prefix('#')
+                .map(|name| SharedString::from(name.to_owned()))
+                .unwrap_or(display),
+            false,
+        ),
+    };
 
     let inner = div()
         .flex()
@@ -793,7 +843,7 @@ fn render_hashtag_chip(
         .items_center()
         .gap_0p5()
         .child(Icon::new(icon).size_4().text_color(color))
-        .child(label);
+        .child(div().when(unresolved_link, |d| d.italic()).child(label));
 
     match parsed_channel {
         Some(channel_id) => {
@@ -906,15 +956,16 @@ fn build_inline_content(msg: &Message, ctx: &RowCtx, body_color: gpui::Rgba) -> 
                 display,
                 channel_id,
             } => {
-                let label = display.strip_prefix('#').unwrap_or(display);
                 let parsed_channel = channel_id.as_deref().and_then(parse_channel_id);
-                let icon = parsed_channel
-                    .map(|cid| hashtag_icon(cid, ctx.app))
-                    .unwrap_or(IconName::Hashtag);
+                let (resolved_name, icon) = match parsed_channel {
+                    Some(cid) => hashtag_channel(cid, ctx.app),
+                    None => (None, IconName::Hashtag),
+                };
+                let label = hashtag_label(display, resolved_name, ctx.locale);
                 let icon_index = text.len();
                 text.push(INLINE_ICON_PLACEHOLDER);
                 let label_index = text.len();
-                text.push_str(label);
+                text.push_str(&label);
                 let end = text.len();
                 runs.push(StyledRun {
                     range: icon_index..label_index,
@@ -966,7 +1017,17 @@ fn build_inline_content(msg: &Message, ctx: &RowCtx, body_color: gpui::Rgba) -> 
     )
 }
 
-fn hashtag_icon(channel_id: ChannelId, cx: &App) -> IconName {
+fn hashtag_label(display: &str, resolved_name: Option<SharedString>, locale: &str) -> SharedString {
+    if let Some(name) = resolved_name {
+        return name;
+    }
+    if display.starts_with("http://") || display.starts_with("https://") {
+        return SharedString::from(mezon_i18n::t(locale, "message.unknown"));
+    }
+    SharedString::from(display.strip_prefix('#').unwrap_or(display).to_owned())
+}
+
+fn hashtag_channel(channel_id: ChannelId, cx: &App) -> (Option<SharedString>, IconName) {
     let channels = ChannelList::global(cx);
     let store = channels.read(cx);
     let resolved = store
@@ -978,8 +1039,11 @@ fn hashtag_icon(channel_id: ChannelId, cx: &App) -> IconName {
         })
         .or_else(|| store.user_channel(channel_id));
     match resolved {
-        Some(channel) => channel_type_icon(channel.channel_type, channel.private),
-        None => IconName::Hashtag,
+        Some(channel) => (
+            (!channel.name.is_empty()).then(|| SharedString::from(channel.name.clone())),
+            channel_type_icon(channel.channel_type, channel.private),
+        ),
+        None => (None, IconName::Hashtag),
     }
 }
 
@@ -1248,12 +1312,63 @@ fn split_unbreakable(text: &str) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_channel_id;
-    use mezon_store::ChannelId;
+    use super::{RichTextRenderPlan, parse_channel_id, rich_text_plan_matches};
+    use gpui::{Hsla, SharedString};
+    use mezon_store::{ChannelId, MessageSpan, build_rich_layout};
 
     #[test]
     fn parse_channel_id_rejects_zero() {
         assert_eq!(parse_channel_id("0"), None);
         assert_eq!(parse_channel_id("12345"), Some(ChannelId(12345)));
+    }
+
+    #[test]
+    fn rich_text_plan_reuses_only_the_same_layout_and_style() {
+        let layout = build_rich_layout(&[MessageSpan::Bold("hello".into())]).unwrap();
+        let colors = [Hsla::default(); 5];
+        let plan = RichTextRenderPlan {
+            layout: layout.clone(),
+            colors,
+            edited: false,
+            text: SharedString::from("hello"),
+            highlights: Vec::new().into(),
+            font_overrides: Vec::new().into(),
+            click_ranges: Vec::new().into(),
+            actions: Vec::new().into(),
+            locale: SharedString::from("en"),
+        };
+
+        assert!(rich_text_plan_matches(&plan, &layout, colors, false));
+        assert!(!rich_text_plan_matches(&plan, &layout, colors, true));
+
+        let replacement = std::sync::Arc::new((*layout).clone());
+        assert!(!rich_text_plan_matches(&plan, &replacement, colors, false));
+    }
+}
+
+#[cfg(test)]
+mod hashtag_label_tests {
+    use super::hashtag_label;
+    use gpui::SharedString;
+
+    #[test]
+    fn resolved_channel_wins_over_the_raw_url() {
+        let label = hashtag_label(
+            "https://mezon.ai/chat/clans/1/channels/2",
+            Some(SharedString::from("general")),
+            "en",
+        );
+        assert_eq!(label, "general");
+    }
+
+    #[test]
+    fn unresolved_channel_link_never_shows_the_raw_url() {
+        let label = hashtag_label("https://mezon.ai/chat/clans/1/channels/2", None, "en");
+        assert_eq!(label, "unknown");
+    }
+
+    #[test]
+    fn typed_hashtag_falls_back_to_the_name_without_the_hash() {
+        assert_eq!(hashtag_label("#general", None, "en"), "general");
     }
 }

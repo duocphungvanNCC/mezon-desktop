@@ -179,11 +179,7 @@ impl RenderOnce for ContextMenu {
         }
 
         if !self.quick_reactions.is_empty() {
-            let mut reaction_row = h_flex()
-                .gap_1()
-                .px(px(6.))
-                .pt(px(4.))
-                .pb(px(6.));
+            let mut reaction_row = h_flex().gap_1().px(px(6.)).pt(px(4.)).pb(px(6.));
             for (index, reaction) in self.quick_reactions.into_iter().enumerate() {
                 let emoji_id = reaction.emoji_id.clone();
                 let shortname = reaction.shortname.clone();
@@ -209,28 +205,28 @@ impl RenderOnce for ContextMenu {
                     });
                 if !src.is_empty() {
                     let fallback_color = muted;
-                    cell = cell.child(
-                        img(SharedString::from(src))
-                            .size(px(24.))
-                            .with_fallback(move || {
-                                div()
-                                    .size(px(24.))
-                                    .rounded(px(4.))
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .child(
-                                        Icon::new(IconName::ImageThumbnail)
-                                            .size(px(16.))
-                                            .text_color(fallback_color),
-                                    )
-                                    .into_any_element()
-                            }),
-                    );
+                    cell = cell.child(img(SharedString::from(src)).size(px(24.)).with_fallback(
+                        move || {
+                            div()
+                                .size(px(24.))
+                                .rounded(px(4.))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .child(
+                                    Icon::new(IconName::ImageThumbnail)
+                                        .size(px(16.))
+                                        .text_color(fallback_color),
+                                )
+                                .into_any_element()
+                        },
+                    ));
                 }
                 reaction_row = reaction_row.child(cell);
             }
-            panel = panel.child(reaction_row).child(div().my(px(5.)).h(px(1.)).w_full().bg(border));
+            panel = panel
+                .child(reaction_row)
+                .child(div().my(px(5.)).h(px(1.)).w_full().bg(border));
         }
 
         for (index, item) in self.items.into_iter().enumerate() {

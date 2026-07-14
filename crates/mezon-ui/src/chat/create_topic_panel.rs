@@ -1,6 +1,6 @@
 use gpui::{
-    AnyView, ClickEvent, Context, Entity, FontWeight, KeyDownEvent, SharedString,
-    StyleRefinement, Subscription, Window, div, prelude::*, px,
+    AnyView, ClickEvent, Context, Entity, FontWeight, KeyDownEvent, SharedString, StyleRefinement,
+    Subscription, Window, div, prelude::*, px,
 };
 use mezon_store::{ChannelId, MessagesStore, Settings, TopicsStore};
 
@@ -33,7 +33,8 @@ impl TopicPanel {
     ) -> Self {
         let locale = settings.read(cx).language.clone();
         let placeholder = mezon_i18n::t(&locale, "messageBox.placeholder").to_string();
-        let mention_input = cx.new(|cx| MentionInput::new(placeholder, settings.clone(), window, cx));
+        let mention_input =
+            cx.new(|cx| MentionInput::new(placeholder, settings.clone(), window, cx));
         let input_bar = cx.new(|cx| {
             InputBar::new(
                 mention_input.clone(),
@@ -57,6 +58,9 @@ impl TopicPanel {
                 MentionInputEvent::Submit => this.submit(window, cx),
                 MentionInputEvent::SendSticker { url, filename } => {
                     this.send_sticker(url.clone(), filename.clone(), cx);
+                }
+                MentionInputEvent::SendGif { url, .. } => {
+                    this.send_gif(url.clone(), cx);
                 }
                 MentionInputEvent::SendSound { url, filename } => {
                     this.send_sound(url.clone(), filename.clone(), cx);
@@ -101,6 +105,15 @@ impl TopicPanel {
         });
     }
 
+    fn send_gif(&mut self, url: String, cx: &mut Context<Self>) {
+        if TopicsStore::global(cx).read(cx).is_submitting() {
+            return;
+        }
+        TopicsStore::global(cx).update(cx, |store, cx| {
+            store.submit_reply_url_attachment(url, String::new(), "sticker".to_string(), cx);
+        });
+    }
+
     fn send_sound(&mut self, url: String, filename: String, cx: &mut Context<Self>) {
         if TopicsStore::global(cx).read(cx).is_submitting() {
             return;
@@ -115,7 +128,10 @@ impl Render for TopicPanel {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let (topic_id, error) = {
             let topics = TopicsStore::global(cx).read(cx);
-            (topics.active_topic_id(), topics.create_error().map(str::to_string))
+            (
+                topics.active_topic_id(),
+                topics.create_error().map(str::to_string),
+            )
         };
 
         self.typing.update(cx, |typing, cx| {
@@ -209,15 +225,10 @@ impl Render for TopicPanel {
             }))
             .child(header)
             .child(
-                div()
-                    .flex_1()
-                    .min_h_0()
-                    .w_full()
-                    .overflow_hidden()
-                    .child(
-                        AnyView::from(self.topic_timeline.clone())
-                            .cached(StyleRefinement::default().size_full()),
-                    ),
+                div().flex_1().min_h_0().w_full().overflow_hidden().child(
+                    AnyView::from(self.topic_timeline.clone())
+                        .cached(StyleRefinement::default().size_full()),
+                ),
             )
             .child(composer)
     }

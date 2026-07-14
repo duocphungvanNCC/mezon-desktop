@@ -179,8 +179,8 @@ pub fn render_user_message(
         && (msg.highlights_viewer_direct
             || mezon_store::message_row_highlight_roles(msg, ctx.current_role_ids));
     let mention_bg = theme.tokens.bg_highlight;
-    let show_combined_time = !show_head
-        && (ctx.hovered_row == Some(msg.id) || ctx.context_menu_message == Some(msg.id));
+    let show_combined_time =
+        !show_head && (ctx.hovered_row == Some(msg.id) || ctx.context_menu_message == Some(msg.id));
     let combined_time = msg.time_hhmm.clone();
     let context_menu_id = msg.id;
     let context_menu_host = ctx.video_host.clone();
@@ -262,10 +262,7 @@ pub fn render_user_message(
             ))
         })
         .when(
-            !ctx.is_topic_box
-                && msg.is_card
-                && !ephemeral
-                && msg.code != MessageCode::Topic,
+            !ctx.is_topic_box && msg.is_card && !ephemeral && msg.code != MessageCode::Topic,
             |d| d.child(render_go_to_topic_footer(msg, ctx)),
         )
         .into_any_element()
@@ -312,8 +309,9 @@ fn render_go_to_topic_footer(msg: &Message, ctx: &RowCtx) -> AnyElement {
         .cursor_pointer()
         .hover(move |s| s.bg(hover_bg))
         .on_click(move |_, _, cx| {
-            TopicsStore::global(cx)
-                .update(cx, |store, cx| store.start_create_for_message(message_id, cx));
+            TopicsStore::global(cx).update(cx, |store, cx| {
+                store.start_create_for_message(message_id, cx)
+            });
         })
         .child(
             div()

@@ -1,8 +1,3 @@
-//! Runtime configuration loaded from environment variables (typically via `.env`).
-//!
-//! Variable names match the legacy Electron desktop app (`NX_*` prefix) for parity.
-//! Values are read at startup and are not persisted to `settings.json`.
-
 use gpui::{App, Global};
 use std::sync::Arc;
 // No `Debug` derive: AppConfig holds secrets (api_key, imgproxy_key, fcm/tenor/treasury keys,
@@ -43,11 +38,9 @@ pub struct AppConfig {
     pub imgproxy_base_url: String,
     pub imgproxy_key: String,
 
-    // ── Tenor (GIF search) ────────────────────────────────────────────────────
-    pub tenor_key: String,
-    pub tenor_url_categories: String,
-    pub tenor_url_search: String,
-    pub tenor_url_featured: String,
+    // ── Klipy (GIF search) ────────────────────────────────────────────────────
+    pub klipy_key: String,
+    pub klipy_base_url: String,
 
     // ── Treasury / blockchain ─────────────────────────────────────────────────
     pub mezon_treasury_url: String,
@@ -119,10 +112,8 @@ impl AppConfig {
             imgproxy_base_url: "https://dev-imgproxy.nccsoft.vn".into(),
             imgproxy_key: "_AEhOrrckkG-NjqIdVLtzc-dtLFuE4u6ClM0P46ICEY".into(),
 
-            tenor_key: String::new(),
-            tenor_url_categories: "https://tenor.googleapis.com/v2/categories?key=".into(),
-            tenor_url_search: "https://tenor.googleapis.com/v2/search?q=".into(),
-            tenor_url_featured: "https://tenor.googleapis.com/v2/featured?key=".into(),
+            klipy_key: String::new(),
+            klipy_base_url: "https://api.klipy.com/api/v1".into(),
 
             mezon_treasury_url: "https://withdraw-api.nccsoft.vn".into(),
             mezon_treasury_key: String::new(),
@@ -163,7 +154,7 @@ impl AppConfig {
             ),
             api_gw_port: opt_u16(option_env!("NX_CHAT_APP_API_GW_PORT"), defaults.api_gw_port),
 
-            tcp_port: opt_opt_u16(option_env!("NX_CHAT_APP_TCP_PORT")),
+            tcp_port: opt_tcp_port(option_env!("NX_CHAT_APP_TCP_PORT"), defaults.tcp_port),
             stream_ws_url: opt_str(
                 option_env!("NX_CHAT_APP_STREAM_WS_URL"),
                 &defaults.stream_ws_url,
@@ -228,21 +219,13 @@ impl AppConfig {
             ),
             imgproxy_key: opt_str(option_env!("NX_IMGPROXY_KEY"), &defaults.imgproxy_key),
 
-            tenor_key: opt_str(
-                option_env!("NX_CHAT_APP_API_TENOR_KEY"),
-                &defaults.tenor_key,
+            klipy_key: opt_str(
+                option_env!("NX_CHAT_APP_API_KLIPY_KEY"),
+                &defaults.klipy_key,
             ),
-            tenor_url_categories: opt_str(
-                option_env!("NX_CHAT_APP_API_TENOR_URL_CATEGORIES"),
-                &defaults.tenor_url_categories,
-            ),
-            tenor_url_search: opt_str(
-                option_env!("NX_CHAT_APP_API_TENOR_URL_SEARCH"),
-                &defaults.tenor_url_search,
-            ),
-            tenor_url_featured: opt_str(
-                option_env!("NX_CHAT_APP_API_TENOR_URL_FEATURED"),
-                &defaults.tenor_url_featured,
+            klipy_base_url: opt_str(
+                option_env!("NX_CHAT_APP_API_KLIPY_URL"),
+                &defaults.klipy_base_url,
             ),
 
             mezon_treasury_url: opt_str(
@@ -580,8 +563,16 @@ fn opt_u16(value: Option<&'static str>, default: u16) -> u16 {
         .unwrap_or(default)
 }
 
+#[cfg(test)]
 fn opt_opt_u16(value: Option<&'static str>) -> Option<u16> {
     normalize(value).and_then(|v| v.parse().ok())
+}
+
+fn opt_tcp_port(value: Option<&'static str>, default: Option<u16>) -> Option<u16> {
+    match value {
+        None => default,
+        Some(v) => normalize(Some(v)).and_then(|v| v.parse().ok()),
+    }
 }
 
 fn opt_u32(value: Option<&'static str>, default: u32) -> u32 {

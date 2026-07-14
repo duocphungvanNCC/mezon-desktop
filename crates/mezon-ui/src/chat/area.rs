@@ -117,6 +117,9 @@ impl ChatArea {
                     MentionInputEvent::SendSticker { url, filename } => {
                         this.send_sticker(url.clone(), filename.clone(), cx)
                     }
+                    MentionInputEvent::SendGif { url, width, height } => {
+                        this.send_gif(url.clone(), *width, *height, cx)
+                    }
                     MentionInputEvent::SendSound { url, filename } => {
                         this.send_sound(url.clone(), filename.clone(), cx)
                     }
@@ -218,7 +221,12 @@ impl ChatArea {
             .update(cx, |typing, cx| typing.sync(channel_id, cx));
 
         input_bar.update(cx, |input_bar, cx| {
-            input_bar.sync(locale, self.replying_to.clone(), ReplyClearSource::Messages, cx)
+            input_bar.sync(
+                locale,
+                self.replying_to.clone(),
+                ReplyClearSource::Messages,
+                cx,
+            )
         });
 
         let header = AnyView::from(self.header.clone()).cached(
