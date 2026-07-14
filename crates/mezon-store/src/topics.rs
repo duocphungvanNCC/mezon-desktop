@@ -832,6 +832,7 @@ impl TopicsStore {
                             filetype: att.filetype,
                             width: att.width,
                             height: att.height,
+                            duration: att.duration,
                             thumbnail,
                         }
                     })

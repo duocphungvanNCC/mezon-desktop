@@ -217,6 +217,7 @@ pub struct OutgoingAttachment {
     pub filetype: String,
     pub width: i32,
     pub height: i32,
+    pub duration: i32,
     pub poster_jpeg: Option<Vec<u8>>,
 }
 
@@ -2546,6 +2547,7 @@ impl MessagesStore {
                             filetype: att.filetype,
                             width: att.width,
                             height: att.height,
+                            duration: att.duration,
                             thumbnail,
                         }
                     })
@@ -5347,7 +5349,7 @@ impl MessageAttachment {
             width,
             height,
             thumbnail: String::new(),
-            duration: 0,
+            duration: att.duration,
             size: 0,
             size_label: SharedString::default(),
             presign_pending: false,
@@ -6030,6 +6032,7 @@ mod tests {
             filetype: "image/png".to_string(),
             width: 100,
             height: 100,
+            duration: 0,
             poster_jpeg: None,
         };
         let atts = [outgoing("a.png"), outgoing("b.png")];

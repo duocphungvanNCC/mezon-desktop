@@ -96,6 +96,7 @@ pub struct UploadFile {
     pub filetype: String,
     pub width: i32,
     pub height: i32,
+    pub duration: i32,
     pub thumbnail: Option<UploadThumbnail>,
 }
 
@@ -1011,6 +1012,7 @@ impl AppApi {
             filetype,
             width,
             height,
+            duration,
             thumbnail,
         } = file;
         let filename = sanitize_filename(&filename);
@@ -1076,7 +1078,7 @@ impl AppApi {
                 width,
                 height,
                 thumbnail: thumbnail_url,
-                duration: 0,
+                duration,
             },
             plan,
         })
