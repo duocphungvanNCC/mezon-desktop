@@ -285,6 +285,9 @@ fn run_app(lock: SingleInstance, initial_url: Option<String>) {
         tracing::debug!("App started");
         install_foreground_watchdog(cx);
 
+        #[cfg(target_os = "linux")]
+        cx.set_text_rendering_mode(gpui::TextRenderingMode::Grayscale);
+
         // Register gg sans font (TTFs pre-decompressed by build.rs)
         let gg_sans_paths: &[(&[u8], &str)] = &[
             (

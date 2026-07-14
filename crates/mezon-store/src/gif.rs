@@ -43,11 +43,11 @@ struct KlipyCategoriesData {
 #[derive(Deserialize)]
 struct KlipyCategory {
     #[serde(default)]
-    category: String,
+    category: Option<String>,
     #[serde(default)]
-    query: String,
+    query: Option<String>,
     #[serde(default)]
-    preview_url: String,
+    preview_url: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -84,18 +84,24 @@ struct KlipyVariant {
 #[derive(Deserialize)]
 struct KlipyMedia {
     #[serde(default)]
-    url: String,
+    url: Option<String>,
     #[serde(default)]
-    width: u32,
+    width: Option<u32>,
     #[serde(default)]
-    height: u32,
+    height: Option<u32>,
+}
+
+impl KlipyMedia {
+    fn url(&self) -> &str {
+        self.url.as_deref().unwrap_or_default()
+    }
 }
 
 impl KlipyFile {
     fn gif_media(variant: Option<&KlipyVariant>) -> Option<&KlipyMedia> {
         variant
             .and_then(|v| v.gif.as_ref())
-            .filter(|media| !media.url.is_empty())
+            .filter(|media| !media.url().is_empty())
     }
 
     fn shareable(&self) -> Option<&KlipyMedia> {
@@ -204,6 +210,12 @@ impl GifStore {
 
     fn fetch_base(&mut self, cx: &mut Context<Self>) {
         if self.loading {
+            return;
+        }
+        if self.config.key.is_empty() {
+            tracing::error!(
+                "klipy api key is empty: set NX_CHAT_APP_API_KLIPY_KEY at build time (.env or CI)"
+            );
             return;
         }
         self.loading = true;
@@ -347,29 +359,31 @@ async fn fetch_gifs(url: &str) -> Option<Vec<Gif>> {
 }
 
 fn category_from_klipy(category: KlipyCategory) -> Option<GifCategory> {
-    if category.category.is_empty() && category.query.is_empty() {
+    let name = category.category.unwrap_or_default();
+    let query = category.query.unwrap_or_default();
+    if name.is_empty() && query.is_empty() {
         return None;
     }
-    let searchterm = if category.query.is_empty() {
-        category.category.clone()
+    let searchterm = if query.is_empty() {
+        name.clone()
     } else {
-        category.query
+        query
     };
     Some(GifCategory {
-        name: category.category.into(),
+        name: name.into(),
         searchterm: searchterm.into(),
-        image: category.preview_url.into(),
+        image: category.preview_url.unwrap_or_default().into(),
     })
 }
 
 fn gif_from_klipy(gif: KlipyGif) -> Option<Gif> {
     let still = gif.file.shareable()?;
-    let url: SharedString = still.url.clone().into();
+    let url: SharedString = still.url().to_owned().into();
     Some(Gif {
         preview_url: url.clone(),
         url,
-        width: still.width,
-        height: still.height,
+        width: still.width.unwrap_or_default(),
+        height: still.height.unwrap_or_default(),
     })
 }
 
@@ -470,6 +484,45 @@ mod tests {
         assert_eq!(gifs.len(), 1);
         assert_eq!(gifs[0].url, "https://static.klipy.com/b-sm.gif");
         assert_eq!((gifs[0].width, gifs[0].height), (300, 200));
+    }
+
+    #[test]
+    fn a_null_scalar_does_not_discard_the_whole_response() {
+        let json = r#"{"result":true,"data":{"data":[
+            {"file":{"xs":{"gif":{"url":null,"width":null,"height":null}},
+                     "sm":{"gif":{"url":"https://static.klipy.com/ok.gif","width":220,"height":178}}}},
+            {"file":{"xs":{"gif":{"url":"https://static.klipy.com/b.gif","width":null,"height":90}}}}
+        ]}}"#;
+        let response: KlipyGifsResponse = serde_json::from_str(json).unwrap();
+        let gifs: Vec<Gif> = response
+            .data
+            .data
+            .into_iter()
+            .filter_map(gif_from_klipy)
+            .collect();
+        assert_eq!(gifs.len(), 2);
+        assert_eq!(gifs[0].url, "https://static.klipy.com/ok.gif");
+        assert_eq!((gifs[0].width, gifs[0].height), (220, 178));
+        assert_eq!(gifs[1].url, "https://static.klipy.com/b.gif");
+        assert_eq!((gifs[1].width, gifs[1].height), (0, 90));
+    }
+
+    #[test]
+    fn a_null_category_field_does_not_discard_the_whole_response() {
+        let json = r#"{"result":true,"data":{"categories":[
+            {"category":"hello","query":null,"preview_url":null},
+            {"category":null,"query":null,"preview_url":null}
+        ]}}"#;
+        let response: KlipyCategoriesResponse = serde_json::from_str(json).unwrap();
+        let cats: Vec<GifCategory> = response
+            .data
+            .categories
+            .into_iter()
+            .filter_map(category_from_klipy)
+            .collect();
+        assert_eq!(cats.len(), 1);
+        assert_eq!(cats[0].name, "hello");
+        assert_eq!(cats[0].searchterm, "hello");
     }
 
     #[test]
