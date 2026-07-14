@@ -1694,6 +1694,23 @@ impl OutgoingMention {
     }
 }
 
+/// Build the content JSON of a forwarded message: the source message's content
+/// object re-sent verbatim with `fwd: true` added, mirroring mezon-react's
+/// `{ ...message.content, fwd: true }`. Falls back to a plain `{ "t": text }`
+/// object when the source payload is absent or not a JSON object (optimistic
+/// messages that never round-tripped through the server).
+pub fn forward_content_json(content_raw: &str, text: &str) -> String {
+    let mut obj = match serde_json::from_str::<serde_json::Value>(content_raw) {
+        Ok(serde_json::Value::Object(map)) => map,
+        _ => serde_json::Map::new(),
+    };
+    if !text.is_empty() && !obj.contains_key("t") {
+        obj.insert("t".into(), text.into());
+    }
+    obj.insert("fwd".into(), serde_json::Value::Bool(true));
+    serde_json::Value::Object(obj).to_string()
+}
+
 pub fn mention_content_tokens(mentions: &[OutgoingMention]) -> Vec<ContentToken> {
     mentions
         .iter()
@@ -1994,6 +2011,11 @@ pub struct ApiMessage {
     pub content: String,
     /// Full parsed content tokens for rich-text rendering.
     pub content_tokens: ApiMessageContent,
+    /// The content JSON exactly as the server sent it. Forwarding re-sends this
+    /// verbatim (plus `fwd: true`) so markdown/emoji/hashtag/embed tokens survive
+    /// — mezon-react forwards `{ ...message.content, fwd: true }`.
+    #[serde(default)]
+    pub content_raw: String,
     /// Message type/category (`TypeMessage` in React). 0 = normal chat.
     pub code: i32,
     pub sender_id: i64,
@@ -2246,6 +2268,7 @@ impl MezonTransport {
             message_id: message.message_id,
             content,
             content_tokens,
+            content_raw: message.content.clone(),
             code: message.code,
             sender_id: message.sender_id,
             sender_name,
@@ -3084,6 +3107,7 @@ impl MezonTransport {
         Ok(ApiMessage {
             message_id: ack.message_id,
             content: content.to_string(),
+            content_raw: String::new(),
             content_tokens: ApiMessageContent {
                 t: content.to_string(),
                 mentions: mentions
@@ -3926,27 +3950,34 @@ impl MezonTransport {
             .collect())
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn forward_channel_message(
         &self,
         clan_id: i64,
         channel_id: i64,
-        content: &str,
+        content_raw: &str,
+        text: &str,
         is_public: bool,
         mode: i32,
         attachments: Vec<api::MessageAttachment>,
+        mentions: Vec<OutgoingMention>,
     ) -> Result<()> {
         let cid = self.generate_cid();
-        let mut obj = serde_json::Map::new();
-        obj.insert("t".into(), content.into());
-        obj.insert("fwd".into(), serde_json::Value::Bool(true));
-        let content_json = serde_json::Value::Object(obj).to_string();
+        let content_json = forward_content_json(content_raw, text);
+        let mention_everyone = mentions.iter().any(OutgoingMention::is_here);
+        let proto_mentions: Vec<api::MessageMention> = mentions
+            .iter()
+            .filter_map(OutgoingMention::to_proto)
+            .collect();
         let body = realtime::ChannelMessageSend {
             clan_id,
             channel_id,
             content: content_json,
+            mentions: proto_mentions,
             attachments,
             mode,
             is_public,
+            mention_everyone,
             ..Default::default()
         }
         .encode_to_vec();
@@ -7347,6 +7378,41 @@ mod tests {
             parsed.content_tokens.presign_finish,
             Some(vec!["a/b/photo.png".to_string()])
         );
+    }
+
+    #[test]
+    fn message_from_proto_keeps_the_raw_content_payload() {
+        let raw = r#"{"t":"hi","ej":[{"s":0,"e":2,"emojiid":"9"}]}"#;
+        let msg = api::ChannelMessage {
+            message_id: 1,
+            content: raw.into(),
+            ..Default::default()
+        };
+        let parsed = MezonTransport::message_from_proto(&msg);
+        assert_eq!(parsed.content_raw, raw);
+    }
+
+    #[test]
+    fn forward_content_json_preserves_tokens_and_marks_forwarded() {
+        let raw =
+            r#"{"t":"hi","ej":[{"s":0,"e":2,"emojiid":"9"}],"mk":[{"s":0,"e":2,"type":"b"}]}"#;
+
+        let json = forward_content_json(raw, "hi");
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(value["fwd"], serde_json::Value::Bool(true));
+        assert_eq!(value["t"], "hi");
+        assert_eq!(value["ej"][0]["emojiid"], "9");
+        assert_eq!(value["mk"][0]["type"], "b");
+    }
+
+    #[test]
+    fn forward_content_json_falls_back_to_plain_text() {
+        let json = forward_content_json("", "hello");
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(value["t"], "hello");
+        assert_eq!(value["fwd"], serde_json::Value::Bool(true));
     }
 
     #[test]

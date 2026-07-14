@@ -825,7 +825,9 @@ impl ChannelMessages {
                         });
                     }));
                 }
-                MessagesEvent::ReplyTargetChanged => return,
+                MessagesEvent::ReplyTargetChanged
+                | MessagesEvent::ForwardProgress { .. }
+                | MessagesEvent::ForwardFinished { .. } => return,
             }
             if structural {
                 {
@@ -1122,7 +1124,9 @@ impl ChannelMessages {
             move |this, _input, event: &MentionInputEvent, window, cx| match event {
                 MentionInputEvent::Submit => this.save_edit(window, cx),
                 MentionInputEvent::Cancel => this.cancel_edit(cx),
-                MentionInputEvent::SendSticker { .. } | MentionInputEvent::SendSound { .. } => {}
+                MentionInputEvent::SendSticker { .. }
+                | MentionInputEvent::SendGif { .. }
+                | MentionInputEvent::SendSound { .. } => {}
             },
         ));
         self.edit_input = Some((message_id, input));

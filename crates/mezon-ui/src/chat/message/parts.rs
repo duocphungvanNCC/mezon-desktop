@@ -349,7 +349,13 @@ pub fn render_attachments(msg: &Message, ctx: &RowCtx) -> Option<AnyElement> {
         },
     };
 
-    let mut col = div().flex().flex_col().gap_2().mt_1().w_full();
+    let mut col = div()
+        .id(("msg-attachments", msg.id.0 as usize))
+        .flex()
+        .flex_col()
+        .gap_2()
+        .mt_1()
+        .w_full();
     for (i, att) in videos.iter().enumerate() {
         col = col.child(render_video(msg.id, i, att, ctx, att.uploading));
     }
@@ -548,7 +554,12 @@ fn render_album(
             tile_element = tile_element
                 .cursor_pointer()
                 .when(!src.is_empty(), |d| {
-                    d.child(img(src).size_full().object_fit(ObjectFit::Cover))
+                    d.child(
+                        img(src)
+                            .id(("msg-album-frames", index))
+                            .size_full()
+                            .object_fit(ObjectFit::Cover),
+                    )
                 })
                 .on_click(move |_, _window, cx| {
                     open_viewer_from_message(&settings, raw_url.clone(), anchor, cx);
@@ -673,6 +684,7 @@ fn render_photo(
         });
         el = el.child(
             img(path)
+                .id(("msg-img-frames", msg.id.0 as usize))
                 .size_full()
                 .object_fit(ObjectFit::Cover)
                 .with_fallback(move || {
@@ -747,6 +759,7 @@ fn render_photo(
     });
     el = el.child(
         img(src)
+            .id(("msg-img-frames", msg.id.0 as usize))
             .size_full()
             .object_fit(object_fit)
             .with_fallback(move || {

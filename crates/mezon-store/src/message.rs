@@ -593,6 +593,10 @@ pub struct Message {
     pub attachments: Vec<MessageAttachment>,
     pub album_layout: Option<AlbumLayout>,
     pub viewer_media: Arc<[ViewerMedia]>,
+    /// The content JSON as received from the server, kept so forwarding can
+    /// re-send the whole payload (markdown/emoji/hashtag/embed tokens) rather
+    /// than just the plain text. `None` for optimistic messages.
+    pub raw_content: Option<Arc<str>>,
 }
 
 #[derive(Debug, Clone)]
@@ -1362,7 +1366,13 @@ impl Message {
             attachments: Vec::new(),
             album_layout: None,
             viewer_media: Vec::new().into(),
+            raw_content: None,
         }
+    }
+
+    pub fn with_raw_content(mut self, raw: &str) -> Self {
+        self.raw_content = (!raw.is_empty()).then(|| Arc::from(raw));
+        self
     }
 
     pub fn is_sending(&self) -> bool {

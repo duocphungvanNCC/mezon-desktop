@@ -263,6 +263,18 @@ pub struct ImgLayoutState {
     replacement: Option<AnyElement>,
 }
 
+const MIN_ANIMATION_FRAME_DELAY: Duration = Duration::from_millis(20);
+const CLAMPED_ANIMATION_FRAME_DELAY: Duration = Duration::from_millis(100);
+
+fn animation_frame_delay(data: &RenderImage, frame_index: usize) -> Duration {
+    let delay = Duration::from(data.delay(frame_index));
+    if delay < MIN_ANIMATION_FRAME_DELAY {
+        CLAMPED_ANIMATION_FRAME_DELAY
+    } else {
+        delay
+    }
+}
+
 impl Element for Img {
     type RequestLayoutState = ImgLayoutState;
     type PrepaintState = Option<Hitbox>;
@@ -327,7 +339,7 @@ impl Element for Img {
                                         if let Some(last_frame_time) = state.last_frame_time {
                                             let elapsed = current_time - last_frame_time;
                                             let frame_duration =
-                                                Duration::from(data.delay(state.frame_index));
+                                                animation_frame_delay(&data, state.frame_index);
 
                                             if elapsed >= frame_duration {
                                                 state.frame_index =
@@ -392,7 +404,7 @@ impl Element for Img {
                                 match state
                                     .as_ref()
                                     .and_then(|state| state.last_frame_time)
-                                    .map(|last| last + Duration::from(data.delay(frame_index)))
+                                    .map(|last| last + animation_frame_delay(&data, frame_index))
                                 {
                                     Some(due_at)
                                         if due_at
