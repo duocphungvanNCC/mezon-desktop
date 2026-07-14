@@ -71,12 +71,14 @@ const WHEEL_SCROLL_BEZIER_X2: f32 = 0.58;
 const WHEEL_SCROLL_MIN_DELTA: f32 = 120.;
 const WHEEL_SCROLL_MAX_DELTA: f32 = 480.;
 const WHEEL_SCROLL_MIN_DURATION: f32 = 0.1;
-const WHEEL_SCROLL_MAX_DURATION: f32 = 0.2;
+const WHEEL_SCROLL_MAX_DURATION: f32 = 0.16;
+const OVERDRAW_MEASURE_ITEM_BUDGET: usize = 4;
 
 #[derive(Clone, Copy, Debug)]
 struct WheelScrollAnimation {
     start: f32,
     target: f32,
+    applied: f32,
     started_at: Instant,
     duration: Duration,
     initial_slope: f32,
@@ -104,6 +106,7 @@ impl WheelScrollAnimation {
         Self {
             start,
             target,
+            applied: start,
             started_at,
             duration,
             initial_slope,
@@ -219,21 +222,22 @@ fn start_smooth_wheel_scroll(
         let now = Instant::now();
         let current = state.scrollbar_offset().as_f32();
         let previous = state.wheel_scroll_animation;
-        let base = previous.map_or(current, |animation| animation.target);
-        let target = (base + delta.as_f32()).clamp(-state.max_scroll_offset().as_f32(), 0.);
-        if (target - base).abs() <= f32::EPSILON {
+        let (remaining, velocity) = previous.map_or((0., 0.), |animation| {
+            let (_, velocity, _) = animation.sample(now);
+            (animation.target - animation.applied, velocity)
+        });
+        let target = (current + remaining + delta.as_f32())
+            .clamp(-state.max_scroll_offset().as_f32(), 0.);
+        if (target - current).abs() <= f32::EPSILON {
+            state.wheel_scroll_animation = None;
             return;
         }
-        let (start, velocity) = previous.map_or((current, 0.), |animation| {
-            let (position, velocity, _) = animation.sample(now);
-            (position, velocity)
-        });
         state.wheel_scroll_animation = Some(WheelScrollAnimation::new(
-            start,
+            current,
             target,
             velocity,
             now,
-            wheel_scroll_duration(delta),
+            wheel_scroll_duration(px(target - current)),
         ));
         if state.wheel_frame_scheduled {
             false
@@ -243,8 +247,8 @@ fn start_smooth_wheel_scroll(
         }
     };
 
-    cx.notify(current_view);
     if should_schedule {
+        cx.notify(current_view);
         schedule_smooth_wheel_frame(list_state.clone(), current_view, window);
     }
 }
@@ -258,16 +262,18 @@ fn schedule_smooth_wheel_frame(
         let continue_animation = {
             let state = &mut *list_state.0.borrow_mut();
             state.wheel_frame_scheduled = false;
-            let Some(animation) = state.wheel_scroll_animation else {
+            let Some(mut animation) = state.wheel_scroll_animation else {
                 return;
             };
 
             let (position, _, finished) = animation.sample(Instant::now());
-            let pixel_delta = px(position) - state.scrollbar_offset();
+            let pixel_delta = px(position - animation.applied);
+            animation.applied = position;
             let height = state.last_layout_bounds.unwrap_or_default().size.height;
             if finished {
                 state.wheel_scroll_animation = None;
             } else {
+                state.wheel_scroll_animation = Some(animation);
                 state.wheel_frame_scheduled = true;
             }
             state.scroll(
@@ -382,6 +388,9 @@ pub enum ListAlignment {
 
 /// A scroll event that has been converted to be in terms of the list's items.
 pub struct ListScrollEvent {
+    #[allow(missing_docs)]
+    pub scroll_top: ListOffset,
+
     /// The range of items currently visible in the list, after applying the scroll event.
     pub visible_range: Range<usize>,
 
@@ -696,6 +705,20 @@ impl ListState {
         self.splice_focusable(old_range, (0..count).map(|_| None))
     }
 
+    #[allow(missing_docs)]
+    pub fn splice_with_size_hint(
+        &self,
+        old_range: Range<usize>,
+        count: usize,
+        size_hint: Size<Pixels>,
+    ) {
+        self.splice_focusable_with_size_hint(
+            old_range,
+            (0..count).map(|_| None),
+            Some(size_hint),
+        )
+    }
+
     /// Register with the list state that the items in `old_range` have been replaced
     /// by new items. As opposed to [`Self::splice`], this method allows an iterator of optional focus handles
     /// to be supplied to properly integrate with items in the list that can be focused. If a focused item
@@ -704,6 +727,15 @@ impl ListState {
         &self,
         old_range: Range<usize>,
         focus_handles: impl IntoIterator<Item = Option<FocusHandle>>,
+    ) {
+        self.splice_focusable_with_size_hint(old_range, focus_handles, None)
+    }
+
+    fn splice_focusable_with_size_hint(
+        &self,
+        old_range: Range<usize>,
+        focus_handles: impl IntoIterator<Item = Option<FocusHandle>>,
+        size_hint: Option<Size<Pixels>>,
     ) {
         let state = &mut *self.0.borrow_mut();
 
@@ -716,7 +748,7 @@ impl ListState {
             focus_handles.into_iter().map(|focus_handle| {
                 spliced_count += 1;
                 ListItem::Unmeasured {
-                    size_hint: None,
+                    size_hint,
                     focus_handle,
                 }
             }),
@@ -738,6 +770,23 @@ impl ListState {
                 *item_ix = *item_ix - (old_range.end - old_range.start) + spliced_count;
             }
         }
+    }
+
+    #[allow(missing_docs)]
+    pub fn average_measured_item_size(&self) -> Option<Size<Pixels>> {
+        let state = self.0.borrow();
+        let mut count = 0usize;
+        let mut height = px(0.);
+        let mut width = px(0.);
+        for item in state.items.iter() {
+            let Some(size) = item.size() else {
+                continue;
+            };
+            count += 1;
+            height += size.height;
+            width = width.max(size.width);
+        }
+        (count > 0).then(|| size(width, height / count as f32))
     }
 
     /// Set a handler that will be called when the list is scrolled.
@@ -1136,6 +1185,7 @@ impl StateInner {
             let visible_range = Self::visible_range(&self.items, height, &current_scroll_top);
             handler(
                 &ListScrollEvent {
+                    scroll_top: current_scroll_top,
                     visible_range,
                     count: self.items.summary().count,
                     is_scrolled: self.logical_scroll_top.is_some(),
@@ -1233,6 +1283,7 @@ impl StateInner {
         let mut rendered_height = padding.top;
         let mut max_item_width = px(0.);
         let mut scroll_top = self.logical_scroll_top();
+        let mut overdraw_measurements_remaining = OVERDRAW_MEASURE_ITEM_BUDGET;
 
         if self.follow_state.is_following() {
             scroll_top = ListOffset {
@@ -1266,6 +1317,15 @@ impl StateInner {
 
             // If we're within the visible area or the height wasn't cached, render and measure the item's element
             if visible_height < available_height || size.is_none() {
+                if visible_height >= available_height
+                    && size.is_none()
+                    && item.size_hint().is_some()
+                {
+                    if overdraw_measurements_remaining == 0 {
+                        break;
+                    }
+                    overdraw_measurements_remaining -= 1;
+                }
                 let item_index = scroll_top.item_ix + ix;
                 let mut element = render_item(item_index, window, cx);
                 let element_size = element.layout_as_root(available_item_space, window, cx);
@@ -1377,6 +1437,12 @@ impl StateInner {
                 let size = if let ListItem::Measured { size, .. } = item {
                     *size
                 } else {
+                    if item.size_hint().is_some() {
+                        if overdraw_measurements_remaining == 0 {
+                            break;
+                        }
+                        overdraw_measurements_remaining -= 1;
+                    }
                     let mut element = render_item(cursor.start().0, window, cx);
                     element.layout_as_root(available_item_space, window, cx)
                 };

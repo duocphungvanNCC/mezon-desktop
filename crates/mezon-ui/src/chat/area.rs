@@ -19,20 +19,22 @@ use crate::chat::message_search::{MESSAGE_SEARCH_PANEL_WIDTH, MessageSearchPanel
 use crate::chat::pinned_popover::PinnedPopoverPanel;
 use crate::components::primitives::{Icon, IconName, InputState};
 use crate::image_cache::LruImageCache;
-use crate::theme::ActiveTheme;
 
 pub struct ChatArea {
     pub(crate) timeline: Entity<ChannelMessages>,
     pub(crate) mention_input: Option<Entity<MentionInput>>,
+    input_bar: Option<Entity<InputBar>>,
     member_panel: Option<Entity<MemberListPanel>>,
     member_source: Option<MemberSource>,
     member_avatar_cache: Entity<LruImageCache>,
     settings: Entity<Settings>,
     header: Entity<ChatHeader>,
     typing: Entity<ChannelTyping>,
+    replying_to: Option<ReplyTarget>,
     _submit_sub: Option<Subscription>,
     _reply_sub: Option<Subscription>,
     drop_title_cache: Option<(SharedString, SharedString, SharedString)>,
+    drop_body_cache: Option<(SharedString, SharedString)>,
 }
 
 impl ChatArea {
@@ -48,15 +50,18 @@ impl ChatArea {
         Self {
             timeline,
             mention_input: None,
+            input_bar: None,
             member_panel: None,
             member_source: None,
             member_avatar_cache,
             settings,
             header,
             typing,
+            replying_to: None,
             _submit_sub: None,
             _reply_sub: None,
             drop_title_cache: None,
+            drop_body_cache: None,
         }
     }
 
@@ -112,24 +117,45 @@ impl ChatArea {
                     MentionInputEvent::SendSticker { url, filename } => {
                         this.send_sticker(url.clone(), filename.clone(), cx)
                     }
+                    MentionInputEvent::SendGif { url, width, height } => {
+                        this.send_gif(url.clone(), *width, *height, cx)
+                    }
                     MentionInputEvent::SendSound { url, filename } => {
                         this.send_sound(url.clone(), filename.clone(), cx)
                     }
                 },
             );
             self._submit_sub = Some(submit_sub);
+            self.input_bar = Some(cx.new(|cx| {
+                InputBar::new(
+                    mention_input.clone(),
+                    SharedString::from(locale.clone()),
+                    &self.settings,
+                    cx,
+                )
+            }));
             self.mention_input = Some(mention_input);
+            self.replying_to = MessagesStore::global(cx)
+                .read(cx)
+                .reply_target()
+                .map(|draft| ReplyTarget {
+                    sender_name: SharedString::from(draft.sender_name.clone()),
+                });
 
             let reply_sub = cx.subscribe_in(
                 &MessagesStore::global(cx),
                 window,
                 |this: &mut crate::ChatLayout, store, event: &MessagesEvent, window, cx| {
                     if matches!(event, MessagesEvent::ReplyTargetChanged) {
-                        if store.read(cx).reply_target().is_some()
+                        let replying_to = store.read(cx).reply_target().map(|draft| ReplyTarget {
+                            sender_name: SharedString::from(draft.sender_name.clone()),
+                        });
+                        if replying_to.is_some()
                             && let Some(input) = this.chat_area.mention_input.clone()
                         {
                             input.update(cx, |input, cx| input.focus_input(window, cx));
                         }
+                        this.chat_area.replying_to = replying_to;
                         cx.notify();
                     }
                 },
@@ -159,9 +185,10 @@ impl ChatArea {
         message_search_panel: Option<Entity<MessageSearchPanel>>,
         cx: &mut Context<crate::ChatLayout>,
     ) -> gpui::AnyElement {
-        let mention_input = match self.mention_input.clone() {
-            Some(s) => s,
-            None => {
+        let (input_bar, mention_input) = match (self.input_bar.clone(), self.mention_input.clone())
+        {
+            (Some(input_bar), Some(mention_input)) => (input_bar, mention_input),
+            _ => {
                 return div()
                     .flex()
                     .flex_col()
@@ -173,7 +200,7 @@ impl ChatArea {
 
         self.header.update(cx, |header, cx| {
             header.sync(
-                channel_name.map(SharedString::from),
+                channel_name,
                 is_dm,
                 show_members_button,
                 show_member_panel,
@@ -185,7 +212,7 @@ impl ChatArea {
                 search_expanded,
                 show_search_options,
                 search_input,
-                Some(locale.to_string()),
+                Some(locale),
                 cx,
             );
         });
@@ -193,17 +220,9 @@ impl ChatArea {
         self.typing
             .update(cx, |typing, cx| typing.sync(channel_id, cx));
 
-        let theme = cx.theme();
-
-        let replying_to = MessagesStore::global(cx)
-            .read(cx)
-            .reply_target()
-            .map(|draft| ReplyTarget {
-                sender_name: draft.sender_name.clone(),
-            });
-        let input_bar = InputBar::new()
-            .with_mention_input(mention_input.clone())
-            .replying_to(replying_to);
+        input_bar.update(cx, |input_bar, cx| {
+            input_bar.sync(locale, self.replying_to.clone(), cx)
+        });
 
         let header = AnyView::from(self.header.clone()).cached(
             StyleRefinement::default()
@@ -212,7 +231,7 @@ impl ChatArea {
                 .flex_shrink_0(),
         );
 
-        let drop_input = mention_input.clone();
+        let drop_input = mention_input;
         let channel_label = channel_name.unwrap_or_default();
         let drop_title = match &self.drop_title_cache {
             Some((cached_locale, cached_channel, title))
@@ -232,7 +251,14 @@ impl ChatArea {
                 title
             }
         };
-        let drop_body = mezon_i18n::t(locale, "common.uploadInstructions");
+        let drop_body = match &self.drop_body_cache {
+            Some((cached_locale, body)) if cached_locale.as_ref() == locale => body.clone(),
+            _ => {
+                let body: SharedString = mezon_i18n::t(locale, "common.uploadInstructions").into();
+                self.drop_body_cache = Some((SharedString::from(locale.to_string()), body.clone()));
+                body
+            }
+        };
         let drop_overlay = div()
             .absolute()
             .inset_0()
@@ -296,8 +322,15 @@ impl ChatArea {
             .child(div().flex_1().min_h_0().overflow_hidden().child(
                 AnyView::from(self.timeline.clone()).cached(StyleRefinement::default().size_full()),
             ))
-            .child(input_bar.render(theme, locale))
-            .child(self.typing.clone())
+            .child(input_bar)
+            .child(
+                AnyView::from(self.typing.clone()).cached(
+                    StyleRefinement::default()
+                        .w_full()
+                        .h(px(16.))
+                        .flex_shrink_0(),
+                ),
+            )
             .child(drop_overlay);
 
         let has_search_panel = show_results_panel && message_search_panel.is_some();

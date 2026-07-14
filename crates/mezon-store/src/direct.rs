@@ -383,6 +383,66 @@ impl DirectMessageStore {
         })
     }
 
+    pub fn send_direct_text_to_target(
+        &self,
+        user_id: Option<UserId>,
+        existing_channel: Option<(ChannelId, i32)>,
+        member_label: String,
+        member_avatar: String,
+        member_username: String,
+        content: String,
+        cx: &mut Context<Self>,
+    ) -> Task<anyhow::Result<()>> {
+        let api = self.api.clone();
+        let existing = existing_channel.or_else(|| {
+            user_id.and_then(|user_id| {
+                self.channels
+                    .as_slice()
+                    .iter()
+                    .find(|channel| {
+                        channel.kind == DirectKind::Dm && channel.peer_user_id == Some(user_id)
+                    })
+                    .map(|channel| (channel.id, channel.kind.stream_mode()))
+            })
+        });
+
+        cx.spawn(async move |this, cx| {
+            let (channel_id, mode) = match existing {
+                Some(existing) => existing,
+                None => {
+                    let user_id = user_id
+                        .ok_or_else(|| anyhow::anyhow!("invite target has no user or channel"))?;
+                    let desc = api.create_direct_channel(&[user_id.0]).await?;
+                    let channel_id = ChannelId(desc.channel_id);
+                    let kind = DirectKind::from_raw(desc.channel_type);
+                    let mode = kind.stream_mode();
+                    this.update(cx, |this, cx| {
+                        let channel = direct_from_created(
+                            &desc,
+                            user_id,
+                            &member_label,
+                            &member_avatar,
+                            &member_username,
+                        );
+                        this.channels.upsert_created(channel);
+                        this.freshness.mark_fetched();
+                        cx.emit(DirectEvent::Changed { channel_id: None });
+                        cx.notify();
+                    })?;
+                    (channel_id, mode)
+                }
+            };
+
+            let sent = api
+                .send_channel_message_structured(channel_id.get(), &content, mode)
+                .await?;
+            this.update(cx, |this, cx| {
+                this.note_message(channel_id, sent.create_time, true, false, cx);
+            })?;
+            Ok(())
+        })
+    }
+
     pub fn set_current(&mut self, id: ChannelId, channel_type: i32) {
         self.current = Some((id, channel_type));
     }

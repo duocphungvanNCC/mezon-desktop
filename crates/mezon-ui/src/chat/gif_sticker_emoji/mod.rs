@@ -26,10 +26,23 @@ pub enum SubPanel {
 }
 
 pub enum GifStickerEmojiEvent {
-    Emoji { emoji_id: String, emoji: String },
-    Sticker { url: String, filename: String },
-    Gif { url: String },
-    Sound { url: String, filename: String },
+    Emoji {
+        emoji_id: String,
+        emoji: String,
+    },
+    Sticker {
+        url: String,
+        filename: String,
+    },
+    Gif {
+        url: String,
+        width: u32,
+        height: u32,
+    },
+    Sound {
+        url: String,
+        filename: String,
+    },
 }
 
 pub struct GifStickerEmojiPopup {
@@ -66,7 +79,7 @@ impl GifStickerEmojiPopup {
             InputState::new(window, cx)
                 .placeholder(placeholder_for(active, &locale))
                 .height(px(40.))
-                .radius(px(8.))
+                .radius(px(6.))
                 .text_size(px(14.))
                 .bg(input_bg)
                 .borderless()
@@ -134,8 +147,12 @@ impl GifStickerEmojiPopup {
                         &gif,
                         window,
                         |this, _gif, event, window, cx| match event {
-                            GifPanelEvent::Picked { url } => {
-                                cx.emit(GifStickerEmojiEvent::Gif { url: url.clone() });
+                            GifPanelEvent::Picked { url, width, height } => {
+                                cx.emit(GifStickerEmojiEvent::Gif {
+                                    url: url.clone(),
+                                    width: *width,
+                                    height: *height,
+                                });
                             }
                             GifPanelEvent::SetSearch { term } => {
                                 this.search.update(cx, |input, cx| {
@@ -305,7 +322,7 @@ impl Render for GifStickerEmojiPopup {
                     .flex_shrink_0()
                     .border_b_1()
                     .border_color(theme.tokens.border_theme_primary)
-                    .pb_3()
+                    .pb_4()
                     .child(tab_bar)
                     .child(search_row),
             )

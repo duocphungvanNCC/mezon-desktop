@@ -20,6 +20,7 @@ jobs:
       NX_CHAT_APP_API_KEY: ${{ secrets.NX_CHAT_APP_API_KEY }}
       NX_CHAT_APP_API_GW_HOST: gw.mezon.ai
       NX_CHAT_APP_API_GW_PORT: "443"
+      NX_CHAT_APP_TCP_PORT: ""
       NX_CHAT_APP_STREAM_WS_URL: wss://stn.mezon.ai
       NX_CHAT_APP_MEET_WS_URL: wss://meet.mezon.ai
       NX_CHAT_APP_NOTIFICATION_WS_URL: wss://gotify.mezon.ai
@@ -39,10 +40,8 @@ jobs:
       NX_PROFILE_IMG_URL: https://profile.mezon.ai
       NX_IMGPROXY_BASE_URL: https://imgproxy.mezon.ai
       NX_IMGPROXY_KEY: ${{ secrets.NX_IMGPROXY_KEY }}
-      NX_CHAT_APP_API_TENOR_KEY: ${{ secrets.NX_CHAT_APP_API_TENOR_KEY }}
-      NX_CHAT_APP_API_TENOR_URL_CATEGORIES: https://tenor.googleapis.com/v2/categories?key=
-      NX_CHAT_APP_API_TENOR_URL_SEARCH: https://tenor.googleapis.com/v2/search?q=
-      NX_CHAT_APP_API_TENOR_URL_FEATURED: https://tenor.googleapis.com/v2/featured?key=
+      NX_CHAT_APP_API_KLIPY_KEY: ${{ secrets.NX_CHAT_APP_API_KLIPY_KEY }}
+      NX_CHAT_APP_API_KLIPY_URL: https://api.klipy.com/api/v1
       NX_CHAT_APP_MEZON_TREASURY_URL: https://withdraw-api.nccsoft.vn
       NX_CHAT_APP_API_MEZONTREASURY_KEY: ${{ secrets.NX_CHAT_APP_API_MEZONTREASURY_KEY }}
       NX_CHAT_APP_CONTRACT_ADDRESS: "0x4F17a94dD6E1B2D6241C4D1956C6c7a07ba2Ec50"

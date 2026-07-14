@@ -1,9 +1,13 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::ops::Range;
 use std::rc::Rc;
+use std::sync::Arc;
 
-use gpui::{App, Entity, SharedString, WeakEntity};
-use mezon_store::{ChannelType, ClanId, Emoji, MessageId, ProfileContext, Settings, UserId};
+use gpui::{App, Entity, HighlightStyle, Hsla, SharedString, WeakEntity};
+use mezon_store::{
+    ChannelType, ClanId, Emoji, MessageId, ProfileContext, RichClick, RichLayout, Settings, UserId,
+};
 
 use super::audio_player::AudioPlayerView;
 use super::channel_messages::ChannelMessages;
@@ -53,6 +57,7 @@ pub struct RowCtx<'a> {
     pub welcome: Option<WelcomeContext>,
     pub onboarding: Option<OnboardingContext>,
     pub suppress_hover: bool,
+    pub scroll_active: bool,
     /// Message whose hover toolbar should show, after the React-style hover-intent
     /// delay (fast mouse sweeps never latch it). `None` = no toolbar visible.
     pub hovered_row: Option<MessageId>,
@@ -97,6 +102,20 @@ pub struct RowMemo {
     pub avatars: HashMap<UserId, Option<(SharedString, SharedString)>>,
     /// message -> formatted head time label ("14:03" / "Yesterday at 14:03").
     pub time_labels: HashMap<MessageId, SharedString>,
+    pub rich_text: HashMap<MessageId, RichTextRenderPlan>,
+}
+
+#[derive(Clone)]
+pub struct RichTextRenderPlan {
+    pub layout: Arc<RichLayout>,
+    pub colors: [Hsla; 5],
+    pub edited: bool,
+    pub text: SharedString,
+    pub highlights: Arc<[(Range<usize>, HighlightStyle)]>,
+    pub font_overrides: Arc<[(Range<usize>, SharedString)]>,
+    pub click_ranges: Arc<[Range<usize>]>,
+    pub actions: Arc<[RichClick]>,
+    pub locale: SharedString,
 }
 
 pub const DEFAULT_DISPLAY_NAME_COLOR: u32 = 0x17_ac_86;

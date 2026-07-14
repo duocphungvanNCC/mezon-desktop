@@ -1,5 +1,7 @@
 mod audio;
 mod camera;
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+mod pipewire_init;
 mod runtime;
 mod screen;
 mod screen_audio;

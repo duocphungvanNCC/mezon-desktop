@@ -158,6 +158,8 @@ pub struct GifVideoView {
     player: Option<Rc<VideoPlayer>>,
     shared: Rc<RefCell<GifPlayback>>,
     playing: bool,
+    window_active: bool,
+    paused_for_inactive: bool,
     _frame_pump: Option<Task<()>>,
 }
 
@@ -186,6 +188,8 @@ impl GifVideoView {
             player,
             shared,
             playing,
+            window_active: true,
+            paused_for_inactive: false,
             _frame_pump: None,
         };
         this.start_frame_pump(cx);
@@ -196,6 +200,7 @@ impl GifVideoView {
         let Some(player) = self.player.clone() else {
             return;
         };
+        self.paused_for_inactive = false;
         if playing {
             player.play();
         } else {
@@ -232,6 +237,17 @@ impl GifVideoView {
         let Some(player) = self.player.clone() else {
             return false;
         };
+        if !self.window_active {
+            if !self.paused_for_inactive {
+                player.pause();
+                self.paused_for_inactive = true;
+            }
+            return true;
+        }
+        if self.paused_for_inactive {
+            player.play();
+            self.paused_for_inactive = false;
+        }
         let failed = player.failed();
         let duration = player.duration();
         let current_time = player.current_time();
@@ -357,7 +373,8 @@ impl GifVideoView {
 }
 
 impl Render for GifVideoView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.window_active = window.is_window_active();
         let theme = cx.theme();
         let failed = self.shared.borrow().failed;
         let root = div()
