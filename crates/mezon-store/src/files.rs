@@ -168,6 +168,13 @@ impl FilesStore {
     }
 
     pub fn refresh(&mut self, clan_id: ClanId, channel_id: ChannelId, cx: &mut Context<Self>) {
+        if self
+            .by_channel
+            .get(&channel_id)
+            .is_some_and(|c| c.is_loading)
+        {
+            return;
+        }
         self.fetch(clan_id, channel_id, cx);
     }
 

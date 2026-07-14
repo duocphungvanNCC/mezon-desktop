@@ -760,7 +760,7 @@ pub fn files_popover_on_open() -> Rc<dyn Fn(&mut Window, &mut App)> {
             return;
         };
         FilesStore::global(cx).update(cx, |store, cx| {
-            store.ensure_loaded(clan_id, channel_id, cx);
+            store.refresh(clan_id, channel_id, cx);
         });
         ClanMembersStore::global(cx).update(cx, |members, cx| {
             members.ensure_loaded(clan_id, cx);
