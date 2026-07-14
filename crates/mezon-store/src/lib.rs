@@ -55,7 +55,10 @@ use tokio::fs;
 pub use account::*;
 pub use activity::{ActivityEvent, ActivityStore, UserActivity};
 pub use album_layout::{AlbumLayout, AlbumTile, calculate_album_layout};
-pub use audio::{AudioDeviceInfo, AudioStore, MicCaptureFactory, MicCaptureHandle};
+pub use audio::{
+    AudioDeviceInfo, AudioStore, MicCaptureFactory, MicCaptureHandle, MicPcmCaptureFactory,
+    MicPcmFormat,
+};
 pub use badge::BadgeService;
 pub use cache::{Freshness, KeyedCache};
 pub use channel::*;
