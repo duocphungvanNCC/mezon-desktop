@@ -5,7 +5,7 @@ use gpui::{
     Render, RenderOnce, SharedString, Stateful, Subscription, WeakEntity, Window, div, point,
     prelude::*, px,
 };
-use mezon_store::{Settings, ThreadsStore};
+use mezon_store::{InVoiceInfo, Settings, ThreadsStore};
 use ui::{ButtonLike, Clickable, PopoverMenu, PopoverMenuHandle, Toggleable};
 
 use crate::app::window_controls;
@@ -25,6 +25,7 @@ type ThreadTriggerClickHandler = Box<dyn Fn(&ClickEvent, &mut Window, &mut App) 
 pub struct ChannelHeader {
     name: String,
     dm: bool,
+    in_voice: Option<(SharedString, InVoiceInfo)>,
     members_action: bool,
     members_active: bool,
     on_toggle_members: Option<ToggleHandler>,
@@ -46,6 +47,7 @@ impl ChannelHeader {
         Self {
             name: name.into(),
             dm: false,
+            in_voice: None,
             members_action: true,
             members_active: false,
             on_toggle_members: None,
@@ -65,6 +67,11 @@ impl ChannelHeader {
 
     pub fn dm(mut self, dm: bool) -> Self {
         self.dm = dm;
+        self
+    }
+
+    pub fn in_voice(mut self, label: SharedString, info: InVoiceInfo) -> Self {
+        self.in_voice = Some((label, info));
         self
     }
 
@@ -152,6 +159,7 @@ impl ChannelHeader {
         let ChannelHeader {
             name,
             dm,
+            in_voice,
             members_action,
             members_active,
             on_toggle_members,
@@ -222,13 +230,53 @@ impl ChannelHeader {
                                 .text_color(theme.text_muted),
                         )
                     })
-                    .child(
-                        div()
+                    .child({
+                        let name_el = div()
                             .text_base()
                             .font_weight(gpui::FontWeight::SEMIBOLD)
                             .text_color(theme.text_primary)
-                            .child(name),
-                    ),
+                            .child(name);
+                        match in_voice {
+                            Some((label, info)) => div()
+                                .flex()
+                                .flex_col()
+                                .justify_center()
+                                .gap(px(4.))
+                                .child(name_el.line_height(px(18.)))
+                                .child(
+                                    div()
+                                        .id("hdr-in-voice")
+                                        .flex()
+                                        .flex_row()
+                                        .items_center()
+                                        .gap_1()
+                                        .h(px(16.))
+                                        .cursor_pointer()
+                                        .on_click(move |_, _, cx| {
+                                            crate::router::navigate(
+                                                cx,
+                                                crate::router::Route::Channel {
+                                                    clan_id: info.clan_id,
+                                                    channel_id: info.channel_id,
+                                                },
+                                            )
+                                        })
+                                        .child(
+                                            Icon::new(IconName::Speaker)
+                                                .size(px(12.))
+                                                .text_color(gpui::rgb(0x22c55e)),
+                                        )
+                                        .child(
+                                            div()
+                                                .text_xs()
+                                                .text_color(theme.text_primary)
+                                                .child(label),
+                                        ),
+                                )
+                                .into_any_element(),
+                            None => name_el.into_any_element(),
+                        }
+                    }),
             )
             .child(div().flex_1())
             .child(
@@ -262,6 +310,7 @@ impl ChannelHeader {
         let header = ChannelHeader {
             name: String::new(),
             dm: false,
+            in_voice: None,
             members_action: false,
             members_active: false,
             on_toggle_members: None,
@@ -301,6 +350,7 @@ impl ChannelHeader {
         let header = ChannelHeader {
             name: String::new(),
             dm: false,
+            in_voice: None,
             members_action,
             members_active,
             on_toggle_members,
@@ -534,6 +584,7 @@ impl ChannelHeader {
 pub struct ChatHeader {
     name: SharedString,
     dm: bool,
+    in_voice: Option<InVoiceInfo>,
     members_action: bool,
     members_active: bool,
     show_search_bar: bool,
@@ -561,6 +612,7 @@ impl ChatHeader {
         Self {
             name: SharedString::default(),
             dm: false,
+            in_voice: None,
             members_action: true,
             members_active: false,
             show_search_bar: false,
@@ -583,6 +635,7 @@ impl ChatHeader {
         &mut self,
         name: Option<&str>,
         dm: bool,
+        in_voice: Option<InVoiceInfo>,
         members_action: bool,
         members_active: bool,
         show_inbox: bool,
@@ -613,6 +666,7 @@ impl ChatHeader {
         };
         if self.name == name
             && self.dm == dm
+            && self.in_voice == in_voice
             && self.members_action == members_action
             && self.members_active == members_active
             && self.show_search_bar == show_search_bar
@@ -627,6 +681,7 @@ impl ChatHeader {
         }
         self.name = name;
         self.dm = dm;
+        self.in_voice = in_voice;
         self.members_action = members_action;
         self.members_active = members_active;
         self.show_search_bar = show_search_bar;
@@ -677,6 +732,12 @@ impl Render for ChatHeader {
             .show_inbox(self.show_inbox)
             .on_toggle_members(members_toggle)
             .show_threads(show_threads);
+        if self.dm
+            && let Some(info) = self.in_voice
+        {
+            let label: SharedString = mezon_i18n::t(&locale, "channelTopbar.invoice").into();
+            header = header.in_voice(label, info);
+        }
         if show_search_bar {
             let search_bar = crate::chat::message_search::render_header_search_bar(
                 &theme,
