@@ -13,6 +13,7 @@ pub mod config;
 pub mod connection;
 pub mod direct;
 pub mod emoji;
+pub mod files;
 pub mod friend;
 pub mod gallery;
 pub mod gif;
@@ -71,6 +72,10 @@ pub use config::AppConfig;
 pub use connection::{ConnectionStore, resolve_initial_auth_state};
 pub use direct::{DirectChannel, DirectEvent, DirectKind, DirectMessageStore};
 pub use emoji::{Emoji, EmojiEvent, EmojiStore};
+pub use files::{
+    ChannelDocument, FILES_CACHE_TTL, FILES_FILE_TYPE, FILES_PAGE_SIZE, FilesEvent, FilesStore,
+    is_document, short_file_type_label,
+};
 pub use friend::{Friend, FriendEvent, FriendState, FriendStore};
 pub use gallery::{
     ChannelAttachment, GalleryEvent, GalleryStore, LoadDirection, MediaFilter, UploaderInfo,
