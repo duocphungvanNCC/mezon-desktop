@@ -40,6 +40,7 @@ tracy = ["dep:tracing-tracy", "dep:tracy-client"]
 
 [build-dependencies]
 woff2-patched = "0.4.0"
+embed-resource.workspace = true
 
 [package.metadata.deb]
 name = "mezon"
