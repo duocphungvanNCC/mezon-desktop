@@ -48,6 +48,9 @@ impl ClanSidebar {
         cx: &mut Context<Self>,
     ) -> Self {
         let direct_store = DirectMessageStore::global(cx);
+        let list_state = ListState::new(0, gpui::ListAlignment::Top, px(48.))
+            .smooth_line_scroll()
+            .suppress_hover_while_scrolling();
         let direct_sub = cx.observe(&direct_store, |this, store, cx| {
             let fingerprint = direct_unread_fingerprint(store.read(cx));
             if this.direct_unread_fingerprint == Some(fingerprint) {
@@ -107,7 +110,7 @@ impl ClanSidebar {
                 cx,
             )),
             direct_unread_fingerprint: Some(direct_unread_fingerprint(direct_store.read(cx))),
-            list_state: ListState::new(0, gpui::ListAlignment::Top, px(48.)),
+            list_state,
             dm_active: initial_dm_active,
             can_go_back: initial_can_go_back,
             can_go_forward: initial_can_go_forward,
@@ -215,6 +218,7 @@ impl Render for ClanSidebar {
         let rows = self.rows.clone();
         let clan_list_handle = self.clan_list.clone();
         let list_state = self.list_state.clone();
+        let suppress_hover = self.list_state.is_scroll_hover_suppressed();
         let locale = self.settings.read(cx).language.clone();
         let discover_title = self.discover_title.clone();
         let create_clan_title = self.create_clan_title.clone();
@@ -225,7 +229,7 @@ impl Render for ClanSidebar {
         let clan_count = rows.len();
         let list_element = list(list_state, move |ix, _window, cx| {
             if ix < clan_count {
-                render_clan_row(&rows, ix, cx, clan_list_handle.clone())
+                render_clan_row(&rows, ix, cx, clan_list_handle.clone(), suppress_hover)
             } else {
                 render_clan_footer(
                     cx,
@@ -234,6 +238,7 @@ impl Render for ClanSidebar {
                     create_clan_title.clone(),
                     clan_list_for_modal.clone(),
                     settings_for_modal.clone(),
+                    suppress_hover,
                 )
             }
         })
@@ -361,6 +366,7 @@ fn render_clan_footer(
     create_clan_title: SharedString,
     clan_list_for_modal: Entity<ClanList>,
     settings_for_modal: Entity<Settings>,
+    suppress_hover: bool,
 ) -> AnyElement {
     let theme = cx.theme();
     div()
@@ -379,11 +385,14 @@ fn render_clan_footer(
                 .items_center()
                 .justify_center()
                 .cursor_pointer()
-                .hover(|s| {
-                    s.bg(theme.tokens.bg_button_add_friend)
-                        .text_color(gpui::white())
+                .when(!suppress_hover, |button| {
+                    button
+                        .hover(|s| {
+                            s.bg(theme.tokens.bg_button_add_friend)
+                                .text_color(gpui::white())
+                        })
+                        .tooltip(Tooltip::text(discover_title))
                 })
-                .tooltip(Tooltip::text(discover_title))
                 .on_click({
                     let locale = locale.to_string();
                     move |_, _, cx| {
@@ -410,11 +419,14 @@ fn render_clan_footer(
                 .items_center()
                 .justify_center()
                 .cursor_pointer()
-                .hover(|s| {
-                    s.bg(theme.tokens.bg_button_add_friend)
-                        .text_color(gpui::white())
+                .when(!suppress_hover, |button| {
+                    button
+                        .hover(|s| {
+                            s.bg(theme.tokens.bg_button_add_friend)
+                                .text_color(gpui::white())
+                        })
+                        .tooltip(Tooltip::text(create_clan_title))
                 })
-                .tooltip(Tooltip::text(create_clan_title))
                 .on_click(move |_, window, cx| {
                     use crate::clan::create_clan_modal::CreateClanModal;
                     let modal = cx.new(|cx| {

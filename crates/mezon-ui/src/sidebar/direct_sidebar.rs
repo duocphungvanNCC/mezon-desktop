@@ -1,18 +1,16 @@
 use std::rc::Rc;
-use std::time::{Duration, Instant};
 
 use gpui::{
     App, Context, Entity, FontWeight, SharedString, UniformListScrollHandle, Window, div, img,
-    prelude::*, px, uniform_list,
+    prelude::*, px, size, uniform_list,
 };
 use mezon_store::{ChannelId, DirectKind, DirectMessageStore, Settings};
+use ui::{ScrollAxes, Scrollbars, WithScrollbar};
 
-use crate::components::compositions::DmRow;
+use crate::components::compositions::{DM_ROW_HEIGHT, DmRow};
 use crate::components::primitives::{Icon, IconName};
 use crate::router::{Route, Router, navigate};
 use crate::theme::{ActiveTheme, Theme};
-
-const SCROLL_HOVER_RELEASE_MS: u64 = 150;
 
 #[derive(PartialEq)]
 struct DmItem {
@@ -35,8 +33,6 @@ pub struct DirectSidebar {
     dm_items: Rc<Vec<DmItem>>,
     dm_items_fingerprint: u64,
     pending_rebuild: bool,
-    suppress_hover: bool,
-    last_scroll_at: Option<Instant>,
     image_cache: Entity<crate::image_cache::LruImageCache>,
 }
 
@@ -130,8 +126,6 @@ impl DirectSidebar {
             dm_items,
             dm_items_fingerprint,
             pending_rebuild: false,
-            suppress_hover: false,
-            last_scroll_at: None,
             image_cache: cx.new(|cx| {
                 crate::image_cache::LruImageCache::avatar_thumbnail_small(
                     "dm-list",
@@ -141,26 +135,6 @@ impl DirectSidebar {
                     cx,
                 )
             }),
-        }
-    }
-
-    fn on_scroll(&mut self, cx: &mut Context<Self>) {
-        self.last_scroll_at = Some(Instant::now());
-        if self.suppress_hover {
-            return;
-        }
-        self.suppress_hover = true;
-        cx.notify();
-    }
-
-    fn on_mouse_move_release(&mut self, cx: &mut Context<Self>) {
-        if self.suppress_hover
-            && self
-                .last_scroll_at
-                .is_none_or(|t| t.elapsed() >= Duration::from_millis(SCROLL_HOVER_RELEASE_MS))
-        {
-            self.suppress_hover = false;
-            cx.notify();
         }
     }
 
@@ -255,7 +229,7 @@ impl DirectSidebar {
 }
 
 impl Render for DirectSidebar {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         crate::trace_render!("DirectSidebar");
         let theme = cx.theme();
         let locale = self.settings.read(cx).language.clone();
@@ -266,7 +240,7 @@ impl Render for DirectSidebar {
             _ => None,
         };
         let items = self.dm_items.clone();
-        let suppress_hover = self.suppress_hover;
+        let suppress_hover = self.list_scroll.is_scroll_hover_suppressed();
         let image_cache = self.image_cache.clone();
 
         let list = uniform_list("dm-list", count, move |range, _window, cx| {
@@ -298,10 +272,12 @@ impl Render for DirectSidebar {
                 })
                 .collect::<Vec<_>>()
         })
+        .with_item_size(size(px(240.), px(DM_ROW_HEIGHT)))
+        .smooth_line_scroll()
+        .suppress_hover_while_scrolling()
         .track_scroll(&self.list_scroll)
-        .on_scroll_wheel(cx.listener(|this, _event, _window, cx| this.on_scroll(cx)))
-        .on_mouse_move(cx.listener(|this, _event, _window, cx| this.on_mouse_move_release(cx)))
         .flex_1()
+        .h_full()
         .min_h_0()
         .px_2();
 
@@ -321,6 +297,18 @@ impl Render for DirectSidebar {
                     .child(self.render_friends_button(theme, &locale, on_friends)),
             )
             .child(self.render_section_header(theme, &locale))
-            .child(list)
+            .child(
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .relative()
+                    .child(list)
+                    .custom_scrollbars(
+                        Scrollbars::always_visible(ScrollAxes::Vertical)
+                            .tracked_scroll_handle(&self.list_scroll),
+                        window,
+                        cx,
+                    ),
+            )
     }
 }
