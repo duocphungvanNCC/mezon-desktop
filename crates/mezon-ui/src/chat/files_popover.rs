@@ -4,8 +4,8 @@ use std::time::Duration;
 
 use gpui::{
     App, ClickEvent, Context, DismissEvent, Entity, EventEmitter, FocusHandle, Focusable,
-    FontWeight, ListAlignment, ListState, MouseDownEvent, SharedString, Task, Window, div, list,
-    prelude::*, px, svg,
+    FontWeight, ListAlignment, ListState, MouseDownEvent, SharedString, Task, Window, div, img,
+    list, prelude::*, px, svg,
 };
 use mezon_store::{
     ChannelDocument, ChannelId, ClanId, ClanMembersStore, FilesStore, Settings,
@@ -36,7 +36,6 @@ struct FileRowVm {
     filename: SharedString,
     shared_by: SharedString,
     download_label: SharedString,
-    type_badge: SharedString,
     icon: IconName,
     failed: bool,
 }
@@ -56,14 +55,13 @@ impl FileRowVm {
         let download_label = format!(
             "{} {}",
             mezon_i18n::t(locale, "channelTopbar.fileItem.download"),
-            type_badge.as_ref()
+            type_badge
         );
         Self {
             url: doc.url.clone().into(),
             filename: doc.filename.clone().into(),
             shared_by: shared_by.into(),
             download_label: download_label.into(),
-            type_badge,
             icon: file_type_icon_for(&doc.filetype, &doc.filename),
             failed: doc.is_failed(),
         }
@@ -564,10 +562,10 @@ fn file_row(index: usize, vm: &FileRowVm, theme: &Theme, locale: &str) -> gpui::
                     .items_center()
                     .justify_center()
                     .child(
-                        svg()
-                            .path(IconName::FileThumbEmpty.path())
-                            .size(px(32.))
-                            .text_color(tokens.text_theme_primary),
+                        img(IconName::FileThumbEmpty.path())
+                            .w(px(32.))
+                            .h(px(40.))
+                            .flex_none(),
                     ),
             )
             .child(
@@ -605,25 +603,14 @@ fn file_row(index: usize, vm: &FileRowVm, theme: &Theme, locale: &str) -> gpui::
             download_url_with_dialog(url.clone(), filename.clone(), cx);
         })
         .child(
-            v_flex()
+            div()
                 .flex_shrink_0()
-                .w(px(36.))
+                .w(px(32.))
+                .h(px(40.))
+                .flex()
                 .items_center()
-                .gap_0p5()
-                .child(
-                    svg()
-                        .path(vm.icon.path())
-                        .w(px(32.))
-                        .h(px(40.))
-                        .text_color(tokens.text_theme_primary),
-                )
-                .child(
-                    div()
-                        .text_size(px(9.))
-                        .font_weight(FontWeight::BOLD)
-                        .text_color(tokens.text_secondary)
-                        .child(vm.type_badge.clone()),
-                ),
+                .justify_center()
+                .child(img(vm.icon.path()).w(px(32.)).h(px(40.)).flex_none()),
         )
         .child(
             v_flex()
