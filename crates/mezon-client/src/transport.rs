@@ -3148,6 +3148,32 @@ impl MezonTransport {
             hashtags,
             emojis,
             None,
+            false,
+        )
+        .await
+    }
+
+    pub async fn send_channel_message_structured(
+        &self,
+        channel_id: i64,
+        content_json: &str,
+        mode: i32,
+    ) -> Result<ApiMessage> {
+        serde_json::from_str::<ApiMessageContent>(content_json)
+            .context("invalid structured message content")?;
+        self.send_channel_message_inner(
+            0,
+            channel_id,
+            content_json,
+            false,
+            mode,
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            None,
+            true,
         )
         .await
     }
@@ -3194,6 +3220,7 @@ impl MezonTransport {
             hashtags,
             emojis,
             presign_finish,
+            false,
         )
         .await
     }
@@ -3236,6 +3263,7 @@ impl MezonTransport {
             hashtags,
             emojis,
             None,
+            false,
         )
         .await
     }
@@ -3254,6 +3282,7 @@ impl MezonTransport {
         hashtags: Vec<OutgoingHashtag>,
         emojis: Vec<OutgoingEmoji>,
         presign_finish: Option<Vec<String>>,
+        content_is_json: bool,
     ) -> Result<ApiMessage> {
         let cid = self.generate_cid();
 
@@ -3269,7 +3298,21 @@ impl MezonTransport {
             attachments.len()
         );
         // mezon stores message content as JSON `{ "t": <text> }` (matches mezon-js), not raw text.
-        let sent = build_send_content(content, &mentions, &hashtags, &emojis);
+        let sent = if content_is_json {
+            let text = serde_json::from_str::<ApiMessageContent>(content)
+                .map(|c| c.t)
+                .unwrap_or_else(|_| content.to_string());
+            SendContent {
+                json: content.to_string(),
+                text,
+                mentions,
+                hashtags,
+                emojis,
+                markdowns: Vec::new(),
+            }
+        } else {
+            build_send_content(content, &mentions, &hashtags, &emojis)
+        };
         let content_json = sent.json.clone();
         let content_json = match &presign_finish {
             Some(keys) => with_presign_finish(content_json, keys),
@@ -3286,7 +3329,7 @@ impl MezonTransport {
         let body = realtime::ChannelMessageSend {
             clan_id: parsed_clan_id,
             channel_id: parsed_channel_id,
-            content: content_json,
+            content: content_json.clone(),
             mentions: proto_mentions,
             attachments,
             references,
@@ -3310,11 +3353,10 @@ impl MezonTransport {
             ack.channel_id,
             ack.code
         );
-        Ok(ApiMessage {
-            message_id: ack.message_id,
-            content: sent.text.clone(),
-            content_raw: String::new(),
-            content_tokens: ApiMessageContent {
+        let content_tokens = if content_is_json {
+            serde_json::from_str(&content_json).unwrap_or_default()
+        } else {
+            ApiMessageContent {
                 t: sent.text.clone(),
                 mentions: sent
                     .mentions
@@ -3333,7 +3375,13 @@ impl MezonTransport {
                     .collect(),
                 mk: markdown_content_tokens(&sent.markdowns),
                 ..Default::default()
-            },
+            }
+        };
+        Ok(ApiMessage {
+            message_id: ack.message_id,
+            content: sent.text.clone(),
+            content_raw: String::new(),
+            content_tokens,
             code: 0,
             sender_id: 0,
             sender_name: ack.username,

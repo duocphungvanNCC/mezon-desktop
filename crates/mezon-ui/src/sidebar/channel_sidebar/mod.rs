@@ -454,8 +454,22 @@ impl Render for ChannelSidebar {
             )
         });
         let clan_menu_data = self.clan_menu_open.then(|| {
+            let active_clan_for_menu = self.clan_list.read(cx).active_clan().map(|clan| {
+                (
+                    clan.name.clone(),
+                    clan.avatar_url.clone().unwrap_or_default(),
+                )
+            });
             (
                 self.active_clan_id,
+                active_clan_for_menu
+                    .as_ref()
+                    .map(|(name, _)| name.clone())
+                    .unwrap_or_else(|| self.active_clan_name.clone()),
+                active_clan_for_menu
+                    .as_ref()
+                    .map(|(_, avatar)| avatar.clone())
+                    .unwrap_or_default(),
                 self.channel_list
                     .read(cx)
                     .is_show_empty_category(self.active_clan_id.unwrap_or(ClanId(0))),
@@ -577,7 +591,15 @@ impl Render for ChannelSidebar {
                     })
                     .when_some(
                         clan_menu_data,
-                        move |el, (clan_id, show_empty, can_create_category, locale)| {
+                        move |el,
+                              (
+                            clan_id,
+                            clan_name,
+                            clan_avatar_url,
+                            show_empty,
+                            can_create_category,
+                            locale,
+                        )| {
                             let Some(clan_id) = clan_id else {
                                 return el;
                             };
@@ -586,6 +608,8 @@ impl Render for ChannelSidebar {
                                     sidebar_for_menu.clone(),
                                     channel_list_for_menu.clone(),
                                     clan_id,
+                                    clan_name,
+                                    clan_avatar_url,
                                     &locale,
                                     show_empty,
                                     can_create_category,

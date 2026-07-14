@@ -141,6 +141,16 @@ pub enum AttachmentUploadOutcome {
 }
 
 impl AppApi {
+    pub async fn send_channel_message_structured(
+        &self,
+        channel_id: i64,
+        content_json: &str,
+        mode: i32,
+    ) -> Result<ApiMessage> {
+        self.transport
+            .send_channel_message_structured(channel_id, content_json, mode)
+            .await
+    }
     pub fn new(transport: Arc<TransportClient>, base_img_url: String) -> Self {
         let (realtime_tx, _) = tokio::sync::broadcast::channel(1024);
         let (status_tx, _) = tokio::sync::watch::channel(ConnectionStatus::Disconnected);
@@ -1531,6 +1541,17 @@ impl AppApi {
     ) -> Result<mezon_proto::api::UserPermissionInChannelListResponse> {
         self.transport
             .list_user_permission_in_channel(clan_id, channel_id)
+            .await
+    }
+
+    pub async fn create_link_invite_user(
+        &self,
+        clan_id: i64,
+        channel_id: i64,
+        expiry_time: i32,
+    ) -> Result<mezon_proto::api::LinkInviteUser> {
+        self.transport
+            .create_link_invite_user(clan_id, channel_id, expiry_time)
             .await
     }
 }
