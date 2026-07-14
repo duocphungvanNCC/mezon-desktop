@@ -1047,27 +1047,33 @@ impl TransportClient {
             .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn forward_channel_message(
         &self,
         clan_id: i64,
         channel_id: i64,
-        content: &str,
+        content_raw: &str,
+        text: &str,
         is_public: bool,
         mode: i32,
         attachments: Vec<mezon_proto::api::MessageAttachment>,
+        mentions: Vec<crate::transport::OutgoingMention>,
     ) -> Result<()> {
         let transport = self.inner.clone();
-        let content = content.to_string();
+        let content_raw = content_raw.to_string();
+        let text = text.to_string();
         runtime()
             .spawn(async move {
                 transport
                     .forward_channel_message(
                         clan_id,
                         channel_id,
-                        &content,
+                        &content_raw,
+                        &text,
                         is_public,
                         mode,
                         attachments,
+                        mentions,
                     )
                     .await
             })

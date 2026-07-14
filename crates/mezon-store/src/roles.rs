@@ -15,6 +15,7 @@ const MAX_CACHED_CLANS: usize = 32;
 pub struct Role {
     pub name: String,
     pub color: String,
+    pub icon: String,
 }
 
 #[derive(Debug, Clone)]
@@ -22,8 +23,14 @@ pub enum RolesEvent {
     Changed { clan_id: ClanId },
 }
 
+#[derive(Debug, Default)]
+struct ClanRoles {
+    order: Vec<RoleId>,
+    by_id: HashMap<RoleId, Role>,
+}
+
 pub struct RolesStore {
-    cache: KeyedCache<ClanId, HashMap<RoleId, Role>>,
+    cache: KeyedCache<ClanId, ClanRoles>,
     loading: std::collections::HashSet<ClanId>,
     api: Arc<AppApi>,
     _clan_sub: Subscription,
@@ -139,7 +146,7 @@ impl RolesStore {
                         let roles = roles_map_from_proto(proto_roles);
                         tracing::info!(
                             "RolesStore: fetched {} roles for clan {clan_id}",
-                            roles.len()
+                            roles.order.len()
                         );
                         this.cache.insert(clan_id, roles, None);
                         cx.emit(RolesEvent::Changed { clan_id });
@@ -153,33 +160,54 @@ impl RolesStore {
     }
 
     pub fn roles_for(&self, clan_id: ClanId, role_ids: &[RoleId]) -> Vec<&Role> {
-        let Some(map) = self.cache.get(&clan_id) else {
+        let Some(roles) = self.cache.get(&clan_id) else {
             return Vec::new();
         };
-        role_ids.iter().filter_map(|id| map.get(id)).collect()
+        role_ids
+            .iter()
+            .filter_map(|id| roles.by_id.get(id))
+            .collect()
     }
 
     pub fn role(&self, clan_id: ClanId, role_id: RoleId) -> Option<&Role> {
-        self.cache.get(&clan_id)?.get(&role_id)
+        self.cache.get(&clan_id)?.by_id.get(&role_id)
+    }
+
+    pub fn roles_in_clan(&self, clan_id: ClanId) -> Vec<(RoleId, &Role)> {
+        let Some(roles) = self.cache.get(&clan_id) else {
+            return Vec::new();
+        };
+        roles
+            .order
+            .iter()
+            .filter_map(|id| roles.by_id.get(id).map(|role| (*id, role)))
+            .collect()
     }
 }
 
-fn roles_map_from_proto(roles: Vec<mezon_proto::api::Role>) -> HashMap<RoleId, Role> {
-    roles
-        .into_iter()
-        .filter_map(|r| {
-            if r.id == 0 {
-                return None;
-            }
-            Some((
-                RoleId(r.id),
+fn roles_map_from_proto(roles: Vec<mezon_proto::api::Role>) -> ClanRoles {
+    let mut out = ClanRoles::default();
+    for r in roles {
+        if r.id == 0 {
+            continue;
+        }
+        let id = RoleId(r.id);
+        if out
+            .by_id
+            .insert(
+                id,
                 Role {
                     name: r.title,
                     color: r.color,
+                    icon: r.role_icon,
                 },
-            ))
-        })
-        .collect()
+            )
+            .is_none()
+        {
+            out.order.push(id);
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -188,16 +216,16 @@ mod tests {
     use mezon_proto::api;
 
     fn roles_for_in(
-        by_clan: &HashMap<ClanId, HashMap<RoleId, Role>>,
+        by_clan: &HashMap<ClanId, ClanRoles>,
         clan_id: ClanId,
         role_ids: &[RoleId],
     ) -> Vec<Role> {
-        let Some(map) = by_clan.get(&clan_id) else {
+        let Some(roles) = by_clan.get(&clan_id) else {
             return Vec::new();
         };
         role_ids
             .iter()
-            .filter_map(|id| map.get(id))
+            .filter_map(|id| roles.by_id.get(id))
             .cloned()
             .collect()
     }
@@ -213,26 +241,38 @@ mod tests {
 
     #[test]
     fn maps_proto_roles_to_domain() {
-        let map = roles_map_from_proto(vec![
+        let roles = roles_map_from_proto(vec![
             make_role(1, "Admin", "#ff0000"),
             make_role(2, "Member", "#00ff00"),
         ]);
-        assert_eq!(map.len(), 2);
-        assert_eq!(map[&RoleId(1)].name, "Admin");
-        assert_eq!(map[&RoleId(1)].color, "#ff0000");
-        assert_eq!(map[&RoleId(2)].name, "Member");
+        assert_eq!(roles.by_id.len(), 2);
+        assert_eq!(roles.by_id[&RoleId(1)].name, "Admin");
+        assert_eq!(roles.by_id[&RoleId(1)].color, "#ff0000");
+        assert_eq!(roles.by_id[&RoleId(2)].name, "Member");
+    }
+
+    #[test]
+    fn keeps_server_role_order() {
+        let roles = roles_map_from_proto(vec![
+            make_role(9, "Zulu", ""),
+            make_role(3, "Alpha", ""),
+            make_role(7, "Mike", ""),
+        ]);
+        assert_eq!(roles.order, vec![RoleId(9), RoleId(3), RoleId(7)]);
     }
 
     #[test]
     fn skips_role_with_zero_id() {
-        let map = roles_map_from_proto(vec![make_role(0, "Bad", ""), make_role(1, "Good", "blue")]);
-        assert!(!map.contains_key(&RoleId(0)));
-        assert!(map.contains_key(&RoleId(1)));
+        let roles =
+            roles_map_from_proto(vec![make_role(0, "Bad", ""), make_role(1, "Good", "blue")]);
+        assert!(!roles.by_id.contains_key(&RoleId(0)));
+        assert!(roles.by_id.contains_key(&RoleId(1)));
+        assert_eq!(roles.order, vec![RoleId(1)]);
     }
 
     #[test]
     fn roles_for_returns_matching_roles() {
-        let mut by_clan: HashMap<ClanId, HashMap<RoleId, Role>> = HashMap::new();
+        let mut by_clan: HashMap<ClanId, ClanRoles> = HashMap::new();
         by_clan.insert(
             ClanId(1),
             roles_map_from_proto(vec![
@@ -248,13 +288,13 @@ mod tests {
 
     #[test]
     fn roles_for_returns_empty_for_unknown_clan() {
-        let by_clan: HashMap<ClanId, HashMap<RoleId, Role>> = HashMap::new();
+        let by_clan: HashMap<ClanId, ClanRoles> = HashMap::new();
         assert!(roles_for_in(&by_clan, ClanId(99), &[RoleId(1)]).is_empty());
     }
 
     #[test]
     fn keyed_cache_reconnect_marks_stale_without_dropping_values_then_refetches() {
-        let mut cache: KeyedCache<ClanId, HashMap<RoleId, Role>> = KeyedCache::new(None);
+        let mut cache: KeyedCache<ClanId, ClanRoles> = KeyedCache::new(None);
         cache.insert(
             ClanId(1),
             roles_map_from_proto(vec![make_role(10, "Admin", "#f00")]),

@@ -117,6 +117,9 @@ impl ChatArea {
                     MentionInputEvent::SendSticker { url, filename } => {
                         this.send_sticker(url.clone(), filename.clone(), cx)
                     }
+                    MentionInputEvent::SendGif { url, width, height } => {
+                        this.send_gif(url.clone(), *width, *height, cx)
+                    }
                     MentionInputEvent::SendSound { url, filename } => {
                         this.send_sound(url.clone(), filename.clone(), cx)
                     }

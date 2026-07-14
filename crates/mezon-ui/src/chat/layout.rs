@@ -1475,6 +1475,16 @@ impl ChatLayout {
         crate::chat::ChatSending::send_sticker(url, filename, &self.auth_state, cx);
     }
 
+    pub(crate) fn send_gif(
+        &mut self,
+        url: String,
+        width: u32,
+        height: u32,
+        cx: &mut Context<Self>,
+    ) {
+        crate::chat::ChatSending::send_gif(url, width, height, &self.auth_state, cx);
+    }
+
     pub(crate) fn send_sound(&mut self, url: String, filename: String, cx: &mut Context<Self>) {
         crate::chat::ChatSending::send_sound(url, filename, &self.auth_state, cx);
     }

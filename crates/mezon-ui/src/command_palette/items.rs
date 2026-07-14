@@ -7,27 +7,13 @@ use mezon_store::{
     ChannelId, ChannelList, ChannelType, ClanId, ClanList, ClanMembersStore, DirectChannel,
     DirectKind, DirectMessageStore, User, UserId, UsersByUserStore,
 };
-use unicode_normalization::UnicodeNormalization;
 
 use crate::SHOW_UNREAD_BADGE_COUNT;
 use crate::theme::Theme;
 
 pub(crate) const ROW_PX: f32 = 32.;
 
-pub(crate) fn normalize_string(value: &str) -> String {
-    if value.is_empty() {
-        return String::new();
-    }
-    value
-        .nfd()
-        .filter(|ch| !('\u{0300}'..='\u{036f}').contains(ch))
-        .collect::<String>()
-        .to_uppercase()
-}
-
-pub(crate) fn normalize_search_string(value: &str) -> String {
-    normalize_string(value).replace(['-', '_', '+'], " ")
-}
+pub(crate) use crate::util::text_utils::{normalize_search_string, normalize_string};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PaletteItemKind {
