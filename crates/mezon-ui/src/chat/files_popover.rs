@@ -1,30 +1,34 @@
 use std::rc::Rc;
 use std::sync::Arc;
+use std::time::Duration;
 
 use gpui::{
     App, ClickEvent, Context, DismissEvent, Entity, EventEmitter, FocusHandle, Focusable,
-    FontWeight, ListAlignment, ListState, MouseDownEvent, SharedString, Window, div, list,
+    FontWeight, ListAlignment, ListState, MouseDownEvent, SharedString, Task, Window, div, list,
     prelude::*, px, svg,
 };
 use mezon_store::{
     ChannelDocument, ChannelId, ClanId, ClanMembersStore, FilesStore, Settings,
-    download_url_with_dialog,
+    download_url_with_dialog, filename_matches_query,
 };
 use ui::{PopoverMenuHandle, ScrollAxes, Scrollbars, WithScrollbar};
 
+use crate::chat::file_type_icon::file_type_icon_for;
 use crate::components::primitives::{
-    Button, ButtonVariants, Icon, IconName, Sizable, Size, Spinner, h_flex, v_flex,
+    Button, ButtonVariants, Icon, IconName, Input, InputEvent, InputState, Sizable, Size, Spinner,
+    h_flex, v_flex,
 };
 use crate::router::{Route, Router};
 use crate::theme::{ActiveTheme, Theme};
 
 const POPOVER_WIDTH: f32 = 540.;
 const HEADER_HEIGHT: f32 = 48.;
-const MIN_BODY_HEIGHT: f32 = 400.;
-const LIST_BODY_HEIGHT: f32 = 520.;
+const MIN_POPOVER_HEIGHT: f32 = 400.;
 const LIST_OVERDRAW: f32 = 200.;
 const MAX_VH: f32 = 0.8;
-const ROW_ESTIMATE: f32 = 72.;
+const SEARCH_WIDTH: f32 = 224.;
+const SEARCH_DEBOUNCE_MS: u64 = 200;
+const LIST_PAD_X: f32 = 16.;
 
 #[derive(Clone)]
 struct FileRowVm {
@@ -32,6 +36,8 @@ struct FileRowVm {
     filename: SharedString,
     shared_by: SharedString,
     download_label: SharedString,
+    type_badge: SharedString,
+    icon: IconName,
     failed: bool,
 }
 
@@ -46,17 +52,19 @@ impl FileRowVm {
         let shared_by = mezon_i18n::t(locale, "channelTopbar.fileItem.sharedBy")
             .replace("{{username}}", username)
             .replace("{{time}}", &time);
-        let type_label = mezon_store::short_file_type_label(&doc.filetype);
+        let type_badge = mezon_store::short_file_type_label_for(&doc.filetype, &doc.filename);
         let download_label = format!(
             "{} {}",
             mezon_i18n::t(locale, "channelTopbar.fileItem.download"),
-            type_label.as_ref()
+            type_badge.as_ref()
         );
         Self {
             url: doc.url.clone().into(),
             filename: doc.filename.clone().into(),
             shared_by: shared_by.into(),
             download_label: download_label.into(),
+            type_badge,
+            icon: file_type_icon_for(&doc.filetype, &doc.filename),
             failed: doc.is_failed(),
         }
     }
@@ -66,9 +74,12 @@ pub struct FilesPopoverPanel {
     settings: Entity<Settings>,
     channel_id: ChannelId,
     clan_id: ClanId,
+    search_input: Entity<InputState>,
+    debounced_query: String,
     list_state: ListState,
     focus_handle: FocusHandle,
     rows: Vec<FileRowVm>,
+    _debounce_task: Task<()>,
     _subs: Vec<gpui::Subscription>,
 }
 
@@ -82,44 +93,75 @@ impl FilesPopoverPanel {
         cx: &mut Context<Self>,
     ) -> Self {
         let focus_handle = cx.focus_handle();
-        cx.on_blur(&focus_handle, window, |_, _, cx| cx.emit(DismissEvent))
-            .detach();
+        let locale = settings.read(cx).language.clone();
+        let placeholder = mezon_i18n::t(&locale, "channelTopbar.files.searchPlaceholder");
+        let search_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder(placeholder)
+                .embedded(true)
+        });
 
-        let subs = vec![
+        let mut subs = vec![
             cx.observe(&FilesStore::global(cx), |this, _, cx| {
-                this.rows = Self::compute_rows(this.channel_id, &this.settings, cx);
-                cx.notify();
+                this.refresh_rows(cx);
             }),
             cx.observe(&ClanMembersStore::global(cx), |this, _, cx| {
                 FilesStore::global(cx).update(cx, |store, cx| {
                     store.refresh_uploaders(this.channel_id, cx);
                 });
-                this.rows = Self::compute_rows(this.channel_id, &this.settings, cx);
-                cx.notify();
+                this.refresh_rows(cx);
             }),
             cx.observe(&settings, |this, _, cx| {
-                this.rows = Self::compute_rows(this.channel_id, &this.settings, cx);
-                cx.notify();
+                this.refresh_rows(cx);
             }),
         ];
+        subs.push(
+            cx.subscribe(&search_input, |this, _, event: &InputEvent, cx| {
+                if matches!(event, InputEvent::Change) {
+                    this.schedule_debounced_filter(cx);
+                }
+            }),
+        );
 
-        let rows = Self::compute_rows(channel_id, &settings, cx);
         let list_state = ListState::new(0, ListAlignment::Top, px(LIST_OVERDRAW)).measure_all();
 
-        Self {
+        let mut this = Self {
             settings,
             channel_id,
             clan_id,
+            search_input,
+            debounced_query: String::new(),
             list_state,
             focus_handle,
-            rows,
+            rows: Vec::new(),
+            _debounce_task: Task::ready(()),
             _subs: subs,
-        }
+        };
+        this.refresh_rows(cx);
+        this
+    }
+
+    fn schedule_debounced_filter(&mut self, cx: &mut Context<Self>) {
+        self._debounce_task = cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis(SEARCH_DEBOUNCE_MS))
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                this.debounced_query = this.search_input.read(cx).value().to_string();
+                this.refresh_rows(cx);
+            });
+        });
+    }
+
+    fn refresh_rows(&mut self, cx: &mut Context<Self>) {
+        self.rows = Self::compute_rows(self.channel_id, &self.settings, &self.debounced_query, cx);
+        cx.notify();
     }
 
     fn compute_rows(
         channel_id: ChannelId,
         settings: &Entity<Settings>,
+        query: &str,
         cx: &App,
     ) -> Vec<FileRowVm> {
         let locale = settings.read(cx).language.clone();
@@ -127,6 +169,7 @@ impl FilesPopoverPanel {
             .read(cx)
             .documents(channel_id)
             .iter()
+            .filter(|doc| filename_matches_query(&doc.filename, query))
             .map(|doc| FileRowVm::from_doc(doc, &locale))
             .collect()
     }
@@ -151,6 +194,8 @@ impl Render for FilesPopoverPanel {
         let tokens = &theme.tokens;
         let clan_id = self.clan_id;
         let channel_id = self.channel_id;
+        let search_input = self.search_input.clone();
+        let query_active = !self.debounced_query.trim().is_empty();
 
         ClanMembersStore::global(cx).update(cx, |members, cx| {
             members.ensure_loaded(clan_id, cx);
@@ -163,6 +208,8 @@ impl Render for FilesPopoverPanel {
             self.list_state.reset(rows.len());
         }
         let list_state = self.list_state.clone();
+        let viewport_h = f32::from(window.viewport_size().height);
+        let panel_max_h = (viewport_h * MAX_VH).max(MIN_POPOVER_HEIGHT);
 
         v_flex()
             .key_context("menu")
@@ -174,18 +221,20 @@ impl Render for FilesPopoverPanel {
                 cx.emit(DismissEvent);
             }))
             .w(px(POPOVER_WIDTH))
-            .min_h(px(MIN_BODY_HEIGHT))
+            .min_h(px(MIN_POPOVER_HEIGHT))
+            .max_h(px(panel_max_h))
             .overflow_hidden()
             .rounded_md()
             .border_1()
             .border_color(tokens.border_primary)
             .bg(tokens.theme_setting_primary)
             .text_color(tokens.text_theme_message)
-            .child(render_header(&theme, &locale, cx))
+            .child(render_header(&theme, &locale, search_input, cx))
             .child(render_body(
                 rows,
                 loading,
                 fetch_error,
+                query_active,
                 theme.clone(),
                 locale,
                 clan_id,
@@ -200,13 +249,16 @@ impl Render for FilesPopoverPanel {
 fn render_header(
     theme: &Theme,
     locale: &str,
+    search_input: Entity<InputState>,
     cx: &mut Context<FilesPopoverPanel>,
 ) -> impl IntoElement {
     let tokens = &theme.tokens;
     h_flex()
         .w_full()
+        .flex_shrink_0()
         .items_center()
         .justify_between()
+        .gap_3()
         .px(px(16.))
         .h(px(HEADER_HEIGHT))
         .border_b_1()
@@ -216,6 +268,10 @@ fn render_header(
             h_flex()
                 .items_center()
                 .gap_4()
+                .pr(px(16.))
+                .flex_shrink_0()
+                .border_r_1()
+                .border_color(tokens.border_theme_primary)
                 .child(
                     Icon::new(IconName::FileIcon)
                         .size(px(20.))
@@ -227,6 +283,42 @@ fn render_header(
                         .font_weight(FontWeight::SEMIBOLD)
                         .text_color(tokens.text_theme_message)
                         .child(mezon_i18n::t(locale, "channelTopbar.modals.files.title")),
+                ),
+        )
+        .child(
+            div()
+                .relative()
+                .w(px(SEARCH_WIDTH))
+                .flex_shrink_0()
+                .child(
+                    h_flex()
+                        .w_full()
+                        .h(px(24.))
+                        .pl_4()
+                        .pr_2()
+                        .rounded_md()
+                        .bg(tokens.theme_input)
+                        .items_center()
+                        .child(
+                            Input::new(&search_input)
+                                .flex_1()
+                                .text_sm()
+                                .text_color(tokens.text_theme_primary),
+                        ),
+                )
+                .child(
+                    h_flex()
+                        .absolute()
+                        .right(px(4.))
+                        .top_0()
+                        .bottom_0()
+                        .items_center()
+                        .pl_1()
+                        .child(
+                            Icon::new(IconName::Search)
+                                .size_4()
+                                .text_color(tokens.text_theme_primary),
+                        ),
                 ),
         )
         .child(
@@ -249,6 +341,7 @@ fn render_body(
     rows: Rc<Vec<FileRowVm>>,
     loading: bool,
     fetch_error: bool,
+    query_active: bool,
     theme: Arc<Theme>,
     locale: String,
     clan_id: ClanId,
@@ -258,17 +351,9 @@ fn render_body(
     cx: &mut Context<FilesPopoverPanel>,
 ) -> impl IntoElement {
     let tokens = &theme.tokens;
-    let viewport_h = f32::from(window.viewport_size().height);
-    let max_body = (viewport_h * MAX_VH - HEADER_HEIGHT).max(MIN_BODY_HEIGHT);
-    let estimated_content_h = if rows.is_empty() {
-        MIN_BODY_HEIGHT
-    } else {
-        (rows.len() as f32 * ROW_ESTIMATE) + 16.
-    };
-    let body_h = px(estimated_content_h.min(LIST_BODY_HEIGHT).min(max_body));
 
     let body: gpui::AnyElement = if rows.is_empty() {
-        if loading {
+        if loading && !query_active {
             div()
                 .flex()
                 .items_center()
@@ -276,7 +361,7 @@ fn render_body(
                 .size_full()
                 .child(Spinner::new().with_size(Size::Small))
                 .into_any_element()
-        } else if fetch_error {
+        } else if fetch_error && !query_active {
             render_error_body(&locale, &theme, clan_id, channel_id).into_any_element()
         } else {
             render_empty_body(&locale, &theme).into_any_element()
@@ -290,9 +375,13 @@ fn render_body(
             .overflow_hidden()
             .flex()
             .flex_col()
-            .px(px(16.))
             .when(fetch_error, |this| {
-                this.child(render_retry_banner(&locale, &theme, clan_id, channel_id))
+                this.child(
+                    div()
+                        .px(px(LIST_PAD_X))
+                        .pt(px(8.))
+                        .child(render_retry_banner(&locale, &theme, clan_id, channel_id)),
+                )
             })
             .child(
                 div()
@@ -300,6 +389,9 @@ fn render_body(
                     .min_h_0()
                     .w_full()
                     .overflow_hidden()
+                    .pl(px(LIST_PAD_X))
+                    .pr(px(LIST_PAD_X))
+                    .py(px(8.))
                     .child(
                         list(list_state.clone(), move |ix, _window, _cx| {
                             let Some(vm) = rows_for_list.get(ix) else {
@@ -307,7 +399,6 @@ fn render_body(
                             };
                             div()
                                 .w_full()
-                                .pt(if ix == 0 { px(8.) } else { px(0.) })
                                 .pb(px(8.))
                                 .child(file_row(ix, vm, &theme_for_list, &locale_for_list))
                                 .into_any_element()
@@ -325,8 +416,9 @@ fn render_body(
     };
 
     div()
+        .flex_1()
+        .min_h_0()
         .w_full()
-        .h(body_h)
         .overflow_hidden()
         .bg(tokens.theme_setting_primary)
         .child(body)
@@ -464,9 +556,19 @@ fn file_row(index: usize, vm: &FileRowVm, theme: &Theme, locale: &str) -> gpui::
             .border_color(tokens.border_theme_primary)
             .bg(tokens.theme_setting_nav)
             .child(
-                Icon::new(IconName::FileIcon)
-                    .size(px(32.))
-                    .text_color(tokens.text_theme_primary),
+                div()
+                    .flex_shrink_0()
+                    .w(px(32.))
+                    .h(px(40.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(
+                        svg()
+                            .path(IconName::FileThumbEmpty.path())
+                            .size(px(32.))
+                            .text_color(tokens.text_theme_primary),
+                    ),
             )
             .child(
                 div()
@@ -503,11 +605,25 @@ fn file_row(index: usize, vm: &FileRowVm, theme: &Theme, locale: &str) -> gpui::
             download_url_with_dialog(url.clone(), filename.clone(), cx);
         })
         .child(
-            div().flex_shrink_0().child(
-                Icon::new(IconName::FileIcon)
-                    .size(px(32.))
-                    .text_color(tokens.text_theme_primary),
-            ),
+            v_flex()
+                .flex_shrink_0()
+                .w(px(36.))
+                .items_center()
+                .gap_0p5()
+                .child(
+                    svg()
+                        .path(vm.icon.path())
+                        .w(px(32.))
+                        .h(px(40.))
+                        .text_color(tokens.text_theme_primary),
+                )
+                .child(
+                    div()
+                        .text_size(px(9.))
+                        .font_weight(FontWeight::BOLD)
+                        .text_color(tokens.text_secondary)
+                        .child(vm.type_badge.clone()),
+                ),
         )
         .child(
             v_flex()

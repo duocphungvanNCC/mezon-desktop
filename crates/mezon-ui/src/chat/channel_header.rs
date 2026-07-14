@@ -1,9 +1,9 @@
 use std::sync::Arc;
 
 use gpui::{
-    Anchor, AnyElement, App, ClickEvent, Context, CursorStyle, Div, Entity, Hsla, IntoElement,
-    Render, RenderOnce, SharedString, Stateful, Subscription, WeakEntity, Window, div, point,
-    prelude::*, px,
+    Anchor, AnyElement, App, ClickEvent, Context, CursorStyle, Div, Entity, IntoElement, Render,
+    RenderOnce, SharedString, Stateful, Subscription, WeakEntity, Window, div, point, prelude::*,
+    px,
 };
 use mezon_store::{Settings, ThreadsStore};
 use ui::{ButtonLike, Clickable, PopoverMenu, PopoverMenuHandle, Toggleable};
@@ -14,14 +14,14 @@ use crate::chat::inbox::{InboxPopoverPanel, clan_has_inbox_badge};
 use crate::chat::layout::ChatLayout;
 use crate::chat::pinned_popover::{PinnedPopoverPanel, pin_popover_on_open};
 use crate::chat::threads_popover::{ThreadsPopoverPanel, thread_popover_on_open};
-use crate::components::primitives::{
-    Button, ButtonVariant, ButtonVariants, Icon, IconName, InputState, Sizable, Size,
-};
+use crate::components::primitives::{Icon, IconName, InputState};
 use crate::theme::{ActiveTheme, Theme};
 
 type ToggleHandler = Arc<dyn Fn(&mut Window, &mut App)>;
 type ClickHandler = Box<dyn Fn(&ClickEvent, &mut Window, &mut App) + 'static>;
 type ThreadTriggerClickHandler = Box<dyn Fn(&ClickEvent, &mut Window, &mut App) + 'static>;
+
+const HEADER_POPOVER_Y_OFFSET: f32 = 4.;
 
 pub struct ChannelHeader {
     name: String,
@@ -376,7 +376,7 @@ impl ChannelHeader {
                             .with_handle(handle)
                             .anchor(Anchor::TopRight)
                             .attach(Anchor::BottomRight)
-                            .offset(point(px(0.), px(9.)))
+                            .offset(point(px(0.), px(HEADER_POPOVER_Y_OFFSET)))
                             .on_open(thread_popover_on_open(layout.clone()))
                             .menu({
                                 let layout = layout.clone();
@@ -412,7 +412,7 @@ impl ChannelHeader {
                         .with_handle(handle)
                         .anchor(Anchor::TopRight)
                         .attach(Anchor::BottomRight)
-                        .offset(point(px(0.), px(9.)))
+                        .offset(point(px(0.), px(HEADER_POPOVER_Y_OFFSET)))
                         .on_open(pin_popover_on_open())
                         .menu({
                             let settings = settings.clone();
@@ -678,7 +678,7 @@ impl Render for ChatHeader {
         let gallery_trigger = PopoverMenu::new("hdr-gallery-popover")
             .anchor(Anchor::TopRight)
             .attach(Anchor::BottomRight)
-            .offset(point(px(0.), px(4.)))
+            .offset(point(px(0.), px(HEADER_POPOVER_Y_OFFSET)))
             .trigger(GalleryTrigger::new(&theme))
             .menu({
                 let settings = settings.clone();
@@ -691,7 +691,7 @@ impl Render for ChatHeader {
                 PopoverMenu::new("hdr-files-popover")
                     .anchor(Anchor::TopRight)
                     .attach(Anchor::BottomRight)
-                    .offset(point(px(0.), px(9.)))
+                    .offset(point(px(0.), px(HEADER_POPOVER_Y_OFFSET)))
                     .on_open(files_popover_on_open())
                     .menu({
                         let settings = settings.clone();
@@ -846,7 +846,10 @@ impl RenderOnce for ThreadPopoverTrigger {
 #[derive(IntoElement)]
 struct PinPopoverTrigger {
     open: bool,
-    icon_color: Hsla,
+    icon_color: gpui::Rgba,
+    icon_active: gpui::Rgba,
+    bg_hover: gpui::Rgba,
+    bg_active: gpui::Rgba,
     on_click: Option<Box<dyn Fn(&ClickEvent, &mut Window, &mut App) + 'static>>,
 }
 
@@ -854,7 +857,10 @@ impl PinPopoverTrigger {
     fn new(theme: &Theme, open: bool) -> Self {
         Self {
             open,
-            icon_color: theme.text_muted.into(),
+            icon_color: theme.text_muted,
+            icon_active: theme.text_primary,
+            bg_hover: theme.bg_hover,
+            bg_active: theme.bg_tertiary,
             on_click: None,
         }
     }
@@ -880,16 +886,31 @@ impl Clickable for PinPopoverTrigger {
 
 impl RenderOnce for PinPopoverTrigger {
     fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
-        let mut button = Button::new("hdr-pin-trigger").with_size(Size::Small).icon(
-            Icon::new(IconName::PinRight)
-                .size(px(20.))
-                .text_color(self.icon_color),
-        );
-        button = if self.open {
-            button.with_variant(ButtonVariant::Secondary)
+        let tint = if self.open {
+            self.icon_active
         } else {
-            button.ghost()
+            self.icon_color
         };
+        let bg_hover = self.bg_hover;
+        let mut button = div()
+            .id("hdr-pin-trigger")
+            .flex()
+            .items_center()
+            .justify_center()
+            .w(px(32.))
+            .h(px(32.))
+            .rounded_md()
+            .cursor_pointer()
+            .hover(move |s| s.bg(bg_hover))
+            .occlude()
+            .child(
+                Icon::new(IconName::PinRight)
+                    .size(px(20.))
+                    .text_color(tint),
+            );
+        if self.open {
+            button = button.bg(self.bg_active);
+        }
         if let Some(handler) = self.on_click {
             button.on_click(handler)
         } else {

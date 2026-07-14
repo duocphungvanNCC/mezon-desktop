@@ -25,6 +25,7 @@ const MIN_BODY_HEIGHT: f32 = 144.;
 const LIST_BODY_HEIGHT: f32 = 520.;
 const LIST_OVERDRAW: f32 = 200.;
 const MAX_VH: f32 = 0.8;
+const LIST_PAD_X: f32 = 16.;
 
 #[derive(Clone)]
 struct PinCardVm {
@@ -259,6 +260,9 @@ fn render_body(
         div()
             .size_full()
             .overflow_hidden()
+            .pl(px(LIST_PAD_X))
+            .pr(px(LIST_PAD_X))
+            .py(px(8.))
             .child(
                 list(list_state.clone(), move |ix, _window, _cx| {
                     let Some(vm) = cards_for_list.get(ix) else {
@@ -266,7 +270,6 @@ fn render_body(
                     };
                     div()
                         .w_full()
-                        .pt(if ix == 0 { px(8.) } else { px(0.) })
                         .pb(px(8.))
                         .child(pin_card(
                             ix,
@@ -422,7 +425,7 @@ fn pin_card(
         .id(("pin-item", index))
         .group(group_name)
         .relative()
-        .mx(px(8.))
+        .w_full()
         .items_start()
         .gap_2()
         .px(px(12.))

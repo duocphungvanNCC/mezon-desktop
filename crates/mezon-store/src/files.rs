@@ -11,7 +11,9 @@ use crate::ids::{ChannelId, ClanId, MessageId, UserId};
 
 pub const FILES_CACHE_TTL: Duration = Duration::from_secs(60 * 60);
 pub const FILES_PAGE_SIZE: i32 = 100;
-pub const FILES_FILE_TYPE: &str = "FILE";
+pub const FILES_TYPED_QUERY: &str = "FILE";
+pub const FILES_BROAD_QUERY: &str = "";
+const FILES_QUERY_GEN: u8 = 3;
 
 #[derive(Debug, Clone)]
 pub struct ChannelDocument {
@@ -82,12 +84,15 @@ struct FilesChannel {
     is_loading: bool,
     fetch_error: bool,
     fetched_at: Option<Instant>,
+    query_gen: u8,
 }
 
 impl FilesChannel {
     fn is_fresh(&self) -> bool {
-        self.fetched_at
-            .is_some_and(|t| t.elapsed() < FILES_CACHE_TTL)
+        self.query_gen == FILES_QUERY_GEN
+            && self
+                .fetched_at
+                .is_some_and(|t| t.elapsed() < FILES_CACHE_TTL)
     }
 }
 
@@ -203,17 +208,13 @@ impl FilesStore {
 
         let api = self.api.clone();
         cx.spawn(async move |this, cx| {
-            let result = api
-                .list_channel_attachments(
-                    clan_id.0,
-                    channel_id.0,
-                    FILES_FILE_TYPE,
-                    0,
-                    FILES_PAGE_SIZE,
-                    0,
-                    0,
-                )
-                .await;
+            let result = fetch_channel_documents(
+                &api,
+                clan_id.0,
+                channel_id.0,
+                FILES_PAGE_SIZE,
+            )
+            .await;
             let mapped = result.map(|list| {
                 let mut docs: Vec<ChannelDocument> = list
                     .into_iter()
@@ -230,11 +231,12 @@ impl FilesStore {
                     Ok(docs) => {
                         entry.documents = docs;
                         entry.fetched_at = Some(Instant::now());
+                        entry.query_gen = FILES_QUERY_GEN;
                         entry.fetch_error = false;
                         this.enrich_channel(channel_id, cx);
                     }
                     Err(e) => {
-                        tracing::error!("list_channel_attachments (FILE) failed: {e}");
+                        tracing::error!("list_channel_attachments (documents) failed: {e}");
                         entry.fetch_error = true;
                     }
                 }
@@ -267,6 +269,53 @@ impl FilesStore {
     }
 }
 
+async fn fetch_channel_documents(
+    api: &AppApi,
+    clan_id: i64,
+    channel_id: i64,
+    limit: i32,
+) -> anyhow::Result<Vec<ApiChannelAttachment>> {
+    let broad = api
+        .list_channel_attachments(
+            clan_id,
+            channel_id,
+            FILES_BROAD_QUERY,
+            0,
+            limit,
+            0,
+            0,
+        )
+        .await?;
+    let typed = api
+        .list_channel_attachments(
+            clan_id,
+            channel_id,
+            FILES_TYPED_QUERY,
+            0,
+            limit,
+            0,
+            0,
+        )
+        .await?;
+    Ok(merge_attachments(broad, typed))
+}
+
+fn merge_attachments(
+    mut broad: Vec<ApiChannelAttachment>,
+    typed: Vec<ApiChannelAttachment>,
+) -> Vec<ApiChannelAttachment> {
+    let mut seen = std::collections::HashSet::new();
+    for item in &broad {
+        seen.insert(item.id);
+    }
+    for item in typed {
+        if seen.insert(item.id) {
+            broad.push(item);
+        }
+    }
+    broad
+}
+
 fn sort_desc_in_place(items: &mut [ChannelDocument]) {
     items.sort_by(|a, b| {
         a.create_time_seconds
@@ -282,42 +331,64 @@ fn dedupe_by_id(docs: Vec<ChannelDocument>) -> Vec<ChannelDocument> {
 }
 
 pub fn short_file_type_label(filetype: &str) -> SharedString {
+    short_file_type_label_for(filetype, "")
+}
+
+pub fn short_file_type_label_for(filetype: &str, filename: &str) -> SharedString {
     let ft = filetype.trim();
-    if ft.is_empty() || ft.eq_ignore_ascii_case("file") {
-        return "FILE".into();
-    }
-    if ft == "application/vnd.android.package-archive" {
-        return "FILE".into();
-    }
-    let lower = ft.to_ascii_lowercase();
-    let label = match lower.as_str() {
-        "application/pdf" => "PDF",
-        "text/csv" | "application/csv" => "CSV",
-        "text/plain" => "TXT",
-        "text/markdown" => "MD",
-        "application/json" => "JSON",
-        "application/zip" | "application/x-zip-compressed" => "ZIP",
-        "application/vnd.rar" | "application/x-rar-compressed" => "RAR",
-        "application/x-7z-compressed" => "7Z",
-        "application/msword"
-        | "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-        | "docx" => "DOC",
-        "application/vnd.ms-excel"
-        | "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        | "xlsx" => "XLS",
-        "application/vnd.ms-powerpoint"
-        | "application/vnd.openxmlformats-officedocument.presentationml.presentation"
-        | "pptx" => "PPT",
-        _ => {
-            if let Some(ext) = lower.rsplit('/').next() {
-                if ext.len() <= 8 && !ext.is_empty() {
-                    return SharedString::from(ext.to_ascii_uppercase());
+    if !ft.is_empty()
+        && !ft.eq_ignore_ascii_case("file")
+        && ft != "application/vnd.android.package-archive"
+    {
+        let lower = ft.to_ascii_lowercase();
+        let label = match lower.as_str() {
+            "application/pdf" => Some("PDF"),
+            "text/csv" | "application/csv" => Some("CSV"),
+            "text/plain" => Some("TXT"),
+            "text/markdown" => Some("MD"),
+            "application/json" => Some("JSON"),
+            "application/zip" | "application/x-zip-compressed" => Some("ZIP"),
+            "application/vnd.rar" | "application/x-rar-compressed" => Some("RAR"),
+            "application/x-7z-compressed" => Some("7Z"),
+            "application/msword"
+            | "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+            | "docx" => Some("DOC"),
+            "application/vnd.ms-excel"
+            | "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            | "xlsx" => Some("XLS"),
+            "application/vnd.ms-powerpoint"
+            | "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+            | "pptx" => Some("PPT"),
+            _ => {
+                if let Some(ext) = lower.rsplit('/').next() {
+                    if ext.len() <= 8 && !ext.is_empty() {
+                        return SharedString::from(ext.to_ascii_uppercase());
+                    }
                 }
+                None
             }
-            "FILE"
+        };
+        if let Some(label) = label {
+            return label.into();
         }
-    };
-    label.into()
+    }
+    if let Some(ext) = filename.rsplit_once('.').map(|(_, e)| e) {
+        let ext = ext.trim();
+        if !ext.is_empty() && ext.len() <= 8 && !ext.contains('/') {
+            return SharedString::from(ext.to_ascii_uppercase());
+        }
+    }
+    "FILE".into()
+}
+
+pub fn filename_matches_query(filename: &str, query: &str) -> bool {
+    let q = query.trim();
+    if q.is_empty() {
+        return true;
+    }
+    filename
+        .to_ascii_lowercase()
+        .contains(&q.to_ascii_lowercase())
 }
 
 #[cfg(test)]
@@ -332,9 +403,11 @@ mod tests {
         assert!(!is_document("application/mp4"));
         assert!(is_document("application/pdf"));
         assert!(is_document("text/csv"));
+        assert!(is_document("text/plain"));
         assert!(is_document("FILE"));
         assert!(is_document(""));
         assert!(is_document("application/zip"));
+        assert!(is_document("audio/mpeg"));
     }
 
     #[test]
@@ -407,6 +480,53 @@ mod tests {
             short_file_type_label("application/vnd.android.package-archive").as_ref(),
             "FILE"
         );
+        assert_eq!(
+            short_file_type_label_for("FILE", "Mezon AI Summary.pdf").as_ref(),
+            "PDF"
+        );
+        assert_eq!(short_file_type_label_for("pdf", "x.bin").as_ref(), "PDF");
+    }
+
+    #[test]
+    fn merge_attachments_dedupes_by_id() {
+        let broad = vec![
+            ApiChannelAttachment {
+                id: 1,
+                filetype: "text/plain".into(),
+                ..ApiChannelAttachment::default()
+            },
+            ApiChannelAttachment {
+                id: 2,
+                filetype: "image/png".into(),
+                ..ApiChannelAttachment::default()
+            },
+        ];
+        let typed = vec![
+            ApiChannelAttachment {
+                id: 2,
+                filetype: "application/pdf".into(),
+                ..ApiChannelAttachment::default()
+            },
+            ApiChannelAttachment {
+                id: 3,
+                filetype: "application/pdf".into(),
+                ..ApiChannelAttachment::default()
+            },
+        ];
+        let merged = merge_attachments(broad, typed);
+        assert_eq!(merged.len(), 3);
+        assert!(merged.iter().any(|a| a.id == 1));
+        assert!(merged.iter().any(|a| a.id == 2));
+        assert!(merged.iter().any(|a| a.id == 3));
+    }
+
+    #[test]
+    fn filename_matches_query_is_case_insensitive() {
+        assert!(filename_matches_query("Report.PDF", ""));
+        assert!(filename_matches_query("Report.PDF", "  "));
+        assert!(filename_matches_query("Report.PDF", "report"));
+        assert!(filename_matches_query("Mezon AI Summary.pdf", "ai"));
+        assert!(!filename_matches_query("Mezon AI Summary.pdf", "docx"));
     }
 
     #[test]
