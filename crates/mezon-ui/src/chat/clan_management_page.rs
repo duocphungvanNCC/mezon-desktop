@@ -2,7 +2,6 @@ use gpui::{AnyElement, Div, FontWeight, ParentElement, SharedString, Styled, div
 
 use crate::theme::Theme;
 
-/// Shared shell for clan management screens (Members today, Channels next).
 pub fn management_page(title: impl Into<SharedString>, body: AnyElement, theme: &Theme) -> Div {
     let title = title.into();
     div()

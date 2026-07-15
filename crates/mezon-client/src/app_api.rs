@@ -163,18 +163,6 @@ impl AppApi {
         }
     }
 
-    pub async fn update_role_member(
-        &self,
-        clan_id: i64,
-        role_id: i64,
-        user_id: i64,
-        assign: bool,
-    ) -> Result<()> {
-        self.transport
-            .update_role_member(clan_id, role_id, user_id, assign)
-            .await
-    }
-
     pub fn subscribe(&self) -> tokio::sync::broadcast::Receiver<RealtimeEvent> {
         self.realtime_tx.subscribe()
     }

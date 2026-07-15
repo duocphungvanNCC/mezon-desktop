@@ -291,24 +291,6 @@ impl TransportClient {
         }
     }
 
-    pub async fn update_role_member(
-        &self,
-        clan_id: i64,
-        role_id: i64,
-        user_id: i64,
-        assign: bool,
-    ) -> Result<()> {
-        let transport = self.inner.clone();
-        runtime()
-            .spawn(async move {
-                transport
-                    .update_role_member(clan_id, role_id, user_id, assign)
-                    .await
-            })
-            .await
-            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
-    }
-
     pub async fn connect(
         &self,
         host: &str,

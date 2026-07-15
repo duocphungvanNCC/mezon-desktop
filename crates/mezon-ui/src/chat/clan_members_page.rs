@@ -854,16 +854,11 @@ fn role_checkbox(checked: bool, cx: &Context<ClanMembersPage>) -> AnyElement {
         .border_1()
         .border_color(cx.theme().border)
         .when(checked, |element| {
-            element
-                // .bg(cx.theme().brand)
-                // .border_color(cx.theme().brand)
-                .text_size(px(12.))
-                .text_color(gpui::white())
-                .child(
-                    Icon::new(IconName::Check)
-                        .size(px(14.))
-                        .text_color(gpui::white()),
-                )
+            element.text_size(px(12.)).text_color(gpui::white()).child(
+                Icon::new(IconName::Check)
+                    .size(px(14.))
+                    .text_color(gpui::white()),
+            )
         })
         .into_any_element()
 }

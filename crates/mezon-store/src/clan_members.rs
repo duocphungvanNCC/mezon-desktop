@@ -225,27 +225,6 @@ impl ClanMembersStore {
         self.fetch(clan_id, cx);
     }
 
-    pub fn set_member_role(
-        &mut self,
-        clan_id: ClanId,
-        user_id: UserId,
-        role_id: RoleId,
-        assign: bool,
-        cx: &mut Context<Self>,
-    ) {
-        let api = self.api.clone();
-        cx.spawn(async move |this, cx| {
-            let result = api
-                .update_role_member(clan_id.get(), role_id.get(), user_id.get(), assign)
-                .await;
-            let _ = this.update(cx, |this, cx| match result {
-                Ok(()) => this.fetch(clan_id, cx),
-                Err(error) => tracing::error!("updating member role failed: {error}"),
-            });
-        })
-        .detach();
-    }
-
     fn fetch(&mut self, clan_id: ClanId, cx: &mut Context<Self>) {
         if !self.loading.insert(clan_id) {
             return;
