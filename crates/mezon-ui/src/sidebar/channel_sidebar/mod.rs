@@ -1,8 +1,6 @@
 use std::collections::HashSet;
 use std::rc::Rc;
-use std::time::{Duration, Instant};
-
-const SCROLL_HOVER_RELEASE_MS: u64 = 150;
+use std::time::Duration;
 
 use gpui::{
     Animation, AnimationExt as _, AnyElement, App, Context, Entity, ListState, MouseButton,
@@ -70,8 +68,6 @@ pub struct ChannelSidebar {
     skeleton_phase: skeleton::Phase,
     skeleton_clan: Option<ClanId>,
     _skeleton_timer: Option<Task<()>>,
-    suppress_hover: bool,
-    last_scroll_at: Option<Instant>,
     last_locale: String,
     last_route_channel: Option<ChannelId>,
     last_clan_inputs: (Option<ClanId>, u64),
@@ -91,18 +87,10 @@ impl ChannelSidebar {
     ) -> Self {
         let channel_list_handle = channel_list.clone();
 
-        let list_state = ListState::new(0, gpui::ListAlignment::Top, px(32.)).measure_all();
-        let weak = cx.weak_entity();
-        list_state.set_scroll_handler(move |_event, _window, cx| {
-            weak.update(cx, |this, cx| {
-                this.last_scroll_at = Some(Instant::now());
-                if !this.suppress_hover {
-                    this.suppress_hover = true;
-                    cx.notify();
-                }
-            })
-            .ok();
-        });
+        let list_state = ListState::new(0, gpui::ListAlignment::Top, px(32.))
+            .measure_all()
+            .smooth_line_scroll()
+            .suppress_hover_while_scrolling();
 
         let clan_observe = cx.observe(&clan_list, |this, clan_list, cx| {
             let inputs = clan_inputs_fingerprint(clan_list.read(cx));
@@ -169,8 +157,6 @@ impl ChannelSidebar {
             skeleton_phase: skeleton::Phase::default(),
             skeleton_clan: None,
             _skeleton_timer: None,
-            suppress_hover: false,
-            last_scroll_at: None,
             last_locale: initial_locale,
             last_route_channel: initial_route_channel,
             last_clan_inputs: initial_clan_inputs,
@@ -195,7 +181,6 @@ impl ChannelSidebar {
         let clan_changed = self.active_clan_id != new_clan_id;
         if clan_changed {
             self.clan_menu_open = false;
-            self.suppress_hover = false;
         }
 
         let new_clan_name = clans
@@ -430,7 +415,7 @@ impl Render for ChannelSidebar {
         let items = self.items.clone();
         let channel_list_handle = self.channel_list_handle.clone();
         let active_clan_id_for_nav = self.active_clan_id;
-        let suppress_hover = self.suppress_hover;
+        let suppress_hover = self.list_state.is_scroll_hover_suppressed();
         let list_state = self.list_state.clone();
         let sidebar = cx.entity().downgrade();
         let sidebar_for_channel_menu = sidebar.clone();
@@ -625,16 +610,6 @@ impl Render for ChannelSidebar {
                     .flex_1()
                     .min_h_0()
                     .relative()
-                    .on_mouse_move(cx.listener(|this, _event, _window, cx| {
-                        if this.suppress_hover
-                            && this.last_scroll_at.is_none_or(|t| {
-                                t.elapsed() >= Duration::from_millis(SCROLL_HOVER_RELEASE_MS)
-                            })
-                        {
-                            this.suppress_hover = false;
-                            cx.notify();
-                        }
-                    }))
                     .child(list_element)
                     .children(skeleton_overlay)
                     .custom_scrollbars(
@@ -788,6 +763,7 @@ fn render_banner_and_events(
     banner_url: Option<&str>,
     app_channels: &[AppChannelSlot],
     cx: &App,
+    suppress_hover: bool,
 ) -> AnyElement {
     let theme = cx.theme();
     let divider_color = theme.border;
@@ -871,7 +847,7 @@ fn render_banner_and_events(
                     .items_center()
                     .justify_center()
                     .cursor_pointer()
-                    .hover(|s| s.bg(hover_bg))
+                    .when(!suppress_hover, |app| app.hover(|s| s.bg(hover_bg)))
                     .child(icon_el),
             );
         }
@@ -887,7 +863,7 @@ fn render_banner_and_events(
                     .items_center()
                     .justify_center()
                     .cursor_pointer()
-                    .hover(|s| s.bg(hover_bg))
+                    .when(!suppress_hover, |more| more.hover(|s| s.bg(hover_bg)))
                     .child(
                         Icon::new(IconName::RightIcon)
                             .size(px(24.))
@@ -922,7 +898,7 @@ fn render_sidebar_item(
         SidebarItem::BannerAndEvents {
             banner_url,
             app_channels,
-        } => render_banner_and_events(banner_url.as_deref(), app_channels, cx),
+        } => render_banner_and_events(banner_url.as_deref(), app_channels, cx, suppress_hover),
 
         SidebarItem::Category {
             elem_id,

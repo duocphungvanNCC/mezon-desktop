@@ -3,7 +3,7 @@ use std::time::Duration;
 use gpui::{
     AnyElement, App, Context, DismissEvent, Entity, Focusable, FontWeight, Hsla, Pixels, Point,
     SharedString, Subscription, Task, UniformListScrollHandle, WeakEntity, Window, anchored,
-    deferred, div, prelude::*, px, rgb, uniform_list,
+    deferred, div, prelude::*, px, rgb, size, uniform_list,
 };
 use mezon_store::{
     AccountStore, BadgeService, ChannelEvent, ChannelId, ChannelList, ChannelMembersEvent,
@@ -957,6 +957,9 @@ impl Render for MemberListPanel {
                 })
                 .collect::<Vec<_>>()
         })
+        .with_item_size(size(px(245.), px(48.)))
+        .smooth_line_scroll()
+        .suppress_hover_while_scrolling()
         .track_scroll(&self.list_scroll)
         .flex_1()
         .min_h_0()
@@ -1062,4 +1065,171 @@ fn build_member_menu(
     }
 
     menu
+}
+
+#[cfg(test)]
+mod scroll_tests {
+    use std::cell::Cell;
+    use std::ops::Range;
+    use std::rc::Rc;
+    use std::time::Duration;
+
+    use gpui::{
+        AppContext, Context, IntoElement, ListAlignment, ListState, MouseMoveEvent, Render,
+        ScrollDelta, ScrollWheelEvent, Styled, TestAppContext, UniformListScrollHandle, Window,
+        div, list, point, px, size, uniform_list,
+    };
+
+    struct TestView {
+        scroll: UniformListScrollHandle,
+        probes: Rc<Cell<usize>>,
+    }
+
+    struct VariableTestView {
+        scroll: ListState,
+    }
+
+    impl Render for TestView {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            let probes = self.probes.clone();
+            uniform_list(
+                "member-list-scroll-test",
+                10,
+                move |range: Range<usize>, _, _| {
+                    if range == (0..1) {
+                        probes.set(probes.get() + 1);
+                    }
+                    range.map(|_| div().h(px(48.)).w_full()).collect::<Vec<_>>()
+                },
+            )
+            .with_item_size(size(px(100.), px(48.)))
+            .smooth_line_scroll()
+            .suppress_hover_while_scrolling()
+            .track_scroll(&self.scroll)
+            .size_full()
+        }
+    }
+
+    impl Render for VariableTestView {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            list(self.scroll.clone(), |_, _, _| {
+                div().h(px(48.)).w_full().into_any_element()
+            })
+            .size_full()
+        }
+    }
+
+    #[gpui::test]
+    fn member_list_skips_size_probe_and_smooths_only_line_wheel(cx: &mut TestAppContext) {
+        let cx = cx.add_empty_window();
+        let scroll = UniformListScrollHandle::new();
+        let probes = Rc::new(Cell::new(0));
+        cx.draw(point(px(0.), px(0.)), size(px(100.), px(200.)), |_, cx| {
+            cx.new(|_| TestView {
+                scroll: scroll.clone(),
+                probes: probes.clone(),
+            })
+            .into_any_element()
+        });
+
+        assert_eq!(probes.get(), 0);
+        cx.simulate_event(ScrollWheelEvent {
+            position: point(px(50.), px(100.)),
+            delta: ScrollDelta::Lines(point(0., -3.)),
+            ..Default::default()
+        });
+        assert!(scroll.is_smooth_wheel_scrolling());
+        assert!(scroll.is_scroll_hover_suppressed());
+
+        cx.simulate_event(ScrollWheelEvent {
+            position: point(px(50.), px(100.)),
+            delta: ScrollDelta::Pixels(point(px(0.), px(-10.))),
+            ..Default::default()
+        });
+        assert!(!scroll.is_smooth_wheel_scrolling());
+        assert!(scroll.is_scroll_hover_suppressed());
+
+        cx.draw(point(px(0.), px(0.)), size(px(100.), px(200.)), |_, cx| {
+            cx.new(|_| TestView {
+                scroll: scroll.clone(),
+                probes: probes.clone(),
+            })
+            .into_any_element()
+        });
+        cx.executor().advance_clock(Duration::from_millis(350));
+        cx.run_until_parked();
+        assert!(!scroll.is_scroll_hover_active());
+        assert!(scroll.is_scroll_hover_suppressed());
+        cx.simulate_event(MouseMoveEvent {
+            position: point(px(51.), px(100.)),
+            ..Default::default()
+        });
+        assert!(!scroll.is_scroll_hover_suppressed());
+
+        cx.simulate_event(ScrollWheelEvent {
+            position: point(px(50.), px(100.)),
+            delta: ScrollDelta::Pixels(point(px(0.), px(-10.))),
+            ..Default::default()
+        });
+        assert!(scroll.is_scroll_hover_suppressed());
+        cx.draw(point(px(0.), px(0.)), size(px(100.), px(200.)), |_, cx| {
+            cx.new(|_| TestView {
+                scroll: scroll.clone(),
+                probes: probes.clone(),
+            })
+            .into_any_element()
+        });
+        cx.executor().advance_clock(Duration::from_millis(350));
+        cx.run_until_parked();
+        assert!(!scroll.is_scroll_hover_active());
+        assert!(scroll.is_scroll_hover_suppressed());
+        cx.simulate_event(MouseMoveEvent {
+            position: point(px(52.), px(100.)),
+            ..Default::default()
+        });
+        assert!(!scroll.is_scroll_hover_suppressed());
+    }
+
+    #[gpui::test]
+    fn variable_list_suppresses_hover_for_the_scroll_gesture(cx: &mut TestAppContext) {
+        let cx = cx.add_empty_window();
+        let scroll = ListState::new(10, ListAlignment::Top, px(0.))
+            .smooth_line_scroll()
+            .suppress_hover_while_scrolling();
+        cx.draw(point(px(0.), px(0.)), size(px(100.), px(200.)), |_, cx| {
+            cx.new(|_| VariableTestView {
+                scroll: scroll.clone(),
+            })
+            .into_any_element()
+        });
+
+        cx.simulate_event(ScrollWheelEvent {
+            position: point(px(50.), px(100.)),
+            delta: ScrollDelta::Lines(point(0., -3.)),
+            ..Default::default()
+        });
+        assert!(scroll.is_scroll_hover_suppressed());
+
+        cx.simulate_event(ScrollWheelEvent {
+            position: point(px(50.), px(100.)),
+            delta: ScrollDelta::Pixels(point(px(0.), px(-10.))),
+            ..Default::default()
+        });
+
+        cx.draw(point(px(0.), px(0.)), size(px(100.), px(200.)), |_, cx| {
+            cx.new(|_| VariableTestView {
+                scroll: scroll.clone(),
+            })
+            .into_any_element()
+        });
+        cx.executor().advance_clock(Duration::from_millis(350));
+        cx.run_until_parked();
+        assert!(!scroll.is_scroll_hover_active());
+        assert!(scroll.is_scroll_hover_suppressed());
+        cx.simulate_event(MouseMoveEvent {
+            position: point(px(51.), px(100.)),
+            ..Default::default()
+        });
+        assert!(!scroll.is_scroll_hover_suppressed());
+    }
 }

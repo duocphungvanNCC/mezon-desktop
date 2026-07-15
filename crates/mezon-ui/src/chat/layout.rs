@@ -8,7 +8,8 @@ use mezon_store::{
     AuthState, Channel, ChannelId, ChannelList, ChannelType, ClanId, ClanList, ClanMembersStore,
     DirectChannel, DirectKind, DirectMessageStore, GroupMembersStore, InboxStore,
     MessageSearchEvent, MessageSearchStore, MessagesStore, Settings, ThreadsEvent, ThreadsStore,
-    VoiceMember, VoiceModerationError, VoiceStore, expand_mention_name_tokens,
+    TopicsEvent, TopicsStore, VoiceMember, VoiceModerationError, VoiceStore,
+    expand_mention_name_tokens,
 };
 use ui::PopoverMenuHandle;
 use ui::utils::ROUNDED_BORDER_WINDOW;
@@ -66,10 +67,12 @@ pub struct ChatLayout {
     pub(crate) thread_search_input: Option<Entity<InputState>>,
     thread_name_input: Option<Entity<InputState>>,
     create_thread_message_input: Option<Entity<InputState>>,
+    topic_panel: Option<Entity<crate::chat::create_topic_panel::TopicPanel>>,
     pin_popover_handle: PopoverMenuHandle<PinnedPopoverPanel>,
     displayed_active_channel: Option<ActiveChannelSlice>,
     displayed_voice_mini: Option<VoiceMiniSlice>,
     displayed_threads_panel: ThreadsPanelSlice,
+    threads_creating_gate: bool,
     displayed_inbox: InboxDisplaySlice,
     pending_open_threads_popover: bool,
     voice_emoji_picker: Option<Entity<ReactionPicker>>,
@@ -259,6 +262,7 @@ impl ChatLayout {
             this.sync_inbox_context(cx);
             this.sync_voice_frame_pump(cx);
             if this.active_channel_display_changed(cx) {
+                this.dismiss_topic_panel(cx);
                 this.dismiss_threads_popover(cx);
                 this.pin_popover_handle.hide(cx);
                 cx.notify();
@@ -270,6 +274,7 @@ impl ChatLayout {
                 Router::global(cx).read(cx).route(),
                 Route::Direct | Route::Friends | Route::DirectMessage { .. }
             ) {
+                this.dismiss_topic_panel(cx);
                 this.dismiss_threads_popover(cx);
                 this.pin_popover_handle.hide(cx);
             }
@@ -283,6 +288,27 @@ impl ChatLayout {
         .detach();
         cx.observe(&MessageSearchStore::global(cx), |_, _, cx| cx.notify())
             .detach();
+        cx.subscribe(&TopicsStore::global(cx), |this, _, event, cx| match event {
+            TopicsEvent::Opened => {
+                ThreadsStore::global(cx).update(cx, |threads, cx| threads.cancel_create(cx));
+                this.reset_message_search(cx);
+                cx.notify();
+            }
+            TopicsEvent::Closed => cx.notify(),
+            TopicsEvent::Updated | TopicsEvent::ReplySent | TopicsEvent::ReplyTargetChanged => {}
+        })
+        .detach();
+        cx.observe(&ThreadsStore::global(cx), |this, store, cx| {
+            let creating = store.read(cx).is_creating();
+            if creating == this.threads_creating_gate {
+                return;
+            }
+            this.threads_creating_gate = creating;
+            if creating {
+                TopicsStore::global(cx).update(cx, |topics, cx| topics.close_panel(cx));
+            }
+        })
+        .detach();
         cx.observe(&clan_list, |this, _, cx| {
             this.sync_inbox_context(cx);
             if this.inbox_display_changed(cx) {
@@ -343,10 +369,12 @@ impl ChatLayout {
             thread_search_input: None,
             thread_name_input: None,
             create_thread_message_input: None,
+            topic_panel: None,
             pin_popover_handle: PopoverMenuHandle::default(),
             displayed_active_channel: None,
             displayed_voice_mini: None,
             displayed_threads_panel: ThreadsPanelSlice::default(),
+            threads_creating_gate: false,
             displayed_inbox: InboxDisplaySlice::default(),
             pending_open_threads_popover: false,
             voice_emoji_picker: None,
@@ -1147,9 +1175,15 @@ impl Render for ChatLayout {
 
         let nav_body = self.render_nav_body(cx);
         let locale = self.settings.read(cx).language.clone();
-        let create_panel = self.build_create_thread_panel(&locale, window, cx);
+        let topic_panel = self.build_topic_panel(window, cx);
+        let create_panel = if topic_panel.is_some() {
+            None
+        } else {
+            self.build_create_thread_panel(&locale, window, cx)
+        };
+        let right_panel = topic_panel.or(create_panel);
         let chat_content = self.render_content(cx);
-        let main_content = if let Some(panel) = create_panel {
+        let main_content = if let Some(panel) = right_panel {
             div()
                 .flex()
                 .flex_row()
@@ -1304,6 +1338,12 @@ impl ChatLayout {
         self.thread_popover_handle.hide(cx);
         self.clear_thread_search(cx);
         self.close_create_thread(cx);
+    }
+
+    fn dismiss_topic_panel(&self, cx: &mut Context<Self>) {
+        if TopicsStore::global(cx).read(cx).is_panel_open() {
+            TopicsStore::global(cx).update(cx, |store, cx| store.close_panel(cx));
+        }
     }
 
     fn clear_create_thread_inputs(&mut self, cx: &mut Context<Self>) {
@@ -1475,6 +1515,32 @@ impl ChatLayout {
                 },
             ),
         )
+    }
+
+    fn build_topic_panel(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<gpui::AnyElement> {
+        if !TopicsStore::global(cx).read(cx).is_panel_open() {
+            self.topic_panel = None;
+            return None;
+        }
+        if self.topic_panel.is_none() {
+            let settings = self.settings.clone();
+            let align_timeline = self.chat_area.timeline.clone();
+            self.topic_panel = Some(cx.new(|cx| {
+                crate::chat::create_topic_panel::TopicPanel::new(
+                    settings,
+                    align_timeline,
+                    window,
+                    cx,
+                )
+            }));
+        }
+        self.topic_panel
+            .clone()
+            .map(|panel| panel.into_any_element())
     }
 
     pub(crate) fn send_sticker(&mut self, url: String, filename: String, cx: &mut Context<Self>) {
@@ -1783,6 +1849,7 @@ impl ChatLayout {
         let active_clan_id = self.active_clan_id(cx);
         let pin_handle = self.pin_popover_handle.clone();
         let show_results_panel = self.show_results_panel;
+        let topic_open = TopicsStore::global(cx).read(cx).is_panel_open();
         let search_expanded = self.message_search_expanded;
         let show_search_options = self.show_search_options;
         let search_input = self.message_search_input.clone();
@@ -1816,7 +1883,7 @@ impl ChatLayout {
                         true,
                         Some(dm.id),
                         is_group,
-                        is_group && self.show_member_list && !show_results_panel,
+                        is_group && self.show_member_list && !show_results_panel && !topic_open,
                         false,
                         None,
                         None,
@@ -1927,7 +1994,7 @@ impl ChatLayout {
                     false,
                     Some(channel_id),
                     true,
-                    self.show_member_list && !show_results_panel,
+                    self.show_member_list && !show_results_panel && !topic_open,
                     true,
                     Some(inbox_handle),
                     active_clan_id,
@@ -1958,7 +2025,7 @@ impl ChatLayout {
                     false,
                     None,
                     true,
-                    self.show_member_list && !show_results_panel,
+                    self.show_member_list && !show_results_panel && !topic_open,
                     true,
                     Some(inbox_handle),
                     active_clan_id,
