@@ -109,7 +109,7 @@ pub use permissions::{
     ClanSettingsPermissions, PERMISSION_ADMINISTRATOR, PERMISSION_CLAN_OWNER,
     PERMISSION_MANAGE_CHANNEL, PERMISSION_MANAGE_CLAN, PermissionEvent, PermissionStore,
 };
-pub use pinned::{PinnedMessage, PinnedMessagesStore};
+pub use pinned::{PinnedEvent, PinnedMessage, PinnedMessagesStore};
 pub use platform::{
     DesktopNotification, NotifyFn, OpenUrlFn, PlatformStore, download_url_with_dialog,
 };

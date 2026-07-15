@@ -1,7 +1,7 @@
 use gpui::{AnyElement, App, FontWeight, IntoElement, SharedString, div, prelude::*, px};
 use mezon_store::{
     BadgeService, ChannelId, ChannelList, ChannelType, ClanMembersStore, Message, MessageCode,
-    MessageId, MessagesStore, ThreadsStore,
+    MessageId, MessagesStore, PinnedMessagesStore, ThreadsStore,
 };
 
 use super::content::{append_system_mention_spans, render_system_message_content};
@@ -249,7 +249,7 @@ fn append_system_suffix(msg: &Message, ctx: &RowCtx, mut row: gpui::Div) -> gpui
             row = row.child(system_link(
                 primary,
                 mezon_i18n::t(locale, "message.systemMessages.allPinned"),
-                |_, _, _| {},
+                open_pinned_popover,
             ));
             row.child(format!(
                 " {}",
@@ -339,6 +339,12 @@ fn jump_to_message(message_id: MessageId, cx: &mut App) {
 
 fn open_threads_popover(_: &gpui::ClickEvent, _: &mut gpui::Window, cx: &mut App) {
     ThreadsStore::global(cx).update(cx, |store, cx| {
+        store.request_open_popover(cx);
+    });
+}
+
+fn open_pinned_popover(_: &gpui::ClickEvent, _: &mut gpui::Window, cx: &mut App) {
+    PinnedMessagesStore::global(cx).update(cx, |store, cx| {
         store.request_open_popover(cx);
     });
 }

@@ -7,8 +7,8 @@ use gpui::{
 use mezon_store::{
     AuthState, Channel, ChannelId, ChannelList, ChannelType, ClanId, ClanList, ClanMembersStore,
     DirectChannel, DirectKind, DirectMessageStore, GroupMembersStore, InboxStore,
-    MessageSearchEvent, MessageSearchStore, MessagesStore, Settings, ThreadsEvent, ThreadsStore,
-    TopicsEvent, TopicsStore, VoiceMember, VoiceModerationError, VoiceStore,
+    MessageSearchEvent, MessageSearchStore, MessagesStore, PinnedEvent, PinnedMessagesStore,
+    Settings, ThreadsEvent, ThreadsStore, TopicsEvent, TopicsStore, VoiceMember, VoiceModerationError, VoiceStore,
     expand_mention_name_tokens,
 };
 use ui::PopoverMenuHandle;
@@ -74,6 +74,7 @@ pub struct ChatLayout {
     threads_creating_gate: bool,
     displayed_inbox: InboxDisplaySlice,
     pending_open_threads_popover: bool,
+    pending_open_pin_popover: bool,
     voice_emoji_picker: Option<Entity<ReactionPicker>>,
     _voice_emoji_picker_sub: Option<Subscription>,
     _voice_emoji_picker_dismiss_sub: Option<Subscription>,
@@ -227,6 +228,11 @@ impl ChatLayout {
         })
         .detach();
 
+        cx.subscribe(&PinnedMessagesStore::global(cx), |this, _, event, cx| {
+            this.on_pinned_event(event, cx);
+        })
+        .detach();
+
         cx.subscribe(
             &MessageSearchStore::global(cx),
             |this, _, event: &MessageSearchEvent, cx| {
@@ -371,6 +377,7 @@ impl ChatLayout {
             threads_creating_gate: false,
             displayed_inbox: InboxDisplaySlice::default(),
             pending_open_threads_popover: false,
+            pending_open_pin_popover: false,
             voice_emoji_picker: None,
             _voice_emoji_picker_sub: None,
             _voice_emoji_picker_dismiss_sub: None,
@@ -1166,6 +1173,10 @@ impl Render for ChatLayout {
             let handle = self.thread_popover_handle.clone();
             window.defer(cx, move |window, cx| handle.show(window, cx));
         }
+        if std::mem::take(&mut self.pending_open_pin_popover) {
+            let handle = self.pin_popover_handle.clone();
+            window.defer(cx, move |window, cx| handle.show(window, cx));
+        }
 
         let nav_body = self.render_nav_body(cx);
         let locale = self.settings.read(cx).language.clone();
@@ -1425,6 +1436,13 @@ impl ChatLayout {
                 self.pending_open_threads_popover = true;
                 cx.notify();
             }
+        }
+    }
+
+    fn on_pinned_event(&mut self, event: &PinnedEvent, cx: &mut Context<Self>) {
+        if matches!(event, PinnedEvent::OpenPopoverRequested) {
+            self.pending_open_pin_popover = true;
+            cx.notify();
         }
     }
 
@@ -1875,7 +1893,7 @@ impl ChatLayout {
                         false,
                         None,
                         None,
-                        None,
+                        Some(pin_handle),
                         show_search_bar,
                         search_expanded,
                         show_search_options,
@@ -1902,7 +1920,7 @@ impl ChatLayout {
                         false,
                         None,
                         None,
-                        None,
+                        Some(pin_handle),
                         false,
                         false,
                         false,
