@@ -69,6 +69,7 @@ pub struct ChatLayout {
     topic_panel: Option<Entity<crate::chat::create_topic_panel::TopicPanel>>,
     pin_popover_handle: PopoverMenuHandle<PinnedPopoverPanel>,
     displayed_active_channel: Option<ActiveChannelSlice>,
+    focused_channel_id: Option<ChannelId>,
     displayed_voice_mini: Option<VoiceMiniSlice>,
     displayed_threads_panel: ThreadsPanelSlice,
     threads_creating_gate: bool,
@@ -372,6 +373,7 @@ impl ChatLayout {
             topic_panel: None,
             pin_popover_handle: PopoverMenuHandle::default(),
             displayed_active_channel: None,
+            focused_channel_id: None,
             displayed_voice_mini: None,
             displayed_threads_panel: ThreadsPanelSlice::default(),
             threads_creating_gate: false,
@@ -1025,6 +1027,23 @@ impl ChatLayout {
         changed
     }
 
+    fn focus_composer_on_channel_switch(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let active_channel_id = Router::global(cx).read(cx).conversation_channel_id();
+        if active_channel_id == self.focused_channel_id {
+            return;
+        }
+        self.focused_channel_id = active_channel_id;
+        if active_channel_id.is_none() {
+            return;
+        }
+        let Some(input) = self.chat_area.mention_input.clone() else {
+            return;
+        };
+        window.defer(cx, move |window, cx| {
+            input.update(cx, |input, cx| input.focus_input(window, cx));
+        });
+    }
+
     fn sync_voice_frame_pump(&mut self, cx: &mut Context<Self>) {
         const VOICE_FRAME_INTERVAL: std::time::Duration = std::time::Duration::from_millis(33);
         let want_pump =
@@ -1165,6 +1184,7 @@ impl Render for ChatLayout {
         crate::trace_render!("ChatLayout");
         self.chat_area.ensure_input(window, cx);
         self.chat_area.bind_window(window, cx);
+        self.focus_composer_on_channel_switch(window, cx);
         self.maybe_prefetch_voice_token(cx);
         self.voice_store
             .update(cx, |store, cx| store.flush_texture_drops(Some(window), cx));
@@ -1273,7 +1293,7 @@ impl Render for ChatLayout {
                             .rounded(px(12.0))
                             .overflow_hidden()
                             .border_1()
-                            .border_color(theme.tokens.border_theme_primary)
+                            .border_color(theme.tokens.border_primary)
                             .shadow_lg()
                             .bg(theme.tokens.bg_surface)
                             .occlude()

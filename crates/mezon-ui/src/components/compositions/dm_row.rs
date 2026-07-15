@@ -137,7 +137,7 @@ impl DmRow {
             .flex_row()
             .items_center()
             .gap_2()
-            .h(px(DM_ROW_HEIGHT))
+            .h(px(DM_ROW_HEIGHT - 1.))
             .w_full()
             .px_2()
             .rounded_md()

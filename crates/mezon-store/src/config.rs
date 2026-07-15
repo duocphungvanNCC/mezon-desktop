@@ -140,7 +140,7 @@ impl AppConfig {
 
             api_client_key_custom: "mezon.ai".into(),
             sentry_dsn: String::new(),
-            anonymous_user_id: String::new(),
+            anonymous_user_id: "1767478432163172999".into(),
             max_length_name_allowed: 64,
             update_url: "https://cdn.mezon.ai/release/".into(),
         }
@@ -361,11 +361,15 @@ impl AppConfig {
     }
 
     pub fn emoji_src(&self, emoji_id: &str) -> String {
+        self.emoji_src_sized(emoji_id, 100)
+    }
+
+    pub fn emoji_src_sized(&self, emoji_id: &str, size: u32) -> String {
         if emoji_id.is_empty() || emoji_id == "0" {
             return String::new();
         }
         let source = format!("{}/emojis/{}.webp", self.base_img_url, emoji_id);
-        self.imgproxy_url(&source, 100, 100, "fit")
+        self.imgproxy_url(&source, size, size, "fit")
     }
 
     pub fn attachment_proxy(

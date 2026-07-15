@@ -4,7 +4,9 @@ use gpui::{
     App, Context, Entity, FontWeight, SharedString, UniformListScrollHandle, Window, div, img,
     prelude::*, px, size, uniform_list,
 };
-use mezon_store::{ChannelId, DirectKind, DirectMessageStore, Settings};
+use mezon_store::{ChannelId, DirectKind, DirectMessageStore, FriendStore, Settings};
+
+use super::friend_request_badge;
 use ui::{ScrollAxes, Scrollbars, WithScrollbar};
 
 use crate::components::compositions::{DM_ROW_HEIGHT, DmRow};
@@ -116,6 +118,8 @@ impl DirectSidebar {
         })
         .detach();
         cx.observe(&settings, |_, _, cx| cx.notify()).detach();
+        cx.observe(&FriendStore::global(cx), |_, _, cx| cx.notify())
+            .detach();
 
         let dm_items_fingerprint = dm_items_fingerprint(direct_store.read(cx));
         let dm_items = build_dm_items(direct_store.read(cx), cx);
@@ -165,7 +169,13 @@ impl DirectSidebar {
             )
     }
 
-    fn render_friends_button(&self, theme: &Theme, locale: &str, active: bool) -> impl IntoElement {
+    fn render_friends_button(
+        &self,
+        theme: &Theme,
+        locale: &str,
+        active: bool,
+        pending: usize,
+    ) -> impl IntoElement {
         let bg_hover = theme.bg_hover;
         div()
             .id("dm-friends")
@@ -189,6 +199,9 @@ impl DirectSidebar {
                     .text_color(theme.text_primary)
                     .child(mezon_i18n::t(locale, "directMessage.friends")),
             )
+            .when(pending > 0, |el| {
+                el.child(friend_request_badge(pending, px(11.)).ml_auto())
+            })
     }
 
     fn render_section_header(&self, theme: &Theme, locale: &str) -> impl IntoElement {
@@ -282,6 +295,7 @@ impl Render for DirectSidebar {
         .px_2();
 
         let on_friends = matches!(Router::global(cx).read(cx).route(), Route::Friends);
+        let friend_pending = FriendStore::global(cx).read(cx).pending_incoming_count();
 
         div()
             .flex()
@@ -290,12 +304,12 @@ impl Render for DirectSidebar {
             .pb(px(68.))
             .bg(theme.bg_secondary)
             .child(self.render_search(theme, &locale))
-            .child(
-                div()
-                    .px_2()
-                    .pt_2()
-                    .child(self.render_friends_button(theme, &locale, on_friends)),
-            )
+            .child(div().px_2().pt_2().child(self.render_friends_button(
+                theme,
+                &locale,
+                on_friends,
+                friend_pending,
+            )))
             .child(self.render_section_header(theme, &locale))
             .child(
                 div()

@@ -245,7 +245,7 @@ impl Render for AudioPlayerView {
             self.time_label.clone(),
             cx.listener(|view, _, _window, cx| view.toggle_play(cx)),
             move |_, _, cx| {
-                mezon_store::download_url_with_dialog(
+                crate::util::download::save_with_progress_toast(
                     download_url.clone(),
                     download_name.clone(),
                     cx,

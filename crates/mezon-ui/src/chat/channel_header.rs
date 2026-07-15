@@ -244,7 +244,7 @@ impl ChannelHeader {
                             .items_center()
                             .pl_4()
                             .border_l_1()
-                            .border_color(theme.tokens.border_theme_primary)
+                            .border_color(theme.tokens.border_primary)
                             .child(inbox)
                             .into_any_element()
                     }))
