@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -6,6 +5,7 @@ use gpui::{App, AppContext, Context, Entity, EventEmitter, Global, SharedString}
 use mezon_client::AppApi;
 use mezon_client::transport::ApiChannelAttachment;
 
+use crate::KeyedCache;
 use crate::gallery::resolve_attachment_uploader;
 use crate::ids::{ChannelId, ClanId, MessageId, UserId};
 
@@ -14,6 +14,7 @@ pub const FILES_PAGE_SIZE: i32 = 100;
 pub const FILES_TYPED_QUERY: &str = "FILE";
 pub const FILES_BROAD_QUERY: &str = "";
 const FILES_QUERY_GEN: u8 = 3;
+const MAX_CACHED_CHANNELS: usize = 32;
 
 #[derive(Debug, Clone)]
 pub struct ChannelDocument {
@@ -72,9 +73,6 @@ pub fn is_document(filetype: &str) -> bool {
     if lower.starts_with("image/") || lower.starts_with("video/") {
         return false;
     }
-    if lower.contains("mp4") || lower.contains("mov") {
-        return false;
-    }
     true
 }
 
@@ -102,7 +100,7 @@ pub enum FilesEvent {
 }
 
 pub struct FilesStore {
-    by_channel: HashMap<ChannelId, FilesChannel>,
+    by_channel: KeyedCache<ChannelId, FilesChannel>,
     api: Arc<AppApi>,
 }
 
@@ -114,7 +112,7 @@ impl EventEmitter<FilesEvent> for FilesStore {}
 impl FilesStore {
     pub fn init(api: Arc<AppApi>, cx: &mut App) -> Entity<Self> {
         let entity = cx.new(|_| Self {
-            by_channel: HashMap::new(),
+            by_channel: KeyedCache::new(Some(MAX_CACHED_CHANNELS)),
             api,
         });
         cx.set_global(GlobalFilesStore(entity.clone()));
@@ -164,6 +162,8 @@ impl FilesStore {
         };
         if needs_fetch {
             self.fetch(clan_id, channel_id, cx);
+        } else {
+            self.by_channel.touch(&channel_id);
         }
     }
 
@@ -189,7 +189,7 @@ impl FilesStore {
         if self.by_channel.is_empty() {
             return;
         }
-        let channel_ids: Vec<ChannelId> = self.by_channel.keys().copied().collect();
+        let channel_ids: Vec<ChannelId> = self.by_channel.iter().map(|(id, _)| *id).collect();
         self.by_channel.clear();
         for channel_id in channel_ids {
             cx.emit(FilesEvent::Changed(channel_id));
@@ -198,16 +198,29 @@ impl FilesStore {
     }
 
     pub fn refresh_uploaders(&mut self, channel_id: ChannelId, cx: &mut Context<Self>) {
-        if !self.by_channel.contains_key(&channel_id) {
+        if !self.by_channel.contains(&channel_id) {
             return;
         }
-        self.enrich_channel(channel_id, cx);
-        cx.emit(FilesEvent::Changed(channel_id));
-        cx.notify();
+        if self.enrich_channel(channel_id, cx) {
+            cx.emit(FilesEvent::Changed(channel_id));
+            cx.notify();
+        }
+    }
+
+    fn ensure_channel(&mut self, channel_id: ChannelId) -> &mut FilesChannel {
+        if !self.by_channel.contains(&channel_id) {
+            self.by_channel
+                .insert(channel_id, FilesChannel::default(), Some(&channel_id));
+        } else {
+            self.by_channel.touch(&channel_id);
+        }
+        self.by_channel
+            .get_mut(&channel_id)
+            .expect("channel just ensured")
     }
 
     fn fetch(&mut self, clan_id: ClanId, channel_id: ChannelId, cx: &mut Context<Self>) {
-        let entry = self.by_channel.entry(channel_id).or_default();
+        let entry = self.ensure_channel(channel_id);
         entry.is_loading = true;
         entry.fetch_error = false;
         cx.emit(FilesEvent::Changed(channel_id));
@@ -215,13 +228,8 @@ impl FilesStore {
 
         let api = self.api.clone();
         cx.spawn(async move |this, cx| {
-            let result = fetch_channel_documents(
-                &api,
-                clan_id.0,
-                channel_id.0,
-                FILES_PAGE_SIZE,
-            )
-            .await;
+            let result =
+                fetch_channel_documents(&api, clan_id.0, channel_id.0, FILES_PAGE_SIZE).await;
             let mapped = result.map(|list| {
                 let mut docs: Vec<ChannelDocument> = list
                     .into_iter()
@@ -232,20 +240,26 @@ impl FilesStore {
                 dedupe_by_id(docs)
             });
             let _ = this.update(cx, |this, cx| {
-                let entry = this.by_channel.entry(channel_id).or_default();
-                entry.is_loading = false;
-                match mapped {
+                let succeeded = match mapped {
                     Ok(docs) => {
+                        let entry = this.ensure_channel(channel_id);
+                        entry.is_loading = false;
                         entry.documents = docs;
                         entry.fetched_at = Some(Instant::now());
                         entry.query_gen = FILES_QUERY_GEN;
                         entry.fetch_error = false;
-                        this.enrich_channel(channel_id, cx);
+                        true
                     }
                     Err(e) => {
                         tracing::error!("list_channel_attachments (documents) failed: {e}");
+                        let entry = this.ensure_channel(channel_id);
+                        entry.is_loading = false;
                         entry.fetch_error = true;
+                        false
                     }
+                };
+                if succeeded {
+                    this.enrich_channel(channel_id, cx);
                 }
                 cx.emit(FilesEvent::Changed(channel_id));
                 cx.notify();
@@ -254,10 +268,11 @@ impl FilesStore {
         .detach();
     }
 
-    fn enrich_channel(&mut self, channel_id: ChannelId, cx: &App) {
+    fn enrich_channel(&mut self, channel_id: ChannelId, cx: &App) -> bool {
         let Some(entry) = self.by_channel.get_mut(&channel_id) else {
-            return;
+            return false;
         };
+        let mut changed = false;
         for doc in entry.documents.iter_mut() {
             let info = resolve_attachment_uploader(
                 doc.clan_id,
@@ -267,12 +282,17 @@ impl FilesStore {
                 None,
                 cx,
             );
-            doc.uploader_name = if info.name.is_empty() {
+            let name = if info.name.is_empty() {
                 SharedString::from("Unknown")
             } else {
                 info.name.into()
             };
+            if doc.uploader_name != name {
+                doc.uploader_name = name;
+                changed = true;
+            }
         }
+        changed
     }
 }
 
@@ -367,10 +387,11 @@ pub fn short_file_type_label_for(filetype: &str, filename: &str) -> SharedString
             | "application/vnd.openxmlformats-officedocument.presentationml.presentation"
             | "pptx" => Some("PPT"),
             _ => {
-                if let Some(ext) = lower.rsplit('/').next() {
-                    if ext.len() <= 8 && !ext.is_empty() {
-                        return SharedString::from(ext.to_ascii_uppercase());
-                    }
+                if let Some(ext) = lower.rsplit('/').next()
+                    && ext.len() <= 8
+                    && !ext.is_empty()
+                {
+                    return SharedString::from(ext.to_ascii_uppercase());
                 }
                 None
             }
@@ -407,7 +428,7 @@ mod tests {
         assert!(!is_document("image/png"));
         assert!(!is_document("video/mp4"));
         assert!(!is_document("sticker"));
-        assert!(!is_document("application/mp4"));
+        assert!(is_document("application/mp4"));
         assert!(is_document("application/pdf"));
         assert!(is_document("text/csv"));
         assert!(is_document("text/plain"));
@@ -415,6 +436,7 @@ mod tests {
         assert!(is_document(""));
         assert!(is_document("application/zip"));
         assert!(is_document("audio/mpeg"));
+        assert!(is_document("audio/mp4"));
     }
 
     #[test]

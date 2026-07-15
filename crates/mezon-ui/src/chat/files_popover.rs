@@ -4,8 +4,8 @@ use std::time::Duration;
 
 use gpui::{
     App, ClickEvent, Context, DismissEvent, Entity, EventEmitter, FocusHandle, Focusable,
-    FontWeight, ListAlignment, ListState, MouseDownEvent, SharedString, Task, Window, div, img,
-    list, prelude::*, px, svg,
+    FontWeight, ListAlignment, ListState, MouseDownEvent, SharedString, Task, WeakEntity, Window,
+    div, img, list, prelude::*, px, rgb, svg,
 };
 use mezon_store::{
     ChannelDocument, ChannelId, ClanId, ClanMembersStore, FilesStore, Settings,
@@ -29,6 +29,8 @@ const MAX_VH: f32 = 0.8;
 const SEARCH_WIDTH: f32 = 224.;
 const SEARCH_DEBOUNCE_MS: u64 = 200;
 const LIST_PAD_X: f32 = 16.;
+const AUDIO_FETCH_MAX_BYTES: usize = 64 * 1024 * 1024;
+const AUDIO_TICK_INTERVAL: Duration = Duration::from_millis(250);
 
 #[derive(Clone)]
 struct FileRowVm {
@@ -38,6 +40,7 @@ struct FileRowVm {
     download_label: SharedString,
     icon: IconName,
     failed: bool,
+    is_audio: bool,
 }
 
 impl FileRowVm {
@@ -57,6 +60,7 @@ impl FileRowVm {
             mezon_i18n::t(locale, "channelTopbar.fileItem.download"),
             type_badge
         );
+        let filetype = doc.filetype.to_ascii_lowercase();
         Self {
             url: doc.url.clone().into(),
             filename: doc.filename.clone().into(),
@@ -64,6 +68,7 @@ impl FileRowVm {
             download_label: download_label.into(),
             icon: file_type_icon_for(&doc.filetype, &doc.filename),
             failed: doc.is_failed(),
+            is_audio: filetype.starts_with("audio"),
         }
     }
 }
@@ -76,7 +81,13 @@ pub struct FilesPopoverPanel {
     debounced_query: String,
     list_state: ListState,
     focus_handle: FocusHandle,
-    rows: Vec<FileRowVm>,
+    rows: Rc<Vec<FileRowVm>>,
+    audio_url: Option<SharedString>,
+    audio_player: Option<mezon_audio::AudioPlayer>,
+    audio_ready: bool,
+    audio_want_play: bool,
+    _audio_load: Task<()>,
+    _audio_tick: Task<()>,
     _debounce_task: Task<()>,
     _subs: Vec<gpui::Subscription>,
 }
@@ -107,7 +118,6 @@ impl FilesPopoverPanel {
                 FilesStore::global(cx).update(cx, |store, cx| {
                     store.refresh_uploaders(this.channel_id, cx);
                 });
-                this.refresh_rows(cx);
             }),
             cx.observe(&settings, |this, _, cx| {
                 this.refresh_rows(cx);
@@ -123,6 +133,10 @@ impl FilesPopoverPanel {
 
         let list_state = ListState::new(0, ListAlignment::Top, px(LIST_OVERDRAW)).measure_all();
 
+        ClanMembersStore::global(cx).update(cx, |members, cx| {
+            members.ensure_loaded(clan_id, cx);
+        });
+
         let mut this = Self {
             settings,
             channel_id,
@@ -131,7 +145,13 @@ impl FilesPopoverPanel {
             debounced_query: String::new(),
             list_state,
             focus_handle,
-            rows: Vec::new(),
+            rows: Rc::new(Vec::new()),
+            audio_url: None,
+            audio_player: None,
+            audio_ready: false,
+            audio_want_play: false,
+            _audio_load: Task::ready(()),
+            _audio_tick: Task::ready(()),
             _debounce_task: Task::ready(()),
             _subs: subs,
         };
@@ -152,8 +172,138 @@ impl FilesPopoverPanel {
     }
 
     fn refresh_rows(&mut self, cx: &mut Context<Self>) {
-        self.rows = Self::compute_rows(self.channel_id, &self.settings, &self.debounced_query, cx);
+        self.rows = Rc::new(Self::compute_rows(
+            self.channel_id,
+            &self.settings,
+            &self.debounced_query,
+            cx,
+        ));
+        if self.list_state.item_count() != self.rows.len() {
+            self.list_state.reset(self.rows.len());
+        }
         cx.notify();
+    }
+
+    fn toggle_audio(&mut self, url: SharedString, cx: &mut Context<Self>) {
+        if self.audio_url.as_ref() == Some(&url) {
+            if self.audio_ready {
+                if let Some(player) = &self.audio_player {
+                    if player.is_playing() {
+                        player.pause();
+                        self._audio_tick = Task::ready(());
+                    } else {
+                        player.play();
+                        self.start_audio_tick(cx);
+                    }
+                }
+            } else {
+                self.audio_want_play = !self.audio_want_play;
+            }
+            cx.notify();
+            return;
+        }
+
+        if let Some(player) = &self.audio_player {
+            player.pause();
+        }
+        self._audio_tick = Task::ready(());
+        self.audio_url = Some(url.clone());
+        self.audio_ready = false;
+        self.audio_want_play = true;
+        self.audio_player = mezon_audio::AudioPlayer::new()
+            .inspect_err(|err| tracing::warn!("audio output unavailable: {err}"))
+            .ok();
+        if self.audio_player.is_none() {
+            if let Some(store) = mezon_store::PlatformStore::try_global(cx) {
+                let _ = store.read(cx).open_url_external(url.as_ref());
+            }
+            self.audio_url = None;
+            cx.notify();
+            return;
+        }
+        self.start_audio_load(url, cx);
+        cx.notify();
+    }
+
+    fn start_audio_load(&mut self, url: SharedString, cx: &mut Context<Self>) {
+        let client = cx.http_client();
+        self._audio_load = cx.spawn(async move |this, cx| {
+            let fetch = async {
+                let mut response = client.get(url.as_ref(), ().into(), true).await?;
+                if !response.status().is_success() {
+                    anyhow::bail!("audio fetch status {}", response.status());
+                }
+                let body =
+                    crate::image_cache::read_body_limited(&mut response, AUDIO_FETCH_MAX_BYTES)
+                        .await?;
+                anyhow::Ok(body)
+            };
+            let bytes = match fetch.await {
+                Ok(bytes) => bytes,
+                Err(err) => {
+                    tracing::warn!("files audio download failed: {err}");
+                    let _ = this.update(cx, |this, cx| {
+                        this.audio_ready = false;
+                        this.audio_want_play = false;
+                        cx.notify();
+                    });
+                    return;
+                }
+            };
+            let decoded = cx
+                .background_executor()
+                .spawn(async move { mezon_audio::decode_audio(bytes) })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                match decoded {
+                    Ok(pcm) => {
+                        this.audio_ready = true;
+                        if let Some(player) = &this.audio_player {
+                            player.set_data(pcm);
+                            if this.audio_want_play {
+                                player.play();
+                                this.start_audio_tick(cx);
+                            }
+                        }
+                    }
+                    Err(err) => {
+                        tracing::warn!("files audio decode failed: {err}");
+                        this.audio_ready = false;
+                        this.audio_want_play = false;
+                    }
+                }
+                cx.notify();
+            });
+        });
+    }
+
+    fn start_audio_tick(&mut self, cx: &mut Context<Self>) {
+        self._audio_tick = cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(AUDIO_TICK_INTERVAL).await;
+                let keep = this
+                    .update(cx, |this, cx| {
+                        let Some(player) = &this.audio_player else {
+                            return false;
+                        };
+                        if player.finished() {
+                            player.pause();
+                            cx.notify();
+                            return false;
+                        }
+                        if player.is_playing() {
+                            cx.notify();
+                            true
+                        } else {
+                            false
+                        }
+                    })
+                    .unwrap_or(false);
+                if !keep {
+                    break;
+                }
+            }
+        });
     }
 
     fn compute_rows(
@@ -188,24 +338,18 @@ impl Render for FilesPopoverPanel {
         let store = FilesStore::global(cx);
         let loading = store.read(cx).is_loading(self.channel_id);
         let fetch_error = store.read(cx).fetch_error(self.channel_id);
-        let rows = Rc::new(self.rows.clone());
+        let has_documents = !store.read(cx).is_empty(self.channel_id);
+        let rows = self.rows.clone();
         let tokens = &theme.tokens;
         let clan_id = self.clan_id;
         let channel_id = self.channel_id;
         let search_input = self.search_input.clone();
-        let query_active = !self.debounced_query.trim().is_empty();
-
-        ClanMembersStore::global(cx).update(cx, |members, cx| {
-            members.ensure_loaded(clan_id, cx);
-        });
-
-        let current = self.list_state.item_count();
-        if rows.len() > current {
-            self.list_state.splice(0..0, rows.len() - current);
-        } else if rows.len() < current {
-            self.list_state.reset(rows.len());
-        }
         let list_state = self.list_state.clone();
+        let panel = cx.weak_entity();
+        let playing_audio_url = self
+            .audio_url
+            .clone()
+            .filter(|_| self.audio_player.as_ref().is_some_and(|p| p.is_playing()));
         let viewport_h = f32::from(window.viewport_size().height);
         let panel_max_h = (viewport_h * MAX_VH).max(MIN_POPOVER_HEIGHT);
 
@@ -232,12 +376,14 @@ impl Render for FilesPopoverPanel {
                 rows,
                 loading,
                 fetch_error,
-                query_active,
+                has_documents,
                 theme.clone(),
                 locale,
                 clan_id,
                 channel_id,
                 list_state,
+                panel,
+                playing_audio_url,
                 window,
                 cx,
             ))
@@ -339,19 +485,21 @@ fn render_body(
     rows: Rc<Vec<FileRowVm>>,
     loading: bool,
     fetch_error: bool,
-    query_active: bool,
+    has_documents: bool,
     theme: Arc<Theme>,
     locale: String,
     clan_id: ClanId,
     channel_id: ChannelId,
     list_state: ListState,
+    panel: WeakEntity<FilesPopoverPanel>,
+    playing_audio_url: Option<SharedString>,
     window: &mut Window,
     cx: &mut Context<FilesPopoverPanel>,
 ) -> impl IntoElement {
     let tokens = &theme.tokens;
 
     let body: gpui::AnyElement = if rows.is_empty() {
-        if loading && !query_active {
+        if loading && !has_documents {
             div()
                 .flex()
                 .items_center()
@@ -359,7 +507,7 @@ fn render_body(
                 .size_full()
                 .child(Spinner::new().with_size(Size::Small))
                 .into_any_element()
-        } else if fetch_error && !query_active {
+        } else if fetch_error && !has_documents {
             render_error_body(&locale, &theme, clan_id, channel_id).into_any_element()
         } else {
             render_empty_body(&locale, &theme).into_any_element()
@@ -368,6 +516,8 @@ fn render_body(
         let rows_for_list = rows.clone();
         let theme_for_list = theme.clone();
         let locale_for_list = locale.clone();
+        let panel_for_list = panel;
+        let playing_for_list = playing_audio_url;
         div()
             .size_full()
             .overflow_hidden()
@@ -395,10 +545,20 @@ fn render_body(
                             let Some(vm) = rows_for_list.get(ix) else {
                                 return div().into_any_element();
                             };
+                            let playing = playing_for_list
+                                .as_ref()
+                                .is_some_and(|url| url.as_ref() == vm.url.as_ref());
                             div()
                                 .w_full()
                                 .pb(px(8.))
-                                .child(file_row(ix, vm, &theme_for_list, &locale_for_list))
+                                .child(file_row(
+                                    ix,
+                                    vm,
+                                    &theme_for_list,
+                                    &locale_for_list,
+                                    panel_for_list.clone(),
+                                    playing,
+                                ))
                                 .into_any_element()
                         })
                         .size_full(),
@@ -538,7 +698,14 @@ fn render_retry_banner(
         )
 }
 
-fn file_row(index: usize, vm: &FileRowVm, theme: &Theme, locale: &str) -> gpui::AnyElement {
+fn file_row(
+    index: usize,
+    vm: &FileRowVm,
+    theme: &Theme,
+    locale: &str,
+    panel: WeakEntity<FilesPopoverPanel>,
+    audio_playing: bool,
+) -> gpui::AnyElement {
     let tokens = &theme.tokens;
     let group_name = SharedString::from(format!("file-row-{index}"));
 
@@ -584,6 +751,19 @@ fn file_row(index: usize, vm: &FileRowVm, theme: &Theme, locale: &str) -> gpui::
     let filename = vm.filename.clone();
     let download_url = url.clone();
     let download_name = filename.clone();
+    let thumb = if vm.is_audio {
+        file_audio_thumb(index, vm.url.clone(), panel, audio_playing)
+    } else {
+        div()
+            .flex_shrink_0()
+            .w(px(32.))
+            .h(px(40.))
+            .flex()
+            .items_center()
+            .justify_center()
+            .child(img(vm.icon.path()).w(px(32.)).h(px(40.)).flex_none())
+            .into_any_element()
+    };
 
     h_flex()
         .id(("file-item", index))
@@ -602,16 +782,7 @@ fn file_row(index: usize, vm: &FileRowVm, theme: &Theme, locale: &str) -> gpui::
         .on_click(move |_: &ClickEvent, _window, cx| {
             download_url_with_dialog(url.clone(), filename.clone(), cx);
         })
-        .child(
-            div()
-                .flex_shrink_0()
-                .w(px(32.))
-                .h(px(40.))
-                .flex()
-                .items_center()
-                .justify_center()
-                .child(img(vm.icon.path()).w(px(32.)).h(px(40.)).flex_none()),
-        )
+        .child(thumb)
         .child(
             v_flex()
                 .flex_1()
@@ -681,6 +852,7 @@ fn file_row(index: usize, vm: &FileRowVm, theme: &Theme, locale: &str) -> gpui::
                         .bg(tokens.theme_input)
                         .cursor_pointer()
                         .on_click(move |_: &ClickEvent, _window, cx| {
+                            cx.stop_propagation();
                             download_url_with_dialog(
                                 download_url.clone(),
                                 download_name.clone(),
@@ -691,6 +863,64 @@ fn file_row(index: usize, vm: &FileRowVm, theme: &Theme, locale: &str) -> gpui::
                             Icon::new(IconName::Download)
                                 .size(px(16.))
                                 .text_color(tokens.text_theme_primary),
+                        ),
+                ),
+        )
+        .into_any_element()
+}
+
+fn file_audio_thumb(
+    index: usize,
+    url: SharedString,
+    panel: WeakEntity<FilesPopoverPanel>,
+    playing: bool,
+) -> gpui::AnyElement {
+    let play_icon = if playing {
+        IconName::PauseButton
+    } else {
+        IconName::PlayButton
+    };
+    div()
+        .relative()
+        .flex_shrink_0()
+        .w(px(32.))
+        .h(px(40.))
+        .flex()
+        .items_center()
+        .justify_center()
+        .child(
+            img(IconName::FileThumbEmpty.path())
+                .w(px(32.))
+                .h(px(40.))
+                .flex_none(),
+        )
+        .child(
+            div()
+                .absolute()
+                .inset_0()
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(
+                    div()
+                        .id(("file-audio", index))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .size(px(20.))
+                        .rounded_full()
+                        .bg(gpui::rgba(0x00000066))
+                        .hover(|s| s.bg(gpui::rgba(0x00000099)))
+                        .cursor_pointer()
+                        .on_click(move |_: &ClickEvent, _window, cx| {
+                            cx.stop_propagation();
+                            let url = url.clone();
+                            let _ = panel.update(cx, |this, cx| this.toggle_audio(url, cx));
+                        })
+                        .child(
+                            Icon::new(play_icon)
+                                .size(px(8.))
+                                .text_color(rgb(0xffffff)),
                         ),
                 ),
         )
@@ -747,7 +977,7 @@ pub fn files_popover_on_open() -> Rc<dyn Fn(&mut Window, &mut App)> {
             return;
         };
         FilesStore::global(cx).update(cx, |store, cx| {
-            store.refresh(clan_id, channel_id, cx);
+            store.ensure_loaded(clan_id, channel_id, cx);
         });
         ClanMembersStore::global(cx).update(cx, |members, cx| {
             members.ensure_loaded(clan_id, cx);

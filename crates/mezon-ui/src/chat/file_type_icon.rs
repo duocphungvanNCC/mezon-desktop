@@ -13,9 +13,8 @@ pub fn file_type_icon_for(filetype: &str, filename: &str) -> IconName {
         "application/javascript" | "application/json" | "json" | "js" => {
             Some(IconName::FileThumbJson)
         }
-        "audio/mpeg" | "audio/mp3" | "audio/wav" | "audio/ogg" | "mp3" | "wav" | "ogg" => {
-            Some(IconName::FileThumbAudio)
-        }
+        "audio/mpeg" | "audio/mp3" | "audio/wav" | "audio/ogg" | "audio/mp4" | "mp3" | "wav"
+        | "ogg" | "m4a" => Some(IconName::FileThumbAudio),
         "application/pdf" | "pdf" => Some(IconName::FileThumbPdf),
         "application/msword"
         | "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
