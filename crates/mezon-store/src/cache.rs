@@ -109,11 +109,6 @@ impl<K: Eq + Hash + Clone, V> KeyedCache<K, V> {
         self.order.clear();
     }
 
-    pub fn remove(&mut self, key: &K) -> Option<V> {
-        self.order.retain(|k| k != key);
-        self.entries.remove(key).map(|e| e.value)
-    }
-
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
