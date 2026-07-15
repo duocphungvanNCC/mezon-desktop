@@ -10,7 +10,7 @@ use mezon_client::transport::ApiPinMessage;
 use mezon_proto::realtime::LastPinMessageEvent;
 
 use crate::AppConfig;
-use crate::ids::ClanId;
+use crate::ids::{ChannelId, ClanId};
 use crate::messages::{MessagesEvent, MessagesStore};
 use crate::realtime::{RealtimeDispatch, RealtimeKind};
 
@@ -151,13 +151,7 @@ impl PinnedMessagesStore {
     fn sync_from_messages(&mut self, store: &Entity<MessagesStore>, cx: &mut Context<Self>) {
         let (channel_id, clan_id) = {
             let messages = store.read(cx);
-            (
-                messages.active_channel_id().map(|id| id.to_string()),
-                messages
-                    .active_clan_id()
-                    .map(|id| id.to_string())
-                    .or_else(|| messages.active_channel_id().map(|_| "0".into())),
-            )
+            context_from_active(messages.active_channel_id(), messages.active_clan_id())
         };
         if self.channel_id == channel_id && self.clan_id == clan_id {
             return;
@@ -373,6 +367,16 @@ fn parse_pin_create_time(raw: &str) -> i64 {
         .unwrap_or_else(|_| chrono::Utc::now().timestamp())
 }
 
+fn context_from_active(
+    channel_id: Option<ChannelId>,
+    clan_id: Option<ClanId>,
+) -> (Option<String>, Option<String>) {
+    (
+        channel_id.map(|id| id.to_string()),
+        clan_id.map(|id| id.to_string()),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -380,5 +384,26 @@ mod tests {
     #[test]
     fn parse_pin_create_time_unix() {
         assert_eq!(parse_pin_create_time("1710000000"), 1710000000);
+    }
+
+    #[test]
+    fn context_from_active_dm_keeps_clan_id_zero() {
+        assert_eq!(
+            context_from_active(Some(ChannelId(9)), Some(ClanId(0))),
+            (Some("9".into()), Some("0".into())),
+        );
+    }
+
+    #[test]
+    fn context_from_active_clan_channel() {
+        assert_eq!(
+            context_from_active(Some(ChannelId(3)), Some(ClanId(7))),
+            (Some("3".into()), Some("7".into())),
+        );
+    }
+
+    #[test]
+    fn context_from_active_cleared() {
+        assert_eq!(context_from_active(None, None), (None, None));
     }
 }

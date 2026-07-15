@@ -82,7 +82,10 @@ impl RenderImage {
     }
 
     #[allow(missing_docs)]
-    pub fn new_recyclable(frame: Frame, recycler: Arc<dyn Fn(Vec<u8>) + Send + Sync>) -> Self {
+    pub fn new_recyclable(
+        frame: Frame,
+        recycler: Arc<dyn Fn(Vec<u8>) + Send + Sync>,
+    ) -> Self {
         let mut image = Self::new(SmallVec::from_const([frame]));
         image.recycler = Some(recycler);
         image
