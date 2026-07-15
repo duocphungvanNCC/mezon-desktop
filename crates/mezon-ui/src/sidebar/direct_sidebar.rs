@@ -1,20 +1,20 @@
 use std::rc::Rc;
-use std::time::{Duration, Instant};
 
 use gpui::{
     App, Context, Entity, FontWeight, SharedString, UniformListScrollHandle, Window, div, img,
-    prelude::*, px, uniform_list,
+    prelude::*, px, size, uniform_list,
 };
 use mezon_store::{
-    ChannelEvent, ChannelId, ChannelList, DirectChannel, DirectKind, DirectMessageStore, Settings,
+    ChannelEvent, ChannelId, ChannelList, DirectChannel, DirectKind, DirectMessageStore, FriendStore, Settings,
 };
 
-use crate::components::compositions::DmRow;
+use super::friend_request_badge;
+use ui::{ScrollAxes, Scrollbars, WithScrollbar};
+
+use crate::components::compositions::{DM_ROW_HEIGHT, DmRow};
 use crate::components::primitives::{Icon, IconName};
 use crate::router::{Route, Router, navigate};
 use crate::theme::{ActiveTheme, Theme};
-
-const SCROLL_HOVER_RELEASE_MS: u64 = 150;
 
 #[derive(PartialEq)]
 struct DmItem {
@@ -38,8 +38,6 @@ pub struct DirectSidebar {
     dm_items: Rc<Vec<DmItem>>,
     dm_items_fingerprint: u64,
     pending_rebuild: bool,
-    suppress_hover: bool,
-    last_scroll_at: Option<Instant>,
     image_cache: Entity<crate::image_cache::LruImageCache>,
 }
 
@@ -131,6 +129,8 @@ impl DirectSidebar {
         })
         .detach();
         cx.observe(&settings, |_, _, cx| cx.notify()).detach();
+        cx.observe(&FriendStore::global(cx), |_, _, cx| cx.notify())
+            .detach();
 
         let dm_items_fingerprint = dm_items_fingerprint(direct_store.read(cx), cx);
         let dm_items = build_dm_items(direct_store.read(cx), cx);
@@ -141,8 +141,6 @@ impl DirectSidebar {
             dm_items,
             dm_items_fingerprint,
             pending_rebuild: false,
-            suppress_hover: false,
-            last_scroll_at: None,
             image_cache: cx.new(|cx| {
                 crate::image_cache::LruImageCache::avatar_thumbnail_small(
                     "dm-list",
@@ -152,44 +150,6 @@ impl DirectSidebar {
                     cx,
                 )
             }),
-        }
-    }
-
-    fn refresh_dm_items(&mut self, cx: &mut Context<Self>) {
-        if !is_dm_route(cx) {
-            self.pending_rebuild = true;
-            return;
-        }
-        let store = DirectMessageStore::global(cx);
-        let fingerprint = dm_items_fingerprint(store.read(cx), cx);
-        if fingerprint == self.dm_items_fingerprint {
-            return;
-        }
-        self.dm_items_fingerprint = fingerprint;
-        let items = build_dm_items(store.read(cx), cx);
-        if self.dm_items != items {
-            self.dm_items = items;
-            cx.notify();
-        }
-    }
-
-    fn on_scroll(&mut self, cx: &mut Context<Self>) {
-        self.last_scroll_at = Some(Instant::now());
-        if self.suppress_hover {
-            return;
-        }
-        self.suppress_hover = true;
-        cx.notify();
-    }
-
-    fn on_mouse_move_release(&mut self, cx: &mut Context<Self>) {
-        if self.suppress_hover
-            && self
-                .last_scroll_at
-                .is_none_or(|t| t.elapsed() >= Duration::from_millis(SCROLL_HOVER_RELEASE_MS))
-        {
-            self.suppress_hover = false;
-            cx.notify();
         }
     }
 
@@ -220,7 +180,13 @@ impl DirectSidebar {
             )
     }
 
-    fn render_friends_button(&self, theme: &Theme, locale: &str, active: bool) -> impl IntoElement {
+    fn render_friends_button(
+        &self,
+        theme: &Theme,
+        locale: &str,
+        active: bool,
+        pending: usize,
+    ) -> impl IntoElement {
         let bg_hover = theme.bg_hover;
         div()
             .id("dm-friends")
@@ -244,6 +210,9 @@ impl DirectSidebar {
                     .text_color(theme.text_primary)
                     .child(mezon_i18n::t(locale, "directMessage.friends")),
             )
+            .when(pending > 0, |el| {
+                el.child(friend_request_badge(pending, px(11.)).ml_auto())
+            })
     }
 
     fn render_section_header(&self, theme: &Theme, locale: &str) -> impl IntoElement {
@@ -284,7 +253,7 @@ impl DirectSidebar {
 }
 
 impl Render for DirectSidebar {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         crate::trace_render!("DirectSidebar");
         let theme = cx.theme();
         let locale = self.settings.read(cx).language.clone();
@@ -295,7 +264,7 @@ impl Render for DirectSidebar {
             _ => None,
         };
         let items = self.dm_items.clone();
-        let suppress_hover = self.suppress_hover;
+        let suppress_hover = self.list_scroll.is_scroll_hover_suppressed();
         let image_cache = self.image_cache.clone();
         let in_voice_label: SharedString = mezon_i18n::t(&locale, "memberPage.inVoice").into();
 
@@ -330,14 +299,17 @@ impl Render for DirectSidebar {
                 })
                 .collect::<Vec<_>>()
         })
+        .with_item_size(size(px(240.), px(DM_ROW_HEIGHT)))
+        .smooth_line_scroll()
+        .suppress_hover_while_scrolling()
         .track_scroll(&self.list_scroll)
-        .on_scroll_wheel(cx.listener(|this, _event, _window, cx| this.on_scroll(cx)))
-        .on_mouse_move(cx.listener(|this, _event, _window, cx| this.on_mouse_move_release(cx)))
         .flex_1()
+        .h_full()
         .min_h_0()
         .px_2();
 
         let on_friends = matches!(Router::global(cx).read(cx).route(), Route::Friends);
+        let friend_pending = FriendStore::global(cx).read(cx).pending_incoming_count();
 
         div()
             .flex()
@@ -346,13 +318,25 @@ impl Render for DirectSidebar {
             .pb(px(68.))
             .bg(theme.bg_secondary)
             .child(self.render_search(theme, &locale))
+            .child(div().px_2().pt_2().child(self.render_friends_button(
+                theme,
+                &locale,
+                on_friends,
+                friend_pending,
+            )))
+            .child(self.render_section_header(theme, &locale))
             .child(
                 div()
-                    .px_2()
-                    .pt_2()
-                    .child(self.render_friends_button(theme, &locale, on_friends)),
+                    .flex_1()
+                    .min_h_0()
+                    .relative()
+                    .child(list)
+                    .custom_scrollbars(
+                        Scrollbars::always_visible(ScrollAxes::Vertical)
+                            .tracked_scroll_handle(&self.list_scroll),
+                        window,
+                        cx,
+                    ),
             )
-            .child(self.render_section_header(theme, &locale))
-            .child(list)
     }
 }

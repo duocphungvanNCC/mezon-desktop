@@ -1,10 +1,10 @@
-//! Runtime configuration loaded from environment variables (typically via `.env`).
-//!
-//! Variable names match the legacy Electron desktop app (`NX_*` prefix) for parity.
-//! Values are read at startup and are not persisted to `settings.json`.
-
 use gpui::{App, Global};
 use std::sync::Arc;
+
+#[allow(dead_code)]
+mod baked_env {
+    include!(concat!(env!("OUT_DIR"), "/baked_env.rs"));
+}
 // No `Debug` derive: AppConfig holds secrets (api_key, imgproxy_key, fcm/tenor/treasury keys,
 // webrtc credential). Deny `{:?}` so they can't leak into logs; log specific non-secret fields.
 #[derive(Clone)]
@@ -43,11 +43,9 @@ pub struct AppConfig {
     pub imgproxy_base_url: String,
     pub imgproxy_key: String,
 
-    // ── Tenor (GIF search) ────────────────────────────────────────────────────
-    pub tenor_key: String,
-    pub tenor_url_categories: String,
-    pub tenor_url_search: String,
-    pub tenor_url_featured: String,
+    // ── Klipy (GIF search) ────────────────────────────────────────────────────
+    pub klipy_key: String,
+    pub klipy_base_url: String,
 
     // ── Treasury / blockchain ─────────────────────────────────────────────────
     pub mezon_treasury_url: String,
@@ -119,10 +117,8 @@ impl AppConfig {
             imgproxy_base_url: "https://dev-imgproxy.nccsoft.vn".into(),
             imgproxy_key: "_AEhOrrckkG-NjqIdVLtzc-dtLFuE4u6ClM0P46ICEY".into(),
 
-            tenor_key: String::new(),
-            tenor_url_categories: "https://tenor.googleapis.com/v2/categories?key=".into(),
-            tenor_url_search: "https://tenor.googleapis.com/v2/search?q=".into(),
-            tenor_url_featured: "https://tenor.googleapis.com/v2/featured?key=".into(),
+            klipy_key: String::new(),
+            klipy_base_url: "https://api.klipy.com/api/v1".into(),
 
             mezon_treasury_url: "https://withdraw-api.nccsoft.vn".into(),
             mezon_treasury_key: String::new(),
@@ -144,7 +140,7 @@ impl AppConfig {
 
             api_client_key_custom: "mezon.ai".into(),
             sentry_dsn: String::new(),
-            anonymous_user_id: String::new(),
+            anonymous_user_id: "1767478432163172999".into(),
             max_length_name_allowed: 64,
             update_url: "https://cdn.mezon.ai/release/".into(),
         }
@@ -153,175 +149,149 @@ impl AppConfig {
     pub fn from_env() -> Self {
         let defaults = Self::dev_defaults();
         Self {
-            api_host: opt_str(option_env!("NX_CHAT_APP_API_HOST"), &defaults.api_host),
-            api_port: opt_u16(option_env!("NX_CHAT_APP_API_PORT"), defaults.api_port),
-            api_secure: opt_bool(option_env!("NX_CHAT_APP_API_SECURE"), defaults.api_secure),
-            api_key: opt_str(option_env!("NX_CHAT_APP_API_KEY"), &defaults.api_key),
-            api_gw_host: opt_str(
-                option_env!("NX_CHAT_APP_API_GW_HOST"),
-                &defaults.api_gw_host,
-            ),
-            api_gw_port: opt_u16(option_env!("NX_CHAT_APP_API_GW_PORT"), defaults.api_gw_port),
+            api_host: opt_str(baked_env::NX_CHAT_APP_API_HOST, &defaults.api_host),
+            api_port: opt_u16(baked_env::NX_CHAT_APP_API_PORT, defaults.api_port),
+            api_secure: opt_bool(baked_env::NX_CHAT_APP_API_SECURE, defaults.api_secure),
+            api_key: opt_str(baked_env::NX_CHAT_APP_API_KEY, &defaults.api_key),
+            api_gw_host: opt_str(baked_env::NX_CHAT_APP_API_GW_HOST, &defaults.api_gw_host),
+            api_gw_port: opt_u16(baked_env::NX_CHAT_APP_API_GW_PORT, defaults.api_gw_port),
 
-            tcp_port: opt_opt_u16(option_env!("NX_CHAT_APP_TCP_PORT")),
+            tcp_port: opt_tcp_port(baked_env::NX_CHAT_APP_TCP_PORT, defaults.tcp_port),
             stream_ws_url: opt_str(
-                option_env!("NX_CHAT_APP_STREAM_WS_URL"),
+                baked_env::NX_CHAT_APP_STREAM_WS_URL,
                 &defaults.stream_ws_url,
             ),
-            meet_ws_url: opt_str(
-                option_env!("NX_CHAT_APP_MEET_WS_URL"),
-                &defaults.meet_ws_url,
-            ),
+            meet_ws_url: opt_str(baked_env::NX_CHAT_APP_MEET_WS_URL, &defaults.meet_ws_url),
             notification_ws_url: opt_str(
-                option_env!("NX_CHAT_APP_NOTIFICATION_WS_URL"),
+                baked_env::NX_CHAT_APP_NOTIFICATION_WS_URL,
                 &defaults.notification_ws_url,
             ),
 
             oauth2_authorize_url: opt_str(
-                option_env!("NX_CHAT_APP_OAUTH2_AUTHORIZE_URL"),
+                baked_env::NX_CHAT_APP_OAUTH2_AUTHORIZE_URL,
                 &defaults.oauth2_authorize_url,
             ),
             oauth2_client_id: opt_str(
-                option_env!("NX_CHAT_APP_OAUTH2_CLIENT_ID"),
+                baked_env::NX_CHAT_APP_OAUTH2_CLIENT_ID,
                 &defaults.oauth2_client_id,
             ),
             oauth2_redirect_uri: opt_str(
-                option_env!("NX_CHAT_APP_OAUTH2_REDIRECT_URI"),
+                baked_env::NX_CHAT_APP_OAUTH2_REDIRECT_URI,
                 &defaults.oauth2_redirect_uri,
             ),
             oauth2_response_type: opt_str(
-                option_env!("NX_CHAT_APP_OAUTH2_RESPONSE_TYPE"),
+                baked_env::NX_CHAT_APP_OAUTH2_RESPONSE_TYPE,
                 &defaults.oauth2_response_type,
             ),
-            oauth2_scope: opt_str(
-                option_env!("NX_CHAT_APP_OAUTH2_SCOPE"),
-                &defaults.oauth2_scope,
-            ),
+            oauth2_scope: opt_str(baked_env::NX_CHAT_APP_OAUTH2_SCOPE, &defaults.oauth2_scope),
             oauth2_code_challenge_method: opt_str(
-                option_env!("NX_CHAT_APP_OAUTH2_CODE_CHALLENGE_METHOD"),
+                baked_env::NX_CHAT_APP_OAUTH2_CODE_CHALLENGE_METHOD,
                 &defaults.oauth2_code_challenge_method,
             ),
             oauth2_log_out: opt_str(
-                option_env!("NX_CHAT_APP_OAUTH2_LOG_OUT"),
+                baked_env::NX_CHAT_APP_OAUTH2_LOG_OUT,
                 &defaults.oauth2_log_out,
             ),
             oauth2_log_out_callback: opt_str(
-                option_env!("NX_CHAT_APP_OAUTH2_LOG_OUT_CALLBACK"),
+                baked_env::NX_CHAT_APP_OAUTH2_LOG_OUT_CALLBACK,
                 &defaults.oauth2_log_out_callback,
             ),
             google_client_id: opt_str(
-                option_env!("NX_CHAT_APP_GOOGLE_CLIENT_ID"),
+                baked_env::NX_CHAT_APP_GOOGLE_CLIENT_ID,
                 &defaults.google_client_id,
             ),
 
-            domain_url: opt_str(option_env!("NX_DOMAIN_URL"), &defaults.domain_url),
-            redirect_uri: opt_str(
-                option_env!("NX_CHAT_APP_REDIRECT_URI"),
-                &defaults.redirect_uri,
-            ),
-            logo_mezon: opt_str(option_env!("NX_LOGO_MEZON"), &defaults.logo_mezon),
-            base_img_url: opt_str(option_env!("NX_BASE_IMG_URL"), &defaults.base_img_url),
-            profile_img_url: opt_str(option_env!("NX_PROFILE_IMG_URL"), &defaults.profile_img_url),
+            domain_url: opt_str(baked_env::NX_DOMAIN_URL, &defaults.domain_url),
+            redirect_uri: opt_str(baked_env::NX_CHAT_APP_REDIRECT_URI, &defaults.redirect_uri),
+            logo_mezon: opt_str(baked_env::NX_LOGO_MEZON, &defaults.logo_mezon),
+            base_img_url: opt_str(baked_env::NX_BASE_IMG_URL, &defaults.base_img_url),
+            profile_img_url: opt_str(baked_env::NX_PROFILE_IMG_URL, &defaults.profile_img_url),
             imgproxy_base_url: opt_str(
-                option_env!("NX_IMGPROXY_BASE_URL"),
+                baked_env::NX_IMGPROXY_BASE_URL,
                 &defaults.imgproxy_base_url,
             ),
-            imgproxy_key: opt_str(option_env!("NX_IMGPROXY_KEY"), &defaults.imgproxy_key),
+            imgproxy_key: opt_str(baked_env::NX_IMGPROXY_KEY, &defaults.imgproxy_key),
 
-            tenor_key: opt_str(
-                option_env!("NX_CHAT_APP_API_TENOR_KEY"),
-                &defaults.tenor_key,
-            ),
-            tenor_url_categories: opt_str(
-                option_env!("NX_CHAT_APP_API_TENOR_URL_CATEGORIES"),
-                &defaults.tenor_url_categories,
-            ),
-            tenor_url_search: opt_str(
-                option_env!("NX_CHAT_APP_API_TENOR_URL_SEARCH"),
-                &defaults.tenor_url_search,
-            ),
-            tenor_url_featured: opt_str(
-                option_env!("NX_CHAT_APP_API_TENOR_URL_FEATURED"),
-                &defaults.tenor_url_featured,
+            klipy_key: opt_str(baked_env::NX_CHAT_APP_API_KLIPY_KEY, &defaults.klipy_key),
+            klipy_base_url: opt_str(
+                baked_env::NX_CHAT_APP_API_KLIPY_URL,
+                &defaults.klipy_base_url,
             ),
 
             mezon_treasury_url: opt_str(
-                option_env!("NX_CHAT_APP_MEZON_TREASURY_URL"),
+                baked_env::NX_CHAT_APP_MEZON_TREASURY_URL,
                 &defaults.mezon_treasury_url,
             ),
             mezon_treasury_key: opt_str(
-                option_env!("NX_CHAT_APP_API_MEZONTREASURY_KEY"),
+                baked_env::NX_CHAT_APP_API_MEZONTREASURY_KEY,
                 &defaults.mezon_treasury_key,
             ),
             contract_address: opt_str(
-                option_env!("NX_CHAT_APP_CONTRACT_ADDRESS"),
+                baked_env::NX_CHAT_APP_CONTRACT_ADDRESS,
                 &defaults.contract_address,
             ),
             mezon_treasury_url_network: opt_str(
-                option_env!("NX_CHAT_APP_MEZON_TREASURY_URL_NETWORK"),
+                baked_env::NX_CHAT_APP_MEZON_TREASURY_URL_NETWORK,
                 &defaults.mezon_treasury_url_network,
             ),
 
             webrtc_ice_servers_url: opt_str(
-                option_env!("NX_WEBRTC_ICESERVERS_URL"),
+                baked_env::NX_WEBRTC_ICESERVERS_URL,
                 &defaults.webrtc_ice_servers_url,
             ),
             webrtc_ice_servers_username: opt_str(
-                option_env!("NX_WEBRTC_ICESERVERS_USERNAME"),
+                baked_env::NX_WEBRTC_ICESERVERS_USERNAME,
                 &defaults.webrtc_ice_servers_username,
             ),
             webrtc_ice_servers_credential: opt_str(
-                option_env!("NX_WEBRTC_ICESERVERS_CREDENTIAL"),
+                baked_env::NX_WEBRTC_ICESERVERS_CREDENTIAL,
                 &defaults.webrtc_ice_servers_credential,
             ),
 
-            fcm_api_key: opt_str(
-                option_env!("NX_CHAT_APP_FCM_API_KEY"),
-                &defaults.fcm_api_key,
-            ),
+            fcm_api_key: opt_str(baked_env::NX_CHAT_APP_FCM_API_KEY, &defaults.fcm_api_key),
             fcm_auth_domain: opt_str(
-                option_env!("NX_CHAT_APP_FCM_AUTH_DOMAIN"),
+                baked_env::NX_CHAT_APP_FCM_AUTH_DOMAIN,
                 &defaults.fcm_auth_domain,
             ),
             fcm_project_id: opt_str(
-                option_env!("NX_CHAT_APP_FCM_PROJECT_ID"),
+                baked_env::NX_CHAT_APP_FCM_PROJECT_ID,
                 &defaults.fcm_project_id,
             ),
             fcm_storage_bucket: opt_str(
-                option_env!("NX_CHAT_APP_FCM_STORAGE_BUCKET"),
+                baked_env::NX_CHAT_APP_FCM_STORAGE_BUCKET,
                 &defaults.fcm_storage_bucket,
             ),
             fcm_messaging_sender_id: opt_str(
-                option_env!("NX_CHAT_APP_FCM_MESSAGING_SENDER_ID"),
+                baked_env::NX_CHAT_APP_FCM_MESSAGING_SENDER_ID,
                 &defaults.fcm_messaging_sender_id,
             ),
-            fcm_app_id: opt_str(option_env!("NX_CHAT_APP_FCM_APP_ID"), &defaults.fcm_app_id),
+            fcm_app_id: opt_str(baked_env::NX_CHAT_APP_FCM_APP_ID, &defaults.fcm_app_id),
             fcm_measurement_id: opt_str(
-                option_env!("NX_CHAT_APP_FCM_MEASUREMENT_ID"),
+                baked_env::NX_CHAT_APP_FCM_MEASUREMENT_ID,
                 &defaults.fcm_measurement_id,
             ),
             fcm_vapid_key: opt_str(
-                option_env!("NX_CHAT_APP_FCM_VAPID_KEY"),
+                baked_env::NX_CHAT_APP_FCM_VAPID_KEY,
                 &defaults.fcm_vapid_key,
             ),
 
             api_client_key_custom: opt_str(
-                option_env!("NX_CHAT_APP_API_CLIENT_KEY_CUSTOM"),
+                baked_env::NX_CHAT_APP_API_CLIENT_KEY_CUSTOM,
                 &defaults.api_client_key_custom,
             ),
             sentry_dsn: opt_str(
-                option_env!("NX_CHAT_SENTRY_DSN").or(option_env!("NX_CHAT_SENTRY_DNS")),
+                baked_env::NX_CHAT_SENTRY_DSN.or(baked_env::NX_CHAT_SENTRY_DNS),
                 &defaults.sentry_dsn,
             ),
             anonymous_user_id: opt_str(
-                option_env!("NX_CHAT_APP_ANNONYMOUS_USER_ID"),
+                baked_env::NX_CHAT_APP_ANNONYMOUS_USER_ID,
                 &defaults.anonymous_user_id,
             ),
             max_length_name_allowed: opt_u32(
-                option_env!("NX_MAX_LENGTH_NAME_ALLOWED"),
+                baked_env::NX_MAX_LENGTH_NAME_ALLOWED,
                 defaults.max_length_name_allowed,
             ),
-            update_url: opt_str(option_env!("NX_UPDATE_URL"), &defaults.update_url),
+            update_url: opt_str(baked_env::NX_UPDATE_URL, &defaults.update_url),
         }
     }
 
@@ -391,11 +361,15 @@ impl AppConfig {
     }
 
     pub fn emoji_src(&self, emoji_id: &str) -> String {
+        self.emoji_src_sized(emoji_id, 100)
+    }
+
+    pub fn emoji_src_sized(&self, emoji_id: &str, size: u32) -> String {
         if emoji_id.is_empty() || emoji_id == "0" {
             return String::new();
         }
         let source = format!("{}/emojis/{}.webp", self.base_img_url, emoji_id);
-        self.imgproxy_url(&source, 100, 100, "fit")
+        self.imgproxy_url(&source, size, size, "fit")
     }
 
     pub fn attachment_proxy(
@@ -580,8 +554,16 @@ fn opt_u16(value: Option<&'static str>, default: u16) -> u16 {
         .unwrap_or(default)
 }
 
+#[cfg(test)]
 fn opt_opt_u16(value: Option<&'static str>) -> Option<u16> {
     normalize(value).and_then(|v| v.parse().ok())
+}
+
+fn opt_tcp_port(value: Option<&'static str>, default: Option<u16>) -> Option<u16> {
+    match value {
+        None => default,
+        Some(v) => normalize(Some(v)).and_then(|v| v.parse().ok()),
+    }
 }
 
 fn opt_u32(value: Option<&'static str>, default: u32) -> u32 {

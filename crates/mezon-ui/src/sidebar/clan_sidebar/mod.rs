@@ -4,7 +4,7 @@ use gpui::{
     AnyElement, App, Context, Entity, ListState, SharedString, Subscription, Window, div, img,
     list, prelude::*, px,
 };
-use mezon_store::{AccountStore, ClanList, DirectMessageStore, Settings};
+use mezon_store::{AccountStore, ClanList, DirectMessageStore, FriendStore, Settings};
 use ui::Tooltip;
 
 use crate::app::shell::Shell;
@@ -16,6 +16,8 @@ use crate::theme::{ActiveTheme, Theme};
 mod clan_row;
 mod direct_unread_list;
 use clan_row::{ClanRow, render_clan_row, render_pill};
+
+use super::friend_request_badge;
 use direct_unread_list::{
     DirectUnreadListState, build_direct_unread_items, direct_unread_fingerprint,
 };
@@ -39,6 +41,7 @@ pub struct ClanSidebar {
     _settings_sub: Subscription,
     _router_sub: Subscription,
     _account_sub: Subscription,
+    _friend_sub: Subscription,
 }
 
 impl ClanSidebar {
@@ -48,6 +51,9 @@ impl ClanSidebar {
         cx: &mut Context<Self>,
     ) -> Self {
         let direct_store = DirectMessageStore::global(cx);
+        let list_state = ListState::new(0, gpui::ListAlignment::Top, px(48.))
+            .smooth_line_scroll()
+            .suppress_hover_while_scrolling();
         let direct_sub = cx.observe(&direct_store, |this, store, cx| {
             let fingerprint = direct_unread_fingerprint(store.read(cx));
             if this.direct_unread_fingerprint == Some(fingerprint) {
@@ -71,6 +77,7 @@ impl ClanSidebar {
             this.sync_chrome(cx);
             cx.notify();
         });
+        let friend_sub = cx.observe(&FriendStore::global(cx), |_, _, cx| cx.notify());
         let router_sub = cx.observe(&Router::global(cx), |this, router, cx| {
             let router = router.read(cx);
             let new_dm_active = matches!(
@@ -107,7 +114,7 @@ impl ClanSidebar {
                 cx,
             )),
             direct_unread_fingerprint: Some(direct_unread_fingerprint(direct_store.read(cx))),
-            list_state: ListState::new(0, gpui::ListAlignment::Top, px(48.)),
+            list_state,
             dm_active: initial_dm_active,
             can_go_back: initial_can_go_back,
             can_go_forward: initial_can_go_forward,
@@ -128,6 +135,7 @@ impl ClanSidebar {
             _settings_sub: settings_sub,
             _router_sub: router_sub,
             _account_sub: account_sub,
+            _friend_sub: friend_sub,
         };
         let clan_list_handle = this.clan_list.clone();
         this.sync_rows(clan_list_handle.read(cx), cx);
@@ -215,17 +223,19 @@ impl Render for ClanSidebar {
         let rows = self.rows.clone();
         let clan_list_handle = self.clan_list.clone();
         let list_state = self.list_state.clone();
+        let suppress_hover = self.list_state.is_scroll_hover_suppressed();
         let locale = self.settings.read(cx).language.clone();
         let discover_title = self.discover_title.clone();
         let create_clan_title = self.create_clan_title.clone();
         let clan_list_for_modal = self.clan_list.clone();
         let settings_for_modal = self.settings.clone();
         let home_logo = self.home_logo.clone();
+        let friend_pending = FriendStore::global(cx).read(cx).pending_incoming_count();
 
         let clan_count = rows.len();
         let list_element = list(list_state, move |ix, _window, cx| {
             if ix < clan_count {
-                render_clan_row(&rows, ix, cx, clan_list_handle.clone())
+                render_clan_row(&rows, ix, cx, clan_list_handle.clone(), suppress_hover)
             } else {
                 render_clan_footer(
                     cx,
@@ -234,6 +244,7 @@ impl Render for ClanSidebar {
                     create_clan_title.clone(),
                     clan_list_for_modal.clone(),
                     settings_for_modal.clone(),
+                    suppress_hover,
                 )
             }
         })
@@ -286,10 +297,24 @@ impl Render for ClanSidebar {
                             })
                             .child(render_pill(dm_active, "dm-group".into(), pill_color))
                             .child(
-                                img(home_logo)
+                                div()
+                                    .relative()
                                     .size(px(40.))
-                                    .rounded(px(8.))
-                                    .object_fit(gpui::ObjectFit::Cover),
+                                    .flex_none()
+                                    .child(
+                                        img(home_logo)
+                                            .size(px(40.))
+                                            .rounded(px(8.))
+                                            .object_fit(gpui::ObjectFit::Cover),
+                                    )
+                                    .when(friend_pending > 0, |el| {
+                                        el.child(
+                                            friend_request_badge(friend_pending, px(11.))
+                                                .absolute()
+                                                .bottom(px(-2.))
+                                                .right(px(-2.)),
+                                        )
+                                    }),
                             ),
                     )
                     .child(unread_list)
@@ -361,6 +386,7 @@ fn render_clan_footer(
     create_clan_title: SharedString,
     clan_list_for_modal: Entity<ClanList>,
     settings_for_modal: Entity<Settings>,
+    suppress_hover: bool,
 ) -> AnyElement {
     let theme = cx.theme();
     div()
@@ -379,11 +405,14 @@ fn render_clan_footer(
                 .items_center()
                 .justify_center()
                 .cursor_pointer()
-                .hover(|s| {
-                    s.bg(theme.tokens.bg_button_add_friend)
-                        .text_color(gpui::white())
+                .when(!suppress_hover, |button| {
+                    button
+                        .hover(|s| {
+                            s.bg(theme.tokens.bg_button_add_friend)
+                                .text_color(gpui::white())
+                        })
+                        .tooltip(Tooltip::text(discover_title))
                 })
-                .tooltip(Tooltip::text(discover_title))
                 .on_click({
                     let locale = locale.to_string();
                     move |_, _, cx| {
@@ -410,11 +439,14 @@ fn render_clan_footer(
                 .items_center()
                 .justify_center()
                 .cursor_pointer()
-                .hover(|s| {
-                    s.bg(theme.tokens.bg_button_add_friend)
-                        .text_color(gpui::white())
+                .when(!suppress_hover, |button| {
+                    button
+                        .hover(|s| {
+                            s.bg(theme.tokens.bg_button_add_friend)
+                                .text_color(gpui::white())
+                        })
+                        .tooltip(Tooltip::text(create_clan_title))
                 })
-                .tooltip(Tooltip::text(create_clan_title))
                 .on_click(move |_, window, cx| {
                     use crate::clan::create_clan_modal::CreateClanModal;
                     let modal = cx.new(|cx| {

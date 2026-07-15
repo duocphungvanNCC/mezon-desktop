@@ -96,6 +96,7 @@ pub struct UploadFile {
     pub filetype: String,
     pub width: i32,
     pub height: i32,
+    pub duration: i32,
     pub thumbnail: Option<UploadThumbnail>,
 }
 
@@ -130,6 +131,8 @@ pub struct UrlAttachment {
     pub url: String,
     pub filename: String,
     pub filetype: String,
+    pub width: i32,
+    pub height: i32,
 }
 
 #[derive(Debug, Clone)]
@@ -139,6 +142,16 @@ pub enum AttachmentUploadOutcome {
 }
 
 impl AppApi {
+    pub async fn send_channel_message_structured(
+        &self,
+        channel_id: i64,
+        content_json: &str,
+        mode: i32,
+    ) -> Result<ApiMessage> {
+        self.transport
+            .send_channel_message_structured(channel_id, content_json, mode)
+            .await
+    }
     pub fn new(transport: Arc<TransportClient>, base_img_url: String) -> Self {
         let (realtime_tx, _) = tokio::sync::broadcast::channel(1024);
         let (status_tx, _) = tokio::sync::watch::channel(ConnectionStatus::Disconnected);
@@ -298,6 +311,19 @@ impl AppApi {
             .await
     }
 
+    pub async fn list_topic_messages(
+        &self,
+        clan_id: i64,
+        channel_id: i64,
+        topic_id: i64,
+        direction: i32,
+        limit: u32,
+    ) -> Result<crate::transport::ListChannelMessagesResult> {
+        self.transport
+            .list_topic_messages(clan_id, channel_id, topic_id, direction, limit)
+            .await
+    }
+
     pub async fn list_thread_descs(
         &self,
         channel_id: &str,
@@ -409,11 +435,22 @@ impl AppApi {
         emojis: Vec<crate::transport::OutgoingEmoji>,
         mode: i32,
         is_public: bool,
+        topic_id: i64,
+        is_update_msg_topic: bool,
     ) -> Result<()> {
         self.transport
             .update_channel_message(
-                clan_id, channel_id, message_id, content, mentions, hashtags, emojis, mode,
+                clan_id,
+                channel_id,
+                message_id,
+                content,
+                mentions,
+                hashtags,
+                emojis,
+                mode,
                 is_public,
+                topic_id,
+                is_update_msg_topic,
             )
             .await
     }
@@ -447,14 +484,31 @@ impl AppApi {
             .await
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn delete_channel_message(
         &self,
         clan_id: i64,
         channel_id: i64,
         message_id: i64,
+        mode: i32,
+        is_public: bool,
+        has_attachment: bool,
+        topic_id: i64,
+        has_mentions: bool,
+        has_references: bool,
     ) -> Result<()> {
         self.transport
-            .delete_channel_message(clan_id, channel_id, message_id)
+            .delete_channel_message(
+                clan_id,
+                channel_id,
+                message_id,
+                mode,
+                is_public,
+                has_attachment,
+                topic_id,
+                has_mentions,
+                has_references,
+            )
             .await
     }
 
@@ -487,6 +541,7 @@ impl AppApi {
         mode: i32,
         is_public: bool,
         remove: bool,
+        topic_id: i64,
     ) -> Result<()> {
         self.transport
             .react_channel_message(
@@ -500,6 +555,7 @@ impl AppApi {
                 mode,
                 is_public,
                 remove,
+                topic_id,
             )
             .await
     }
@@ -562,6 +618,87 @@ impl AppApi {
                 clan_id, channel_id, content, is_public, mode, mentions, hashtags, emojis,
             )
             .await
+    }
+
+    /// Send a message into a discussion topic (mezon-js `writeChatMessage(..., topicId)`).
+    #[allow(clippy::too_many_arguments)]
+    pub async fn send_topic_message(
+        &self,
+        clan_id: i64,
+        channel_id: i64,
+        content: &str,
+        is_public: bool,
+        mode: i32,
+        topic_id: i64,
+        mentions: Vec<crate::transport::OutgoingMention>,
+        hashtags: Vec<crate::transport::OutgoingHashtag>,
+        emojis: Vec<crate::transport::OutgoingEmoji>,
+        reply: Option<crate::transport::OutgoingReply>,
+    ) -> Result<ApiMessage> {
+        self.transport
+            .send_topic_message(
+                clan_id, channel_id, content, is_public, mode, topic_id, mentions, hashtags,
+                emojis, reply,
+            )
+            .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn send_topic_message_with_attachment_urls(
+        &self,
+        clan_id: i64,
+        channel_id: i64,
+        is_public: bool,
+        mode: i32,
+        topic_id: i64,
+        attachments: Vec<UrlAttachment>,
+        reply: Option<crate::transport::OutgoingReply>,
+    ) -> Result<ApiMessage> {
+        let proto: Vec<mezon_proto::api::MessageAttachment> = attachments
+            .iter()
+            .map(|a| mezon_proto::api::MessageAttachment {
+                filename: a.filename.clone(),
+                size: 0,
+                url: a.url.clone(),
+                filetype: a.filetype.clone(),
+                width: a.width,
+                height: a.height,
+                thumbnail: String::new(),
+                duration: 0,
+            })
+            .collect();
+        let echo: Vec<crate::transport::ApiAttachment> = attachments
+            .into_iter()
+            .map(|a| crate::transport::ApiAttachment {
+                url: a.url,
+                filename: a.filename,
+                filetype: a.filetype,
+                width: a.width,
+                height: a.height,
+                thumbnail: String::new(),
+                duration: 0,
+                size: 0,
+            })
+            .collect();
+        let mut sent = self
+            .transport
+            .send_topic_message_with_attachments(
+                clan_id,
+                channel_id,
+                "",
+                is_public,
+                mode,
+                topic_id,
+                proto,
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                None,
+                reply,
+            )
+            .await?;
+        sent.attachments = echo;
+        Ok(sent)
     }
 
     /// Send a message as a reply to another message.
@@ -642,14 +779,17 @@ impl AppApi {
             .await
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn forward_channel_message(
         &self,
         clan_id: i64,
         channel_id: i64,
-        content: &str,
+        content_raw: &str,
+        text: &str,
         is_public: bool,
         mode: i32,
         attachments: Vec<ApiAttachment>,
+        mentions: Vec<crate::transport::OutgoingMention>,
     ) -> Result<()> {
         let proto = attachments
             .into_iter()
@@ -665,10 +805,20 @@ impl AppApi {
             })
             .collect();
         self.transport
-            .forward_channel_message(clan_id, channel_id, content, is_public, mode, proto)
+            .forward_channel_message(
+                clan_id,
+                channel_id,
+                content_raw,
+                text,
+                is_public,
+                mode,
+                proto,
+                mentions,
+            )
             .await
     }
 
+    #[allow(clippy::too_many_arguments)]
     #[allow(clippy::too_many_arguments)]
     pub async fn update_channel_message_with_attachments(
         &self,
@@ -679,6 +829,8 @@ impl AppApi {
         attachments: Vec<ApiAttachment>,
         mode: i32,
         is_public: bool,
+        topic_id: i64,
+        is_update_msg_topic: bool,
     ) -> Result<()> {
         let proto = attachments
             .into_iter()
@@ -695,7 +847,15 @@ impl AppApi {
             .collect();
         self.transport
             .update_channel_message_with_attachments(
-                clan_id, channel_id, message_id, content, proto, mode, is_public,
+                clan_id,
+                channel_id,
+                message_id,
+                content,
+                proto,
+                mode,
+                is_public,
+                topic_id,
+                is_update_msg_topic,
             )
             .await
     }
@@ -852,6 +1012,7 @@ impl AppApi {
             filetype,
             width,
             height,
+            duration,
             thumbnail,
         } = file;
         let filename = sanitize_filename(&filename);
@@ -917,7 +1078,7 @@ impl AppApi {
                 width,
                 height,
                 thumbnail: thumbnail_url,
-                duration: 0,
+                duration,
             },
             plan,
         })
@@ -1033,6 +1194,56 @@ impl AppApi {
     }
 
     #[allow(clippy::too_many_arguments)]
+    pub async fn send_topic_presigned_message(
+        &self,
+        clan_id: i64,
+        channel_id: i64,
+        content: &str,
+        is_public: bool,
+        mode: i32,
+        topic_id: i64,
+        attachments: Vec<mezon_proto::api::MessageAttachment>,
+        mentions: Vec<crate::transport::OutgoingMention>,
+        hashtags: Vec<crate::transport::OutgoingHashtag>,
+        emojis: Vec<crate::transport::OutgoingEmoji>,
+        presign_finish: Vec<String>,
+        reply: Option<crate::transport::OutgoingReply>,
+    ) -> Result<ApiMessage> {
+        let echo: Vec<crate::transport::ApiAttachment> = attachments
+            .iter()
+            .map(|a| crate::transport::ApiAttachment {
+                url: a.url.clone(),
+                filename: a.filename.clone(),
+                filetype: a.filetype.clone(),
+                width: a.width,
+                height: a.height,
+                thumbnail: a.thumbnail.clone(),
+                duration: a.duration,
+                size: a.size,
+            })
+            .collect();
+        let mut sent = self
+            .transport
+            .send_topic_message_with_attachments(
+                clan_id,
+                channel_id,
+                content,
+                is_public,
+                mode,
+                topic_id,
+                attachments,
+                mentions,
+                hashtags,
+                emojis,
+                Some(presign_finish),
+                reply,
+            )
+            .await?;
+        sent.attachments = echo;
+        Ok(sent)
+    }
+
+    #[allow(clippy::too_many_arguments)]
     pub async fn update_presign_finish(
         &self,
         clan_id: i64,
@@ -1044,6 +1255,8 @@ impl AppApi {
         create_time_seconds: u32,
         mode: i32,
         is_public: bool,
+        topic_id: i64,
+        is_update_msg_topic: bool,
     ) -> Result<()> {
         self.transport
             .patch_message_presign_finish(
@@ -1056,6 +1269,8 @@ impl AppApi {
                 create_time_seconds,
                 mode,
                 is_public,
+                topic_id,
+                is_update_msg_topic,
             )
             .await
     }
@@ -1083,6 +1298,8 @@ impl AppApi {
         keys: Vec<String>,
         mode: i32,
         is_public: bool,
+        topic_id: i64,
+        is_update_msg_topic: bool,
         on_complete: tokio::sync::mpsc::UnboundedSender<AttachmentUploadOutcome>,
     ) {
         use futures::StreamExt as _;
@@ -1118,6 +1335,8 @@ impl AppApi {
                         create_time_seconds,
                         mode,
                         is_public,
+                        topic_id,
+                        is_update_msg_topic,
                     )
                     .await
                 {
@@ -1139,6 +1358,8 @@ impl AppApi {
                     create_time_seconds,
                     mode,
                     is_public,
+                    topic_id,
+                    is_update_msg_topic,
                 )
                 .await
         {
@@ -1161,8 +1382,8 @@ impl AppApi {
                 size: 0,
                 url: a.url.clone(),
                 filetype: a.filetype.clone(),
-                width: 0,
-                height: 0,
+                width: a.width,
+                height: a.height,
                 thumbnail: String::new(),
                 duration: 0,
             })
@@ -1173,8 +1394,8 @@ impl AppApi {
                 url: a.url,
                 filename: a.filename,
                 filetype: a.filetype,
-                width: 0,
-                height: 0,
+                width: a.width,
+                height: a.height,
                 thumbnail: String::new(),
                 duration: 0,
                 size: 0,
@@ -1517,6 +1738,17 @@ impl AppApi {
     ) -> Result<mezon_proto::api::UserPermissionInChannelListResponse> {
         self.transport
             .list_user_permission_in_channel(clan_id, channel_id)
+            .await
+    }
+
+    pub async fn create_link_invite_user(
+        &self,
+        clan_id: i64,
+        channel_id: i64,
+        expiry_time: i32,
+    ) -> Result<mezon_proto::api::LinkInviteUser> {
+        self.transport
+            .create_link_invite_user(clan_id, channel_id, expiry_time)
             .await
     }
 }

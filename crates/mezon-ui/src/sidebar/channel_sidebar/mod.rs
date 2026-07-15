@@ -1,8 +1,6 @@
 use std::collections::HashSet;
 use std::rc::Rc;
-use std::time::{Duration, Instant};
-
-const SCROLL_HOVER_RELEASE_MS: u64 = 150;
+use std::time::Duration;
 
 use gpui::{
     Animation, AnimationExt as _, AnyElement, App, Context, Entity, ListState, MouseButton,
@@ -60,6 +58,7 @@ pub struct ChannelSidebar {
     settings: Entity<Settings>,
     items: Rc<Vec<SidebarItem>>,
     list_state: ListState,
+    first_badged_index: Option<usize>,
     active_clan_name: String,
     active_clan_name_upper: String,
     active_clan_id: Option<ClanId>,
@@ -70,8 +69,6 @@ pub struct ChannelSidebar {
     skeleton_phase: skeleton::Phase,
     skeleton_clan: Option<ClanId>,
     _skeleton_timer: Option<Task<()>>,
-    suppress_hover: bool,
-    last_scroll_at: Option<Instant>,
     last_locale: String,
     last_route_channel: Option<ChannelId>,
     last_clan_inputs: (Option<ClanId>, u64),
@@ -91,18 +88,10 @@ impl ChannelSidebar {
     ) -> Self {
         let channel_list_handle = channel_list.clone();
 
-        let list_state = ListState::new(0, gpui::ListAlignment::Top, px(32.)).measure_all();
-        let weak = cx.weak_entity();
-        list_state.set_scroll_handler(move |_event, _window, cx| {
-            weak.update(cx, |this, cx| {
-                this.last_scroll_at = Some(Instant::now());
-                if !this.suppress_hover {
-                    this.suppress_hover = true;
-                    cx.notify();
-                }
-            })
-            .ok();
-        });
+        let list_state = ListState::new(0, gpui::ListAlignment::Top, px(32.))
+            .measure_all()
+            .smooth_line_scroll()
+            .suppress_hover_while_scrolling();
 
         let clan_observe = cx.observe(&clan_list, |this, clan_list, cx| {
             let inputs = clan_inputs_fingerprint(clan_list.read(cx));
@@ -159,6 +148,7 @@ impl ChannelSidebar {
             settings,
             items: Rc::new(Vec::new()),
             list_state,
+            first_badged_index: None,
             active_clan_name: String::new(),
             active_clan_name_upper: String::new(),
             active_clan_id: None,
@@ -169,8 +159,6 @@ impl ChannelSidebar {
             skeleton_phase: skeleton::Phase::default(),
             skeleton_clan: None,
             _skeleton_timer: None,
-            suppress_hover: false,
-            last_scroll_at: None,
             last_locale: initial_locale,
             last_route_channel: initial_route_channel,
             last_clan_inputs: initial_clan_inputs,
@@ -195,7 +183,6 @@ impl ChannelSidebar {
         let clan_changed = self.active_clan_id != new_clan_id;
         if clan_changed {
             self.clan_menu_open = false;
-            self.suppress_hover = false;
         }
 
         let new_clan_name = clans
@@ -293,9 +280,9 @@ impl ChannelSidebar {
                                     &category.id, &ch.id
                                 )),
                                 row_elem_id: SharedString::from(if is_thread {
-                                    format!("thread-row-{}", ch.id)
+                                    format!("thread-row-{}-{}", &category.id, ch.id)
                                 } else {
-                                    format!("channel-row-{}", ch.id)
+                                    format!("channel-row-{}-{}", &category.id, ch.id)
                                 }),
                                 id: ch.id.to_string(),
                                 name: truncate_channel_label(&ch.name),
@@ -307,6 +294,7 @@ impl ChannelSidebar {
                                 badge_label,
                                 muted: ch.muted,
                                 is_thread,
+                                is_favorite: is_favorites,
                                 line_above,
                                 line_below,
                                 voice_members: ch
@@ -329,6 +317,13 @@ impl ChannelSidebar {
         let items_changed = *self.items != items;
         self.items = Rc::new(items);
 
+        self.first_badged_index = self.items.iter().position(|item| {
+            matches!(
+                item,
+                SidebarItem::Channel { badge_count, is_favorite: false, .. } if *badge_count > 0
+            )
+        });
+
         if clan_changed || old_count == 0 {
             self.list_state.reset(new_count);
         } else if new_count > old_count {
@@ -340,6 +335,31 @@ impl ChannelSidebar {
 
         let skeleton_changed = self.advance_skeleton(cold_loading, new_clan_id, cx);
         items_changed || name_changed || clan_changed || skeleton_changed
+    }
+
+    fn reveal_original_channel(&mut self, channel_id: &str, cx: &mut Context<Self>) {
+        let target = self.items.iter().position(|item| {
+            matches!(
+                item,
+                SidebarItem::Channel { id, is_favorite: false, .. } if id.as_str() == channel_id
+            )
+        });
+        if let Some(ix) = target {
+            self.list_state.scroll_to_center_item(ix);
+            cx.notify();
+        }
+    }
+
+    fn mention_target(&self) -> Option<usize> {
+        let ix = self.first_badged_index?;
+        (!self.list_state.visible_range().contains(&ix)).then_some(ix)
+    }
+
+    fn scroll_to_first_mention(&mut self, cx: &mut Context<Self>) {
+        if let Some(ix) = self.first_badged_index {
+            self.list_state.scroll_to_center_item(ix);
+            cx.notify();
+        }
     }
 
     fn advance_skeleton(
@@ -430,7 +450,7 @@ impl Render for ChannelSidebar {
         let items = self.items.clone();
         let channel_list_handle = self.channel_list_handle.clone();
         let active_clan_id_for_nav = self.active_clan_id;
-        let suppress_hover = self.suppress_hover;
+        let suppress_hover = self.list_state.is_scroll_hover_suppressed();
         let list_state = self.list_state.clone();
         let sidebar = cx.entity().downgrade();
         let sidebar_for_channel_menu = sidebar.clone();
@@ -454,8 +474,22 @@ impl Render for ChannelSidebar {
             )
         });
         let clan_menu_data = self.clan_menu_open.then(|| {
+            let active_clan_for_menu = self.clan_list.read(cx).active_clan().map(|clan| {
+                (
+                    clan.name.clone(),
+                    clan.avatar_url.clone().unwrap_or_default(),
+                )
+            });
             (
                 self.active_clan_id,
+                active_clan_for_menu
+                    .as_ref()
+                    .map(|(name, _)| name.clone())
+                    .unwrap_or_else(|| self.active_clan_name.clone()),
+                active_clan_for_menu
+                    .as_ref()
+                    .map(|(_, avatar)| avatar.clone())
+                    .unwrap_or_default(),
                 self.channel_list
                     .read(cx)
                     .is_show_empty_category(self.active_clan_id.unwrap_or(ClanId(0))),
@@ -504,6 +538,41 @@ impl Render for ChannelSidebar {
             ),
             skeleton::Phase::Hidden | skeleton::Phase::Pending => None,
         };
+
+        let mention_button = self.mention_target().map(|_| {
+            let sidebar = sidebar.clone();
+            let label = mezon_i18n::t(&locale, "common.newMention").to_uppercase();
+            div()
+                .absolute()
+                .top(px(8.))
+                .left_0()
+                .w_full()
+                .flex()
+                .justify_center()
+                .child(
+                    div()
+                        .id("mention-float-button")
+                        .occlude()
+                        .px_2()
+                        .py_1()
+                        .rounded_full()
+                        .bg(gpui::rgb(0xda_37_3c))
+                        .text_color(gpui::white())
+                        .text_sm()
+                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .shadow_lg()
+                        .cursor_pointer()
+                        .opacity(0.9)
+                        .hover(|s| s.opacity(0.95))
+                        .child(label)
+                        .on_click(move |_, _window, cx| {
+                            if let Some(view) = sidebar.upgrade() {
+                                view.update(cx, |this, cx| this.scroll_to_first_mention(cx));
+                            }
+                        }),
+                )
+                .into_any_element()
+        });
 
         div()
             .flex()
@@ -577,7 +646,15 @@ impl Render for ChannelSidebar {
                     })
                     .when_some(
                         clan_menu_data,
-                        move |el, (clan_id, show_empty, can_create_category, locale)| {
+                        move |el,
+                              (
+                            clan_id,
+                            clan_name,
+                            clan_avatar_url,
+                            show_empty,
+                            can_create_category,
+                            locale,
+                        )| {
                             let Some(clan_id) = clan_id else {
                                 return el;
                             };
@@ -586,6 +663,8 @@ impl Render for ChannelSidebar {
                                     sidebar_for_menu.clone(),
                                     channel_list_for_menu.clone(),
                                     clan_id,
+                                    clan_name,
+                                    clan_avatar_url,
                                     &locale,
                                     show_empty,
                                     can_create_category,
@@ -601,18 +680,9 @@ impl Render for ChannelSidebar {
                     .flex_1()
                     .min_h_0()
                     .relative()
-                    .on_mouse_move(cx.listener(|this, _event, _window, cx| {
-                        if this.suppress_hover
-                            && this.last_scroll_at.is_none_or(|t| {
-                                t.elapsed() >= Duration::from_millis(SCROLL_HOVER_RELEASE_MS)
-                            })
-                        {
-                            this.suppress_hover = false;
-                            cx.notify();
-                        }
-                    }))
                     .child(list_element)
                     .children(skeleton_overlay)
+                    .children(mention_button)
                     .custom_scrollbars(
                         Scrollbars::always_visible(ScrollAxes::Vertical)
                             .tracked_scroll_handle(&self.list_state),
@@ -764,6 +834,7 @@ fn render_banner_and_events(
     banner_url: Option<&str>,
     app_channels: &[AppChannelSlot],
     cx: &App,
+    suppress_hover: bool,
 ) -> AnyElement {
     let theme = cx.theme();
     let divider_color = theme.border;
@@ -839,7 +910,7 @@ fn render_banner_and_events(
                     .items_center()
                     .justify_center()
                     .cursor_pointer()
-                    .hover(|s| s.bg(hover_bg))
+                    .when(!suppress_hover, |app| app.hover(|s| s.bg(hover_bg)))
                     .child(icon_el),
             );
         }
@@ -855,7 +926,7 @@ fn render_banner_and_events(
                     .items_center()
                     .justify_center()
                     .cursor_pointer()
-                    .hover(|s| s.bg(hover_bg))
+                    .when(!suppress_hover, |more| more.hover(|s| s.bg(hover_bg)))
                     .child(
                         Icon::new(IconName::RightIcon)
                             .size(px(24.))
@@ -890,7 +961,7 @@ fn render_sidebar_item(
         SidebarItem::BannerAndEvents {
             banner_url,
             app_channels,
-        } => render_banner_and_events(banner_url.as_deref(), app_channels, cx),
+        } => render_banner_and_events(banner_url.as_deref(), app_channels, cx, suppress_hover),
 
         SidebarItem::Category {
             elem_id,
@@ -951,6 +1022,7 @@ fn render_sidebar_item(
             badge_label: _badge_label,
             muted,
             is_thread,
+            is_favorite,
             line_above,
             line_below,
             voice_members,
@@ -1072,6 +1144,8 @@ fn render_sidebar_item(
                 let click_id = ch_id.clone();
                 let click_clan = clan_id_inner;
                 let menu_sidebar = sidebar.clone();
+                let reveal_sidebar = sidebar.clone();
+                let reveal_favorite = *is_favorite;
                 let menu_channel_type = *channel_type;
                 let menu_is_thread = *is_thread;
                 return element
@@ -1087,6 +1161,11 @@ fn render_sidebar_item(
                                     channel_id: click_id.parse().unwrap_or_default(),
                                 },
                             );
+                        }
+                        if reveal_favorite {
+                            let _ = reveal_sidebar.update(cx, |this, cx| {
+                                this.reveal_original_channel(&click_id, cx);
+                            });
                         }
                     })
                     .on_right_click(move |position, _window, cx| {

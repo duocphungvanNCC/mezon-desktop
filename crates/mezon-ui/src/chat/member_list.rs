@@ -1,15 +1,15 @@
 use std::time::Duration;
 
 use gpui::{
-    AnyElement, App, Context, DismissEvent, Entity, Focusable, FontWeight, Hsla, Pixels, Point,
-    SharedString, Subscription, Task, UniformListScrollHandle, WeakEntity, Window, anchored,
-    deferred, div, prelude::*, px, rgb, uniform_list,
+    Anchor, AnyElement, App, Context, DismissEvent, Entity, Focusable, FontWeight, Hsla, Pixels,
+    Point, SharedString, Subscription, Task, UniformListScrollHandle, WeakEntity, Window, anchored,
+    deferred, div, prelude::*, px, rgb, size, uniform_list,
 };
 use mezon_store::{
-    ChannelEvent, ChannelId, ChannelList, ChannelMembersEvent, ChannelMembersStore, ClanId,
-    ClanList, ClanMember, ClanMembersEvent, ClanMembersStore, DirectEvent, DirectKind,
-    DirectMessageStore, GroupMember, GroupMembersEvent, GroupMembersStore, PresenceEvent,
-    PresenceStore, ProfileContext, Settings, UserId, split_members_by_status,
+    AccountStore, BadgeService, ChannelEvent, ChannelId, ChannelList, ChannelMembersEvent,
+    ChannelMembersStore, ClanId, ClanList, ClanMember, ClanMembersEvent, ClanMembersStore,
+    DirectEvent, DirectKind, DirectMessageStore, GroupMember, GroupMembersEvent, GroupMembersStore,
+    PresenceEvent, PresenceStore, ProfileContext, Settings, UserId, split_members_by_status,
 };
 use ui::utils::ROUNDED_BORDER_WINDOW;
 
@@ -21,6 +21,7 @@ use crate::image_cache::LruImageCache;
 use crate::router::{Route, Router};
 use crate::theme::{ActiveTheme, Theme};
 use crate::util::reactive::Derived;
+use crate::util::text_utils::normalize_search_string;
 
 const DEFAULT_ROLE_COLOR: u32 = 0x99aab5;
 
@@ -537,58 +538,182 @@ pub(crate) struct MentionMemberRaw {
     pub avatar_raw: String,
     pub display_lc: String,
     pub username_lc: String,
-    pub avatar_src: SharedString,
+    pub display_norm: String,
+    pub username_norm: String,
 }
 
-fn mention_avatar_src(cx: &App, avatar: &str) -> SharedString {
-    if avatar.is_empty() {
-        SharedString::default()
-    } else {
-        SharedString::from(crate::util::imgproxy::avatar_url(cx, avatar))
+fn active_dm(cx: &App) -> Option<ChannelId> {
+    match Router::global(cx).read(cx).route() {
+        Route::DirectMessage { direct_id, .. } => Some(direct_id),
+        _ => None,
     }
+}
+
+fn mention_member_raw(
+    user_id: String,
+    name: &str,
+    username: &str,
+    avatar: &str,
+) -> MentionMemberRaw {
+    MentionMemberRaw {
+        user_id,
+        display: name.to_string(),
+        username: username.to_string(),
+        avatar_raw: avatar.to_string(),
+        display_lc: name.to_lowercase(),
+        username_lc: username.to_lowercase(),
+        display_norm: normalize_search_string(name),
+        username_norm: normalize_search_string(username),
+    }
+}
+
+struct MentionChannelContext {
+    clan_id: ClanId,
+    private_channel: Option<ChannelId>,
+}
+
+fn mention_channel_context(cx: &App) -> Option<MentionChannelContext> {
+    if active_dm(cx).is_some() {
+        return None;
+    }
+    let channel_list = ChannelList::global(cx);
+    let channels = channel_list.read(cx);
+    let active = channels.active_channel()?;
+    let target = match active.parent_id.filter(|parent| !parent.is_zero()) {
+        Some(parent_id) => channels
+            .channel(active.clan_id, parent_id)
+            .unwrap_or(active),
+        None => active,
+    };
+    if target.clan_id.is_zero() {
+        return None;
+    }
+    Some(MentionChannelContext {
+        clan_id: target.clan_id,
+        private_channel: target.private.then_some(target.id),
+    })
+}
+
+pub(crate) fn mention_role_clan(cx: &App) -> Option<ClanId> {
+    mention_channel_context(cx).map(|ctx| ctx.clan_id)
+}
+
+pub(crate) fn mention_direct_id(cx: &App) -> Option<ChannelId> {
+    active_dm(cx)
+}
+
+pub(crate) fn mention_private_channel(cx: &App) -> Option<ChannelId> {
+    mention_channel_context(cx).and_then(|ctx| ctx.private_channel)
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) struct MentionScope {
+    direct_id: Option<ChannelId>,
+    clan_id: Option<ClanId>,
+    channel_id: Option<ChannelId>,
+}
+
+pub(crate) fn mention_scope(cx: &App) -> MentionScope {
+    if let Some(direct_id) = active_dm(cx) {
+        return MentionScope {
+            direct_id: Some(direct_id),
+            clan_id: None,
+            channel_id: None,
+        };
+    }
+    let channel_list = ChannelList::global(cx);
+    let channels = channel_list.read(cx);
+    MentionScope {
+        direct_id: None,
+        clan_id: ClanList::global(cx).read(cx).active_clan_id,
+        channel_id: channels.active_channel().map(|channel| channel.id),
+    }
+}
+
+fn direct_pair_pool(cx: &App, direct_id: ChannelId) -> Vec<MentionMemberRaw> {
+    let store = DirectMessageStore::global(cx);
+    let Some(dm) = store.read(cx).find(direct_id) else {
+        return Vec::new();
+    };
+    let Some(peer_id) = dm.peer_user_id else {
+        return Vec::new();
+    };
+    let mut out = Vec::with_capacity(2);
+    if let Some(self_id) = BadgeService::global(cx).read(cx).current_user_id(cx)
+        && let Some(account) = AccountStore::try_global(cx)
+        && let Some(me) = account.read(cx).account.as_ref()
+    {
+        let display = if me.display_name.is_empty() {
+            me.username.as_str()
+        } else {
+            me.display_name.as_str()
+        };
+        out.push(mention_member_raw(
+            self_id.to_string(),
+            display,
+            &me.username,
+            me.avatar_url.as_deref().unwrap_or_default(),
+        ));
+    }
+    out.push(mention_member_raw(
+        peer_id.to_string(),
+        &dm.label,
+        &dm.peer_username,
+        &dm.avatar,
+    ));
+    out
 }
 
 pub(crate) fn mention_member_pool(cx: &App) -> Vec<MentionMemberRaw> {
-    if let Some(direct_id) = active_group_dm(cx) {
+    let mut pool = if let Some(direct_id) = active_group_dm(cx) {
         let store = GroupMembersStore::global(cx);
         let store = store.read(cx);
-        return store
+        store
             .members(direct_id)
             .iter()
-            .map(|m| MentionMemberRaw {
-                user_id: m.id().to_string(),
-                display: m.name().to_string(),
-                username: m.user.username.clone(),
-                avatar_raw: m.avatar().to_string(),
-                display_lc: m.name().to_lowercase(),
-                username_lc: m.user.username.to_lowercase(),
-                avatar_src: mention_avatar_src(cx, m.avatar()),
-            })
-            .collect();
-    }
-    let Some(ctx) = active_channel_context(cx) else {
-        return Vec::new();
-    };
-    let store = ClanMembersStore::global(cx);
-    let store = store.read(cx);
-    let pool: Vec<&ClanMember> = match &ctx.filter_ids {
-        Some(ids) => ids
+            .map(|m| mention_member_raw(m.id().to_string(), m.name(), &m.user.username, m.avatar()))
+            .collect::<Vec<_>>()
+    } else if let Some(direct_id) = active_dm(cx) {
+        direct_pair_pool(cx, direct_id)
+    } else {
+        let Some(ctx) = mention_channel_context(cx) else {
+            return Vec::new();
+        };
+        let store = ClanMembersStore::global(cx);
+        let store = store.read(cx);
+        let members: Vec<&ClanMember> = match ctx.private_channel {
+            Some(channel_id) => ChannelMembersStore::global(cx)
+                .read(cx)
+                .member_ids(channel_id)
+                .iter()
+                .filter_map(|id| store.member(ctx.clan_id, *id))
+                .collect(),
+            None => store.members(ctx.clan_id),
+        };
+        members
             .iter()
-            .filter_map(|id| store.member(ctx.clan_id, *id))
-            .collect(),
-        None => store.members(ctx.clan_id),
+            .map(|m| {
+                mention_member_raw(
+                    m.user.id.to_string(),
+                    m.name(),
+                    &m.user.username,
+                    m.avatar(),
+                )
+            })
+            .collect::<Vec<_>>()
     };
-    pool.iter()
-        .map(|m| MentionMemberRaw {
-            user_id: m.user.id.to_string(),
-            display: m.name().to_string(),
-            username: m.user.username.clone(),
-            avatar_raw: m.avatar().to_string(),
-            display_lc: m.name().to_lowercase(),
-            username_lc: m.user.username.to_lowercase(),
-            avatar_src: mention_avatar_src(cx, m.avatar()),
-        })
-        .collect()
+    pool.sort_by(|a, b| a.display_lc.cmp(&b.display_lc));
+    pool
+}
+
+pub(crate) fn ensure_mention_members_loaded(cx: &mut App) {
+    if let Some(direct_id) = active_group_dm(cx) {
+        GroupMembersStore::global(cx).update(cx, |store, cx| store.ensure_loaded(direct_id, cx));
+        return;
+    }
+    if let Some(channel_id) = mention_channel_context(cx).and_then(|ctx| ctx.private_channel) {
+        ChannelMembersStore::global(cx).update(cx, |store, cx| store.ensure_loaded(channel_id, cx));
+    }
 }
 
 fn single_line(s: String) -> String {
@@ -856,6 +981,9 @@ impl Render for MemberListPanel {
                 })
                 .collect::<Vec<_>>()
         })
+        .with_item_size(size(px(245.), px(48.)))
+        .smooth_line_scroll()
+        .suppress_hover_while_scrolling()
         .track_scroll(&self.list_scroll)
         .flex_1()
         .min_h_0()
@@ -883,7 +1011,11 @@ impl Render for MemberListPanel {
             )
             .when_some(profile_overlay, |el, (popover, pos)| {
                 el.child(deferred(
-                    anchored().position(pos).snap_to_window().child(popover),
+                    anchored()
+                        .position(pos)
+                        .anchor(Anchor::TopRight)
+                        .snap_to_window()
+                        .child(popover),
                 ))
             })
     }
@@ -961,4 +1093,171 @@ fn build_member_menu(
     }
 
     menu
+}
+
+#[cfg(test)]
+mod scroll_tests {
+    use std::cell::Cell;
+    use std::ops::Range;
+    use std::rc::Rc;
+    use std::time::Duration;
+
+    use gpui::{
+        AppContext, Context, IntoElement, ListAlignment, ListState, MouseMoveEvent, Render,
+        ScrollDelta, ScrollWheelEvent, Styled, TestAppContext, UniformListScrollHandle, Window,
+        div, list, point, px, size, uniform_list,
+    };
+
+    struct TestView {
+        scroll: UniformListScrollHandle,
+        probes: Rc<Cell<usize>>,
+    }
+
+    struct VariableTestView {
+        scroll: ListState,
+    }
+
+    impl Render for TestView {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            let probes = self.probes.clone();
+            uniform_list(
+                "member-list-scroll-test",
+                10,
+                move |range: Range<usize>, _, _| {
+                    if range == (0..1) {
+                        probes.set(probes.get() + 1);
+                    }
+                    range.map(|_| div().h(px(48.)).w_full()).collect::<Vec<_>>()
+                },
+            )
+            .with_item_size(size(px(100.), px(48.)))
+            .smooth_line_scroll()
+            .suppress_hover_while_scrolling()
+            .track_scroll(&self.scroll)
+            .size_full()
+        }
+    }
+
+    impl Render for VariableTestView {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            list(self.scroll.clone(), |_, _, _| {
+                div().h(px(48.)).w_full().into_any_element()
+            })
+            .size_full()
+        }
+    }
+
+    #[gpui::test]
+    fn member_list_skips_size_probe_and_smooths_only_line_wheel(cx: &mut TestAppContext) {
+        let cx = cx.add_empty_window();
+        let scroll = UniformListScrollHandle::new();
+        let probes = Rc::new(Cell::new(0));
+        cx.draw(point(px(0.), px(0.)), size(px(100.), px(200.)), |_, cx| {
+            cx.new(|_| TestView {
+                scroll: scroll.clone(),
+                probes: probes.clone(),
+            })
+            .into_any_element()
+        });
+
+        assert_eq!(probes.get(), 0);
+        cx.simulate_event(ScrollWheelEvent {
+            position: point(px(50.), px(100.)),
+            delta: ScrollDelta::Lines(point(0., -3.)),
+            ..Default::default()
+        });
+        assert!(scroll.is_smooth_wheel_scrolling());
+        assert!(scroll.is_scroll_hover_suppressed());
+
+        cx.simulate_event(ScrollWheelEvent {
+            position: point(px(50.), px(100.)),
+            delta: ScrollDelta::Pixels(point(px(0.), px(-10.))),
+            ..Default::default()
+        });
+        assert!(!scroll.is_smooth_wheel_scrolling());
+        assert!(scroll.is_scroll_hover_suppressed());
+
+        cx.draw(point(px(0.), px(0.)), size(px(100.), px(200.)), |_, cx| {
+            cx.new(|_| TestView {
+                scroll: scroll.clone(),
+                probes: probes.clone(),
+            })
+            .into_any_element()
+        });
+        cx.executor().advance_clock(Duration::from_millis(350));
+        cx.run_until_parked();
+        assert!(!scroll.is_scroll_hover_active());
+        assert!(scroll.is_scroll_hover_suppressed());
+        cx.simulate_event(MouseMoveEvent {
+            position: point(px(51.), px(100.)),
+            ..Default::default()
+        });
+        assert!(!scroll.is_scroll_hover_suppressed());
+
+        cx.simulate_event(ScrollWheelEvent {
+            position: point(px(50.), px(100.)),
+            delta: ScrollDelta::Pixels(point(px(0.), px(-10.))),
+            ..Default::default()
+        });
+        assert!(scroll.is_scroll_hover_suppressed());
+        cx.draw(point(px(0.), px(0.)), size(px(100.), px(200.)), |_, cx| {
+            cx.new(|_| TestView {
+                scroll: scroll.clone(),
+                probes: probes.clone(),
+            })
+            .into_any_element()
+        });
+        cx.executor().advance_clock(Duration::from_millis(350));
+        cx.run_until_parked();
+        assert!(!scroll.is_scroll_hover_active());
+        assert!(scroll.is_scroll_hover_suppressed());
+        cx.simulate_event(MouseMoveEvent {
+            position: point(px(52.), px(100.)),
+            ..Default::default()
+        });
+        assert!(!scroll.is_scroll_hover_suppressed());
+    }
+
+    #[gpui::test]
+    fn variable_list_suppresses_hover_for_the_scroll_gesture(cx: &mut TestAppContext) {
+        let cx = cx.add_empty_window();
+        let scroll = ListState::new(10, ListAlignment::Top, px(0.))
+            .smooth_line_scroll()
+            .suppress_hover_while_scrolling();
+        cx.draw(point(px(0.), px(0.)), size(px(100.), px(200.)), |_, cx| {
+            cx.new(|_| VariableTestView {
+                scroll: scroll.clone(),
+            })
+            .into_any_element()
+        });
+
+        cx.simulate_event(ScrollWheelEvent {
+            position: point(px(50.), px(100.)),
+            delta: ScrollDelta::Lines(point(0., -3.)),
+            ..Default::default()
+        });
+        assert!(scroll.is_scroll_hover_suppressed());
+
+        cx.simulate_event(ScrollWheelEvent {
+            position: point(px(50.), px(100.)),
+            delta: ScrollDelta::Pixels(point(px(0.), px(-10.))),
+            ..Default::default()
+        });
+
+        cx.draw(point(px(0.), px(0.)), size(px(100.), px(200.)), |_, cx| {
+            cx.new(|_| VariableTestView {
+                scroll: scroll.clone(),
+            })
+            .into_any_element()
+        });
+        cx.executor().advance_clock(Duration::from_millis(350));
+        cx.run_until_parked();
+        assert!(!scroll.is_scroll_hover_active());
+        assert!(scroll.is_scroll_hover_suppressed());
+        cx.simulate_event(MouseMoveEvent {
+            position: point(px(51.), px(100.)),
+            ..Default::default()
+        });
+        assert!(!scroll.is_scroll_hover_suppressed());
+    }
 }

@@ -38,16 +38,20 @@ use std::{
     fmt::Debug,
     marker::PhantomData,
     mem,
-    rc::Rc,
+    rc::{Rc, Weak},
     sync::Arc,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
-use super::ImageCacheProvider;
+use super::{
+    ImageCacheProvider,
+    list::{WheelScrollAnimation, wheel_scroll_duration},
+};
 
 const DRAG_THRESHOLD: f64 = 2.;
 const DEFAULT_TOOLTIP_SHOW_DELAY: Duration = Duration::from_millis(500);
 const HOVERABLE_TOOLTIP_HIDE_DELAY: Duration = Duration::from_millis(500);
+const SCROLL_HOVER_RELEASE_DELAY: Duration = Duration::from_millis(300);
 
 /// The styling information for a given group.
 pub struct GroupStyle {
@@ -1817,6 +1821,8 @@ pub struct Interactivity {
     pub(crate) focusable: bool,
     pub(crate) tracked_focus_handle: Option<FocusHandle>,
     pub(crate) tracked_scroll_handle: Option<ScrollHandle>,
+    pub(crate) smooth_line_scroll: bool,
+    pub(crate) suppress_hover_while_scrolling: bool,
     pub(crate) scroll_anchor: Option<ScrollAnchor>,
     pub(crate) scroll_offset: Option<Rc<RefCell<Point<Pixels>>>>,
     pub(crate) group: Option<SharedString>,
@@ -1883,6 +1889,149 @@ pub struct Interactivity {
 
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) debug_selector: Option<String>,
+}
+
+fn start_smooth_scroll_handle(
+    handle: ScrollHandle,
+    delta: Pixels,
+    current_view: EntityId,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    if delta == px(0.) {
+        return;
+    }
+
+    let should_schedule = {
+        let state = &mut *handle.0.borrow_mut();
+        let now = Instant::now();
+        let current = state.offset.borrow().y.as_f32();
+        let previous = state.wheel_scroll_animation;
+        let (remaining, velocity) = previous.map_or((0., 0.), |animation| {
+            let (_, velocity, _) = animation.sample(now);
+            (animation.target - animation.applied, velocity)
+        });
+        let target = (current + remaining + delta.as_f32())
+            .clamp(-state.max_offset.y.as_f32(), 0.);
+        if (target - current).abs() <= f32::EPSILON {
+            state.wheel_scroll_animation = None;
+            return;
+        }
+        state.touch_scroll_hover_activity();
+        state.wheel_scroll_animation = Some(WheelScrollAnimation::new(
+            current,
+            target,
+            velocity,
+            now,
+            wheel_scroll_duration(px(target - current)),
+        ));
+        if state.wheel_frame_scheduled {
+            false
+        } else {
+            state.wheel_frame_scheduled = true;
+            true
+        }
+    };
+
+    if should_schedule {
+        cx.notify(current_view);
+        schedule_smooth_scroll_handle_frame(handle, current_view, window);
+    }
+}
+
+fn ensure_scroll_handle_hover_release_task(
+    handle: &ScrollHandle,
+    current_view: EntityId,
+    window: &Window,
+    cx: &App,
+) {
+    let should_spawn = {
+        let state = handle.0.borrow();
+        state.suppress_hover_while_scrolling
+            && state.scroll_hover_last_activity.is_some()
+            && state
+                .scroll_hover_release_task
+                .as_ref()
+                .is_none_or(Task::is_ready)
+    };
+    if !should_spawn {
+        return;
+    }
+
+    let weak_state = Rc::downgrade(&handle.0);
+    let task = window.spawn(cx, async move |cx| {
+        let mut remaining = SCROLL_HOVER_RELEASE_DELAY;
+        loop {
+            cx.background_executor().timer(remaining).await;
+            let next = cx
+                .update(|_, cx| {
+                    let Some(state) = Weak::upgrade(&weak_state) else {
+                        return None;
+                    };
+                    let mut state = state.borrow_mut();
+                    let Some(last_activity) = state.scroll_hover_last_activity else {
+                        return None;
+                    };
+                    let elapsed = cx
+                        .background_executor()
+                        .now()
+                        .saturating_duration_since(last_activity);
+                    if elapsed >= SCROLL_HOVER_RELEASE_DELAY {
+                        state.scroll_hover_last_activity = None;
+                        cx.notify(current_view);
+                        None
+                    } else {
+                        Some(SCROLL_HOVER_RELEASE_DELAY - elapsed)
+                    }
+                })
+                .ok()
+                .flatten();
+            let Some(next) = next else {
+                break;
+            };
+            remaining = next;
+        }
+    });
+    handle.0.borrow_mut().scroll_hover_release_task = Some(task);
+}
+
+fn schedule_smooth_scroll_handle_frame(
+    handle: ScrollHandle,
+    current_view: EntityId,
+    window: &mut Window,
+) {
+    window.on_next_frame(move |window, cx| {
+        let continue_animation = {
+            let state = &mut *handle.0.borrow_mut();
+            state.wheel_frame_scheduled = false;
+            let Some(mut animation) = state.wheel_scroll_animation else {
+                return;
+            };
+
+            let (position, _, finished) = animation.sample(Instant::now());
+            let pixel_delta = px(position - animation.applied);
+            animation.applied = position;
+            {
+                let mut offset = state.offset.borrow_mut();
+                let next = (offset.y + pixel_delta).clamp(-state.max_offset.y, px(0.));
+                if next != offset.y {
+                    offset.y = next;
+                }
+            }
+            if finished {
+                state.wheel_scroll_animation = None;
+            } else {
+                state.wheel_scroll_animation = Some(animation);
+                state.wheel_frame_scheduled = true;
+            }
+            cx.notify(current_view);
+            !finished
+        };
+
+        if continue_animation {
+            schedule_smooth_scroll_handle_frame(handle, current_view, window);
+        }
+    });
 }
 
 impl Interactivity {
@@ -1983,6 +2132,17 @@ impl Interactivity {
         f: impl FnOnce(&Style, Point<Pixels>, Option<Hitbox>, &mut Window, &mut App) -> R,
     ) -> R {
         self.content_size = content_size;
+        if self.suppress_hover_while_scrolling
+            && let Some(handle) = self.tracked_scroll_handle.as_ref()
+        {
+            handle.0.borrow_mut().suppress_hover_while_scrolling = true;
+            ensure_scroll_handle_hover_release_task(
+                handle,
+                window.current_view(),
+                window,
+                cx,
+            );
+        }
 
         #[cfg(any(feature = "inspector", debug_assertions))]
         window.with_inspector_state(
@@ -2049,6 +2209,16 @@ impl Interactivity {
                             let scroll_offset =
                                 self.clamp_scroll_position(bounds, &style, window, cx);
                             let result = f(&style, scroll_offset, hitbox, window, cx);
+                            if self.suppress_hover_while_scrolling
+                                && self.tracked_scroll_handle.as_ref().is_some_and(|handle| {
+                                    handle.0.borrow().is_scroll_hover_active()
+                                })
+                            {
+                                window.insert_hitbox(
+                                    bounds,
+                                    HitboxBehavior::BlockMouseExceptScroll,
+                                );
+                            }
                             (result, element_state)
                         },
                     )
@@ -2875,10 +3045,37 @@ impl Interactivity {
             let line_height = window.line_height();
             let hitbox = hitbox.clone();
             let current_view = window.current_view();
+            let smooth_line_scroll = self.smooth_line_scroll;
+            let suppress_hover_while_scrolling = self.suppress_hover_while_scrolling;
+            let tracked_scroll_handle = self.tracked_scroll_handle.clone();
+            let hover_scroll_handle = tracked_scroll_handle.clone().filter(|handle| {
+                suppress_hover_while_scrolling
+                    && handle.0.borrow().scroll_hover_waiting_for_pointer_move
+            });
+            if let Some(handle) = hover_scroll_handle {
+                let bounds = hitbox.bounds;
+                window.on_mouse_event(move |event: &MouseMoveEvent, phase, _window, cx| {
+                    if phase != DispatchPhase::Bubble || !bounds.contains(&event.position) {
+                        return;
+                    }
+                    let should_release = {
+                        let mut state = handle.0.borrow_mut();
+                        if state.scroll_hover_waiting_for_pointer_move
+                            && !state.is_scroll_hover_active()
+                        {
+                            state.scroll_hover_waiting_for_pointer_move = false;
+                            true
+                        } else {
+                            false
+                        }
+                    };
+                    if should_release {
+                        cx.notify(current_view);
+                    }
+                });
+            }
             window.on_mouse_event(move |event: &ScrollWheelEvent, phase, window, cx| {
                 if phase == DispatchPhase::Bubble && hitbox.should_handle_scroll(window) {
-                    let mut scroll_offset = scroll_offset.borrow_mut();
-                    let old_scroll_offset = *scroll_offset;
                     let delta = event.delta.pixel_delta(line_height);
 
                     let mut delta_x = Pixels::ZERO;
@@ -2904,9 +3101,29 @@ impl Interactivity {
                             delta_x = Pixels::ZERO;
                         }
                     }
+                    if smooth_line_scroll
+                        && !event.delta.precise()
+                        && delta_x.is_zero()
+                        && !delta_y.is_zero()
+                        && let Some(handle) = tracked_scroll_handle.clone()
+                    {
+                        start_smooth_scroll_handle(handle, delta_y, current_view, window, cx);
+                        return;
+                    }
+                    if let Some(handle) = tracked_scroll_handle.as_ref() {
+                        handle.cancel_smooth_wheel_scroll();
+                    }
+                    let mut scroll_offset = scroll_offset.borrow_mut();
+                    let old_scroll_offset = *scroll_offset;
                     scroll_offset.y += delta_y;
                     scroll_offset.x += delta_x;
                     if *scroll_offset != old_scroll_offset {
+                        drop(scroll_offset);
+                        if suppress_hover_while_scrolling
+                            && let Some(handle) = tracked_scroll_handle.as_ref()
+                        {
+                            handle.0.borrow_mut().touch_scroll_hover_activity();
+                        }
                         cx.notify(current_view);
                     }
                 }
@@ -3650,10 +3867,41 @@ struct ScrollHandleState {
     offset: Rc<RefCell<Point<Pixels>>>,
     bounds: Bounds<Pixels>,
     max_offset: Point<Pixels>,
+    wheel_scroll_animation: Option<WheelScrollAnimation>,
+    wheel_frame_scheduled: bool,
+    suppress_hover_while_scrolling: bool,
+    scroll_hover_last_activity: Option<Instant>,
+    scroll_hover_waiting_for_pointer_move: bool,
+    scroll_hover_release_task: Option<Task<()>>,
+    scrollbar_dragging: bool,
     child_bounds: Vec<Bounds<Pixels>>,
     scroll_to_bottom: bool,
     overflow: Point<Overflow>,
     active_item: Option<ScrollActiveItem>,
+}
+
+impl ScrollHandleState {
+    fn touch_scroll_hover_activity(&mut self) {
+        if self.suppress_hover_while_scrolling {
+            self.scroll_hover_last_activity = Some(Instant::now());
+            self.scroll_hover_waiting_for_pointer_move = true;
+        }
+    }
+
+    fn is_scroll_hover_suppressed(&self) -> bool {
+        self.suppress_hover_while_scrolling
+            && (self.scroll_hover_last_activity.is_some()
+                || self.wheel_scroll_animation.is_some()
+                || self.scrollbar_dragging
+                || self.scroll_hover_waiting_for_pointer_move)
+    }
+
+    fn is_scroll_hover_active(&self) -> bool {
+        self.suppress_hover_while_scrolling
+            && (self.scroll_hover_last_activity.is_some()
+                || self.wheel_scroll_animation.is_some()
+                || self.scrollbar_dragging)
+    }
 }
 
 #[derive(Default, Debug, Clone, Copy)]
@@ -3685,6 +3933,34 @@ impl ScrollHandle {
     /// Construct a new scroll handle.
     pub fn new() -> Self {
         Self(Rc::default())
+    }
+
+    pub(crate) fn cancel_smooth_wheel_scroll(&self) {
+        self.0.borrow_mut().wheel_scroll_animation = None;
+    }
+
+    pub(crate) fn is_smooth_wheel_scrolling(&self) -> bool {
+        self.0.borrow().wheel_scroll_animation.is_some()
+    }
+
+    pub(crate) fn is_scroll_hover_suppressed(&self) -> bool {
+        self.0.borrow().is_scroll_hover_suppressed()
+    }
+
+    pub(crate) fn is_scroll_hover_active(&self) -> bool {
+        self.0.borrow().is_scroll_hover_active()
+    }
+
+    #[allow(missing_docs)]
+    pub fn scrollbar_drag_started(&self) {
+        let mut state = self.0.borrow_mut();
+        state.wheel_scroll_animation = None;
+        state.scrollbar_dragging = true;
+    }
+
+    #[allow(missing_docs)]
+    pub fn scrollbar_drag_ended(&self) {
+        self.0.borrow_mut().scrollbar_dragging = false;
     }
 
     /// Get the current scroll offset.
@@ -3748,6 +4024,7 @@ impl ScrollHandle {
     /// Update [ScrollHandleState]'s active item for scrolling to in prepaint
     pub fn scroll_to_item(&self, ix: usize) {
         let mut state = self.0.borrow_mut();
+        state.wheel_scroll_animation = None;
         state.active_item = Some(ScrollActiveItem {
             index: ix,
             strategy: ScrollStrategy::default(),
@@ -3758,6 +4035,7 @@ impl ScrollHandle {
     /// This scrolls the minimal amount to ensure that the child is the first visible element
     pub fn scroll_to_top_of_item(&self, ix: usize) {
         let mut state = self.0.borrow_mut();
+        state.wheel_scroll_animation = None;
         state.active_item = Some(ScrollActiveItem {
             index: ix,
             strategy: ScrollStrategy::Top,
@@ -3818,6 +4096,7 @@ impl ScrollHandle {
     /// Scrolls to the bottom.
     pub fn scroll_to_bottom(&self) {
         let mut state = self.0.borrow_mut();
+        state.wheel_scroll_animation = None;
         state.scroll_to_bottom = true;
     }
 
@@ -3825,8 +4104,13 @@ impl ScrollHandle {
     /// parent container to the top left of the first child.
     /// As you scroll further down the offset becomes more negative.
     pub fn set_offset(&self, mut position: Point<Pixels>) {
-        let state = self.0.borrow();
+        let mut state = self.0.borrow_mut();
+        state.wheel_scroll_animation = None;
+        let changed = *state.offset.borrow() != position;
         *state.offset.borrow_mut() = position;
+        if changed {
+            state.touch_scroll_hover_activity();
+        }
     }
 
     /// Get the logical scroll top, based on a child index and a pixel offset.

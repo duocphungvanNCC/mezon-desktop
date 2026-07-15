@@ -50,6 +50,7 @@ pub fn render_ogp_preview(
 
     let image_box = div()
         .w_full()
+        .h(px(200.))
         .flex_shrink_0()
         .mt_1()
         .rounded(px(4.))
@@ -57,6 +58,9 @@ pub fn render_ogp_preview(
         .border_1()
         .border_color(hsla(0., 0., 1., 0.05))
         .bg(theme.tokens.theme_setting_primary)
+        .flex()
+        .items_center()
+        .justify_center()
         .child(ogp_image(ogp.image_proxied.clone(), theme.text_muted));
 
     Some(
@@ -68,6 +72,7 @@ pub fn render_ogp_preview(
             .mt_1()
             .mb_1()
             .rounded(px(8.))
+            .overflow_hidden()
             .border_l(px(3.))
             .border_color(theme.tokens.border_left_highlight)
             .bg(theme.tokens.theme_setting_nav)
@@ -94,7 +99,7 @@ fn ogp_image(src: SharedString, fallback_fg: gpui::Rgba) -> AnyElement {
     img(src)
         .w_full()
         .max_h(px(200.))
-        .object_fit(ObjectFit::Cover)
+        .object_fit(ObjectFit::Contain)
         .with_fallback(move || ogp_image_fallback(fallback_fg))
         .into_any_element()
 }
@@ -102,7 +107,7 @@ fn ogp_image(src: SharedString, fallback_fg: gpui::Rgba) -> AnyElement {
 fn ogp_image_fallback(fallback_fg: gpui::Rgba) -> AnyElement {
     div()
         .w_full()
-        .h(px(120.))
+        .h_full()
         .flex()
         .items_center()
         .justify_center()

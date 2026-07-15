@@ -792,6 +792,7 @@ impl<T: ScrollableHandle> ScrollbarState<T> {
     ) {
         self.set_thumb_state(ThumbState::Dragging(axis, drag_offset), window, cx);
         self.scroll_handle().drag_started();
+        self.notify_parent(cx);
     }
 
     fn update_hovered_thumb(
@@ -966,6 +967,14 @@ impl ScrollableHandle for UniformListScrollHandle {
     fn viewport(&self) -> Bounds<Pixels> {
         self.0.borrow().base_handle.bounds()
     }
+
+    fn drag_started(&self) {
+        self.0.borrow().base_handle.scrollbar_drag_started();
+    }
+
+    fn drag_ended(&self) {
+        self.0.borrow().base_handle.scrollbar_drag_ended();
+    }
 }
 
 impl ScrollableHandle for ListState {
@@ -1009,6 +1018,14 @@ impl ScrollableHandle for ScrollHandle {
 
     fn viewport(&self) -> Bounds<Pixels> {
         self.bounds()
+    }
+
+    fn drag_started(&self) {
+        self.scrollbar_drag_started();
+    }
+
+    fn drag_ended(&self) {
+        self.scrollbar_drag_ended();
     }
 }
 
@@ -1559,6 +1576,7 @@ impl<T: ScrollableHandle> Element for ScrollbarElement<T> {
                     state.update(cx, |state, cx| {
                         if state.is_dragging() {
                             state.scroll_handle().drag_ended();
+                            state.notify_parent(cx);
                         }
 
                         if !state.parent_hovered(window) {

@@ -55,13 +55,17 @@ use tokio::fs;
 pub use account::*;
 pub use activity::{ActivityEvent, ActivityStore, UserActivity};
 pub use album_layout::{AlbumLayout, AlbumTile, calculate_album_layout};
-pub use audio::{AudioDeviceInfo, AudioStore, MicCaptureFactory, MicCaptureHandle};
+pub use audio::{
+    AudioDeviceInfo, AudioStore, MicCaptureFactory, MicCaptureHandle, MicPcmCaptureFactory,
+    MicPcmFormat,
+};
 pub use badge::BadgeService;
 pub use cache::{Freshness, KeyedCache};
 pub use channel::*;
 pub use channel_members::{ChannelMember, ChannelMembersEvent, ChannelMembersStore};
 pub use channel_permissions::{
-    ChannelPermissionsEvent, ChannelPermissionsStore, PERMISSION_MANAGE_THREAD,
+    ChannelPermissionsEvent, ChannelPermissionsStore, PERMISSION_DELETE_MESSAGE,
+    PERMISSION_MANAGE_THREAD,
 };
 pub use clan::*;
 pub use clan_members::{
@@ -105,9 +109,10 @@ pub use permissions::{
     ClanSettingsPermissions, PERMISSION_ADMINISTRATOR, PERMISSION_CLAN_OWNER,
     PERMISSION_MANAGE_CHANNEL, PERMISSION_MANAGE_CLAN, PermissionEvent, PermissionStore,
 };
-pub use pinned::{PinnedMessage, PinnedMessagesStore};
+pub use pinned::{PinnedEvent, PinnedMessage, PinnedMessagesStore};
 pub use platform::{
-    DesktopNotification, NotifyFn, OpenUrlFn, PlatformStore, download_url_with_dialog,
+    DesktopNotification, DownloadEvent, NotifyFn, OpenUrlFn, PlatformStore,
+    copy_image_url_to_clipboard, download_url_with_dialog,
 };
 pub use presence::*;
 pub use realtime::{RealtimeDispatch, RealtimeKind};

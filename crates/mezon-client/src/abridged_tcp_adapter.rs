@@ -587,7 +587,6 @@ impl AbridgedTcpAdapter {
             tracing::trace!("select iteration begin");
             tokio::select! {
                 result = tls.read(&mut read_buf) => {
-                    tracing::debug!("select: READ branch fired");
                     match result {
                         Ok(0) => {
                             tracing::info!("Server closed connection after {} reads", read_count);
@@ -629,7 +628,6 @@ impl AbridgedTcpAdapter {
                     }
                 }
                 maybe_msg = write_rx.recv() => {
-                    tracing::debug!("select: WRITE branch fired");
                     match maybe_msg {
                         Some(packet) => {
                             if packet.first() == Some(&0xef) {

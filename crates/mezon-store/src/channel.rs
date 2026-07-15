@@ -138,6 +138,8 @@ pub enum ChannelEvent {
     ActiveChannelChanged(Option<ChannelId>),
     Unread(ChannelId),
     InVoiceChanged,
+    ClanChannelsLoaded(ClanId),
+    UserChannelsLoaded,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -202,8 +204,10 @@ pub struct ChannelList {
     topic_parent_badges: HashMap<ChannelId, TopicParentBadge>,
     pending_channel_badges: HashMap<ChannelId, u32>,
     user_channels: HashMap<ChannelId, Channel>,
+    user_channels_order: Vec<ChannelId>,
     user_channels_loading: bool,
     in_voice: HashMap<UserId, InVoiceInfo>,
+    user_channels_loaded: bool,
     loading: HashSet<ClanId>,
     active_clan_id: Option<ClanId>,
     pub active_channel_id: Option<ChannelId>,
@@ -307,8 +311,10 @@ impl ChannelList {
         self.topic_parent_badges.clear();
         self.pending_channel_badges.clear();
         self.user_channels.clear();
+        self.user_channels_order.clear();
         self.user_channels_loading = false;
         self.in_voice.clear();
+        self.user_channels_loaded = false;
         self.loading.clear();
         self.show_empty_categories.clear();
         self.remembered_channels.clear();
@@ -375,8 +381,10 @@ impl ChannelList {
             topic_parent_badges: HashMap::new(),
             pending_channel_badges: HashMap::new(),
             user_channels: HashMap::new(),
+            user_channels_order: Vec::new(),
             user_channels_loading: false,
             in_voice: HashMap::new(),
+            user_channels_loaded: false,
             loading: HashSet::new(),
             active_clan_id: None,
             active_channel_id: None,
@@ -494,6 +502,7 @@ impl ChannelList {
                                 cx.notify();
                             });
                         }
+                        cx.emit(ChannelEvent::ClanChannelsLoaded(clan_id));
                         cx.notify();
                     });
                 }
@@ -525,13 +534,17 @@ impl ChannelList {
                 }
                 match result {
                     Ok(descs) => {
-                        this.user_channels = descs
-                            .into_iter()
-                            .map(|d| {
-                                let channel = channel_from_desc(d, 0, Vec::new(), false);
-                                (channel.id, channel)
-                            })
-                            .collect();
+                        this.user_channels.clear();
+                        this.user_channels_order.clear();
+                        for d in descs {
+                            let channel = channel_from_desc(d, 0, Vec::new(), false);
+                            let id = channel.id;
+                            if this.user_channels.insert(id, channel).is_none() {
+                                this.user_channels_order.push(id);
+                            }
+                        }
+                        this.user_channels_loaded = true;
+                        cx.emit(ChannelEvent::UserChannelsLoaded);
                         cx.notify();
                     }
                     Err(e) => {
@@ -552,11 +565,13 @@ impl ChannelList {
     }
 
     pub fn user_channels(&self) -> impl Iterator<Item = &Channel> + '_ {
-        self.user_channels.values()
+        self.user_channels_order
+            .iter()
+            .filter_map(|id| self.user_channels.get(id))
     }
 
     pub fn ensure_user_channels_loaded(&mut self, cx: &mut Context<Self>) {
-        if self.user_channels.is_empty() && !self.user_channels_loading {
+        if !self.user_channels_loaded && !self.user_channels_loading {
             self.fetch_user_channels(cx);
         }
     }

@@ -10,15 +10,15 @@
 use crate::{
     AnyElement, App, AvailableSpace, Bounds, ContentMask, DispatchPhase, Edges, Element, EntityId,
     FocusHandle, GlobalElementId, Hitbox, HitboxBehavior, InspectorElementId, IntoElement,
-    Overflow, Pixels, Point, ScrollWheelEvent, Size, Style, StyleRefinement, Styled,
-    Window, point, px, size,
+    MouseMoveEvent, Overflow, Pixels, Point, ScrollWheelEvent, Size, Style, StyleRefinement, Styled,
+    Task, Window, point, px, size,
 };
 use collections::VecDeque;
 use refineable::Refineable as _;
 use std::{
     cell::RefCell,
     ops::Range,
-    rc::Rc,
+    rc::{Rc, Weak},
     time::{Duration, Instant},
 };
 use sum_tree::{Bias, Dimensions, SumTree};
@@ -72,18 +72,21 @@ const WHEEL_SCROLL_MIN_DELTA: f32 = 120.;
 const WHEEL_SCROLL_MAX_DELTA: f32 = 480.;
 const WHEEL_SCROLL_MIN_DURATION: f32 = 0.1;
 const WHEEL_SCROLL_MAX_DURATION: f32 = 0.16;
+const OVERDRAW_MEASURE_ITEM_BUDGET: usize = 4;
+const SCROLL_HOVER_RELEASE_DELAY: Duration = Duration::from_millis(300);
 
 #[derive(Clone, Copy, Debug)]
-struct WheelScrollAnimation {
+pub(super) struct WheelScrollAnimation {
     start: f32,
-    target: f32,
+    pub(super) target: f32,
+    pub(super) applied: f32,
     started_at: Instant,
     duration: Duration,
     initial_slope: f32,
 }
 
 impl WheelScrollAnimation {
-    fn new(
+    pub(super) fn new(
         start: f32,
         target: f32,
         initial_velocity: f32,
@@ -104,13 +107,14 @@ impl WheelScrollAnimation {
         Self {
             start,
             target,
+            applied: start,
             started_at,
             duration,
             initial_slope,
         }
     }
 
-    fn sample(self, now: Instant) -> (f32, f32, bool) {
+    pub(super) fn sample(self, now: Instant) -> (f32, f32, bool) {
         let duration = self.duration.as_secs_f32();
         let elapsed = now.saturating_duration_since(self.started_at).as_secs_f32();
         if elapsed >= duration {
@@ -138,7 +142,7 @@ impl WheelScrollAnimation {
     }
 }
 
-fn wheel_scroll_duration(delta: Pixels) -> Duration {
+pub(super) fn wheel_scroll_duration(delta: Pixels) -> Duration {
     let progress = ((delta.abs().as_f32() - WHEEL_SCROLL_MIN_DELTA)
         / (WHEEL_SCROLL_MAX_DELTA - WHEEL_SCROLL_MIN_DELTA))
         .clamp(0., 1.);
@@ -201,6 +205,66 @@ struct StateInner {
     smooth_line_scroll: bool,
     wheel_scroll_animation: Option<WheelScrollAnimation>,
     wheel_frame_scheduled: bool,
+    suppress_hover_while_scrolling: bool,
+    scroll_hover_last_activity: Option<Instant>,
+    scroll_hover_waiting_for_pointer_move: bool,
+    scroll_hover_release_task: Option<Task<()>>,
+}
+
+fn ensure_scroll_hover_release_task(
+    list_state: &ListState,
+    current_view: EntityId,
+    window: &Window,
+    cx: &App,
+) {
+    let should_spawn = {
+        let state = list_state.0.borrow();
+        state.suppress_hover_while_scrolling
+            && state.scroll_hover_last_activity.is_some()
+            && state
+                .scroll_hover_release_task
+                .as_ref()
+                .is_none_or(Task::is_ready)
+    };
+    if !should_spawn {
+        return;
+    }
+
+    let weak_state = Rc::downgrade(&list_state.0);
+    let task = window.spawn(cx, async move |cx| {
+        let mut remaining = SCROLL_HOVER_RELEASE_DELAY;
+        loop {
+            cx.background_executor().timer(remaining).await;
+            let next = cx
+                .update(|_, cx| {
+                    let Some(state) = Weak::upgrade(&weak_state) else {
+                        return None;
+                    };
+                    let mut state = state.borrow_mut();
+                    let Some(last_activity) = state.scroll_hover_last_activity else {
+                        return None;
+                    };
+                    let elapsed = cx
+                        .background_executor()
+                        .now()
+                        .saturating_duration_since(last_activity);
+                    if elapsed >= SCROLL_HOVER_RELEASE_DELAY {
+                        state.scroll_hover_last_activity = None;
+                        cx.notify(current_view);
+                        None
+                    } else {
+                        Some(SCROLL_HOVER_RELEASE_DELAY - elapsed)
+                    }
+                })
+                .ok()
+                .flatten();
+            let Some(next) = next else {
+                break;
+            };
+            remaining = next;
+        }
+    });
+    list_state.0.borrow_mut().scroll_hover_release_task = Some(task);
 }
 
 fn start_smooth_wheel_scroll(
@@ -219,21 +283,23 @@ fn start_smooth_wheel_scroll(
         let now = Instant::now();
         let current = state.scrollbar_offset().as_f32();
         let previous = state.wheel_scroll_animation;
-        let base = previous.map_or(current, |animation| animation.target);
-        let target = (base + delta.as_f32()).clamp(-state.max_scroll_offset().as_f32(), 0.);
-        if (target - base).abs() <= f32::EPSILON {
+        let (remaining, velocity) = previous.map_or((0., 0.), |animation| {
+            let (_, velocity, _) = animation.sample(now);
+            (animation.target - animation.applied, velocity)
+        });
+        let target = (current + remaining + delta.as_f32())
+            .clamp(-state.max_scroll_offset().as_f32(), 0.);
+        if (target - current).abs() <= f32::EPSILON {
+            state.wheel_scroll_animation = None;
             return;
         }
-        let (start, velocity) = previous.map_or((current, 0.), |animation| {
-            let (position, velocity, _) = animation.sample(now);
-            (position, velocity)
-        });
+        state.touch_scroll_hover_activity();
         state.wheel_scroll_animation = Some(WheelScrollAnimation::new(
-            start,
+            current,
             target,
             velocity,
             now,
-            wheel_scroll_duration(px(target - start)),
+            wheel_scroll_duration(px(target - current)),
         ));
         if state.wheel_frame_scheduled {
             false
@@ -243,8 +309,8 @@ fn start_smooth_wheel_scroll(
         }
     };
 
-    cx.notify(current_view);
     if should_schedule {
+        cx.notify(current_view);
         schedule_smooth_wheel_frame(list_state.clone(), current_view, window);
     }
 }
@@ -258,16 +324,18 @@ fn schedule_smooth_wheel_frame(
         let continue_animation = {
             let state = &mut *list_state.0.borrow_mut();
             state.wheel_frame_scheduled = false;
-            let Some(animation) = state.wheel_scroll_animation else {
+            let Some(mut animation) = state.wheel_scroll_animation else {
                 return;
             };
 
             let (position, _, finished) = animation.sample(Instant::now());
-            let pixel_delta = px(position) - state.scrollbar_offset();
+            let pixel_delta = px(position - animation.applied);
+            animation.applied = position;
             let height = state.last_layout_bounds.unwrap_or_default().size.height;
             if finished {
                 state.wheel_scroll_animation = None;
             } else {
+                state.wheel_scroll_animation = Some(animation);
                 state.wheel_frame_scheduled = true;
             }
             state.scroll(
@@ -277,6 +345,7 @@ fn schedule_smooth_wheel_frame(
                 window,
                 cx,
                 true,
+                false,
             );
             !finished
         };
@@ -382,6 +451,9 @@ pub enum ListAlignment {
 
 /// A scroll event that has been converted to be in terms of the list's items.
 pub struct ListScrollEvent {
+    #[allow(missing_docs)]
+    pub scroll_top: ListOffset,
+
     /// The range of items currently visible in the list, after applying the scroll event.
     pub visible_range: Range<usize>,
 
@@ -541,6 +613,10 @@ impl ListState {
             smooth_line_scroll: false,
             wheel_scroll_animation: None,
             wheel_frame_scheduled: false,
+            suppress_hover_while_scrolling: false,
+            scroll_hover_last_activity: None,
+            scroll_hover_waiting_for_pointer_move: false,
+            scroll_hover_release_task: None,
         })));
         this.splice(0..0, item_count);
         this
@@ -561,6 +637,22 @@ impl ListState {
         self
     }
 
+    #[allow(missing_docs)]
+    pub fn suppress_hover_while_scrolling(self) -> Self {
+        self.0.borrow_mut().suppress_hover_while_scrolling = true;
+        self
+    }
+
+    #[allow(missing_docs)]
+    pub fn is_scroll_hover_suppressed(&self) -> bool {
+        self.0.borrow().is_scroll_hover_suppressed()
+    }
+
+    #[allow(missing_docs)]
+    pub fn is_scroll_hover_active(&self) -> bool {
+        self.0.borrow().is_scroll_hover_active()
+    }
+
     /// Returns whether a discrete mouse-wheel animation is active.
     pub fn is_smooth_wheel_scrolling(&self) -> bool {
         self.0.borrow().wheel_scroll_animation.is_some()
@@ -579,6 +671,9 @@ impl ListState {
             state.scrollbar_drag_start_height = None;
             state.wheel_scroll_animation = None;
             state.wheel_frame_scheduled = false;
+            state.scroll_hover_last_activity = None;
+            state.scroll_hover_waiting_for_pointer_move = false;
+            state.scroll_hover_release_task = None;
             state.items.summary().count
         };
 
@@ -696,6 +791,20 @@ impl ListState {
         self.splice_focusable(old_range, (0..count).map(|_| None))
     }
 
+    #[allow(missing_docs)]
+    pub fn splice_with_size_hint(
+        &self,
+        old_range: Range<usize>,
+        count: usize,
+        size_hint: Size<Pixels>,
+    ) {
+        self.splice_focusable_with_size_hint(
+            old_range,
+            (0..count).map(|_| None),
+            Some(size_hint),
+        )
+    }
+
     /// Register with the list state that the items in `old_range` have been replaced
     /// by new items. As opposed to [`Self::splice`], this method allows an iterator of optional focus handles
     /// to be supplied to properly integrate with items in the list that can be focused. If a focused item
@@ -704,6 +813,15 @@ impl ListState {
         &self,
         old_range: Range<usize>,
         focus_handles: impl IntoIterator<Item = Option<FocusHandle>>,
+    ) {
+        self.splice_focusable_with_size_hint(old_range, focus_handles, None)
+    }
+
+    fn splice_focusable_with_size_hint(
+        &self,
+        old_range: Range<usize>,
+        focus_handles: impl IntoIterator<Item = Option<FocusHandle>>,
+        size_hint: Option<Size<Pixels>>,
     ) {
         let state = &mut *self.0.borrow_mut();
 
@@ -716,7 +834,7 @@ impl ListState {
             focus_handles.into_iter().map(|focus_handle| {
                 spliced_count += 1;
                 ListItem::Unmeasured {
-                    size_hint: None,
+                    size_hint,
                     focus_handle,
                 }
             }),
@@ -738,6 +856,23 @@ impl ListState {
                 *item_ix = *item_ix - (old_range.end - old_range.start) + spliced_count;
             }
         }
+    }
+
+    #[allow(missing_docs)]
+    pub fn average_measured_item_size(&self) -> Option<Size<Pixels>> {
+        let state = self.0.borrow();
+        let mut count = 0usize;
+        let mut height = px(0.);
+        let mut width = px(0.);
+        for item in state.items.iter() {
+            let Some(size) = item.size() else {
+                continue;
+            };
+            count += 1;
+            height += size.height;
+            width = width.max(size.width);
+        }
+        (count > 0).then(|| size(width, height / count as f32))
     }
 
     /// Set a handler that will be called when the list is scrolled.
@@ -888,6 +1023,57 @@ impl ListState {
         state.logical_scroll_top = Some(scroll_top);
     }
 
+    /// Scroll the list so the given item is vertically centered in the viewport.
+    /// mezon vendor edit: added for the favorites "jump to original channel"
+    /// centered reveal; re-apply on snapshot bump.
+    pub fn scroll_to_center_item(&self, ix: usize) {
+        let state = &mut *self.0.borrow_mut();
+
+        let item_count = state.items.summary().count;
+        if ix >= item_count {
+            return;
+        }
+
+        let mut scroll_top = state.logical_scroll_top();
+        let height = state
+            .last_layout_bounds
+            .map_or(px(0.), |bounds| bounds.size.height);
+        let padding = state.last_padding.unwrap_or_default();
+
+        let (start_ix, start_item_top, goal_top) = {
+            let mut cursor = state.items.cursor::<ListItemSummary>(());
+            cursor.seek(&Count(ix), Bias::Right);
+            let item_top = cursor.start().height;
+            cursor.seek(&Count(ix + 1), Bias::Right);
+            let item_bottom = cursor.start().height;
+            let item_height = item_bottom - item_top;
+
+            let goal_top = px(0.).max(item_top + padding.top + item_height * 0.5 - height * 0.5);
+
+            cursor.seek(&Height(goal_top), Bias::Left);
+            (cursor.start().count, cursor.start().height, goal_top)
+        };
+
+        scroll_top.item_ix = start_ix;
+        scroll_top.offset_in_item = goal_top - start_item_top;
+
+        state.rebase_pending_scroll(scroll_top);
+        state.logical_scroll_top = Some(scroll_top);
+    }
+
+    /// The range of items currently visible, based on the last laid-out height
+    /// and current scroll position.
+    /// mezon vendor edit: exposed for the favorites new-mention float button;
+    /// re-apply on snapshot bump.
+    pub fn visible_range(&self) -> Range<usize> {
+        let state = self.0.borrow();
+        let height = state
+            .last_layout_bounds
+            .map_or(px(0.), |bounds| bounds.size.height);
+        let scroll_top = state.logical_scroll_top();
+        StateInner::visible_range(&state.items, height, &scroll_top)
+    }
+
     /// Get the bounds for the given item in window coordinates, if it's
     /// been rendered.
     pub fn bounds_for_item(&self, ix: usize) -> Option<Bounds<Pixels>> {
@@ -1015,6 +1201,28 @@ impl ListState {
 }
 
 impl StateInner {
+    fn touch_scroll_hover_activity(&mut self) {
+        if self.suppress_hover_while_scrolling {
+            self.scroll_hover_last_activity = Some(Instant::now());
+            self.scroll_hover_waiting_for_pointer_move = true;
+        }
+    }
+
+    fn is_scroll_hover_suppressed(&self) -> bool {
+        self.suppress_hover_while_scrolling
+            && (self.scroll_hover_last_activity.is_some()
+                || self.wheel_scroll_animation.is_some()
+                || self.scrollbar_drag_start_height.is_some()
+                || self.scroll_hover_waiting_for_pointer_move)
+    }
+
+    fn is_scroll_hover_active(&self) -> bool {
+        self.suppress_hover_while_scrolling
+            && (self.scroll_hover_last_activity.is_some()
+                || self.wheel_scroll_animation.is_some()
+                || self.scrollbar_drag_start_height.is_some())
+    }
+
     /// Re-anchor a pending scroll adjustment from a remeasure onto a newly set
     /// scroll position, so it clamps to the remeasured item's new height on
     /// the next layout instead of reverting the scroll.
@@ -1089,6 +1297,7 @@ impl StateInner {
         window: &mut Window,
         cx: &mut App,
         dispatch_scroll_handler: bool,
+        mark_hover_activity: bool,
     ) {
         // Drop scroll events after a reset, since we can't calculate
         // the new logical scroll top without the item heights
@@ -1108,6 +1317,9 @@ impl StateInner {
         let new_scroll_top = (current_scroll_top - delta.y)
             .max(px(0.))
             .min(scroll_max);
+        if mark_hover_activity && new_scroll_top != current_scroll_top {
+            self.touch_scroll_hover_activity();
+        }
 
         if self.alignment == ListAlignment::Bottom && new_scroll_top == scroll_max {
             self.pending_scroll = None;
@@ -1136,6 +1348,7 @@ impl StateInner {
             let visible_range = Self::visible_range(&self.items, height, &current_scroll_top);
             handler(
                 &ListScrollEvent {
+                    scroll_top: current_scroll_top,
                     visible_range,
                     count: self.items.summary().count,
                     is_scrolled: self.logical_scroll_top.is_some(),
@@ -1233,6 +1446,7 @@ impl StateInner {
         let mut rendered_height = padding.top;
         let mut max_item_width = px(0.);
         let mut scroll_top = self.logical_scroll_top();
+        let mut overdraw_measurements_remaining = OVERDRAW_MEASURE_ITEM_BUDGET;
 
         if self.follow_state.is_following() {
             scroll_top = ListOffset {
@@ -1266,6 +1480,15 @@ impl StateInner {
 
             // If we're within the visible area or the height wasn't cached, render and measure the item's element
             if visible_height < available_height || size.is_none() {
+                if visible_height >= available_height
+                    && size.is_none()
+                    && item.size_hint().is_some()
+                {
+                    if overdraw_measurements_remaining == 0 {
+                        break;
+                    }
+                    overdraw_measurements_remaining -= 1;
+                }
                 let item_index = scroll_top.item_ix + ix;
                 let mut element = render_item(item_index, window, cx);
                 let element_size = element.layout_as_root(available_item_space, window, cx);
@@ -1377,6 +1600,12 @@ impl StateInner {
                 let size = if let ListItem::Measured { size, .. } = item {
                     *size
                 } else {
+                    if item.size_hint().is_some() {
+                        if overdraw_measurements_remaining == 0 {
+                            break;
+                        }
+                        overdraw_measurements_remaining -= 1;
+                    }
                     let mut element = render_item(cursor.start().0, window, cx);
                     element.layout_as_root(available_item_space, window, cx)
                 };
@@ -1548,6 +1777,10 @@ impl StateInner {
             .unwrap_or_else(|| self.items.summary().height);
         let scroll_max = (content_height + padding.top + padding.bottom - height).max(px(0.));
         let new_scroll_top = (-point.y).max(px(0.)).min(scroll_max);
+        let previous_scroll_top = -self.scrollbar_offset();
+        if new_scroll_top != previous_scroll_top {
+            self.touch_scroll_hover_activity();
+        }
 
         // If content grew during the drag, the frozen bottom is below the
         // live bottom. Treat dragging to the frozen end as resuming tail follow.
@@ -1698,6 +1931,12 @@ impl Element for List {
         window: &mut Window,
         cx: &mut App,
     ) -> ListPrepaintState {
+        ensure_scroll_hover_release_task(
+            &self.state,
+            window.current_view(),
+            window,
+            cx,
+        );
         let state = &mut *self.state.0.borrow_mut();
         state.reset = false;
 
@@ -1739,6 +1978,9 @@ impl Element for List {
 
         state.last_layout_bounds = Some(bounds);
         state.last_padding = Some(padding);
+        if state.is_scroll_hover_suppressed() {
+            window.insert_hitbox(bounds, HitboxBehavior::BlockMouseExceptScroll);
+        }
         ListPrepaintState { hitbox, layout }
     }
 
@@ -1785,10 +2027,39 @@ impl Element for List {
                         window,
                         cx,
                         true,
+                        true,
                     );
                 }
             }
         });
+
+        let should_listen_for_pointer_move = self
+            .state
+            .0
+            .borrow()
+            .scroll_hover_waiting_for_pointer_move;
+        if should_listen_for_pointer_move {
+            let list_state = self.state.clone();
+            window.on_mouse_event(move |event: &MouseMoveEvent, phase, _window, cx| {
+                if phase != DispatchPhase::Bubble || !bounds.contains(&event.position) {
+                    return;
+                }
+                let should_release = {
+                    let mut state = list_state.0.borrow_mut();
+                    if state.scroll_hover_waiting_for_pointer_move
+                        && !state.is_scroll_hover_active()
+                    {
+                        state.scroll_hover_waiting_for_pointer_move = false;
+                        true
+                    } else {
+                        false
+                    }
+                };
+                if should_release {
+                    cx.notify(current_view);
+                }
+            });
+        }
     }
 }
 

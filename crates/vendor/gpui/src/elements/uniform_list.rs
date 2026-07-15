@@ -41,6 +41,7 @@ where
     UniformList {
         item_count,
         item_to_measure_index: 0,
+        known_item_size: None,
         measured_item_size: None,
         render_items: Box::new(render_range),
         decorations: Vec::new(),
@@ -59,6 +60,7 @@ where
 pub struct UniformList {
     item_count: usize,
     item_to_measure_index: usize,
+    known_item_size: Option<Size<Pixels>>,
     measured_item_size: Option<Size<Pixels>>,
     render_items: Box<
         dyn for<'a> Fn(Range<usize>, &'a mut Window, &'a mut App) -> SmallVec<[AnyElement; 64]>,
@@ -150,7 +152,9 @@ impl UniformListScrollHandle {
     /// If the item is out of view, it scrolls the minimum amount to bring it into view according
     /// to the strategy.
     pub fn scroll_to_item(&self, ix: usize, strategy: ScrollStrategy) {
-        self.0.borrow_mut().deferred_scroll_to_item = Some(DeferredScrollToItem {
+        let mut state = self.0.borrow_mut();
+        state.base_handle.cancel_smooth_wheel_scroll();
+        state.deferred_scroll_to_item = Some(DeferredScrollToItem {
             item_index: ix,
             strategy,
             offset: 0,
@@ -163,7 +167,9 @@ impl UniformListScrollHandle {
     /// This uses strict scrolling: the item will always be scrolled to match the strategy position,
     /// even if it's already visible. Use this when you need precise positioning.
     pub fn scroll_to_item_strict(&self, ix: usize, strategy: ScrollStrategy) {
-        self.0.borrow_mut().deferred_scroll_to_item = Some(DeferredScrollToItem {
+        let mut state = self.0.borrow_mut();
+        state.base_handle.cancel_smooth_wheel_scroll();
+        state.deferred_scroll_to_item = Some(DeferredScrollToItem {
             item_index: ix,
             strategy,
             offset: 0,
@@ -182,7 +188,9 @@ impl UniformListScrollHandle {
     /// - `ScrollStrategy::Center`: Shrinks from top, centers item in the reduced viewport
     /// - `ScrollStrategy::Bottom`: Shrinks from bottom, positions item at the new bottom
     pub fn scroll_to_item_with_offset(&self, ix: usize, strategy: ScrollStrategy, offset: usize) {
-        self.0.borrow_mut().deferred_scroll_to_item = Some(DeferredScrollToItem {
+        let mut state = self.0.borrow_mut();
+        state.base_handle.cancel_smooth_wheel_scroll();
+        state.deferred_scroll_to_item = Some(DeferredScrollToItem {
             item_index: ix,
             strategy,
             offset,
@@ -206,7 +214,9 @@ impl UniformListScrollHandle {
         strategy: ScrollStrategy,
         offset: usize,
     ) {
-        self.0.borrow_mut().deferred_scroll_to_item = Some(DeferredScrollToItem {
+        let mut state = self.0.borrow_mut();
+        state.base_handle.cancel_smooth_wheel_scroll();
+        state.deferred_scroll_to_item = Some(DeferredScrollToItem {
             item_index: ix,
             strategy,
             offset,
@@ -236,6 +246,27 @@ impl UniformListScrollHandle {
         } else {
             false
         }
+    }
+
+    #[allow(missing_docs)]
+    pub fn is_smooth_wheel_scrolling(&self) -> bool {
+        self.0
+            .borrow()
+            .base_handle
+            .is_smooth_wheel_scrolling()
+    }
+
+    #[allow(missing_docs)]
+    pub fn is_scroll_hover_suppressed(&self) -> bool {
+        self.0
+            .borrow()
+            .base_handle
+            .is_scroll_hover_suppressed()
+    }
+
+    #[allow(missing_docs)]
+    pub fn is_scroll_hover_active(&self) -> bool {
+        self.0.borrow().base_handle.is_scroll_hover_active()
     }
 
     /// Whether the list is scrolled to the end, or `None` if the list is
@@ -282,7 +313,9 @@ impl Element for UniformList {
         cx: &mut App,
     ) -> (LayoutId, Self::RequestLayoutState) {
         let max_items = self.item_count;
-        let item_size = self.measure_item(None, window, cx);
+        let item_size = self
+            .known_item_size
+            .unwrap_or_else(|| self.measure_item(None, window, cx));
         // mezon vendor edit: keep the measurement (see `measured_item_size`) — upstream
         // re-ran `measure_item` in `prepaint`, laying out a throwaway sample row a
         // second time on every frame of every uniform_list.
@@ -628,6 +661,24 @@ impl<T: UniformListDecoration + 'static> UniformListDecoration for Entity<T> {
 }
 
 impl UniformList {
+    #[allow(missing_docs)]
+    pub fn with_item_size(mut self, item_size: Size<Pixels>) -> Self {
+        self.known_item_size = Some(item_size);
+        self
+    }
+
+    #[allow(missing_docs)]
+    pub fn smooth_line_scroll(mut self) -> Self {
+        self.interactivity.smooth_line_scroll = true;
+        self
+    }
+
+    #[allow(missing_docs)]
+    pub fn suppress_hover_while_scrolling(mut self) -> Self {
+        self.interactivity.suppress_hover_while_scrolling = true;
+        self
+    }
+
     /// Selects a specific list item for measurement.
     pub fn with_width_from_item(mut self, item_index: Option<usize>) -> Self {
         self.item_to_measure_index = item_index.unwrap_or(0);

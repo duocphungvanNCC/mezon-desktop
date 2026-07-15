@@ -1,4 +1,5 @@
 mod attachments;
+mod recorder;
 mod text_field;
 
 use std::cell::Cell;
@@ -7,35 +8,52 @@ use std::rc::Rc;
 
 use gpui::{
     AnyElement, App, Bounds, Context, DismissEvent, Div, Entity, EventEmitter, Focusable,
-    FontWeight, Image, ImageFormat, IntoElement, KeyBinding, PathPromptOptions, Pixels, Rgba,
-    ScrollStrategy, SharedString, Stateful, Subscription, UniformListScrollHandle, Window, actions,
-    canvas, deferred, div, img, prelude::*, px, uniform_list,
+    FontWeight, Image, ImageFormat, IntoElement, KeyBinding, MouseButton, PathPromptOptions,
+    Pixels, Rgba, ScrollStrategy, SharedString, Stateful, Subscription, UniformListScrollHandle,
+    Window, actions, canvas, deferred, div, img, prelude::*, px, uniform_list,
 };
 use mezon_store::{
-    ChannelId, ChannelList, ChannelType, ClanList, EmojiStore, MENTION_HERE_ID, MessageSpan,
-    OutgoingAttachment, OutgoingContent, OutgoingEmoji, OutgoingHashtag, OutgoingMention, Settings,
+    AccountEvent, AccountStore, AudioStore, Channel, ChannelEvent, ChannelId, ChannelList,
+    ChannelMembersEvent, ChannelMembersStore, ClanList, ClanMembersEvent, ClanMembersStore,
+    DirectEvent, DirectMessageStore, Emoji, EmojiEvent, EmojiStore, GroupMembersEvent,
+    GroupMembersStore, MENTION_HERE_ID, MessageSpan, OutgoingAttachment, OutgoingContent,
+    OutgoingEmoji, OutgoingHashtag, OutgoingMention, RolesEvent, RolesStore, Settings,
 };
 
 use attachments::{
     AttachmentLimit, MAX_FILE_ATTACHMENTS, PendingAttachment, build_pending, mime_from_extension,
     validate_batch,
 };
+use recorder::{ActiveRecording, MIN_RECORDING_MILLIS, RecordTask, encode_recording};
 
 use crate::app::shell::Shell;
 use crate::chat::gif_sticker_emoji::{GifStickerEmojiEvent, GifStickerEmojiPopup, SubPanel};
-use crate::chat::member_list::{MentionMemberRaw, mention_member_pool};
-use crate::components::primitives::{Avatar, Icon, IconName};
+use crate::chat::member_list::{
+    MentionMemberRaw, MentionScope, ensure_mention_members_loaded, mention_direct_id,
+    mention_member_pool, mention_private_channel, mention_role_clan, mention_scope,
+};
+use crate::components::primitives::{Avatar, Icon, IconName, ToastKind};
 use crate::image_cache::{
     AVATAR_ENTRY_MAX_BYTES, AVATAR_IMAGE_CACHE_BYTES, AVATAR_IMAGE_CACHE_CAPACITY, LruImageCache,
 };
 use crate::theme::{ActiveTheme, Theme};
+use crate::util::text_utils::normalize_search_string;
 use text_field::{
     MentionFieldEvent, MentionInputField, MentionInputState, MentionSpan, MentionSpanKind,
     byte_offset_to_utf16,
 };
 
 const KEY_CONTEXT: &str = "MezonMention";
-const MAX_SUGGESTIONS: usize = 50;
+const RECORDING_COLOR: Rgba = Rgba {
+    r: 0xdc as f32 / 255.,
+    g: 0x26 as f32 / 255.,
+    b: 0x26 as f32 / 255.,
+    a: 1.0,
+};
+const MAX_SUGGESTIONS: usize = 10;
+const MAX_EMOJI_CANDIDATES: usize = 20;
+const MENTION_HERE_DISPLAY: &str = "@here";
+const MENTION_HERE_NORM: &str = "@HERE";
 const CONVERT_TO_FILE_THRESHOLD: usize = 3700;
 const CONVERT_PREFIX_LEN: usize = 8;
 const MENTION_ROW_PX: f32 = 36.;
@@ -59,6 +77,14 @@ enum Sigil {
 }
 
 impl Sigil {
+    fn slot(self) -> usize {
+        match self {
+            Sigil::At => 0,
+            Sigil::Hash => 1,
+            Sigil::Colon => 2,
+        }
+    }
+
     fn from_byte(b: u8) -> Option<Self> {
         match b {
             b'@' => Some(Self::At),
@@ -99,6 +125,18 @@ struct ChannelSuggestRaw {
     channel_id: String,
     name: String,
     name_lc: String,
+    name_norm: String,
+    sub_text: String,
+    sub_text_norm: String,
+}
+
+#[derive(Clone)]
+struct RoleSuggestRaw {
+    role_id: String,
+    title: String,
+    title_lc: String,
+    title_norm: String,
+    icon_src: SharedString,
 }
 
 #[derive(Clone)]
@@ -106,23 +144,102 @@ struct EmojiSuggestRaw {
     emoji_id: String,
     shortname: String,
     shortname_lc: String,
-    src: String,
 }
 
 #[derive(Clone)]
 enum Suggestion {
     Here,
-    Member(Rc<MentionMemberRaw>),
+    Member(Rc<MentionMemberRaw>, SharedString),
+    Role(Rc<RoleSuggestRaw>),
     Channel(Rc<ChannelSuggestRaw>),
-    Emoji(Rc<EmojiSuggestRaw>),
+    Emoji(Rc<EmojiSuggestRaw>, SharedString),
+}
+
+impl Suggestion {
+    fn group_order(&self) -> u8 {
+        match self {
+            Suggestion::Member(..) | Suggestion::Channel(_) | Suggestion::Emoji(..) => 0,
+            Suggestion::Role(_) => 1,
+            Suggestion::Here => 2,
+        }
+    }
+
+    fn item_key(&self) -> (u8, &str) {
+        match self {
+            Suggestion::Here => (0, MENTION_HERE_DISPLAY),
+            Suggestion::Member(member, _) => (1, member.user_id.as_str()),
+            Suggestion::Role(role) => (2, role.role_id.as_str()),
+            Suggestion::Channel(channel) => (3, channel.channel_id.as_str()),
+            Suggestion::Emoji(emoji, _) => (4, emoji.emoji_id.as_str()),
+        }
+    }
+
+    fn sort_keys(&self) -> (&str, &str) {
+        match self {
+            Suggestion::Here => (MENTION_HERE_DISPLAY, MENTION_HERE_DISPLAY),
+            Suggestion::Member(member, _) => (&member.display_lc, &member.username_lc),
+            Suggestion::Role(role) => (&role.title_lc, ""),
+            Suggestion::Channel(channel) => (&channel.name_lc, ""),
+            Suggestion::Emoji(emoji, _) => (&emoji.shortname_lc, ""),
+        }
+    }
+
+    fn norm_keys(&self) -> (&str, &str) {
+        match self {
+            Suggestion::Here => (MENTION_HERE_NORM, MENTION_HERE_NORM),
+            Suggestion::Member(member, _) => (&member.display_norm, &member.username_norm),
+            Suggestion::Role(role) => (&role.title_norm, ""),
+            Suggestion::Channel(channel) => (&channel.name_norm, &channel.sub_text_norm),
+            Suggestion::Emoji(emoji, _) => (&emoji.shortname, ""),
+        }
+    }
+
+    fn match_rank(&self, query_lc: &str) -> u8 {
+        let (display, username) = self.sort_keys();
+        if display == query_lc || username == query_lc {
+            0
+        } else if display.starts_with(query_lc) || username.starts_with(query_lc) {
+            1
+        } else {
+            2
+        }
+    }
+}
+
+fn resolve_suggestion_media(items: &mut [Suggestion], cx: &App) {
+    for item in items {
+        if let Suggestion::Member(member, src) = item
+            && !member.avatar_raw.is_empty()
+        {
+            *src = crate::util::imgproxy::avatar_url(cx, &member.avatar_raw).into();
+        }
+    }
+}
+
+fn prioritize_and_limit(mut items: Vec<Suggestion>, query: &str) -> Vec<Suggestion> {
+    let query_lc = query.to_lowercase();
+    items.sort_by_cached_key(|item| (item.group_order(), item.match_rank(&query_lc)));
+    items.truncate(MAX_SUGGESTIONS);
+    items
 }
 
 #[derive(Clone, PartialEq, Eq)]
 pub enum MentionInputEvent {
     Submit,
     Cancel,
-    SendSticker { url: String, filename: String },
-    SendSound { url: String, filename: String },
+    SendSticker {
+        url: String,
+        filename: String,
+    },
+    SendGif {
+        url: String,
+        width: u32,
+        height: u32,
+    },
+    SendSound {
+        url: String,
+        filename: String,
+    },
 }
 
 pub struct MentionInput {
@@ -130,12 +247,13 @@ pub struct MentionInput {
     committed: Vec<CommittedToken>,
     active_at: Option<usize>,
     active_sigil: Sigil,
-    pooled: Option<(usize, Sigil)>,
+    pooled: [Option<MentionScope>; 3],
     query_len: usize,
     suggestions: Vec<Suggestion>,
     selected: usize,
     suggestion_scroll: UniformListScrollHandle,
     session_members: Vec<Rc<MentionMemberRaw>>,
+    session_roles: Vec<Rc<RoleSuggestRaw>>,
     session_channels: Vec<Rc<ChannelSuggestRaw>>,
     session_emojis: Vec<Rc<EmojiSuggestRaw>>,
     popup: Option<Entity<GifStickerEmojiPopup>>,
@@ -145,11 +263,16 @@ pub struct MentionInput {
     preview_cache: Entity<LruImageCache>,
     settings: Entity<Settings>,
     pending_attachments: Vec<PendingAttachment>,
+    recording: Option<ActiveRecording>,
+    record_generation: u64,
+    encoding_recording: bool,
+    _record_task: Option<RecordTask>,
     compact: bool,
     overflow_to_file: bool,
     overflow_counter: Option<isize>,
     last_content: SharedString,
     _input_sub: Subscription,
+    _store_subs: Vec<Subscription>,
 }
 
 impl EventEmitter<MentionInputEvent> for MentionInput {}
@@ -285,6 +408,7 @@ impl MentionInput {
                 }
             },
         );
+        let store_subs = Self::subscribe_pool_sources(cx);
         let avatar_cache = crate::image_cache::shared_avatar_cache(cx);
         let preview_cache = cx.new(|cx| {
             LruImageCache::avatar_thumbnail(
@@ -300,12 +424,13 @@ impl MentionInput {
             committed: Vec::new(),
             active_at: None,
             active_sigil: Sigil::At,
-            pooled: None,
+            pooled: [None; 3],
             query_len: 0,
             suggestions: Vec::new(),
             selected: 0,
             suggestion_scroll: UniformListScrollHandle::new(),
             session_members: Vec::new(),
+            session_roles: Vec::new(),
             session_channels: Vec::new(),
             session_emojis: Vec::new(),
             popup: None,
@@ -315,11 +440,16 @@ impl MentionInput {
             preview_cache,
             settings,
             pending_attachments: Vec::new(),
+            recording: None,
+            record_generation: 0,
+            encoding_recording: false,
+            _record_task: None,
             compact,
             overflow_to_file: false,
             overflow_counter: None,
             last_content: SharedString::default(),
             _input_sub: input_sub,
+            _store_subs: store_subs,
         }
     }
 
@@ -403,6 +533,7 @@ impl MentionInput {
                 filetype: p.filetype,
                 width: i32::try_from(p.width).unwrap_or(0),
                 height: i32::try_from(p.height).unwrap_or(0),
+                duration: p.duration,
                 poster_jpeg: p.poster_jpeg,
             })
             .collect();
@@ -546,6 +677,92 @@ impl MentionInput {
         self.add_dropped_paths(images, window, cx);
     }
 
+    fn start_recording(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.recording.is_some() || self.encoding_recording {
+            return;
+        }
+        let Some(store) = AudioStore::try_global(cx) else {
+            return;
+        };
+        let Some(factory) = store.read(cx).mic_pcm_capture_factory.clone() else {
+            Self::show_recording_error(cx);
+            return;
+        };
+
+        self.record_generation = self.record_generation.wrapping_add(1);
+        let generation = self.record_generation;
+        let (sender, receiver) = flume::unbounded();
+
+        self._record_task = Some(cx.spawn_in(window, async move |this, cx| {
+            let opened = cx
+                .background_executor()
+                .spawn(async move { factory(sender) })
+                .await;
+            let (capture, format) = match opened {
+                Ok(opened) => opened,
+                Err(err) => {
+                    tracing::warn!("voice recording unavailable: {err}");
+                    let _ = this.update(cx, |this, cx| {
+                        this.recording = None;
+                        Self::show_recording_error(cx);
+                        cx.notify();
+                    });
+                    return;
+                }
+            };
+
+            let live = this
+                .update(cx, |this, cx| {
+                    let attached = this
+                        .recording
+                        .as_mut()
+                        .is_some_and(|recording| recording.attach(generation, capture));
+                    cx.notify();
+                    attached
+                })
+                .unwrap_or(false);
+            if !live {
+                return;
+            }
+
+            let built = cx
+                .background_executor()
+                .spawn(encode_recording(receiver, format))
+                .await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                this.encoding_recording = false;
+                match built {
+                    Ok(attachment) => this.add_pending(vec![attachment], window, cx),
+                    Err(err) => tracing::warn!("voice recording failed: {err}"),
+                }
+                cx.notify();
+            });
+        }));
+        self.recording = Some(ActiveRecording::opening(generation));
+        cx.notify();
+    }
+
+    fn stop_recording(&mut self, cx: &mut Context<Self>) {
+        let Some(recording) = self.recording.take() else {
+            return;
+        };
+        let keep = recording.is_live() && recording.elapsed_millis() >= MIN_RECORDING_MILLIS;
+        drop(recording);
+
+        if keep {
+            self.encoding_recording = true;
+        } else {
+            self._record_task = None;
+        }
+        cx.notify();
+    }
+
+    fn show_recording_error(cx: &mut Context<Self>) {
+        Shell::global(cx).update(cx, |shell, cx| {
+            shell.toast(ToastKind::Error, "Microphone unavailable", cx)
+        });
+    }
+
     fn add_pending(
         &mut self,
         candidates: Vec<PendingAttachment>,
@@ -660,19 +877,57 @@ impl MentionInput {
         self.active_at.is_some() && !self.suggestions.is_empty()
     }
 
-    fn reset_popup(&mut self) {
+    fn close_suggestions(&mut self) {
         self.active_at = None;
         self.query_len = 0;
         self.suggestions.clear();
         self.selected = 0;
-        self.pooled = None;
+    }
+
+    fn reset_popup(&mut self) {
+        self.close_suggestions();
+        self.drop_pool();
+    }
+
+    fn end_mention(&mut self, cx: &mut Context<Self>) {
+        self.hide(cx);
+        self.drop_pool();
     }
 
     fn hide(&mut self, cx: &mut Context<Self>) {
         if self.active_at.is_some() || !self.suggestions.is_empty() {
-            self.reset_popup();
+            self.close_suggestions();
             cx.notify();
         }
+    }
+
+    fn clear_suggestions(&mut self, cx: &mut Context<Self>) {
+        if !self.suggestions.is_empty() {
+            self.suggestions.clear();
+            self.selected = 0;
+            cx.notify();
+        }
+    }
+
+    fn drop_pool_slot(&mut self, sigil: Sigil) {
+        self.pooled[sigil.slot()] = None;
+        match sigil {
+            Sigil::At => {
+                self.session_members = Vec::new();
+                self.session_roles = Vec::new();
+            }
+            Sigil::Hash => self.session_channels = Vec::new(),
+            Sigil::Colon => self.session_emojis = Vec::new(),
+        }
+    }
+
+    fn invalidate_pool(&mut self, sigil: Sigil, cx: &mut Context<Self>) {
+        self.drop_pool_slot(sigil);
+        if self.active_at.is_none() || self.active_sigil != sigil {
+            return;
+        }
+        let content = self.input.read(cx).value_shared();
+        self.check_trigger(&content, cx);
     }
 
     fn on_enter(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -753,7 +1008,7 @@ impl MentionInput {
     fn check_trigger(&mut self, content: &str, cx: &mut Context<Self>) {
         let cursor = self.input.read(cx).cursor().min(content.len());
         if cursor == 0 || content.is_empty() {
-            self.hide(cx);
+            self.end_mention(cx);
             return;
         }
 
@@ -775,7 +1030,7 @@ impl MentionInput {
         }
 
         let Some((at, sigil)) = found else {
-            self.hide(cx);
+            self.end_mention(cx);
             return;
         };
 
@@ -785,31 +1040,123 @@ impl MentionInput {
             return;
         }
 
-        if self.pooled != Some((at, sigil)) {
+        let scope = mention_scope(cx);
+        if self.pooled[sigil.slot()] != Some(scope) {
             self.refresh_pool(sigil, cx);
-            self.pooled = if self.pool_is_empty(sigil) {
-                None
-            } else {
-                Some((at, sigil))
-            };
+            self.pooled[sigil.slot()] = (!self.pool_is_empty(sigil)).then_some(scope);
         }
         self.active_at = Some(at);
         self.active_sigil = sigil;
         self.query_len = query.len() + 1;
-        self.build_suggestions(query);
+        self.build_suggestions(query, cx);
         if self.suggestions.is_empty() {
-            self.hide(cx);
+            self.clear_suggestions(cx);
         } else {
             cx.notify();
         }
     }
 
+    fn subscribe_pool_sources(cx: &mut Context<Self>) -> Vec<Subscription> {
+        let mut subs = vec![
+            cx.subscribe(
+                &ChannelList::global(cx),
+                |this, _, event: &ChannelEvent, cx| match event {
+                    ChannelEvent::ActiveChannelChanged(_) => {
+                        this.hide(cx);
+                        this.drop_pool();
+                    }
+                    ChannelEvent::ClanChannelsLoaded(_) | ChannelEvent::UserChannelsLoaded => {
+                        this.invalidate_pool(Sigil::Hash, cx);
+                    }
+                    ChannelEvent::Unread(_) => {}
+                },
+            ),
+            cx.subscribe(
+                &DirectMessageStore::global(cx),
+                |this, _, event: &DirectEvent, cx| {
+                    let DirectEvent::Changed { channel_id } = event;
+                    if channel_id.is_none() || *channel_id == mention_direct_id(cx) {
+                        this.invalidate_pool(Sigil::At, cx);
+                    }
+                },
+            ),
+            cx.subscribe(
+                &ClanMembersStore::global(cx),
+                |this, _, event: &ClanMembersEvent, cx| {
+                    let ClanMembersEvent::Changed { clan_id } = event;
+                    if mention_role_clan(cx) == Some(*clan_id) {
+                        this.invalidate_pool(Sigil::At, cx);
+                    }
+                },
+            ),
+            cx.subscribe(
+                &ChannelMembersStore::global(cx),
+                |this, _, event: &ChannelMembersEvent, cx| {
+                    let ChannelMembersEvent::Changed { channel_id } = event;
+                    if mention_private_channel(cx) == Some(*channel_id) {
+                        this.invalidate_pool(Sigil::At, cx);
+                    }
+                },
+            ),
+            cx.subscribe(
+                &GroupMembersStore::global(cx),
+                |this, _, event: &GroupMembersEvent, cx| {
+                    let GroupMembersEvent::Changed { channel_id } = event;
+                    if mention_direct_id(cx) == Some(*channel_id) {
+                        this.invalidate_pool(Sigil::At, cx);
+                    }
+                },
+            ),
+        ];
+        if let Some(store) = RolesStore::try_global(cx) {
+            subs.push(cx.subscribe(&store, |this, _, event: &RolesEvent, cx| {
+                let RolesEvent::Changed { clan_id } = event;
+                if mention_role_clan(cx) == Some(*clan_id) {
+                    this.invalidate_pool(Sigil::At, cx);
+                }
+            }));
+        }
+        if let Some(store) = AccountStore::try_global(cx) {
+            subs.push(cx.subscribe(&store, |this, _, event: &AccountEvent, cx| {
+                if matches!(
+                    event,
+                    AccountEvent::AccountLoaded | AccountEvent::AccountSaved
+                ) {
+                    this.invalidate_pool(Sigil::At, cx);
+                }
+            }));
+        }
+        if let Some(store) = EmojiStore::try_global(cx) {
+            subs.push(cx.subscribe(&store, |this, _, _: &EmojiEvent, cx| {
+                this.invalidate_pool(Sigil::Colon, cx)
+            }));
+        }
+        subs
+    }
+
+    fn drop_pool(&mut self) {
+        self.pooled = [None; 3];
+        self.session_members = Vec::new();
+        self.session_roles = Vec::new();
+        self.session_channels = Vec::new();
+        self.session_emojis = Vec::new();
+    }
+
     fn refresh_pool(&mut self, sigil: Sigil, cx: &mut Context<Self>) {
         match sigil {
             Sigil::At => {
-                self.session_members = mention_member_pool(cx).into_iter().map(Rc::new).collect()
+                ensure_mention_members_loaded(cx);
+                if let Some(clan_id) = mention_role_clan(cx)
+                    && let Some(store) = RolesStore::try_global(cx)
+                {
+                    store.update(cx, |store, cx| store.ensure_loaded(clan_id, cx));
+                }
+                self.session_members = mention_member_pool(cx).into_iter().map(Rc::new).collect();
+                self.session_roles = role_suggest_pool(cx).into_iter().map(Rc::new).collect();
             }
             Sigil::Hash => {
+                ChannelList::global(cx)
+                    .update(cx, |store, cx| store.ensure_user_channels_loaded(cx));
                 self.session_channels = channel_suggest_pool(cx).into_iter().map(Rc::new).collect()
             }
             Sigil::Colon => {
@@ -823,56 +1170,99 @@ impl MentionInput {
 
     fn pool_is_empty(&self, sigil: Sigil) -> bool {
         match sigil {
-            Sigil::At => self.session_members.is_empty(),
+            Sigil::At => self.session_members.is_empty() && self.session_roles.is_empty(),
             Sigil::Hash => self.session_channels.is_empty(),
             Sigil::Colon => self.session_emojis.is_empty(),
         }
     }
 
-    fn build_suggestions(&mut self, query: &str) {
-        let needle = query.to_lowercase();
-        let mut out = Vec::new();
-        match self.active_sigil {
-            Sigil::At => {
-                if "here".starts_with(&needle) {
-                    out.push(Suggestion::Here);
-                }
-                for member in &self.session_members {
-                    if out.len() >= MAX_SUGGESTIONS {
-                        break;
-                    }
-                    if member.display_lc.starts_with(&needle)
-                        || member.username_lc.starts_with(&needle)
-                    {
-                        out.push(Suggestion::Member(member.clone()));
-                    }
-                }
-            }
-            Sigil::Hash => {
-                for channel in &self.session_channels {
-                    if out.len() >= MAX_SUGGESTIONS {
-                        break;
-                    }
-                    if channel.name_lc.starts_with(&needle) {
-                        out.push(Suggestion::Channel(channel.clone()));
-                    }
-                }
-            }
-            Sigil::Colon => {
-                for emoji in &self.session_emojis {
-                    if out.len() >= MAX_SUGGESTIONS {
-                        break;
-                    }
-                    if emoji.shortname_lc.starts_with(&needle) {
-                        out.push(Suggestion::Emoji(emoji.clone()));
-                    }
-                }
-            }
+    fn build_suggestions(&mut self, query: &str, cx: &App) {
+        let candidates = match self.active_sigil {
+            Sigil::At => self.at_candidates(query),
+            Sigil::Hash => self.hash_candidates(query),
+            Sigil::Colon => self.colon_candidates(query, cx),
+        };
+        let mut suggestions = prioritize_and_limit(candidates, query);
+        resolve_suggestion_media(&mut suggestions, cx);
+        let same_items = suggestions.len() == self.suggestions.len()
+            && suggestions
+                .iter()
+                .zip(self.suggestions.iter())
+                .all(|(new, old)| new.item_key() == old.item_key());
+        if !same_items || self.selected >= suggestions.len() {
+            self.selected = 0;
         }
-        self.selected = 0;
-        self.suggestions = out;
+        self.suggestions = suggestions;
         self.suggestion_scroll
             .scroll_to_item(self.selected, ScrollStrategy::Nearest);
+    }
+
+    fn at_candidates(&self, query: &str) -> Vec<Suggestion> {
+        let mut out: Vec<Suggestion> = Vec::new();
+        if query.is_empty() {
+            out.reserve(self.session_members.len() + self.session_roles.len() + 1);
+            out.extend(
+                self.session_members
+                    .iter()
+                    .map(|member| Suggestion::Member(member.clone(), SharedString::default())),
+            );
+            out.extend(
+                self.session_roles
+                    .iter()
+                    .map(|role| Suggestion::Role(role.clone())),
+            );
+            out.push(Suggestion::Here);
+            return out;
+        }
+        let needle = normalize_search_string(query);
+        for member in &self.session_members {
+            if member.display_norm.contains(&needle) || member.username_norm.contains(&needle) {
+                out.push(Suggestion::Member(member.clone(), SharedString::default()));
+            }
+        }
+        for role in &self.session_roles {
+            if role.title_norm.contains(&needle) {
+                out.push(Suggestion::Role(role.clone()));
+            }
+        }
+        if MENTION_HERE_NORM.contains(&needle) {
+            out.push(Suggestion::Here);
+        }
+        if !needle.is_empty() {
+            out.sort_by_cached_key(|item| {
+                let display = item.norm_keys().0;
+                let exact = u8::from(display != needle);
+                let index = display.find(&needle).map_or(i64::MAX, |i| i as i64);
+                (exact, index)
+            });
+        }
+        out
+    }
+
+    fn hash_candidates(&self, query: &str) -> Vec<Suggestion> {
+        let needle = normalize_search_string(query);
+        self.session_channels
+            .iter()
+            .filter(|channel| {
+                channel.name_norm.contains(&needle) || channel.sub_text_norm.contains(&needle)
+            })
+            .map(|channel| Suggestion::Channel(channel.clone()))
+            .collect()
+    }
+
+    fn colon_candidates(&self, query: &str, cx: &App) -> Vec<Suggestion> {
+        let needle = query.to_lowercase();
+        let mut out = Vec::new();
+        for emoji in &self.session_emojis {
+            if out.len() >= MAX_EMOJI_CANDIDATES {
+                break;
+            }
+            if emoji.shortname.contains(&needle) {
+                let src = crate::util::imgproxy::emoji_url(cx, &emoji.emoji_id);
+                out.push(Suggestion::Emoji(emoji.clone(), src.into()));
+            }
+        }
+        out
     }
 
     fn accept(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
@@ -892,11 +1282,18 @@ impl MentionInput {
                     role_id: String::new(),
                 },
             ),
-            Suggestion::Member(member) => (
+            Suggestion::Member(member, _) => (
                 format!("@{}", member.display),
                 TokenKind::Mention {
                     user_id: member.user_id.clone(),
                     role_id: String::new(),
+                },
+            ),
+            Suggestion::Role(role) => (
+                format!("@{}", role.title),
+                TokenKind::Mention {
+                    user_id: String::new(),
+                    role_id: role.role_id.clone(),
                 },
             ),
             Suggestion::Channel(channel) => (
@@ -905,8 +1302,8 @@ impl MentionInput {
                     channel_id: channel.channel_id.clone(),
                 },
             ),
-            Suggestion::Emoji(emoji) => (
-                format!(":{}:", emoji.shortname),
+            Suggestion::Emoji(emoji, _) => (
+                emoji.shortname.clone(),
                 TokenKind::Emoji {
                     emoji_id: emoji.emoji_id.clone(),
                 },
@@ -928,7 +1325,14 @@ impl MentionInput {
         cx.notify();
     }
 
-    fn picker_toggle(&self, id: &'static str, icon: IconName, color: Rgba) -> Stateful<Div> {
+    fn picker_toggle(
+        &self,
+        id: &'static str,
+        icon: IconName,
+        color: Rgba,
+        hover_bg: Rgba,
+        hover_color: Rgba,
+    ) -> Stateful<Div> {
         div()
             .id(id)
             .flex()
@@ -937,7 +1341,13 @@ impl MentionInput {
             .size(px(20.))
             .rounded(px(4.))
             .cursor_pointer()
-            .child(Icon::new(icon).size_5().text_color(color))
+            .hover(|s| s.bg(hover_bg))
+            .child(
+                Icon::new(icon)
+                    .size_5()
+                    .text_color(color)
+                    .hover(|s| s.text_color(hover_color)),
+            )
     }
 
     fn toggle_tab(&mut self, tab: SubPanel, window: &mut Window, cx: &mut Context<Self>) {
@@ -967,7 +1377,6 @@ impl MentionInput {
                         emoji_id: emoji_id.clone(),
                         shortname: emoji.clone(),
                         shortname_lc: emoji.to_lowercase(),
-                        src: String::new(),
                     },
                     window,
                     cx,
@@ -980,11 +1389,12 @@ impl MentionInput {
                     });
                     cx.notify();
                 }
-                GifStickerEmojiEvent::Gif { url } => {
+                GifStickerEmojiEvent::Gif { url, width, height } => {
                     this.close_popup();
-                    cx.emit(MentionInputEvent::SendSticker {
+                    cx.emit(MentionInputEvent::SendGif {
                         url: url.clone(),
-                        filename: String::new(),
+                        width: *width,
+                        height: *height,
                     });
                     cx.notify();
                 }
@@ -1019,7 +1429,7 @@ impl MentionInput {
     ) {
         let content_len = self.input.read(cx).value().len();
         let at = self.input.read(cx).cursor().min(content_len);
-        let display = format!(":{}:", emoji.shortname);
+        let display = emoji.shortname;
         let inserted = format!("{display} ");
         self.input.update(cx, |input, cx| {
             input.replace_range(at..at, &inserted, window, cx)
@@ -1100,20 +1510,34 @@ impl MentionInput {
                     "@here".into(),
                     mezon_i18n::t(locale, "messageBox.suggestions.notifyEveryone").into(),
                 ),
-                Suggestion::Member(member) => {
+                Suggestion::Member(member, avatar_src) => {
                     let mut avatar = Avatar::new()
                         .name(member.display.clone())
                         .size_px(px(24.))
                         .image_cache(self.avatar_cache.clone());
-                    if !member.avatar_src.is_empty() {
+                    if !avatar_src.is_empty() {
                         avatar = avatar
-                            .src(member.avatar_src.clone())
+                            .src(avatar_src.clone())
                             .fallback_src(member.avatar_raw.clone());
                     }
                     (
                         Some(avatar.into_any_element()),
                         member.display.clone().into(),
                         format!("@{}", member.username).into(),
+                    )
+                }
+                Suggestion::Role(role) => {
+                    let mut avatar = Avatar::new()
+                        .name(role.title.clone())
+                        .size_px(px(24.))
+                        .image_cache(self.avatar_cache.clone());
+                    if !role.icon_src.is_empty() {
+                        avatar = avatar.src(role.icon_src.clone());
+                    }
+                    (
+                        Some(avatar.into_any_element()),
+                        role.title.clone().into(),
+                        SharedString::default(),
                     )
                 }
                 Suggestion::Channel(channel) => (
@@ -1130,21 +1554,17 @@ impl MentionInput {
                             .into_any_element(),
                     ),
                     channel.name.clone().into(),
-                    SharedString::default(),
+                    channel.sub_text.clone().into(),
                 ),
-                Suggestion::Emoji(emoji) => {
-                    let leading = if emoji.src.is_empty() {
+                Suggestion::Emoji(emoji, src) => {
+                    let leading = if src.is_empty() {
                         None
                     } else {
-                        Some(
-                            img(SharedString::from(emoji.src.clone()))
-                                .size(px(22.))
-                                .into_any_element(),
-                        )
+                        Some(img(src.clone()).size(px(22.)).into_any_element())
                     };
                     (
                         leading,
-                        format!(":{}:", emoji.shortname).into(),
+                        emoji.shortname.clone().into(),
                         SharedString::default(),
                     )
                 }
@@ -1306,48 +1726,110 @@ impl MentionInput {
     }
 }
 
+fn channel_suggest_raw(channel: &Channel) -> ChannelSuggestRaw {
+    let sub_text = if channel.category_name.is_empty() {
+        channel.clan_name.clone()
+    } else {
+        channel.category_name.clone()
+    };
+    ChannelSuggestRaw {
+        channel_id: channel.id.to_string(),
+        name: channel.name.clone(),
+        name_lc: channel.name.to_lowercase(),
+        name_norm: normalize_search_string(&channel.name),
+        sub_text_norm: normalize_search_string(&sub_text),
+        sub_text,
+    }
+}
+
+fn has_hashtag_content(raw: &ChannelSuggestRaw) -> bool {
+    !raw.channel_id.is_empty() || !raw.name.is_empty() || !raw.sub_text.is_empty()
+}
+
 fn channel_suggest_pool(cx: &App) -> Vec<ChannelSuggestRaw> {
+    let channel_list = ChannelList::global(cx);
+    let channel_list = channel_list.read(cx);
+    if mention_direct_id(cx).is_some() {
+        return channel_list
+            .user_channels()
+            .map(channel_suggest_raw)
+            .filter(has_hashtag_content)
+            .collect();
+    }
     let Some(clan_id) = ClanList::global(cx).read(cx).active_clan_id else {
         return Vec::new();
     };
-    let channel_list = ChannelList::global(cx);
-    let channel_list = channel_list.read(cx);
     let mut seen: std::collections::HashSet<ChannelId> = std::collections::HashSet::new();
     let mut out = Vec::new();
     for category in channel_list.categories_for_clan(clan_id) {
         for channel in &category.channels {
-            if channel.channel_type != ChannelType::Text || channel.parent_id.is_some() {
+            if !seen.insert(channel.id) {
                 continue;
             }
-            if seen.insert(channel.id) {
-                out.push(ChannelSuggestRaw {
-                    channel_id: channel.id.to_string(),
-                    name: channel.name.clone(),
-                    name_lc: channel.name.to_lowercase(),
-                });
+            let raw = channel_suggest_raw(channel);
+            if has_hashtag_content(&raw) {
+                out.push(raw);
             }
         }
     }
     out
 }
 
-fn emoji_suggest_pool(cx: &App) -> Vec<EmojiSuggestRaw> {
-    let Some(clan_id) = ClanList::global(cx).read(cx).active_clan_id else {
+fn role_suggest_pool(cx: &App) -> Vec<RoleSuggestRaw> {
+    let Some(clan_id) = mention_role_clan(cx) else {
         return Vec::new();
     };
-    let clan_id = clan_id.to_string();
+    let Some(store) = RolesStore::try_global(cx) else {
+        return Vec::new();
+    };
+    store
+        .read(cx)
+        .roles_in_clan(clan_id)
+        .into_iter()
+        .map(|(role_id, role)| RoleSuggestRaw {
+            role_id: role_id.to_string(),
+            title: role.name.clone(),
+            title_lc: role.name.to_lowercase(),
+            title_norm: normalize_search_string(&role.name),
+            icon_src: if role.icon.is_empty() {
+                SharedString::default()
+            } else {
+                SharedString::from(crate::util::imgproxy::avatar_url(cx, &role.icon))
+            },
+        })
+        .collect()
+}
+
+fn sale_item_id_from_source(src: &str) -> String {
+    let file_name = src.rsplit('/').next().unwrap_or_default();
+    match file_name.rsplit_once('.') {
+        Some((stem, _)) => stem.to_string(),
+        None => String::new(),
+    }
+}
+
+fn emoji_suggest_id(emoji: &Emoji) -> String {
+    if emoji.is_for_sale && !emoji.src.is_empty() {
+        let sale_id = sale_item_id_from_source(&emoji.src);
+        if !sale_id.is_empty() {
+            return sale_id;
+        }
+    }
+    emoji.id.clone()
+}
+
+fn emoji_suggest_pool(cx: &App) -> Vec<EmojiSuggestRaw> {
     let Some(store) = EmojiStore::try_global(cx) else {
         return Vec::new();
     };
-    let store = store.read(cx);
     store
-        .for_clan(&clan_id)
+        .read(cx)
+        .all()
         .into_iter()
         .map(|emoji| EmojiSuggestRaw {
-            emoji_id: emoji.id.clone(),
+            emoji_id: emoji_suggest_id(emoji),
             shortname: emoji.shortname.clone(),
             shortname_lc: emoji.shortname.to_lowercase(),
-            src: emoji.src.clone(),
         })
         .collect()
 }
@@ -1413,8 +1895,8 @@ impl Render for MentionInput {
             return self.render_compact(cx);
         }
         let open = self.popup_open();
-        let theme = cx.theme();
         let active_tab = self.popup.as_ref().map(|p| p.read(cx).active_tab());
+        let theme = cx.theme().clone();
         let toggle_color = if active_tab == Some(SubPanel::Emoji) {
             theme.text_primary
         } else {
@@ -1430,7 +1912,8 @@ impl Render for MentionInput {
         } else {
             theme.text_muted
         };
-        let plus_color = theme.text_muted;
+        let icon_hover = theme.text_primary;
+        let icon_bg_hover = theme.bg_hover;
         let has_pending = !self.pending_attachments.is_empty();
         let overflow_counter = self.overflow_counter;
 
@@ -1458,10 +1941,12 @@ impl Render for MentionInput {
                     .size(px(24.))
                     .rounded(px(4.))
                     .cursor_pointer()
+                    .hover(|s| s.bg(icon_bg_hover))
                     .child(
                         Icon::new(IconName::AddCircle)
                             .size_5()
-                            .text_color(plus_color),
+                            .text_color(theme.text_muted)
+                            .hover(|s| s.text_color(icon_hover)),
                     )
                     .on_click(
                         cx.listener(|this, _event, window, cx| this.open_file_picker(window, cx)),
@@ -1478,11 +1963,30 @@ impl Render for MentionInput {
                     .justify_center()
                     .size(px(20.))
                     .rounded(px(4.))
-                    .child(
+                    .cursor_pointer()
+                    .hover(|s| s.bg(icon_bg_hover))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _event, window, cx| this.start_recording(window, cx)),
+                    )
+                    .on_mouse_up(
+                        MouseButton::Left,
+                        cx.listener(|this, _event, _window, cx| this.stop_recording(cx)),
+                    )
+                    .on_mouse_up_out(
+                        MouseButton::Left,
+                        cx.listener(|this, _event, _window, cx| this.stop_recording(cx)),
+                    )
+                    .child(if self.recording.is_some() {
                         Icon::new(IconName::MicEnable)
                             .size_5()
-                            .text_color(plus_color),
-                    ),
+                            .text_color(RECORDING_COLOR)
+                    } else {
+                        Icon::new(IconName::MicEnable)
+                            .size_5()
+                            .text_color(theme.text_muted)
+                            .hover(|s| s.text_color(icon_hover))
+                    }),
             )
             .child(
                 div()
@@ -1504,22 +2008,40 @@ impl Render for MentionInput {
                         .size_full(),
                     )
                     .child(
-                        self.picker_toggle("gif-toggle", IconName::Gif, gif_color)
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.toggle_tab(SubPanel::Gifs, window, cx)
-                            })),
+                        self.picker_toggle(
+                            "gif-toggle",
+                            IconName::Gif,
+                            gif_color,
+                            icon_bg_hover,
+                            icon_hover,
+                        )
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.toggle_tab(SubPanel::Gifs, window, cx)
+                        })),
                     )
                     .child(
-                        self.picker_toggle("sticker-toggle", IconName::Sticker, sticker_color)
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.toggle_tab(SubPanel::Stickers, window, cx)
-                            })),
+                        self.picker_toggle(
+                            "sticker-toggle",
+                            IconName::Sticker,
+                            sticker_color,
+                            icon_bg_hover,
+                            icon_hover,
+                        )
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.toggle_tab(SubPanel::Stickers, window, cx)
+                        })),
                     )
                     .child(
-                        self.picker_toggle("emoji-toggle", IconName::Smile, toggle_color)
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.toggle_tab(SubPanel::Emoji, window, cx)
-                            })),
+                        self.picker_toggle(
+                            "emoji-toggle",
+                            IconName::Smile,
+                            toggle_color,
+                            icon_bg_hover,
+                            icon_hover,
+                        )
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.toggle_tab(SubPanel::Emoji, window, cx)
+                        })),
                     ),
             )
             .when_some(popup, |this, popup| this.child(popup))
@@ -1580,5 +2102,26 @@ mod convert_tests {
         assert!(content_payload_utf8_len(&text) <= CONVERT_TO_FILE_THRESHOLD);
         let over = "a".repeat(CONVERT_TO_FILE_THRESHOLD - CONVERT_PREFIX_LEN + 1);
         assert!(content_payload_utf8_len(&over) > CONVERT_TO_FILE_THRESHOLD);
+    }
+}
+
+#[cfg(test)]
+mod suggest_tests {
+    use super::sale_item_id_from_source;
+
+    #[test]
+    fn sale_id_is_source_basename_without_extension() {
+        assert_eq!(
+            sale_item_id_from_source("https://cdn.mezon.ai/emojis/1750123.webp"),
+            "1750123"
+        );
+        assert_eq!(sale_item_id_from_source("1750123.webp"), "1750123");
+        assert_eq!(sale_item_id_from_source("a/b/c.tar.gz"), "c.tar");
+    }
+
+    #[test]
+    fn sale_id_is_empty_without_extension() {
+        assert_eq!(sale_item_id_from_source("https://cdn.mezon.ai/emojis"), "");
+        assert_eq!(sale_item_id_from_source(""), "");
     }
 }

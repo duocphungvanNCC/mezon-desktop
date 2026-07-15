@@ -1,3 +1,5 @@
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 use anyhow::Result;
 use futures::StreamExt;
 use gpui::{App, AppContext, AsyncApp, Bounds, Entity, WindowBounds, WindowOptions, px, size};
@@ -284,6 +286,9 @@ fn run_app(lock: SingleInstance, initial_url: Option<String>) {
     app.run(move |cx: &mut App| {
         tracing::debug!("App started");
         install_foreground_watchdog(cx);
+
+        #[cfg(target_os = "linux")]
+        cx.set_text_rendering_mode(gpui::TextRenderingMode::Grayscale);
 
         // Register gg sans font (TTFs pre-decompressed by build.rs)
         let gg_sans_paths: &[(&[u8], &str)] = &[
@@ -644,6 +649,23 @@ fn open_main_window(
         std::sync::Arc::new(|device_id: &str, sender: flume::Sender<f32>| {
             mezon_native::audio::MicCapture::start(device_id, sender)
                 .map(|capture| Box::new(capture) as Box<dyn Send>)
+                .map_err(|e| e.to_string())
+        }),
+        cx,
+    );
+    mezon_store::AudioStore::set_mic_pcm_capture_factory(
+        &audio_store,
+        std::sync::Arc::new(|sender: flume::Sender<Vec<f32>>| {
+            mezon_native::audio::MicPcmCapture::start(sender)
+                .map(|(capture, format)| {
+                    (
+                        Box::new(capture) as Box<dyn Send>,
+                        mezon_store::MicPcmFormat {
+                            sample_rate: format.sample_rate,
+                            channels: format.channels,
+                        },
+                    )
+                })
                 .map_err(|e| e.to_string())
         }),
         cx,

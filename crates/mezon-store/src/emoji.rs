@@ -24,6 +24,7 @@ pub struct Emoji {
     pub category: String,
     pub clan_id: String,
     pub clan_logo: String,
+    pub is_for_sale: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -242,12 +243,6 @@ impl EmojiStore {
         ordered_emojis(&self.by_id, &self.order).collect()
     }
 
-    pub fn for_clan(&self, clan_id: &str) -> Vec<&Emoji> {
-        ordered_emojis(&self.by_id, &self.order)
-            .filter(|emoji| emoji.clan_id == clan_id)
-            .collect()
-    }
-
     pub fn suggest(&self, query: &str, clan_id: &str, limit: usize) -> Vec<&Emoji> {
         suggest_in(&self.by_id, &self.order, query, clan_id, limit)
     }
@@ -369,6 +364,7 @@ fn emoji_from_proto(e: api::ClanEmoji) -> Option<Emoji> {
         category,
         clan_id: e.clan_id.to_string(),
         clan_logo: e.logo,
+        is_for_sale: e.is_for_sale,
     })
 }
 
@@ -388,6 +384,7 @@ fn emoji_from_event(e: &realtime::EventEmoji) -> Option<Emoji> {
         category,
         clan_id: e.clan_id.to_string(),
         clan_logo: e.logo.clone(),
+        is_for_sale: e.is_for_sale,
     })
 }
 
@@ -433,6 +430,7 @@ mod tests {
             category: category.into(),
             clan_id: clan_id.into(),
             clan_logo: String::new(),
+            is_for_sale: false,
         }
     }
 
