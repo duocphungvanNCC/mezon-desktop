@@ -1,17 +1,18 @@
 use std::collections::HashSet;
+use std::sync::Arc;
 
-use crate::Theme;
 use crate::chat::clan_management_page::{management_page, section_toolbar};
 use crate::components::primitives::{Avatar, Icon, IconName, Input, InputEvent, InputState};
 use crate::theme::ActiveTheme;
 use gpui::{
-    AnyElement, Context, Entity, FontWeight, Hsla, Render, Subscription, Window, deferred, div,
-    img, prelude::*, px,
+    AnyElement, Context, Entity, FontWeight, Hsla, ListAlignment, ListOffset, ListState,
+    MouseButton, Render, Subscription, Window, deferred, div, img, list, prelude::*, px,
 };
 use mezon_store::{
     ClanId, ClanMembersStore, PERMISSION_MANAGE_CLAN, PermissionStore, Role, RoleId, RolesStore,
     Settings, UserId,
 };
+use unicode_normalization::{UnicodeNormalization, char::is_combining_mark};
 
 const PAGE_SIZES: [usize; 3] = [10, 50, 100];
 
@@ -26,7 +27,7 @@ pub struct ClanMembersPage {
     page_size_picker_open: bool,
     newest_first: bool,
     role_picker: Option<UserId>,
-    hovered_roles: Option<UserId>,
+    list_state: ListState,
 }
 
 #[derive(Clone)]
@@ -39,6 +40,20 @@ struct MemberRow {
     member_since: u32,
     joined_mezon: u32,
     role_ids: Vec<RoleId>,
+}
+
+struct ExtraRolesTooltip {
+    roles: Vec<Role>,
+}
+
+impl Render for ExtraRolesTooltip {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let mut roles = div().flex().flex_col().items_start().gap_1();
+        for role in &self.roles {
+            roles = roles.child(role_badge(role, true, cx.theme()));
+        }
+        roles
+    }
 }
 
 impl ClanMembersPage {
@@ -61,7 +76,7 @@ impl ClanMembersPage {
             page_size_picker_open: false,
             newest_first: true,
             role_picker: None,
-            hovered_roles: None,
+            list_state: ListState::new(0, ListAlignment::Top, px(240.)),
         }
     }
 
@@ -72,7 +87,6 @@ impl ClanMembersPage {
         self.clan_id = clan_id;
         self.page = 0;
         self.role_picker = None;
-        self.hovered_roles = None;
         self.page_size_picker_open = false;
         ClanMembersStore::global(cx).update(cx, |store, cx| store.ensure_loaded(clan_id, cx));
         RolesStore::global(cx).update(cx, |store, cx| store.ensure_loaded(clan_id, cx));
@@ -106,6 +120,7 @@ impl ClanMembersPage {
         self.search_sub = Some(cx.subscribe(&input, |this, _, event, cx| {
             if matches!(event, InputEvent::Change) {
                 this.page = 0;
+                this.scroll_to_top();
                 cx.notify();
             }
         }));
@@ -117,7 +132,7 @@ impl ClanMembersPage {
         let query = self
             .search
             .as_ref()
-            .map(|input| input.read(cx).value().trim().to_lowercase())
+            .map(|input| normalize_search(input.read(cx).value().trim()))
             .unwrap_or_default();
         let mut rows: Vec<_> = ClanMembersStore::global(cx)
             .read(cx)
@@ -125,9 +140,9 @@ impl ClanMembersPage {
             .into_iter()
             .filter(|member| {
                 query.is_empty()
-                    || member.user.username.to_lowercase().contains(&query)
-                    || member.user.display_name.to_lowercase().contains(&query)
-                    || member.clan_nick.to_lowercase().contains(&query)
+                    || normalize_search(&member.user.username).contains(&query)
+                    || normalize_search(&member.user.display_name).contains(&query)
+                    || normalize_search(&member.clan_nick).contains(&query)
             })
             .map(|member| MemberRow {
                 id: member.id(),
@@ -182,42 +197,26 @@ impl ClanMembersPage {
         let mut cell = div().relative().flex().items_center().gap_2().min_w_0();
 
         if let Some(role) = roles.first() {
-            cell = cell.child(role_badge(role, false, cx));
+            cell = cell.child(role_badge(role, false, cx.theme()));
         } else {
             cell = cell.child(div().text_color(cx.theme().text_secondary).child("-"));
         }
 
         if extra > 0 {
-            let mut extra_roles = div()
+            let tooltip_roles = roles.iter().skip(1).cloned().collect::<Vec<_>>();
+            let extra_roles = div()
                 .id(format!("extra-roles-{}", user_id.get()))
                 .relative()
                 .cursor_default()
                 .text_size(px(12.))
                 .px_1()
                 .child(format!("+{extra}"))
-                .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
-                    this.hovered_roles = hovered.then_some(user_id);
-                    cx.notify();
-                }));
-            if self.hovered_roles == Some(user_id) {
-                let mut role_list = div()
-                    .absolute()
-                    .left(px(24.))
-                    .top_0()
-                    .flex()
-                    .flex_col()
-                    .items_start()
-                    .gap_1()
-                    .occlude()
-                    .on_mouse_down_out(cx.listener(|this, _, _, cx| {
-                        this.role_picker = None;
-                        cx.notify();
-                    }));
-                for role in roles.iter().skip(1) {
-                    role_list = role_list.child(role_badge(role, true, cx));
-                }
-                extra_roles = extra_roles.child(deferred(role_list));
-            }
+                .hoverable_tooltip(move |_window, cx| {
+                    cx.new(|_| ExtraRolesTooltip {
+                        roles: tooltip_roles.clone(),
+                    })
+                    .into()
+                });
             cell = cell.child(extra_roles);
         }
 
@@ -323,248 +322,90 @@ impl ClanMembersPage {
         cell.into_any_element()
     }
 
-    fn page_size_control(&self, cx: &Context<Self>) -> AnyElement {
-        let open = self.page_size_picker_open;
-        let locale = &self.settings.read(cx).language;
-        let mut control = div()
-            .relative()
-            .flex()
-            .items_center()
-            .gap_2()
-            .child(tr(locale, "memberPage.show"))
-            .child(
+    fn render_member_row(
+        &self,
+        row: &MemberRow,
+        can_manage: bool,
+        current_level: Option<i32>,
+        locale: &str,
+        cx: &Context<Self>,
+    ) -> AnyElement {
+        let theme = cx.theme();
+        let roles = self.visible_roles(&row.role_ids, cx);
+        let name_color = roles
+            .first()
+            .and_then(|role| parse_hex_color(&role.color))
+            .map(Hsla::from)
+            .unwrap_or_else(|| Hsla::from(theme.text_secondary));
+        let subtitle = if row.clan_nick.is_empty() || row.clan_nick == row.username {
+            row.username.clone()
+        } else {
+            format!("{} · {}", row.clan_nick, row.username)
+        };
+        table_row(theme, false)
+            .id(format!("member-row-{}", row.id.get()))
+            .hover(|style| style.bg(theme.bg_hover))
+            .child(name_column(
                 div()
-                    .id("member-page-size")
-                    .cursor_pointer()
-                    .px_2()
-                    .py_1()
                     .flex()
                     .items_center()
-                    .justify_center()
-                    .gap_1()
-                    .rounded(px(4.))
-                    .hover(|style| style.bg(cx.theme().bg_hover))
-                    .child(self.page_size.to_string())
-                    .child(Icon::new(IconName::ArrowDown).size(px(14.)))
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.page_size_picker_open = !open;
-                        this.role_picker = None;
-                        cx.notify();
-                    })),
-            );
-        if open {
-            let mut menu = div()
-                .absolute()
-                .bottom(px(34.))
-                .left(px(48.))
-                .w(px(64.))
-                .p_1()
-                .rounded(px(5.))
-                .bg(cx.theme().bg_floating)
-                .border_1()
-                .border_color(cx.theme().border)
-                .shadow_lg();
-            for size in PAGE_SIZES {
-                menu = menu.child(
-                    div()
-                        .id(format!("member-page-size-{size}"))
-                        .cursor_pointer()
-                        .px_2()
-                        .py_1()
-                        .rounded(px(3.))
-                        .hover(|style| style.bg(cx.theme().bg_hover))
-                        .child(size.to_string())
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.page_size = size;
-                            this.page = 0;
-                            this.page_size_picker_open = false;
-                            cx.notify();
-                        })),
-                );
-            }
-            control = control.child(menu);
-        }
-        control.into_any_element()
-    }
-
-    fn pagination(&self, pages: usize, cx: &Context<Self>) -> AnyElement {
-        if pages <= 1 {
-            return div().into_any_element();
-        }
-        let current = self.page;
-        let mut bar = div().flex().items_center().gap_2();
-        bar = bar.child(
-            page_arrow(true, "previous", current == 0, cx.theme()).on_click(cx.listener(
-                |this, _, _, cx| {
-                    if this.page > 0 {
-                        this.page -= 1;
-                        cx.notify();
-                    }
-                },
-            )),
-        );
-        for item in pagination_items(current, pages) {
-            match item {
-                Some(page) => {
-                    let selected = page == current;
-                    bar = bar.child(page_number(page + 1, selected, cx.theme()).on_click(
-                        cx.listener(move |this, _, _, cx| {
-                            this.page = page;
-                            cx.notify();
-                        }),
-                    ));
-                }
-                None => bar = bar.child(div().px_2().text_color(cx.theme().text_muted).child("…")),
-            }
-        }
-        bar.child(
-            page_arrow(false, "next", current + 1 >= pages, cx.theme()).on_click(cx.listener(
-                move |this, _, _, cx| {
-                    if this.page + 1 < pages {
-                        this.page += 1;
-                        cx.notify();
-                    }
-                },
-            )),
-        )
-        .into_any_element()
-    }
-}
-
-impl Render for ClanMembersPage {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        self.ensure_search(window, cx);
-        let theme = cx.theme();
-        let locale = self.settings.read(cx).language.clone();
-        let rows = self.rows(cx);
-        let total = rows.len();
-        let pages = total.div_ceil(self.page_size).max(1);
-        self.page = self.page.min(pages - 1);
-        let visible = rows
-            .iter()
-            .skip(self.page * self.page_size)
-            .take(self.page_size)
-            .cloned()
-            .collect::<Vec<_>>();
-        let permissions = PermissionStore::global(cx);
-        let can_manage =
-            permissions
-                .read(cx)
-                .check_permission(self.clan_id, PERMISSION_MANAGE_CLAN, cx);
-        let current_level = permissions
-            .read(cx)
-            .current_permission_level(self.clan_id, cx);
-
-        let header = table_row(theme, true)
-            .child(name_column(
-                tr(&locale, "memberTable.headers.name")
-                    .to_uppercase()
+                    .gap_2()
+                    .min_w_0()
+                    .child(
+                        Avatar::new()
+                            .src(row.avatar.clone())
+                            .name(row.name.clone())
+                            .size_px(px(36.)),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .min_w_0()
+                            .child(
+                                div()
+                                    .text_size(px(16.))
+                                    .text_color(name_color)
+                                    .child(row.name.clone()),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(11.))
+                                    .text_color(theme.text_secondary)
+                                    .child(subtitle),
+                            ),
+                    )
                     .into_any_element(),
             ))
             .child(weighted_column(
-                tr(&locale, "memberTable.headers.memberSince")
-                    .to_uppercase()
-                    .into_any_element(),
+                date_cell(Self::format_date(row.member_since), theme),
                 1.,
                 true,
             ))
             .child(weighted_column(
-                tr(&locale, "memberTable.headers.joinedMezon")
-                    .to_uppercase()
-                    .into_any_element(),
+                date_cell(Self::format_date(row.joined_mezon), theme),
                 1.,
                 true,
             ))
             .child(weighted_column(
-                header_with_filter(
-                    tr(&locale, "memberTable.headers.roles").to_uppercase(),
-                    theme,
-                ),
+                self.role_cell(row, can_manage, current_level, cx),
                 2.,
                 true,
             ))
             .child(weighted_column(
-                header_with_filter(
-                    tr(&locale, "memberTable.headers.signals").to_uppercase(),
-                    theme,
-                ),
+                div()
+                    .text_size(px(12.))
+                    .text_color(theme.text_secondary)
+                    .child(tr(locale, "memberTable.headers.signals").to_uppercase())
+                    .into_any_element(),
                 1.,
                 true,
-            ));
-        let mut table = div().flex().flex_col().w_full().child(header);
-        for row in visible {
-            let roles = self.visible_roles(&row.role_ids, cx);
-            let name_color = roles
-                .first()
-                .and_then(|role| parse_hex_color(&role.color))
-                .map(Hsla::from)
-                .unwrap_or_else(|| Hsla::from(Theme::clone(theme).text_secondary));
-            let subtitle = if row.clan_nick.is_empty() || row.clan_nick == row.username {
-                row.username.clone()
-            } else {
-                format!("{} · {}", row.clan_nick, row.username)
-            };
-            table = table.child(
-                table_row(theme, false)
-                    .child(name_column(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_2()
-                            .min_w_0()
-                            .child(
-                                Avatar::new()
-                                    .src(row.avatar.clone())
-                                    .name(row.name.clone())
-                                    .size_px(px(36.)),
-                            )
-                            .child(
-                                div()
-                                    .flex()
-                                    .flex_col()
-                                    .min_w_0()
-                                    .child(
-                                        div()
-                                            .text_size(px(16.))
-                                            .text_color(name_color)
-                                            .child(row.name.clone()),
-                                    )
-                                    .child(
-                                        div()
-                                            .text_size(px(11.))
-                                            .text_color(theme.text_secondary)
-                                            .child(subtitle),
-                                    ),
-                            )
-                            .into_any_element(),
-                    ))
-                    .child(weighted_column(
-                        date_cell(Self::format_date(row.member_since), theme),
-                        1.,
-                        true,
-                    ))
-                    .child(weighted_column(
-                        date_cell(Self::format_date(row.joined_mezon), theme),
-                        1.,
-                        true,
-                    ))
-                    .child(weighted_column(
-                        self.role_cell(&row, can_manage, current_level, cx),
-                        2.,
-                        true,
-                    ))
-                    .child(weighted_column(
-                        div()
-                            .text_size(px(12.))
-                            .text_color(theme.text_secondary)
-                            .child(tr(&locale, "memberTable.headers.signals").to_uppercase())
-                            .into_any_element(),
-                        1.,
-                        true,
-                    )),
-            );
-        }
+            ))
+            .into_any_element()
+    }
 
+    fn render_toolbar(&self, locale: &str, cx: &Context<Self>) -> AnyElement {
+        let theme = cx.theme();
         let controls = div()
             .flex()
             .items_center()
@@ -615,60 +456,246 @@ impl Render for ClanMembersPage {
                                 std::f32::consts::FRAC_PI_2,
                             ))),
                     )
-                    .child(tr(&locale, "memberTable.topBar.sort"))
+                    .child(tr(locale, "memberTable.topBar.sort"))
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.newest_first = !this.newest_first;
                         this.page = 0;
+                        this.scroll_to_top();
                         cx.notify();
                     })),
             )
             .into_any_element();
-        let body = div()
+        section_toolbar(
+            tr(locale, "memberTable.topBar.recentMembers"),
+            controls,
+            theme,
+        )
+        .w_full()
+        .into_any_element()
+    }
+
+    fn render_footer(
+        &self,
+        total: usize,
+        pages: usize,
+        locale: &str,
+        cx: &Context<Self>,
+    ) -> AnyElement {
+        let theme = cx.theme();
+        div()
+            .w_full()
+            .h(px(72.))
+            .flex_shrink_0()
             .flex()
-            .flex_col()
+            .items_center()
+            .justify_between()
+            .border_t_1()
+            .border_color(theme.border)
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(self.page_size_control(cx))
+                    .text_color(theme.text_secondary)
+                    .child(
+                        tr(locale, "memberPage.membersOf").replace("{{count}}", &total.to_string()),
+                    ),
+            )
+            .child(self.pagination(pages, cx))
+            .into_any_element()
+    }
+
+    fn page_size_control(&self, cx: &Context<Self>) -> AnyElement {
+        let open = self.page_size_picker_open;
+        let locale = &self.settings.read(cx).language;
+        let mut control = div()
+            .id("member-page-size-control")
+            .relative()
+            .flex()
+            .items_center()
+            .gap_2()
+            .child(tr(locale, "memberPage.show"))
+            .child(
+                div()
+                    .id("member-page-size")
+                    .cursor_pointer()
+                    .px_2()
+                    .py_1()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .gap_1()
+                    .rounded(px(4.))
+                    .hover(|style| style.bg(cx.theme().bg_hover))
+                    .child(self.page_size.to_string())
+                    .child(Icon::new(IconName::ArrowDown).size(px(14.)))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.page_size_picker_open = !open;
+                        this.role_picker = None;
+                        cx.notify();
+                    })),
+            )
+            .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                if this.page_size_picker_open {
+                    this.page_size_picker_open = false;
+                    cx.notify();
+                }
+            }));
+        if open {
+            let mut menu = div()
+                .absolute()
+                .bottom(px(34.))
+                .left(px(48.))
+                .w(px(64.))
+                .p_1()
+                .rounded(px(5.))
+                .bg(cx.theme().bg_floating)
+                .border_1()
+                .border_color(cx.theme().border)
+                .shadow_lg();
+            for size in PAGE_SIZES {
+                menu = menu.child(
+                    div()
+                        .id(format!("member-page-size-{size}"))
+                        .cursor_pointer()
+                        .px_2()
+                        .py_1()
+                        .rounded(px(3.))
+                        .hover(|style| style.bg(cx.theme().bg_hover))
+                        .child(size.to_string())
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |this, _, _, cx| {
+                                this.page_size = size;
+                                this.page = 0;
+                                this.page_size_picker_open = false;
+                                this.scroll_to_top();
+                                cx.notify();
+                            }),
+                        ),
+                );
+            }
+            control = control.child(deferred(menu));
+        }
+        control.into_any_element()
+    }
+
+    fn pagination(&self, pages: usize, cx: &Context<Self>) -> AnyElement {
+        if pages <= 1 {
+            return div().into_any_element();
+        }
+        let current = self.page;
+        let mut bar = div().flex().items_center().gap_2();
+        bar = bar.child(
+            page_arrow(true, "previous", current == 0, cx.theme()).on_click(cx.listener(
+                |this, _, _, cx| {
+                    if this.page > 0 {
+                        this.page -= 1;
+                        this.scroll_to_top();
+                        cx.notify();
+                    }
+                },
+            )),
+        );
+        for item in pagination_items(current, pages) {
+            match item {
+                Some(page) => {
+                    let selected = page == current;
+                    bar = bar.child(page_number(page + 1, selected, cx.theme()).on_click(
+                        cx.listener(move |this, _, _, cx| {
+                            this.page = page;
+                            this.scroll_to_top();
+                            cx.notify();
+                        }),
+                    ));
+                }
+                None => bar = bar.child(div().px_2().text_color(cx.theme().text_muted).child("…")),
+            }
+        }
+        bar.child(
+            page_arrow(false, "next", current + 1 >= pages, cx.theme()).on_click(cx.listener(
+                move |this, _, _, cx| {
+                    if this.page + 1 < pages {
+                        this.page += 1;
+                        this.scroll_to_top();
+                        cx.notify();
+                    }
+                },
+            )),
+        )
+        .into_any_element()
+    }
+
+    fn scroll_to_top(&self) {
+        self.list_state.scroll_to(ListOffset {
+            item_ix: 0,
+            offset_in_item: px(0.),
+        });
+    }
+}
+
+impl Render for ClanMembersPage {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.ensure_search(window, cx);
+        let theme = cx.theme();
+        let locale = self.settings.read(cx).language.clone();
+        let rows = self.rows(cx);
+        let total = rows.len();
+        let pages = total.div_ceil(self.page_size).max(1);
+        self.page = self.page.min(pages - 1);
+        let visible = rows
+            .iter()
+            .skip(self.page * self.page_size)
+            .take(self.page_size)
+            .cloned()
+            .collect::<Vec<_>>();
+        let permissions = PermissionStore::global(cx);
+        let can_manage =
+            permissions
+                .read(cx)
+                .check_permission(self.clan_id, PERMISSION_MANAGE_CLAN, cx);
+        let current_level = permissions
+            .read(cx)
+            .current_permission_level(self.clan_id, cx);
+
+        let visible = Arc::new(visible);
+        let item_count = visible.len() + 3;
+        if self.list_state.item_count() != item_count {
+            self.list_state.reset(item_count);
+        }
+        let entity = cx.entity();
+        let locale_for_list = Arc::<str>::from(locale.clone());
+        let visible_for_list = visible.clone();
+        let member_list = list(self.list_state.clone(), move |index, _window, cx| {
+            entity.update(cx, |this, cx| {
+                if index == 0 {
+                    return this.render_toolbar(&locale_for_list, cx);
+                }
+                if index == 1 {
+                    return member_header(&locale_for_list, cx.theme());
+                }
+                let row_index = index - 2;
+                if let Some(row) = visible_for_list.get(row_index) {
+                    return this.render_member_row(
+                        row,
+                        can_manage,
+                        current_level,
+                        &locale_for_list,
+                        cx,
+                    );
+                }
+                this.render_footer(total, pages, &locale_for_list, cx)
+            })
+        })
+        .size_full();
+        let body = div()
             .flex_1()
             .min_h_0()
             .min_w_0()
             .p_4()
             .text_color(theme.text_secondary)
-            .child(section_toolbar(
-                tr(&locale, "memberTable.topBar.recentMembers"),
-                controls,
-                theme,
-            ))
-            .child(
-                div()
-                    .id("members-table-scroll")
-                    .flex_1()
-                    .min_h_0()
-                    .min_w_0()
-                    .overflow_y_scroll()
-                    .text_color(theme.text_secondary)
-                    .child(table),
-            )
-            .child(
-                div()
-                    .h(px(72.))
-                    .flex_shrink_0()
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .border_t_1()
-                    .border_color(theme.border)
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_2()
-                            .child(self.page_size_control(cx))
-                            .text_color(theme.text_secondary)
-                            .child(
-                                tr(&locale, "memberPage.membersOf")
-                                    .replace("{{count}}", &total.to_string()),
-                            ),
-                    )
-                    .child(self.pagination(pages, cx)),
-            )
+            .child(member_list)
             .into_any_element();
         management_page(tr(&locale, "common.members"), body, theme)
     }
@@ -676,6 +703,7 @@ impl Render for ClanMembersPage {
 
 fn table_row(theme: &crate::theme::Theme, header: bool) -> gpui::Div {
     let row = div()
+        .w_full()
         .flex()
         .items_center()
         .min_w_0()
@@ -690,6 +718,46 @@ fn table_row(theme: &crate::theme::Theme, header: bool) -> gpui::Div {
     } else {
         row.h(px(48.))
     }
+}
+
+fn member_header(locale: &str, theme: &crate::theme::Theme) -> AnyElement {
+    table_row(theme, true)
+        .child(name_column(
+            tr(locale, "memberTable.headers.name")
+                .to_uppercase()
+                .into_any_element(),
+        ))
+        .child(weighted_column(
+            tr(locale, "memberTable.headers.memberSince")
+                .to_uppercase()
+                .into_any_element(),
+            1.,
+            true,
+        ))
+        .child(weighted_column(
+            tr(locale, "memberTable.headers.joinedMezon")
+                .to_uppercase()
+                .into_any_element(),
+            1.,
+            true,
+        ))
+        .child(weighted_column(
+            header_with_filter(
+                tr(locale, "memberTable.headers.roles").to_uppercase(),
+                theme,
+            ),
+            2.,
+            true,
+        ))
+        .child(weighted_column(
+            header_with_filter(
+                tr(locale, "memberTable.headers.signals").to_uppercase(),
+                theme,
+            ),
+            1.,
+            true,
+        ))
+        .into_any_element()
 }
 
 fn name_column(content: AnyElement) -> gpui::Div {
@@ -739,7 +807,7 @@ fn date_cell(value: String, theme: &crate::theme::Theme) -> AnyElement {
         .child(value)
         .into_any_element()
 }
-fn role_badge(role: &Role, emphasized: bool, cx: &Context<ClanMembersPage>) -> AnyElement {
+fn role_badge(role: &Role, emphasized: bool, theme: &crate::theme::Theme) -> AnyElement {
     let color = parse_hex_color(&role.color).unwrap_or_else(|| gpui::rgba(0x778899ff));
     let mut background = color;
     background.a = 0.31;
@@ -768,7 +836,7 @@ fn role_badge(role: &Role, emphasized: bool, cx: &Context<ClanMembersPage>) -> A
                 .text_color(if emphasized {
                     gpui::white()
                 } else {
-                    Hsla::from(cx.theme().text_secondary)
+                    Hsla::from(theme.text_secondary)
                 })
                 .child(role.name.clone()),
         )
@@ -875,11 +943,7 @@ fn page_arrow(
         .rounded(px(5.))
         .border_1()
         .border_color(theme.border)
-        .bg(if disabled {
-            theme.bg_hover
-        } else {
-            theme.brand
-        })
+        .bg(theme.brand)
         .text_color(gpui::white())
         .when(disabled, |element| element.opacity(0.5))
         .when(!disabled, |element| element.cursor_pointer())
@@ -928,6 +992,18 @@ fn tr(locale: &str, key: &'static str) -> String {
     mezon_i18n::t(locale, key).to_string()
 }
 
+fn normalize_search(value: &str) -> String {
+    value
+        .nfd()
+        .filter(|character| !is_combining_mark(*character))
+        .flat_map(char::to_lowercase)
+        .map(|character| match character {
+            '\u{0111}' => 'd',
+            _ => character,
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -972,5 +1048,11 @@ mod tests {
             order: 0,
         };
         assert!(is_everyone(&role));
+    }
+
+    #[test]
+    fn search_matches_vietnamese_names_without_diacritics() {
+        assert_eq!(normalize_search("Hiền"), "hien");
+        assert_eq!(normalize_search("Đặng Văn"), "dang van");
     }
 }
