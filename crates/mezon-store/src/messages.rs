@@ -5,7 +5,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use gpui::{
-    App, AppContext, Context, Entity, EventEmitter, Global, Rgba, SharedString, Subscription, Task,
+    App, AppContext, AsyncApp, Context, Entity, EventEmitter, Global, Rgba, SharedString,
+    Subscription, Task,
 };
 use mezon_client::transport::{
     ApiActionRow, ApiComponentPayload, ApiEmbed, ApiMessage, ApiMessageComponent,
@@ -25,7 +26,7 @@ use crate::album_layout::{AlbumLayout, calculate_album_layout};
 use crate::badge::BadgeService;
 use crate::channel::{ChannelEvent, ChannelList, ChannelType};
 use crate::clan_members::ClanMembersStore;
-use crate::direct::DirectMessageStore;
+use crate::direct::{DirectKind, DirectMessageStore};
 use crate::message::{
     CallLog, CallLogType, Embed, EmbedAuthor, EmbedField, EmbedFooter, EmbedImage, InvitePreview,
     MentionTarget, Message, MessageAttachment, MessageButton, MessageCode, MessageComponent,
@@ -35,10 +36,15 @@ use crate::message::{
     parse_spans, reaction_key, recompute_message_grouping, rollback_reaction, sort_messages,
     spans_only_emoji, viewer_highlight_direct,
 };
+use crate::message_time::{
+    format_local_time_hhmm, local_datetime, local_day_key, unix_now_seconds,
+};
 use crate::presign;
 use crate::realtime::{RealtimeDispatch, RealtimeKind};
+use crate::topics::TopicsStore;
 
 const MESSAGE_PAGE_LIMIT: u32 = 50;
+const MAX_COUNTED_TOPIC_REPLIES: usize = 2048;
 const DIRECTION_BEFORE: i32 = 3;
 const DIRECTION_AFTER: i32 = 1;
 /// `Direction_Mode.AROUND_TIMESTAMP` — fetch a window centered on a message
@@ -60,6 +66,13 @@ struct PendingLastSeen {
     create_time: i64,
     mode: i32,
     badge_count: u32,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct TopicAppend {
+    pub appended: bool,
+    pub should_count_reply: bool,
+    pub create_time: i64,
 }
 
 #[derive(Debug, Clone)]
@@ -96,6 +109,23 @@ pub enum MessagesEvent {
         message_id: MessageId,
     },
     ReplyTargetChanged,
+    /// A discussion topic's message bucket changed (loaded / new reply). Drives
+    /// the topic side panel to re-read `messages_in_channel(topic_id)`.
+    TopicUpdated {
+        topic_id: i64,
+    },
+    /// One forward destination finished (cf. React `sendingProgress`).
+    ForwardProgress {
+        current: usize,
+        total: usize,
+    },
+    /// Every forward destination has been attempted. `failed` names only the
+    /// destinations that did not go through — a partial failure must not be
+    /// reported as if the whole forward failed.
+    ForwardFinished {
+        sent: usize,
+        failed: Vec<SharedString>,
+    },
 }
 
 /// The message currently being replied to (composer state), mirroring React's
@@ -122,7 +152,7 @@ pub struct OutgoingMention {
 }
 
 impl OutgoingMention {
-    fn into_transport(self) -> TransportMention {
+    pub(crate) fn into_transport(self) -> TransportMention {
         TransportMention {
             user_id: self.user_id,
             role_id: self.role_id,
@@ -141,7 +171,7 @@ pub struct OutgoingHashtag {
 }
 
 impl OutgoingHashtag {
-    fn into_transport(self) -> TransportHashtag {
+    pub(crate) fn into_transport(self) -> TransportHashtag {
         TransportHashtag {
             channel_id: self.channel_id,
             s: self.s,
@@ -158,7 +188,7 @@ pub struct OutgoingEmoji {
 }
 
 impl OutgoingEmoji {
-    fn into_transport(self) -> TransportEmoji {
+    pub(crate) fn into_transport(self) -> TransportEmoji {
         TransportEmoji {
             emoji_id: self.emoji_id,
             s: self.s,
@@ -187,6 +217,7 @@ pub struct OutgoingAttachment {
     pub filetype: String,
     pub width: i32,
     pub height: i32,
+    pub duration: i32,
     pub poster_jpeg: Option<Vec<u8>>,
 }
 
@@ -432,6 +463,9 @@ pub struct MessagesStore {
     viewing_older_by_channel: HashMap<ChannelId, bool>,
     active_channel_id: Option<ChannelId>,
     active_clan_id: Option<ClanId>,
+    /// Topic bucket currently shown in the discussion side panel, if any. Lets
+    /// realtime replies to a non-active topic bucket still notify the panel.
+    active_topic_id: Option<ChannelId>,
     pending_jump: Option<(ChannelId, MessageId)>,
     is_public: bool,
     is_dm: bool,
@@ -451,6 +485,8 @@ pub struct MessagesStore {
     editing: Option<MessageId>,
     joined_channels: HashSet<ChannelId>,
     pending_self_adds: HashMap<(ChannelId, MessageId, String), u32>,
+    counted_topic_replies: HashSet<MessageId>,
+    counted_topic_reply_order: std::collections::VecDeque<MessageId>,
     api: Arc<AppApi>,
     _channel_sub: Subscription,
     _conn_watch: Task<()>,
@@ -465,27 +501,59 @@ pub struct MessagesStore {
     /// `VotePollResponse.my_answer_indices`.
     poll_my_vote: HashMap<MessageId, Vec<i32>>,
     select_ui: HashMap<MessageId, HashMap<SharedString, Vec<SharedString>>>,
+    forward_task: Option<Task<()>>,
+    forward_in_flight: bool,
 }
 
+/// Longest additional note that may ride along with a forward
+/// (React `MAX_FORWARD_MESSAGE_LENGTH`).
+pub const MAX_FORWARD_MESSAGE_LENGTH: usize = 2000;
+
+/// A forward destination. A friend has no channel yet — the DM is created on
+/// send (React `createDirectMessageWithUser`).
 #[derive(Debug, Clone)]
-pub struct ForwardTarget {
-    pub clan_id: ClanId,
-    pub channel_id: ChannelId,
-    pub channel_type: i32,
-    pub mode: i32,
-    pub is_public: bool,
+pub enum ForwardTarget {
+    Channel {
+        clan_id: ClanId,
+        channel_id: ChannelId,
+        channel_type: i32,
+        mode: i32,
+        is_public: bool,
+        label: SharedString,
+    },
+    Friend {
+        user_id: UserId,
+        label: String,
+        avatar: String,
+        username: String,
+    },
 }
 
-#[derive(Debug, Clone)]
-struct ForwardPlan {
+impl ForwardTarget {
+    pub fn label(&self) -> SharedString {
+        match self {
+            Self::Channel { label, .. } => label.clone(),
+            Self::Friend { label, .. } => label.clone().into(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ResolvedTarget {
     clan_id: i64,
     channel_id: i64,
     channel_type: i32,
     mode: i32,
     is_public: bool,
-    content: String,
+}
+
+/// One source message, snapshotted off the store before the send task runs.
+#[derive(Debug, Clone)]
+struct ForwardSource {
+    content_raw: String,
+    text: String,
     attachments: Vec<mezon_client::transport::ApiAttachment>,
-    note: Option<String>,
+    mentions: Vec<TransportMention>,
 }
 
 fn attachment_to_api(a: &MessageAttachment) -> mezon_client::transport::ApiAttachment {
@@ -501,25 +569,191 @@ fn attachment_to_api(a: &MessageAttachment) -> mezon_client::transport::ApiAttac
     }
 }
 
-fn plan_forwards(
-    content: &str,
-    attachments: &[mezon_client::transport::ApiAttachment],
-    targets: &[ForwardTarget],
-    note: Option<&str>,
-) -> Vec<ForwardPlan> {
+/// Mentions carried by the source message. The server delivers them in the binary
+/// proto field, never in the content JSON, so they are read off the domain message
+/// rather than re-parsed out of `content_raw`. Only sent when the destination is the
+/// `message.channel_id === channel_id ? message.mentions : []`.
+fn forward_mentions(targets: &[MentionTarget]) -> Vec<TransportMention> {
     targets
         .iter()
-        .map(|target| ForwardPlan {
-            clan_id: target.clan_id.get(),
-            channel_id: target.channel_id.get(),
-            channel_type: target.channel_type,
-            mode: target.mode,
-            is_public: target.is_public,
-            content: content.to_string(),
-            attachments: attachments.to_vec(),
-            note: note.map(str::to_string),
+        .filter_map(|target| {
+            let user_id = target.user_id.clone().unwrap_or_default();
+            let role_id = target.role_id.clone().unwrap_or_default();
+            if user_id.is_empty() && role_id.is_empty() {
+                return None;
+            }
+            Some(TransportMention {
+                user_id,
+                role_id,
+                username: target.username.clone(),
+                s: target.s,
+                e: target.e,
+            })
         })
         .collect()
+}
+
+/// Fallback for content payloads that carry their own mention tokens (a message
+/// composed on web can), used only when the proto field delivered none.
+fn content_json_mentions(content_raw: &str) -> Vec<TransportMention> {
+    let Ok(content) = serde_json::from_str::<ApiMessageContent>(content_raw) else {
+        return Vec::new();
+    };
+    content
+        .mentions
+        .iter()
+        .filter_map(|token| {
+            let user_id = token.user_id.clone().unwrap_or_default();
+            let role_id = token.role_id.clone().unwrap_or_default();
+            if user_id.is_empty() && role_id.is_empty() {
+                return None;
+            }
+            Some(TransportMention {
+                user_id,
+                role_id,
+                username: token.username.clone().unwrap_or_default(),
+                s: i32::try_from(token.s?).ok()?,
+                e: i32::try_from(token.e?).ok()?,
+            })
+        })
+        .collect()
+}
+
+fn forward_source(msg: &Message) -> ForwardSource {
+    let content_raw = msg.raw_content.as_deref().unwrap_or_default().to_string();
+    ForwardSource {
+        mentions: {
+            let proto = forward_mentions(&msg.mention_targets);
+            if proto.is_empty() {
+                content_json_mentions(&content_raw)
+            } else {
+                proto
+            }
+        },
+        content_raw,
+        text: msg.content.clone(),
+        attachments: msg.attachments.iter().map(attachment_to_api).collect(),
+    }
+}
+
+/// Turn a picked destination into a real channel. A friend row has no DM yet,
+/// so one is created first (React `createDirectMessageWithUser`).
+async fn resolve_forward_target(
+    target: &ForwardTarget,
+    cx: &mut AsyncApp,
+) -> anyhow::Result<ResolvedTarget> {
+    match target {
+        ForwardTarget::Channel {
+            clan_id,
+            channel_id,
+            channel_type,
+            mode,
+            is_public,
+            ..
+        } => Ok(ResolvedTarget {
+            clan_id: clan_id.get(),
+            channel_id: channel_id.get(),
+            channel_type: *channel_type,
+            mode: *mode,
+            is_public: *is_public,
+        }),
+        ForwardTarget::Friend {
+            user_id,
+            label,
+            avatar,
+            username,
+        } => {
+            let create = cx.update(|cx| {
+                DirectMessageStore::global(cx).update(cx, |store, cx| {
+                    store.create_dm_with_user(
+                        *user_id,
+                        label.clone(),
+                        avatar.clone(),
+                        username.clone(),
+                        cx,
+                    )
+                })
+            });
+            let (channel_id, channel_type) = create.await?;
+            Ok(ResolvedTarget {
+                clan_id: 0,
+                channel_id: channel_id.get(),
+                channel_type,
+                mode: DirectKind::Dm.stream_mode(),
+                is_public: false,
+            })
+        }
+    }
+}
+
+async fn send_forward(
+    api: &AppApi,
+    dest: ResolvedTarget,
+    sources: &[ForwardSource],
+    source_channel_id: ChannelId,
+    note: Option<&str>,
+) -> anyhow::Result<()> {
+    api.join_chat(
+        dest.clan_id,
+        dest.channel_id,
+        dest.channel_type,
+        dest.is_public,
+    )
+    .await?;
+    let same_channel = dest.channel_id == source_channel_id.get();
+    let mut failures = 0usize;
+    for source in sources {
+        let mentions = if same_channel {
+            source.mentions.clone()
+        } else {
+            Vec::new()
+        };
+        if let Err(e) = api
+            .forward_channel_message(
+                dest.clan_id,
+                dest.channel_id,
+                &source.content_raw,
+                &source.text,
+                dest.is_public,
+                dest.mode,
+                source.attachments.clone(),
+                mentions,
+            )
+            .await
+        {
+            tracing::error!(
+                "forwarding one message to channel {} failed: {e}",
+                dest.channel_id
+            );
+            failures += 1;
+        }
+    }
+    let all_failed = failures == sources.len();
+    if let Some(note) = note
+        && !all_failed
+        && let Err(e) = api
+            .send_channel_message(
+                dest.clan_id,
+                dest.channel_id,
+                note,
+                dest.is_public,
+                dest.mode,
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+            )
+            .await
+    {
+        tracing::error!("forward note to channel {} failed: {e}", dest.channel_id);
+        failures += 1;
+    }
+    if failures > 0 {
+        anyhow::bail!(
+            "{failures} of {} forwarded items failed",
+            sources.len() + usize::from(note.is_some())
+        );
+    }
+    Ok(())
 }
 
 /// Transient UI state for a single poll card.
@@ -558,6 +792,7 @@ impl MessagesStore {
         self.viewing_older_by_channel.clear();
         self.active_channel_id = None;
         self.active_clan_id = None;
+        self.active_topic_id = None;
         self.is_public = true;
         self.is_dm = false;
         self.mode = STREAM_MODE_CHANNEL;
@@ -577,6 +812,8 @@ impl MessagesStore {
         self.poll_ui.clear();
         self.poll_my_vote.clear();
         self.select_ui.clear();
+        self.forward_task = None;
+        self.forward_in_flight = false;
         cx.notify();
     }
 
@@ -598,6 +835,7 @@ impl MessagesStore {
             viewing_older_by_channel: HashMap::new(),
             active_channel_id: None,
             active_clan_id: None,
+            active_topic_id: None,
             pending_jump: None,
             is_public: true,
             is_dm: false,
@@ -612,6 +850,8 @@ impl MessagesStore {
             editing: None,
             joined_channels: HashSet::new(),
             pending_self_adds: HashMap::new(),
+            counted_topic_replies: HashSet::new(),
+            counted_topic_reply_order: std::collections::VecDeque::new(),
             api,
             _channel_sub: channel_sub,
             _conn_watch: conn_watch,
@@ -622,6 +862,8 @@ impl MessagesStore {
             poll_ui: HashMap::new(),
             poll_my_vote: HashMap::new(),
             select_ui: HashMap::new(),
+            forward_task: None,
+            forward_in_flight: false,
         }
     }
 
@@ -719,10 +961,10 @@ impl MessagesStore {
         emoji_id: &str,
         emoji: &str,
     ) -> Option<(u32, Vec<(String, u32)>)> {
-        let channel_id = self.active_channel_id?;
+        let storage_id = self.reaction_storage_channel(message_id);
         let msg = self
             .cache
-            .get(&channel_id)?
+            .get(&storage_id)?
             .messages
             .get_by_id(message_id)?;
         let key = reaction_key(emoji_id, emoji);
@@ -1053,6 +1295,19 @@ impl MessagesStore {
 
     pub fn active_channel_id(&self) -> Option<ChannelId> {
         self.active_channel_id
+    }
+
+    pub fn active_clan_id(&self) -> Option<ClanId> {
+        self.active_clan_id
+    }
+
+    /// Stream mode of the active channel (`STREAM_MODE_CHANNEL` / `STREAM_MODE_THREAD`).
+    pub fn mode(&self) -> i32 {
+        self.mode
+    }
+
+    pub fn is_public(&self) -> bool {
+        self.is_public
     }
 
     pub fn is_dm(&self) -> bool {
@@ -1504,12 +1759,16 @@ impl MessagesStore {
     }
 
     pub fn set_reply_to(&mut self, message_id: MessageId, cx: &mut Context<Self>) {
-        let Some(channel_id) = self.active_channel_id else {
+        let Some(draft) = self.reply_draft_for(message_id) else {
             return;
         };
-        let Some(draft) = self
-            .cache
-            .get(&channel_id)
+        self.set_reply(draft, cx);
+    }
+
+    pub fn reply_draft_for(&self, message_id: MessageId) -> Option<ReplyDraft> {
+        let storage_id = self.reaction_storage_channel(message_id);
+        self.cache
+            .get(&storage_id)
             .and_then(|c| c.messages.get_by_id(message_id))
             .map(|msg| ReplyDraft {
                 message_ref_id: msg.id,
@@ -1521,10 +1780,6 @@ impl MessagesStore {
                 has_embed: msg.content.is_empty() && !msg.embeds.is_empty(),
                 is_poll: msg.poll.is_some(),
             })
-        else {
-            return;
-        };
-        self.set_reply(draft, cx);
     }
 
     /// Clear the composer reply target.
@@ -1562,14 +1817,15 @@ impl MessagesStore {
         content_tokens: OutgoingContent,
         cx: &mut Context<Self>,
     ) {
-        let Some(channel_id) = self.active_channel_id else {
+        if self.active_channel_id.is_none() {
             return;
         };
+        let storage_id = self.reaction_storage_channel(message_id);
         let mode = self.mode;
         let is_public = self.is_public;
         let (spans, transport_mentions, transport_hashtags, transport_emojis) =
             edit_content_spans(&content, content_tokens);
-        let Some(channel) = self.cache.get_mut(&channel_id) else {
+        let Some(channel) = self.cache.get_mut(&storage_id) else {
             return;
         };
         let Some(msg) = channel.messages.get_mut_by_id(message_id) else {
@@ -1582,20 +1838,31 @@ impl MessagesStore {
         msg.is_edited = true;
         patch_reply_previews_after_update(&mut channel.messages, message_id, &content);
         self.editing = None;
-        cx.emit(MessagesEvent::Updated {
-            message_id: Some(message_id),
-        });
+        if self.active_topic_id == Some(storage_id) {
+            cx.emit(MessagesEvent::TopicUpdated {
+                topic_id: storage_id.get(),
+            });
+        } else {
+            cx.emit(MessagesEvent::Updated {
+                message_id: Some(message_id),
+            });
+        }
         cx.notify();
 
         let api = self.api.clone();
         let clan_id = self.active_clan_id.map_or(0, |c| c.get());
-        let channel_num = channel_id.get();
         let message_num = message_id.get();
+        let (api_channel_id, api_topic_id, is_update_msg_topic) =
+            if self.active_topic_id == Some(storage_id) {
+                (storage_id.get(), storage_id.get(), true)
+            } else {
+                (storage_id.get(), 0, false)
+            };
         cx.spawn(async move |_this, _cx| {
             if let Err(e) = api
                 .update_channel_message(
                     clan_id,
-                    channel_num,
+                    api_channel_id,
                     message_num,
                     &content,
                     transport_mentions,
@@ -1603,6 +1870,8 @@ impl MessagesStore {
                     transport_emojis,
                     mode,
                     is_public,
+                    api_topic_id,
+                    is_update_msg_topic,
                 )
                 .await
             {
@@ -1615,21 +1884,45 @@ impl MessagesStore {
     /// Remove a message locally, then send the delete to the server.
     /// No rollback on network failure — a channel refresh reconciles true failures.
     pub fn delete_message(&mut self, message_id: MessageId, cx: &mut Context<Self>) {
-        let Some(channel_id) = self.active_channel_id else {
+        let Some(parent_channel_id) = self.active_channel_id else {
             return;
         };
+        let storage_id = self.reaction_storage_channel(message_id);
+        let deleted = self
+            .cache
+            .get(&storage_id)
+            .and_then(|channel| channel.messages.get_by_id(message_id));
+        let has_attachment = deleted.is_some_and(|msg| !msg.attachments.is_empty());
+        let has_mentions = deleted.is_some_and(|msg| !msg.mention_targets.is_empty());
+        let has_references = deleted.is_some_and(|msg| !msg.references.is_empty());
         if self.editing == Some(message_id) {
             self.editing = None;
         }
-        self.apply_message_remove(channel_id, message_id, cx);
+        self.apply_message_remove(storage_id, message_id, cx);
 
         let api = self.api.clone();
         let clan_id = self.active_clan_id.map_or(0, |c| c.get());
-        let channel_num = channel_id.get();
+        let mode = self.mode;
+        let is_public = self.is_public;
         let message_num = message_id.get();
+        let (api_channel_id, api_topic_id) = if self.active_topic_id == Some(storage_id) {
+            (parent_channel_id.get(), storage_id.get())
+        } else {
+            (storage_id.get(), 0)
+        };
         cx.spawn(async move |_this, _cx| {
             if let Err(e) = api
-                .delete_channel_message(clan_id, channel_num, message_num)
+                .delete_channel_message(
+                    clan_id,
+                    api_channel_id,
+                    message_num,
+                    mode,
+                    is_public,
+                    has_attachment,
+                    api_topic_id,
+                    has_mentions,
+                    has_references,
+                )
                 .await
             {
                 tracing::error!("delete_channel_message failed: {e}");
@@ -1687,13 +1980,13 @@ impl MessagesStore {
         .detach();
     }
 
-    #[allow(dead_code)]
     pub fn add_to_inbox(&mut self, message_id: MessageId, cx: &mut Context<Self>) {
         let Some(channel_id) = self.active_channel_id else {
             return;
         };
+        let storage_id = self.reaction_storage_channel(message_id);
         let clan_id = self.active_clan_id.map_or(0, |c| c.get());
-        let Some(channel) = self.cache.get(&channel_id) else {
+        let Some(channel) = self.cache.get(&storage_id) else {
             return;
         };
         let Some(msg) = channel.messages.get_by_id(message_id) else {
@@ -1735,96 +2028,219 @@ impl MessagesStore {
         .detach();
     }
 
-    pub fn create_topic(&self, message_id: MessageId, cx: &mut Context<Self>) {
-        let Some(channel_id) = self.active_channel_id else {
+    /// Messages held in an arbitrary bucket (used by the discussion topic panel,
+    /// whose replies are stored under the topic id — mirroring mezon-react).
+    pub fn messages_in_channel(&self, channel_id: ChannelId) -> &[Message] {
+        self.cache
+            .get(&channel_id)
+            .map(|c| c.messages.as_slice())
+            .unwrap_or(&[])
+    }
+
+    /// Mark the topic bucket the discussion panel is watching so realtime replies
+    /// to it (a non-active channel) still notify the panel. Closing (`None`) drops
+    /// the previous topic bucket so it does not permanently occupy channel-cache slots.
+    pub fn set_active_topic(&mut self, topic_id: Option<i64>, cx: &mut Context<Self>) {
+        let next = topic_id.map(ChannelId);
+        if self.active_topic_id == next {
             return;
-        };
-        let clan_id = self.active_clan_id.map_or(0, |c| c.get());
+        }
+        if let Some(prev) = self.active_topic_id
+            && next != Some(prev)
+        {
+            self.cache.remove(&prev);
+            self.last_message_by_channel.remove(&prev);
+            self.pending_self_adds
+                .retain(|(channel_id, _, _), _| *channel_id != prev);
+        }
+        self.active_topic_id = next;
+        cx.notify();
+    }
+
+    /// Load a discussion topic's replies into their own bucket (keyed by topic id).
+    /// Mirrors mezon-js `listChannelMessages(clanId, channelId, undefined, dir, limit, topicId)`.
+    pub fn fetch_topic_messages(
+        &mut self,
+        clan_id: i64,
+        parent_channel_id: i64,
+        topic_id: i64,
+        cx: &mut Context<Self>,
+    ) {
+        let topic_key = ChannelId(topic_id);
         let api = self.api.clone();
-        let channel_num = channel_id.get();
-        let message_num = message_id.get();
-        cx.spawn(async move |_this, _cx| {
-            if let Err(e) = api.create_sd_topic(message_num, clan_id, channel_num).await {
-                tracing::error!("create_topic create_sd_topic failed: {e}");
-            }
+        let cfg = AppConfig::try_global(cx).cloned();
+        let viewer_id = viewer_user_id(cx);
+        cx.spawn(async move |this, cx| {
+            let result = api
+                .list_topic_messages(clan_id, parent_channel_id, topic_id, 0, MESSAGE_PAGE_LIMIT)
+                .await;
+            let msgs = match result {
+                Ok(page) => page.messages,
+                Err(e) => {
+                    tracing::error!("fetch_topic_messages failed for topic {topic_id}: {e}");
+                    return;
+                }
+            };
+            let parsed = prepare_messages(msgs, cfg.as_ref(), viewer_id);
+            let _ = this.update(cx, |this, cx| {
+                if this.active_topic_id != Some(topic_key) {
+                    return;
+                }
+                this.set_channel(topic_key, parsed);
+                cx.emit(MessagesEvent::TopicUpdated { topic_id });
+                cx.notify();
+            });
         })
         .detach();
     }
 
-    #[allow(dead_code)]
+    pub fn append_topic_message(
+        &mut self,
+        topic_id: i64,
+        api_msg: mezon_client::transport::ApiMessage,
+        cx: &mut Context<Self>,
+    ) -> TopicAppend {
+        let topic_key = ChannelId(topic_id);
+        let cfg = AppConfig::try_global(cx);
+        let viewer_id = viewer_user_id(cx);
+        let mut msg = message_from_api(api_msg, cfg, viewer_id);
+        enrich_sparse_topic_ack(&mut msg, viewer_id, self.active_clan_id, cx);
+        mark_pending_attachments_uploading(&mut msg.attachments);
+        let message_id = msg.id;
+        let create_time = if msg.create_time > 0 {
+            msg.create_time
+        } else {
+            unix_now_seconds()
+        };
+        if self.cache.contains(&topic_key) {
+            if let Some(channel) = self.cache.get_mut(&topic_key) {
+                if channel.messages.contains_id(msg.id) {
+                    return TopicAppend::default();
+                }
+                channel.messages.push_grouped(msg);
+            }
+        } else {
+            self.set_channel(topic_key, vec![msg]);
+        }
+        let should_count_reply = topic_id != 0
+            && mark_topic_reply_counted(
+                &mut self.counted_topic_replies,
+                &mut self.counted_topic_reply_order,
+                message_id,
+            );
+        cx.emit(MessagesEvent::TopicUpdated { topic_id });
+        cx.notify();
+        TopicAppend {
+            appended: true,
+            should_count_reply,
+            create_time,
+        }
+    }
+
+    pub fn mark_message_as_topic(
+        &mut self,
+        parent_channel_id: ChannelId,
+        origin_message_id: MessageId,
+        topic_id: i64,
+        creator_id: Option<UserId>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(channel) = self.cache.get_mut(&parent_channel_id) else {
+            return;
+        };
+        let Some(msg) = channel.messages.get_mut_by_id(origin_message_id) else {
+            return;
+        };
+        if msg.code == MessageCode::Topic && msg.topic_id == Some(ChannelId(topic_id)) {
+            return;
+        }
+        msg.code = MessageCode::Topic;
+        msg.topic_id = Some(ChannelId(topic_id));
+        msg.topic_creator_id = creator_id;
+        if self.active_channel_id == Some(parent_channel_id) {
+            cx.emit(MessagesEvent::Updated {
+                message_id: Some(origin_message_id),
+            });
+        }
+        cx.notify();
+    }
+
+    pub fn is_forwarding(&self) -> bool {
+        self.forward_in_flight
+    }
+
+    /// Forward `message_ids` to every destination, one destination at a time so
+    /// the copies land in order (React awaits each `forwardToSingleDestination`).
+    /// The note rides along after the last message of each destination.
+    ///
+    /// Returns `false` when nothing was started — the caller must not enter a
+    /// "sending" state it would never be released from, since `ForwardProgress`
+    /// / `ForwardFinished` are only emitted for a send that actually began.
     pub fn forward(
         &mut self,
-        message_id: MessageId,
+        message_ids: Vec<MessageId>,
         targets: Vec<ForwardTarget>,
         note: Option<String>,
         cx: &mut Context<Self>,
-    ) {
-        if targets.is_empty() {
-            return;
+    ) -> bool {
+        if message_ids.is_empty() || targets.is_empty() || self.forward_in_flight {
+            return false;
         }
-        let Some(channel_id) = self.active_channel_id else {
-            return;
+        let Some(source_channel_id) = self.active_channel_id else {
+            return false;
         };
-        let Some(channel) = self.cache.get(&channel_id) else {
-            return;
+        let storage_id = self.reaction_storage_channel(message_ids[0]);
+        let Some(channel) = self.cache.get(&storage_id) else {
+            return false;
         };
-        let Some(msg) = channel.messages.get_by_id(message_id) else {
-            return;
-        };
-        let content = msg.content.clone();
-        let attachments: Vec<mezon_client::transport::ApiAttachment> =
-            msg.attachments.iter().map(attachment_to_api).collect();
-        let plans = plan_forwards(&content, &attachments, &targets, note.as_deref());
+        let sources: Vec<ForwardSource> = message_ids
+            .iter()
+            .filter_map(|id| channel.messages.get_by_id(*id))
+            .map(forward_source)
+            .collect();
+        if sources.is_empty() {
+            return false;
+        }
+        let note = note
+            .map(|n| n.trim().to_string())
+            .filter(|n| !n.is_empty() && n.chars().count() <= MAX_FORWARD_MESSAGE_LENGTH);
 
         let api = self.api.clone();
-        cx.spawn(async move |_this, _cx| {
-            for plan in plans {
-                if let Err(e) = api
-                    .join_chat(
-                        plan.clan_id,
-                        plan.channel_id,
-                        plan.channel_type,
-                        plan.is_public,
-                    )
-                    .await
-                {
-                    tracing::error!("forward join_chat failed: {e}");
-                    continue;
+        let total = targets.len();
+        self.forward_in_flight = true;
+        let task = cx.spawn(async move |this, cx| {
+            let mut failed: Vec<SharedString> = Vec::new();
+            for (index, target) in targets.iter().enumerate() {
+                match resolve_forward_target(target, cx).await {
+                    Ok(dest) => {
+                        if let Err(e) =
+                            send_forward(&api, dest, &sources, source_channel_id, note.as_deref())
+                                .await
+                        {
+                            tracing::error!("forward to channel {} failed: {e}", dest.channel_id);
+                            failed.push(target.label());
+                        }
+                    }
+                    Err(e) => {
+                        tracing::error!("forward target could not be resolved: {e}");
+                        failed.push(target.label());
+                    }
                 }
-                if let Err(e) = api
-                    .forward_channel_message(
-                        plan.clan_id,
-                        plan.channel_id,
-                        &plan.content,
-                        plan.is_public,
-                        plan.mode,
-                        plan.attachments,
-                    )
-                    .await
-                {
-                    tracing::error!("forward_channel_message failed: {e}");
-                    continue;
-                }
-                if let Some(note) = plan.note
-                    && !note.is_empty()
-                    && let Err(e) = api
-                        .send_channel_message(
-                            plan.clan_id,
-                            plan.channel_id,
-                            &note,
-                            plan.is_public,
-                            plan.mode,
-                            Vec::new(),
-                            Vec::new(),
-                            Vec::new(),
-                        )
-                        .await
-                {
-                    tracing::error!("forward note send failed: {e}");
-                }
+                let _ = this.update(cx, |_, cx| {
+                    cx.emit(MessagesEvent::ForwardProgress {
+                        current: index + 1,
+                        total,
+                    });
+                });
             }
-        })
-        .detach();
+            let _ = this.update(cx, |this, cx| {
+                this.forward_in_flight = false;
+                let sent = total - failed.len();
+                cx.emit(MessagesEvent::ForwardFinished { sent, failed });
+            });
+        });
+        self.forward_task = Some(task);
+        true
     }
 
     #[allow(dead_code)]
@@ -1834,14 +2250,16 @@ impl MessagesStore {
         attachment_index: usize,
         cx: &mut Context<Self>,
     ) {
-        let Some(channel_id) = self.active_channel_id else {
+        if self.active_channel_id.is_none() {
             return;
-        };
+        }
+        let storage_id = self.reaction_storage_channel(message_id);
+        let is_topic = self.active_topic_id == Some(storage_id);
         let mode = self.mode;
         let is_public = self.is_public;
         let clan_id = self.active_clan_id.map_or(0, |c| c.get());
         let cfg = AppConfig::try_global(cx).cloned();
-        let Some(channel) = self.cache.get_mut(&channel_id) else {
+        let Some(channel) = self.cache.get_mut(&storage_id) else {
             return;
         };
         let Some(msg) = channel.messages.get_mut_by_id(message_id) else {
@@ -1857,24 +2275,36 @@ impl MessagesStore {
         let content = msg.content.clone();
         let remaining: Vec<mezon_client::transport::ApiAttachment> =
             msg.attachments.iter().map(attachment_to_api).collect();
-        cx.emit(MessagesEvent::Updated {
-            message_id: Some(message_id),
-        });
+        if is_topic {
+            cx.emit(MessagesEvent::TopicUpdated {
+                topic_id: storage_id.get(),
+            });
+        } else {
+            cx.emit(MessagesEvent::Updated {
+                message_id: Some(message_id),
+            });
+        }
         cx.notify();
 
         let api = self.api.clone();
-        let channel_num = channel_id.get();
+        let (api_channel_id, api_topic_id) = if is_topic {
+            (storage_id.get(), storage_id.get())
+        } else {
+            (storage_id.get(), 0)
+        };
         let message_num = message_id.get();
         cx.spawn(async move |_this, _cx| {
             if let Err(e) = api
                 .update_channel_message_with_attachments(
                     clan_id,
-                    channel_num,
+                    api_channel_id,
                     message_num,
                     &content,
                     remaining,
                     mode,
                     is_public,
+                    api_topic_id,
+                    is_topic,
                 )
                 .await
             {
@@ -2117,6 +2547,7 @@ impl MessagesStore {
                             filetype: att.filetype,
                             width: att.width,
                             height: att.height,
+                            duration: att.duration,
                             thumbnail,
                         }
                     })
@@ -2176,15 +2607,12 @@ impl MessagesStore {
                 cx.spawn(async move |cx: &mut gpui::AsyncApp| {
                     while let Some(outcome) = completions.recv().await {
                         let _ = drain_this.update(cx, |this, cx| {
-                            let message_id = MessageId(real_message_id);
-                            match outcome {
-                                AttachmentUploadOutcome::Uploaded(key) => {
-                                    this.mark_attachment_uploaded(channel_id, message_id, &key, cx);
-                                }
-                                AttachmentUploadOutcome::Failed(key) => {
-                                    this.mark_attachment_failed(channel_id, message_id, &key, cx);
-                                }
-                            }
+                            this.mark_channel_attachment_outcome(
+                                channel_id,
+                                MessageId(real_message_id),
+                                outcome,
+                                cx,
+                            );
                         });
                     }
                 })
@@ -2200,6 +2628,8 @@ impl MessagesStore {
                     keys,
                     mode,
                     is_public,
+                    0,
+                    false,
                     on_complete,
                 )
                 .await;
@@ -2261,7 +2691,37 @@ impl MessagesStore {
         sender_name: String,
         cx: &mut Context<Self>,
     ) {
-        self.send_url_attachment(url, filename, STICKER_FILETYPE, sender_id, sender_name, cx);
+        self.send_url_attachment(
+            url,
+            filename,
+            STICKER_FILETYPE,
+            0,
+            0,
+            sender_id,
+            sender_name,
+            cx,
+        );
+    }
+
+    pub fn send_gif(
+        &mut self,
+        url: String,
+        width: i32,
+        height: i32,
+        sender_id: String,
+        sender_name: String,
+        cx: &mut Context<Self>,
+    ) {
+        self.send_url_attachment(
+            url,
+            String::new(),
+            STICKER_FILETYPE,
+            width,
+            height,
+            sender_id,
+            sender_name,
+            cx,
+        );
     }
 
     pub fn send_sound(
@@ -2272,7 +2732,16 @@ impl MessagesStore {
         sender_name: String,
         cx: &mut Context<Self>,
     ) {
-        self.send_url_attachment(url, filename, AUDIO_FILETYPE, sender_id, sender_name, cx);
+        self.send_url_attachment(
+            url,
+            filename,
+            AUDIO_FILETYPE,
+            0,
+            0,
+            sender_id,
+            sender_name,
+            cx,
+        );
     }
 
     fn send_url_attachment(
@@ -2280,6 +2749,8 @@ impl MessagesStore {
         url: String,
         filename: String,
         filetype: &'static str,
+        width: i32,
+        height: i32,
         sender_id: String,
         sender_name: String,
         cx: &mut Context<Self>,
@@ -2307,8 +2778,8 @@ impl MessagesStore {
                 url: url.clone(),
                 filename: filename.clone(),
                 filetype: filetype.to_string(),
-                width: 0,
-                height: 0,
+                width,
+                height,
                 thumbnail: String::new(),
                 duration: 0,
                 size: 0,
@@ -2338,6 +2809,8 @@ impl MessagesStore {
                         url,
                         filename,
                         filetype: filetype.to_string(),
+                        width,
+                        height,
                     }],
                 )
                 .await;
@@ -2627,19 +3100,31 @@ impl MessagesStore {
             parent_id,
             m.message_id,
         ));
-        let cfg = AppConfig::try_global(cx);
         let viewer_id = viewer_user_id(cx);
 
         match code {
             MessageCode::ChatUpdate | MessageCode::UpdateEphemeralMsg => {
-                let incoming = message_from_channel_proto(m, message_id.get(), cfg, viewer_id);
+                let target_id = self.mutation_storage_channel(m, message_id);
+                let incoming = message_from_channel_proto(
+                    m,
+                    message_id.get(),
+                    AppConfig::try_global(cx),
+                    viewer_id,
+                );
                 let presign_keys = presign::parse_presign_finish_keys(&m.content);
-                self.apply_message_update(storage_id, message_id, incoming, presign_keys, cx);
+                self.apply_message_update(target_id, message_id, incoming, presign_keys, cx);
             }
             MessageCode::ChatRemove | MessageCode::DeleteEphemeralMsg => {
-                self.apply_message_remove(storage_id, message_id, cx);
+                let target_id = self.mutation_storage_channel(m, message_id);
+                self.apply_message_remove(target_id, message_id, cx);
+                if m.topic_id != 0 {
+                    TopicsStore::global(cx).update(cx, |store, cx| {
+                        store.decrement_topic_reply_count(m.topic_id, cx);
+                    });
+                }
             }
             _ => {
+                self.count_topic_reply(m, storage_id, message_id, cx);
                 if !self.cache.contains(&storage_id) {
                     self.set_last_message(storage_id, message_id);
                     return;
@@ -2658,10 +3143,47 @@ impl MessagesStore {
                     self.set_last_message(storage_id, message_id);
                     return;
                 }
-                let incoming = message_from_channel_proto(m, message_id.get(), cfg, viewer_id);
+                let incoming = message_from_channel_proto(
+                    m,
+                    message_id.get(),
+                    AppConfig::try_global(cx),
+                    viewer_id,
+                );
                 self.apply_incoming_message(storage_id, incoming, cx);
             }
         }
+    }
+
+    fn count_topic_reply(
+        &mut self,
+        m: &mezon_proto::api::ChannelMessage,
+        _storage_id: ChannelId,
+        message_id: MessageId,
+        cx: &mut Context<Self>,
+    ) {
+        self.note_topic_reply(m.topic_id, message_id, i64::from(m.create_time_seconds), cx);
+    }
+
+    fn note_topic_reply(
+        &mut self,
+        topic_id: i64,
+        message_id: MessageId,
+        create_time: i64,
+        cx: &mut Context<Self>,
+    ) {
+        if topic_id == 0 {
+            return;
+        }
+        if !mark_topic_reply_counted(
+            &mut self.counted_topic_replies,
+            &mut self.counted_topic_reply_order,
+            message_id,
+        ) {
+            return;
+        }
+        TopicsStore::global(cx).update(cx, |store, cx| {
+            store.increment_topic_reply_count(topic_id, create_time, cx);
+        });
     }
 
     fn apply_incoming_message(
@@ -2671,17 +3193,25 @@ impl MessagesStore {
         cx: &mut Context<Self>,
     ) {
         let is_active = self.active_channel_id == Some(storage_id);
+        let is_active_topic = self.active_topic_id == Some(storage_id);
         let incoming_id = msg.id;
         let Some(channel) = self.cache.get_mut(&storage_id) else {
             self.set_last_message(storage_id, msg.id);
             return;
         };
         if channel.messages.contains_id(msg.id) {
-            if channel.messages.merge_existing(msg.id, msg) && is_active {
-                cx.emit(MessagesEvent::Updated {
-                    message_id: Some(incoming_id),
-                });
-                cx.notify();
+            if channel.messages.merge_existing(msg.id, msg) {
+                if is_active_topic {
+                    cx.emit(MessagesEvent::TopicUpdated {
+                        topic_id: storage_id.get(),
+                    });
+                    cx.notify();
+                } else if is_active {
+                    cx.emit(MessagesEvent::Updated {
+                        message_id: Some(incoming_id),
+                    });
+                    cx.notify();
+                }
             }
             return;
         }
@@ -2713,6 +3243,11 @@ impl MessagesStore {
                 });
                 cx.notify();
             }
+        } else if is_active_topic {
+            cx.emit(MessagesEvent::TopicUpdated {
+                topic_id: storage_id.get(),
+            });
+            cx.notify();
         }
     }
 
@@ -2745,7 +3280,12 @@ impl MessagesStore {
             );
         }
         patch_reply_previews_after_update(&mut channel.messages, message_id, &preview);
-        if is_active {
+        if self.active_topic_id == Some(storage_id) {
+            cx.emit(MessagesEvent::TopicUpdated {
+                topic_id: storage_id.get(),
+            });
+            cx.notify();
+        } else if is_active {
             cx.emit(MessagesEvent::Updated {
                 message_id: Some(message_id),
             });
@@ -2770,16 +3310,58 @@ impl MessagesStore {
         self.retreat_last_message(storage_id, message_id);
 
         let is_active = self.active_channel_id == Some(storage_id);
+        let deleted_topic_id = self
+            .cache
+            .get(&storage_id)
+            .and_then(|channel| channel.messages.get_by_id(message_id))
+            .and_then(|msg| msg.topic_id);
         let Some(channel) = self.cache.get_mut(&storage_id) else {
+            self.on_message_deleted(message_id, deleted_topic_id, cx);
             return;
         };
         patch_reply_previews_after_delete(&mut channel.messages, message_id);
-        if let Some(index) = channel.messages.remove_id(message_id)
-            && is_active
-        {
-            cx.emit(MessagesEvent::RemovedAt { index, message_id });
+        if let Some(index) = channel.messages.remove_id(message_id) {
+            self.on_message_deleted(message_id, deleted_topic_id, cx);
+            if self.active_topic_id == Some(storage_id) {
+                cx.emit(MessagesEvent::TopicUpdated {
+                    topic_id: storage_id.get(),
+                });
+            } else if is_active {
+                cx.emit(MessagesEvent::RemovedAt { index, message_id });
+            }
             cx.notify();
         }
+    }
+
+    fn on_message_deleted(
+        &mut self,
+        message_id: MessageId,
+        message_topic_id: Option<ChannelId>,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(topics) = TopicsStore::try_global(cx) {
+            topics.update(cx, |store, _| store.clear_init_topic_message_if(message_id));
+        }
+        self.close_topic_panel_if_origin_deleted(message_id, message_topic_id, cx);
+    }
+
+    fn close_topic_panel_if_origin_deleted(
+        &mut self,
+        message_id: MessageId,
+        message_topic_id: Option<ChannelId>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(topics) = TopicsStore::try_global(cx) else {
+            return;
+        };
+        let should_close = topics
+            .read(cx)
+            .should_close_on_message_deleted(message_id, message_topic_id);
+        if !should_close {
+            return;
+        }
+        self.set_active_topic(None, cx);
+        topics.update(cx, |store, cx| store.close_panel_from_messages(cx));
     }
 
     fn retreat_last_message(&mut self, storage_id: ChannelId, deleted_id: MessageId) {
@@ -2831,9 +3413,10 @@ impl MessagesStore {
         remove: bool,
         cx: &mut Context<Self>,
     ) {
-        let Some(channel_id) = self.active_channel_id else {
+        let Some(parent_channel_id) = self.active_channel_id else {
             return;
         };
+        let storage_id = self.reaction_storage_channel(message_id);
         let Some(current_uid) = BadgeService::global(cx).read(cx).current_user_id(cx) else {
             return;
         };
@@ -2842,7 +3425,7 @@ impl MessagesStore {
         let cfg = AppConfig::try_global(cx);
         let applied = self
             .cache
-            .get_mut(&channel_id)
+            .get_mut(&storage_id)
             .and_then(|channel| channel.messages.get_mut_by_id(message_id))
             .map(|msg| {
                 apply_reaction_event(&mut msg.reactions, &emoji_id, &emoji, &uid_str, remove, cfg);
@@ -2852,12 +3435,18 @@ impl MessagesStore {
             if !remove {
                 *self
                     .pending_self_adds
-                    .entry((channel_id, message_id, key))
+                    .entry((storage_id, message_id, key))
                     .or_insert(0) += 1;
             }
-            cx.emit(MessagesEvent::Updated {
-                message_id: Some(message_id),
-            });
+            if self.active_topic_id == Some(storage_id) {
+                cx.emit(MessagesEvent::TopicUpdated {
+                    topic_id: storage_id.get(),
+                });
+            } else {
+                cx.emit(MessagesEvent::Updated {
+                    message_id: Some(message_id),
+                });
+            }
             cx.notify();
         }
 
@@ -2867,13 +3456,19 @@ impl MessagesStore {
         let is_public = self.is_public;
         let message_sender_id = current_uid.get();
         let emoji_id_num = emoji_id.parse::<i64>().unwrap_or(0);
-        let channel = channel_id.get();
+        let api_channel = parent_channel_id.get();
+        let api_topic_id = if self.active_topic_id == Some(storage_id) {
+            storage_id.get()
+        } else {
+            0
+        };
         let message = message_id.get();
+        let storage_for_rollback = storage_id;
         cx.spawn(async move |this, cx| {
             if let Err(e) = api
                 .react_channel_message(
                     clan_id,
-                    channel,
+                    api_channel,
                     message,
                     emoji_id_num,
                     &emoji,
@@ -2882,6 +3477,7 @@ impl MessagesStore {
                     mode,
                     is_public,
                     remove,
+                    api_topic_id,
                 )
                 .await
             {
@@ -2889,13 +3485,50 @@ impl MessagesStore {
                 if applied {
                     let _ = this.update(cx, |store, cx| {
                         store.rollback_reaction_send(
-                            channel_id, message_id, &emoji_id, &emoji, &uid_str, remove, cx,
+                            storage_for_rollback,
+                            message_id,
+                            &emoji_id,
+                            &emoji,
+                            &uid_str,
+                            remove,
+                            cx,
                         );
                     });
                 }
             }
         })
         .detach();
+    }
+
+    fn bucket_contains(&self, bucket: ChannelId, message_id: MessageId) -> bool {
+        self.cache
+            .get(&bucket)
+            .is_some_and(|c| c.messages.contains_id(message_id))
+    }
+
+    fn reaction_storage_channel(&self, message_id: MessageId) -> ChannelId {
+        if let Some(topic_id) = self.active_topic_id {
+            if self.bucket_contains(topic_id, message_id) {
+                return topic_id;
+            }
+            if let Some(parent) = self.active_channel_id
+                && self.bucket_contains(parent, message_id)
+            {
+                return parent;
+            }
+            return topic_id;
+        }
+        self.active_channel_id.unwrap_or(ChannelId(0))
+    }
+
+    fn mutation_storage_channel(
+        &self,
+        m: &mezon_proto::api::ChannelMessage,
+        message_id: MessageId,
+    ) -> ChannelId {
+        mutation_bucket_for(m, self.active_topic_id, self.active_channel_id, |bucket| {
+            self.bucket_contains(bucket, message_id)
+        })
     }
 
     fn rollback_reaction_send(
@@ -3080,22 +3713,27 @@ impl MessagesStore {
         let RealtimeEvent::MessageReaction(r) = event else {
             return;
         };
-        let channel_id = ChannelId(r.channel_id);
+        let storage_id = if r.topic_id != 0 {
+            ChannelId(r.topic_id)
+        } else {
+            ChannelId(r.channel_id)
+        };
         let message_id = MessageId(r.message_id);
-        let is_active = self.active_channel_id == Some(channel_id);
+        let is_active = self.active_channel_id == Some(storage_id);
+        let is_active_topic = self.active_topic_id == Some(storage_id);
         let sender_id = r.sender_id.to_string();
         let emoji_id = r.emoji_id.to_string();
 
         if !r.action
             && self.consume_pending_self_add(
-                channel_id, message_id, &emoji_id, &r.emoji, &sender_id, cx,
+                storage_id, message_id, &emoji_id, &r.emoji, &sender_id, cx,
             )
         {
             return;
         }
 
         let cfg = AppConfig::try_global(cx);
-        let Some(channel) = self.cache.get_mut(&channel_id) else {
+        let Some(channel) = self.cache.get_mut(&storage_id) else {
             return;
         };
         let Some(msg) = channel.messages.get_mut_by_id(message_id) else {
@@ -3109,7 +3747,12 @@ impl MessagesStore {
             r.action,
             cfg,
         );
-        if is_active {
+        if is_active_topic {
+            cx.emit(MessagesEvent::TopicUpdated {
+                topic_id: storage_id.get(),
+            });
+            cx.notify();
+        } else if is_active {
             cx.emit(MessagesEvent::Updated {
                 message_id: Some(message_id),
             });
@@ -3216,30 +3859,45 @@ impl MessagesStore {
         }
     }
 
-    fn mark_attachment_uploaded(
+    fn apply_attachment_outcome(
+        &mut self,
+        bucket: ChannelId,
+        message_id: MessageId,
+        outcome: &AttachmentUploadOutcome,
+    ) -> bool {
+        let (key, failed) = match outcome {
+            AttachmentUploadOutcome::Uploaded(key) => (key.as_str(), false),
+            AttachmentUploadOutcome::Failed(key) => (key.as_str(), true),
+        };
+        let Some(channel) = self.cache.get_mut(&bucket) else {
+            return false;
+        };
+        let Some(message) = channel.messages.get_mut_by_id(message_id) else {
+            return false;
+        };
+        let mut changed = false;
+        for att in message.attachments.iter_mut() {
+            if att.uploading && presign::normalize_presign_key(&att.url) == key {
+                att.uploading = false;
+                if failed {
+                    att.upload_failed = true;
+                }
+                changed = true;
+            }
+        }
+        changed
+    }
+
+    fn mark_channel_attachment_outcome(
         &mut self,
         channel_id: ChannelId,
         message_id: MessageId,
-        key: &str,
+        outcome: AttachmentUploadOutcome,
         cx: &mut Context<Self>,
     ) {
-        let cleared = {
-            let Some(channel) = self.cache.get_mut(&channel_id) else {
-                return;
-            };
-            let Some(message) = channel.messages.get_mut_by_id(message_id) else {
-                return;
-            };
-            let mut cleared = false;
-            for att in message.attachments.iter_mut() {
-                if att.uploading && presign::normalize_presign_key(&att.url) == key {
-                    att.uploading = false;
-                    cleared = true;
-                }
-            }
-            cleared
-        };
-        if cleared && self.active_channel_id == Some(channel_id) {
+        if self.apply_attachment_outcome(channel_id, message_id, &outcome)
+            && self.active_channel_id == Some(channel_id)
+        {
             cx.emit(MessagesEvent::Updated {
                 message_id: Some(message_id),
             });
@@ -3247,34 +3905,18 @@ impl MessagesStore {
         }
     }
 
-    fn mark_attachment_failed(
+    pub fn apply_topic_attachment_outcome(
         &mut self,
-        channel_id: ChannelId,
+        topic_id: i64,
         message_id: MessageId,
-        key: &str,
+        outcome: AttachmentUploadOutcome,
         cx: &mut Context<Self>,
     ) {
-        let changed = {
-            let Some(channel) = self.cache.get_mut(&channel_id) else {
-                return;
-            };
-            let Some(message) = channel.messages.get_mut_by_id(message_id) else {
-                return;
-            };
-            let mut changed = false;
-            for att in message.attachments.iter_mut() {
-                if att.uploading && presign::normalize_presign_key(&att.url) == key {
-                    att.uploading = false;
-                    att.upload_failed = true;
-                    changed = true;
-                }
-            }
-            changed
-        };
-        if changed && self.active_channel_id == Some(channel_id) {
-            cx.emit(MessagesEvent::Updated {
-                message_id: Some(message_id),
-            });
+        let bucket = ChannelId(topic_id);
+        if self.apply_attachment_outcome(bucket, message_id, &outcome)
+            && self.active_topic_id == Some(bucket)
+        {
+            cx.emit(MessagesEvent::TopicUpdated { topic_id });
             cx.notify();
         }
     }
@@ -3406,6 +4048,74 @@ fn parent_channel_id(m: &mezon_proto::api::ChannelMessage) -> ChannelId {
     ChannelId(m.channel_id)
 }
 
+fn carries_topic_marker(m: &mezon_proto::api::ChannelMessage) -> bool {
+    serde_json::from_str::<ApiMessageContent>(&m.content)
+        .ok()
+        .and_then(|content| content.tp)
+        .and_then(|tp| tp.parse::<i64>().ok())
+        .is_some_and(|id| id != 0)
+}
+
+fn mark_pending_attachments_uploading(attachments: &mut [MessageAttachment]) {
+    for att in attachments.iter_mut() {
+        if att.presign_pending {
+            att.uploading = true;
+        }
+    }
+}
+
+fn named_mutation_channel(m: &mezon_proto::api::ChannelMessage) -> ChannelId {
+    if m.topic_id != 0 && !carries_topic_marker(m) {
+        ChannelId(m.topic_id)
+    } else {
+        ChannelId(m.channel_id)
+    }
+}
+
+fn mutation_bucket_for(
+    m: &mezon_proto::api::ChannelMessage,
+    active_topic_id: Option<ChannelId>,
+    active_channel_id: Option<ChannelId>,
+    bucket_contains: impl Fn(ChannelId) -> bool,
+) -> ChannelId {
+    let named = named_mutation_channel(m);
+    if bucket_contains(named) {
+        return named;
+    }
+    [
+        Some(ChannelId(m.channel_id)),
+        (m.topic_id != 0).then_some(ChannelId(m.topic_id)),
+        active_topic_id,
+        active_channel_id,
+    ]
+    .into_iter()
+    .flatten()
+    .find(|bucket| bucket_contains(*bucket))
+    .unwrap_or(named)
+}
+
+fn mark_topic_reply_counted(
+    seen: &mut HashSet<MessageId>,
+    order: &mut std::collections::VecDeque<MessageId>,
+    message_id: MessageId,
+) -> bool {
+    if message_id.is_zero() {
+        return false;
+    }
+    if !seen.insert(message_id) {
+        return false;
+    }
+    order.push_back(message_id);
+    if order.len() > MAX_COUNTED_TOPIC_REPLIES {
+        while order.len() > MAX_COUNTED_TOPIC_REPLIES / 2 {
+            if let Some(evicted) = order.pop_front() {
+                seen.remove(&evicted);
+            }
+        }
+    }
+    true
+}
+
 fn synthesize_ws_message_id(
     store: &MessagesStore,
     storage_id: ChannelId,
@@ -3436,7 +4146,7 @@ fn synthesize_ws_message_id(
         .unwrap_or(1)
 }
 
-fn message_from_channel_proto(
+pub(crate) fn message_from_channel_proto(
     m: &mezon_proto::api::ChannelMessage,
     message_id: i64,
     cfg: Option<&AppConfig>,
@@ -3481,6 +4191,8 @@ fn merge_message_update(existing: &mut Message, incoming: &Message) {
     existing.topic_id = incoming.topic_id;
     existing.topic_creator_id = incoming.topic_creator_id;
     existing.highlights_viewer_direct = incoming.highlights_viewer_direct;
+    existing.raw_content = incoming.raw_content.clone();
+    existing.mention_targets = incoming.mention_targets.clone();
     if incoming.poll.is_some() {
         existing.poll = incoming.poll.clone();
     }
@@ -3542,7 +4254,7 @@ fn has_more_from_oldest(messages: &[Message]) -> bool {
         .is_some_and(|m| m.code != MessageCode::Indicator)
 }
 
-fn prepare_messages(
+pub(crate) fn prepare_messages(
     msgs: Vec<ApiMessage>,
     cfg: Option<&AppConfig>,
     viewer_id: Option<UserId>,
@@ -3590,6 +4302,77 @@ fn trim_messages_back(messages: &mut Vec<Message>) -> usize {
     let drop = messages.len() - MAX_MESSAGES_PER_CHANNEL;
     messages.truncate(MAX_MESSAGES_PER_CHANNEL);
     drop
+}
+
+#[derive(Clone, Copy)]
+struct SparseAckGaps {
+    sender: bool,
+    name: bool,
+    avatar: bool,
+    time: bool,
+}
+
+fn sparse_topic_ack_gaps(msg: &Message) -> Option<SparseAckGaps> {
+    let gaps = SparseAckGaps {
+        sender: msg.sender_id.is_empty() || msg.sender_id.as_str() == "0",
+        name: msg.sender_name.is_empty(),
+        avatar: msg.avatar_url.is_empty(),
+        time: msg.create_time <= 0,
+    };
+    (gaps.sender || gaps.name || gaps.avatar || gaps.time).then_some(gaps)
+}
+
+fn fill_sparse_topic_ack(
+    msg: &mut Message,
+    gaps: SparseAckGaps,
+    viewer_id: Option<UserId>,
+    sender_id: String,
+    profile: (String, String, SharedString),
+    now: i64,
+) {
+    let (display_name, avatar_url, avatar_proxied) = profile;
+    if gaps.sender {
+        msg.sender_id = sender_id;
+        msg.sender_user_id = viewer_id.or_else(|| msg.sender_id.parse().ok().map(UserId));
+    }
+    if gaps.name && !display_name.is_empty() {
+        msg.sender_name = display_name.into();
+    }
+    if gaps.avatar && !avatar_url.is_empty() {
+        msg.avatar_url = avatar_url.into();
+        msg.avatar_proxied = avatar_proxied;
+    }
+    if gaps.time {
+        msg.create_time = now;
+        msg.day_label = local_day_key(now);
+        msg.time_hhmm = format_local_time_hhmm(now).into();
+        msg.local_date = local_datetime(now).map(|dt| dt.date_naive());
+    }
+}
+
+fn enrich_sparse_topic_ack(
+    msg: &mut Message,
+    viewer_id: Option<UserId>,
+    clan_id: Option<ClanId>,
+    cx: &App,
+) {
+    let Some(gaps) = sparse_topic_ack_gaps(msg) else {
+        return;
+    };
+    let sender_id = if gaps.sender {
+        viewer_id
+            .map(|id| id.to_string())
+            .unwrap_or_else(|| msg.sender_id.to_string())
+    } else {
+        msg.sender_id.to_string()
+    };
+    let profile = outgoing_sender_profile(
+        &sender_id,
+        msg.sender_name.as_ref(),
+        clan_id.unwrap_or_default(),
+        cx,
+    );
+    fill_sparse_topic_ack(msg, gaps, viewer_id, sender_id, profile, unix_now_seconds());
 }
 
 /// Display name + avatar for an outgoing optimistic row (React `fakeItUntilYouMakeIt`).
@@ -3711,6 +4494,16 @@ fn apply_presign_gate(
     base_img: &str,
     create_time: i64,
 ) {
+    apply_presign_gate_at(attachments, keys, base_img, create_time, now_unix_seconds());
+}
+
+fn apply_presign_gate_at(
+    attachments: &mut Vec<MessageAttachment>,
+    keys: &[String],
+    base_img: &str,
+    create_time: i64,
+    now: i64,
+) {
     let presignable = attachments
         .iter()
         .filter(|a| presign::is_mezon_cdn(&a.url, base_img))
@@ -3721,7 +4514,6 @@ fn apply_presign_gate(
             a.presign_pending = false;
         }
     } else {
-        let now = now_unix_seconds();
         attachments.retain(|a| {
             !presign::is_expired_presign_attachment(&a.url, Some(keys), base_img, create_time, now)
         });
@@ -3767,7 +4559,7 @@ fn optimistic_create_time_at(messages: &MessageList, sender_id: &str, now: i64) 
     }
 }
 
-fn viewer_user_id(cx: &App) -> Option<UserId> {
+pub(crate) fn viewer_user_id(cx: &App) -> Option<UserId> {
     BadgeService::try_global(cx)?.read(cx).current_user_id(cx)
 }
 
@@ -3798,6 +4590,9 @@ fn message_from_api(m: ApiMessage, cfg: Option<&AppConfig>, viewer_id: Option<Us
         .map(|mention| MentionTarget {
             user_id: (mention.user_id != 0).then(|| mention.user_id.to_string()),
             role_id: (mention.role_id != 0).then(|| mention.role_id.to_string()),
+            username: mention.username.clone(),
+            s: mention.s,
+            e: mention.e,
         })
         .collect();
     let references: Vec<MessageReference> = m
@@ -3849,17 +4644,6 @@ fn message_from_api(m: ApiMessage, cfg: Option<&AppConfig>, viewer_id: Option<Us
         .and_then(|s| s.parse::<i64>().ok())
         .filter(|&id| id != 0)
         .map(UserId);
-    if !mention_targets.is_empty() {
-        tracing::debug!(
-            message_id = m.message_id,
-            entity = mention_targets.len(),
-            span_mentions = spans
-                .iter()
-                .filter(|s| matches!(s, crate::message::MessageSpan::Mention { .. }))
-                .count(),
-            "message mention targets parsed"
-        );
-    }
     Message::new(
         MessageId(m.message_id),
         m.content,
@@ -3867,6 +4651,7 @@ fn message_from_api(m: ApiMessage, cfg: Option<&AppConfig>, viewer_id: Option<Us
         m.sender_name,
         m.create_time,
     )
+    .with_raw_content(&m.content_raw)
     .with_code(code)
     .with_spans(spans)
     .with_mention_targets(mention_targets)
@@ -4564,7 +5349,7 @@ impl MessageAttachment {
             width,
             height,
             thumbnail: String::new(),
-            duration: 0,
+            duration: att.duration,
             size: 0,
             size_label: SharedString::default(),
             presign_pending: false,
@@ -4598,43 +5383,112 @@ mod tests {
     }
 
     #[test]
-    fn plan_forwards_builds_one_send_per_target() {
+    fn forward_target_label_names_the_destination() {
+        let channel = ForwardTarget::Channel {
+            clan_id: ClanId(1),
+            channel_id: ChannelId(2),
+            channel_type: 1,
+            mode: 2,
+            is_public: true,
+            label: "#general".into(),
+        };
+        let friend = ForwardTarget::Friend {
+            user_id: UserId(9),
+            label: "bob".into(),
+            avatar: String::new(),
+            username: "bob".into(),
+        };
+
+        assert_eq!(channel.label(), "#general");
+        assert_eq!(friend.label(), "bob");
+    }
+
+    #[test]
+    fn forward_source_carries_the_whole_content_payload() {
+        let raw = r#"{"t":"hey @bob","mentions":[{"s":4,"e":8,"user_id":"77","username":"bob"}],"mk":[{"s":0,"e":3,"type":"b"}]}"#;
+        let msg = Message::new(
+            MessageId(1),
+            "hey @bob".to_string(),
+            "5".to_string(),
+            "me",
+            100,
+        )
+        .with_raw_content(raw);
+
+        let source = forward_source(&msg);
+
+        assert_eq!(
+            source.content_raw, raw,
+            "the server content payload must be forwarded verbatim, not collapsed to plain text"
+        );
+        assert_eq!(source.mentions.len(), 1);
+        assert_eq!(source.mentions[0].user_id, "77");
+        assert_eq!(source.mentions[0].s, 4);
+        assert_eq!(source.mentions[0].e, 8);
+    }
+
+    #[test]
+    fn forward_source_falls_back_to_plain_text_for_optimistic_messages() {
+        let msg = Message::new(
+            MessageId(1),
+            "hello".to_string(),
+            "5".to_string(),
+            "me",
+            100,
+        );
+
+        let source = forward_source(&msg);
+
+        assert!(source.content_raw.is_empty());
+        assert_eq!(source.text, "hello");
+        assert!(source.mentions.is_empty());
+    }
+
+    #[test]
+    fn forward_mentions_skips_targets_without_a_user_or_role() {
         let targets = vec![
-            ForwardTarget {
-                clan_id: ClanId(1),
-                channel_id: ChannelId(10),
-                channel_type: 1,
-                mode: 2,
-                is_public: true,
+            MentionTarget {
+                user_id: None,
+                role_id: None,
+                username: String::new(),
+                s: 0,
+                e: 1,
             },
-            ForwardTarget {
-                clan_id: ClanId(0),
-                channel_id: ChannelId(20),
-                channel_type: 4,
-                mode: 3,
-                is_public: false,
+            MentionTarget {
+                user_id: None,
+                role_id: Some("9".into()),
+                username: "@mods".into(),
+                s: 2,
+                e: 3,
             },
         ];
-        let attachment = mezon_client::transport::ApiAttachment {
-            url: "https://cdn.mezon.ai/a.png".to_string(),
-            filename: "a.png".to_string(),
-            filetype: "image/png".to_string(),
-            ..Default::default()
-        };
-        let plans = plan_forwards(
-            "hi",
-            std::slice::from_ref(&attachment),
-            &targets,
-            Some("note"),
-        );
-        assert_eq!(plans.len(), targets.len());
-        assert_eq!(plans[0].channel_id, 10);
-        assert_eq!(plans[0].content, "hi");
-        assert_eq!(plans[0].note.as_deref(), Some("note"));
-        assert_eq!(plans[0].attachments.len(), 1);
-        assert_eq!(plans[1].channel_id, 20);
-        assert_eq!(plans[1].mode, 3);
-        assert!(!plans[1].is_public);
+
+        let mentions = forward_mentions(&targets);
+
+        assert_eq!(mentions.len(), 1);
+        assert_eq!(mentions[0].role_id, "9");
+        assert_eq!(mentions[0].username, "@mods");
+        assert_eq!((mentions[0].s, mentions[0].e), (2, 3));
+    }
+
+    #[test]
+    fn forward_mentions_come_from_the_proto_targets_not_the_content_json() {
+        let mut msg = Message::new(MessageId(1), "hey @bob", "7", "alice", 100);
+        msg.raw_content = Some(r#"{"t":"hey @bob"}"#.into());
+        msg.mention_targets = vec![MentionTarget {
+            user_id: Some("42".into()),
+            role_id: None,
+            username: "bob".into(),
+            s: 4,
+            e: 8,
+        }];
+
+        let source = forward_source(&msg);
+
+        assert_eq!(source.mentions.len(), 1);
+        assert_eq!(source.mentions[0].user_id, "42");
+        assert_eq!(source.mentions[0].username, "bob");
+        assert_eq!((source.mentions[0].s, source.mentions[0].e), (4, 8));
     }
 
     #[test]
@@ -4875,6 +5729,7 @@ mod tests {
             ApiMessage {
                 message_id: 1,
                 content: "hi".into(),
+                content_raw: String::new(),
                 content_tokens: mezon_client::transport::ApiMessageContent {
                     t: "hi".into(),
                     ..Default::default()
@@ -4919,6 +5774,7 @@ mod tests {
             ApiMessage {
                 message_id: 5,
                 content: String::new(),
+                content_raw: String::new(),
                 content_tokens: mezon_client::transport::ApiMessageContent::default(),
                 code: 0,
                 sender_id: 1,
@@ -4950,6 +5806,7 @@ mod tests {
         let msg = |finish: Option<Vec<String>>| ApiMessage {
             message_id: 5,
             content: "hi".into(),
+            content_raw: String::new(),
             content_tokens: mezon_client::transport::ApiMessageContent {
                 t: "hi".into(),
                 presign_finish: finish,
@@ -5028,6 +5885,7 @@ mod tests {
         ApiMessage {
             message_id: 11,
             content: "yo".into(),
+            content_raw: String::new(),
             content_tokens: mezon_client::transport::ApiMessageContent {
                 t: "yo".into(),
                 ..Default::default()
@@ -5174,6 +6032,7 @@ mod tests {
             filetype: "image/png".to_string(),
             width: 100,
             height: 100,
+            duration: 0,
             poster_jpeg: None,
         };
         let atts = [outgoing("a.png"), outgoing("b.png")];
@@ -5635,5 +6494,429 @@ mod tests {
         assert!(should_write_last_seen(Some(seen), Some(tail), newer));
         assert!(should_write_last_seen(Some(seen), Some(tail), tail));
         assert!(!should_write_last_seen(Some(newer), Some(tail), seen));
+    }
+
+    fn topic_proto(
+        channel_id: i64,
+        topic_id: i64,
+        content: &str,
+    ) -> mezon_proto::api::ChannelMessage {
+        mezon_proto::api::ChannelMessage {
+            channel_id,
+            topic_id,
+            content: content.to_string(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn storage_channel_id_routes_topic_reply_to_topic_bucket_not_parent() {
+        let reply = topic_proto(10, 99, r#"{"t":"a reply"}"#);
+        assert_eq!(storage_channel_id(&reply), ChannelId(99));
+        assert_eq!(parent_channel_id(&reply), ChannelId(10));
+    }
+
+    #[test]
+    fn storage_channel_id_routes_plain_message_to_its_channel_bucket() {
+        let plain = topic_proto(10, 0, r#"{"t":"hello"}"#);
+        assert_eq!(storage_channel_id(&plain), ChannelId(10));
+        assert_eq!(parent_channel_id(&plain), ChannelId(10));
+    }
+
+    #[test]
+    fn carries_topic_marker_only_for_a_nonzero_numeric_tp() {
+        assert!(carries_topic_marker(&topic_proto(
+            10,
+            0,
+            r#"{"t":"origin","tp":"99"}"#
+        )));
+        assert!(!carries_topic_marker(&topic_proto(
+            10,
+            0,
+            r#"{"t":"origin","tp":"0"}"#
+        )));
+        assert!(!carries_topic_marker(&topic_proto(
+            10,
+            0,
+            r#"{"t":"plain"}"#
+        )));
+        assert!(!carries_topic_marker(&topic_proto(10, 0, "not json")));
+    }
+
+    #[test]
+    fn named_mutation_channel_sends_a_topic_reply_to_the_topic_bucket() {
+        let reply = topic_proto(10, 99, r#"{"t":"a reply"}"#);
+        assert_eq!(named_mutation_channel(&reply), ChannelId(99));
+    }
+
+    #[test]
+    fn named_mutation_channel_keeps_a_topic_origin_in_its_parent_channel() {
+        let origin = topic_proto(10, 99, r#"{"t":"origin","tp":"99"}"#);
+        assert_eq!(
+            named_mutation_channel(&origin),
+            ChannelId(10),
+            "a message that merely HAS a topic hanging off it lives in the parent channel"
+        );
+    }
+
+    #[test]
+    fn named_mutation_channel_sends_a_plain_message_to_its_channel() {
+        let plain = topic_proto(10, 0, r#"{"t":"hello"}"#);
+        assert_eq!(named_mutation_channel(&plain), ChannelId(10));
+    }
+
+    #[test]
+    fn mutation_bucket_for_prefers_the_named_bucket_over_the_parent_that_also_holds_the_id() {
+        let reply = topic_proto(10, 99, r#"{"t":"a reply"}"#);
+        let bucket = mutation_bucket_for(&reply, Some(ChannelId(99)), Some(ChannelId(10)), |b| {
+            b == ChannelId(99) || b == ChannelId(10)
+        });
+        assert_eq!(
+            bucket,
+            ChannelId(99),
+            "a topic reply edits the copy in the topic bucket, not a same-id row in the parent"
+        );
+    }
+
+    #[test]
+    fn mutation_bucket_for_falls_back_to_the_bucket_that_actually_holds_the_message() {
+        let reply = topic_proto(10, 99, r#"{"t":"a reply"}"#);
+        let bucket = mutation_bucket_for(&reply, Some(ChannelId(99)), Some(ChannelId(10)), |b| {
+            b == ChannelId(10)
+        });
+        assert_eq!(
+            bucket,
+            ChannelId(10),
+            "the edit must land in the bucket that really holds the row"
+        );
+    }
+
+    #[test]
+    fn mutation_bucket_for_falls_back_to_the_active_topic_panel() {
+        let orphan = topic_proto(0, 0, r#"{"t":"a reply"}"#);
+        let bucket = mutation_bucket_for(&orphan, Some(ChannelId(99)), Some(ChannelId(10)), |b| {
+            b == ChannelId(99)
+        });
+        assert_eq!(bucket, ChannelId(99));
+    }
+
+    #[test]
+    fn mutation_bucket_for_returns_the_named_bucket_when_nothing_holds_the_message() {
+        let reply = topic_proto(10, 99, r#"{"t":"a reply"}"#);
+        let bucket = mutation_bucket_for(&reply, Some(ChannelId(7)), Some(ChannelId(8)), |_| false);
+        assert_eq!(bucket, ChannelId(99));
+    }
+
+    #[test]
+    fn mark_topic_reply_counted_counts_the_same_message_id_only_once() {
+        let mut seen = HashSet::new();
+        let mut order = std::collections::VecDeque::new();
+        let id = MessageId(42);
+        assert!(mark_topic_reply_counted(&mut seen, &mut order, id));
+        assert!(
+            !mark_topic_reply_counted(&mut seen, &mut order, id),
+            "the realtime echo and our own send ack must not both bump the reply count"
+        );
+        assert!(!mark_topic_reply_counted(&mut seen, &mut order, id));
+    }
+
+    #[test]
+    fn mark_topic_reply_counted_counts_distinct_message_ids() {
+        let mut seen = HashSet::new();
+        let mut order = std::collections::VecDeque::new();
+        assert!(mark_topic_reply_counted(
+            &mut seen,
+            &mut order,
+            MessageId(42)
+        ));
+        assert!(mark_topic_reply_counted(
+            &mut seen,
+            &mut order,
+            MessageId(43)
+        ));
+        assert_eq!(seen.len(), 2);
+    }
+
+    #[test]
+    fn mark_topic_reply_counted_ignores_a_zero_message_id() {
+        let mut seen = HashSet::new();
+        let mut order = std::collections::VecDeque::new();
+        assert!(!mark_topic_reply_counted(
+            &mut seen,
+            &mut order,
+            MessageId(0)
+        ));
+        assert!(seen.is_empty());
+        assert!(order.is_empty());
+    }
+
+    #[test]
+    fn mark_topic_reply_counted_evicts_oldest_but_still_dedups_recent_ids() {
+        let mut seen = HashSet::new();
+        let mut order = std::collections::VecDeque::new();
+        for i in 1..=(MAX_COUNTED_TOPIC_REPLIES as i64 + 1) {
+            assert!(mark_topic_reply_counted(
+                &mut seen,
+                &mut order,
+                MessageId(i)
+            ));
+        }
+        assert!(seen.len() <= MAX_COUNTED_TOPIC_REPLIES);
+        assert_eq!(seen.len(), order.len());
+
+        let newest = MessageId(MAX_COUNTED_TOPIC_REPLIES as i64 + 1);
+        assert!(seen.contains(&newest));
+        assert!(
+            !mark_topic_reply_counted(&mut seen, &mut order, newest),
+            "eviction must not break dedup for recently counted replies"
+        );
+        assert!(!seen.contains(&MessageId(1)));
+    }
+
+    fn cdn_attachment(url: &str) -> MessageAttachment {
+        MessageAttachment {
+            url: url.into(),
+            presign_pending: false,
+            ..Default::default()
+        }
+    }
+
+    const TEST_CDN: &str = "https://cdn.mezon.ai";
+
+    #[test]
+    fn presign_gate_keeps_attachment_pending_when_the_finish_list_is_empty() {
+        let mut attachments = vec![cdn_attachment("https://cdn.mezon.ai/uploads/photo.png")];
+        apply_presign_gate_at(&mut attachments, &[], TEST_CDN, 1000, 1000);
+        assert_eq!(attachments.len(), 1);
+        assert!(
+            attachments[0].presign_pending,
+            "an ack with no finished keys must not advertise the upload as done"
+        );
+    }
+
+    #[test]
+    fn presign_gate_clears_pending_when_the_finish_list_contains_the_key() {
+        let mut attachments = vec![cdn_attachment("https://cdn.mezon.ai/uploads/photo.png")];
+        attachments[0].presign_pending = true;
+        apply_presign_gate_at(
+            &mut attachments,
+            &["photo".to_string()],
+            TEST_CDN,
+            1000,
+            1000,
+        );
+        assert_eq!(attachments.len(), 1);
+        assert!(!attachments[0].presign_pending);
+    }
+
+    #[test]
+    fn presign_gate_short_circuits_on_key_count_even_when_the_key_does_not_match() {
+        let mut attachments = vec![cdn_attachment("https://cdn.mezon.ai/uploads/photo.png")];
+        attachments[0].presign_pending = true;
+        apply_presign_gate_at(
+            &mut attachments,
+            &["some-other-key".to_string()],
+            TEST_CDN,
+            1000,
+            1000,
+        );
+        assert!(!attachments[0].presign_pending);
+    }
+
+    #[test]
+    fn presign_gate_keeps_second_attachment_pending_until_both_keys_arrive() {
+        let mut attachments = vec![
+            cdn_attachment("https://cdn.mezon.ai/uploads/a.png"),
+            cdn_attachment("https://cdn.mezon.ai/uploads/b.png"),
+        ];
+        apply_presign_gate_at(&mut attachments, &["a".to_string()], TEST_CDN, 1000, 1000);
+        assert_eq!(attachments.len(), 2);
+        assert!(!attachments[0].presign_pending);
+        assert!(attachments[1].presign_pending);
+    }
+
+    #[test]
+    fn presign_gate_drops_a_pending_attachment_that_never_finished_uploading() {
+        let mut attachments = vec![cdn_attachment("https://cdn.mezon.ai/uploads/photo.png")];
+        apply_presign_gate_at(
+            &mut attachments,
+            &[],
+            TEST_CDN,
+            1000,
+            1000 + presign::PRESIGN_PENDING_MAX_AGE_SEC,
+        );
+        assert!(
+            attachments.is_empty(),
+            "a stale never-uploaded attachment is dropped instead of rendering broken forever"
+        );
+    }
+
+    #[test]
+    fn presign_gate_leaves_a_non_cdn_attachment_alone() {
+        let mut attachments = vec![cdn_attachment("https://tenor.com/view/cat.gif")];
+        apply_presign_gate_at(
+            &mut attachments,
+            &[],
+            TEST_CDN,
+            1000,
+            1000 + presign::PRESIGN_PENDING_MAX_AGE_SEC,
+        );
+        assert_eq!(attachments.len(), 1);
+        assert!(!attachments[0].presign_pending);
+    }
+
+    #[test]
+    fn topic_ack_marks_only_presign_pending_attachments_as_uploading() {
+        let mut attachments = vec![
+            MessageAttachment {
+                url: "https://cdn.mezon.ai/uploads/pending.png".into(),
+                presign_pending: true,
+                ..Default::default()
+            },
+            MessageAttachment {
+                url: "https://cdn.mezon.ai/uploads/done.png".into(),
+                presign_pending: false,
+                ..Default::default()
+            },
+        ];
+        mark_pending_attachments_uploading(&mut attachments);
+        assert!(
+            attachments[0].uploading,
+            "a topic attachment still waiting on presign must render as uploading"
+        );
+        assert!(!attachments[1].uploading);
+    }
+
+    fn sparse_ack_message() -> Message {
+        let mut msg = Message::new(MessageId(7), "a topic reply", "", "", 0);
+        msg.avatar_url = "".into();
+        msg
+    }
+
+    fn test_profile() -> (String, String, SharedString) {
+        (
+            "Alice".to_string(),
+            "https://cdn.mezon.ai/alice.png".to_string(),
+            SharedString::from("https://proxy/alice.png"),
+        )
+    }
+
+    #[test]
+    fn sparse_topic_ack_gaps_detects_each_missing_field() {
+        assert!(sparse_topic_ack_gaps(&sparse_ack_message()).is_some());
+
+        let mut zero_sender = Message::new(MessageId(7), "hi", "0", "Alice", 100);
+        zero_sender.avatar_url = "https://cdn.mezon.ai/alice.png".into();
+        let gaps = sparse_topic_ack_gaps(&zero_sender).expect("sender id 0 is sparse");
+        assert!(gaps.sender);
+        assert!(!gaps.name);
+        assert!(!gaps.time);
+    }
+
+    #[test]
+    fn sparse_topic_ack_gaps_is_none_for_a_complete_ack() {
+        let mut complete = Message::new(MessageId(7), "hi", "42", "Alice", 100);
+        complete.avatar_url = "https://cdn.mezon.ai/alice.png".into();
+        assert!(
+            sparse_topic_ack_gaps(&complete).is_none(),
+            "a fully populated ack must not be rewritten"
+        );
+    }
+
+    #[test]
+    fn fill_sparse_topic_ack_fills_sender_name_avatar_and_time() {
+        let mut msg = sparse_ack_message();
+        let gaps = sparse_topic_ack_gaps(&msg).expect("the ack is sparse");
+        fill_sparse_topic_ack(
+            &mut msg,
+            gaps,
+            Some(UserId(42)),
+            "42".to_string(),
+            test_profile(),
+            1_700_000_000,
+        );
+
+        assert_eq!(msg.sender_id, "42");
+        assert_eq!(msg.sender_user_id, Some(UserId(42)));
+        assert_eq!(msg.sender_name, "Alice");
+        assert_eq!(msg.avatar_url, "https://cdn.mezon.ai/alice.png");
+        assert_eq!(msg.avatar_proxied, "https://proxy/alice.png");
+        assert_eq!(msg.create_time, 1_700_000_000);
+        assert!(!msg.day_label.is_empty());
+        assert!(!msg.time_hhmm.is_empty());
+    }
+
+    #[test]
+    fn fill_sparse_topic_ack_never_stamps_a_topic_id_on_a_reply() {
+        let mut msg = sparse_ack_message();
+        assert_eq!(msg.topic_id, None);
+        let gaps = sparse_topic_ack_gaps(&msg).expect("the ack is sparse");
+        fill_sparse_topic_ack(
+            &mut msg,
+            gaps,
+            Some(UserId(42)),
+            "42".to_string(),
+            test_profile(),
+            1_700_000_000,
+        );
+        assert_eq!(
+            msg.topic_id, None,
+            "topic_id marks a message as a topic ORIGIN; a reply that carries one masquerades as the anchor"
+        );
+        assert_ne!(msg.code, MessageCode::Topic);
+    }
+
+    #[test]
+    fn fill_sparse_topic_ack_keeps_fields_the_server_already_sent() {
+        let mut msg = Message::new(MessageId(7), "hi", "42", "Bob", 500);
+        let gaps = sparse_topic_ack_gaps(&msg).expect("the avatar is missing");
+        fill_sparse_topic_ack(
+            &mut msg,
+            gaps,
+            Some(UserId(99)),
+            "99".to_string(),
+            test_profile(),
+            1_700_000_000,
+        );
+
+        assert_eq!(
+            msg.sender_id, "42",
+            "a server-sent sender is never rewritten"
+        );
+        assert_eq!(msg.sender_name, "Bob");
+        assert_eq!(msg.create_time, 500);
+        assert_eq!(msg.avatar_url, "https://cdn.mezon.ai/alice.png");
+    }
+
+    #[test]
+    fn has_more_bottom_ignores_an_optimistic_tail_id() {
+        let list =
+            MessageList::from_messages(vec![Message::new(MessageId(1), "a", "u1", "U", 100)]);
+        assert!(
+            !has_more_bottom_for(Some(MessageId::next_optimistic()), &list),
+            "an un-acked optimistic row is not evidence of unloaded server history"
+        );
+    }
+
+    #[test]
+    fn removing_a_reply_in_the_middle_keeps_the_index_and_order() {
+        let mut list = MessageList::from_messages(vec![
+            Message::new(MessageId(1), "first", "u1", "U1", 100),
+            Message::new(MessageId(2), "second", "u2", "U2", 200),
+            Message::new(MessageId(3), "third", "u3", "U3", 300),
+        ]);
+
+        assert_eq!(list.remove_id(MessageId(2)), Some(1));
+        assert_list_consistent(&list);
+        assert_eq!(
+            list.as_slice().iter().map(|m| m.id).collect::<Vec<_>>(),
+            vec![MessageId(1), MessageId(3)]
+        );
+        assert_eq!(
+            list.position(MessageId(3)),
+            Some(1),
+            "a stale index after a mid-list delete renders the WRONG row"
+        );
+        assert_eq!(list.remove_id(MessageId(404)), None);
     }
 }

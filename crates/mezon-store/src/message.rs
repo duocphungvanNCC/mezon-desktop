@@ -266,6 +266,9 @@ fn upsert_sender(senders: &mut Vec<ReactionSender>, sender_id: &str, count: u32,
 pub struct MentionTarget {
     pub user_id: Option<String>,
     pub role_id: Option<String>,
+    pub username: String,
+    pub s: i32,
+    pub e: i32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -593,6 +596,10 @@ pub struct Message {
     pub attachments: Vec<MessageAttachment>,
     pub album_layout: Option<AlbumLayout>,
     pub viewer_media: Arc<[ViewerMedia]>,
+    /// The content JSON as received from the server, kept so forwarding can
+    /// re-send the whole payload (markdown/emoji/hashtag/embed tokens) rather
+    /// than just the plain text. `None` for optimistic messages.
+    pub raw_content: Option<Arc<str>>,
 }
 
 #[derive(Debug, Clone)]
@@ -1092,6 +1099,45 @@ pub fn spans_only_emoji(spans: &[MessageSpan]) -> bool {
     has_emoji
 }
 
+pub fn markdown_edit_source(content: &str, spans: &[MessageSpan]) -> Option<String> {
+    let has_markdown = spans.iter().any(|span| {
+        matches!(
+            span,
+            MessageSpan::Bold(_) | MessageSpan::Code(_) | MessageSpan::CodeBlock { .. }
+        )
+    });
+    if !has_markdown {
+        return None;
+    }
+    let mut out = String::with_capacity(content.len() + 8);
+    for span in spans {
+        match span {
+            MessageSpan::Text(t) => out.push_str(t),
+            MessageSpan::Bold(t) => {
+                out.push_str("**");
+                out.push_str(t);
+                out.push_str("**");
+            }
+            MessageSpan::Code(t) => {
+                out.push('`');
+                out.push_str(t);
+                out.push('`');
+            }
+            MessageSpan::CodeBlock { text, .. } => {
+                out.push_str("```");
+                out.push_str(text);
+                out.push_str("```");
+            }
+            MessageSpan::Link { text, .. } => out.push_str(text),
+            MessageSpan::Mention { display, .. } => out.push_str(display),
+            MessageSpan::Hashtag { display, .. } => out.push_str(display),
+            MessageSpan::Emoji { name, .. } => out.push_str(name),
+            MessageSpan::Canvas { .. } | MessageSpan::Heading { .. } => return None,
+        }
+    }
+    (mezon_client::transport::strip_markdown(&out).text == content).then_some(out)
+}
+
 fn strip_marker(s: &str, marker: &str) -> String {
     let trimmed = s
         .strip_prefix(marker)
@@ -1362,7 +1408,13 @@ impl Message {
             attachments: Vec::new(),
             album_layout: None,
             viewer_media: Vec::new().into(),
+            raw_content: None,
         }
+    }
+
+    pub fn with_raw_content(mut self, raw: &str) -> Self {
+        self.raw_content = (!raw.is_empty()).then(|| Arc::from(raw));
+        self
     }
 
     pub fn is_sending(&self) -> bool {
@@ -1562,6 +1614,52 @@ mod tests {
     }
 
     #[test]
+    fn edit_source_restores_stripped_markers_for_the_plain_text_composer() {
+        let content = ApiMessageContent {
+            t: "x @bob".into(),
+            mk: vec![ContentToken {
+                kind: Some("c".into()),
+                ..token(0, 1)
+            }],
+            mentions: vec![ContentToken {
+                user_id: Some("42".into()),
+                username: Some("bob".into()),
+                ..token(2, 6)
+            }],
+            ..Default::default()
+        };
+        let spans = parse_spans(&content);
+        assert_eq!(
+            markdown_edit_source(&content.t, &spans),
+            Some("`x` @bob".to_string())
+        );
+    }
+
+    #[test]
+    fn edit_source_keeps_text_that_already_carries_markers() {
+        let content = ApiMessageContent {
+            t: "`x`".into(),
+            mk: vec![ContentToken {
+                kind: Some("c".into()),
+                ..token(0, 3)
+            }],
+            ..Default::default()
+        };
+        let spans = parse_spans(&content);
+        assert_eq!(markdown_edit_source(&content.t, &spans), None);
+    }
+
+    #[test]
+    fn edit_source_is_none_without_markdown() {
+        let content = ApiMessageContent {
+            t: "plain".into(),
+            ..Default::default()
+        };
+        let spans = parse_spans(&content);
+        assert_eq!(markdown_edit_source(&content.t, &spans), None);
+    }
+
+    #[test]
     fn parse_spans_plain_text() {
         let content = ApiMessageContent {
             t: "hello world".into(),
@@ -1638,6 +1736,7 @@ mod tests {
         msg.mention_targets = vec![MentionTarget {
             user_id: Some("42".into()),
             role_id: None,
+            ..Default::default()
         }];
         assert!(message_row_highlight(&msg, Some(UserId(42)), &[]));
         assert!(!message_row_highlight(&msg, Some(UserId(7)), &[]));

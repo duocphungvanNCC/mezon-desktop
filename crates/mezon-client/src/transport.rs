@@ -10,9 +10,11 @@ use prost::Message;
 use serde::{Deserialize, Serialize};
 use serde_json;
 use std::collections::HashMap;
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU16, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::sync::{oneshot, watch};
 
 const DEFAULT_SEND_TIMEOUT_MS: u64 = 10000;
@@ -77,6 +79,8 @@ pub enum RealtimeEvent {
     SessionRefreshed(api::Session),
     LastPinMessage(realtime::LastPinMessageEvent),
     UnpinMessage(realtime::UnpinMessageEvent),
+    SdTopicEvent(realtime::SdTopicEvent),
+    TopicInMessageEvent(realtime::TopicInMessageEvent),
     Unhandled(realtime::envelope::Message),
 }
 
@@ -126,6 +130,8 @@ impl TryFrom<realtime::envelope::Message> for RealtimeEvent {
             realtime::envelope::Message::RefreshSessionEvent(s) => Ok(Self::SessionRefreshed(s)),
             realtime::envelope::Message::LastPinMessageEvent(m) => Ok(Self::LastPinMessage(m)),
             realtime::envelope::Message::UnpinMessageEvent(m) => Ok(Self::UnpinMessage(m)),
+            realtime::envelope::Message::SdTopicEvent(m) => Ok(Self::SdTopicEvent(m)),
+            realtime::envelope::Message::TopicInMessageEvent(m) => Ok(Self::TopicInMessageEvent(m)),
             other => Ok(Self::Unhandled(other)),
         }
     }
@@ -139,7 +145,7 @@ fn dispatch_realtime_push(
     match realtime::Envelope::decode(payload) {
         Ok(envelope) => match envelope.message {
             Some(msg) => {
-                tracing::debug!("server push (cid={cid}) -> publishing realtime event");
+                tracing::trace!("server push (cid={cid}) -> publishing realtime event");
                 if let Ok(event) = RealtimeEvent::try_from(msg) {
                     on_event(event);
                 }
@@ -168,6 +174,10 @@ pub struct MezonTransport {
     connect_gate: Duration,
     connected_tx: watch::Sender<bool>,
     connected_rx: watch::Receiver<bool>,
+    /// How many times each socket API has completed successfully this session.
+    /// Surfaced in the `api_ok` log so a duplicated / repeated call is obvious
+    /// (`call#2` for a one-shot List means something is fetching twice).
+    api_call_counts: Arc<Mutex<HashMap<String, u64>>>,
     #[allow(dead_code)]
     base_path: String,
 }
@@ -184,6 +194,7 @@ impl MezonTransport {
             connect_gate: Duration::from_millis(DEFAULT_CONNECT_GATE_MS),
             connected_tx,
             connected_rx,
+            api_call_counts: Arc::new(Mutex::new(HashMap::new())),
             base_path,
         }
     }
@@ -1694,6 +1705,23 @@ impl OutgoingMention {
     }
 }
 
+/// Build the content JSON of a forwarded message: the source message's content
+/// object re-sent verbatim with `fwd: true` added, mirroring mezon-react's
+/// `{ ...message.content, fwd: true }`. Falls back to a plain `{ "t": text }`
+/// object when the source payload is absent or not a JSON object (optimistic
+/// messages that never round-tripped through the server).
+pub fn forward_content_json(content_raw: &str, text: &str) -> String {
+    let mut obj = match serde_json::from_str::<serde_json::Value>(content_raw) {
+        Ok(serde_json::Value::Object(map)) => map,
+        _ => serde_json::Map::new(),
+    };
+    if !text.is_empty() && !obj.contains_key("t") {
+        obj.insert("t".into(), text.into());
+    }
+    obj.insert("fwd".into(), serde_json::Value::Bool(true));
+    serde_json::Value::Object(obj).to_string()
+}
+
 pub fn mention_content_tokens(mentions: &[OutgoingMention]) -> Vec<ContentToken> {
     mentions
         .iter()
@@ -1773,17 +1801,15 @@ pub fn markdown_content_tokens(markdowns: &[OutgoingMarkdown]) -> Vec<ContentTok
         .collect()
 }
 
-pub fn detect_markdown(text: &str) -> Vec<OutgoingMarkdown> {
-    let chars: Vec<char> = text.chars().collect();
-    let n = chars.len();
-    let mut u16_at = Vec::with_capacity(n + 1);
-    let mut acc = 0i32;
-    for ch in &chars {
-        u16_at.push(acc);
-        acc += ch.len_utf16() as i32;
-    }
-    u16_at.push(acc);
+struct MarkdownMatch {
+    kind: &'static str,
+    start: usize,
+    end: usize,
+    marker: usize,
+}
 
+fn scan_markdown(chars: &[char]) -> Vec<MarkdownMatch> {
+    let n = chars.len();
     let is_triple =
         |k: usize| k + 2 < n && chars[k] == '`' && chars[k + 1] == '`' && chars[k + 2] == '`';
     let starts_with = |k: usize, pat: &str| -> bool {
@@ -1805,10 +1831,11 @@ pub fn detect_markdown(text: &str) -> Vec<OutgoingMarkdown> {
                 j += 1;
             }
             if is_triple(j) && non_blank(i + 3, j) {
-                out.push(OutgoingMarkdown {
-                    kind: "pre".into(),
-                    s: u16_at[i],
-                    e: u16_at[j + 3],
+                out.push(MarkdownMatch {
+                    kind: "pre",
+                    start: i,
+                    end: j + 3,
+                    marker: 3,
                 });
                 i = j + 3;
                 continue;
@@ -1822,10 +1849,11 @@ pub fn detect_markdown(text: &str) -> Vec<OutgoingMarkdown> {
                 j += 1;
             }
             if j > i + scheme {
-                out.push(OutgoingMarkdown {
-                    kind: "lk".into(),
-                    s: u16_at[i],
-                    e: u16_at[j],
+                out.push(MarkdownMatch {
+                    kind: "lk",
+                    start: i,
+                    end: j,
+                    marker: 0,
                 });
                 i = j;
                 continue;
@@ -1834,14 +1862,15 @@ pub fn detect_markdown(text: &str) -> Vec<OutgoingMarkdown> {
 
         if chars[i] == '`' && !is_triple(i) {
             let mut j = i + 1;
-            while j < n && chars[j] != '`' {
+            while j < n && chars[j] != '`' && chars[j] != '\n' {
                 j += 1;
             }
             if j < n && chars[j] == '`' && non_blank(i + 1, j) {
-                out.push(OutgoingMarkdown {
-                    kind: "c".into(),
-                    s: u16_at[i],
-                    e: u16_at[j + 1],
+                out.push(MarkdownMatch {
+                    kind: "c",
+                    start: i,
+                    end: j + 1,
+                    marker: 1,
                 });
                 i = j + 1;
                 continue;
@@ -1850,14 +1879,15 @@ pub fn detect_markdown(text: &str) -> Vec<OutgoingMarkdown> {
 
         if i + 1 < n && chars[i] == '*' && chars[i + 1] == '*' {
             let mut j = i + 2;
-            while j + 1 < n && !(chars[j] == '*' && chars[j + 1] == '*') {
+            while j < n && chars[j] != '*' && chars[j] != '\n' {
                 j += 1;
             }
             if j + 1 < n && chars[j] == '*' && chars[j + 1] == '*' && non_blank(i + 2, j) {
-                out.push(OutgoingMarkdown {
-                    kind: "b".into(),
-                    s: u16_at[i],
-                    e: u16_at[j + 2],
+                out.push(MarkdownMatch {
+                    kind: "b",
+                    start: i,
+                    end: j + 2,
+                    marker: 2,
                 });
                 i = j + 2;
                 continue;
@@ -1867,6 +1897,151 @@ pub fn detect_markdown(text: &str) -> Vec<OutgoingMarkdown> {
         i += 1;
     }
     out
+}
+
+fn utf16_prefix_offsets(chars: &[char]) -> Vec<i32> {
+    let mut out = Vec::with_capacity(chars.len() + 1);
+    let mut acc = 0i32;
+    for ch in chars {
+        out.push(acc);
+        acc += ch.len_utf16() as i32;
+    }
+    out.push(acc);
+    out
+}
+
+pub fn detect_markdown(text: &str) -> Vec<OutgoingMarkdown> {
+    let chars: Vec<char> = text.chars().collect();
+    let u16_at = utf16_prefix_offsets(&chars);
+    scan_markdown(&chars)
+        .into_iter()
+        .map(|m| OutgoingMarkdown {
+            kind: m.kind.into(),
+            s: u16_at[m.start],
+            e: u16_at[m.end],
+        })
+        .collect()
+}
+
+pub struct StrippedContent {
+    pub text: String,
+    pub markdowns: Vec<OutgoingMarkdown>,
+    map: Vec<i32>,
+}
+
+impl StrippedContent {
+    fn remap(&self, offset: i32) -> i32 {
+        let last = self.map.last().copied().unwrap_or(0);
+        usize::try_from(offset)
+            .ok()
+            .and_then(|idx| self.map.get(idx).copied())
+            .unwrap_or(last)
+    }
+}
+
+pub fn strip_markdown(text: &str) -> StrippedContent {
+    let chars: Vec<char> = text.chars().collect();
+    let matches = scan_markdown(&chars);
+    let u16_at = utf16_prefix_offsets(&chars);
+
+    let mut removed = vec![false; chars.len()];
+    for m in &matches {
+        for slot in removed.iter_mut().take(m.start + m.marker).skip(m.start) {
+            *slot = true;
+        }
+        for slot in removed.iter_mut().take(m.end).skip(m.end - m.marker) {
+            *slot = true;
+        }
+    }
+
+    let mut out = String::with_capacity(text.len());
+    let mut map = Vec::with_capacity(u16_at.len());
+    let mut stripped = 0i32;
+    for (idx, ch) in chars.iter().enumerate() {
+        for _ in 0..ch.len_utf16() {
+            map.push(stripped);
+        }
+        if !removed[idx] {
+            out.push(*ch);
+            stripped += ch.len_utf16() as i32;
+        }
+    }
+    map.push(stripped);
+
+    let stripped_content = StrippedContent {
+        text: out,
+        markdowns: Vec::new(),
+        map,
+    };
+    let markdowns = matches
+        .iter()
+        .map(|m| OutgoingMarkdown {
+            kind: m.kind.into(),
+            s: stripped_content.remap(u16_at[m.start]),
+            e: stripped_content.remap(u16_at[m.end]),
+        })
+        .collect();
+    StrippedContent {
+        markdowns,
+        ..stripped_content
+    }
+}
+
+pub struct SendContent {
+    pub json: String,
+    pub text: String,
+    pub mentions: Vec<OutgoingMention>,
+    pub hashtags: Vec<OutgoingHashtag>,
+    pub emojis: Vec<OutgoingEmoji>,
+    pub markdowns: Vec<OutgoingMarkdown>,
+}
+
+pub fn build_send_content(
+    text: &str,
+    mentions: &[OutgoingMention],
+    hashtags: &[OutgoingHashtag],
+    emojis: &[OutgoingEmoji],
+) -> SendContent {
+    let stripped = strip_markdown(text);
+    let mentions: Vec<OutgoingMention> = mentions
+        .iter()
+        .map(|m| OutgoingMention {
+            s: stripped.remap(m.s),
+            e: stripped.remap(m.e),
+            ..m.clone()
+        })
+        .collect();
+    let hashtags: Vec<OutgoingHashtag> = hashtags
+        .iter()
+        .map(|h| OutgoingHashtag {
+            s: stripped.remap(h.s),
+            e: stripped.remap(h.e),
+            ..h.clone()
+        })
+        .collect();
+    let emojis: Vec<OutgoingEmoji> = emojis
+        .iter()
+        .map(|e| OutgoingEmoji {
+            s: stripped.remap(e.s),
+            e: stripped.remap(e.e),
+            ..e.clone()
+        })
+        .collect();
+    let json = build_message_content_json(
+        &stripped.text,
+        &mentions,
+        &hashtags,
+        &emojis,
+        &stripped.markdowns,
+    );
+    SendContent {
+        json,
+        text: stripped.text,
+        mentions,
+        hashtags,
+        emojis,
+        markdowns: stripped.markdowns,
+    }
 }
 
 fn with_presign_finish(content_json: String, keys: &[String]) -> String {
@@ -1900,6 +2075,10 @@ fn with_create_time_seconds(content_json: String, create_time_seconds: u32) -> S
         serde_json::Value::Number(create_time_seconds.into()),
     );
     serde_json::to_string(&value).unwrap_or(content_json)
+}
+
+fn presence_marker_bytes(present: bool) -> Vec<u8> {
+    if present { vec![0u8] } else { Vec::new() }
 }
 
 fn build_message_content_json(
@@ -1994,6 +2173,11 @@ pub struct ApiMessage {
     pub content: String,
     /// Full parsed content tokens for rich-text rendering.
     pub content_tokens: ApiMessageContent,
+    /// The content JSON exactly as the server sent it. Forwarding re-sends this
+    /// verbatim (plus `fwd: true`) so markdown/emoji/hashtag/embed tokens survive
+    /// — mezon-react forwards `{ ...message.content, fwd: true }`.
+    #[serde(default)]
+    pub content_raw: String,
     /// Message type/category (`TypeMessage` in React). 0 = normal chat.
     pub code: i32,
     pub sender_id: i64,
@@ -2063,6 +2247,48 @@ impl MezonTransport {
         Ok(envelope.encode_to_vec())
     }
 
+    /// Fingerprint of a request's arguments (its encoded body). Two calls with the
+    /// same `action` and the same `args` are the *same* fetch repeated — which is
+    /// what a duplicate looks like. A different `args` just means a different clan
+    /// or channel, not a duplicate.
+    fn args_fingerprint(body: &[u8]) -> u32 {
+        let mut hasher = DefaultHasher::new();
+        body.hash(&mut hasher);
+        hasher.finish() as u32
+    }
+
+    /// Log a completed socket API call. `List*` calls log at INFO with a running
+    /// counter keyed by (action, args), so a duplicated fetch stands out without
+    /// turning on debug logging; everything else stays at DEBUG.
+    fn log_api_ok(
+        &self,
+        api_name: &str,
+        cid: u16,
+        code: u32,
+        bytes: usize,
+        args: u32,
+        started: Instant,
+    ) {
+        let count = {
+            let mut counts = self.api_call_counts.lock();
+            let entry = counts.entry(format!("{api_name}:{args:08x}")).or_insert(0);
+            *entry += 1;
+            *entry
+        };
+        let took_ms = started.elapsed().as_millis();
+        if api_name.starts_with("List") {
+            tracing::info!(
+                target: "socket",
+                "api_ok: action={api_name} args={args:08x} cid={cid} code={code} bytes={bytes} took={took_ms}ms call#{count}"
+            );
+        } else {
+            tracing::debug!(
+                target: "socket",
+                "api_ok: action={api_name} args={args:08x} cid={cid} code={code} bytes={bytes} took={took_ms}ms call#{count}"
+            );
+        }
+    }
+
     async fn send_api_request(
         &self,
         cid: u16,
@@ -2070,8 +2296,13 @@ impl MezonTransport {
         body: Vec<u8>,
     ) -> Result<(u32, Vec<u8>)> {
         tracing::debug!(target: "socket", "api_send: action={api_name} cid={cid}");
-        self.send(cid, self.build_api_request(cid, api_name, body)?)
-            .await
+        let started = Instant::now();
+        let args = Self::args_fingerprint(&body);
+        let (code, response) = self
+            .send(cid, self.build_api_request(cid, api_name, body)?)
+            .await?;
+        self.log_api_ok(api_name, cid, code, response.len(), args, started);
+        Ok((code, response))
     }
 
     async fn send_api_request_with_timeout(
@@ -2082,8 +2313,13 @@ impl MezonTransport {
         timeout: Duration,
     ) -> Result<(u32, Vec<u8>)> {
         tracing::debug!(target: "socket", "api_send: action={api_name} cid={cid}");
-        self.send_with_timeout(cid, self.build_api_request(cid, api_name, body)?, timeout)
-            .await
+        let started = Instant::now();
+        let args = Self::args_fingerprint(&body);
+        let (code, response) = self
+            .send_with_timeout(cid, self.build_api_request(cid, api_name, body)?, timeout)
+            .await?;
+        self.log_api_ok(api_name, cid, code, response.len(), args, started);
+        Ok((code, response))
     }
 
     fn account_from_user(
@@ -2246,6 +2482,7 @@ impl MezonTransport {
             message_id: message.message_id,
             content,
             content_tokens,
+            content_raw: message.content.clone(),
             code: message.code,
             sender_id: message.sender_id,
             sender_name,
@@ -2794,6 +3031,49 @@ impl MezonTransport {
         })
     }
 
+    /// List messages belonging to a discussion topic. Mirrors mezon-js
+    /// `listChannelMessages(clanId, channelId, undefined, direction, limit, topicId)`:
+    /// the parent `channel_id` is passed with `message_id = 0` and the `topic_id` set.
+    pub async fn list_topic_messages(
+        &self,
+        clan_id: i64,
+        channel_id: i64,
+        topic_id: i64,
+        direction: i32,
+        limit: u32,
+    ) -> Result<ListChannelMessagesResult> {
+        let cid = self.generate_cid();
+
+        let api_name = "ListChannelMessages";
+        let body = api::ListChannelMessagesRequest {
+            clan_id,
+            channel_id,
+            message_id: 0,
+            direction,
+            limit: limit as i32,
+            topic_id,
+        }
+        .encode_to_vec();
+
+        let (code, response) = self.send_api_request(cid, api_name, body).await?;
+
+        if code != 0 {
+            return Err(anyhow::anyhow!("API error: code={}", code));
+        }
+
+        let page = api::ChannelMessageList::decode(response.as_slice())?;
+        let last_seen_message_id = page.last_seen_message.as_ref().map(|h| h.id).unwrap_or(0);
+        let messages: Vec<ApiMessage> = page
+            .messages
+            .into_iter()
+            .map(|m| Self::message_from_proto(&m))
+            .collect();
+        Ok(ListChannelMessagesResult {
+            messages,
+            last_seen_message_id,
+        })
+    }
+
     /// Send a message to a channel.
     pub async fn join_chat(
         &self,
@@ -2919,6 +3199,131 @@ impl MezonTransport {
             hashtags,
             emojis,
             None,
+            false,
+            0,
+        )
+        .await
+    }
+
+    pub async fn send_channel_message_structured(
+        &self,
+        channel_id: i64,
+        content_json: &str,
+        mode: i32,
+    ) -> Result<ApiMessage> {
+        serde_json::from_str::<ApiMessageContent>(content_json)
+            .context("invalid structured message content")?;
+        self.send_channel_message_inner(
+            0,
+            channel_id,
+            content_json,
+            false,
+            mode,
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            None,
+            true,
+            0,
+        )
+        .await
+    }
+
+    /// Send a message into a discussion topic (mezon-js `writeChatMessage(..., topicId)`).
+    #[allow(clippy::too_many_arguments)]
+    pub async fn send_topic_message(
+        &self,
+        clan_id: i64,
+        channel_id: i64,
+        content: &str,
+        is_public: bool,
+        mode: i32,
+        topic_id: i64,
+        mentions: Vec<OutgoingMention>,
+        hashtags: Vec<OutgoingHashtag>,
+        emojis: Vec<OutgoingEmoji>,
+        reply: Option<OutgoingReply>,
+    ) -> Result<ApiMessage> {
+        let references = reply
+            .map(|reply| api::MessageRef {
+                message_ref_id: reply.message_ref_id,
+                content: reply.content,
+                has_attachment: reply.has_attachment,
+                ref_type: 0,
+                message_sender_id: reply.message_sender_id,
+                message_sender_username: reply.message_sender_username,
+                message_sender_avatar: reply.message_sender_avatar,
+                message_sender_clan_nick: reply.message_sender_clan_nick,
+                message_sender_display_name: reply.message_sender_display_name,
+                ..Default::default()
+            })
+            .into_iter()
+            .collect();
+        self.send_channel_message_inner(
+            clan_id,
+            channel_id,
+            content,
+            is_public,
+            mode,
+            Vec::new(),
+            references,
+            mentions,
+            hashtags,
+            emojis,
+            None,
+            false,
+            topic_id,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn send_topic_message_with_attachments(
+        &self,
+        clan_id: i64,
+        channel_id: i64,
+        content: &str,
+        is_public: bool,
+        mode: i32,
+        topic_id: i64,
+        attachments: Vec<api::MessageAttachment>,
+        mentions: Vec<OutgoingMention>,
+        hashtags: Vec<OutgoingHashtag>,
+        emojis: Vec<OutgoingEmoji>,
+        presign_finish: Option<Vec<String>>,
+        reply: Option<OutgoingReply>,
+    ) -> Result<ApiMessage> {
+        let references = reply
+            .map(|reply| api::MessageRef {
+                message_ref_id: reply.message_ref_id,
+                content: reply.content,
+                has_attachment: reply.has_attachment,
+                ref_type: 0,
+                message_sender_id: reply.message_sender_id,
+                message_sender_username: reply.message_sender_username,
+                message_sender_avatar: reply.message_sender_avatar,
+                message_sender_clan_nick: reply.message_sender_clan_nick,
+                message_sender_display_name: reply.message_sender_display_name,
+                ..Default::default()
+            })
+            .into_iter()
+            .collect();
+        self.send_channel_message_inner(
+            clan_id,
+            channel_id,
+            content,
+            is_public,
+            mode,
+            attachments,
+            references,
+            mentions,
+            hashtags,
+            emojis,
+            presign_finish,
+            false,
+            topic_id,
         )
         .await
     }
@@ -2965,6 +3370,8 @@ impl MezonTransport {
             hashtags,
             emojis,
             presign_finish,
+            false,
+            0,
         )
         .await
     }
@@ -3007,6 +3414,8 @@ impl MezonTransport {
             hashtags,
             emojis,
             None,
+            false,
+            0,
         )
         .await
     }
@@ -3025,6 +3434,8 @@ impl MezonTransport {
         hashtags: Vec<OutgoingHashtag>,
         emojis: Vec<OutgoingEmoji>,
         presign_finish: Option<Vec<String>>,
+        content_is_json: bool,
+        topic_id: i64,
     ) -> Result<ApiMessage> {
         let cid = self.generate_cid();
 
@@ -3040,15 +3451,29 @@ impl MezonTransport {
             attachments.len()
         );
         // mezon stores message content as JSON `{ "t": <text> }` (matches mezon-js), not raw text.
-        let markdowns = detect_markdown(content);
-        let content_json =
-            build_message_content_json(content, &mentions, &hashtags, &emojis, &markdowns);
+        let sent = if content_is_json {
+            let text = serde_json::from_str::<ApiMessageContent>(content)
+                .map(|c| c.t)
+                .unwrap_or_else(|_| content.to_string());
+            SendContent {
+                json: content.to_string(),
+                text,
+                mentions,
+                hashtags,
+                emojis,
+                markdowns: Vec::new(),
+            }
+        } else {
+            build_send_content(content, &mentions, &hashtags, &emojis)
+        };
+        let content_json = sent.json.clone();
         let content_json = match &presign_finish {
             Some(keys) => with_presign_finish(content_json, keys),
             None => content_json,
         };
-        let mention_everyone = mentions.iter().any(OutgoingMention::is_here);
-        let proto_mentions: Vec<api::MessageMention> = mentions
+        let mention_everyone = sent.mentions.iter().any(OutgoingMention::is_here);
+        let proto_mentions: Vec<api::MessageMention> = sent
+            .mentions
             .iter()
             .filter_map(OutgoingMention::to_proto)
             .collect();
@@ -3057,13 +3482,14 @@ impl MezonTransport {
         let body = realtime::ChannelMessageSend {
             clan_id: parsed_clan_id,
             channel_id: parsed_channel_id,
-            content: content_json,
+            content: content_json.clone(),
             mentions: proto_mentions,
             attachments,
             references,
             mode,
             is_public,
             mention_everyone,
+            topic_id,
             ..Default::default()
         }
         .encode_to_vec();
@@ -3081,23 +3507,36 @@ impl MezonTransport {
             ack.channel_id,
             ack.code
         );
-        Ok(ApiMessage {
-            message_id: ack.message_id,
-            content: content.to_string(),
-            content_tokens: ApiMessageContent {
-                t: content.to_string(),
-                mentions: mentions
+        let content_tokens = if content_is_json {
+            serde_json::from_str(&content_json).unwrap_or_default()
+        } else {
+            ApiMessageContent {
+                t: sent.text.clone(),
+                mentions: sent
+                    .mentions
                     .iter()
                     .map(OutgoingMention::to_content_token)
                     .collect(),
-                hg: hashtags
+                hg: sent
+                    .hashtags
                     .iter()
                     .map(OutgoingHashtag::to_content_token)
                     .collect(),
-                ej: emojis.iter().map(OutgoingEmoji::to_content_token).collect(),
-                mk: markdown_content_tokens(&markdowns),
+                ej: sent
+                    .emojis
+                    .iter()
+                    .map(OutgoingEmoji::to_content_token)
+                    .collect(),
+                mk: markdown_content_tokens(&sent.markdowns),
+                presign_finish: presign_finish.clone(),
                 ..Default::default()
-            },
+            }
+        };
+        Ok(ApiMessage {
+            message_id: ack.message_id,
+            content: sent.text.clone(),
+            content_raw: String::new(),
+            content_tokens,
             code: 0,
             sender_id: 0,
             sender_name: ack.username,
@@ -3926,27 +4365,34 @@ impl MezonTransport {
             .collect())
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn forward_channel_message(
         &self,
         clan_id: i64,
         channel_id: i64,
-        content: &str,
+        content_raw: &str,
+        text: &str,
         is_public: bool,
         mode: i32,
         attachments: Vec<api::MessageAttachment>,
+        mentions: Vec<OutgoingMention>,
     ) -> Result<()> {
         let cid = self.generate_cid();
-        let mut obj = serde_json::Map::new();
-        obj.insert("t".into(), content.into());
-        obj.insert("fwd".into(), serde_json::Value::Bool(true));
-        let content_json = serde_json::Value::Object(obj).to_string();
+        let content_json = forward_content_json(content_raw, text);
+        let mention_everyone = mentions.iter().any(OutgoingMention::is_here);
+        let proto_mentions: Vec<api::MessageMention> = mentions
+            .iter()
+            .filter_map(OutgoingMention::to_proto)
+            .collect();
         let body = realtime::ChannelMessageSend {
             clan_id,
             channel_id,
             content: content_json,
+            mentions: proto_mentions,
             attachments,
             mode,
             is_public,
+            mention_everyone,
             ..Default::default()
         }
         .encode_to_vec();
@@ -3960,6 +4406,7 @@ impl MezonTransport {
     }
 
     #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments)]
     pub async fn update_channel_message_with_attachments(
         &self,
         clan_id: i64,
@@ -3969,10 +4416,11 @@ impl MezonTransport {
         attachments: Vec<api::MessageAttachment>,
         mode: i32,
         is_public: bool,
+        topic_id: i64,
+        is_update_msg_topic: bool,
     ) -> Result<()> {
         let cid = self.generate_cid();
-        let markdowns = detect_markdown(content);
-        let content_json = build_message_content_json(content, &[], &[], &[], &markdowns);
+        let content_json = build_send_content(content, &[], &[], &[]).json;
         let body = realtime::ChannelMessageUpdate {
             clan_id,
             channel_id,
@@ -3981,6 +4429,8 @@ impl MezonTransport {
             attachments,
             mode,
             is_public,
+            topic_id,
+            is_update_msg_topic,
             ..Default::default()
         }
         .encode_to_vec();
@@ -4005,11 +4455,13 @@ impl MezonTransport {
         create_time_seconds: u32,
         mode: i32,
         is_public: bool,
+        topic_id: i64,
+        is_update_msg_topic: bool,
     ) -> Result<()> {
         let cid = self.generate_cid();
-        let markdowns = detect_markdown(content);
-        let content_json = build_message_content_json(content, &mentions, &[], &[], &markdowns);
-        let content_json = with_presign_finish(content_json, &presign_finish);
+        let sent = build_send_content(content, &mentions, &[], &[]);
+        let mentions = sent.mentions;
+        let content_json = with_presign_finish(sent.json, &presign_finish);
         let content_json = with_create_time_seconds(content_json, create_time_seconds);
         let proto_mentions: Vec<api::MessageMention> = mentions
             .iter()
@@ -4025,6 +4477,8 @@ impl MezonTransport {
             is_public,
             hide_editted: true,
             create_time_seconds,
+            topic_id,
+            is_update_msg_topic,
             ..Default::default()
         }
         .encode_to_vec();
@@ -6682,11 +7136,13 @@ impl MezonTransport {
         emojis: Vec<OutgoingEmoji>,
         mode: i32,
         is_public: bool,
+        topic_id: i64,
+        is_update_msg_topic: bool,
     ) -> Result<()> {
         let cid = self.generate_cid();
-        let markdowns = detect_markdown(content);
-        let content_json =
-            build_message_content_json(content, &mentions, &hashtags, &emojis, &markdowns);
+        let sent = build_send_content(content, &mentions, &hashtags, &emojis);
+        let content_json = sent.json;
+        let mentions = sent.mentions;
         let proto_mentions: Vec<api::MessageMention> = mentions
             .iter()
             .filter_map(OutgoingMention::to_proto)
@@ -6699,6 +7155,8 @@ impl MezonTransport {
             mentions: proto_mentions,
             mode,
             is_public,
+            topic_id,
+            is_update_msg_topic,
             ..Default::default()
         }
         .encode_to_vec();
@@ -6711,19 +7169,30 @@ impl MezonTransport {
         Ok(())
     }
 
-    /// Delete channel message.
+    #[allow(clippy::too_many_arguments)]
     pub async fn delete_channel_message(
         &self,
         clan_id: i64,
         channel_id: i64,
         message_id: i64,
+        mode: i32,
+        is_public: bool,
+        has_attachment: bool,
+        topic_id: i64,
+        has_mentions: bool,
+        has_references: bool,
     ) -> Result<()> {
         let cid = self.generate_cid();
         let body = realtime::ChannelMessageRemove {
             clan_id,
             channel_id,
             message_id,
-            ..Default::default()
+            mode,
+            is_public,
+            has_attachment,
+            topic_id,
+            mentions: presence_marker_bytes(has_mentions),
+            references: presence_marker_bytes(has_references),
         }
         .encode_to_vec();
         let (code, _) = self
@@ -6749,6 +7218,7 @@ impl MezonTransport {
         mode: i32,
         is_public: bool,
         remove: bool,
+        topic_id: i64,
     ) -> Result<()> {
         let cid = self.generate_cid();
         let body = api::MessageReaction {
@@ -6762,6 +7232,7 @@ impl MezonTransport {
             mode,
             is_public,
             action: remove,
+            topic_id,
             ..Default::default()
         }
         .encode_to_vec();
@@ -7350,6 +7821,41 @@ mod tests {
     }
 
     #[test]
+    fn message_from_proto_keeps_the_raw_content_payload() {
+        let raw = r#"{"t":"hi","ej":[{"s":0,"e":2,"emojiid":"9"}]}"#;
+        let msg = api::ChannelMessage {
+            message_id: 1,
+            content: raw.into(),
+            ..Default::default()
+        };
+        let parsed = MezonTransport::message_from_proto(&msg);
+        assert_eq!(parsed.content_raw, raw);
+    }
+
+    #[test]
+    fn forward_content_json_preserves_tokens_and_marks_forwarded() {
+        let raw =
+            r#"{"t":"hi","ej":[{"s":0,"e":2,"emojiid":"9"}],"mk":[{"s":0,"e":2,"type":"b"}]}"#;
+
+        let json = forward_content_json(raw, "hi");
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(value["fwd"], serde_json::Value::Bool(true));
+        assert_eq!(value["t"], "hi");
+        assert_eq!(value["ej"][0]["emojiid"], "9");
+        assert_eq!(value["mk"][0]["type"], "b");
+    }
+
+    #[test]
+    fn forward_content_json_falls_back_to_plain_text() {
+        let json = forward_content_json("", "hello");
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(value["t"], "hello");
+        assert_eq!(value["fwd"], serde_json::Value::Bool(true));
+    }
+
+    #[test]
     fn message_from_proto_presign_finish_absent_is_none() {
         let msg = api::ChannelMessage {
             message_id: 1,
@@ -7433,6 +7939,87 @@ mod tests {
             s,
             e,
         }
+    }
+
+    #[test]
+    fn strip_markdown_never_eats_a_backtick_across_a_newline() {
+        let out = strip_markdown("`a\nb`");
+        assert_eq!(out.text, "`a\nb`");
+        assert!(out.markdowns.is_empty());
+    }
+
+    #[test]
+    fn strip_markdown_never_eats_bold_markers_across_a_newline() {
+        let out = strip_markdown("**a\nb**");
+        assert_eq!(out.text, "**a\nb**");
+        assert!(out.markdowns.is_empty());
+    }
+
+    #[test]
+    fn strip_markdown_leaves_bold_with_a_lone_star_inside() {
+        let out = strip_markdown("**a*b**");
+        assert_eq!(out.text, "**a*b**");
+        assert!(out.markdowns.is_empty());
+    }
+
+    #[test]
+    fn strip_markdown_removes_code_block_fences_like_react() {
+        let out = strip_markdown("```code```");
+        assert_eq!(out.text, "code");
+        assert_eq!(out.markdowns, vec![md("pre", 0, 4)]);
+    }
+
+    #[test]
+    fn strip_markdown_removes_inline_code_backticks() {
+        let out = strip_markdown("`x`");
+        assert_eq!(out.text, "x");
+        assert_eq!(out.markdowns, vec![md("c", 0, 1)]);
+    }
+
+    #[test]
+    fn strip_markdown_removes_bold_markers() {
+        let out = strip_markdown("**hi**");
+        assert_eq!(out.text, "hi");
+        assert_eq!(out.markdowns, vec![md("b", 0, 2)]);
+    }
+
+    #[test]
+    fn strip_markdown_leaves_links_untouched() {
+        let out = strip_markdown("see https://a.com");
+        assert_eq!(out.text, "see https://a.com");
+        assert_eq!(out.markdowns, vec![md("lk", 4, 17)]);
+    }
+
+    #[test]
+    fn strip_markdown_shifts_mention_offsets_after_a_stripped_span() {
+        let sent = build_send_content(
+            "`x` @bob",
+            &[OutgoingMention {
+                user_id: "7".into(),
+                username: "bob".into(),
+                s: 4,
+                e: 8,
+                ..Default::default()
+            }],
+            &[],
+            &[],
+        );
+        let value: serde_json::Value = serde_json::from_str(&sent.json).unwrap();
+        assert_eq!(value["t"], "x @bob");
+        assert_eq!(value["mentions"][0]["s"], 2);
+        assert_eq!(value["mentions"][0]["e"], 6);
+        assert_eq!(value["mk"][0]["s"], 0);
+        assert_eq!(value["mk"][0]["e"], 1);
+        assert_eq!(sent.text, "x @bob");
+        assert_eq!(sent.mentions[0].s, 2);
+        assert_eq!(sent.mentions[0].e, 6);
+    }
+
+    #[test]
+    fn strip_markdown_keeps_utf16_offsets_after_astral_chars() {
+        let out = strip_markdown("😀 **b**");
+        assert_eq!(out.text, "😀 b");
+        assert_eq!(out.markdowns, vec![md("b", 3, 4)]);
     }
 
     #[test]

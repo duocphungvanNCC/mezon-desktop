@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+# Formatting gate, run before every commit.
+#
+# It calls scripts/fmt.sh — the same script CI runs — so a commit that passes
+# here cannot fail the CI Format job, and vice versa. Deliberately does NOT
+# depend on `just`, so the gate still works on a machine without it.
+#
+# Installed via `just setup-hooks`, or directly:
+#   git config core.hooksPath .githooks
+set -euo pipefail
+
+# No staged Rust? Nothing to gate on.
+if ! git diff --cached --name-only --diff-filter=ACM | grep -qE '\.rs$'; then
+    exit 0
+fi
+
+repo_root="$(git rev-parse --show-toplevel)"
+
+if ! "$repo_root/scripts/fmt.sh" check; then
+    echo >&2
+    echo "pre-commit: rustfmt check failed — run 'scripts/fmt.sh fix' (or 'just fix') and stage the result." >&2
+    exit 1
+fi

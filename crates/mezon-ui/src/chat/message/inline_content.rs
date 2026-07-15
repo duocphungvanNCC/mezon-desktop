@@ -157,41 +157,48 @@ impl Element for InlineContent {
             }
 
             let mouse_down = state.mouse_down_index.clone();
-            if let Some(mouse_down_index) = mouse_down.get() {
+            let clicks = mem::take(&mut self.clicks);
+
+            {
                 let hitbox = hitbox.clone();
                 let text_layout = text_layout.clone();
-                let clicks = mem::take(&mut self.clicks);
-                window.on_mouse_event(
-                    move |event: &MouseUpEvent, phase, window: &mut Window, cx: &mut App| {
-                        if phase == DispatchPhase::Bubble && hitbox.is_hovered(window) {
-                            if let Ok(mouse_up_index) =
-                                text_layout.index_for_position(event.position)
-                            {
-                                for region in &clicks {
-                                    if region.range.contains(&mouse_down_index)
-                                        && region.range.contains(&mouse_up_index)
-                                    {
-                                        (region.action)(window, cx);
-                                    }
-                                }
-                            }
-                            mouse_down.take();
-                            window.refresh();
-                        }
-                    },
-                );
-            } else {
-                let hitbox = hitbox.clone();
-                let text_layout = text_layout.clone();
+                let mouse_down = mouse_down.clone();
                 window.on_mouse_event(
                     move |event: &MouseDownEvent, phase, window: &mut Window, _: &mut App| {
                         if phase == DispatchPhase::Bubble
                             && hitbox.is_hovered(window)
-                            && let Ok(mouse_down_index) =
-                                text_layout.index_for_position(event.position)
+                            && let Ok(index) = text_layout.index_for_position(event.position)
                         {
-                            mouse_down.set(Some(mouse_down_index));
-                            window.refresh();
+                            mouse_down.set(Some(index));
+                        }
+                    },
+                );
+            }
+
+            {
+                let hitbox = hitbox.clone();
+                let text_layout = text_layout.clone();
+                window.on_mouse_event(
+                    move |event: &MouseUpEvent, phase, window: &mut Window, cx: &mut App| {
+                        if phase != DispatchPhase::Bubble {
+                            return;
+                        }
+                        let Some(down_index) = mouse_down.take() else {
+                            return;
+                        };
+                        if !hitbox.is_hovered(window) {
+                            return;
+                        }
+                        let Ok(up_index) = text_layout.index_for_position(event.position) else {
+                            return;
+                        };
+                        for region in &clicks {
+                            if region.range.contains(&down_index)
+                                && region.range.contains(&up_index)
+                            {
+                                (region.action)(window, cx);
+                                break;
+                            }
                         }
                     },
                 );

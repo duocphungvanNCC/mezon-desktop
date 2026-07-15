@@ -5,6 +5,7 @@ pub mod chat_sending;
 pub mod create_thread_panel;
 pub mod file_type_icon;
 pub mod files_popover;
+pub mod create_topic_panel;
 pub mod friends_page;
 pub mod gif_sticker_emoji;
 pub mod grouping;

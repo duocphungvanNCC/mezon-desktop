@@ -27,8 +27,10 @@ jobs:
           toolchain: 1.95.0
           components: rustfmt
 
+      # Same script the pre-commit hook runs, so the two can never drift:
+      # the fmt scope is defined once, in scripts/fmt.sh.
       - name: Check formatting
-        run: cargo fmt -p mezon-app -p mezon-ui -p mezon-store -p mezon-client -p mezon-native -p mezon-proto -p mezon-i18n -p mezon-updater -p mezon-audio -p mezon-voice -- --check
+        run: ./scripts/fmt.sh check
 
   lint:
     name: Lint

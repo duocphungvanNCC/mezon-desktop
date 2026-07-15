@@ -98,6 +98,11 @@ impl<K: Eq + Hash + Clone, V> KeyedCache<K, V> {
         }
     }
 
+    pub fn remove(&mut self, key: &K) -> Option<V> {
+        self.order.retain(|k| k != key);
+        self.entries.remove(key).map(|e| e.value)
+    }
+
     /// Drop every entry (force a full refetch with an empty cache).
     pub fn clear(&mut self) {
         self.entries.clear();

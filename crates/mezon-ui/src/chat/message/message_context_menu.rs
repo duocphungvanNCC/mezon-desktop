@@ -1,6 +1,7 @@
 use gpui::{App, ClipboardItem, SharedString, WeakEntity, Window};
 use mezon_store::{
-    Message, MessageCode, MessageId, MessagesStore, PinnedMessagesStore, ThreadsStore,
+    AppConfig, ChannelPermissionsStore, EmojiStore, Message, MessageCode, MessageId, MessagesStore,
+    PERMISSION_DELETE_MESSAGE, PinnedMessagesStore, ThreadsStore, TopicsStore,
 };
 
 use super::channel_messages::ChannelMessages;
@@ -10,14 +11,11 @@ use super::report_modal::ReportMessageModal;
 use crate::app::shell::Shell;
 use crate::components::primitives::{ContextMenu, IconName};
 
-pub(crate) fn resolve_forward_group(
+pub(crate) fn resolve_forward_group_in(
+    messages: &[Message],
     message_id: MessageId,
     sender_id: &str,
-    cx: &App,
 ) -> Vec<MessageId> {
-    let store = MessagesStore::global(cx);
-    let store = store.read(cx);
-    let messages = store.messages();
     let Some(start) = messages.iter().position(|m| m.id == message_id) else {
         return vec![message_id];
     };
@@ -32,6 +30,16 @@ pub(crate) fn resolve_forward_group(
     ids
 }
 
+pub(crate) fn resolve_forward_group(
+    message_id: MessageId,
+    sender_id: &str,
+    cx: &App,
+) -> Vec<MessageId> {
+    let store = MessagesStore::global(cx);
+    let store = store.read(cx);
+    resolve_forward_group_in(store.messages(), message_id, sender_id)
+}
+
 fn coming_soon_click(message: SharedString) -> impl Fn(&mut Window, &mut App) + 'static {
     move |_window: &mut Window, cx: &mut App| {
         let message = message.clone();
@@ -39,7 +47,104 @@ fn coming_soon_click(message: SharedString) -> impl Fn(&mut Window, &mut App) + 
     }
 }
 
+fn is_first_topic_message(message_id: MessageId, cx: &App) -> bool {
+    let topics = TopicsStore::global(cx).read(cx);
+    topics
+        .origin_message()
+        .is_some_and(|origin| origin.id == message_id)
+}
+
+fn channel_delete_blocked(msg: &Message, cx: &App) -> bool {
+    if msg.topic_id.is_some() {
+        return true;
+    }
+    TopicsStore::global(cx)
+        .read(cx)
+        .is_init_topic_message(msg.id)
+}
+
+fn sender_allows_give_coffee(msg: &Message, current_user_id: &str, cx: &App) -> bool {
+    if current_user_id == msg.sender_id.as_str() {
+        return false;
+    }
+    if msg.sender_id.is_empty() || msg.sender_id.as_str() == "0" {
+        return false;
+    }
+    if let Some(config) = AppConfig::try_global(cx)
+        && !config.anonymous_user_id.is_empty()
+        && msg.sender_id == config.anonymous_user_id
+    {
+        return false;
+    }
+    true
+}
+
+fn can_delete_message(
+    msg: &Message,
+    current_user_id: &str,
+    is_clan_owner: bool,
+    is_topic_box: bool,
+    cx: &App,
+) -> bool {
+    if is_topic_box {
+        if is_first_topic_message(msg.id, cx) {
+            return false;
+        }
+    } else if channel_delete_blocked(msg, cx) {
+        return false;
+    }
+    if current_user_id == msg.sender_id.as_str() {
+        return true;
+    }
+    if is_clan_owner {
+        return true;
+    }
+    let messages = MessagesStore::global(cx).read(cx);
+    let (Some(channel_id), Some(clan_id)) =
+        (messages.active_channel_id(), messages.active_clan_id())
+    else {
+        return false;
+    };
+    ChannelPermissionsStore::global(cx).read(cx).has_permission(
+        PERMISSION_DELETE_MESSAGE,
+        clan_id,
+        channel_id,
+    )
+}
+
 pub(crate) fn build(
+    msg: &Message,
+    current_user_id: &str,
+    is_clan_owner: bool,
+    locale: &str,
+    show_forward_all: bool,
+    is_topic_box: bool,
+    host: WeakEntity<ChannelMessages>,
+    cx: &App,
+) -> ContextMenu {
+    if is_topic_box {
+        return build_topic_menu(
+            msg,
+            current_user_id,
+            is_clan_owner,
+            locale,
+            show_forward_all,
+            host,
+            cx,
+        );
+    }
+    build_channel_menu(
+        msg,
+        current_user_id,
+        is_clan_owner,
+        locale,
+        show_forward_all,
+        host,
+        cx,
+    )
+}
+
+fn build_topic_menu(
     msg: &Message,
     current_user_id: &str,
     is_clan_owner: bool,
@@ -52,7 +157,185 @@ pub(crate) fn build(
     let coming_soon_msg: SharedString = t("common.comingSoon").into();
     let is_own_message = current_user_id == msg.sender_id.as_str();
     let is_poll = msg.code == MessageCode::Poll;
-    let sender_is_real = !msg.sender_id.is_empty() && msg.sender_id.as_str() != "0";
+
+    let dismiss = {
+        let host = host.clone();
+        move |_window: &mut Window, cx: &mut App| {
+            if let Some(view) = host.upgrade() {
+                view.update(cx, |this, cx| this.close_context_menu(cx));
+            }
+        }
+    };
+
+    let quick_emojis = EmojiStore::global(cx)
+        .read(cx)
+        .recent(4)
+        .into_iter()
+        .map(|emoji| (emoji.id.clone(), emoji.shortname.clone()))
+        .collect::<Vec<_>>();
+
+    let react_message_id = msg.id;
+    let mut menu = ContextMenu::new().on_dismiss(dismiss).quick_reactions(
+        quick_emojis,
+        move |emoji_id, shortname, _window, cx| {
+            MessagesStore::global(cx).update(cx, |store, cx| {
+                store.add_reaction(react_message_id, emoji_id, shortname, cx);
+            });
+        },
+    );
+
+    {
+        let host = host.clone();
+        let message_id = msg.id;
+        menu = menu.item_trailing_icon(
+            t("contextMenu.addReaction"),
+            IconName::ChevronRight,
+            move |window, cx| {
+                let position = window.mouse_position();
+                let _ = host.update(cx, |this, cx| {
+                    this.open_reaction_picker(message_id, position, window, cx);
+                });
+            },
+        );
+    }
+
+    if sender_allows_give_coffee(msg, current_user_id, cx) {
+        menu = menu.item_icon(
+            t("contextMenu.giveACoffee"),
+            IconName::DollarIconRightClick,
+            coming_soon_click(coming_soon_msg.clone()),
+        );
+    }
+
+    let show_edit = is_own_message
+        && msg.code != MessageCode::SendToken
+        && msg.code.is_user_timeline()
+        && !is_poll
+        && !msg.is_forwarded;
+    if show_edit {
+        let host = host.clone();
+        let message_id = msg.id;
+        menu = menu.item_icon(
+            t("contextMenu.editMessage"),
+            IconName::PenEdit,
+            move |window, cx| {
+                let _ = host.update(cx, |this, cx| {
+                    this.begin_edit(message_id, window, cx);
+                });
+            },
+        );
+    }
+
+    menu = menu.separator();
+
+    {
+        let message_id = msg.id;
+        menu = menu.item_icon(
+            t("contextMenu.reply"),
+            IconName::ReplyRightClick,
+            move |_, cx| {
+                TopicsStore::global(cx).update(cx, |store, cx| store.set_reply_to(message_id, cx));
+            },
+        );
+    }
+
+    if !is_poll {
+        let locale_owned = locale.to_string();
+        let message_id = msg.id;
+        menu = menu.item_icon(
+            t("contextMenu.forwardMessage"),
+            IconName::ForwardRightClick,
+            move |window, cx| {
+                ForwardMessageModal::open(
+                    vec![message_id],
+                    locale_owned.clone().into(),
+                    window,
+                    cx,
+                );
+            },
+        );
+    }
+
+    if show_forward_all && !is_poll {
+        let locale_owned = locale.to_string();
+        let message_id = msg.id;
+        let sender_id = msg.sender_id.clone();
+        menu = menu.item_icon(
+            t("contextMenu.forwardAllMessage"),
+            IconName::ForwardAllRightClick,
+            move |window, cx| {
+                let ids = ChannelMessages::resolve_topic_forward_group(message_id, &sender_id, cx);
+                ForwardMessageModal::open(ids, locale_owned.clone().into(), window, cx);
+            },
+        );
+    }
+
+    if !msg.content.is_empty() && !is_poll {
+        let content = msg.content.clone();
+        menu = menu.separator().item_icon(
+            t("contextMenu.copyText"),
+            IconName::CopyTextRightClick,
+            move |_, cx| {
+                cx.write_to_clipboard(ClipboardItem::new_string(content.clone()));
+            },
+        );
+    }
+
+    {
+        let message_id = msg.id;
+        menu = menu.item_icon(
+            t("contextMenu.addToInbox"),
+            IconName::AddToInboxIcon,
+            move |_window, cx| {
+                MessagesStore::global(cx)
+                    .update(cx, |store, cx| store.add_to_inbox(message_id, cx));
+            },
+        );
+    }
+
+    if !is_own_message {
+        let message_id = msg.id;
+        let locale_owned = locale.to_string();
+        menu = menu.danger_item_icon(
+            t("contextMenu.reportMessage"),
+            IconName::ReportMessageRightClick,
+            move |window, cx| {
+                ReportMessageModal::open(message_id, locale_owned.clone().into(), window, cx);
+            },
+        );
+    }
+
+    if can_delete_message(msg, current_user_id, is_clan_owner, true, cx) {
+        let message_id = msg.id;
+        let locale_owned = locale.to_string();
+        menu = menu.separator().danger_item_icon(
+            t("contextMenu.deleteMessage"),
+            IconName::DeleteMessageRightClick,
+            move |window, cx| {
+                let locale = locale_owned.clone();
+                Shell::global(cx).update(cx, |shell, cx| {
+                    shell.confirm_delete_message(message_id, &locale, window, cx);
+                });
+            },
+        );
+    }
+
+    menu
+}
+
+fn build_channel_menu(
+    msg: &Message,
+    current_user_id: &str,
+    is_clan_owner: bool,
+    locale: &str,
+    show_forward_all: bool,
+    host: WeakEntity<ChannelMessages>,
+    cx: &App,
+) -> ContextMenu {
+    let t = |key: &'static str| mezon_i18n::t(locale, key);
+    let coming_soon_msg: SharedString = t("common.comingSoon").into();
+    let is_own_message = current_user_id == msg.sender_id.as_str();
+    let is_poll = msg.code == MessageCode::Poll;
     let is_pinned = PinnedMessagesStore::global(cx)
         .read(cx)
         .is_pinned(&msg.id.to_string());
@@ -67,14 +350,29 @@ pub(crate) fn build(
         }
     };
 
-    let mut menu = ContextMenu::new().on_dismiss(dismiss);
+    let quick_emojis = EmojiStore::global(cx)
+        .read(cx)
+        .recent(4)
+        .into_iter()
+        .map(|emoji| (emoji.id.clone(), emoji.shortname.clone()))
+        .collect::<Vec<_>>();
+
+    let react_message_id = msg.id;
+    let mut menu = ContextMenu::new().on_dismiss(dismiss).quick_reactions(
+        quick_emojis,
+        move |emoji_id, shortname, _window, cx| {
+            MessagesStore::global(cx).update(cx, |store, cx| {
+                store.add_reaction(react_message_id, emoji_id, shortname, cx);
+            });
+        },
+    );
 
     {
         let host = host.clone();
         let message_id = msg.id;
-        menu = menu.item_icon(
+        menu = menu.item_trailing_icon(
             t("contextMenu.addReaction"),
-            IconName::Smile,
+            IconName::ChevronRight,
             move |window, cx| {
                 let position = window.mouse_position();
                 let _ = host.update(cx, |this, cx| {
@@ -84,7 +382,7 @@ pub(crate) fn build(
         );
     }
 
-    if !is_own_message && sender_is_real {
+    if !is_own_message && sender_allows_give_coffee(msg, current_user_id, cx) {
         menu = menu.item_icon(
             t("contextMenu.giveACoffee"),
             IconName::DollarIconRightClick,
@@ -223,17 +521,20 @@ pub(crate) fn build(
         );
     }
 
-    if !is_poll {
+    if TopicsStore::can_create_topic(cx) && TopicsStore::message_allows_topic_discussion(msg) {
         let message_id = msg.id;
         menu = menu.item_icon(
             t("contextMenu.topicDiscussion"),
             IconName::TopicIcon,
             move |_window, cx| {
-                MessagesStore::global(cx)
-                    .update(cx, |store, cx| store.create_topic(message_id, cx));
+                TopicsStore::global(cx).update(cx, |store, cx| {
+                    store.start_create_for_message(message_id, cx)
+                });
             },
         );
     }
+
+    menu = menu.separator();
 
     {
         let message_id = msg.id;
@@ -283,7 +584,7 @@ pub(crate) fn build(
     if !is_own_message {
         let message_id = msg.id;
         let locale_owned = locale.to_string();
-        menu = menu.item_icon(
+        menu = menu.danger_item_icon(
             t("contextMenu.reportMessage"),
             IconName::ReportMessageRightClick,
             move |window, cx| {
@@ -301,7 +602,7 @@ pub(crate) fn build(
         });
     }
 
-    if is_own_message || is_clan_owner {
+    if can_delete_message(msg, current_user_id, is_clan_owner, false, cx) {
         let message_id = msg.id;
         let locale_owned = locale.to_string();
         menu = menu.separator().danger_item_icon(
