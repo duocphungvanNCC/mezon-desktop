@@ -22,6 +22,7 @@ pub struct User {
     pub avatar_url: String,
     pub about_me: String,
     pub create_time_seconds: u32,
+    pub join_time_seconds: u32,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -412,6 +413,7 @@ pub(crate) fn user_from_api(user: api::User) -> Option<User> {
         avatar_url: user.avatar_url,
         about_me: user.about_me,
         create_time_seconds: user.create_time_seconds,
+        join_time_seconds: user.join_time_seconds,
     })
 }
 
@@ -439,6 +441,7 @@ fn clan_member_from_redis(user: Option<&realtime::UserProfileRedis>) -> Option<C
             avatar_url: user.avatar.clone(),
             about_me: String::new(),
             create_time_seconds: user.create_time_second,
+            join_time_seconds: 0,
         },
         clan_nick: String::new(),
         clan_avatar: String::new(),
@@ -514,6 +517,8 @@ mod tests {
         let member = clan_member_from_proto(proto_clan_user(42, "alice", "Alice", "")).unwrap();
         assert_eq!(member.id(), UserId(42));
         assert_eq!(member.user.username, "alice");
+        assert_eq!(member.user.create_time_seconds, 1_700_000_000);
+        assert_eq!(member.user.join_time_seconds, 1_710_000_000);
         assert_eq!(member.role_ids, vec![RoleId(10), RoleId(20)]);
     }
 

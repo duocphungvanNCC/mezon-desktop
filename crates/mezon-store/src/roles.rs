@@ -16,6 +16,9 @@ pub struct Role {
     pub name: String,
     pub color: String,
     pub icon: String,
+    pub slug: String,
+    pub max_level_permission: i32,
+    pub order: i32,
 }
 
 #[derive(Debug, Clone)]
@@ -185,13 +188,14 @@ impl RolesStore {
     }
 
     pub fn all_roles(&self, clan_id: ClanId) -> Vec<(RoleId, Role)> {
-        let mut roles: Vec<_> = self
-            .cache
-            .get(&clan_id)
-            .map(|roles| roles.iter().map(|(id, role)| (*id, role.clone())).collect())
-            .unwrap_or_default();
-        roles.sort_by(|a, b| a.1.name.to_lowercase().cmp(&b.1.name.to_lowercase()));
+        let Some(roles) = self.cache.get(&clan_id) else {
+            return Vec::new();
+        };
         roles
+            .order
+            .iter()
+            .filter_map(|id| roles.by_id.get(id).map(|role| (*id, role.clone())))
+            .collect()
     }
 }
 
@@ -210,6 +214,9 @@ fn roles_map_from_proto(roles: Vec<mezon_proto::api::Role>) -> ClanRoles {
                     name: r.title,
                     color: r.color,
                     icon: r.role_icon,
+                    slug: r.slug,
+                    max_level_permission: r.max_level_permission,
+                    order: r.order_role,
                 },
             )
             .is_none()
