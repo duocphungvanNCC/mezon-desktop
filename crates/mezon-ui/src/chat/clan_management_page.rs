@@ -1,9 +1,10 @@
-use gpui::{AnyElement, Div, FontWeight, ParentElement, Styled, div, px};
+use gpui::{AnyElement, Div, FontWeight, ParentElement, SharedString, Styled, div, px};
 
 use crate::theme::Theme;
 
 /// Shared shell for clan management screens (Members today, Channels next).
-pub fn management_page(title: &'static str, body: AnyElement, theme: &Theme) -> Div {
+pub fn management_page(title: impl Into<SharedString>, body: AnyElement, theme: &Theme) -> Div {
+    let title = title.into();
     div()
         .flex()
         .flex_col()
@@ -26,7 +27,8 @@ pub fn management_page(title: &'static str, body: AnyElement, theme: &Theme) -> 
         .child(body)
 }
 
-pub fn section_toolbar(title: &'static str, controls: AnyElement, theme: &Theme) -> Div {
+pub fn section_toolbar(title: impl Into<SharedString>, controls: AnyElement, theme: &Theme) -> Div {
+    let title = title.into();
     div()
         .flex()
         .items_center()

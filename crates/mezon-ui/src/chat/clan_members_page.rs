@@ -1,25 +1,24 @@
 use std::collections::HashSet;
 
+use crate::Theme;
+use crate::chat::clan_management_page::{management_page, section_toolbar};
+use crate::components::primitives::{Avatar, Icon, IconName, Input, InputEvent, InputState};
+use crate::theme::ActiveTheme;
 use gpui::{
     AnyElement, Context, Entity, FontWeight, Hsla, Render, Subscription, Window, deferred, div,
-    img, prelude::*, px, rgb,
+    img, prelude::*, px,
 };
 use mezon_store::{
     ClanId, ClanMembersStore, PERMISSION_MANAGE_CLAN, PermissionStore, Role, RoleId, RolesStore,
     Settings, UserId,
 };
-use ui::{CommonAnimationExt, Tooltip};
-
-use crate::chat::clan_management_page::{management_page, section_toolbar};
-use crate::components::primitives::{Avatar, Icon, IconName, Input, InputEvent, InputState};
-use crate::Theme;
-use crate::theme::ActiveTheme;
 
 const PAGE_SIZES: [usize; 3] = [10, 50, 100];
 
 pub struct ClanMembersPage {
     clan_id: ClanId,
-    _settings: Entity<Settings>,
+    settings: Entity<Settings>,
+    search_locale: String,
     search: Option<Entity<InputState>>,
     search_sub: Option<Subscription>,
     page: usize,
@@ -50,9 +49,11 @@ impl ClanMembersPage {
             .detach();
         cx.observe(&PermissionStore::global(cx), |_, _, cx| cx.notify())
             .detach();
+        cx.observe(&settings, |_, _, cx| cx.notify()).detach();
         Self {
             clan_id: ClanId(0),
-            _settings: settings,
+            settings,
+            search_locale: String::new(),
             search: None,
             search_sub: None,
             page: 0,
@@ -81,17 +82,26 @@ impl ClanMembersPage {
     }
 
     fn ensure_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let locale = self.settings.read(cx).language.clone();
         if self.search.is_some() {
+            if self.search_locale != locale {
+                let placeholder = tr(&locale, "memberTable.topBar.searchPlaceholder");
+                self.search
+                    .as_ref()
+                    .expect("search initialized")
+                    .update(cx, |input, cx| input.set_placeholder(placeholder, cx));
+                self.search_locale = locale;
+            }
             return;
         }
+        let placeholder = tr(&locale, "memberTable.topBar.searchPlaceholder");
         let input = cx.new(|cx| {
             InputState::new(window, cx)
-                .placeholder("Search by clan nick, display name or username")
+                .placeholder(placeholder)
                 .height(px(32.))
                 .radius(px(8.))
                 .padding_x(px(16.))
                 .padding_right(px(38.))
-                .bg(cx.theme().tokens.bg_input_secondary)
         });
         self.search_sub = Some(cx.subscribe(&input, |this, _, event, cx| {
             if matches!(event, InputEvent::Change) {
@@ -100,6 +110,7 @@ impl ClanMembersPage {
             }
         }));
         self.search = Some(input);
+        self.search_locale = locale;
     }
 
     fn rows(&self, cx: &Context<Self>) -> Vec<MemberRow> {
@@ -171,7 +182,7 @@ impl ClanMembersPage {
         let mut cell = div().relative().flex().items_center().gap_2().min_w_0();
 
         if let Some(role) = roles.first() {
-            cell = cell.child(role_badge(role, cx));
+            cell = cell.child(role_badge(role, false, cx));
         } else {
             cell = cell.child(div().text_color(cx.theme().text_secondary).child("-"));
         }
@@ -197,21 +208,15 @@ impl ClanMembersPage {
                     .flex_col()
                     .items_start()
                     .gap_1()
-                    .p_1()
-                    .rounded(px(6.))
-                    .bg(cx.theme().tokens.bg_theme_contexify)
-                    .border_1()
-                    .border_color(cx.theme().border)
-                    .shadow_lg()
                     .occlude()
                     .on_mouse_down_out(cx.listener(|this, _, _, cx| {
                         this.role_picker = None;
                         cx.notify();
                     }));
                 for role in roles.iter().skip(1) {
-                    role_list = role_list.child(role_badge(role, cx));
+                    role_list = role_list.child(role_badge(role, true, cx));
                 }
-                extra_roles = extra_roles.child(role_list);
+                extra_roles = extra_roles.child(deferred(role_list));
             }
             cell = cell.child(extra_roles);
         }
@@ -221,12 +226,13 @@ impl ClanMembersPage {
                 div()
                     .id(format!("assign-role-{}", user_id.get()))
                     .cursor_pointer()
-                    .size(px(30.))
+                    .size(px(25.))
                     .flex()
                     .items_center()
                     .justify_center()
                     .rounded(px(4.))
                     .bg(cx.theme().bg_hover)
+                    .text_color(cx.theme().text_secondary)
                     .child("+")
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.role_picker = if picker_open { None } else { Some(user_id) };
@@ -251,8 +257,9 @@ impl ClanMembersPage {
                 .id(format!("role-picker-{}", user_id.get()))
                 .absolute()
                 .top_0()
-                .right(px(34.))
-                .w(px(212.))
+                .left_1_2()
+                .ml(px(-80.))
+                .w(px(160.))
                 .max_h(px(208.))
                 .overflow_y_scroll()
                 .p_1()
@@ -272,7 +279,10 @@ impl ClanMembersPage {
                         .px_2()
                         .py_2()
                         .text_color(cx.theme().text_secondary)
-                        .child("No roles available"),
+                        .child(tr(
+                            &self.settings.read(cx).language,
+                            "common.noRolesAvailable",
+                        )),
                 );
             } else {
                 for (index, (role_id, role)) in assignable.into_iter().enumerate() {
@@ -315,12 +325,13 @@ impl ClanMembersPage {
 
     fn page_size_control(&self, cx: &Context<Self>) -> AnyElement {
         let open = self.page_size_picker_open;
+        let locale = &self.settings.read(cx).language;
         let mut control = div()
             .relative()
             .flex()
             .items_center()
             .gap_2()
-            .child("Show")
+            .child(tr(locale, "memberPage.show"))
             .child(
                 div()
                     .id("member-page-size")
@@ -383,29 +394,31 @@ impl ClanMembersPage {
         let current = self.page;
         let mut bar = div().flex().items_center().gap_2();
         bar = bar.child(
-            page_arrow(true, "previous", current == 0).on_click(cx.listener(|this, _, _, cx| {
-                if this.page > 0 {
-                    this.page -= 1;
-                    cx.notify();
-                }
-            })),
+            page_arrow(true, "previous", current == 0, cx.theme()).on_click(cx.listener(
+                |this, _, _, cx| {
+                    if this.page > 0 {
+                        this.page -= 1;
+                        cx.notify();
+                    }
+                },
+            )),
         );
         for item in pagination_items(current, pages) {
             match item {
                 Some(page) => {
                     let selected = page == current;
-                    bar = bar.child(page_number(page + 1, selected).on_click(cx.listener(
-                        move |this, _, _, cx| {
+                    bar = bar.child(page_number(page + 1, selected, cx.theme()).on_click(
+                        cx.listener(move |this, _, _, cx| {
                             this.page = page;
                             cx.notify();
-                        },
-                    )));
+                        }),
+                    ));
                 }
                 None => bar = bar.child(div().px_2().text_color(cx.theme().text_muted).child("…")),
             }
         }
         bar.child(
-            page_arrow(false, "next", current + 1 >= pages).on_click(cx.listener(
+            page_arrow(false, "next", current + 1 >= pages, cx.theme()).on_click(cx.listener(
                 move |this, _, _, cx| {
                     if this.page + 1 < pages {
                         this.page += 1;
@@ -422,6 +435,7 @@ impl Render for ClanMembersPage {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.ensure_search(window, cx);
         let theme = cx.theme();
+        let locale = self.settings.read(cx).language.clone();
         let rows = self.rows(cx);
         let total = rows.len();
         let pages = total.div_ceil(self.page_size).max(1);
@@ -442,16 +456,38 @@ impl Render for ClanMembersPage {
             .current_permission_level(self.clan_id, cx);
 
         let header = table_row(theme, true)
-            .child(name_column("NAME".into_any_element()))
-            .child(weighted_column("MEMBER SINCE".into_any_element(), 1., true))
-            .child(weighted_column("JOINED MEZON".into_any_element(), 1., true))
+            .child(name_column(
+                tr(&locale, "memberTable.headers.name")
+                    .to_uppercase()
+                    .into_any_element(),
+            ))
             .child(weighted_column(
-                header_with_filter("ROLES", theme),
+                tr(&locale, "memberTable.headers.memberSince")
+                    .to_uppercase()
+                    .into_any_element(),
+                1.,
+                true,
+            ))
+            .child(weighted_column(
+                tr(&locale, "memberTable.headers.joinedMezon")
+                    .to_uppercase()
+                    .into_any_element(),
+                1.,
+                true,
+            ))
+            .child(weighted_column(
+                header_with_filter(
+                    tr(&locale, "memberTable.headers.roles").to_uppercase(),
+                    theme,
+                ),
                 2.,
                 true,
             ))
             .child(weighted_column(
-                header_with_filter("SIGNALS", theme),
+                header_with_filter(
+                    tr(&locale, "memberTable.headers.signals").to_uppercase(),
+                    theme,
+                ),
                 1.,
                 true,
             ));
@@ -521,7 +557,7 @@ impl Render for ClanMembersPage {
                         div()
                             .text_size(px(12.))
                             .text_color(theme.text_secondary)
-                            .child("SIGNALS")
+                            .child(tr(&locale, "memberTable.headers.signals").to_uppercase())
                             .into_any_element(),
                         1.,
                         true,
@@ -576,10 +612,10 @@ impl Render for ClanMembersPage {
                             .size(px(18.))
                             .text_color(gpui::white())
                             .with_transformation(gpui::Transformation::rotate(gpui::radians(
-                                std::f32::consts::FRAC_PI_2
+                                std::f32::consts::FRAC_PI_2,
                             ))),
                     )
-                    .child("Sort")
+                    .child(tr(&locale, "memberTable.topBar.sort"))
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.newest_first = !this.newest_first;
                         this.page = 0;
@@ -594,7 +630,12 @@ impl Render for ClanMembersPage {
             .min_h_0()
             .min_w_0()
             .p_4()
-            .child(section_toolbar("Recent Members", controls, theme))
+            .text_color(theme.text_secondary)
+            .child(section_toolbar(
+                tr(&locale, "memberTable.topBar.recentMembers"),
+                controls,
+                theme,
+            ))
             .child(
                 div()
                     .id("members-table-scroll")
@@ -602,6 +643,7 @@ impl Render for ClanMembersPage {
                     .min_h_0()
                     .min_w_0()
                     .overflow_y_scroll()
+                    .text_color(theme.text_secondary)
                     .child(table),
             )
             .child(
@@ -619,12 +661,16 @@ impl Render for ClanMembersPage {
                             .items_center()
                             .gap_2()
                             .child(self.page_size_control(cx))
-                            .child(format!("members of {total}")),
+                            .text_color(theme.text_secondary)
+                            .child(
+                                tr(&locale, "memberPage.membersOf")
+                                    .replace("{{count}}", &total.to_string()),
+                            ),
                     )
                     .child(self.pagination(pages, cx)),
             )
             .into_any_element();
-        management_page("Members", body, theme)
+        management_page(tr(&locale, "common.members"), body, theme)
     }
 }
 
@@ -667,7 +713,7 @@ fn weighted_column(content: AnyElement, weight: f32, centered: bool) -> gpui::Di
         .child(content)
 }
 
-fn header_with_filter(label: &'static str, theme: &crate::theme::Theme) -> AnyElement {
+fn header_with_filter(label: String, theme: &crate::theme::Theme) -> AnyElement {
     div()
         .flex()
         .items_center()
@@ -678,7 +724,9 @@ fn header_with_filter(label: &'static str, theme: &crate::theme::Theme) -> AnyEl
             Icon::new(IconName::FiltersIcon)
                 .size(px(16.))
                 .text_color(theme.text_secondary)
-                .with_transformation(gpui::Transformation::rotate(gpui::radians(std::f32::consts::FRAC_PI_2))),
+                .with_transformation(gpui::Transformation::rotate(gpui::radians(
+                    std::f32::consts::FRAC_PI_2,
+                ))),
         )
         .into_any_element()
 }
@@ -691,7 +739,7 @@ fn date_cell(value: String, theme: &crate::theme::Theme) -> AnyElement {
         .child(value)
         .into_any_element()
 }
-fn role_badge(role: &Role, _cx: &Context<ClanMembersPage>) -> AnyElement {
+fn role_badge(role: &Role, emphasized: bool, cx: &Context<ClanMembersPage>) -> AnyElement {
     let color = parse_hex_color(&role.color).unwrap_or_else(|| gpui::rgba(0x778899ff));
     let mut background = color;
     background.a = 0.31;
@@ -717,7 +765,11 @@ fn role_badge(role: &Role, _cx: &Context<ClanMembersPage>) -> AnyElement {
                 .text_ellipsis()
                 .text_size(px(12.))
                 .font_weight(FontWeight::MEDIUM)
-                .text_color(_cx.theme().text_secondary)
+                .text_color(if emphasized {
+                    gpui::white()
+                } else {
+                    Hsla::from(cx.theme().text_secondary)
+                })
                 .child(role.name.clone()),
         )
         .into_any_element()
@@ -735,8 +787,8 @@ fn role_checkbox(checked: bool, cx: &Context<ClanMembersPage>) -> AnyElement {
         .border_color(cx.theme().border)
         .when(checked, |element| {
             element
-                .bg(cx.theme().brand)
-                .border_color(cx.theme().brand)
+                // .bg(cx.theme().brand)
+                // .border_color(cx.theme().brand)
                 .text_size(px(12.))
                 .text_color(gpui::white())
                 .child(
@@ -807,7 +859,12 @@ fn pagination_items(current: usize, pages: usize) -> Vec<Option<usize>> {
     ]
 }
 
-fn page_arrow(left: bool, id: &'static str, disabled: bool) -> gpui::Stateful<gpui::Div> {
+fn page_arrow(
+    left: bool,
+    id: &'static str,
+    disabled: bool,
+    theme: &crate::theme::Theme,
+) -> gpui::Stateful<gpui::Div> {
     div()
         .id(format!("members-page-{id}"))
         .w(px(40.))
@@ -817,22 +874,32 @@ fn page_arrow(left: bool, id: &'static str, disabled: bool) -> gpui::Stateful<gp
         .justify_center()
         .rounded(px(5.))
         .border_1()
-        .border_color(gpui::rgba(0xffffff30))
-        .bg(gpui::rgba(if disabled { 0x45455a88 } else { 0x5865f2ff }))
+        .border_color(theme.border)
+        .bg(if disabled {
+            theme.bg_hover
+        } else {
+            theme.brand
+        })
         .text_color(gpui::white())
         .when(disabled, |element| element.opacity(0.5))
         .when(!disabled, |element| element.cursor_pointer())
         .child(
-            Icon::new(if left {
-                IconName::ArrowLeft
-            } else {
-                IconName::ArrowRight
-            })
-            .size(px(20.)),
+            Icon::new(IconName::ArrowRight)
+                .size(px(20.))
+                .text_color(gpui::white())
+                .when(left, |element| {
+                    element.with_transformation(gpui::Transformation::rotate(gpui::radians(
+                        std::f32::consts::PI,
+                    )))
+                }),
         )
 }
 
-fn page_number(page: usize, selected: bool) -> gpui::Stateful<gpui::Div> {
+fn page_number(
+    page: usize,
+    selected: bool,
+    theme: &crate::theme::Theme,
+) -> gpui::Stateful<gpui::Div> {
     div()
         .id(format!("members-page-{page}"))
         .w(px(40.))
@@ -844,13 +911,21 @@ fn page_number(page: usize, selected: bool) -> gpui::Stateful<gpui::Div> {
         .cursor_pointer()
         .border_1()
         .border_color(if selected {
-            gpui::rgba(0xffffffff)
+            theme.text_primary
         } else {
-            gpui::rgba(0xffffff30)
+            theme.border
         })
-        .bg(gpui::rgba(if selected { 0x1d1d38ff } else { 0x5865f2ff }))
-        .text_color(gpui::white())
+        .bg(if selected {
+            theme.tokens.bg_active_button
+        } else {
+            theme.brand
+        })
+        .text_color(theme.text_primary)
         .child(page.to_string())
+}
+
+fn tr(locale: &str, key: &'static str) -> String {
+    mezon_i18n::t(locale, key).to_string()
 }
 
 #[cfg(test)]
