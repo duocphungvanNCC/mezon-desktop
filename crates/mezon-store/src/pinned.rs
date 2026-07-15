@@ -148,6 +148,12 @@ impl PinnedMessagesStore {
             .filter(|id| !id.is_zero())
     }
 
+    pub fn channel_id(&self) -> Option<ChannelId> {
+        self.channel_id
+            .as_ref()
+            .and_then(|id| id.parse::<ChannelId>().ok())
+    }
+
     fn sync_from_messages(&mut self, store: &Entity<MessagesStore>, cx: &mut Context<Self>) {
         let (channel_id, clan_id) = {
             let messages = store.read(cx);
