@@ -9,7 +9,6 @@ use super::context::{CONTENT_INSET, OnboardingContext, RowCtx, WelcomeContext};
 use super::time::format_message_time;
 use crate::components::primitives::{Avatar, Icon, IconName};
 use crate::router::{Route, navigate};
-use crate::theme::Theme;
 
 const SYSTEM_ARROW_ICON: f32 = 20.;
 const SYSTEM_SMALL_ICON: f32 = 18.;
@@ -778,7 +777,8 @@ fn fmt_i18n(template: &str, vars: &[(&str, &str)]) -> String {
     out
 }
 
-pub fn render_unread_break(theme: &Theme, locale: &str) -> AnyElement {
+pub fn render_unread_break(locale: &str) -> AnyElement {
+    let red = gpui::rgb(0xef4444);
     div()
         .id("unread-break")
         .flex()
@@ -788,12 +788,17 @@ pub fn render_unread_break(theme: &Theme, locale: &str) -> AnyElement {
         .px_4()
         .py_0p5()
         .w_full()
-        .child(div().flex_1().h(px(1.)).bg(theme.mention_badge))
+        .child(div().flex_1().h(px(1.)).bg(red))
         .child(
             div()
-                .text_xs()
+                .flex_none()
+                .px(px(4.))
+                .py(px(2.))
+                .rounded(px(4.))
+                .bg(red)
+                .text_size(px(8.))
                 .font_weight(FontWeight::SEMIBOLD)
-                .text_color(theme.mention_badge)
+                .text_color(gpui::rgb(0xffffff))
                 .child(mezon_i18n::t(locale, "chat.newMessages")),
         )
         .into_any_element()

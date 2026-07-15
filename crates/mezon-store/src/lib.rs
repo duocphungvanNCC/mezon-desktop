@@ -111,7 +111,8 @@ pub use permissions::{
 };
 pub use pinned::{PinnedEvent, PinnedMessage, PinnedMessagesStore};
 pub use platform::{
-    DesktopNotification, NotifyFn, OpenUrlFn, PlatformStore, download_url_with_dialog,
+    DesktopNotification, DownloadEvent, NotifyFn, OpenUrlFn, PlatformStore,
+    copy_image_url_to_clipboard, download_url_with_dialog,
 };
 pub use presence::*;
 pub use realtime::{RealtimeDispatch, RealtimeKind};

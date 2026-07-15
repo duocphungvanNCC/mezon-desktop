@@ -178,13 +178,14 @@ impl Element for MemberRowElement {
 
         if let Some(handler) = self.on_click.clone() {
             let hitbox_down = hitbox.clone();
+            let avatar_anchor = bounds.origin;
             window.on_mouse_event(
                 move |event: &MouseDownEvent, phase, window: &mut Window, cx: &mut App| {
                     if phase == DispatchPhase::Bubble
                         && hitbox_down.is_hovered(window)
                         && event.button == MouseButton::Left
                     {
-                        handler(event.position, window, cx);
+                        handler(avatar_anchor, window, cx);
                     }
                 },
             );

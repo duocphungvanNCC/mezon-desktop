@@ -468,20 +468,22 @@ impl ForwardMessageModal {
             });
             let search_sub = cx.subscribe(
                 &search_input,
-                |this: &mut Self, _input, event: &InputEvent, cx| {
-                    if matches!(event, InputEvent::Change) {
+                |this: &mut Self, _input, event: &InputEvent, cx| match event {
+                    InputEvent::Change => {
                         this.recompute_filtered(cx);
                         cx.notify();
                     }
+                    InputEvent::PressEnter => this.send(cx),
                 },
             );
             let note_sub = cx.subscribe(
                 &note_input,
-                |this: &mut Self, input, event: &InputEvent, cx| {
-                    if matches!(event, InputEvent::Change) {
+                |this: &mut Self, input, event: &InputEvent, cx| match event {
+                    InputEvent::Change => {
                         this.note_len = input.read(cx).value().trim().chars().count();
                         cx.notify();
                     }
+                    InputEvent::PressEnter => this.send(cx),
                 },
             );
             let channel_obs = cx.observe(&ChannelList::global(cx), |this: &mut Self, _, cx| {
@@ -961,7 +963,7 @@ fn render_shared_content(
         .rounded_lg()
         .bg(theme.tokens.bg_surface)
         .border_1()
-        .border_color(theme.tokens.border_theme_primary)
+        .border_color(theme.tokens.border_primary)
         .p_3();
 
     if let Some(thumbnail) = shared.thumbnail.clone() {

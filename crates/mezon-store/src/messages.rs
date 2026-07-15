@@ -2868,7 +2868,9 @@ impl MessagesStore {
             self.is_dm = false;
             self.loading = false;
             self.loading_more = false;
-            self.reply_target = None;
+            if self.reply_target.take().is_some() {
+                cx.emit(MessagesEvent::ReplyTargetChanged);
+            }
             cx.emit(MessagesEvent::Reset { count: 0 });
             cx.notify();
             return;
@@ -2970,7 +2972,9 @@ impl MessagesStore {
         self.mode = mode;
         self.viewing_older_by_channel.insert(channel_id, false);
         self.loading_more = false;
-        self.reply_target = None;
+        if self.reply_target.take().is_some() {
+            cx.emit(MessagesEvent::ReplyTargetChanged);
+        }
         self.fetch_generation = self.fetch_generation.wrapping_add(1);
         let generation = self.fetch_generation;
 

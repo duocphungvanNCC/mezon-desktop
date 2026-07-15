@@ -1,8 +1,8 @@
 use std::time::Duration;
 
 use gpui::{
-    AnyElement, App, Context, DismissEvent, Entity, Focusable, FontWeight, Hsla, Pixels, Point,
-    SharedString, Subscription, Task, UniformListScrollHandle, WeakEntity, Window, anchored,
+    Anchor, AnyElement, App, Context, DismissEvent, Entity, Focusable, FontWeight, Hsla, Pixels,
+    Point, SharedString, Subscription, Task, UniformListScrollHandle, WeakEntity, Window, anchored,
     deferred, div, prelude::*, px, rgb, size, uniform_list,
 };
 use mezon_store::{
@@ -987,7 +987,11 @@ impl Render for MemberListPanel {
             )
             .when_some(profile_overlay, |el, (popover, pos)| {
                 el.child(deferred(
-                    anchored().position(pos).snap_to_window().child(popover),
+                    anchored()
+                        .position(pos)
+                        .anchor(Anchor::TopRight)
+                        .snap_to_window()
+                        .child(popover),
                 ))
             })
     }
