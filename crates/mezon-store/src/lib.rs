@@ -55,13 +55,17 @@ use tokio::fs;
 pub use account::*;
 pub use activity::{ActivityEvent, ActivityStore, UserActivity};
 pub use album_layout::{AlbumLayout, AlbumTile, calculate_album_layout};
-pub use audio::{AudioDeviceInfo, AudioStore, MicCaptureFactory, MicCaptureHandle};
+pub use audio::{
+    AudioDeviceInfo, AudioStore, MicCaptureFactory, MicCaptureHandle, MicPcmCaptureFactory,
+    MicPcmFormat,
+};
 pub use badge::BadgeService;
 pub use cache::{Freshness, KeyedCache};
 pub use channel::*;
 pub use channel_members::{ChannelMember, ChannelMembersEvent, ChannelMembersStore};
 pub use channel_permissions::{
-    ChannelPermissionsEvent, ChannelPermissionsStore, PERMISSION_MANAGE_THREAD,
+    ChannelPermissionsEvent, ChannelPermissionsStore, PERMISSION_DELETE_MESSAGE,
+    PERMISSION_MANAGE_THREAD,
 };
 pub use clan::*;
 pub use clan_members::{

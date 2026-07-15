@@ -5,6 +5,8 @@ use crate::components::primitives::Avatar;
 use crate::router::{Route, navigate};
 use crate::theme::Theme;
 
+pub const DM_ROW_HEIGHT: f32 = 42.;
+
 pub struct DmRow {
     id: SharedString,
     label: SharedString,
@@ -135,7 +137,7 @@ impl DmRow {
             .flex_row()
             .items_center()
             .gap_2()
-            .h(px(42.))
+            .h(px(DM_ROW_HEIGHT))
             .w_full()
             .px_2()
             .rounded_md()
