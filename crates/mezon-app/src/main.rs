@@ -653,6 +653,23 @@ fn open_main_window(
         }),
         cx,
     );
+    mezon_store::AudioStore::set_mic_pcm_capture_factory(
+        &audio_store,
+        std::sync::Arc::new(|sender: flume::Sender<Vec<f32>>| {
+            mezon_native::audio::MicPcmCapture::start(sender)
+                .map(|(capture, format)| {
+                    (
+                        Box::new(capture) as Box<dyn Send>,
+                        mezon_store::MicPcmFormat {
+                            sample_rate: format.sample_rate,
+                            channels: format.channels,
+                        },
+                    )
+                })
+                .map_err(|e| e.to_string())
+        }),
+        cx,
+    );
 
     let root_auth_state = auth_state.clone();
     let window_handle = cx
