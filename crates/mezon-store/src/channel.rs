@@ -1432,14 +1432,15 @@ impl ChannelList {
                 for cats in self.cache.values_mut() {
                     removed |= remove_channel(cats, channel_id);
                 }
+                let in_voice_changed = remove_in_voice_in_channel(&mut self.in_voice, channel_id);
                 if removed {
                     self.invalidate_channel_index_all();
                     if self.active_channel_id == Some(channel_id) {
                         self.active_channel_id = None;
                         cx.emit(ChannelEvent::ActiveChannelChanged(None));
                     }
-                    cx.notify();
                 }
+                notify_in_voice_change(removed, in_voice_changed, cx);
             }
             _ => {}
         }
@@ -2109,10 +2110,13 @@ fn seed_in_voice_from_categories(
     clan_id: ClanId,
     categories: &[Category],
 ) -> bool {
-    let mut changed = false;
+    let before = clan_in_voice_snapshot(in_voice, clan_id);
+
+    in_voice.retain(|_, info| info.clan_id != clan_id);
+
     for channel in categories.iter().flat_map(|c| &c.channels) {
         for member in &channel.voice_members {
-            changed |= apply_in_voice_joined(
+            apply_in_voice_joined(
                 in_voice,
                 member.user_id,
                 InVoiceInfo {
@@ -2122,7 +2126,19 @@ fn seed_in_voice_from_categories(
             );
         }
     }
-    changed
+
+    clan_in_voice_snapshot(in_voice, clan_id) != before
+}
+
+fn clan_in_voice_snapshot(
+    in_voice: &HashMap<UserId, InVoiceInfo>,
+    clan_id: ClanId,
+) -> HashMap<UserId, InVoiceInfo> {
+    in_voice
+        .iter()
+        .filter(|(_, info)| info.clan_id == clan_id)
+        .map(|(user, info)| (*user, *info))
+        .collect()
 }
 
 fn update_channel(
