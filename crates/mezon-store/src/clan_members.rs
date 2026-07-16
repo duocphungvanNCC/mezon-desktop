@@ -482,6 +482,8 @@ mod tests {
                 username: username.into(),
                 display_name: display.into(),
                 avatar_url: "avatar.png".into(),
+                create_time_seconds: 1_700_000_000,
+                join_time_seconds: 1_710_000_000,
                 ..Default::default()
             }),
             role_id: vec![10, 20],

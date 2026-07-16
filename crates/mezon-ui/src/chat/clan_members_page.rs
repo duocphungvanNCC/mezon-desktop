@@ -1,5 +1,3 @@
-use std::cmp::Ordering;
-use std::collections::HashSet;
 use std::sync::Arc;
 
 use crate::chat::clan_management_page::{management_page, section_toolbar};
@@ -9,10 +7,7 @@ use gpui::{
     AnyElement, Context, Entity, FontWeight, Hsla, ListAlignment, ListOffset, ListState,
     MouseButton, Render, Subscription, Window, deferred, div, img, list, prelude::*, px,
 };
-use mezon_store::{
-    ClanId, ClanMembersStore, PERMISSION_MANAGE_CLAN, PermissionStore, Role, RoleId, RolesStore,
-    Settings, UserId,
-};
+use mezon_store::{ClanId, ClanMembersStore, Role, RoleId, RolesStore, Settings, UserId};
 use unicode_normalization::{UnicodeNormalization, char::is_combining_mark};
 
 const PAGE_SIZES: [usize; 3] = [10, 50, 100];
@@ -36,7 +31,8 @@ pub struct ClanMembersPage {
     page_size_picker_open: bool,
     sort_field: MemberSortField,
     sort_descending: bool,
-    role_picker: Option<UserId>,
+    cached_rows: Vec<MemberRow>,
+    rows_dirty: bool,
     list_state: ListState,
 }
 
@@ -45,7 +41,6 @@ struct MemberRow {
     id: UserId,
     name: String,
     username: String,
-    clan_nick: String,
     avatar: String,
     member_since: u32,
     joined_mezon: u32,
@@ -69,12 +64,16 @@ impl Render for ExtraRolesTooltip {
 
 impl ClanMembersPage {
     pub fn new(settings: Entity<Settings>, cx: &mut Context<Self>) -> Self {
-        cx.observe(&ClanMembersStore::global(cx), |_, _, cx| cx.notify())
-            .detach();
-        cx.observe(&RolesStore::global(cx), |_, _, cx| cx.notify())
-            .detach();
-        cx.observe(&PermissionStore::global(cx), |_, _, cx| cx.notify())
-            .detach();
+        cx.observe(&ClanMembersStore::global(cx), |this, _, cx| {
+            this.rows_dirty = true;
+            cx.notify();
+        })
+        .detach();
+        cx.observe(&RolesStore::global(cx), |this, _, cx| {
+            this.rows_dirty = true;
+            cx.notify();
+        })
+        .detach();
         cx.observe(&settings, |_, _, cx| cx.notify()).detach();
         Self {
             clan_id: ClanId(0),
@@ -87,7 +86,8 @@ impl ClanMembersPage {
             page_size_picker_open: false,
             sort_field: MemberSortField::MemberSince,
             sort_descending: true,
-            role_picker: None,
+            cached_rows: Vec::new(),
+            rows_dirty: true,
             list_state: ListState::new(0, ListAlignment::Top, px(240.)),
         }
     }
@@ -98,12 +98,10 @@ impl ClanMembersPage {
         }
         self.clan_id = clan_id;
         self.page = 0;
-        self.role_picker = None;
+        self.rows_dirty = true;
         self.page_size_picker_open = false;
         ClanMembersStore::global(cx).update(cx, |store, cx| store.ensure_loaded(clan_id, cx));
         RolesStore::global(cx).update(cx, |store, cx| store.ensure_loaded(clan_id, cx));
-        PermissionStore::global(cx)
-            .update(cx, |store, cx| store.load_clan_permissions(clan_id, cx));
         cx.notify();
     }
 
@@ -132,6 +130,7 @@ impl ClanMembersPage {
         self.search_sub = Some(cx.subscribe(&input, |this, _, event, cx| {
             if matches!(event, InputEvent::Change) {
                 this.page = 0;
+                this.rows_dirty = true;
                 this.scroll_to_top();
                 cx.notify();
             }
@@ -140,7 +139,10 @@ impl ClanMembersPage {
         self.search_locale = locale;
     }
 
-    fn rows(&self, cx: &Context<Self>) -> Vec<MemberRow> {
+    fn rows(&mut self, cx: &Context<Self>) -> &[MemberRow] {
+        if !self.rows_dirty {
+            return &self.cached_rows;
+        }
         let query = self
             .search
             .as_ref()
@@ -162,7 +164,6 @@ impl ClanMembersPage {
                     id: member.id(),
                     name: member.name().to_string(),
                     username: member.user.username.clone(),
-                    clan_nick: member.clan_nick.clone(),
                     avatar: member.avatar().to_string(),
                     member_since: member.user.join_time_seconds,
                     joined_mezon: member.user.create_time_seconds,
@@ -171,25 +172,37 @@ impl ClanMembersPage {
                 }
             })
             .collect();
-        rows.sort_by(|left, right| {
-            let ordering = match self.sort_field {
-                MemberSortField::Name => apply_direction(
-                    normalize_search(&left.name).cmp(&normalize_search(&right.name)),
-                    self.sort_descending,
-                ),
-                MemberSortField::MemberSince => {
-                    compare_timestamp(left.member_since, right.member_since, self.sort_descending)
+        match self.sort_field {
+            MemberSortField::Name => {
+                rows.sort_by_cached_key(|row| normalize_search(&row.name));
+                if self.sort_descending {
+                    rows.reverse();
                 }
-                MemberSortField::JoinedMezon => {
-                    compare_timestamp(left.joined_mezon, right.joined_mezon, self.sort_descending)
-                }
-                MemberSortField::Roles => {
-                    apply_direction(left.role_count.cmp(&right.role_count), self.sort_descending)
-                }
-            };
-            ordering.then_with(|| normalize_search(&left.name).cmp(&normalize_search(&right.name)))
-        });
-        rows
+            }
+            MemberSortField::MemberSince => rows.sort_by_cached_key(|row| {
+                (
+                    timestamp_sort_key(row.member_since, self.sort_descending),
+                    normalize_search(&row.name),
+                )
+            }),
+            MemberSortField::JoinedMezon => rows.sort_by_cached_key(|row| {
+                (
+                    timestamp_sort_key(row.joined_mezon, self.sort_descending),
+                    normalize_search(&row.name),
+                )
+            }),
+            MemberSortField::Roles => rows.sort_by_cached_key(|row| {
+                let count = if self.sort_descending {
+                    usize::MAX - row.role_count
+                } else {
+                    row.role_count
+                };
+                (count, normalize_search(&row.name))
+            }),
+        }
+        self.cached_rows = rows;
+        self.rows_dirty = false;
+        &self.cached_rows
     }
 
     fn select_sort(&mut self, field: MemberSortField) {
@@ -200,6 +213,7 @@ impl ClanMembersPage {
             self.sort_descending = !matches!(field, MemberSortField::Name);
         }
         self.page = 0;
+        self.rows_dirty = true;
         self.scroll_to_top();
     }
 
@@ -224,17 +238,10 @@ impl ClanMembersPage {
         roles
     }
 
-    fn role_cell(
-        &self,
-        row: &MemberRow,
-        can_manage: bool,
-        current_level: Option<i32>,
-        cx: &Context<Self>,
-    ) -> AnyElement {
+    fn role_cell(&self, row: &MemberRow, cx: &Context<Self>) -> AnyElement {
         let roles = self.visible_roles(&row.role_ids, cx);
         let extra = roles.len().saturating_sub(1);
         let user_id = row.id;
-        let picker_open = self.role_picker == Some(user_id);
         let mut cell = div().relative().flex().items_center().gap_2().min_w_0();
 
         if let Some(role) = roles.first() {
@@ -261,116 +268,10 @@ impl ClanMembersPage {
             cell = cell.child(extra_roles);
         }
 
-        if can_manage {
-            cell = cell.child(
-                div()
-                    .id(format!("assign-role-{}", user_id.get()))
-                    .cursor_pointer()
-                    .size(px(25.))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .rounded(px(4.))
-                    .bg(cx.theme().bg_hover)
-                    .text_color(cx.theme().text_secondary)
-                    .child("+")
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.role_picker = if picker_open { None } else { Some(user_id) };
-                        this.page_size_picker_open = false;
-                        cx.notify();
-                    })),
-            );
-        }
-
-        if picker_open {
-            let assignable = RolesStore::global(cx)
-                .read(cx)
-                .all_roles(self.clan_id)
-                .into_iter()
-                .filter(|(_, role)| {
-                    !is_everyone(role)
-                        && current_level.is_some_and(|level| role.max_level_permission < level)
-                })
-                .collect::<Vec<_>>();
-            let assigned: HashSet<_> = row.role_ids.iter().copied().collect();
-            let mut menu = div()
-                .id(format!("role-picker-{}", user_id.get()))
-                .absolute()
-                .top_0()
-                .left_1_2()
-                .ml(px(-80.))
-                .w(px(160.))
-                .max_h(px(208.))
-                .overflow_y_scroll()
-                .p_1()
-                .rounded(px(8.))
-                .bg(cx.theme().tokens.bg_theme_contexify)
-                .border_1()
-                .border_color(cx.theme().border)
-                .shadow_lg()
-                .occlude()
-                .on_mouse_down_out(cx.listener(|this, _, _, cx| {
-                    this.role_picker = None;
-                    cx.notify();
-                }));
-            if assignable.is_empty() {
-                menu = menu.child(
-                    div()
-                        .px_2()
-                        .py_2()
-                        .text_color(cx.theme().text_secondary)
-                        .child(tr(
-                            &self.settings.read(cx).language,
-                            "common.noRolesAvailable",
-                        )),
-                );
-            } else {
-                for (index, (role_id, role)) in assignable.into_iter().enumerate() {
-                    let checked = assigned.contains(&role_id);
-                    menu = menu.child(
-                        div()
-                            .id(format!("assignable-role-{user_id:?}-{index}"))
-                            .flex()
-                            .items_center()
-                            .justify_between()
-                            .gap_2()
-                            .h(px(28.))
-                            .px_2()
-                            .rounded(px(6.))
-                            .hover(|style| style.bg(cx.theme().bg_hover))
-                            .child(
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .gap_2()
-                                    .min_w_0()
-                                    .child(role_dot(&role))
-                                    .child(
-                                        div()
-                                            .flex_1()
-                                            .min_w_0()
-                                            .truncate()
-                                            .text_size(px(12.))
-                                            .child(role.name),
-                                    ),
-                            )
-                            .child(role_checkbox(checked, cx)),
-                    );
-                }
-            }
-            cell = cell.child(deferred(menu));
-        }
         cell.into_any_element()
     }
 
-    fn render_member_row(
-        &self,
-        row: &MemberRow,
-        can_manage: bool,
-        current_level: Option<i32>,
-        locale: &str,
-        cx: &Context<Self>,
-    ) -> AnyElement {
+    fn render_member_row(&self, row: &MemberRow, locale: &str, cx: &Context<Self>) -> AnyElement {
         let theme = cx.theme();
         let roles = self.visible_roles(&row.role_ids, cx);
         let name_color = roles
@@ -378,11 +279,7 @@ impl ClanMembersPage {
             .and_then(|role| parse_hex_color(&role.color))
             .map(Hsla::from)
             .unwrap_or_else(|| Hsla::from(theme.text_secondary));
-        let subtitle = if row.clan_nick.is_empty() || row.clan_nick == row.username {
-            row.username.clone()
-        } else {
-            format!("{} · {}", row.clan_nick, row.username)
-        };
+        let subtitle = row.username.clone();
         table_row(theme, false)
             .id(format!("member-row-{}", row.id.get()))
             .hover(|style| style.bg(theme.bg_hover))
@@ -428,11 +325,7 @@ impl ClanMembersPage {
                 1.,
                 true,
             ))
-            .child(weighted_column(
-                self.role_cell(row, can_manage, current_level, cx),
-                2.,
-                true,
-            ))
+            .child(weighted_column(self.role_cell(row, cx), 2., true))
             .child(weighted_column(
                 div()
                     .text_size(px(12.))
@@ -661,7 +554,6 @@ impl ClanMembersPage {
                     .child(Icon::new(IconName::ArrowDown).size(px(14.)))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.page_size_picker_open = !open;
-                        this.role_picker = None;
                         cx.notify();
                     })),
             )
@@ -682,7 +574,8 @@ impl ClanMembersPage {
                 .bg(cx.theme().bg_floating)
                 .border_1()
                 .border_color(cx.theme().border)
-                .shadow_lg();
+                .shadow_lg()
+                .occlude();
             for size in PAGE_SIZES {
                 menu = menu.child(
                     div()
@@ -769,27 +662,21 @@ impl Render for ClanMembersPage {
         self.ensure_search(window, cx);
         let theme = cx.theme();
         let locale = self.settings.read(cx).language.clone();
-        let rows = self.rows(cx);
-        let total = rows.len();
+        let total = self.rows(cx).len();
         let pages = total.div_ceil(self.page_size).max(1);
         self.page = self.page.min(pages - 1);
-        let visible = rows
+        let page_start = self.page * self.page_size;
+        let page_size = self.page_size;
+        let visible = self
+            .rows(cx)
             .iter()
-            .skip(self.page * self.page_size)
-            .take(self.page_size)
+            .skip(page_start)
+            .take(page_size)
             .cloned()
             .collect::<Vec<_>>();
-        let permissions = PermissionStore::global(cx);
-        let can_manage =
-            permissions
-                .read(cx)
-                .check_permission(self.clan_id, PERMISSION_MANAGE_CLAN, cx);
-        let current_level = permissions
-            .read(cx)
-            .current_permission_level(self.clan_id, cx);
 
         let visible = Arc::new(visible);
-        let item_count = visible.len() + 3;
+        let item_count = visible.len();
         if self.list_state.item_count() != item_count {
             self.list_state.reset(item_count);
         }
@@ -798,33 +685,25 @@ impl Render for ClanMembersPage {
         let visible_for_list = visible.clone();
         let member_list = list(self.list_state.clone(), move |index, _window, cx| {
             entity.update(cx, |this, cx| {
-                if index == 0 {
-                    return this.render_toolbar(&locale_for_list, cx);
-                }
-                if index == 1 {
-                    return this.render_header(&locale_for_list, cx);
-                }
-                let row_index = index - 2;
-                if let Some(row) = visible_for_list.get(row_index) {
-                    return this.render_member_row(
-                        row,
-                        can_manage,
-                        current_level,
-                        &locale_for_list,
-                        cx,
-                    );
-                }
-                this.render_footer(total, pages, &locale_for_list, cx)
+                visible_for_list
+                    .get(index)
+                    .map(|row| this.render_member_row(row, &locale_for_list, cx))
+                    .unwrap_or_else(|| div().into_any_element())
             })
         })
         .size_full();
         let body = div()
+            .flex()
+            .flex_col()
             .flex_1()
             .min_h_0()
             .min_w_0()
             .p_4()
             .text_color(theme.text_secondary)
-            .child(member_list)
+            .child(self.render_toolbar(&locale, cx))
+            .child(self.render_header(&locale, cx))
+            .child(div().flex_1().min_h_0().child(member_list))
+            .child(self.render_footer(total, pages, &locale, cx))
             .into_any_element();
         management_page(tr(&locale, "common.members"), body, theme)
     }
@@ -929,31 +808,6 @@ fn role_badge(role: &Role, emphasized: bool, theme: &crate::theme::Theme) -> Any
                 })
                 .child(role.name.clone()),
         )
-        .into_any_element()
-}
-
-fn role_checkbox(checked: bool, cx: &Context<ClanMembersPage>) -> AnyElement {
-    div()
-        .size(px(16.))
-        .flex_shrink_0()
-        .flex()
-        .items_center()
-        .justify_center()
-        .rounded(px(4.))
-        .border_1()
-        .border_color(cx.theme().border)
-        .when(checked, |element| {
-            element
-                .bg(cx.theme().tokens.bg_active_button)
-                .border_color(cx.theme().border)
-                .text_size(px(12.))
-                .text_color(cx.theme().tokens.color_text_active_button)
-                .child(
-                    Icon::new(IconName::Check)
-                        .size(px(14.))
-                        .text_color(cx.theme().tokens.color_text_active_button),
-                )
-        })
         .into_any_element()
 }
 
@@ -1081,20 +935,13 @@ fn tr(locale: &str, key: &'static str) -> String {
     mezon_i18n::t(locale, key).to_string()
 }
 
-fn apply_direction(ordering: Ordering, descending: bool) -> Ordering {
-    if descending {
-        ordering.reverse()
+fn timestamp_sort_key(value: u32, descending: bool) -> u32 {
+    if value == 0 {
+        u32::MAX
+    } else if descending {
+        u32::MAX - value
     } else {
-        ordering
-    }
-}
-
-fn compare_timestamp(left: u32, right: u32, descending: bool) -> Ordering {
-    match (left == 0, right == 0) {
-        (true, true) => Ordering::Equal,
-        (true, false) => Ordering::Greater,
-        (false, true) => Ordering::Less,
-        (false, false) => apply_direction(left.cmp(&right), descending),
+        value
     }
 }
 
@@ -1164,9 +1011,9 @@ mod tests {
 
     #[test]
     fn missing_timestamps_always_sort_last() {
-        assert_eq!(compare_timestamp(0, 10, false), Ordering::Greater);
-        assert_eq!(compare_timestamp(0, 10, true), Ordering::Greater);
-        assert_eq!(compare_timestamp(20, 10, false), Ordering::Greater);
-        assert_eq!(compare_timestamp(20, 10, true), Ordering::Less);
+        assert!(timestamp_sort_key(0, false) > timestamp_sort_key(10, false));
+        assert!(timestamp_sort_key(0, true) > timestamp_sort_key(10, true));
+        assert!(timestamp_sort_key(20, false) > timestamp_sort_key(10, false));
+        assert!(timestamp_sort_key(20, true) < timestamp_sort_key(10, true));
     }
 }

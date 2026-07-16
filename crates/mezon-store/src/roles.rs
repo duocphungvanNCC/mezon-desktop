@@ -186,17 +186,6 @@ impl RolesStore {
             .filter_map(|id| roles.by_id.get(id).map(|role| (*id, role)))
             .collect()
     }
-
-    pub fn all_roles(&self, clan_id: ClanId) -> Vec<(RoleId, Role)> {
-        let Some(roles) = self.cache.get(&clan_id) else {
-            return Vec::new();
-        };
-        roles
-            .order
-            .iter()
-            .filter_map(|id| roles.by_id.get(id).map(|role| (*id, role.clone())))
-            .collect()
-    }
 }
 
 fn roles_map_from_proto(roles: Vec<mezon_proto::api::Role>) -> ClanRoles {
