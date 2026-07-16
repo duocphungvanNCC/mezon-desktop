@@ -12,8 +12,8 @@ use mezon_voice::{IceServerConfig, VoiceEvent, VoiceSession};
 use parking_lot::Mutex;
 
 pub use mezon_voice::{
-    NetworkQuality, PickedScreen, ScreenShareKind, ScreenShareListError, ScreenShareOption,
-    ScreenSharePreview, VideoFrameData, VideoFrameStore, VoiceParticipant,
+    CameraDeviceInfo, NetworkQuality, PickedScreen, ScreenShareKind, ScreenShareListError,
+    ScreenShareOption, ScreenSharePreview, VideoFrameData, VideoFrameStore, VoiceParticipant,
     capture_screen_share_preview, list_screen_share_options, peek_screen_share_options,
 };
 
@@ -21,6 +21,19 @@ use crate::AppConfig;
 use crate::clan_members::ClanMembersStore;
 use crate::ids::{ClanId, UserId};
 use crate::realtime::{RealtimeDispatch, RealtimeKind};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeviceKind {
+    AudioInput,
+    AudioOutput,
+    VideoInput,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeviceMenuKind {
+    Microphone,
+    Camera,
+}
 
 const MEET_TOKEN_CACHE_TTL: Duration = Duration::from_secs(45);
 const RAISE_HAND_TTL: Duration = Duration::from_secs(10);
@@ -157,6 +170,10 @@ pub struct VoiceStore {
     last_emoji_at: Option<Instant>,
     session: Option<VoiceSession>,
     frame_store: Option<Arc<VideoFrameStore>>,
+    camera_devices: Vec<CameraDeviceInfo>,
+    device_menu: Option<DeviceMenuKind>,
+    device_submenu: Option<DeviceKind>,
+    _camera_enum_task: Option<Task<()>>,
     render_cache: Mutex<HashMap<u64, CachedRenderFrame>>,
     pending_texture_drops: Mutex<Vec<Arc<RenderImage>>>,
     pending_texture_replaces: Mutex<Vec<Arc<RenderImage>>>,
@@ -257,6 +274,10 @@ impl VoiceStore {
             last_emoji_at: None,
             session: None,
             frame_store: None,
+            camera_devices: Vec::new(),
+            device_menu: None,
+            device_submenu: None,
+            _camera_enum_task: None,
             render_cache: Mutex::new(HashMap::new()),
             pending_texture_drops: Mutex::new(Vec::new()),
             pending_texture_replaces: Mutex::new(Vec::new()),
@@ -1280,6 +1301,7 @@ impl VoiceStore {
         channel_label: String,
         input_device_id: Option<String>,
         output_device_id: Option<String>,
+        camera_device_id: Option<String>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -1319,6 +1341,7 @@ impl VoiceStore {
                 channel_id,
                 input_device_id,
                 output_device_id,
+                camera_device_id,
                 cx,
             );
             return;
@@ -1338,6 +1361,7 @@ impl VoiceStore {
                         channel_id,
                         input_device_id,
                         output_device_id,
+                        camera_device_id,
                         cx,
                     );
                 }
@@ -1361,6 +1385,7 @@ impl VoiceStore {
         channel_id: String,
         input_device_id: Option<String>,
         output_device_id: Option<String>,
+        camera_device_id: Option<String>,
         cx: &mut Context<Self>,
     ) {
         if self.connection.active_channel_id() != Some(channel_id.as_str()) {
@@ -1373,6 +1398,7 @@ impl VoiceStore {
             token,
             input_device_id,
             output_device_id,
+            camera_device_id,
             ice_servers,
         );
         let events = session.events();
@@ -1558,6 +1584,107 @@ impl VoiceStore {
         cx.notify();
     }
 
+    pub fn set_input_device(&mut self, device_id: Option<String>, cx: &mut Context<Self>) {
+        Self::persist_device(DeviceKind::AudioInput, device_id.clone(), cx);
+        if let Some(session) = &self.session {
+            session.set_input_device(device_id);
+        }
+        self.device_menu = None;
+        self.device_submenu = None;
+        cx.notify();
+    }
+
+    pub fn set_output_device(&mut self, device_id: Option<String>, cx: &mut Context<Self>) {
+        Self::persist_device(DeviceKind::AudioOutput, device_id.clone(), cx);
+        if let Some(session) = &self.session {
+            session.set_output_device(device_id);
+        }
+        self.device_menu = None;
+        self.device_submenu = None;
+        cx.notify();
+    }
+
+    pub fn set_camera_device(&mut self, device_id: Option<String>, cx: &mut Context<Self>) {
+        Self::persist_device(DeviceKind::VideoInput, device_id.clone(), cx);
+        if let Some(session) = &self.session {
+            session.set_camera_device(device_id);
+        }
+        self.device_menu = None;
+        self.device_submenu = None;
+        cx.notify();
+    }
+
+    fn persist_device(kind: DeviceKind, device_id: Option<String>, cx: &mut Context<Self>) {
+        let Some(settings) = crate::Settings::try_global(cx) else {
+            return;
+        };
+        settings.update(cx, |s, _| match kind {
+            DeviceKind::AudioInput => s.input_device_id = device_id,
+            DeviceKind::AudioOutput => s.output_device_id = device_id,
+            DeviceKind::VideoInput => s.camera_device_id = device_id,
+        });
+        crate::schedule_settings_save(&settings, cx);
+    }
+
+    pub fn device_menu(&self) -> Option<DeviceMenuKind> {
+        self.device_menu
+    }
+
+    pub fn device_submenu(&self) -> Option<DeviceKind> {
+        self.device_submenu
+    }
+
+    pub fn camera_devices(&self) -> &[CameraDeviceInfo] {
+        &self.camera_devices
+    }
+
+    pub fn toggle_device_menu(&mut self, kind: DeviceMenuKind, cx: &mut Context<Self>) {
+        if self.device_menu == Some(kind) {
+            self.device_menu = None;
+            self.device_submenu = None;
+        } else {
+            self.device_menu = Some(kind);
+            self.device_submenu = None;
+            self.refresh_devices(cx);
+        }
+        cx.notify();
+    }
+
+    pub fn close_device_menu(&mut self, cx: &mut Context<Self>) {
+        if self.device_menu.is_some() || self.device_submenu.is_some() {
+            self.device_menu = None;
+            self.device_submenu = None;
+            cx.notify();
+        }
+    }
+
+    pub fn set_device_submenu(&mut self, submenu: Option<DeviceKind>, cx: &mut Context<Self>) {
+        if self.device_submenu != submenu {
+            self.device_submenu = submenu;
+            cx.notify();
+        }
+    }
+
+    fn refresh_devices(&mut self, cx: &mut Context<Self>) {
+        if let Some(audio_store) = crate::AudioStore::try_global(cx) {
+            crate::AudioStore::refresh_devices(&audio_store, cx);
+        }
+        self.refresh_cameras(cx);
+    }
+
+    fn refresh_cameras(&mut self, cx: &mut Context<Self>) {
+        self._camera_enum_task = Some(cx.spawn(async move |this, cx| {
+            let devices = cx
+                .background_executor()
+                .spawn(async move { mezon_voice::enumerate_cameras() })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                this.camera_devices = devices;
+                cx.notify();
+            });
+        }));
+    }
+
     pub fn start_screen_share(
         &mut self,
         pick: PickedScreen,
@@ -1615,6 +1742,8 @@ impl VoiceStore {
         self.noise_suppression_level = DEFAULT_NOISE_SUPPRESSION_LEVEL;
         self.focused_tile = None;
         self.room_name.clear();
+        self.device_menu = None;
+        self.device_submenu = None;
         self.participant_menu = None;
         self.pending_kick = None;
         self.moderation_error = None;

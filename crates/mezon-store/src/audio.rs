@@ -118,6 +118,29 @@ impl AudioStore {
         .detach();
     }
 
+    pub fn refresh_devices(entity: &Entity<Self>, cx: &mut App) {
+        let store = entity.read(cx);
+        let Some(enumerator) = store.device_enumerator.clone() else {
+            return;
+        };
+        entity.update(cx, |store, _| {
+            store.devices_requested = true;
+        });
+        let weak = entity.downgrade();
+        cx.spawn(async move |cx: &mut gpui::AsyncApp| {
+            let (inputs, outputs) = cx
+                .background_executor()
+                .spawn(async move { enumerator() })
+                .await;
+            cx.update(|cx| {
+                if let Some(store) = weak.upgrade() {
+                    AudioStore::set_devices(&store, inputs, outputs, cx);
+                }
+            });
+        })
+        .detach();
+    }
+
     pub fn set_mic_pcm_capture_factory(
         entity: &Entity<Self>,
         factory: MicPcmCaptureFactory,

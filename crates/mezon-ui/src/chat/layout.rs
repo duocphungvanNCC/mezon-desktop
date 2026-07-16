@@ -8,8 +8,8 @@ use mezon_store::{
     AuthState, Channel, ChannelId, ChannelList, ChannelType, ClanId, ClanList, ClanMembersStore,
     DirectChannel, DirectKind, DirectMessageStore, GroupMembersStore, InboxStore,
     MessageSearchEvent, MessageSearchStore, MessagesStore, PinnedEvent, PinnedMessagesStore,
-    Settings, ThreadsEvent, ThreadsStore, TopicsEvent, TopicsStore, VoiceMember, VoiceModerationError, VoiceStore,
-    expand_mention_name_tokens,
+    Settings, ThreadsEvent, ThreadsStore, TopicsEvent, TopicsStore, VoiceMember,
+    VoiceModerationError, VoiceStore, expand_mention_name_tokens,
 };
 use ui::PopoverMenuHandle;
 use ui::utils::ROUNDED_BORDER_WINDOW;
@@ -1244,6 +1244,7 @@ impl Render for ChatLayout {
                 &self.settings,
                 self.voice_store.read(cx),
                 &chat,
+                cx,
             )
         } else {
             None
@@ -1965,11 +1966,12 @@ impl ChatLayout {
         if let Some(ch) = self.channel_list.read(cx).active_channel() {
             if ch.channel_type == ChannelType::Voice {
                 let channel = ch.clone();
-                let (input_device_id, output_device_id) = {
+                let (input_device_id, output_device_id, camera_device_id) = {
                     let settings = self.settings.read(cx);
                     (
                         settings.input_device_id.clone(),
                         settings.output_device_id.clone(),
+                        settings.camera_device_id.clone(),
                     )
                 };
                 let voice_view = crate::chat::voice::render_voice_channel(
@@ -1980,6 +1982,7 @@ impl ChatLayout {
                     &self.settings,
                     input_device_id,
                     output_device_id,
+                    camera_device_id,
                     cx,
                 );
                 return div()

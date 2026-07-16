@@ -127,11 +127,11 @@ pub use user_profile::{
 };
 pub use users_by_user::{UsersByUserEvent, UsersByUserStore};
 pub use voice::{
-    DisplayedReaction, NetworkQuality, PickedScreen, ScreenShareKind, ScreenShareListError,
-    ScreenShareOption, ScreenSharePreview, VideoFrameData, VideoFrameStore, VoiceCallStatus,
-    VoiceConnection, VoiceModerationError, VoiceParticipant, VoiceRenderFrame, VoiceStore,
-    camera_tile_id, capture_screen_share_preview, list_screen_share_options,
-    peek_screen_share_options, screen_tile_id,
+    CameraDeviceInfo, DeviceKind, DeviceMenuKind, DisplayedReaction, NetworkQuality, PickedScreen,
+    ScreenShareKind, ScreenShareListError, ScreenShareOption, ScreenSharePreview, VideoFrameData,
+    VideoFrameStore, VoiceCallStatus, VoiceConnection, VoiceModerationError, VoiceParticipant,
+    VoiceRenderFrame, VoiceStore, camera_tile_id, capture_screen_share_preview,
+    list_screen_share_options, peek_screen_share_options, screen_tile_id,
 };
 
 pub const CACHE_TTL: Duration = Duration::from_secs(20 * 60);
@@ -225,6 +225,8 @@ pub struct Settings {
     pub input_device_id: Option<String>,
     /// Selected audio output device identifier
     pub output_device_id: Option<String>,
+    /// Selected camera (video input) device identifier
+    pub camera_device_id: Option<String>,
     /// User-defined clan ordering: list of clan_ids in display order
     #[serde(default)]
     pub clan_order: Vec<ClanId>,
@@ -252,6 +254,7 @@ impl Default for Settings {
             speaker_volume: 0.8,
             input_device_id: None,
             output_device_id: None,
+            camera_device_id: None,
             clan_order: Vec::new(),
             last_clan_id: None,
             last_channel_id: None,
