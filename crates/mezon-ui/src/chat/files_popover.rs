@@ -9,7 +9,7 @@ use gpui::{
 };
 use mezon_store::{
     ChannelDocument, ChannelId, ClanId, ClanMembersStore, FilesStore, Settings,
-    download_url_with_dialog, filename_matches_query,
+    filename_matches_query,
 };
 use ui::{PopoverMenuHandle, ScrollAxes, Scrollbars, WithScrollbar};
 
@@ -20,6 +20,7 @@ use crate::components::primitives::{
 };
 use crate::router::{Route, Router};
 use crate::theme::{ActiveTheme, Theme};
+use crate::util::download::save_with_progress_toast;
 
 const POPOVER_WIDTH: f32 = 540.;
 const HEADER_HEIGHT: f32 = 48.;
@@ -780,7 +781,7 @@ fn file_row(
         .bg(tokens.theme_setting_nav)
         .cursor_pointer()
         .on_click(move |_: &ClickEvent, _window, cx| {
-            download_url_with_dialog(url.clone(), filename.clone(), cx);
+            save_with_progress_toast(url.clone(), filename.clone(), cx);
         })
         .child(thumb)
         .child(
@@ -853,7 +854,7 @@ fn file_row(
                         .cursor_pointer()
                         .on_click(move |_: &ClickEvent, _window, cx| {
                             cx.stop_propagation();
-                            download_url_with_dialog(
+                            save_with_progress_toast(
                                 download_url.clone(),
                                 download_name.clone(),
                                 cx,
