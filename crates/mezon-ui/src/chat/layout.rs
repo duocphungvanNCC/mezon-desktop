@@ -7,8 +7,8 @@ use gpui::{
 use mezon_store::{
     AuthState, Channel, ChannelId, ChannelList, ChannelType, ClanId, ClanList, ClanMembersStore,
     DirectChannel, DirectKind, DirectMessageStore, GroupMembersStore, InboxStore,
-    MessageSearchEvent, MessageSearchStore, MessagesStore, Settings, ThreadsEvent, ThreadsStore,
-    TopicsEvent, TopicsStore, VoiceMember, VoiceModerationError, VoiceStore,
+    MessageSearchEvent, MessageSearchStore, MessagesStore, PinnedEvent, PinnedMessagesStore,
+    Settings, ThreadsEvent, ThreadsStore, TopicsEvent, TopicsStore, VoiceMember, VoiceModerationError, VoiceStore,
     expand_mention_name_tokens,
 };
 use ui::PopoverMenuHandle;
@@ -70,11 +70,13 @@ pub struct ChatLayout {
     topic_panel: Option<Entity<crate::chat::create_topic_panel::TopicPanel>>,
     pin_popover_handle: PopoverMenuHandle<PinnedPopoverPanel>,
     displayed_active_channel: Option<ActiveChannelSlice>,
+    focused_channel_id: Option<ChannelId>,
     displayed_voice_mini: Option<VoiceMiniSlice>,
     displayed_threads_panel: ThreadsPanelSlice,
     threads_creating_gate: bool,
     displayed_inbox: InboxDisplaySlice,
     pending_open_threads_popover: bool,
+    pending_open_pin_popover: bool,
     voice_emoji_picker: Option<Entity<ReactionPicker>>,
     _voice_emoji_picker_sub: Option<Subscription>,
     _voice_emoji_picker_dismiss_sub: Option<Subscription>,
@@ -232,6 +234,11 @@ impl ChatLayout {
         })
         .detach();
 
+        cx.subscribe(&PinnedMessagesStore::global(cx), |this, _, event, cx| {
+            this.on_pinned_event(event, cx);
+        })
+        .detach();
+
         cx.subscribe(
             &MessageSearchStore::global(cx),
             |this, _, event: &MessageSearchEvent, cx| {
@@ -372,11 +379,13 @@ impl ChatLayout {
             topic_panel: None,
             pin_popover_handle: PopoverMenuHandle::default(),
             displayed_active_channel: None,
+            focused_channel_id: None,
             displayed_voice_mini: None,
             displayed_threads_panel: ThreadsPanelSlice::default(),
             threads_creating_gate: false,
             displayed_inbox: InboxDisplaySlice::default(),
             pending_open_threads_popover: false,
+            pending_open_pin_popover: false,
             voice_emoji_picker: None,
             _voice_emoji_picker_sub: None,
             _voice_emoji_picker_dismiss_sub: None,
@@ -1024,6 +1033,23 @@ impl ChatLayout {
         changed
     }
 
+    fn focus_composer_on_channel_switch(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let active_channel_id = Router::global(cx).read(cx).conversation_channel_id();
+        if active_channel_id == self.focused_channel_id {
+            return;
+        }
+        self.focused_channel_id = active_channel_id;
+        if active_channel_id.is_none() {
+            return;
+        }
+        let Some(input) = self.chat_area.mention_input.clone() else {
+            return;
+        };
+        window.defer(cx, move |window, cx| {
+            input.update(cx, |input, cx| input.focus_input(window, cx));
+        });
+    }
+
     fn sync_voice_frame_pump(&mut self, cx: &mut Context<Self>) {
         const VOICE_FRAME_INTERVAL: std::time::Duration = std::time::Duration::from_millis(33);
         let want_pump =
@@ -1164,12 +1190,17 @@ impl Render for ChatLayout {
         crate::trace_render!("ChatLayout");
         self.chat_area.ensure_input(window, cx);
         self.chat_area.bind_window(window, cx);
+        self.focus_composer_on_channel_switch(window, cx);
         self.maybe_prefetch_voice_token(cx);
         self.voice_store
             .update(cx, |store, cx| store.flush_texture_drops(Some(window), cx));
 
         if std::mem::take(&mut self.pending_open_threads_popover) {
             let handle = self.thread_popover_handle.clone();
+            window.defer(cx, move |window, cx| handle.show(window, cx));
+        }
+        if std::mem::take(&mut self.pending_open_pin_popover) {
+            let handle = self.pin_popover_handle.clone();
             window.defer(cx, move |window, cx| handle.show(window, cx));
         }
 
@@ -1268,7 +1299,7 @@ impl Render for ChatLayout {
                             .rounded(px(12.0))
                             .overflow_hidden()
                             .border_1()
-                            .border_color(theme.tokens.border_theme_primary)
+                            .border_color(theme.tokens.border_primary)
                             .shadow_lg()
                             .bg(theme.tokens.bg_surface)
                             .occlude()
@@ -1431,6 +1462,13 @@ impl ChatLayout {
                 self.pending_open_threads_popover = true;
                 cx.notify();
             }
+        }
+    }
+
+    fn on_pinned_event(&mut self, event: &PinnedEvent, cx: &mut Context<Self>) {
+        if matches!(event, PinnedEvent::OpenPopoverRequested) {
+            self.pending_open_pin_popover = true;
+            cx.notify();
         }
     }
 
@@ -1875,19 +1913,26 @@ impl ChatLayout {
             }
             if let Some(dm) = self.current_dm(cx) {
                 let is_group = dm.kind == DirectKind::Group;
+                let in_voice = if is_group {
+                    None
+                } else {
+                    dm.peer_user_id
+                        .and_then(|user_id| self.channel_list.read(cx).in_voice_status(user_id))
+                };
                 return self
                     .chat_area
                     .render(
                         &locale,
                         Some(dm.label.as_str()),
                         true,
+                        in_voice,
                         Some(dm.id),
                         is_group,
                         is_group && self.show_member_list && !show_results_panel && !topic_open,
                         false,
                         None,
                         None,
-                        None,
+                        Some(pin_handle),
                         show_search_bar,
                         search_expanded,
                         show_search_options,
@@ -1909,12 +1954,13 @@ impl ChatLayout {
                         None,
                         true,
                         None,
+                        None,
                         false,
                         false,
                         false,
                         None,
                         None,
-                        None,
+                        Some(pin_handle),
                         false,
                         false,
                         false,
@@ -1992,6 +2038,7 @@ impl ChatLayout {
                     &locale,
                     Some(channel_name.as_str()),
                     false,
+                    None,
                     Some(channel_id),
                     true,
                     self.show_member_list && !show_results_panel && !topic_open,
@@ -2023,6 +2070,7 @@ impl ChatLayout {
                     &locale,
                     None,
                     false,
+                    None,
                     None,
                     true,
                     self.show_member_list && !show_results_panel && !topic_open,

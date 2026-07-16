@@ -208,11 +208,15 @@ pub async fn put_bytes_return_etag(url: &str, data: Vec<u8>, content_type: &str)
         .map_err(|e| anyhow::anyhow!("upload part task failed: {e}"))?
 }
 
-pub async fn download_to(url: &str, dest: std::path::PathBuf) -> Result<()> {
+pub async fn download_to(
+    url: &str,
+    dest: std::path::PathBuf,
+    on_progress: impl Fn(u64, Option<u64>) + Send + 'static,
+) -> Result<()> {
     let url = url.to_string();
     runtime()
         .spawn(async move {
-            let outcome = stream_to_file(&url, &dest).await;
+            let outcome = stream_to_file(&url, &dest, on_progress).await;
             if outcome.is_err() {
                 let _ = tokio::fs::remove_file(&dest).await;
             }
@@ -222,7 +226,11 @@ pub async fn download_to(url: &str, dest: std::path::PathBuf) -> Result<()> {
         .map_err(|e| anyhow::anyhow!("download task failed: {e}"))?
 }
 
-async fn stream_to_file(url: &str, dest: &std::path::Path) -> Result<()> {
+async fn stream_to_file(
+    url: &str,
+    dest: &std::path::Path,
+    on_progress: impl Fn(u64, Option<u64>),
+) -> Result<()> {
     let request = http::Request::builder()
         .method(http::Method::GET)
         .uri(url)
@@ -239,9 +247,18 @@ async fn stream_to_file(url: &str, dest: &std::path::Path) -> Result<()> {
     if !status.is_success() {
         anyhow::bail!("HTTP GET failed with status {status}");
     }
+    let total = response
+        .headers()
+        .get(http::header::CONTENT_LENGTH)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.parse::<u64>().ok())
+        .filter(|len| *len > 0);
     let mut file = tokio::fs::File::create(dest).await?;
     let body = response.body_mut();
     let mut buffer = vec![0u8; 64 * 1024];
+    let mut written: u64 = 0;
+    let mut reported: u64 = 0;
+    on_progress(0, total);
     loop {
         let read = tokio::time::timeout(HTTP_TRANSFER_TIMEOUT, body.read(&mut buffer)).await;
         let count = match read {
@@ -255,8 +272,19 @@ async fn stream_to_file(url: &str, dest: &std::path::Path) -> Result<()> {
             break;
         }
         file.write_all(&buffer[..count]).await?;
+        written += count as u64;
+        // Throttle to ~1% steps (known size) / 256 KB (unknown) to avoid flooding the UI.
+        let step = match total {
+            Some(t) => written * 100 / t != reported * 100 / t,
+            None => written - reported >= 256 * 1024,
+        };
+        if step {
+            reported = written;
+            on_progress(written, total);
+        }
     }
     file.flush().await?;
+    on_progress(written, total.or(Some(written)));
     Ok(())
 }
 

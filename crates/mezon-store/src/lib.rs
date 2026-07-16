@@ -13,6 +13,7 @@ pub mod config;
 pub mod connection;
 pub mod direct;
 pub mod emoji;
+pub mod files;
 pub mod friend;
 pub mod gallery;
 pub mod gif;
@@ -75,6 +76,11 @@ pub use config::AppConfig;
 pub use connection::{ConnectionStore, resolve_initial_auth_state};
 pub use direct::{DirectChannel, DirectEvent, DirectKind, DirectMessageStore};
 pub use emoji::{Emoji, EmojiEvent, EmojiStore};
+pub use files::{
+    ChannelDocument, FILES_BROAD_QUERY, FILES_CACHE_TTL, FILES_PAGE_SIZE, FILES_TYPED_QUERY,
+    FilesEvent, FilesStore, filename_matches_query, is_document, short_file_type_label,
+    short_file_type_label_for,
+};
 pub use friend::{Friend, FriendEvent, FriendState, FriendStore};
 pub use gallery::{
     ChannelAttachment, GalleryEvent, GalleryStore, LoadDirection, MediaFilter, UploaderInfo,
@@ -109,9 +115,10 @@ pub use permissions::{
     ClanSettingsPermissions, PERMISSION_ADMINISTRATOR, PERMISSION_CLAN_OWNER,
     PERMISSION_MANAGE_CHANNEL, PERMISSION_MANAGE_CLAN, PermissionEvent, PermissionStore,
 };
-pub use pinned::{PinnedMessage, PinnedMessagesStore};
+pub use pinned::{PinnedEvent, PinnedMessage, PinnedMessagesStore};
 pub use platform::{
-    DesktopNotification, NotifyFn, OpenUrlFn, PlatformStore, download_url_with_dialog,
+    DesktopNotification, DownloadEvent, NotifyFn, OpenUrlFn, PlatformStore,
+    copy_image_url_to_clipboard, download_url_with_dialog,
 };
 pub use presence::*;
 pub use realtime::{RealtimeDispatch, RealtimeKind};

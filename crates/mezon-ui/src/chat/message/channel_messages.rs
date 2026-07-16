@@ -627,6 +627,7 @@ pub struct ChannelMessages {
     _edit_input_sub: Option<Subscription>,
     context_menu_target: Option<(MessageId, Point<Pixels>)>,
     context_menu_forward_all: bool,
+    reaction_submenu_open: bool,
     emoji_recent: Rc<Vec<Emoji>>,
     _emoji_observe: Subscription,
     channel_permissions_fp: Option<(bool, bool)>,
@@ -1017,15 +1018,8 @@ impl ChannelMessages {
                 this.last_visible_start = visible_start;
                 this.last_visible_end = visible_end;
 
-                if range_moved {
-                    if this.context_menu_target.take().is_some() {
-                        cx.notify();
-                    }
-                    if this.reaction_picker.take().is_some() {
-                        this._reaction_picker_sub = None;
-                        this._reaction_picker_dismiss_sub = None;
-                        cx.notify();
-                    }
+                if range_moved && this.context_menu_target.take().is_some() {
+                    cx.notify();
                 }
 
                 this.mark_scroll_activity(cx);
@@ -1218,6 +1212,7 @@ impl ChannelMessages {
             _edit_input_sub: None,
             context_menu_target: None,
             context_menu_forward_all: false,
+            reaction_submenu_open: false,
             emoji_recent,
             _emoji_observe: emoji_observe,
             channel_permissions_fp: None,
@@ -1683,15 +1678,24 @@ impl ChannelMessages {
         self._hover_hide_task = None;
         self.hovered_row = None;
         self.raw_hover = None;
+        self.reaction_submenu_open = false;
         self.context_menu_target = Some((message_id, position));
         cx.notify();
     }
 
     pub(crate) fn close_context_menu(&mut self, cx: &mut Context<Self>) {
         if self.context_menu_target.take().is_some() {
+            self.reaction_submenu_open = false;
             if self.raw_hover.is_none() {
                 self.hovered_row = None;
             }
+            cx.notify();
+        }
+    }
+
+    pub(crate) fn set_reaction_submenu_open(&mut self, open: bool, cx: &mut Context<Self>) {
+        if self.reaction_submenu_open != open {
+            self.reaction_submenu_open = open;
             cx.notify();
         }
     }
@@ -2391,12 +2395,13 @@ impl ChannelMessages {
             .flex()
             .items_center()
             .justify_center()
-            .cursor_pointer()
             .opacity(if visible { 1.0 } else { 0.0 })
             .when(visible, |el| {
-                el.on_click(cx.listener(|this, _event, _window, cx| {
-                    this.scroll_down_clicked(cx);
-                }))
+                el.cursor_pointer()
+                    .occlude()
+                    .on_click(cx.listener(|this, _event, _window, cx| {
+                        this.scroll_down_clicked(cx);
+                    }))
             })
             .when(unread_count > 0, |el| {
                 el.child(
@@ -2839,6 +2844,7 @@ impl ChannelMessages {
                     &self.cached_locale,
                     self.context_menu_forward_all,
                     true,
+                    self.reaction_submenu_open,
                     cx.entity().downgrade(),
                     cx,
                 );
@@ -3065,6 +3071,7 @@ impl Render for ChannelMessages {
                     &self.cached_locale,
                     self.context_menu_forward_all,
                     false,
+                    self.reaction_submenu_open,
                     cx.entity().downgrade(),
                     cx,
                 );
