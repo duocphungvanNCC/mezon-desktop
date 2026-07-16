@@ -109,6 +109,14 @@ impl<K: Eq + Hash + Clone, V> KeyedCache<K, V> {
         self.order.clear();
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
     /// Force a refetch on next access **without** dropping values — `is_fresh` returns false for
     /// every key but `get` still returns the last value (no empty flash on resync).
     pub fn mark_all_stale(&mut self) {

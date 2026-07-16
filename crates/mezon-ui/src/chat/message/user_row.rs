@@ -218,7 +218,7 @@ pub fn render_user_message(
                 .p_3()
                 .rounded(px(8.))
                 .border_1()
-                .border_color(theme.tokens.border_theme_primary)
+                .border_color(theme.tokens.border_primary)
                 .bg(theme.tokens.bg_tertiary)
         })
         .when(ephemeral, |d| {
@@ -356,7 +356,7 @@ fn render_edit_box(
                 .mt(px(5.))
                 .rounded(px(8.))
                 .border_1()
-                .border_color(theme.tokens.border_theme_primary)
+                .border_color(theme.tokens.border_primary)
                 .bg(theme.tokens.bg_surface)
                 .child(input),
         )

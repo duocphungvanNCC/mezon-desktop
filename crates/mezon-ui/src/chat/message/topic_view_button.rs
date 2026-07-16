@@ -95,7 +95,7 @@ pub fn render_topic_view_button(msg: &Message, ctx: &RowCtx) -> AnyElement {
         .p_1()
         .rounded(px(8.))
         .border_1()
-        .border_color(theme.tokens.border_theme_primary)
+        .border_color(theme.tokens.border_primary)
         .bg(theme.tokens.bg_item_theme_hover)
         .text_color(theme.tokens.text_theme_primary)
         .cursor_pointer()

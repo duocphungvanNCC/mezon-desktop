@@ -165,6 +165,26 @@ fn dispatch_realtime_push(
     }
 }
 
+fn push_varint(buf: &mut Vec<u8>, mut value: u64) {
+    while value >= 0x80 {
+        buf.push((value as u8) | 0x80);
+        value >>= 7;
+    }
+    buf.push(value as u8);
+}
+
+fn encode_envelope_cid_last(mut envelope: realtime::Envelope) -> Vec<u8> {
+    let cid = envelope.cid;
+    if cid <= 0 {
+        return envelope.encode_to_vec();
+    }
+    envelope.cid = 0;
+    let mut bytes = envelope.encode_to_vec();
+    bytes.push(0x08);
+    push_varint(&mut bytes, cid as u64);
+    bytes
+}
+
 /// Main transport client.
 pub struct MezonTransport {
     adapter: Arc<dyn TransportAdapter>,
@@ -2244,7 +2264,7 @@ impl MezonTransport {
                 },
             )),
         };
-        Ok(envelope.encode_to_vec())
+        Ok(encode_envelope_cid_last(envelope))
     }
 
     /// Fingerprint of a request's arguments (its encoded body). Two calls with the
@@ -3095,7 +3115,7 @@ impl MezonTransport {
                 },
             )),
         };
-        let (code, _response) = self.send(cid, envelope.encode_to_vec()).await?;
+        let (code, _response) = self.send(cid, encode_envelope_cid_last(envelope)).await?;
         if code != 0 {
             anyhow::bail!("join_chat error: code={code}");
         }
@@ -3116,7 +3136,7 @@ impl MezonTransport {
                 },
             )),
         };
-        let (code, _response) = self.send(cid, envelope.encode_to_vec()).await?;
+        let (code, _response) = self.send(cid, encode_envelope_cid_last(envelope)).await?;
         if code != 0 {
             anyhow::bail!("write_voice_reaction error: code={code}");
         }
@@ -3152,7 +3172,7 @@ impl MezonTransport {
                 },
             )),
         };
-        let (code, _response) = self.send(cid, envelope.encode_to_vec()).await?;
+        let (code, _response) = self.send(cid, encode_envelope_cid_last(envelope)).await?;
         if code != 0 {
             anyhow::bail!("write_last_seen_message error: code={code}");
         }
@@ -3168,7 +3188,7 @@ impl MezonTransport {
                 clan_id,
             })),
         };
-        let (code, _response) = self.send(cid, envelope.encode_to_vec()).await?;
+        let (code, _response) = self.send(cid, encode_envelope_cid_last(envelope)).await?;
         if code != 0 {
             anyhow::bail!("join_clan_chat error: code={code}");
         }
@@ -7652,6 +7672,62 @@ impl MezonTransport {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn envelope_cid_last_moves_cid_after_empty_submessage() {
+        let envelope = realtime::Envelope {
+            cid: 7,
+            message: Some(realtime::envelope::Message::ClanJoin(realtime::ClanJoin {
+                clan_id: 0,
+            })),
+        };
+        let bytes = encode_envelope_cid_last(envelope);
+        assert_eq!(bytes, vec![0x1a, 0x00, 0x08, 0x07]);
+        assert_ne!(*bytes.last().unwrap(), 0);
+        let decoded = realtime::Envelope::decode(bytes.as_slice()).unwrap();
+        assert_eq!(decoded.cid, 7);
+        assert!(matches!(
+            decoded.message,
+            Some(realtime::envelope::Message::ClanJoin(cj)) if cj.clan_id == 0
+        ));
+    }
+
+    #[test]
+    fn envelope_cid_last_protects_body_ending_in_zero() {
+        let envelope = realtime::Envelope {
+            cid: 300,
+            message: Some(realtime::envelope::Message::ApiRequestEvent(
+                realtime::ApiRequestEvent {
+                    api_index: 1,
+                    api_name: "X".to_string(),
+                    body: vec![0x08, 0x00],
+                },
+            )),
+        };
+        let bytes = encode_envelope_cid_last(envelope);
+        assert_ne!(*bytes.last().unwrap(), 0);
+        let decoded = realtime::Envelope::decode(bytes.as_slice()).unwrap();
+        assert_eq!(decoded.cid, 300);
+        match decoded.message {
+            Some(realtime::envelope::Message::ApiRequestEvent(e)) => {
+                assert_eq!(e.body, vec![0x08, 0x00]);
+                assert_eq!(e.api_name, "X");
+            }
+            _ => panic!("expected ApiRequestEvent"),
+        }
+    }
+
+    #[test]
+    fn envelope_cid_last_noop_when_cid_zero() {
+        let envelope = realtime::Envelope {
+            cid: 0,
+            message: Some(realtime::envelope::Message::ClanJoin(realtime::ClanJoin {
+                clan_id: 5,
+            })),
+        };
+        let expected = envelope.clone().encode_to_vec();
+        assert_eq!(encode_envelope_cid_last(envelope), expected);
+    }
 
     #[test]
     fn message_fields_parse_json_payloads() {
