@@ -1,3 +1,4 @@
+use std::cmp::Ordering;
 use std::collections::HashSet;
 use std::sync::Arc;
 
@@ -16,6 +17,14 @@ use unicode_normalization::{UnicodeNormalization, char::is_combining_mark};
 
 const PAGE_SIZES: [usize; 3] = [10, 50, 100];
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MemberSortField {
+    Name,
+    MemberSince,
+    JoinedMezon,
+    Roles,
+}
+
 pub struct ClanMembersPage {
     clan_id: ClanId,
     settings: Entity<Settings>,
@@ -25,7 +34,8 @@ pub struct ClanMembersPage {
     page: usize,
     page_size: usize,
     page_size_picker_open: bool,
-    newest_first: bool,
+    sort_field: MemberSortField,
+    sort_descending: bool,
     role_picker: Option<UserId>,
     list_state: ListState,
 }
@@ -40,6 +50,7 @@ struct MemberRow {
     member_since: u32,
     joined_mezon: u32,
     role_ids: Vec<RoleId>,
+    role_count: usize,
 }
 
 struct ExtraRolesTooltip {
@@ -74,7 +85,8 @@ impl ClanMembersPage {
             page: 0,
             page_size: PAGE_SIZES[0],
             page_size_picker_open: false,
-            newest_first: true,
+            sort_field: MemberSortField::MemberSince,
+            sort_descending: true,
             role_picker: None,
             list_state: ListState::new(0, ListAlignment::Top, px(240.)),
         }
@@ -144,22 +156,51 @@ impl ClanMembersPage {
                     || normalize_search(&member.user.display_name).contains(&query)
                     || normalize_search(&member.clan_nick).contains(&query)
             })
-            .map(|member| MemberRow {
-                id: member.id(),
-                name: member.name().to_string(),
-                username: member.user.username.clone(),
-                clan_nick: member.clan_nick.clone(),
-                avatar: member.avatar().to_string(),
-                member_since: member.user.join_time_seconds,
-                joined_mezon: member.user.create_time_seconds,
-                role_ids: member.role_ids.clone(),
+            .map(|member| {
+                let role_count = self.visible_roles(&member.role_ids, cx).len();
+                MemberRow {
+                    id: member.id(),
+                    name: member.name().to_string(),
+                    username: member.user.username.clone(),
+                    clan_nick: member.clan_nick.clone(),
+                    avatar: member.avatar().to_string(),
+                    member_since: member.user.join_time_seconds,
+                    joined_mezon: member.user.create_time_seconds,
+                    role_ids: member.role_ids.clone(),
+                    role_count,
+                }
             })
             .collect();
-        rows.sort_by_key(|member| member.member_since);
-        if self.newest_first {
-            rows.reverse();
-        }
+        rows.sort_by(|left, right| {
+            let ordering = match self.sort_field {
+                MemberSortField::Name => apply_direction(
+                    normalize_search(&left.name).cmp(&normalize_search(&right.name)),
+                    self.sort_descending,
+                ),
+                MemberSortField::MemberSince => {
+                    compare_timestamp(left.member_since, right.member_since, self.sort_descending)
+                }
+                MemberSortField::JoinedMezon => {
+                    compare_timestamp(left.joined_mezon, right.joined_mezon, self.sort_descending)
+                }
+                MemberSortField::Roles => {
+                    apply_direction(left.role_count.cmp(&right.role_count), self.sort_descending)
+                }
+            };
+            ordering.then_with(|| normalize_search(&left.name).cmp(&normalize_search(&right.name)))
+        });
         rows
+    }
+
+    fn select_sort(&mut self, field: MemberSortField) {
+        if self.sort_field == field {
+            self.sort_descending = !self.sort_descending;
+        } else {
+            self.sort_field = field;
+            self.sort_descending = !matches!(field, MemberSortField::Name);
+        }
+        self.page = 0;
+        self.scroll_to_top();
     }
 
     fn format_date(seconds: u32) -> String {
@@ -404,6 +445,96 @@ impl ClanMembersPage {
             .into_any_element()
     }
 
+    fn render_sort_header(
+        &self,
+        label: String,
+        field: MemberSortField,
+        centered: bool,
+        cx: &Context<Self>,
+    ) -> AnyElement {
+        let active = self.sort_field == field;
+        div()
+            .id(format!("member-sort-{field:?}"))
+            .flex()
+            .items_center()
+            .gap_1()
+            .cursor_pointer()
+            .when(centered, |element| element.justify_center())
+            .text_color(if active {
+                cx.theme().text_primary
+            } else {
+                cx.theme().text_secondary
+            })
+            .child(label)
+            .child(
+                Icon::new(IconName::FiltersIcon)
+                    .size(px(14.))
+                    .text_color(if active {
+                        cx.theme().text_primary
+                    } else {
+                        cx.theme().text_secondary
+                    })
+                    .with_transformation(gpui::Transformation::rotate(gpui::radians(
+                        std::f32::consts::FRAC_PI_2,
+                    ))),
+            )
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.select_sort(field);
+                cx.notify();
+            }))
+            .into_any_element()
+    }
+
+    fn render_header(&self, locale: &str, cx: &Context<Self>) -> AnyElement {
+        let theme = cx.theme();
+        table_row(theme, true)
+            .child(name_column(self.render_sort_header(
+                tr(locale, "memberTable.headers.name").to_uppercase(),
+                MemberSortField::Name,
+                false,
+                cx,
+            )))
+            .child(weighted_column(
+                self.render_sort_header(
+                    tr(locale, "memberTable.headers.memberSince").to_uppercase(),
+                    MemberSortField::MemberSince,
+                    true,
+                    cx,
+                ),
+                1.,
+                true,
+            ))
+            .child(weighted_column(
+                self.render_sort_header(
+                    tr(locale, "memberTable.headers.joinedMezon").to_uppercase(),
+                    MemberSortField::JoinedMezon,
+                    true,
+                    cx,
+                ),
+                1.,
+                true,
+            ))
+            .child(weighted_column(
+                self.render_sort_header(
+                    tr(locale, "memberTable.headers.roles").to_uppercase(),
+                    MemberSortField::Roles,
+                    true,
+                    cx,
+                ),
+                2.,
+                true,
+            ))
+            .child(weighted_column(
+                header_with_filter(
+                    tr(locale, "memberTable.headers.signals").to_uppercase(),
+                    theme,
+                ),
+                1.,
+                true,
+            ))
+            .into_any_element()
+    }
+
     fn render_toolbar(&self, locale: &str, cx: &Context<Self>) -> AnyElement {
         let theme = cx.theme();
         let controls = div()
@@ -458,9 +589,7 @@ impl ClanMembersPage {
                     )
                     .child(tr(locale, "memberTable.topBar.sort"))
                     .on_click(cx.listener(|this, _, _, cx| {
-                        this.newest_first = !this.newest_first;
-                        this.page = 0;
-                        this.scroll_to_top();
+                        this.select_sort(MemberSortField::MemberSince);
                         cx.notify();
                     })),
             )
@@ -673,7 +802,7 @@ impl Render for ClanMembersPage {
                     return this.render_toolbar(&locale_for_list, cx);
                 }
                 if index == 1 {
-                    return member_header(&locale_for_list, cx.theme());
+                    return this.render_header(&locale_for_list, cx);
                 }
                 let row_index = index - 2;
                 if let Some(row) = visible_for_list.get(row_index) {
@@ -718,46 +847,6 @@ fn table_row(theme: &crate::theme::Theme, header: bool) -> gpui::Div {
     } else {
         row.h(px(48.))
     }
-}
-
-fn member_header(locale: &str, theme: &crate::theme::Theme) -> AnyElement {
-    table_row(theme, true)
-        .child(name_column(
-            tr(locale, "memberTable.headers.name")
-                .to_uppercase()
-                .into_any_element(),
-        ))
-        .child(weighted_column(
-            tr(locale, "memberTable.headers.memberSince")
-                .to_uppercase()
-                .into_any_element(),
-            1.,
-            true,
-        ))
-        .child(weighted_column(
-            tr(locale, "memberTable.headers.joinedMezon")
-                .to_uppercase()
-                .into_any_element(),
-            1.,
-            true,
-        ))
-        .child(weighted_column(
-            header_with_filter(
-                tr(locale, "memberTable.headers.roles").to_uppercase(),
-                theme,
-            ),
-            2.,
-            true,
-        ))
-        .child(weighted_column(
-            header_with_filter(
-                tr(locale, "memberTable.headers.signals").to_uppercase(),
-                theme,
-            ),
-            1.,
-            true,
-        ))
-        .into_any_element()
 }
 
 fn name_column(content: AnyElement) -> gpui::Div {
@@ -854,11 +943,16 @@ fn role_checkbox(checked: bool, cx: &Context<ClanMembersPage>) -> AnyElement {
         .border_1()
         .border_color(cx.theme().border)
         .when(checked, |element| {
-            element.text_size(px(12.)).text_color(gpui::white()).child(
-                Icon::new(IconName::Check)
-                    .size(px(14.))
-                    .text_color(gpui::white()),
-            )
+            element
+                .bg(cx.theme().tokens.bg_active_button)
+                .border_color(cx.theme().border)
+                .text_size(px(12.))
+                .text_color(cx.theme().tokens.color_text_active_button)
+                .child(
+                    Icon::new(IconName::Check)
+                        .size(px(14.))
+                        .text_color(cx.theme().tokens.color_text_active_button),
+                )
         })
         .into_any_element()
 }
@@ -987,6 +1081,23 @@ fn tr(locale: &str, key: &'static str) -> String {
     mezon_i18n::t(locale, key).to_string()
 }
 
+fn apply_direction(ordering: Ordering, descending: bool) -> Ordering {
+    if descending {
+        ordering.reverse()
+    } else {
+        ordering
+    }
+}
+
+fn compare_timestamp(left: u32, right: u32, descending: bool) -> Ordering {
+    match (left == 0, right == 0) {
+        (true, true) => Ordering::Equal,
+        (true, false) => Ordering::Greater,
+        (false, true) => Ordering::Less,
+        (false, false) => apply_direction(left.cmp(&right), descending),
+    }
+}
+
 fn normalize_search(value: &str) -> String {
     value
         .nfd()
@@ -1049,5 +1160,13 @@ mod tests {
     fn search_matches_vietnamese_names_without_diacritics() {
         assert_eq!(normalize_search("Hiền"), "hien");
         assert_eq!(normalize_search("Đặng Văn"), "dang van");
+    }
+
+    #[test]
+    fn missing_timestamps_always_sort_last() {
+        assert_eq!(compare_timestamp(0, 10, false), Ordering::Greater);
+        assert_eq!(compare_timestamp(0, 10, true), Ordering::Greater);
+        assert_eq!(compare_timestamp(20, 10, false), Ordering::Greater);
+        assert_eq!(compare_timestamp(20, 10, true), Ordering::Less);
     }
 }
