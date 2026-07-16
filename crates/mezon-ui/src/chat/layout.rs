@@ -1901,12 +1901,19 @@ impl ChatLayout {
             }
             if let Some(dm) = self.current_dm(cx) {
                 let is_group = dm.kind == DirectKind::Group;
+                let in_voice = if is_group {
+                    None
+                } else {
+                    dm.peer_user_id
+                        .and_then(|user_id| self.channel_list.read(cx).in_voice_status(user_id))
+                };
                 return self
                     .chat_area
                     .render(
                         &locale,
                         Some(dm.label.as_str()),
                         true,
+                        in_voice,
                         Some(dm.id),
                         is_group,
                         is_group && self.show_member_list && !show_results_panel && !topic_open,
@@ -1934,6 +1941,7 @@ impl ChatLayout {
                         &locale,
                         None,
                         true,
+                        None,
                         None,
                         false,
                         false,
@@ -2018,6 +2026,7 @@ impl ChatLayout {
                     &locale,
                     Some(channel_name.as_str()),
                     false,
+                    None,
                     Some(channel_id),
                     true,
                     self.show_member_list && !show_results_panel && !topic_open,
@@ -2049,6 +2058,7 @@ impl ChatLayout {
                     &locale,
                     None,
                     false,
+                    None,
                     None,
                     true,
                     self.show_member_list && !show_results_panel && !topic_open,

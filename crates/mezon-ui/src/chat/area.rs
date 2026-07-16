@@ -4,7 +4,7 @@ use gpui::{
     AnyView, App, Context, Entity, ExternalPaths, FontWeight, SharedString, StyleRefinement,
     Subscription, Window, div, prelude::*, px, rgb, rgba,
 };
-use mezon_store::{ChannelId, MessagesEvent, MessagesStore, Settings};
+use mezon_store::{ChannelId, InVoiceInfo, MessagesEvent, MessagesStore, Settings};
 use ui::PopoverMenuHandle;
 
 use crate::chat::ReplyTarget;
@@ -170,6 +170,7 @@ impl ChatArea {
         locale: &str,
         channel_name: Option<&str>,
         is_dm: bool,
+        in_voice: Option<InVoiceInfo>,
         channel_id: Option<ChannelId>,
         show_members_button: bool,
         show_member_panel: bool,
@@ -202,6 +203,7 @@ impl ChatArea {
             header.sync(
                 channel_name,
                 is_dm,
+                in_voice,
                 show_members_button,
                 show_member_panel,
                 show_inbox,
