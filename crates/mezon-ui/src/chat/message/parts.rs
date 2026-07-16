@@ -530,7 +530,11 @@ fn render_audio(
             });
         },
         move |_, _, cx| {
-            mezon_store::download_url_with_dialog(download_url.clone(), download_name.clone(), cx)
+            crate::util::download::save_with_progress_toast(
+                download_url.clone(),
+                download_name.clone(),
+                cx,
+            )
         },
     )
 }
@@ -851,6 +855,7 @@ fn render_video_poster(
 ) -> AnyElement {
     let theme = ctx.theme;
     let url = SharedString::from(att.url.clone());
+    let filename = SharedString::from(att.filename.clone());
     let thumbnail = att.thumbnail_proxied.clone();
     let width = att.display_width;
     let height = att.display_height;
@@ -922,6 +927,7 @@ fn render_video_poster(
         .on_click(move |_, window, cx| {
             let activation = VideoActivation {
                 url: url.clone(),
+                filename: filename.clone(),
                 poster: thumbnail.clone(),
                 width,
                 height,
@@ -959,7 +965,7 @@ fn file_box_action(
         .rounded_md()
         .bg(theme.tokens.bg_theme_contexify)
         .border_1()
-        .border_color(theme.tokens.border_theme_primary)
+        .border_color(theme.tokens.border_primary)
         .cursor_pointer()
         .hover(|s| s.opacity(0.8))
         .on_click(on_click)
@@ -1014,7 +1020,7 @@ fn render_file_box(
         .rounded_lg()
         .bg(theme.tokens.bg_item_theme_hover)
         .border_1()
-        .border_color(theme.tokens.border_theme_primary)
+        .border_color(theme.tokens.border_primary)
         .child(
             div()
                 .relative()
@@ -1090,7 +1096,7 @@ fn render_file_box(
                         IconName::Download,
                         theme,
                         move |_, _, cx| {
-                            mezon_store::download_url_with_dialog(
+                            crate::util::download::save_with_progress_toast(
                                 download_url.clone(),
                                 download_name.clone(),
                                 cx,

@@ -111,8 +111,8 @@ impl AppConfig {
 
             domain_url: "https://mezon.ai".into(),
             redirect_uri: "https://mezon.ai".into(),
-            logo_mezon: "https://cdn.mezon.ai/images/mezon_logo.png".into(),
-            base_img_url: "https://cdn.mezon.ai".into(),
+            logo_mezon: "https://cdn.komu.vn/images/mezon_logo.png".into(),
+            base_img_url: "https://cdn.komu.vn".into(),
             profile_img_url: "https://profile.mezon.ai".into(),
             imgproxy_base_url: "https://dev-imgproxy.nccsoft.vn".into(),
             imgproxy_key: "_AEhOrrckkG-NjqIdVLtzc-dtLFuE4u6ClM0P46ICEY".into(),
@@ -140,9 +140,9 @@ impl AppConfig {
 
             api_client_key_custom: "mezon.ai".into(),
             sentry_dsn: String::new(),
-            anonymous_user_id: String::new(),
+            anonymous_user_id: "1767478432163172999".into(),
             max_length_name_allowed: 64,
-            update_url: "https://cdn.mezon.ai/release/".into(),
+            update_url: "https://cdn.komu.vn/release/".into(),
         }
     }
 
@@ -361,11 +361,15 @@ impl AppConfig {
     }
 
     pub fn emoji_src(&self, emoji_id: &str) -> String {
+        self.emoji_src_sized(emoji_id, 100)
+    }
+
+    pub fn emoji_src_sized(&self, emoji_id: &str, size: u32) -> String {
         if emoji_id.is_empty() || emoji_id == "0" {
             return String::new();
         }
         let source = format!("{}/emojis/{}.webp", self.base_img_url, emoji_id);
-        self.imgproxy_url(&source, 100, 100, "fit")
+        self.imgproxy_url(&source, size, size, "fit")
     }
 
     pub fn attachment_proxy(
@@ -656,7 +660,7 @@ mod tests {
             imgproxy_key: "sig".into(),
             ..AppConfig::dev_defaults()
         };
-        let src = "https://cdn.mezon.ai/images/avatar.png";
+        let src = "https://cdn.komu.vn/images/avatar.png";
         let out = cfg.imgproxy_url(src, 100, 100, "fit");
         assert!(out.starts_with("https://imgproxy.example/sig/rs:fit:100:100:1/mb:2097152/plain/"));
         assert!(out.ends_with("@webp"));
@@ -673,7 +677,7 @@ mod tests {
     #[test]
     fn imgproxy_url_proxies_cdn_on_dev_base() {
         let cfg = AppConfig::dev_defaults();
-        let src = "https://cdn.mezon.ai/images/avatar.png";
+        let src = "https://cdn.komu.vn/images/avatar.png";
         let out = cfg.imgproxy_url(src, 100, 100, "fit");
         assert!(out.starts_with("https://dev-imgproxy.nccsoft.vn/"));
         assert!(out.contains("/rs:fit:100:100:1/mb:2097152/plain/"));
@@ -694,7 +698,7 @@ mod tests {
             imgproxy_key: "sig".into(),
             ..AppConfig::dev_defaults()
         };
-        let out = cfg.avatar_proxy("https://cdn.mezon.ai/a.png");
+        let out = cfg.avatar_proxy("https://cdn.komu.vn/a.png");
         assert!(
             out.contains("rs:fit:100:100:1/mb:2097152/plain/"),
             "avatar must be 100x100 fit like React MessageAvatar: {out}"
@@ -708,7 +712,7 @@ mod tests {
             imgproxy_key: "sig".into(),
             ..AppConfig::dev_defaults()
         };
-        let src = "https://cdn.mezon.ai/images/photo.png";
+        let src = "https://cdn.komu.vn/images/photo.png";
         let (url, display_w, display_h) = cfg.attachment_proxy(src, 1200, 800);
         let pw = display_w.ceil() as u32;
         let ph = display_h.ceil() as u32;
