@@ -153,6 +153,24 @@ impl DirectSidebar {
         }
     }
 
+    fn refresh_dm_items(&mut self, cx: &mut Context<Self>) {
+        if !is_dm_route(cx) {
+            self.pending_rebuild = true;
+            return;
+        }
+        let store = DirectMessageStore::global(cx);
+        let fingerprint = dm_items_fingerprint(store.read(cx), cx);
+        if fingerprint == self.dm_items_fingerprint {
+            return;
+        }
+        self.dm_items_fingerprint = fingerprint;
+        let items = build_dm_items(store.read(cx), cx);
+        if self.dm_items != items {
+            self.dm_items = items;
+            cx.notify();
+        }
+    }
+
     fn render_search(&self, theme: &Theme, locale: &str) -> impl IntoElement {
         div()
             .w_full()
