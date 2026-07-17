@@ -1,0 +1,24 @@
+[package]
+name = "mezon-mcp"
+version.workspace = true
+license.workspace = true
+edition = "2024"
+
+[lints]
+workspace = true
+
+[dependencies]
+anyhow.workspace = true
+axum.workspace = true
+mezon-client.workspace = true
+mezon-proto.workspace = true
+rmcp.workspace = true
+schemars.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+futures.workspace = true
+tracing.workspace = true
+dirs.workspace = true
+base64.workspace = true

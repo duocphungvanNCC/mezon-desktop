@@ -1,3 +1,4 @@
+pub mod capture;
 pub mod main_window;
 pub mod root;
 pub mod shell;

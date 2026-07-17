@@ -32,6 +32,8 @@ indexmap.workspace = true
 image.workspace = true
 qrcode.workspace = true
 smallvec.workspace = true
+base64.workspace = true
+scap.workspace = true
 
 [dev-dependencies]
 gpui = { workspace = true, features = ["inspector", "test-support"] }
@@ -41,5 +43,10 @@ block = "0.1"
 objc.workspace = true
 raw-window-handle.workspace = true
 
-[target.'cfg(target_os = "linux")'.dependencies]
+[target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies]
 libc.workspace = true
+raw-window-handle.workspace = true
+scap = { workspace = true, features = ["wayland", "x11"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+raw-window-handle.workspace = true

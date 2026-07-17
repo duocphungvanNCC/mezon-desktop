@@ -107,7 +107,9 @@ pub use permissions::{
 };
 pub use pinned::{PinnedMessage, PinnedMessagesStore};
 pub use platform::{
-    DesktopNotification, NotifyFn, OpenUrlFn, PlatformStore, download_url_with_dialog,
+    CliInstallHooks, CliInstallStateFn, CliInstallToggleFn, CliInstallVisibleFn,
+    DesktopNotification, McpServerHooks, McpServerStatus, McpStartFn, McpStatusFn, McpStopFn,
+    NotifyFn, OpenUrlFn, PlatformStore, download_url_with_dialog,
 };
 pub use presence::*;
 pub use realtime::{RealtimeDispatch, RealtimeKind};
@@ -229,6 +231,9 @@ pub struct Settings {
     /// Last active channel_id within the last clan (restored on startup)
     #[serde(default)]
     pub last_channel_id: Option<ChannelId>,
+    /// Start the HTTP MCP server in read-only mode (no write tools)
+    #[serde(default)]
+    pub mcp_read_only: bool,
 }
 
 impl Default for Settings {
@@ -250,6 +255,7 @@ impl Default for Settings {
             clan_order: Vec::new(),
             last_clan_id: None,
             last_channel_id: None,
+            mcp_read_only: false,
         }
     }
 }

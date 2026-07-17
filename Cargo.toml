@@ -12,6 +12,8 @@ members = [
     "crates/mezon-updater",
     "crates/mezon-proto",
     "crates/mezon-i18n",
+    "crates/mezon-cli",
+    "crates/mezon-mcp",
     # "crates/mezon-active-windows" excluded: orphan (unused) + does not compile (Rust 2024
     # `unsafe extern` + core_foundation API mismatch). Re-add once fixed & wired for rich-presence.
     # Vendored GPUI crates
@@ -117,6 +119,8 @@ mezon-native  = { path = "crates/mezon-native" }
 mezon-proto   = { path = "crates/mezon-proto" }
 mezon-updater = { path = "crates/mezon-updater" }
 mezon-i18n    = { path = "crates/mezon-i18n" }
+mezon-cli     = { path = "crates/mezon-cli" }
+mezon-mcp     = { path = "crates/mezon-mcp" }
 # mezon-active-windows = { path = "crates/mezon-active-windows" }  # excluded — see [workspace.members]
 
 # ---------- Async runtime ----------
@@ -153,6 +157,10 @@ serde                = { version = "1", features = ["derive", "rc"] }
 serde_json           = { version = "1", features = ["preserve_order", "raw_value"] }
 serde_json_lenient   = "0.2"
 serde_repr           = "0.1"
+clap                 = { version = "4", features = ["derive"] }
+rmcp                 = { version = "2.2.0", features = ["server", "transport-io", "transport-streamable-http-server", "schemars", "macros"] }
+axum                 = { version = "0.8", default-features = false, features = ["http1", "tokio"] }
+tokio-util           = { version = "0.7", features = ["rt"] }
 
 # ---------- Logging ----------
 tracing              = "0.1"

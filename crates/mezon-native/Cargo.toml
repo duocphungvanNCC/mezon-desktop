@@ -13,6 +13,7 @@ crossbeam-channel = "0.5"
 thiserror.workspace = true
 tracing.workspace = true
 serde.workspace = true
+serde_json.workspace = true
 tokio.workspace = true
 flume.workspace = true
 cpal.workspace = true
