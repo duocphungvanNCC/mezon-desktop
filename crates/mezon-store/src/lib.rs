@@ -7,6 +7,7 @@ pub mod cache;
 pub mod channel;
 pub mod channel_members;
 pub mod channel_permissions;
+pub mod channel_settings;
 pub mod clan;
 pub mod clan_members;
 pub mod config;
@@ -68,6 +69,7 @@ pub use channel_permissions::{
     ChannelPermissionsEvent, ChannelPermissionsStore, PERMISSION_DELETE_MESSAGE,
     PERMISSION_MANAGE_THREAD,
 };
+pub use channel_settings::{ChannelSetting, ChannelSettingsEvent, ChannelSettingsStore};
 pub use clan::*;
 pub use clan_members::{
     ClanMember, ClanMembersEvent, ClanMembersStore, User, split_members_by_status,

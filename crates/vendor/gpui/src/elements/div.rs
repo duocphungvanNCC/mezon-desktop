@@ -1911,8 +1911,7 @@ fn start_smooth_scroll_handle(
             let (_, velocity, _) = animation.sample(now);
             (animation.target - animation.applied, velocity)
         });
-        let target = (current + remaining + delta.as_f32())
-            .clamp(-state.max_offset.y.as_f32(), 0.);
+        let target = (current + remaining + delta.as_f32()).clamp(-state.max_offset.y.as_f32(), 0.);
         if (target - current).abs() <= f32::EPSILON {
             state.wheel_scroll_animation = None;
             return;
@@ -2136,12 +2135,7 @@ impl Interactivity {
             && let Some(handle) = self.tracked_scroll_handle.as_ref()
         {
             handle.0.borrow_mut().suppress_hover_while_scrolling = true;
-            ensure_scroll_handle_hover_release_task(
-                handle,
-                window.current_view(),
-                window,
-                cx,
-            );
+            ensure_scroll_handle_hover_release_task(handle, window.current_view(), window, cx);
         }
 
         #[cfg(any(feature = "inspector", debug_assertions))]
@@ -2214,10 +2208,8 @@ impl Interactivity {
                                     handle.0.borrow().is_scroll_hover_active()
                                 })
                             {
-                                window.insert_hitbox(
-                                    bounds,
-                                    HitboxBehavior::BlockMouseExceptScroll,
-                                );
+                                window
+                                    .insert_hitbox(bounds, HitboxBehavior::BlockMouseExceptScroll);
                             }
                             (result, element_state)
                         },

@@ -4253,9 +4253,24 @@ impl MezonTransport {
         &self,
         clan_id: i64,
     ) -> Result<api::ChannelSettingListResponse> {
+        self.list_channel_setting_page(clan_id, 0, 500, 1, "").await
+    }
+
+    pub async fn list_channel_setting_page(
+        &self,
+        clan_id: i64,
+        parent_id: i64,
+        limit: i32,
+        page: i32,
+        channel_label: &str,
+    ) -> Result<api::ChannelSettingListResponse> {
         let cid = self.generate_cid();
         let body = api::ChannelSettingListRequest {
             clan_id,
+            parent_id,
+            limit,
+            page,
+            channel_label: channel_label.to_string(),
             ..Default::default()
         }
         .encode_to_vec();

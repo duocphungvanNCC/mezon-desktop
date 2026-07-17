@@ -887,6 +887,18 @@ impl AppApi {
         self.transport.get_clan_user_role(clan_id, 0).await
     }
 
+    pub async fn list_channel_setting_page(
+        &self,
+        clan_id: i64,
+        parent_id: i64,
+        limit: i32,
+        page: i32,
+    ) -> Result<mezon_proto::api::ChannelSettingListResponse> {
+        self.transport
+            .list_channel_setting_page(clan_id, parent_id, limit, page, "")
+            .await
+    }
+
     pub async fn list_stickers_by_user_id(&self) -> Result<Vec<mezon_proto::api::ClanSticker>> {
         let resp = self.transport.list_stickers_by_user_id().await?;
         Ok(resp.stickers)
