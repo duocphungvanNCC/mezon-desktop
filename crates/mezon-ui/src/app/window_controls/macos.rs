@@ -36,6 +36,12 @@ pub fn minimize_active_window(cx: &mut App) {
     update_active_window(cx, |window| window.minimize_window());
 }
 
+pub fn disable_window_fullscreen(window: &Window) {
+    if let Some(view) = appkit_view(window) {
+        disable_fullscreen(view);
+    }
+}
+
 pub fn configure_window<V: 'static>(cx: &mut App, handle: WindowHandle<V>) {
     if let Err(error) = cx.update_window(handle.into(), |_, window, cx| {
         window.on_window_should_close(cx, |window, _| {
@@ -43,9 +49,7 @@ pub fn configure_window<V: 'static>(cx: &mut App, handle: WindowHandle<V>) {
             false
         });
 
-        if let Some(view) = appkit_view(window) {
-            disable_fullscreen(view);
-        }
+        disable_window_fullscreen(window);
     }) {
         tracing::warn!("Failed to configure window: {error}");
     }
