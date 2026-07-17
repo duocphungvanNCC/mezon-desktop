@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 
 use gpui::{
-    AnyView, App, Context, DismissEvent, Entity, Focusable, StyleRefinement, Subscription, Task,
-    Window, deferred, div, prelude::*, px,
+    AnyView, App, Context, DismissEvent, Entity, Focusable, ScrollHandle, StyleRefinement,
+    Subscription, Task, Window, deferred, div, prelude::*, px,
 };
 use mezon_store::{
     AuthState, Channel, ChannelId, ChannelList, ChannelType, ClanId, ClanList, ClanMembersStore,
@@ -45,6 +45,7 @@ pub struct ChatLayout {
     auth_state: Entity<AuthState>,
     settings: Entity<Settings>,
     voice_store: Entity<VoiceStore>,
+    voice_strip_scroll: ScrollHandle,
     pending_channel_id: Option<ChannelId>,
     prefetched_voice_channel: Option<ChannelId>,
     dm_view_fingerprint: Option<(ChannelId, DirectKind, String)>,
@@ -349,6 +350,7 @@ impl ChatLayout {
             chat_area,
             settings,
             voice_store,
+            voice_strip_scroll: ScrollHandle::new(),
             pending_channel_id: None,
             prefetched_voice_channel: None,
             dm_view_fingerprint: None,
@@ -1983,6 +1985,7 @@ impl ChatLayout {
                     input_device_id,
                     output_device_id,
                     camera_device_id,
+                    &self.voice_strip_scroll,
                     cx,
                 );
                 return div()

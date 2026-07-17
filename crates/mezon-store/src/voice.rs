@@ -149,6 +149,7 @@ pub struct VoiceStore {
     noise_suppression_enabled: bool,
     noise_suppression_level: u8,
     focused_tile: Option<String>,
+    auto_focused_screen: Option<String>,
     fullscreen_screen: Option<u64>,
     pip: Option<PipWindow>,
     room_name: String,
@@ -224,6 +225,36 @@ pub fn camera_tile_id(identity: &str) -> String {
     format!("{identity}\u{1}camera")
 }
 
+#[derive(Debug, PartialEq)]
+enum ScreenAutoFocus {
+    Keep,
+    Clear,
+    Focus(String),
+}
+
+fn screen_auto_focus_transition(
+    participants: &[VoiceParticipant],
+    auto_focused: Option<&str>,
+) -> ScreenAutoFocus {
+    let auto_still_live = auto_focused.is_some_and(|id| {
+        participants
+            .iter()
+            .any(|p| p.screenshare.is_some() && screen_tile_id(&p.identity) == id)
+    });
+    if auto_still_live {
+        return ScreenAutoFocus::Keep;
+    }
+    let next = participants
+        .iter()
+        .find(|p| p.screenshare.is_some())
+        .map(|p| screen_tile_id(&p.identity));
+    match next {
+        Some(id) => ScreenAutoFocus::Focus(id),
+        None if auto_focused.is_some() => ScreenAutoFocus::Clear,
+        None => ScreenAutoFocus::Keep,
+    }
+}
+
 impl VoiceStore {
     pub fn init(api: Arc<AppApi>, cx: &mut App) -> Entity<Self> {
         let entity = cx.new(|cx| Self::new(api, cx));
@@ -253,6 +284,7 @@ impl VoiceStore {
             noise_suppression_enabled: false,
             noise_suppression_level: DEFAULT_NOISE_SUPPRESSION_LEVEL,
             focused_tile: None,
+            auto_focused_screen: None,
             fullscreen_screen: None,
             pip: None,
             room_name: String::new(),
@@ -1084,6 +1116,21 @@ impl VoiceStore {
         }
     }
 
+    fn sync_screen_auto_focus(&mut self) {
+        match screen_auto_focus_transition(&self.participants, self.auto_focused_screen.as_deref())
+        {
+            ScreenAutoFocus::Keep => {}
+            ScreenAutoFocus::Clear => {
+                self.focused_tile = None;
+                self.auto_focused_screen = None;
+            }
+            ScreenAutoFocus::Focus(id) => {
+                self.focused_tile = Some(id.clone());
+                self.auto_focused_screen = Some(id);
+            }
+        }
+    }
+
     pub fn toggle_focus(&mut self, id: String, cx: &mut Context<Self>) {
         if self.focused_tile.as_deref() == Some(id.as_str()) {
             self.focused_tile = None;
@@ -1518,6 +1565,7 @@ impl VoiceStore {
                     self.camera_enabled = local.camera.is_some();
                     self.screen_share_enabled = local.screenshare.is_some();
                 }
+                self.sync_screen_auto_focus();
                 self.evict_stale_render_cache();
                 self.flush_texture_drops(None, cx);
                 self.prune_screen_targets(cx);
@@ -1741,6 +1789,7 @@ impl VoiceStore {
         self.noise_suppression_enabled = false;
         self.noise_suppression_level = DEFAULT_NOISE_SUPPRESSION_LEVEL;
         self.focused_tile = None;
+        self.auto_focused_screen = None;
         self.room_name.clear();
         self.device_menu = None;
         self.device_submenu = None;
@@ -1771,7 +1820,89 @@ mod tests {
     use gpui::RenderImage;
     use parking_lot::Mutex;
 
-    use super::parse_raise_token;
+    use super::{ScreenAutoFocus, parse_raise_token, screen_auto_focus_transition, screen_tile_id};
+    use crate::{NetworkQuality, VoiceParticipant};
+
+    fn voice_participant(identity: &str, screenshare: Option<u64>) -> VoiceParticipant {
+        VoiceParticipant {
+            identity: identity.to_string(),
+            name: identity.to_string(),
+            is_local: false,
+            speaking: false,
+            muted: false,
+            camera: None,
+            screenshare,
+            quality: NetworkQuality::Unknown,
+        }
+    }
+
+    #[test]
+    fn auto_focuses_first_screen_share() {
+        let participants = vec![
+            voice_participant("a", None),
+            voice_participant("b", Some(1)),
+            voice_participant("c", Some(2)),
+        ];
+        assert_eq!(
+            screen_auto_focus_transition(&participants, None),
+            ScreenAutoFocus::Focus(screen_tile_id("b"))
+        );
+    }
+
+    #[test]
+    fn keeps_state_while_auto_focused_share_lives() {
+        let participants = vec![voice_participant("b", Some(1))];
+        let auto = screen_tile_id("b");
+        assert_eq!(
+            screen_auto_focus_transition(&participants, Some(&auto)),
+            ScreenAutoFocus::Keep
+        );
+    }
+
+    #[test]
+    fn does_not_steal_focus_for_second_share() {
+        let participants = vec![
+            voice_participant("b", Some(1)),
+            voice_participant("c", Some(2)),
+        ];
+        let auto = screen_tile_id("b");
+        assert_eq!(
+            screen_auto_focus_transition(&participants, Some(&auto)),
+            ScreenAutoFocus::Keep
+        );
+    }
+
+    #[test]
+    fn clears_focus_when_auto_focused_share_ends() {
+        let participants = vec![voice_participant("b", None)];
+        let auto = screen_tile_id("b");
+        assert_eq!(
+            screen_auto_focus_transition(&participants, Some(&auto)),
+            ScreenAutoFocus::Clear
+        );
+    }
+
+    #[test]
+    fn moves_focus_to_remaining_share_when_auto_focused_share_ends() {
+        let participants = vec![
+            voice_participant("b", None),
+            voice_participant("c", Some(2)),
+        ];
+        let auto = screen_tile_id("b");
+        assert_eq!(
+            screen_auto_focus_transition(&participants, Some(&auto)),
+            ScreenAutoFocus::Focus(screen_tile_id("c"))
+        );
+    }
+
+    #[test]
+    fn stays_idle_without_screen_shares() {
+        let participants = vec![voice_participant("a", None)];
+        assert_eq!(
+            screen_auto_focus_transition(&participants, None),
+            ScreenAutoFocus::Keep
+        );
+    }
 
     #[test]
     fn parse_raise_token_classifies_prefixes() {

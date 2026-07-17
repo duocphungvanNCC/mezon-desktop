@@ -1,7 +1,7 @@
 use gpui::{
     Animation, AnimationExt, AnyElement, App, ClipboardItem, Context, Entity, FontWeight, Hsla,
-    MouseButton, MouseDownEvent, ObjectFit, SharedString, StyledImage, Window, deferred, div, img,
-    prelude::*, px, relative,
+    MouseButton, MouseDownEvent, ObjectFit, ScrollHandle, SharedString, StyledImage, Window,
+    deferred, div, img, prelude::*, px, relative,
 };
 use mezon_store::{
     AppConfig, AudioStore, Channel, ChannelId, ClanId, ClanMembersStore, DeviceKind,
@@ -35,6 +35,7 @@ pub fn render_voice_channel(
     input_device_id: Option<String>,
     output_device_id: Option<String>,
     camera_device_id: Option<String>,
+    strip_scroll: &ScrollHandle,
     cx: &Context<ChatLayout>,
 ) -> AnyElement {
     let store = voice.read(cx);
@@ -46,7 +47,16 @@ pub fn render_voice_channel(
     if store.is_connected_to(&channel.id.to_string()) || connecting {
         let chat = cx.entity();
         return render_in_call(
-            theme, locale, channel, voice, settings, store, connecting, &chat, cx,
+            theme,
+            locale,
+            channel,
+            voice,
+            settings,
+            store,
+            connecting,
+            &chat,
+            strip_scroll,
+            cx,
         );
     }
 
@@ -801,6 +811,7 @@ fn render_in_call(
     store: &VoiceStore,
     connecting: bool,
     chat: &Entity<ChatLayout>,
+    strip_scroll: &ScrollHandle,
     cx: &App,
 ) -> AnyElement {
     let fullscreen_active = store.fullscreen_screen().is_some();
@@ -828,7 +839,9 @@ fn render_in_call(
         let focused_idx = focused.and_then(|id| cells.iter().position(|c| c.id == id));
 
         match focused_idx {
-            Some(idx) => render_focus_layout(theme, locale, store, voice, &cells, idx),
+            Some(idx) => {
+                render_focus_layout(theme, locale, store, voice, &cells, idx, strip_scroll)
+            }
             None => render_grid(
                 theme,
                 locale,
@@ -1354,10 +1367,10 @@ fn render_grid(
         .p_2()
         .bg(theme.bg_tertiary);
     for r in 0..rows {
-        let mut row = div().flex().flex_row().flex_1().min_h_0().gap_2();
+        let mut row = div().flex().flex_row().flex_1().min_h_0().w_full().gap_2();
         for c in 0..cols {
             let index = r * cols + c;
-            let mut cell_el = div().flex_1().min_w_0().min_h_0();
+            let mut cell_el = div().flex_1().min_w_0().min_h_0().w_full();
             if index < count {
                 cell_el = cell_el.child(video_tile(theme, locale, store, voice, &cells[index]));
             }
@@ -1380,6 +1393,7 @@ fn grid_dimensions(count: usize) -> (usize, usize) {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_focus_layout(
     theme: &Theme,
     locale: &str,
@@ -1387,39 +1401,83 @@ fn render_focus_layout(
     voice: &Entity<VoiceStore>,
     cells: &[VideoCell],
     focused_idx: usize,
+    strip_scroll: &ScrollHandle,
 ) -> AnyElement {
     let focused = &cells[focused_idx];
 
     let main = div()
         .flex()
-        .flex_1()
+        .flex_grow(5.)
+        .flex_basis(px(0.))
         .min_h_0()
-        .items_center()
-        .justify_center()
-        .p_3()
+        .w_full()
         .child(focus_main_tile(theme, locale, store, voice, focused));
 
-    let strip = div()
+    let strip_cells: Vec<&VideoCell> = if focused.is_screen {
+        cells.iter().collect()
+    } else {
+        cells
+            .iter()
+            .enumerate()
+            .filter(|&(i, _)| i != focused_idx)
+            .map(|(_, c)| c)
+            .collect()
+    };
+
+    let viewport = strip_scroll.bounds().size.width;
+    let max_x = strip_scroll.max_offset().x;
+    let overflows = max_x > px(0.);
+
+    let carousel = div()
+        .id("voice-carousel")
+        .flex_1()
+        .min_h_0()
+        .w_full()
         .flex()
         .flex_row()
-        .items_center()
-        .justify_center()
         .gap_2()
-        .px_3()
-        .pb_3()
-        .overflow_hidden()
+        .pb_1()
+        .when(!overflows, |this| this.justify_center())
+        .overflow_x_scroll()
+        .track_scroll(strip_scroll)
         .children(
-            cells
-                .iter()
-                .enumerate()
-                .map(|(i, c)| strip_tile(theme, locale, store, voice, c, i == focused_idx)),
+            strip_cells
+                .into_iter()
+                .map(|c| strip_tile(theme, locale, store, voice, c)),
         );
+
+    let scrollbar = overflows.then(|| {
+        let content = viewport + max_x;
+        let thumb = viewport * (viewport / content).clamp(0., 1.);
+        let scrolled = ((-strip_scroll.offset().x) / max_x).clamp(0., 1.);
+        let thumb_x = (viewport - thumb) * scrolled;
+        div().h(px(6.)).w_full().child(
+            div()
+                .ml(thumb_x)
+                .w(thumb)
+                .h_full()
+                .rounded(px(4.))
+                .bg(gpui::rgb(0x6d6f77)),
+        )
+    });
+
+    let strip = div()
+        .flex_grow(1.)
+        .flex()
+        .flex_col()
+        .flex_basis(px(0.))
+        .min_h_0()
+        .w_full()
+        .child(carousel)
+        .children(scrollbar);
 
     div()
         .flex()
         .flex_col()
         .flex_1()
         .min_h_0()
+        .p_2()
+        .gap_2()
         .bg(theme.bg_tertiary)
         .child(main)
         .child(strip)
@@ -1518,8 +1576,7 @@ fn focus_main_tile(
         .bg(theme.bg_secondary)
         .cursor_pointer()
         .child(inner)
-        .child(tile_label(locale, cell))
-        .child(tile_quality(cell))
+        .child(tile_metadata(locale, cell))
         .children(tile_sound_overlay(store, cell))
         .on_mouse_down(
             MouseButton::Right,
@@ -1537,14 +1594,11 @@ fn strip_tile(
     store: &VoiceStore,
     voice: &Entity<VoiceStore>,
     cell: &VideoCell,
-    is_focused: bool,
 ) -> AnyElement {
     let voice = voice.clone();
     let id = cell.id.clone();
     let inner = tile_inner(theme, store, cell, false);
-    let border_color: Hsla = if is_focused {
-        gpui::rgb(ACCENT_BLUE).into()
-    } else if cell.speaking && !cell.is_screen {
+    let border_color: Hsla = if cell.speaking && !cell.is_screen {
         theme.status_online.into()
     } else {
         gpui::transparent_black()
@@ -1554,10 +1608,11 @@ fn strip_tile(
         .id(SharedString::from(format!("strip-{}", cell.id)))
         .relative()
         .flex()
+        .flex_none()
         .items_center()
         .justify_center()
-        .w(px(214.))
-        .h(px(120.))
+        .h_full()
+        .aspect_ratio(16. / 10.)
         .rounded_lg()
         .overflow_hidden()
         .bg(theme.bg_secondary)
@@ -1565,15 +1620,14 @@ fn strip_tile(
         .border_2()
         .border_color(border_color)
         .child(inner)
-        .child(tile_label(locale, cell))
-        .child(tile_quality(cell))
+        .child(tile_metadata(locale, cell))
         .children(tile_sound_overlay(store, cell))
         .on_mouse_down(
             MouseButton::Right,
             participant_menu_trigger(&voice, cell.identity.clone()),
         )
         .on_click(move |_, _, cx| {
-            voice.update(cx, |store, cx| store.set_focus(id.clone(), cx));
+            voice.update(cx, |store, cx| store.toggle_focus(id.clone(), cx));
         })
         .into_any_element()
 }
@@ -1608,8 +1662,7 @@ fn video_tile(
         .border_2()
         .border_color(border_color)
         .child(inner)
-        .child(tile_label(locale, cell))
-        .child(tile_quality(cell))
+        .child(tile_metadata(locale, cell))
         .children(tile_sound_overlay(store, cell))
         .on_mouse_down(
             MouseButton::Right,
@@ -1661,45 +1714,14 @@ fn render_voice_frame(frame: VoiceRenderFrame, fit: ObjectFit) -> AnyElement {
     }
 }
 
-fn tile_label(locale: &str, cell: &VideoCell) -> AnyElement {
+fn tile_metadata(locale: &str, cell: &VideoCell) -> AnyElement {
     let label = if cell.is_screen {
         mezon_i18n::t(locale, "channelVoice.usernameScreen").replace("{{username}}", &cell.name)
     } else {
         cell.name.clone()
     };
 
-    div()
-        .absolute()
-        .left_2()
-        .bottom_2()
-        .flex()
-        .flex_row()
-        .items_center()
-        .gap_1()
-        .px(px(6.))
-        .py(px(2.))
-        .rounded_md()
-        .bg(gpui::rgba(0x000000b0))
-        .when(cell.muted && !cell.is_screen, |this| {
-            this.child(
-                Icon::new(IconName::VoiceMicDisabledIcon)
-                    .size(px(14.))
-                    .text_color(gpui::rgba(0xffffff80)),
-            )
-        })
-        .when(cell.is_screen, |this| {
-            this.child(
-                Icon::new(IconName::VoiceScreenShareIcon)
-                    .size(px(14.))
-                    .text_color(gpui::rgb(0xffffff)),
-            )
-        })
-        .child(div().text_xs().text_color(gpui::rgb(0xffffff)).child(label))
-        .into_any_element()
-}
-
-fn tile_quality(cell: &VideoCell) -> AnyElement {
-    let icon = match cell.quality {
+    let quality_icon = match cell.quality {
         NetworkQuality::Excellent => IconName::SvgQualityExcellentIcon,
         NetworkQuality::Good => IconName::SvgQualityGoodIcon,
         NetworkQuality::Poor => IconName::SvgQualityPoorIcon,
@@ -1708,19 +1730,73 @@ fn tile_quality(cell: &VideoCell) -> AnyElement {
 
     div()
         .absolute()
+        .left_2()
         .right_2()
         .bottom_2()
         .flex()
+        .flex_row()
         .items_center()
-        .justify_center()
-        .px(px(6.))
-        .py(px(2.))
-        .rounded_md()
-        .bg(gpui::rgba(0x000000b0))
+        .justify_between()
+        .gap_1()
         .child(
-            Icon::new(icon)
-                .size(px(16.))
-                .text_color(gpui::rgb(0xffffff)),
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap_1()
+                .min_w_0()
+                .overflow_hidden()
+                .p(px(5.))
+                .rounded_md()
+                .bg(gpui::rgba(0x00000080))
+                .when(cell.muted && !cell.is_screen, |this| {
+                    this.child(
+                        Icon::new(IconName::VoiceMicDisabledIcon)
+                            .size(px(14.))
+                            .flex_none()
+                            .text_color(gpui::rgba(0xffffff80)),
+                    )
+                })
+                .when(cell.is_screen, |this| {
+                    this.child(
+                        Icon::new(IconName::VoiceScreenShareIcon)
+                            .size(px(14.))
+                            .flex_none()
+                            .text_color(gpui::rgb(0xffffff)),
+                    )
+                })
+                .child(
+                    div()
+                        .relative()
+                        .min_w_0()
+                        .py(px(2.))
+                        .text_xs()
+                        .text_color(gpui::rgb(0xffffff))
+                        .child(div().invisible().whitespace_nowrap().child(label.clone()))
+                        .child(
+                            div()
+                                .absolute()
+                                .inset_0()
+                                .py(px(2.))
+                                .truncate()
+                                .child(label),
+                        ),
+                ),
+        )
+        .child(
+            div()
+                .flex_none()
+                .flex()
+                .items_center()
+                .justify_center()
+                .p(px(5.))
+                .rounded_md()
+                .bg(gpui::rgba(0x00000080))
+                .child(
+                    Icon::new(quality_icon)
+                        .size(px(16.))
+                        .text_color(gpui::rgb(0xffffff)),
+                ),
         )
         .into_any_element()
 }
