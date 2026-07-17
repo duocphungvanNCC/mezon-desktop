@@ -1882,6 +1882,8 @@ impl ChatLayout {
         let pin_handle = self.pin_popover_handle.clone();
         let show_results_panel = self.show_results_panel;
         let topic_open = TopicsStore::global(cx).read(cx).is_panel_open();
+        let create_thread_open = ThreadsStore::global(cx).read(cx).is_creating();
+        let side_panel_open = topic_open || create_thread_open;
         let search_expanded = self.message_search_expanded;
         let show_search_options = self.show_search_options;
         let search_input = self.message_search_input.clone();
@@ -1916,7 +1918,10 @@ impl ChatLayout {
                         in_voice,
                         Some(dm.id),
                         is_group,
-                        is_group && self.show_member_list && !show_results_panel && !topic_open,
+                        is_group
+                            && self.show_member_list
+                            && !show_results_panel
+                            && !side_panel_open,
                         false,
                         None,
                         None,
@@ -2029,7 +2034,7 @@ impl ChatLayout {
                     None,
                     Some(channel_id),
                     true,
-                    self.show_member_list && !show_results_panel && !topic_open,
+                    self.show_member_list && !show_results_panel && !side_panel_open,
                     true,
                     Some(inbox_handle),
                     active_clan_id,
@@ -2061,7 +2066,7 @@ impl ChatLayout {
                     None,
                     None,
                     true,
-                    self.show_member_list && !show_results_panel && !topic_open,
+                    self.show_member_list && !show_results_panel && !side_panel_open,
                     true,
                     Some(inbox_handle),
                     active_clan_id,

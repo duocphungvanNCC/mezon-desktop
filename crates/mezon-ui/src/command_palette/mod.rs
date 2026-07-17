@@ -293,6 +293,9 @@ impl CommandPaletteModal {
         if !self.items_dirty {
             return;
         }
+        ChannelList::global(cx).update(cx, |store, cx| {
+            items::ensure_palette_clans_loaded(store, cx);
+        });
         self.items = Rc::new(build_palette_items(cx));
         self.items_dirty = false;
         self.recompute_filtered(cx);
