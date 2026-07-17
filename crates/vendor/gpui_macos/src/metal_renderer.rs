@@ -504,7 +504,8 @@ impl MetalRenderer {
                     layer.as_ref(),
                     setDrawableSize: ns_size
                 ];
-                let _: () = msg_send![layer.as_ref(), setContents: ptr::null_mut::<std::ffi::c_void>()];
+                let _: () =
+                    msg_send![layer.as_ref(), setContents: ptr::null_mut::<std::ffi::c_void>()];
             }
         }
         self.layer = None;

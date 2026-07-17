@@ -303,26 +303,10 @@ async fn fetch_channel_documents(
     limit: i32,
 ) -> anyhow::Result<Vec<ApiChannelAttachment>> {
     let broad = api
-        .list_channel_attachments(
-            clan_id,
-            channel_id,
-            FILES_BROAD_QUERY,
-            0,
-            limit,
-            0,
-            0,
-        )
+        .list_channel_attachments(clan_id, channel_id, FILES_BROAD_QUERY, 0, limit, 0, 0)
         .await?;
     let typed = api
-        .list_channel_attachments(
-            clan_id,
-            channel_id,
-            FILES_TYPED_QUERY,
-            0,
-            limit,
-            0,
-            0,
-        )
+        .list_channel_attachments(clan_id, channel_id, FILES_TYPED_QUERY, 0, limit, 0, 0)
         .await?;
     Ok(merge_attachments(broad, typed))
 }

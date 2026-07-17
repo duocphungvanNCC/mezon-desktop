@@ -12,6 +12,9 @@ pub enum Route {
     ClanMembers {
         clan_id: ClanId,
     },
+    ClanChannels {
+        clan_id: ClanId,
+    },
     DirectMessage {
         direct_id: ChannelId,
         message_type: String,
@@ -61,6 +64,7 @@ impl Route {
             Route::Direct => "/chat/direct".to_string(),
             Route::Friends => "/chat/direct/friends".to_string(),
             Route::ClanMembers { clan_id } => format!("/chat/clans/{clan_id}/members"),
+            Route::ClanChannels { clan_id } => format!("/chat/clans/{clan_id}/channel-setting"),
             Route::DirectMessage {
                 direct_id,
                 message_type,
@@ -117,6 +121,9 @@ impl Route {
             ["chat", "direct"] => Route::Direct,
             ["chat", "direct", "friends"] => Route::Friends,
             ["chat", "clans", clan_id, "members"] => Route::ClanMembers {
+                clan_id: ClanId(clan_id.parse().ok()?),
+            },
+            ["chat", "clans", clan_id, "channel-setting"] => Route::ClanChannels {
                 clan_id: ClanId(clan_id.parse().ok()?),
             },
             ["chat", "direct", "message", direct_id, message_type] => Route::DirectMessage {

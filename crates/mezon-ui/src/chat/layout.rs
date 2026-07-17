@@ -8,8 +8,8 @@ use mezon_store::{
     AuthState, Channel, ChannelId, ChannelList, ChannelType, ClanId, ClanList, ClanMembersStore,
     DirectChannel, DirectKind, DirectMessageStore, GroupMembersStore, InboxStore,
     MessageSearchEvent, MessageSearchStore, MessagesStore, PinnedEvent, PinnedMessagesStore,
-    Settings, ThreadsEvent, ThreadsStore, TopicsEvent, TopicsStore, VoiceMember, VoiceModerationError, VoiceStore,
-    expand_mention_name_tokens,
+    Settings, ThreadsEvent, ThreadsStore, TopicsEvent, TopicsStore, VoiceMember,
+    VoiceModerationError, VoiceStore, expand_mention_name_tokens,
 };
 use ui::PopoverMenuHandle;
 use ui::utils::ROUNDED_BORDER_WINDOW;
@@ -40,6 +40,7 @@ pub struct ChatLayout {
     direct_sidebar: Entity<DirectSidebar>,
     friends_page: Entity<crate::chat::FriendsPage>,
     clan_members_page: Entity<crate::chat::clan_members_page::ClanMembersPage>,
+    clan_channels_page: Entity<crate::chat::clan_channels_page::ClanChannelsPage>,
     direct_store: Entity<DirectMessageStore>,
     user_info_bar: Entity<UserInfoBar>,
     clan_list: Entity<ClanList>,
@@ -184,6 +185,10 @@ impl ChatLayout {
         });
 
         let user_info_bar = cx.new(|cx| UserInfoBar::new(auth_state.clone(), cx));
+        let channels_settings = settings.clone();
+        let clan_channels_page = cx.new(move |cx| {
+            crate::chat::clan_channels_page::ClanChannelsPage::new(channels_settings, cx)
+        });
 
         let direct_store = DirectMessageStore::global(cx);
 
@@ -348,6 +353,7 @@ impl ChatLayout {
             direct_sidebar,
             friends_page,
             clan_members_page,
+            clan_channels_page,
             direct_store,
             user_info_bar,
             clan_list,
@@ -1904,6 +1910,12 @@ impl ChatLayout {
             return self.clan_members_page.clone().into_any_element();
         }
 
+        if let Route::ClanChannels { clan_id } = Router::global(cx).read(cx).route() {
+            self.clan_channels_page
+                .update(cx, |page, cx| page.set_clan(clan_id, cx));
+            return self.clan_channels_page.clone().into_any_element();
+        }
+
         if self.is_dm_route(cx) {
             if matches!(
                 Router::global(cx).read(cx).route(),
@@ -2113,7 +2125,9 @@ impl ChatLayout {
                 &format!("Direct {direct_id}"),
                 &current_path,
             ),
-            Route::Channel { .. } | Route::ClanMembers { .. } => div().into_any_element(),
+            Route::Channel { .. } | Route::ClanMembers { .. } | Route::ClanChannels { .. } => {
+                div().into_any_element()
+            }
             Route::Friends => self.render_placeholder(
                 theme,
                 crate::components::primitives::IconName::IconFriends,
