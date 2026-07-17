@@ -144,7 +144,7 @@ fn spawn_image_viewer_window(
         kind: WindowKind::Normal,
         focus: true,
         show: true,
-        titlebar: Some(window_controls::viewer_title_options()),
+        titlebar: Some(window_controls::window_title_options()),
         window_decorations: window_controls::main_window_decorations(),
         ..Default::default()
     };

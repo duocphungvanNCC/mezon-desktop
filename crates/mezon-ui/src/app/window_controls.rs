@@ -73,10 +73,6 @@ pub fn window_title_options() -> TitlebarOptions {
     }
 }
 
-pub fn viewer_title_options() -> TitlebarOptions {
-    window_title_options()
-}
-
 pub fn main_window_decorations() -> Option<WindowDecorations> {
     #[cfg(target_os = "linux")]
     {
