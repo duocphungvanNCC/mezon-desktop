@@ -964,11 +964,7 @@ impl RenderOnce for PinPopoverTrigger {
             .cursor_pointer()
             .hover(move |s| s.bg(bg_hover))
             .occlude()
-            .child(
-                Icon::new(IconName::PinRight)
-                    .size(px(20.))
-                    .text_color(tint),
-            );
+            .child(Icon::new(IconName::PinRight).size(px(20.)).text_color(tint));
         if self.open {
             button = button.bg(self.bg_active);
         }

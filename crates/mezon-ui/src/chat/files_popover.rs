@@ -918,11 +918,7 @@ fn file_audio_thumb(
                             let url = url.clone();
                             let _ = panel.update(cx, |this, cx| this.toggle_audio(url, cx));
                         })
-                        .child(
-                            Icon::new(play_icon)
-                                .size(px(8.))
-                                .text_color(rgb(0xffffff)),
-                        ),
+                        .child(Icon::new(play_icon).size(px(8.)).text_color(rgb(0xffffff))),
                 ),
         )
         .into_any_element()
