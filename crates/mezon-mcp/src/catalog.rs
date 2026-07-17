@@ -344,7 +344,8 @@ Parameters:
 - message_id (required)
 - emoji (required)
 - remove (optional boolean)
-- message_sender_id (optional)",
+- message_sender_id (optional)
+- topic_id (optional): discussion topic id when reacting inside a topic",
         write: true,
     },
     ToolSpec {
@@ -379,7 +380,9 @@ Parameters:
 - clan_id (required)
 - channel_id (required)
 - message_id (required)
-- content (required)",
+- content (required)
+- topic_id (optional): discussion topic id when editing inside a topic
+- is_update_msg_topic (optional boolean)",
         write: true,
     },
     ToolSpec {
@@ -390,7 +393,8 @@ Delete a message from a channel.
 Parameters:
 - clan_id (required)
 - channel_id (required)
-- message_id (required)",
+- message_id (required)
+- topic_id (optional): discussion topic id when deleting inside a topic",
         write: true,
     },
     ToolSpec {

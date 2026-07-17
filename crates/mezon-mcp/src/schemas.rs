@@ -186,6 +186,7 @@ pub fn input_schema(name: &str) -> Arc<Map<String, Value>> {
                 "emoji": string("Emoji character or shortcode."),
                 "remove": bool("When true, removes the reaction instead of adding it."),
                 "message_sender_id": id("Optional message author id (resolved automatically when omitted)."),
+                "topic_id": id("Optional topic id when reacting inside a discussion topic."),
             }),
             &["clan_id", "channel_id", "message_id", "emoji"],
         )),
@@ -218,10 +219,20 @@ pub fn input_schema(name: &str) -> Arc<Map<String, Value>> {
                 "channel_id": id("Channel snowflake id."),
                 "message_id": id("Message to edit."),
                 "content": string("New message text."),
+                "topic_id": id("Optional topic id when editing inside a discussion topic."),
+                "is_update_msg_topic": bool("When true, sends the edit as a topic message update."),
             }),
             &["clan_id", "channel_id", "message_id", "content"],
         )),
-        "delete_message" => Arc::new(clan_channel_message()),
+        "delete_message" => Arc::new(object(
+            json!({
+                "clan_id": id("Clan snowflake id. Use 0 for direct messages."),
+                "channel_id": id("Channel snowflake id."),
+                "message_id": id("Target message snowflake id."),
+                "topic_id": id("Optional topic id when deleting inside a discussion topic."),
+            }),
+            &["clan_id", "channel_id", "message_id"],
+        )),
         "send_image" => Arc::new(object(
             json!({
                 "clan_id": id("Clan snowflake id."),

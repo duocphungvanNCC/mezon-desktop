@@ -751,6 +751,7 @@ impl McpBackend {
             .and_then(Value::as_bool)
             .unwrap_or(false);
         let (clan_id, is_public, mode) = self.resolve_channel_mode(clan_id, channel_id).await?;
+        let topic_id = optional_i64_field(arguments, "topic_id").unwrap_or(0);
         let message_sender_id = if let Some(id) = optional_i64_field(arguments, "message_sender_id")
         {
             id
@@ -770,6 +771,7 @@ impl McpBackend {
                 mode,
                 is_public,
                 remove,
+                topic_id,
             )
             .await?;
         Ok(serde_json::json!({ "ok": true }))
@@ -855,6 +857,11 @@ impl McpBackend {
             .and_then(Value::as_str)
             .ok_or_else(|| anyhow::anyhow!("edit_message requires string field content"))?;
         let (clan_id, is_public, mode) = self.resolve_channel_mode(clan_id, channel_id).await?;
+        let topic_id = optional_i64_field(arguments, "topic_id").unwrap_or(0);
+        let is_update_msg_topic = arguments
+            .get("is_update_msg_topic")
+            .and_then(Value::as_bool)
+            .unwrap_or(topic_id != 0);
         self.api
             .update_channel_message(
                 clan_id,
@@ -866,6 +873,8 @@ impl McpBackend {
                 Vec::new(),
                 mode,
                 is_public,
+                topic_id,
+                is_update_msg_topic,
             )
             .await?;
         Ok(serde_json::json!({ "ok": true, "message_id": message_id }))
@@ -875,9 +884,26 @@ impl McpBackend {
         let clan_id = parse_i64_field(arguments, "clan_id")?;
         let channel_id = parse_i64_field(arguments, "channel_id")?;
         let message_id = parse_i64_field(arguments, "message_id")?;
-        let (clan_id, _, _) = self.resolve_channel_mode(clan_id, channel_id).await?;
+        let (clan_id, is_public, mode) = self.resolve_channel_mode(clan_id, channel_id).await?;
+        let topic_id = optional_i64_field(arguments, "topic_id").unwrap_or(0);
+        let message = self
+            .fetch_channel_message(clan_id, channel_id, message_id)
+            .await?;
+        let has_attachment = !message.attachments.is_empty();
+        let has_mentions = !message.entity_mentions.is_empty();
+        let has_references = !message.references.is_empty();
         self.api
-            .delete_channel_message(clan_id, channel_id, message_id)
+            .delete_channel_message(
+                clan_id,
+                channel_id,
+                message_id,
+                mode,
+                is_public,
+                has_attachment,
+                topic_id,
+                has_mentions,
+                has_references,
+            )
             .await?;
         Ok(serde_json::json!({ "ok": true, "message_id": message_id }))
     }
@@ -960,6 +986,8 @@ impl McpBackend {
                 sent.create_time.max(0) as u32,
                 mode,
                 is_public,
+                0,
+                false,
             )
             .await?;
         Ok(serde_json::json!({ "message_id": sent.message_id }))
@@ -1427,6 +1455,7 @@ async fn build_upload_file(path: &Path) -> anyhow::Result<UploadFile> {
         filetype,
         width: 0,
         height: 0,
+        duration: 0,
         thumbnail: None,
     })
 }
