@@ -144,7 +144,7 @@ fn spawn_image_viewer_window(
         kind: WindowKind::Normal,
         focus: true,
         show: true,
-        titlebar: Some(window_controls::viewer_title_options()),
+        titlebar: Some(window_controls::window_title_options()),
         window_decorations: window_controls::main_window_decorations(),
         ..Default::default()
     };
@@ -152,7 +152,15 @@ fn spawn_image_viewer_window(
     match cx.open_window(options, |window, cx| {
         cx.new(|cx| ImageViewer::new(request, window, cx))
     }) {
-        Ok(handle) => cx.set_global(GlobalImageViewer(handle)),
+        Ok(handle) => {
+            #[cfg(target_os = "macos")]
+            if let Err(error) = handle.update(cx, |_, window, _| {
+                window_controls::macos::disable_window_fullscreen(window);
+            }) {
+                tracing::warn!("Failed to configure image viewer window: {error}");
+            }
+            cx.set_global(GlobalImageViewer(handle));
+        }
         Err(e) => tracing::error!("failed to open image viewer window: {e}"),
     }
 }
@@ -915,6 +923,7 @@ impl Render for ImageViewer {
             .when_some(self.context_menu, |el, pos| {
                 el.child(context_menu_at(pos, self.build_context_menu(&locale, cx)))
             })
+            .child(window_controls::render_app_drag_header())
             .when(window_controls::is_edge_resizable(), |el| {
                 el.child(window_controls::render_resize_edges(window))
             })
@@ -923,7 +932,9 @@ impl Render for ImageViewer {
 
 impl ImageViewer {
     fn render_app_title_strip(&self, theme: &Theme) -> impl IntoElement {
-        div().flex_shrink_0().h_8().w_full().bg(theme.title_bar_bg)
+        window_controls::window_drag_handle(
+            div().flex_shrink_0().h_8().w_full().bg(theme.title_bar_bg),
+        )
     }
 
     fn render_channel_header(&self, theme: &Theme) -> impl IntoElement {
