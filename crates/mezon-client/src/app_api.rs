@@ -879,6 +879,41 @@ impl AppApi {
         self.transport.list_roles(clan_id, limit, cursor).await
     }
 
+    pub async fn create_role(
+        &self,
+        request: mezon_proto::api::CreateRoleRequest,
+    ) -> Result<mezon_proto::api::Role> {
+        self.transport.create_role(request).await
+    }
+
+    pub async fn update_role(&self, request: mezon_proto::api::UpdateRoleRequest) -> Result<()> {
+        self.transport.update_role(request).await
+    }
+
+    pub async fn list_role_users(
+        &self,
+        role_id: i64,
+        limit: i32,
+        cursor: &str,
+    ) -> Result<mezon_proto::api::RoleUserList> {
+        self.transport.list_role_users(role_id, limit, cursor).await
+    }
+
+    pub async fn delete_role(&self, role_id: i64, clan_id: i64) -> Result<()> {
+        self.transport.delete_role(role_id, clan_id).await
+    }
+
+    pub async fn update_role_order(&self, clan_id: i64, roles: &[(i32, i64)]) -> Result<()> {
+        self.transport.update_role_order(clan_id, roles).await
+    }
+
+    pub async fn list_role_permissions(
+        &self,
+        role_id: i64,
+    ) -> Result<mezon_proto::api::PermissionList> {
+        self.transport.list_role_permissions(role_id).await
+    }
+
     pub async fn get_list_permission(&self) -> Result<mezon_proto::api::PermissionList> {
         self.transport.get_list_permission().await
     }

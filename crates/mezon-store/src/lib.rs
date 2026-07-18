@@ -113,7 +113,8 @@ pub use mezon_client::{
 };
 pub use permissions::{
     ClanSettingsPermissions, PERMISSION_ADMINISTRATOR, PERMISSION_CLAN_OWNER,
-    PERMISSION_MANAGE_CHANNEL, PERMISSION_MANAGE_CLAN, PermissionEvent, PermissionStore,
+    PERMISSION_MANAGE_CHANNEL, PERMISSION_MANAGE_CLAN, PERMISSION_SEND_MESSAGE,
+    PermissionDefinition, PermissionEvent, PermissionStore,
 };
 pub use pinned::{PinnedEvent, PinnedMessage, PinnedMessagesStore};
 pub use platform::{
@@ -122,7 +123,10 @@ pub use platform::{
 };
 pub use presence::*;
 pub use realtime::{RealtimeDispatch, RealtimeKind};
-pub use roles::{Role, RolesEvent, RolesStore};
+pub use roles::{
+    ClanRoleDetail, DEFAULT_ROLE_COLOR, MAX_ROLE_ICON_BYTES, Role, RoleDraft, RolePermission,
+    RoleUser, RolesEvent, RolesStore, everyone_slug,
+};
 pub use sticker::{ClanSound, Sticker, StickerEvent, StickerStore};
 pub use threads::{THREAD_STATUS_JOINED, ThreadSummary, ThreadsEvent, ThreadsStore, group_threads};
 pub use topic_badges::{TopicBadgeEvent, TopicBadgeStore};
