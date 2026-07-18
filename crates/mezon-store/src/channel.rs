@@ -95,6 +95,14 @@ impl From<ApiChannelApp> for AppChannel {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArchivedChannelDesc {
+    pub channel_id: i64,
+    pub channel_label: String,
+    pub channel_private: bool,
+    pub last_active_timestamp: Option<i64>,
+}
+
 #[derive(Debug, Clone)]
 pub struct Channel {
     pub id: ChannelId,
@@ -471,6 +479,48 @@ impl ChannelList {
 
     pub fn refresh_clan(&mut self, clan_id: ClanId, cx: &mut Context<Self>) {
         self.fetch_clan(clan_id, cx);
+    }
+
+    pub fn fetch_archived_channels(
+        &self,
+        clan_id: ClanId,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<Vec<ArchivedChannelDesc>, String>> {
+        let api = self.api.clone();
+        let id = clan_id.get();
+        cx.spawn(async move |_, _| {
+            let descs = api
+                .list_archived_channel_descs(id)
+                .await
+                .map_err(|e| e.to_string())?;
+            Ok(descs
+                .into_iter()
+                .map(|d| ArchivedChannelDesc {
+                    channel_id: d.channel_id,
+                    channel_label: d.channel_label,
+                    channel_private: d.channel_private != 0,
+                    last_active_timestamp: d
+                        .last_sent_message
+                        .filter(|m| m.timestamp_seconds > 0)
+                        .map(|m| i64::from(m.timestamp_seconds)),
+                })
+                .collect())
+        })
+    }
+
+    pub fn restore_archived_channel(
+        &self,
+        clan_id: ClanId,
+        channel_id: i64,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<(), String>> {
+        let api = self.api.clone();
+        let clan_id_raw = clan_id.get();
+        cx.spawn(async move |_, _| {
+            api.restore_archived_channel(clan_id_raw, channel_id)
+                .await
+                .map_err(|e| e.to_string())
+        })
     }
 
     fn fetch_clan(&mut self, clan_id: ClanId, cx: &mut Context<Self>) {
@@ -1080,6 +1130,50 @@ impl ChannelList {
                 category.id != FAVOR_CATE_ID
                     && category.name.trim().to_lowercase() == normalized.to_lowercase()
             })
+        })
+    }
+
+    pub fn update_categories_order(
+        &mut self,
+        clan_id: ClanId,
+        category_ids: &[i64],
+        cx: &mut Context<Self>,
+    ) -> Task<Result<(), String>> {
+        if category_ids.is_empty() {
+            return Task::ready(Err("no categories to reorder".into()));
+        }
+        let payload: Vec<(i32, i64)> = category_ids
+            .iter()
+            .enumerate()
+            .map(|(index, category_id)| ((index + 1) as i32, *category_id))
+            .collect();
+        if let Some(categories) = self.cache.get_mut(&clan_id) {
+            for (index, category_id) in category_ids.iter().enumerate() {
+                let order = (index + 1) as i32;
+                let id = category_id.to_string();
+                if let Some(category) = categories.iter_mut().find(|c| c.id == id) {
+                    category.order = order;
+                }
+            }
+            categories.sort_by_key(|c| {
+                if c.id == FAVOR_CATE_ID {
+                    i32::MIN
+                } else {
+                    c.order
+                }
+            });
+            cx.notify();
+        }
+        let api = self.api.clone();
+        cx.spawn(async move |this, cx| {
+            api.update_category_order(clan_id.get(), &payload)
+                .await
+                .map_err(|e| e.to_string())?;
+            this.update(cx, |this, cx| {
+                this.refresh_clan(clan_id, cx);
+            })
+            .map_err(|_| "store dropped".to_string())?;
+            Ok(())
         })
     }
 

@@ -9,7 +9,6 @@ use mezon_store::{
 };
 
 use super::friend_request_badge;
-use ui::{ScrollAxes, Scrollbars, WithScrollbar};
 
 use crate::components::compositions::{DM_ROW_HEIGHT, DmRow};
 use crate::components::primitives::{Icon, IconName};
@@ -271,7 +270,7 @@ impl DirectSidebar {
 }
 
 impl Render for DirectSidebar {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         crate::trace_render!("DirectSidebar");
         let theme = cx.theme();
         let locale = self.settings.read(cx).language.clone();
@@ -348,13 +347,7 @@ impl Render for DirectSidebar {
                     .flex_1()
                     .min_h_0()
                     .relative()
-                    .child(list)
-                    .custom_scrollbars(
-                        Scrollbars::always_visible(ScrollAxes::Vertical)
-                            .tracked_scroll_handle(&self.list_scroll),
-                        window,
-                        cx,
-                    ),
+                    .child(list),
             )
     }
 }
