@@ -596,6 +596,8 @@
   "channelCreator.monthsShort.8": "SEP",
   "channelCreator.monthsShort.9": "OCT",
   "channelList.channelApps": "Channel Apps",
+  "channelList.findChannelApp": "Find Channel App",
+  "channelList.findChannelAppHint": "Discover more apps",
   "channelList.dragMode.disable": "Click to disable drag mode category",
   "channelList.dragMode.enable": "Click to enable drag mode category",
   "channelList.favoriteChannel": "Favorite Channel",

@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use gpui::{App, AppContext, Context, Entity, EventEmitter, Global, Subscription, Task};
 use mezon_client::transport::{ApiCategoryDesc, ApiChannelDesc};
-use mezon_client::{ApiChannelApp, AppApi, ConnectionStatus, RealtimeEvent};
+use mezon_client::{ApiChannelApp, AppApi, ChannelAppLaunchParams, ConnectionStatus, RealtimeEvent, build_channel_app_url};
 
 use crate::KeyedCache;
 use crate::clan::{ClanEvent, ClanList};
@@ -302,6 +302,44 @@ impl ChannelList {
 
     pub fn try_global(cx: &App) -> Option<Entity<Self>> {
         cx.try_global::<GlobalChannelList>().map(|g| g.0.clone())
+    }
+
+    pub fn fetch_channel_app_url(
+        &self,
+        app_id: i64,
+        app_url: String,
+        clan_id: ClanId,
+        clan_name: String,
+        cx: &mut Context<Self>,
+    ) -> Task<Option<String>> {
+        let api = self.api.clone();
+        cx.spawn(async move |_this, _cx| {
+            let hash = match api.generate_hash_channel_apps(app_id).await {
+                Ok(hash) => hash,
+                Err(error) => {
+                    tracing::warn!("generate_hash_channel_apps failed: {error:#}");
+                    return None;
+                }
+            };
+            if hash.web_app_data.is_empty() {
+                tracing::warn!("generate_hash_channel_apps returned empty web_app_data");
+                return None;
+            }
+            match build_channel_app_url(
+                &app_url,
+                ChannelAppLaunchParams {
+                    web_app_data: &hash.web_app_data,
+                    clan_id: &clan_id.0.to_string(),
+                    clan_name: Some(&clan_name),
+                },
+            ) {
+                Ok(url) => Some(url),
+                Err(error) => {
+                    tracing::warn!("build_channel_app_url failed: {error:#}");
+                    None
+                }
+            }
+        })
     }
 
     pub fn reset(&mut self, cx: &mut Context<Self>) {
@@ -1474,6 +1512,17 @@ impl ChannelList {
         self.app_channels_cache
             .get(&clan_id)
             .map_or(&[], Vec::as_slice)
+    }
+
+    pub fn app_channel_for_id(
+        &self,
+        clan_id: ClanId,
+        channel_id: ChannelId,
+    ) -> Option<&AppChannel> {
+        self.app_channels_cache
+            .get(&clan_id)?
+            .iter()
+            .find(|app| app.channel_id == channel_id)
     }
 
     pub fn channel_in_clan(&self, clan_id: ClanId, channel_id: ChannelId) -> bool {

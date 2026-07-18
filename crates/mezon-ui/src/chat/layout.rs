@@ -11,6 +11,7 @@ use mezon_store::{
     Settings, ThreadsEvent, ThreadsStore, TopicsEvent, TopicsStore, VoiceMember, VoiceModerationError, VoiceStore,
     expand_mention_name_tokens,
 };
+use crate::chat::channel_app_bar::ChannelAppBarTarget;
 use ui::PopoverMenuHandle;
 use ui::utils::ROUNDED_BORDER_WINDOW;
 
@@ -1874,6 +1875,26 @@ impl ChatLayout {
         root.into_any_element()
     }
 
+    fn get_app_channel_bar(&self, cx: &Context<Self>) -> Option<ChannelAppBarTarget> {
+        let channel = self.channel_list.read(cx).active_channel()?;
+        if channel.channel_type != ChannelType::App {
+            return None;
+        }
+        let app = self
+            .channel_list
+            .read(cx)
+            .app_channel_for_id(channel.clan_id, channel.id)?;
+        let app_id = app.app_id.parse().ok()?;
+        Some(ChannelAppBarTarget {
+            app_id,
+            app_url: app.app_url.clone(),
+            app_name: app.app_name.clone(),
+            clan_id: channel.clan_id,
+            clan_name: channel.clan_name.clone(),
+            channel_list: self.channel_list.clone(),
+        })
+    }
+
     fn render_content(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let theme = cx.theme();
         let locale = self.settings.read(cx).language.clone();
@@ -1927,6 +1948,7 @@ impl ChatLayout {
                         search_input.clone(),
                         show_results_panel,
                         search_panel.clone(),
+                        None,
                         cx,
                     )
                     .into_any_element();
@@ -1955,6 +1977,7 @@ impl ChatLayout {
                         None,
                         show_results_panel,
                         search_panel.clone(),
+                        None,
                         cx,
                     )
                     .into_any_element();
@@ -2020,6 +2043,7 @@ impl ChatLayout {
 
             let channel_name = ch.name.clone();
             let channel_id = ch.id;
+            let app_channel_bar = self.get_app_channel_bar(cx);
             return self
                 .chat_area
                 .render(
@@ -2040,6 +2064,7 @@ impl ChatLayout {
                     search_input.clone(),
                     show_results_panel,
                     search_panel.clone(),
+                    app_channel_bar,
                     cx,
                 )
                 .into_any_element();
@@ -2072,6 +2097,7 @@ impl ChatLayout {
                     search_input.clone(),
                     show_results_panel,
                     search_panel,
+                    None,
                     cx,
                 )
                 .into_any_element();

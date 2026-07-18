@@ -5,6 +5,7 @@ pub mod abridged_tcp_adapter;
 pub mod app_api;
 pub mod attachment_download;
 pub mod auth;
+pub mod channel_app_launch;
 pub mod image_disk_cache;
 pub mod inbox;
 pub mod keychain;
@@ -28,6 +29,7 @@ pub use attachment_download::{
 pub use auth::MezonClient;
 pub use auth::QrLoginId;
 pub use auth::{DEFAULT_API_HOST, DEFAULT_API_PORT, DEFAULT_API_SECURE, DEFAULT_SERVER_KEY};
+pub use channel_app_launch::{ChannelAppLaunchParams, build_channel_app_url};
 pub use inbox::{
     DIRECTION_AROUND_TIMESTAMP, DIRECTION_BEFORE_TIMESTAMP, INBOX_PAGE_LIMIT, InboxCategory,
     InboxMentionSpan, InboxMessagePreview, InboxNotification, TopicDiscussion,

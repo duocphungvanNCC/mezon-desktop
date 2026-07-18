@@ -1,5 +1,6 @@
 pub mod app;
 pub mod auth;
+pub mod channel_app;
 pub mod chat;
 pub mod clan;
 pub mod command_palette;
@@ -22,6 +23,11 @@ pub use auth::login_view::LoginView;
 pub use chat::layout::ChatLayout;
 pub use dev::gallery::DevGallery;
 pub use gallery::GalleryModal;
+pub use channel_app::{
+    OpenChannelAppRequest, close_channel_app_window, focus_channel_app_window,
+    is_channel_app_open, is_channel_app_open_id, is_channel_app_window_open,
+    launch_channel_app_from_store, open_channel_app_window, reset_channel_app_from_store,
+};
 pub use image_viewer::{OpenViewerRequest, open_image_viewer};
 pub use router::{Route, Router};
 pub use settings::SettingsScreen;

@@ -24,6 +24,7 @@ dirs.workspace = true
 base64.workspace = true
 rand.workspace = true
 url.workspace = true
+percent-encoding.workspace = true
 async-trait = "0.1"
 bytes.workspace = true
 foyer.workspace = true
