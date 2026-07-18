@@ -1,7 +1,7 @@
 use gpui::{
     Animation, AnimationExt, AnyElement, App, ClipboardItem, Context, Entity, FontWeight, Hsla,
-    MouseButton, MouseDownEvent, ObjectFit, ScrollHandle, SharedString, StyledImage, Window,
-    deferred, div, img, prelude::*, px, relative,
+    MouseButton, MouseDownEvent, ObjectFit, Pixels, ScrollHandle, SharedString, StyledImage,
+    Window, canvas, deferred, div, img, prelude::*, px, relative,
 };
 use mezon_store::{
     AppConfig, AudioStore, Channel, ChannelId, ClanId, ClanMembersStore, DeviceKind,
@@ -36,6 +36,10 @@ pub fn render_voice_channel(
     output_device_id: Option<String>,
     camera_device_id: Option<String>,
     strip_scroll: &ScrollHandle,
+    grid_page: usize,
+    grid_size: gpui::Size<Pixels>,
+    show_members: bool,
+    window_width: Pixels,
     cx: &Context<ChatLayout>,
 ) -> AnyElement {
     let store = voice.read(cx);
@@ -56,6 +60,9 @@ pub fn render_voice_channel(
             connecting,
             &chat,
             strip_scroll,
+            grid_page,
+            grid_size,
+            show_members,
             cx,
         );
     }
@@ -77,6 +84,7 @@ pub fn render_voice_channel(
         output_device_id,
         camera_device_id,
         error,
+        window_width,
         cx,
     )
 }
@@ -427,6 +435,22 @@ fn decorative_icon(theme: &Theme, icon: IconName) -> AnyElement {
         .into_any_element()
 }
 
+fn pre_join_max_members(window_width: f32) -> usize {
+    if window_width < 1000. {
+        2
+    } else if window_width < 1200. {
+        3
+    } else if window_width < 1300. {
+        4
+    } else if window_width < 1400. {
+        5
+    } else if window_width < 1700. {
+        6
+    } else {
+        3
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn render_pre_join(
     theme: &Theme,
@@ -437,6 +461,7 @@ fn render_pre_join(
     output_device_id: Option<String>,
     camera_device_id: Option<String>,
     error: Option<String>,
+    window_width: Pixels,
     cx: &App,
 ) -> AnyElement {
     let members = &channel.voice_members;
@@ -447,13 +472,15 @@ fn render_pre_join(
     };
 
     let avatars = (!members.is_empty()).then(|| {
+        let max_members = pre_join_max_members(f32::from(window_width));
+        let remaining = members.len().saturating_sub(max_members);
         div()
             .flex()
             .flex_row()
             .items_center()
             .justify_center()
             .gap_2()
-            .children(members.iter().take(12).map(|m| {
+            .children(members.iter().take(max_members).map(|m| {
                 let (name, avatar_url) = resolve_voice_member(cx, channel.clan_id, m);
                 let mut avatar = Avatar::new().name(name).size_px(px(56.));
                 if !avatar_url.is_empty() {
@@ -461,6 +488,20 @@ fn render_pre_join(
                 }
                 avatar
             }))
+            .when(remaining > 0, |this| {
+                this.child(
+                    div()
+                        .size(px(56.))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded_full()
+                        .bg(theme.bg_secondary)
+                        .text_color(theme.text_primary)
+                        .font_weight(FontWeight::MEDIUM)
+                        .child(format!("+{remaining}")),
+                )
+            })
     });
 
     // A single shared closure builds a join action so both the primary "Join"
@@ -812,6 +853,9 @@ fn render_in_call(
     connecting: bool,
     chat: &Entity<ChatLayout>,
     strip_scroll: &ScrollHandle,
+    grid_page: usize,
+    grid_size: gpui::Size<Pixels>,
+    show_members: bool,
     cx: &App,
 ) -> AnyElement {
     let fullscreen_active = store.fullscreen_screen().is_some();
@@ -839,9 +883,17 @@ fn render_in_call(
         let focused_idx = focused.and_then(|id| cells.iter().position(|c| c.id == id));
 
         match focused_idx {
-            Some(idx) => {
-                render_focus_layout(theme, locale, store, voice, &cells, idx, strip_scroll)
-            }
+            Some(idx) => render_focus_layout(
+                theme,
+                locale,
+                store,
+                voice,
+                &cells,
+                idx,
+                chat,
+                show_members,
+                strip_scroll,
+            ),
             None => render_grid(
                 theme,
                 locale,
@@ -851,6 +903,9 @@ fn render_in_call(
                 &channel.voice_members,
                 connecting,
                 channel.clan_id,
+                chat,
+                grid_page,
+                grid_size,
                 cx,
             ),
         }
@@ -1323,6 +1378,9 @@ fn render_grid(
     room_members: &[VoiceMember],
     connecting: bool,
     clan_id: ClanId,
+    chat: &Entity<ChatLayout>,
+    grid_page: usize,
+    grid_size: gpui::Size<Pixels>,
     cx: &App,
 ) -> AnyElement {
     let placeholder_cells: Vec<VideoCell>;
@@ -1356,20 +1414,33 @@ fn render_grid(
     };
 
     let count = cells.len();
-    let (cols, rows) = grid_dimensions(count);
+    let measured = grid_size.width > px(0.) && grid_size.height > px(0.);
+    let (cols, rows) = select_grid_layout(
+        GRID_LAYOUTS,
+        count,
+        f32::from(grid_size.width),
+        f32::from(grid_size.height),
+    );
+    let max_tiles = cols * rows;
+    let total_pages = count.div_ceil(max_tiles).max(1);
+    let page = grid_page.min(total_pages - 1);
+    let page_offset = page * max_tiles;
+    let paginated = measured && total_pages > 1;
 
     let mut grid = div()
+        .relative()
         .flex()
         .flex_col()
         .flex_1()
         .min_h_0()
         .gap_2()
         .p_2()
+        .when(paginated, |this| this.pb(px(16.)))
         .bg(theme.bg_tertiary);
     for r in 0..rows {
         let mut row = div().flex().flex_row().flex_1().min_h_0().w_full().gap_2();
         for c in 0..cols {
-            let index = r * cols + c;
+            let index = page_offset + r * cols + c;
             let mut cell_el = div().flex_1().min_w_0().min_h_0().w_full();
             if index < count {
                 cell_el = cell_el.child(video_tile(theme, locale, store, voice, &cells[index]));
@@ -1378,19 +1449,143 @@ fn render_grid(
         }
         grid = grid.child(row);
     }
+
+    grid = grid.child({
+        let chat = chat.clone();
+        canvas(
+            move |bounds, _, cx| {
+                chat.update(cx, |layout, cx| {
+                    layout.record_voice_grid_size(bounds.size, cx)
+                })
+            },
+            |_, _, _, _| {},
+        )
+        .absolute()
+        .size_full()
+    });
+
+    if paginated {
+        let chat = chat.clone();
+        grid = grid
+            .on_scroll_wheel(move |event, window, cx| {
+                let delta = f32::from(event.delta.pixel_delta(window.line_height()).y);
+                chat.update(cx, |layout, cx| {
+                    layout.scroll_voice_grid_page(delta, total_pages, cx)
+                });
+            })
+            .child(
+                div()
+                    .absolute()
+                    .bottom(px(4.))
+                    .left_0()
+                    .right_0()
+                    .flex()
+                    .flex_row()
+                    .justify_center()
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap(px(3.))
+                            .px_2()
+                            .py(px(3.))
+                            .rounded_full()
+                            .bg(gpui::rgb(0x1e1e1e))
+                            .children((0..total_pages).map(|i| {
+                                div()
+                                    .size(px(6.))
+                                    .rounded_full()
+                                    .bg(gpui::rgb(0xffffff))
+                                    .opacity(if i == page { 0.9 } else { 0.35 })
+                            })),
+                    ),
+            );
+    }
     grid.into_any_element()
 }
 
-fn grid_dimensions(count: usize) -> (usize, usize) {
-    match count {
-        0 | 1 => (1, 1),
-        2 => (2, 1),
-        3 | 4 => (2, 2),
-        5..=9 => (3, 3),
-        10..=16 => (4, 4),
-        17..=25 => (5, 5),
-        _ => (5, count.div_ceil(5)),
+enum GridOrientation {
+    Portrait,
+    Landscape,
+}
+
+struct GridLayoutDef {
+    columns: usize,
+    rows: usize,
+    min_width: f32,
+    orientation: Option<GridOrientation>,
+}
+
+impl GridLayoutDef {
+    const fn new(columns: usize, rows: usize, min_width: f32) -> Self {
+        Self {
+            columns,
+            rows,
+            min_width,
+            orientation: None,
+        }
     }
+
+    const fn oriented(columns: usize, rows: usize, orientation: GridOrientation) -> Self {
+        Self {
+            columns,
+            rows,
+            min_width: 0.,
+            orientation: Some(orientation),
+        }
+    }
+
+    fn max_tiles(&self) -> usize {
+        self.columns * self.rows
+    }
+
+    fn fits_orientation(&self, landscape: bool) -> bool {
+        match self.orientation {
+            None => true,
+            Some(GridOrientation::Landscape) => landscape,
+            Some(GridOrientation::Portrait) => !landscape,
+        }
+    }
+}
+
+const GRID_LAYOUTS: &[GridLayoutDef] = &[
+    GridLayoutDef::new(1, 1, 0.),
+    GridLayoutDef::oriented(1, 2, GridOrientation::Portrait),
+    GridLayoutDef::oriented(2, 1, GridOrientation::Landscape),
+    GridLayoutDef::new(2, 2, 560.),
+    GridLayoutDef::new(3, 3, 700.),
+    GridLayoutDef::new(4, 4, 960.),
+    GridLayoutDef::new(5, 5, 1100.),
+];
+
+fn select_grid_layout(
+    layouts: &[GridLayoutDef],
+    participant_count: usize,
+    width: f32,
+    height: f32,
+) -> (usize, usize) {
+    if width <= 0. || height <= 0. {
+        return (layouts[0].columns, layouts[0].rows);
+    }
+    let landscape = width / height > 1.;
+    let mut selected = None;
+    for (index, layout) in layouts.iter().enumerate() {
+        let bigger_same_capacity = layouts[index + 1..]
+            .iter()
+            .any(|l| l.max_tiles() == layout.max_tiles() && l.fits_orientation(landscape));
+        if layout.max_tiles() >= participant_count && !bigger_same_capacity {
+            selected = Some(index);
+            break;
+        }
+    }
+    let index = selected.unwrap_or(layouts.len() - 1);
+    let layout = &layouts[index];
+    if width < layout.min_width && index > 0 {
+        let smaller_count = layouts[index - 1].max_tiles();
+        return select_grid_layout(&layouts[..index], smaller_count, width, height);
+    }
+    (layout.columns, layout.rows)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1401,6 +1596,8 @@ fn render_focus_layout(
     voice: &Entity<VoiceStore>,
     cells: &[VideoCell],
     focused_idx: usize,
+    chat: &Entity<ChatLayout>,
+    show_members: bool,
     strip_scroll: &ScrollHandle,
 ) -> AnyElement {
     let focused = &cells[focused_idx];
@@ -1413,65 +1610,46 @@ fn render_focus_layout(
         .w_full()
         .child(focus_main_tile(theme, locale, store, voice, focused));
 
-    let strip_cells: Vec<&VideoCell> = if focused.is_screen {
-        cells.iter().collect()
-    } else {
-        cells
-            .iter()
-            .enumerate()
-            .filter(|&(i, _)| i != focused_idx)
-            .map(|(_, c)| c)
-            .collect()
+    let member_count = cells.iter().filter(|c| !c.is_screen).count();
+    let toggle_pill = {
+        let chat = chat.clone();
+        div()
+            .id("voice-member-strip-toggle")
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(2.))
+            .p(px(2.))
+            .rounded(px(20.))
+            .bg(gpui::rgb(0x2b2b2b))
+            .cursor_pointer()
+            .on_click(move |_, _, cx| {
+                chat.update(cx, |layout, cx| layout.toggle_voice_member_strip(cx))
+            })
+            .child(
+                Icon::new(if show_members {
+                    IconName::VoiceArowDownIcon
+                } else {
+                    IconName::VoiceArowUpIcon
+                })
+                .size(px(20.))
+                .text_color(gpui::rgb(0xffffff)),
+            )
+            .child(
+                Icon::new(IconName::MemberList)
+                    .size(px(20.))
+                    .text_color(gpui::rgb(0xffffff)),
+            )
+            .child(
+                div()
+                    .pl(px(2.))
+                    .pr(px(6.))
+                    .text_color(gpui::rgb(0xffffff))
+                    .child(member_count.to_string()),
+            )
     };
 
-    let viewport = strip_scroll.bounds().size.width;
-    let max_x = strip_scroll.max_offset().x;
-    let overflows = max_x > px(0.);
-
-    let carousel = div()
-        .id("voice-carousel")
-        .flex_1()
-        .min_h_0()
-        .w_full()
-        .flex()
-        .flex_row()
-        .gap_2()
-        .pb_1()
-        .when(!overflows, |this| this.justify_center())
-        .overflow_x_scroll()
-        .track_scroll(strip_scroll)
-        .children(
-            strip_cells
-                .into_iter()
-                .map(|c| strip_tile(theme, locale, store, voice, c)),
-        );
-
-    let scrollbar = overflows.then(|| {
-        let content = viewport + max_x;
-        let thumb = viewport * (viewport / content).clamp(0., 1.);
-        let scrolled = ((-strip_scroll.offset().x) / max_x).clamp(0., 1.);
-        let thumb_x = (viewport - thumb) * scrolled;
-        div().h(px(6.)).w_full().child(
-            div()
-                .ml(thumb_x)
-                .w(thumb)
-                .h_full()
-                .rounded(px(4.))
-                .bg(gpui::rgb(0x6d6f77)),
-        )
-    });
-
-    let strip = div()
-        .flex_grow(1.)
-        .flex()
-        .flex_col()
-        .flex_basis(px(0.))
-        .min_h_0()
-        .w_full()
-        .child(carousel)
-        .children(scrollbar);
-
-    div()
+    let container = div()
         .flex()
         .flex_col()
         .flex_1()
@@ -1479,9 +1657,121 @@ fn render_focus_layout(
         .p_2()
         .gap_2()
         .bg(theme.bg_tertiary)
-        .child(main)
-        .child(strip)
-        .into_any_element()
+        .child(main);
+
+    let container = if show_members {
+        let strip_cells: Vec<&VideoCell> = if focused.is_screen {
+            cells.iter().collect()
+        } else {
+            cells
+                .iter()
+                .enumerate()
+                .filter(|&(i, _)| i != focused_idx)
+                .map(|(_, c)| c)
+                .collect()
+        };
+
+        let strip_bounds = strip_scroll.bounds();
+        let viewport = strip_bounds.size.width;
+        let max_x = strip_scroll.max_offset().x;
+        let overflows = max_x > px(0.);
+
+        let total = strip_cells.len();
+        let gap = 8.;
+        let tile_step = f32::from(strip_bounds.size.height - px(4.)) * 1.6 + gap;
+        let (start, end) = if f32::from(viewport) > 0. && tile_step > gap {
+            let scrolled = f32::from(-strip_scroll.offset().x).max(0.);
+            let first = (scrolled / tile_step) as usize;
+            let visible = (f32::from(viewport) / tile_step).ceil() as usize + 1;
+            (
+                first.saturating_sub(2).min(total),
+                (first + visible + 2).min(total),
+            )
+        } else {
+            (0, total.min(16))
+        };
+        let lead_spacer =
+            (start > 0).then(|| div().flex_none().w(px(start as f32 * tile_step - gap)));
+        let trail_spacer = (end < total).then(|| {
+            div()
+                .flex_none()
+                .w(px((total - end) as f32 * tile_step - gap))
+        });
+
+        let carousel = div()
+            .id("voice-carousel")
+            .flex_1()
+            .min_h_0()
+            .w_full()
+            .flex()
+            .flex_row()
+            .gap_2()
+            .pb_1()
+            .when(!overflows, |this| this.justify_center())
+            .overflow_x_scroll()
+            .track_scroll(strip_scroll)
+            .children(lead_spacer)
+            .children(
+                strip_cells[start..end]
+                    .iter()
+                    .copied()
+                    .map(|c| strip_tile(theme, locale, store, voice, c)),
+            )
+            .children(trail_spacer);
+
+        let scrollbar = overflows.then(|| {
+            let content = viewport + max_x;
+            let thumb = viewport * (viewport / content).clamp(0., 1.);
+            let scrolled = ((-strip_scroll.offset().x) / max_x).clamp(0., 1.);
+            let thumb_x = (viewport - thumb) * scrolled;
+            div().h(px(6.)).w_full().child(
+                div()
+                    .ml(thumb_x)
+                    .w(thumb)
+                    .h_full()
+                    .rounded(px(4.))
+                    .bg(gpui::rgb(0x6d6f77)),
+            )
+        });
+
+        let strip = div()
+            .relative()
+            .flex_grow(1.)
+            .flex()
+            .flex_col()
+            .flex_basis(px(0.))
+            .min_h_0()
+            .w_full()
+            .child(carousel)
+            .children(scrollbar)
+            .child(
+                div()
+                    .absolute()
+                    .top(px(-26.))
+                    .left_0()
+                    .right_0()
+                    .flex()
+                    .flex_row()
+                    .justify_center()
+                    .child(toggle_pill),
+            );
+
+        container.child(strip)
+    } else {
+        container.relative().child(
+            div()
+                .absolute()
+                .bottom(px(8.))
+                .left_0()
+                .right_0()
+                .flex()
+                .flex_row()
+                .justify_center()
+                .child(toggle_pill),
+        )
+    };
+
+    container.into_any_element()
 }
 
 fn participant_menu_trigger(
@@ -2616,27 +2906,57 @@ mod grid_order_tests {
 }
 
 #[cfg(test)]
-mod grid_dimensions_tests {
-    use super::grid_dimensions;
+mod grid_layout_tests {
+    use super::{GRID_LAYOUTS, select_grid_layout};
 
-    #[test]
-    fn matches_livekit_grid_layouts() {
-        assert_eq!(grid_dimensions(1), (1, 1));
-        assert_eq!(grid_dimensions(2), (2, 1));
-        assert_eq!(grid_dimensions(3), (2, 2));
-        assert_eq!(grid_dimensions(4), (2, 2));
-        assert_eq!(grid_dimensions(5), (3, 3));
-        assert_eq!(grid_dimensions(9), (3, 3));
-        assert_eq!(grid_dimensions(10), (4, 4));
-        assert_eq!(grid_dimensions(16), (4, 4));
-        assert_eq!(grid_dimensions(25), (5, 5));
+    fn wide(count: usize) -> (usize, usize) {
+        select_grid_layout(GRID_LAYOUTS, count, 1280., 800.)
     }
 
     #[test]
-    fn every_participant_gets_a_cell() {
-        for count in 1..=40usize {
-            let (cols, rows) = grid_dimensions(count);
-            assert!(cols * rows >= count, "count {count} needs {cols}x{rows}");
-        }
+    fn matches_livekit_grid_layouts() {
+        assert_eq!(wide(1), (1, 1));
+        assert_eq!(wide(2), (2, 1));
+        assert_eq!(wide(3), (2, 2));
+        assert_eq!(wide(4), (2, 2));
+        assert_eq!(wide(5), (3, 3));
+        assert_eq!(wide(9), (3, 3));
+        assert_eq!(wide(10), (4, 4));
+        assert_eq!(wide(16), (4, 4));
+        assert_eq!(wide(25), (5, 5));
+    }
+
+    #[test]
+    fn caps_at_five_by_five_for_large_rooms() {
+        assert_eq!(wide(26), (5, 5));
+        assert_eq!(wide(100), (5, 5));
+    }
+
+    #[test]
+    fn portrait_container_prefers_stacked_pair() {
+        assert_eq!(select_grid_layout(GRID_LAYOUTS, 2, 700., 1280.), (1, 2));
+    }
+
+    #[test]
+    fn narrow_container_falls_back_to_smaller_layout() {
+        assert_eq!(select_grid_layout(GRID_LAYOUTS, 100, 1000., 700.), (4, 4));
+        assert_eq!(select_grid_layout(GRID_LAYOUTS, 100, 900., 700.), (3, 3));
+        assert_eq!(select_grid_layout(GRID_LAYOUTS, 100, 600., 500.), (2, 2));
+    }
+
+    #[test]
+    fn unmeasured_container_uses_smallest_layout() {
+        assert_eq!(select_grid_layout(GRID_LAYOUTS, 10, 0., 0.), (1, 1));
+    }
+
+    #[test]
+    fn pre_join_avatar_cap_matches_react_breakpoints() {
+        use super::pre_join_max_members;
+        assert_eq!(pre_join_max_members(900.), 2);
+        assert_eq!(pre_join_max_members(1100.), 3);
+        assert_eq!(pre_join_max_members(1250.), 4);
+        assert_eq!(pre_join_max_members(1350.), 5);
+        assert_eq!(pre_join_max_members(1500.), 6);
+        assert_eq!(pre_join_max_members(1800.), 3);
     }
 }
