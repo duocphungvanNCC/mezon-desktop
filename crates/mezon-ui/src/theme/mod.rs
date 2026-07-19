@@ -148,7 +148,7 @@ pub struct Theme {
     pub status_offline: Rgba, // #80848e
 
     // Unread / notification
-    pub unread_dot: Rgba,    // #f2f3f5
+    pub unread_dot: Rgba, // #f2f3f5
     pub mention_badge: Rgba,
 
     // Borders

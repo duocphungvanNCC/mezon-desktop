@@ -173,6 +173,9 @@ fn push_varint(buf: &mut Vec<u8>, mut value: u64) {
     buf.push(value as u8);
 }
 
+/// `TypeMessage.Ephemeral` — the message code carried by an ephemeral send.
+const EPHEMERAL_MESSAGE_CODE: i32 = 12;
+
 fn encode_envelope_cid_last(mut envelope: realtime::Envelope) -> Vec<u8> {
     let cid = envelope.cid;
     if cid <= 0 {
@@ -6105,6 +6108,58 @@ impl MezonTransport {
         let (code, _) = self
             .send_api_request(cid, "MessageButtonClick", body)
             .await?;
+        if code != 0 {
+            return Err(anyhow::anyhow!("API error: code={}", code));
+        }
+        Ok(())
+    }
+
+    /// Send an ephemeral message (visible only to `receiver_id`). Sent as the
+    /// `EphemeralMessageSend` envelope oneof (not an `ApiRequestEvent`), mirroring
+    /// mezon-js `writeEphemeralMessage`. The nested message carries `code = 12`
+    /// (`TypeMessage.Ephemeral`); the server echoes it to the recipient only.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn write_ephemeral_message(
+        &self,
+        receiver_id: i64,
+        clan_id: i64,
+        channel_id: i64,
+        content: &str,
+        is_public: bool,
+        mode: i32,
+        mentions: Vec<OutgoingMention>,
+        hashtags: Vec<OutgoingHashtag>,
+        emojis: Vec<OutgoingEmoji>,
+    ) -> Result<()> {
+        let cid = self.generate_cid();
+        let sent = build_send_content(content, &mentions, &hashtags, &emojis);
+        let mention_everyone = sent.mentions.iter().any(OutgoingMention::is_here);
+        let proto_mentions: Vec<api::MessageMention> = sent
+            .mentions
+            .iter()
+            .filter_map(OutgoingMention::to_proto)
+            .collect();
+        let message = realtime::ChannelMessageSend {
+            clan_id,
+            channel_id,
+            content: sent.json,
+            mentions: proto_mentions,
+            mode,
+            is_public,
+            mention_everyone,
+            code: EPHEMERAL_MESSAGE_CODE,
+            ..Default::default()
+        };
+        let envelope = realtime::Envelope {
+            cid: i32::from(cid),
+            message: Some(realtime::envelope::Message::EphemeralMessageSend(
+                realtime::EphemeralMessageSend {
+                    message: Some(message),
+                    receiver_ids: vec![receiver_id],
+                },
+            )),
+        };
+        let (code, _) = self.send(cid, encode_envelope_cid_last(envelope)).await?;
         if code != 0 {
             return Err(anyhow::anyhow!("API error: code={}", code));
         }

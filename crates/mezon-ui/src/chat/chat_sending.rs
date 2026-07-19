@@ -31,6 +31,21 @@ impl ChatSending {
         });
     }
 
+    pub fn send_ephemeral(
+        receiver_id: i64,
+        content: impl Into<String>,
+        content_tokens: OutgoingContent,
+        cx: &mut App,
+    ) {
+        let content = content.into();
+        if content.is_empty() && content_tokens.is_empty() {
+            return;
+        }
+        MessagesStore::global(cx).update(cx, |store, cx| {
+            store.send_ephemeral_message(receiver_id, content, content_tokens, cx);
+        });
+    }
+
     pub fn send_sticker(
         url: String,
         filename: String,
