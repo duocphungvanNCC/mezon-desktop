@@ -12,7 +12,6 @@ use crate::app::window_controls;
 use crate::chat::files_popover::{FilesPopoverPanel, files_popover_on_open};
 use crate::chat::inbox::{InboxPopoverPanel, clan_has_inbox_badge};
 use crate::chat::layout::ChatLayout;
-use crate::chat::message::coming_soon_toast;
 use crate::chat::pinned_popover::{PinnedPopoverPanel, pin_popover_on_open};
 use crate::chat::threads_popover::{ThreadsPopoverPanel, thread_popover_on_open};
 use crate::components::primitives::{Icon, IconName, InputState};
@@ -150,7 +149,7 @@ impl ChannelHeader {
         self
     }
 
-    pub fn render(self, theme: &Theme, locale: &str, cx: &App) -> impl IntoElement {
+    pub fn render(self, theme: &Theme, cx: &App) -> impl IntoElement {
         let bg_hover = theme.bg_hover;
         let bg_active = theme.bg_tertiary;
         let icon_color = theme.text_muted;
@@ -175,7 +174,7 @@ impl ChannelHeader {
             show_inbox,
             inbox_handle,
             clan_id,
-            locale: inbox_locale,
+            locale,
             show_threads,
             layout,
             thread_handle,
@@ -191,47 +190,30 @@ impl ChannelHeader {
                 cx,
                 inbox_handle,
                 clan_id,
-                inbox_locale,
+                locale,
             ))
         } else {
             None
         };
-        let buttons = if dm {
-            Self::build_dm_action_buttons(
-                theme,
-                icon_color,
-                icon_active,
-                bg_hover,
-                bg_active,
-                members_action,
-                members_active,
-                on_toggle_members,
-                pin_handle,
-                settings,
-                locale,
-                cx,
-            )
-        } else {
-            Self::build_action_buttons(
-                actions,
-                theme,
-                icon_color,
-                icon_active,
-                bg_hover,
-                bg_active,
-                members_action,
-                members_active,
-                on_toggle_members,
-                show_threads,
-                thread_handle,
-                layout,
-                pin_handle,
-                settings,
-                gallery_trigger,
-                files_trigger,
-                cx,
-            )
-        };
+        let buttons = Self::build_action_buttons(
+            actions,
+            theme,
+            icon_color,
+            icon_active,
+            bg_hover,
+            bg_active,
+            members_action,
+            members_active,
+            on_toggle_members,
+            show_threads,
+            thread_handle,
+            layout,
+            pin_handle,
+            settings,
+            gallery_trigger,
+            files_trigger,
+            cx,
+        );
 
         div()
             .flex()
@@ -356,202 +338,6 @@ impl ChannelHeader {
             search_bar: None,
         };
         header.render_inbox_button(theme, cx)
-    }
-
-    fn build_dm_action_buttons(
-        theme: &Theme,
-        icon_color: gpui::Rgba,
-        icon_active: gpui::Rgba,
-        bg_hover: gpui::Rgba,
-        bg_active: gpui::Rgba,
-        members_action: bool,
-        members_active: bool,
-        on_toggle_members: Option<ToggleHandler>,
-        pin_handle: Option<PopoverMenuHandle<PinnedPopoverPanel>>,
-        settings: Option<Entity<Settings>>,
-        locale: &str,
-        cx: &App,
-    ) -> Vec<AnyElement> {
-        let header = ChannelHeader {
-            name: String::new(),
-            dm: true,
-            in_voice: None,
-            members_action,
-            members_active,
-            on_toggle_members,
-            show_inbox: false,
-            inbox_handle: None,
-            clan_id: None,
-            locale: None,
-            show_threads: false,
-            layout: None,
-            thread_handle: None,
-            pin_handle,
-            settings,
-            gallery_trigger: None,
-            files_trigger: None,
-            search_bar: None,
-        };
-        header.dm_action_buttons(
-            theme,
-            icon_color,
-            icon_active,
-            bg_hover,
-            bg_active,
-            locale,
-            cx,
-        )
-    }
-
-    fn dm_action_buttons(
-        self,
-        theme: &Theme,
-        icon_color: gpui::Rgba,
-        icon_active: gpui::Rgba,
-        bg_hover: gpui::Rgba,
-        bg_active: gpui::Rgba,
-        locale: &str,
-        _cx: &App,
-    ) -> Vec<AnyElement> {
-        let is_group = self.members_action;
-        let members_active = self.members_active;
-        let on_toggle_members = self.on_toggle_members;
-        let pin_handle = self.pin_handle;
-        let settings = self.settings;
-        let mut buttons: Vec<AnyElement> = Vec::new();
-        let locale = locale.to_string();
-
-        if !is_group {
-            for (id, icon) in [
-                ("hdr-voice-call", IconName::IconPhoneDM),
-                ("hdr-video-call", IconName::IconMeetDM),
-            ] {
-                let locale = locale.clone();
-                buttons.push(
-                    div()
-                        .id(id)
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .w(px(32.))
-                        .h(px(32.))
-                        .rounded_md()
-                        .cursor_pointer()
-                        .hover(move |s| s.bg(bg_hover))
-                        .occlude()
-                        .on_click(move |_, _, cx| coming_soon_toast(&locale, cx))
-                        .child(Icon::new(icon).size(px(20.)).text_color(icon_color))
-                        .into_any_element(),
-                );
-            }
-        }
-
-        if let (Some(handle), Some(settings)) = (pin_handle.clone(), settings.clone()) {
-            let menu_handle = handle.clone();
-            buttons.push(
-                PopoverMenu::new("hdr-pin-popover")
-                    .with_handle(handle)
-                    .anchor(Anchor::TopRight)
-                    .attach(Anchor::BottomRight)
-                    .offset(point(px(0.), px(HEADER_POPOVER_Y_OFFSET)))
-                    .on_open(pin_popover_on_open())
-                    .menu({
-                        let settings = settings.clone();
-                        move |window, cx| {
-                            Some(cx.new(|cx| {
-                                PinnedPopoverPanel::new(
-                                    settings.clone(),
-                                    menu_handle.clone(),
-                                    window,
-                                    cx,
-                                )
-                            }))
-                        }
-                    })
-                    .trigger(PinPopoverTrigger::new(theme, false))
-                    .into_any_element(),
-            );
-        }
-
-        let locale = locale.clone();
-        buttons.push(
-            div()
-                .id("hdr-add-friend-dm")
-                .flex()
-                .items_center()
-                .justify_center()
-                .w(px(32.))
-                .h(px(32.))
-                .rounded_md()
-                .cursor_pointer()
-                .hover(move |s| s.bg(bg_hover))
-                .occlude()
-                .on_click({
-                    let locale = locale.clone();
-                    move |_, _, cx| coming_soon_toast(&locale, cx)
-                })
-                .child(
-                    Icon::new(IconName::IconAddFriendDM)
-                        .size(px(20.))
-                        .text_color(icon_color),
-                )
-                .into_any_element(),
-        );
-
-        if is_group {
-            let tint = if members_active {
-                icon_active
-            } else {
-                icon_color
-            };
-            let mut button = div()
-                .id("hdr-members")
-                .flex()
-                .items_center()
-                .justify_center()
-                .w(px(32.))
-                .h(px(32.))
-                .rounded_md()
-                .cursor_pointer()
-                .hover(move |s| s.bg(bg_hover))
-                .occlude()
-                .child(
-                    Icon::new(IconName::MemberList)
-                        .size(px(20.))
-                        .text_color(tint),
-                );
-            if members_active {
-                button = button.bg(bg_active);
-            }
-            if let Some(handler) = on_toggle_members {
-                button = button.on_click(move |_, window, cx| handler(window, cx));
-            }
-            buttons.push(button.into_any_element());
-        } else {
-            let locale = locale.clone();
-            buttons.push(
-                div()
-                    .id("hdr-user-profile-dm")
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .w(px(32.))
-                    .h(px(32.))
-                    .rounded_md()
-                    .cursor_pointer()
-                    .hover(move |s| s.bg(bg_hover))
-                    .occlude()
-                    .on_click(move |_, _, cx| coming_soon_toast(&locale, cx))
-                    .child(
-                        Icon::new(IconName::IconUserProfileDM)
-                            .size(px(20.))
-                            .text_color(icon_color),
-                    )
-                    .into_any_element(),
-            );
-        }
-
-        buttons
     }
 
     fn build_action_buttons(
@@ -944,22 +730,16 @@ impl Render for ChatHeader {
             .clone()
             .unwrap_or_else(|| SharedString::from("en"));
 
-        let gallery_trigger = if self.dm {
-            None
-        } else {
-            Some(
-                PopoverMenu::new("hdr-gallery-popover")
-                    .anchor(Anchor::TopRight)
-                    .attach(Anchor::BottomRight)
-                    .offset(point(px(0.), px(HEADER_POPOVER_Y_OFFSET)))
-                    .trigger(GalleryTrigger::new(&theme))
-                    .menu({
-                        let settings = settings.clone();
-                        move |window, cx| build_gallery_modal(settings.clone(), window, cx)
-                    })
-                    .into_any_element(),
-            )
-        };
+        let gallery_trigger = PopoverMenu::new("hdr-gallery-popover")
+            .anchor(Anchor::TopRight)
+            .attach(Anchor::BottomRight)
+            .offset(point(px(0.), px(HEADER_POPOVER_Y_OFFSET)))
+            .trigger(GalleryTrigger::new(&theme))
+            .menu({
+                let settings = settings.clone();
+                move |window, cx| build_gallery_modal(settings.clone(), window, cx)
+            })
+            .into_any_element();
 
         let files_trigger = if !self.dm {
             Some(
@@ -999,12 +779,10 @@ impl Render for ChatHeader {
             .dm(self.dm)
             .members_action(self.members_action)
             .members_active(self.members_active)
+            .gallery_trigger(gallery_trigger)
             .show_inbox(self.show_inbox)
             .on_toggle_members(members_toggle)
             .show_threads(show_threads);
-        if let Some(gallery_trigger) = gallery_trigger {
-            header = header.gallery_trigger(gallery_trigger);
-        }
         if let Some(files_trigger) = files_trigger {
             header = header.files_trigger(files_trigger);
         }
@@ -1046,9 +824,7 @@ impl Render for ChatHeader {
         if let Some(handle) = self.pin_handle.clone() {
             header = header.pin_popover(handle, settings);
         }
-        header
-            .render(&theme, locale.as_ref(), cx)
-            .into_any_element()
+        header.render(&theme, cx).into_any_element()
     }
 }
 

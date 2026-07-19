@@ -655,7 +655,7 @@ impl EntityInputHandler for InputState {
         self.selected_range = new_selected_range_utf16
             .as_ref()
             .map(|range_utf16| self.range_from_utf16(range_utf16))
-            .map(|new_range| new_range.start + range.start..new_range.end + range.end)
+            .map(|new_range| new_range.start + range.start..new_range.end + range.start)
             .unwrap_or_else(|| range.start + new_text.len()..range.start + new_text.len());
 
         self.refresh_filter_token_chips(cx);
@@ -671,7 +671,12 @@ impl EntityInputHandler for InputState {
         _window: &mut Window,
         _cx: &mut Context<Self>,
     ) -> Option<Bounds<Pixels>> {
-        let last_layout = self.last_layout.as_ref()?;
+        let Some(last_layout) = self.last_layout.as_ref() else {
+            return Some(Bounds::from_corners(
+                point(bounds.left(), bounds.top()),
+                point(bounds.left(), bounds.bottom()),
+            ));
+        };
         let range = self.range_from_utf16(&range_utf16);
         Some(Bounds::from_corners(
             point(

@@ -95,6 +95,7 @@ pub struct RowCtx<'a> {
     /// Owned by the view; invalidated on member-store change, channel switch,
     /// locale change and day rollover.
     pub row_memo: Rc<RefCell<RowMemo>>,
+    pub selection: super::selection::SharedSelection,
 }
 
 #[derive(Default)]
@@ -108,6 +109,9 @@ pub struct RowMemo {
     /// message -> formatted head time label ("14:03" / "Yesterday at 14:03").
     pub time_labels: HashMap<MessageId, SharedString>,
     pub rich_text: HashMap<MessageId, RichTextRenderPlan>,
+    pub selection_layouts: HashMap<MessageId, super::content::SelectableMessageLayoutCacheEntry>,
+    pub selection_text_pieces:
+        HashMap<SharedString, Rc<[super::content::CachedSelectableTextPiece]>>,
 }
 
 #[derive(Clone)]

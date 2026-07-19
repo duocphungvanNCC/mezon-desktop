@@ -1,7 +1,7 @@
 use gpui::{AnyElement, ObjectFit, SharedString, div, hsla, img, prelude::*, px, rgb};
 use mezon_store::{Message, MessageId, OgpPreview};
 
-use super::content::open_message_link;
+use super::content::{SelectableSectionCursor, SelectableTextContext, open_message_link};
 use super::context::RowCtx;
 use crate::components::primitives::{Icon, IconName};
 use crate::theme::Theme;
@@ -9,8 +9,18 @@ use crate::theme::Theme;
 const OGP_TITLE_COLOR: u32 = 0x3b82f6;
 const OGP_TITLE_HOVER_COLOR: u32 = 0x60a5fa;
 
-pub fn render_ogp_embed(msg: &Message, ctx: &RowCtx) -> Option<AnyElement> {
-    render_ogp_preview(msg.ogp.as_deref()?, msg.row_anchor_id, ctx.theme)
+pub fn render_ogp_embed(
+    msg: &Message,
+    ctx: &RowCtx,
+    base: usize,
+    selection_context: &SelectableTextContext,
+) -> Option<AnyElement> {
+    render_ogp_preview_impl(
+        msg.ogp.as_deref()?,
+        msg.row_anchor_id,
+        ctx.theme,
+        Some((base, selection_context, ctx.selection.clone())),
+    )
 }
 
 pub fn render_ogp_preview(
@@ -18,31 +28,68 @@ pub fn render_ogp_preview(
     message_id: MessageId,
     theme: &Theme,
 ) -> Option<AnyElement> {
+    render_ogp_preview_impl(ogp, message_id, theme, None)
+}
+
+fn render_ogp_preview_impl(
+    ogp: &OgpPreview,
+    message_id: MessageId,
+    theme: &Theme,
+    selectable: Option<(
+        usize,
+        &SelectableTextContext,
+        super::selection::SharedSelection,
+    )>,
+) -> Option<AnyElement> {
     let url = ogp.url.clone();
     let has_text = !ogp.title.is_empty() || !ogp.description.is_empty();
+    let base = selectable.as_ref().map_or(0, |value| value.0);
+    let selection_context = selectable.as_ref().map(|value| value.1);
+    let click_selection = selectable
+        .as_ref()
+        .map(|(_, _, selection)| selection.clone());
 
     let text_block = has_text.then(|| {
+        let mut cursor = SelectableSectionCursor::new(base);
         let mut block = div().flex().flex_col().gap_0p5();
         if !ogp.title.is_empty() {
+            let range = cursor.section(&ogp.title);
             block = block.child(
                 div()
                     .id("ogp-title")
+                    .cursor(gpui::CursorStyle::IBeam)
                     .text_size(px(14.))
                     .font_weight(gpui::FontWeight::BOLD)
                     .text_color(rgb(OGP_TITLE_COLOR))
                     .line_clamp(2)
                     .hover(|s| s.text_color(rgb(OGP_TITLE_HOVER_COLOR)))
-                    .child(ogp.title.clone()),
+                    .child(
+                        if let (Some(context), Some(range)) = (selection_context, range) {
+                            context.text_node(&ogp.title, range).into_any_element()
+                        } else {
+                            ogp.title.clone().into_any_element()
+                        },
+                    ),
             );
         }
         if !ogp.description.is_empty() {
+            let range = cursor.section(&ogp.description);
             block = block.child(
                 div()
+                    .cursor(gpui::CursorStyle::IBeam)
                     .text_size(px(12.))
                     .text_color(theme.tokens.text_theme_primary)
                     .opacity(0.9)
                     .line_clamp(2)
-                    .child(ogp.description.clone()),
+                    .child(
+                        if let (Some(context), Some(range)) = (selection_context, range) {
+                            context
+                                .text_node(&ogp.description, range)
+                                .into_any_element()
+                        } else {
+                            ogp.description.clone().into_any_element()
+                        },
+                    ),
             );
         }
         block
@@ -77,7 +124,15 @@ pub fn render_ogp_preview(
             .border_color(theme.tokens.border_left_highlight)
             .bg(theme.tokens.theme_setting_nav)
             .cursor_pointer()
-            .on_click(move |_, _, cx| open_message_link(url.clone(), cx))
+            .on_click(move |_, _, cx| {
+                if click_selection
+                    .as_ref()
+                    .is_some_and(|selection| selection.borrow().has_selection())
+                {
+                    return;
+                }
+                open_message_link(url.clone(), cx);
+            })
             .child(
                 div()
                     .w_full()
@@ -90,6 +145,15 @@ pub fn render_ogp_preview(
             )
             .into_any_element(),
     )
+}
+
+pub(crate) fn selectable_ogp_text(ogp: &OgpPreview) -> String {
+    match (ogp.title.is_empty(), ogp.description.is_empty()) {
+        (false, false) => format!("{}\n{}", ogp.title, ogp.description),
+        (false, true) => ogp.title.to_string(),
+        (true, false) => ogp.description.to_string(),
+        (true, true) => String::new(),
+    }
 }
 
 fn ogp_image(src: SharedString, fallback_fg: gpui::Rgba) -> AnyElement {

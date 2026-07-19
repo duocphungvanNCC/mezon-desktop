@@ -3186,6 +3186,7 @@ impl MezonTransport {
             cid: i32::from(cid),
             message: Some(realtime::envelope::Message::ClanJoin(realtime::ClanJoin {
                 clan_id,
+                is_last_field: false,
             })),
         };
         let (code, _response) = self.send(cid, encode_envelope_cid_last(envelope)).await?;
@@ -4325,7 +4326,12 @@ impl MezonTransport {
     /// List Sd Topics.
     pub async fn list_sd_topic(&self, clan_id: i64, limit: i32) -> Result<api::SdTopicList> {
         let cid = self.generate_cid();
-        let body = api::ListSdTopicRequest { clan_id, limit }.encode_to_vec();
+        let body = api::ListSdTopicRequest {
+            clan_id,
+            limit,
+            page: 1,
+        }
+        .encode_to_vec();
         let (code, response) = self.send_api_request(cid, "ListSdTopic", body).await?;
         if code != 0 {
             return Err(anyhow::anyhow!("API error: code={}", code));
@@ -7679,6 +7685,7 @@ mod tests {
             cid: 7,
             message: Some(realtime::envelope::Message::ClanJoin(realtime::ClanJoin {
                 clan_id: 0,
+                is_last_field: false,
             })),
         };
         let bytes = encode_envelope_cid_last(envelope);
@@ -7723,6 +7730,7 @@ mod tests {
             cid: 0,
             message: Some(realtime::envelope::Message::ClanJoin(realtime::ClanJoin {
                 clan_id: 5,
+                is_last_field: false,
             })),
         };
         let expected = envelope.clone().encode_to_vec();

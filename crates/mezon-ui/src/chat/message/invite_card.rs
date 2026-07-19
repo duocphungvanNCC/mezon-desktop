@@ -3,7 +3,7 @@ use gpui::{
 };
 use mezon_store::{ClanId, ClanList, InvitePreview};
 
-use super::content::open_message_link;
+use super::content::{SelectableSectionCursor, SelectableTextContext, open_message_link};
 use super::context::RowCtx;
 use crate::components::primitives::{Icon, IconName};
 use crate::router::{Route, navigate};
@@ -15,9 +15,30 @@ const ERROR_TEXT: u32 = 0xfc_a5_a5;
 const ERROR_BORDER: u32 = 0xf8_71_71_4d;
 const WHITE: u32 = 0xff_ff_ff;
 
-pub fn render_invite_card(invite: &InvitePreview, ctx: &RowCtx) -> AnyElement {
+pub(crate) fn selectable_invite_text(invite: &InvitePreview, locale: &str) -> String {
     if invite.is_error {
-        return render_invalid_invite(ctx);
+        return mezon_i18n::t(locale, "linkMessageInvite.invalidInvite.message").to_string();
+    }
+    let title = if invite.title.is_empty() {
+        mezon_i18n::t(locale, "linkMessageInvite.unknownClan").to_string()
+    } else {
+        invite.title.to_string()
+    };
+    format!(
+        "{}\n{}",
+        title.to_uppercase(),
+        member_count_label(locale, invite.member_count)
+    )
+}
+
+pub fn render_invite_card(
+    invite: &InvitePreview,
+    base: Option<usize>,
+    selection_context: Option<&SelectableTextContext>,
+    ctx: &RowCtx,
+) -> AnyElement {
+    if invite.is_error {
+        return render_invalid_invite(base, selection_context, ctx);
     }
 
     let theme = ctx.theme;
@@ -73,6 +94,14 @@ pub fn render_invite_card(invite: &InvitePreview, ctx: &RowCtx) -> AnyElement {
         );
     }
 
+    let mut cursor = base.map(SelectableSectionCursor::new);
+    let uppercase_title = SharedString::from(title.to_uppercase());
+    let title_element = cursor
+        .as_mut()
+        .and_then(|cursor| cursor.section(&uppercase_title))
+        .zip(selection_context)
+        .map(|(range, selection)| selection.end_truncated_text_node(&uppercase_title, range))
+        .unwrap_or_else(|| gpui::StyledText::new(uppercase_title));
     let mut title_row = div()
         .flex()
         .flex_row()
@@ -87,7 +116,8 @@ pub fn render_invite_card(invite: &InvitePreview, ctx: &RowCtx) -> AnyElement {
                 .text_size(px(18.))
                 .font_weight(FontWeight::EXTRA_BOLD)
                 .text_color(theme.tokens.text_theme_primary)
-                .child(SharedString::from(title.to_uppercase())),
+                .cursor(gpui::CursorStyle::IBeam)
+                .child(title_element),
         );
     if invite.is_community {
         title_row = title_row.child(
@@ -109,6 +139,12 @@ pub fn render_invite_card(invite: &InvitePreview, ctx: &RowCtx) -> AnyElement {
     }
 
     let member_label = member_count_label(ctx.locale, invite.member_count);
+    let member_element = cursor
+        .as_mut()
+        .and_then(|cursor| cursor.section(&member_label))
+        .zip(selection_context)
+        .map(|(range, selection)| selection.text_node(&member_label, range))
+        .unwrap_or_else(|| gpui::StyledText::new(member_label));
     let member_row = div()
         .mt_2()
         .flex()
@@ -123,6 +159,7 @@ pub fn render_invite_card(invite: &InvitePreview, ctx: &RowCtx) -> AnyElement {
                 .flex_row()
                 .items_center()
                 .gap_1()
+                .cursor(gpui::CursorStyle::IBeam)
                 .child(
                     div()
                         .w(px(8.))
@@ -130,14 +167,19 @@ pub fn render_invite_card(invite: &InvitePreview, ctx: &RowCtx) -> AnyElement {
                         .rounded_full()
                         .bg(rgb(COMMUNITY_GREEN)),
                 )
-                .child(member_label),
+                .child(member_element),
         );
 
     let open_url = invite.url.clone();
+    let open_selection = ctx.selection.clone();
     let header_block = div()
         .id(SharedString::from(format!("invite-open-{}", invite.url)))
         .cursor_pointer()
-        .on_click(move |_, _, cx| open_message_link(open_url.clone(), cx))
+        .on_click(move |_, _, cx| {
+            if !open_selection.borrow().has_selection() {
+                open_message_link(open_url.clone(), cx);
+            }
+        })
         .child(title_row)
         .child(member_row);
 
@@ -147,6 +189,7 @@ pub fn render_invite_card(invite: &InvitePreview, ctx: &RowCtx) -> AnyElement {
         mezon_i18n::t(ctx.locale, "linkMessageInvite.join")
     };
     let join_url = invite.url.clone();
+    let join_selection = ctx.selection.clone();
     let button = div()
         .id(SharedString::from(format!("invite-join-{}", invite.url)))
         .mt_4()
@@ -163,7 +206,9 @@ pub fn render_invite_card(invite: &InvitePreview, ctx: &RowCtx) -> AnyElement {
         .font_weight(FontWeight::SEMIBOLD)
         .text_color(rgb(WHITE))
         .on_click(move |_, _, cx| {
-            handle_join_or_goto(joined_clan, &join_url, cx);
+            if !join_selection.borrow().has_selection() {
+                handle_join_or_goto(joined_clan, &join_url, cx);
+            }
         })
         .child(button_label);
 
@@ -210,9 +255,17 @@ pub fn render_invite_card(invite: &InvitePreview, ctx: &RowCtx) -> AnyElement {
         .into_any_element()
 }
 
-fn render_invalid_invite(ctx: &RowCtx) -> AnyElement {
+fn render_invalid_invite(
+    base: Option<usize>,
+    selection_context: Option<&SelectableTextContext>,
+    ctx: &RowCtx,
+) -> AnyElement {
     let theme = ctx.theme;
     let message = mezon_i18n::t(ctx.locale, "linkMessageInvite.invalidInvite.message");
+    let message_element = base
+        .zip(selection_context)
+        .map(|(base, selection)| selection.text_node(message, base..base + message.len()))
+        .unwrap_or_else(|| gpui::StyledText::new(message));
     div()
         .flex()
         .flex_col()
@@ -231,7 +284,8 @@ fn render_invalid_invite(ctx: &RowCtx) -> AnyElement {
                     div()
                         .text_size(px(14.))
                         .text_color(rgb(ERROR_TEXT))
-                        .child(SharedString::from(message)),
+                        .cursor(gpui::CursorStyle::IBeam)
+                        .child(message_element),
                 ),
         )
         .into_any_element()
