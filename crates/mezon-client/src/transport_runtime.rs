@@ -1125,6 +1125,41 @@ impl TransportClient {
     }
 
     #[allow(clippy::too_many_arguments)]
+    pub async fn write_ephemeral_message(
+        &self,
+        receiver_id: i64,
+        clan_id: i64,
+        channel_id: i64,
+        content: &str,
+        is_public: bool,
+        mode: i32,
+        mentions: Vec<crate::transport::OutgoingMention>,
+        hashtags: Vec<crate::transport::OutgoingHashtag>,
+        emojis: Vec<crate::transport::OutgoingEmoji>,
+    ) -> Result<()> {
+        let transport = self.inner.clone();
+        let content = content.to_string();
+        runtime()
+            .spawn(async move {
+                transport
+                    .write_ephemeral_message(
+                        receiver_id,
+                        clan_id,
+                        channel_id,
+                        &content,
+                        is_public,
+                        mode,
+                        mentions,
+                        hashtags,
+                        emojis,
+                    )
+                    .await
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
+    #[allow(clippy::too_many_arguments)]
     pub async fn forward_channel_message(
         &self,
         clan_id: i64,

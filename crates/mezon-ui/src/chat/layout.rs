@@ -1350,6 +1350,13 @@ impl ChatLayout {
         else {
             return;
         };
+        let ephemeral_receiver = mention_input.update(cx, |mention_input, cx| {
+            mention_input.take_ephemeral_receiver(cx)
+        });
+        if let Some(receiver_id) = ephemeral_receiver {
+            crate::chat::ChatSending::send_ephemeral(receiver_id, content, content_tokens, cx);
+            return;
+        }
         crate::chat::ChatSending::send_text(
             content,
             content_tokens,

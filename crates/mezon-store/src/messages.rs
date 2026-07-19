@@ -2539,6 +2539,67 @@ impl MessagesStore {
         .detach();
     }
 
+    /// Send an ephemeral message (visible only to `receiver_id`). No optimistic
+    /// row — the message arrives back through the normal realtime pipeline with
+    /// `code = Ephemeral`, so nothing is echoed locally to the sender.
+    pub fn send_ephemeral_message(
+        &mut self,
+        receiver_id: i64,
+        content: String,
+        content_tokens: OutgoingContent,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(channel_id) = self.active_channel_id else {
+            return;
+        };
+        let Some(clan_id) = self.active_clan_id else {
+            return;
+        };
+        let is_public = self.is_public;
+        let mode = self.mode;
+
+        let OutgoingContent {
+            mentions,
+            hashtags,
+            emojis,
+        } = content_tokens;
+        let transport_mentions: Vec<TransportMention> = mentions
+            .into_iter()
+            .map(OutgoingMention::into_transport)
+            .collect();
+        let transport_hashtags: Vec<TransportHashtag> = hashtags
+            .into_iter()
+            .map(OutgoingHashtag::into_transport)
+            .collect();
+        let transport_emojis: Vec<TransportEmoji> = emojis
+            .into_iter()
+            .map(OutgoingEmoji::into_transport)
+            .collect();
+
+        let api = self.api.clone();
+        let clan_num = clan_id.get();
+        let channel_num = channel_id.get();
+        cx.spawn(async move |_this, _cx| {
+            if let Err(e) = api
+                .write_ephemeral_message(
+                    receiver_id,
+                    clan_num,
+                    channel_num,
+                    &content,
+                    is_public,
+                    mode,
+                    transport_mentions,
+                    transport_hashtags,
+                    transport_emojis,
+                )
+                .await
+            {
+                tracing::error!("send_ephemeral_message failed: {e}");
+            }
+        })
+        .detach();
+    }
+
     pub fn send_message(
         &mut self,
         content: String,
