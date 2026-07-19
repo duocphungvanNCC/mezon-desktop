@@ -1,15 +1,15 @@
 use std::collections::HashMap;
 
 use gpui::{
-    AnyView, App, Context, DismissEvent, Entity, Focusable, StyleRefinement, Subscription, Task,
-    Window, deferred, div, prelude::*, px,
+    AnyView, App, Context, DismissEvent, Entity, Focusable, Pixels, ScrollHandle, Size,
+    StyleRefinement, Subscription, Task, Window, deferred, div, prelude::*, px,
 };
 use mezon_store::{
     AuthState, Channel, ChannelId, ChannelList, ChannelType, ClanId, ClanList, ClanMembersStore,
     DirectChannel, DirectKind, DirectMessageStore, GroupMembersStore, InboxStore,
     MessageSearchEvent, MessageSearchStore, MessagesStore, PinnedEvent, PinnedMessagesStore,
-    Settings, ThreadsEvent, ThreadsStore, TopicsEvent, TopicsStore, VoiceMember, VoiceModerationError, VoiceStore,
-    expand_mention_name_tokens,
+    Settings, ThreadsEvent, ThreadsStore, TopicsEvent, TopicsStore, VoiceConnection, VoiceMember,
+    VoiceModerationError, VoiceStore, expand_mention_name_tokens,
 };
 use ui::PopoverMenuHandle;
 use ui::utils::ROUNDED_BORDER_WINDOW;
@@ -45,6 +45,12 @@ pub struct ChatLayout {
     auth_state: Entity<AuthState>,
     settings: Entity<Settings>,
     voice_store: Entity<VoiceStore>,
+    voice_strip_scroll: ScrollHandle,
+    voice_grid_page: usize,
+    voice_grid_wheel_accum: f32,
+    voice_grid_size: Size<Pixels>,
+    voice_show_members: bool,
+    voice_session_key: Option<String>,
     pending_channel_id: Option<ChannelId>,
     prefetched_voice_channel: Option<ChannelId>,
     dm_view_fingerprint: Option<(ChannelId, DirectKind, String)>,
@@ -349,6 +355,12 @@ impl ChatLayout {
             chat_area,
             settings,
             voice_store,
+            voice_strip_scroll: ScrollHandle::new(),
+            voice_grid_page: 0,
+            voice_grid_wheel_accum: 0.,
+            voice_grid_size: Size::default(),
+            voice_show_members: true,
+            voice_session_key: None,
             pending_channel_id: None,
             prefetched_voice_channel: None,
             dm_view_fingerprint: None,
@@ -1207,7 +1219,7 @@ impl Render for ChatLayout {
             self.build_create_thread_panel(&locale, window, cx)
         };
         let right_panel = topic_panel.or(create_panel);
-        let chat_content = self.render_content(cx);
+        let chat_content = self.render_content(window.viewport_size().width, cx);
         let main_content = if let Some(panel) = right_panel {
             div()
                 .flex()
@@ -1244,6 +1256,7 @@ impl Render for ChatLayout {
                 &self.settings,
                 self.voice_store.read(cx),
                 &chat,
+                cx,
             )
         } else {
             None
@@ -1652,6 +1665,58 @@ impl ChatLayout {
             .into_any_element()
     }
 
+    fn sync_voice_session_defaults(&mut self, cx: &App) {
+        let key = match self.voice_store.read(cx).connection() {
+            VoiceConnection::Connecting { channel_id, .. }
+            | VoiceConnection::Connected { channel_id, .. } => Some(channel_id.clone()),
+            _ => None,
+        };
+        if self.voice_session_key != key {
+            self.voice_session_key = key;
+            self.voice_show_members = true;
+            self.voice_grid_page = 0;
+            self.voice_grid_wheel_accum = 0.;
+            self.voice_strip_scroll
+                .set_offset(gpui::point(px(0.), px(0.)));
+        }
+    }
+
+    pub(crate) fn toggle_voice_member_strip(&mut self, cx: &mut Context<Self>) {
+        self.voice_show_members = !self.voice_show_members;
+        cx.notify();
+    }
+
+    pub(crate) fn record_voice_grid_size(&mut self, size: Size<Pixels>, cx: &mut Context<Self>) {
+        if self.voice_grid_size != size {
+            self.voice_grid_size = size;
+            cx.notify();
+        }
+    }
+
+    pub(crate) fn scroll_voice_grid_page(
+        &mut self,
+        delta: f32,
+        total_pages: usize,
+        cx: &mut Context<Self>,
+    ) {
+        const STEP: f32 = 100.;
+        let last_page = total_pages.saturating_sub(1);
+        self.voice_grid_wheel_accum += delta;
+        let mut page = self.voice_grid_page.min(last_page);
+        while self.voice_grid_wheel_accum <= -STEP {
+            self.voice_grid_wheel_accum += STEP;
+            page = (page + 1).min(last_page);
+        }
+        while self.voice_grid_wheel_accum >= STEP {
+            self.voice_grid_wheel_accum -= STEP;
+            page = page.saturating_sub(1);
+        }
+        if page != self.voice_grid_page {
+            self.voice_grid_page = page;
+            cx.notify();
+        }
+    }
+
     pub(crate) fn toggle_voice_emoji_picker(
         &mut self,
         window: &mut Window,
@@ -1874,7 +1939,7 @@ impl ChatLayout {
         root.into_any_element()
     }
 
-    fn render_content(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
+    fn render_content(&mut self, window_width: Pixels, cx: &mut Context<Self>) -> gpui::AnyElement {
         let theme = cx.theme();
         let locale = self.settings.read(cx).language.clone();
         let inbox_handle = self.inbox_handle.clone();
@@ -1969,12 +2034,14 @@ impl ChatLayout {
 
         if let Some(ch) = self.channel_list.read(cx).active_channel() {
             if ch.channel_type == ChannelType::Voice {
+                self.sync_voice_session_defaults(cx);
                 let channel = ch.clone();
-                let (input_device_id, output_device_id) = {
+                let (input_device_id, output_device_id, camera_device_id) = {
                     let settings = self.settings.read(cx);
                     (
                         settings.input_device_id.clone(),
                         settings.output_device_id.clone(),
+                        settings.camera_device_id.clone(),
                     )
                 };
                 let voice_view = crate::chat::voice::render_voice_channel(
@@ -1985,6 +2052,12 @@ impl ChatLayout {
                     &self.settings,
                     input_device_id,
                     output_device_id,
+                    camera_device_id,
+                    &self.voice_strip_scroll,
+                    self.voice_grid_page,
+                    self.voice_grid_size,
+                    self.voice_show_members,
+                    window_width,
                     cx,
                 );
                 return div()

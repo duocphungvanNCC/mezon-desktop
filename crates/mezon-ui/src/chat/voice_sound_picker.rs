@@ -193,11 +193,15 @@ impl Render for VoiceSoundPicker {
                     .hover(|s| s.rounded(px(16.)).bg(gpui::rgb(ACCENT_BLUE)));
             }
             if !cat.logo.is_empty() {
-                btn = btn.child(
-                    img(cat.logo.clone())
-                        .size_full()
-                        .object_fit(gpui::ObjectFit::Cover),
-                );
+                let mut logo = img(cat.logo.clone())
+                    .size_full()
+                    .object_fit(gpui::ObjectFit::Cover);
+                if active {
+                    logo = logo.rounded(px(16.));
+                } else {
+                    logo = logo.rounded(px(24.)).hover(|s| s.rounded(px(16.)));
+                }
+                btn = btn.child(logo);
             } else {
                 btn = btn.child(
                     div()
@@ -351,6 +355,7 @@ fn render_header(
             "voice-sound-cat-{}",
             cat.clan_id
         )))
+        .w_full()
         .h(px(ROW_PX))
         .flex()
         .flex_row()
@@ -372,7 +377,6 @@ fn render_header(
                 .size(px(12.))
                 .text_color(theme.text_muted),
         )
-        .child(div().h(px(1.)).flex_1().ml_2().bg(theme.border))
         .on_click(move |_, _, cx| {
             ent.update(cx, |this, cx| this.toggle_collapse(clan_id.clone(), cx));
         })
@@ -386,7 +390,13 @@ fn render_sound_row(
     previewing: &Option<SharedString>,
     entity: &Entity<VoiceSoundPicker>,
 ) -> AnyElement {
-    let mut row = div().h(px(ROW_PX)).flex().flex_row().items_start().gap_3();
+    let mut row = div()
+        .w_full()
+        .h(px(ROW_PX))
+        .flex()
+        .flex_row()
+        .items_start()
+        .gap_3();
     row = row.child(render_sound_cell(theme, left, previewing, entity));
     match right {
         Some(sound) => row = row.child(render_sound_cell(theme, sound, previewing, entity)),
@@ -429,7 +439,10 @@ fn render_sound_cell(
         .bg(theme.bg_secondary)
         .border_1()
         .border_color(gpui::transparent_black())
-        .hover(|s| s.border_color(gpui::rgb(ACCENT_BLUE)))
+        .hover(|s| {
+            s.bg(gpui::rgba(0x5865f21a))
+                .border_color(gpui::rgba(0x5865f24d))
+        })
         .child(
             div()
                 .id(SharedString::from(format!("{}-preview", sound.row_id)))
