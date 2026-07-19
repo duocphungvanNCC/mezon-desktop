@@ -16,6 +16,9 @@ pub struct Role {
     pub name: String,
     pub color: String,
     pub icon: String,
+    pub slug: String,
+    pub max_level_permission: i32,
+    pub order: i32,
 }
 
 #[derive(Debug, Clone)]
@@ -200,6 +203,9 @@ fn roles_map_from_proto(roles: Vec<mezon_proto::api::Role>) -> ClanRoles {
                     name: r.title,
                     color: r.color,
                     icon: r.role_icon,
+                    slug: r.slug,
+                    max_level_permission: r.max_level_permission,
+                    order: r.order_role,
                 },
             )
             .is_none()
