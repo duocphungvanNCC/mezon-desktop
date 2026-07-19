@@ -609,7 +609,7 @@ fn render_album(
             tile_element = tile_element.when(
                 !att.uploading && !att.upload_failed && !raw_url.is_empty(),
                 |d| {
-                    d.cursor_pointer().on_click(move |_, _window, cx| {
+                    d.cursor_pointer().on_mouse_down(MouseButton::Left, move |_, _window, cx| {
                         if !selection.borrow().has_selection() {
                             open_viewer_from_message(&settings, raw_url.clone(), anchor, cx);
                         }
@@ -638,7 +638,7 @@ fn render_album(
                             .object_fit(ObjectFit::Cover),
                     )
                 })
-                .on_click(move |_, _window, cx| {
+                .on_mouse_down(MouseButton::Left, move |_, _window, cx| {
                     if !selection.borrow().has_selection() {
                         open_viewer_from_message(&settings, raw_url.clone(), anchor, cx);
                     }
@@ -758,7 +758,7 @@ fn render_photo(
             .overflow_hidden()
             .bg(theme.bg_tertiary);
         el = el.when(!sending && !att.upload_failed && !raw_url.is_empty(), |d| {
-            d.cursor_pointer().on_click(move |_, _window, cx| {
+            d.cursor_pointer().on_mouse_down(MouseButton::Left, move |_, _window, cx| {
                 if !selection.borrow().has_selection() {
                     open_viewer_from_message(&settings, raw_url.clone(), anchor, cx);
                 }
@@ -836,7 +836,7 @@ fn render_photo(
         .overflow_hidden()
         .bg(theme.bg_tertiary);
     el = el.when(!is_sticker && !att.upload_failed, |d| {
-        d.cursor_pointer().on_click(move |_, _window, cx| {
+        d.cursor_pointer().on_mouse_down(MouseButton::Left, move |_, _window, cx| {
             if !selection.borrow().has_selection() {
                 open_viewer_from_message(&settings, raw_url.clone(), anchor, cx);
             }

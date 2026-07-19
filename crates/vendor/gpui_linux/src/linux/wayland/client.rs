@@ -318,6 +318,26 @@ impl WaylandClientStatePtr {
             Some(PendingActivation::Window(window));
     }
 
+    pub(crate) fn activation_interaction_surface(
+        &self,
+        exclude: ObjectId,
+    ) -> Option<wl_surface::WlSurface> {
+        let client = self.get_client();
+        let state = client.borrow();
+        state
+            .mouse_focused_window
+            .as_ref()
+            .filter(|window| window.surface().id() != exclude)
+            .map(WaylandWindowStatePtr::surface)
+            .or_else(|| {
+                state
+                    .keyboard_focused_window
+                    .as_ref()
+                    .filter(|window| window.surface().id() != exclude)
+                    .map(WaylandWindowStatePtr::surface)
+            })
+    }
+
     pub fn enable_ime(&self) {
         let client = self.get_client();
         let mut state = client.borrow_mut();

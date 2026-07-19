@@ -1281,7 +1281,11 @@ impl PlatformWindow for WaylandWindow {
             let serial = state.client.get_serial(SerialKind::MousePress);
             token.set_app_id(app_id);
             token.set_serial(serial, &state.globals.seat);
-            token.set_surface(&state.surface);
+            let interaction_surface = state
+                .client
+                .activation_interaction_surface(state.surface.id())
+                .unwrap_or_else(|| state.surface.clone());
+            token.set_surface(&interaction_surface);
             token.commit();
         }
     }

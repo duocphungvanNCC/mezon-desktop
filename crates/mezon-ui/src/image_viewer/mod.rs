@@ -16,6 +16,7 @@ use mezon_store::{
 };
 
 use crate::app::main_window::{activate_main_window, main_window_bounds};
+use crate::app::shell::Shell;
 use crate::app::title_bar::TitleBar;
 use crate::app::window_controls;
 use crate::chat::message::{VideoActivation, VideoFullscreenMode, VideoLayout, VideoPlayerView};
@@ -97,7 +98,7 @@ fn prior_viewer_bounds(cx: &mut App) -> Option<Bounds<Pixels>> {
 
 /// Open the image viewer, replacing any existing viewer window.
 pub fn open_image_viewer(request: OpenViewerRequest, cx: &mut App) {
-    cx.defer(move |cx| open_image_viewer_now(request, cx));
+    open_image_viewer_now(request, cx);
 }
 
 fn open_image_viewer_now(request: OpenViewerRequest, cx: &mut App) {
@@ -105,8 +106,9 @@ fn open_image_viewer_now(request: OpenViewerRequest, cx: &mut App) {
     if let Some(handle) = cx.try_global::<GlobalImageViewer>().map(|g| g.0) {
         let _ = handle.update(cx, |viewer, window, cx| {
             if let Some(request) = pending.take() {
-                viewer.set_request(request, window, cx);
                 window.activate_window();
+                window.focus(&viewer.focus_handle, cx);
+                viewer.set_request(request, window, cx);
             }
         });
         if pending.is_none() {
@@ -146,6 +148,7 @@ fn spawn_image_viewer_window(
         show: true,
         titlebar: Some(window_controls::window_title_options()),
         window_decorations: window_controls::main_window_decorations(),
+        app_id: window_controls::linux_app_id(),
         ..Default::default()
     };
 
@@ -160,6 +163,10 @@ fn spawn_image_viewer_window(
                 tracing::warn!("Failed to configure image viewer window: {error}");
             }
             cx.set_global(GlobalImageViewer(handle));
+            let _ = handle.update(cx, |viewer, window, cx| {
+                window.focus(&viewer.focus_handle, cx);
+                window.activate_window();
+            });
         }
         Err(e) => tracing::error!("failed to open image viewer window: {e}"),
     }
@@ -810,6 +817,33 @@ impl ImageViewer {
             cx,
         );
     }
+
+    fn copy_image(&mut self, cx: &mut Context<Self>) {
+        let Some(att) = self.current().filter(|a| a.is_image) else {
+            return;
+        };
+        let locale = self.locale(cx);
+        let url = SharedString::from(att.url.clone());
+        mezon_store::copy_image_url_to_clipboard(
+            url,
+            move |success, cx| {
+                let key = if success {
+                    "contextMenu.imageCopiedToClipboard"
+                } else {
+                    "contextMenu.errors.failedToCopyImage"
+                };
+                let message = mezon_i18n::t(&locale, key).to_string();
+                Shell::global(cx).update(cx, |shell, cx| {
+                    if success {
+                        shell.success(message, cx);
+                    } else {
+                        shell.error(message, cx);
+                    }
+                });
+            },
+            cx,
+        );
+    }
 }
 
 fn apply_uploader_info(att: &mut ChannelAttachment, info: UploaderInfo) {
@@ -1362,6 +1396,7 @@ impl ImageViewer {
     fn build_context_menu(&self, locale: &str, cx: &Context<Self>) -> ContextMenu {
         let entity = cx.entity();
         let t = |key: &'static str| mezon_i18n::t(locale, key).to_string();
+        let is_image = self.current().is_some_and(|a| a.is_image);
         let dismiss = {
             let entity = entity.downgrade();
             move |_window: &mut Window, cx: &mut App| {
@@ -1373,7 +1408,7 @@ impl ImageViewer {
                 }
             }
         };
-        ContextMenu::new()
+        let mut menu = ContextMenu::new()
             .on_dismiss(dismiss)
             .item_icon(t("contextMenu.copyLink"), IconName::CopyIcon, {
                 let entity = entity.downgrade();
@@ -1387,19 +1422,6 @@ impl ImageViewer {
                     }
                 }
             })
-            .item_icon(t("contextMenu.saveImage"), IconName::Download, {
-                let entity = entity.downgrade();
-                move |_w, cx| {
-                    if let Some(this) = entity.upgrade() {
-                        this.update(cx, |this, cx| {
-                            this.save_image(cx);
-                            this.context_menu = None;
-                            cx.notify();
-                        });
-                    }
-                }
-            })
-            .separator()
             .item(t("contextMenu.openLink"), {
                 let entity = entity.downgrade();
                 move |_w, cx| {
@@ -1411,7 +1433,36 @@ impl ImageViewer {
                         });
                     }
                 }
-            })
+            });
+        if is_image {
+            menu = menu
+                .separator()
+                .item(t("contextMenu.copyImage"), {
+                    let entity = entity.downgrade();
+                    move |_w, cx| {
+                        if let Some(this) = entity.upgrade() {
+                            this.update(cx, |this, cx| {
+                                this.copy_image(cx);
+                                this.context_menu = None;
+                                cx.notify();
+                            });
+                        }
+                    }
+                })
+                .item_icon(t("contextMenu.saveImage"), IconName::Download, {
+                    let entity = entity.downgrade();
+                    move |_w, cx| {
+                        if let Some(this) = entity.upgrade() {
+                            this.update(cx, |this, cx| {
+                                this.save_image(cx);
+                                this.context_menu = None;
+                                cx.notify();
+                            });
+                        }
+                    }
+                });
+        }
+        menu
     }
 }
 
