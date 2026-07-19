@@ -1343,7 +1343,7 @@ impl ChatLayout {
         let Some(mention_input) = self.chat_area.mention_input.clone() else {
             return;
         };
-        let Some((content, content_tokens, attachments)) = mention_input
+        let Some((content, content_tokens, attachments, ogp)) = mention_input
             .update(cx, |mention_input, cx| {
                 mention_input.take_payload(window, cx)
             })
@@ -1354,6 +1354,7 @@ impl ChatLayout {
             content,
             content_tokens,
             attachments,
+            ogp,
             &self.auth_state,
             cx,
         );

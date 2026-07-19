@@ -127,6 +127,40 @@ const SHARED_SMALL_AVATAR_CACHE_BYTES: u64 = 20 * 1024 * 1024;
 struct SharedAvatarCache(Entity<LruImageCache>);
 impl Global for SharedAvatarCache {}
 
+struct SharedOgpCache(Entity<LruImageCache>);
+impl Global for SharedOgpCache {}
+
+const OGP_SHARED_CACHE_CAPACITY: usize = 64;
+const OGP_SHARED_CACHE_BYTES: u64 = 16 * 1024 * 1024;
+const OGP_SHARED_ENTRY_MAX_BYTES: u64 = 2 * 1024 * 1024;
+
+/// App-global, bounded, aspect-preserving cache for OGP link-preview images
+/// (decode-capped at [`OGP_THUMB_DECODE_MAX_PX`]), so previews never share/evict
+/// the message image cache and large external OG images decode downscaled. Must
+/// be initialized once with a `&mut App`; read from render via [`ogp_image_cache`].
+pub fn shared_ogp_cache(cx: &mut App) -> Entity<LruImageCache> {
+    if let Some(existing) = cx.try_global::<SharedOgpCache>() {
+        return existing.0.clone();
+    }
+    let cache = cx.new(|cx| {
+        LruImageCache::ogp_thumbnail(
+            "ogp-shared",
+            OGP_SHARED_CACHE_CAPACITY,
+            OGP_SHARED_CACHE_BYTES,
+            OGP_SHARED_ENTRY_MAX_BYTES,
+            cx,
+        )
+    });
+    cx.set_global(SharedOgpCache(cache.clone()));
+    cache
+}
+
+/// The app-global OGP image cache if [`shared_ogp_cache`] has been initialized.
+pub fn ogp_image_cache(app: &App) -> Option<Entity<LruImageCache>> {
+    app.try_global::<SharedOgpCache>()
+        .map(|cache| cache.0.clone())
+}
+
 pub fn shared_avatar_cache(cx: &mut App) -> Entity<LruImageCache> {
     if let Some(existing) = cx.try_global::<SharedAvatarCache>() {
         return existing.0.clone();
@@ -399,6 +433,9 @@ enum LoaderKind {
     AvatarThumbnail,
     AvatarThumbnailSmall,
     GalleryThumbnail,
+    /// Aspect-preserving thumbnail for OGP link previews, capped at
+    /// [`OGP_THUMB_DECODE_MAX_PX`].
+    OgpThumbnail,
     Message,
     /// The image-viewer loader: still images keep near-full resolution
     /// ([`VIEWER_STATIC_MAX_PX`]); animated GIF/WebP keep every frame so they
@@ -492,6 +529,23 @@ impl LruImageCache {
         Self::with_loader(
             label,
             LoaderKind::GalleryThumbnail,
+            max_items,
+            max_bytes,
+            max_entry_bytes,
+            cx,
+        )
+    }
+
+    pub fn ogp_thumbnail(
+        label: &'static str,
+        max_items: usize,
+        max_bytes: u64,
+        max_entry_bytes: u64,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        Self::with_loader(
+            label,
+            LoaderKind::OgpThumbnail,
             max_items,
             max_bytes,
             max_entry_bytes,
@@ -827,6 +881,9 @@ impl LruImageCache {
             LoaderKind::GalleryThumbnail => {
                 AssetLogger::<GalleryImageLoader>::load(resource.clone(), cx).boxed()
             }
+            LoaderKind::OgpThumbnail => {
+                AssetLogger::<OgpImageLoader>::load(resource.clone(), cx).boxed()
+            }
             LoaderKind::Message => {
                 AssetLogger::<MessageImageLoader>::load(resource.clone(), cx).boxed()
             }
@@ -880,6 +937,10 @@ impl ImageCache for LruImageCache {
 const AVATAR_DECODE_MAX_PX: u32 = 160;
 const AVATAR_SMALL_DECODE_MAX_PX: u32 = 80;
 const GALLERY_THUMB_DECODE_MAX_PX: u32 = 320;
+/// OGP link-preview thumbnails render at ≤200px tall; decode to 512px longest
+/// side (aspect-preserving, ~2x for retina) so a large external OG image
+/// (typically 1200×630) can never decode oversized in the preview card.
+const OGP_THUMB_DECODE_MAX_PX: u32 = 512;
 
 /// An [`Asset`] loader for avatars that, unlike GPUI's stock [`ImageAssetLoader`],
 /// decodes **only the first frame** and **downscales** to avatar size before
@@ -1290,6 +1351,80 @@ fn message_path_maybe_animated(path: &std::path::Path) -> bool {
 /// every frame so they still animate, but each frame is downscaled to at most
 /// [`MESSAGE_ANIMATION_MAX_PX`], so a long high-resolution animation cannot
 /// expand to hundreds of MB of decoded BGRA. Static images keep full resolution.
+/// Fetch + decode an image downscaled to `max_px` on the longest side,
+/// **preserving aspect ratio** (unlike [`avatar_render_image`], which crops to
+/// a square). Used for OGP banner thumbnails.
+fn load_scaled_aspect(
+    source: Resource,
+    max_px: u32,
+    cx: &mut App,
+) -> impl Future<Output = Result<Arc<RenderImage>, ImageCacheError>> + Send + 'static {
+    let client = cx.http_client();
+    let svg_renderer = cx.svg_renderer();
+    let asset_source = cx.asset_source().clone();
+    async move {
+        use anyhow::Context as _;
+        let bytes = match source.clone() {
+            Resource::Path(uri) => std::fs::read(uri.as_ref())?,
+            Resource::Uri(uri) => {
+                let mut response = client
+                    .get(uri.as_ref(), ().into(), true)
+                    .await
+                    .with_context(|| format!("loading ogp image from {uri:?}"))?;
+                let body = read_body_limited(&mut response, GALLERY_FETCH_MAX_BYTES).await?;
+                if !response.status().is_success() {
+                    let mut body = String::from_utf8_lossy(&body).into_owned();
+                    let first_line = body.lines().next().unwrap_or("").trim_end();
+                    body.truncate(first_line.len());
+                    return Err(ImageCacheError::BadStatus {
+                        uri,
+                        status: response.status(),
+                        body,
+                    });
+                }
+                body
+            }
+            Resource::Embedded(path) => match asset_source.load(&path).ok().flatten() {
+                Some(data) => data.to_vec(),
+                None => {
+                    return Err(ImageCacheError::Asset(
+                        format!("Embedded resource not found: {path}").into(),
+                    ));
+                }
+            },
+        };
+        if image::guess_format(&bytes).is_ok() {
+            let decoded = match decode_scaled_dynamic(&bytes, max_px) {
+                Some(image) => image,
+                None => image::load_from_memory(&bytes)?,
+            };
+            let mut data = decoded.into_rgba8();
+            for pixel in data.chunks_exact_mut(4) {
+                pixel.swap(0, 2);
+            }
+            Ok(Arc::new(RenderImage::new(vec![image::Frame::new(data)])))
+        } else {
+            svg_renderer
+                .render_single_frame(&bytes, 1.0)
+                .map_err(Into::into)
+        }
+    }
+}
+
+pub enum OgpImageLoader {}
+
+impl Asset for OgpImageLoader {
+    type Source = Resource;
+    type Output = Result<Arc<RenderImage>, ImageCacheError>;
+
+    fn load(
+        source: Self::Source,
+        cx: &mut App,
+    ) -> impl Future<Output = Self::Output> + Send + 'static {
+        load_scaled_aspect(source, OGP_THUMB_DECODE_MAX_PX, cx)
+    }
+}
+
 pub enum MessageImageLoader {}
 
 impl Asset for MessageImageLoader {

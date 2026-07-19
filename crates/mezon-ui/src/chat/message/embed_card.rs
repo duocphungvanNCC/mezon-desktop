@@ -98,6 +98,7 @@ pub fn render_embed_card(
     if !embed.fields.is_empty() {
         left = left.child(render_embed_fields(
             &embed.fields,
+            msg.id,
             selection_context,
             &mut selection_cursor,
             ctx,

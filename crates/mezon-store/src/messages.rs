@@ -9,10 +9,12 @@ use gpui::{
     Subscription, Task,
 };
 use mezon_client::transport::{
-    ApiActionRow, ApiComponentPayload, ApiEmbed, ApiMessage, ApiMessageComponent,
-    ApiMessageContent, OutgoingEmoji as TransportEmoji, OutgoingHashtag as TransportHashtag,
-    OutgoingMention as TransportMention, OutgoingReply, detect_markdown, emoji_content_tokens,
-    hashtag_content_tokens, markdown_content_tokens, mention_content_tokens,
+    ApiActionRow, ApiComponentPayload, ApiEmbed, ApiEmbedInputWrapper, ApiMessage,
+    ApiMessageComponent, ApiMessageContent, ApiMessageInput, ApiSelectComponent,
+    OutgoingEmoji as TransportEmoji, OutgoingHashtag as TransportHashtag,
+    OutgoingMention as TransportMention, OutgoingOgp, OutgoingReply, build_send_content,
+    detect_markdown, emoji_content_tokens, hashtag_content_tokens, markdown_content_tokens,
+    mention_content_tokens,
 };
 use mezon_client::{
     AppApi, AttachmentUploadOutcome, ConnectionStatus, MezonTransport, RealtimeEvent, UploadFile,
@@ -28,13 +30,14 @@ use crate::channel::{ChannelEvent, ChannelList, ChannelType};
 use crate::clan_members::ClanMembersStore;
 use crate::direct::{DirectKind, DirectMessageStore};
 use crate::message::{
-    CallLog, CallLogType, Embed, EmbedAuthor, EmbedField, EmbedFooter, EmbedImage, InvitePreview,
-    MentionTarget, Message, MessageAttachment, MessageButton, MessageCode, MessageComponent,
-    MessageComponentRow, MessageReference, MessageSelect, MessageSelectOption, MessageSpan,
-    OgpPreview, PollAnswerView, PollData, PollDetail, PollLabelSegment, PollVoter, ViewerMedia,
-    aggregate_reactions, apply_reaction_event, message_combined_with_prev, message_sort_key,
-    parse_spans, reaction_key, recompute_message_grouping, rollback_reaction, sort_messages,
-    spans_only_emoji, viewer_highlight_direct,
+    CallLog, CallLogType, Embed, EmbedAuthor, EmbedField, EmbedFooter, EmbedImage, EmbedInput,
+    EmbedTextInput, InvitePreview, MentionTarget, Message, MessageAttachment, MessageButton,
+    MessageCode, MessageComponent, MessageComponentRow, MessageReference, MessageSelect,
+    MessageSelectOption, MessageSpan, OgpPreview, PollAnswerView, PollData, PollDetail,
+    PollLabelSegment, PollVoter, ViewerMedia, aggregate_reactions, apply_reaction_event,
+    message_combined_with_prev, message_sort_key, parse_spans, reaction_key,
+    recompute_message_grouping, rollback_reaction, sort_messages, spans_only_emoji,
+    viewer_highlight_direct,
 };
 use crate::message_time::{
     format_local_time_hhmm, local_datetime, local_day_key, unix_now_seconds,
@@ -501,6 +504,7 @@ pub struct MessagesStore {
     /// `VotePollResponse.my_answer_indices`.
     poll_my_vote: HashMap<MessageId, Vec<i32>>,
     select_ui: HashMap<MessageId, HashMap<SharedString, Vec<SharedString>>>,
+    embed_form: HashMap<MessageId, HashMap<SharedString, SharedString>>,
     forward_task: Option<Task<()>>,
     forward_in_flight: bool,
 }
@@ -741,6 +745,7 @@ async fn send_forward(
                 Vec::new(),
                 Vec::new(),
                 Vec::new(),
+                None,
             )
             .await
     {
@@ -812,6 +817,7 @@ impl MessagesStore {
         self.poll_ui.clear();
         self.poll_my_vote.clear();
         self.select_ui.clear();
+        self.embed_form.clear();
         self.forward_task = None;
         self.forward_in_flight = false;
         cx.notify();
@@ -862,6 +868,7 @@ impl MessagesStore {
             poll_ui: HashMap::new(),
             poll_my_vote: HashMap::new(),
             select_ui: HashMap::new(),
+            embed_form: HashMap::new(),
             forward_task: None,
             forward_in_flight: false,
         }
@@ -1881,6 +1888,92 @@ impl MessagesStore {
         .detach();
     }
 
+    /// Remove the OGP link preview from a message (author only), mirroring the
+    /// React `DeleteOgpButton`: drop it locally and re-send the message content
+    /// without the `lk_ogp` token so it is gone for everyone.
+    pub fn remove_message_ogp(&mut self, message_id: MessageId, cx: &mut Context<Self>) {
+        if self.active_channel_id.is_none() {
+            return;
+        }
+        let storage_id = self.reaction_storage_channel(message_id);
+        let mode = self.mode;
+        let is_public = self.is_public;
+        let Some(channel) = self.cache.get_mut(&storage_id) else {
+            return;
+        };
+        let Some(msg) = channel.messages.get_mut_by_id(message_id) else {
+            return;
+        };
+        if msg.ogp.is_none() {
+            return;
+        }
+        msg.ogp = None;
+        let content = msg.content.clone();
+        let outgoing = msg
+            .raw_content
+            .as_deref()
+            .and_then(outgoing_content_from_raw)
+            .unwrap_or_default();
+        if self.active_topic_id == Some(storage_id) {
+            cx.emit(MessagesEvent::TopicUpdated {
+                topic_id: storage_id.get(),
+            });
+        } else {
+            cx.emit(MessagesEvent::Updated {
+                message_id: Some(message_id),
+            });
+        }
+        cx.notify();
+
+        let api = self.api.clone();
+        let clan_id = self.active_clan_id.map_or(0, |c| c.get());
+        let message_num = message_id.get();
+        let (api_channel_id, api_topic_id, is_update_msg_topic) =
+            if self.active_topic_id == Some(storage_id) {
+                (storage_id.get(), storage_id.get(), true)
+            } else {
+                (storage_id.get(), 0, false)
+            };
+        let OutgoingContent {
+            mentions,
+            hashtags,
+            emojis,
+        } = outgoing;
+        let transport_mentions = mentions
+            .into_iter()
+            .map(OutgoingMention::into_transport)
+            .collect();
+        let transport_hashtags = hashtags
+            .into_iter()
+            .map(OutgoingHashtag::into_transport)
+            .collect();
+        let transport_emojis = emojis
+            .into_iter()
+            .map(OutgoingEmoji::into_transport)
+            .collect();
+        cx.spawn(async move |_this, _cx| {
+            if let Err(e) = api
+                .update_channel_message(
+                    clan_id,
+                    api_channel_id,
+                    message_num,
+                    &content,
+                    transport_mentions,
+                    transport_hashtags,
+                    transport_emojis,
+                    mode,
+                    is_public,
+                    api_topic_id,
+                    is_update_msg_topic,
+                )
+                .await
+            {
+                tracing::error!("remove ogp update failed: {e}");
+            }
+        })
+        .detach();
+    }
+
     /// Remove a message locally, then send the delete to the server.
     /// No rollback on network failure — a channel refresh reconciles true failures.
     pub fn delete_message(&mut self, message_id: MessageId, cx: &mut Context<Self>) {
@@ -2314,6 +2407,24 @@ impl MessagesStore {
         .detach();
     }
 
+    pub fn embed_form_value(&self, message_id: MessageId, input_id: &str) -> Option<&SharedString> {
+        self.embed_form
+            .get(&message_id)
+            .and_then(|by_input| by_input.get(input_id))
+    }
+
+    pub fn set_embed_form_value(
+        &mut self,
+        message_id: MessageId,
+        input_id: SharedString,
+        value: SharedString,
+    ) {
+        self.embed_form
+            .entry(message_id)
+            .or_default()
+            .insert(input_id, value);
+    }
+
     #[allow(dead_code)]
     pub fn message_select_selection(
         &self,
@@ -2379,30 +2490,34 @@ impl MessagesStore {
         cx: &mut Context<Self>,
     ) {
         let Some(channel_id) = self.active_channel_id else {
+            tracing::warn!("message button '{button_id}' ignored: no active channel");
             return;
         };
-        let extra_data = self
-            .select_ui
-            .get(&message_id)
-            .map(|by_select| {
-                let map: std::collections::BTreeMap<String, Vec<String>> = by_select
+        let mut form = serde_json::Map::new();
+        if let Some(by_select) = self.select_ui.get(&message_id) {
+            for (id, values) in by_select {
+                let values: Vec<serde_json::Value> = values
                     .iter()
-                    .map(|(id, values)| {
-                        (
-                            id.to_string(),
-                            values.iter().map(|v| v.to_string()).collect(),
-                        )
-                    })
+                    .map(|v| serde_json::Value::String(v.to_string()))
                     .collect();
-                serde_json::to_string(&map).unwrap_or_default()
-            })
-            .unwrap_or_default();
+                form.insert(id.to_string(), serde_json::Value::Array(values));
+            }
+        }
+        if let Some(by_input) = self.embed_form.get(&message_id) {
+            for (id, value) in by_input {
+                form.insert(id.to_string(), serde_json::Value::String(value.to_string()));
+            }
+        }
+        let extra_data =
+            serde_json::to_string(&serde_json::Value::Object(form)).unwrap_or_else(|_| "{}".into());
         let api = self.api.clone();
         let channel_num = channel_id.get();
         let message_num = message_id.get();
         let button_id = button_id.to_string();
+        let button_id_log = button_id.clone();
+        let extra_len = extra_data.len();
         cx.spawn(async move |_this, _cx| {
-            if let Err(e) = api
+            match api
                 .message_button_click(
                     message_num,
                     channel_num,
@@ -2413,7 +2528,12 @@ impl MessagesStore {
                 )
                 .await
             {
-                tracing::error!("click_message_button message_button_click failed: {e}");
+                Ok(()) => tracing::info!(
+                    "message button '{button_id_log}' submitted (extra_data {extra_len} bytes)"
+                ),
+                Err(e) => {
+                    tracing::error!("message button '{button_id_log}' submit failed: {e}")
+                }
             }
         })
         .detach();
@@ -2426,6 +2546,7 @@ impl MessagesStore {
         sender_name: String,
         content_tokens: OutgoingContent,
         attachments: Vec<OutgoingAttachment>,
+        ogp: Option<OutgoingOgp>,
         cx: &mut Context<Self>,
     ) {
         let Some(channel_id) = self.active_channel_id else {
@@ -2441,6 +2562,7 @@ impl MessagesStore {
         if reply.is_some() {
             cx.emit(MessagesEvent::ReplyTargetChanged);
         }
+        let ogp = if has_attachments { None } else { ogp };
 
         self.clear_last_read_message(channel_id);
         let Some(channel) = self.cache.get_mut(&channel_id) else {
@@ -2466,32 +2588,46 @@ impl MessagesStore {
             .into_iter()
             .map(OutgoingEmoji::into_transport)
             .collect();
-        let markdowns = detect_markdown(&content);
+        let sent = build_send_content(
+            &content,
+            &transport_mentions,
+            &transport_hashtags,
+            &transport_emojis,
+        );
         let (display_name, avatar_url, avatar_proxied) =
             outgoing_sender_profile(&sender_id, &sender_name, clan_id, cx);
         let mut optimistic = Message::new(
             temp_id,
-            content.clone(),
+            sent.text.clone(),
             sender_id,
             display_name,
             create_time,
         )
         .with_avatar(avatar_url)
         .with_avatar_proxied(avatar_proxied);
-        if !transport_mentions.is_empty()
-            || !transport_hashtags.is_empty()
-            || !transport_emojis.is_empty()
-            || !markdowns.is_empty()
+        if !sent.mentions.is_empty()
+            || !sent.hashtags.is_empty()
+            || !sent.emojis.is_empty()
+            || !sent.markdowns.is_empty()
+            || ogp.is_some()
         {
+            let mut mk = markdown_content_tokens(&sent.markdowns);
+            if let Some(ogp) = &ogp {
+                mk.push(ogp.to_content_token(sent.text.encode_utf16().count()));
+            }
             let tokens = ApiMessageContent {
-                t: content.clone(),
-                mentions: mention_content_tokens(&transport_mentions),
-                hg: hashtag_content_tokens(&transport_hashtags),
-                ej: emoji_content_tokens(&transport_emojis),
-                mk: markdown_content_tokens(&markdowns),
+                t: sent.text.clone(),
+                mentions: mention_content_tokens(&sent.mentions),
+                hg: hashtag_content_tokens(&sent.hashtags),
+                ej: emoji_content_tokens(&sent.emojis),
+                mk,
                 ..Default::default()
             };
             optimistic = optimistic.with_spans(parse_spans(&tokens));
+            if ogp.is_some() {
+                optimistic =
+                    optimistic.with_ogp(build_ogp_preview(&tokens, AppConfig::try_global(cx)));
+            }
         }
         if let Some(draft) = &reply {
             optimistic = optimistic.with_references(vec![MessageReference {
@@ -2645,6 +2781,7 @@ impl MessagesStore {
                         transport_mentions,
                         transport_hashtags,
                         transport_emojis,
+                        ogp,
                     )
                     .await
                 } else {
@@ -2657,6 +2794,7 @@ impl MessagesStore {
                         transport_mentions,
                         transport_hashtags,
                         transport_emojis,
+                        ogp,
                     )
                     .await
                 };
@@ -2840,7 +2978,11 @@ impl MessagesStore {
     }
 
     fn prune_message_ui_state(&mut self) {
-        if self.poll_ui.is_empty() && self.poll_my_vote.is_empty() && self.select_ui.is_empty() {
+        if self.poll_ui.is_empty()
+            && self.poll_my_vote.is_empty()
+            && self.select_ui.is_empty()
+            && self.embed_form.is_empty()
+        {
             return;
         }
         let stale: Vec<MessageId> = self
@@ -2848,6 +2990,7 @@ impl MessagesStore {
             .keys()
             .chain(self.poll_my_vote.keys())
             .chain(self.select_ui.keys())
+            .chain(self.embed_form.keys())
             .copied()
             .filter(|id| !self.message_is_loaded(*id))
             .collect();
@@ -2855,6 +2998,7 @@ impl MessagesStore {
             self.poll_ui.remove(&id);
             self.poll_my_vote.remove(&id);
             self.select_ui.remove(&id);
+            self.embed_form.remove(&id);
         }
     }
 
@@ -4728,6 +4872,45 @@ fn map_poll_detail(
     }
 }
 
+fn outgoing_content_from_raw(raw: &str) -> Option<OutgoingContent> {
+    let content: ApiMessageContent = serde_json::from_str(raw).ok()?;
+    let to_i32 = |value: Option<i64>| i32::try_from(value.unwrap_or(0)).unwrap_or(0);
+    let mentions = content
+        .mentions
+        .iter()
+        .map(|token| OutgoingMention {
+            user_id: token.user_id.clone().unwrap_or_default(),
+            role_id: token.role_id.clone().unwrap_or_default(),
+            display: token.username.clone().unwrap_or_default(),
+            s: to_i32(token.s),
+            e: to_i32(token.e),
+        })
+        .collect();
+    let hashtags = content
+        .hg
+        .iter()
+        .map(|token| OutgoingHashtag {
+            channel_id: token.channel_id.clone().unwrap_or_default(),
+            s: to_i32(token.s),
+            e: to_i32(token.e),
+        })
+        .collect();
+    let emojis = content
+        .ej
+        .iter()
+        .map(|token| OutgoingEmoji {
+            emoji_id: token.emojiid.clone().unwrap_or_default(),
+            s: to_i32(token.s),
+            e: to_i32(token.e),
+        })
+        .collect();
+    Some(OutgoingContent {
+        mentions,
+        hashtags,
+        emojis,
+    })
+}
+
 pub(crate) fn build_ogp_preview(
     content: &ApiMessageContent,
     cfg: Option<&AppConfig>,
@@ -4978,6 +5161,7 @@ fn build_embed(embed: &ApiEmbed, cfg: Option<&AppConfig>) -> Embed {
             name: field.name.clone().into(),
             value: field.value.clone().into(),
             inline: field.inline,
+            input: parse_embed_input(field.inputs.as_ref()),
         })
         .collect::<Vec<_>>()
         .into();
@@ -5005,6 +5189,57 @@ fn format_embed_footer_date(raw: &SharedString) -> SharedString {
     match chrono::DateTime::parse_from_rfc3339(raw) {
         Ok(dt) => SharedString::from(dt.format("%-m/%-d/%Y").to_string()),
         Err(_) => raw.clone(),
+    }
+}
+
+const EMBED_COMPONENT_TYPE_SELECT: i32 = 2;
+const EMBED_COMPONENT_TYPE_INPUT: i32 = 3;
+
+fn parse_embed_input(value: Option<&serde_json::Value>) -> Option<EmbedInput> {
+    let value = value?;
+    let wrapper: ApiEmbedInputWrapper = serde_json::from_value(value.clone()).ok()?;
+    let id = wrapper.id.filter(|id| !id.is_empty())?;
+    match wrapper.component_type {
+        Some(EMBED_COMPONENT_TYPE_INPUT) => {
+            let component: ApiMessageInput =
+                serde_json::from_value(wrapper.component).unwrap_or_default();
+            Some(EmbedInput::Text(EmbedTextInput {
+                id: id.into(),
+                placeholder: component.placeholder.unwrap_or_default().into(),
+                default_value: component.default_value.unwrap_or_default().into(),
+                multiline: component.textarea,
+                required: component.required,
+                disabled: component.disabled,
+            }))
+        }
+        Some(EMBED_COMPONENT_TYPE_SELECT) => {
+            let component: ApiSelectComponent =
+                serde_json::from_value(wrapper.component).unwrap_or_default();
+            let options = component
+                .options
+                .iter()
+                .map(|option| MessageSelectOption {
+                    label: option.label.clone().into(),
+                    value: option.value.clone().into(),
+                    description: option.description.clone().map(Into::into),
+                    default: option.default,
+                })
+                .collect();
+            Some(EmbedInput::Select(MessageSelect {
+                select_type: component.select_type.unwrap_or(1),
+                options,
+                placeholder: component.placeholder.clone().map(Into::into),
+                min_options: component.min_options,
+                max_options: wrapper.max_options.or(component.max_options),
+                disabled: component.disabled,
+                id: Some(id.into()),
+                value_selected: component
+                    .value_selected
+                    .as_ref()
+                    .map(|option| option.value.clone().into()),
+            }))
+        }
+        _ => None,
     }
 }
 
@@ -5053,6 +5288,10 @@ fn build_component(component: &ApiMessageComponent) -> MessageComponent {
             max_options: component.max_options.or(s.max_options),
             disabled: s.disabled,
             id: component.id.clone().map(Into::into),
+            value_selected: s
+                .value_selected
+                .as_ref()
+                .map(|option| option.value.clone().into()),
         }),
         ApiComponentPayload::Other(_) => MessageComponent::Other,
     }
@@ -5374,6 +5613,91 @@ mod tests {
     use super::*;
     use crate::ids::UserId;
     use crate::message::MessageSpan;
+
+    #[test]
+    fn parse_embed_input_extracts_text_input() {
+        let value = serde_json::json!({
+            "type": 3,
+            "id": "project",
+            "component": {
+                "placeholder": "Enter project",
+                "type": "text",
+                "required": true,
+                "textarea": false,
+                "defaultValue": "Alpha",
+                "disabled": false
+            }
+        });
+        let EmbedInput::Text(input) =
+            parse_embed_input(Some(&value)).expect("input component should parse")
+        else {
+            panic!("expected a text input");
+        };
+        assert_eq!(input.id.as_ref(), "project");
+        assert_eq!(input.placeholder.as_ref(), "Enter project");
+        assert_eq!(input.default_value.as_ref(), "Alpha");
+        assert!(input.required);
+        assert!(!input.multiline);
+        assert!(!input.disabled);
+    }
+
+    #[test]
+    fn parse_embed_input_extracts_select() {
+        let value = serde_json::json!({
+            "type": 2,
+            "id": "typeOfWork",
+            "component": {
+                "type": 1,
+                "placeholder": "Pick one",
+                "max_options": 1,
+                "options": [
+                    { "label": "Coding", "value": "code" },
+                    { "label": "Review", "value": "review" }
+                ]
+            }
+        });
+        let EmbedInput::Select(select) =
+            parse_embed_input(Some(&value)).expect("select component should parse")
+        else {
+            panic!("expected a select");
+        };
+        assert_eq!(select.id.as_deref(), Some("typeOfWork"));
+        assert_eq!(select.options.len(), 2);
+        assert_eq!(select.options[0].value.as_ref(), "code");
+    }
+
+    #[test]
+    fn parse_embed_input_ignores_unsupported_and_incomplete() {
+        let datepicker = serde_json::json!({ "type": 4, "id": "date", "component": {} });
+        assert!(parse_embed_input(Some(&datepicker)).is_none());
+        let missing_id = serde_json::json!({ "type": 3, "component": {} });
+        assert!(parse_embed_input(Some(&missing_id)).is_none());
+        assert!(parse_embed_input(None).is_none());
+    }
+
+    #[test]
+    fn build_embed_maps_field_input_including_textarea() {
+        let field = mezon_client::transport::ApiEmbedField {
+            name: "Project".into(),
+            inputs: Some(serde_json::json!({
+                "type": 3,
+                "id": "project",
+                "component": { "textarea": true }
+            })),
+            ..Default::default()
+        };
+        let api = ApiEmbed {
+            fields: vec![field],
+            ..Default::default()
+        };
+        let embed = build_embed(&api, None);
+        let mapped = embed.fields.first().expect("one field");
+        let Some(EmbedInput::Text(input)) = mapped.input.as_ref() else {
+            panic!("field should carry a text input");
+        };
+        assert_eq!(input.id.as_ref(), "project");
+        assert!(input.multiline);
+    }
 
     #[test]
     fn text_to_spans_parses_embed_code_block() {
@@ -6248,6 +6572,23 @@ mod tests {
         assert_eq!(ids, [MessageId(100), MessageId(250)]);
         assert!(list.temp_ids.is_empty());
         assert_list_consistent(&list);
+    }
+
+    #[test]
+    fn optimistic_markdown_content_matches_stripped_echo() {
+        let optimistic_text = build_send_content("**bold**", &[], &[], &[]).text;
+        assert_eq!(
+            optimistic_text, "bold",
+            "optimistic text must be stripped like the server-stored text"
+        );
+        let temp = MessageId::next_optimistic();
+        let list =
+            MessageList::from_messages(vec![Message::new(temp, optimistic_text, "u9", "Me", 200)]);
+        assert_eq!(
+            list.temp_match_position("u9", "bold"),
+            Some(0),
+            "stripped optimistic must reconcile with the stripped realtime echo"
+        );
     }
 
     #[test]

@@ -1,5 +1,5 @@
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
@@ -16,9 +16,10 @@ use ui::{ScrollAxes, Scrollbars, WithScrollbar};
 
 use mezon_store::{
     BadgeService, ChannelId, ChannelList, ChannelPermissionsEvent, ChannelPermissionsStore, ClanId,
-    ClanList, ClanMembersStore, DirectMessageStore, Emoji, EmojiStore, GroupMembersStore,
-    MessageCode, MessageId, MessagesEvent, MessagesStore, PERMISSION_DELETE_MESSAGE,
-    ProfileContext, Settings, TopicsEvent, TopicsStore, UserId, UsersByUserStore,
+    ClanList, ClanMembersStore, DirectMessageStore, EmbedInput, EmbedTextInput, Emoji, EmojiStore,
+    GroupMembersStore, MessageCode, MessageId, MessagesEvent, MessagesStore,
+    PERMISSION_DELETE_MESSAGE, ProfileContext, Settings, TopicsEvent, TopicsStore, UserId,
+    UsersByUserStore,
     message::{Message, markdown_edit_source},
 };
 
@@ -36,7 +37,7 @@ use crate::app::shell::Shell;
 use crate::chat::mention_input::{MentionInput, MentionInputEvent};
 use crate::chat::user_profile_popover::UserProfilePopover;
 use crate::components::primitives::input::Copy;
-use crate::components::primitives::{Icon, IconName, context_menu_at};
+use crate::components::primitives::{Icon, IconName, TextArea, TextAreaEvent, context_menu_at};
 use crate::image_cache::{
     LruImageCache, MESSAGE_ENTRY_MAX_BYTES, MESSAGE_IMAGE_CACHE_BYTES, MESSAGE_IMAGE_CACHE_CAPACITY,
 };
@@ -1103,6 +1104,10 @@ pub struct ChannelMessages {
     active_videos: Rc<HashMap<(MessageId, usize), Entity<VideoPlayerView>>>,
     active_audios: Rc<indexmap::IndexMap<(MessageId, usize), Entity<AudioPlayerView>>>,
     gif_videos: Rc<HashMap<(MessageId, usize), Entity<GifVideoView>>>,
+    embed_inputs: Rc<HashMap<(MessageId, SharedString), Entity<TextArea>>>,
+    embed_input_subs: HashMap<(MessageId, SharedString), Subscription>,
+    embed_input_fingerprint: Option<(Option<ChannelId>, usize)>,
+    embed_select_seeded: HashSet<(MessageId, SharedString)>,
     cached_for_channel: Option<ChannelId>,
     skeleton_phase: SkeletonPhase,
     skeleton_key: SkeletonKey,
@@ -1324,6 +1329,10 @@ impl ChannelMessages {
                     Rc::make_mut(&mut this.active_videos).clear();
                     Rc::make_mut(&mut this.active_audios).clear();
                     Rc::make_mut(&mut this.gif_videos).clear();
+                    Rc::make_mut(&mut this.embed_inputs).clear();
+                    this.embed_input_subs.clear();
+                    this.embed_input_fingerprint = None;
+                    this.embed_select_seeded.clear();
                     this.list_state.reset(*count);
                     this.last_visible_start = 0;
                     this.last_visible_end = 0;
@@ -1495,6 +1504,10 @@ impl ChannelMessages {
                     Rc::make_mut(&mut this.active_videos).retain(|(id, _), _| id != message_id);
                     Rc::make_mut(&mut this.active_audios).retain(|(id, _), _| id != message_id);
                     Rc::make_mut(&mut this.gif_videos).retain(|(id, _), _| id != message_id);
+                    Rc::make_mut(&mut this.embed_inputs).retain(|(id, _), _| id != message_id);
+                    this.embed_input_subs.retain(|(id, _), _| id != message_id);
+                    this.embed_select_seeded.retain(|(id, _)| id != message_id);
+                    this.embed_input_fingerprint = None;
                     let at = usize::from(this.header_shown) + *index;
                     if at < this.list_state.item_count() {
                         this.list_state.splice(at..at + 1, 0);
@@ -1700,6 +1713,10 @@ impl ChannelMessages {
             active_videos: Rc::new(HashMap::new()),
             active_audios: Rc::new(indexmap::IndexMap::new()),
             gif_videos: Rc::new(HashMap::new()),
+            embed_inputs: Rc::new(HashMap::new()),
+            embed_input_subs: HashMap::new(),
+            embed_input_fingerprint: None,
+            embed_select_seeded: HashSet::new(),
             cached_for_channel: None,
             skeleton_phase: SkeletonPhase::Hidden,
             skeleton_key: SkeletonKey::None,
@@ -2164,7 +2181,7 @@ impl ChannelMessages {
         let payload = input.update(cx, |input, cx| input.take_payload(window, cx));
         let store = MessagesStore::global(cx);
 
-        let Some((text, content_tokens, _attachments)) = payload else {
+        let Some((text, content_tokens, _attachments, _ogp)) = payload else {
             store.update(cx, |store, cx| store.cancel_edit(cx));
             let locale = self.cached_locale.clone();
             Shell::global(cx).update(cx, |shell, cx| {
@@ -2531,6 +2548,158 @@ impl ChannelMessages {
             }
             Rc::make_mut(&mut self.gif_videos).insert(gif.key, view);
             changed = true;
+        }
+
+        if changed {
+            cx.notify();
+        }
+    }
+
+    fn apply_embed_input_reconcile(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.is_topic_box {
+            return;
+        }
+        let fingerprint = (self.cached_for_channel, self.list_state.item_count());
+        if self.embed_input_fingerprint == Some(fingerprint) {
+            return;
+        }
+        self.embed_input_fingerprint = Some(fingerprint);
+
+        let desired: Vec<(MessageId, EmbedTextInput)> = {
+            let store = MessagesStore::global(cx);
+            let store = store.read(cx);
+            store
+                .viewport_messages()
+                .iter()
+                .flat_map(|message| {
+                    let message_id = message.id;
+                    message.embeds.iter().flat_map(move |embed| {
+                        embed
+                            .fields
+                            .iter()
+                            .filter_map(move |field| match field.input.as_ref() {
+                                Some(EmbedInput::Text(text)) if !text.disabled => {
+                                    Some((message_id, text.clone()))
+                                }
+                                _ => None,
+                            })
+                    })
+                })
+                .collect()
+        };
+        let wanted: HashSet<(MessageId, SharedString)> = desired
+            .iter()
+            .map(|(id, input)| (*id, input.id.clone()))
+            .collect();
+
+        let mut changed = false;
+        if self.embed_inputs.keys().any(|key| !wanted.contains(key)) {
+            Rc::make_mut(&mut self.embed_inputs).retain(|key, _| wanted.contains(key));
+            self.embed_input_subs.retain(|key, _| wanted.contains(key));
+            changed = true;
+        }
+
+        let bg = cx.theme().tokens.bg_markdown_code;
+        let text_color = cx.theme().tokens.text_theme_message;
+        for (message_id, input) in desired {
+            let key = (message_id, input.id.clone());
+            if self.embed_inputs.contains_key(&key) {
+                continue;
+            }
+            let restored = MessagesStore::global(cx)
+                .read(cx)
+                .embed_form_value(message_id, &input.id)
+                .cloned();
+            let initial = restored.unwrap_or_else(|| input.default_value.clone());
+            let placeholder = if input.required && !input.placeholder.is_empty() {
+                SharedString::from(format!("{}*", input.placeholder))
+            } else {
+                input.placeholder.clone()
+            };
+            let multiline = input.multiline;
+            let min_height = if multiline { px(72.) } else { px(36.) };
+            let input_state = cx.new(|cx| {
+                TextArea::new(window, cx)
+                    .placeholder(placeholder)
+                    .single_line(!multiline)
+                    .min_height(min_height)
+                    .radius(px(4.))
+                    .padding_x(px(12.))
+                    .text_size(px(14.))
+                    .bg(bg)
+                    .text_color(text_color)
+            });
+            if !initial.is_empty() {
+                input_state.update(cx, |state, cx| {
+                    state.set_value(initial.clone(), cx);
+                });
+                MessagesStore::global(cx).update(cx, |store, _cx| {
+                    store.set_embed_form_value(message_id, input.id.clone(), initial.clone());
+                });
+            }
+            let sub_key = key.clone();
+            let sub = cx.subscribe(&input_state, move |_this, entity, event, cx| {
+                if *event == TextAreaEvent::Change {
+                    let value: SharedString = entity.read(cx).value().to_string().into();
+                    let (message_id, input_id) = &sub_key;
+                    MessagesStore::global(cx).update(cx, |store, _cx| {
+                        store.set_embed_form_value(*message_id, input_id.clone(), value);
+                    });
+                }
+            });
+            Rc::make_mut(&mut self.embed_inputs).insert(key.clone(), input_state);
+            self.embed_input_subs.insert(key, sub);
+            changed = true;
+        }
+
+        let select_defaults: Vec<(MessageId, SharedString, Vec<SharedString>)> = {
+            let store = MessagesStore::global(cx);
+            let store = store.read(cx);
+            store
+                .viewport_messages()
+                .iter()
+                .flat_map(|message| {
+                    let message_id = message.id;
+                    message.embeds.iter().flat_map(move |embed| {
+                        embed.fields.iter().filter_map(move |field| {
+                            let Some(EmbedInput::Select(select)) = field.input.as_ref() else {
+                                return None;
+                            };
+                            let select_id = select.id.clone()?;
+                            let mut defaults: Vec<SharedString> =
+                                select.value_selected.clone().into_iter().collect();
+                            if defaults.is_empty() {
+                                defaults = select
+                                    .options
+                                    .iter()
+                                    .filter(|option| option.default)
+                                    .map(|option| option.value.clone())
+                                    .collect();
+                            }
+                            Some((message_id, select_id, defaults))
+                        })
+                    })
+                })
+                .collect()
+        };
+        for (message_id, select_id, defaults) in select_defaults {
+            if !self
+                .embed_select_seeded
+                .insert((message_id, select_id.clone()))
+            {
+                continue;
+            }
+            if defaults.is_empty() {
+                continue;
+            }
+            MessagesStore::global(cx).update(cx, |store, cx| {
+                if store
+                    .message_select_selection(message_id, &select_id)
+                    .is_empty()
+                {
+                    store.set_message_select_selection(message_id, select_id, defaults, cx);
+                }
+            });
         }
 
         if changed {
@@ -3716,6 +3885,7 @@ impl ChannelMessages {
         let active_videos = self.active_videos.clone();
         let active_audios = self.active_audios.clone();
         let gif_videos = self.gif_videos.clone();
+        let embed_inputs = self.embed_inputs.clone();
         let video_host = cx.entity().downgrade();
         let current_user_id = self.cached_current_user_id.clone();
         let role_ids = self.cached_role_ids.clone();
@@ -3773,6 +3943,7 @@ impl ChannelMessages {
                         active_videos: &active_videos,
                         active_audios: &active_audios,
                         gif_videos: &gif_videos,
+                        embed_inputs: &embed_inputs,
                         video_host: video_host.clone(),
                         now: frame_now,
                         clan_id: active_clan,
@@ -3885,7 +4056,8 @@ impl Render for ChannelMessages {
         if !scroll_active {
             self.schedule_scroll_state_sync(window, cx);
             cx.defer_in(window, |this, window, cx| {
-                this.apply_gif_reconcile(window, cx)
+                this.apply_gif_reconcile(window, cx);
+                this.apply_embed_input_reconcile(window, cx);
             });
         }
 
@@ -3943,6 +4115,7 @@ impl Render for ChannelMessages {
         let active_videos = self.active_videos.clone();
         let active_audios = self.active_audios.clone();
         let gif_videos = self.gif_videos.clone();
+        let embed_inputs = self.embed_inputs.clone();
         let video_host = cx.entity().downgrade();
         let current_user_id = self.cached_current_user_id.clone();
         let role_ids = self.cached_role_ids.clone();
@@ -4008,6 +4181,7 @@ impl Render for ChannelMessages {
                         active_videos: &active_videos,
                         active_audios: &active_audios,
                         gif_videos: &gif_videos,
+                        embed_inputs: &embed_inputs,
                         video_host: video_host.clone(),
                         now: frame_now,
                         clan_id: active_clan,

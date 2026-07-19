@@ -77,6 +77,10 @@ impl RootView {
             if matches!(*auth_state.read(cx), AuthState::NotAuthenticated) {
                 crate::image_viewer::close_image_viewer(cx);
                 crate::image_cache::clear_all_image_caches(cx);
+                Router::global(cx).update(cx, |router, cx| {
+                    router.reset();
+                    cx.notify();
+                });
             }
             cx.notify();
         })

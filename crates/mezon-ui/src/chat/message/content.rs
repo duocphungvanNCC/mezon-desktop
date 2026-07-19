@@ -147,7 +147,8 @@ fn render_message_content_with_options(
         .spans
         .iter()
         .any(|s| matches!(s, MessageSpan::Emoji { emoji_id, .. } if !emoji_id.is_empty()));
-    if !options.inline && !has_code_block && !has_custom_emoji && !needs_chip_path {
+    if !options.inline && !msg.is_edited && !has_code_block && !has_custom_emoji && !needs_chip_path
+    {
         return render_rich_styled(msg, ctx, body_color);
     }
 
@@ -407,7 +408,8 @@ fn render_rich_styled(msg: &Message, ctx: &RowCtx, body_color: gpui::Rgba) -> An
             .into_any_element()
     };
 
-    let mut row = rich_content_row(body_color, false).child(content);
+    let mut row =
+        rich_content_row(body_color, false).child(div().max_w_full().min_w_0().child(content));
     if msg.is_edited {
         row = row.child(edited_marker(theme, ctx.locale));
     }
@@ -583,7 +585,13 @@ fn render_selectable_segmented_spans(
                 let end = base + text.len();
                 let styled = selectable_segment(text, base, selected.as_ref());
                 segments.push(TextSegment::text(styled.layout().clone(), base..end));
-                row = row.child(div().font_weight(FontWeight::BOLD).child(styled));
+                row = row.child(
+                    div()
+                        .max_w_full()
+                        .min_w_0()
+                        .font_weight(FontWeight::BOLD)
+                        .child(styled),
+                );
                 base = end;
             }
             MessageSpan::Code(text) => {
@@ -592,6 +600,8 @@ fn render_selectable_segmented_spans(
                 segments.push(TextSegment::text(styled.layout().clone(), base..end));
                 row = row.child(
                     div()
+                        .max_w_full()
+                        .min_w_0()
                         .px_2()
                         .rounded_md()
                         .bg(ctx.theme.tokens.bg_active_member_channel)
@@ -713,6 +723,7 @@ fn render_selectable_segmented_spans(
                 row = row.child(
                     div()
                         .w_full()
+                        .min_w_0()
                         .my(px(4.))
                         .text_size(heading_size(*level))
                         .font_weight(FontWeight::BOLD)
@@ -1442,12 +1453,16 @@ fn append_span(
         }
         MessageSpan::Bold(text) => row.child(
             div()
+                .max_w_full()
+                .min_w_0()
                 .font_weight(FontWeight::BOLD)
                 .text_color(body_color)
                 .child(text.clone()),
         ),
         MessageSpan::Code(text) => row.child(
             div()
+                .max_w_full()
+                .min_w_0()
                 .px_2()
                 .rounded_md()
                 .bg(theme.tokens.bg_active_member_channel)
@@ -1537,6 +1552,7 @@ fn heading_size(level: u8) -> Pixels {
 fn render_heading(level: u8, text: SharedString) -> AnyElement {
     div()
         .w_full()
+        .min_w_0()
         .my(px(4.))
         .text_size(heading_size(level))
         .font_weight(FontWeight::BOLD)
@@ -1560,8 +1576,9 @@ fn render_canvas_chip(title: SharedString) -> AnyElement {
     div()
         .id(hashed_element_id("canvas-chip", &title))
         .flex()
-        .flex_none()
         .flex_row()
+        .max_w_full()
+        .min_w_0()
         .items_center()
         .gap_1()
         .px(px(2.))
@@ -1578,7 +1595,7 @@ fn render_canvas_chip(title: SharedString) -> AnyElement {
                 .size_4()
                 .text_color(rgb(CANVAS_TEXT)),
         )
-        .child(title)
+        .child(div().min_w_0().child(title))
         .into_any_element()
 }
 
@@ -1699,7 +1716,8 @@ fn render_mention_chip_with_child(
     };
 
     let chip = div()
-        .flex_none()
+        .max_w_full()
+        .min_w_0()
         .px(px(1.))
         .rounded_sm()
         .font_weight(FontWeight::MEDIUM)
@@ -1733,7 +1751,8 @@ fn render_mention_chip_with_child(
         ctx,
         chip.into_any_element(),
     )
-    .flex_none()
+    .max_w_full()
+    .min_w_0()
     .into_any_element()
 }
 
@@ -1806,12 +1825,18 @@ fn render_hashtag_chip(
 
     let inner = div()
         .flex()
-        .flex_none()
         .flex_row()
+        .max_w_full()
+        .min_w_0()
         .items_center()
         .gap_0p5()
         .child(Icon::new(icon).size_4().text_color(color))
-        .child(div().when(unresolved_link, |d| d.italic()).child(label));
+        .child(
+            div()
+                .min_w_0()
+                .when(unresolved_link, |d| d.italic())
+                .child(label),
+        );
 
     match parsed_channel {
         Some(channel_id) => {
@@ -1819,7 +1844,8 @@ fn render_hashtag_chip(
             let selection = ctx.selection.clone();
             div()
                 .id(("msg-hashtag", channel_id.get() as usize))
-                .flex_none()
+                .max_w_full()
+                .min_w_0()
                 .px(px(1.))
                 .rounded_sm()
                 .font_weight(FontWeight::MEDIUM)
@@ -1836,7 +1862,8 @@ fn render_hashtag_chip(
                 .into_any_element()
         }
         None => div()
-            .flex_none()
+            .max_w_full()
+            .min_w_0()
             .px(px(1.))
             .rounded_sm()
             .font_weight(FontWeight::MEDIUM)

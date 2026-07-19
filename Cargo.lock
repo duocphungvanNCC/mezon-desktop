@@ -5538,6 +5538,7 @@ dependencies = [
  "bytes",
  "core-foundation 0.9.4",
  "dirs 5.0.1",
+ "flate2",
  "foyer",
  "futures",
  "http_client",

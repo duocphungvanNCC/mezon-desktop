@@ -16,6 +16,8 @@ use crate::components::primitives::{Icon, IconName};
 use crate::theme::ActiveTheme;
 
 const BUTTON_TEXT: u32 = 0xff_ff_ff;
+const COLOR_PRIMARY: u32 = 0x58_65_f2;
+const COLOR_SECONDARY: u32 = 0x4e_50_57;
 const COLOR_SUCCESS: u32 = 0x16_a3_4a;
 const COLOR_DANGER: u32 = 0xda_37_3c;
 const CHIP_REMOVE: u32 = 0xef_44_44;
@@ -34,12 +36,12 @@ pub fn render_actions_panel(msg: &Message, ctx: &RowCtx) -> AnyElement {
             match component {
                 MessageComponent::Button(button) => {
                     row_element = row_element.child(render_message_button(
-                        button, msg.id, sender_id, user_id, index, ctx,
+                        button, msg.id, sender_id, user_id, index,
                     ));
                 }
                 MessageComponent::Select(select) => {
                     row_element =
-                        row_element.child(render_message_select(select, msg.id, index, ctx));
+                        row_element.child(render_message_select(select, msg.id, index, false, ctx));
                 }
                 MessageComponent::Other => {}
             }
@@ -56,7 +58,6 @@ fn render_message_button(
     sender_id: i64,
     user_id: i64,
     index: usize,
-    ctx: &RowCtx,
 ) -> AnyElement {
     let has_url = button.url.is_some();
     let icon = if has_url {
@@ -73,7 +74,7 @@ fn render_message_button(
         .px_5()
         .py_1()
         .rounded(px(4.))
-        .bg(button_bg(button.style, ctx))
+        .bg(button_bg(button.style))
         .text_color(rgb(BUTTON_TEXT))
         .font_weight(FontWeight::MEDIUM)
         .cursor_pointer()
@@ -118,10 +119,11 @@ fn render_message_button(
     element.into_any_element()
 }
 
-fn render_message_select(
+pub(super) fn render_message_select(
     select: &MessageSelect,
     message_id: MessageId,
     index: usize,
+    inside: bool,
     ctx: &RowCtx,
 ) -> AnyElement {
     let theme = ctx.theme;
@@ -190,18 +192,15 @@ fn render_message_select(
         }
         left = left.child(chips);
     }
-    left = left.child(
+    let mut placeholder_col = div().flex().flex_col().items_start().child(
         div()
-            .flex()
-            .flex_col()
-            .items_start()
-            .child(
-                div()
-                    .text_color(theme.tokens.text_theme_primary)
-                    .child(placeholder),
-            )
-            .child(div().text_size(px(12.)).italic().child(note)),
+            .text_color(theme.tokens.text_theme_primary)
+            .child(placeholder),
     );
+    if !inside {
+        placeholder_col = placeholder_col.child(div().text_size(px(12.)).italic().child(note));
+    }
+    left = left.child(placeholder_col);
 
     let box_id = SharedString::from(format!("msg-action-select-{}-{index}", message_id.get()));
     let trigger = ClickableContainer::new(box_id)
@@ -211,7 +210,8 @@ fn render_message_select(
         .flex_row()
         .justify_between()
         .items_center()
-        .p_3()
+        .when(inside, |el| el.px_3().py_2())
+        .when(!inside, |el| el.p_3())
         .rounded_md()
         .border_1()
         .border_color(theme.tokens.border_primary)
@@ -253,6 +253,7 @@ fn render_message_select(
                     max,
                     disabled,
                     options_len,
+                    inside,
                     window,
                     cx,
                 )
@@ -264,12 +265,12 @@ fn render_message_select(
         .into_any_element()
 }
 
-fn button_bg(style: i32, ctx: &RowCtx) -> Rgba {
+fn button_bg(style: i32) -> Rgba {
     match style {
         3 => rgb(COLOR_SUCCESS),
         4 => rgb(COLOR_DANGER),
-        2 | 5 => ctx.theme.tokens.bg_button_secondary,
-        _ => ctx.theme.tokens.bg_button_primary,
+        2 | 5 => rgb(COLOR_SECONDARY),
+        _ => rgb(COLOR_PRIMARY),
     }
 }
 
@@ -318,6 +319,7 @@ struct SelectDropdown {
     min: Option<i32>,
     max: Option<i32>,
     disabled: bool,
+    inside: bool,
     _blur_sub: Subscription,
 }
 
@@ -339,6 +341,7 @@ impl SelectDropdown {
         max: Option<i32>,
         disabled: bool,
         options_len: usize,
+        inside: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -367,6 +370,7 @@ impl SelectDropdown {
             min,
             max,
             disabled,
+            inside,
             _blur_sub: blur_sub,
         }
     }
@@ -381,26 +385,45 @@ impl SelectDropdown {
             .read(cx)
             .message_select_selection(self.message_id, &self.select_id)
             .to_vec();
-        let max_effective = self
-            .max
-            .filter(|&value| value > 0)
-            .map(|value| value as usize)
-            .unwrap_or(self.options_len);
-        if current.len() >= max_effective {
-            cx.emit(DismissEvent);
-            return;
-        }
-        let single = self.min.filter(|&value| value > 0).is_none()
-            && self.max.filter(|&value| value > 0).is_none();
-        let new_values = if single {
-            vec![value]
-        } else {
+        let multiple =
+            self.min.is_some_and(|value| value > 1) || self.max.is_some_and(|value| value >= 2);
+        let new_values = if multiple {
+            if current.contains(&value) {
+                cx.emit(DismissEvent);
+                return;
+            }
+            let max_effective = self
+                .max
+                .filter(|&value| value > 0)
+                .map(|value| value as usize)
+                .unwrap_or(self.options_len);
+            if current.len() >= max_effective {
+                cx.emit(DismissEvent);
+                return;
+            }
             let mut values = current;
             values.push(value);
             values
+        } else {
+            vec![value]
         };
+        let inside = self.inside;
         store.update(cx, |store, cx| {
-            store.select_message_option(self.message_id, self.select_id.clone(), new_values, cx);
+            if inside {
+                store.set_message_select_selection(
+                    self.message_id,
+                    self.select_id.clone(),
+                    new_values,
+                    cx,
+                );
+            } else {
+                store.select_message_option(
+                    self.message_id,
+                    self.select_id.clone(),
+                    new_values,
+                    cx,
+                );
+            }
         });
         cx.emit(DismissEvent);
     }
