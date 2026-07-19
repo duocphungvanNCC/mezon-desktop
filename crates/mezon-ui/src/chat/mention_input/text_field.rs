@@ -11,9 +11,9 @@ use gpui::{
     ElementInputHandler, Entity, EntityInputHandler, EventEmitter, FocusHandle, Focusable,
     FontWeight, GlobalElementId, Hsla, Image, InspectorElementId, IntoElement, KeyBinding,
     LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point,
-    Render, RenderOnce, SharedString, Style, StyleRefinement, Styled, Subscription, TextAlign,
-    TextRun, UTF16Selection, UnderlineStyle, Window, WrappedLine, actions, div, fill, point,
-    prelude::*, px, rgb, size,
+    Render, RenderOnce, ScrollWheelEvent, SharedString, Style, StyleRefinement, Styled,
+    Subscription, TextAlign, TextRun, UTF16Selection, UnderlineStyle, Window, WrappedLine, actions,
+    div, fill, point, prelude::*, px, rgb, size,
 };
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -26,6 +26,12 @@ const MAX_VISIBLE_LINES: usize = 10;
 struct DocLine {
     line: WrappedLine,
     start: usize,
+    top: Pixels,
+    height: Pixels,
+}
+
+fn wrapped_line_height(line: &WrappedLine, line_height: Pixels) -> Pixels {
+    line_height * (line.wrap_boundaries.len() as f32 + 1.0)
 }
 
 fn locate_display_offset(lines: &[DocLine], display_off: usize) -> (usize, usize) {
@@ -213,6 +219,9 @@ pub(crate) struct MentionInputState {
     last_bounds: Option<Bounds<Pixels>>,
     line_height: Pixels,
     scroll_offset: Point<Pixels>,
+    measured_rows: usize,
+    content_height: Pixels,
+    pending_caret_reveal: bool,
     is_selecting: bool,
     masked: bool,
     compact: bool,
@@ -242,6 +251,9 @@ impl MentionInputState {
             last_bounds: None,
             line_height: px(20.),
             scroll_offset: Point::default(),
+            measured_rows: 1,
+            content_height: px(0.),
+            pending_caret_reveal: true,
             is_selecting: false,
             masked: false,
             compact: false,
@@ -536,6 +548,7 @@ impl MentionInputState {
 
     fn move_to(&mut self, offset: usize, cx: &mut Context<Self>) {
         self.selected_range = offset..offset;
+        self.pending_caret_reveal = true;
         self.pause_caret_blink(cx);
         cx.notify()
     }
@@ -577,10 +590,37 @@ impl MentionInputState {
         if let Some(marked) = self.marked_range.clone() {
             self.marked_range = Some(self.clamp_range(marked));
         }
+        self.pending_caret_reveal = true;
+    }
+
+    fn on_scroll_wheel(
+        &mut self,
+        event: &ScrollWheelEvent,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(bounds) = self.last_bounds else {
+            return;
+        };
+        let max_scroll = (self.content_height - bounds.size.height).max(Pixels::ZERO);
+        if max_scroll <= Pixels::ZERO {
+            return;
+        }
+        let delta = event.delta.pixel_delta(self.line_height).y;
+        let next = (self.scroll_offset.y - delta).clamp(Pixels::ZERO, max_scroll);
+        if next != self.scroll_offset.y {
+            self.scroll_offset.y = next;
+            cx.stop_propagation();
+            cx.notify();
+        }
     }
 
     fn visible_line_count(&self) -> usize {
-        if self.is_masked() { 1 } else { self.line_count }
+        if self.is_masked() || self.content.is_empty() {
+            1
+        } else {
+            self.measured_rows.max(self.line_count)
+        }
     }
 
     fn display_text(&self) -> SharedString {
@@ -621,18 +661,22 @@ impl MentionInputState {
         };
         let line_height = self.line_height;
         let rel_y = position.y - bounds.top() + self.scroll_offset.y;
-        let rel_x = position.x - bounds.left() + self.scroll_offset.x;
-        let line_ix = if rel_y < Pixels::ZERO {
-            0
-        } else {
-            ((rel_y / line_height) as usize).min(self.last_lines.len() - 1)
-        };
-        let line = &self.last_lines[line_ix];
-        let local = line
+        let rel_x = (position.x - bounds.left() + self.scroll_offset.x).max(Pixels::ZERO);
+        if rel_y < Pixels::ZERO {
+            return self.display_to_content_offset(self.last_lines[0].start);
+        }
+        let doc = self
+            .last_lines
+            .iter()
+            .find(|doc| rel_y < doc.top + doc.height)
+            .unwrap_or_else(|| self.last_lines.last().expect("non-empty"));
+        let local_y =
+            (rel_y - doc.top).clamp(Pixels::ZERO, (doc.height - line_height).max(Pixels::ZERO));
+        let local = doc
             .line
-            .closest_index_for_position(point(rel_x.max(Pixels::ZERO), px(0.)), line_height)
+            .closest_index_for_position(point(rel_x, local_y), line_height)
             .unwrap_or_else(|ix| ix);
-        self.display_to_content_offset(line.start + local)
+        self.display_to_content_offset(doc.start + local)
     }
 
     fn select_to(&mut self, offset: usize, cx: &mut Context<Self>) {
@@ -645,6 +689,7 @@ impl MentionInputState {
             self.selection_reversed = !self.selection_reversed;
             self.selected_range = self.selected_range.end..self.selected_range.start;
         }
+        self.pending_caret_reveal = true;
         self.pause_caret_blink(cx);
         cx.notify()
     }
@@ -811,20 +856,18 @@ impl EntityInputHandler for MentionInputState {
         else {
             return Some(fallback);
         };
-        let x0 = s_doc
+        let s_pos = s_doc
             .line
             .position_for_index(s_local, line_height)
-            .map(|p| p.x)
-            .unwrap_or(Pixels::ZERO);
-        let x1 = e_doc
+            .unwrap_or_default();
+        let e_pos = e_doc
             .line
             .position_for_index(e_local, line_height)
-            .map(|p| p.x)
-            .unwrap_or(Pixels::ZERO);
-        let top = bounds.top() + (s_line as f32 * line_height) - self.scroll_offset.y;
+            .unwrap_or_default();
+        let top = bounds.top() + s_doc.top + s_pos.y - self.scroll_offset.y;
         Some(Bounds::from_corners(
-            point(bounds.left() + x0 - self.scroll_offset.x, top),
-            point(bounds.left() + x1 - self.scroll_offset.x, top + line_height),
+            point(bounds.left() + s_pos.x, top),
+            point(bounds.left() + e_pos.x, top + line_height),
         ))
     }
 
@@ -857,7 +900,44 @@ impl Render for MentionInputState {
         let text_color: Hsla = cx.theme().text_primary.into();
         let compact = self.compact;
 
+        let viewport_h = self
+            .last_bounds
+            .map(|bounds| bounds.size.height)
+            .unwrap_or(Pixels::ZERO);
+        let content_h = self.content_height;
+        let scrollbar = (viewport_h > Pixels::ZERO && content_h > viewport_h + px(1.)).then(|| {
+            let ratio = viewport_h / content_h;
+            let thumb_h = (viewport_h * ratio).max(px(24.)).min(viewport_h);
+            let max_scroll = (content_h - viewport_h).max(px(1.));
+            let frac = (self.scroll_offset.y / max_scroll).clamp(0., 1.);
+            let thumb_top = (viewport_h - thumb_h) * frac;
+            let thumb_color: Hsla = cx.theme().tokens.thread_scroll.into();
+            div()
+                .absolute()
+                .top(px(9.))
+                .right(px(3.))
+                .w(px(4.))
+                .h(viewport_h)
+                .child(
+                    div()
+                        .id("mention-input-scrollbar-thumb")
+                        .absolute()
+                        .top(thumb_top)
+                        .w(px(4.))
+                        .h(thumb_h)
+                        .rounded_full()
+                        .bg(thumb_color)
+                        .when(!focused, |thumb| {
+                            thumb
+                                .opacity(0.)
+                                .group_hover("mention-input-scrollbar", |style| style.opacity(1.))
+                        }),
+                )
+        });
+
         div()
+            .relative()
+            .when(!focused, |input| input.group("mention-input-scrollbar"))
             .key_context(KEY_CONTEXT)
             .track_focus(&self.focus_handle)
             .cursor(CursorStyle::IBeam)
@@ -882,6 +962,7 @@ impl Render for MentionInputState {
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_move(cx.listener(Self::on_mouse_move))
+            .on_scroll_wheel(cx.listener(Self::on_scroll_wheel))
             .flex()
             .items_start()
             .w_full()
@@ -897,6 +978,7 @@ impl Render for MentionInputState {
                     .overflow_hidden()
                     .child(MentionTextElement { input: cx.entity() }),
             )
+            .when_some(scrollbar, |el, bar| el.child(bar))
     }
 }
 
@@ -908,6 +990,8 @@ struct PreparedLine {
     line: WrappedLine,
     origin: Point<Pixels>,
     start: usize,
+    top: Pixels,
+    height: Pixels,
 }
 
 struct PrepaintState {
@@ -916,6 +1000,7 @@ struct PrepaintState {
     selection: Vec<PaintQuad>,
     line_height: Pixels,
     scroll_offset: Point<Pixels>,
+    content_height: Pixels,
 }
 
 impl IntoElement for MentionTextElement {
@@ -973,6 +1058,7 @@ impl Element for MentionTextElement {
         let selected_range = input.selected_range.clone();
         let cursor = input.cursor_offset();
         let masked = input.is_masked();
+        let reveal_caret = input.pending_caret_reveal;
         let resolved_spans: Vec<ResolvedSpan> = input
             .mention_spans
             .iter()
@@ -1018,9 +1104,12 @@ impl Element for MentionTextElement {
         let mut scroll_offset = input.scroll_offset;
         let line_height = window.line_height();
         let font_size = style.font_size.to_pixels(window.rem_size());
+        let visible_h = bounds.size.height;
+        let visible_w = bounds.size.width;
+        let wrap_width = if masked { None } else { Some(visible_w) };
         let wrapped = window
             .text_system()
-            .shape_text(display_text, font_size, &runs, None, None)
+            .shape_text(display_text, font_size, &runs, wrap_width, None)
             .unwrap_or_default();
 
         let spans: Vec<(usize, usize)> = {
@@ -1034,74 +1123,90 @@ impl Element for MentionTextElement {
                 })
                 .collect()
         };
-        let line_count = wrapped.len().max(1);
+
+        let mut tops: Vec<(Pixels, Pixels)> = Vec::with_capacity(wrapped.len());
+        let mut y_acc = Pixels::ZERO;
+        for line in wrapped.iter() {
+            let h = wrapped_line_height(line, line_height);
+            tops.push((y_acc, h));
+            y_acc += h;
+        }
+        let total_h = y_acc.max(line_height);
 
         let (caret_line, caret_local) = locate_span(&spans, display_cursor);
-        let caret_x = wrapped
+        let caret_point = wrapped
             .get(caret_line)
             .and_then(|line| line.position_for_index(caret_local, line_height))
-            .map(|p| p.x)
-            .unwrap_or(Pixels::ZERO);
-        let caret_top = caret_line as f32 * line_height;
+            .unwrap_or_default();
+        let caret_x = caret_point.x;
+        let caret_top = tops
+            .get(caret_line)
+            .map(|(t, _)| *t)
+            .unwrap_or(Pixels::ZERO)
+            + caret_point.y;
 
-        let visible_h = bounds.size.height;
-        let visible_w = bounds.size.width;
-        let total_h = line_count as f32 * line_height;
-        if caret_top < scroll_offset.y {
-            scroll_offset.y = caret_top;
-        }
-        if caret_top + line_height > scroll_offset.y + visible_h {
-            scroll_offset.y = caret_top + line_height - visible_h;
+        if reveal_caret {
+            if caret_top < scroll_offset.y {
+                scroll_offset.y = caret_top;
+            }
+            if caret_top + line_height > scroll_offset.y + visible_h {
+                scroll_offset.y = caret_top + line_height - visible_h;
+            }
         }
         scroll_offset.y = scroll_offset
             .y
             .clamp(Pixels::ZERO, (total_h - visible_h).max(Pixels::ZERO));
-        if caret_x < scroll_offset.x {
-            scroll_offset.x = caret_x;
-        }
-        if caret_x > scroll_offset.x + visible_w - px(6.) {
-            scroll_offset.x = caret_x - visible_w + px(6.);
-        }
-        scroll_offset.x = scroll_offset.x.max(Pixels::ZERO);
+        scroll_offset.x = Pixels::ZERO;
 
         let mut prepared = Vec::with_capacity(wrapped.len());
         let mut selection = Vec::new();
         for (ix, line) in wrapped.into_iter().enumerate() {
             let (line_start, line_len) = spans[ix];
             let line_end = line_start + line_len;
-            let y = bounds.top() + (ix as f32 * line_height) - scroll_offset.y;
-            let origin = point(bounds.left() - scroll_offset.x, y);
+            let (line_top, line_h) = tops[ix];
+            let origin = point(bounds.left(), bounds.top() + line_top - scroll_offset.y);
             if !display_selection.is_empty()
                 && display_selection.start <= line_end
                 && display_selection.end >= line_start
             {
-                let seg_start = display_selection.start.max(line_start) - line_start;
-                let x0 = line
-                    .position_for_index(seg_start, line_height)
-                    .map(|p| p.x)
-                    .unwrap_or(Pixels::ZERO);
-                let x1 = if display_selection.end > line_end {
-                    line.position_for_index(line_len, line_height)
-                        .map(|p| p.x)
-                        .unwrap_or(Pixels::ZERO)
-                        + px(4.)
+                let local_start = display_selection.start.max(line_start) - line_start;
+                let extends = display_selection.end > line_end;
+                let local_end = if extends {
+                    line_len
                 } else {
-                    line.position_for_index(display_selection.end - line_start, line_height)
-                        .map(|p| p.x)
-                        .unwrap_or(Pixels::ZERO)
+                    display_selection.end - line_start
                 };
-                selection.push(fill(
-                    Bounds::from_corners(
-                        point(bounds.left() + x0 - scroll_offset.x, y),
-                        point(bounds.left() + x1 - scroll_offset.x, y + line_height),
-                    ),
-                    selection_color.opacity(0.3),
-                ));
+                let p0 = line
+                    .position_for_index(local_start, line_height)
+                    .unwrap_or_default();
+                let p1 = line
+                    .position_for_index(local_end, line_height)
+                    .unwrap_or_default();
+                let row0 = (p0.y / line_height).round() as usize;
+                let row1 = (p1.y / line_height).round().max(row0 as f32) as usize;
+                for row in row0..=row1 {
+                    let row_y =
+                        bounds.top() + line_top + line_height * row as f32 - scroll_offset.y;
+                    let x_from = if row == row0 { p0.x } else { Pixels::ZERO };
+                    let mut x_to = if row == row1 { p1.x } else { visible_w };
+                    if row == row1 && extends {
+                        x_to += px(4.);
+                    }
+                    selection.push(fill(
+                        Bounds::from_corners(
+                            point(bounds.left() + x_from, row_y),
+                            point(bounds.left() + x_to, row_y + line_height),
+                        ),
+                        selection_color.opacity(0.3),
+                    ));
+                }
             }
             prepared.push(PreparedLine {
                 line,
                 origin,
                 start: line_start,
+                top: line_top,
+                height: line_h,
             });
         }
 
@@ -1109,7 +1214,7 @@ impl Element for MentionTextElement {
             Some(fill(
                 Bounds::new(
                     point(
-                        bounds.left() + caret_x - scroll_offset.x,
+                        bounds.left() + caret_x,
                         bounds.top() + caret_top - scroll_offset.y,
                     ),
                     size(px(2.), line_height),
@@ -1126,6 +1231,7 @@ impl Element for MentionTextElement {
             selection,
             line_height,
             scroll_offset,
+            content_height: total_h,
         }
     }
 
@@ -1149,10 +1255,11 @@ impl Element for MentionTextElement {
             window.paint_quad(quad);
         }
         let line_height = prepaint.line_height;
+        let content_height = prepaint.content_height;
         let lines = std::mem::take(&mut prepaint.lines);
         let mut stored = Vec::with_capacity(lines.len());
         for prepared in lines {
-            if prepared.origin.y + line_height >= bounds.top()
+            if prepared.origin.y + prepared.height >= bounds.top()
                 && prepared.origin.y <= bounds.bottom()
                 && let Err(e) = prepared.line.paint(
                     prepared.origin,
@@ -1168,6 +1275,8 @@ impl Element for MentionTextElement {
             stored.push(DocLine {
                 line: prepared.line,
                 start: prepared.start,
+                top: prepared.top,
+                height: prepared.height,
             });
         }
 
@@ -1179,11 +1288,20 @@ impl Element for MentionTextElement {
         }
 
         let scroll_offset = prepaint.scroll_offset;
-        self.input.update(cx, |input, _cx| {
+        let measured_rows = (content_height / line_height).round().max(1.) as usize;
+        self.input.update(cx, |input, cx| {
             input.last_lines = stored;
             input.last_bounds = Some(bounds);
             input.line_height = line_height;
             input.scroll_offset = scroll_offset;
+            input.content_height = content_height;
+            input.pending_caret_reveal = false;
+            if input.measured_rows != measured_rows {
+                input.measured_rows = measured_rows;
+                if !input.content.is_empty() {
+                    cx.notify();
+                }
+            }
         });
     }
 }

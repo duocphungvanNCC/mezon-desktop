@@ -85,6 +85,12 @@ fn byte_offset_to_utf16(text: &str, byte_offset: usize) -> usize {
 struct DocLine {
     line: WrappedLine,
     start: usize,
+    top: Pixels,
+    height: Pixels,
+}
+
+fn wrapped_line_height(line: &WrappedLine, line_height: Pixels) -> Pixels {
+    line_height * (line.wrap_boundaries.len() as f32 + 1.0)
 }
 
 fn locate_display_offset(lines: &[DocLine], offset: usize) -> (usize, usize) {
@@ -123,6 +129,9 @@ pub struct TextArea {
     last_bounds: Option<Bounds<Pixels>>,
     line_height: Pixels,
     scroll_offset: Point<Pixels>,
+    measured_rows: usize,
+    content_height: Pixels,
+    pending_caret_reveal: bool,
     is_selecting: bool,
     single_line: bool,
     bg: Option<Hsla>,
@@ -164,6 +173,9 @@ impl TextArea {
             last_bounds: None,
             line_height: px(20.),
             scroll_offset: Point::default(),
+            measured_rows: 1,
+            content_height: px(0.),
+            pending_caret_reveal: true,
             is_selecting: false,
             single_line: false,
             bg: None,
@@ -258,10 +270,15 @@ impl TextArea {
         if let Some(marked) = self.marked_range.clone() {
             self.marked_range = Some(self.clamp_range(marked));
         }
+        self.pending_caret_reveal = true;
     }
 
     fn visible_line_count(&self) -> usize {
-        if self.single_line { 1 } else { self.line_count }
+        if self.single_line || self.content.is_empty() {
+            1
+        } else {
+            self.measured_rows.max(self.line_count)
+        }
     }
 
     fn cursor_offset(&self) -> usize {
@@ -288,6 +305,7 @@ impl TextArea {
 
     fn move_to(&mut self, offset: usize, cx: &mut Context<Self>) {
         self.selected_range = offset..offset;
+        self.pending_caret_reveal = true;
         self.caret_blink.pause_blinking(cx);
         cx.notify();
     }
@@ -302,6 +320,7 @@ impl TextArea {
             self.selection_reversed = !self.selection_reversed;
             self.selected_range = self.selected_range.end..self.selected_range.start;
         }
+        self.pending_caret_reveal = true;
         self.caret_blink.pause_blinking(cx);
         cx.notify();
     }
@@ -363,18 +382,22 @@ impl TextArea {
         };
         let line_height = self.line_height;
         let rel_y = position.y - bounds.top() + self.scroll_offset.y;
-        let rel_x = position.x - bounds.left() + self.scroll_offset.x;
-        let line_ix = if rel_y < Pixels::ZERO {
-            0
-        } else {
-            ((rel_y / line_height) as usize).min(self.last_lines.len() - 1)
-        };
-        let line = &self.last_lines[line_ix];
-        let local = line
+        let rel_x = (position.x - bounds.left() + self.scroll_offset.x).max(Pixels::ZERO);
+        if rel_y < Pixels::ZERO {
+            return self.last_lines[0].start;
+        }
+        let doc = self
+            .last_lines
+            .iter()
+            .find(|doc| rel_y < doc.top + doc.height)
+            .unwrap_or_else(|| self.last_lines.last().expect("non-empty"));
+        let local_y =
+            (rel_y - doc.top).clamp(Pixels::ZERO, (doc.height - line_height).max(Pixels::ZERO));
+        let local = doc
             .line
-            .closest_index_for_position(point(rel_x.max(Pixels::ZERO), px(0.)), line_height)
+            .closest_index_for_position(point(rel_x, local_y), line_height)
             .unwrap_or_else(|ix| ix);
-        line.start + local
+        doc.start + local
     }
 
     fn left(&mut self, _: &Left, _: &mut Window, cx: &mut Context<Self>) {
@@ -659,20 +682,21 @@ impl EntityInputHandler for TextArea {
         else {
             return Some(fallback);
         };
-        let x0 = s_doc
+        let s_pos = s_doc
             .line
             .position_for_index(s_local, line_height)
-            .map(|p| p.x)
-            .unwrap_or(Pixels::ZERO);
-        let x1 = e_doc
+            .unwrap_or_default();
+        let e_pos = e_doc
             .line
             .position_for_index(e_local, line_height)
-            .map(|p| p.x)
-            .unwrap_or(Pixels::ZERO);
-        let top = bounds.top() + (s_line as f32 * line_height) - self.scroll_offset.y;
+            .unwrap_or_default();
+        let top = bounds.top() + s_doc.top + s_pos.y - self.scroll_offset.y;
         Some(Bounds::from_corners(
-            point(bounds.left() + x0 - self.scroll_offset.x, top),
-            point(bounds.left() + x1 - self.scroll_offset.x, top + line_height),
+            point(bounds.left() + s_pos.x - self.scroll_offset.x, top),
+            point(
+                bounds.left() + e_pos.x - self.scroll_offset.x,
+                top + line_height,
+            ),
         ))
     }
 
@@ -749,6 +773,8 @@ struct PreparedLine {
     line: WrappedLine,
     origin: Point<Pixels>,
     start: usize,
+    top: Pixels,
+    height: Pixels,
 }
 
 struct PrepaintState {
@@ -757,6 +783,7 @@ struct PrepaintState {
     selection: Vec<PaintQuad>,
     line_height: Pixels,
     scroll_offset: Point<Pixels>,
+    content_height: Pixels,
 }
 
 impl IntoElement for TextAreaElement {
@@ -811,6 +838,8 @@ impl Element for TextAreaElement {
         let content = input.content.clone();
         let selected_range = input.selected_range.clone();
         let cursor = input.cursor_offset();
+        let single_line = input.single_line;
+        let reveal_caret = input.pending_caret_reveal;
         let style = window.text_style();
         let text_color = input.text_color.unwrap_or(style.color);
 
@@ -853,9 +882,12 @@ impl Element for TextAreaElement {
         let mut scroll_offset = input.scroll_offset;
         let line_height = window.line_height();
         let font_size = style.font_size.to_pixels(window.rem_size());
+        let visible_h = bounds.size.height;
+        let visible_w = bounds.size.width;
+        let wrap_width = if single_line { None } else { Some(visible_w) };
         let wrapped = window
             .text_system()
-            .shape_text(display_text, font_size, &runs, None, None)
+            .shape_text(display_text, font_size, &runs, wrap_width, None)
             .unwrap_or_default();
 
         let spans: Vec<(usize, usize)> = {
@@ -869,35 +901,52 @@ impl Element for TextAreaElement {
                 })
                 .collect()
         };
-        let line_count = wrapped.len().max(1);
+
+        let mut tops: Vec<(Pixels, Pixels)> = Vec::with_capacity(wrapped.len());
+        let mut y_acc = Pixels::ZERO;
+        for line in wrapped.iter() {
+            let h = wrapped_line_height(line, line_height);
+            tops.push((y_acc, h));
+            y_acc += h;
+        }
+        let total_h = y_acc.max(line_height);
 
         let (caret_line, caret_local) = locate_span(&spans, cursor);
-        let caret_x = wrapped
+        let caret_point = wrapped
             .get(caret_line)
             .and_then(|line| line.position_for_index(caret_local, line_height))
-            .map(|p| p.x)
-            .unwrap_or(Pixels::ZERO);
-        let caret_top = caret_line as f32 * line_height;
+            .unwrap_or_default();
+        let caret_x = caret_point.x;
+        let caret_top = tops
+            .get(caret_line)
+            .map(|(t, _)| *t)
+            .unwrap_or(Pixels::ZERO)
+            + caret_point.y;
 
-        let visible_h = bounds.size.height;
-        let visible_w = bounds.size.width;
-        let total_h = line_count as f32 * line_height;
-        if caret_top < scroll_offset.y {
-            scroll_offset.y = caret_top;
-        }
-        if caret_top + line_height > scroll_offset.y + visible_h {
-            scroll_offset.y = caret_top + line_height - visible_h;
+        if reveal_caret {
+            if caret_top < scroll_offset.y {
+                scroll_offset.y = caret_top;
+            }
+            if caret_top + line_height > scroll_offset.y + visible_h {
+                scroll_offset.y = caret_top + line_height - visible_h;
+            }
         }
         scroll_offset.y = scroll_offset
             .y
             .clamp(Pixels::ZERO, (total_h - visible_h).max(Pixels::ZERO));
-        if caret_x < scroll_offset.x {
-            scroll_offset.x = caret_x;
+        if single_line {
+            if reveal_caret {
+                if caret_x < scroll_offset.x {
+                    scroll_offset.x = caret_x;
+                }
+                if caret_x > scroll_offset.x + visible_w - px(6.) {
+                    scroll_offset.x = caret_x - visible_w + px(6.);
+                }
+            }
+            scroll_offset.x = scroll_offset.x.max(Pixels::ZERO);
+        } else {
+            scroll_offset.x = Pixels::ZERO;
         }
-        if caret_x > scroll_offset.x + visible_w - px(6.) {
-            scroll_offset.x = caret_x - visible_w + px(6.);
-        }
-        scroll_offset.x = scroll_offset.x.max(Pixels::ZERO);
 
         let selection_range = selected_range.start.min(selected_range.end)
             ..selected_range.start.max(selected_range.end);
@@ -906,39 +955,53 @@ impl Element for TextAreaElement {
         for (ix, line) in wrapped.into_iter().enumerate() {
             let (line_start, line_len) = spans[ix];
             let line_end = line_start + line_len;
-            let y = bounds.top() + (ix as f32 * line_height) - scroll_offset.y;
-            let origin = point(bounds.left() - scroll_offset.x, y);
+            let (line_top, line_h) = tops[ix];
+            let origin = point(
+                bounds.left() - scroll_offset.x,
+                bounds.top() + line_top - scroll_offset.y,
+            );
             if !selection_range.is_empty()
                 && selection_range.start <= line_end
                 && selection_range.end >= line_start
             {
-                let seg_start = selection_range.start.max(line_start) - line_start;
-                let x0 = line
-                    .position_for_index(seg_start, line_height)
-                    .map(|p| p.x)
-                    .unwrap_or(Pixels::ZERO);
-                let x1 = if selection_range.end > line_end {
-                    line.position_for_index(line_len, line_height)
-                        .map(|p| p.x)
-                        .unwrap_or(Pixels::ZERO)
-                        + px(4.)
+                let local_start = selection_range.start.max(line_start) - line_start;
+                let extends = selection_range.end > line_end;
+                let local_end = if extends {
+                    line_len
                 } else {
-                    line.position_for_index(selection_range.end - line_start, line_height)
-                        .map(|p| p.x)
-                        .unwrap_or(Pixels::ZERO)
+                    selection_range.end - line_start
                 };
-                selection.push(fill(
-                    Bounds::from_corners(
-                        point(bounds.left() + x0 - scroll_offset.x, y),
-                        point(bounds.left() + x1 - scroll_offset.x, y + line_height),
-                    ),
-                    selection_color.opacity(0.3),
-                ));
+                let p0 = line
+                    .position_for_index(local_start, line_height)
+                    .unwrap_or_default();
+                let p1 = line
+                    .position_for_index(local_end, line_height)
+                    .unwrap_or_default();
+                let row0 = (p0.y / line_height).round() as usize;
+                let row1 = (p1.y / line_height).round().max(row0 as f32) as usize;
+                for row in row0..=row1 {
+                    let row_y =
+                        bounds.top() + line_top + line_height * row as f32 - scroll_offset.y;
+                    let x_from = if row == row0 { p0.x } else { Pixels::ZERO };
+                    let mut x_to = if row == row1 { p1.x } else { visible_w };
+                    if row == row1 && extends {
+                        x_to += px(4.);
+                    }
+                    selection.push(fill(
+                        Bounds::from_corners(
+                            point(bounds.left() + x_from - scroll_offset.x, row_y),
+                            point(bounds.left() + x_to - scroll_offset.x, row_y + line_height),
+                        ),
+                        selection_color.opacity(0.3),
+                    ));
+                }
             }
             prepared.push(PreparedLine {
                 line,
                 origin,
                 start: line_start,
+                top: line_top,
+                height: line_h,
             });
         }
 
@@ -963,6 +1026,7 @@ impl Element for TextAreaElement {
             selection,
             line_height,
             scroll_offset,
+            content_height: total_h,
         }
     }
 
@@ -986,10 +1050,11 @@ impl Element for TextAreaElement {
             window.paint_quad(quad);
         }
         let line_height = prepaint.line_height;
+        let content_height = prepaint.content_height;
         let lines = std::mem::take(&mut prepaint.lines);
         let mut stored = Vec::with_capacity(lines.len());
         for prepared in lines {
-            if prepared.origin.y + line_height >= bounds.top()
+            if prepared.origin.y + prepared.height >= bounds.top()
                 && prepared.origin.y <= bounds.bottom()
                 && let Err(e) = prepared.line.paint(
                     prepared.origin,
@@ -1005,6 +1070,8 @@ impl Element for TextAreaElement {
             stored.push(DocLine {
                 line: prepared.line,
                 start: prepared.start,
+                top: prepared.top,
+                height: prepared.height,
             });
         }
 
@@ -1016,11 +1083,20 @@ impl Element for TextAreaElement {
         }
 
         let scroll_offset = prepaint.scroll_offset;
-        self.input.update(cx, |input, _cx| {
+        let measured_rows = (content_height / line_height).round().max(1.) as usize;
+        self.input.update(cx, |input, cx| {
             input.last_lines = stored;
             input.last_bounds = Some(bounds);
             input.line_height = line_height;
             input.scroll_offset = scroll_offset;
+            input.content_height = content_height;
+            input.pending_caret_reveal = false;
+            if input.measured_rows != measured_rows {
+                input.measured_rows = measured_rows;
+                if !input.content.is_empty() {
+                    cx.notify();
+                }
+            }
         });
     }
 }
