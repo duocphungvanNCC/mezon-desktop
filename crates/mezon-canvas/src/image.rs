@@ -1,0 +1,340 @@
+use std::collections::HashMap;
+use std::sync::Arc;
+
+use base64::Engine as _;
+use futures::AsyncReadExt as _;
+use gpui::{
+    AnyElement, App, EntityId, Global, InteractiveElement, ObjectFit, Pixels, RenderImage,
+    SharedString, Styled, div, img, prelude::*, px,
+};
+use smallvec::smallvec;
+
+use mezon_theme::Theme;
+use mezon_widgets::{Icon, IconName};
+
+pub const CANVAS_IMAGE_FALLBACK_HEIGHT: Pixels = px(200.);
+
+const IMAGE_DIMENSION_PROBE_MAX_BYTES: u64 = 24 * 1024 * 1024;
+
+#[derive(Clone, Copy)]
+enum ImageDimState {
+    Loading,
+    Ready(u32, u32),
+    Failed,
+}
+
+#[derive(Default)]
+struct CanvasImageDimCache {
+    entries: HashMap<String, ImageDimState>,
+}
+impl Global for CanvasImageDimCache {}
+
+pub fn canvas_image_known_size(cx: &App, src: &str) -> Option<(u32, u32)> {
+    match cx.try_global::<CanvasImageDimCache>()?.entries.get(src)? {
+        ImageDimState::Ready(width, height) => Some((*width, *height)),
+        _ => None,
+    }
+}
+
+pub fn remember_canvas_image_size(cx: &mut App, src: &str, width: u32, height: u32) {
+    if src.is_empty() || width == 0 || height == 0 {
+        return;
+    }
+    cx.default_global::<CanvasImageDimCache>()
+        .entries
+        .insert(src.to_string(), ImageDimState::Ready(width, height));
+}
+
+pub fn ensure_canvas_image_dimensions_loaded(cx: &mut App, src: &str, notify: EntityId) {
+    if src.is_empty() || is_data_image_url(src) {
+        return;
+    }
+    let cache = cx.default_global::<CanvasImageDimCache>();
+    if cache.entries.contains_key(src) {
+        return;
+    }
+    cache
+        .entries
+        .insert(src.to_string(), ImageDimState::Loading);
+    let client = cx.http_client();
+    let url = canvas_image_display_src(src);
+    let src_owned = src.to_string();
+    cx.spawn(async move |cx| {
+        let dims = fetch_remote_image_dimensions(client, url).await;
+        let _ = cx.update(|cx| {
+            let state = match dims {
+                Some((width, height)) if width > 0 && height > 0 => {
+                    ImageDimState::Ready(width, height)
+                }
+                _ => ImageDimState::Failed,
+            };
+            cx.default_global::<CanvasImageDimCache>()
+                .entries
+                .insert(src_owned, state);
+            cx.notify(notify);
+        });
+    })
+    .detach();
+}
+
+async fn fetch_remote_image_dimensions(
+    client: Arc<dyn gpui::http_client::HttpClient>,
+    url: String,
+) -> Option<(u32, u32)> {
+    let mut response = client.get(&url, Default::default(), true).await.ok()?;
+    if !response.status().is_success() {
+        return None;
+    }
+    let mut body = Vec::new();
+    response
+        .body_mut()
+        .take(IMAGE_DIMENSION_PROBE_MAX_BYTES)
+        .read_to_end(&mut body)
+        .await
+        .ok()?;
+    image::ImageReader::new(std::io::Cursor::new(body))
+        .with_guessed_format()
+        .ok()?
+        .into_dimensions()
+        .ok()
+}
+
+pub fn canvas_image_display_src(src: &str) -> String {
+    if src.is_empty() {
+        return String::new();
+    }
+    if src.starts_with("data:") {
+        return src.to_string();
+    }
+    if src.starts_with("http://cdn.mezon") {
+        return src.replacen("http://", "https://", 1);
+    }
+    if src.starts_with("http://profile.mezon") {
+        return src.replacen("http://", "https://", 1);
+    }
+    src.to_string()
+}
+
+pub fn is_data_image_url(src: &str) -> bool {
+    src.starts_with("data:image/")
+}
+
+fn decode_data_image(src: &str) -> Option<Vec<u8>> {
+    let payload = src.strip_prefix("data:")?;
+    let (_, data) = payload.split_once(',')?;
+    if src.contains(";base64,") {
+        base64::engine::general_purpose::STANDARD.decode(data).ok()
+    } else {
+        None
+    }
+}
+
+fn image_pixel_size(src: &str) -> Option<(u32, u32)> {
+    if is_data_image_url(src) {
+        let bytes = decode_data_image(src)?;
+        let decoded = image::load_from_memory(&bytes).ok()?;
+        return Some((decoded.width(), decoded.height()));
+    }
+    None
+}
+
+pub fn fit_image_to_max_width(width: u32, height: u32, max_width: Pixels) -> (Pixels, Pixels) {
+    if width == 0 || height == 0 {
+        return (max_width, CANVAS_IMAGE_FALLBACK_HEIGHT);
+    }
+    let max_w = max_width.as_f32().max(1.);
+    let fw = width as f32;
+    let fh = height as f32;
+    if fw <= max_w {
+        return (px(fw), px(fh));
+    }
+    let scale = max_w / fw;
+    (px(max_w), px(fh * scale))
+}
+
+pub fn canvas_image_display_size(cx: &App, src: &str, max_width: Pixels) -> (Pixels, Pixels) {
+    if let Some((w, h)) = image_pixel_size(src) {
+        return fit_image_to_max_width(w, h, max_width);
+    }
+    if let Some((w, h)) = canvas_image_known_size(cx, src) {
+        return fit_image_to_max_width(w, h, max_width);
+    }
+    let fallback_h = (max_width * 9. / 16.).max(CANVAS_IMAGE_FALLBACK_HEIGHT);
+    (max_width, fallback_h)
+}
+
+fn bytes_to_render_image(bytes: &[u8]) -> Option<Arc<RenderImage>> {
+    let decoded = image::load_from_memory(bytes).ok()?;
+    let mut data = decoded.into_rgba8();
+    for pixel in data.chunks_exact_mut(4) {
+        pixel.swap(0, 2);
+    }
+    Some(Arc::new(RenderImage::new(smallvec![image::Frame::new(
+        data
+    )])))
+}
+
+fn canvas_image_fallback_inner(fallback_fg: gpui::Rgba, fallback_bg: gpui::Rgba) -> AnyElement {
+    div()
+        .max_w_full()
+        .h(CANVAS_IMAGE_FALLBACK_HEIGHT)
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded_md()
+        .bg(fallback_bg)
+        .child(
+            Icon::new(IconName::ImageThumbnail)
+                .size(px(32.))
+                .text_color(fallback_fg),
+        )
+        .into_any_element()
+}
+
+pub fn canvas_img(
+    cx: &App,
+    src: &str,
+    img_id: impl Into<gpui::ElementId>,
+    fallback_fg: gpui::Rgba,
+    fallback_bg: gpui::Rgba,
+    max_width: Option<Pixels>,
+    display_height: Option<Pixels>,
+) -> AnyElement {
+    let img_id = img_id.into();
+    if let Some(max_w) = max_width {
+        let (display_w, display_h) = canvas_image_display_size(cx, src, max_w);
+        let height = display_height.unwrap_or(display_h);
+        if is_data_image_url(src) {
+            if let Some(bytes) = decode_data_image(src)
+                && let Some(render) = bytes_to_render_image(&bytes)
+            {
+                return img(render)
+                    .id(img_id)
+                    .w(display_w)
+                    .h(height)
+                    .object_fit(ObjectFit::Contain)
+                    .with_fallback(move || canvas_image_fallback_inner(fallback_fg, fallback_bg))
+                    .into_any_element();
+            }
+            return canvas_image_fallback_inner(fallback_fg, fallback_bg);
+        }
+        return img(SharedString::from(canvas_image_display_src(src)))
+            .id(img_id)
+            .w(display_w)
+            .h(height)
+            .object_fit(ObjectFit::Contain)
+            .with_fallback(move || canvas_image_fallback_inner(fallback_fg, fallback_bg))
+            .into_any_element();
+    }
+
+    if is_data_image_url(src) {
+        if let Some(bytes) = decode_data_image(src)
+            && let Some(render) = bytes_to_render_image(&bytes)
+        {
+            return img(render)
+                .id(img_id)
+                .max_w_full()
+                .object_fit(ObjectFit::Contain)
+                .with_fallback(move || canvas_image_fallback_inner(fallback_fg, fallback_bg))
+                .into_any_element();
+        }
+        return canvas_image_fallback_inner(fallback_fg, fallback_bg);
+    }
+    img(SharedString::from(canvas_image_display_src(src)))
+        .id(img_id)
+        .max_w_full()
+        .object_fit(ObjectFit::Contain)
+        .with_fallback(move || canvas_image_fallback_inner(fallback_fg, fallback_bg))
+        .into_any_element()
+}
+
+pub fn render_canvas_image(src: &str, theme: &Theme, cx: &App) -> AnyElement {
+    if src.is_empty() {
+        return div().into_any_element();
+    }
+    let fallback_fg = theme.text_muted;
+    let fallback_bg = theme.bg_tertiary;
+    let img_id = SharedString::from(format!("canvas-img-{}", src.len().min(64)));
+    div()
+        .w_full()
+        .py(px(16.))
+        .flex()
+        .items_start()
+        .child(canvas_img(
+            cx,
+            src,
+            img_id,
+            fallback_fg,
+            fallback_bg,
+            None,
+            None,
+        ))
+        .into_any_element()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn normalizes_http_cdn_to_https() {
+        let src = "http://cdn.mezon.ai/clan/file.png";
+        assert_eq!(
+            canvas_image_display_src(src),
+            "https://cdn.mezon.ai/clan/file.png"
+        );
+    }
+
+    #[test]
+    fn passes_through_https_cdn() {
+        let src = "https://cdn.mezon.ai/clan/file.png";
+        assert_eq!(canvas_image_display_src(src), src);
+    }
+
+    #[test]
+    fn passes_through_data_url() {
+        let src = "data:image/png;base64,abcd";
+        assert_eq!(canvas_image_display_src(src), src);
+    }
+
+    #[test]
+    fn decodes_tiny_png_data_url() {
+        let png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+        let src = format!("data:image/png;base64,{png}");
+        let bytes = decode_data_image(&src).expect("decode");
+        assert!(bytes_to_render_image(&bytes).is_some());
+    }
+
+    #[test]
+    fn fits_wide_image_to_max_width() {
+        let (w, h) = fit_image_to_max_width(800, 600, px(400.));
+        assert_eq!(w, px(400.));
+        assert_eq!(h, px(300.));
+    }
+
+    #[test]
+    fn keeps_small_image_intrinsic_size() {
+        let (w, h) = fit_image_to_max_width(200, 100, px(800.));
+        assert_eq!(w, px(200.));
+        assert_eq!(h, px(100.));
+    }
+
+    #[gpui::test]
+    fn unknown_remote_image_uses_widescreen_box(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let (w, h) = canvas_image_display_size(cx, "https://cdn.mezon.ai/x.png", px(640.));
+            assert_eq!(w, px(640.));
+            assert_eq!(h, px(360.));
+        });
+    }
+
+    #[gpui::test]
+    fn known_remote_image_size_overrides_fallback(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            remember_canvas_image_size(cx, "https://cdn.mezon.ai/x.png", 300, 200);
+            let (w, h) = canvas_image_display_size(cx, "https://cdn.mezon.ai/x.png", px(640.));
+            assert_eq!(w, px(300.));
+            assert_eq!(h, px(200.));
+        });
+    }
+}

@@ -14,10 +14,12 @@ use gpui::{
 use crate::components::primitives::{Toast, ToastKind};
 
 mod coming_soon_modal;
+mod confirm_delete_canvas_modal;
 mod confirm_delete_message_modal;
 mod confirm_remove_friend_modal;
 mod upload_limit_modal;
 use coming_soon_modal::ComingSoonModal;
+use confirm_delete_canvas_modal::ConfirmDeleteCanvasModal;
 use confirm_delete_message_modal::ConfirmDeleteMessageModal;
 pub use confirm_remove_friend_modal::FriendRemovalKind;
 use confirm_remove_friend_modal::{ConfirmRemoveFriendModal, interpolate_username};
@@ -215,6 +217,44 @@ impl Shell {
         let view = cx.new(|cx| ConfirmDeleteMessageModal {
             focus_handle: cx.focus_handle(),
             message_id,
+            title,
+            description,
+            cancel_label,
+            delete_label,
+        });
+        let focus_handle = view.read(cx).focus_handle.clone();
+        window.focus(&focus_handle, cx);
+        self.show_modal(view.into(), cx);
+    }
+
+    pub fn confirm_delete_canvas(
+        &mut self,
+        canvas_id: String,
+        canvas_title: String,
+        clan_id: mezon_store::ClanId,
+        channel_id: mezon_store::ChannelId,
+        locale: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let display_title = if canvas_title.trim().is_empty() {
+            mezon_i18n::t(locale, "common.canvas.untitled").to_string()
+        } else {
+            canvas_title
+        };
+        let title: SharedString = format!("Delete {display_title}").into();
+        let description: SharedString = mezon_i18n::t(locale, "common.canvas.deleteMessage")
+            .to_string()
+            .into();
+        let cancel_label: SharedString = mezon_i18n::t(locale, "common.cancel").to_string().into();
+        let delete_label: SharedString = mezon_i18n::t(locale, "message.deleteMessageModal.delete")
+            .to_string()
+            .into();
+        let view = cx.new(|cx| ConfirmDeleteCanvasModal {
+            focus_handle: cx.focus_handle(),
+            canvas_id,
+            clan_id,
+            channel_id,
             title,
             description,
             cancel_label,

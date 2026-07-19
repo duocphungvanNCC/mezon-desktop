@@ -5,7 +5,7 @@ use gpui::{
 
 use super::sizing::{Sizable, Size};
 use super::spinner::Spinner;
-use crate::theme::ActiveTheme;
+use mezon_theme::ActiveTheme;
 
 #[derive(Clone, Copy, PartialEq, Eq, Default)]
 pub enum ButtonVariant {

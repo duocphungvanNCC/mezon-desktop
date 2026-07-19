@@ -1,5 +1,6 @@
 pub mod app;
 pub mod auth;
+pub mod canvas_navigation;
 pub mod chat;
 pub mod clan;
 pub mod command_palette;
@@ -88,6 +89,8 @@ pub fn init(cx: &mut gpui::App) {
     });
     components::primitives::init_input(cx);
     chat::mention_input::init(cx);
+    mezon_canvas::init(cx);
+    canvas_navigation::init(cx);
     chat::message_search::init(cx);
     command_palette::init(cx);
     router::Router::init(cx);

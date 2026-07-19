@@ -7,6 +7,7 @@ use gpui::{
 use mezon_store::{ChannelId, InVoiceInfo, MessagesEvent, MessagesStore, Settings};
 use ui::PopoverMenuHandle;
 
+use crate::chat::CanvasPopoverPanel;
 use crate::chat::ReplyTarget;
 use crate::chat::channel_header::ChatHeader;
 use crate::chat::channel_typing::ChannelTyping;
@@ -165,6 +166,101 @@ impl ChatArea {
     }
 
     #[allow(clippy::too_many_arguments)]
+    pub fn render_canvas(
+        &mut self,
+        locale: &str,
+        channel_name: Option<&str>,
+        channel_id: Option<ChannelId>,
+        show_members_button: bool,
+        show_member_panel: bool,
+        show_inbox: bool,
+        inbox_handle: Option<PopoverMenuHandle<InboxPopoverPanel>>,
+        clan_id: Option<String>,
+        pin_handle: Option<PopoverMenuHandle<PinnedPopoverPanel>>,
+        canvas_handle: Option<PopoverMenuHandle<CanvasPopoverPanel>>,
+        show_search_bar: bool,
+        search_expanded: bool,
+        show_search_options: bool,
+        search_input: Option<Entity<InputState>>,
+        canvas_body: gpui::AnyElement,
+        cx: &mut Context<crate::ChatLayout>,
+    ) -> gpui::AnyElement {
+        self.header.update(cx, |header, cx| {
+            header.sync(
+                channel_name,
+                false,
+                None,
+                show_members_button,
+                show_member_panel,
+                show_inbox,
+                inbox_handle,
+                clan_id,
+                pin_handle,
+                canvas_handle,
+                show_search_bar,
+                search_expanded,
+                show_search_options,
+                search_input,
+                Some(locale),
+                cx,
+            );
+        });
+
+        self.typing
+            .update(cx, |typing, cx| typing.sync(channel_id, cx));
+
+        let header = AnyView::from(self.header.clone()).cached(
+            StyleRefinement::default()
+                .w_full()
+                .h(px(crate::app::window_controls::APP_HEADER_HEIGHT))
+                .flex_shrink_0(),
+        );
+
+        let canvas_column = div()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_w_0()
+            .min_h_0()
+            .overflow_hidden()
+            .child(canvas_body);
+
+        let body = div()
+            .flex()
+            .flex_row()
+            .flex_1()
+            .w_full()
+            .h_full()
+            .min_h_0()
+            .overflow_hidden()
+            .child(canvas_column)
+            .when(show_member_panel, |row| match &self.member_panel {
+                Some(panel) => row.child(
+                    AnyView::from(panel.clone()).cached(
+                        StyleRefinement::default()
+                            .w(px(245.))
+                            .h_full()
+                            .flex_shrink_0(),
+                    ),
+                ),
+                None => row.child(div().w(px(245.)).h_full().flex_shrink_0()),
+            });
+
+        div()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_h_0()
+            .w_full()
+            .h_full()
+            .min_w_0()
+            .overflow_hidden()
+            .child(header)
+            .child(body)
+            .into_any_element()
+    }
+
+    #[allow(clippy::too_many_arguments)]
     pub fn render(
         &mut self,
         locale: &str,
@@ -178,6 +274,7 @@ impl ChatArea {
         inbox_handle: Option<PopoverMenuHandle<InboxPopoverPanel>>,
         clan_id: Option<String>,
         pin_handle: Option<PopoverMenuHandle<PinnedPopoverPanel>>,
+        canvas_handle: Option<PopoverMenuHandle<CanvasPopoverPanel>>,
         show_search_bar: bool,
         search_expanded: bool,
         show_search_options: bool,
@@ -210,6 +307,7 @@ impl ChatArea {
                 inbox_handle,
                 clan_id,
                 pin_handle,
+                canvas_handle,
                 show_search_bar,
                 search_expanded,
                 show_search_options,

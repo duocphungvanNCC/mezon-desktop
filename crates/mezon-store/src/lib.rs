@@ -4,6 +4,7 @@ pub mod album_layout;
 pub mod audio;
 pub mod badge;
 pub mod cache;
+pub mod canvas;
 pub mod channel;
 pub mod channel_members;
 pub mod channel_permissions;
@@ -62,6 +63,7 @@ pub use audio::{
 };
 pub use badge::BadgeService;
 pub use cache::{Freshness, KeyedCache};
+pub use canvas::{CanvasDetail, CanvasStore, CanvasSummary, UploadedCanvasImage, canvas_web_link};
 pub use channel::*;
 pub use channel_members::{ChannelMember, ChannelMembersEvent, ChannelMembersStore};
 pub use channel_permissions::{

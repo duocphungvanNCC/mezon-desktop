@@ -5529,6 +5529,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "mezon-canvas"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "base64 0.22.1",
+ "futures",
+ "gpui",
+ "image",
+ "menu",
+ "mezon-i18n",
+ "mezon-store",
+ "mezon-theme",
+ "mezon-widgets",
+ "serde",
+ "serde_json",
+ "smallvec",
+ "tracing",
+ "ui",
+ "unicode-segmentation",
+]
+
+[[package]]
 name = "mezon-client"
 version = "0.1.0"
 dependencies = [
@@ -5628,10 +5650,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "mezon-theme"
+version = "0.1.0"
+dependencies = [
+ "gpui",
+ "theme",
+]
+
+[[package]]
 name = "mezon-ui"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "base64 0.22.1",
  "block",
  "chrono",
  "flume",
@@ -5643,9 +5674,12 @@ dependencies = [
  "libc",
  "menu",
  "mezon-audio",
+ "mezon-canvas",
  "mezon-i18n",
  "mezon-store",
+ "mezon-theme",
  "mezon-video",
+ "mezon-widgets",
  "objc",
  "qrcode",
  "raw-window-handle",
@@ -5724,6 +5758,17 @@ dependencies = [
  "windows-capture 2.0.0",
  "yuv",
  "zed-scap",
+]
+
+[[package]]
+name = "mezon-widgets"
+version = "0.1.0"
+dependencies = [
+ "gpui",
+ "mezon-store",
+ "mezon-theme",
+ "tracing",
+ "unicode-segmentation",
 ]
 
 [[package]]
