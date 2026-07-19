@@ -777,7 +777,7 @@ impl EntityInputHandler for MentionInputState {
         self.selected_range = new_selected_range_utf16
             .as_ref()
             .map(|range_utf16| self.range_from_utf16(range_utf16))
-            .map(|new_range| new_range.start + range.start..new_range.end + range.end)
+            .map(|new_range| new_range.start + range.start..new_range.end + range.start)
             .unwrap_or_else(|| range.start + new_text.len()..range.start + new_text.len());
 
         self.pause_caret_blink(cx);
@@ -792,21 +792,31 @@ impl EntityInputHandler for MentionInputState {
         _window: &mut Window,
         _cx: &mut Context<Self>,
     ) -> Option<Bounds<Pixels>> {
-        if self.last_lines.is_empty() {
-            return None;
-        }
         let line_height = self.line_height;
+        let caret_x = bounds.left() - self.scroll_offset.x;
+        let caret_top = bounds.top() - self.scroll_offset.y;
+        let fallback = Bounds::from_corners(
+            point(caret_x, caret_top),
+            point(caret_x, caret_top + line_height),
+        );
+        if self.last_lines.is_empty() {
+            return Some(fallback);
+        }
         let range = self.range_from_utf16(&range_utf16);
         let (s_line, s_local) =
             locate_display_offset(&self.last_lines, self.to_display_offset(range.start));
         let (e_line, e_local) =
             locate_display_offset(&self.last_lines, self.to_display_offset(range.end));
-        let x0 = self.last_lines[s_line]
+        let (Some(s_doc), Some(e_doc)) = (self.last_lines.get(s_line), self.last_lines.get(e_line))
+        else {
+            return Some(fallback);
+        };
+        let x0 = s_doc
             .line
             .position_for_index(s_local, line_height)
             .map(|p| p.x)
             .unwrap_or(Pixels::ZERO);
-        let x1 = self.last_lines[e_line]
+        let x1 = e_doc
             .line
             .position_for_index(e_local, line_height)
             .map(|p| p.x)
