@@ -7,7 +7,10 @@ use mezon_store::{
     ChannelList, ClanId, ClanList, ClanSettingsPermissions, PermissionStore, Settings,
 };
 
+use super::emoji_setting_page::EmojiSettingPage;
 use super::overview_setting_page::{OverviewSettingPage, render_clan_overview_save_bar};
+use super::sound_setting_page::SoundSettingPage;
+use super::sticker_setting_page::StickerSettingPage;
 use crate::theme::{ActiveTheme, Theme};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -155,6 +158,9 @@ pub struct ClanSettingScreen {
     channel_list: Entity<ChannelList>,
     current_page: ClanSettingsPage,
     overview_page: Option<Entity<OverviewSettingPage>>,
+    emoji_page: Option<Entity<EmojiSettingPage>>,
+    sticker_page: Option<Entity<StickerSettingPage>>,
+    sound_page: Option<Entity<SoundSettingPage>>,
     scroll: ScrollHandle,
     nav_scroll: ScrollHandle,
     focus_handle: FocusHandle,
@@ -184,6 +190,9 @@ impl ClanSettingScreen {
             channel_list,
             current_page: page,
             overview_page: None,
+            emoji_page: None,
+            sticker_page: None,
+            sound_page: None,
             scroll: ScrollHandle::new(),
             nav_scroll: ScrollHandle::new(),
             focus_handle: cx.focus_handle(),
@@ -262,6 +271,9 @@ impl ClanSettingScreen {
             self.release_page(self.current_page, cx);
             if clan_changed {
                 self.release_page(ClanSettingsPage::Overview, cx);
+                self.release_page(ClanSettingsPage::Emoji, cx);
+                self.release_page(ClanSettingsPage::ImageStickers, cx);
+                self.release_page(ClanSettingsPage::VoiceStickers, cx);
             }
             self.reset_content_scroll();
         }
@@ -272,10 +284,28 @@ impl ClanSettingScreen {
     }
 
     fn release_page(&mut self, page: ClanSettingsPage, cx: &mut Context<Self>) {
-        if page == ClanSettingsPage::Overview
-            && let Some(entity) = self.overview_page.take()
-        {
-            entity.update(cx, |page, _| page.release());
+        match page {
+            ClanSettingsPage::Overview => {
+                if let Some(entity) = self.overview_page.take() {
+                    entity.update(cx, |page, _| page.release());
+                }
+            }
+            ClanSettingsPage::Emoji => {
+                if let Some(entity) = self.emoji_page.take() {
+                    entity.update(cx, |page, _| page.release());
+                }
+            }
+            ClanSettingsPage::ImageStickers => {
+                if let Some(entity) = self.sticker_page.take() {
+                    entity.update(cx, |page, _| page.release());
+                }
+            }
+            ClanSettingsPage::VoiceStickers => {
+                if let Some(entity) = self.sound_page.take() {
+                    entity.update(cx, |page, _| page.release());
+                }
+            }
+            _ => {}
         }
     }
 
@@ -284,17 +314,39 @@ impl ClanSettingScreen {
     }
 
     fn activate_page(&mut self, page: ClanSettingsPage, cx: &mut Context<Self>) {
-        if page == ClanSettingsPage::Overview && self.overview_page.is_none() {
-            let clan_list = self.clan_list.clone();
-            let channel_list = self.channel_list.clone();
-            let settings = self.settings.clone();
-            let clan_id = self.clan_id;
-            self.overview_page = Some(cx.new(|cx| {
-                OverviewSettingPage::new(clan_id, clan_list, channel_list, settings, cx)
-            }));
-            if let Some(overview) = &self.overview_page {
-                cx.observe(overview, |_, _, cx| cx.notify()).detach();
+        let settings = self.settings.clone();
+        let clan_id = self.clan_id;
+        match page {
+            ClanSettingsPage::Overview if self.overview_page.is_none() => {
+                let clan_list = self.clan_list.clone();
+                let channel_list = self.channel_list.clone();
+                self.overview_page = Some(cx.new(|cx| {
+                    OverviewSettingPage::new(clan_id, clan_list, channel_list, settings, cx)
+                }));
+                if let Some(overview) = &self.overview_page {
+                    cx.observe(overview, |_, _, cx| cx.notify()).detach();
+                }
             }
+            ClanSettingsPage::Emoji if self.emoji_page.is_none() => {
+                self.emoji_page = Some(cx.new(|cx| EmojiSettingPage::new(clan_id, settings, cx)));
+                if let Some(page) = &self.emoji_page {
+                    cx.observe(page, |_, _, cx| cx.notify()).detach();
+                }
+            }
+            ClanSettingsPage::ImageStickers if self.sticker_page.is_none() => {
+                self.sticker_page =
+                    Some(cx.new(|cx| StickerSettingPage::new(clan_id, settings, cx)));
+                if let Some(page) = &self.sticker_page {
+                    cx.observe(page, |_, _, cx| cx.notify()).detach();
+                }
+            }
+            ClanSettingsPage::VoiceStickers if self.sound_page.is_none() => {
+                self.sound_page = Some(cx.new(|cx| SoundSettingPage::new(clan_id, settings, cx)));
+                if let Some(page) = &self.sound_page {
+                    cx.observe(page, |_, _, cx| cx.notify()).detach();
+                }
+            }
+            _ => {}
         }
     }
 
@@ -306,6 +358,18 @@ impl ClanSettingScreen {
         match self.current_page {
             ClanSettingsPage::Overview => self
                 .overview_page
+                .as_ref()
+                .map(|p| p.clone().into_any_element()),
+            ClanSettingsPage::Emoji => self
+                .emoji_page
+                .as_ref()
+                .map(|p| p.clone().into_any_element()),
+            ClanSettingsPage::ImageStickers => self
+                .sticker_page
+                .as_ref()
+                .map(|p| p.clone().into_any_element()),
+            ClanSettingsPage::VoiceStickers => self
+                .sound_page
                 .as_ref()
                 .map(|p| p.clone().into_any_element()),
             _ => None,
@@ -560,19 +624,36 @@ impl Render for ClanSettingScreen {
                                                 ),
                                         )
                                     })
-                                    .child(
+                                    .child(if page == ClanSettingsPage::Emoji {
+                                        div()
+                                            .flex_1()
+                                            .min_h_0()
+                                            .w_full()
+                                            .pl(px(40.0))
+                                            .pr(px(28.0))
+                                            .child(div().max_w(px(740.0)).size_full().child(content))
+                                            .into_any_element()
+                                    } else {
                                         div()
                                             .id("clan-settings-scroll")
                                             .flex_1()
                                             .min_h_0()
+                                            .w_full()
                                             .overflow_y_scroll()
                                             .track_scroll(&self.scroll)
                                             .pb(px(28.0))
                                             .pl(px(40.0))
                                             .pr(px(28.0))
                                             .when(hide_page_title, |el| el.pt(px(60.0)))
-                                            .child(div().max_w(px(740.0)).child(content)),
-                                    ),
+                                            .child(
+                                                div()
+                                                    .w_full()
+                                                    .max_w(px(740.0))
+                                                    .min_w(px(0.0))
+                                                    .child(content),
+                                            )
+                                            .into_any_element()
+                                    }),
                             )
                             .child(
                                 div()
