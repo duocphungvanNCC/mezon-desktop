@@ -143,11 +143,20 @@ pub(super) fn render_message_select(
         None => Vec::new(),
     };
 
-    let mut left = div().flex().flex_col().min_w_0();
+    let mut left = div()
+        .flex()
+        .flex_col()
+        .min_w_0()
+        .overflow_hidden()
+        .whitespace_nowrap();
     if let Some(id) = &select_id
         && !selected_values.is_empty()
     {
-        let mut chips = div().flex().flex_wrap().gap_2().mb_2();
+        let mut chips = div()
+            .flex()
+            .flex_wrap()
+            .gap_2()
+            .when(!inside, |el| el.mb_2());
         for value in &selected_values {
             let label = option_label(select, value);
             let chip_id = SharedString::from(format!(
@@ -192,15 +201,20 @@ pub(super) fn render_message_select(
         }
         left = left.child(chips);
     }
-    let mut placeholder_col = div().flex().flex_col().items_start().child(
+    let mut placeholder_col = div().flex().flex_col().items_start().min_w_0().child(
         div()
+            .min_w_0()
+            .overflow_hidden()
+            .text_ellipsis()
             .text_color(theme.tokens.text_theme_primary)
             .child(placeholder),
     );
     if !inside {
         placeholder_col = placeholder_col.child(div().text_size(px(12.)).italic().child(note));
     }
-    left = left.child(placeholder_col);
+    if !inside || selected_values.is_empty() {
+        left = left.child(placeholder_col);
+    }
 
     let box_id = SharedString::from(format!("msg-action-select-{}-{index}", message_id.get()));
     let trigger = ClickableContainer::new(box_id)
@@ -210,7 +224,9 @@ pub(super) fn render_message_select(
         .flex_row()
         .justify_between()
         .items_center()
-        .when(inside, |el| el.px_3().py_2())
+        .when(inside, |el| {
+            el.h(px(40.)).max_h(px(40.)).px_3().overflow_hidden()
+        })
         .when(!inside, |el| el.p_3())
         .rounded_md()
         .border_1()
