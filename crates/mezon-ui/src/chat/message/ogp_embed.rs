@@ -1,5 +1,7 @@
-use gpui::{AnyElement, ObjectFit, SharedString, div, hsla, img, prelude::*, px, rgb};
-use mezon_store::{Message, MessageId, OgpPreview};
+use gpui::{AnyElement, Entity, ObjectFit, SharedString, div, hsla, img, prelude::*, px, rgb};
+use mezon_store::{Message, MessageId, MessagesStore, OgpPreview};
+
+use crate::image_cache::LruImageCache;
 
 use super::content::{SelectableSectionCursor, SelectableTextContext, open_message_link};
 use super::context::RowCtx;
@@ -15,10 +17,15 @@ pub fn render_ogp_embed(
     base: usize,
     selection_context: &SelectableTextContext,
 ) -> Option<AnyElement> {
+    let can_remove =
+        !ctx.current_user_id.is_empty() && msg.sender_id.as_str() == ctx.current_user_id;
+    let og_cache = crate::image_cache::ogp_image_cache(ctx.app);
     render_ogp_preview_impl(
         msg.ogp.as_deref()?,
         msg.row_anchor_id,
         ctx.theme,
+        can_remove,
+        og_cache,
         Some((base, selection_context, ctx.selection.clone())),
     )
 }
@@ -28,13 +35,15 @@ pub fn render_ogp_preview(
     message_id: MessageId,
     theme: &Theme,
 ) -> Option<AnyElement> {
-    render_ogp_preview_impl(ogp, message_id, theme, None)
+    render_ogp_preview_impl(ogp, message_id, theme, false, None, None)
 }
 
 fn render_ogp_preview_impl(
     ogp: &OgpPreview,
     message_id: MessageId,
     theme: &Theme,
+    can_remove: bool,
+    og_cache: Option<Entity<LruImageCache>>,
     selectable: Option<(
         usize,
         &SelectableTextContext,
@@ -108,6 +117,7 @@ fn render_ogp_preview_impl(
         .flex()
         .items_center()
         .justify_center()
+        .when_some(og_cache, |image_box, cache| image_box.image_cache(cache))
         .child(ogp_image(ogp.image_proxied.clone(), theme.text_muted));
 
     Some(
@@ -143,8 +153,39 @@ fn render_ogp_preview_impl(
                     .when_some(text_block, |d, block| d.child(block))
                     .child(image_box),
             )
+            .when(can_remove, |card| {
+                card.child(ogp_remove_button(message_id, theme))
+            })
             .into_any_element(),
     )
+}
+
+fn ogp_remove_button(message_id: MessageId, theme: &Theme) -> AnyElement {
+    div()
+        .id("ogp-remove")
+        .absolute()
+        .top(px(4.))
+        .right(px(4.))
+        .flex()
+        .items_center()
+        .justify_center()
+        .size(px(18.))
+        .rounded(px(4.))
+        .cursor_pointer()
+        .occlude()
+        .bg(theme.tokens.theme_setting_primary)
+        .hover(|s| s.bg(theme.bg_hover))
+        .child(
+            Icon::new(IconName::Close)
+                .size(px(12.))
+                .text_color(theme.text_muted),
+        )
+        .on_click(move |_, _, cx| {
+            MessagesStore::global(cx).update(cx, |store, cx| {
+                store.remove_message_ogp(message_id, cx);
+            });
+        })
+        .into_any_element()
 }
 
 pub(crate) fn selectable_ogp_text(ogp: &OgpPreview) -> String {

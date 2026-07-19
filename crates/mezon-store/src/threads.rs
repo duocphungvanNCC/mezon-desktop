@@ -768,6 +768,7 @@ impl ThreadsStore {
                     vec![],
                     vec![],
                     vec![],
+                    None,
                 )
                 .await
             {

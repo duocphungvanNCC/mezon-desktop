@@ -154,6 +154,8 @@ pub fn render_head(msg: &Message, ctx: &RowCtx, name_color: u32) -> AnyElement {
     };
     let display_name = resolve_message_display_name(msg, ctx, ctx.app);
     let name = div()
+        .max_w_full()
+        .min_w_0()
         .text_size(px(16.))
         .font_weight(FontWeight::MEDIUM)
         .text_color(gpui::rgb(name_color))
@@ -161,11 +163,14 @@ pub fn render_head(msg: &Message, ctx: &RowCtx, name_color: u32) -> AnyElement {
     div()
         .flex()
         .flex_row()
+        .w_full()
+        .min_w_0()
         .items_baseline()
         .gap_2()
         .child(profile_name_trigger(msg, ctx, name))
         .child(
             div()
+                .flex_none()
                 .text_size(px(12.))
                 .text_color(theme.text_muted)
                 .child(time_label),
@@ -185,6 +190,8 @@ fn profile_name_trigger(msg: &Message, ctx: &RowCtx, name: gpui::Div) -> AnyElem
         ctx,
         name.into_any_element(),
     )
+    .max_w_full()
+    .min_w_0()
     .into_any_element()
 }
 

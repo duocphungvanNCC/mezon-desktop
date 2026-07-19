@@ -1,8 +1,15 @@
 use crate::chat::{MentionInput, ReplyTarget};
 use crate::components::primitives::{Icon, IconName};
+use crate::image_cache::LruImageCache;
 use crate::theme::{ActiveTheme, Theme};
-use gpui::{Context, Entity, Render, SharedString, Subscription, Window, div, prelude::*, px};
-use mezon_store::{MessagesStore, Settings, TopicsStore};
+use gpui::{
+    Context, Entity, FontWeight, ObjectFit, Render, SharedString, Subscription, Window, div, img,
+    prelude::*, px,
+};
+use mezon_store::{MessagesStore, OgpResult, Settings, TopicsStore};
+
+const OGP_PREVIEW_CACHE_ITEMS: usize = 4;
+const OGP_PREVIEW_CACHE_BYTES: u64 = 8 * 1024 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ReplyClearSource {
@@ -16,7 +23,9 @@ pub struct InputBar {
     locale: SharedString,
     replying_to: Option<ReplyTarget>,
     reply_clear: ReplyClearSource,
+    ogp_image_cache: Entity<LruImageCache>,
     _settings_observe: Subscription,
+    _mention_observe: Subscription,
 }
 
 impl InputBar {
@@ -27,12 +36,24 @@ impl InputBar {
         cx: &mut Context<Self>,
     ) -> Self {
         let settings_observe = cx.observe(settings, |_, _, cx| cx.notify());
+        let mention_observe = cx.observe(&mention_input, |_, _, cx| cx.notify());
+        let ogp_image_cache = cx.new(|cx| {
+            LruImageCache::avatar_thumbnail(
+                "ogp-composer-preview",
+                OGP_PREVIEW_CACHE_ITEMS,
+                OGP_PREVIEW_CACHE_BYTES,
+                OGP_PREVIEW_CACHE_BYTES,
+                cx,
+            )
+        });
         Self {
             mention_input,
             locale,
             replying_to: None,
             reply_clear: ReplyClearSource::Messages,
+            ogp_image_cache,
             _settings_observe: settings_observe,
+            _mention_observe: mention_observe,
         }
     }
 
@@ -114,9 +135,96 @@ impl InputBar {
             )
     }
 
-    fn render_bar(&self, theme: &Theme) -> impl IntoElement {
+    fn ogp_preview_bar(
+        &self,
+        preview: &OgpResult,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let mut text_col = div()
+            .flex()
+            .flex_col()
+            .justify_center()
+            .gap(px(1.))
+            .flex_1()
+            .min_w_0();
+        if !preview.title.is_empty() {
+            text_col = text_col.child(
+                div()
+                    .w_full()
+                    .truncate()
+                    .text_size(px(15.))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(theme.text_primary)
+                    .child(SharedString::from(preview.title.clone())),
+            );
+        }
+        if !preview.description.is_empty() {
+            text_col = text_col.child(
+                div()
+                    .w_full()
+                    .truncate()
+                    .text_size(px(13.))
+                    .text_color(theme.text_muted)
+                    .child(SharedString::from(preview.description.clone())),
+            );
+        }
+        div()
+            .id("ogp-preview-bar")
+            .flex()
+            .items_center()
+            .gap(px(12.))
+            .w_full()
+            .p_2()
+            .mb_1()
+            .rounded_lg()
+            .border_1()
+            .border_color(theme.tokens.border_primary)
+            .bg(theme.tokens.theme_setting_nav)
+            .when(!preview.image.is_empty(), |row| {
+                row.child(
+                    div()
+                        .size(px(48.))
+                        .flex_shrink_0()
+                        .overflow_hidden()
+                        .rounded(px(4.))
+                        .bg(theme.tokens.theme_setting_primary)
+                        .image_cache(self.ogp_image_cache.clone())
+                        .child(
+                            img(SharedString::from(preview.image.clone()))
+                                .size_full()
+                                .object_fit(ObjectFit::Cover),
+                        ),
+                )
+            })
+            .child(text_col)
+            .child(
+                div()
+                    .id("ogp-preview-close")
+                    .flex_shrink_0()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .size(px(24.))
+                    .rounded(px(4.))
+                    .cursor_pointer()
+                    .hover(|s| s.bg(theme.bg_hover))
+                    .child(
+                        Icon::new(IconName::Close)
+                            .size(px(14.))
+                            .text_color(theme.text_muted),
+                    )
+                    .on_click(cx.listener(|this, _event, _window, cx| {
+                        this.mention_input
+                            .update(cx, |input, cx| input.clear_ogp_preview(cx));
+                    })),
+            )
+    }
+
+    fn render_bar(&self, theme: std::sync::Arc<Theme>, cx: &mut Context<Self>) -> impl IntoElement {
         let replying = self.replying_to.is_some();
         let reply_clear = self.reply_clear;
+        let ogp_preview = self.mention_input.read(cx).ogp_preview().cloned();
         div()
             .flex()
             .flex_col()
@@ -124,9 +232,12 @@ impl InputBar {
             .w_full()
             .px_3()
             .pb_1()
+            .when_some(ogp_preview, |d, preview| {
+                d.child(self.ogp_preview_bar(&preview, &theme, cx))
+            })
             .when_some(self.replying_to.as_ref(), |d, target| {
                 d.child(Self::reply_preview_bar(
-                    theme,
+                    &theme,
                     &self.locale,
                     target,
                     reply_clear,
@@ -150,6 +261,6 @@ impl InputBar {
 
 impl Render for InputBar {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        self.render_bar(cx.theme())
+        self.render_bar(cx.theme().clone(), cx)
     }
 }

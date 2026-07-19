@@ -9,16 +9,19 @@ use std::rc::Rc;
 use gpui::{
     AnyElement, App, Bounds, Context, DismissEvent, Div, Entity, EventEmitter, Focusable,
     FontWeight, Image, ImageFormat, IntoElement, KeyBinding, MouseButton, PathPromptOptions,
-    Pixels, Rgba, ScrollStrategy, SharedString, Stateful, Subscription, UniformListScrollHandle,
-    Window, actions, canvas, deferred, div, img, prelude::*, px, uniform_list,
+    Pixels, Rgba, ScrollStrategy, SharedString, Stateful, Subscription, Task,
+    UniformListScrollHandle, Window, actions, canvas, deferred, div, img, prelude::*, px,
+    uniform_list,
 };
 use mezon_store::{
     AccountEvent, AccountStore, AudioStore, Channel, ChannelEvent, ChannelId, ChannelList,
     ChannelMembersEvent, ChannelMembersStore, ClanList, ClanMembersEvent, ClanMembersStore,
     DirectEvent, DirectMessageStore, Emoji, EmojiEvent, EmojiStore, GroupMembersEvent,
-    GroupMembersStore, MENTION_HERE_ID, MessageSpan, OutgoingAttachment, OutgoingContent,
-    OutgoingEmoji, OutgoingHashtag, OutgoingMention, RolesEvent, RolesStore, Settings,
+    GroupMembersStore, MENTION_HERE_ID, MessageSpan, OgpResult, OutgoingAttachment,
+    OutgoingContent, OutgoingEmoji, OutgoingHashtag, OutgoingMention, OutgoingOgp, RolesEvent,
+    RolesStore, Settings, fetch_ogp, first_previewable_url,
 };
+use std::time::Duration;
 
 use attachments::{
     AttachmentLimit, MAX_FILE_ATTACHMENTS, PendingAttachment, build_pending, mime_from_extension,
@@ -271,6 +274,10 @@ pub struct MentionInput {
     overflow_to_file: bool,
     overflow_counter: Option<isize>,
     last_content: SharedString,
+    ogp_preview: Option<OgpResult>,
+    ogp_url: Option<String>,
+    ogp_generation: u64,
+    _ogp_task: Option<Task<()>>,
     _input_sub: Subscription,
     _store_subs: Vec<Subscription>,
 }
@@ -448,6 +455,10 @@ impl MentionInput {
             overflow_to_file: false,
             overflow_counter: None,
             last_content: SharedString::default(),
+            ogp_preview: None,
+            ogp_url: None,
+            ogp_generation: 0,
+            _ogp_task: None,
             _input_sub: input_sub,
             _store_subs: store_subs,
         }
@@ -476,7 +487,12 @@ impl MentionInput {
         &mut self,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> Option<(String, OutgoingContent, Vec<OutgoingAttachment>)> {
+    ) -> Option<(
+        String,
+        OutgoingContent,
+        Vec<OutgoingAttachment>,
+        Option<OutgoingOgp>,
+    )> {
         let raw = self.input.read(cx).value().to_string();
         if raw.trim().is_empty() && self.pending_attachments.is_empty() {
             return None;
@@ -494,6 +510,7 @@ impl MentionInput {
             self.committed.clear();
             self.reset_popup();
             self.close_popup();
+            self.clear_ogp_preview(cx);
             self.input.update(cx, |input, cx| {
                 input.set_mention_spans(Vec::new(), cx);
                 input.set_value("", window, cx);
@@ -537,6 +554,7 @@ impl MentionInput {
                 poster_jpeg: p.poster_jpeg,
             })
             .collect();
+        let ogp = self.take_outgoing_ogp();
         self.committed.clear();
         self.reset_popup();
         self.close_popup();
@@ -544,7 +562,7 @@ impl MentionInput {
             input.set_mention_spans(Vec::new(), cx);
             input.set_value("", window, cx);
         });
-        Some((text, content, attachments))
+        Some((text, content, attachments, ogp))
     }
 
     fn open_file_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -951,7 +969,71 @@ impl MentionInput {
                 None
             }
         };
+        self.update_ogp_preview(&content, cx);
         self.last_content = content;
+    }
+
+    fn update_ogp_preview(&mut self, content: &str, cx: &mut Context<Self>) {
+        if self.compact {
+            return;
+        }
+        let candidate = first_previewable_url(content, None);
+        let Some(url) = candidate else {
+            if self.ogp_url.take().is_some() || self.ogp_preview.take().is_some() {
+                self._ogp_task = None;
+                self.ogp_generation += 1;
+                cx.notify();
+            }
+            return;
+        };
+        if self.ogp_url.as_deref() == Some(url.as_str()) {
+            return;
+        }
+        self.ogp_url = Some(url.clone());
+        self.ogp_preview = None;
+        self.ogp_generation += 1;
+        let generation = self.ogp_generation;
+        cx.notify();
+        self._ogp_task = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis(300))
+                .await;
+            let current = this
+                .read_with(cx, |this, _| this.ogp_generation == generation)
+                .unwrap_or(false);
+            if !current {
+                return;
+            }
+            let result = fetch_ogp(&url).await;
+            let _ = this.update(cx, |this, cx| {
+                if this.ogp_generation != generation {
+                    return;
+                }
+                this.ogp_preview = result.ok();
+                cx.notify();
+            });
+        }));
+    }
+
+    pub fn ogp_preview(&self) -> Option<&OgpResult> {
+        self.ogp_preview.as_ref()
+    }
+
+    pub fn clear_ogp_preview(&mut self, cx: &mut Context<Self>) {
+        let had = self.ogp_url.take().is_some() | self.ogp_preview.take().is_some();
+        self._ogp_task = None;
+        self.ogp_generation += 1;
+        if had {
+            cx.notify();
+        }
+    }
+
+    fn take_outgoing_ogp(&mut self) -> Option<OutgoingOgp> {
+        let ogp = self.ogp_preview.take().map(|preview| preview.to_outgoing());
+        self.ogp_url = None;
+        self._ogp_task = None;
+        self.ogp_generation += 1;
+        ogp
     }
 
     fn revalidate(&mut self, content: &str, cx: &mut Context<Self>) {

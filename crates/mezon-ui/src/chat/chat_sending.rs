@@ -1,5 +1,5 @@
 use gpui::{App, Entity};
-use mezon_store::{AuthState, MessagesStore, OutgoingAttachment, OutgoingContent};
+use mezon_store::{AuthState, MessagesStore, OutgoingAttachment, OutgoingContent, OutgoingOgp};
 
 pub struct ChatSending;
 
@@ -17,6 +17,7 @@ impl ChatSending {
         content: impl Into<String>,
         content_tokens: OutgoingContent,
         attachments: Vec<OutgoingAttachment>,
+        ogp: Option<OutgoingOgp>,
         auth_state: &Entity<AuthState>,
         cx: &mut App,
     ) {
@@ -26,7 +27,7 @@ impl ChatSending {
         }
         let (uid, uname) = Self::current_user(auth_state, cx);
         MessagesStore::global(cx).update(cx, |store, cx| {
-            store.send_message(content, uid, uname, content_tokens, attachments, cx);
+            store.send_message(content, uid, uname, content_tokens, attachments, ogp, cx);
         });
     }
 

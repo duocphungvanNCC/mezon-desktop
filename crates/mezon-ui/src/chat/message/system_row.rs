@@ -40,6 +40,7 @@ pub fn render_system_message(msg: &Message, ctx: &RowCtx) -> AnyElement {
         .flex()
         .flex_row()
         .flex_wrap()
+        .max_w_full()
         .items_baseline()
         .min_w_0()
         .cursor(gpui::CursorStyle::IBeam)
@@ -91,6 +92,8 @@ pub fn render_system_message(msg: &Message, ctx: &RowCtx) -> AnyElement {
             div()
                 .flex()
                 .flex_row()
+                .flex_1()
+                .max_w_full()
                 .items_start()
                 .min_w_0()
                 .pl(text_gap)
@@ -367,7 +370,8 @@ fn append_system_suffix(
                 ))
                 .child(
                     div()
-                        .flex_none()
+                        .max_w_full()
+                        .min_w_0()
                         .font_weight(FontWeight::SEMIBOLD)
                         .text_color(primary)
                         .child(system_text(thread_label, cursor, selection_context)),
@@ -396,7 +400,8 @@ fn system_link(
     let selection = selection_context.selection();
     div()
         .id(id)
-        .flex_none()
+        .max_w_full()
+        .min_w_0()
         .font_weight(FontWeight::SEMIBOLD)
         .cursor_pointer()
         .text_color(color)
@@ -413,12 +418,17 @@ fn system_text(
     text: impl Into<SharedString>,
     cursor: &mut SelectableSectionCursor,
     selection_context: &SelectableTextContext,
-) -> gpui::StyledText {
+) -> AnyElement {
     let text = text.into();
-    cursor
+    let styled = cursor
         .inline(&text)
         .map(|range| selection_context.text_node(&text, range))
-        .unwrap_or_else(|| gpui::StyledText::new(text))
+        .unwrap_or_else(|| gpui::StyledText::new(text));
+    div()
+        .max_w_full()
+        .min_w_0()
+        .child(styled)
+        .into_any_element()
 }
 
 pub(crate) fn selectable_system_message_text(msg: &Message, locale: &str) -> String {

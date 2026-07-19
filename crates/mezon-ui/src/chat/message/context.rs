@@ -14,6 +14,7 @@ use super::channel_messages::ChannelMessages;
 use super::gif_video::GifVideoView;
 use super::video_player::VideoPlayerView;
 use crate::chat::mention_input::MentionInput;
+use crate::components::primitives::TextArea;
 use crate::image_cache::LruImageCache;
 use crate::theme::Theme;
 
@@ -74,6 +75,7 @@ pub struct RowCtx<'a> {
     pub active_videos: &'a HashMap<(MessageId, usize), Entity<VideoPlayerView>>,
     pub active_audios: &'a indexmap::IndexMap<(MessageId, usize), Entity<AudioPlayerView>>,
     pub gif_videos: &'a HashMap<(MessageId, usize), Entity<GifVideoView>>,
+    pub embed_inputs: &'a HashMap<(MessageId, SharedString), Entity<TextArea>>,
     pub video_host: WeakEntity<ChannelMessages>,
     pub now: chrono::DateTime<chrono::Local>,
     /// Active clan of the currently open channel (permission-substitute + Topic gating).

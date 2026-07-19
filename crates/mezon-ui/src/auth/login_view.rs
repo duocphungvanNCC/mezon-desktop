@@ -257,7 +257,6 @@ impl LoginView {
             .text_size(px(16.))
             .bg(rgb(0x1e1e1e))
             .text_color(white())
-            .borderless()
     }
 
     fn start_qr_flow(auth_state: Entity<AuthState>, cx: &mut Context<LoginView>) -> Task<()> {
@@ -402,7 +401,7 @@ impl LoginView {
                     }
                     Err(e) => {
                         let locale = this.settings.read(cx).language.clone();
-                        this.error = Some(friendly_error(&locale, &e));
+                        this.error = Some(confirm_otp_error(&locale, &e));
                     }
                 }
                 cx.notify();
@@ -735,7 +734,11 @@ impl LoginView {
             .overflow_hidden();
 
         if let Some(image) = &self.qr_image {
-            qr_box = qr_box.child(img(image.clone()).size(px(168.)));
+            let mut qr_img = img(image.clone()).size(px(168.));
+            if expired {
+                qr_img = qr_img.opacity(0.5);
+            }
+            qr_box = qr_box.child(qr_img);
         } else if !expired {
             qr_box = qr_box.child(Spinner::new());
         }
@@ -746,8 +749,6 @@ impl LoginView {
                 div()
                     .absolute()
                     .inset_0()
-                    .rounded(px(8.))
-                    .bg(rgba(0x000000a6))
                     .flex()
                     .items_center()
                     .justify_center()
@@ -756,10 +757,20 @@ impl LoginView {
                         Self::reload_qr(&entity, cx);
                     })
                     .child(
-                        svg()
-                            .path("icons/reload-icon.svg")
-                            .size(px(20.))
-                            .text_color(white()),
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .size(px(44.))
+                            .rounded_full()
+                            .bg(white())
+                            .shadow_md()
+                            .child(
+                                svg()
+                                    .path("icons/reload-icon.svg")
+                                    .size(px(22.))
+                                    .text_color(rgb(0x155eef)),
+                            ),
                     ),
             );
         }
@@ -1053,6 +1064,18 @@ fn email_error_key(email: &str) -> Option<&'static str> {
     }
 }
 
+fn confirm_otp_error(locale: &str, err: &anyhow::Error) -> String {
+    let chain: String = err
+        .chain()
+        .map(|cause| cause.to_string())
+        .collect::<Vec<_>>()
+        .join(" :: ");
+    if chain.contains("Network error") {
+        return mezon_i18n::t(locale, "common.errorBoundary.offlineMessage").to_string();
+    }
+    mezon_i18n::t(locale, "common.login.invalidOtp").to_string()
+}
+
 fn friendly_error(locale: &str, err: &anyhow::Error) -> String {
     let chain: String = err
         .chain()
@@ -1196,6 +1219,27 @@ mod tests {
         assert_eq!(
             friendly_error("en", &e),
             "Email OTP requested too frequently, please try again later"
+        );
+    }
+
+    #[test]
+    fn confirm_otp_maps_backend_error_to_invalid_otp() {
+        let e = anyhow::anyhow!(
+            "HTTP 500 on POST https://api.example.com/v2/account/authenticate/confirmotp: {{\"code\":13,\"message\":\"Internal Error\"}}"
+        );
+        assert_eq!(
+            confirm_otp_error("en", &e),
+            mezon_i18n::t("en", "common.login.invalidOtp")
+        );
+    }
+
+    #[test]
+    fn confirm_otp_network_error_shows_offline_message() {
+        let e = anyhow::anyhow!("error sending request")
+            .context("Network error on POST https://api.example.com/x");
+        assert_eq!(
+            confirm_otp_error("en", &e),
+            mezon_i18n::t("en", "common.errorBoundary.offlineMessage")
         );
     }
 
