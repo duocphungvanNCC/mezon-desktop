@@ -8,6 +8,7 @@ use mezon_store::{
 };
 
 use super::overview_setting_page::{OverviewSettingPage, render_clan_overview_save_bar};
+use super::integration_setting_page::IntegrationSettingPage;
 use crate::theme::{ActiveTheme, Theme};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -155,6 +156,7 @@ pub struct ClanSettingScreen {
     channel_list: Entity<ChannelList>,
     current_page: ClanSettingsPage,
     overview_page: Option<Entity<OverviewSettingPage>>,
+    integrations_page: Option<Entity<IntegrationSettingPage>>,
     scroll: ScrollHandle,
     nav_scroll: ScrollHandle,
     focus_handle: FocusHandle,
@@ -184,6 +186,7 @@ impl ClanSettingScreen {
             channel_list,
             current_page: page,
             overview_page: None,
+            integrations_page: None,
             scroll: ScrollHandle::new(),
             nav_scroll: ScrollHandle::new(),
             focus_handle: cx.focus_handle(),
@@ -277,6 +280,11 @@ impl ClanSettingScreen {
         {
             entity.update(cx, |page, _| page.release());
         }
+        if page == ClanSettingsPage::Integrations {
+            if let Some(entity) = self.integrations_page.take() {
+                entity.update(cx, |page, _| page.release());
+            }
+        }
     }
 
     fn reset_content_scroll(&mut self) {
@@ -296,6 +304,28 @@ impl ClanSettingScreen {
                 cx.observe(overview, |_, _, cx| cx.notify()).detach();
             }
         }
+        if page == ClanSettingsPage::Integrations && self.integrations_page.is_none() {
+            let channel_list = self.channel_list.clone();
+            let settings = self.settings.clone();
+            let clan_id = self.clan_id;
+            let can_manage_clan_webhooks = {
+                let store = PermissionStore::global(cx).read(cx);
+                let perms = store.clan_settings_permissions(clan_id, cx);
+                perms.is_clan_owner || perms.has_manage_clan
+            };
+            self.integrations_page = Some(cx.new(|cx| {
+                IntegrationSettingPage::new(
+                    clan_id,
+                    channel_list,
+                    settings,
+                    can_manage_clan_webhooks,
+                    cx,
+                )
+            }));
+            if let Some(integrations) = &self.integrations_page {
+                cx.observe(integrations, |_, _, cx| cx.notify()).detach();
+            }
+        }
     }
 
     fn page_title(&self, page: ClanSettingsPage, locale: &str) -> SharedString {
@@ -306,6 +336,10 @@ impl ClanSettingScreen {
         match self.current_page {
             ClanSettingsPage::Overview => self
                 .overview_page
+                .as_ref()
+                .map(|p| p.clone().into_any_element()),
+            ClanSettingsPage::Integrations => self
+                .integrations_page
                 .as_ref()
                 .map(|p| p.clone().into_any_element()),
             _ => None,
@@ -334,10 +368,7 @@ impl Render for ClanSettingScreen {
         let perms = PermissionStore::global(cx)
             .read(cx)
             .clan_settings_permissions(clan_id, cx);
-        let hide_page_title = matches!(
-            page,
-            ClanSettingsPage::Integrations | ClanSettingsPage::AuditLog
-        );
+        let hide_page_title = matches!(page, ClanSettingsPage::AuditLog);
 
         let content = self.current_page_view().unwrap_or_else(|| {
             div()
@@ -571,7 +602,15 @@ impl Render for ClanSettingScreen {
                                             .pl(px(40.0))
                                             .pr(px(28.0))
                                             .when(hide_page_title, |el| el.pt(px(60.0)))
-                                            .child(div().max_w(px(740.0)).child(content)),
+                                            .child(
+                                                div()
+                                                    .flex()
+                                                    .flex_col()
+                                                    .w_full()
+                                                    .max_w(px(740.0))
+                                                    .items_stretch()
+                                                    .child(content),
+                                            ),
                                     ),
                             )
                             .child(

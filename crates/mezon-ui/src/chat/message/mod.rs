@@ -30,6 +30,7 @@ mod user_row;
 mod video_player;
 
 pub use channel_messages::ChannelMessages;
+pub use time::format_relative_time_from_seconds;
 pub(crate) use content::open_message_link;
 pub use context::DEFAULT_DISPLAY_NAME_COLOR;
 pub use gif_video::VideoThumbView;

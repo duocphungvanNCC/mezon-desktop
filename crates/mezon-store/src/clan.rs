@@ -597,7 +597,7 @@ impl ClanList {
         cx.spawn(async move |_, cx| {
             cx.background_executor()
                 .spawn(async move {
-                    upload_clan_image_to_cdn(&api, &base_img_url, &path, max_bytes).await
+                    upload_image_to_cdn(&api, &base_img_url, &path, max_bytes).await
                 })
                 .await
         })
@@ -773,7 +773,7 @@ fn read_clan_image_file(path: &Path, max_bytes: u64) -> Result<Vec<u8>, String> 
     std::fs::read(path).map_err(|e| e.to_string())
 }
 
-async fn upload_clan_image_to_cdn(
+pub(crate) async fn upload_image_to_cdn(
     api: &AppApi,
     base_img_url: &str,
     path: &Path,

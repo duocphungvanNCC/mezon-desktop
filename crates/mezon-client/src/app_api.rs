@@ -892,6 +892,65 @@ impl AppApi {
         Ok(resp.stickers)
     }
 
+    pub async fn list_webhooks_by_channel(
+        &self,
+        channel_id: i64,
+        clan_id: i64,
+    ) -> Result<Vec<mezon_proto::api::Webhook>> {
+        let resp = self
+            .transport
+            .list_webhook_by_channel_id(channel_id, clan_id)
+            .await?;
+        Ok(resp.webhooks)
+    }
+
+    pub async fn generate_webhook(
+        &self,
+        request: mezon_proto::api::WebhookCreateRequest,
+    ) -> Result<mezon_proto::api::WebhookGenerateResponse> {
+        self.transport.generate_webhook(request).await
+    }
+
+    pub async fn update_webhook(
+        &self,
+        request: mezon_proto::api::WebhookUpdateRequestById,
+    ) -> Result<()> {
+        self.transport.update_webhook_by_id(request).await
+    }
+
+    pub async fn delete_webhook(
+        &self,
+        request: mezon_proto::api::WebhookDeleteRequestById,
+    ) -> Result<()> {
+        self.transport.delete_webhook_by_id(request).await
+    }
+
+    pub async fn list_clan_webhooks(
+        &self,
+        clan_id: i64,
+    ) -> Result<Vec<mezon_proto::api::ClanWebhook>> {
+        let resp = self.transport.list_clan_webhook(clan_id).await?;
+        Ok(resp.list_clan_webhooks)
+    }
+
+    pub async fn generate_clan_webhook(
+        &self,
+        request: mezon_proto::api::GenerateClanWebhookRequest,
+    ) -> Result<mezon_proto::api::GenerateClanWebhookResponse> {
+        self.transport.generate_clan_webhook(request).await
+    }
+
+    pub async fn update_clan_webhook(
+        &self,
+        request: mezon_proto::api::UpdateClanWebhookRequest,
+    ) -> Result<()> {
+        self.transport.update_clan_webhook_by_id(request).await
+    }
+
+    pub async fn delete_clan_webhook(&self, id: i64, clan_id: i64) -> Result<()> {
+        self.transport.delete_clan_webhook_by_id(id, clan_id).await
+    }
+
     pub async fn create_channel(
         &self,
         clan_id: i64,

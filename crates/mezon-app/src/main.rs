@@ -595,6 +595,7 @@ fn open_main_window(
     mezon_store::GroupMembersStore::init(api.clone(), cx);
     mezon_store::UsersByUserStore::init(api.clone(), cx);
     mezon_store::RolesStore::init(api.clone(), cx);
+    mezon_store::WebhookStore::init(api.clone(), cx);
     mezon_store::GalleryStore::init(api.clone(), cx);
     mezon_store::FilesStore::init(api.clone(), cx);
     mezon_store::PermissionStore::init(api.clone(), auth_state.clone(), cx);
