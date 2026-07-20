@@ -391,11 +391,28 @@ pub struct EmbedFooter {
     pub icon_proxied: SharedString,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
+pub struct EmbedTextInput {
+    pub id: SharedString,
+    pub placeholder: SharedString,
+    pub default_value: SharedString,
+    pub multiline: bool,
+    pub required: bool,
+    pub disabled: bool,
+}
+
+#[derive(Debug, Clone)]
+pub enum EmbedInput {
+    Text(EmbedTextInput),
+    Select(MessageSelect),
+}
+
+#[derive(Debug, Clone)]
 pub struct EmbedField {
     pub name: SharedString,
     pub value: SharedString,
     pub inline: bool,
+    pub input: Option<EmbedInput>,
 }
 
 #[derive(Debug, Clone)]
@@ -440,6 +457,7 @@ pub struct MessageSelect {
     pub max_options: Option<i32>,
     pub disabled: bool,
     pub id: Option<SharedString>,
+    pub value_selected: Option<SharedString>,
 }
 
 #[derive(Debug, Clone)]

@@ -6,9 +6,11 @@ use std::rc::Rc;
 use gpui::{
     App, Bounds, CursorStyle, DispatchPhase, Element, ElementId, GlobalElementId, HighlightStyle,
     Hitbox, HitboxBehavior, Hsla, InspectorElementId, IntoElement, LayoutId, MouseDownEvent,
-    MouseUpEvent, Pixels, SharedString, StyledText, TransformationMatrix, Window, point, px, size,
+    MouseUpEvent, Pixels, SharedString, StyledText, TextLayout, TransformationMatrix, Window,
+    point, px, size,
 };
 
+use super::selection::{SharedSelection, merge_selection_background};
 use crate::components::primitives::IconName;
 
 const INLINE_ICON_SIZE: Pixels = px(16.);
@@ -41,6 +43,7 @@ pub struct InlineContent {
     styled: StyledText,
     icons: Vec<IconOverlay>,
     clicks: Vec<ClickRegion>,
+    selection_state: SharedSelection,
 }
 
 impl InlineContent {
@@ -51,15 +54,25 @@ impl InlineContent {
         icons: Vec<IconOverlay>,
         clicks: Vec<ClickRegion>,
         body_color: Hsla,
+        selection: Option<(Range<usize>, Hsla)>,
+        selection_state: SharedSelection,
     ) -> Self {
-        let highlights = build_highlights(&text, runs, body_color);
+        let mut highlights = build_highlights(&text, runs, body_color);
+        if let Some((range, bg)) = selection {
+            highlights = merge_selection_background(&highlights, range, bg);
+        }
         let styled = StyledText::new(text).with_highlights(highlights);
         Self {
             element_id: id.into(),
             styled,
             icons,
             clicks,
+            selection_state,
         }
+    }
+
+    pub fn text_layout(&self) -> TextLayout {
+        self.styled.layout().clone()
     }
 }
 
@@ -150,7 +163,8 @@ impl Element for InlineContent {
             let state = state.unwrap_or_default();
 
             let mouse_position = window.mouse_position();
-            if let Ok(ix) = text_layout.index_for_position(mouse_position)
+            window.set_cursor_style(CursorStyle::IBeam, hitbox);
+            if let Some(Ok(ix)) = text_layout.try_index_for_position(mouse_position)
                 && self.clicks.iter().any(|region| region.range.contains(&ix))
             {
                 window.set_cursor_style(CursorStyle::PointingHand, hitbox);
@@ -167,7 +181,8 @@ impl Element for InlineContent {
                     move |event: &MouseDownEvent, phase, window: &mut Window, _: &mut App| {
                         if phase == DispatchPhase::Bubble
                             && hitbox.is_hovered(window)
-                            && let Ok(index) = text_layout.index_for_position(event.position)
+                            && let Some(Ok(index)) =
+                                text_layout.try_index_for_position(event.position)
                         {
                             mouse_down.set(Some(index));
                         }
@@ -178,6 +193,7 @@ impl Element for InlineContent {
             {
                 let hitbox = hitbox.clone();
                 let text_layout = text_layout.clone();
+                let selection_state = self.selection_state.clone();
                 window.on_mouse_event(
                     move |event: &MouseUpEvent, phase, window: &mut Window, cx: &mut App| {
                         if phase != DispatchPhase::Bubble {
@@ -186,10 +202,14 @@ impl Element for InlineContent {
                         let Some(down_index) = mouse_down.take() else {
                             return;
                         };
+                        if selection_state.borrow().has_selection() {
+                            return;
+                        }
                         if !hitbox.is_hovered(window) {
                             return;
                         }
-                        let Ok(up_index) = text_layout.index_for_position(event.position) else {
+                        let Some(Ok(up_index)) = text_layout.try_index_for_position(event.position)
+                        else {
                             return;
                         };
                         for region in &clicks {

@@ -1,10 +1,18 @@
+use std::cell::Cell;
+use std::rc::Rc;
+
 use gpui::{
-    AnyElement, FontWeight, ObjectFit, SharedString, div, img, prelude::*, px, relative, rgb, rgba,
+    AnyElement, Bounds, FontWeight, ObjectFit, Pixels, SharedString, div, img, prelude::*, px,
+    relative, rgb, rgba,
 };
 use mezon_store::{Message, MessageId, MessagesStore, PollAnswerView, PollData, PollLabelSegment};
 
+use super::content::{
+    ATTACHMENT_PLACEHOLDER, SELECTION_BG, SelectableSectionCursor, SelectableTextContext,
+};
 use super::context::RowCtx;
 use super::poll_detail_modal::PollDetailModal;
+use super::selection::{SelectableRegion, TextSegment};
 use crate::components::primitives::{Icon, IconName};
 
 const BLUE_600: u32 = 0x2563eb;
@@ -13,7 +21,12 @@ const RED_500: u32 = 0xef4444;
 const RED_500_10: u32 = 0xef44_4419;
 const ANSWERS_SCROLL_AFTER: usize = 5;
 
-pub fn render_poll_card(msg: &Message, ctx: &RowCtx) -> AnyElement {
+pub fn render_poll_card(
+    msg: &Message,
+    ctx: &RowCtx,
+    base: usize,
+    selection_context: &SelectableTextContext,
+) -> AnyElement {
     let Some(poll) = msg.poll.as_ref() else {
         return div().into_any_element();
     };
@@ -36,15 +49,20 @@ pub fn render_poll_card(msg: &Message, ctx: &RowCtx) -> AnyElement {
     let msg_id = msg.id;
     let poll_id = poll.poll_id;
     let allow_multiple = poll.allow_multiple;
+    let mut selection_cursor = SelectableSectionCursor::new(base);
+    let question_range = selection_cursor.section(&poll.question);
 
     let mut header = div().flex().flex_row().items_center().gap_2().mb_1().child(
         div()
+            .cursor(gpui::CursorStyle::IBeam)
             .flex_1()
             .min_w_0()
             .text_size(px(15.))
             .font_weight(FontWeight::SEMIBOLD)
             .text_color(theme.tokens.text_secondary)
-            .child(poll.question.clone()),
+            .when_some(question_range, |div, range| {
+                div.child(selection_context.text_node(&poll.question, range))
+            }),
     );
     if is_closed || is_expired {
         header = header.child(
@@ -74,11 +92,16 @@ pub fn render_poll_card(msg: &Message, ctx: &RowCtx) -> AnyElement {
         .mb_3()
         .child(subtitle_text);
 
+    let answer_clip = (poll.answers.len() > ANSWERS_SCROLL_AFTER).then(|| Rc::new(Cell::new(None)));
     let answer_rows: Vec<AnyElement> = poll
         .answers
         .iter()
         .enumerate()
         .map(|(i, answer)| {
+            let answer_text = selectable_poll_answer_text(answer);
+            let answer_base = selection_cursor
+                .section(&answer_text)
+                .map(|range| range.start);
             render_answer_row(
                 i,
                 answer,
@@ -91,11 +114,14 @@ pub fn render_poll_card(msg: &Message, ctx: &RowCtx) -> AnyElement {
                 should_show_results,
                 can_select,
                 has_voted,
+                answer_base,
+                selection_context,
+                answer_clip.as_ref(),
             )
         })
         .collect();
-    let answers_col = if poll.answers.len() > ANSWERS_SCROLL_AFTER {
-        div()
+    let answers_col = if let Some(clip) = answer_clip {
+        let scroll = div()
             .id(("poll-answers", msg_id.get() as usize))
             .flex()
             .flex_col()
@@ -105,7 +131,8 @@ pub fn render_poll_card(msg: &Message, ctx: &RowCtx) -> AnyElement {
             .overflow_y_scroll()
             .pr_1()
             .children(answer_rows)
-            .into_any_element()
+            .into_any_element();
+        SelectableRegion::new(scroll, clip, None).into_any_element()
     } else {
         div()
             .id(("poll-answers", msg_id.get() as usize))
@@ -163,6 +190,9 @@ fn render_answer_row(
     should_show_results: bool,
     can_select: bool,
     has_voted: bool,
+    answer_base: Option<usize>,
+    selection_context: &SelectableTextContext,
+    answer_clip: Option<&Rc<Cell<Option<Bounds<Pixels>>>>>,
 ) -> AnyElement {
     let theme = ctx.theme;
     let index = position as i32;
@@ -196,7 +226,11 @@ fn render_answer_row(
         .bg(theme.tokens.bg_item_hover);
 
     if can_toggle {
+        let selection = ctx.selection.clone();
         row = row.cursor_pointer().on_click(move |_, _, cx| {
+            if selection.borrow().has_selection() {
+                return;
+            }
             MessagesStore::global(cx).update(cx, |store, cx| {
                 store.toggle_poll_answer(msg_id, index, allow_multiple, cx);
             });
@@ -217,6 +251,7 @@ fn render_answer_row(
 
     row = row.child(
         div()
+            .cursor(gpui::CursorStyle::IBeam)
             .relative()
             .flex_1()
             .min_w_0()
@@ -224,7 +259,13 @@ fn render_answer_row(
             .text_size(px(14.))
             .font_weight(FontWeight::MEDIUM)
             .text_color(theme.tokens.text_secondary)
-            .child(render_poll_label(answer, ctx)),
+            .child(render_poll_label(
+                answer,
+                answer_base,
+                selection_context,
+                ctx,
+                answer_clip,
+            )),
     );
 
     let mut right = div()
@@ -281,28 +322,90 @@ fn render_answer_row(
     row.child(right).into_any_element()
 }
 
-fn render_poll_label(answer: &PollAnswerView, ctx: &RowCtx) -> AnyElement {
+fn render_poll_label(
+    answer: &PollAnswerView,
+    base: Option<usize>,
+    selection_context: &SelectableTextContext,
+    ctx: &RowCtx,
+    answer_clip: Option<&Rc<Cell<Option<Bounds<Pixels>>>>>,
+) -> AnyElement {
     let mut row = div().flex().flex_row().items_center().overflow_hidden();
+    let mut cursor = base.map(SelectableSectionCursor::new);
     for segment in &answer.segments {
         match segment {
             PollLabelSegment::Text(text) => {
-                row = row.child(div().overflow_hidden().child(text.clone()));
+                let range = cursor.as_mut().and_then(|cursor| cursor.inline(text));
+                row = row.child(div().overflow_hidden().when_some(range, |div, range| {
+                    div.child(match answer_clip {
+                        Some(clip) => {
+                            selection_context.clipped_text_node(text, range, clip.clone())
+                        }
+                        None => selection_context.text_node(text, range),
+                    })
+                }));
             }
             PollLabelSegment::Emoji(src) => {
                 if src.is_empty() {
                     continue;
                 }
-                row = row.child(
-                    img(src.clone())
-                        .w(px(20.))
-                        .h(px(20.))
-                        .object_fit(ObjectFit::Contain)
-                        .image_cache(&ctx.avatar_cache),
-                );
+                let placeholder = ATTACHMENT_PLACEHOLDER.to_string();
+                let range = cursor
+                    .as_mut()
+                    .and_then(|cursor| cursor.inline(&placeholder));
+                let image = img(src.clone())
+                    .w(px(20.))
+                    .h(px(20.))
+                    .object_fit(ObjectFit::Contain)
+                    .image_cache(&ctx.avatar_cache)
+                    .into_any_element();
+                if let Some(range) = range {
+                    let bounds = Rc::new(Cell::new(None));
+                    let mut segment = TextSegment::bounded(range.clone(), bounds.clone());
+                    if let Some(clip) = answer_clip {
+                        segment = segment.clipped(clip.clone());
+                    }
+                    selection_context.push_segment(segment);
+                    row = row.child(SelectableRegion::new(
+                        image,
+                        bounds,
+                        selection_context
+                            .is_selected(&range)
+                            .then(|| rgba(SELECTION_BG)),
+                    ));
+                } else {
+                    row = row.child(image);
+                }
             }
         }
     }
     row.into_any_element()
+}
+
+fn selectable_poll_answer_text(answer: &PollAnswerView) -> String {
+    let mut text = String::new();
+    for segment in &answer.segments {
+        match segment {
+            PollLabelSegment::Text(value) => text.push_str(value),
+            PollLabelSegment::Emoji(src) if !src.is_empty() => text.push(ATTACHMENT_PLACEHOLDER),
+            PollLabelSegment::Emoji(_) => {}
+        }
+    }
+    text
+}
+
+pub(crate) fn selectable_poll_text(poll: &PollData) -> String {
+    let mut text = poll.question.to_string();
+    for answer in &poll.answers {
+        let answer = selectable_poll_answer_text(answer);
+        if answer.is_empty() {
+            continue;
+        }
+        if !text.is_empty() {
+            text.push('\n');
+        }
+        text.push_str(&answer);
+    }
+    text
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -323,6 +426,7 @@ fn render_footer(
     let theme = ctx.theme;
     let total_label = format!("{total_votes} {}", vote_word(ctx, total_votes));
     let modal_settings = ctx.settings.clone();
+    let total_selection = ctx.selection.clone();
 
     let mut left = div()
         .flex()
@@ -339,6 +443,9 @@ fn render_footer(
                 .cursor_pointer()
                 .hover(|s| s.underline())
                 .on_click(move |_, window, cx| {
+                    if total_selection.borrow().has_selection() {
+                        return;
+                    }
                     let locale = SharedString::from(modal_settings.read(cx).language.clone());
                     PollDetailModal::open(poll_id, msg_id, locale, window, cx);
                 })
@@ -356,6 +463,7 @@ fn render_footer(
 
     let mut buttons = div().flex().flex_row().flex_shrink_0().gap_2();
     if !has_voted && !is_closed && !is_expired {
+        let selection = ctx.selection.clone();
         let toggle_key = if show_results {
             "message.poll.backToVote"
         } else {
@@ -375,8 +483,10 @@ fn render_footer(
                 .cursor_pointer()
                 .hover(|s| s.text_color(theme.tokens.text_secondary))
                 .on_click(move |_, _, cx| {
-                    MessagesStore::global(cx)
-                        .update(cx, |store, cx| store.toggle_poll_results(msg_id, cx));
+                    if !selection.borrow().has_selection() {
+                        MessagesStore::global(cx)
+                            .update(cx, |store, cx| store.toggle_poll_results(msg_id, cx));
+                    }
                 })
                 .child(mezon_i18n::t(ctx.locale, toggle_key)),
         );
@@ -396,12 +506,15 @@ fn render_footer(
         if disabled {
             btn = btn.opacity(0.5);
         } else {
+            let selection = ctx.selection.clone();
             btn = btn
                 .cursor_pointer()
                 .hover(|s| s.bg(theme.tokens.bg_button_primary_hover))
                 .on_click(move |_, _, cx| {
-                    MessagesStore::global(cx)
-                        .update(cx, |store, cx| store.submit_poll_vote(poll_id, msg_id, cx));
+                    if !selection.borrow().has_selection() {
+                        MessagesStore::global(cx)
+                            .update(cx, |store, cx| store.submit_poll_vote(poll_id, msg_id, cx));
+                    }
                 });
         }
         buttons = buttons.child(btn);
@@ -422,12 +535,15 @@ fn render_footer(
         if voting {
             btn = btn.opacity(0.5);
         } else {
+            let selection = ctx.selection.clone();
             btn = btn
                 .cursor_pointer()
                 .hover(|s| s.bg(theme.tokens.bg_secondary_button_hover))
                 .on_click(move |_, _, cx| {
-                    MessagesStore::global(cx)
-                        .update(cx, |store, cx| store.remove_poll_vote(poll_id, msg_id, cx));
+                    if !selection.borrow().has_selection() {
+                        MessagesStore::global(cx)
+                            .update(cx, |store, cx| store.remove_poll_vote(poll_id, msg_id, cx));
+                    }
                 });
         }
         buttons = buttons.child(btn);

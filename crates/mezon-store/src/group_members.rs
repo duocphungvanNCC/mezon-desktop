@@ -268,6 +268,7 @@ fn group_members_from_proto(resp: &api::AllUsersAddChannelResponse) -> Vec<Group
                     avatar_url: resp.avatars.get(i).cloned().unwrap_or_default(),
                     about_me: String::new(),
                     create_time_seconds: 0,
+                    join_time_seconds: 0,
                 },
                 online: resp.onlines.get(i).copied().unwrap_or(false),
             })
@@ -287,6 +288,7 @@ fn group_member_from_redis(user: &realtime::UserProfileRedis) -> Option<GroupMem
             avatar_url: user.avatar.clone(),
             about_me: String::new(),
             create_time_seconds: user.create_time_second,
+            join_time_seconds: 0,
         },
         online: user.online,
     })

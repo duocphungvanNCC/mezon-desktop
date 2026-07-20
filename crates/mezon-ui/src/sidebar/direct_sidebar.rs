@@ -5,7 +5,8 @@ use gpui::{
     prelude::*, px, size, uniform_list,
 };
 use mezon_store::{
-    ChannelEvent, ChannelId, ChannelList, DirectChannel, DirectKind, DirectMessageStore, FriendStore, Settings,
+    ChannelEvent, ChannelId, ChannelList, DirectChannel, DirectKind, DirectMessageStore,
+    FriendStore, Settings,
 };
 
 use super::friend_request_badge;

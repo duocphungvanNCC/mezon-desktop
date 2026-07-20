@@ -1849,6 +1849,7 @@
   "common.login.getStarted": "Get Started",
   "common.login.gladToMeetAgain": "So glad to meet you again!",
   "common.login.invalidCredentials": "Email or password is invalid",
+  "common.login.invalidOtp": "Invalid OTP. Please try again.",
   "common.login.invalidPhone": "Phone number is invalid",
   "common.login.invalidPhoneNumber": "Invalid phone number",
   "common.login.invalidTimeOtp": "Invalid time OTP",

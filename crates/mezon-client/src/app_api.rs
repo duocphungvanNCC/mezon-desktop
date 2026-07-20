@@ -608,6 +608,7 @@ impl AppApi {
     }
 
     #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments)]
     pub async fn send_channel_message(
         &self,
         clan_id: i64,
@@ -618,10 +619,11 @@ impl AppApi {
         mentions: Vec<crate::transport::OutgoingMention>,
         hashtags: Vec<crate::transport::OutgoingHashtag>,
         emojis: Vec<crate::transport::OutgoingEmoji>,
+        ogp: Option<crate::transport::OutgoingOgp>,
     ) -> Result<ApiMessage> {
         self.transport
             .send_channel_message(
-                clan_id, channel_id, content, is_public, mode, mentions, hashtags, emojis,
+                clan_id, channel_id, content, is_public, mode, mentions, hashtags, emojis, ogp,
             )
             .await
     }
@@ -720,10 +722,12 @@ impl AppApi {
         mentions: Vec<crate::transport::OutgoingMention>,
         hashtags: Vec<crate::transport::OutgoingHashtag>,
         emojis: Vec<crate::transport::OutgoingEmoji>,
+        ogp: Option<crate::transport::OutgoingOgp>,
     ) -> Result<ApiMessage> {
         self.transport
             .send_channel_message_reply(
                 clan_id, channel_id, content, is_public, mode, reply, mentions, hashtags, emojis,
+                ogp,
             )
             .await
     }
@@ -782,6 +786,34 @@ impl AppApi {
     ) -> Result<()> {
         self.transport
             .dropdown_box_selected(message_id, channel_id, selectbox_id)
+            .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn write_ephemeral_message(
+        &self,
+        receiver_id: i64,
+        clan_id: i64,
+        channel_id: i64,
+        content: &str,
+        is_public: bool,
+        mode: i32,
+        mentions: Vec<crate::transport::OutgoingMention>,
+        hashtags: Vec<crate::transport::OutgoingHashtag>,
+        emojis: Vec<crate::transport::OutgoingEmoji>,
+    ) -> Result<()> {
+        self.transport
+            .write_ephemeral_message(
+                receiver_id,
+                clan_id,
+                channel_id,
+                content,
+                is_public,
+                mode,
+                mentions,
+                hashtags,
+                emojis,
+            )
             .await
     }
 

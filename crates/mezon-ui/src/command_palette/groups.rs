@@ -207,6 +207,7 @@ mod tests {
             label: SharedString::from(label),
             subtext: SharedString::default(),
             avatar: SharedString::default(),
+            avatar_raw: SharedString::default(),
             unread_count,
             last_sent_timestamp: last_sent,
             last_seen_timestamp: last_seen,
@@ -221,6 +222,7 @@ mod tests {
             filter_name: normalize_search_string(label),
             filter_display: String::new(),
             filter_blob: normalize_search_string(label),
+            voice_busy: false,
         }
     }
 

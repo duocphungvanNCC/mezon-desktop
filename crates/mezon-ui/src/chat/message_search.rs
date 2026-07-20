@@ -827,9 +827,12 @@ fn render_search_row(
                                         .flex_row()
                                         .items_baseline()
                                         .gap_2()
+                                        .w_full()
                                         .min_w_0()
                                         .child(
                                             div()
+                                                .max_w_full()
+                                                .min_w_0()
                                                 .text_size(px(16.))
                                                 .font_weight(FontWeight::SEMIBOLD)
                                                 .text_color(sender_color)
@@ -987,11 +990,19 @@ fn render_search_spans(spans: &[MessageSpan], theme: &Theme) -> gpui::AnyElement
                 }
             }
             MessageSpan::Bold(text) => {
-                row = row.child(div().font_weight(FontWeight::BOLD).child(text.to_string()));
+                row = row.child(
+                    div()
+                        .max_w_full()
+                        .min_w_0()
+                        .font_weight(FontWeight::BOLD)
+                        .child(text.to_string()),
+                );
             }
             MessageSpan::Code(text) => {
                 row = row.child(
                     div()
+                        .max_w_full()
+                        .min_w_0()
                         .px_1()
                         .rounded_sm()
                         .bg(code_bg)
@@ -1014,7 +1025,8 @@ fn render_search_spans(spans: &[MessageSpan], theme: &Theme) -> gpui::AnyElement
             MessageSpan::Mention { display, .. } | MessageSpan::Hashtag { display, .. } => {
                 row = row.child(
                     div()
-                        .flex_none()
+                        .max_w_full()
+                        .min_w_0()
                         .px(px(2.))
                         .rounded_sm()
                         .font_weight(FontWeight::MEDIUM)
@@ -1024,7 +1036,7 @@ fn render_search_spans(spans: &[MessageSpan], theme: &Theme) -> gpui::AnyElement
                 );
             }
             MessageSpan::Emoji { name, .. } => {
-                row = row.child(div().child(name.to_string()));
+                row = row.child(div().max_w_full().min_w_0().child(name.to_string()));
             }
             MessageSpan::CodeBlock { text, .. } => {
                 row = row.child(
@@ -1039,7 +1051,7 @@ fn render_search_spans(spans: &[MessageSpan], theme: &Theme) -> gpui::AnyElement
                 );
             }
             MessageSpan::Canvas { title, .. } | MessageSpan::Heading { text: title, .. } => {
-                row = row.child(div().child(title.to_string()));
+                row = row.child(div().max_w_full().min_w_0().child(title.to_string()));
             }
         }
     }
