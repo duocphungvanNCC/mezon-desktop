@@ -1,5 +1,6 @@
 mod avatar;
 mod badge;
+mod blink_manager;
 mod button;
 mod checkbox;
 mod context_menu;
@@ -19,6 +20,7 @@ mod spinner;
 mod stack;
 mod switch;
 mod tab_bar;
+mod textarea;
 mod toast;
 mod tooltip;
 
@@ -44,7 +46,9 @@ pub use spinner::Spinner;
 pub use stack::{h_flex, v_flex};
 pub use switch::Switch;
 pub use tab_bar::TabBar;
+pub use textarea::{TextArea, TextAreaEvent, TextAreaField};
 pub use toast::{Toast, ToastKind};
 pub use tooltip::Tooltip;
 
 pub use input::init as init_input;
+pub use textarea::init as init_textarea;

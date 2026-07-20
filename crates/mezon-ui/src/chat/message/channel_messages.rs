@@ -1,22 +1,25 @@
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use gpui::{
-    Anchor, Animation, AnimationExt as _, App, Context, DismissEvent, Entity, FocusHandle,
-    Focusable, KeyDownEvent, ListAlignment, ListState, MouseButton, MouseDownEvent, Pixels, Point,
-    SharedString, Subscription, Task, Window, anchored, deferred, div, ease_in_out, list,
+    Anchor, Animation, AnimationExt as _, AnyElement, App, ClipboardItem, Context, DismissEvent,
+    DispatchPhase, Element, ElementId, Entity, FocusHandle, Focusable, GlobalElementId, Hitbox,
+    HitboxBehavior, InspectorElementId, KeyDownEvent, LayoutId, ListAlignment, ListState,
+    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, SharedString,
+    Subscription, Task, TextLayout, WeakEntity, Window, anchored, deferred, div, ease_in_out, list,
     prelude::*, px,
 };
 use ui::{ScrollAxes, Scrollbars, WithScrollbar};
 
 use mezon_store::{
     BadgeService, ChannelId, ChannelList, ChannelPermissionsEvent, ChannelPermissionsStore, ClanId,
-    ClanList, ClanMembersStore, DirectMessageStore, Emoji, EmojiStore, GroupMembersStore,
-    MessageCode, MessageId, MessagesEvent, MessagesStore, PERMISSION_DELETE_MESSAGE,
-    ProfileContext, Settings, TopicsEvent, TopicsStore, UserId, UsersByUserStore,
+    ClanList, ClanMembersStore, DirectMessageStore, EmbedInput, EmbedTextInput, Emoji, EmojiStore,
+    GroupMembersStore, MessageCode, MessageId, MessagesEvent, MessagesStore,
+    PERMISSION_DELETE_MESSAGE, ProfileContext, Settings, TopicsEvent, TopicsStore, UserId,
+    UsersByUserStore,
     message::{Message, markdown_edit_source},
 };
 
@@ -26,17 +29,414 @@ use super::dispatch::render_message_item;
 use super::gif_video::GifVideoView;
 use super::message_context_menu;
 use super::reaction_picker::{ReactionPicker, ReactionPickerEvent};
+use super::selection::{MessageSelectionState, SelPoint, SharedSelection, TextSegment, word_range};
 use super::skeleton::message_skeleton;
 use super::system_row::{build_onboarding_context, build_welcome_context};
 use super::video_player::{VideoActivation, VideoPlayerView};
 use crate::app::shell::Shell;
 use crate::chat::mention_input::{MentionInput, MentionInputEvent};
 use crate::chat::user_profile_popover::UserProfilePopover;
-use crate::components::primitives::{Icon, IconName, context_menu_at};
+use crate::components::primitives::input::Copy;
+use crate::components::primitives::{Icon, IconName, TextArea, TextAreaEvent, context_menu_at};
 use crate::image_cache::{
     LruImageCache, MESSAGE_ENTRY_MAX_BYTES, MESSAGE_IMAGE_CACHE_BYTES, MESSAGE_IMAGE_CACHE_CAPACITY,
 };
 use crate::theme::{ActiveTheme, Theme};
+
+fn register_selection_listeners(
+    window: &mut Window,
+    host: WeakEntity<ChannelMessages>,
+    selection: SharedSelection,
+    hitbox: Hitbox,
+) {
+    let down_host = host.clone();
+    window.on_mouse_event(move |event: &MouseDownEvent, phase, window, cx| {
+        if phase != DispatchPhase::Capture
+            || event.button != MouseButton::Left
+            || !hitbox.is_hovered(window)
+        {
+            return;
+        }
+        let event = event.clone();
+        let host = down_host.clone();
+        window.defer(cx, move |window, cx| {
+            if let Some(view) = host.upgrade() {
+                view.update(cx, |this, cx| this.on_selection_down(&event, window, cx));
+            }
+        });
+    });
+    let move_host = host.clone();
+    let move_selection = selection.clone();
+    window.on_mouse_event(move |event: &MouseMoveEvent, phase, window, cx| {
+        if phase != DispatchPhase::Capture
+            || !move_selection
+                .try_borrow()
+                .is_ok_and(|selection| selection.selecting)
+        {
+            return;
+        }
+        let event = event.clone();
+        let host = move_host.clone();
+        window.defer(cx, move |window, cx| {
+            if let Some(view) = host.upgrade() {
+                view.update(cx, |this, cx| this.on_selection_move(&event, window, cx));
+            }
+        });
+    });
+    window.on_mouse_event(move |event: &MouseUpEvent, phase, window, cx| {
+        if phase != DispatchPhase::Capture
+            || event.button != MouseButton::Left
+            || !selection
+                .try_borrow()
+                .is_ok_and(|selection| selection.selecting)
+        {
+            return;
+        }
+        let event = event.clone();
+        let host = host.clone();
+        window.defer(cx, move |window, cx| {
+            if let Some(view) = host.upgrade() {
+                view.update(cx, |this, cx| this.on_selection_up(&event, window, cx));
+            }
+        });
+    });
+}
+
+/// Adds the list-wide selection hitbox without inserting a canvas/layout node
+/// beside the virtualized list.
+struct SelectionCapture {
+    child: AnyElement,
+    host: WeakEntity<ChannelMessages>,
+    selection: SharedSelection,
+}
+
+impl SelectionCapture {
+    fn new(
+        child: AnyElement,
+        host: WeakEntity<ChannelMessages>,
+        selection: SharedSelection,
+    ) -> Self {
+        Self {
+            child,
+            host,
+            selection,
+        }
+    }
+}
+
+impl Element for SelectionCapture {
+    type RequestLayoutState = ();
+    type PrepaintState = Hitbox;
+
+    fn id(&self) -> Option<ElementId> {
+        None
+    }
+
+    fn source_location(&self) -> Option<&'static core::panic::Location<'static>> {
+        None
+    }
+
+    fn request_layout(
+        &mut self,
+        _id: Option<&GlobalElementId>,
+        _inspector_id: Option<&InspectorElementId>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> (LayoutId, Self::RequestLayoutState) {
+        (self.child.request_layout(window, cx), ())
+    }
+
+    fn prepaint(
+        &mut self,
+        _id: Option<&GlobalElementId>,
+        _inspector_id: Option<&InspectorElementId>,
+        bounds: gpui::Bounds<Pixels>,
+        _request_layout: &mut Self::RequestLayoutState,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Self::PrepaintState {
+        let hitbox = window.insert_hitbox(bounds, HitboxBehavior::Normal);
+        self.child.prepaint(window, cx);
+        hitbox
+    }
+
+    fn paint(
+        &mut self,
+        _id: Option<&GlobalElementId>,
+        _inspector_id: Option<&InspectorElementId>,
+        _bounds: gpui::Bounds<Pixels>,
+        _request_layout: &mut Self::RequestLayoutState,
+        hitbox: &mut Self::PrepaintState,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        register_selection_listeners(
+            window,
+            self.host.clone(),
+            self.selection.clone(),
+            hitbox.clone(),
+        );
+        self.child.paint(window, cx);
+    }
+}
+
+impl IntoElement for SelectionCapture {
+    type Element = Self;
+
+    fn into_element(self) -> Self::Element {
+        self
+    }
+}
+
+fn text_layout_offset_at(layout: &TextLayout, position: Point<Pixels>) -> Option<usize> {
+    let bounds = layout.try_bounds()?;
+    if bounds.contains(&position) {
+        Some(
+            layout
+                .try_index_for_position(position)?
+                .unwrap_or_else(|err| err),
+        )
+    } else {
+        None
+    }
+}
+
+fn text_layout_offset_snap(layout: &TextLayout, position: Point<Pixels>) -> Option<usize> {
+    let bounds = layout.try_bounds()?;
+    if position.y >= bounds.top() && position.y <= bounds.bottom() {
+        Some(
+            layout
+                .try_index_for_position(position)?
+                .unwrap_or_else(|offset| offset),
+        )
+    } else {
+        None
+    }
+}
+
+fn segment_offset_at(segments: &[TextSegment], position: Point<Pixels>) -> Option<usize> {
+    segments
+        .iter()
+        .find_map(|segment| segment.offset_at(position))
+}
+
+fn segment_offset_snap(segments: &[TextSegment], position: Point<Pixels>) -> Option<usize> {
+    let mut best: Option<(Pixels, usize, usize)> = None;
+    for (index, segment) in segments.iter().enumerate() {
+        let Some((dx, offset)) = segment.snapped_offset(position) else {
+            continue;
+        };
+        if best.is_none_or(|(best_dx, _, _)| dx < best_dx) {
+            best = Some((dx, offset, index));
+        }
+    }
+    let (_, mut offset, index) = best?;
+    let bounds = segments[index].bounds()?;
+    if position.x >= bounds.right() {
+        for segment in &segments[index + 1..] {
+            if segment.bounds().is_some() {
+                break;
+            }
+            offset = segment.end();
+        }
+    }
+    Some(offset)
+}
+
+fn message_point_at(state: &MessageSelectionState, position: Point<Pixels>) -> Option<SelPoint> {
+    for (id, layout) in &state.registry {
+        if let Some(offset) = text_layout_offset_snap(layout, position) {
+            return Some(SelPoint {
+                message_id: *id,
+                offset,
+            });
+        }
+    }
+    for (id, entry) in &state.segment_registry {
+        let Some((top, bottom)) = entry.vertical_bounds() else {
+            continue;
+        };
+        if position.y >= top
+            && position.y <= bottom
+            && let Some(offset) = segment_offset_snap(&entry.segments, position)
+        {
+            return Some(SelPoint {
+                message_id: *id,
+                offset,
+            });
+        }
+    }
+
+    let mut best: Option<(Pixels, SelPoint)> = None;
+    let mut consider = |id: MessageId, top: Pixels, bottom: Pixels, end: usize| {
+        let (dy, offset) = if position.y < top {
+            (top - position.y, 0usize)
+        } else if position.y > bottom {
+            (position.y - bottom, end)
+        } else {
+            return;
+        };
+        if best.as_ref().is_none_or(|(best_dy, _)| dy < *best_dy) {
+            best = Some((
+                dy,
+                SelPoint {
+                    message_id: id,
+                    offset,
+                },
+            ));
+        }
+    };
+    for (id, layout) in &state.registry {
+        if let (Some(bounds), Some(len)) = (layout.try_bounds(), layout.try_len()) {
+            consider(*id, bounds.top(), bounds.bottom(), len);
+        }
+    }
+    for (id, entry) in &state.segment_registry {
+        if let Some((t, bot)) = entry.vertical_bounds() {
+            consider(*id, t, bot, entry.text.len());
+        }
+    }
+    best.map(|(_, point)| point)
+}
+
+fn message_offset_at(
+    state: &MessageSelectionState,
+    message_id: MessageId,
+    position: Point<Pixels>,
+) -> Option<usize> {
+    state
+        .registry
+        .get(&message_id)
+        .and_then(|layout| {
+            text_layout_offset_at(layout, position)
+                .or_else(|| text_layout_offset_snap(layout, position))
+        })
+        .or_else(|| {
+            let entry = state.segment_registry.get(&message_id)?;
+            segment_offset_at(&entry.segments, position)
+                .or_else(|| segment_offset_snap(&entry.segments, position))
+        })
+}
+
+const EXPANDED_SELECTION_DRAG_THRESHOLD_PX: f32 = 2.;
+
+#[derive(Clone, Copy)]
+struct ExpandedSelection {
+    message_id: MessageId,
+    start: usize,
+    end: usize,
+    origin: Point<Pixels>,
+}
+
+impl ExpandedSelection {
+    fn drag_started(self, position: Point<Pixels>) -> bool {
+        (position.x - self.origin.x).as_f32().abs() > EXPANDED_SELECTION_DRAG_THRESHOLD_PX
+            || (position.y - self.origin.y).as_f32().abs() > EXPANDED_SELECTION_DRAG_THRESHOLD_PX
+    }
+}
+
+fn update_selection_head(
+    state: &mut MessageSelectionState,
+    point: SelPoint,
+    expanded: Option<ExpandedSelection>,
+) -> bool {
+    let (anchor, head) = if let Some(expanded) = expanded {
+        let start = SelPoint {
+            message_id: expanded.message_id,
+            offset: expanded.start,
+        };
+        let end = SelPoint {
+            message_id: expanded.message_id,
+            offset: expanded.end,
+        };
+        if point.message_id == expanded.message_id {
+            if point.offset < expanded.start {
+                (end, point)
+            } else if point.offset > expanded.end {
+                (start, point)
+            } else {
+                (start, end)
+            }
+        } else {
+            let point_before = state
+                .order_map
+                .get(&point.message_id)
+                .zip(state.order_map.get(&expanded.message_id))
+                .is_some_and(|(point_order, expanded_order)| point_order < expanded_order);
+            if point_before {
+                (end, point)
+            } else {
+                (start, point)
+            }
+        }
+    } else {
+        let Some(anchor) = state.anchor else {
+            return false;
+        };
+        (anchor, point)
+    };
+    let changed = state.anchor != Some(anchor) || state.head != Some(head);
+    state.anchor = Some(anchor);
+    state.head = Some(head);
+    changed
+}
+
+fn selected_text_for_messages(
+    state: &MessageSelectionState,
+    messages: &[Message],
+    locale: &str,
+    current_user_id: &str,
+    cx: &App,
+) -> Option<String> {
+    use super::selection::floor_char_boundary;
+
+    let mut parts = Vec::new();
+    for message in messages {
+        if !state.includes_message(message.id) {
+            continue;
+        }
+        let full = super::content::selectable_message_text(message, locale, current_user_id, cx);
+        let Some(range) = state.range_for_message(message.id, &full) else {
+            continue;
+        };
+        let start = floor_char_boundary(&full, range.start);
+        let end = floor_char_boundary(&full, range.end);
+        if start < end
+            && let Some(cleaned) = clipboard_selection_slice(&full[start..end])
+        {
+            parts.push(cleaned);
+        }
+    }
+    (!parts.is_empty()).then(|| parts.join("\n"))
+}
+
+fn clipboard_selection_slice(text: &str) -> Option<String> {
+    let cleaned = text.replace(
+        [
+            super::content::INLINE_ICON_PLACEHOLDER,
+            super::content::ATTACHMENT_PLACEHOLDER,
+        ],
+        "",
+    );
+    (!cleaned.is_empty()).then_some(cleaned)
+}
+
+#[cfg(test)]
+mod selection_copy_tests {
+    use super::clipboard_selection_slice;
+    use crate::chat::message::content::{ATTACHMENT_PLACEHOLDER, INLINE_ICON_PLACEHOLDER};
+
+    #[test]
+    fn placeholder_only_selection_does_not_clear_the_clipboard() {
+        let placeholders = format!("{INLINE_ICON_PLACEHOLDER}{ATTACHMENT_PLACEHOLDER}");
+        assert_eq!(clipboard_selection_slice(&placeholders), None);
+    }
+
+    #[test]
+    fn clipboard_selection_preserves_real_whitespace() {
+        assert_eq!(clipboard_selection_slice(" a "), Some(" a ".to_string()));
+    }
+}
 
 const LOAD_MORE_ITEM_THRESHOLD: usize = 12;
 const LIST_OVERDRAW: f32 = 1024.;
@@ -374,6 +774,137 @@ fn solve_keyboard_scroll_bezier(progress: f32) -> f32 {
 }
 
 #[cfg(test)]
+mod selection_hit_tests {
+    use std::cell::Cell;
+    use std::collections::HashMap;
+
+    use gpui::{Bounds, point, size};
+
+    use super::*;
+
+    #[test]
+    fn snap_past_text_includes_trailing_unmeasured_emoji() {
+        let word_bounds = Rc::new(Cell::new(Some(Bounds::new(
+            point(px(10.), px(20.)),
+            size(px(40.), px(24.)),
+        ))));
+        let emoji_bounds = Rc::new(Cell::new(None));
+        let segments = [
+            TextSegment::bounded(0..4, word_bounds),
+            TextSegment::bounded(4..11, emoji_bounds),
+        ];
+
+        assert_eq!(
+            segment_offset_snap(&segments, point(px(60.), px(30.))),
+            Some(11)
+        );
+    }
+
+    #[test]
+    fn expanded_selection_survives_mouse_up_inside_its_range() {
+        let message_id = MessageId::new(42);
+        let expanded = ExpandedSelection {
+            message_id,
+            start: 4,
+            end: 9,
+            origin: point(px(10.), px(10.)),
+        };
+        let mut state = MessageSelectionState::default();
+        state.anchor = Some(SelPoint {
+            message_id,
+            offset: expanded.start,
+        });
+        state.head = Some(SelPoint {
+            message_id,
+            offset: expanded.end,
+        });
+
+        assert!(!update_selection_head(
+            &mut state,
+            SelPoint {
+                message_id,
+                offset: 6,
+            },
+            Some(expanded),
+        ));
+        assert_eq!(state.anchor.unwrap().offset, 4);
+        assert_eq!(state.head.unwrap().offset, 9);
+    }
+
+    #[test]
+    fn dragging_an_expanded_selection_keeps_the_original_word_selected() {
+        let message_id = MessageId::new(42);
+        let expanded = ExpandedSelection {
+            message_id,
+            start: 4,
+            end: 9,
+            origin: point(px(10.), px(10.)),
+        };
+        let mut state = MessageSelectionState::default();
+
+        assert!(update_selection_head(
+            &mut state,
+            SelPoint {
+                message_id,
+                offset: 1,
+            },
+            Some(expanded),
+        ));
+        assert_eq!(state.anchor.unwrap().offset, 9);
+        assert_eq!(state.head.unwrap().offset, 1);
+
+        assert!(update_selection_head(
+            &mut state,
+            SelPoint {
+                message_id,
+                offset: 12,
+            },
+            Some(expanded),
+        ));
+        assert_eq!(state.anchor.unwrap().offset, 4);
+        assert_eq!(state.head.unwrap().offset, 12);
+    }
+
+    #[test]
+    fn dragging_expanded_selection_across_messages_uses_message_order() {
+        let earlier = MessageId::new(10);
+        let selected = MessageId::new(20);
+        let expanded = ExpandedSelection {
+            message_id: selected,
+            start: 4,
+            end: 9,
+            origin: point(px(10.), px(10.)),
+        };
+        let mut state = MessageSelectionState::default();
+        state.order_map = HashMap::from([(earlier, 0), (selected, 1)]);
+
+        assert!(update_selection_head(
+            &mut state,
+            SelPoint {
+                message_id: earlier,
+                offset: 2,
+            },
+            Some(expanded),
+        ));
+        assert_eq!(state.anchor.unwrap().offset, 9);
+        assert_eq!(state.head.unwrap().message_id, earlier);
+    }
+
+    #[test]
+    fn expanded_selection_ignores_pointer_jitter_until_drag_threshold() {
+        let expanded = ExpandedSelection {
+            message_id: MessageId::new(42),
+            start: 4,
+            end: 9,
+            origin: point(px(10.), px(10.)),
+        };
+
+        assert!(!expanded.drag_started(point(px(12.), px(8.))));
+        assert!(expanded.drag_started(point(px(12.1), px(10.))));
+    }
+}
+
+#[cfg(test)]
 mod keyboard_scroll_animation_tests {
     use super::*;
 
@@ -561,6 +1092,10 @@ mod scroll_idle_tests {
 pub struct ChannelMessages {
     pub(crate) list_state: ListState,
     focus_handle: FocusHandle,
+    selection: SharedSelection,
+    selection_pointer: Option<Point<Pixels>>,
+    expanded_selection: Option<ExpandedSelection>,
+    selection_autoscroll_scheduled: bool,
     keyboard_scroll: Option<KeyboardScrollAnimation>,
     settings: Entity<Settings>,
     image_cache: Entity<LruImageCache>,
@@ -569,6 +1104,10 @@ pub struct ChannelMessages {
     active_videos: Rc<HashMap<(MessageId, usize), Entity<VideoPlayerView>>>,
     active_audios: Rc<indexmap::IndexMap<(MessageId, usize), Entity<AudioPlayerView>>>,
     gif_videos: Rc<HashMap<(MessageId, usize), Entity<GifVideoView>>>,
+    embed_inputs: Rc<HashMap<(MessageId, SharedString), Entity<TextArea>>>,
+    embed_input_subs: HashMap<(MessageId, SharedString), Subscription>,
+    embed_input_fingerprint: Option<(Option<ChannelId>, usize)>,
+    embed_select_seeded: HashSet<(MessageId, SharedString)>,
     cached_for_channel: Option<ChannelId>,
     skeleton_phase: SkeletonPhase,
     skeleton_key: SkeletonKey,
@@ -662,11 +1201,16 @@ impl ChannelMessages {
             let mut memo = this.row_memo.borrow_mut();
             memo.time_labels.clear();
             memo.rich_text.clear();
+            memo.selection_layouts.clear();
+            memo.selection_text_pieces.clear();
             cx.notify();
         }));
 
         let channel_list = ChannelList::global(cx);
-        let channel_list_observe = cx.observe(&channel_list, |this, _, cx| this.reconcile_cold(cx));
+        let channel_list_observe = cx.observe(&channel_list, |this, _, cx| {
+            this.row_memo.borrow_mut().selection_layouts.clear();
+            this.reconcile_cold(cx);
+        });
 
         let clan_list = ClanList::global(cx);
         let clan_list_observe = cx.observe(&clan_list, |this, _, cx| this.reconcile_cold(cx));
@@ -785,6 +1329,10 @@ impl ChannelMessages {
                     Rc::make_mut(&mut this.active_videos).clear();
                     Rc::make_mut(&mut this.active_audios).clear();
                     Rc::make_mut(&mut this.gif_videos).clear();
+                    Rc::make_mut(&mut this.embed_inputs).clear();
+                    this.embed_input_subs.clear();
+                    this.embed_input_fingerprint = None;
+                    this.embed_select_seeded.clear();
                     this.list_state.reset(*count);
                     this.last_visible_start = 0;
                     this.last_visible_end = 0;
@@ -956,6 +1504,10 @@ impl ChannelMessages {
                     Rc::make_mut(&mut this.active_videos).retain(|(id, _), _| id != message_id);
                     Rc::make_mut(&mut this.active_audios).retain(|(id, _), _| id != message_id);
                     Rc::make_mut(&mut this.gif_videos).retain(|(id, _), _| id != message_id);
+                    Rc::make_mut(&mut this.embed_inputs).retain(|(id, _), _| id != message_id);
+                    this.embed_input_subs.retain(|(id, _), _| id != message_id);
+                    this.embed_select_seeded.retain(|(id, _)| id != message_id);
+                    this.embed_input_fingerprint = None;
                     let at = usize::from(this.header_shown) + *index;
                     if at < this.list_state.item_count() {
                         this.list_state.splice(at..at + 1, 0);
@@ -1149,6 +1701,10 @@ impl ChannelMessages {
         Self {
             list_state,
             focus_handle: cx.focus_handle(),
+            selection: MessageSelectionState::new_shared(),
+            selection_pointer: None,
+            expanded_selection: None,
+            selection_autoscroll_scheduled: false,
             keyboard_scroll: None,
             settings,
             image_cache,
@@ -1157,6 +1713,10 @@ impl ChannelMessages {
             active_videos: Rc::new(HashMap::new()),
             active_audios: Rc::new(indexmap::IndexMap::new()),
             gif_videos: Rc::new(HashMap::new()),
+            embed_inputs: Rc::new(HashMap::new()),
+            embed_input_subs: HashMap::new(),
+            embed_input_fingerprint: None,
+            embed_select_seeded: HashSet::new(),
             cached_for_channel: None,
             skeleton_phase: SkeletonPhase::Hidden,
             skeleton_key: SkeletonKey::None,
@@ -1559,6 +2119,10 @@ impl ChannelMessages {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.selection.borrow_mut().clear();
+        self.selection_pointer = None;
+        self.expanded_selection = None;
+        self.selection_autoscroll_scheduled = false;
         let (initial_content, initial_spans) = MessagesStore::global(cx)
             .read(cx)
             .viewport_messages()
@@ -1617,7 +2181,7 @@ impl ChannelMessages {
         let payload = input.update(cx, |input, cx| input.take_payload(window, cx));
         let store = MessagesStore::global(cx);
 
-        let Some((text, content_tokens, _attachments)) = payload else {
+        let Some((text, content_tokens, _attachments, _ogp)) = payload else {
             store.update(cx, |store, cx| store.cancel_edit(cx));
             let locale = self.cached_locale.clone();
             Shell::global(cx).update(cx, |shell, cx| {
@@ -1991,6 +2555,158 @@ impl ChannelMessages {
         }
     }
 
+    fn apply_embed_input_reconcile(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.is_topic_box {
+            return;
+        }
+        let fingerprint = (self.cached_for_channel, self.list_state.item_count());
+        if self.embed_input_fingerprint == Some(fingerprint) {
+            return;
+        }
+        self.embed_input_fingerprint = Some(fingerprint);
+
+        let desired: Vec<(MessageId, EmbedTextInput)> = {
+            let store = MessagesStore::global(cx);
+            let store = store.read(cx);
+            store
+                .viewport_messages()
+                .iter()
+                .flat_map(|message| {
+                    let message_id = message.id;
+                    message.embeds.iter().flat_map(move |embed| {
+                        embed
+                            .fields
+                            .iter()
+                            .filter_map(move |field| match field.input.as_ref() {
+                                Some(EmbedInput::Text(text)) if !text.disabled => {
+                                    Some((message_id, text.clone()))
+                                }
+                                _ => None,
+                            })
+                    })
+                })
+                .collect()
+        };
+        let wanted: HashSet<(MessageId, SharedString)> = desired
+            .iter()
+            .map(|(id, input)| (*id, input.id.clone()))
+            .collect();
+
+        let mut changed = false;
+        if self.embed_inputs.keys().any(|key| !wanted.contains(key)) {
+            Rc::make_mut(&mut self.embed_inputs).retain(|key, _| wanted.contains(key));
+            self.embed_input_subs.retain(|key, _| wanted.contains(key));
+            changed = true;
+        }
+
+        let bg = cx.theme().tokens.bg_markdown_code;
+        let text_color = cx.theme().tokens.text_theme_message;
+        for (message_id, input) in desired {
+            let key = (message_id, input.id.clone());
+            if self.embed_inputs.contains_key(&key) {
+                continue;
+            }
+            let restored = MessagesStore::global(cx)
+                .read(cx)
+                .embed_form_value(message_id, &input.id)
+                .cloned();
+            let initial = restored.unwrap_or_else(|| input.default_value.clone());
+            let placeholder = if input.required && !input.placeholder.is_empty() {
+                SharedString::from(format!("{}*", input.placeholder))
+            } else {
+                input.placeholder.clone()
+            };
+            let multiline = input.multiline;
+            let min_height = if multiline { px(72.) } else { px(36.) };
+            let input_state = cx.new(|cx| {
+                TextArea::new(window, cx)
+                    .placeholder(placeholder)
+                    .single_line(!multiline)
+                    .min_height(min_height)
+                    .radius(px(4.))
+                    .padding_x(px(12.))
+                    .text_size(px(14.))
+                    .bg(bg)
+                    .text_color(text_color)
+            });
+            if !initial.is_empty() {
+                input_state.update(cx, |state, cx| {
+                    state.set_value(initial.clone(), cx);
+                });
+                MessagesStore::global(cx).update(cx, |store, _cx| {
+                    store.set_embed_form_value(message_id, input.id.clone(), initial.clone());
+                });
+            }
+            let sub_key = key.clone();
+            let sub = cx.subscribe(&input_state, move |_this, entity, event, cx| {
+                if *event == TextAreaEvent::Change {
+                    let value: SharedString = entity.read(cx).value().to_string().into();
+                    let (message_id, input_id) = &sub_key;
+                    MessagesStore::global(cx).update(cx, |store, _cx| {
+                        store.set_embed_form_value(*message_id, input_id.clone(), value);
+                    });
+                }
+            });
+            Rc::make_mut(&mut self.embed_inputs).insert(key.clone(), input_state);
+            self.embed_input_subs.insert(key, sub);
+            changed = true;
+        }
+
+        let select_defaults: Vec<(MessageId, SharedString, Vec<SharedString>)> = {
+            let store = MessagesStore::global(cx);
+            let store = store.read(cx);
+            store
+                .viewport_messages()
+                .iter()
+                .flat_map(|message| {
+                    let message_id = message.id;
+                    message.embeds.iter().flat_map(move |embed| {
+                        embed.fields.iter().filter_map(move |field| {
+                            let Some(EmbedInput::Select(select)) = field.input.as_ref() else {
+                                return None;
+                            };
+                            let select_id = select.id.clone()?;
+                            let mut defaults: Vec<SharedString> =
+                                select.value_selected.clone().into_iter().collect();
+                            if defaults.is_empty() {
+                                defaults = select
+                                    .options
+                                    .iter()
+                                    .filter(|option| option.default)
+                                    .map(|option| option.value.clone())
+                                    .collect();
+                            }
+                            Some((message_id, select_id, defaults))
+                        })
+                    })
+                })
+                .collect()
+        };
+        for (message_id, select_id, defaults) in select_defaults {
+            if !self
+                .embed_select_seeded
+                .insert((message_id, select_id.clone()))
+            {
+                continue;
+            }
+            if defaults.is_empty() {
+                continue;
+            }
+            MessagesStore::global(cx).update(cx, |store, cx| {
+                if store
+                    .message_select_selection(message_id, &select_id)
+                    .is_empty()
+                {
+                    store.set_message_select_selection(message_id, select_id, defaults, cx);
+                }
+            });
+        }
+
+        if changed {
+            cx.notify();
+        }
+    }
+
     fn reconcile_cold(&mut self, cx: &mut Context<Self>) {
         if self.is_topic_box {
             return;
@@ -2138,6 +2854,10 @@ impl ChannelMessages {
             channel_id
         );
         self.cached_for_channel = channel_id;
+        self.selection.borrow_mut().clear();
+        self.selection_pointer = None;
+        self.expanded_selection = None;
+        self.selection_autoscroll_scheduled = false;
         self.last_seen_at_bottom = None;
         self.fab_scroll_pending = false;
         self.last_scroll_sync = None;
@@ -2147,6 +2867,8 @@ impl ChannelMessages {
             memo.display_names.clear();
             memo.time_labels.clear();
             memo.rich_text.clear();
+            memo.selection_layouts.clear();
+            memo.selection_text_pieces.clear();
         }
         self.channel_permissions_fp = None;
         self.image_cache
@@ -2616,9 +3338,24 @@ impl ChannelMessages {
     fn on_messages_key(
         &mut self,
         event: &KeyDownEvent,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if !self.focus_handle.is_focused(window) {
+            return;
+        }
+        if event.keystroke.key == "c" {
+            let modifiers = &event.keystroke.modifiers;
+            let copy_combo = if cfg!(target_os = "macos") {
+                modifiers.platform
+            } else {
+                modifiers.control
+            };
+            if copy_combo && !modifiers.alt && self.copy_selection(cx) {
+                cx.stop_propagation();
+                return;
+            }
+        }
         let step = px(KEY_SCROLL_STEP_PX);
         let page = self.list_state.viewport_bounds().size.height * 0.9;
         let handled = match event.keystroke.key.as_str() {
@@ -2660,6 +3397,414 @@ impl ChannelMessages {
         }
     }
 
+    fn on_selection_down(
+        &mut self,
+        event: &MouseDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let hit = {
+            let Ok(state) = self.selection.try_borrow() else {
+                return;
+            };
+            if let Some(message_id) = self.raw_hover {
+                message_offset_at(&state, message_id, event.position)
+                    .map(|offset| (message_id, offset))
+            } else {
+                state
+                    .registry
+                    .iter()
+                    .find_map(|(id, layout)| {
+                        text_layout_offset_at(layout, event.position).map(|offset| (*id, offset))
+                    })
+                    .or_else(|| {
+                        state.segment_registry.iter().find_map(|(id, entry)| {
+                            segment_offset_at(&entry.segments, event.position)
+                                .map(|offset| (*id, offset))
+                        })
+                    })
+                    .or_else(|| {
+                        state.segment_registry.iter().find_map(|(id, entry)| {
+                            segment_offset_snap(&entry.segments, event.position)
+                                .map(|offset| (*id, offset))
+                        })
+                    })
+            }
+        };
+        match hit {
+            Some((message_id, offset)) => {
+                let had_selection = self
+                    .selection
+                    .try_borrow()
+                    .is_ok_and(|selection| selection.has_selection());
+                let range = if event.click_count >= 2 {
+                    let text = self
+                        .find_local_message(message_id, cx)
+                        .map(|message| {
+                            super::content::selectable_message_text(
+                                &message,
+                                &self.cached_locale,
+                                &self.cached_current_user_id,
+                                cx,
+                            )
+                        })
+                        .or_else(|| {
+                            let state = self.selection.try_borrow().ok()?;
+                            state
+                                .registry
+                                .get(&message_id)
+                                .and_then(TextLayout::try_text)
+                                .or_else(|| {
+                                    state
+                                        .segment_registry
+                                        .get(&message_id)
+                                        .map(|entry| entry.text.to_string())
+                                })
+                        })
+                        .unwrap_or_default();
+                    let offset = offset.min(text.len());
+                    if event.click_count >= 3 {
+                        0..text.len()
+                    } else {
+                        word_range(&text, offset)
+                    }
+                } else {
+                    offset..offset
+                };
+                let expanded_selection = (range.start < range.end).then_some(ExpandedSelection {
+                    message_id,
+                    start: range.start,
+                    end: range.end,
+                    origin: event.position,
+                });
+                let needs_repaint = had_selection || range.start < range.end;
+                {
+                    let Ok(mut state) = self.selection.try_borrow_mut() else {
+                        return;
+                    };
+                    state.anchor = Some(SelPoint {
+                        message_id,
+                        offset: range.start,
+                    });
+                    state.head = Some(SelPoint {
+                        message_id,
+                        offset: range.end,
+                    });
+                    state.selecting = true;
+                    // Cross-message ordering is only needed once the pointer
+                    // actually leaves the anchor message.
+                    state.order_map.clear();
+                }
+                // Autoscroll starts only after a real drag. Keeping the pointer
+                // unset here prevents a click near a viewport edge from moving
+                // the message list while the button is merely held down.
+                self.selection_pointer = None;
+                self.expanded_selection = expanded_selection;
+                if !self.focus_handle.is_focused(window) {
+                    window.focus(&self.focus_handle, cx);
+                }
+                if needs_repaint {
+                    cx.notify();
+                }
+            }
+            None => {
+                let had = self
+                    .selection
+                    .try_borrow()
+                    .is_ok_and(|selection| selection.has_selection());
+                let Ok(mut selection) = self.selection.try_borrow_mut() else {
+                    return;
+                };
+                selection.clear();
+                drop(selection);
+                self.selection_pointer = None;
+                self.expanded_selection = None;
+                if had {
+                    cx.notify();
+                }
+            }
+        }
+    }
+
+    fn replace_selection_order(&self, order: impl Iterator<Item = (MessageId, usize)>) {
+        let Ok(mut state) = self.selection.try_borrow_mut() else {
+            return;
+        };
+        state.order_map.clear();
+        let (minimum, _) = order.size_hint();
+        state.order_map.reserve(minimum);
+        state.order_map.extend(order);
+    }
+
+    fn sync_selection_order(&self, cx: &App) {
+        if self.is_topic_box {
+            let stale = {
+                let Ok(state) = self.selection.try_borrow() else {
+                    return;
+                };
+                state.order_map.len() != self.topic_messages.len()
+                    || self
+                        .topic_messages
+                        .iter()
+                        .enumerate()
+                        .any(|(index, message)| state.order_map.get(&message.id) != Some(&index))
+            };
+            if stale {
+                self.replace_selection_order(
+                    self.topic_messages
+                        .iter()
+                        .enumerate()
+                        .map(|(index, message)| (message.id, index)),
+                );
+            }
+            return;
+        }
+        let store = MessagesStore::global(cx);
+        let messages = store.read(cx);
+        let messages = messages.viewport_messages();
+        let stale = {
+            let Ok(state) = self.selection.try_borrow() else {
+                return;
+            };
+            state.order_map.len() != messages.len()
+                || messages
+                    .iter()
+                    .enumerate()
+                    .any(|(index, message)| state.order_map.get(&message.id) != Some(&index))
+        };
+        if !stale {
+            return;
+        }
+        self.replace_selection_order(
+            messages
+                .iter()
+                .enumerate()
+                .map(|(index, message)| (message.id, index)),
+        );
+    }
+
+    fn on_selection_move(
+        &mut self,
+        event: &MouseMoveEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self
+            .selection
+            .try_borrow()
+            .is_ok_and(|selection| selection.selecting)
+        {
+            return;
+        }
+        if event.pressed_button != Some(MouseButton::Left) {
+            if let Ok(mut selection) = self.selection.try_borrow_mut() {
+                selection.selecting = false;
+            }
+            self.selection_pointer = None;
+            self.expanded_selection = None;
+            return;
+        }
+        if self
+            .expanded_selection
+            .is_some_and(|expanded| !expanded.drag_started(event.position))
+        {
+            return;
+        }
+        self.selection_pointer = Some(event.position);
+        let point = {
+            let Ok(state) = self.selection.try_borrow() else {
+                return;
+            };
+            message_point_at(&state, event.position)
+        };
+        let crosses_messages = {
+            let Ok(state) = self.selection.try_borrow() else {
+                return;
+            };
+            point.is_some_and(|point| {
+                state
+                    .anchor
+                    .is_some_and(|anchor| anchor.message_id != point.message_id)
+            })
+        };
+        if crosses_messages {
+            self.sync_selection_order(cx);
+        }
+        let changed = self.selection.try_borrow_mut().is_ok_and(|mut state| {
+            point.is_some_and(|point| {
+                update_selection_head(&mut state, point, self.expanded_selection)
+            })
+        });
+        if changed {
+            cx.notify();
+        }
+        self.schedule_selection_autoscroll(window, cx);
+    }
+
+    fn on_selection_up(
+        &mut self,
+        event: &MouseUpEvent,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let point = {
+            let Ok(state) = self.selection.try_borrow() else {
+                return;
+            };
+            message_point_at(&state, event.position)
+        };
+        let crosses_messages = {
+            let Ok(state) = self.selection.try_borrow() else {
+                return;
+            };
+            point.is_some_and(|point| {
+                state
+                    .anchor
+                    .is_some_and(|anchor| anchor.message_id != point.message_id)
+            })
+        };
+        if crosses_messages {
+            self.sync_selection_order(cx);
+        }
+        let preserve_expanded = self
+            .expanded_selection
+            .is_some_and(|expanded| !expanded.drag_started(event.position));
+        let (empty, head_changed) = {
+            let Ok(mut state) = self.selection.try_borrow_mut() else {
+                return;
+            };
+            if !state.selecting {
+                return;
+            }
+            let head_changed = !preserve_expanded
+                && point.is_some_and(|point| {
+                    update_selection_head(&mut state, point, self.expanded_selection)
+                });
+            state.selecting = false;
+            (!state.has_selection(), head_changed)
+        };
+        self.selection_pointer = None;
+        self.expanded_selection = None;
+        if empty && let Ok(mut selection) = self.selection.try_borrow_mut() {
+            selection.clear();
+        }
+        if head_changed {
+            cx.notify();
+        }
+    }
+
+    pub(crate) fn copy_selection(&mut self, cx: &mut App) -> bool {
+        self.sync_selection_order(cx);
+        let text = {
+            let state = self.selection.borrow();
+            if !state.has_selection() {
+                return false;
+            }
+            if self.is_topic_box {
+                selected_text_for_messages(
+                    &state,
+                    &self.topic_messages,
+                    &self.cached_locale,
+                    &self.cached_current_user_id,
+                    cx,
+                )
+            } else {
+                let store = MessagesStore::global(cx);
+                let messages = store.read(cx);
+                selected_text_for_messages(
+                    &state,
+                    messages.viewport_messages(),
+                    &self.cached_locale,
+                    &self.cached_current_user_id,
+                    cx,
+                )
+            }
+        };
+        let Some(text) = text else {
+            return false;
+        };
+        cx.write_to_clipboard(ClipboardItem::new_string(text));
+        true
+    }
+
+    fn on_copy(&mut self, _: &Copy, window: &mut Window, cx: &mut Context<Self>) {
+        if self.focus_handle.is_focused(window) && self.copy_selection(cx) {
+            cx.stop_propagation();
+        }
+    }
+
+    fn selection_scroll_delta(&self) -> Pixels {
+        let Some(pointer) = self.selection_pointer else {
+            return px(0.);
+        };
+        let bounds = self.list_state.viewport_bounds();
+        if bounds.size.height <= px(0.) {
+            return px(0.);
+        }
+        let edge = px(40.);
+        let max_step = 18.;
+        if pointer.y < bounds.top() + edge {
+            let ratio = ((bounds.top() + edge - pointer.y).as_f32() / edge.as_f32()).clamp(0.2, 1.);
+            return px(-max_step * ratio);
+        }
+        if pointer.y > bounds.bottom() - edge {
+            let ratio =
+                ((pointer.y - (bounds.bottom() - edge)).as_f32() / edge.as_f32()).clamp(0.2, 1.);
+            return px(max_step * ratio);
+        }
+        px(0.)
+    }
+
+    fn schedule_selection_autoscroll(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.selection_autoscroll_scheduled
+            || !self
+                .selection
+                .try_borrow()
+                .is_ok_and(|selection| selection.selecting)
+            || self.selection_scroll_delta() == px(0.)
+        {
+            return;
+        }
+        self.selection_autoscroll_scheduled = true;
+        cx.on_next_frame(window, |this, _window, cx| {
+            this.selection_autoscroll_scheduled = false;
+            if !this
+                .selection
+                .try_borrow()
+                .is_ok_and(|selection| selection.selecting)
+            {
+                return;
+            }
+            let Some(pointer) = this.selection_pointer else {
+                return;
+            };
+            this.sync_selection_order(cx);
+            let point = {
+                let Ok(state) = this.selection.try_borrow() else {
+                    return;
+                };
+                message_point_at(&state, pointer)
+            };
+            let changed = this.selection.try_borrow_mut().is_ok_and(|mut state| {
+                point.is_some_and(|point| {
+                    update_selection_head(&mut state, point, this.expanded_selection)
+                })
+            });
+            let delta = this.selection_scroll_delta();
+            let before = this.list_state.logical_scroll_top();
+            this.list_state.scroll_by(delta);
+            let after = this.list_state.logical_scroll_top();
+            let scrolled =
+                after.item_ix != before.item_ix || after.offset_in_item != before.offset_in_item;
+            if !changed && !scrolled {
+                this.selection_pointer = None;
+                this.expanded_selection = None;
+                return;
+            }
+            cx.notify();
+        });
+    }
+
     fn render_topic_box(
         &mut self,
         window: &mut Window,
@@ -2667,6 +3812,7 @@ impl ChannelMessages {
     ) -> gpui::AnyElement {
         self.sync_render_identity(cx);
         self.drive_scroll_anim(window);
+        self.schedule_selection_autoscroll(window, cx);
         let suppress_hover = self.list_state.is_scroll_hover_suppressed();
         let scroll_active =
             self.keyboard_scroll.is_some() || self.list_state.is_scroll_hover_active();
@@ -2724,6 +3870,7 @@ impl ChannelMessages {
             self.row_memo.borrow_mut().time_labels.clear();
         }
         let row_memo = self.row_memo.clone();
+        let selection = self.selection.clone();
         let list_state = self.list_state.clone();
         let hovered_row = self.hovered_row;
         let context_menu_message = self.context_menu_target.map(|(id, _)| id);
@@ -2738,16 +3885,30 @@ impl ChannelMessages {
         let active_videos = self.active_videos.clone();
         let active_audios = self.active_audios.clone();
         let gif_videos = self.gif_videos.clone();
+        let embed_inputs = self.embed_inputs.clone();
         let video_host = cx.entity().downgrade();
         let current_user_id = self.cached_current_user_id.clone();
         let role_ids = self.cached_role_ids.clone();
         let entity = cx.entity();
+        let selection_host = cx.entity().downgrade();
+        let selection_state = self.selection.clone();
+        let key_listener = cx.listener(Self::on_messages_key);
+        let copy_listener = cx.listener(Self::on_copy);
+        let focus_on_click = cx.listener(|this, _: &MouseDownEvent, window, cx| {
+            if !this.focus_handle.contains_focused(window, cx) {
+                window.focus(&this.focus_handle, cx);
+            }
+        });
 
-        div()
+        let content = div()
             .size_full()
             .relative()
             .overflow_hidden()
             .image_cache(self.image_cache.clone())
+            .track_focus(&self.focus_handle)
+            .on_action(copy_listener)
+            .on_key_down(key_listener)
+            .on_mouse_down(MouseButton::Left, focus_on_click)
             .child(
                 list(list_state, move |ix, _window, cx| {
                     if use_align_spacer && ix == 0 {
@@ -2782,6 +3943,7 @@ impl ChannelMessages {
                         active_videos: &active_videos,
                         active_audios: &active_audios,
                         gif_videos: &gif_videos,
+                        embed_inputs: &embed_inputs,
                         video_host: video_host.clone(),
                         now: frame_now,
                         clan_id: active_clan,
@@ -2793,6 +3955,7 @@ impl ChannelMessages {
                         emoji_recent: &emoji_recent,
                         coming_soon: coming_soon.clone(),
                         row_memo: row_memo.clone(),
+                        selection: selection.clone(),
                     };
                     render_message_item(&entity.read(cx).topic_messages, msg_ix, &ctx, cx)
                 })
@@ -2855,16 +4018,22 @@ impl ChannelMessages {
                     .tracked_scroll_handle(&self.list_state),
                 window,
                 cx,
-            )
+            );
+        SelectionCapture::new(content.into_any_element(), selection_host, selection_state)
             .into_any_element()
     }
 }
 
 impl Render for ChannelMessages {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        {
+            let mut selection = self.selection.borrow_mut();
+            selection.begin_render();
+        }
         if self.is_topic_box {
             return self.render_topic_box(window, cx);
         }
+        self.schedule_selection_autoscroll(window, cx);
         crate::trace_render!(
             "ChannelMessages ch={:?}",
             MessagesStore::global(cx).read(cx).active_channel_id()
@@ -2887,7 +4056,8 @@ impl Render for ChannelMessages {
         if !scroll_active {
             self.schedule_scroll_state_sync(window, cx);
             cx.defer_in(window, |this, window, cx| {
-                this.apply_gif_reconcile(window, cx)
+                this.apply_gif_reconcile(window, cx);
+                this.apply_embed_input_reconcile(window, cx);
             });
         }
 
@@ -2931,6 +4101,7 @@ impl Render for ChannelMessages {
             self.row_memo.borrow_mut().time_labels.clear();
         }
         let row_memo = self.row_memo.clone();
+        let selection = self.selection.clone();
         let list_state = self.list_state.clone();
         let hovered_row = self.hovered_row;
         let context_menu_message = self.context_menu_target.map(|(id, _)| id);
@@ -2944,6 +4115,7 @@ impl Render for ChannelMessages {
         let active_videos = self.active_videos.clone();
         let active_audios = self.active_audios.clone();
         let gif_videos = self.gif_videos.clone();
+        let embed_inputs = self.embed_inputs.clone();
         let video_host = cx.entity().downgrade();
         let current_user_id = self.cached_current_user_id.clone();
         let role_ids = self.cached_role_ids.clone();
@@ -2957,19 +4129,23 @@ impl Render for ChannelMessages {
                 .unwrap_or(self.at_bottom);
         let unread_count = self.cached_fab_unread_count;
         let key_listener = cx.listener(Self::on_messages_key);
+        let copy_listener = cx.listener(Self::on_copy);
         let focus_on_click = cx.listener(|this, _: &MouseDownEvent, window, cx| {
             if !this.focus_handle.contains_focused(window, cx) {
                 window.focus(&this.focus_handle, cx);
             }
         });
+        let selection_host = cx.entity().downgrade();
+        let selection_state = self.selection.clone();
         let scroll_down_fab = self.scroll_down_fab(show_scroll_down, unread_count, cx);
 
-        div()
+        let content = div()
             .size_full()
             .relative()
             .overflow_hidden()
             .image_cache(self.image_cache.clone())
             .track_focus(&self.focus_handle)
+            .on_action(copy_listener)
             .on_key_down(key_listener)
             .on_mouse_down(MouseButton::Left, focus_on_click)
             .child(
@@ -3005,6 +4181,7 @@ impl Render for ChannelMessages {
                         active_videos: &active_videos,
                         active_audios: &active_audios,
                         gif_videos: &gif_videos,
+                        embed_inputs: &embed_inputs,
                         video_host: video_host.clone(),
                         now: frame_now,
                         clan_id: active_clan,
@@ -3016,6 +4193,7 @@ impl Render for ChannelMessages {
                         emoji_recent: &emoji_recent,
                         coming_soon: coming_soon.clone(),
                         row_memo: row_memo.clone(),
+                        selection: selection.clone(),
                     };
                     render_message_item(store.read(cx).viewport_messages(), msg_ix, &ctx, cx)
                 })
@@ -3082,7 +4260,8 @@ impl Render for ChannelMessages {
                     .tracked_scroll_handle(&self.list_state),
                 window,
                 cx,
-            )
+            );
+        SelectionCapture::new(content.into_any_element(), selection_host, selection_state)
             .into_any_element()
     }
 }

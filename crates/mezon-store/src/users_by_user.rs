@@ -163,6 +163,7 @@ impl UsersByUserStore {
                 avatar_url: redis.avatar.clone(),
                 about_me: String::new(),
                 create_time_seconds: redis.create_time_second,
+                join_time_seconds: 0,
             };
             self.by_id.insert(user.id, user);
             cx.emit(UsersByUserEvent::Changed);

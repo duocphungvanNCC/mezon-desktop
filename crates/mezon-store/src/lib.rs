@@ -25,6 +25,7 @@ pub mod message;
 pub mod message_search;
 pub mod message_time;
 pub mod messages;
+pub mod ogp;
 pub mod permissions;
 pub mod pinned;
 pub mod platform;
@@ -111,6 +112,7 @@ pub use mezon_client::{
     search_content_highlight_terms, search_dropdown_mode, search_filter_chip_ranges,
     search_page_count, search_page_numbers, should_show_search_dropdown,
 };
+pub use ogp::{OgpResult, OutgoingOgp, fetch_ogp, first_previewable_url};
 pub use permissions::{
     ClanSettingsPermissions, PERMISSION_ADMINISTRATOR, PERMISSION_CLAN_OWNER,
     PERMISSION_MANAGE_CHANNEL, PERMISSION_MANAGE_CLAN, PermissionEvent, PermissionStore,
@@ -133,11 +135,11 @@ pub use user_profile::{
 };
 pub use users_by_user::{UsersByUserEvent, UsersByUserStore};
 pub use voice::{
-    DisplayedReaction, NetworkQuality, PickedScreen, ScreenShareKind, ScreenShareListError,
-    ScreenShareOption, ScreenSharePreview, VideoFrameData, VideoFrameStore, VoiceCallStatus,
-    VoiceConnection, VoiceModerationError, VoiceParticipant, VoiceRenderFrame, VoiceStore,
-    camera_tile_id, capture_screen_share_preview, list_screen_share_options,
-    peek_screen_share_options, screen_tile_id,
+    CameraDeviceInfo, DeviceKind, DeviceMenuKind, DisplayedReaction, NetworkQuality, PickedScreen,
+    ScreenShareKind, ScreenShareListError, ScreenShareOption, ScreenSharePreview, VideoFrameData,
+    VideoFrameStore, VoiceCallStatus, VoiceConnection, VoiceModerationError, VoiceParticipant,
+    VoiceRenderFrame, VoiceStore, camera_tile_id, capture_screen_share_preview,
+    list_screen_share_options, peek_screen_share_options, screen_tile_id,
 };
 
 pub const CACHE_TTL: Duration = Duration::from_secs(20 * 60);
@@ -231,6 +233,8 @@ pub struct Settings {
     pub input_device_id: Option<String>,
     /// Selected audio output device identifier
     pub output_device_id: Option<String>,
+    /// Selected camera (video input) device identifier
+    pub camera_device_id: Option<String>,
     /// User-defined clan ordering: list of clan_ids in display order
     #[serde(default)]
     pub clan_order: Vec<ClanId>,
@@ -258,6 +262,7 @@ impl Default for Settings {
             speaker_volume: 0.8,
             input_device_id: None,
             output_device_id: None,
+            camera_device_id: None,
             clan_order: Vec::new(),
             last_clan_id: None,
             last_channel_id: None,

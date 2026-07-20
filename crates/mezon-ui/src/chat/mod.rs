@@ -3,6 +3,8 @@ pub mod channel_app_bar;
 pub mod channel_header;
 pub mod channel_typing;
 pub mod chat_sending;
+pub mod clan_management_page;
+pub mod clan_members_page;
 pub mod create_thread_panel;
 pub mod create_topic_panel;
 pub mod file_type_icon;

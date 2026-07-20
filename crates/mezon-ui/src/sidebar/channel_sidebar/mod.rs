@@ -933,6 +933,14 @@ fn render_banner_and_events(
         );
     }
 
+    let members_clan_id = ClanList::global(cx).read(cx).active_clan_id;
+    let members_row = nav_row(IconName::MemberList, "Members", theme)
+        .id("clan-members-nav")
+        .on_click(move |_, _, cx| {
+            if let Some(clan_id) = members_clan_id {
+                crate::router::navigate(cx, crate::router::Route::ClanMembers { clan_id });
+            }
+        });
     let nav_col = div()
         .flex()
         .flex_col()
@@ -940,7 +948,7 @@ fn render_banner_and_events(
         .p_2()
         .gap_1()
         .child(nav_row(IconName::IconEvents, "Events", theme))
-        .child(nav_row(IconName::MemberList, "Members", theme));
+        .child(members_row);
 
     col = col.child(nav_col);
 

@@ -4,6 +4,7 @@ use gpui::{
 };
 use mezon_store::{DirectMessageStore, Embed, PresenceStore, UserId};
 
+use super::content::{SelectableSectionCursor, SelectableTextContext};
 use super::context::RowCtx;
 use crate::app::shell::Shell;
 use crate::components::primitives::{Avatar, Icon, IconName};
@@ -14,7 +15,12 @@ const AVATAR_SIZE: f32 = 48.0;
 const STATUS_DOT_SIZE: f32 = 14.0;
 const AVATAR_BORDER: u32 = 0xff_ff_ff_4d;
 
-pub fn render_share_contact_card(embed: &Embed, ctx: &RowCtx) -> AnyElement {
+pub fn render_share_contact_card(
+    embed: &Embed,
+    base: usize,
+    selection_context: &SelectableTextContext,
+    ctx: &RowCtx,
+) -> AnyElement {
     let theme = ctx.theme;
     let user_id = field_value(embed, "user_id");
     let username = field_value(embed, "username");
@@ -30,6 +36,16 @@ pub fn render_share_contact_card(embed: &Embed, ctx: &RowCtx) -> AnyElement {
     } else {
         display_name
     };
+    let mut selection_cursor = SelectableSectionCursor::new(base);
+    let name_text = selection_cursor
+        .section(name)
+        .map(|range| selection_context.end_truncated_text_node(name, range))
+        .unwrap_or_else(|| gpui::StyledText::new(name.to_string()));
+    let username_label = format!("@{username}");
+    let username_text = selection_cursor
+        .section(&username_label)
+        .map(|range| selection_context.end_truncated_text_node(&username_label, range))
+        .unwrap_or_else(|| gpui::StyledText::new(username_label));
 
     let online = user_id
         .parse::<i64>()
@@ -86,20 +102,21 @@ pub fn render_share_contact_card(embed: &Embed, ctx: &RowCtx) -> AnyElement {
                     .flex_col()
                     .flex_1()
                     .min_w_0()
+                    .cursor(gpui::CursorStyle::IBeam)
                     .child(
                         div()
                             .truncate()
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_size(px(16.))
                             .text_color(theme.tokens.text_secondary)
-                            .child(name.to_string()),
+                            .child(name_text),
                     )
                     .child(
                         div()
                             .truncate()
                             .text_size(px(14.))
                             .text_color(theme.tokens.text_theme_primary)
-                            .child(format!("@{username}")),
+                            .child(username_text),
                     ),
             ),
     );
@@ -162,6 +179,7 @@ fn contact_action_button(
     ctx: &RowCtx,
 ) -> AnyElement {
     let theme = ctx.theme;
+    let selection = ctx.selection.clone();
     let mut button = div()
         .id(id)
         .flex_1()
@@ -176,7 +194,11 @@ fn contact_action_button(
         .text_color(theme.tokens.text_theme_primary)
         .cursor_pointer()
         .hover(|s| s.text_color(theme.tokens.text_secondary))
-        .on_click(on_click);
+        .on_click(move |event, window, cx| {
+            if !selection.borrow().has_selection() {
+                on_click(event, window, cx);
+            }
+        });
     if divided {
         button = button
             .border_l_1()

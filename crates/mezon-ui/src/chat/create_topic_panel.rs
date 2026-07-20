@@ -108,7 +108,7 @@ impl TopicPanel {
         if TopicsStore::global(cx).read(cx).is_submitting() {
             return;
         }
-        let Some((content, content_tokens, attachments)) = self
+        let Some((content, content_tokens, attachments, _ogp)) = self
             .mention_input
             .update(cx, |input, cx| input.take_payload(window, cx))
         else {

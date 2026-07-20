@@ -208,6 +208,7 @@ mod tests {
             avatar_url: "avatar.png".into(),
             about_me: "hi there".into(),
             create_time_seconds: 1_700_000_000,
+            join_time_seconds: 1_700_000_100,
         }
     }
 

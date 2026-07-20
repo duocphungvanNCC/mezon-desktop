@@ -4,7 +4,10 @@ use mezon_store::{
     MessageId, MessagesStore, PinnedMessagesStore, ThreadsStore,
 };
 
-use super::content::{append_system_mention_spans, render_system_message_content};
+use super::content::{
+    SelectableSectionCursor, SelectableTextContext, append_selectable_system_mention_spans,
+    memoized_selectable_message_layout, render_system_message_content,
+};
 use super::context::{CONTENT_INSET, OnboardingContext, RowCtx, WelcomeContext};
 use super::time::format_message_time;
 use crate::components::primitives::{Avatar, Icon, IconName};
@@ -37,16 +40,35 @@ pub fn render_system_message(msg: &Message, ctx: &RowCtx) -> AnyElement {
         .flex()
         .flex_row()
         .flex_wrap()
+        .max_w_full()
         .items_baseline()
         .min_w_0()
+        .cursor(gpui::CursorStyle::IBeam)
         .text_sm()
         .text_color(primary);
-    if is_custom {
-        content_line = append_system_mention_spans(content_line, msg, ctx);
-    } else {
+    let selection_layout = is_custom.then(|| memoized_selectable_message_layout(msg, ctx));
+    let selection_context = selection_layout.as_ref().map(|layout| {
+        SelectableTextContext::new(msg.id, layout.text.clone(), ctx.selection.clone())
+    });
+    let mut selection_cursor = SelectableSectionCursor::new(0);
+    if is_custom && let Some(selection_context) = selection_context.as_ref() {
+        content_line = append_selectable_system_mention_spans(
+            content_line,
+            msg,
+            ctx,
+            &mut selection_cursor,
+            selection_context,
+        );
+        content_line = append_system_suffix(
+            msg,
+            ctx,
+            content_line,
+            &mut selection_cursor,
+            selection_context,
+        );
+    } else if !is_custom {
         content_line = content_line.child(render_system_message_content(msg, ctx, false));
     }
-    content_line = append_system_suffix(msg, ctx, content_line);
 
     let row = div()
         .id(("msg-sys", msg.id.0 as usize))
@@ -70,6 +92,8 @@ pub fn render_system_message(msg: &Message, ctx: &RowCtx) -> AnyElement {
             div()
                 .flex()
                 .flex_row()
+                .flex_1()
+                .max_w_full()
                 .items_start()
                 .min_w_0()
                 .pl(text_gap)
@@ -139,6 +163,7 @@ fn render_wave_button(msg: &Message, ctx: &RowCtx) -> AnyElement {
     };
     let sticker_url = WAVE_STICKERS[sticker_idx].to_string();
     let label = mezon_i18n::t(ctx.locale, "dmMessage.waveWelcome");
+    let selection = ctx.selection.clone();
 
     div()
         .flex()
@@ -160,6 +185,9 @@ fn render_wave_button(msg: &Message, ctx: &RowCtx) -> AnyElement {
                 .on_click({
                     let url = sticker_url.clone();
                     move |_, _, cx| {
+                        if selection.borrow().has_selection() {
+                            return;
+                        }
                         let badge = BadgeService::global(cx).read(cx);
                         let Some(user_id) = badge.current_user_id(cx) else {
                             return;
@@ -222,67 +250,109 @@ fn system_icon_color(code: MessageCode, primary: gpui::Rgba, icon_fill: gpui::Rg
     }
 }
 
-fn append_system_suffix(msg: &Message, ctx: &RowCtx, mut row: gpui::Div) -> gpui::Div {
+fn append_system_suffix(
+    msg: &Message,
+    ctx: &RowCtx,
+    mut row: gpui::Div,
+    cursor: &mut SelectableSectionCursor,
+    selection_context: &SelectableTextContext,
+) -> gpui::Div {
     let locale = ctx.locale;
     let primary = ctx.theme.tokens.text_theme_primary;
     match msg.code {
         MessageCode::CreatePin => {
-            row = row.child(format!(
-                "{} ",
-                mezon_i18n::t(locale, "message.systemMessages.pinned")
+            row = row.child(system_text(
+                format!(
+                    "{} ",
+                    mezon_i18n::t(locale, "message.systemMessages.pinned")
+                ),
+                cursor,
+                selection_context,
             ));
             if let Some(reference) = msg.references.first() {
                 let jump_id = reference.message_ref_id;
                 row = row.child(system_link(
                     primary,
                     mezon_i18n::t(locale, "message.systemMessages.aMessage"),
+                    cursor,
+                    selection_context,
                     move |_, _, cx| jump_to_message(jump_id, cx),
                 ));
             } else {
-                row = row.child(mezon_i18n::t(locale, "message.systemMessages.aMessage"));
+                row = row.child(system_text(
+                    mezon_i18n::t(locale, "message.systemMessages.aMessage"),
+                    cursor,
+                    selection_context,
+                ));
             }
-            row = row.child(format!(
-                " {} ",
-                mezon_i18n::t(locale, "message.systemMessages.toThisChannel")
+            row = row.child(system_text(
+                format!(
+                    " {} ",
+                    mezon_i18n::t(locale, "message.systemMessages.toThisChannel")
+                ),
+                cursor,
+                selection_context,
             ));
             row = row.child(system_link(
                 primary,
                 mezon_i18n::t(locale, "message.systemMessages.allPinned"),
+                cursor,
+                selection_context,
                 open_pinned_popover,
             ));
-            row.child(format!(
-                " {}",
-                mezon_i18n::t(locale, "message.systemMessages.messages")
+            row.child(system_text(
+                format!(
+                    " {}",
+                    mezon_i18n::t(locale, "message.systemMessages.messages")
+                ),
+                cursor,
+                selection_context,
             ))
         }
         MessageCode::CreateThread => {
             let (thread_label, thread_id, thread_content) = parse_thread_info(&msg.content);
             if !thread_id.is_empty() {
-                row = row.child(format!(
-                    " {} ",
-                    mezon_i18n::t(locale, "message.systemMessages.startedAThread")
+                row = row.child(system_text(
+                    format!(
+                        " {} ",
+                        mezon_i18n::t(locale, "message.systemMessages.startedAThread")
+                    ),
+                    cursor,
+                    selection_context,
                 ));
                 let parsed = thread_id.parse::<i64>().ok().map(ChannelId);
                 row = if let Some(channel_id) = parsed {
                     let thread_link_label = thread_label.clone();
-                    row.child(system_link(primary, thread_label, move |_, _, cx| {
-                        navigate_to_channel(channel_id, thread_link_label.clone(), cx)
-                    }))
+                    row.child(system_link(
+                        primary,
+                        thread_label,
+                        cursor,
+                        selection_context,
+                        move |_, _, cx| {
+                            navigate_to_channel(channel_id, thread_link_label.clone(), cx)
+                        },
+                    ))
                 } else {
-                    row.child(thread_label)
+                    row.child(system_text(thread_label, cursor, selection_context))
                 };
-                row.child(format!(
-                    ". {} ",
-                    mezon_i18n::t(locale, "message.systemMessages.seeAllThreads")
+                row.child(system_text(
+                    format!(
+                        ". {} ",
+                        mezon_i18n::t(locale, "message.systemMessages.seeAllThreads")
+                    ),
+                    cursor,
+                    selection_context,
                 ))
                 .child(system_link(
                     primary,
                     mezon_i18n::t(locale, "message.systemMessages.allThreads"),
+                    cursor,
+                    selection_context,
                     open_threads_popover,
                 ))
-                .child(".")
+                .child(system_text(".", cursor, selection_context))
             } else if !thread_content.is_empty() {
-                row.child(thread_content)
+                row.child(system_text(thread_content, cursor, selection_context))
             } else {
                 row
             }
@@ -290,20 +360,25 @@ fn append_system_suffix(msg: &Message, ctx: &RowCtx, mut row: gpui::Div) -> gpui
         MessageCode::DeleteThread => {
             let (thread_label, _thread_id, thread_content) = parse_thread_info(&msg.content);
             if !thread_label.is_empty() {
-                row.child(format!(
-                    "{} ",
-                    mezon_i18n::t(locale, "message.systemMessages.deletedAThread")
+                row.child(system_text(
+                    format!(
+                        "{} ",
+                        mezon_i18n::t(locale, "message.systemMessages.deletedAThread")
+                    ),
+                    cursor,
+                    selection_context,
                 ))
                 .child(
                     div()
-                        .flex_none()
+                        .max_w_full()
+                        .min_w_0()
                         .font_weight(FontWeight::SEMIBOLD)
                         .text_color(primary)
-                        .child(thread_label),
+                        .child(system_text(thread_label, cursor, selection_context)),
                 )
-                .child(".")
+                .child(system_text(".", cursor, selection_context))
             } else if !thread_content.is_empty() {
-                row.child(thread_content)
+                row.child(system_text(thread_content, cursor, selection_context))
             } else {
                 row
             }
@@ -315,19 +390,94 @@ fn append_system_suffix(msg: &Message, ctx: &RowCtx, mut row: gpui::Div) -> gpui
 fn system_link(
     color: gpui::Rgba,
     label: impl Into<SharedString>,
+    cursor: &mut SelectableSectionCursor,
+    selection_context: &SelectableTextContext,
     on_click: impl Fn(&gpui::ClickEvent, &mut gpui::Window, &mut App) + 'static,
 ) -> AnyElement {
     let label = label.into();
     let id = SharedString::from(format!("sys-link-{label}"));
+    let child = system_text(label.clone(), cursor, selection_context);
+    let selection = selection_context.selection();
     div()
         .id(id)
-        .flex_none()
+        .max_w_full()
+        .min_w_0()
         .font_weight(FontWeight::SEMIBOLD)
         .cursor_pointer()
         .text_color(color)
-        .on_click(on_click)
-        .child(label)
+        .on_click(move |event, window, cx| {
+            if !selection.borrow().has_selection() {
+                on_click(event, window, cx);
+            }
+        })
+        .child(child)
         .into_any_element()
+}
+
+fn system_text(
+    text: impl Into<SharedString>,
+    cursor: &mut SelectableSectionCursor,
+    selection_context: &SelectableTextContext,
+) -> AnyElement {
+    let text = text.into();
+    let styled = cursor
+        .inline(&text)
+        .map(|range| selection_context.text_node(&text, range))
+        .unwrap_or_else(|| gpui::StyledText::new(text));
+    div()
+        .max_w_full()
+        .min_w_0()
+        .child(styled)
+        .into_any_element()
+}
+
+pub(crate) fn selectable_system_message_text(msg: &Message, locale: &str) -> String {
+    let mut text = msg
+        .spans
+        .iter()
+        .filter_map(|span| match span {
+            mezon_store::MessageSpan::Mention { display, .. } => Some(display.as_ref()),
+            _ => None,
+        })
+        .collect::<String>();
+    match msg.code {
+        MessageCode::CreatePin => text.push_str(&format!(
+            "{} {} {} {} {}",
+            mezon_i18n::t(locale, "message.systemMessages.pinned"),
+            mezon_i18n::t(locale, "message.systemMessages.aMessage"),
+            mezon_i18n::t(locale, "message.systemMessages.toThisChannel"),
+            mezon_i18n::t(locale, "message.systemMessages.allPinned"),
+            mezon_i18n::t(locale, "message.systemMessages.messages")
+        )),
+        MessageCode::CreateThread => {
+            let (thread_label, thread_id, thread_content) = parse_thread_info(&msg.content);
+            if !thread_id.is_empty() {
+                text.push_str(&format!(
+                    " {} {}. {} {}.",
+                    mezon_i18n::t(locale, "message.systemMessages.startedAThread"),
+                    thread_label,
+                    mezon_i18n::t(locale, "message.systemMessages.seeAllThreads"),
+                    mezon_i18n::t(locale, "message.systemMessages.allThreads")
+                ));
+            } else {
+                text.push_str(&thread_content);
+            }
+        }
+        MessageCode::DeleteThread => {
+            let (thread_label, _, thread_content) = parse_thread_info(&msg.content);
+            if !thread_label.is_empty() {
+                text.push_str(&format!(
+                    "{} {}.",
+                    mezon_i18n::t(locale, "message.systemMessages.deletedAThread"),
+                    thread_label
+                ));
+            } else {
+                text.push_str(&thread_content);
+            }
+        }
+        _ => {}
+    }
+    text
 }
 
 fn jump_to_message(message_id: MessageId, cx: &mut App) {
