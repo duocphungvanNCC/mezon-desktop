@@ -22,7 +22,9 @@ use crate::screen_picker::{PickedScreen, portal_source_types_for_pick, scap_targ
 use crate::video::bgra_to_i420;
 #[cfg(target_os = "macos")]
 use crate::video::i420_to_bgra_into;
-use crate::video::{VideoFrameStore, local_screen_key, nv12_full_to_i420};
+#[cfg(target_os = "macos")]
+use crate::video::nv12_full_to_i420;
+use crate::video::{VideoFrameStore, local_screen_key};
 
 const CAPTURE_FPS: u32 = 15;
 #[cfg(not(target_os = "macos"))]

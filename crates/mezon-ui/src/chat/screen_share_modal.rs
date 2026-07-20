@@ -188,15 +188,12 @@ impl ScreenShareModal {
             while let Ok((kind, id, preview)) = rx.recv_async().await {
                 let key = PreviewKey { kind, id };
                 let image = preview.and_then(preview_to_render_image);
-                let updated = this.update(cx, |this, cx| match image {
-                    Some(image) => {
+                let updated = this.update(cx, |this, cx| {
+                    if let Some(image) = image {
                         if let Some(previous) = this.previews.insert(key, image) {
                             crate::image_cache::queue_atlas_drop(cx, previous);
                         }
                         cx.notify();
-                    }
-                    None => {
-                        this.preview_requests.remove(&key);
                     }
                 });
                 if updated.is_err() {
@@ -219,9 +216,9 @@ impl ScreenShareModal {
         self.tab = tab;
         if let Some(selected) = self.selected {
             let still_valid = self
-                .options
+                .filtered_options()
                 .iter()
-                .any(|option| option_kind(option) == selected.kind && option.id == selected.id);
+                .any(|option| option.kind == selected.kind && option.id == selected.id);
             if !still_valid {
                 self.selected = None;
             }
@@ -236,7 +233,7 @@ impl ScreenShareModal {
         let Some(option) = self
             .options
             .iter()
-            .find(|option| option_kind(option) == selected.kind && option.id == selected.id)
+            .find(|option| option.kind == selected.kind && option.id == selected.id)
         else {
             return;
         };
@@ -255,7 +252,7 @@ impl ScreenShareModal {
         };
         self.options
             .iter()
-            .filter(|option| option.is_portal() || option.kind == kind)
+            .filter(|option| option.kind == kind)
             .collect()
     }
 }
@@ -265,10 +262,6 @@ fn preview_to_render_image(preview: ScreenSharePreview) -> Option<Arc<RenderImag
     Some(Arc::new(RenderImage::new(smallvec::smallvec![
         image::Frame::new(buffer,)
     ])))
-}
-
-fn option_kind(option: &ScreenShareOption) -> ScreenShareKind {
-    option.kind
 }
 
 impl Render for ScreenShareModal {

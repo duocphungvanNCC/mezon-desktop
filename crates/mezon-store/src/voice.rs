@@ -509,6 +509,7 @@ impl VoiceStore {
             }
         });
         let mut render_image = RenderImage::new_recyclable(image::Frame::new(buffer), recycler);
+        #[cfg_attr(not(target_os = "macos"), allow(clippy::bind_instead_of_map))]
         let previous_id = self
             .render_cache
             .lock()
@@ -1803,6 +1804,7 @@ impl VoiceStore {
         self.fullscreen_screen = None;
         self.session = None;
         self.frame_store = None;
+        #[cfg_attr(not(target_os = "macos"), allow(clippy::unnecessary_filter_map))]
         let stale: Vec<Arc<RenderImage>> = {
             let mut cache = self.render_cache.lock();
             cache
