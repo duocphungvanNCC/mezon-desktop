@@ -1,3 +1,4 @@
+pub mod blink_manager;
 mod button;
 mod icon;
 pub mod input;

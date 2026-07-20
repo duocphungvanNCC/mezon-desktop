@@ -1,9 +1,6 @@
-#[path = "blink_manager.rs"]
-mod blink_manager;
-
 use std::ops::Range;
 
-use blink_manager::CaretBlink;
+use super::blink_manager::{CaretBlink, HasCaretBlink};
 
 use gpui::{
     App, Bounds, ClipboardItem, Context, Corners, CursorStyle, Div, Element, ElementId,
@@ -79,7 +76,7 @@ pub struct InputState {
     last_lines: Vec<InputDocLine>,
     last_bounds: Option<Bounds<Pixels>>,
     line_height: Pixels,
-    scroll_offset: Point<Pixels>,
+    page_scroll_offset: Point<Pixels>,
     is_selecting: bool,
     masked: bool,
     multi_line: bool,
@@ -94,6 +91,9 @@ pub struct InputState {
     padding_x: Option<Pixels>,
     padding_right: Option<Pixels>,
     show_border: bool,
+    center_text: bool,
+    single_line_scroll: Pixels,
+    draw_offset: Pixels,
     filter_token_chips: bool,
     token_bg_ranges: Vec<Range<usize>>,
     token_bg_color: Option<Hsla>,
@@ -101,6 +101,12 @@ pub struct InputState {
 }
 
 impl EventEmitter<InputEvent> for InputState {}
+
+impl HasCaretBlink for InputState {
+    fn caret_blink_mut(&mut self) -> &mut CaretBlink {
+        &mut self.caret_blink
+    }
+}
 
 impl InputState {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
@@ -116,7 +122,7 @@ impl InputState {
             last_lines: Vec::new(),
             last_bounds: None,
             line_height: Pixels::ZERO,
-            scroll_offset: Point::default(),
+            page_scroll_offset: Point::default(),
             is_selecting: false,
             masked: false,
             multi_line: false,
@@ -131,6 +137,9 @@ impl InputState {
             padding_x: None,
             padding_right: None,
             show_border: true,
+            center_text: false,
+            single_line_scroll: px(0.),
+            draw_offset: px(0.),
             filter_token_chips: false,
             token_bg_ranges: Vec::new(),
             token_bg_color: None,
@@ -206,6 +215,11 @@ impl InputState {
 
     pub fn borderless(mut self) -> Self {
         self.show_border = false;
+        self
+    }
+
+    pub fn text_align_center(mut self) -> Self {
+        self.center_text = true;
         self
     }
 
@@ -499,8 +513,8 @@ impl InputState {
                 return 0;
             };
             let line_height = self.line_height;
-            let rel_y = position.y - bounds.top() + self.scroll_offset.y;
-            let rel_x = position.x - bounds.left() + self.scroll_offset.x;
+            let rel_y = position.y - bounds.top() + self.page_scroll_offset.y;
+            let rel_x = position.x - bounds.left() + self.page_scroll_offset.x;
             let line_ix = if rel_y < Pixels::ZERO {
                 0
             } else {
@@ -548,7 +562,7 @@ impl InputState {
         if position.y > bounds.bottom() {
             return self.content.len();
         }
-        let display_index = line.closest_index_for_x(position.x - bounds.left());
+        let display_index = line.closest_index_for_x(position.x - bounds.left() - self.draw_offset);
         self.display_to_content_offset(display_index)
     }
 
@@ -713,7 +727,7 @@ impl EntityInputHandler for InputState {
         self.selected_range = new_selected_range_utf16
             .as_ref()
             .map(|range_utf16| self.range_from_utf16(range_utf16))
-            .map(|new_range| new_range.start + range.start..new_range.end + range.end)
+            .map(|new_range| new_range.start + range.start..new_range.end + range.start)
             .unwrap_or_else(|| range.start + new_text.len()..range.start + new_text.len());
 
         self.refresh_filter_token_chips(cx);
@@ -732,7 +746,7 @@ impl EntityInputHandler for InputState {
         let range = self.range_from_utf16(&range_utf16);
         if self.multi_line && !self.last_lines.is_empty() {
             let line_height = self.line_height;
-            let scroll = self.scroll_offset;
+            let scroll = self.page_scroll_offset;
             let (s_line, s_local) =
                 locate_display_offset(&self.last_lines, self.to_display_offset(range.start));
             let (e_line, e_local) =
@@ -754,14 +768,23 @@ impl EntityInputHandler for InputState {
                 point(bounds.left() + x1 - scroll.x, y1),
             ));
         }
-        let last_layout = self.last_layout.as_ref()?;
+        let Some(last_layout) = self.last_layout.as_ref() else {
+            return Some(Bounds::from_corners(
+                point(bounds.left(), bounds.top()),
+                point(bounds.left(), bounds.bottom()),
+            ));
+        };
         Some(Bounds::from_corners(
             point(
-                bounds.left() + last_layout.x_for_index(self.to_display_offset(range.start)),
+                bounds.left()
+                    + self.draw_offset
+                    + last_layout.x_for_index(self.to_display_offset(range.start)),
                 bounds.top(),
             ),
             point(
-                bounds.left() + last_layout.x_for_index(self.to_display_offset(range.end)),
+                bounds.left()
+                    + self.draw_offset
+                    + last_layout.x_for_index(self.to_display_offset(range.end)),
                 bounds.bottom(),
             ),
         ))
@@ -872,6 +895,14 @@ impl Render for InputState {
     }
 }
 
+fn to_single_line_display(text: SharedString) -> SharedString {
+    if text.contains(['\n', '\r']) {
+        text.replace(['\n', '\r'], " ").into()
+    } else {
+        text
+    }
+}
+
 fn build_input_text_runs(
     text_len: usize,
     base: &TextRun,
@@ -961,6 +992,34 @@ fn locate_input_span(spans: &[(usize, usize)], off: usize) -> (usize, usize) {
     }
 }
 
+fn compute_draw_offset(
+    center: bool,
+    prev_scroll: Pixels,
+    content_width: Pixels,
+    text_width: Pixels,
+    cursor_pos: Pixels,
+) -> Pixels {
+    if center {
+        return ((content_width - text_width) / 2.).max(px(0.));
+    }
+    let caret_pad = px(1.);
+    let mut scroll = prev_scroll;
+    if cursor_pos - scroll > content_width - caret_pad {
+        scroll = cursor_pos - content_width + caret_pad;
+    }
+    if cursor_pos - scroll < px(0.) {
+        scroll = cursor_pos;
+    }
+    let max_scroll = (text_width - content_width).max(px(0.));
+    if scroll > max_scroll {
+        scroll = max_scroll;
+    }
+    if scroll < px(0.) {
+        scroll = px(0.);
+    }
+    -scroll
+}
+
 struct TextElement {
     input: Entity<InputState>,
 }
@@ -1036,6 +1095,8 @@ impl Element for TextElement {
         let selected_range = input.selected_range.clone();
         let cursor = input.cursor_offset();
         let masked = input.is_masked();
+        let center_text = input.center_text;
+        let prev_scroll = input.single_line_scroll;
         let style = window.text_style();
 
         let (display_text, text_color) = if content.is_empty() {
@@ -1076,7 +1137,7 @@ impl Element for TextElement {
             .unwrap_or_else(|| style.font_size.to_pixels(window.rem_size()));
 
         if multi_line {
-            let mut scroll_offset = input.scroll_offset;
+            let mut scroll_offset = input.page_scroll_offset;
             let line_height = input
                 .text_size_override
                 .map(|size| size * 1.214)
@@ -1192,17 +1253,33 @@ impl Element for TextElement {
             };
         }
 
-        let line = window
-            .text_system()
-            .shape_line(display_text, font_size, &runs, None);
+        let line = window.text_system().shape_line(
+            to_single_line_display(display_text),
+            font_size,
+            &runs,
+            None,
+        );
 
         let cursor_pos = line.x_for_index(display_cursor);
+        let draw_offset = compute_draw_offset(
+            center_text,
+            prev_scroll,
+            bounds.size.width,
+            line.width,
+            cursor_pos,
+        );
+        let single_line_scroll = if center_text { px(0.) } else { -draw_offset };
+        self.input.update(cx, |input, _cx| {
+            input.draw_offset = draw_offset;
+            input.single_line_scroll = single_line_scroll;
+        });
+
         let (selection, cursor) = if display_selection.is_empty() {
             (
                 None,
                 Some(fill(
                     Bounds::new(
-                        point(bounds.left() + cursor_pos, bounds.top()),
+                        point(bounds.left() + draw_offset + cursor_pos, bounds.top()),
                         size(px(2.), bounds.bottom() - bounds.top()),
                     ),
                     cursor_color,
@@ -1213,11 +1290,11 @@ impl Element for TextElement {
                 Some(fill(
                     Bounds::from_corners(
                         point(
-                            bounds.left() + line.x_for_index(display_selection.start),
+                            bounds.left() + draw_offset + line.x_for_index(display_selection.start),
                             bounds.top(),
                         ),
                         point(
-                            bounds.left() + line.x_for_index(display_selection.end),
+                            bounds.left() + draw_offset + line.x_for_index(display_selection.end),
                             bounds.bottom(),
                         ),
                     ),
@@ -1295,7 +1372,7 @@ impl Element for TextElement {
                     input.last_layout = None;
                     input.last_bounds = Some(bounds);
                     input.line_height = line_height;
-                    input.scroll_offset = scroll_offset;
+                    input.page_scroll_offset = scroll_offset;
                 });
             }
             PrepaintState::Single {
@@ -1307,9 +1384,13 @@ impl Element for TextElement {
                     window.paint_quad(selection)
                 }
 
-                let (token_ranges, token_color) = {
+                let (token_ranges, token_color, draw_offset) = {
                     let input = self.input.read(cx);
-                    (input.token_bg_ranges.clone(), input.token_bg_color)
+                    (
+                        input.token_bg_ranges.clone(),
+                        input.token_bg_color,
+                        input.draw_offset,
+                    )
                 };
                 if let Some(color) = token_color {
                     let pad_x = px(2.);
@@ -1327,7 +1408,7 @@ impl Element for TextElement {
                         window.paint_quad(
                             fill(
                                 Bounds::new(
-                                    point(bounds.left() + x0 - pad_x, chip_top),
+                                    point(bounds.left() + draw_offset + x0 - pad_x, chip_top),
                                     size((x1 - x0) + pad_x * 2., chip_height),
                                 ),
                                 color,
@@ -1339,7 +1420,7 @@ impl Element for TextElement {
 
                 let stored = line.clone();
                 if let Err(e) = line.paint(
-                    bounds.origin,
+                    point(bounds.origin.x + draw_offset, bounds.origin.y),
                     window.line_height(),
                     TextAlign::Left,
                     None,
@@ -1442,5 +1523,70 @@ impl RenderOnce for Input {
             })
             .child(state)
             .when_some(toggle, |el, toggle| el.child(toggle))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{compute_draw_offset, to_single_line_display};
+    use gpui::{SharedString, px};
+
+    #[test]
+    fn single_line_display_collapses_newlines_preserving_byte_len() {
+        let input = SharedString::from("line1\nline2\r\nline3");
+        let output = to_single_line_display(input.clone());
+        assert!(!output.contains('\n'));
+        assert!(!output.contains('\r'));
+        assert_eq!(output.len(), input.len());
+        assert_eq!(output.as_ref(), "line1 line2  line3");
+    }
+
+    #[test]
+    fn single_line_display_leaves_plain_text_untouched() {
+        let input = SharedString::from("no breaks here");
+        assert_eq!(
+            to_single_line_display(input.clone()).as_ref(),
+            input.as_ref()
+        );
+    }
+
+    #[test]
+    fn center_offset_centers_short_text() {
+        assert_eq!(
+            compute_draw_offset(true, px(0.), px(44.), px(12.), px(6.)),
+            px(16.)
+        );
+    }
+
+    #[test]
+    fn center_offset_never_negative_for_overflowing_text() {
+        assert_eq!(
+            compute_draw_offset(true, px(0.), px(20.), px(30.), px(30.)),
+            px(0.)
+        );
+    }
+
+    #[test]
+    fn left_offset_zero_when_text_fits() {
+        assert_eq!(
+            compute_draw_offset(false, px(0.), px(100.), px(50.), px(50.)),
+            px(0.)
+        );
+    }
+
+    #[test]
+    fn left_offset_scrolls_to_keep_caret_visible() {
+        assert_eq!(
+            compute_draw_offset(false, px(0.), px(100.), px(200.), px(200.)),
+            px(-100.)
+        );
+    }
+
+    #[test]
+    fn left_offset_scrolls_back_to_start_when_caret_returns() {
+        assert_eq!(
+            compute_draw_offset(false, px(100.), px(100.), px(200.), px(0.)),
+            px(0.)
+        );
     }
 }

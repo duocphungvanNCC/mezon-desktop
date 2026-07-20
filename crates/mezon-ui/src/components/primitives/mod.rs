@@ -13,6 +13,7 @@ mod select;
 mod slider;
 mod switch;
 mod tab_bar;
+mod textarea;
 mod toast;
 mod tooltip;
 
@@ -56,6 +57,7 @@ pub use select::{Select, SelectEvent};
 pub use slider::{Slider, SliderEvent, SliderState, SliderValue};
 pub use switch::Switch;
 pub use tab_bar::TabBar;
+pub use textarea::{TextArea, TextAreaEvent, TextAreaField};
 pub use toast::{Toast, ToastKind};
 pub use tooltip::Tooltip;
 
@@ -67,3 +69,4 @@ pub use spinner::Spinner;
 pub use stack::{h_flex, v_flex};
 
 pub use mezon_widgets::init_input;
+pub use textarea::init as init_textarea;

@@ -1,7 +1,10 @@
 use gpui::{AnyElement, FontWeight, ObjectFit, SharedString, div, img, prelude::*, px};
 use mezon_store::{Embed, EmbedAuthor, EmbedImage, Message, MessageCode};
 
-use super::content::render_embed_description;
+use super::content::{
+    SelectableSectionCursor, SelectableTextContext, render_selectable_embed_description,
+    selectable_spans_text,
+};
 use super::context::RowCtx;
 use super::embed_fields::render_embed_fields;
 use super::share_contact_card::render_share_contact_card;
@@ -15,14 +18,23 @@ const FOOTER_ICON_SIZE: f32 = 20.0;
 const EMBED_IMAGE_MAX_HEIGHT: f32 = 300.0;
 const SHARE_CONTACT_KEY: &str = "share_contact";
 
-pub fn render_embeds(msg: &Message, ctx: &RowCtx) -> AnyElement {
+pub fn render_embeds(
+    msg: &Message,
+    ctx: &RowCtx,
+    ranges: &[Option<std::ops::Range<usize>>],
+    selection_context: &SelectableTextContext,
+) -> AnyElement {
     let mut column = div().flex().flex_col().w_full();
-    for embed in msg.embeds.iter() {
-        if is_share_contact_embed(embed, msg.code) {
-            column = column.child(render_share_contact_card(embed, ctx));
+    for (index, embed) in msg.embeds.iter().enumerate() {
+        let base = ranges
+            .get(index)
+            .and_then(|range| range.as_ref())
+            .map_or(0, |range| range.start);
+        column = column.child(if is_share_contact_embed(embed, msg.code) {
+            render_share_contact_card(embed, base, selection_context, ctx)
         } else {
-            column = column.child(render_embed_card(embed, ctx));
-        }
+            render_embed_card(embed, msg, base, selection_context, ctx)
+        });
     }
     column.into_any_element()
 }
@@ -35,27 +47,62 @@ fn is_share_contact_embed(embed: &Embed, code: MessageCode) -> bool {
             .is_some_and(|field| field.value.as_ref() == SHARE_CONTACT_KEY)
 }
 
-pub fn render_embed_card(embed: &Embed, ctx: &RowCtx) -> AnyElement {
+pub fn render_embed_card(
+    embed: &Embed,
+    msg: &Message,
+    base: usize,
+    selection_context: &SelectableTextContext,
+    ctx: &RowCtx,
+) -> AnyElement {
     let theme = ctx.theme;
     let has_thumbnail = !embed.thumbnail_proxied.is_empty();
+    let mut selection_cursor = SelectableSectionCursor::new(base);
 
-    let mut left = div().flex().flex_col().min_w_0().w_full();
+    let mut left = div()
+        .flex()
+        .flex_col()
+        .min_w_0()
+        .w_full()
+        .cursor(gpui::CursorStyle::IBeam);
     if let Some(author) = embed.author.as_ref() {
-        left = left.child(render_embed_author(author, ctx));
+        let child = selection_cursor
+            .section(&author.name)
+            .map(|range| selection_context.text_node(&author.name, range));
+        left = left.child(render_embed_author(author, child, ctx));
     }
-    if !embed.title.is_empty() {
-        left = left.child(render_embed_title(&embed.title, ctx));
+    if let Some(range) = selection_cursor.section(&embed.title) {
+        left = left.child(render_embed_title(
+            selection_context.text_node(&embed.title, range),
+            ctx,
+        ));
     }
     if !embed.description_spans.is_empty() {
-        left = left.child(div().mt_2().w_full().child(render_embed_description(
-            &embed.description_spans,
-            ctx,
-            theme.tokens.text_theme_primary,
-            px(14.),
-        )));
+        let description = selectable_spans_text(&embed.description_spans, ctx.locale, ctx.app);
+        if let Some(range) = selection_cursor.section(&description) {
+            left = left.child(
+                div()
+                    .mt_2()
+                    .w_full()
+                    .child(render_selectable_embed_description(
+                        &embed.description_spans,
+                        msg,
+                        range.start,
+                        selection_context,
+                        ctx,
+                        theme.tokens.text_theme_primary,
+                        px(14.),
+                    )),
+            );
+        }
     }
     if !embed.fields.is_empty() {
-        left = left.child(render_embed_fields(&embed.fields, ctx));
+        left = left.child(render_embed_fields(
+            &embed.fields,
+            msg.id,
+            selection_context,
+            &mut selection_cursor,
+            ctx,
+        ));
     }
 
     let mut inner = div().flex().flex_col().px_5().pt_2().pb_4();
@@ -76,7 +123,12 @@ pub fn render_embed_card(embed: &Embed, ctx: &RowCtx) -> AnyElement {
         inner = inner.child(render_embed_image(image));
     }
     if embed.footer.is_some() || !embed.timestamp.is_empty() {
-        inner = inner.child(render_embed_footer(embed, ctx));
+        inner = inner.child(render_embed_footer(
+            embed,
+            selection_context,
+            &mut selection_cursor,
+            ctx,
+        ));
     }
 
     div()
@@ -105,7 +157,11 @@ pub fn render_embed_card(embed: &Embed, ctx: &RowCtx) -> AnyElement {
         .into_any_element()
 }
 
-fn render_embed_author(author: &EmbedAuthor, ctx: &RowCtx) -> AnyElement {
+fn render_embed_author(
+    author: &EmbedAuthor,
+    name: Option<gpui::StyledText>,
+    ctx: &RowCtx,
+) -> AnyElement {
     let mut row = div().flex().items_center().gap_2().mt_2();
     if !author.icon_proxied.is_empty() {
         row = row.child(
@@ -127,17 +183,17 @@ fn render_embed_author(author: &EmbedAuthor, ctx: &RowCtx) -> AnyElement {
             .text_size(px(14.))
             .font_weight(FontWeight::MEDIUM)
             .text_color(ctx.theme.tokens.text_theme_message)
-            .child(author.name.clone()),
+            .child(name.unwrap_or_else(|| gpui::StyledText::new(author.name.clone()))),
     )
     .into_any_element()
 }
 
-fn render_embed_title(title: &SharedString, ctx: &RowCtx) -> AnyElement {
+fn render_embed_title(title: gpui::StyledText, ctx: &RowCtx) -> AnyElement {
     div()
         .mt_2()
         .font_weight(FontWeight::SEMIBOLD)
         .text_color(ctx.theme.tokens.text_theme_message)
-        .child(title.clone())
+        .child(title)
         .into_any_element()
 }
 
@@ -185,7 +241,12 @@ fn render_embed_image(image: &EmbedImage) -> AnyElement {
     container.child(image_element).into_any_element()
 }
 
-fn render_embed_footer(embed: &Embed, ctx: &RowCtx) -> AnyElement {
+fn render_embed_footer(
+    embed: &Embed,
+    selection_context: &SelectableTextContext,
+    selection_cursor: &mut SelectableSectionCursor,
+    ctx: &RowCtx,
+) -> AnyElement {
     let footer = embed.footer.as_ref();
     let icon = footer
         .map(|f| f.icon_proxied.clone())
@@ -225,14 +286,22 @@ fn render_embed_footer(embed: &Embed, ctx: &RowCtx) -> AnyElement {
         .gap_2()
         .items_center()
         .text_size(px(12.));
-    if let Some(text) = text {
-        inner = inner.child(div().min_w_0().child(text));
+    if let Some(text) = text
+        && let Some(range) = selection_cursor.section(&text)
+    {
+        inner = inner.child(
+            div()
+                .min_w_0()
+                .child(selection_context.text_node(&text, range)),
+        );
     }
     if !date.is_empty() {
         if has_text {
             inner = inner.child(div().child("•"));
         }
-        inner = inner.child(div().child(date));
+        if let Some(range) = selection_cursor.section(&date) {
+            inner = inner.child(div().child(selection_context.text_node(&date, range)));
+        }
     }
     row.child(inner).into_any_element()
 }

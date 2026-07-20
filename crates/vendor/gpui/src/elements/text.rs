@@ -868,6 +868,40 @@ impl TextLayout {
         Err(line_start_ix.saturating_sub(1))
     }
 
+    /// Get the byte index for a position when measurement and prepaint are available.
+    pub fn try_index_for_position(
+        &self,
+        mut position: Point<Pixels>,
+    ) -> Option<Result<usize, usize>> {
+        let element_state = self.0.try_borrow().ok()?;
+        let element_state = element_state.as_ref()?;
+        let bounds = element_state.bounds?;
+
+        if position.y < bounds.top() {
+            return Some(Err(0));
+        }
+
+        let line_height = element_state.line_height;
+        let mut line_origin = bounds.origin;
+        let mut line_start_ix = 0;
+        for line in &element_state.lines {
+            let line_bottom = line_origin.y + line.size(line_height).height;
+            if position.y > line_bottom {
+                line_origin.y = line_bottom;
+                line_start_ix += line.len() + 1;
+            } else {
+                position -= line_origin;
+                return Some(
+                    line.index_for_position(position, line_height)
+                        .map(|index| line_start_ix + index)
+                        .map_err(|index| line_start_ix + index),
+                );
+            }
+        }
+
+        Some(Err(line_start_ix.saturating_sub(1)))
+    }
+
     /// Get the pixel position for the given byte index.
     pub fn position_for_index(&self, index: usize) -> Option<Point<Pixels>> {
         let element_state = self.0.borrow();
@@ -932,6 +966,34 @@ impl TextLayout {
     /// The bounds of this layout.
     pub fn bounds(&self) -> Bounds<Pixels> {
         self.0.borrow().as_ref().unwrap().bounds.unwrap()
+    }
+
+    #[allow(missing_docs)]
+    pub fn try_bounds(&self) -> Option<Bounds<Pixels>> {
+        self.0
+            .try_borrow()
+            .ok()?
+            .as_ref()
+            .and_then(|inner| inner.bounds)
+    }
+
+    #[allow(missing_docs)]
+    pub fn try_len(&self) -> Option<usize> {
+        self.0.try_borrow().ok()?.as_ref().map(|inner| inner.len)
+    }
+
+    #[allow(missing_docs)]
+    pub fn try_text(&self) -> Option<String> {
+        Some(
+            self.0
+                .try_borrow()
+                .ok()?
+                .as_ref()?
+                .lines
+                .iter()
+                .map(|line| &line.text)
+                .join("\n"),
+        )
     }
 
     /// The line height for this layout.
@@ -1158,7 +1220,7 @@ impl Element for InteractiveText {
                 let mut interactive_state = interactive_state.unwrap_or_default();
                 if let Some(click_listener) = self.click_listener.take() {
                     let mouse_position = window.mouse_position();
-                    if let Ok(ix) = text_layout.index_for_position(mouse_position)
+                    if let Some(Ok(ix)) = text_layout.try_index_for_position(mouse_position)
                         && self
                             .clickable_ranges
                             .iter()
@@ -1175,8 +1237,8 @@ impl Element for InteractiveText {
                         window.on_mouse_event(
                             move |event: &MouseUpEvent, phase, window: &mut Window, cx| {
                                 if phase == DispatchPhase::Bubble && hitbox.is_hovered(window) {
-                                    if let Ok(mouse_up_index) =
-                                        text_layout.index_for_position(event.position)
+                                    if let Some(Ok(mouse_up_index)) =
+                                        text_layout.try_index_for_position(event.position)
                                     {
                                         click_listener(
                                             &clickable_ranges,
@@ -1199,8 +1261,8 @@ impl Element for InteractiveText {
                         window.on_mouse_event(move |event: &MouseDownEvent, phase, window, _| {
                             if phase == DispatchPhase::Bubble
                                 && hitbox.is_hovered(window)
-                                && let Ok(mouse_down_index) =
-                                    text_layout.index_for_position(event.position)
+                                && let Some(Ok(mouse_down_index)) =
+                                    text_layout.try_index_for_position(event.position)
                             {
                                 mouse_down.set(Some(mouse_down_index));
                                 window.refresh();
@@ -1217,7 +1279,9 @@ impl Element for InteractiveText {
                     move |event: &MouseMoveEvent, phase, window, cx| {
                         if phase == DispatchPhase::Bubble && hitbox.is_hovered(window) {
                             let current = hovered_index.get();
-                            let updated = text_layout.index_for_position(event.position).ok();
+                            let updated = text_layout
+                                .try_index_for_position(event.position)
+                                .and_then(Result::ok);
                             if current != updated {
                                 hovered_index.set(updated);
                                 if let Some(hover_listener) = hover_listener.as_ref() {
@@ -1236,8 +1300,8 @@ impl Element for InteractiveText {
                         let text_layout = text_layout.clone();
                         move |window: &mut Window, cx: &mut App| {
                             text_layout
-                                .index_for_position(window.mouse_position())
-                                .ok()
+                                .try_index_for_position(window.mouse_position())
+                                .and_then(Result::ok)
                                 .and_then(|position| tooltip_builder(position, window, cx))
                                 .map(|view| (view, tooltip_is_hoverable))
                         }
@@ -1250,8 +1314,8 @@ impl Element for InteractiveText {
                         let pending_mouse_down = interactive_state.mouse_down_index.clone();
                         move |window: &Window| {
                             text_layout
-                                .index_for_position(window.mouse_position())
-                                .is_ok()
+                                .try_index_for_position(window.mouse_position())
+                                .is_some_and(|result| result.is_ok())
                                 && source_bounds.contains(&window.mouse_position())
                                 && pending_mouse_down.get().is_none()
                         }
@@ -1263,8 +1327,8 @@ impl Element for InteractiveText {
                         let pending_mouse_down = interactive_state.mouse_down_index.clone();
                         move |window: &Window| {
                             text_layout
-                                .index_for_position(window.mouse_position())
-                                .is_ok()
+                                .try_index_for_position(window.mouse_position())
+                                .is_some_and(|result| result.is_ok())
                                 && hitbox.is_hovered(window)
                                 && pending_mouse_down.get().is_none()
                         }

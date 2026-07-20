@@ -1,8 +1,10 @@
+use std::cell::Cell;
+use std::rc::Rc;
 use std::sync::Arc;
 
 use gpui::{
     Anchor, AnyElement, App, ClickEvent, Entity, FontWeight, MouseButton, ObjectFit, Pixels,
-    SharedString, Transformation, Window, div, img, prelude::*, px, radians, rems,
+    SharedString, Transformation, Window, div, img, prelude::*, px, radians, rems, rgba,
 };
 use mezon_store::{
     AlbumLayout, AppConfig, ChannelType, ClanMembersStore, Message, MessageAttachment, MessageCode,
@@ -14,10 +16,11 @@ use smallvec::SmallVec;
 use super::audio_player::{
     AudioActivation, audio_failed_pill, audio_pill, audio_sending_pill, audio_time_label,
 };
-use super::content::profile_popover_trigger;
+use super::content::{SELECTION_BG, SelectableTextContext, profile_popover_trigger};
 use super::context::{REPLY_USERNAME_COLOR, RowCtx};
 use super::gif_video::GifVideoView;
 use super::reaction_detail::{UserReactionPanel, emoji_error_fallback};
+use super::selection::{SelectableRegion, TextSegment};
 use super::time::format_message_time;
 use super::video_player::{VideoActivation, VideoFullscreenMode, VideoLayout};
 use crate::app::shell::Shell;
@@ -151,6 +154,8 @@ pub fn render_head(msg: &Message, ctx: &RowCtx, name_color: u32) -> AnyElement {
     };
     let display_name = resolve_message_display_name(msg, ctx, ctx.app);
     let name = div()
+        .max_w_full()
+        .min_w_0()
         .text_size(px(16.))
         .font_weight(FontWeight::MEDIUM)
         .text_color(gpui::rgb(name_color))
@@ -158,11 +163,14 @@ pub fn render_head(msg: &Message, ctx: &RowCtx, name_color: u32) -> AnyElement {
     div()
         .flex()
         .flex_row()
+        .w_full()
+        .min_w_0()
         .items_baseline()
         .gap_2()
         .child(profile_name_trigger(msg, ctx, name))
         .child(
             div()
+                .flex_none()
                 .text_size(px(12.))
                 .text_color(theme.text_muted)
                 .child(time_label),
@@ -182,6 +190,8 @@ fn profile_name_trigger(msg: &Message, ctx: &RowCtx, name: gpui::Div) -> AnyElem
         ctx,
         name.into_any_element(),
     )
+    .max_w_full()
+    .min_w_0()
     .into_any_element()
 }
 
@@ -356,7 +366,12 @@ fn reply_avatar_trigger(
         .into_any_element()
 }
 
-pub fn render_attachments(msg: &Message, ctx: &RowCtx) -> Option<AnyElement> {
+pub fn render_attachments(
+    msg: &Message,
+    ctx: &RowCtx,
+    range: Option<std::ops::Range<usize>>,
+    selection_context: &SelectableTextContext,
+) -> Option<AnyElement> {
     if msg.attachments.is_empty() {
         return None;
     }
@@ -432,7 +447,21 @@ pub fn render_attachments(msg: &Message, ctx: &RowCtx) -> Option<AnyElement> {
     for (i, att) in documents.iter().enumerate() {
         col = col.child(render_file_box(i, att, msg, ctx));
     }
-    Some(col.into_any_element())
+    let bounds = Rc::new(Cell::new(None));
+    let selected = range
+        .as_ref()
+        .is_some_and(|range| selection_context.is_selected(range));
+    if let Some(range) = range {
+        selection_context.push_segment(TextSegment::block(range, bounds.clone()));
+    }
+    Some(
+        SelectableRegion::new(
+            col.into_any_element(),
+            bounds,
+            selected.then(|| rgba(SELECTION_BG)),
+        )
+        .into_any_element(),
+    )
 }
 
 #[allow(dead_code)]
@@ -513,12 +542,17 @@ fn render_audio(
     };
     let activate_download_url = download_url.clone();
     let activate_download_name = download_name.clone();
+    let activate_selection = ctx.selection.clone();
+    let download_selection = ctx.selection.clone();
     audio_pill(
         ("audio-play", index),
         ("audio-dl", index),
         false,
         audio_time_label(0.0, duration),
         move |_, _, cx| {
+            if activate_selection.borrow().has_selection() {
+                return;
+            }
             let activation = AudioActivation {
                 url: url.clone(),
                 duration,
@@ -530,6 +564,9 @@ fn render_audio(
             });
         },
         move |_, _, cx| {
+            if download_selection.borrow().has_selection() {
+                return;
+            }
             crate::util::download::save_with_progress_toast(
                 download_url.clone(),
                 download_name.clone(),
@@ -575,11 +612,14 @@ fn render_album(
             .overflow_hidden()
             .bg(theme.bg_tertiary);
         if let Some(path) = att.local_source.clone() {
+            let selection = ctx.selection.clone();
             tile_element = tile_element.when(
                 !att.uploading && !att.upload_failed && !raw_url.is_empty(),
                 |d| {
                     d.cursor_pointer().on_click(move |_, _window, cx| {
-                        open_viewer_from_message(&settings, raw_url.clone(), anchor, cx);
+                        if !selection.borrow().has_selection() {
+                            open_viewer_from_message(&settings, raw_url.clone(), anchor, cx);
+                        }
                     })
                 },
             );
@@ -593,6 +633,7 @@ fn render_album(
         } else if att.presign_pending {
             tile_element = presign_child(tile_element, att, theme);
         } else {
+            let selection = ctx.selection.clone();
             let src = album_tile_src(cfg, att, tile.width, tile.height);
             tile_element = tile_element
                 .cursor_pointer()
@@ -605,7 +646,9 @@ fn render_album(
                     )
                 })
                 .on_click(move |_, _window, cx| {
-                    open_viewer_from_message(&settings, raw_url.clone(), anchor, cx);
+                    if !selection.borrow().has_selection() {
+                        open_viewer_from_message(&settings, raw_url.clone(), anchor, cx);
+                    }
                 });
         }
         if att.upload_failed {
@@ -712,6 +755,7 @@ fn render_photo(
         let anchor = (msg.create_time + 86_400).max(0) as u32;
         let fallback_bg = theme.bg_tertiary;
         let fallback_fg = theme.text_muted;
+        let selection = ctx.selection.clone();
         let mut el = div()
             .id(("msg-img", index))
             .relative()
@@ -722,7 +766,9 @@ fn render_photo(
             .bg(theme.bg_tertiary);
         el = el.when(!sending && !att.upload_failed && !raw_url.is_empty(), |d| {
             d.cursor_pointer().on_click(move |_, _window, cx| {
-                open_viewer_from_message(&settings, raw_url.clone(), anchor, cx);
+                if !selection.borrow().has_selection() {
+                    open_viewer_from_message(&settings, raw_url.clone(), anchor, cx);
+                }
             })
         });
         el = el.child(
@@ -787,6 +833,7 @@ fn render_photo(
     let settings = ctx.settings.clone();
     let raw_url = SharedString::from(att.url.clone());
     let anchor = (msg.create_time + 86_400).max(0) as u32;
+    let selection = ctx.selection.clone();
     let mut el = div()
         .id(("msg-img", index))
         .relative()
@@ -797,7 +844,9 @@ fn render_photo(
         .bg(theme.bg_tertiary);
     el = el.when(!is_sticker && !att.upload_failed, |d| {
         d.cursor_pointer().on_click(move |_, _window, cx| {
-            open_viewer_from_message(&settings, raw_url.clone(), anchor, cx);
+            if !selection.borrow().has_selection() {
+                open_viewer_from_message(&settings, raw_url.clone(), anchor, cx);
+            }
         })
     });
     el = el.child(
@@ -860,6 +909,7 @@ fn render_video_poster(
     let width = att.display_width;
     let height = att.display_height;
     let host = ctx.video_host.clone();
+    let selection = ctx.selection.clone();
     let container = div()
         .id(("msg-video", index))
         .relative()
@@ -925,6 +975,9 @@ fn render_video_poster(
         .cursor_pointer()
         .child(overlay)
         .on_click(move |_, window, cx| {
+            if selection.borrow().has_selection() {
+                return;
+            }
             let activation = VideoActivation {
                 url: url.clone(),
                 filename: filename.clone(),
@@ -1001,6 +1054,10 @@ fn render_file_box(
     let download_name = filename.clone();
     let body_url = url.clone();
     let pdf_url = url.clone();
+    let body_selection = ctx.selection.clone();
+    let download_selection = ctx.selection.clone();
+    let remove_selection = ctx.selection.clone();
+    let pdf_selection = ctx.selection.clone();
 
     div()
         .id((
@@ -1061,8 +1118,11 @@ fn render_file_box(
                 .flex_1()
                 .min_w_0()
                 .when(!sending && !failed, |d| {
-                    d.cursor_pointer()
-                        .on_click(move |_, _, cx| open_external(&body_url, cx))
+                    d.cursor_pointer().on_click(move |_, _, cx| {
+                        if !body_selection.borrow().has_selection() {
+                            open_external(&body_url, cx);
+                        }
+                    })
                 })
                 .child(
                     div()
@@ -1096,6 +1156,9 @@ fn render_file_box(
                         IconName::Download,
                         theme,
                         move |_, _, cx| {
+                            if download_selection.borrow().has_selection() {
+                                return;
+                            }
                             crate::util::download::save_with_progress_toast(
                                 download_url.clone(),
                                 download_name.clone(),
@@ -1110,6 +1173,9 @@ fn render_file_box(
                             IconName::TrashIcon,
                             theme,
                             move |_, _, cx| {
+                                if remove_selection.borrow().has_selection() {
+                                    return;
+                                }
                                 mezon_store::MessagesStore::global(cx).update(cx, |store, cx| {
                                     store.remove_attachment(remove_msg_id, index, cx);
                                 });
@@ -1121,7 +1187,11 @@ fn render_file_box(
                             ("file-pdf", index),
                             IconName::FileIcon,
                             theme,
-                            move |_, _, cx| open_external(&pdf_url, cx),
+                            move |_, _, cx| {
+                                if !pdf_selection.borrow().has_selection() {
+                                    open_external(&pdf_url, cx);
+                                }
+                            },
                         ))
                     }),
             )

@@ -77,6 +77,10 @@ impl RootView {
             if matches!(*auth_state.read(cx), AuthState::NotAuthenticated) {
                 crate::image_viewer::close_image_viewer(cx);
                 crate::image_cache::clear_all_image_caches(cx);
+                Router::global(cx).update(cx, |router, cx| {
+                    router.reset();
+                    cx.notify();
+                });
             }
             cx.notify();
         })
@@ -262,9 +266,6 @@ impl Render for RootView {
                 this.child(render_title_bar(self.title_bar.clone()))
             })
             .child(content)
-            .when(cfg!(target_os = "macos"), |this| {
-                this.child(window_controls::render_controls(theme, window))
-            })
             .when(window_controls::is_edge_resizable(), |this| {
                 this.child(window_controls::render_resize_edges(window))
             })
