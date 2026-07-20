@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use std::ops::Range;
 use std::sync::Arc;
 
 use gpui::{
@@ -43,13 +44,29 @@ pub struct ClanChannelsPage {
     sort_descending: bool,
     cached_rows: Vec<ChannelSetting>,
     rows_dirty: bool,
+    visible_row_keys: Vec<VisibleRowKey>,
     list_state: ListState,
 }
 
 #[derive(Clone)]
 enum VisibleRow {
     Channel(ChannelSetting, bool, bool),
-    NoThreads,
+    NoThreads(ChannelId),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum VisibleRowKey {
+    Channel(ChannelId),
+    NoThreads(ChannelId),
+}
+
+impl VisibleRow {
+    fn key(&self) -> VisibleRowKey {
+        match self {
+            Self::Channel(channel, _, _) => VisibleRowKey::Channel(channel.id),
+            Self::NoThreads(channel_id) => VisibleRowKey::NoThreads(*channel_id),
+        }
+    }
 }
 
 impl ClanChannelsPage {
@@ -83,6 +100,7 @@ impl ClanChannelsPage {
             sort_descending: true,
             cached_rows: Vec::new(),
             rows_dirty: true,
+            visible_row_keys: Vec::new(),
             list_state: ListState::new(0, ListAlignment::Top, px(60.))
                 .measure_all()
                 .smooth_line_scroll()
@@ -97,6 +115,7 @@ impl ClanChannelsPage {
         self.clan_id = clan_id;
         self.page = 0;
         self.expanded.clear();
+        self.visible_row_keys.clear();
         self.rows_dirty = true;
         self.page_size_picker_open = false;
         ChannelSettingsStore::global(cx).update(cx, |store, cx| {
@@ -499,7 +518,7 @@ impl ClanChannelsPage {
             let threads = store.rows(self.clan_id, parent.id);
             if threads.is_empty() {
                 if !store.is_loading(self.clan_id, parent.id) {
-                    result.push(VisibleRow::NoThreads);
+                    result.push(VisibleRow::NoThreads(parent.id));
                 }
                 continue;
             }
@@ -524,7 +543,7 @@ impl ClanChannelsPage {
             VisibleRow::Channel(channel, is_thread, show_separator) => {
                 self.render_row(channel, *is_thread, *show_separator, locale, cx)
             }
-            VisibleRow::NoThreads => div()
+            VisibleRow::NoThreads(_) => div()
                 .w_full()
                 .min_w_0()
                 .h(px(60.))
@@ -688,9 +707,11 @@ impl Render for ClanChannelsPage {
             .cloned()
             .collect::<Vec<_>>();
         let visible = Arc::new(self.flattened_rows(&parents, cx));
-        let previous_count = self.list_state.item_count();
-        if previous_count != visible.len() {
-            self.list_state.splice(0..previous_count, visible.len());
+        let visible_row_keys = visible.iter().map(VisibleRow::key).collect::<Vec<_>>();
+        if self.visible_row_keys != visible_row_keys {
+            let (old_range, new_count) = changed_range(&self.visible_row_keys, &visible_row_keys);
+            self.list_state.splice(old_range, new_count);
+            self.visible_row_keys = visible_row_keys;
         }
         let entity = cx.entity();
         let locale_for_list = Arc::<str>::from(locale.clone());
@@ -821,6 +842,24 @@ fn compact_number(value: i64) -> String {
     }
 }
 
+fn changed_range<T: PartialEq>(old: &[T], new: &[T]) -> (Range<usize>, usize) {
+    let prefix = old
+        .iter()
+        .zip(new)
+        .take_while(|(old_item, new_item)| old_item == new_item)
+        .count();
+    let max_suffix = old.len().min(new.len()).saturating_sub(prefix);
+    let suffix = old
+        .iter()
+        .rev()
+        .zip(new.iter().rev())
+        .take(max_suffix)
+        .take_while(|(old_item, new_item)| old_item == new_item)
+        .count();
+
+    (prefix..old.len() - suffix, new.len() - prefix - suffix)
+}
+
 fn pagination_items(current: usize, pages: usize) -> Vec<Option<usize>> {
     if pages <= 6 {
         return (0..pages).map(Some).collect();
@@ -925,6 +964,15 @@ mod tests {
                 Some(9)
             ]
         );
+    }
+
+    #[test]
+    fn expanding_channel_only_splices_inserted_threads() {
+        let old = [1, 2, 3, 4];
+        let expanded = [1, 2, 20, 21, 3, 4];
+
+        assert_eq!(changed_range(&old, &expanded), (2..2, 2));
+        assert_eq!(changed_range(&expanded, &old), (2..4, 0));
     }
 
     #[test]
