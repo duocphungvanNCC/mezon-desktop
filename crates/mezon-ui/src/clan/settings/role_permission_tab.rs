@@ -93,6 +93,10 @@ impl RoleSettingPage {
                         .contains(&query)
             })
             .collect();
+        let user_permission_level = PermissionStore::global(cx)
+            .read(cx)
+            .current_permission_level(self.clan_id, cx)
+            .unwrap_or(-1);
 
         v_flex()
             .gap_3()
@@ -119,6 +123,7 @@ impl RoleSettingPage {
                             can_edit,
                             is_everyone,
                             is_clan_owner,
+                            user_permission_level,
                             cx,
                         )
                         .into_any_element(),
@@ -136,12 +141,14 @@ impl RoleSettingPage {
         can_edit: bool,
         is_everyone: bool,
         is_clan_owner: bool,
+        user_permission_level: i32,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let checked = self.draft_permission_ids.contains(&perm.id);
         let hide_admin = !is_clan_owner && can_edit && perm.slug == PERMISSION_ADMINISTRATOR;
         let lock_everyone_send = is_everyone && perm.slug == PERMISSION_SEND_MESSAGE;
-        let disabled = !can_edit || hide_admin || lock_everyone_send;
+        let lock_hierarchy = !is_clan_owner && can_edit && perm.level >= user_permission_level;
+        let disabled = !can_edit || hide_admin || lock_everyone_send || lock_hierarchy;
         let title = localized_permission_title(locale, perm);
         let description = localized_permission_description(locale, &perm.slug);
         let perm_id = perm.id;

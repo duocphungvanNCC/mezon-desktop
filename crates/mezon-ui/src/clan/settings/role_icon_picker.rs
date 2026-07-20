@@ -42,25 +42,16 @@ pub fn render_role_icon_picker_modal(
     window: &mut Window,
     cx: &mut App,
 ) -> impl IntoElement {
-    let _ = page.update(cx, |page, cx| {
-        if page.role_icon_picker_tab == RoleIconPickerTab::Emoji {
-            page.ensure_role_icon_emoji_picker(window, cx);
-        }
-    });
-
     let tab = page.read(cx).role_icon_picker_tab;
     let uploading = page.read(cx).icon_uploading;
-    let upload_label: SharedString = mezon_i18n::t(&locale, "common.roleIcon.uploadImage").into();
-    let emoji_label: SharedString = mezon_i18n::t(&locale, "common.roleIcon.emoji").into();
+    let focus_handle = page.read(cx).role_icon_picker_focus();
+    let upload_label: SharedString = mezon_i18n::t(locale, "common.roleIcon.uploadImage").into();
+    let emoji_label: SharedString = mezon_i18n::t(locale, "common.roleIcon.emoji").into();
     let emoji_picker = page.read(cx).role_icon_emoji_picker.clone();
 
     let viewport = window.viewport_size();
-    let modal_w = f32::from(viewport.width)
-        .min(MODAL_W)
-        .max(320.0);
-    let modal_h = (f32::from(viewport.height) - 48.0)
-        .min(MODAL_H)
-        .max(360.0);
+    let modal_w = f32::from(viewport.width).clamp(320.0, MODAL_W);
+    let modal_h = (f32::from(viewport.height) - 48.0).clamp(360.0, MODAL_H);
 
     deferred(
         div()
@@ -98,6 +89,7 @@ pub fn render_role_icon_picker_modal(
             .child(
                 div()
                     .id("role-icon-picker-modal")
+                    .track_focus(&focus_handle)
                     .occlude()
                     .relative()
                     .w(px(modal_w))
@@ -124,6 +116,7 @@ pub fn render_role_icon_picker_modal(
                                 RoleIconPickerTab::Image,
                                 tab,
                                 upload_label,
+                                window,
                                 cx,
                             ))
                             .child(render_role_icon_tab_button(
@@ -132,6 +125,7 @@ pub fn render_role_icon_picker_modal(
                                 RoleIconPickerTab::Emoji,
                                 tab,
                                 emoji_label,
+                                window,
                                 cx,
                             )),
                     )
@@ -144,15 +138,9 @@ pub fn render_role_icon_picker_modal(
                             .flex()
                             .flex_col()
                             .when(tab == RoleIconPickerTab::Image, |panel| {
-                                panel
-                                    .items_center()
-                                    .justify_center()
-                                    .child(render_role_icon_upload_panel(
-                                        page.clone(),
-                                        locale,
-                                        theme,
-                                        cx,
-                                    ))
+                                panel.items_center().justify_center().child(
+                                    render_role_icon_upload_panel(page.clone(), locale, theme, cx),
+                                )
                             })
                             .when(tab == RoleIconPickerTab::Emoji, |panel| {
                                 panel.child(
@@ -163,9 +151,7 @@ pub fn render_role_icon_picker_modal(
                                         .overflow_hidden()
                                         .flex()
                                         .flex_col()
-                                        .when_some(emoji_picker, |col, picker| {
-                                            col.child(picker)
-                                        }),
+                                        .when_some(emoji_picker, |col, picker| col.child(picker)),
                                 )
                             }),
                     )
@@ -272,10 +258,11 @@ impl RoleSettingPage {
             })
     }
 
-    pub(super) fn open_role_icon_picker(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn open_role_icon_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         EmojiStore::global(cx).update(cx, |store, cx| store.ensure_loaded(cx));
         self.role_icon_picker_open = true;
         self.role_icon_picker_tab = RoleIconPickerTab::Image;
+        window.focus(&self.role_icon_picker_focus, cx);
         cx.notify();
     }
 
@@ -289,19 +276,19 @@ impl RoleSettingPage {
     pub(super) fn set_role_icon_picker_tab(
         &mut self,
         tab: RoleIconPickerTab,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         if self.role_icon_picker_tab != tab {
             self.role_icon_picker_tab = tab;
+            if tab == RoleIconPickerTab::Emoji {
+                self.ensure_role_icon_emoji_picker(window, cx);
+            }
             cx.notify();
         }
     }
 
-    fn ensure_role_icon_emoji_picker(
-        &mut self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn ensure_role_icon_emoji_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.role_icon_emoji_picker.is_some() {
             return;
         }
@@ -449,6 +436,7 @@ fn render_role_icon_tab_button(
     tab: RoleIconPickerTab,
     active: RoleIconPickerTab,
     label: SharedString,
+    _window: &mut Window,
     _cx: &mut App,
 ) -> impl IntoElement {
     let selected = tab == active;
@@ -472,8 +460,10 @@ fn render_role_icon_tab_button(
         .child(label)
         .on_click({
             let page = page.clone();
-            move |_, _, cx| {
-                page.update(cx, |this, cx| this.set_role_icon_picker_tab(tab, cx));
+            move |_, window, cx| {
+                page.update(cx, |this, cx| {
+                    this.set_role_icon_picker_tab(tab, window, cx);
+                });
             }
         })
 }
@@ -517,9 +507,6 @@ fn render_role_icon_upload_panel(
             div()
                 .text_sm()
                 .text_color(theme.text_primary)
-                .child(mezon_i18n::t(
-                    locale,
-                    "common.roleIcon.chooseImageToUpload",
-                )),
+                .child(mezon_i18n::t(locale, "common.roleIcon.chooseImageToUpload")),
         )
 }

@@ -61,6 +61,9 @@ impl From<&ClanRoleDetail> for Role {
             name: detail.name.clone(),
             color: detail.color.clone(),
             icon: detail.icon.clone(),
+            slug: detail.slug.clone(),
+            max_level_permission: detail.max_level_permission,
+            order: detail.order_role,
         }
     }
 }
@@ -68,6 +71,9 @@ impl From<&ClanRoleDetail> for Role {
 #[derive(Debug, Clone)]
 pub enum RolesEvent {
     Changed { clan_id: ClanId },
+    Created { clan_id: ClanId, role_id: RoleId },
+    RoleSaved { clan_id: ClanId, role_id: RoleId },
+    RoleSaveFailed { clan_id: ClanId, role_id: RoleId },
 }
 
 #[derive(Debug, Default)]
@@ -92,6 +98,7 @@ pub struct RolesStore {
     role_users_loading: HashSet<RoleId>,
     loading: HashSet<ClanId>,
     saving: HashSet<ClanId>,
+    reset_generation: u64,
     api: Arc<AppApi>,
     _clan_sub: Subscription,
     _conn_watch: Task<()>,
@@ -118,6 +125,7 @@ impl RolesStore {
     }
 
     pub fn reset(&mut self, cx: &mut Context<Self>) {
+        self.reset_generation = self.reset_generation.wrapping_add(1);
         self.cache.clear();
         self.role_users.clear();
         self.role_users_loading.clear();
@@ -157,6 +165,7 @@ impl RolesStore {
             role_users_loading: HashSet::new(),
             loading: HashSet::new(),
             saving: HashSet::new(),
+            reset_generation: 0,
             api,
             _clan_sub: clan_sub,
             _conn_watch: conn_watch,
@@ -225,29 +234,32 @@ impl RolesStore {
             return;
         }
         let api = self.api.clone();
+        let generation = self.reset_generation;
         cx.spawn(async move |this, cx| {
             let mut users = Vec::new();
             let mut cursor = String::new();
-            let mut fetched = false;
+            let mut complete = false;
             loop {
                 let result = api.list_role_users(role_id.get(), 100, &cursor).await;
                 let Ok(page) = result else {
                     break;
                 };
-                fetched = true;
                 users.extend(page.role_users.into_iter().map(role_user_from_proto));
                 if page.cursor.is_empty() {
+                    complete = true;
                     break;
                 }
                 cursor = page.cursor;
             }
             let _ = this.update(cx, |this, cx| {
                 this.role_users_loading.remove(&role_id);
-                if fetched {
-                    this.role_users.insert(role_id, users);
-                    if let Some(clan_id) = this.clan_id_for_role(role_id) {
-                        this.sync_role_member_count(role_id, clan_id);
-                    }
+                if this.reset_generation != generation || !complete {
+                    return;
+                }
+                this.role_users.insert(role_id, users);
+                if let Some(clan_id) = this.clan_id_for_role(role_id) {
+                    this.sync_role_member_count(role_id, clan_id);
+                    cx.emit(RolesEvent::Changed { clan_id });
                 }
                 cx.notify();
             });
@@ -331,19 +343,19 @@ impl RolesStore {
         add_user_ids: Vec<i64>,
         remove_user_ids: Vec<i64>,
         cx: &mut Context<Self>,
-    ) {
+    ) -> bool {
         if add_user_ids.is_empty() && remove_user_ids.is_empty() {
-            return;
+            return false;
         }
         let Some(role) = self
             .cache
             .get(&clan_id)
             .and_then(|roles| roles.by_id.get(&role_id).cloned())
         else {
-            return;
+            return false;
         };
         if !self.saving.insert(clan_id) {
-            return;
+            return false;
         }
         let max_permission_id = self.resolve_max_permission_id(clan_id, cx);
         let api = self.api.clone();
@@ -373,12 +385,13 @@ impl RolesStore {
                         cx.notify();
                     }
                     Err(err) => {
-                        tracing::error!("mutate_role_members failed for role {role_id}: {err}")
+                        tracing::error!("mutate_role_members failed for role {role_id}: {err}");
                     }
                 }
             });
         })
         .detach();
+        true
     }
 
     pub fn ensure_loaded(&mut self, clan_id: ClanId, cx: &mut Context<Self>) {
@@ -515,7 +528,10 @@ impl RolesStore {
             let _ = this.update(cx, |this, cx| {
                 this.saving.remove(&clan_id);
                 match result {
-                    Ok(_) => {
+                    Ok(role_proto) => {
+                        let role_id = RoleId(role_proto.id);
+                        this.upsert_role_from_proto(clan_id, role_proto);
+                        cx.emit(RolesEvent::Created { clan_id, role_id });
                         this.refresh_active(clan_id, cx);
                     }
                     Err(err) => tracing::error!("create_role failed for {clan_id}: {err}"),
@@ -557,9 +573,11 @@ impl RolesStore {
                 match result {
                     Ok(()) => {
                         this.refresh_active(clan_id, cx);
+                        cx.emit(RolesEvent::RoleSaved { clan_id, role_id });
                     }
                     Err(err) => {
-                        tracing::error!("update_role failed for role {role_id}: {err}")
+                        tracing::error!("update_role failed for role {role_id}: {err}");
+                        cx.emit(RolesEvent::RoleSaveFailed { clan_id, role_id });
                     }
                 }
             });
@@ -587,6 +605,53 @@ impl RolesStore {
             });
         })
         .detach();
+    }
+
+    fn upsert_role_from_proto(&mut self, clan_id: ClanId, r: api::Role) {
+        if r.id == 0 || r.active != 1 {
+            return;
+        }
+        let id = RoleId(r.id);
+        let permissions = r
+            .permission_list
+            .map(|list| {
+                list.permissions
+                    .into_iter()
+                    .map(|p| RolePermission {
+                        id: p.id,
+                        slug: p.slug,
+                        title: p.title,
+                        active: p.active == 1,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let member_count = r
+            .role_user_list
+            .map(|list| list.role_users.len())
+            .unwrap_or(0);
+        let detail = ClanRoleDetail {
+            name: r.title,
+            color: r.color,
+            icon: r.role_icon,
+            slug: r.slug,
+            active: r.active == 1,
+            order_role: r.order_role,
+            max_level_permission: r.max_level_permission,
+            permissions,
+            member_count,
+        };
+        let roles = self.cache.get_mut(&clan_id);
+        if let Some(roles) = roles {
+            if roles.by_id.insert(id, detail).is_none() {
+                roles.order.push(id);
+            }
+        } else {
+            let mut clan_roles = ClanRoles::default();
+            clan_roles.by_id.insert(id, detail);
+            clan_roles.order.push(id);
+            self.cache.insert(clan_id, clan_roles, None);
+        }
     }
 
     pub fn resolve_max_permission_id(&self, clan_id: ClanId, cx: &App) -> i64 {

@@ -147,7 +147,12 @@ impl RoleSettingPage {
                         theme,
                     ))
                     .child(role_color_picker::render_role_color_section(
-                        self, locale, theme, can_edit_display, window, cx,
+                        self,
+                        locale,
+                        theme,
+                        can_edit_display,
+                        window,
+                        cx,
                     )),
             )
             .child(
@@ -166,7 +171,12 @@ impl RoleSettingPage {
                         theme,
                     ))
                     .child(role_icon_picker::render_role_icon_section(
-                        self, locale, theme, can_edit_display, window, cx,
+                        self,
+                        locale,
+                        theme,
+                        can_edit_display,
+                        window,
+                        cx,
                     )),
             )
     }

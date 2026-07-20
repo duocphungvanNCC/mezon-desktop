@@ -1,6 +1,9 @@
 use std::collections::HashSet;
 
-use gpui::{Context, FontWeight, MouseDownEvent, SharedString, Window, canvas, div, prelude::*, px};
+use gpui::{
+    Context, FontWeight, ListSizingBehavior, MouseDownEvent, SharedString, Window, canvas, div,
+    prelude::*, px, size, uniform_list,
+};
 
 use mezon_store::{ClanMembersStore, RoleUser, RolesStore, UserId};
 
@@ -13,7 +16,10 @@ use crate::theme::{ActiveTheme, Theme};
 
 const MEMBER_CONTROL_HEIGHT: f32 = 34.0;
 const MEMBER_REMOVE_ICON_SIZE: f32 = 14.0;
+const MEMBER_ROW_HEIGHT: f32 = 44.0;
+const ADD_MEMBER_ROW_HEIGHT: f32 = 40.0;
 
+#[derive(Clone)]
 struct MemberDisplay {
     user_id: UserId,
     name: SharedString,
@@ -58,9 +64,7 @@ fn role_user_display(
     }
 }
 
-fn clan_member_display(
-    member: &mezon_store::ClanMember,
-) -> MemberDisplay {
+fn clan_member_display(member: &mezon_store::ClanMember) -> MemberDisplay {
     MemberDisplay {
         user_id: member.id(),
         name: member.name().into(),
@@ -116,9 +120,13 @@ impl RoleSettingPage {
 
         let query = self.member_search_query.to_ascii_lowercase();
         let members = self.filtered_role_members(query, cx);
-        let can_add = can_edit && self.selected_role_id.is_some();
+        let can_add = can_edit && self.selected_role_id.is_some() && !self.is_saving(cx);
+        let members_saving = self.is_saving(cx);
         let popover_open = self.add_members_popover_open;
-        let page = cx.entity().clone();
+        let entity = cx.entity().clone();
+        let bounds_page = entity.clone();
+        let locale = locale.to_string();
+        let member_count = members.len();
 
         v_flex()
             .gap_3()
@@ -128,22 +136,20 @@ impl RoleSettingPage {
                     .h(px(MEMBER_CONTROL_HEIGHT))
                     .gap_2()
                     .items_center()
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .when_some(self.member_search_input.clone(), |row, input| {
-                                row.child(
-                                    div()
-                                        .h(px(MEMBER_CONTROL_HEIGHT))
-                                        .rounded_lg()
-                                        .border_1()
-                                        .border_color(theme.border)
-                                        .bg(theme.tokens.bg_tertiary)
-                                        .child(Input::new(&input)),
-                                )
-                            }),
-                    )
+                    .child(div().flex_1().min_w_0().when_some(
+                        self.member_search_input.clone(),
+                        |row, input| {
+                            row.child(
+                                div()
+                                    .h(px(MEMBER_CONTROL_HEIGHT))
+                                    .rounded_lg()
+                                    .border_1()
+                                    .border_color(theme.border)
+                                    .bg(theme.tokens.bg_tertiary)
+                                    .child(Input::new(&input)),
+                            )
+                        },
+                    ))
                     .when(can_add, |row| {
                         row.child(
                             div()
@@ -151,7 +157,7 @@ impl RoleSettingPage {
                                 .child(
                                     Button::new("role-add-members")
                                         .label(mezon_i18n::t(
-                                            locale,
+                                            &locale,
                                             "clanRoles.setupMember.addMember",
                                         ))
                                         .primary()
@@ -163,7 +169,7 @@ impl RoleSettingPage {
                                 .child(
                                     canvas(
                                         move |bounds, _, cx| {
-                                            page.update(cx, |this, _| {
+                                            bounds_page.update(cx, |this, _| {
                                                 this.add_members_button_bounds = bounds;
                                             });
                                         },
@@ -180,18 +186,13 @@ impl RoleSettingPage {
                     div()
                         .w_full()
                         .occlude()
-                        .on_mouse_down_out(cx.listener(
-                            |this, event: &MouseDownEvent, _, cx| {
-                                if this
-                                    .add_members_button_bounds
-                                    .contains(&event.position)
-                                {
-                                    return;
-                                }
-                                this.close_add_members_popover(cx);
-                            },
-                        ))
-                        .child(self.render_add_members_popover(locale, theme, window, cx)),
+                        .on_mouse_down_out(cx.listener(|this, event: &MouseDownEvent, _, cx| {
+                            if this.add_members_button_bounds.contains(&event.position) {
+                                return;
+                            }
+                            this.close_add_members_popover(cx);
+                        }))
+                        .child(self.render_add_members_popover(&locale, theme, window, cx)),
                 )
             })
             .child(if members.is_empty() {
@@ -202,22 +203,40 @@ impl RoleSettingPage {
                     .py_8()
                     .text_sm()
                     .text_color(theme.text_secondary)
-                    .child(mezon_i18n::t(locale, "clanRoles.setupMember.noMembersFound"))
+                    .child(mezon_i18n::t(
+                        &locale,
+                        "clanRoles.setupMember.noMembersFound",
+                    ))
                     .into_any_element()
             } else {
-                v_flex()
-                    .gap_2()
-                    .children(members.into_iter().map(|member| {
-                        self.render_role_member_row(
-                            locale,
-                            theme,
-                            member,
-                            can_edit,
-                            cx,
-                        )
-                        .into_any_element()
-                    }))
-                    .into_any_element()
+                uniform_list(
+                    "role-member-list",
+                    member_count,
+                    move |range, _window, cx| {
+                        let theme = cx.theme().clone();
+                        let page = entity.read(cx);
+                        let query = page.member_search_query.to_ascii_lowercase();
+                        let members = page.filtered_role_members(query, cx);
+                        range
+                            .map(|ix| match members.get(ix) {
+                                Some(member) => page
+                                    .render_role_member_row(
+                                        &theme,
+                                        member.clone(),
+                                        can_edit && !members_saving,
+                                        entity.clone(),
+                                    )
+                                    .into_any_element(),
+                                None => div().h(px(MEMBER_ROW_HEIGHT)).into_any_element(),
+                            })
+                            .collect::<Vec<_>>()
+                    },
+                )
+                .with_item_size(size(px(0.0), px(MEMBER_ROW_HEIGHT)))
+                .with_sizing_behavior(ListSizingBehavior::Infer)
+                .track_scroll(&self.member_list_scroll)
+                .w_full()
+                .into_any_element()
             })
     }
 
@@ -234,6 +253,10 @@ impl RoleSettingPage {
         let role_name = self.draft_name.clone();
         let selected_count = self.add_member_selection.len();
         let title = mezon_i18n::t(locale, "clanRoles.setupMember.addMember");
+        let members_saving = self.is_saving(cx);
+        let page = cx.entity().clone();
+        let entity = page.clone();
+        let candidate_count = candidates.len();
 
         v_flex()
             .w_full()
@@ -290,7 +313,7 @@ impl RoleSettingPage {
                     .id("role-add-members-list")
                     .max_h(px(200.0))
                     .overflow_y_scroll()
-                    .child(if candidates.is_empty() {
+                    .child(if candidate_count == 0 {
                         div()
                             .py_4()
                             .text_sm()
@@ -301,13 +324,36 @@ impl RoleSettingPage {
                             ))
                             .into_any_element()
                     } else {
-                        v_flex()
-                            .gap_1()
-                            .children(candidates.into_iter().map(|member| {
-                                self.render_add_member_candidate_row(theme, member, cx)
-                                    .into_any_element()
-                            }))
-                            .into_any_element()
+                        uniform_list(
+                            "role-add-member-candidates",
+                            candidate_count,
+                            move |range, _window, cx| {
+                                let theme = cx.theme().clone();
+                                let page = page.read(cx);
+                                let query = page.add_member_search_query.to_ascii_lowercase();
+                                let candidates = page.add_member_candidates(query, cx);
+                                range
+                                    .map(|ix| match candidates.get(ix) {
+                                        Some(member) => page
+                                            .render_add_member_candidate_row(
+                                                &theme,
+                                                member.clone(),
+                                                members_saving,
+                                                entity.clone(),
+                                            )
+                                            .into_any_element(),
+                                        None => {
+                                            div().h(px(ADD_MEMBER_ROW_HEIGHT)).into_any_element()
+                                        }
+                                    })
+                                    .collect::<Vec<_>>()
+                            },
+                        )
+                        .with_item_size(size(px(0.0), px(ADD_MEMBER_ROW_HEIGHT)))
+                        .with_sizing_behavior(ListSizingBehavior::Infer)
+                        .track_scroll(&self.add_member_list_scroll)
+                        .w_full()
+                        .into_any_element()
                     }),
             )
             .child(
@@ -326,7 +372,7 @@ impl RoleSettingPage {
                         Button::new("role-add-members-confirm")
                             .label(mezon_i18n::t(locale, "clanRoles.setupMember.add"))
                             .primary()
-                            .disabled(selected_count == 0)
+                            .disabled(selected_count == 0 || members_saving)
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.confirm_add_members(cx);
                             })),
@@ -334,11 +380,7 @@ impl RoleSettingPage {
             )
     }
 
-    fn filtered_role_members(
-        &self,
-        query: String,
-        cx: &gpui::App,
-    ) -> Vec<MemberDisplay> {
+    fn filtered_role_members(&self, query: String, cx: &gpui::App) -> Vec<MemberDisplay> {
         let Some(role_id) = self.selected_role_id else {
             return Vec::new();
         };
@@ -373,17 +415,14 @@ impl RoleSettingPage {
 
     fn render_role_member_row(
         &self,
-        _locale: &str,
         theme: &Theme,
         member: MemberDisplay,
         can_edit: bool,
-        cx: &mut Context<Self>,
+        page: gpui::Entity<Self>,
     ) -> impl IntoElement {
         let user_id = member.user_id;
         let row_group = SharedString::from(format!("role-member-row-{}", user_id.get()));
-        let mut avatar = Avatar::new()
-            .name(member.name.clone())
-            .size_px(px(24.0));
+        let mut avatar = Avatar::new().name(member.name.clone()).size_px(px(24.0));
         if !member.avatar.is_empty() {
             avatar = avatar.src(member.avatar.clone());
         }
@@ -391,6 +430,7 @@ impl RoleSettingPage {
         h_flex()
             .id(("role-member-row", user_id.get() as u64))
             .group(row_group.clone())
+            .w_full()
             .w_full()
             .p_2()
             .rounded(px(6.0))
@@ -420,11 +460,13 @@ impl RoleSettingPage {
                         .child(
                             Icon::new(IconName::Close)
                                 .size(px(MEMBER_REMOVE_ICON_SIZE))
-                                .text_color(theme.text_secondary)
+                                .text_color(theme.text_secondary),
                         )
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.remove_role_member(user_id, cx);
-                        })),
+                        .on_click(move |_, _, cx| {
+                            page.update(cx, |this, cx| {
+                                this.remove_role_member(user_id, cx);
+                            });
+                        }),
                 )
             })
     }
@@ -433,13 +475,12 @@ impl RoleSettingPage {
         &self,
         theme: &Theme,
         member: MemberDisplay,
-        cx: &mut Context<Self>,
+        disabled: bool,
+        page: gpui::Entity<Self>,
     ) -> impl IntoElement {
         let user_id = member.user_id;
         let checked = self.add_member_selection.contains(&user_id);
-        let mut avatar = Avatar::new()
-            .name(member.name.clone())
-            .size_px(px(20.0));
+        let mut avatar = Avatar::new().name(member.name.clone()).size_px(px(20.0));
         if !member.avatar.is_empty() {
             avatar = avatar.src(member.avatar.clone());
         }
@@ -447,14 +488,23 @@ impl RoleSettingPage {
         div()
             .id(("role-add-member-candidate", user_id.get() as u64))
             .w_full()
+            .w_full()
             .px_2()
             .py_1()
             .rounded(px(4.0))
-            .cursor_pointer()
-            .hover(|s| s.bg(theme.bg_hover))
-            .on_click(cx.listener(move |this, _, _, cx| {
-                this.toggle_add_member_selection(user_id, cx);
-            }))
+            .when(!disabled, |el| el.cursor_pointer())
+            .when(disabled, |el| el.opacity(0.5))
+            .when(!disabled, |el| el.hover(|s| s.bg(theme.bg_hover)))
+            .when(!disabled, |el| {
+                el.on_click({
+                    let page = page.clone();
+                    move |_, _, cx| {
+                        page.update(cx, |this, cx| {
+                            this.toggle_add_member_selection(user_id, cx);
+                        });
+                    }
+                })
+            })
             .child(
                 h_flex()
                     .w_full()
@@ -471,7 +521,8 @@ impl RoleSettingPage {
                     )
                     .child(
                         Checkbox::new(("role-add-member-check", user_id.get() as u64))
-                            .checked(checked),
+                            .checked(checked)
+                            .disabled(disabled),
                     ),
             )
     }
@@ -516,14 +567,11 @@ impl RoleSettingPage {
         let Some(role_id) = self.selected_role_id else {
             return;
         };
+        if self.is_saving(cx) {
+            return;
+        }
         RolesStore::global(cx).update(cx, |store, cx| {
-            store.mutate_role_members(
-                self.clan_id,
-                role_id,
-                Vec::new(),
-                vec![user_id.get()],
-                cx,
-            );
+            store.mutate_role_members(self.clan_id, role_id, Vec::new(), vec![user_id.get()], cx);
         });
     }
 
@@ -531,6 +579,9 @@ impl RoleSettingPage {
         let Some(role_id) = self.selected_role_id else {
             return;
         };
+        if self.is_saving(cx) {
+            return;
+        }
         let user_ids: Vec<i64> = self
             .add_member_selection
             .iter()
@@ -539,10 +590,12 @@ impl RoleSettingPage {
         if user_ids.is_empty() {
             return;
         }
-        RolesStore::global(cx).update(cx, |store, cx| {
-            store.mutate_role_members(self.clan_id, role_id, user_ids, Vec::new(), cx);
+        let accepted = RolesStore::global(cx).update(cx, |store, cx| {
+            store.mutate_role_members(self.clan_id, role_id, user_ids, Vec::new(), cx)
         });
-        self.close_add_members_popover(cx);
+        if accepted {
+            self.close_add_members_popover(cx);
+        }
     }
 
     pub(super) fn ensure_member_search_input(
@@ -575,11 +628,7 @@ impl RoleSettingPage {
         self._member_search_sub = Some(sub);
     }
 
-    fn ensure_add_member_search_input(
-        &mut self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn ensure_add_member_search_input(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.add_member_search_input.is_some() {
             return;
         }

@@ -57,7 +57,8 @@ fn clan_image_extension(path: &Path) -> Option<String> {
 }
 
 pub fn validate_clan_image_file(path: &Path, max_bytes: u64) -> Result<ClanImageMimeType, String> {
-    let ext = clan_image_extension(path).ok_or_else(|| "Unsupported image file type".to_string())?;
+    let ext =
+        clan_image_extension(path).ok_or_else(|| "Unsupported image file type".to_string())?;
     let mime_type = ClanImageMimeType::from_extension(&ext)
         .ok_or_else(|| "Unsupported image file type".to_string())?;
     let len = std::fs::metadata(path).map_err(|e| e.to_string())?.len();
@@ -810,7 +811,8 @@ async fn upload_clan_image_to_cdn(
         .and_then(|n| n.to_str())
         .unwrap_or("avatar");
     let filename = timestamped_upload_filename(raw_filename);
-    let ext = clan_image_extension(path).ok_or_else(|| "Unsupported image file type".to_string())?;
+    let ext =
+        clan_image_extension(path).ok_or_else(|| "Unsupported image file type".to_string())?;
     let filetype = ClanImageMimeType::from_extension(&ext)
         .ok_or_else(|| "Unsupported image file type".to_string())?
         .as_str();
@@ -1030,7 +1032,8 @@ mod tests {
 
     #[test]
     fn validate_clan_image_file_rejects_unsupported_extension() {
-        let dir = std::env::temp_dir().join(format!("mezon-clan-image-test-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("mezon-clan-image-test-{}", std::process::id()));
         let _ = std::fs::create_dir_all(&dir);
         let path = dir.join("bad.bmp");
         std::fs::write(&path, b"data").expect("write temp file");
@@ -1043,7 +1046,8 @@ mod tests {
 
     #[test]
     fn validate_clan_image_file_rejects_oversized_file() {
-        let dir = std::env::temp_dir().join(format!("mezon-clan-image-size-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("mezon-clan-image-size-{}", std::process::id()));
         let _ = std::fs::create_dir_all(&dir);
         let path = dir.join("large.png");
         std::fs::write(&path, vec![0_u8; 32]).expect("write temp file");

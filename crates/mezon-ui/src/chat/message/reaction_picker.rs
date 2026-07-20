@@ -122,7 +122,12 @@ impl ReactionPicker {
         }
     }
 
-    fn build(embedded_search: bool, fill_container: bool, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    fn build(
+        embedded_search: bool,
+        fill_container: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let focus_handle = cx.focus_handle();
         let search = cx.new(|cx| {
             InputState::new(window, cx)

@@ -4840,7 +4840,6 @@ impl MezonTransport {
             role_id,
             limit,
             cursor: cursor.to_string(),
-            ..Default::default()
         }
         .encode_to_vec();
         let (code, response) = self.send_api_request(cid, "ListRoleUsers", body).await?;

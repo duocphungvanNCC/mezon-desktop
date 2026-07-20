@@ -1,13 +1,13 @@
 use std::collections::HashSet;
 
 use gpui::{
-    App, Context, Entity, FontWeight, Pixels, SharedString, Subscription, Task, Window, div,
-    prelude::*, px,
+    App, Context, Entity, FocusHandle, FontWeight, ListSizingBehavior, Pixels, SharedString,
+    Subscription, Task, UniformListScrollHandle, Window, div, prelude::*, px, size, uniform_list,
 };
 
 use mezon_store::{
-    ClanId, ClanRoleDetail, DEFAULT_ROLE_COLOR, PermissionStore, RoleDraft, RoleId, RolesStore,
-    Settings, UserId, everyone_slug,
+    ClanId, ClanRoleDetail, DEFAULT_ROLE_COLOR, PermissionStore, RoleDraft, RoleId, RolesEvent,
+    RolesStore, Settings, UserId, everyone_slug,
 };
 
 use crate::components::primitives::{
@@ -18,6 +18,7 @@ use crate::theme::{ActiveTheme, Theme};
 use super::role_color_picker;
 use super::role_icon_picker::RoleIconPickerTab;
 use super::role_list_side_bar::{self, active_permission_ids as role_active_permission_ids};
+use crate::app::shell::Shell;
 use crate::chat::message::ReactionPicker;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -73,7 +74,12 @@ pub struct RoleSettingPage {
     pub(super) icon_uploading: bool,
     pub(super) role_icon_picker_open: bool,
     pub(super) role_icon_picker_tab: RoleIconPickerTab,
+    pub(super) role_icon_picker_focus: FocusHandle,
     pub(super) role_icon_emoji_picker: Option<Entity<ReactionPicker>>,
+    pub(super) role_sidebar_scroll: UniformListScrollHandle,
+    pub(super) role_list_scroll: UniformListScrollHandle,
+    pub(super) member_list_scroll: UniformListScrollHandle,
+    pub(super) add_member_list_scroll: UniformListScrollHandle,
     pub(super) _role_icon_emoji_picker_sub: Option<Subscription>,
     _list_search_sub: Option<Subscription>,
     pub(super) _permission_search_sub: Option<Subscription>,
@@ -84,7 +90,6 @@ pub struct RoleSettingPage {
     pub(super) _icon_upload_task: Option<Task<()>>,
     _roles_sub: Subscription,
     _permissions_sub: Subscription,
-    _create_task: Option<Task<()>>,
 }
 
 impl RoleSettingPage {
@@ -97,7 +102,42 @@ impl RoleSettingPage {
             store.load_clan_permissions(clan_id, cx);
         });
 
-        let roles_sub = cx.subscribe(&RolesStore::global(cx), |_, _, _, cx| cx.notify());
+        let roles_sub = cx.subscribe(
+            &RolesStore::global(cx),
+            |this, _, event: &RolesEvent, cx| {
+                match event {
+                    RolesEvent::Created { clan_id, role_id } if *clan_id == this.clan_id => {
+                        if let Some(role) = RolesStore::global(cx)
+                            .read(cx)
+                            .clan_role(*clan_id, *role_id)
+                            .cloned()
+                        {
+                            this.mode = RolePageMode::Edit;
+                            this.selected_role_id = Some(*role_id);
+                            this.creating_role = false;
+                            this.edit_tab = RoleEditTab::Display;
+                            this.load_draft_from_role(&role);
+                            this.reset_name_input();
+                        }
+                    }
+                    RolesEvent::RoleSaved { clan_id, role_id }
+                        if *clan_id == this.clan_id && this.selected_role_id == Some(*role_id) =>
+                    {
+                        this.commit_saved_baseline();
+                    }
+                    RolesEvent::RoleSaveFailed { clan_id, role_id }
+                        if *clan_id == this.clan_id && this.selected_role_id == Some(*role_id) =>
+                    {
+                        let locale = this.settings.read(cx).language.clone();
+                        let message = mezon_i18n::t(&locale, "clanOverviewSetting.toast.saveError")
+                            .to_string();
+                        Shell::global(cx).update(cx, |shell, cx| shell.error(message, cx));
+                    }
+                    _ => {}
+                }
+                cx.notify();
+            },
+        );
         let permissions_sub = cx.subscribe(&PermissionStore::global(cx), |_, _, _, cx| cx.notify());
 
         Self {
@@ -140,7 +180,12 @@ impl RoleSettingPage {
             icon_uploading: false,
             role_icon_picker_open: false,
             role_icon_picker_tab: RoleIconPickerTab::Image,
+            role_icon_picker_focus: cx.focus_handle(),
             role_icon_emoji_picker: None,
+            role_sidebar_scroll: UniformListScrollHandle::new(),
+            role_list_scroll: UniformListScrollHandle::new(),
+            member_list_scroll: UniformListScrollHandle::new(),
+            add_member_list_scroll: UniformListScrollHandle::new(),
             _role_icon_emoji_picker_sub: None,
             _list_search_sub: None,
             _permission_search_sub: None,
@@ -151,12 +196,26 @@ impl RoleSettingPage {
             _icon_upload_task: None,
             _roles_sub: roles_sub,
             _permissions_sub: permissions_sub,
-            _create_task: None,
         }
     }
 
+    pub fn role_icon_picker_focus(&self) -> FocusHandle {
+        self.role_icon_picker_focus.clone()
+    }
+
+    fn reset_name_input(&mut self) {
+        self.name_input = None;
+        self._name_sub = None;
+    }
+
+    fn commit_saved_baseline(&mut self) {
+        self.saved_name = self.draft_name.trim().to_string();
+        self.saved_color = self.draft_color.clone();
+        self.saved_icon = self.draft_icon.clone();
+        self.saved_permission_ids = self.draft_permission_ids.clone();
+    }
+
     pub fn release(&mut self) {
-        self._create_task.take();
         self._icon_upload_task.take();
         self.icon_uploading = false;
         self.role_icon_picker_open = false;
@@ -224,7 +283,32 @@ impl RoleSettingPage {
         let Some(role) = self.selected_role_detail(cx) else {
             return true;
         };
-        !RolesStore::global(cx).read(cx).role_has_administrator(role)
+        if RolesStore::global(cx).read(cx).role_has_administrator(role) {
+            return false;
+        }
+        PermissionStore::global(cx)
+            .read(cx)
+            .current_permission_level(self.clan_id, cx)
+            .is_none_or(|level| role.max_level_permission < level)
+    }
+
+    fn can_manage_role(&self, role: &ClanRoleDetail, cx: &App) -> bool {
+        let perms = PermissionStore::global(cx)
+            .read(cx)
+            .clan_settings_permissions(self.clan_id, cx);
+        if !perms.has_manage_clan {
+            return false;
+        }
+        if perms.is_clan_owner {
+            return true;
+        }
+        if RolesStore::global(cx).read(cx).role_has_administrator(role) {
+            return false;
+        }
+        PermissionStore::global(cx)
+            .read(cx)
+            .current_permission_level(self.clan_id, cx)
+            .is_none_or(|level| role.max_level_permission < level)
     }
 
     fn filtered_roles(&self, cx: &App) -> Vec<(RoleId, ClanRoleDetail)> {
@@ -251,6 +335,7 @@ impl RoleSettingPage {
         self.creating_role = false;
         self.edit_tab = RoleEditTab::Display;
         self.load_draft_from_role(&role);
+        self.reset_name_input();
         RolesStore::global(cx).update(cx, |store, cx| {
             store.ensure_role_users_loaded(role_id, cx);
         });
@@ -364,41 +449,19 @@ impl RoleSettingPage {
             add_user_ids: Vec::new(),
             remove_user_ids: Vec::new(),
         };
+        self.creating_role = true;
+        self.mode = RolePageMode::Edit;
+        self.selected_role_id = None;
+        self.edit_tab = RoleEditTab::Display;
+        self.draft_name = default_name;
+        self.draft_color = DEFAULT_ROLE_COLOR.to_string();
+        self.draft_icon.clear();
+        self.draft_permission_ids.clear();
+        self.reset_name_input();
         roles.update(cx, |store, cx| {
             store.create_role(self.clan_id, draft, max_permission_id, cx);
         });
-        self._create_task = Some(cx.spawn(async move |this, cx| {
-            for _ in 0..40 {
-                cx.background_executor()
-                    .timer(std::time::Duration::from_millis(150))
-                    .await;
-                if this
-                    .update(cx, |this, cx| {
-                        let store = RolesStore::global(cx).read(cx);
-                        if store.is_saving(this.clan_id) {
-                            return false;
-                        }
-                        if let Some((role_id, role)) = store
-                            .active_roles_in_clan(this.clan_id)
-                            .into_iter()
-                            .find(|(_, role)| role.name == default_name)
-                        {
-                            this.mode = RolePageMode::Edit;
-                            this.selected_role_id = Some(role_id);
-                            this.creating_role = false;
-                            this.edit_tab = RoleEditTab::Display;
-                            this.load_draft_from_role(role);
-                            cx.notify();
-                            return true;
-                        }
-                        false
-                    })
-                    .unwrap_or(false)
-                {
-                    break;
-                }
-            }
-        }));
+        cx.notify();
     }
 
     fn open_everyone_role(&mut self, cx: &mut Context<Self>) {
@@ -465,15 +528,16 @@ impl RoleSettingPage {
             roles.update(cx, |store, cx| {
                 store.update_role(self.clan_id, role_id, draft, max_permission_id, cx);
             });
-            self.saved_name = self.draft_name.trim().to_string();
-            self.saved_color = self.draft_color.clone();
-            self.saved_icon = self.draft_icon.clone();
-            self.saved_permission_ids = self.draft_permission_ids.clone();
         }
         cx.notify();
     }
 
-    pub fn request_delete_role(&self, role_id: RoleId, window: &mut Window, cx: &mut Context<Self>) {
+    pub fn request_delete_role(
+        &self,
+        role_id: RoleId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let locale = self.settings.read(cx).language.clone();
         crate::app::shell::Shell::global(cx).update(cx, |shell, cx| {
             shell.confirm_delete_role(self.clan_id, role_id, &locale, window, cx);
@@ -605,7 +669,7 @@ impl RoleSettingPage {
                     .text_color(theme.text_secondary)
                     .child(mezon_i18n::t(locale, "clanRoles.mainRoles.membersUseColor")),
             )
-            .child(self.render_roles_table(locale, theme, &roles, role_count, can_manage, cx))
+            .child(self.render_roles_table(locale, theme, &roles, role_count, cx))
     }
 
     fn render_roles_table(
@@ -614,22 +678,24 @@ impl RoleSettingPage {
         theme: &Theme,
         roles: &[(RoleId, ClanRoleDetail)],
         role_count: usize,
-        can_manage: bool,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
+        const ROW_HEIGHT: f32 = 56.0;
         let roles_header = format!(
             "{} - {}",
             mezon_i18n::t(locale, "clanRoles.roles"),
             role_count
         );
         let members_header = mezon_i18n::t(locale, "clanRoles.members");
+        let entity = cx.entity().clone();
+        let locale = locale.to_string();
 
         v_flex()
             .w_full()
             .overflow_hidden()
             .child(
                 h_flex()
-                    .h(px(44.0))
+                    .h(px(ROW_HEIGHT))
                     .items_center()
                     .border_b_1()
                     .border_color(theme.border)
@@ -652,32 +718,47 @@ impl RoleSettingPage {
                     )
                     .child(div().w(gpui::relative(0.25))),
             )
-            .children({
-                let mut rows = Vec::new();
-                if roles.is_empty() {
-                    rows.push(
-                        div()
-                            .h(px(56.0))
-                            .flex()
-                            .items_center()
-                            .border_b_1()
-                            .border_color(theme.border)
-                            .text_base()
-                            .text_color(theme.text_primary)
-                            .child(mezon_i18n::t(locale, "clanRoles.mainRoles.noRoles"))
-                            .into_any_element(),
-                    );
-                } else {
-                    for (role_id, role) in roles {
-                        rows.push(
-                            self.render_list_role_row(
-                                locale, theme, *role_id, role, can_manage, cx,
-                            )
-                            .into_any_element(),
-                        );
-                    }
-                }
-                rows
+            .child(if roles.is_empty() {
+                div()
+                    .h(px(ROW_HEIGHT))
+                    .flex()
+                    .items_center()
+                    .border_b_1()
+                    .border_color(theme.border)
+                    .text_base()
+                    .text_color(theme.text_primary)
+                    .child(mezon_i18n::t(&locale, "clanRoles.mainRoles.noRoles"))
+                    .into_any_element()
+            } else {
+                uniform_list(
+                    "clan-roles-table",
+                    roles.len(),
+                    move |range, _window, cx| {
+                        let theme = cx.theme().clone();
+                        let page = entity.read(cx);
+                        let roles = page.filtered_roles(cx);
+                        range
+                            .map(|ix| match roles.get(ix) {
+                                Some((role_id, role)) => page
+                                    .render_list_role_row(
+                                        &locale,
+                                        &theme,
+                                        *role_id,
+                                        role,
+                                        page.can_manage_role(role, cx),
+                                        entity.clone(),
+                                    )
+                                    .into_any_element(),
+                                None => div().h(px(ROW_HEIGHT)).into_any_element(),
+                            })
+                            .collect::<Vec<_>>()
+                    },
+                )
+                .with_item_size(size(px(0.0), px(ROW_HEIGHT)))
+                .with_sizing_behavior(ListSizingBehavior::Infer)
+                .track_scroll(&self.role_list_scroll)
+                .w_full()
+                .into_any_element()
             })
     }
 
@@ -688,13 +769,14 @@ impl RoleSettingPage {
         role_id: RoleId,
         role: &ClanRoleDetail,
         can_manage: bool,
-        cx: &mut Context<Self>,
+        page: Entity<Self>,
     ) -> impl IntoElement {
         let is_everyone = role.slug == everyone_slug(self.clan_id);
         let row_group = SharedString::from(format!("clan-role-row-{}", role_id.get()));
         div()
             .id(("clan-role-row", role_id.get() as u64))
             .group(row_group.clone())
+            .w_full()
             .h(px(56.0))
             .flex()
             .items_center()
@@ -748,7 +830,7 @@ impl RoleSettingPage {
                     .justify_center()
                     .gap_2()
                     .when(can_manage, |actions| {
-                        let render_edit_button = |cx: &mut Context<Self>| {
+                        let make_edit_button = |page: Entity<Self>| {
                             div()
                                 .id(("clan-role-edit", role_id.get() as u64))
                                 .flex()
@@ -765,9 +847,11 @@ impl RoleSettingPage {
                                         .size(px(20.))
                                         .text_color(theme.text_primary),
                                 )
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.enter_edit_mode(role_id, cx);
-                                }))
+                                .on_click(move |_, _, cx| {
+                                    page.update(cx, |this, cx| {
+                                        this.enter_edit_mode(role_id, cx);
+                                    });
+                                })
                         };
 
                         actions.child(
@@ -777,10 +861,10 @@ impl RoleSettingPage {
                                 .child(if is_everyone {
                                     div().size(px(36.0)).into_any_element()
                                 } else {
-                                    render_edit_button(cx).into_any_element()
+                                    make_edit_button(page.clone()).into_any_element()
                                 })
                                 .child(if is_everyone {
-                                    render_edit_button(cx).into_any_element()
+                                    make_edit_button(page.clone()).into_any_element()
                                 } else {
                                     div()
                                         .id(("clan-role-delete", role_id.get() as u64))
@@ -796,9 +880,14 @@ impl RoleSettingPage {
                                                 .size(px(20.))
                                                 .text_color(theme.text_primary),
                                         )
-                                        .on_click(cx.listener(move |this, _, window, cx| {
-                                            this.request_delete_role(role_id, window, cx);
-                                        }))
+                                        .on_click({
+                                            let delete_page = page.clone();
+                                            move |_, window, cx| {
+                                                delete_page.update(cx, |this, cx| {
+                                                    this.request_delete_role(role_id, window, cx);
+                                                });
+                                            }
+                                        })
                                         .into_any_element()
                                 }),
                         )
@@ -878,12 +967,10 @@ impl RoleSettingPage {
                                     )
                                     .into_any_element(),
                                 RoleEditTab::ManageMembers => self
-                                    .render_manage_members_tab(
-                                        locale, theme, can_edit, window, cx,
-                                    )
+                                    .render_manage_members_tab(locale, theme, can_edit, window, cx)
                                     .into_any_element(),
                             }),
-                    )
+                    ),
             )
     }
 
@@ -998,7 +1085,9 @@ impl Render for RoleSettingPage {
         let locale = self.settings.read(cx).language.clone();
 
         div()
-            .when(self.mode == RolePageMode::Edit, |el| el.w_full().h_full().min_h_0())
+            .when(self.mode == RolePageMode::Edit, |el| {
+                el.w_full().h_full().min_h_0()
+            })
             .child(match self.mode {
                 RolePageMode::List => self
                     .render_list_mode(&locale, &theme, window, cx)

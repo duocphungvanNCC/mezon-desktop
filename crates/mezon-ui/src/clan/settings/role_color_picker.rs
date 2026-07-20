@@ -8,7 +8,9 @@ use mezon_store::DEFAULT_ROLE_COLOR;
 
 use super::role_list_side_bar::{parse_role_color, role_color_or_default};
 use super::role_setting_page::RoleSettingPage;
-use crate::components::primitives::{Icon, IconName, Input, InputEvent, InputState, h_flex, v_flex};
+use crate::components::primitives::{
+    Icon, IconName, Input, InputEvent, InputState, h_flex, v_flex,
+};
 use crate::theme::{ActiveTheme, Theme};
 
 pub const ROLE_COLOR_PRESETS: &[&str] = &[
@@ -45,9 +47,7 @@ impl Render for DragHue {
 }
 
 pub fn is_custom_role_color(color: &str) -> bool {
-    !color.is_empty()
-        && color != DEFAULT_ROLE_COLOR
-        && !ROLE_COLOR_PRESETS.contains(&color)
+    !color.is_empty() && color != DEFAULT_ROLE_COLOR && !ROLE_COLOR_PRESETS.contains(&color)
 }
 
 pub fn hex_to_rgb(hex: &str) -> Option<(f32, f32, f32)> {
@@ -187,12 +187,7 @@ impl RoleSettingPage {
                         cx,
                     )),
             )
-            .child(self.render_preset_color_grid(
-                &selected_color,
-                can_edit,
-                theme,
-                cx,
-            ))
+            .child(self.render_preset_color_grid(&selected_color, can_edit, theme, cx))
             .when(picker_open && can_edit, |row| {
                 row.child(deferred(
                     anchored()
@@ -205,9 +200,7 @@ impl RoleSettingPage {
                                 .occlude()
                                 .on_mouse_down_out(cx.listener(
                                     |this, event: &MouseDownEvent, _, cx| {
-                                        if this
-                                            .custom_color_anchor_bounds
-                                            .contains(&event.position)
+                                        if this.custom_color_anchor_bounds.contains(&event.position)
                                         {
                                             return;
                                         }
@@ -231,62 +224,55 @@ impl RoleSettingPage {
         let color = selected.to_string();
         let page = cx.entity().clone();
 
-        v_flex()
-            .flex_1()
-            .h_full()
-            .child(
-                div()
-                    .id("role-color-custom")
-                    .relative()
-                    .w_full()
-                    .h_full()
-                    .rounded(px(4.0))
-                    .cursor_pointer()
-                    .when(can_edit, |el| {
-                        el.on_click(cx.listener(move |this, _, window, cx| {
-                            this.open_custom_color_picker(window, cx);
-                        }))
-                    })
-                    .when(!can_edit, |el| el.opacity(0.5))
-                    .bg(parse_role_color(&color).unwrap_or(theme.text_muted))
-                    .child(
+        v_flex().flex_1().h_full().child(
+            div()
+                .id("role-color-custom")
+                .relative()
+                .w_full()
+                .h_full()
+                .rounded(px(4.0))
+                .cursor_pointer()
+                .when(can_edit, |el| {
+                    el.on_click(cx.listener(move |this, _, window, cx| {
+                        this.open_custom_color_picker(window, cx);
+                    }))
+                })
+                .when(!can_edit, |el| el.opacity(0.5))
+                .bg(parse_role_color(&color).unwrap_or(theme.text_muted))
+                .child(
+                    div().absolute().top_1().right_1().child(
+                        Icon::new(IconName::PenEdit)
+                            .size(px(10.0))
+                            .text_color(gpui::rgb(0x000000)),
+                    ),
+                )
+                .when(is_custom, |el| {
+                    el.child(
                         div()
                             .absolute()
-                            .top_1()
-                            .right_1()
-                            .child(
-                                Icon::new(IconName::PenEdit)
-                                    .size(px(10.0))
-                                    .text_color(gpui::rgb(0x000000)),
-                            ),
+                            .inset_0()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .text_base()
+                            .font_weight(FontWeight::BOLD)
+                            .text_color(gpui::rgb(0xffffff))
+                            .child("✓"),
                     )
-                    .when(is_custom, |el| {
-                        el.child(
-                            div()
-                                .absolute()
-                                .inset_0()
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .text_base()
-                                .font_weight(FontWeight::BOLD)
-                                .text_color(gpui::rgb(0xffffff))
-                                .child("✓"),
-                        )
-                    })
-                    .child(
-                        canvas(
-                            move |bounds, _, cx| {
-                                page.update(cx, |this, _| {
-                                    this.custom_color_anchor_bounds = bounds;
-                                });
-                            },
-                            |_, _, _, _| {},
-                        )
-                        .absolute()
-                        .size_full(),
-                    ),
-            )
+                })
+                .child(
+                    canvas(
+                        move |bounds, _, cx| {
+                            page.update(cx, |this, _| {
+                                this.custom_color_anchor_bounds = bounds;
+                            });
+                        },
+                        |_, _, _, _| {},
+                    )
+                    .absolute()
+                    .size_full(),
+                ),
+        )
     }
 
     fn render_color_picker_popover(
@@ -354,26 +340,16 @@ impl RoleSettingPage {
             .overflow_hidden()
             .cursor_crosshair()
             .bg(hue_color)
-            .child(
-                div()
-                    .absolute()
-                    .inset_0()
-                    .bg(linear_gradient(
-                        90.0,
-                        linear_color_stop(gpui::white(), 0.0),
-                        linear_color_stop(transparent_white(), 1.0),
-                    )),
-            )
-            .child(
-                div()
-                    .absolute()
-                    .inset_0()
-                    .bg(linear_gradient(
-                        180.0,
-                        linear_color_stop(transparent_white(), 0.0),
-                        linear_color_stop(gpui::black(), 1.0),
-                    )),
-            )
+            .child(div().absolute().inset_0().bg(linear_gradient(
+                90.0,
+                linear_color_stop(gpui::white(), 0.0),
+                linear_color_stop(transparent_white(), 1.0),
+            )))
+            .child(div().absolute().inset_0().bg(linear_gradient(
+                180.0,
+                linear_color_stop(transparent_white(), 0.0),
+                linear_color_stop(gpui::black(), 1.0),
+            )))
             .child(
                 div()
                     .absolute()
@@ -399,9 +375,12 @@ impl RoleSettingPage {
             )
             .on_mouse_down(
                 MouseButton::Left,
-                window.listener_for(&entity, move |this, e: &gpui::MouseDownEvent, window, cx| {
-                    this.update_sv_from_position(e.position, window, cx);
-                }),
+                window.listener_for(
+                    &entity,
+                    move |this, e: &gpui::MouseDownEvent, window, cx| {
+                        this.update_sv_from_position(e.position, window, cx);
+                    },
+                ),
             )
             .on_drag(DragSv(entity_id), |drag, _, _, cx| {
                 cx.stop_propagation();
@@ -468,9 +447,12 @@ impl RoleSettingPage {
             )
             .on_mouse_down(
                 MouseButton::Left,
-                window.listener_for(&entity, move |this, e: &gpui::MouseDownEvent, window, cx| {
-                    this.update_hue_from_position(e.position, window, cx);
-                }),
+                window.listener_for(
+                    &entity,
+                    move |this, e: &gpui::MouseDownEvent, window, cx| {
+                        this.update_hue_from_position(e.position, window, cx);
+                    },
+                ),
             )
             .on_drag(DragHue(entity_id), |drag, _, _, cx| {
                 cx.stop_propagation();
@@ -491,34 +473,39 @@ impl RoleSettingPage {
         h_flex()
             .gap_2()
             .items_end()
-            .children(["R", "G", "B"].into_iter().enumerate().map(|(index, label)| {
-                let input = match index {
-                    0 => self.rgb_r_input.clone(),
-                    1 => self.rgb_g_input.clone(),
-                    _ => self.rgb_b_input.clone(),
-                };
-                v_flex()
-                    .flex_1()
-                    .gap_1()
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_center()
-                            .text_color(theme.text_secondary)
-                            .child(label),
-                    )
-                    .when_some(input, |col, input| {
-                        col.child(
-                            div()
-                                .rounded_md()
-                                .border_1()
-                                .border_color(theme.border)
-                                .bg(theme.tokens.bg_input_secondary)
-                                .child(Input::new(&input)),
-                        )
-                    })
-                    .into_any_element()
-            }))
+            .children(
+                ["R", "G", "B"]
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, label)| {
+                        let input = match index {
+                            0 => self.rgb_r_input.clone(),
+                            1 => self.rgb_g_input.clone(),
+                            _ => self.rgb_b_input.clone(),
+                        };
+                        v_flex()
+                            .flex_1()
+                            .gap_1()
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_center()
+                                    .text_color(theme.text_secondary)
+                                    .child(label),
+                            )
+                            .when_some(input, |col, input| {
+                                col.child(
+                                    div()
+                                        .rounded_md()
+                                        .border_1()
+                                        .border_color(theme.border)
+                                        .bg(theme.tokens.bg_input_secondary)
+                                        .child(Input::new(&input)),
+                                )
+                            })
+                            .into_any_element()
+                    }),
+            )
             .child(
                 v_flex()
                     .gap_1()
@@ -561,12 +548,8 @@ impl RoleSettingPage {
         v_flex()
             .flex_1()
             .gap(px(PRESET_GAP))
-            .child(self.render_preset_color_row(
-                row_one, selected, can_edit, theme, 0, cx,
-            ))
-            .child(self.render_preset_color_row(
-                row_two, selected, can_edit, theme, split, cx,
-            ))
+            .child(self.render_preset_color_row(row_one, selected, can_edit, theme, 0, cx))
+            .child(self.render_preset_color_row(row_two, selected, can_edit, theme, split, cx))
     }
 
     fn render_preset_color_row(
@@ -684,7 +667,6 @@ impl RoleSettingPage {
 
     pub(super) fn ensure_rgb_inputs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.rgb_r_input.is_some() {
-            self.sync_rgb_inputs_from_picker(window, cx);
             return;
         }
 
@@ -749,20 +731,32 @@ impl RoleSettingPage {
         let b_val = ((b * 255.0).round() as u32).to_string();
 
         if let Some(input) = &self.rgb_r_input {
-            input.update(cx, |state, cx| state.set_value(&r_val, window, cx));
+            input.update(cx, |state, cx| {
+                if state.value() != r_val {
+                    state.set_value(&r_val, window, cx);
+                }
+            });
         }
         if let Some(input) = &self.rgb_g_input {
-            input.update(cx, |state, cx| state.set_value(&g_val, window, cx));
+            input.update(cx, |state, cx| {
+                if state.value() != g_val {
+                    state.set_value(&g_val, window, cx);
+                }
+            });
         }
         if let Some(input) = &self.rgb_b_input {
-            input.update(cx, |state, cx| state.set_value(&b_val, window, cx));
+            input.update(cx, |state, cx| {
+                if state.value() != b_val {
+                    state.set_value(&b_val, window, cx);
+                }
+            });
         }
     }
 
     pub(super) fn sync_picker_from_rgb_inputs(&mut self, cx: &mut Context<Self>) {
         let parse = |input: &Option<Entity<InputState>>| -> Option<u8> {
             let value: u8 = input.as_ref()?.read(cx).value().trim().parse().ok()?;
-            Some(value.min(255))
+            Some(value)
         };
         let Some(r) = parse(&self.rgb_r_input) else {
             return;

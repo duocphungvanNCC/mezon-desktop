@@ -1,12 +1,17 @@
 use std::collections::HashSet;
 
-use gpui::{Context, FontWeight, SharedString, Window, div, img, prelude::*, px};
+use gpui::{
+    Context, FontWeight, ListSizingBehavior, SharedString, Window, div, prelude::*, px, size,
+    uniform_list,
+};
 
 use mezon_store::{ClanRoleDetail, DEFAULT_ROLE_COLOR, RoleId, RolesStore};
 
 use super::role_setting_page::RoleSettingPage;
 use crate::components::primitives::{Icon, IconName, v_flex};
-use crate::theme::Theme;
+use crate::theme::{ActiveTheme, Theme};
+
+const SIDEBAR_ITEM_HEIGHT: f32 = 36.0;
 
 impl RoleSettingPage {
     pub(super) fn render_role_sidebar(
@@ -26,22 +31,10 @@ impl RoleSettingPage {
         let selected = self.selected_role_id;
         let draft_name = self.draft_name.clone();
         let draft_color = self.draft_color.clone();
-
-        let mut list = v_flex()
-            .id("role-sidebar-list")
-            .gap_2()
-            .flex_1()
-            .min_h_0()
-            .overflow_y_scroll();
-
-        for (role_id, role) in roles {
-            let is_selected = selected == Some(role_id) && !self.creating_role;
-            list = list.child(self.render_sidebar_item(role_id, &role, is_selected, theme, cx));
-        }
-
-        if self.creating_role {
-            list = list.child(self.render_sidebar_draft_item(draft_name, draft_color, theme));
-        }
+        let creating_role = self.creating_role;
+        let entity = cx.entity().clone();
+        let locale = locale.to_string();
+        let role_count = roles.len() + usize::from(creating_role);
 
         v_flex()
             .w(gpui::relative(1. / 3.))
@@ -69,13 +62,59 @@ impl RoleSettingPage {
                             .text_base()
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_color(theme.tokens.text_theme_primary)
-                            .child(mezon_i18n::t(locale, "clanRoles.roleManagement.back")),
+                            .child(mezon_i18n::t(&locale, "clanRoles.roleManagement.back")),
                     )
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.exit_edit_mode(cx);
                     })),
             )
-            .child(list)
+            .child(
+                uniform_list(
+                    "role-sidebar-list",
+                    role_count,
+                    move |range, _window, cx| {
+                        let theme = cx.theme().clone();
+                        let page = entity.read(cx);
+                        let roles: Vec<(RoleId, ClanRoleDetail)> = RolesStore::global(cx)
+                            .read(cx)
+                            .active_roles_in_clan(page.clan_id)
+                            .into_iter()
+                            .map(|(id, role)| (id, role.clone()))
+                            .collect();
+                        range
+                            .map(|ix| {
+                                if ix < roles.len() {
+                                    let (role_id, role) = &roles[ix];
+                                    let is_selected =
+                                        selected == Some(*role_id) && !page.creating_role;
+                                    page.render_sidebar_item(
+                                        *role_id,
+                                        role,
+                                        is_selected,
+                                        &theme,
+                                        entity.clone(),
+                                    )
+                                    .into_any_element()
+                                } else if creating_role && ix == roles.len() {
+                                    page.render_sidebar_draft_item(
+                                        draft_name.clone(),
+                                        draft_color.clone(),
+                                        &theme,
+                                    )
+                                    .into_any_element()
+                                } else {
+                                    div().h(px(SIDEBAR_ITEM_HEIGHT)).into_any_element()
+                                }
+                            })
+                            .collect::<Vec<_>>()
+                    },
+                )
+                .with_item_size(size(px(0.0), px(SIDEBAR_ITEM_HEIGHT)))
+                .with_sizing_behavior(ListSizingBehavior::Infer)
+                .track_scroll(&self.role_sidebar_scroll)
+                .flex_1()
+                .min_h_0(),
+            )
     }
 
     fn render_sidebar_item(
@@ -84,7 +123,7 @@ impl RoleSettingPage {
         role: &ClanRoleDetail,
         selected: bool,
         theme: &Theme,
-        cx: &mut Context<Self>,
+        page: gpui::Entity<Self>,
     ) -> impl IntoElement {
         let color = role_color_or_default(&role.color);
         let name: SharedString = role.name.clone().into();
@@ -101,7 +140,7 @@ impl RoleSettingPage {
             selected,
             theme,
             Some(role_id),
-            cx,
+            page,
         )
     }
 
@@ -145,7 +184,7 @@ impl RoleSettingPage {
         selected: bool,
         theme: &Theme,
         role_id: Option<RoleId>,
-        cx: &mut Context<Self>,
+        page: gpui::Entity<Self>,
     ) -> impl IntoElement {
         div()
             .id(id)
@@ -158,21 +197,27 @@ impl RoleSettingPage {
             .when(!selected, |el| {
                 el.hover(|s| s.bg(theme.tokens.bg_item_theme_hover))
             })
-            .on_click(cx.listener(move |this, _, _, cx| {
-                if this.is_dirty(cx) {
-                    return;
+            .on_click({
+                move |_, _, cx| {
+                    page.update(cx, |this, cx| {
+                        if this.is_dirty(cx) {
+                            return;
+                        }
+                        if let Some(role_id) = role_id {
+                            this.select_role(role_id, cx);
+                        }
+                    });
                 }
-                if let Some(role_id) = role_id {
-                    this.select_role(role_id, cx);
-                }
-            }))
+            })
             .child(
                 div()
                     .flex()
                     .items_center()
                     .gap_2()
                     .child(role_color_dot(color, theme))
-                    .when(!icon.is_empty(), |row| row.child(role_icon_thumbnail(icon, theme)))
+                    .when(!icon.is_empty(), |row| {
+                        row.child(role_icon_thumbnail(icon, theme))
+                    })
                     .child(
                         div()
                             .text_base()
@@ -214,7 +259,7 @@ pub(super) fn role_icon_thumbnail(icon: String, theme: &Theme) -> impl IntoEleme
         .overflow_hidden()
         .bg(theme.bg_tertiary)
         .child(
-            img(icon)
+            gpui::img(icon)
                 .size_full()
                 .object_fit(gpui::ObjectFit::Cover),
         )
