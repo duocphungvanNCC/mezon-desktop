@@ -537,7 +537,7 @@ pub fn strip_emoji_colons(name: &str) -> String {
     name.trim().trim_matches(':').to_string()
 }
 
-pub fn validate_emoticon_file(path: &Path, max_bytes: u64) -> Result<(), String> {
+pub fn validate_emoticon_file(path: &Path, max_bytes: u64, max_px: u32) -> Result<(), String> {
     let ext = path
         .extension()
         .and_then(|e| e.to_str())
@@ -546,13 +546,17 @@ pub fn validate_emoticon_file(path: &Path, max_bytes: u64) -> Result<(), String>
     if !EMOTICON_ALLOWED_EXTENSIONS.contains(&ext.as_str()) {
         return Err("unsupported_type".into());
     }
-    let len = std::fs::metadata(path).map_err(|e| e.to_string())?.len();
+    let len = std::fs::metadata(path)
+        .map_err(|_| "invalid_image".to_string())?
+        .len();
     if len == 0 {
         return Err("empty".into());
     }
     if len > max_bytes {
         return Err("size_limit".into());
     }
+    let data = std::fs::read(path).map_err(|_| "invalid_image".to_string())?;
+    decode_emoticon_image(&data, max_px)?;
     Ok(())
 }
 
@@ -569,7 +573,6 @@ pub fn generate_snowflake_id() -> i64 {
     i64::try_from(id).unwrap_or(i64::MAX)
 }
 
-
 #[derive(Clone)]
 struct PreparedEmoticon {
     bytes: Vec<u8>,
@@ -581,7 +584,7 @@ fn prepare_emoticon_from_path(
     max_bytes: u64,
     max_px: u32,
 ) -> Result<PreparedEmoticon, String> {
-    validate_emoticon_file(path, max_bytes)?;
+    validate_emoticon_file(path, max_bytes, max_px)?;
     let data = std::fs::read(path).map_err(|e| e.to_string())?;
     let ext = path
         .extension()
@@ -644,11 +647,32 @@ fn box_blur_rgba(img: &mut image::RgbaImage, radius: u32) {
     }
 }
 
-fn create_blurred_watermarked_webp(
-    data: &[u8],
-    filetype: &str,
-) -> Result<Vec<u8>, String> {
-    let img = image::load_from_memory(data).map_err(|e| e.to_string())?;
+fn emoticon_image_limits(max_px: u32) -> image::Limits {
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(max_px);
+    limits.max_image_height = Some(max_px);
+    limits.max_alloc = Some(max_px as u64 * max_px as u64 * 4);
+    limits
+}
+
+fn decode_emoticon_image(data: &[u8], max_px: u32) -> Result<image::DynamicImage, String> {
+    let mut reader = image::ImageReader::new(std::io::Cursor::new(data))
+        .with_guessed_format()
+        .map_err(|e| e.to_string())?;
+    reader.limits(emoticon_image_limits(max_px));
+    reader.decode().map_err(emoticon_decode_error)
+}
+
+fn emoticon_decode_error(err: image::ImageError) -> String {
+    match err {
+        image::ImageError::Limits(_) => "image_too_large".into(),
+        image::ImageError::Decoding(_) | image::ImageError::Parameter(_) => "invalid_image".into(),
+        _ => "invalid_image".into(),
+    }
+}
+
+fn create_blurred_watermarked_webp(data: &[u8], filetype: &str) -> Result<Vec<u8>, String> {
+    let img = decode_emoticon_image(data, STICKER_UPLOAD_MAX_PX)?;
     let mut rgba = img.to_rgba8();
     box_blur_rgba(&mut rgba, 2);
 
@@ -732,7 +756,7 @@ fn prepare_emoticon_upload_bytes(
         return Ok((data.to_vec(), "image/gif"));
     }
 
-    let img = image::load_from_memory(data).map_err(|e| e.to_string())?;
+    let img = decode_emoticon_image(data, max_px)?;
     let thumb = img.thumbnail(max_px, max_px);
     let rgba = thumb.to_rgba8();
     let (width, height) = rgba.dimensions();

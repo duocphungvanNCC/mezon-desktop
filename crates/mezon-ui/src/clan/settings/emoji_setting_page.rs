@@ -1,6 +1,7 @@
 use gpui::{
-    AnyElement, App, Context, Entity, FontWeight, ScrollHandle, SharedString, Subscription, Window,
-    div, img, point, prelude::*, px,
+    AnyElement, App, Context, Entity, FontWeight, ListHorizontalSizingBehavior, ScrollHandle,
+    SharedString, Subscription, UniformListScrollHandle, Window, div, img, prelude::*, px, size,
+    uniform_list,
 };
 use mezon_store::{
     BadgeService, ClanId, ClanMembersEvent, ClanMembersStore, Emoji, EmojiEvent, EmojiStore,
@@ -22,7 +23,18 @@ const EMOJI_ROW_ACTION_RIGHT: f32 = 20.0;
 const EMOJI_THUMB_PX: f32 = 32.0;
 const EMOJI_LIST_CACHE_CAPACITY: usize = 512;
 const EMOJI_LIST_CACHE_BYTES: u64 = 32 * 1024 * 1024;
-const TABLE_HEADER_SCROLL_CHILD: usize = 1;
+
+#[derive(Clone)]
+struct EmojiRowData {
+    id: SharedString,
+    shortname: SharedString,
+    src: SharedString,
+    creator_name: SharedString,
+    creator_avatar: Option<SharedString>,
+    can_modify: bool,
+    is_for_sale: bool,
+    edit_target: EmoticonEditTarget,
+}
 
 fn emoji_thumb_fallback(
     size: gpui::Pixels,
@@ -62,11 +74,16 @@ fn body_text(text: impl Into<SharedString>, theme: &Theme) -> gpui::Div {
 
 pub struct EmojiSettingPage {
     clan_id: ClanId,
+    clan_id_str: String,
     settings: Entity<Settings>,
     emoji_image_cache: Entity<LruImageCache>,
     scroll: ScrollHandle,
+    list_scroll: UniformListScrollHandle,
+    rows: Vec<EmojiRowData>,
     _emoji_sub: Subscription,
+    _emoji_observe: Subscription,
     _members_sub: Subscription,
+    _modal_sub: Option<Subscription>,
 }
 
 impl EmojiSettingPage {
@@ -74,13 +91,25 @@ impl EmojiSettingPage {
         EmojiStore::global(cx).update(cx, |store, cx| store.ensure_loaded(cx));
         ClanMembersStore::global(cx).update(cx, |store, cx| store.ensure_loaded(clan_id, cx));
 
-        let emoji_sub = cx.subscribe(&EmojiStore::global(cx), |_, _, event, cx| {
+        let emoji_sub = cx.subscribe(&EmojiStore::global(cx), |this, _, event, cx| {
             if matches!(event, EmojiEvent::Changed) {
+                this.rebuild_rows(cx);
+                cx.notify();
+            }
+        });
+        let emoji_observe = cx.observe(&EmojiStore::global(cx), |this, _, cx| {
+            let count = EmojiStore::global(cx)
+                .read(cx)
+                .for_clan(&this.clan_id_str)
+                .len();
+            if count != this.rows.len() {
+                this.rebuild_rows(cx);
                 cx.notify();
             }
         });
         let members_sub = cx.subscribe(&ClanMembersStore::global(cx), |this, _, event, cx| {
             if matches!(event, ClanMembersEvent::Changed { clan_id } if *clan_id == this.clan_id) {
+                this.rebuild_rows(cx);
                 cx.notify();
             }
         });
@@ -94,28 +123,34 @@ impl EmojiSettingPage {
             )
         });
 
-        Self {
+        let clan_id_str = clan_id.get().to_string();
+        let mut this = Self {
             clan_id,
+            clan_id_str,
             settings,
             emoji_image_cache,
             scroll: ScrollHandle::new(),
+            list_scroll: UniformListScrollHandle::new(),
+            rows: Vec::new(),
             _emoji_sub: emoji_sub,
+            _emoji_observe: emoji_observe,
             _members_sub: members_sub,
-        }
-    }
-
-    pub fn release(&mut self) {
-        self.scroll.set_offset(point(px(0.0), px(0.0)));
-    }
-
-    fn table_header_sticky(&self) -> bool {
-        let Some(header_bounds) = self.scroll.bounds_for_item(TABLE_HEADER_SCROLL_CHILD) else {
-            return false;
+            _modal_sub: None,
         };
-        let viewport = self.scroll.bounds();
-        let header_top_in_viewport =
-            header_bounds.top() + self.scroll.offset().y - viewport.top();
-        header_top_in_viewport <= px(0.)
+        this.rebuild_rows(cx);
+        this
+    }
+
+    pub fn release(&mut self, _cx: &mut Context<Self>) {
+        self._modal_sub.take();
+    }
+
+    fn rebuild_rows(&mut self, cx: &App) {
+        let emojis = EmojiStore::global(cx).read(cx).for_clan(&self.clan_id_str);
+        self.rows = emojis
+            .iter()
+            .map(|emoji| self.row_data(emoji, cx))
+            .collect();
     }
 
     fn can_manage(&self, cx: &App) -> bool {
@@ -139,16 +174,13 @@ impl EmojiSettingPage {
         self.open_picker(None, window, cx);
     }
 
-    fn open_edit_modal(&mut self, emoji: &Emoji, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.can_modify_emoji(&emoji.creator_id, cx) {
-            return;
-        }
-        let editing = EmoticonEditTarget {
-            id: emoji.id.clone(),
-            shortname: emoji.shortname.clone(),
-            source: emoji.src.clone(),
-        };
-        self.open_picker(Some(editing), window, cx);
+    fn open_edit_modal(
+        &mut self,
+        edit_target: EmoticonEditTarget,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_picker(Some(edit_target), window, cx);
     }
 
     fn open_picker(
@@ -162,8 +194,13 @@ impl EmojiSettingPage {
         let picker = cx.new(|cx| {
             EmojiStickerPicker::new(EmoticonKind::Emoji, clan_id, editing, settings, window, cx)
         });
-        cx.subscribe(&picker, |_, _, _: &EmojiStickerPickerEvent, cx| cx.notify())
-            .detach();
+        self._modal_sub = Some(cx.subscribe(
+            &picker,
+            |this, _, _: &EmojiStickerPickerEvent, cx| {
+                this._modal_sub = None;
+                cx.notify();
+            },
+        ));
         Shell::global(cx).update(cx, |shell, cx| shell.show_modal(picker.into(), cx));
     }
 
@@ -181,7 +218,6 @@ impl EmojiSettingPage {
         });
     }
 
-    /// Match web `getSrcEmoji(id)`: `${NX_BASE_IMG_URL}/emojis/${id}.webp` (+ imgproxy on prod CDN only).
     fn emoji_image_src(emoji: &Emoji, cx: &App) -> SharedString {
         crate::util::imgproxy::emoji_url(cx, &emoji.id).into()
     }
@@ -211,14 +247,23 @@ impl EmojiSettingPage {
         (SharedString::from(label), None)
     }
 
-    fn clan_emojis(&self, cx: &App) -> Vec<Emoji> {
-        let clan_id = self.clan_id.get().to_string();
-        EmojiStore::global(cx)
-            .read(cx)
-            .for_clan(&clan_id)
-            .into_iter()
-            .cloned()
-            .collect()
+    fn row_data(&self, emoji: &Emoji, cx: &App) -> EmojiRowData {
+        let can_modify = self.can_modify_emoji(&emoji.creator_id, cx);
+        let (creator_name, creator_avatar) = self.creator_display(emoji, cx);
+        EmojiRowData {
+            id: SharedString::from(emoji.id.clone()),
+            shortname: SharedString::from(emoji.shortname.clone()),
+            src: Self::emoji_image_src(emoji, cx),
+            creator_name,
+            creator_avatar,
+            can_modify,
+            is_for_sale: emoji.is_for_sale,
+            edit_target: EmoticonEditTarget {
+                id: emoji.id.clone(),
+                shortname: emoji.shortname.clone(),
+                source: emoji.src.clone(),
+            },
+        }
     }
 
     fn render_require_list(require_list: &str, theme: &Theme) -> gpui::Div {
@@ -231,24 +276,49 @@ impl EmojiSettingPage {
             .children(lines.into_iter().map(|line| body_text(line.trim(), theme)))
     }
 
-    fn render_table_header(locale: &str, theme: &Theme, pinned: bool) -> impl IntoElement {
-        h_flex()
-            .id(if pinned {
-                "clan-emoji-table-header-sticky"
-            } else {
-                "clan-emoji-table-header"
-            })
+    fn render_empty_state(locale: &str, theme: &Theme) -> impl IntoElement {
+        div()
+            .id("clan-emoji-empty-state")
             .w_full()
+            .flex()
+            .flex_col()
+            .items_center()
+            .justify_center()
+            .text_center()
+            .py(px(40.0))
+            .rounded_lg()
+            .border_2()
+            .border_dashed()
+            .border_color(theme.border)
+            .bg(theme.tokens.theme_setting_nav)
+            .child(
+                Icon::new(IconName::Smile)
+                    .size(px(40.0))
+                    .text_color(theme.tokens.text_theme_primary)
+                    .mb(px(8.0)),
+            )
+            .child(
+                div()
+                    .text_sm()
+                    .text_color(theme.tokens.text_theme_primary)
+                    .child(mezon_i18n::t(locale, "clanEmojiSetting.empty.title")),
+            )
+    }
+
+    fn render_table_header(locale: &str, theme: &Theme) -> impl IntoElement {
+        div()
+            .id("clan-emoji-table-header")
+            .w_full()
+            .flex()
+            .flex_row()
             .items_center()
             .pb(px(8.0))
-            .when(pinned, |row| {
-                row.bg(theme.tokens.theme_setting_primary)
-                    .border_b_1()
-                    .border_color(theme.border)
-            })
+            .border_b_1()
+            .border_color(theme.border)
             .child(
                 div()
                     .w(px(56.0))
+                    .flex_none()
                     .text_xs()
                     .font_weight(FontWeight::BOLD)
                     .text_color(theme.text_primary)
@@ -257,6 +327,7 @@ impl EmojiSettingPage {
             .child(
                 div()
                     .flex_1()
+                    .min_w(px(0.0))
                     .pl(px(20.0))
                     .text_xs()
                     .font_weight(FontWeight::BOLD)
@@ -266,6 +337,7 @@ impl EmojiSettingPage {
             .child(
                 div()
                     .flex_1()
+                    .min_w(px(0.0))
                     .text_xs()
                     .font_weight(FontWeight::BOLD)
                     .text_color(theme.text_primary)
@@ -275,40 +347,40 @@ impl EmojiSettingPage {
 }
 
 fn render_emoji_row(
-    emoji: &Emoji,
+    row: &EmojiRowData,
     theme: &Theme,
-    can_modify: bool,
-    creator_name: SharedString,
-    creator_avatar: Option<SharedString>,
-    src: SharedString,
     entity: Entity<EmojiSettingPage>,
 ) -> AnyElement {
-    let group_name = SharedString::from(format!("emoji-row-{}", emoji.id));
-    let shortname = SharedString::from(emoji.shortname.clone());
-    let emoji_id = SharedString::from(emoji.id.clone());
-    let emoji_for_edit = emoji.clone();
+    let group_name = SharedString::from(format!("emoji-row-{}", row.id));
+    let shortname = row.shortname.clone();
+    let emoji_id = row.id.clone();
+    let edit_target = row.edit_target.clone();
+    let can_modify = row.can_modify;
     let fallback_color = theme.text_muted;
 
-    h_flex()
+    div()
         .id(SharedString::from(format!("emoji-row-{emoji_id}")))
         .group(group_name.clone())
         .relative()
         .w_full()
+        .flex()
+        .flex_row()
+        .items_center()
         .pr(px(EMOJI_ROW_ACTION_RIGHT))
         .h(px(EMOJI_ROW_H))
-        .items_center()
         .border_b_1()
         .border_color(theme.border)
         .hover(|s| s.bg(theme.bg_hover))
         .child(
             div()
                 .w(px(56.0))
+                .flex_none()
                 .h(px(EMOJI_THUMB_PX))
                 .flex()
                 .items_center()
                 .justify_center()
                 .child(
-                    img(src)
+                    img(row.src.clone())
                         .id(SharedString::from(format!("emoji-thumb-{emoji_id}")))
                         .size(px(EMOJI_THUMB_PX))
                         .flex_none()
@@ -320,29 +392,31 @@ fn render_emoji_row(
             div()
                 .id(SharedString::from(format!("emoji-name-{emoji_id}")))
                 .flex_1()
+                .min_w(px(0.0))
                 .pl(px(20.0))
                 .text_sm()
                 .text_color(theme.text_primary)
                 .child(shortname.clone())
                 .when(can_modify, |el| {
                     let entity = entity.clone();
-                    el.cursor_pointer()
-                        .on_click(move |_, window, cx| {
-                            entity.update(cx, |this, cx| {
-                                this.open_edit_modal(&emoji_for_edit, window, cx);
-                            });
-                        })
+                    el.cursor_pointer().on_click(move |_, window, cx| {
+                        entity.update(cx, |this, cx| {
+                            this.open_edit_modal(edit_target.clone(), window, cx);
+                        });
+                    })
                 }),
         )
         .child(
             h_flex()
                 .flex_1()
+                .min_w(px(0.0))
                 .gap(px(6.0))
                 .items_center()
                 .child({
-                    let mut avatar =
-                        Avatar::new().name(creator_name.clone()).size_px(px(24.0));
-                    if let Some(src) = creator_avatar {
+                    let mut avatar = Avatar::new()
+                        .name(row.creator_name.clone())
+                        .size_px(px(24.0));
+                    if let Some(src) = row.creator_avatar.clone() {
                         avatar = avatar.src(src);
                     }
                     avatar
@@ -354,11 +428,11 @@ fn render_emoji_row(
                         .overflow_hidden()
                         .text_ellipsis()
                         .whitespace_nowrap()
-                        .child(creator_name),
+                        .child(row.creator_name.clone()),
                 ),
         )
-        .when(emoji.is_for_sale || can_modify, |row| {
-            row.child(
+        .when(row.is_for_sale || can_modify, |row_el| {
+            row_el.child(
                 h_flex()
                     .absolute()
                     .right(px(EMOJI_ROW_ACTION_RIGHT))
@@ -366,7 +440,7 @@ fn render_emoji_row(
                     .bottom_0()
                     .items_center()
                     .gap_2()
-                    .when(emoji.is_for_sale, |actions| {
+                    .when(row.is_for_sale, |actions| {
                         actions.child(
                             Icon::new(IconName::MarketIcons)
                                 .size(px(16.0))
@@ -378,38 +452,35 @@ fn render_emoji_row(
                         let emoji_id = emoji_id.clone();
                         let shortname = shortname.clone();
                         actions.child(
-                            div()
-                                .child(
-                                    div()
-                                        .id(SharedString::from(format!(
-                                            "emoji-delete-{emoji_id}"
-                                        )))
-                                        .size(px(20.0))
-                                        .flex()
-                                        .items_center()
-                                        .justify_center()
-                                        .rounded_full()
-                                        .border_1()
-                                        .border_color(theme.border)
-                                        .bg(theme.bg_secondary)
-                                        .cursor_pointer()
-                                        .child(
-                                            Icon::new(IconName::Close)
-                                                .size(px(14.0))
-                                                .text_color(theme.status_dnd),
-                                        )
-                                        .on_click(move |_, window, cx| {
-                                            cx.stop_propagation();
-                                            entity.update(cx, |this, cx| {
-                                                this.confirm_delete_emoji(
-                                                    emoji_id.clone(),
-                                                    shortname.clone(),
-                                                    window,
-                                                    cx,
-                                                );
-                                            });
-                                        }),
-                                ),
+                            div().child(
+                                div()
+                                    .id(SharedString::from(format!("emoji-delete-{emoji_id}")))
+                                    .size(px(20.0))
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .rounded_full()
+                                    .border_1()
+                                    .border_color(theme.border)
+                                    .bg(theme.bg_secondary)
+                                    .cursor_pointer()
+                                    .child(
+                                        Icon::new(IconName::Close)
+                                            .size(px(14.0))
+                                            .text_color(theme.status_dnd),
+                                    )
+                                    .on_click(move |_, window, cx| {
+                                        cx.stop_propagation();
+                                        entity.update(cx, |this, cx| {
+                                            this.confirm_delete_emoji(
+                                                emoji_id.clone(),
+                                                shortname.clone(),
+                                                window,
+                                                cx,
+                                            );
+                                        });
+                                    }),
+                            ),
                         )
                     }),
             )
@@ -419,31 +490,43 @@ fn render_emoji_row(
 
 impl Render for EmojiSettingPage {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let store_count = EmojiStore::global(cx)
+            .read(cx)
+            .for_clan(&self.clan_id_str)
+            .len();
+        if store_count != self.rows.len() {
+            self.rebuild_rows(cx);
+        } else if self.rows.is_empty() {
+            EmojiStore::global(cx).update(cx, |store, cx| store.ensure_loaded(cx));
+        }
+
         let theme = cx.theme().clone();
         let locale = self.settings.read(cx).language.clone();
-        let emojis = self.clan_emojis(cx);
         let require_list = mezon_i18n::t(&locale, "clanEmojiSetting.description.requireList");
         let entity = cx.entity();
         let emoji_image_cache = self.emoji_image_cache.clone();
-        let table_header_sticky = self.table_header_sticky();
-        let emoji_list = v_flex()
-            .image_cache(emoji_image_cache)
-            .id("clan-emoji-settings-list")
-            .w_full()
-            .children(emojis.iter().map(|emoji| {
-                let can_modify = self.can_modify_emoji(&emoji.creator_id, cx);
-                let (creator_name, creator_avatar) = self.creator_display(emoji, cx);
-                let src = Self::emoji_image_src(emoji, cx);
-                render_emoji_row(
-                    emoji,
-                    &theme,
-                    can_modify,
-                    creator_name,
-                    creator_avatar,
-                    src,
-                    entity.clone(),
-                )
-            }));
+        let row_count = self.rows.len();
+        let list_entity = entity.clone();
+        let list_height = px(row_count as f32 * EMOJI_ROW_H);
+
+        let emoji_list = uniform_list(
+            "clan-emoji-settings-list",
+            row_count,
+            move |range, _window, cx| {
+                let theme = cx.theme().clone();
+                let rows = &list_entity.read(cx).rows;
+                range
+                    .map(|ix| match rows.get(ix) {
+                        Some(row) => render_emoji_row(row, &theme, list_entity.clone()),
+                        None => div().h(px(EMOJI_ROW_H)).w_full().into_any_element(),
+                    })
+                    .collect::<Vec<_>>()
+            },
+        )
+        .with_item_size(size(px(740.), px(EMOJI_ROW_H)))
+        .with_horizontal_sizing_behavior(ListHorizontalSizingBehavior::FitList)
+        .track_scroll(&self.list_scroll)
+        .size_full();
 
         let upload_section = v_flex()
             .id("clan-emoji-upload-section")
@@ -477,42 +560,42 @@ impl Render for EmojiSettingPage {
                     ),
             );
 
-        div()
-            .relative()
-            .size_full()
-            .min_h_0()
-            .child(
-                div()
-                    .id("clan-emoji-settings-scroll")
-                    .absolute()
-                    .inset_0()
-                    .overflow_y_scroll()
-                    .track_scroll(&self.scroll)
-                    .on_scroll_wheel(cx.listener(|_, _, _, cx| cx.notify()))
-                    .child(upload_section)
-                    .child(
+        div().relative().size_full().min_h_0().child(
+            div()
+                .id("clan-emoji-settings-scroll")
+                .absolute()
+                .inset_0()
+                .overflow_y_scroll()
+                .track_scroll(&self.scroll)
+                .child(upload_section)
+                .when(row_count > 0, |scroll| {
+                    scroll.child(
                         div()
                             .w_full()
                             .mt(px(16.0))
-                            .child(Self::render_table_header(&locale, &theme, false)),
+                            .child(Self::render_table_header(&locale, &theme)),
                     )
-                    .child(
-                        div()
-                            .w_full()
-                            .pb(px(60.0))
-                            .child(emoji_list),
-                    ),
-            )
-            .when(table_header_sticky, |panel| {
-                panel.child(
+                })
+                .child(
                     div()
-                        .absolute()
-                        .top_0()
-                        .left_0()
-                        .right_0()
-                        .occlude()
-                        .child(Self::render_table_header(&locale, &theme, true)),
-                )
-            })
+                        .w_full()
+                        .pb(px(60.0))
+                        .when(row_count > 0, |section| {
+                            section.child(
+                                div()
+                                    .image_cache(emoji_image_cache)
+                                    .id("clan-emoji-settings-list-container")
+                                    .w_full()
+                                    .h(list_height)
+                                    .child(emoji_list),
+                            )
+                        })
+                        .when(row_count == 0, |section| {
+                            section
+                                .mt(px(16.0))
+                                .child(Self::render_empty_state(&locale, &theme))
+                        }),
+                ),
+        )
     }
 }

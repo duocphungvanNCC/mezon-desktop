@@ -47,11 +47,7 @@ fn audio_time_label(current: f64, duration: f64) -> SharedString {
     let label = if duration_secs == 0 {
         format_mmss(current)
     } else {
-        format!(
-            "{} / {}",
-            format_mmss(current),
-            format_mmss(duration)
-        )
+        format!("{} / {}", format_mmss(current), format_mmss(duration))
     };
     label.into()
 }
@@ -270,13 +266,19 @@ impl SoundPicker {
 
     fn decode_picked_file(&mut self, path: PathBuf, cx: &mut Context<Self>) {
         let check_path = path.clone();
+        let locale = self.settings.read(cx).language.clone();
         self._decode_task = Some(cx.spawn(async move |this, cx| {
             let decoded = cx
                 .background_spawn(async move {
-                    let bytes = std::fs::read(&path).map_err(|err| err.to_string())?;
+                    let bytes = std::fs::read(&path).map_err(|_| "invalid_file".to_string())?;
                     mezon_audio::decode_audio(bytes).map_err(|err| err.to_string())
                 })
                 .await;
+            let error_code = match &decoded {
+                Err(err) if err == "invalid_file" => Some("invalid_file"),
+                Err(_) => Some("decode_failed"),
+                Ok(_) => None,
+            };
             let _ = this.update(cx, |this, cx| {
                 if this.picked_path.as_ref() != Some(&check_path) {
                     return;
@@ -292,6 +294,9 @@ impl SoundPicker {
                 }
                 cx.notify();
             });
+            if let Some(code) = error_code {
+                show_error(cx, sound_error_message(&locale, code));
+            }
         }));
     }
 
@@ -391,12 +396,7 @@ impl SoundPicker {
                 .background_spawn(async move { validate_sound_file(&path_buf, MAX_SOUND_BYTES) })
                 .await;
             if let Err(code) = validated {
-                let message = match code.as_str() {
-                    "size_limit" => mezon_i18n::t(&locale, "clanSoundSetting.modal.errorFileSize"),
-                    _ => mezon_i18n::t(&locale, "clanSoundSetting.modal.errorFileType"),
-                }
-                .to_string();
-                show_error(cx, message);
+                show_error(cx, sound_error_message(&locale, &code));
                 return;
             }
             let label = path
@@ -495,23 +495,7 @@ impl SoundPicker {
                 }
                 Err(e) => {
                     tracing::error!("sound save failed: {e}");
-                    let message = match e.as_str() {
-                        "size_limit" => {
-                            mezon_i18n::t(&locale, "clanSoundSetting.modal.errorFileSize")
-                                .to_string()
-                        }
-                        "unsupported_type" => {
-                            mezon_i18n::t(&locale, "clanSoundSetting.modal.errorFileType")
-                                .to_string()
-                        }
-                        "invalid_name" => {
-                            mezon_i18n::t(&locale, "clanSoundSetting.modal.errorName")
-                                .replace("{{min}}", "3")
-                                .replace("{{max}}", "64")
-                        }
-                        _ => mezon_i18n::t(&locale, "clanSoundSetting.modal.errorUploadFailed")
-                            .to_string(),
-                    };
+                    let message = sound_error_message(&locale, &e);
                     let _ = this.update(cx, |this, cx| {
                         this.submitting = false;
                         cx.notify();
@@ -527,6 +511,19 @@ impl SoundPicker {
         VoiceStore::global(cx).update(cx, |store, cx| store.stop_sound_preview(cx));
         cx.emit(SoundPickerEvent::Cancelled);
         Shell::global(cx).update(cx, |shell, cx| shell.close_modal(cx));
+    }
+}
+
+fn sound_error_message(locale: &str, code: &str) -> String {
+    match code {
+        "size_limit" => mezon_i18n::t(locale, "clanSoundSetting.toast.errorSizeLimit").to_string(),
+        "unsupported_type" | "empty" | "invalid_file" | "decode_failed" => {
+            mezon_i18n::t(locale, "clanSoundSetting.toast.errorFileType").to_string()
+        }
+        "invalid_name" => mezon_i18n::t(locale, "clanSoundSetting.modal.errorName")
+            .replace("{{min}}", "3")
+            .replace("{{max}}", "64"),
+        _ => mezon_i18n::t(locale, "clanSoundSetting.modal.errorUploadFailed").to_string(),
     }
 }
 

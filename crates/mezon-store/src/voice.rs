@@ -1,5 +1,4 @@
 use std::collections::{HashMap, HashSet};
-use std::io::Read;
 use std::path::Path;
 use std::sync::{
     Arc,
@@ -1869,18 +1868,18 @@ pub fn validate_sound_file(path: &Path, max_bytes: u64) -> Result<(), String> {
     if !SOUND_ALLOWED_EXTENSIONS.contains(&ext.as_str()) {
         return Err("unsupported_type".into());
     }
-    let len = std::fs::metadata(path).map_err(|e| e.to_string())?.len();
+    let len = std::fs::metadata(path)
+        .map_err(|_| "invalid_file".to_string())?
+        .len();
     if len == 0 {
         return Err("empty".into());
     }
     if len > max_bytes {
         return Err("size_limit".into());
     }
-    let header_len = len.min(64) as usize;
-    let mut header = vec![0u8; header_len];
-    let mut file = std::fs::File::open(path).map_err(|e| e.to_string())?;
-    file.read_exact(&mut header).map_err(|e| e.to_string())?;
-    let mime = mezon_audio::sniff_sound_mime(&header).ok_or_else(|| "unsupported_type".to_string())?;
+    let data = std::fs::read(path).map_err(|_| "invalid_file".to_string())?;
+    let mime =
+        mezon_audio::sniff_sound_mime(&data).ok_or_else(|| "unsupported_type".to_string())?;
     let ext_matches = match ext.as_str() {
         "wav" => mime == "audio/wav",
         "mp3" | "mpeg" => mime == "audio/mpeg",
@@ -1902,7 +1901,7 @@ pub async fn upload_sound_file(
     let data = mezon_client::transport_runtime::handle()
         .spawn_blocking(move || {
             validate_sound_file(&path_buf, max)?;
-            std::fs::read(&path_buf).map_err(|e| e.to_string())
+            std::fs::read(&path_buf).map_err(|_| "invalid_file".to_string())
         })
         .await
         .map_err(|e| e.to_string())??;
@@ -1927,10 +1926,10 @@ pub async fn upload_sound_file(
 mod tests {
     use std::sync::Arc;
 
-    use gpui::RenderImage;
-    use parking_lot::Mutex;
     use super::parse_raise_token;
     use super::{MAX_SOUND_BYTES, validate_sound_file};
+    use gpui::RenderImage;
+    use parking_lot::Mutex;
 
     #[test]
     fn validate_sound_file_rejects_mismatched_extension() {
@@ -1959,7 +1958,23 @@ mod tests {
         std::fs::write(&wav_path, wav).unwrap();
         assert!(validate_sound_file(&wav_path, MAX_SOUND_BYTES).is_ok());
         let _ = std::fs::remove_dir_all(&dir);
-    use super::{ScreenAutoFocus, parse_raise_token, screen_auto_focus_transition, screen_tile_id};
+    }
+
+    #[test]
+    fn validate_sound_file_accepts_mp3_with_id3_tag() {
+        let dir = std::env::temp_dir().join(format!("mezon-sound-id3-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let mp3_path = dir.join("tagged.mp3");
+        let mut bytes = vec![0u8; 128];
+        bytes[0..3].copy_from_slice(b"ID3");
+        bytes[6..10].copy_from_slice(&[0, 0, 0, 100]);
+        bytes[110..112].copy_from_slice(&[0xFF, 0xFB]);
+        std::fs::write(&mp3_path, bytes).unwrap();
+        assert!(validate_sound_file(&mp3_path, MAX_SOUND_BYTES).is_ok());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    use super::{ScreenAutoFocus, screen_auto_focus_transition, screen_tile_id};
     use crate::{NetworkQuality, VoiceParticipant};
 
     fn voice_participant(identity: &str, screenshare: Option<u64>) -> VoiceParticipant {

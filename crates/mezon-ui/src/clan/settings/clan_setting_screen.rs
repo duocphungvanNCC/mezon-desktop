@@ -287,22 +287,22 @@ impl ClanSettingScreen {
         match page {
             ClanSettingsPage::Overview => {
                 if let Some(entity) = self.overview_page.take() {
-                    entity.update(cx, |page, _| page.release());
+                    entity.update(cx, |page, cx| page.release(cx));
                 }
             }
             ClanSettingsPage::Emoji => {
                 if let Some(entity) = self.emoji_page.take() {
-                    entity.update(cx, |page, _| page.release());
+                    entity.update(cx, |page, cx| page.release(cx));
                 }
             }
             ClanSettingsPage::ImageStickers => {
                 if let Some(entity) = self.sticker_page.take() {
-                    entity.update(cx, |page, _| page.release());
+                    entity.update(cx, |page, cx| page.release(cx));
                 }
             }
             ClanSettingsPage::VoiceStickers => {
                 if let Some(entity) = self.sound_page.take() {
-                    entity.update(cx, |page, _| page.release());
+                    entity.update(cx, |page, cx| page.release(cx));
                 }
             }
             _ => {}
@@ -624,36 +624,50 @@ impl Render for ClanSettingScreen {
                                                 ),
                                         )
                                     })
-                                    .child(if page == ClanSettingsPage::Emoji {
-                                        div()
-                                            .flex_1()
-                                            .min_h_0()
-                                            .w_full()
-                                            .pl(px(40.0))
-                                            .pr(px(28.0))
-                                            .child(div().max_w(px(740.0)).size_full().child(content))
-                                            .into_any_element()
-                                    } else {
-                                        div()
-                                            .id("clan-settings-scroll")
-                                            .flex_1()
-                                            .min_h_0()
-                                            .w_full()
-                                            .overflow_y_scroll()
-                                            .track_scroll(&self.scroll)
-                                            .pb(px(28.0))
-                                            .pl(px(40.0))
-                                            .pr(px(28.0))
-                                            .when(hide_page_title, |el| el.pt(px(60.0)))
-                                            .child(
-                                                div()
-                                                    .w_full()
-                                                    .max_w(px(740.0))
-                                                    .min_w(px(0.0))
-                                                    .child(content),
-                                            )
-                                            .into_any_element()
-                                    }),
+                                    .child(
+                                        if matches!(
+                                            page,
+                                            ClanSettingsPage::Emoji
+                                                | ClanSettingsPage::ImageStickers
+                                                | ClanSettingsPage::VoiceStickers
+                                        ) {
+                                            div()
+                                                .flex_1()
+                                                .min_h_0()
+                                                .w_full()
+                                                .pl(px(40.0))
+                                                .pr(px(28.0))
+                                                .child(
+                                                    div()
+                                                        .w_full()
+                                                        .h_full()
+                                                        .max_w(px(740.0))
+                                                        .min_w(px(0.0))
+                                                        .child(content),
+                                                )
+                                                .into_any_element()
+                                        } else {
+                                            div()
+                                                .id("clan-settings-scroll")
+                                                .flex_1()
+                                                .min_h_0()
+                                                .w_full()
+                                                .overflow_y_scroll()
+                                                .track_scroll(&self.scroll)
+                                                .pb(px(28.0))
+                                                .pl(px(40.0))
+                                                .pr(px(28.0))
+                                                .when(hide_page_title, |el| el.pt(px(60.0)))
+                                                .child(
+                                                    div()
+                                                        .w_full()
+                                                        .max_w(px(740.0))
+                                                        .min_w(px(0.0))
+                                                        .child(content),
+                                                )
+                                                .into_any_element()
+                                        },
+                                    ),
                             )
                             .child(
                                 div()

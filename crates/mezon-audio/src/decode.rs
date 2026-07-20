@@ -336,7 +336,10 @@ mod tests {
 
     #[test]
     fn sniff_sound_mime_detects_mp3_sync() {
-        assert_eq!(sniff_sound_mime(&[0xFF, 0xFB, 0x90, 0x00]), Some("audio/mpeg"));
+        assert_eq!(
+            sniff_sound_mime(&[0xFF, 0xFB, 0x90, 0x00]),
+            Some("audio/mpeg")
+        );
     }
 
     #[test]

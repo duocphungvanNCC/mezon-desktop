@@ -1,4 +1,4 @@
-use gpui::{Context, FocusHandle, SharedString, TaskExt, Window, div, prelude::*, px};
+use gpui::{Context, FocusHandle, SharedString, Window, div, prelude::*, px};
 use mezon_store::{ClanId, StickerStore};
 
 use super::Shell;
@@ -65,12 +65,28 @@ impl Render for ConfirmDeleteSoundModal {
                             .label(self.delete_label.clone())
                             .danger()
                             .on_click(move |_, _window, cx| {
-                                StickerStore::global(cx)
-                                    .update(cx, |store, cx| {
-                                        store.delete_sound(sound_id.as_ref(), clan_id, cx)
-                                    })
-                                    .detach_and_log_err(cx);
-                                Shell::global(cx).update(cx, |shell, cx| shell.close_modal(cx));
+                                let task = StickerStore::global(cx).update(cx, |store, cx| {
+                                    store.delete_sound(sound_id.as_ref(), clan_id, cx)
+                                });
+                                cx.spawn(async move |cx| match task.await {
+                                    Ok(()) => {
+                                        cx.update(|cx| {
+                                            Shell::global(cx)
+                                                .update(cx, |shell, cx| shell.close_modal(cx));
+                                        });
+                                    }
+                                    Err(err) => {
+                                        cx.update(|cx| {
+                                            Shell::global(cx).update(cx, |shell, cx| {
+                                                shell.error(
+                                                    format!("Failed to delete sound: {err}"),
+                                                    cx,
+                                                );
+                                            });
+                                        });
+                                    }
+                                })
+                                .detach();
                             }),
                     ),
             )

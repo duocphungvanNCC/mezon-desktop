@@ -8,9 +8,7 @@ use mezon_proto::api;
 
 use crate::Freshness;
 use crate::clan::{ClanEvent, ClanList};
-use crate::emoji::{
-    MAX_STICKER_BYTES, is_valid_emoticon_shortname, upload_emoticon_file,
-};
+use crate::emoji::{MAX_STICKER_BYTES, is_valid_emoticon_shortname, upload_emoticon_file};
 use crate::ids::ClanId;
 use crate::voice::{MAX_SOUND_BYTES, upload_sound_file};
 
@@ -241,14 +239,9 @@ impl StickerStore {
             if !is_valid_emoticon_shortname(&shortname) {
                 return Err("invalid_name".into());
             }
-            let (id, url) = upload_emoticon_file(
-                &api,
-                &path,
-                "stickers",
-                MAX_STICKER_BYTES,
-                is_for_sale,
-            )
-            .await?;
+            let (id, url) =
+                upload_emoticon_file(&api, &path, "stickers", MAX_STICKER_BYTES, is_for_sale)
+                    .await?;
             api.add_clan_sticker(
                 clan,
                 &url,

@@ -1181,6 +1181,7 @@
   "clanEmojiSetting.description.requirements": "UPLOAD REQUIREMENTS",
   "clanEmojiSetting.emojiList.delete": "Delete",
   "clanEmojiSetting.emojiList.slotsDetails": "LIST EMOJIS",
+  "clanEmojiSetting.empty.title": "No emoji yet. Click \"Upload Emoji\" to add one!",
   "clanEmojiSetting.header.save": "Save",
   "clanEmojiSetting.image": "IMAGE",
   "clanEmojiSetting.modal.browse": "Browse",

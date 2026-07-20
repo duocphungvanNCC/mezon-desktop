@@ -5,8 +5,9 @@ use gpui::{
     SharedString, Subscription, Task, Window, div, img, prelude::*, px,
 };
 use mezon_store::{
-    ClanId, EMOTICON_SHORTNAME_MAX, EmojiStore, MAX_EMOJI_BYTES, MAX_STICKER_BYTES, Settings,
-    StickerStore, is_valid_emoticon_shortname, strip_emoji_colons, validate_emoticon_file,
+    ClanId, EMOJI_UPLOAD_MAX_PX, EMOTICON_SHORTNAME_MAX, EmojiStore, MAX_EMOJI_BYTES,
+    MAX_STICKER_BYTES, STICKER_UPLOAD_MAX_PX, Settings, StickerStore, is_valid_emoticon_shortname,
+    strip_emoji_colons, validate_emoticon_file,
 };
 
 use crate::app::shell::Shell;
@@ -62,7 +63,6 @@ pub struct EmojiStickerPicker {
     picked_path: Option<PathBuf>,
     file_label: SharedString,
     preview: Option<EmoticonPreview>,
-    file_error: Option<SharedString>,
     is_for_sale: bool,
     submitting: bool,
     _name_sub: Subscription,
@@ -143,7 +143,6 @@ impl EmojiStickerPicker {
             picked_path: None,
             file_label,
             preview,
-            file_error: None,
             is_for_sale: false,
             submitting: false,
             _name_sub: name_sub,
@@ -156,6 +155,13 @@ impl EmojiStickerPicker {
         match self.kind {
             EmoticonKind::Emoji => MAX_EMOJI_BYTES,
             EmoticonKind::Sticker => MAX_STICKER_BYTES,
+        }
+    }
+
+    fn max_upload_px(&self) -> u32 {
+        match self.kind {
+            EmoticonKind::Emoji => EMOJI_UPLOAD_MAX_PX,
+            EmoticonKind::Sticker => STICKER_UPLOAD_MAX_PX,
         }
     }
 
@@ -181,8 +187,6 @@ impl EmojiStickerPicker {
         if self.is_editing() {
             return;
         }
-        self.file_error = None;
-        cx.notify();
         let locale = self.settings.read(cx).language.clone();
         let prompt_key = match self.kind {
             EmoticonKind::Emoji => "clanEmojiSetting.modal.chooseAFile",
@@ -190,6 +194,7 @@ impl EmojiStickerPicker {
         };
         let prompt: SharedString = mezon_i18n::t(&locale, prompt_key).to_string().into();
         let max_bytes = self.max_bytes();
+        let max_upload_px = self.max_upload_px();
         let kind = self.kind;
         let rx = cx.prompt_for_paths(PathPromptOptions {
             files: true,
@@ -209,11 +214,9 @@ impl EmojiStickerPicker {
                 }
                 Ok(Err(err)) => {
                     tracing::warn!("emoticon file picker failed: {err}");
-                    let message =
-                        mezon_i18n::t(&locale, "common.somethingWentWrong").to_string();
+                    let message = mezon_i18n::t(&locale, "common.somethingWentWrong").to_string();
                     let _ = this.update(cx, |this, cx| {
                         finish(this);
-                        this.file_error = Some(message.clone().into());
                         cx.notify();
                     });
                     show_error(cx, message);
@@ -230,26 +233,16 @@ impl EmojiStickerPicker {
             };
             let path_buf = path.clone();
             let validated = cx
-                .background_spawn(async move { validate_emoticon_file(&path_buf, max_bytes) })
+                .background_spawn(async move {
+                    validate_emoticon_file(&path_buf, max_bytes, max_upload_px)
+                })
                 .await;
             if let Err(code) = validated {
-                let message = match code.as_str() {
-                    "size_limit" => match kind {
-                        EmoticonKind::Emoji => {
-                            mezon_i18n::t(&locale, "clanEmojiSetting.toast.errorSizeLimit")
-                        }
-                        EmoticonKind::Sticker => {
-                            mezon_i18n::t(&locale, "clanStickerSetting.toast.errorSizeLimit")
-                        }
-                    },
-                    _ => mezon_i18n::t(&locale, "common.onlyImageFiles"),
-                }
-                .to_string();
+                let message = emoticon_error_message(kind, &locale, &code);
                 let _ = this.update(cx, |this, cx| {
                     finish(this);
                     this.picked_path = None;
                     this.preview = None;
-                    this.file_error = Some(message.clone().into());
                     cx.notify();
                 });
                 show_error(cx, message);
@@ -266,7 +259,6 @@ impl EmojiStickerPicker {
                 this.picked_path = Some(path.clone());
                 this.file_label = label.into();
                 this.preview = Some(EmoticonPreview::Local(path));
-                this.file_error = None;
                 this.name_input.update(cx, |state, cx| {
                     state.set_value(default_name, window, cx);
                 });
@@ -346,28 +338,7 @@ impl EmojiStickerPicker {
                 }
                 Err(e) => {
                     tracing::error!("emoticon save failed: {e}");
-                    let message = match e.as_str() {
-                        "size_limit" => match kind {
-                            EmoticonKind::Emoji => {
-                                mezon_i18n::t(&locale, "clanEmojiSetting.toast.errorSizeLimit")
-                            }
-                            EmoticonKind::Sticker => {
-                                mezon_i18n::t(&locale, "clanStickerSetting.toast.errorSizeLimit")
-                            }
-                        }
-                        .to_string(),
-                        "invalid_name" => match kind {
-                            EmoticonKind::Emoji => {
-                                mezon_i18n::t(&locale, "clanEmojiSetting.toast.validateName")
-                            }
-                            EmoticonKind::Sticker => {
-                                mezon_i18n::t(&locale, "clanStickerSetting.toast.validateName")
-                            }
-                        }
-                        .replace("{{min}}", "3")
-                        .replace("{{max}}", "64"),
-                        _ => e,
-                    };
+                    let message = emoticon_error_message(kind, &locale, &e);
                     let _ = this.update(cx, |this, cx| {
                         this.submitting = false;
                         cx.notify();
@@ -439,14 +410,6 @@ impl EmojiStickerPicker {
                         browse_btn.on_click(cx.listener(|this, _, _, cx| this.pick_file(cx)))
                     }),
             )
-            .when_some(self.file_error.clone(), |col, message| {
-                col.child(
-                    div()
-                        .text_xs()
-                        .text_color(theme.status_dnd)
-                        .child(message),
-                )
-            })
     }
 
     fn render_name_field(
@@ -481,6 +444,28 @@ impl EmojiStickerPicker {
                     ),
             )
             .child(Input::new(&self.name_input))
+    }
+}
+
+fn emoticon_error_message(kind: EmoticonKind, locale: &str, code: &str) -> String {
+    match code {
+        "size_limit" | "image_too_large" => match kind {
+            EmoticonKind::Emoji => mezon_i18n::t(locale, "clanEmojiSetting.toast.errorSizeLimit"),
+            EmoticonKind::Sticker => {
+                mezon_i18n::t(locale, "clanStickerSetting.toast.errorSizeLimit")
+            }
+        }
+        .to_string(),
+        "invalid_name" => match kind {
+            EmoticonKind::Emoji => mezon_i18n::t(locale, "clanEmojiSetting.toast.validateName"),
+            EmoticonKind::Sticker => mezon_i18n::t(locale, "clanStickerSetting.toast.validateName"),
+        }
+        .replace("{{min}}", "3")
+        .replace("{{max}}", "64"),
+        "unsupported_type" | "empty" | "invalid_image" => {
+            mezon_i18n::t(locale, "common.onlyImageFiles").to_string()
+        }
+        _ => mezon_i18n::t(locale, "common.somethingWentWrong").to_string(),
     }
 }
 
@@ -675,11 +660,7 @@ impl Render for EmojiStickerPicker {
                         is_editing,
                         cx,
                     ))
-                    .child(self.render_name_field(
-                        &theme,
-                        name_label.into(),
-                        name_len,
-                    )),
+                    .child(self.render_name_field(&theme, name_label.into(), name_len)),
             )
             .child(
                 h_flex()

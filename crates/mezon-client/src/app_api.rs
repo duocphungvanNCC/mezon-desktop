@@ -1000,10 +1000,7 @@ impl AppApi {
             .await?;
         crate::transport_runtime::put_bytes_to_content_type(&upload.url, data, filetype).await?;
         let resolved_id = emoticon_id_from_filename(&upload.filename).ok_or_else(|| {
-            anyhow::anyhow!(
-                "invalid emoticon upload filename: {}",
-                upload.filename
-            )
+            anyhow::anyhow!("invalid emoticon upload filename: {}", upload.filename)
         })?;
         let url = attachment_cdn_url(&self.base_img_url, &upload.filename)?;
         Ok((resolved_id, url))

@@ -1,6 +1,7 @@
 use gpui::{
-    AnyElement, App, Context, Entity, FontWeight, SharedString, Subscription, Window, div, img,
-    prelude::*, px,
+    AnyElement, App, Context, Entity, FontWeight, ListHorizontalSizingBehavior, ScrollHandle,
+    SharedString, Subscription, UniformListScrollHandle, Window, div, img, prelude::*, px, size,
+    uniform_list,
 };
 use mezon_store::{
     BadgeService, ClanId, ClanMembersEvent, ClanMembersStore, PermissionStore, Settings, Sticker,
@@ -29,8 +30,26 @@ const STICKER_GRID_GAP_X: f32 = 16.0;
 const STICKER_GRID_GAP_Y: f32 = 16.0;
 const STICKER_GRID_MIN_COLUMNS: u16 = 3;
 const STICKER_GRID_MAX_COLUMNS: u16 = 5;
+const STICKER_GRID_OVERFLOW_INSET: f32 = 8.0;
+const STICKER_ROW_HEIGHT: f32 = CARD_HEIGHT + STICKER_GRID_GAP_Y;
 
-fn sticker_grid_gap_x() -> f32 {
+#[derive(Clone)]
+struct StickerCardData {
+    id: SharedString,
+    shortname: SharedString,
+    src: SharedString,
+    creator_name: SharedString,
+    creator_avatar: Option<SharedString>,
+    can_manage: bool,
+    is_for_sale: bool,
+}
+
+enum StickerGridCell {
+    Sticker(StickerCardData),
+    Add,
+}
+
+fn sticker_grid_columns() -> usize {
     let mut columns = STICKER_GRID_MIN_COLUMNS;
     for column_count in STICKER_GRID_MIN_COLUMNS..=STICKER_GRID_MAX_COLUMNS {
         let row_width =
@@ -41,8 +60,13 @@ fn sticker_grid_gap_x() -> f32 {
             break;
         }
     }
-    let gaps = (columns - 1).max(1) as f32;
-    ((STICKER_CONTENT_MAX_WIDTH - columns as f32 * CARD_WIDTH) / gaps).max(STICKER_GRID_GAP_X)
+    usize::from(columns)
+}
+
+fn sticker_grid_gap_x() -> f32 {
+    let columns = sticker_grid_columns() as f32;
+    let gaps = (columns - 1.0).max(1.0);
+    ((STICKER_CONTENT_MAX_WIDTH - columns * CARD_WIDTH) / gaps).max(STICKER_GRID_GAP_X)
 }
 
 fn section_heading_xs(text: impl Into<SharedString>, theme: &Theme) -> gpui::Div {
@@ -65,24 +89,59 @@ fn body_text(text: impl Into<SharedString>, theme: &Theme) -> gpui::Div {
 
 pub struct StickerSettingPage {
     clan_id: ClanId,
+    clan_id_str: String,
     settings: Entity<Settings>,
     image_cache: Entity<LruImageCache>,
+    scroll: ScrollHandle,
+    grid_scroll: UniformListScrollHandle,
+    grid_cells: Vec<StickerGridCell>,
+    grid_columns: usize,
     _sticker_sub: Subscription,
+    _sticker_observe: Subscription,
     _members_sub: Subscription,
+    _perm_sub: Subscription,
+    _modal_sub: Option<Subscription>,
 }
 
 impl StickerSettingPage {
     pub fn new(clan_id: ClanId, settings: Entity<Settings>, cx: &mut Context<Self>) -> Self {
         StickerStore::global(cx).update(cx, |store, cx| store.ensure_loaded(cx));
         ClanMembersStore::global(cx).update(cx, |store, cx| store.ensure_loaded(clan_id, cx));
+        PermissionStore::global(cx).update(cx, |store, cx| {
+            store.load_clan_permissions(clan_id, cx);
+        });
 
-        let sticker_sub = cx.subscribe(&StickerStore::global(cx), |_, _, _: &StickerEvent, cx| {
-            cx.notify();
+        let sticker_sub = cx.subscribe(
+            &StickerStore::global(cx),
+            |this, _, _: &StickerEvent, cx| {
+                this.rebuild_grid(cx);
+                cx.notify();
+            },
+        );
+        let sticker_observe = cx.observe(&StickerStore::global(cx), |this, _, cx| {
+            let count = StickerStore::global(cx)
+                .read(cx)
+                .for_clan(&this.clan_id_str)
+                .len();
+            let grid_count = this
+                .grid_cells
+                .iter()
+                .filter(|cell| matches!(cell, StickerGridCell::Sticker(_)))
+                .count();
+            if count != grid_count {
+                this.rebuild_grid(cx);
+                cx.notify();
+            }
         });
         let members_sub = cx.subscribe(&ClanMembersStore::global(cx), |this, _, event, cx| {
             if matches!(event, ClanMembersEvent::Changed { clan_id } if *clan_id == this.clan_id) {
+                this.rebuild_grid(cx);
                 cx.notify();
             }
+        });
+        let perm_sub = cx.observe(&PermissionStore::global(cx), |this, _, cx| {
+            this.rebuild_grid(cx);
+            cx.notify();
         });
         let image_cache = cx.new(|cx| {
             LruImageCache::avatar_thumbnail(
@@ -94,28 +153,52 @@ impl StickerSettingPage {
             )
         });
 
-        Self {
+        let clan_id_str = clan_id.get().to_string();
+        let grid_columns = sticker_grid_columns();
+        let mut this = Self {
             clan_id,
+            clan_id_str,
             settings,
             image_cache,
+            scroll: ScrollHandle::new(),
+            grid_scroll: UniformListScrollHandle::new(),
+            grid_cells: Vec::new(),
+            grid_columns,
             _sticker_sub: sticker_sub,
+            _sticker_observe: sticker_observe,
             _members_sub: members_sub,
-        }
+            _perm_sub: perm_sub,
+            _modal_sub: None,
+        };
+        this.rebuild_grid(cx);
+        this
     }
 
-    pub fn release(&mut self) {}
-
-    fn clan_id_str(&self) -> String {
-        self.clan_id.get().to_string()
+    pub fn release(&mut self, _cx: &mut Context<Self>) {
+        self._modal_sub.take();
     }
 
-    fn stickers(&self, cx: &App) -> Vec<Sticker> {
-        StickerStore::global(cx)
+    fn sticker_count(&self) -> usize {
+        self.grid_cells
+            .iter()
+            .filter(|cell| matches!(cell, StickerGridCell::Sticker(_)))
+            .count()
+    }
+
+    fn rebuild_grid(&mut self, cx: &App) {
+        self.grid_columns = sticker_grid_columns();
+        let stickers = StickerStore::global(cx)
             .read(cx)
-            .for_clan(&self.clan_id_str())
-            .into_iter()
-            .cloned()
-            .collect()
+            .for_clan(&self.clan_id_str);
+        self.grid_cells = stickers
+            .iter()
+            .map(|sticker| StickerGridCell::Sticker(self.card_data(sticker, cx)))
+            .collect();
+        self.grid_cells.push(StickerGridCell::Add);
+    }
+
+    fn grid_row_count(&self) -> usize {
+        self.grid_cells.len().div_ceil(self.grid_columns)
     }
 
     fn can_manage_sticker(&self, sticker: &Sticker, cx: &App) -> bool {
@@ -172,8 +255,21 @@ impl StickerSettingPage {
         }
     }
 
+    fn card_data(&self, sticker: &Sticker, cx: &App) -> StickerCardData {
+        let (creator_name, creator_avatar) = self.creator_display(sticker, cx);
+        StickerCardData {
+            id: SharedString::from(sticker.id.clone()),
+            shortname: SharedString::from(sticker.shortname.clone()),
+            src: Self::sticker_image_src(sticker, cx),
+            creator_name,
+            creator_avatar,
+            can_manage: self.can_manage_sticker(sticker, cx),
+            is_for_sale: sticker.is_for_sale,
+        }
+    }
+
     fn open_picker(
-        &self,
+        &mut self,
         editing: Option<EmoticonEditTarget>,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -190,12 +286,16 @@ impl StickerSettingPage {
                 cx,
             )
         });
-        cx.subscribe(&modal, |_, _, _: &EmojiStickerPickerEvent, cx| cx.notify())
-            .detach();
+        self._modal_sub = Some(
+            cx.subscribe(&modal, |this, _, _: &EmojiStickerPickerEvent, cx| {
+                this._modal_sub = None;
+                cx.notify();
+            }),
+        );
         Shell::global(cx).update(cx, |shell, cx| shell.show_modal(modal.into(), cx));
     }
 
-    fn open_create_modal(&self, window: &mut Window, cx: &mut Context<Self>) {
+    fn open_create_modal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.open_picker(None, window, cx);
     }
 
@@ -260,185 +360,236 @@ impl StickerSettingPage {
                     })),
             )
     }
+}
 
-    fn render_sticker_card(
-        &self,
-        sticker: Sticker,
-        theme: &Theme,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        let can_manage = self.can_manage_sticker(&sticker, cx);
-        let (creator_name, creator_avatar) = self.creator_display(&sticker, cx);
-        let shortname = SharedString::from(sticker.shortname.clone());
-        let src = Self::sticker_image_src(&sticker, cx);
-        let is_for_sale = sticker.is_for_sale;
-        let group_name = SharedString::from(format!("sticker-card-{}", sticker.id));
+fn render_sticker_card(
+    sticker: &StickerCardData,
+    theme: &Theme,
+    entity: Entity<StickerSettingPage>,
+) -> impl IntoElement {
+    let shortname = sticker.shortname.clone();
+    let group_name = SharedString::from(format!("sticker-card-{}", sticker.id));
 
-        let mut card = v_flex()
-            .id(group_name.clone())
-            .group(group_name.clone())
-            .relative()
-            .w(px(CARD_WIDTH))
-            .h(px(CARD_HEIGHT))
-            .p_3()
-            .rounded_lg()
-            .border_1()
-            .border_color(theme.border)
-            .bg(theme.tokens.bg_active_member_channel)
-            .items_center()
-            .justify_between()
-            .child(
-                div()
-                    .h(px(STICKER_IMAGE_SIZE))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .child(
-                        img(src)
-                            .h(px(STICKER_IMAGE_SIZE))
-                            .max_w(px(STICKER_IMAGE_SIZE))
-                            .object_fit(gpui::ObjectFit::Contain),
-                    ),
-            )
-            .child(
-                div()
-                    .w_full()
-                    .max_w(px(90.0))
-                    .text_center()
-                    .text_xs()
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(theme.text_primary)
-                    .overflow_hidden()
-                    .text_ellipsis()
-                    .whitespace_nowrap()
-                    .child(shortname.clone()),
-            )
-            .child(
-                h_flex()
-                    .w_full()
-                    .items_end()
-                    .justify_center()
-                    .gap_1()
-                    .child({
-                        let mut avatar = Avatar::new().name(creator_name.clone()).size_px(px(16.0));
-                        if let Some(src) = creator_avatar {
-                            avatar = avatar.src(src);
-                        }
-                        div().flex_shrink_0().child(avatar)
-                    })
-                    .child(
-                        div()
-                            .max_w(px(80.0))
-                            .text_xs()
-                            .text_color(theme.text_secondary)
-                            .overflow_hidden()
-                            .text_ellipsis()
-                            .whitespace_nowrap()
-                            .child(creator_name),
-                    ),
-            );
-
-        if is_for_sale {
-            card = card.child(
-                div().absolute().top_1().left_1().child(
-                    Icon::new(IconName::MarketIcons)
-                        .size(px(16.0))
-                        .text_color(gpui::rgb(0xfacc15)),
+    let mut card = v_flex()
+        .id(group_name.clone())
+        .group(group_name.clone())
+        .relative()
+        .w(px(CARD_WIDTH))
+        .h(px(CARD_HEIGHT))
+        .p_3()
+        .rounded_lg()
+        .border_1()
+        .border_color(theme.border)
+        .bg(theme.tokens.bg_active_member_channel)
+        .items_center()
+        .justify_between()
+        .child(
+            div()
+                .h(px(STICKER_IMAGE_SIZE))
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(
+                    img(sticker.src.clone())
+                        .h(px(STICKER_IMAGE_SIZE))
+                        .max_w(px(STICKER_IMAGE_SIZE))
+                        .object_fit(gpui::ObjectFit::Contain),
                 ),
-            );
-        }
+        )
+        .child(
+            div()
+                .w_full()
+                .max_w(px(90.0))
+                .text_center()
+                .text_xs()
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(theme.text_primary)
+                .overflow_hidden()
+                .text_ellipsis()
+                .whitespace_nowrap()
+                .child(shortname.clone()),
+        )
+        .child(
+            h_flex()
+                .w_full()
+                .items_end()
+                .justify_center()
+                .gap_1()
+                .child({
+                    let mut avatar = Avatar::new()
+                        .name(sticker.creator_name.clone())
+                        .size_px(px(16.0));
+                    if let Some(src) = sticker.creator_avatar.clone() {
+                        avatar = avatar.src(src);
+                    }
+                    div().flex_shrink_0().child(avatar)
+                })
+                .child(
+                    div()
+                        .max_w(px(80.0))
+                        .text_xs()
+                        .text_color(theme.text_secondary)
+                        .overflow_hidden()
+                        .text_ellipsis()
+                        .whitespace_nowrap()
+                        .child(sticker.creator_name.clone()),
+                ),
+        );
 
-        if can_manage {
-            let sticker_id_for_delete = SharedString::from(sticker.id.clone());
-            let shortname_for_delete = shortname.clone();
-            card = card.child(
-                div()
-                    .absolute()
-                    .top(px(-8.0))
-                    .right(px(-8.0))
-                    .invisible()
-                    .group_hover(group_name, |s| s.visible())
-                    .child(
-                        div()
-                            .id(SharedString::from(format!("sticker-delete-{}", sticker.id)))
-                            .size(px(20.0))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .rounded_full()
-                            .bg(theme.tokens.bg_theme_input_primary)
-                            .shadow_sm()
-                            .cursor_pointer()
-                            .on_click(cx.listener(move |this, _, window, cx| {
+    if sticker.is_for_sale {
+        card = card.child(
+            div().absolute().top_1().left_1().child(
+                Icon::new(IconName::MarketIcons)
+                    .size(px(16.0))
+                    .text_color(gpui::rgb(0xfacc15)),
+            ),
+        );
+    }
+
+    if sticker.can_manage {
+        let sticker_id_for_delete = sticker.id.clone();
+        let shortname_for_delete = shortname.clone();
+        card = card.child(
+            div()
+                .absolute()
+                .top(px(-8.0))
+                .right(px(-8.0))
+                .invisible()
+                .group_hover(group_name, |s| s.visible())
+                .child(
+                    div()
+                        .id(SharedString::from(format!("sticker-delete-{}", sticker.id)))
+                        .size(px(20.0))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded_full()
+                        .bg(theme.tokens.bg_theme_input_primary)
+                        .shadow_sm()
+                        .cursor_pointer()
+                        .on_click(move |_, window, cx| {
+                            entity.update(cx, |this, cx| {
                                 this.confirm_delete_sticker(
                                     sticker_id_for_delete.clone(),
                                     shortname_for_delete.clone(),
                                     window,
                                     cx,
                                 );
-                            }))
-                            .child(
-                                Icon::new(IconName::Close)
-                                    .size(px(12.0))
-                                    .text_color(theme.status_dnd),
-                            ),
-                    ),
-            );
-        }
-
-        card
+                            });
+                        })
+                        .child(
+                            Icon::new(IconName::Close)
+                                .size(px(12.0))
+                                .text_color(theme.status_dnd),
+                        ),
+                ),
+        );
     }
 
-    fn render_add_card(&self, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
-        div()
-            .id("sticker-add-card")
-            .group(SharedString::from("sticker-add-card"))
-            .w(px(CARD_WIDTH))
-            .h(px(CARD_HEIGHT))
-            .p_3()
-            .rounded_lg()
-            .border_1()
-            .border_dashed()
-            .border_color(theme.tokens.bg_tertiary)
-            .flex()
-            .flex_col()
-            .items_center()
-            .justify_center()
-            .cursor_pointer()
-            .on_click(cx.listener(|this, _, window, cx| this.open_create_modal(window, cx)))
-            .child(
-                Icon::new(IconName::ImageUploadIcon)
-                    .size(px(28.0))
-                    .text_color(theme.text_secondary),
-            )
+    card
+}
+
+fn render_add_card(theme: &Theme, entity: Entity<StickerSettingPage>) -> impl IntoElement {
+    div()
+        .id("sticker-add-card")
+        .group(SharedString::from("sticker-add-card"))
+        .w(px(CARD_WIDTH))
+        .h(px(CARD_HEIGHT))
+        .p_3()
+        .rounded_lg()
+        .border_1()
+        .border_dashed()
+        .border_color(theme.tokens.bg_tertiary)
+        .flex()
+        .flex_col()
+        .items_center()
+        .justify_center()
+        .cursor_pointer()
+        .on_click(move |_, window, cx| {
+            entity.update(cx, |this, cx| this.open_create_modal(window, cx));
+        })
+        .child(
+            Icon::new(IconName::ImageUploadIcon)
+                .size(px(28.0))
+                .text_color(theme.text_secondary),
+        )
+}
+
+fn render_sticker_grid_row(
+    row_ix: usize,
+    grid_cells: &[StickerGridCell],
+    grid_columns: usize,
+    theme: &Theme,
+    entity: Entity<StickerSettingPage>,
+) -> AnyElement {
+    let gap_x = sticker_grid_gap_x();
+    let start = row_ix * grid_columns;
+    let end = (start + grid_columns).min(grid_cells.len());
+    let mut row = h_flex()
+        .w_full()
+        .h(px(STICKER_ROW_HEIGHT))
+        .gap_x(px(gap_x))
+        .items_start();
+
+    for cell in &grid_cells[start..end] {
+        row = row.child(match cell {
+            StickerGridCell::Sticker(sticker) => {
+                render_sticker_card(sticker, theme, entity.clone()).into_any_element()
+            }
+            StickerGridCell::Add => render_add_card(theme, entity.clone()).into_any_element(),
+        });
     }
 
+    row.into_any_element()
+}
+
+impl StickerSettingPage {
     fn render_grid(
         &self,
-        stickers: &[Sticker],
         locale: &str,
         theme: &Theme,
-        cx: &mut Context<Self>,
+        entity: Entity<StickerSettingPage>,
+        image_cache: Entity<LruImageCache>,
     ) -> impl IntoElement {
-        let slots_left = MAX_STICKER_SLOTS.saturating_sub(stickers.len());
+        let sticker_count = self.sticker_count();
+        let slots_left = MAX_STICKER_SLOTS.saturating_sub(sticker_count);
         let available = mezon_i18n::t(locale, "clanStickerSetting.content.available")
             .replace("{{left}}", &slots_left.to_string());
-        let gap_x = sticker_grid_gap_x();
+        let row_count = self.grid_row_count();
+        let list_entity = entity.clone();
+        let grid_height = px(row_count as f32 * STICKER_ROW_HEIGHT + STICKER_GRID_OVERFLOW_INSET);
 
-        let mut cards: Vec<AnyElement> = Vec::with_capacity(stickers.len() + 1);
-        for sticker in stickers.iter().cloned() {
-            cards.push(
-                self.render_sticker_card(sticker, theme, cx)
-                    .into_any_element(),
-            );
-        }
-        cards.push(self.render_add_card(theme, cx).into_any_element());
+        let grid_list = uniform_list(
+            "clan-sticker-settings-grid",
+            row_count,
+            move |range, _window, cx| {
+                let theme = cx.theme().clone();
+                let page = list_entity.read(cx);
+                range
+                    .map(|row_ix| {
+                        render_sticker_grid_row(
+                            row_ix,
+                            &page.grid_cells,
+                            page.grid_columns,
+                            &theme,
+                            list_entity.clone(),
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            },
+        )
+        .with_item_size(size(px(STICKER_CONTENT_MAX_WIDTH), px(STICKER_ROW_HEIGHT)))
+        .with_horizontal_sizing_behavior(ListHorizontalSizingBehavior::FitList)
+        .pt(px(STICKER_GRID_OVERFLOW_INSET))
+        .track_scroll(&self.grid_scroll)
+        .size_full();
 
         div()
             .w_full()
             .max_w(px(STICKER_CONTENT_MAX_WIDTH))
             .child(
                 div()
+                    .flex_shrink_0()
                     .mb(px(16.0))
                     .text_xs()
                     .font_weight(FontWeight::BOLD)
@@ -447,68 +598,84 @@ impl StickerSettingPage {
             )
             .child(
                 div()
+                    .image_cache(image_cache)
+                    .id("clan-sticker-settings-grid-container")
                     .w_full()
-                    .flex()
-                    .flex_wrap()
-                    .gap_x(px(gap_x))
-                    .gap_y(px(STICKER_GRID_GAP_Y))
-                    .children(cards),
+                    .h(grid_height)
+                    .child(grid_list),
             )
     }
 }
 
 impl Render for StickerSettingPage {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let store_count = StickerStore::global(cx)
+            .read(cx)
+            .for_clan(&self.clan_id_str)
+            .len();
+        if store_count != self.sticker_count() {
+            self.rebuild_grid(cx);
+        } else if self.sticker_count() == 0 {
+            StickerStore::global(cx).update(cx, |store, cx| store.ensure_loaded(cx));
+        }
+
         let theme = cx.theme().clone();
         let locale = self.settings.read(cx).language.clone();
-        let stickers = self.stickers(cx);
+        let entity = cx.entity();
+        let image_cache = self.image_cache.clone();
 
-        v_flex()
-            .image_cache(self.image_cache.clone())
-            .relative()
+        let requirements_section = v_flex()
+            .flex_shrink_0()
             .w_full()
-            .gap_0()
-            .pb(px(40.0))
+            .pb(px(24.0))
+            .border_b_1()
+            .border_color(theme.border)
+            .gap_2()
+            .child(body_text(
+                mezon_i18n::t(&locale, "clanStickerSetting.content.description"),
+                &theme,
+            ))
             .child(
-                v_flex()
-                    .w_full()
-                    .pb(px(24.0))
-                    .border_b_1()
-                    .border_color(theme.border)
-                    .gap_2()
-                    .child(body_text(
-                        mezon_i18n::t(&locale, "clanStickerSetting.content.description"),
-                        &theme,
-                    ))
-                    .child(
-                        section_heading_xs(
-                            mezon_i18n::t(&locale, "clanStickerSetting.content.requirements"),
-                            &theme,
-                        )
-                        .mt(px(8.0)),
-                    )
-                    .child(body_text(
-                        mezon_i18n::t(&locale, "clanStickerSetting.content.reqType"),
-                        &theme,
-                    ))
-                    .child(body_text(
-                        mezon_i18n::t(&locale, "clanStickerSetting.content.reqDim"),
-                        &theme,
-                    ))
-                    .child(body_text(
-                        mezon_i18n::t(&locale, "clanStickerSetting.content.reqSize"),
-                        &theme,
-                    )),
+                section_heading_xs(
+                    mezon_i18n::t(&locale, "clanStickerSetting.content.requirements"),
+                    &theme,
+                )
+                .mt(px(8.0)),
             )
-            .child(
-                div()
-                    .mt(px(16.0))
-                    .child(self.render_upload_card(&locale, &theme, cx)),
-            )
-            .child(
-                div()
-                    .mt(px(16.0))
-                    .child(self.render_grid(&stickers, &locale, &theme, cx)),
-            )
+            .child(body_text(
+                mezon_i18n::t(&locale, "clanStickerSetting.content.reqType"),
+                &theme,
+            ))
+            .child(body_text(
+                mezon_i18n::t(&locale, "clanStickerSetting.content.reqDim"),
+                &theme,
+            ))
+            .child(body_text(
+                mezon_i18n::t(&locale, "clanStickerSetting.content.reqSize"),
+                &theme,
+            ));
+
+        div().relative().size_full().min_h_0().child(
+            div()
+                .id("clan-sticker-settings-scroll")
+                .absolute()
+                .inset_0()
+                .overflow_y_scroll()
+                .track_scroll(&self.scroll)
+                .child(requirements_section)
+                .child(
+                    div()
+                        .w_full()
+                        .mt(px(16.0))
+                        .child(self.render_upload_card(&locale, &theme, cx)),
+                )
+                .child(
+                    div()
+                        .w_full()
+                        .mt(px(16.0))
+                        .pb(px(60.0))
+                        .child(self.render_grid(&locale, &theme, entity, image_cache)),
+                ),
+        )
     }
 }
