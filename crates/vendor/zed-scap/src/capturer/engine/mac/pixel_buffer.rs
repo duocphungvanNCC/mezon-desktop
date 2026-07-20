@@ -8,8 +8,17 @@ use core_video_sys::{
     CVPixelBufferLockBaseAddress, CVPixelBufferRef, CVPixelBufferUnlockBaseAddress,
 };
 use screencapturekit::{cm_sample_buffer::CMSampleBuffer, sc_types::SCFrameStatus};
-use screencapturekit_sys::cm_sample_buffer_ref::CMSampleBufferGetImageBuffer;
+use screencapturekit_sys::cm_sample_buffer_ref::{
+    CMSampleBufferGetImageBuffer, CMSampleBufferGetSampleAttachmentsArray,
+};
 use std::{ops::Deref, sync::mpsc};
+
+use super::apple_sys::{
+    CFDictionaryGetValue, CFDictionaryRef, CFNumberGetValue,
+    CFNumberType_kCFNumberFloat64Type, CGRectMakeWithDictionaryRepresentation,
+    SCStreamFrameInfoContentRect, SCStreamFrameInfoScaleFactor,
+};
+use core_graphics_helmer_fork::display::{CFArrayGetCount, CFArrayGetValueAtIndex, CFArrayRef};
 
 use crate::capturer::{engine::ChannelItem, RawCapturer};
 
@@ -40,6 +49,43 @@ impl PixelBuffer {
 
     pub fn bytes_per_row(&self) -> usize {
         self.bytes_per_row
+    }
+
+    pub fn content_size(&self) -> Option<(usize, usize)> {
+        unsafe {
+            let buffer_ref = &(*self.buffer.sys_ref);
+            let attachments = CMSampleBufferGetSampleAttachmentsArray(buffer_ref, 0);
+            if attachments.is_null() || CFArrayGetCount(attachments as CFArrayRef) == 0 {
+                return None;
+            }
+            let attachment = CFArrayGetValueAtIndex(attachments as CFArrayRef, 0) as CFDictionaryRef;
+            let rect_ref = CFDictionaryGetValue(attachment, SCStreamFrameInfoContentRect.0 as _);
+            if rect_ref.is_null() {
+                return None;
+            }
+            let mut rect: screencapturekit_sys::os_types::geometry::CGRect = std::mem::zeroed();
+            if CGRectMakeWithDictionaryRepresentation(rect_ref as CFDictionaryRef, &mut rect) == 0 {
+                return None;
+            }
+            let mut scale: f64 = 1.0;
+            let scale_ref = CFDictionaryGetValue(attachment, SCStreamFrameInfoScaleFactor.0 as _);
+            if !scale_ref.is_null() {
+                CFNumberGetValue(
+                    scale_ref as _,
+                    CFNumberType_kCFNumberFloat64Type,
+                    &mut scale as *mut f64 as *mut _,
+                );
+            }
+            if !(scale.is_finite() && scale > 0.0) {
+                scale = 1.0;
+            }
+            let width = (rect.size.width * scale).round() as usize;
+            let height = (rect.size.height * scale).round() as usize;
+            if width == 0 || height == 0 {
+                return None;
+            }
+            Some((width, height))
+        }
     }
 
     #[allow(missing_docs)]

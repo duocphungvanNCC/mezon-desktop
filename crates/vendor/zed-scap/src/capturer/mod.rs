@@ -70,6 +70,7 @@ pub struct Options {
     pub output_type: FrameType,
     pub output_resolution: Resolution,
     pub excluded_targets: Option<Vec<Target>>,
+    pub portal_source_types: Option<u32>,
 }
 
 pub struct Capturer {

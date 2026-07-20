@@ -6,8 +6,9 @@ use gpui::{
     Window, div, img, prelude::*, px,
 };
 use mezon_store::{
-    ScreenShareKind, ScreenShareListError, ScreenShareOption, ScreenSharePreview, Settings,
-    VoiceStore, capture_screen_share_preview, list_screen_share_options, peek_screen_share_options,
+    PickedScreen, ScreenShareKind, ScreenShareListError, ScreenShareOption, ScreenSharePreview,
+    Settings, VoiceStore, capture_screen_share_preview, list_screen_share_options,
+    peek_screen_share_options,
 };
 
 use crate::app::shell::Shell;
@@ -147,7 +148,7 @@ impl ScreenShareModal {
             return;
         }
 
-        let targets: Vec<(ScreenShareKind, u32)> = self
+        let targets: Vec<(ScreenShareKind, u32, PickedScreen)> = self
             .filtered_options()
             .into_iter()
             .filter_map(|option| {
@@ -158,7 +159,7 @@ impl ScreenShareModal {
                 if self.previews.contains_key(&key) || self.preview_requests.contains(&key) {
                     None
                 } else {
-                    Some((option.kind, option.id))
+                    Some((option.kind, option.id, option.pick.clone()))
                 }
             })
             .collect();
@@ -166,12 +167,8 @@ impl ScreenShareModal {
             return;
         }
 
-        self.preview_requests.extend(
-            targets
-                .iter()
-                .copied()
-                .map(|(kind, id)| PreviewKey { kind, id }),
-        );
+        self.preview_requests
+            .extend(targets.iter().map(|&(kind, id, _)| PreviewKey { kind, id }));
 
         self.preview_loading = true;
         self.preview_task = Some(cx.spawn(async move |this, cx| {
@@ -179,8 +176,8 @@ impl ScreenShareModal {
             std::thread::Builder::new()
                 .name("mezon-screen-previews".into())
                 .spawn(move || {
-                    for (kind, id) in targets {
-                        let preview = capture_screen_share_preview(kind, id);
+                    for (kind, id, pick) in targets {
+                        let preview = capture_screen_share_preview(&pick);
                         if tx.send((kind, id, preview)).is_err() {
                             break;
                         }
