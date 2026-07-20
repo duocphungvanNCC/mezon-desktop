@@ -5945,6 +5945,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "raw-window-handle",
+ "url",
  "wry",
 ]
 

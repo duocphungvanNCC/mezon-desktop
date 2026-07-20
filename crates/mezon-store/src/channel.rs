@@ -7,7 +7,10 @@ use std::time::Duration;
 
 use gpui::{App, AppContext, Context, Entity, EventEmitter, Global, Subscription, Task};
 use mezon_client::transport::{ApiCategoryDesc, ApiChannelDesc};
-use mezon_client::{ApiChannelApp, AppApi, ChannelAppLaunchParams, ConnectionStatus, RealtimeEvent, build_channel_app_url};
+use mezon_client::{
+    ApiChannelApp, AppApi, ChannelAppLaunchParams, ConnectionStatus, RealtimeEvent,
+    build_channel_app_url,
+};
 
 use crate::KeyedCache;
 use crate::clan::{ClanEvent, ClanList};

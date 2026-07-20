@@ -548,12 +548,13 @@ impl Render for ChannelSidebar {
             )
         });
 
-        let app_list_overlay = self.app_list_open.then(|| {
-            (self.app_list_apps.clone(), locale.clone())
-        });
+        let app_list_overlay = self
+            .app_list_open
+            .then(|| (self.app_list_apps.clone(), locale.clone()));
 
         let list_element = list(list_state, {
             let sidebar = sidebar.clone();
+            let locale = locale.clone();
             move |ix, _window, cx| {
                 render_sidebar_item(
                     &items,
@@ -563,6 +564,7 @@ impl Render for ChannelSidebar {
                     active_clan_id_for_nav,
                     sidebar.clone(),
                     suppress_hover,
+                    &locale,
                 )
             }
         })
@@ -912,6 +914,7 @@ fn render_banner_and_events(
     sidebar: WeakEntity<ChannelSidebar>,
     cx: &App,
     suppress_hover: bool,
+    locale: &str,
 ) -> AnyElement {
     let theme = cx.theme();
     let divider_color = theme.border;
@@ -1012,6 +1015,8 @@ fn render_banner_and_events(
         if has_more {
             let all_apps: Vec<AppChannelSlot> = app_channels.to_vec();
             let sidebar_more = sidebar.clone();
+            let channel_apps_label =
+                SharedString::from(mezon_i18n::t(locale, "channelList.channelApps").to_string());
             app_row = app_row.child(
                 div()
                     .id("app-channels-more")
@@ -1025,7 +1030,7 @@ fn render_banner_and_events(
                     .cursor_pointer()
                     .when(!suppress_hover, |more| {
                         more.hover(|s| s.bg(hover_bg))
-                            .tooltip(Tooltip::text(SharedString::from("Channel Apps")))
+                            .tooltip(Tooltip::text(channel_apps_label))
                     })
                     .on_click(move |_, _, cx| {
                         let _ = sidebar_more.update(cx, |sidebar, cx| {
@@ -1056,6 +1061,7 @@ fn render_sidebar_item(
     active_clan_id_for_nav: Option<ClanId>,
     sidebar: WeakEntity<ChannelSidebar>,
     suppress_hover: bool,
+    locale: &str,
 ) -> AnyElement {
     let theme = cx.theme();
     let Some(item) = items.get(ix) else {
@@ -1072,6 +1078,7 @@ fn render_sidebar_item(
             sidebar,
             cx,
             suppress_hover,
+            locale,
         ),
 
         SidebarItem::Category {

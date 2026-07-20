@@ -1,15 +1,15 @@
 use gpui::{
-    App, FontWeight, MouseDownEvent, SharedString, WeakEntity, Window, deferred, div,
-    prelude::*, px,
+    App, FontWeight, MouseDownEvent, SharedString, WeakEntity, Window, deferred, div, prelude::*,
+    px,
 };
 use mezon_store::PlatformStore;
 use ui::Tooltip;
 
 use crate::channel_app::is_channel_app_open;
 use crate::components::primitives::{Icon, IconName};
+use crate::sidebar::channel_sidebar::ChannelSidebar;
 use crate::sidebar::channel_sidebar::app_channel_open_dot;
 use crate::sidebar::channel_sidebar::items::AppChannelSlot;
-use crate::sidebar::channel_sidebar::ChannelSidebar;
 use crate::theme::ActiveTheme;
 
 const PANEL_WIDTH: f32 = 360.;
@@ -126,13 +126,11 @@ pub fn app_list_popover_overlay(
                     .bg(theme.bg_secondary)
                     .shadow_lg()
                     .occlude()
-                    .on_mouse_down_out(
-                        move |_: &MouseDownEvent, _: &mut Window, cx| {
-                            let _ = sidebar_dismiss.update(cx, |sidebar, cx| {
-                                sidebar.dismiss_app_list(cx);
-                            });
-                        },
-                    )
+                    .on_mouse_down_out(move |_: &MouseDownEvent, _: &mut Window, cx| {
+                        let _ = sidebar_dismiss.update(cx, |sidebar, cx| {
+                            sidebar.dismiss_app_list(cx);
+                        });
+                    })
                     .child(
                         div()
                             .px_4()

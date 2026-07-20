@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 
+use crate::chat::channel_app_bar::ChannelAppBarTarget;
 use gpui::{
     AnyView, App, Context, DismissEvent, Entity, Focusable, StyleRefinement, Subscription, Task,
     Window, deferred, div, prelude::*, px,
@@ -8,10 +9,9 @@ use mezon_store::{
     AuthState, Channel, ChannelId, ChannelList, ChannelType, ClanId, ClanList, ClanMembersStore,
     DirectChannel, DirectKind, DirectMessageStore, GroupMembersStore, InboxStore,
     MessageSearchEvent, MessageSearchStore, MessagesStore, PinnedEvent, PinnedMessagesStore,
-    Settings, ThreadsEvent, ThreadsStore, TopicsEvent, TopicsStore, VoiceMember, VoiceModerationError, VoiceStore,
-    expand_mention_name_tokens,
+    Settings, ThreadsEvent, ThreadsStore, TopicsEvent, TopicsStore, VoiceMember,
+    VoiceModerationError, VoiceStore, expand_mention_name_tokens,
 };
-use crate::chat::channel_app_bar::ChannelAppBarTarget;
 use ui::PopoverMenuHandle;
 use ui::utils::ROUNDED_BORDER_WINDOW;
 

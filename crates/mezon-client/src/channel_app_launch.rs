@@ -7,10 +7,7 @@ pub struct ChannelAppLaunchParams<'a> {
     pub clan_name: Option<&'a str>,
 }
 
-pub fn build_channel_app_url(
-    app_url: &str,
-    params: ChannelAppLaunchParams<'_>,
-) -> Result<String> {
+pub fn build_channel_app_url(app_url: &str, params: ChannelAppLaunchParams<'_>) -> Result<String> {
     match Url::parse(app_url) {
         Ok(mut url) => {
             {

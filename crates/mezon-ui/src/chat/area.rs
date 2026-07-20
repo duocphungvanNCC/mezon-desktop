@@ -11,7 +11,6 @@ use crate::chat::ReplyTarget;
 use crate::chat::channel_app_bar::{ChannelAppBarTarget, render_channel_app_bar};
 use crate::chat::channel_header::ChatHeader;
 use crate::chat::channel_typing::ChannelTyping;
-use crate::theme::ActiveTheme;
 use crate::chat::inbox::InboxPopoverPanel;
 use crate::chat::input_bar::{InputBar, ReplyClearSource};
 use crate::chat::member_list::{MemberListPanel, MemberSource};
@@ -21,6 +20,7 @@ use crate::chat::message_search::{MESSAGE_SEARCH_PANEL_WIDTH, MessageSearchPanel
 use crate::chat::pinned_popover::PinnedPopoverPanel;
 use crate::components::primitives::{Icon, IconName, InputState};
 use crate::image_cache::LruImageCache;
+use crate::theme::ActiveTheme;
 
 pub struct ChatArea {
     pub(crate) timeline: Entity<ChannelMessages>,

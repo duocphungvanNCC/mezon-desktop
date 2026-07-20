@@ -1,11 +1,11 @@
 use gpui::{
     App, AppContext, Bounds, ClipboardItem, Context, FocusHandle, MouseButton, Pixels, Render,
-    SharedString, Subscription, Task, Window, WindowBounds, WindowHandle, WindowKind, WindowOptions,
-    div, prelude::*, px, size,
+    SharedString, Subscription, Task, Window, WindowBounds, WindowHandle, WindowKind,
+    WindowOptions, div, prelude::*, px, size,
 };
+use mezon_webview::ChannelAppWebView;
 use std::collections::HashMap;
 use std::time::Duration;
-use mezon_webview::ChannelAppWebView;
 
 use crate::app::main_window::{activate_main_window, main_window_bounds};
 use crate::app::window_controls;
@@ -14,7 +14,6 @@ use crate::theme::{ActiveTheme, Theme};
 
 const MIN_WIDTH: f32 = 400.0;
 const MIN_HEIGHT: f32 = 300.0;
-const FOOTER_HEIGHT: f32 = 29.0;
 const NAV_BUTTON_SIZE: f32 = 28.0;
 const NAV_ICON_SIZE: f32 = 16.0;
 const TOOL_BAR_EDGE_SPACE: f32 = 4.0;
@@ -109,11 +108,7 @@ fn update_channel_app(
     handle.update(cx, update).is_ok()
 }
 
-fn register_channel_app_window(
-    app_id: i64,
-    handle: WindowHandle<ChannelAppWindow>,
-    cx: &mut App,
-) {
+fn register_channel_app_window(app_id: i64, handle: WindowHandle<ChannelAppWindow>, cx: &mut App) {
     ensure_channel_app_windows(cx);
     cx.global_mut::<GlobalChannelAppWindows>()
         .0
@@ -180,7 +175,11 @@ pub fn focus_channel_app_window(app_id: i64, cx: &mut App) -> bool {
     })
 }
 
-fn request_channel_app_from_store(request: ChannelAppStoreRequest, mode: PresentMode, cx: &mut App) {
+fn request_channel_app_from_store(
+    request: ChannelAppStoreRequest,
+    mode: PresentMode,
+    cx: &mut App,
+) {
     let ChannelAppStoreRequest {
         app_id,
         app_url,
@@ -387,8 +386,8 @@ impl ChannelAppWindow {
         if self._bounds_observer.is_some() {
             return;
         }
-        self._bounds_observer = Some(cx.observe_window_bounds(window, |_, _, cx| {
-            cx.notify();
+        self._bounds_observer = Some(cx.observe_window_bounds(window, |this, window, _cx| {
+            this.sync_webview_bounds(window);
         }));
     }
 
@@ -479,12 +478,7 @@ impl ChannelAppWindow {
         }));
     }
 
-    fn invoke_action(
-        &mut self,
-        action: TitleBarAction,
-        _window: &Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn invoke_action(&mut self, action: TitleBarAction, _window: &Window, cx: &mut Context<Self>) {
         match action {
             TitleBarAction::Back => self.go_back(),
             TitleBarAction::Forward => self.go_forward(),
@@ -617,7 +611,7 @@ impl ChannelAppWindow {
         div()
             .flex_shrink_0()
             .w_full()
-            .h(px(FOOTER_HEIGHT))
+            .h(px(mezon_webview::WEBVIEW_BOTTOM_OFFSET as f32))
             .flex()
             .items_center()
             .justify_center()
@@ -631,7 +625,6 @@ impl ChannelAppWindow {
 impl Render for ChannelAppWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.schedule_webview_init(window, cx);
-        self.sync_webview_bounds(window);
         let theme = cx.theme().clone();
 
         div()
