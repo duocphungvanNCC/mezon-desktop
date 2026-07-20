@@ -688,8 +688,9 @@ impl Render for ClanChannelsPage {
             .cloned()
             .collect::<Vec<_>>();
         let visible = Arc::new(self.flattened_rows(&parents, cx));
-        if self.list_state.item_count() != visible.len() {
-            self.list_state.reset(visible.len());
+        let previous_count = self.list_state.item_count();
+        if previous_count != visible.len() {
+            self.list_state.splice(0..previous_count, visible.len());
         }
         let entity = cx.entity();
         let locale_for_list = Arc::<str>::from(locale.clone());
@@ -821,7 +822,7 @@ fn compact_number(value: i64) -> String {
 }
 
 fn pagination_items(current: usize, pages: usize) -> Vec<Option<usize>> {
-    if pages <= 5 {
+    if pages <= 6 {
         return (0..pages).map(Some).collect();
     }
     if current <= 2 {
@@ -903,6 +904,10 @@ mod tests {
 
     #[test]
     fn pagination_matches_member_list_edges() {
+        assert_eq!(
+            pagination_items(5, 6),
+            vec![Some(0), Some(1), Some(2), Some(3), Some(4), Some(5)]
+        );
         assert_eq!(
             pagination_items(0, 10),
             vec![Some(0), Some(1), Some(2), Some(3), Some(4), None, Some(9)]

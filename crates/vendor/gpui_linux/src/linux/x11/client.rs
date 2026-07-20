@@ -636,9 +636,7 @@ impl X11Client {
                                     )
                                 };
                                 let len = events.len();
-                                if len >= 2
-                                    && same_run(&events[len - 1])
-                                    && same_run(&events[len - 2])
+                                if len >= 2 && same_run(&events[len - 1]) && same_run(&events[len - 2])
                                 {
                                     events[len - 1] = Event::XinputMotion(motion);
                                 } else {
