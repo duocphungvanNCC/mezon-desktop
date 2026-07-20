@@ -6,7 +6,7 @@ use gpui::{
     px,
 };
 use mezon_store::{InVoiceInfo, Settings, ThreadsStore};
-use ui::{ButtonLike, Clickable, PopoverMenu, PopoverMenuHandle, Toggleable};
+use ui::{Clickable, PopoverMenu, PopoverMenuHandle, Toggleable};
 
 use crate::app::window_controls;
 use crate::chat::files_popover::{FilesPopoverPanel, files_popover_on_open};
@@ -553,7 +553,7 @@ impl ChannelHeader {
             .with_handle(handle.clone())
             .anchor(Anchor::TopRight)
             .attach(Anchor::BottomRight)
-            .offset(gpui::point(px(0.), px(8.)))
+            .offset(point(px(0.), px(HEADER_POPOVER_Y_OFFSET)))
             .menu({
                 let handle = handle.clone();
                 let clan_id = clan_id.clone();
@@ -570,33 +570,12 @@ impl ChannelHeader {
                     }))
                 }
             })
-            .trigger(
-                ButtonLike::new("hdr-inbox-btn")
-                    .toggle_state(is_open)
-                    .child(
-                        div()
-                            .relative()
-                            .child(Icon::new(IconName::Inbox).size(px(20.)).text_color(
-                                if is_open {
-                                    theme.interactive_active
-                                } else {
-                                    theme.text_muted
-                                },
-                            ))
-                            .when(show_badge, |d| {
-                                d.child(
-                                    div()
-                                        .absolute()
-                                        .top(px(0.))
-                                        .right(px(0.))
-                                        .w(px(8.))
-                                        .h(px(8.))
-                                        .rounded_full()
-                                        .bg(badge_color),
-                                )
-                            }),
-                    ),
-            )
+            .trigger(InboxPopoverTrigger::new(
+                theme,
+                is_open,
+                show_badge,
+                badge_color,
+            ))
             .into_any_element()
     }
 }
@@ -901,6 +880,92 @@ impl RenderOnce for ThreadPopoverTrigger {
         } else {
             button
         }
+    }
+}
+
+#[derive(IntoElement)]
+struct InboxPopoverTrigger {
+    open: bool,
+    show_badge: bool,
+    badge_color: gpui::Rgba,
+    icon_color: gpui::Rgba,
+    icon_active: gpui::Rgba,
+    bg_hover: gpui::Rgba,
+    on_click: Option<Box<dyn Fn(&ClickEvent, &mut Window, &mut App) + 'static>>,
+}
+
+impl InboxPopoverTrigger {
+    fn new(theme: &Theme, open: bool, show_badge: bool, badge_color: gpui::Rgba) -> Self {
+        Self {
+            open,
+            show_badge,
+            badge_color,
+            icon_color: theme.text_muted,
+            icon_active: theme.interactive_active,
+            bg_hover: theme.bg_hover,
+            on_click: None,
+        }
+    }
+}
+
+impl Toggleable for InboxPopoverTrigger {
+    fn toggle_state(mut self, selected: bool) -> Self {
+        self.open = selected;
+        self
+    }
+}
+
+impl Clickable for InboxPopoverTrigger {
+    fn on_click(mut self, handler: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static) -> Self {
+        self.on_click = Some(Box::new(handler));
+        self
+    }
+
+    fn cursor_style(self, _cursor_style: CursorStyle) -> Self {
+        self
+    }
+}
+
+impl RenderOnce for InboxPopoverTrigger {
+    fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
+        let tint = if self.open {
+            self.icon_active
+        } else {
+            self.icon_color
+        };
+        let bg_hover = self.bg_hover;
+        let mut button = div()
+            .id("hdr-inbox-trigger")
+            .flex()
+            .items_center()
+            .justify_center()
+            .w(px(32.))
+            .h(px(32.))
+            .rounded_md()
+            .cursor_pointer()
+            .hover(move |s| s.bg(bg_hover))
+            .occlude()
+            .child(
+                div()
+                    .relative()
+                    .child(Icon::new(IconName::Inbox).size(px(20.)).text_color(tint))
+                    .when(self.show_badge, |d| {
+                        d.child(
+                            div()
+                                .absolute()
+                                .top(px(0.))
+                                .right(px(0.))
+                                .w(px(8.))
+                                .h(px(8.))
+                                .rounded_full()
+                                .bg(self.badge_color),
+                        )
+                    }),
+            );
+        if let Some(on_click) = self.on_click {
+            button = button.on_click(on_click);
+        }
+        button
     }
 }
 

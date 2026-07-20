@@ -3216,7 +3216,7 @@
   "notification.permissionRequest.permissionDenied": "通知へのアクセスが拒否されました。",
   "notification.permissionRequest.title": "通知権限",
   "notification.removeNotification": "通知を削除",
-  "notification.repliedTo": "返信: ",
+  "notification.repliedTo": "元のメッセージ: ",
   "notification.seeWhenAnswersAppear": "答えが表示されたときに見る",
   "notification.sender": "送信者: ",
   "notification.tabNotify.forYou": "あなた向け",
