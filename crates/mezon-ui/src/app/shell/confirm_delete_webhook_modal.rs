@@ -29,9 +29,7 @@ impl WebhookDeleteTarget {
 
     pub(super) fn delete_title_key(&self) -> &'static str {
         match self {
-            Self::Channel(_) => {
-                "clanIntegrationsSetting.webhooksEdit.deleteChannelWebhookTitle"
-            }
+            Self::Channel(_) => "clanIntegrationsSetting.webhooksEdit.deleteChannelWebhookTitle",
             Self::Clan(_) => "clanIntegrationsSetting.webhooksEdit.deleteClanWebhookTitle",
         }
     }
@@ -98,25 +96,44 @@ impl Render for ConfirmDeleteWebhookModal {
                             .danger()
                             .on_click(move |_, _window, cx| {
                                 let name = target.webhook_name().to_string();
-                                WebhookStore::global(cx).update(cx, |store, cx| match &target {
-                                    WebhookDeleteTarget::Channel(webhook) => {
-                                        store.delete_channel_webhook(webhook, cx);
-                                    }
-                                    WebhookDeleteTarget::Clan(webhook) => {
-                                        store.delete_clan_webhook(webhook, cx);
-                                    }
-                                });
-                                Shell::global(cx).update(cx, |shell, cx| {
-                                    shell.success(
-                                        mezon_i18n::t(
-                                            &locale,
-                                            "integrations.toast.deleteSuccess",
-                                        )
-                                        .replace("{{name}}", &name),
+                                let locale_for_task = locale.clone();
+                                let task =
+                                    WebhookStore::global(cx).update(
                                         cx,
+                                        |store, cx| match &target {
+                                            WebhookDeleteTarget::Channel(webhook) => {
+                                                store.delete_channel_webhook(webhook, cx)
+                                            }
+                                            WebhookDeleteTarget::Clan(webhook) => {
+                                                store.delete_clan_webhook(webhook, cx)
+                                            }
+                                        },
                                     );
-                                    shell.close_modal(cx);
-                                });
+                                cx.spawn(async move |cx| match task.await {
+                                    Ok(()) => {
+                                        cx.update(|cx| {
+                                            Shell::global(cx).update(cx, |shell, cx| {
+                                                shell.success(
+                                                    mezon_i18n::t(
+                                                        &locale_for_task,
+                                                        "integrations.toast.deleteSuccess",
+                                                    )
+                                                    .replace("{{name}}", &name),
+                                                    cx,
+                                                );
+                                                shell.close_modal(cx);
+                                            });
+                                        });
+                                    }
+                                    Err(err) => {
+                                        cx.update(|cx| {
+                                            Shell::global(cx).update(cx, |shell, cx| {
+                                                shell.error(err, cx);
+                                            });
+                                        });
+                                    }
+                                })
+                                .detach();
                             }),
                     ),
             )

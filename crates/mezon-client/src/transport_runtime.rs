@@ -2008,7 +2008,11 @@ impl TransportClient {
     ) -> Result<mezon_proto::api::WebhookListResponse> {
         let transport = self.inner.clone();
         runtime()
-            .spawn(async move { transport.list_webhook_by_channel_id(channel_id, clan_id).await })
+            .spawn(async move {
+                transport
+                    .list_webhook_by_channel_id(channel_id, clan_id)
+                    .await
+            })
             .await
             .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
     }

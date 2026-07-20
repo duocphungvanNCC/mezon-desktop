@@ -596,9 +596,9 @@ impl ClanList {
         let base_img_url = AppConfig::global(cx).base_img_url.clone();
         cx.spawn(async move |_, cx| {
             cx.background_executor()
-                .spawn(async move {
-                    upload_image_to_cdn(&api, &base_img_url, &path, max_bytes).await
-                })
+                .spawn(
+                    async move { upload_image_to_cdn(&api, &base_img_url, &path, max_bytes).await },
+                )
                 .await
         })
     }

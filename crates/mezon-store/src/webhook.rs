@@ -15,7 +15,7 @@ const MAX_CACHED_CLANS: usize = 16;
 pub const WEBHOOK_NAME_MAX_LENGTH: usize = 64;
 pub const MAX_WEBHOOK_AVATAR_BYTES: u64 = 1024 * 1024;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct ChannelWebhook {
     pub id: String,
     pub webhook_name: String,
@@ -27,7 +27,22 @@ pub struct ChannelWebhook {
     pub create_time_seconds: i64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+impl std::fmt::Debug for ChannelWebhook {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ChannelWebhook")
+            .field("id", &self.id)
+            .field("webhook_name", &self.webhook_name)
+            .field("channel_id", &self.channel_id)
+            .field("clan_id", &self.clan_id)
+            .field("url", &"<redacted>")
+            .field("avatar", &self.avatar)
+            .field("creator_id", &self.creator_id)
+            .field("create_time_seconds", &self.create_time_seconds)
+            .finish()
+    }
+}
+
+#[derive(Clone, PartialEq, Eq)]
 pub struct ClanWebhook {
     pub id: String,
     pub webhook_name: String,
@@ -36,6 +51,20 @@ pub struct ClanWebhook {
     pub avatar: String,
     pub creator_id: UserId,
     pub create_time_seconds: i64,
+}
+
+impl std::fmt::Debug for ClanWebhook {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ClanWebhook")
+            .field("id", &self.id)
+            .field("webhook_name", &self.webhook_name)
+            .field("clan_id", &self.clan_id)
+            .field("url", &"<redacted>")
+            .field("avatar", &self.avatar)
+            .field("creator_id", &self.creator_id)
+            .field("create_time_seconds", &self.create_time_seconds)
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -203,11 +232,8 @@ impl WebhookStore {
                 this.channel_loading.remove(&clan_id);
                 match result {
                     Ok(webhooks) => {
-                        this.channel_cache.insert(
-                            clan_id,
-                            ClanChannelWebhooks { webhooks },
-                            None,
-                        );
+                        this.channel_cache
+                            .insert(clan_id, ClanChannelWebhooks { webhooks }, None);
                         cx.emit(WebhookEvent::ChannelWebhooksChanged { clan_id });
                         cx.notify();
                     }
@@ -226,10 +252,12 @@ impl WebhookStore {
         }
         let api = self.api.clone();
         cx.spawn(async move |this, cx| {
-            let result = api
-                .list_clan_webhooks(clan_id.get())
-                .await
-                .map(|webhooks| webhooks.into_iter().filter_map(clan_webhook_from_proto).collect());
+            let result = api.list_clan_webhooks(clan_id.get()).await.map(|webhooks| {
+                webhooks
+                    .into_iter()
+                    .filter_map(clan_webhook_from_proto)
+                    .collect()
+            });
             let _ = this.update(cx, |this, cx| {
                 this.clan_loading.remove(&clan_id);
                 match result {
@@ -255,7 +283,7 @@ impl WebhookStore {
         webhook_name: String,
         avatar: String,
         cx: &mut Context<Self>,
-    ) {
+    ) -> Task<Result<(), String>> {
         let api = self.api.clone();
         cx.spawn(async move |this, cx| {
             let request = api::WebhookCreateRequest {
@@ -264,15 +292,15 @@ impl WebhookStore {
                 clan_id: clan_id.get(),
                 avatar,
             };
-            let result = api.generate_webhook(request).await;
-            let _ = this.update(cx, |this, cx| {
-                match result {
-                    Ok(_) => this.refresh_channel_webhooks(clan_id, cx),
-                    Err(err) => tracing::error!("generate_webhook failed: {err}"),
-                }
-            });
+            api.generate_webhook(request)
+                .await
+                .map_err(|err| err.to_string())?;
+            this.update(cx, |this, cx| {
+                this.refresh_channel_webhooks(clan_id, cx);
+            })
+            .map_err(|_| "store dropped".to_string())?;
+            Ok(())
         })
-        .detach();
     }
 
     pub fn update_channel_webhook(
@@ -282,10 +310,10 @@ impl WebhookStore {
         avatar: String,
         channel_id_update: Option<ChannelId>,
         cx: &mut Context<Self>,
-    ) {
+    ) -> Task<Result<(), String>> {
         let id = webhook.id.parse::<i64>().unwrap_or(0);
         if id == 0 {
-            return;
+            return cx.spawn(async move |_, _| Err("invalid webhook id".into()));
         }
         let api = self.api.clone();
         let clan_id = webhook.clan_id;
@@ -301,21 +329,25 @@ impl WebhookStore {
                     .unwrap_or_else(|| channel_id.get()),
                 clan_id: clan_id.get(),
             };
-            let result = api.update_webhook(request).await;
-            let _ = this.update(cx, |this, cx| {
-                match result {
-                    Ok(()) => this.refresh_channel_webhooks(clan_id, cx),
-                    Err(err) => tracing::error!("update_webhook failed: {err}"),
-                }
-            });
+            api.update_webhook(request)
+                .await
+                .map_err(|err| err.to_string())?;
+            this.update(cx, |this, cx| {
+                this.refresh_channel_webhooks(clan_id, cx);
+            })
+            .map_err(|_| "store dropped".to_string())?;
+            Ok(())
         })
-        .detach();
     }
 
-    pub fn delete_channel_webhook(&mut self, webhook: &ChannelWebhook, cx: &mut Context<Self>) {
+    pub fn delete_channel_webhook(
+        &mut self,
+        webhook: &ChannelWebhook,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<(), String>> {
         let id = webhook.id.parse::<i64>().unwrap_or(0);
         if id == 0 {
-            return;
+            return cx.spawn(async move |_, _| Err("invalid webhook id".into()));
         }
         let api = self.api.clone();
         let clan_id = webhook.clan_id;
@@ -326,15 +358,15 @@ impl WebhookStore {
                 clan_id: clan_id.get(),
                 channel_id: channel_id.get(),
             };
-            let result = api.delete_webhook(request).await;
-            let _ = this.update(cx, |this, cx| {
-                match result {
-                    Ok(()) => this.refresh_channel_webhooks(clan_id, cx),
-                    Err(err) => tracing::error!("delete_webhook failed: {err}"),
-                }
-            });
+            api.delete_webhook(request)
+                .await
+                .map_err(|err| err.to_string())?;
+            this.update(cx, |this, cx| {
+                this.refresh_channel_webhooks(clan_id, cx);
+            })
+            .map_err(|_| "store dropped".to_string())?;
+            Ok(())
         })
-        .detach();
     }
 
     pub fn create_clan_webhook(
@@ -343,7 +375,7 @@ impl WebhookStore {
         webhook_name: String,
         avatar: String,
         cx: &mut Context<Self>,
-    ) {
+    ) -> Task<Result<(), String>> {
         let api = self.api.clone();
         cx.spawn(async move |this, cx| {
             let request = api::GenerateClanWebhookRequest {
@@ -351,15 +383,15 @@ impl WebhookStore {
                 webhook_name,
                 avatar,
             };
-            let result = api.generate_clan_webhook(request).await;
-            let _ = this.update(cx, |this, cx| {
-                match result {
-                    Ok(_) => this.refresh_clan_webhooks(clan_id, cx),
-                    Err(err) => tracing::error!("generate_clan_webhook failed: {err}"),
-                }
-            });
+            api.generate_clan_webhook(request)
+                .await
+                .map_err(|err| err.to_string())?;
+            this.update(cx, |this, cx| {
+                this.refresh_clan_webhooks(clan_id, cx);
+            })
+            .map_err(|_| "store dropped".to_string())?;
+            Ok(())
         })
-        .detach();
     }
 
     pub fn update_clan_webhook(
@@ -369,10 +401,10 @@ impl WebhookStore {
         avatar: String,
         reset_token: bool,
         cx: &mut Context<Self>,
-    ) {
+    ) -> Task<Result<(), String>> {
         let id = webhook.id.parse::<i64>().unwrap_or(0);
         if id == 0 {
-            return;
+            return cx.spawn(async move |_, _| Err("invalid webhook id".into()));
         }
         let api = self.api.clone();
         let clan_id = webhook.clan_id;
@@ -384,15 +416,15 @@ impl WebhookStore {
                 avatar,
                 reset_token,
             };
-            let result = api.update_clan_webhook(request).await;
-            let _ = this.update(cx, |this, cx| {
-                match result {
-                    Ok(()) => this.refresh_clan_webhooks(clan_id, cx),
-                    Err(err) => tracing::error!("update_clan_webhook failed: {err}"),
-                }
-            });
+            api.update_clan_webhook(request)
+                .await
+                .map_err(|err| err.to_string())?;
+            this.update(cx, |this, cx| {
+                this.refresh_clan_webhooks(clan_id, cx);
+            })
+            .map_err(|_| "store dropped".to_string())?;
+            Ok(())
         })
-        .detach();
     }
 
     pub fn upload_webhook_avatar(
@@ -406,30 +438,33 @@ impl WebhookStore {
         cx.spawn(async move |_, cx| {
             cx.background_executor()
                 .spawn(async move {
-                    upload_image_to_cdn(&api, &base_img_url, &path, MAX_WEBHOOK_AVATAR_BYTES)
-                        .await
+                    upload_image_to_cdn(&api, &base_img_url, &path, MAX_WEBHOOK_AVATAR_BYTES).await
                 })
                 .await
         })
     }
 
-    pub fn delete_clan_webhook(&mut self, webhook: &ClanWebhook, cx: &mut Context<Self>) {
+    pub fn delete_clan_webhook(
+        &mut self,
+        webhook: &ClanWebhook,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<(), String>> {
         let id = webhook.id.parse::<i64>().unwrap_or(0);
         if id == 0 {
-            return;
+            return cx.spawn(async move |_, _| Err("invalid webhook id".into()));
         }
         let api = self.api.clone();
         let clan_id = webhook.clan_id;
         cx.spawn(async move |this, cx| {
-            let result = api.delete_clan_webhook(id, clan_id.get()).await;
-            let _ = this.update(cx, |this, cx| {
-                match result {
-                    Ok(()) => this.refresh_clan_webhooks(clan_id, cx),
-                    Err(err) => tracing::error!("delete_clan_webhook failed: {err}"),
-                }
-            });
+            api.delete_clan_webhook(id, clan_id.get())
+                .await
+                .map_err(|err| err.to_string())?;
+            this.update(cx, |this, cx| {
+                this.refresh_clan_webhooks(clan_id, cx);
+            })
+            .map_err(|_| "store dropped".to_string())?;
+            Ok(())
         })
-        .detach();
     }
 }
 

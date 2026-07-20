@@ -7,8 +7,8 @@ use mezon_store::{
     ChannelList, ClanId, ClanList, ClanSettingsPermissions, PermissionStore, Settings,
 };
 
-use super::overview_setting_page::{OverviewSettingPage, render_clan_overview_save_bar};
 use super::integration_setting_page::IntegrationSettingPage;
+use super::overview_setting_page::{OverviewSettingPage, render_clan_overview_save_bar};
 use crate::theme::{ActiveTheme, Theme};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -280,10 +280,10 @@ impl ClanSettingScreen {
         {
             entity.update(cx, |page, _| page.release());
         }
-        if page == ClanSettingsPage::Integrations {
-            if let Some(entity) = self.integrations_page.take() {
-                entity.update(cx, |page, _| page.release());
-            }
+        if page == ClanSettingsPage::Integrations
+            && let Some(entity) = self.integrations_page.take()
+        {
+            entity.update(cx, |page, _| page.release());
         }
     }
 

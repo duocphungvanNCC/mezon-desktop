@@ -15,7 +15,7 @@ use super::integration_setting_page::{
 use crate::app::shell::Shell;
 use crate::chat::message::format_relative_time_from_seconds;
 use crate::components::primitives::{
-    Avatar, Button, ButtonVariants, Icon, IconName, Input, InputEvent, InputState, Size, Sizable,
+    Avatar, Button, ButtonVariants, Icon, IconName, Input, InputEvent, InputState, Sizable, Size,
     Spinner, h_flex, v_flex,
 };
 use crate::image_cache::shared_avatar_cache;
@@ -90,22 +90,40 @@ impl ClanWebhookTab {
             .unwrap_or_else(|| "https://cdn.komu.vn".to_string());
         let name = random_webhook_name();
         let avatar = random_webhook_avatar(&base_img);
+        let clan_id = self.clan_id;
         self.creating = true;
-        WebhookStore::global(cx).update(cx, |store, cx| {
-            store.create_clan_webhook(self.clan_id, name, avatar, cx);
+        cx.notify();
+        let task = WebhookStore::global(cx).update(cx, |store, cx| {
+            store.create_clan_webhook(clan_id, name, avatar, cx)
         });
         let locale = self.locale(cx);
-        Shell::global(cx).update(cx, |shell, cx| {
-            shell.success(
-                mezon_i18n::t(&locale, "clanIntegrationsSetting.toast.addSuccess"),
-                cx,
-            );
-        });
-        self.creating = false;
-        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            let _ = this.update(cx, |this, cx| {
+                this.creating = false;
+                match &result {
+                    Ok(()) => {
+                        Shell::global(cx).update(cx, |shell, cx| {
+                            shell.success(
+                                mezon_i18n::t(&locale, "clanIntegrationsSetting.toast.addSuccess"),
+                                cx,
+                            );
+                        });
+                    }
+                    Err(err) => {
+                        Shell::global(cx).update(cx, |shell, cx| shell.error(err.clone(), cx));
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     fn toggle_expand(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.can_manage {
+            return;
+        }
         if self.expanded_id.as_ref() == Some(&id) {
             self.discard_edit_state(&id);
             self.expanded_id = None;
@@ -227,7 +245,8 @@ impl ClanWebhookTab {
         });
         let webhook_id = webhook_id.to_string();
         self.edit_names.insert(webhook_id.clone(), input);
-        self.edit_avatars.insert(webhook_id.clone(), webhook.avatar.clone());
+        self.edit_avatars
+            .insert(webhook_id.clone(), webhook.avatar.clone());
         self.edit_input_subs.insert(webhook_id, sub);
     }
 
@@ -262,16 +281,28 @@ impl ClanWebhookTab {
             .get(&webhook.id)
             .cloned()
             .unwrap_or_else(|| webhook.avatar.clone());
-        WebhookStore::global(cx).update(cx, |store, cx| {
-            store.update_clan_webhook(webhook, name, avatar, false, cx);
+        let task = WebhookStore::global(cx).update(cx, |store, cx| {
+            store.update_clan_webhook(webhook, name, avatar, false, cx)
         });
         let locale = self.locale(cx);
-        Shell::global(cx).update(cx, |shell, cx| {
-            shell.success(
-                mezon_i18n::t(&locale, "clanIntegrationsSetting.toast.saveSuccess"),
-                cx,
-            );
-        });
+        cx.spawn(async move |_, cx| match task.await {
+            Ok(()) => {
+                cx.update(|cx| {
+                    Shell::global(cx).update(cx, |shell, cx| {
+                        shell.success(
+                            mezon_i18n::t(&locale, "clanIntegrationsSetting.toast.saveSuccess"),
+                            cx,
+                        );
+                    });
+                });
+            }
+            Err(err) => {
+                cx.update(|cx| {
+                    Shell::global(cx).update(cx, |shell, cx| shell.error(err, cx));
+                });
+            }
+        })
+        .detach();
     }
 
     fn reset_token(&mut self, webhook: &ClanWebhook, cx: &mut Context<Self>) {
@@ -285,16 +316,31 @@ impl ClanWebhookTab {
             .get(&webhook.id)
             .cloned()
             .unwrap_or_else(|| webhook.avatar.clone());
-        WebhookStore::global(cx).update(cx, |store, cx| {
-            store.update_clan_webhook(webhook, name, avatar, true, cx);
+        let task = WebhookStore::global(cx).update(cx, |store, cx| {
+            store.update_clan_webhook(webhook, name, avatar, true, cx)
         });
         let locale = self.locale(cx);
-        Shell::global(cx).update(cx, |shell, cx| {
-            shell.success(
-                mezon_i18n::t(&locale, "clanIntegrationsSetting.toast.resetTokenSuccess"),
-                cx,
-            );
-        });
+        cx.spawn(async move |_, cx| match task.await {
+            Ok(()) => {
+                cx.update(|cx| {
+                    Shell::global(cx).update(cx, |shell, cx| {
+                        shell.success(
+                            mezon_i18n::t(
+                                &locale,
+                                "clanIntegrationsSetting.toast.resetTokenSuccess",
+                            ),
+                            cx,
+                        );
+                    });
+                });
+            }
+            Err(err) => {
+                cx.update(|cx| {
+                    Shell::global(cx).update(cx, |shell, cx| shell.error(err, cx));
+                });
+            }
+        })
+        .detach();
     }
 
     fn creator_name(&self, creator_id: mezon_store::UserId, cx: &gpui::App) -> String {
@@ -334,24 +380,24 @@ impl Render for ClanWebhookTab {
         let (webhooks, loading) = {
             let store = WebhookStore::global(cx).read(cx);
             (
-                store
-                    .clan_webhooks_for_clan(self.clan_id)
-                    .iter()
-                    .cloned()
-                    .collect::<Vec<_>>(),
+                store.clan_webhooks_for_clan(self.clan_id).to_vec(),
                 store.clan_webhooks_loading(self.clan_id),
             )
         };
         let avatar_cache = shared_avatar_cache(cx);
         let now = chrono::Local::now();
+        let can_manage = self.can_manage;
 
         v_flex()
             .w_full()
+            .self_stretch()
             .items_stretch()
             .gap_4()
             .child(
                 v_flex()
                     .w_full()
+                    .pt_2()
+                    .px_2()
                     .gap_1()
                     .child(
                         div()
@@ -400,19 +446,14 @@ impl Render for ClanWebhookTab {
             })
             .children(webhooks.iter().map(|webhook| {
                 let id = webhook.id.clone();
-                let expanded = self.expanded_id.as_ref() == Some(&id);
+                let expanded = can_manage && self.expanded_id.as_ref() == Some(&id);
                 let creator = self.creator_name(webhook.creator_id, cx);
-                let created = format_relative_time_from_seconds(
-                    webhook.create_time_seconds,
-                    &locale,
-                    now,
-                );
-                let created_label = mezon_i18n::t(
-                    &locale,
-                    "clanIntegrationsSetting.webhooksItem.createdBy",
-                )
-                .replace("{{webhookCreateTime}}", &created)
-                .replace("{{webhookUserOwnerName}}", &creator);
+                let created =
+                    format_relative_time_from_seconds(webhook.create_time_seconds, &locale, now);
+                let created_label =
+                    mezon_i18n::t(&locale, "clanIntegrationsSetting.webhooksItem.createdBy")
+                        .replace("{{webhookCreateTime}}", &created)
+                        .replace("{{webhookUserOwnerName}}", &creator);
                 let webhook_for_expand = webhook.clone();
                 let ent = entity.clone();
                 let locale_for_edit = locale.clone();
@@ -429,19 +470,22 @@ impl Render for ClanWebhookTab {
                 };
 
                 v_flex()
-                    .mb_4()
+                    .w_full()
+                    .self_stretch()
+                    .mb_1()
                     .p_4()
                     .rounded_md()
                     .bg(theme.tokens.theme_setting_nav)
                     .border_1()
                     .border_color(theme.border)
-                    .child(
-                        h_flex()
+                    .child({
+                        let mut header = h_flex()
+                            .w_full()
                             .id(SharedString::from(format!("clan-webhook-expand-{id}")))
                             .gap_4()
-                            .items_center()
-                            .cursor_pointer()
-                            .on_click({
+                            .items_center();
+                        if can_manage {
+                            header = header.cursor_pointer().on_click({
                                 let id = id.clone();
                                 let ent = ent.clone();
                                 move |_, window, cx| {
@@ -450,7 +494,9 @@ impl Render for ClanWebhookTab {
                                         this.toggle_expand(expand_id, window, cx);
                                     });
                                 }
-                            })
+                            });
+                        }
+                        header
                             .child(
                                 div()
                                     .relative()
@@ -539,16 +585,18 @@ impl Render for ClanWebhookTab {
                                             ),
                                     ),
                             )
-                            .child(if expanded {
-                                Icon::new(IconName::ChevronDown)
-                                    .size(px(20.0))
-                                    .text_color(theme.text_secondary)
-                            } else {
-                                Icon::new(IconName::ChevronRight)
-                                    .size(px(20.0))
-                                    .text_color(theme.text_secondary)
-                            }),
-                    )
+                            .when(can_manage, |row| {
+                                row.child(if expanded {
+                                    Icon::new(IconName::ChevronDown)
+                                        .size(px(20.0))
+                                        .text_color(theme.text_secondary)
+                                } else {
+                                    Icon::new(IconName::ChevronRight)
+                                        .size(px(20.0))
+                                        .text_color(theme.text_secondary)
+                                })
+                            })
+                    })
                     .when(expanded, |card| {
                         card.child(render_clan_webhook_edit(
                             &webhook_for_expand,
@@ -637,60 +685,69 @@ fn render_clan_webhook_edit(
                 .gap_2()
                 .flex_wrap()
                 .child(
-                    Button::new(SharedString::from(format!("reset-clan-token-{}", webhook.id)))
-                        .label(mezon_i18n::t(
-                            locale,
-                            "clanIntegrationsSetting.webhooksEdit.resetToken",
-                        ))
-                        .ghost()
-                        .with_size(Size::Large)
-                        .on_click({
-                            move |_, _, cx| {
-                                entity_reset.update(cx, |this, cx| {
-                                    this.reset_token(&webhook_reset, cx);
-                                });
-                            }
-                        }),
+                    Button::new(SharedString::from(format!(
+                        "reset-clan-token-{}",
+                        webhook.id
+                    )))
+                    .label(mezon_i18n::t(
+                        locale,
+                        "clanIntegrationsSetting.webhooksEdit.resetToken",
+                    ))
+                    .ghost()
+                    .with_size(Size::Large)
+                    .on_click({
+                        move |_, _, cx| {
+                            entity_reset.update(cx, |this, cx| {
+                                this.reset_token(&webhook_reset, cx);
+                            });
+                        }
+                    }),
                 )
                 .child(
-                    Button::new(SharedString::from(format!("delete-clan-webhook-{}", webhook.id)))
-                        .label(mezon_i18n::t(
-                            locale,
-                            "clanIntegrationsSetting.webhooksEdit.delete",
-                        ))
-                        .danger()
-                        .with_size(Size::Large)
-                        .w(px(100.0))
-                        .on_click({
-                            move |_, window, cx| {
-                                Shell::global(cx).update(cx, |shell, cx| {
-                                    shell.confirm_delete_clan_webhook(
-                                        webhook_delete.clone(),
-                                        &locale_delete,
-                                        window,
-                                        cx,
-                                    );
-                                });
-                            }
-                        }),
+                    Button::new(SharedString::from(format!(
+                        "delete-clan-webhook-{}",
+                        webhook.id
+                    )))
+                    .label(mezon_i18n::t(
+                        locale,
+                        "clanIntegrationsSetting.webhooksEdit.delete",
+                    ))
+                    .danger()
+                    .with_size(Size::Large)
+                    .w(px(100.0))
+                    .on_click({
+                        move |_, window, cx| {
+                            Shell::global(cx).update(cx, |shell, cx| {
+                                shell.confirm_delete_clan_webhook(
+                                    webhook_delete.clone(),
+                                    &locale_delete,
+                                    window,
+                                    cx,
+                                );
+                            });
+                        }
+                    }),
                 )
                 .child(
-                    Button::new(SharedString::from(format!("save-clan-webhook-{}", webhook.id)))
-                        .label(mezon_i18n::t(
-                            locale,
-                            "clanIntegrationsSetting.webhooksEdit.save",
-                        ))
-                        .primary()
-                        .with_size(Size::Large)
-                        .w(px(100.0))
-                        .disabled(!can_save)
-                        .on_click({
-                            move |_, _, cx| {
-                                entity_save.update(cx, |this, cx| {
-                                    this.save_webhook(&webhook_save, cx);
-                                });
-                            }
-                        }),
+                    Button::new(SharedString::from(format!(
+                        "save-clan-webhook-{}",
+                        webhook.id
+                    )))
+                    .label(mezon_i18n::t(
+                        locale,
+                        "clanIntegrationsSetting.webhooksEdit.save",
+                    ))
+                    .primary()
+                    .with_size(Size::Large)
+                    .w(px(100.0))
+                    .disabled(!can_save)
+                    .on_click({
+                        move |_, _, cx| {
+                            entity_save.update(cx, |this, cx| {
+                                this.save_webhook(&webhook_save, cx);
+                            });
+                        }
+                    }),
                 ),
         )
         .into_any_element()

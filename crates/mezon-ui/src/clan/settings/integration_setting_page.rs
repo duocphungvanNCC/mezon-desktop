@@ -1,11 +1,13 @@
 use std::path::PathBuf;
 
 use gpui::{
-    AsyncApp, ClipboardItem, Context, Entity, FontWeight, Render, SharedString, Subscription,
-    Window, div, prelude::*, px,
+    AsyncApp, ClipboardItem, Context, Entity, FontWeight, Pixels, Render, SharedString,
+    Subscription, Window, div, prelude::*, px,
 };
 
-use mezon_store::{ChannelList, ClanId, ClanImageMimeType, MAX_WEBHOOK_AVATAR_BYTES, Settings, WebhookStore};
+use mezon_store::{
+    ChannelList, ClanId, ClanImageMimeType, MAX_WEBHOOK_AVATAR_BYTES, Settings, WebhookStore,
+};
 
 use super::channel_webhook_tab::ChannelWebhookTab;
 use super::clan_webhook_tab::ClanWebhookTab;
@@ -19,6 +21,10 @@ const WEBHOOK_AVATAR_PATHS: [&str; 3] = [
     "/1787707828677382144/1791037204600983552/1787691797724532700/211_1mezon_logo_black.png",
     "/0/1833395573034586112/1787375123666309000/955_0mezon_logo.png",
 ];
+
+const CLAN_SETTINGS_TITLE_AREA_PX: f32 = 112.0;
+const CLAN_SETTINGS_CONTENT_BOTTOM_PADDING_PX: f32 = 28.0;
+const INTEGRATION_PAGE_MIN_HEIGHT_PX: f32 = 240.0;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum IntegrationTab {
@@ -95,10 +101,7 @@ pub fn render_webhook_url_field(
                     cx.write_to_clipboard(ClipboardItem::new_string(url.clone()));
                     Shell::global(cx).update(cx, |shell, cx| {
                         shell.success(
-                            mezon_i18n::t(
-                                &locale,
-                                "clanIntegrationsSetting.webhooksEdit.copied",
-                            ),
+                            mezon_i18n::t(&locale, "clanIntegrationsSetting.webhooksEdit.copied"),
                             cx,
                         );
                     });
@@ -120,7 +123,13 @@ pub fn render_webhook_empty_box(
     label: SharedString,
     theme: &Theme,
 ) -> impl IntoElement {
-    render_webhook_dashed_box(id, label, theme, false, None::<fn(&gpui::ClickEvent, &mut Window, &mut gpui::App)>)
+    render_webhook_dashed_box(
+        id,
+        label,
+        theme,
+        false,
+        None::<fn(&gpui::ClickEvent, &mut Window, &mut gpui::App)>,
+    )
 }
 
 fn render_webhook_dashed_box(
@@ -130,9 +139,7 @@ fn render_webhook_dashed_box(
     interactive: bool,
     on_click: Option<impl Fn(&gpui::ClickEvent, &mut Window, &mut gpui::App) + 'static>,
 ) -> impl IntoElement {
-    v_flex()
-        .self_stretch()
-        .child({
+    v_flex().self_stretch().child({
         let mut box_el = h_flex()
             .id(id.into())
             .justify_center()
@@ -203,12 +210,10 @@ pub async fn upload_webhook_avatar(
     let task = cx.update(|cx| {
         WebhookStore::global(cx).update(cx, |store, cx| store.upload_webhook_avatar(&path, cx))
     });
-    task.await
-        .map(Some)
-        .map_err(|err| {
-            tracing::error!("webhook avatar upload failed: {err}");
-            mezon_i18n::t(locale, "streamThumbnail.errors.uploadFailed").to_string()
-        })
+    task.await.map(Some).map_err(|err| {
+        tracing::error!("webhook avatar upload failed: {err}");
+        mezon_i18n::t(locale, "streamThumbnail.errors.uploadFailed").to_string()
+    })
 }
 
 pub struct IntegrationSettingPage {
@@ -269,8 +274,7 @@ impl IntegrationSettingPage {
                             cx,
                         )
                     });
-                    self._subs
-                        .push(cx.observe(&tab, |_, _, cx| cx.notify()));
+                    self._subs.push(cx.observe(&tab, |_, _, cx| cx.notify()));
                     self.channel_tab = Some(tab);
                 }
             }
@@ -284,8 +288,7 @@ impl IntegrationSettingPage {
                             cx,
                         )
                     });
-                    self._subs
-                        .push(cx.observe(&tab, |_, _, cx| cx.notify()));
+                    self._subs.push(cx.observe(&tab, |_, _, cx| cx.notify()));
                     self.clan_tab = Some(tab);
                 }
             }
@@ -302,15 +305,25 @@ impl IntegrationSettingPage {
     }
 }
 
+fn calc_page_height(window: &Window) -> Pixels {
+    let viewport_h = f32::from(window.viewport_size().height);
+    let height = viewport_h - CLAN_SETTINGS_TITLE_AREA_PX - CLAN_SETTINGS_CONTENT_BOTTOM_PADDING_PX;
+    px(height.max(INTEGRATION_PAGE_MIN_HEIGHT_PX))
+}
+
 impl Render for IntegrationSettingPage {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         let locale = self.settings.read(cx).language.clone();
         let entity = cx.entity();
         let active = self.active_tab;
 
         let tabs = vec![
-            mezon_i18n::t(&locale, "clanIntegrationsSetting.integration.channelWebhooks").into(),
+            mezon_i18n::t(
+                &locale,
+                "clanIntegrationsSetting.integration.channelWebhooks",
+            )
+            .into(),
             mezon_i18n::t(&locale, "clanIntegrationsSetting.integration.clanWebhooks").into(),
         ];
         let selected = match active {
@@ -318,52 +331,62 @@ impl Render for IntegrationSettingPage {
             IntegrationTab::ClanWebhooks => 1,
         };
 
-        let mut content_panel = div()
-            .w_full()
-            .flex_1()
-            .min_h_0()
-            .flex()
-            .flex_col()
-            .items_stretch();
+        let mut content_panel = div().w_full().flex().flex_col().items_stretch();
         match active {
             IntegrationTab::ChannelWebhooks => {
                 if let Some(tab) = &self.channel_tab {
-                    content_panel = content_panel.child(tab.clone());
+                    content_panel = content_panel.child(
+                        div()
+                            .w_full()
+                            .flex()
+                            .flex_col()
+                            .items_stretch()
+                            .child(tab.clone()),
+                    );
                 }
             }
             IntegrationTab::ClanWebhooks => {
                 if let Some(tab) = &self.clan_tab {
-                    content_panel = content_panel.child(tab.clone());
+                    content_panel = content_panel.child(
+                        div()
+                            .w_full()
+                            .flex()
+                            .flex_col()
+                            .items_stretch()
+                            .child(tab.clone()),
+                    );
                 }
             }
         }
 
         v_flex()
-            .relative()
+            .h(calc_page_height(window))
+            .min_h_0()
             .w_full()
             .items_stretch()
-            .gap_4()
             .child(
                 div()
-                    .text_sm()
-                    .text_color(theme.text_muted)
-                    .child(mezon_i18n::t(
-                        &locale,
-                        "clanIntegrationsSetting.integration.description",
+                    .flex_shrink_0()
+                    .w_full()
+                    .bg(theme.tokens.theme_setting_primary)
+                    .child(TabBar::new(tabs).selected(selected).on_select(
+                        move |index, _window, cx| {
+                            let tab = if index == 0 {
+                                IntegrationTab::ChannelWebhooks
+                            } else {
+                                IntegrationTab::ClanWebhooks
+                            };
+                            entity.update(cx, |this, cx| this.set_tab(tab, cx));
+                        },
                     )),
             )
             .child(
-                TabBar::new(tabs)
-                    .selected(selected)
-                    .on_select(move |index, _window, cx| {
-                        let tab = if index == 0 {
-                            IntegrationTab::ChannelWebhooks
-                        } else {
-                            IntegrationTab::ClanWebhooks
-                        };
-                        entity.update(cx, |this, cx| this.set_tab(tab, cx));
-                    }),
+                div()
+                    .id("integration-tab-scroll")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .child(content_panel),
             )
-            .child(content_panel)
     }
 }

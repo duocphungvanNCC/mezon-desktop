@@ -244,18 +244,14 @@ impl Shell {
         )
         .replace("{{webhookName}}", name)
         .into();
-        let cancel_label: SharedString = mezon_i18n::t(
-            locale,
-            "clanIntegrationsSetting.webhooksEdit.cancel",
-        )
-        .to_string()
-        .into();
-        let delete_label: SharedString = mezon_i18n::t(
-            locale,
-            "clanIntegrationsSetting.webhooksEdit.yes",
-        )
-        .to_string()
-        .into();
+        let cancel_label: SharedString =
+            mezon_i18n::t(locale, "clanIntegrationsSetting.webhooksEdit.cancel")
+                .to_string()
+                .into();
+        let delete_label: SharedString =
+            mezon_i18n::t(locale, "clanIntegrationsSetting.webhooksEdit.yes")
+                .to_string()
+                .into();
         let view = cx.new(|cx| ConfirmDeleteWebhookModal {
             focus_handle: cx.focus_handle(),
             target,
@@ -277,12 +273,7 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.confirm_delete_webhook(
-            WebhookDeleteTarget::Channel(webhook),
-            locale,
-            window,
-            cx,
-        );
+        self.confirm_delete_webhook(WebhookDeleteTarget::Channel(webhook), locale, window, cx);
     }
 
     pub fn confirm_delete_clan_webhook(

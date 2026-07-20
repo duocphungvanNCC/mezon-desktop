@@ -6591,10 +6591,7 @@ impl MezonTransport {
     }
 
     /// Update webhook by ID.
-    pub async fn update_webhook_by_id(
-        &self,
-        request: api::WebhookUpdateRequestById,
-    ) -> Result<()> {
+    pub async fn update_webhook_by_id(&self, request: api::WebhookUpdateRequestById) -> Result<()> {
         let cid = self.generate_cid();
         let body = request.encode_to_vec();
         let (code, _) = self
@@ -6607,10 +6604,7 @@ impl MezonTransport {
     }
 
     /// Delete webhook by ID.
-    pub async fn delete_webhook_by_id(
-        &self,
-        request: api::WebhookDeleteRequestById,
-    ) -> Result<()> {
+    pub async fn delete_webhook_by_id(&self, request: api::WebhookDeleteRequestById) -> Result<()> {
         let cid = self.generate_cid();
         let body = request.encode_to_vec();
         let (code, _) = self

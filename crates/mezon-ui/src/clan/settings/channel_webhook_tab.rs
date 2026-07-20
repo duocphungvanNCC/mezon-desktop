@@ -15,7 +15,7 @@ use super::integration_setting_page::{
 use crate::app::shell::Shell;
 use crate::chat::message::format_relative_time_from_seconds;
 use crate::components::primitives::{
-    Avatar, Button, ButtonVariants, Icon, IconName, Input, InputEvent, InputState, Size, Sizable,
+    Avatar, Button, ButtonVariants, Icon, IconName, Input, InputEvent, InputState, Sizable, Size,
     Spinner, h_flex, v_flex,
 };
 use crate::image_cache::shared_avatar_cache;
@@ -40,6 +40,7 @@ pub struct ChannelWebhookTab {
     edit_avatars: std::collections::HashMap<String, String>,
     edit_input_subs: std::collections::HashMap<String, Subscription>,
     avatar_uploading: std::collections::HashSet<String>,
+    creating: bool,
     _channel_sub: Subscription,
     _webhook_sub: Subscription,
     _members_sub: Subscription,
@@ -76,6 +77,7 @@ impl ChannelWebhookTab {
             edit_avatars: std::collections::HashMap::new(),
             edit_input_subs: std::collections::HashMap::new(),
             avatar_uploading: std::collections::HashSet::new(),
+            creating: false,
             _channel_sub: cx.subscribe(&channel_list_for_sub, |this, _, _, cx| {
                 this.channel_options =
                     Self::build_channel_options(&this.channel_list, this.clan_id, cx);
@@ -136,23 +138,43 @@ impl ChannelWebhookTab {
         let Some(channel) = self.selected_channel() else {
             return;
         };
+        if self.creating {
+            return;
+        }
         let base_img = AppConfig::try_global(cx)
             .map(|cfg| cfg.base_img_url.clone())
             .unwrap_or_else(|| "https://cdn.komu.vn".to_string());
         let name = random_webhook_name();
         let avatar = random_webhook_avatar(&base_img);
         let channel_id = channel.id;
-        WebhookStore::global(cx).update(cx, |store, cx| {
-            store.create_channel_webhook(self.clan_id, channel_id, name, avatar, cx);
+        let clan_id = self.clan_id;
+        self.creating = true;
+        cx.notify();
+        let task = WebhookStore::global(cx).update(cx, |store, cx| {
+            store.create_channel_webhook(clan_id, channel_id, name, avatar, cx)
         });
         let locale = self.locale(cx);
-        Shell::global(cx).update(cx, |shell, cx| {
-            shell.success(
-                mezon_i18n::t(&locale, "clanIntegrationsSetting.toast.addSuccess"),
-                cx,
-            );
-        });
-        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            let _ = this.update(cx, |this, cx| {
+                this.creating = false;
+                match &result {
+                    Ok(()) => {
+                        Shell::global(cx).update(cx, |shell, cx| {
+                            shell.success(
+                                mezon_i18n::t(&locale, "clanIntegrationsSetting.toast.addSuccess"),
+                                cx,
+                            );
+                        });
+                    }
+                    Err(err) => {
+                        Shell::global(cx).update(cx, |shell, cx| shell.error(err.clone(), cx));
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     fn toggle_expand(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
@@ -277,7 +299,8 @@ impl ChannelWebhookTab {
         });
         let webhook_id = webhook_id.to_string();
         self.edit_names.insert(webhook_id.clone(), input);
-        self.edit_avatars.insert(webhook_id.clone(), webhook.avatar.clone());
+        self.edit_avatars
+            .insert(webhook_id.clone(), webhook.avatar.clone());
         self.edit_input_subs.insert(webhook_id, sub);
     }
 
@@ -312,39 +335,28 @@ impl ChannelWebhookTab {
             .get(&webhook.id)
             .cloned()
             .unwrap_or_else(|| webhook.avatar.clone());
-        WebhookStore::global(cx).update(cx, |store, cx| {
-            store.update_channel_webhook(webhook, name, avatar, None, cx);
+        let task = WebhookStore::global(cx).update(cx, |store, cx| {
+            store.update_channel_webhook(webhook, name, avatar, None, cx)
         });
         let locale = self.locale(cx);
-        Shell::global(cx).update(cx, |shell, cx| {
-            shell.success(
-                mezon_i18n::t(&locale, "clanIntegrationsSetting.toast.saveSuccess"),
-                cx,
-            );
-        });
-    }
-
-    fn reset_token(&mut self, webhook: &ChannelWebhook, cx: &mut Context<Self>) {
-        let name = self
-            .edit_names
-            .get(&webhook.id)
-            .map(|input| input.read(cx).value().trim().to_string())
-            .unwrap_or_else(|| webhook.webhook_name.clone());
-        let avatar = self
-            .edit_avatars
-            .get(&webhook.id)
-            .cloned()
-            .unwrap_or_else(|| webhook.avatar.clone());
-        WebhookStore::global(cx).update(cx, |store, cx| {
-            store.update_channel_webhook(webhook, name, avatar, None, cx);
-        });
-        let locale = self.locale(cx);
-        Shell::global(cx).update(cx, |shell, cx| {
-            shell.success(
-                mezon_i18n::t(&locale, "clanIntegrationsSetting.toast.resetTokenSuccess"),
-                cx,
-            );
-        });
+        cx.spawn(async move |_, cx| match task.await {
+            Ok(()) => {
+                cx.update(|cx| {
+                    Shell::global(cx).update(cx, |shell, cx| {
+                        shell.success(
+                            mezon_i18n::t(&locale, "clanIntegrationsSetting.toast.saveSuccess"),
+                            cx,
+                        );
+                    });
+                });
+            }
+            Err(err) => {
+                cx.update(|cx| {
+                    Shell::global(cx).update(cx, |shell, cx| shell.error(err, cx));
+                });
+            }
+        })
+        .detach();
     }
 
     fn creator_name(&self, creator_id: mezon_store::UserId, cx: &App) -> String {
@@ -410,12 +422,12 @@ impl ChannelWebhookTab {
                         el.child(render_channel_label(&option, theme))
                     })
                     .when(selected.is_none(), |el| {
-                        el.text_sm().text_color(theme.text_muted).child(
-                            mezon_i18n::t(
+                        el.text_sm()
+                            .text_color(theme.text_muted)
+                            .child(mezon_i18n::t(
                                 &locale,
                                 "clanIntegrationsSetting.webhookChannelSelect.placeholder",
-                            ),
-                        )
+                            ))
                     }),
             )
             .child(
@@ -466,7 +478,7 @@ impl ChannelWebhookTab {
                                 .child(v_flex().children(options.into_iter().enumerate().map(
                                     |(index, option)| {
                                         let is_selected = selected_channel_index == Some(index);
-                                        let row = h_flex()
+                                        h_flex()
                                             .id(("channel-webhook-filter-item", index))
                                             .w_full()
                                             .items_center()
@@ -487,8 +499,7 @@ impl ChannelWebhookTab {
                                                         cx.notify();
                                                     });
                                                 }
-                                            });
-                                        row
+                                            })
                                     },
                                 ))),
                         ),
@@ -540,10 +551,8 @@ fn render_channel_webhook_edit(
 ) -> impl IntoElement {
     let url = webhook.url.clone();
     let webhook_save = webhook.clone();
-    let webhook_reset = webhook.clone();
     let webhook_delete = webhook.clone();
     let entity_save = entity.clone();
-    let entity_reset = entity.clone();
     let locale_delete = locale.to_string();
 
     v_flex()
@@ -612,25 +621,6 @@ fn render_channel_webhook_edit(
                 .justify_end()
                 .gap_2()
                 .flex_wrap()
-                .child(
-                    Button::new(SharedString::from(format!(
-                        "reset-channel-token-{}",
-                        webhook.id
-                    )))
-                    .label(mezon_i18n::t(
-                        locale,
-                        "clanIntegrationsSetting.webhooksEdit.resetToken",
-                    ))
-                    .ghost()
-                    .with_size(Size::Large)
-                    .on_click({
-                        move |_, _, cx| {
-                            entity_reset.update(cx, |this, cx| {
-                                this.reset_token(&webhook_reset, cx);
-                            });
-                        }
-                    }),
-                )
                 .child(
                     Button::new(SharedString::from(format!(
                         "delete-channel-webhook-{}",
@@ -704,7 +694,9 @@ fn render_channel_webhook_item(
     };
 
     v_flex()
-        .mb_2()
+        .w_full()
+        .self_stretch()
+        .mb_1()
         .p_4()
         .rounded_md()
         .bg(theme.tokens.theme_setting_nav)
@@ -712,6 +704,7 @@ fn render_channel_webhook_item(
         .border_color(theme.border)
         .child(
             h_flex()
+                .w_full()
                 .id(SharedString::from(format!("channel-webhook-expand-{id}")))
                 .gap_4()
                 .items_center()
@@ -833,15 +826,17 @@ impl Render for ChannelWebhookTab {
         let locale = self.locale(cx);
         let entity = cx.entity();
         let filter_channel = self.selected_channel().map(|c| c.id);
-        let (webhooks, loading) = {
+        let (loading, has_webhooks, filtered_webhook_ids) = {
             let store = WebhookStore::global(cx).read(cx);
-            let webhooks = store
-                .channel_webhooks_for_clan(self.clan_id)
+            let webhooks = store.channel_webhooks_for_clan(self.clan_id);
+            let filtered_webhook_ids = webhooks
                 .iter()
                 .filter(|webhook| filter_channel.is_none_or(|id| webhook.channel_id == id))
-                .cloned()
+                .map(|webhook| webhook.id.clone())
                 .collect::<Vec<_>>();
-            (webhooks, store.channel_webhooks_loading(self.clan_id))
+            let has_webhooks = !filtered_webhook_ids.is_empty();
+            let loading = store.channel_webhooks_loading(self.clan_id);
+            (loading, has_webhooks, filtered_webhook_ids)
         };
         let avatar_cache = shared_avatar_cache(cx);
         let now = chrono::Local::now();
@@ -852,10 +847,13 @@ impl Render for ChannelWebhookTab {
         v_flex()
             .relative()
             .w_full()
+            .self_stretch()
             .items_stretch()
             .gap_4()
             .child(
                 div()
+                    .pt_2()
+                    .px_2()
                     .text_sm()
                     .text_color(theme.text_primary)
                     .child(mezon_i18n::t(
@@ -867,12 +865,7 @@ impl Render for ChannelWebhookTab {
                 el.child(
                     h_flex()
                         .self_stretch()
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w(px(0.0))
-                                .child(filter_picker),
-                        ),
+                        .child(div().flex_1().min_w(px(0.0)).child(filter_picker)),
                 )
             })
             .when(!has_channels, |el| {
@@ -886,7 +879,7 @@ impl Render for ChannelWebhookTab {
                         )),
                 )
             })
-            .when(loading && webhooks.is_empty(), |el| {
+            .when(loading && !has_webhooks, |el| {
                 el.child(
                     div()
                         .text_sm()
@@ -895,7 +888,7 @@ impl Render for ChannelWebhookTab {
                         .child(mezon_i18n::t(&locale, "common.loading")),
                 )
             })
-            .when(webhooks.is_empty() && !loading && has_channels, |el| {
+            .when(!has_webhooks && !loading && has_channels, |el| {
                 el.child(render_webhook_create_box(
                     "new-channel-webhook-empty",
                     mezon_i18n::t(&locale, "integrations.noWebhooks").into(),
@@ -903,49 +896,54 @@ impl Render for ChannelWebhookTab {
                     cx.listener(|this, _, _, cx| this.create_webhook(cx)),
                 ))
             })
-            .children(webhooks.iter().map(|webhook| {
-                let id = webhook.id.clone();
-                let expanded = self.expanded_id.as_ref() == Some(&id);
-                let creator = self.creator_name(webhook.creator_id, cx);
-                let created = format_relative_time_from_seconds(
-                    webhook.create_time_seconds,
-                    &locale,
-                    now,
-                );
-                let channel_name = self
-                    .channel_list
-                    .read(cx)
-                    .channel_display_name(self.clan_id, webhook.channel_id)
-                    .unwrap_or_else(|| "unknown".to_string());
-                let created_label = mezon_i18n::t(
-                    &locale,
-                    "clanIntegrationsSetting.webhooksItem.createdBy",
-                )
-                .replace("{{webhookCreateTime}}", &created)
-                .replace("{{webhookUserOwnerName}}", &creator);
-                let edit_avatar = self
-                    .edit_avatars
-                    .get(&id)
-                    .cloned()
-                    .unwrap_or_else(|| webhook.avatar.clone());
-                let avatar_uploading = self.avatar_uploading.contains(&id);
+            .when(has_webhooks, |el| {
+                el.children(filtered_webhook_ids.iter().filter_map(|webhook_id| {
+                    let webhook = WebhookStore::global(cx)
+                        .read(cx)
+                        .channel_webhooks_for_clan(self.clan_id)
+                        .iter()
+                        .find(|webhook| webhook.id == *webhook_id)?;
+                    let id = webhook.id.clone();
+                    let expanded = self.expanded_id.as_ref() == Some(&id);
+                    let creator = self.creator_name(webhook.creator_id, cx);
+                    let created = format_relative_time_from_seconds(
+                        webhook.create_time_seconds,
+                        &locale,
+                        now,
+                    );
+                    let channel_name = self
+                        .channel_list
+                        .read(cx)
+                        .channel_display_name(self.clan_id, webhook.channel_id)
+                        .unwrap_or_else(|| "unknown".to_string());
+                    let created_label =
+                        mezon_i18n::t(&locale, "clanIntegrationsSetting.webhooksItem.createdBy")
+                            .replace("{{webhookCreateTime}}", &created)
+                            .replace("{{webhookUserOwnerName}}", &creator);
+                    let edit_avatar = self
+                        .edit_avatars
+                        .get(&id)
+                        .cloned()
+                        .unwrap_or_else(|| webhook.avatar.clone());
+                    let avatar_uploading = self.avatar_uploading.contains(&id);
 
-                render_channel_webhook_item(
-                    webhook,
-                    expanded,
-                    channel_name.into(),
-                    created_label.into(),
-                    edit_avatar,
-                    avatar_uploading,
-                    self.webhook_edit_can_save(webhook, cx),
-                    &self.edit_names,
-                    &locale,
-                    &theme,
-                    avatar_cache.clone(),
-                    entity.clone(),
-                )
-            }))
-            .when(has_channels && !webhooks.is_empty(), |el| {
+                    Some(render_channel_webhook_item(
+                        webhook,
+                        expanded,
+                        channel_name.into(),
+                        created_label.into(),
+                        edit_avatar,
+                        avatar_uploading,
+                        self.webhook_edit_can_save(webhook, cx),
+                        &self.edit_names,
+                        &locale,
+                        &theme,
+                        avatar_cache.clone(),
+                        entity.clone(),
+                    ))
+                }))
+            })
+            .when(has_channels && has_webhooks, |el| {
                 el.child(render_webhook_create_box(
                     "new-channel-webhook",
                     mezon_i18n::t(&locale, "integrations.newWebhook").into(),
