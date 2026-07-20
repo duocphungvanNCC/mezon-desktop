@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use gpui::{
     AnyView, App, Context, DismissEvent, Entity, Focusable, Pixels, ScrollHandle, Size,
-    StyleRefinement, Subscription, Task, Window, deferred, div, prelude::*, px,
+    StyleRefinement, Subscription, Task, Window, canvas, deferred, div, prelude::*, px,
 };
 use mezon_store::{
     AuthState, Channel, ChannelId, ChannelList, ChannelType, ClanId, ClanList, ClanMembersStore,
@@ -52,6 +52,8 @@ pub struct ChatLayout {
     voice_grid_size: Size<Pixels>,
     voice_show_members: bool,
     voice_session_key: Option<String>,
+    voice_visual: crate::chat::voice::VoiceVisualState,
+    voice_mini_bar_height: Pixels,
     pending_channel_id: Option<ChannelId>,
     prefetched_voice_channel: Option<ChannelId>,
     dm_view_fingerprint: Option<(ChannelId, DirectKind, String)>,
@@ -367,6 +369,8 @@ impl ChatLayout {
             voice_grid_size: Size::default(),
             voice_show_members: true,
             voice_session_key: None,
+            voice_visual: Default::default(),
+            voice_mini_bar_height: px(0.),
             pending_channel_id: None,
             prefetched_voice_channel: None,
             dm_view_fingerprint: None,
@@ -1253,6 +1257,11 @@ impl Render for ChatLayout {
             chat_content
         };
         let voice_mini_bar = self.render_voice_mini_bar(cx);
+        let nav_bottom_pad = if voice_mini_bar.is_some() {
+            self.voice_mini_bar_height
+        } else {
+            px(0.)
+        };
         let fullscreen = if self.connected_call_is_active(cx) {
             let chat = cx.entity();
             crate::chat::voice::render_screen_fullscreen_overlay(
@@ -1294,12 +1303,18 @@ impl Render for ChatLayout {
                             .rounded_bl(px(ROUNDED_BORDER_WINDOW))
                             .overflow_hidden()
                             .child(
-                                div().w(px(72.0)).h_full().child(
+                                div().w(px(72.0)).h_full().pb(nav_bottom_pad).child(
                                     AnyView::from(self.clan_sidebar.clone())
                                         .cached(StyleRefinement::default().size_full()),
                                 ),
                             )
-                            .child(div().w(px(272.0)).h_full().child(nav_body)),
+                            .child(
+                                div()
+                                    .w(px(272.0))
+                                    .h_full()
+                                    .pb(nav_bottom_pad)
+                                    .child(nav_body),
+                            ),
                     )
                     .child(
                         div()
@@ -1316,7 +1331,24 @@ impl Render for ChatLayout {
                             .shadow_lg()
                             .bg(theme.tokens.bg_surface)
                             .occlude()
-                            .children(voice_mini_bar)
+                            .children(voice_mini_bar.map(|bar| {
+                                let chat = cx.entity();
+                                div().relative().w_full().child(bar).child(
+                                    canvas(
+                                        move |bounds, _, cx| {
+                                            chat.update(cx, |layout, cx| {
+                                                layout.record_voice_mini_bar_height(
+                                                    bounds.size.height,
+                                                    cx,
+                                                )
+                                            })
+                                        },
+                                        |_, _, _, _| {},
+                                    )
+                                    .absolute()
+                                    .size_full(),
+                                )
+                            }))
                             .child(
                                 AnyView::from(self.user_info_bar.clone())
                                     .cached(StyleRefinement::default().w_full().h(px(56.0))),
@@ -1679,6 +1711,13 @@ impl ChatLayout {
             .into_any_element()
     }
 
+    fn record_voice_mini_bar_height(&mut self, height: Pixels, cx: &mut Context<Self>) {
+        if self.voice_mini_bar_height != height {
+            self.voice_mini_bar_height = height;
+            cx.notify();
+        }
+    }
+
     fn sync_voice_session_defaults(&mut self, cx: &App) {
         let key = match self.voice_store.read(cx).connection() {
             VoiceConnection::Connecting { channel_id, .. }
@@ -1690,6 +1729,7 @@ impl ChatLayout {
             self.voice_show_members = true;
             self.voice_grid_page = 0;
             self.voice_grid_wheel_accum = 0.;
+            self.voice_visual = Default::default();
             self.voice_strip_scroll
                 .set_offset(gpui::point(px(0.), px(0.)));
         }
@@ -2077,6 +2117,7 @@ impl ChatLayout {
                     self.voice_grid_page,
                     self.voice_grid_size,
                     self.voice_show_members,
+                    &mut self.voice_visual,
                     window_width,
                     cx,
                 );
