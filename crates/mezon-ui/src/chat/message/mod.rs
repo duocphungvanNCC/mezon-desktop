@@ -19,6 +19,7 @@ mod poll_detail_modal;
 mod reaction_detail;
 mod reaction_picker;
 mod report_modal;
+mod selection;
 mod share_contact_card;
 mod skeleton;
 mod system_row;

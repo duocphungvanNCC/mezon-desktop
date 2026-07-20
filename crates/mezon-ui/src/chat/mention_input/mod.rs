@@ -9,16 +9,19 @@ use std::rc::Rc;
 use gpui::{
     AnyElement, App, Bounds, Context, DismissEvent, Div, Entity, EventEmitter, Focusable,
     FontWeight, Image, ImageFormat, IntoElement, KeyBinding, MouseButton, PathPromptOptions,
-    Pixels, Rgba, ScrollStrategy, SharedString, Stateful, Subscription, UniformListScrollHandle,
-    Window, actions, canvas, deferred, div, img, prelude::*, px, uniform_list,
+    Pixels, Rgba, ScrollStrategy, SharedString, Stateful, Subscription, Task,
+    UniformListScrollHandle, Window, actions, canvas, deferred, div, img, prelude::*, px,
+    uniform_list,
 };
 use mezon_store::{
-    AccountEvent, AccountStore, AudioStore, Channel, ChannelEvent, ChannelId, ChannelList,
-    ChannelMembersEvent, ChannelMembersStore, ClanList, ClanMembersEvent, ClanMembersStore,
-    DirectEvent, DirectMessageStore, Emoji, EmojiEvent, EmojiStore, GroupMembersEvent,
-    GroupMembersStore, MENTION_HERE_ID, MessageSpan, OutgoingAttachment, OutgoingContent,
-    OutgoingEmoji, OutgoingHashtag, OutgoingMention, RolesEvent, RolesStore, Settings,
+    AccountEvent, AccountStore, AudioStore, BadgeService, Channel, ChannelEvent, ChannelId,
+    ChannelList, ChannelMembersEvent, ChannelMembersStore, ClanList, ClanMembersEvent,
+    ClanMembersStore, DirectEvent, DirectMessageStore, Emoji, EmojiEvent, EmojiStore,
+    GroupMembersEvent, GroupMembersStore, MENTION_HERE_ID, MessageSpan, OgpResult,
+    OutgoingAttachment, OutgoingContent, OutgoingEmoji, OutgoingHashtag, OutgoingMention,
+    OutgoingOgp, RolesEvent, RolesStore, Settings, fetch_ogp, first_previewable_url,
 };
+use std::time::Duration;
 
 use attachments::{
     AttachmentLimit, MAX_FILE_ATTACHMENTS, PendingAttachment, build_pending, mime_from_extension,
@@ -74,6 +77,7 @@ enum Sigil {
     At,
     Hash,
     Colon,
+    Slash,
 }
 
 impl Sigil {
@@ -82,6 +86,7 @@ impl Sigil {
             Sigil::At => 0,
             Sigil::Hash => 1,
             Sigil::Colon => 2,
+            Sigil::Slash => 3,
         }
     }
 
@@ -90,6 +95,7 @@ impl Sigil {
             b'@' => Some(Self::At),
             b'#' => Some(Self::Hash),
             b':' => Some(Self::Colon),
+            b'/' => Some(Self::Slash),
             _ => None,
         }
     }
@@ -147,18 +153,30 @@ struct EmojiSuggestRaw {
 }
 
 #[derive(Clone)]
+struct SlashCommandRaw {
+    id: &'static str,
+    display: &'static str,
+    display_lc: &'static str,
+    description: SharedString,
+}
+
+#[derive(Clone)]
 enum Suggestion {
     Here,
     Member(Rc<MentionMemberRaw>, SharedString),
     Role(Rc<RoleSuggestRaw>),
     Channel(Rc<ChannelSuggestRaw>),
     Emoji(Rc<EmojiSuggestRaw>, SharedString),
+    SlashCommand(Rc<SlashCommandRaw>),
 }
 
 impl Suggestion {
     fn group_order(&self) -> u8 {
         match self {
-            Suggestion::Member(..) | Suggestion::Channel(_) | Suggestion::Emoji(..) => 0,
+            Suggestion::Member(..)
+            | Suggestion::Channel(_)
+            | Suggestion::Emoji(..)
+            | Suggestion::SlashCommand(_) => 0,
             Suggestion::Role(_) => 1,
             Suggestion::Here => 2,
         }
@@ -171,6 +189,7 @@ impl Suggestion {
             Suggestion::Role(role) => (2, role.role_id.as_str()),
             Suggestion::Channel(channel) => (3, channel.channel_id.as_str()),
             Suggestion::Emoji(emoji, _) => (4, emoji.emoji_id.as_str()),
+            Suggestion::SlashCommand(command) => (5, command.id),
         }
     }
 
@@ -181,6 +200,7 @@ impl Suggestion {
             Suggestion::Role(role) => (&role.title_lc, ""),
             Suggestion::Channel(channel) => (&channel.name_lc, ""),
             Suggestion::Emoji(emoji, _) => (&emoji.shortname_lc, ""),
+            Suggestion::SlashCommand(command) => (command.display_lc, ""),
         }
     }
 
@@ -191,6 +211,7 @@ impl Suggestion {
             Suggestion::Role(role) => (&role.title_norm, ""),
             Suggestion::Channel(channel) => (&channel.name_norm, &channel.sub_text_norm),
             Suggestion::Emoji(emoji, _) => (&emoji.shortname, ""),
+            Suggestion::SlashCommand(command) => (command.display_lc, ""),
         }
     }
 
@@ -247,7 +268,7 @@ pub struct MentionInput {
     committed: Vec<CommittedToken>,
     active_at: Option<usize>,
     active_sigil: Sigil,
-    pooled: [Option<MentionScope>; 3],
+    pooled: [Option<MentionScope>; 4],
     query_len: usize,
     suggestions: Vec<Suggestion>,
     selected: usize,
@@ -256,6 +277,10 @@ pub struct MentionInput {
     session_roles: Vec<Rc<RoleSuggestRaw>>,
     session_channels: Vec<Rc<ChannelSuggestRaw>>,
     session_emojis: Vec<Rc<EmojiSuggestRaw>>,
+    session_commands: Vec<Rc<SlashCommandRaw>>,
+    ephemeral_mode: bool,
+    ephemeral_target: Option<(i64, SharedString)>,
+    base_placeholder: SharedString,
     popup: Option<Entity<GifStickerEmojiPopup>>,
     toggle_bounds: Rc<Cell<Bounds<Pixels>>>,
     _popup_subs: Vec<Subscription>,
@@ -271,6 +296,10 @@ pub struct MentionInput {
     overflow_to_file: bool,
     overflow_counter: Option<isize>,
     last_content: SharedString,
+    ogp_preview: Option<OgpResult>,
+    ogp_url: Option<String>,
+    ogp_generation: u64,
+    _ogp_task: Option<Task<()>>,
     _input_sub: Subscription,
     _store_subs: Vec<Subscription>,
 }
@@ -387,6 +416,7 @@ impl MentionInput {
         cx: &mut Context<Self>,
     ) -> Self {
         let placeholder = placeholder.into();
+        let base_placeholder = placeholder.clone();
         let input = cx.new(|cx| {
             let state = MentionInputState::new(window, cx).placeholder(placeholder);
             if compact { state.compact() } else { state }
@@ -424,7 +454,7 @@ impl MentionInput {
             committed: Vec::new(),
             active_at: None,
             active_sigil: Sigil::At,
-            pooled: [None; 3],
+            pooled: [None; 4],
             query_len: 0,
             suggestions: Vec::new(),
             selected: 0,
@@ -433,6 +463,10 @@ impl MentionInput {
             session_roles: Vec::new(),
             session_channels: Vec::new(),
             session_emojis: Vec::new(),
+            session_commands: Vec::new(),
+            ephemeral_mode: false,
+            ephemeral_target: None,
+            base_placeholder,
             popup: None,
             toggle_bounds: Rc::new(Cell::new(Bounds::default())),
             _popup_subs: Vec::new(),
@@ -448,6 +482,10 @@ impl MentionInput {
             overflow_to_file: false,
             overflow_counter: None,
             last_content: SharedString::default(),
+            ogp_preview: None,
+            ogp_url: None,
+            ogp_generation: 0,
+            _ogp_task: None,
             _input_sub: input_sub,
             _store_subs: store_subs,
         }
@@ -476,7 +514,12 @@ impl MentionInput {
         &mut self,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> Option<(String, OutgoingContent, Vec<OutgoingAttachment>)> {
+    ) -> Option<(
+        String,
+        OutgoingContent,
+        Vec<OutgoingAttachment>,
+        Option<OutgoingOgp>,
+    )> {
         let raw = self.input.read(cx).value().to_string();
         if raw.trim().is_empty() && self.pending_attachments.is_empty() {
             return None;
@@ -494,6 +537,7 @@ impl MentionInput {
             self.committed.clear();
             self.reset_popup();
             self.close_popup();
+            self.clear_ogp_preview(cx);
             self.input.update(cx, |input, cx| {
                 input.set_mention_spans(Vec::new(), cx);
                 input.set_value("", window, cx);
@@ -537,6 +581,7 @@ impl MentionInput {
                 poster_jpeg: p.poster_jpeg,
             })
             .collect();
+        let ogp = self.take_outgoing_ogp();
         self.committed.clear();
         self.reset_popup();
         self.close_popup();
@@ -544,7 +589,7 @@ impl MentionInput {
             input.set_mention_spans(Vec::new(), cx);
             input.set_value("", window, cx);
         });
-        Some((text, content, attachments))
+        Some((text, content, attachments, ogp))
     }
 
     fn open_file_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -918,6 +963,7 @@ impl MentionInput {
             }
             Sigil::Hash => self.session_channels = Vec::new(),
             Sigil::Colon => self.session_emojis = Vec::new(),
+            Sigil::Slash => self.session_commands = Vec::new(),
         }
     }
 
@@ -951,7 +997,104 @@ impl MentionInput {
                 None
             }
         };
+        self.update_ogp_preview(&content, cx);
         self.last_content = content;
+    }
+
+    fn update_ogp_preview(&mut self, content: &str, cx: &mut Context<Self>) {
+        if self.compact {
+            return;
+        }
+        let candidate = first_previewable_url(content, None);
+        let Some(url) = candidate else {
+            if self.ogp_url.take().is_some() || self.ogp_preview.take().is_some() {
+                self._ogp_task = None;
+                self.ogp_generation += 1;
+                cx.notify();
+            }
+            return;
+        };
+        if self.ogp_url.as_deref() == Some(url.as_str()) {
+            return;
+        }
+        self.ogp_url = Some(url.clone());
+        self.ogp_preview = None;
+        self.ogp_generation += 1;
+        let generation = self.ogp_generation;
+        cx.notify();
+        self._ogp_task = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis(300))
+                .await;
+            let current = this
+                .read_with(cx, |this, _| this.ogp_generation == generation)
+                .unwrap_or(false);
+            if !current {
+                return;
+            }
+            let result = fetch_ogp(&url).await;
+            let _ = this.update(cx, |this, cx| {
+                if this.ogp_generation != generation {
+                    return;
+                }
+                this.ogp_preview = result.ok();
+                cx.notify();
+            });
+        }));
+    }
+
+    pub fn ogp_preview(&self) -> Option<&OgpResult> {
+        self.ogp_preview.as_ref()
+    }
+
+    fn apply_ephemeral_placeholder(&mut self, cx: &mut Context<Self>) {
+        let placeholder = match &self.ephemeral_target {
+            Some((_, display)) => {
+                let template = mezon_i18n::t(
+                    &self.settings.read(cx).language,
+                    "messageBox.ephemeralMessage",
+                );
+                SharedString::from(template.replace("{{username}}", display))
+            }
+            None => self.base_placeholder.clone(),
+        };
+        self.input
+            .update(cx, |input, cx| input.set_placeholder(placeholder, cx));
+    }
+
+    pub fn take_ephemeral_receiver(&mut self, cx: &mut Context<Self>) -> Option<i64> {
+        let receiver = self.ephemeral_target.take().map(|(id, _)| id);
+        if receiver.is_some() {
+            self.apply_ephemeral_placeholder(cx);
+        }
+        receiver
+    }
+
+    pub fn clear_ephemeral(&mut self, cx: &mut Context<Self>) {
+        let had = self.ephemeral_mode || self.ephemeral_target.is_some();
+        self.ephemeral_mode = false;
+        self.ephemeral_target = None;
+        if had {
+            self.apply_ephemeral_placeholder(cx);
+            cx.notify();
+        }
+    }
+
+    pub fn clear_ogp_preview(&mut self, cx: &mut Context<Self>) {
+        let had = self.ogp_url.take().is_some() | self.ogp_preview.take().is_some();
+        self._ogp_task = None;
+        self.ogp_generation += 1;
+        if had {
+            cx.notify();
+        }
+    }
+
+    fn take_outgoing_ogp(&mut self) -> Option<OutgoingOgp> {
+        let ogp = self.ogp_preview.take().map(|preview| preview.to_outgoing());
+        self.ogp_url = None;
+        self._ogp_task = None;
+        self.ogp_generation += 1;
+        ogp
     }
 
     fn revalidate(&mut self, content: &str, cx: &mut Context<Self>) {
@@ -1033,6 +1176,11 @@ impl MentionInput {
             self.end_mention(cx);
             return;
         };
+
+        if sigil == Sigil::Slash && at != 0 {
+            self.end_mention(cx);
+            return;
+        }
 
         let query = &content[at + 1..cursor];
         if sigil == Sigil::Colon && query.is_empty() {
@@ -1135,11 +1283,12 @@ impl MentionInput {
     }
 
     fn drop_pool(&mut self) {
-        self.pooled = [None; 3];
+        self.pooled = [None; 4];
         self.session_members = Vec::new();
         self.session_roles = Vec::new();
         self.session_channels = Vec::new();
         self.session_emojis = Vec::new();
+        self.session_commands = Vec::new();
     }
 
     fn refresh_pool(&mut self, sigil: Sigil, cx: &mut Context<Self>) {
@@ -1165,6 +1314,10 @@ impl MentionInput {
                 }
                 self.session_emojis = emoji_suggest_pool(cx).into_iter().map(Rc::new).collect();
             }
+            Sigil::Slash => {
+                let locale = self.settings.read(cx).language.clone();
+                self.session_commands = slash_command_pool(&locale);
+            }
         }
     }
 
@@ -1173,15 +1326,36 @@ impl MentionInput {
             Sigil::At => self.session_members.is_empty() && self.session_roles.is_empty(),
             Sigil::Hash => self.session_channels.is_empty(),
             Sigil::Colon => self.session_emojis.is_empty(),
+            Sigil::Slash => self.session_commands.is_empty(),
         }
     }
 
+    fn slash_candidates(&self, query: &str) -> Vec<Suggestion> {
+        let query_lc = query.to_lowercase();
+        self.session_commands
+            .iter()
+            .filter(|command| command.display_lc.starts_with(&query_lc))
+            .map(|command| Suggestion::SlashCommand(command.clone()))
+            .collect()
+    }
+
     fn build_suggestions(&mut self, query: &str, cx: &App) {
-        let candidates = match self.active_sigil {
+        let mut candidates = match self.active_sigil {
             Sigil::At => self.at_candidates(query),
             Sigil::Hash => self.hash_candidates(query),
             Sigil::Colon => self.colon_candidates(query, cx),
+            Sigil::Slash => self.slash_candidates(query),
         };
+        if self.ephemeral_mode && self.active_sigil == Sigil::At {
+            let self_id = BadgeService::try_global(cx)
+                .and_then(|badge| badge.read(cx).current_user_id(cx))
+                .map(|uid| uid.to_string());
+            candidates.retain(|suggestion| match suggestion {
+                Suggestion::Here => false,
+                Suggestion::Member(member, _) => Some(&member.user_id) != self_id.as_ref(),
+                _ => true,
+            });
+        }
         let mut suggestions = prioritize_and_limit(candidates, query);
         resolve_suggestion_media(&mut suggestions, cx);
         let same_items = suggestions.len() == self.suggestions.len()
@@ -1274,7 +1448,37 @@ impl MentionInput {
         };
         let content_len = self.input.read(cx).value().len();
         let replace_end = (at + self.query_len).min(content_len);
+        if let Suggestion::SlashCommand(command) = &suggestion {
+            if command.id == "ephemeral" {
+                self.input.update(cx, |input, cx| {
+                    input.replace_range(at..replace_end, "@", window, cx)
+                });
+                self.ephemeral_mode = true;
+                self.reset_popup();
+                self.sync_ranges(cx);
+                cx.notify();
+            }
+            return;
+        }
+        if self.ephemeral_mode {
+            if let Suggestion::Member(member, _) = &suggestion {
+                if let Ok(user_id) = member.user_id.parse::<i64>() {
+                    self.ephemeral_target = Some((user_id, member.display.clone().into()));
+                }
+                self.ephemeral_mode = false;
+                self.input.update(cx, |input, cx| {
+                    input.replace_range(at..replace_end, "", window, cx)
+                });
+                self.apply_ephemeral_placeholder(cx);
+                self.reset_popup();
+                self.sync_ranges(cx);
+                cx.notify();
+                return;
+            }
+            self.ephemeral_mode = false;
+        }
         let (display, kind) = match suggestion {
+            Suggestion::SlashCommand(_) => return,
             Suggestion::Here => (
                 "@here".to_string(),
                 TokenKind::Mention {
@@ -1479,9 +1683,16 @@ impl MentionInput {
         }
     }
 
-    fn on_dismiss(&mut self, _: &MentionDismiss, _window: &mut Window, cx: &mut Context<Self>) {
+    fn on_dismiss(&mut self, _: &MentionDismiss, window: &mut Window, cx: &mut Context<Self>) {
         if self.popup_open() {
             self.hide(cx);
+        } else if self.ephemeral_mode || self.ephemeral_target.is_some() {
+            self.clear_ephemeral(cx);
+            self.committed.clear();
+            self.input.update(cx, |input, cx| {
+                input.set_mention_spans(Vec::new(), cx);
+                input.set_value("", window, cx);
+            });
         } else if self.popup.is_some() {
             self.close_popup();
             cx.notify();
@@ -1568,6 +1779,22 @@ impl MentionInput {
                         SharedString::default(),
                     )
                 }
+                Suggestion::SlashCommand(command) => (
+                    Some(
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .size(px(24.))
+                            .text_size(px(16.))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(text_muted)
+                            .child("/")
+                            .into_any_element(),
+                    ),
+                    command.display.into(),
+                    command.description.clone(),
+                ),
             };
 
         div()
@@ -1816,6 +2043,17 @@ fn emoji_suggest_id(emoji: &Emoji) -> String {
         }
     }
     emoji.id.clone()
+}
+
+fn slash_command_pool(locale: &str) -> Vec<Rc<SlashCommandRaw>> {
+    let description: SharedString =
+        mezon_i18n::t(locale, "messageBox.slashCommands.ephemeral.description").into();
+    vec![Rc::new(SlashCommandRaw {
+        id: "ephemeral",
+        display: "ephemeral",
+        display_lc: "ephemeral",
+        description,
+    })]
 }
 
 fn emoji_suggest_pool(cx: &App) -> Vec<EmojiSuggestRaw> {

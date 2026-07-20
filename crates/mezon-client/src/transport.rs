@@ -173,6 +173,9 @@ fn push_varint(buf: &mut Vec<u8>, mut value: u64) {
     buf.push(value as u8);
 }
 
+/// `TypeMessage.Ephemeral` — the message code carried by an ephemeral send.
+const EPHEMERAL_MESSAGE_CODE: i32 = 12;
+
 fn encode_envelope_cid_last(mut envelope: realtime::Envelope) -> Vec<u8> {
     let cid = envelope.cid;
     if cid <= 0 {
@@ -1357,6 +1360,36 @@ pub struct ApiEmbedField {
     pub button: Option<serde_json::Value>,
 }
 
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct ApiMessageInput {
+    #[serde(default)]
+    pub placeholder: Option<String>,
+    #[serde(default, deserialize_with = "bool_flex::deserialize")]
+    pub required: bool,
+    #[serde(default, deserialize_with = "bool_flex::deserialize")]
+    pub textarea: bool,
+    #[serde(default, rename = "defaultValue")]
+    pub default_value: Option<String>,
+    #[serde(default, deserialize_with = "bool_flex::deserialize")]
+    pub disabled: bool,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct ApiEmbedInputWrapper {
+    #[serde(
+        default,
+        rename = "type",
+        deserialize_with = "opt_i32_flex::deserialize"
+    )]
+    pub component_type: Option<i32>,
+    #[serde(default)]
+    pub id: Option<String>,
+    #[serde(default)]
+    pub component: serde_json::Value,
+    #[serde(default, deserialize_with = "opt_i32_flex::deserialize")]
+    pub max_options: Option<i32>,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ApiEmbed {
     #[serde(default)]
@@ -1821,6 +1854,34 @@ pub fn markdown_content_tokens(markdowns: &[OutgoingMarkdown]) -> Vec<ContentTok
         .collect()
 }
 
+/// An OGP link-preview to bake into the outgoing message as an `lk_ogp` markdown token.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct OutgoingOgp {
+    pub url: String,
+    pub title: String,
+    pub description: String,
+    pub image: String,
+}
+
+pub const OGP_MARKDOWN_KIND: &str = "lk_ogp";
+const OGP_DESCRIPTION_MAX: usize = 200;
+
+impl OutgoingOgp {
+    pub fn to_content_token(&self, text_len_utf16: usize) -> ContentToken {
+        ContentToken {
+            s: Some(text_len_utf16 as i64),
+            e: Some(text_len_utf16 as i64 + 1),
+            kind: Some(OGP_MARKDOWN_KIND.to_string()),
+            url: (!self.url.is_empty()).then(|| self.url.clone()),
+            title: (!self.title.is_empty()).then(|| self.title.clone()),
+            description: (!self.description.is_empty())
+                .then(|| self.description.chars().take(OGP_DESCRIPTION_MAX).collect()),
+            image: (!self.image.is_empty()).then(|| self.image.clone()),
+            ..Default::default()
+        }
+    }
+}
+
 struct MarkdownMatch {
     kind: &'static str,
     start: usize,
@@ -2094,6 +2155,44 @@ fn with_create_time_seconds(content_json: String, create_time_seconds: u32) -> S
         "create_time_seconds".into(),
         serde_json::Value::Number(create_time_seconds.into()),
     );
+    serde_json::to_string(&value).unwrap_or(content_json)
+}
+
+fn with_ogp_token(content_json: String, ogp: &OutgoingOgp) -> String {
+    let mut value: serde_json::Value =
+        serde_json::from_str(&content_json).unwrap_or_else(|_| serde_json::json!({}));
+    let Some(obj) = value.as_object_mut() else {
+        return content_json;
+    };
+    let text_len_utf16 = obj
+        .get("t")
+        .and_then(serde_json::Value::as_str)
+        .map(|text| text.encode_utf16().count())
+        .unwrap_or(0);
+    let mut token = serde_json::Map::new();
+    token.insert("type".into(), OGP_MARKDOWN_KIND.into());
+    token.insert("s".into(), text_len_utf16.into());
+    token.insert("e".into(), (text_len_utf16 + 1).into());
+    if !ogp.url.is_empty() {
+        token.insert("url".into(), ogp.url.clone().into());
+    }
+    if !ogp.title.is_empty() {
+        token.insert("title".into(), ogp.title.clone().into());
+    }
+    if !ogp.description.is_empty() {
+        let description: String = ogp.description.chars().take(OGP_DESCRIPTION_MAX).collect();
+        token.insert("description".into(), description.into());
+    }
+    if !ogp.image.is_empty() {
+        token.insert("image".into(), ogp.image.clone().into());
+    }
+    let entry = obj
+        .entry("mk")
+        .or_insert_with(|| serde_json::Value::Array(Vec::new()));
+    match entry.as_array_mut() {
+        Some(array) => array.push(serde_json::Value::Object(token)),
+        None => return content_json,
+    }
     serde_json::to_string(&value).unwrap_or(content_json)
 }
 
@@ -3186,6 +3285,7 @@ impl MezonTransport {
             cid: i32::from(cid),
             message: Some(realtime::envelope::Message::ClanJoin(realtime::ClanJoin {
                 clan_id,
+                is_last_field: false,
             })),
         };
         let (code, _response) = self.send(cid, encode_envelope_cid_last(envelope)).await?;
@@ -3195,6 +3295,7 @@ impl MezonTransport {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     #[allow(clippy::too_many_arguments)]
     pub async fn send_channel_message(
         &self,
@@ -3206,6 +3307,7 @@ impl MezonTransport {
         mentions: Vec<OutgoingMention>,
         hashtags: Vec<OutgoingHashtag>,
         emojis: Vec<OutgoingEmoji>,
+        ogp: Option<OutgoingOgp>,
     ) -> Result<ApiMessage> {
         self.send_channel_message_inner(
             clan_id,
@@ -3221,6 +3323,7 @@ impl MezonTransport {
             None,
             false,
             0,
+            ogp,
         )
         .await
     }
@@ -3247,6 +3350,7 @@ impl MezonTransport {
             None,
             true,
             0,
+            None,
         )
         .await
     }
@@ -3295,6 +3399,7 @@ impl MezonTransport {
             None,
             false,
             topic_id,
+            None,
         )
         .await
     }
@@ -3344,6 +3449,7 @@ impl MezonTransport {
             presign_finish,
             false,
             topic_id,
+            None,
         )
         .await
     }
@@ -3392,6 +3498,7 @@ impl MezonTransport {
             presign_finish,
             false,
             0,
+            None,
         )
         .await
     }
@@ -3409,6 +3516,7 @@ impl MezonTransport {
         mentions: Vec<OutgoingMention>,
         hashtags: Vec<OutgoingHashtag>,
         emojis: Vec<OutgoingEmoji>,
+        ogp: Option<OutgoingOgp>,
     ) -> Result<ApiMessage> {
         let reference = api::MessageRef {
             message_ref_id: reply.message_ref_id,
@@ -3436,6 +3544,7 @@ impl MezonTransport {
             None,
             false,
             0,
+            ogp,
         )
         .await
     }
@@ -3456,6 +3565,7 @@ impl MezonTransport {
         presign_finish: Option<Vec<String>>,
         content_is_json: bool,
         topic_id: i64,
+        ogp: Option<OutgoingOgp>,
     ) -> Result<ApiMessage> {
         let cid = self.generate_cid();
 
@@ -3489,6 +3599,10 @@ impl MezonTransport {
         let content_json = sent.json.clone();
         let content_json = match &presign_finish {
             Some(keys) => with_presign_finish(content_json, keys),
+            None => content_json,
+        };
+        let content_json = match &ogp {
+            Some(ogp) => with_ogp_token(content_json, ogp),
             None => content_json,
         };
         let mention_everyone = sent.mentions.iter().any(OutgoingMention::is_here);
@@ -3527,7 +3641,7 @@ impl MezonTransport {
             ack.channel_id,
             ack.code
         );
-        let content_tokens = if content_is_json {
+        let mut content_tokens = if content_is_json {
             serde_json::from_str(&content_json).unwrap_or_default()
         } else {
             ApiMessageContent {
@@ -3552,6 +3666,10 @@ impl MezonTransport {
                 ..Default::default()
             }
         };
+        if !content_is_json && let Some(ogp) = &ogp {
+            let text_len_utf16 = sent.text.encode_utf16().count();
+            content_tokens.mk.push(ogp.to_content_token(text_len_utf16));
+        }
         Ok(ApiMessage {
             message_id: ack.message_id,
             content: sent.text.clone(),
@@ -4340,7 +4458,12 @@ impl MezonTransport {
     /// List Sd Topics.
     pub async fn list_sd_topic(&self, clan_id: i64, limit: i32) -> Result<api::SdTopicList> {
         let cid = self.generate_cid();
-        let body = api::ListSdTopicRequest { clan_id, limit }.encode_to_vec();
+        let body = api::ListSdTopicRequest {
+            clan_id,
+            limit,
+            page: 1,
+        }
+        .encode_to_vec();
         let (code, response) = self.send_api_request(cid, "ListSdTopic", body).await?;
         if code != 0 {
             return Err(anyhow::anyhow!("API error: code={}", code));
@@ -6000,6 +6123,58 @@ impl MezonTransport {
         let (code, _) = self
             .send_api_request(cid, "MessageButtonClick", body)
             .await?;
+        if code != 0 {
+            return Err(anyhow::anyhow!("API error: code={}", code));
+        }
+        Ok(())
+    }
+
+    /// Send an ephemeral message (visible only to `receiver_id`). Sent as the
+    /// `EphemeralMessageSend` envelope oneof (not an `ApiRequestEvent`), mirroring
+    /// mezon-js `writeEphemeralMessage`. The nested message carries `code = 12`
+    /// (`TypeMessage.Ephemeral`); the server echoes it to the recipient only.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn write_ephemeral_message(
+        &self,
+        receiver_id: i64,
+        clan_id: i64,
+        channel_id: i64,
+        content: &str,
+        is_public: bool,
+        mode: i32,
+        mentions: Vec<OutgoingMention>,
+        hashtags: Vec<OutgoingHashtag>,
+        emojis: Vec<OutgoingEmoji>,
+    ) -> Result<()> {
+        let cid = self.generate_cid();
+        let sent = build_send_content(content, &mentions, &hashtags, &emojis);
+        let mention_everyone = sent.mentions.iter().any(OutgoingMention::is_here);
+        let proto_mentions: Vec<api::MessageMention> = sent
+            .mentions
+            .iter()
+            .filter_map(OutgoingMention::to_proto)
+            .collect();
+        let message = realtime::ChannelMessageSend {
+            clan_id,
+            channel_id,
+            content: sent.json,
+            mentions: proto_mentions,
+            mode,
+            is_public,
+            mention_everyone,
+            code: EPHEMERAL_MESSAGE_CODE,
+            ..Default::default()
+        };
+        let envelope = realtime::Envelope {
+            cid: i32::from(cid),
+            message: Some(realtime::envelope::Message::EphemeralMessageSend(
+                realtime::EphemeralMessageSend {
+                    message: Some(message),
+                    receiver_ids: vec![receiver_id],
+                },
+            )),
+        };
+        let (code, _) = self.send(cid, encode_envelope_cid_last(envelope)).await?;
         if code != 0 {
             return Err(anyhow::anyhow!("API error: code={}", code));
         }
@@ -7694,6 +7869,7 @@ mod tests {
             cid: 7,
             message: Some(realtime::envelope::Message::ClanJoin(realtime::ClanJoin {
                 clan_id: 0,
+                is_last_field: false,
             })),
         };
         let bytes = encode_envelope_cid_last(envelope);
@@ -7738,6 +7914,7 @@ mod tests {
             cid: 0,
             message: Some(realtime::envelope::Message::ClanJoin(realtime::ClanJoin {
                 clan_id: 5,
+                is_last_field: false,
             })),
         };
         let expected = envelope.clone().encode_to_vec();

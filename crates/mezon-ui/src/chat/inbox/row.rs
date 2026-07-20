@@ -512,6 +512,8 @@ fn render_message_content(
         if start > cursor {
             children.push(
                 div()
+                    .max_w_full()
+                    .min_w_0()
                     .text_sm()
                     .text_color(theme.tokens.text_theme_message)
                     .child(SharedString::from(text_str[cursor..start].to_string()))
@@ -523,6 +525,8 @@ fn render_message_content(
             if span.is_role {
                 children.push(
                     div()
+                        .max_w_full()
+                        .min_w_0()
                         .text_sm()
                         .font_weight(FontWeight::MEDIUM)
                         .text_color(theme.tokens.color_mention_evryone)
@@ -535,6 +539,8 @@ fn render_message_content(
             } else {
                 children.push(
                     div()
+                        .max_w_full()
+                        .min_w_0()
                         .text_sm()
                         .font_weight(FontWeight::MEDIUM)
                         .text_color(theme.tokens.mention_color)
@@ -551,6 +557,8 @@ fn render_message_content(
     if cursor < text_str.len() {
         children.push(
             div()
+                .max_w_full()
+                .min_w_0()
                 .text_sm()
                 .text_color(theme.tokens.text_theme_message)
                 .child(SharedString::from(text_str[cursor..].to_string()))
@@ -558,6 +566,8 @@ fn render_message_content(
         );
     }
     h_flex()
+        .w_full()
+        .min_w_0()
         .flex_wrap()
         .overflow_hidden()
         .children(children)
@@ -627,10 +637,14 @@ fn render_message_head(
     time_label: &SharedString,
 ) -> impl IntoElement {
     h_flex()
+        .w_full()
+        .min_w_0()
         .items_baseline()
         .gap_1()
         .child(
             div()
+                .max_w_full()
+                .min_w_0()
                 .text_sm()
                 .font_weight(FontWeight::MEDIUM)
                 .text_color(rgb(DISPLAY_NAME_COLOR))
@@ -639,6 +653,7 @@ fn render_message_head(
         .when(!time_label.is_empty(), |row| {
             row.child(
                 div()
+                    .flex_none()
                     .text_xs()
                     .font_weight(FontWeight::MEDIUM)
                     .text_color(theme.tokens.text_secondary)
@@ -703,12 +718,22 @@ pub fn render_notification_body(
                         col.child(
                             div().text_sm().text_color(theme.text_primary).child(
                                 h_flex()
+                                    .w_full()
+                                    .min_w_0()
+                                    .flex_wrap()
                                     .child(
                                         div()
+                                            .max_w_full()
+                                            .min_w_0()
                                             .font_weight(FontWeight::BOLD)
                                             .child(for_you.display_name.clone()),
                                     )
-                                    .child(for_you.subject_suffix.clone()),
+                                    .child(
+                                        div()
+                                            .max_w_full()
+                                            .min_w_0()
+                                            .child(for_you.subject_suffix.clone()),
+                                    ),
                             ),
                         )
                         .when(!view.time_label.is_empty(), |c| {
@@ -807,9 +832,12 @@ pub fn render_topic_body(
                 .child(
                     div().text_xs().text_color(theme.text_muted).child(
                         h_flex()
+                            .w_full()
+                            .min_w_0()
+                            .flex_wrap()
                             .child(div().font_weight(FontWeight::SEMIBOLD).child(replied_label))
                             .child(": ")
-                            .child(reply_text),
+                            .child(div().max_w_full().min_w_0().child(reply_text)),
                     ),
                 ),
         )

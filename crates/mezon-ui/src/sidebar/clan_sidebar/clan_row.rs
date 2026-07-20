@@ -55,7 +55,7 @@ pub(super) fn render_pill(
     let anim_id = SharedString::from(format!("pill-{group_name}"));
     div()
         .absolute()
-        .left_0()
+        .left(px(8.))
         .top_0()
         .bottom_0()
         .flex()
@@ -63,7 +63,7 @@ pub(super) fn render_pill(
         .child(
             div()
                 .w(px(4.))
-                .rounded_r(px(4.))
+                .rounded_full()
                 .bg(pill_color)
                 .with_animation(
                     anim_id,

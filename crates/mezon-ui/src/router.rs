@@ -248,6 +248,10 @@ impl Router {
         self.current = route;
     }
 
+    pub fn reset(&mut self) {
+        *self = Router::new();
+    }
+
     pub fn go_back(&mut self) {
         if let Some(prev) = self.backward.pop_back() {
             self.forward

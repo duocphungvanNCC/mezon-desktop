@@ -2,14 +2,18 @@ use std::collections::HashSet;
 
 use std::rc::Rc;
 
-use gpui::{AnyElement, App, Entity, FontWeight, Pixels, SharedString, div, img, prelude::*, px};
+use gpui::{
+    AnyElement, App, Context, Entity, FontWeight, Pixels, SharedString, div, img, prelude::*, px,
+};
 use mezon_store::{
     ChannelId, ChannelList, ChannelType, ClanId, ClanList, ClanMembersStore, DirectChannel,
     DirectKind, DirectMessageStore, User, UserId, UsersByUserStore,
 };
 
 use crate::SHOW_UNREAD_BADGE_COUNT;
+use crate::components::primitives::Avatar;
 use crate::theme::Theme;
+use crate::util::assets::AVATAR_GROUP;
 
 pub(crate) const ROW_PX: f32 = 32.;
 
@@ -28,6 +32,7 @@ pub struct PaletteItem {
     pub label: SharedString,
     pub subtext: SharedString,
     pub avatar: SharedString,
+    pub avatar_raw: SharedString,
     pub unread_count: u32,
     pub last_sent_timestamp: i64,
     pub last_seen_timestamp: i64,
@@ -42,6 +47,7 @@ pub struct PaletteItem {
     pub(crate) filter_name: String,
     pub(crate) filter_display: String,
     pub(crate) filter_blob: String,
+    pub voice_busy: bool,
 }
 
 impl PaletteItem {
@@ -109,11 +115,39 @@ fn palette_channel_subtext(
 }
 
 pub fn ensure_palette_sources_loaded(cx: &mut App) {
-    ChannelList::global(cx).update(cx, |store, cx| store.ensure_user_channels_loaded(cx));
+    ChannelList::global(cx).update(cx, |store, cx| {
+        store.ensure_user_channels_loaded(cx);
+        ensure_palette_clans_loaded(store, cx);
+    });
     DirectMessageStore::global(cx).update(cx, |store, cx| store.ensure_loaded(cx));
     if let Some(store) = UsersByUserStore::try_global(cx) {
         store.update(cx, |store, cx| store.ensure_loaded(cx));
     }
+}
+
+pub(crate) fn ensure_palette_clans_loaded(store: &mut ChannelList, cx: &mut Context<ChannelList>) {
+    let clan_ids: HashSet<ClanId> = store
+        .user_channels()
+        .map(|channel| channel.clan_id)
+        .filter(|clan_id| !clan_id.is_zero())
+        .collect();
+    for clan_id in clan_ids {
+        store.load_for_clan(clan_id, cx);
+    }
+}
+
+fn channel_voice_busy(
+    channels: &ChannelList,
+    clan_id: ClanId,
+    channel_id: ChannelId,
+    channel_type: ChannelType,
+) -> bool {
+    if channel_type != ChannelType::Voice {
+        return false;
+    }
+    channels
+        .channel(clan_id, channel_id)
+        .is_some_and(|channel| channel.voice_members.len() >= 2)
 }
 
 pub fn build_palette_items(cx: &App) -> Vec<PaletteItem> {
@@ -130,6 +164,7 @@ pub fn build_palette_items(cx: &App) -> Vec<PaletteItem> {
         {
             dm_user_ids.insert(user_id);
         }
+        let avatar_raw = SharedString::from(dm.avatar.clone());
         let avatar = avatar_url(cx, &dm.avatar);
         let label = dm.label.clone();
         let subtext = dm_username_subtext(dm, users_store.as_ref(), cx);
@@ -140,6 +175,7 @@ pub fn build_palette_items(cx: &App) -> Vec<PaletteItem> {
             label: SharedString::from(label.clone()),
             subtext,
             avatar,
+            avatar_raw,
             unread_count: dm.unread_count,
             last_sent_timestamp: dm.last_sent_timestamp,
             last_seen_timestamp: dm.last_seen_timestamp,
@@ -154,6 +190,7 @@ pub fn build_palette_items(cx: &App) -> Vec<PaletteItem> {
             filter_name,
             filter_display: String::new(),
             filter_blob,
+            voice_busy: false,
         });
     }
 
@@ -176,6 +213,7 @@ pub fn build_palette_items(cx: &App) -> Vec<PaletteItem> {
                 label: SharedString::from(name.clone()),
                 subtext: SharedString::default(),
                 avatar: SharedString::default(),
+                avatar_raw: SharedString::default(),
                 unread_count,
                 last_sent_timestamp,
                 last_seen_timestamp,
@@ -190,6 +228,7 @@ pub fn build_palette_items(cx: &App) -> Vec<PaletteItem> {
                 filter_name: normalize_search_string(&name),
                 filter_display: String::new(),
                 filter_blob: normalize_search_string(&name),
+                voice_busy: false,
             });
             continue;
         }
@@ -197,11 +236,14 @@ pub fn build_palette_items(cx: &App) -> Vec<PaletteItem> {
         let name = channel.name.clone();
         let (unread_count, last_sent_timestamp, last_seen_timestamp) =
             channels.palette_channel_unread(channel);
+        let voice_busy =
+            channel_voice_busy(channels, channel.clan_id, channel.id, channel.channel_type);
         items.push(PaletteItem {
             kind: PaletteItemKind::Channel,
             label: SharedString::from(name.clone()),
             subtext: SharedString::from(subtext.clone()),
             avatar: SharedString::default(),
+            avatar_raw: SharedString::default(),
             unread_count,
             last_sent_timestamp,
             last_seen_timestamp,
@@ -215,7 +257,8 @@ pub fn build_palette_items(cx: &App) -> Vec<PaletteItem> {
             filter_prioritize: normalize_search_string(&name),
             filter_name: normalize_search_string(&name),
             filter_display: String::new(),
-            filter_blob: normalize_search_string(&format!("{name} {subtext}")),
+            filter_blob: normalize_search_string(&name),
+            voice_busy,
         });
     }
 
@@ -253,11 +296,13 @@ pub fn build_palette_items(cx: &App) -> Vec<PaletteItem> {
         .copied()
         .collect::<Vec<_>>()
         .join(".");
+        let avatar_raw = SharedString::from(user.avatar_url.clone());
         items.push(PaletteItem {
             kind: PaletteItemKind::Member,
             label: SharedString::from(label.clone()),
             subtext,
             avatar: avatar_url(cx, &user.avatar_url),
+            avatar_raw,
             unread_count: 0,
             last_sent_timestamp: 0,
             last_seen_timestamp: 0,
@@ -272,6 +317,7 @@ pub fn build_palette_items(cx: &App) -> Vec<PaletteItem> {
             filter_name: normalize_search_string(&username),
             filter_display: normalize_search_string(&display_name),
             filter_blob: normalize_search_string(&search_blob),
+            voice_busy: false,
         });
     }
 
@@ -366,28 +412,13 @@ pub fn render_palette_row(
                 }),
             )
             .into_any_element(),
-        PaletteItemKind::Direct | PaletteItemKind::Member => {
-            if item.avatar.is_empty() {
-                div()
-                    .size(px(20.))
-                    .rounded_full()
-                    .flex_shrink_0()
-                    .bg(theme.tokens.bg_active_member_channel)
-                    .into_any_element()
-            } else {
-                img(item.avatar.clone())
-                    .size(px(20.))
-                    .rounded_full()
-                    .flex_shrink_0()
-                    .into_any_element()
-            }
-        }
+        PaletteItemKind::Direct | PaletteItemKind::Member => render_palette_avatar(item),
     };
 
-    let label = render_highlighted_text(
-        &item.label,
+    let label = render_palette_label(
+        theme,
+        item,
         highlight,
-        px(15.),
         label_weight,
         label_color,
         highlight_label,
@@ -502,6 +533,66 @@ pub fn render_palette_row(
             });
     }
     row.into_any_element()
+}
+
+fn render_palette_label(
+    theme: &Theme,
+    item: &PaletteItem,
+    highlight: &str,
+    label_weight: FontWeight,
+    label_color: gpui::Rgba,
+    highlight_label: bool,
+) -> AnyElement {
+    let label = render_highlighted_text(
+        &item.label,
+        highlight,
+        px(15.),
+        label_weight,
+        label_color,
+        highlight_label,
+    );
+    if !item.voice_busy {
+        return label;
+    }
+    div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap_1()
+        .min_w_0()
+        .overflow_hidden()
+        .child(label)
+        .child(
+            div()
+                .flex_shrink_0()
+                .text_size(px(15.))
+                .italic()
+                .text_color(theme.status_dnd)
+                .child("(busy)"),
+        )
+        .into_any_element()
+}
+
+fn render_palette_avatar(item: &PaletteItem) -> AnyElement {
+    if item.dm_kind == Some(DirectKind::Group) && item.avatar.is_empty() {
+        return img(AVATAR_GROUP)
+            .size(px(20.))
+            .rounded_full()
+            .flex_shrink_0()
+            .object_fit(gpui::ObjectFit::Cover)
+            .into_any_element();
+    }
+
+    let mut avatar = Avatar::new().name(item.label.clone()).size_px(px(20.));
+    if !item.avatar.is_empty() {
+        avatar = avatar.src(item.avatar.clone());
+        if !item.avatar_raw.is_empty() && item.avatar_raw != item.avatar {
+            avatar = avatar.fallback_src(item.avatar_raw.clone());
+        }
+    } else if !item.avatar_raw.is_empty() {
+        avatar = avatar.src(item.avatar_raw.clone());
+    }
+    avatar.into_any_element()
 }
 
 fn highlight_query(raw_query: &str, kind: PaletteItemKind) -> &str {
