@@ -21,6 +21,9 @@ pub struct Role {
     pub name: String,
     pub color: String,
     pub icon: String,
+    pub slug: String,
+    pub max_level_permission: i32,
+    pub order: i32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

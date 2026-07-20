@@ -356,6 +356,10 @@ fn run_app(lock: SingleInstance, initial_url: Option<String>) {
 
         cx.set_global(SingleInstanceGlobal(lock));
 
+        // Initialize the app-global OGP preview image cache so message-row
+        // rendering (which only has `&App`) can read it.
+        mezon_ui::image_cache::shared_ogp_cache(cx);
+
         // If we were launched with a deep link, inject it immediately.
         if let Some(url) = initial_url {
             let _ = url_tx.unbounded_send(url);

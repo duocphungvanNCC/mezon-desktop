@@ -546,7 +546,7 @@ impl ChannelHeader {
             .is_some_and(|id| clan_has_inbox_badge(id, cx));
         let clan_id = self.clan_id.clone().unwrap_or_default();
         let locale = self.locale.clone().unwrap_or_else(|| "en".to_string());
-        let mention_badge = theme.mention_badge;
+        let badge_color = theme.mention_badge;
         let is_open = handle.is_deployed();
 
         PopoverMenu::new("hdr-inbox-popover")
@@ -592,7 +592,7 @@ impl ChannelHeader {
                                         .w(px(8.))
                                         .h(px(8.))
                                         .rounded_full()
-                                        .bg(mention_badge),
+                                        .bg(badge_color),
                                 )
                             }),
                     ),
@@ -964,11 +964,7 @@ impl RenderOnce for PinPopoverTrigger {
             .cursor_pointer()
             .hover(move |s| s.bg(bg_hover))
             .occlude()
-            .child(
-                Icon::new(IconName::PinRight)
-                    .size(px(20.))
-                    .text_color(tint),
-            );
+            .child(Icon::new(IconName::PinRight).size(px(20.)).text_color(tint));
         if self.open {
             button = button.bg(self.bg_active);
         }

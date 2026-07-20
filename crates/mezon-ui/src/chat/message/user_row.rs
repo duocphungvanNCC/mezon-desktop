@@ -2,7 +2,9 @@ use gpui::{AnyElement, App, MouseButton, MouseDownEvent, div, prelude::*, px, rg
 use mezon_store::{Message, MessageCode, TopicsStore};
 
 use super::call_log_card::render_call_log_card;
-use super::content::render_message_content;
+use super::content::{
+    SelectableTextContext, memoized_selectable_message_layout, render_message_content,
+};
 use super::context::{
     AVATAR_LEFT, AVATAR_SIZE, CONTENT_INSET, CONTENT_RIGHT_PAD, DEFAULT_DISPLAY_NAME_COLOR, RowCtx,
 };
@@ -46,6 +48,26 @@ pub fn render_user_message(
     let ephemeral = msg.code == MessageCode::Ephemeral;
     let sending = msg.is_sending();
     let is_me = ctx.current_user_id == msg.sender_id.as_str();
+    let needs_composite_selection = msg.call_log.is_some()
+        || msg.code == MessageCode::SendToken
+        || msg.poll.is_some()
+        || msg.invite.is_some()
+        || msg.ogp.is_some()
+        || !msg.attachments.is_empty()
+        || !msg.embeds.is_empty();
+    let selection_layout =
+        needs_composite_selection.then(|| memoized_selectable_message_layout(msg, ctx));
+    let selection_context = selection_layout.as_ref().map(|layout| {
+        SelectableTextContext::new(msg.id, layout.text.clone(), ctx.selection.clone())
+    });
+    let primary_base = selection_layout
+        .as_ref()
+        .and_then(|layout| layout.primary.as_ref())
+        .map_or(0, |range| range.start);
+    let invite_base = selection_layout
+        .as_ref()
+        .and_then(|layout| layout.invite.as_ref())
+        .map(|range| range.start);
 
     let mut body_column = div()
         .flex()
@@ -88,20 +110,31 @@ pub fn render_user_message(
 
     let content_element = if let Some(input) = editing_input {
         render_edit_box(msg.id, input, ctx)
-    } else if let Some(call_log) = msg.call_log.as_ref() {
-        render_call_log_card(msg, call_log, is_me, ctx)
-    } else if msg.code == MessageCode::SendToken {
-        render_token_transaction_card(msg, ctx)
-    } else if msg.poll.is_some() {
-        render_poll_card(msg, ctx)
+    } else if let (Some(call_log), Some(selection_context)) =
+        (msg.call_log.as_ref(), selection_context.as_ref())
+    {
+        render_call_log_card(msg, call_log, is_me, ctx, primary_base, selection_context)
+    } else if msg.code == MessageCode::SendToken
+        && let Some(selection_context) = selection_context.as_ref()
+    {
+        render_token_transaction_card(msg, ctx, primary_base, selection_context)
+    } else if msg.poll.is_some()
+        && let Some(selection_context) = selection_context.as_ref()
+    {
+        render_poll_card(msg, ctx, primary_base, selection_context)
     } else if sending {
         div()
             .w_full()
             .opacity(0.5)
-            .child(render_message_content(msg, ctx))
+            .child(render_message_content(
+                msg,
+                ctx,
+                invite_base,
+                selection_context.as_ref(),
+            ))
             .into_any_element()
     } else {
-        render_message_content(msg, ctx)
+        render_message_content(msg, ctx, invite_base, selection_context.as_ref())
     };
     body_column = body_column.child(content_element);
 
@@ -111,16 +144,45 @@ pub fn render_user_message(
         body_column = body_column.child(render_ephemeral_notice(ctx));
     }
 
-    if let Some(ogp) = render_ogp_embed(msg, ctx) {
+    if msg.ogp.is_some()
+        && let Some(selection_context) = selection_context.as_ref()
+        && let Some(ogp) = render_ogp_embed(
+            msg,
+            ctx,
+            selection_layout
+                .as_ref()
+                .and_then(|layout| layout.ogp.as_ref())
+                .map_or(0, |range| range.start),
+            selection_context,
+        )
+    {
         body_column = body_column.child(ogp);
     }
 
-    if let Some(attachments) = render_attachments(msg, ctx) {
+    if !msg.attachments.is_empty()
+        && let Some(selection_context) = selection_context.as_ref()
+        && let Some(attachments) = render_attachments(
+            msg,
+            ctx,
+            selection_layout
+                .as_ref()
+                .and_then(|layout| layout.attachment.clone()),
+            selection_context,
+        )
+    {
         body_column = body_column.child(attachments);
     }
 
-    if !msg.embeds.is_empty() {
-        body_column = body_column.child(render_embeds(msg, ctx));
+    if !msg.embeds.is_empty()
+        && let (Some(selection_layout), Some(selection_context)) =
+            (selection_layout.as_ref(), selection_context.as_ref())
+    {
+        body_column = body_column.child(render_embeds(
+            msg,
+            ctx,
+            &selection_layout.embeds,
+            selection_context,
+        ));
     }
 
     if !ctx.is_topic_box && msg.code == MessageCode::Topic {

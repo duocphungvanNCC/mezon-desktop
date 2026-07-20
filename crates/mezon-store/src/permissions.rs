@@ -172,6 +172,13 @@ impl PermissionStore {
         self.has_permission_level(max_level, slug)
     }
 
+    pub fn current_permission_level(&self, clan_id: ClanId, cx: &App) -> Option<i32> {
+        if self.is_clan_owner(clan_id, cx) {
+            return Some(i32::MAX);
+        }
+        self.max_level_by_clan.get(&clan_id).copied()
+    }
+
     pub fn has_clan_permissions_loaded(&self, clan_id: ClanId, cx: &App) -> bool {
         self.is_clan_owner(clan_id, cx) || self.max_level_by_clan.contains_key(&clan_id)
     }

@@ -2,6 +2,7 @@ use gpui::{AnyElement, FontWeight, SharedString, div, prelude::*, px, rgb};
 use mezon_store::{CallLog, CallLogType, Message};
 
 use super::coming_soon_toast;
+use super::content::{SelectableSectionCursor, SelectableTextContext};
 use super::context::RowCtx;
 use crate::components::primitives::{Icon, IconName};
 
@@ -14,10 +15,15 @@ pub fn render_call_log_card(
     call_log: &CallLog,
     is_me: bool,
     ctx: &RowCtx,
+    base: usize,
+    selection_context: &SelectableTextContext,
 ) -> AnyElement {
     let theme = ctx.theme;
-    let (icon, title, title_is_red) = call_log_header(msg, call_log, is_me, ctx);
-    let sub_message = call_log_sub_message(msg, call_log, is_me, ctx);
+    let (icon, title, title_is_red) = call_log_header(msg, call_log, is_me, ctx.locale);
+    let sub_message = call_log_sub_message(msg, call_log, is_me, ctx.locale);
+    let mut cursor = SelectableSectionCursor::new(base);
+    let title_range = cursor.section(&title);
+    let sub_message_range = cursor.section(&sub_message);
 
     let mut header = div()
         .w_full()
@@ -29,7 +35,12 @@ pub fn render_call_log_card(
         .flex_col()
         .gap(px(16.));
 
-    let mut title_span = div().font_weight(FontWeight::SEMIBOLD).child(title);
+    let mut title_span = div()
+        .cursor(gpui::CursorStyle::IBeam)
+        .font_weight(FontWeight::SEMIBOLD)
+        .when_some(title_range, |div, range| {
+            div.child(selection_context.text_node(&title, range))
+        });
     if title_is_red {
         title_span = title_span.text_color(rgb(RED_500));
     }
@@ -50,7 +61,14 @@ pub fn render_call_log_card(
                     .size(px(24.))
                     .text_color(theme.tokens.text_theme_primary),
             )
-            .child(div().text_size(px(14.)).child(sub_message)),
+            .child(
+                div()
+                    .cursor(gpui::CursorStyle::IBeam)
+                    .text_size(px(14.))
+                    .when_some(sub_message_range, |div, range| {
+                        div.child(selection_context.text_node(&sub_message, range))
+                    }),
+            ),
     );
 
     let mut card = div()
@@ -65,6 +83,7 @@ pub fn render_call_log_card(
     if call_log.show_call_back {
         let label = mezon_i18n::t(ctx.locale, "message.callLog.CALL_BACK").to_uppercase();
         let locale = SharedString::from(ctx.locale);
+        let selection = ctx.selection.clone();
         card = card.child(
             div()
                 .id(("call-log-callback", msg.id.0 as usize))
@@ -76,7 +95,11 @@ pub fn render_call_log_card(
                 .cursor_pointer()
                 .text_color(rgb(BLUE_500))
                 .child(label)
-                .on_click(move |_, _, cx| coming_soon_toast(&locale, cx)),
+                .on_click(move |_, _, cx| {
+                    if !selection.borrow().has_selection() {
+                        coming_soon_toast(&locale, cx);
+                    }
+                }),
         );
     }
 
@@ -95,9 +118,9 @@ fn call_log_header(
     msg: &Message,
     call_log: &CallLog,
     is_me: bool,
-    ctx: &RowCtx,
+    locale: &str,
 ) -> (IconName, SharedString, bool) {
-    let key = |name: &'static str| SharedString::from(mezon_i18n::t(ctx.locale, name));
+    let key = |name: &'static str| SharedString::from(mezon_i18n::t(locale, name));
     match (call_log.log_type, is_me) {
         (CallLogType::TimeoutCall, true) => (
             IconName::OutGoingCall,
@@ -154,7 +177,7 @@ fn call_log_sub_message(
     msg: &Message,
     call_log: &CallLog,
     is_me: bool,
-    ctx: &RowCtx,
+    locale: &str,
 ) -> SharedString {
     match call_log.log_type {
         CallLogType::FinishCall => msg.content.clone().into(),
@@ -165,7 +188,22 @@ fn call_log_sub_message(
             } else {
                 "message.callLog.VOICE_CALL"
             };
-            mezon_i18n::t(ctx.locale, key).into()
+            mezon_i18n::t(locale, key).into()
         }
+    }
+}
+
+pub(crate) fn selectable_call_log_text(
+    msg: &Message,
+    call_log: &CallLog,
+    is_me: bool,
+    locale: &str,
+) -> String {
+    let (_, title, _) = call_log_header(msg, call_log, is_me, locale);
+    let sub_message = call_log_sub_message(msg, call_log, is_me, locale);
+    if sub_message.is_empty() {
+        title.to_string()
+    } else {
+        format!("{title}\n{sub_message}")
     }
 }
