@@ -290,6 +290,18 @@ impl AppApi {
         self.transport.update_system_message(request).await
     }
 
+    pub async fn list_audit_log(
+        &self,
+        clan_id: i64,
+        action_log: &str,
+        user_id: Option<i64>,
+        date_log: &str,
+    ) -> Result<mezon_proto::api::ListAuditLog> {
+        self.transport
+            .list_audit_log(clan_id, action_log, user_id, date_log)
+            .await
+    }
+
     pub async fn is_open(&self) -> bool {
         self.transport.is_open().await
     }

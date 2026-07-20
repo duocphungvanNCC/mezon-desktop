@@ -4917,11 +4917,19 @@ impl MezonTransport {
     }
 
     /// List audit log.
-    pub async fn list_audit_log(&self, clan_id: i64) -> Result<api::ListAuditLog> {
+    pub async fn list_audit_log(
+        &self,
+        clan_id: i64,
+        action_log: &str,
+        user_id: Option<i64>,
+        date_log: &str,
+    ) -> Result<api::ListAuditLog> {
         let cid = self.generate_cid();
         let body = api::ListAuditLogRequest {
             clan_id,
-            ..Default::default()
+            action_log: action_log.to_string(),
+            user_id: user_id.unwrap_or(0),
+            date_log: date_log.to_string(),
         }
         .encode_to_vec();
         let (code, response) = self.send_api_request(cid, "ListAuditLog", body).await?;

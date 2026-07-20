@@ -7,6 +7,7 @@ use mezon_store::{
     ChannelList, ClanId, ClanList, ClanSettingsPermissions, PermissionStore, Settings,
 };
 
+use super::audit_log_setting_page::AuditLogSettingPage;
 use super::overview_setting_page::{OverviewSettingPage, render_clan_overview_save_bar};
 use crate::theme::{ActiveTheme, Theme};
 
@@ -155,6 +156,7 @@ pub struct ClanSettingScreen {
     channel_list: Entity<ChannelList>,
     current_page: ClanSettingsPage,
     overview_page: Option<Entity<OverviewSettingPage>>,
+    audit_log_page: Option<Entity<AuditLogSettingPage>>,
     scroll: ScrollHandle,
     nav_scroll: ScrollHandle,
     focus_handle: FocusHandle,
@@ -184,6 +186,7 @@ impl ClanSettingScreen {
             channel_list,
             current_page: page,
             overview_page: None,
+            audit_log_page: None,
             scroll: ScrollHandle::new(),
             nav_scroll: ScrollHandle::new(),
             focus_handle: cx.focus_handle(),
@@ -262,6 +265,7 @@ impl ClanSettingScreen {
             self.release_page(self.current_page, cx);
             if clan_changed {
                 self.release_page(ClanSettingsPage::Overview, cx);
+                self.release_page(ClanSettingsPage::AuditLog, cx);
             }
             self.reset_content_scroll();
         }
@@ -272,10 +276,18 @@ impl ClanSettingScreen {
     }
 
     fn release_page(&mut self, page: ClanSettingsPage, cx: &mut Context<Self>) {
-        if page == ClanSettingsPage::Overview
-            && let Some(entity) = self.overview_page.take()
-        {
-            entity.update(cx, |page, _| page.release());
+        match page {
+            ClanSettingsPage::Overview => {
+                if let Some(entity) = self.overview_page.take() {
+                    entity.update(cx, |page, _| page.release());
+                }
+            }
+            ClanSettingsPage::AuditLog => {
+                if let Some(entity) = self.audit_log_page.take() {
+                    entity.update(cx, |page, cx| page.release(cx));
+                }
+            }
+            _ => {}
         }
     }
 
@@ -284,17 +296,29 @@ impl ClanSettingScreen {
     }
 
     fn activate_page(&mut self, page: ClanSettingsPage, cx: &mut Context<Self>) {
-        if page == ClanSettingsPage::Overview && self.overview_page.is_none() {
-            let clan_list = self.clan_list.clone();
-            let channel_list = self.channel_list.clone();
-            let settings = self.settings.clone();
-            let clan_id = self.clan_id;
-            self.overview_page = Some(cx.new(|cx| {
-                OverviewSettingPage::new(clan_id, clan_list, channel_list, settings, cx)
-            }));
-            if let Some(overview) = &self.overview_page {
-                cx.observe(overview, |_, _, cx| cx.notify()).detach();
+        match page {
+            ClanSettingsPage::Overview if self.overview_page.is_none() => {
+                let clan_list = self.clan_list.clone();
+                let channel_list = self.channel_list.clone();
+                let settings = self.settings.clone();
+                let clan_id = self.clan_id;
+                self.overview_page = Some(cx.new(|cx| {
+                    OverviewSettingPage::new(clan_id, clan_list, channel_list, settings, cx)
+                }));
+                if let Some(overview) = &self.overview_page {
+                    cx.observe(overview, |_, _, cx| cx.notify()).detach();
+                }
             }
+            ClanSettingsPage::AuditLog if self.audit_log_page.is_none() => {
+                let settings = self.settings.clone();
+                let clan_id = self.clan_id;
+                self.audit_log_page =
+                    Some(cx.new(|cx| AuditLogSettingPage::new(clan_id, settings, cx)));
+                if let Some(audit_log) = &self.audit_log_page {
+                    cx.observe(audit_log, |_, _, cx| cx.notify()).detach();
+                }
+            }
+            _ => {}
         }
     }
 
@@ -306,6 +330,10 @@ impl ClanSettingScreen {
         match self.current_page {
             ClanSettingsPage::Overview => self
                 .overview_page
+                .as_ref()
+                .map(|p| p.clone().into_any_element()),
+            ClanSettingsPage::AuditLog => self
+                .audit_log_page
                 .as_ref()
                 .map(|p| p.clone().into_any_element()),
             _ => None,
@@ -338,6 +366,7 @@ impl Render for ClanSettingScreen {
             page,
             ClanSettingsPage::Integrations | ClanSettingsPage::AuditLog
         );
+        let audit_log_layout = page == ClanSettingsPage::AuditLog;
 
         let content = self.current_page_view().unwrap_or_else(|| {
             div()
@@ -565,13 +594,31 @@ impl Render for ClanSettingScreen {
                                             .id("clan-settings-scroll")
                                             .flex_1()
                                             .min_h_0()
-                                            .overflow_y_scroll()
-                                            .track_scroll(&self.scroll)
+                                            .when(audit_log_layout, |el| {
+                                                el.overflow_hidden().flex().flex_col()
+                                            })
+                                            .when(!audit_log_layout, |el| {
+                                                el.overflow_y_scroll().track_scroll(&self.scroll)
+                                            })
                                             .pb(px(28.0))
                                             .pl(px(40.0))
                                             .pr(px(28.0))
                                             .when(hide_page_title, |el| el.pt(px(60.0)))
-                                            .child(div().max_w(px(740.0)).child(content)),
+                                            .child(if audit_log_layout {
+                                                v_flex()
+                                                    .max_w(px(740.0))
+                                                    .w_full()
+                                                    .h_full()
+                                                    .min_h_0()
+                                                    .flex_1()
+                                                    .child(content)
+                                                    .into_any_element()
+                                            } else {
+                                                div()
+                                                    .max_w(px(740.0))
+                                                    .child(content)
+                                                    .into_any_element()
+                                            }),
                                     ),
                             )
                             .child(
