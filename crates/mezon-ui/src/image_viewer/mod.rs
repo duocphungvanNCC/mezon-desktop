@@ -164,8 +164,8 @@ fn spawn_image_viewer_window(
             }
             cx.set_global(GlobalImageViewer(handle));
             let _ = handle.update(cx, |viewer, window, cx| {
-                window.focus(&viewer.focus_handle, cx);
                 window.activate_window();
+                window.focus(&viewer.focus_handle, cx);
             });
         }
         Err(e) => tracing::error!("failed to open image viewer window: {e}"),

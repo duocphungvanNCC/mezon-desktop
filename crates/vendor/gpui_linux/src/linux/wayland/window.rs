@@ -1277,14 +1277,12 @@ impl PlatformWindow for WaylandWindow {
         {
             state.client.set_pending_activation(state.surface.id());
             let token = activation.get_activation_token(&state.globals.qh, ());
-            // The serial isn't exactly important here, since the activation is probably going to be rejected anyway.
-            let serial = state.client.get_serial(SerialKind::MousePress);
+            let (serial, interaction_surface) =
+                state.client.activation_token_for_raise(state.surface.id());
             token.set_app_id(app_id);
             token.set_serial(serial, &state.globals.seat);
-            let interaction_surface = state
-                .client
-                .activation_interaction_surface(state.surface.id())
-                .unwrap_or_else(|| state.surface.clone());
+            let interaction_surface =
+                interaction_surface.unwrap_or_else(|| state.surface.clone());
             token.set_surface(&interaction_surface);
             token.commit();
         }
