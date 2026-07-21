@@ -9,6 +9,7 @@ members = [
     "crates/mezon-video",
     "crates/mezon-audio",
     "crates/mezon-native",
+    "crates/mezon-webview",
     "crates/mezon-updater",
     "crates/mezon-proto",
     "crates/mezon-i18n",
@@ -114,6 +115,7 @@ mezon-voice   = { path = "crates/mezon-voice" }
 mezon-video   = { path = "crates/mezon-video" }
 mezon-audio   = { path = "crates/mezon-audio" }
 mezon-native  = { path = "crates/mezon-native" }
+mezon-webview = { path = "crates/mezon-webview" }
 mezon-proto   = { path = "crates/mezon-proto" }
 mezon-updater = { path = "crates/mezon-updater" }
 mezon-i18n    = { path = "crates/mezon-i18n" }
@@ -198,6 +200,7 @@ windows              = { version = "0.61.3", features = [
     "Win32_Security",
     "Win32_Security_Credentials",
     "Win32_Security_Cryptography",
+    "Win32_Storage_EnhancedStorage",
     "Win32_Storage_FileSystem",
     "Win32_System_Com",
     "Win32_System_Com_StructuredStorage",

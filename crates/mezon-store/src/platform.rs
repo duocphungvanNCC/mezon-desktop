@@ -108,6 +108,8 @@ pub struct DesktopNotification {
     pub title: String,
     pub body: String,
     pub channel_id: Option<String>,
+    pub clan_id: Option<String>,
+    pub link: Option<String>,
 }
 
 pub struct PlatformStore {

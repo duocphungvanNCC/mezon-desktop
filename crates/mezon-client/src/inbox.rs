@@ -183,26 +183,28 @@ fn mention_spans_from_json_content(content: &str) -> Vec<InboxMentionSpan> {
         return Vec::new();
     };
     value
-        .get("mk")
-        .and_then(|mk| mk.as_array())
+        .get("mentions")
+        .and_then(|mentions| mentions.as_array())
         .map(|items| {
             items
                 .iter()
                 .filter_map(|item| {
+                    let role_id = item
+                        .get("role_id")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let user_id = item
+                        .get("user_id")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
                     Some(InboxMentionSpan {
                         start: item.get("s")?.as_i64()? as i32,
                         end: item.get("e")?.as_i64()? as i32,
-                        user_id: item
-                            .get("user_id")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("")
-                            .to_string(),
-                        role_id: item
-                            .get("role_id")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("")
-                            .to_string(),
-                        is_role: item.get("type").and_then(|v| v.as_str()) == Some("role"),
+                        user_id,
+                        role_id: role_id.clone(),
+                        is_role: !role_id.is_empty(),
                     })
                 })
                 .collect()
@@ -513,7 +515,7 @@ mod tests {
 
     #[test]
     fn parse_mention_content_json() {
-        let bytes = br#"{"t":"@gia.chuvan","mk":[{"s":0,"e":11,"type":"pre"}]}"#;
+        let bytes = br#"{"t":"@gia.chuvan","mentions":[{"s":0,"e":11,"user_id":"1"}]}"#;
         let preview = parse_notification_content(bytes).expect("preview");
         assert_eq!(preview.content, "@gia.chuvan");
     }

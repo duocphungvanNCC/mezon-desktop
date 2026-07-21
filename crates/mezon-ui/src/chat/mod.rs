@@ -1,7 +1,9 @@
 pub mod area;
+pub mod channel_app_bar;
 pub mod channel_header;
 pub mod channel_typing;
 pub mod chat_sending;
+pub mod clan_channels_page;
 pub mod clan_management_page;
 pub mod clan_members_page;
 pub mod create_thread_panel;
@@ -20,6 +22,7 @@ pub mod member_row_element;
 pub mod mention_input;
 pub mod message;
 pub mod message_search;
+pub mod notification_setting_popover;
 pub mod pinned_popover;
 pub mod screen_share_modal;
 pub mod screen_share_pip;

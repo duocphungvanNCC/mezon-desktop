@@ -19,14 +19,22 @@ impl From<&VoiceMember> for VoiceMemberSlot {
 }
 
 #[derive(Clone, PartialEq)]
-pub(super) struct AppChannelSlot {
-    pub(super) app_logo: Option<String>,
+pub(crate) struct AppChannelSlot {
+    pub(crate) app_id: String,
+    pub(crate) app_name: String,
+    pub(crate) app_logo: Option<String>,
+    pub(crate) app_url: String,
+    pub(crate) channel_id: mezon_store::ChannelId,
 }
 
 impl From<&AppChannel> for AppChannelSlot {
     fn from(a: &AppChannel) -> Self {
         Self {
+            app_id: a.app_id.clone(),
+            app_name: a.app_name.clone(),
             app_logo: a.app_logo.clone(),
+            app_url: a.app_url.clone(),
+            channel_id: a.channel_id,
         }
     }
 }

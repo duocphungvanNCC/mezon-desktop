@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use gpui::{
     Animation, AnimationExt, AnyElement, App, ClipboardItem, Context, Entity, FontWeight, Hsla,
     MouseButton, MouseDownEvent, ObjectFit, Pixels, ScrollHandle, SharedString, StyledImage,
@@ -25,6 +27,17 @@ const RAISE_HAND_GOLD: u32 = 0xefbc39;
 const LEAVE_RED: u32 = 0xda373c;
 const LEAVE_RED_HOVER: u32 = 0xa12829;
 
+const SPEAKING_BLUE: u32 = 0x1f8cf9;
+const SPEAKING_BORDER_WIDTH: f32 = 2.5;
+
+fn speaking_border_color(cell: &VideoCell) -> Hsla {
+    if cell.speaking && !cell.muted && !cell.is_screen {
+        gpui::rgb(SPEAKING_BLUE).into()
+    } else {
+        gpui::transparent_black()
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn render_voice_channel(
     theme: &Theme,
@@ -39,6 +52,7 @@ pub fn render_voice_channel(
     grid_page: usize,
     grid_size: gpui::Size<Pixels>,
     show_members: bool,
+    visual: &mut VoiceVisualState,
     window_width: Pixels,
     cx: &Context<ChatLayout>,
 ) -> AnyElement {
@@ -63,6 +77,7 @@ pub fn render_voice_channel(
             grid_page,
             grid_size,
             show_members,
+            visual,
             cx,
         );
     }
@@ -341,8 +356,8 @@ pub fn render_mini_bar(
         .gap_2()
         .px_3()
         .py_2()
-        .border_b_1()
-        .border_color(theme.border)
+        .border_b_2()
+        .border_color(theme.tokens.border_primary)
         .child(header)
         .child(
             div()
@@ -605,6 +620,7 @@ struct VideoCell {
     avatar_url: String,
     key: Option<u64>,
     is_screen: bool,
+    is_local: bool,
     speaking: bool,
     muted: bool,
     quality: NetworkQuality,
@@ -619,6 +635,7 @@ impl VideoCell {
             avatar_url,
             key: p.camera,
             is_screen: false,
+            is_local: p.is_local,
             speaking: p.speaking,
             muted: p.muted,
             quality: p.quality,
@@ -633,6 +650,7 @@ impl VideoCell {
             avatar_url,
             key: p.screenshare,
             is_screen: true,
+            is_local: p.is_local,
             speaking: p.speaking,
             muted: p.muted,
             quality: p.quality,
@@ -647,6 +665,7 @@ impl VideoCell {
             avatar_url,
             key: None,
             is_screen: false,
+            is_local: false,
             speaking: false,
             muted: false,
             quality: NetworkQuality::Unknown,
@@ -654,13 +673,129 @@ impl VideoCell {
     }
 }
 
-fn voice_grid_order(participants: &[VoiceParticipant]) -> Vec<usize> {
-    let mut order: Vec<usize> = (0..participants.len()).collect();
-    order.sort_by_key(|&i| {
-        let p = &participants[i];
-        (!p.is_local, !p.speaking, p.muted, p.camera.is_none(), i)
+#[derive(Default)]
+pub struct VoiceVisualState {
+    order: Vec<String>,
+    max_items: usize,
+}
+
+fn cell_category(cell: &VideoCell) -> u8 {
+    match (cell.is_local, cell.is_screen) {
+        (true, false) => 0,
+        (false, true) => 1,
+        (true, true) => 2,
+        (false, false) => 3,
+    }
+}
+
+fn target_visual_order(
+    cells: &[VideoCell],
+    join_rank: &dyn Fn(&str) -> usize,
+    last_spoke_rank: &dyn Fn(&str) -> u64,
+) -> Vec<String> {
+    let mut idx: Vec<usize> = (0..cells.len()).collect();
+    idx.sort_by(|&a, &b| {
+        let ca = &cells[a];
+        let cb = &cells[b];
+        cell_category(ca)
+            .cmp(&cell_category(cb))
+            .then_with(|| match cell_category(ca) {
+                1 | 2 => join_rank(&ca.identity).cmp(&join_rank(&cb.identity)),
+                3 => cb
+                    .speaking
+                    .cmp(&ca.speaking)
+                    .then_with(|| last_spoke_rank(&cb.identity).cmp(&last_spoke_rank(&ca.identity)))
+                    .then_with(|| cb.key.is_some().cmp(&ca.key.is_some()))
+                    .then_with(|| join_rank(&ca.identity).cmp(&join_rank(&cb.identity))),
+                _ => std::cmp::Ordering::Equal,
+            })
     });
-    order
+    idx.into_iter().map(|i| cells[i].id.clone()).collect()
+}
+
+fn stable_visual_order(
+    state: &mut VoiceVisualState,
+    target: &[String],
+    max_items: usize,
+) -> Vec<String> {
+    if max_items == 0 || max_items != state.max_items {
+        state.order = target.to_vec();
+        state.max_items = max_items;
+        return state.order.clone();
+    }
+    state.order = update_pages(&state.order, target, max_items);
+    state.order.clone()
+}
+
+fn update_pages(current: &[String], next: &[String], max_items: usize) -> Vec<String> {
+    let mut updated: Vec<String> = current.to_vec();
+    if updated.len() < next.len() {
+        let missing: Vec<String> = next
+            .iter()
+            .filter(|id| !updated.contains(id))
+            .cloned()
+            .collect();
+        updated.extend(missing);
+    }
+    let page_count = updated
+        .len()
+        .div_ceil(max_items)
+        .min(next.len().div_ceil(max_items));
+    for page in 0..page_count {
+        let page_of = |list: &[String]| -> Vec<String> {
+            list.iter()
+                .skip(page * max_items)
+                .take(max_items)
+                .cloned()
+                .collect()
+        };
+        let updated_page = page_of(&updated);
+        let next_page = page_of(next);
+        let dropped: Vec<String> = updated_page
+            .iter()
+            .filter(|id| !next_page.contains(id))
+            .cloned()
+            .collect();
+        let added: Vec<String> = next_page
+            .iter()
+            .filter(|id| !updated_page.contains(id))
+            .cloned()
+            .collect();
+        if added.len() == dropped.len() {
+            for (add, drop) in added.iter().zip(dropped.iter()) {
+                let (Some(add_at), Some(drop_at)) = (
+                    updated.iter().position(|x| x == add),
+                    updated.iter().position(|x| x == drop),
+                ) else {
+                    return next.to_vec();
+                };
+                updated.swap(add_at, drop_at);
+            }
+        } else if added.is_empty() {
+            updated.retain(|id| !dropped.contains(id));
+        } else if dropped.is_empty() {
+            for add in added {
+                if !updated.contains(&add) {
+                    updated.push(add);
+                }
+            }
+        }
+    }
+    if updated.len() > next.len() {
+        updated.retain(|id| next.contains(id));
+    }
+    updated
+}
+
+const AGENT_AVATAR_URL: &str = "https://imgproxy.mezon.ai/K0YUZRIosDOcz5lY6qrgC6UIXmQgWzLjZv7VJ1RAA8c/rs:fit:100:100:1/mb:2097152/plain/https://cdn.mezon.vn/0/0/1779484387973271600/1737423959329_undefined173740153013517374015248704886401586613166392.png@webp";
+
+fn resolve_cell_identity(cx: &App, clan_id: ClanId, p: &VoiceParticipant) -> (String, String) {
+    let (name, avatar_url) = resolve_voice_identity(cx, clan_id, &p.identity, &p.name);
+    if p.is_agent {
+        (name, AGENT_AVATAR_URL.to_string())
+    } else {
+        (name, avatar_url)
+    }
 }
 
 fn resolve_voice_identity(
@@ -856,6 +991,7 @@ fn render_in_call(
     grid_page: usize,
     grid_size: gpui::Size<Pixels>,
     show_members: bool,
+    visual: &mut VoiceVisualState,
     cx: &App,
 ) -> AnyElement {
     let fullscreen_active = store.fullscreen_screen().is_some();
@@ -863,24 +999,65 @@ fn render_in_call(
     let body = (!fullscreen_active).then(|| {
         let participants = store.participants();
         let focused = store.focused_tile();
-        let order = voice_grid_order(participants);
 
         let mut cells: Vec<VideoCell> = Vec::new();
-        for &i in &order {
-            let p = &participants[i];
+        for p in participants {
             if p.screenshare.is_some() {
-                let (name, avatar) =
-                    resolve_voice_identity(cx, channel.clan_id, &p.identity, &p.name);
+                let (name, avatar) = resolve_cell_identity(cx, channel.clan_id, p);
                 cells.push(VideoCell::screen(p, name, avatar));
             }
         }
-        for &i in &order {
-            let p = &participants[i];
-            let (name, avatar) = resolve_voice_identity(cx, channel.clan_id, &p.identity, &p.name);
+        for p in participants {
+            let (name, avatar) = resolve_cell_identity(cx, channel.clan_id, p);
             cells.push(VideoCell::camera(p, name, avatar));
         }
 
-        let focused_idx = focused.and_then(|id| cells.iter().position(|c| c.id == id));
+        let focused_id = focused
+            .filter(|id| cells.iter().any(|c| c.id == *id))
+            .map(|id| id.to_string());
+        let target = target_visual_order(&cells, &|id| store.join_rank(id), &|id| {
+            store.last_spoke_rank(id)
+        });
+        let stable = match &focused_id {
+            None => {
+                let (cols, rows) = select_grid_layout(
+                    GRID_LAYOUTS,
+                    cells.len().max(1),
+                    f32::from(grid_size.width),
+                    f32::from(grid_size.height),
+                );
+                Some(stable_visual_order(visual, &target, cols * rows))
+            }
+            Some(fid) if show_members => {
+                let screen_focus = cells.iter().any(|c| &c.id == fid && c.is_screen);
+                let strip_target: Vec<String> = if screen_focus {
+                    target
+                } else {
+                    target.into_iter().filter(|id| id != fid).collect()
+                };
+                let bounds = strip_scroll.bounds();
+                let viewport_w = f32::from(bounds.size.width);
+                let max_items = if viewport_w > 0. {
+                    let overflows = strip_scroll.max_offset().x > px(0.);
+                    let aside_h = f32::from(bounds.size.height) + if overflows { 6. } else { 0. };
+                    carousel_max_visible_tiles(viewport_w, aside_h)
+                } else {
+                    0
+                };
+                Some(stable_visual_order(visual, &strip_target, max_items))
+            }
+            Some(_) => None,
+        };
+        if let Some(order) = stable {
+            let ranks: HashMap<&str, usize> = order
+                .iter()
+                .enumerate()
+                .map(|(rank, id)| (id.as_str(), rank))
+                .collect();
+            cells.sort_by_key(|c| ranks.get(c.id.as_str()).copied().unwrap_or(usize::MAX));
+        }
+
+        let focused_idx = focused_id.and_then(|fid| cells.iter().position(|c| c.id == fid));
 
         match focused_idx {
             Some(idx) => render_focus_layout(
@@ -1588,6 +1765,15 @@ fn select_grid_layout(
     (layout.columns, layout.rows)
 }
 
+const CAROUSEL_MIN_TILE_WIDTH: f32 = 140.;
+const CAROUSEL_MAX_ROW_HEIGHT: f32 = 93.;
+const CAROUSEL_ASPECT_RATIO: f32 = 16. / 10.;
+
+fn carousel_max_visible_tiles(viewport_width: f32, aside_height: f32) -> usize {
+    let target = (aside_height * CAROUSEL_ASPECT_RATIO).max(CAROUSEL_MIN_TILE_WIDTH);
+    ((viewport_width / target).floor() as usize).max(1)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn render_focus_layout(
     theme: &Theme,
@@ -1623,7 +1809,9 @@ fn render_focus_layout(
             .rounded(px(20.))
             .bg(gpui::rgb(0x2b2b2b))
             .cursor_pointer()
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .on_click(move |_, _, cx| {
+                cx.stop_propagation();
                 chat.update(cx, |layout, cx| layout.toggle_voice_member_strip(cx))
             })
             .child(
@@ -1678,11 +1866,26 @@ fn render_focus_layout(
 
         let total = strip_cells.len();
         let gap = 8.;
-        let tile_step = f32::from(strip_bounds.size.height - px(4.)) * 1.6 + gap;
-        let (start, end) = if f32::from(viewport) > 0. && tile_step > gap {
+        let viewport_w = f32::from(viewport);
+        let measured = viewport_w > 0.;
+        let aside_h = f32::from(strip_bounds.size.height) + if overflows { 6. } else { 0. };
+        let tile_w = if measured {
+            let max_tiles = carousel_max_visible_tiles(viewport_w, aside_h);
+            (viewport_w - gap * (max_tiles as f32 - 1.)) / max_tiles as f32
+        } else {
+            CAROUSEL_MIN_TILE_WIDTH
+        };
+        let tile_step = tile_w + gap;
+        let tile_h = f32::from(strip_bounds.size.height) - 4.;
+        let avatar_size = if tile_h > 0. {
+            px((tile_h * 0.6).clamp(24., 80.))
+        } else {
+            px(48.)
+        };
+        let (start, end) = if measured {
             let scrolled = f32::from(-strip_scroll.offset().x).max(0.);
             let first = (scrolled / tile_step) as usize;
-            let visible = (f32::from(viewport) / tile_step).ceil() as usize + 1;
+            let visible = (viewport_w / tile_step).ceil() as usize + 1;
             (
                 first.saturating_sub(2).min(total),
                 (first + visible + 2).min(total),
@@ -1715,7 +1918,7 @@ fn render_focus_layout(
                 strip_cells[start..end]
                     .iter()
                     .copied()
-                    .map(|c| strip_tile(theme, locale, store, voice, c)),
+                    .map(|c| strip_tile(theme, locale, store, voice, c, tile_w, avatar_size)),
             )
             .children(trail_spacer);
 
@@ -1741,6 +1944,7 @@ fn render_focus_layout(
             .flex_col()
             .flex_basis(px(0.))
             .min_h_0()
+            .max_h(px(CAROUSEL_MAX_ROW_HEIGHT))
             .w_full()
             .child(carousel)
             .children(scrollbar)
@@ -1850,7 +2054,7 @@ fn focus_main_tile(
     cell: &VideoCell,
 ) -> AnyElement {
     let voice = voice.clone();
-    let inner = tile_inner(theme, store, cell, true);
+    let inner = tile_inner(theme, store, cell, px(120.));
 
     div()
         .id(SharedString::from(format!("focus-main-{}", cell.id)))
@@ -1884,15 +2088,13 @@ fn strip_tile(
     store: &VoiceStore,
     voice: &Entity<VoiceStore>,
     cell: &VideoCell,
+    tile_width: f32,
+    avatar_size: Pixels,
 ) -> AnyElement {
     let voice = voice.clone();
     let id = cell.id.clone();
-    let inner = tile_inner(theme, store, cell, false);
-    let border_color: Hsla = if cell.speaking && !cell.is_screen {
-        theme.status_online.into()
-    } else {
-        gpui::transparent_black()
-    };
+    let inner = tile_inner(theme, store, cell, avatar_size);
+    let border_color = speaking_border_color(cell);
 
     div()
         .id(SharedString::from(format!("strip-{}", cell.id)))
@@ -1902,12 +2104,12 @@ fn strip_tile(
         .items_center()
         .justify_center()
         .h_full()
-        .aspect_ratio(16. / 10.)
+        .w(px(tile_width))
         .rounded_lg()
         .overflow_hidden()
         .bg(theme.bg_secondary)
         .cursor_pointer()
-        .border_2()
+        .border(px(SPEAKING_BORDER_WIDTH))
         .border_color(border_color)
         .child(inner)
         .child(tile_metadata(locale, cell))
@@ -1931,12 +2133,8 @@ fn video_tile(
 ) -> AnyElement {
     let voice = voice.clone();
     let id = cell.id.clone();
-    let inner = tile_inner(theme, store, cell, false);
-    let border_color: Hsla = if cell.speaking && !cell.is_screen {
-        theme.status_online.into()
-    } else {
-        gpui::transparent_black()
-    };
+    let inner = tile_inner(theme, store, cell, px(80.));
+    let border_color = speaking_border_color(cell);
 
     div()
         .id(SharedString::from(format!("tile-{}", cell.id)))
@@ -1949,7 +2147,7 @@ fn video_tile(
         .overflow_hidden()
         .bg(theme.bg_secondary)
         .cursor_pointer()
-        .border_2()
+        .border(px(SPEAKING_BORDER_WIDTH))
         .border_color(border_color)
         .child(inner)
         .child(tile_metadata(locale, cell))
@@ -1964,7 +2162,12 @@ fn video_tile(
         .into_any_element()
 }
 
-fn tile_inner(theme: &Theme, store: &VoiceStore, cell: &VideoCell, large: bool) -> AnyElement {
+fn tile_inner(
+    theme: &Theme,
+    store: &VoiceStore,
+    cell: &VideoCell,
+    avatar_size: Pixels,
+) -> AnyElement {
     if let Some(key) = cell.key
         && let Some(frame) = store.render_frame(key)
     {
@@ -1983,10 +2186,7 @@ fn tile_inner(theme: &Theme, store: &VoiceStore, cell: &VideoCell, large: bool) 
             .into_any_element();
     }
 
-    let mut avatar =
-        Avatar::new()
-            .name(cell.name.clone())
-            .size_px(if large { px(120.) } else { px(80.) });
+    let mut avatar = Avatar::new().name(cell.name.clone()).size_px(avatar_size);
     if !cell.avatar_url.is_empty() {
         avatar = avatar.src(cell.avatar_url.clone());
     }
@@ -2042,7 +2242,7 @@ fn tile_metadata(locale: &str, cell: &VideoCell) -> AnyElement {
                 .when(cell.muted && !cell.is_screen, |this| {
                     this.child(
                         Icon::new(IconName::VoiceMicDisabledIcon)
-                            .size(px(14.))
+                            .size(px(16.))
                             .flex_none()
                             .text_color(gpui::rgba(0xffffff80)),
                     )
@@ -2050,7 +2250,7 @@ fn tile_metadata(locale: &str, cell: &VideoCell) -> AnyElement {
                 .when(cell.is_screen, |this| {
                     this.child(
                         Icon::new(IconName::VoiceScreenShareIcon)
-                            .size(px(14.))
+                            .size(px(16.))
                             .flex_none()
                             .text_color(gpui::rgb(0xffffff)),
                     )
@@ -2061,6 +2261,7 @@ fn tile_metadata(locale: &str, cell: &VideoCell) -> AnyElement {
                         .min_w_0()
                         .py(px(2.))
                         .text_xs()
+                        .line_height(px(12.))
                         .text_color(gpui::rgb(0xffffff))
                         .child(div().invisible().whitespace_nowrap().child(label.clone()))
                         .child(
@@ -2845,118 +3046,5 @@ mod device_menu_tests {
             active_device_name(&entries(), &Some("gone".to_string())),
             "System default"
         );
-    }
-}
-
-#[cfg(test)]
-mod grid_order_tests {
-    use super::voice_grid_order;
-    use mezon_store::{NetworkQuality, VoiceParticipant};
-
-    fn participant(
-        identity: &str,
-        is_local: bool,
-        speaking: bool,
-        muted: bool,
-        camera: bool,
-    ) -> VoiceParticipant {
-        VoiceParticipant {
-            identity: identity.to_string(),
-            name: identity.to_string(),
-            is_local,
-            speaking,
-            muted,
-            camera: camera.then_some(1),
-            screenshare: None,
-            quality: NetworkQuality::Unknown,
-        }
-    }
-
-    fn ordered_ids(participants: &[VoiceParticipant]) -> Vec<String> {
-        voice_grid_order(participants)
-            .into_iter()
-            .map(|i| participants[i].identity.clone())
-            .collect()
-    }
-
-    #[test]
-    fn local_first_then_speaking_then_mic_on_then_camera() {
-        let participants = vec![
-            participant("muted", false, false, true, false),
-            participant("speaking", false, true, false, false),
-            participant("local", true, false, true, false),
-            participant("mic-on", false, false, false, false),
-            participant("mic-on-camera", false, false, false, true),
-        ];
-        assert_eq!(
-            ordered_ids(&participants),
-            vec!["local", "speaking", "mic-on-camera", "mic-on", "muted"]
-        );
-    }
-
-    #[test]
-    fn preserves_input_order_for_equal_keys() {
-        let participants = vec![
-            participant("a", false, false, true, false),
-            participant("b", false, false, true, false),
-            participant("c", false, false, true, false),
-        ];
-        assert_eq!(ordered_ids(&participants), vec!["a", "b", "c"]);
-    }
-}
-
-#[cfg(test)]
-mod grid_layout_tests {
-    use super::{GRID_LAYOUTS, select_grid_layout};
-
-    fn wide(count: usize) -> (usize, usize) {
-        select_grid_layout(GRID_LAYOUTS, count, 1280., 800.)
-    }
-
-    #[test]
-    fn matches_livekit_grid_layouts() {
-        assert_eq!(wide(1), (1, 1));
-        assert_eq!(wide(2), (2, 1));
-        assert_eq!(wide(3), (2, 2));
-        assert_eq!(wide(4), (2, 2));
-        assert_eq!(wide(5), (3, 3));
-        assert_eq!(wide(9), (3, 3));
-        assert_eq!(wide(10), (4, 4));
-        assert_eq!(wide(16), (4, 4));
-        assert_eq!(wide(25), (5, 5));
-    }
-
-    #[test]
-    fn caps_at_five_by_five_for_large_rooms() {
-        assert_eq!(wide(26), (5, 5));
-        assert_eq!(wide(100), (5, 5));
-    }
-
-    #[test]
-    fn portrait_container_prefers_stacked_pair() {
-        assert_eq!(select_grid_layout(GRID_LAYOUTS, 2, 700., 1280.), (1, 2));
-    }
-
-    #[test]
-    fn narrow_container_falls_back_to_smaller_layout() {
-        assert_eq!(select_grid_layout(GRID_LAYOUTS, 100, 1000., 700.), (4, 4));
-        assert_eq!(select_grid_layout(GRID_LAYOUTS, 100, 900., 700.), (3, 3));
-        assert_eq!(select_grid_layout(GRID_LAYOUTS, 100, 600., 500.), (2, 2));
-    }
-
-    #[test]
-    fn unmeasured_container_uses_smallest_layout() {
-        assert_eq!(select_grid_layout(GRID_LAYOUTS, 10, 0., 0.), (1, 1));
-    }
-
-    #[test]
-    fn pre_join_avatar_cap_matches_react_breakpoints() {
-        use super::pre_join_max_members;
-        assert_eq!(pre_join_max_members(900.), 2);
-        assert_eq!(pre_join_max_members(1100.), 3);
-        assert_eq!(pre_join_max_members(1250.), 4);
-        assert_eq!(pre_join_max_members(1350.), 5);
-        assert_eq!(pre_join_max_members(1500.), 6);
-        assert_eq!(pre_join_max_members(1800.), 3);
     }
 }

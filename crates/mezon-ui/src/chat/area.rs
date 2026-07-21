@@ -8,6 +8,7 @@ use mezon_store::{ChannelId, ClanId, InVoiceInfo, MessagesEvent, MessagesStore, 
 use ui::PopoverMenuHandle;
 
 use crate::chat::ReplyTarget;
+use crate::chat::channel_app_bar::{ChannelAppBarTarget, render_channel_app_bar};
 use crate::chat::channel_header::ChatHeader;
 use crate::chat::channel_typing::ChannelTyping;
 use crate::chat::inbox::InboxPopoverPanel;
@@ -20,6 +21,7 @@ use crate::chat::message_search::{MESSAGE_SEARCH_PANEL_WIDTH, MessageSearchPanel
 use crate::chat::pinned_popover::PinnedPopoverPanel;
 use crate::components::primitives::{Icon, IconName, InputState};
 use crate::image_cache::LruImageCache;
+use crate::theme::ActiveTheme;
 
 pub struct ChatArea {
     pub(crate) timeline: Entity<ChannelMessages>,
@@ -196,6 +198,7 @@ impl ChatArea {
         search_input: Option<Entity<InputState>>,
         show_results_panel: bool,
         message_search_panel: Option<Entity<MessageSearchPanel>>,
+        app_channel_bar: Option<ChannelAppBarTarget>,
         cx: &mut Context<crate::ChatLayout>,
     ) -> gpui::AnyElement {
         let (input_bar, mention_input) = if media_channel_view {
@@ -392,7 +395,17 @@ impl ChatArea {
                             .cached(StyleRefinement::default().size_full()),
                     ),
                 )
-                .when_some(input_bar.clone(), |col, input_bar| col.child(input_bar))
+                .when_some(app_channel_bar.as_ref(), |col, target| {
+                    col.child(render_channel_app_bar(
+                        locale,
+                        target.clone(),
+                        cx.theme(),
+                        cx,
+                    ))
+                })
+                .when(app_channel_bar.is_none(), |col| {
+                    col.when_some(input_bar.clone(), |col, input_bar| col.child(input_bar))
+                })
                 .child(
                     AnyView::from(self.typing.clone()).cached(
                         StyleRefinement::default()

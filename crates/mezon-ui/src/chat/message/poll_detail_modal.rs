@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
 use gpui::{
-    App, Context, Entity, FocusHandle, Focusable, ListSizingBehavior, SharedString, Task,
-    UniformListScrollHandle, Window, div, img, prelude::*, px, relative, rgba, uniform_list,
+    App, Context, Entity, FocusHandle, Focusable, SharedString, Task, UniformListScrollHandle,
+    Window, div, img, prelude::*, px, relative, uniform_list,
 };
 use mezon_store::{MessageId, MessagesStore, PollAnswerView, PollVoter};
 
@@ -10,6 +10,10 @@ use crate::app::shell::Shell;
 use crate::components::primitives::{Icon, IconName};
 use crate::image_cache::LruImageCache;
 use crate::theme::ActiveTheme;
+
+const DETAIL_OPTIONS_SCROLL_AFTER: usize = 5;
+const VOTER_ROW_PX: f32 = 56.;
+const VOTER_LIST_PX: f32 = 520.;
 
 pub struct PollDetailModal {
     focus_handle: FocusHandle,
@@ -72,10 +76,11 @@ impl PollDetailModal {
                         modal.voters_by_answer =
                             Some(detail.voters_by_answer.into_iter().map(Arc::from).collect());
                     }
+                    modal.apply_mock_voters();
                     cx.notify();
                 });
             });
-            Self {
+            let mut this = Self {
                 focus_handle: cx.focus_handle(),
                 locale,
                 question,
@@ -88,7 +93,9 @@ impl PollDetailModal {
                 voter_scroll: UniformListScrollHandle::new(),
                 image_cache,
                 _fetch: fetch,
-            }
+            };
+            this.apply_mock_voters();
+            this
         });
 
         let focus_handle = view.read(cx).focus_handle.clone();
@@ -99,6 +106,60 @@ impl PollDetailModal {
     fn close(cx: &mut App) {
         Shell::global(cx).update(cx, |shell, cx| shell.close_modal(cx));
     }
+
+    #[cfg(debug_assertions)]
+    fn apply_mock_voters(&mut self) {
+        let raw = std::env::var("MEZON_MOCK_POLL_VOTERS").ok();
+        let Some(per_answer) = raw
+            .as_deref()
+            .and_then(|value| value.trim().parse::<usize>().ok())
+            .filter(|value| *value > 0)
+        else {
+            tracing::info!(target: "poll_perf", "mock_voters disabled raw={raw:?}");
+            return;
+        };
+        let answer_count = self.answers.len().max(1);
+        tracing::info!(
+            target: "poll_perf",
+            "mock_voters applied per_answer={per_answer} answers={answer_count}"
+        );
+        self.loading = false;
+        self.voters_by_answer = Some(
+            (0..answer_count)
+                .map(|answer| {
+                    let rows: Vec<PollVoter> = (0..per_answer)
+                        .map(|i| {
+                            let long = i % 3 == 0;
+                            PollVoter {
+                                user_id: mezon_store::UserId(i as i64 + 1),
+                                display_name: if long {
+                                    format!(
+                                        "[A{answer}] Voter {i} extremely long display name that must be truncated instead of pushing the layout {}",
+                                        "x".repeat(60)
+                                    )
+                                    .into()
+                                } else {
+                                    format!("[A{answer}] Voter {i}").into()
+                                },
+                                username: if long {
+                                    format!("[A{answer}] mock_user_{i}_{}", "y".repeat(80)).into()
+                                } else {
+                                    format!("[A{answer}] mock_user_{i}").into()
+                                },
+                                avatar_proxied: SharedString::from("icons/add-person.svg"),
+                            }
+                        })
+                        .collect();
+                    Arc::from(rows)
+                })
+                .collect(),
+        );
+        self.answer_counts = vec![per_answer as i32; answer_count];
+        self.total_votes = (per_answer * answer_count) as i32;
+    }
+
+    #[cfg(not(debug_assertions))]
+    fn apply_mock_voters(&mut self) {}
 }
 
 impl Render for PollDetailModal {
@@ -116,7 +177,20 @@ impl Render for PollDetailModal {
             mezon_i18n::t(&locale, total_word)
         );
 
-        let mut answer_list = div().flex().flex_col().gap_2().w(relative(0.35)).min_w_0();
+        let mut answer_list = div()
+            .id("poll-detail-answers")
+            .flex()
+            .flex_col()
+            .gap_2()
+            .w(relative(0.35))
+            .min_w_0()
+            .min_h_0()
+            .pr_3()
+            .border_r_1()
+            .border_color(theme.tokens.border_primary)
+            .when(self.answers.len() > DETAIL_OPTIONS_SCROLL_AFTER, |el| {
+                el.max_h(px(280.)).overflow_y_scroll()
+            });
         for (i, answer) in self.answers.iter().enumerate() {
             let count = self.answer_counts.get(i).copied().unwrap_or(0);
             let selected = i == self.selected_index;
@@ -138,7 +212,24 @@ impl Render for PollDetailModal {
                         }
                         cx.notify();
                     }))
-                    .child(format!("{} ({count})", answer.label)),
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .child(answer.label.clone()),
+                    )
+                    .child(
+                        div()
+                            .flex_shrink_0()
+                            .text_xs()
+                            .text_color(theme.text_muted)
+                            .child(format!("({count})")),
+                    ),
             );
         }
 
@@ -161,19 +252,18 @@ impl Render for PollDetailModal {
         } else {
             let rows: Arc<[PollVoter]> = voters.cloned().unwrap_or_default();
             let count = rows.len();
-            uniform_list("poll-detail-voters", count, move |range, _window, cx| {
+            let list = uniform_list("poll-detail-voters", count, move |range, _window, cx| {
                 let theme = cx.theme().clone();
                 range
                     .map(|ix| match rows.get(ix) {
                         Some(voter) => render_voter(voter, &theme),
-                        None => div().into_any_element(),
+                        None => div().h(px(VOTER_ROW_PX)).into_any_element(),
                     })
                     .collect::<Vec<_>>()
             })
             .track_scroll(&self.voter_scroll)
-            .with_sizing_behavior(ListSizingBehavior::Infer)
-            .size_full()
-            .into_any_element()
+            .size_full();
+            list.into_any_element()
         };
 
         let header = div()
@@ -189,9 +279,13 @@ impl Render for PollDetailModal {
                 div()
                     .flex()
                     .flex_col()
+                    .flex_1()
                     .min_w_0()
                     .child(
                         div()
+                            .min_w_0()
+                            .max_h(px(84.))
+                            .overflow_hidden()
                             .text_size(px(20.))
                             .font_weight(gpui::FontWeight::BOLD)
                             .text_color(theme.tokens.text_secondary)
@@ -207,6 +301,7 @@ impl Render for PollDetailModal {
             .child(
                 div()
                     .id("poll-detail-close")
+                    .flex_shrink_0()
                     .size_6()
                     .flex()
                     .items_center()
@@ -234,32 +329,28 @@ impl Render for PollDetailModal {
                 div()
                     .flex_1()
                     .min_w_0()
-                    .min_h_0()
+                    .h(px(VOTER_LIST_PX))
                     .overflow_hidden()
                     .child(voter_panel),
             );
 
         div()
-            .absolute()
-            .inset_0()
+            .track_focus(&self.focus_handle)
+            .key_context("menu")
+            .on_action(|_: &::menu::Cancel, _window, cx| Self::close(cx))
+            .occlude()
+            .image_cache(self.image_cache.clone())
+            .w(px(620.))
+            .min_h(px(700.))
+            .max_h(relative(0.85))
             .flex()
-            .items_center()
-            .justify_center()
-            .bg(rgba(0x00_00_00_99))
-            .child(
-                div()
-                    .occlude()
-                    .image_cache(self.image_cache.clone())
-                    .min_w(px(600.))
-                    .max_w(px(620.))
-                    .max_h(relative(0.85))
-                    .flex()
-                    .flex_col()
-                    .rounded(px(8.))
-                    .bg(theme.tokens.theme_setting_primary)
-                    .child(header)
-                    .child(body),
-            )
+            .flex_col()
+            .overflow_hidden()
+            .rounded(px(8.))
+            .bg(theme.tokens.theme_setting_primary)
+            .shadow_lg()
+            .child(header)
+            .child(body)
     }
 }
 
@@ -269,6 +360,9 @@ fn render_voter(voter: &PollVoter, theme: &crate::theme::Theme) -> gpui::AnyElem
         .flex_row()
         .items_center()
         .gap_3()
+        .w_full()
+        .min_w_0()
+        .overflow_hidden()
         .child(
             img(voter.avatar_proxied.clone())
                 .size(px(40.))
@@ -279,6 +373,7 @@ fn render_voter(voter: &PollVoter, theme: &crate::theme::Theme) -> gpui::AnyElem
             div()
                 .flex()
                 .flex_col()
+                .flex_1()
                 .min_w_0()
                 .child(
                     div()

@@ -188,7 +188,8 @@ impl RolesStore {
     }
 }
 
-fn roles_map_from_proto(roles: Vec<mezon_proto::api::Role>) -> ClanRoles {
+fn roles_map_from_proto(mut roles: Vec<mezon_proto::api::Role>) -> ClanRoles {
+    roles.sort_by_key(|r| r.order_role);
     let mut out = ClanRoles::default();
     for r in roles {
         if r.id == 0 {
@@ -245,6 +246,13 @@ mod tests {
         }
     }
 
+    fn make_role_with_order(id: i64, title: &str, color: &str, order_role: i32) -> api::Role {
+        api::Role {
+            order_role,
+            ..make_role(id, title, color)
+        }
+    }
+
     #[test]
     fn maps_proto_roles_to_domain() {
         let roles = roles_map_from_proto(vec![
@@ -265,6 +273,16 @@ mod tests {
             make_role(7, "Mike", ""),
         ]);
         assert_eq!(roles.order, vec![RoleId(9), RoleId(3), RoleId(7)]);
+    }
+
+    #[test]
+    fn sorts_roles_by_order_role_ascending() {
+        let roles = roles_map_from_proto(vec![
+            make_role_with_order(9, "Zulu", "", 5),
+            make_role_with_order(3, "Alpha", "", 1),
+            make_role_with_order(7, "Mike", "", 3),
+        ]);
+        assert_eq!(roles.order, vec![RoleId(3), RoleId(7), RoleId(9)]);
     }
 
     #[test]

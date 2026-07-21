@@ -3209,7 +3209,7 @@
   "notification.permissionRequest.permissionDenied": "알림 권한이 거부되었습니다.",
   "notification.permissionRequest.title": "알림 권한",
   "notification.removeNotification": "알림 제거",
-  "notification.repliedTo": "답장: ",
+  "notification.repliedTo": "원본 메시지: ",
   "notification.seeWhenAnswersAppear": "답변이 나타날 때 보기",
   "notification.sender": "발신자: ",
   "notification.tabNotify.forYou": "당신을 위해",
