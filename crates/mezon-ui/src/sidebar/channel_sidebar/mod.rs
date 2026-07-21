@@ -9,7 +9,7 @@ use gpui::{
 };
 use mezon_store::{
     ChannelId, ChannelList, ClanId, ClanList, ClanMembersStore, FAVOR_CATE_ID,
-    PERMISSION_MANAGE_CLAN, PermissionStore, Settings, VoiceMember,
+    PERMISSION_ADMINISTRATOR, PERMISSION_MANAGE_CLAN, PermissionStore, Settings, VoiceMember,
 };
 
 use crate::channel_app::{is_channel_app_open, launch_channel_app_from_store};
@@ -83,6 +83,7 @@ pub struct ChannelSidebar {
     _settings_observe: Subscription,
     _router_observe: Subscription,
     _members_observe: Subscription,
+    _permissions_observe: Subscription,
 }
 
 impl ChannelSidebar {
@@ -144,6 +145,7 @@ impl ChannelSidebar {
                 cx.notify();
             }
         });
+        let permissions_observe = cx.observe(&PermissionStore::global(cx), |_, _, cx| cx.notify());
 
         let initial_locale = settings.read(cx).language.clone();
         let initial_route_channel = route_active_channel(cx);
@@ -175,6 +177,7 @@ impl ChannelSidebar {
             _settings_observe: settings_observe,
             _router_observe: router_observe,
             _members_observe: members_observe,
+            _permissions_observe: permissions_observe,
         };
         this.rebuild_items(cx);
         this
@@ -832,7 +835,13 @@ fn sidebar_skeleton_layer(theme: &Theme, cx: &App) -> gpui::Div {
         .child(render_skeleton(cx))
 }
 
-fn nav_row(icon: IconName, label: &'static str, theme: &crate::theme::Theme) -> gpui::Div {
+fn nav_row(
+    icon: IconName,
+    label: impl Into<SharedString>,
+    theme: &crate::theme::Theme,
+    active: bool,
+) -> gpui::Div {
+    let label = label.into();
     div()
         .flex()
         .flex_row()
@@ -843,12 +852,18 @@ fn nav_row(icon: IconName, label: &'static str, theme: &crate::theme::Theme) -> 
         .gap_2()
         .rounded(px(4.))
         .cursor_pointer()
-        .text_color(theme.text_secondary)
-        .child(
-            Icon::new(icon)
-                .size(px(20.))
-                .text_color(theme.text_secondary),
-        )
+        .when(active, |element| element.bg(theme.bg_hover))
+        .hover(|style| style.bg(theme.bg_hover))
+        .text_color(if active {
+            theme.text_primary
+        } else {
+            theme.text_secondary
+        })
+        .child(Icon::new(icon).size(px(20.)).text_color(if active {
+            theme.text_primary
+        } else {
+            theme.text_secondary
+        }))
         .child(
             div()
                 .text_base()
@@ -934,21 +949,45 @@ fn render_banner_and_events(
     }
 
     let members_clan_id = ClanList::global(cx).read(cx).active_clan_id;
-    let members_row = nav_row(IconName::MemberList, "Members", theme)
+    let route = crate::router::Router::global(cx).read(cx).route();
+    let members_active = matches!(route, crate::router::Route::ClanMembers { .. });
+    let channels_active = matches!(route, crate::router::Route::ClanChannels { .. });
+    let members_row = nav_row(IconName::MemberList, "Members", theme, members_active)
         .id("clan-members-nav")
         .on_click(move |_, _, cx| {
             if let Some(clan_id) = members_clan_id {
                 crate::router::navigate(cx, crate::router::Route::ClanMembers { clan_id });
             }
         });
+    let can_view_channels = members_clan_id.is_some_and(|clan_id| {
+        PermissionStore::global(cx)
+            .read(cx)
+            .check_permission(clan_id, PERMISSION_ADMINISTRATOR, cx)
+    });
+    let locale = Settings::try_global(cx)
+        .map(|settings| settings.read(cx).language.clone())
+        .unwrap_or_else(|| "en".to_string());
+    let channels_row = nav_row(
+        IconName::ChannelBrowser,
+        mezon_i18n::t(&locale, "channelList.navigation.channels"),
+        theme,
+        channels_active,
+    )
+    .id("clan-channels-nav")
+    .on_click(move |_, _, cx| {
+        if let Some(clan_id) = members_clan_id {
+            crate::router::navigate(cx, crate::router::Route::ClanChannels { clan_id });
+        }
+    });
     let nav_col = div()
         .flex()
         .flex_col()
         .w_full()
         .p_2()
         .gap_1()
-        .child(nav_row(IconName::IconEvents, "Events", theme))
-        .child(members_row);
+        .child(nav_row(IconName::IconEvents, "Events", theme, false))
+        .child(members_row)
+        .when(can_view_channels, |element| element.child(channels_row));
 
     col = col.child(nav_col);
 

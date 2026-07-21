@@ -1290,6 +1290,26 @@ impl TransportClient {
             .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
     }
 
+    pub async fn list_channel_setting_page(
+        &self,
+        clan_id: i64,
+        parent_id: i64,
+        limit: i32,
+        page: i32,
+        channel_label: &str,
+    ) -> Result<mezon_proto::api::ChannelSettingListResponse> {
+        let transport = self.inner.clone();
+        let channel_label = channel_label.to_string();
+        runtime()
+            .spawn(async move {
+                transport
+                    .list_channel_setting_page(clan_id, parent_id, limit, page, &channel_label)
+                    .await
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
     #[allow(clippy::too_many_arguments)]
     #[allow(clippy::too_many_arguments)]
     pub async fn send_channel_message(
