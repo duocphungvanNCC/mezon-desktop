@@ -174,7 +174,6 @@ extern "C" fn did_receive_notification_response(
     use objc::runtime::Object;
     use objc::{msg_send, sel, sel_impl};
 
-    tracing::debug!("native: notification response delegate fired");
     unsafe {
         if !response.is_null() {
             let notification: *mut Object = msg_send![response, notification];
@@ -182,9 +181,7 @@ extern "C" fn did_receive_notification_response(
                 let request: *mut Object = msg_send![notification, request];
                 if !request.is_null() {
                     let identifier: *mut Object = msg_send![request, identifier];
-                    let decoded = nsstring_to_string(identifier);
-                    tracing::debug!(identifier = ?decoded, "native: notification response identifier");
-                    if let Some(identifier) = decoded
+                    if let Some(identifier) = nsstring_to_string(identifier)
                         && let Some(target) = build_target(&identifier)
                     {
                         dispatch_click(target);
@@ -249,7 +246,6 @@ fn install_notification_delegate(center: *mut objc::runtime::Object) {
     unsafe {
         let _: () = msg_send![center, setDelegate: delegate as *mut Object];
     }
-    tracing::debug!("native: notification delegate installed");
 }
 
 #[cfg(target_os = "macos")]
@@ -379,15 +375,15 @@ fn init_windows() {
 
 #[cfg(target_os = "windows")]
 fn ensure_start_menu_shortcut() -> anyhow::Result<()> {
-    use windows::Win32::System::Com::StructuredStorage::PROPVARIANT;
+    use windows::Win32::Storage::EnhancedStorage::PKEY_AppUserModel_ID;
+    use windows::Win32::System::Com::StructuredStorage::InitPropVariantFromStringAsVector;
     use windows::Win32::System::Com::{
         CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx,
         IPersistFile,
     };
-    use windows::Win32::UI::Shell::PropertiesSystem::{
-        IPropertyStore, InitPropVariantFromStringAsVector, PKEY_AppUserModel_ID,
-    };
+    use windows::Win32::UI::Shell::PropertiesSystem::IPropertyStore;
     use windows::Win32::UI::Shell::{IShellLinkW, ShellLink};
+    use windows::core::PROPVARIANT;
     use windows::core::{HSTRING, Interface};
 
     let Some(appdata) = dirs::data_dir() else {
@@ -435,7 +431,7 @@ fn ensure_start_menu_shortcut() -> anyhow::Result<()> {
 fn show_windows(n: &Notification) {
     let title = n.title.clone();
     let body = n.body.clone();
-    let tag = replacement_key(n.channel_id.as_ref());
+    let tag = replacement_key(n);
 
     std::thread::spawn(move || {
         if let Err(e) = try_show_toast(&title, &body, tag.as_deref()) {
