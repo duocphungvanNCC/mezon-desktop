@@ -455,6 +455,27 @@ impl AppApi {
             .await
     }
 
+    pub async fn create_poll(
+        &self,
+        channel_id: i64,
+        clan_id: i64,
+        question: String,
+        answers: Vec<String>,
+        expire_hours: i32,
+        poll_type: i32,
+    ) -> Result<mezon_proto::api::CreatePollResponse> {
+        self.transport
+            .create_poll(
+                channel_id,
+                clan_id,
+                question,
+                answers,
+                expire_hours,
+                poll_type,
+            )
+            .await
+    }
+
     pub async fn vote_poll(
         &self,
         poll_id: i64,
