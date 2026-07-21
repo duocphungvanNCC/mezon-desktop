@@ -41,6 +41,7 @@ pub mod topics;
 pub mod user_profile;
 pub mod users_by_user;
 pub mod voice;
+pub mod webhook;
 
 use anyhow::{Context, Result};
 use dirs::config_dir;
@@ -142,6 +143,10 @@ pub use voice::{
     VideoFrameStore, VoiceCallStatus, VoiceConnection, VoiceModerationError, VoiceParticipant,
     VoiceRenderFrame, VoiceStore, camera_tile_id, capture_screen_share_preview,
     list_screen_share_options, peek_screen_share_options, screen_tile_id,
+};
+pub use webhook::{
+    ChannelWebhook, ClanWebhook, MAX_WEBHOOK_AVATAR_BYTES, WEBHOOK_NAME_MAX_LENGTH, WebhookEvent,
+    WebhookStore,
 };
 
 pub const CACHE_TTL: Duration = Duration::from_secs(20 * 60);

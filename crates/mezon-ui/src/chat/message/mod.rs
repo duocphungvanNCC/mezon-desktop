@@ -37,6 +37,7 @@ pub(crate) use ogp_embed::render_ogp_preview;
 pub(crate) use reaction_picker::{ReactionPicker, ReactionPickerEvent};
 pub(crate) use time::format_channel_setting_relative_time_from_seconds;
 pub(crate) use time::format_message_time;
+pub use time::format_relative_time_from_seconds;
 pub use video_player::{VideoActivation, VideoFullscreenMode, VideoLayout, VideoPlayerView};
 
 use gpui::{App, SharedString};

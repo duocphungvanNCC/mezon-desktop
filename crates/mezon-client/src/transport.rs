@@ -6763,34 +6763,21 @@ impl MezonTransport {
     /// Generate webhook.
     pub async fn generate_webhook(
         &self,
-        webhook_name: &str,
-        channel_id: i64,
-        clan_id: i64,
-    ) -> Result<()> {
+        request: api::WebhookCreateRequest,
+    ) -> Result<api::WebhookGenerateResponse> {
         let cid = self.generate_cid();
-        let body = api::WebhookCreateRequest {
-            webhook_name: webhook_name.to_string(),
-            channel_id,
-            clan_id,
-            ..Default::default()
-        }
-        .encode_to_vec();
-        let (code, _) = self.send_api_request(cid, "GenerateWebhook", body).await?;
+        let body = request.encode_to_vec();
+        let (code, response) = self.send_api_request(cid, "GenerateWebhook", body).await?;
         if code != 0 {
             return Err(anyhow::anyhow!("API error: code={}", code));
         }
-        Ok(())
+        Ok(api::WebhookGenerateResponse::decode(response.as_slice())?)
     }
 
     /// Update webhook by ID.
-    pub async fn update_webhook_by_id(&self, id: i64, webhook_name: &str) -> Result<()> {
+    pub async fn update_webhook_by_id(&self, request: api::WebhookUpdateRequestById) -> Result<()> {
         let cid = self.generate_cid();
-        let body = api::WebhookUpdateRequestById {
-            id,
-            webhook_name: webhook_name.to_string(),
-            ..Default::default()
-        }
-        .encode_to_vec();
+        let body = request.encode_to_vec();
         let (code, _) = self
             .send_api_request(cid, "UpdateWebhookById", body)
             .await?;
@@ -6801,13 +6788,9 @@ impl MezonTransport {
     }
 
     /// Delete webhook by ID.
-    pub async fn delete_webhook_by_id(&self, id: i64) -> Result<()> {
+    pub async fn delete_webhook_by_id(&self, request: api::WebhookDeleteRequestById) -> Result<()> {
         let cid = self.generate_cid();
-        let body = api::WebhookDeleteRequestById {
-            id,
-            ..Default::default()
-        }
-        .encode_to_vec();
+        let body = request.encode_to_vec();
         let (code, _) = self
             .send_api_request(cid, "DeleteWebhookById", body)
             .await?;
@@ -6820,16 +6803,10 @@ impl MezonTransport {
     /// Generate clan webhook.
     pub async fn generate_clan_webhook(
         &self,
-        clan_id: i64,
-        webhook_name: &str,
+        request: api::GenerateClanWebhookRequest,
     ) -> Result<api::GenerateClanWebhookResponse> {
         let cid = self.generate_cid();
-        let body = api::GenerateClanWebhookRequest {
-            clan_id,
-            webhook_name: webhook_name.to_string(),
-            ..Default::default()
-        }
-        .encode_to_vec();
+        let body = request.encode_to_vec();
         let (code, response) = self
             .send_api_request(cid, "GenerateClanWebhook", body)
             .await?;
@@ -6844,18 +6821,10 @@ impl MezonTransport {
     /// Update clan webhook by ID.
     pub async fn update_clan_webhook_by_id(
         &self,
-        id: i64,
-        clan_id: i64,
-        webhook_name: &str,
+        request: api::UpdateClanWebhookRequest,
     ) -> Result<()> {
         let cid = self.generate_cid();
-        let body = api::UpdateClanWebhookRequest {
-            id,
-            clan_id,
-            webhook_name: webhook_name.to_string(),
-            ..Default::default()
-        }
-        .encode_to_vec();
+        let body = request.encode_to_vec();
         let (code, _) = self
             .send_api_request(cid, "UpdateClanWebhookById", body)
             .await?;
