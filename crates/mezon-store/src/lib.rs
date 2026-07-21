@@ -5,6 +5,7 @@ pub mod audio;
 pub mod badge;
 pub mod cache;
 pub mod channel;
+pub mod channel_media;
 pub mod channel_members;
 pub mod channel_permissions;
 pub mod clan;
@@ -64,6 +65,11 @@ pub use audio::{
 pub use badge::BadgeService;
 pub use cache::{Freshness, KeyedCache};
 pub use channel::*;
+pub use channel_media::{
+    CHANNEL_MEDIA_CACHE_TTL, CHANNEL_MEDIA_PAGE_SIZE, ChannelMediaEvent, ChannelMediaStore,
+    ChannelTimeline, ChannelTimelineAttachment, CreateTimelineInput, TimelineCardSide,
+    UpdateTimelineInput, first_event_year, timeline_card_position,
+};
 pub use channel_members::{ChannelMember, ChannelMembersEvent, ChannelMembersStore};
 pub use channel_permissions::{
     ChannelPermissionsEvent, ChannelPermissionsStore, PERMISSION_DELETE_MESSAGE,

@@ -388,6 +388,45 @@ impl AppApi {
     }
 
     #[allow(clippy::too_many_arguments)]
+    pub async fn list_channel_timeline(
+        &self,
+        clan_id: i64,
+        channel_id: i64,
+        year: i32,
+        limit: i32,
+    ) -> Result<mezon_proto::api::ListChannelTimelineResponse> {
+        self.transport
+            .list_channel_timeline(clan_id, channel_id, year, limit)
+            .await
+    }
+
+    pub async fn create_channel_timeline(
+        &self,
+        req: mezon_proto::api::CreateChannelTimelineRequest,
+    ) -> Result<mezon_proto::api::CreateChannelTimelineResponse> {
+        self.transport.create_channel_timeline(req).await
+    }
+
+    pub async fn update_channel_timeline(
+        &self,
+        req: mezon_proto::api::UpdateChannelTimelineRequest,
+    ) -> Result<mezon_proto::api::UpdateChannelTimelineResponse> {
+        self.transport.update_channel_timeline(req).await
+    }
+
+    pub async fn detail_channel_timeline(
+        &self,
+        clan_id: i64,
+        channel_id: i64,
+        id: i64,
+        start_time_seconds: u32,
+    ) -> Result<mezon_proto::api::ChannelTimelineDetailResponse> {
+        self.transport
+            .detail_channel_timeline(clan_id, channel_id, id, start_time_seconds)
+            .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
     pub async fn list_channel_attachments(
         &self,
         clan_id: i64,

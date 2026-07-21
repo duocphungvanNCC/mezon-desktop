@@ -7525,18 +7525,10 @@ impl MezonTransport {
     /// Create channel timeline.
     pub async fn create_channel_timeline(
         &self,
-        clan_id: i64,
-        channel_id: i64,
-        title: &str,
+        req: api::CreateChannelTimelineRequest,
     ) -> Result<api::CreateChannelTimelineResponse> {
         let cid = self.generate_cid();
-        let body = api::CreateChannelTimelineRequest {
-            clan_id,
-            channel_id,
-            title: title.to_string(),
-            ..Default::default()
-        }
-        .encode_to_vec();
+        let body = req.encode_to_vec();
         let (code, response) = self
             .send_api_request(cid, "CreateChannelTimeline", body)
             .await?;
@@ -7551,20 +7543,10 @@ impl MezonTransport {
     /// Update channel timeline.
     pub async fn update_channel_timeline(
         &self,
-        clan_id: i64,
-        channel_id: i64,
-        id: i64,
-        title: &str,
+        req: api::UpdateChannelTimelineRequest,
     ) -> Result<api::UpdateChannelTimelineResponse> {
         let cid = self.generate_cid();
-        let body = api::UpdateChannelTimelineRequest {
-            clan_id,
-            channel_id,
-            id,
-            title: title.to_string(),
-            ..Default::default()
-        }
-        .encode_to_vec();
+        let body = req.encode_to_vec();
         let (code, response) = self
             .send_api_request(cid, "UpdateChannelTimeline", body)
             .await?;
@@ -7582,13 +7564,14 @@ impl MezonTransport {
         clan_id: i64,
         channel_id: i64,
         id: i64,
+        start_time_seconds: u32,
     ) -> Result<api::ChannelTimelineDetailResponse> {
         let cid = self.generate_cid();
         let body = api::ChannelTimelineDetailRequest {
             clan_id,
             channel_id,
             id,
-            ..Default::default()
+            start_time_seconds,
         }
         .encode_to_vec();
         let (code, response) = self

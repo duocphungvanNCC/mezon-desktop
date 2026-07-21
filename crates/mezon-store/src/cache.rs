@@ -125,6 +125,16 @@ impl<K: Eq + Hash + Clone, V> KeyedCache<K, V> {
         }
     }
 
+    pub fn mark_stale<Q>(&mut self, key: &Q)
+    where
+        K: Borrow<Q>,
+        Q: Hash + Eq + ?Sized,
+    {
+        if let Some(entry) = self.entries.get_mut(key) {
+            entry.fetched_at = None;
+        }
+    }
+
     fn evict(&mut self, protect: Option<&K>) {
         let Some(max) = self.max else {
             return;

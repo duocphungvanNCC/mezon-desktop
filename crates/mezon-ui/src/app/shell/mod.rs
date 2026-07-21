@@ -38,6 +38,7 @@ struct ToastItem {
 pub struct Shell {
     toasts: Vec<ToastItem>,
     modal: Option<AnyView>,
+    modal_fullscreen: bool,
     command_palette_open: bool,
     next_id: usize,
 }
@@ -50,6 +51,7 @@ impl Shell {
         let entity = cx.new(|_| Self {
             toasts: Vec::new(),
             modal: None,
+            modal_fullscreen: false,
             command_palette_open: false,
             next_id: 0,
         });
@@ -149,6 +151,16 @@ impl Shell {
     /// Show `view` as the active modal (backdrop click dismisses). The view renders its own card.
     pub fn show_modal(&mut self, view: AnyView, cx: &mut Context<Self>) {
         self.command_palette_open = false;
+        self.modal_fullscreen = false;
+        self.modal = Some(view);
+        cx.notify();
+    }
+
+    /// Show `view` as a fullscreen modal (e.g. an image/media viewer): it renders its own
+    /// full-viewport backdrop, so the overlay skips the centered card treatment and dim layer.
+    pub fn show_fullscreen_modal(&mut self, view: AnyView, cx: &mut Context<Self>) {
+        self.command_palette_open = false;
+        self.modal_fullscreen = true;
         self.modal = Some(view);
         cx.notify();
     }
@@ -282,6 +294,7 @@ impl Shell {
     pub fn close_modal(&mut self, cx: &mut Context<Self>) {
         if self.modal.take().is_some() {
             self.command_palette_open = false;
+            self.modal_fullscreen = false;
             cx.notify();
         }
     }
@@ -293,6 +306,7 @@ impl Shell {
     /// The overlay (modal backdrop + toast stack), rendered on top by `RootView`.
     pub fn render_overlay(&self) -> impl IntoElement {
         let modal = self.modal.clone();
+        let fullscreen = self.modal_fullscreen;
         let has_toasts = !self.toasts.is_empty();
         let toasts: Vec<(SharedString, ToastKind, Option<f32>)> = self
             .toasts
@@ -306,7 +320,19 @@ impl Shell {
             .left_0()
             .size_full()
             .when_some(modal, |el, view| {
-                el.child(deferred(
+                el.child(deferred(if fullscreen {
+                    div()
+                        .absolute()
+                        .top_0()
+                        .left_0()
+                        .size_full()
+                        .key_context("modal_backdrop")
+                        .on_action(|_: &::menu::Cancel, _window, cx| {
+                            Shell::global(cx).update(cx, |shell, cx| shell.close_modal(cx));
+                        })
+                        .child(div().occlude().size_full().child(view))
+                        .into_any_element()
+                } else {
                     div()
                         .absolute()
                         .top_0()
@@ -323,8 +349,9 @@ impl Shell {
                         .on_mouse_down(MouseButton::Left, |_, _, cx| {
                             Shell::global(cx).update(cx, |shell, cx| shell.close_modal(cx));
                         })
-                        .child(div().occlude().child(view)),
-                ))
+                        .child(div().occlude().child(view))
+                        .into_any_element()
+                }))
             })
             .when(has_toasts, |el| {
                 el.child(deferred(

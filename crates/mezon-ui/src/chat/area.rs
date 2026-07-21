@@ -4,7 +4,7 @@ use gpui::{
     AnyView, App, Context, Entity, ExternalPaths, FontWeight, SharedString, StyleRefinement,
     Subscription, Window, div, prelude::*, px, rgb, rgba,
 };
-use mezon_store::{ChannelId, InVoiceInfo, MessagesEvent, MessagesStore, Settings};
+use mezon_store::{ChannelId, ClanId, InVoiceInfo, MessagesEvent, MessagesStore, Settings};
 use ui::PopoverMenuHandle;
 
 use crate::chat::ReplyTarget;
@@ -12,6 +12,7 @@ use crate::chat::channel_header::ChatHeader;
 use crate::chat::channel_typing::ChannelTyping;
 use crate::chat::inbox::InboxPopoverPanel;
 use crate::chat::input_bar::{InputBar, ReplyClearSource};
+use crate::chat::media_channel::MediaChannelPanel;
 use crate::chat::member_list::{MemberListPanel, MemberSource};
 use crate::chat::mention_input::{MentionInput, MentionInputEvent};
 use crate::chat::message::ChannelMessages;
@@ -30,6 +31,8 @@ pub struct ChatArea {
     settings: Entity<Settings>,
     header: Entity<ChatHeader>,
     typing: Entity<ChannelTyping>,
+    media_channel_panel: Option<Entity<MediaChannelPanel>>,
+    media_channel_context: Option<(ClanId, ChannelId)>,
     replying_to: Option<ReplyTarget>,
     _submit_sub: Option<Subscription>,
     _reply_sub: Option<Subscription>,
@@ -57,6 +60,8 @@ impl ChatArea {
             settings,
             header,
             typing,
+            media_channel_panel: None,
+            media_channel_context: None,
             replying_to: None,
             _submit_sub: None,
             _reply_sub: None,
@@ -97,6 +102,9 @@ impl ChatArea {
     pub fn bind_window(&mut self, window: &mut Window, cx: &mut Context<crate::ChatLayout>) {
         self.timeline
             .update(cx, |timeline, cx| timeline.bind_window(window, cx));
+        if let Some(panel) = self.media_channel_panel.clone() {
+            panel.update(cx, |panel, cx| panel.bind_window(window, cx));
+        }
     }
 
     pub fn ensure_input(&mut self, window: &mut Window, cx: &mut Context<crate::ChatLayout>) {
@@ -175,6 +183,10 @@ impl ChatArea {
         show_members_button: bool,
         show_member_panel: bool,
         show_inbox: bool,
+        timeline_action: bool,
+        timeline_active: bool,
+        media_channel_view: bool,
+        media_clan_id: Option<ClanId>,
         inbox_handle: Option<PopoverMenuHandle<InboxPopoverPanel>>,
         clan_id: Option<String>,
         pin_handle: Option<PopoverMenuHandle<PinnedPopoverPanel>>,
@@ -186,16 +198,19 @@ impl ChatArea {
         message_search_panel: Option<Entity<MessageSearchPanel>>,
         cx: &mut Context<crate::ChatLayout>,
     ) -> gpui::AnyElement {
-        let (input_bar, mention_input) = match (self.input_bar.clone(), self.mention_input.clone())
-        {
-            (Some(input_bar), Some(mention_input)) => (input_bar, mention_input),
-            _ => {
-                return div()
-                    .flex()
-                    .flex_col()
-                    .flex_1()
-                    .min_h_0()
-                    .into_any_element();
+        let (input_bar, mention_input) = if media_channel_view {
+            (None, None)
+        } else {
+            match (self.input_bar.clone(), self.mention_input.clone()) {
+                (Some(input_bar), Some(mention_input)) => (Some(input_bar), Some(mention_input)),
+                _ => {
+                    return div()
+                        .flex()
+                        .flex_col()
+                        .flex_1()
+                        .min_h_0()
+                        .into_any_element();
+                }
             }
         };
 
@@ -210,6 +225,8 @@ impl ChatArea {
                 inbox_handle,
                 clan_id,
                 pin_handle,
+                timeline_action,
+                timeline_active,
                 show_search_bar,
                 search_expanded,
                 show_search_options,
@@ -222,14 +239,37 @@ impl ChatArea {
         self.typing
             .update(cx, |typing, cx| typing.sync(channel_id, cx));
 
-        input_bar.update(cx, |input_bar, cx| {
-            input_bar.sync(
-                locale,
-                self.replying_to.clone(),
-                ReplyClearSource::Messages,
-                cx,
-            )
-        });
+        if media_channel_view && let (Some(clan_id), Some(channel_id)) = (media_clan_id, channel_id)
+        {
+            let needs_new = self.media_channel_context != Some((clan_id, channel_id));
+            if needs_new || self.media_channel_panel.is_none() {
+                self.media_channel_context = Some((clan_id, channel_id));
+                self.media_channel_panel = Some(cx.new(|cx| {
+                    MediaChannelPanel::new(clan_id, channel_id, self.settings.clone(), cx)
+                }));
+                if let Some(panel) = self.media_channel_panel.clone() {
+                    panel.update(cx, |panel, cx| panel.on_enter(cx));
+                }
+            } else if let Some(panel) = self.media_channel_panel.clone() {
+                panel.update(cx, |panel, cx| {
+                    panel.sync_channel(clan_id, channel_id, cx);
+                });
+            }
+        } else {
+            self.media_channel_panel = None;
+            self.media_channel_context = None;
+        }
+
+        if let Some(input_bar) = input_bar.clone() {
+            input_bar.update(cx, |input_bar, cx| {
+                input_bar.sync(
+                    locale,
+                    self.replying_to.clone(),
+                    ReplyClearSource::Messages,
+                    cx,
+                )
+            });
+        }
 
         let header = AnyView::from(self.header.clone()).cached(
             StyleRefinement::default()
@@ -238,7 +278,6 @@ impl ChatArea {
                 .flex_shrink_0(),
         );
 
-        let drop_input = mention_input;
         let channel_label = channel_name.unwrap_or_default();
         let drop_title = match &self.drop_title_cache {
             Some((cached_locale, cached_channel, title))
@@ -266,50 +305,56 @@ impl ChatArea {
                 body
             }
         };
-        let drop_overlay = div()
-            .absolute()
-            .inset_0()
-            .invisible()
-            .group_drag_over::<ExternalPaths>("chat-drop-zone", |style| style.visible())
-            .flex()
-            .items_center()
-            .justify_center()
-            .bg(rgba(0x000000e6))
-            .child(
+        let drop_overlay = if media_channel_view {
+            None
+        } else {
+            Some(
                 div()
+                    .absolute()
+                    .inset_0()
+                    .invisible()
+                    .group_drag_over::<ExternalPaths>("chat-drop-zone", |style| style.visible())
                     .flex()
-                    .flex_col()
                     .items_center()
                     .justify_center()
-                    .gap(px(16.))
-                    .w(px(400.))
-                    .h(px(240.))
-                    .rounded(px(8.))
-                    .border_2()
-                    .border_dashed()
-                    .border_color(rgb(0xffffff))
-                    .bg(rgb(0x5865f2))
-                    .child(
-                        Icon::new(IconName::FileAndFolder)
-                            .size(px(48.))
-                            .text_color(rgb(0xffffff)),
-                    )
+                    .bg(rgba(0x000000e6))
                     .child(
                         div()
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_size(px(18.))
-                            .text_color(rgb(0xffffff))
-                            .child(drop_title),
-                    )
-                    .child(
-                        div()
-                            .px(px(24.))
-                            .text_center()
-                            .text_size(px(14.))
-                            .text_color(rgb(0xffffff))
-                            .child(drop_body),
+                            .flex()
+                            .flex_col()
+                            .items_center()
+                            .justify_center()
+                            .gap(px(16.))
+                            .w(px(400.))
+                            .h(px(240.))
+                            .rounded(px(8.))
+                            .border_2()
+                            .border_dashed()
+                            .border_color(rgb(0xffffff))
+                            .bg(rgb(0x5865f2))
+                            .child(
+                                Icon::new(IconName::FileAndFolder)
+                                    .size(px(48.))
+                                    .text_color(rgb(0xffffff)),
+                            )
+                            .child(
+                                div()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_size(px(18.))
+                                    .text_color(rgb(0xffffff))
+                                    .child(drop_title),
+                            )
+                            .child(
+                                div()
+                                    .px(px(24.))
+                                    .text_center()
+                                    .text_size(px(14.))
+                                    .text_color(rgb(0xffffff))
+                                    .child(drop_body),
+                            ),
                     ),
-            );
+            )
+        };
 
         let message_column = div()
             .relative()
@@ -320,25 +365,44 @@ impl ChatArea {
             .min_w_0()
             .min_h_0()
             .overflow_hidden()
-            .on_drop(
-                move |paths: &ExternalPaths, window: &mut Window, cx: &mut App| {
-                    let dropped: Vec<PathBuf> = paths.paths().to_vec();
-                    drop_input.update(cx, |input, cx| input.add_dropped_paths(dropped, window, cx));
-                },
-            )
-            .child(div().flex_1().min_h_0().overflow_hidden().child(
-                AnyView::from(self.timeline.clone()).cached(StyleRefinement::default().size_full()),
-            ))
-            .child(input_bar)
-            .child(
-                AnyView::from(self.typing.clone()).cached(
-                    StyleRefinement::default()
-                        .w_full()
-                        .h(px(16.))
-                        .flex_shrink_0(),
-                ),
-            )
-            .child(drop_overlay);
+            .when(!media_channel_view, |col| {
+                let drop_input = mention_input;
+                col.on_drop(
+                    move |paths: &ExternalPaths, window: &mut Window, cx: &mut App| {
+                        if let Some(drop_input) = drop_input.clone() {
+                            let dropped: Vec<PathBuf> = paths.paths().to_vec();
+                            drop_input.update(cx, |input, cx| {
+                                input.add_dropped_paths(dropped, window, cx)
+                            });
+                        }
+                    },
+                )
+            })
+            .when(media_channel_view, |col| {
+                if let Some(panel) = self.media_channel_panel.clone() {
+                    col.child(AnyView::from(panel).cached(StyleRefinement::default().size_full()))
+                } else {
+                    col
+                }
+            })
+            .when(!media_channel_view, |col| {
+                col.child(
+                    div().flex_1().min_h_0().overflow_hidden().child(
+                        AnyView::from(self.timeline.clone())
+                            .cached(StyleRefinement::default().size_full()),
+                    ),
+                )
+                .when_some(input_bar.clone(), |col, input_bar| col.child(input_bar))
+                .child(
+                    AnyView::from(self.typing.clone()).cached(
+                        StyleRefinement::default()
+                            .w_full()
+                            .h(px(16.))
+                            .flex_shrink_0(),
+                    ),
+                )
+                .when_some(drop_overlay, |col, overlay| col.child(overlay))
+            });
 
         let has_search_panel = show_results_panel && message_search_panel.is_some();
         let body = div()
@@ -360,8 +424,9 @@ impl ChatArea {
                     ),
                 )
             })
-            .when(show_member_panel && !has_search_panel, |row| {
-                match &self.member_panel {
+            .when(
+                show_member_panel && !has_search_panel && !media_channel_view,
+                |row| match &self.member_panel {
                     Some(panel) => row.child(
                         AnyView::from(panel.clone()).cached(
                             StyleRefinement::default()
@@ -371,8 +436,8 @@ impl ChatArea {
                         ),
                     ),
                     None => row.child(div().w(px(245.)).h_full().flex_shrink_0()),
-                }
-            });
+                },
+            );
 
         div()
             .flex()

@@ -5,8 +5,8 @@ use gpui::{
     StyleRefinement, Subscription, Task, Window, deferred, div, prelude::*, px,
 };
 use mezon_store::{
-    AuthState, Channel, ChannelId, ChannelList, ChannelType, ClanId, ClanList, ClanMembersStore,
-    DirectChannel, DirectKind, DirectMessageStore, GroupMembersStore, InboxStore,
+    AuthState, Channel, ChannelId, ChannelList, ChannelMediaStore, ChannelType, ClanId, ClanList,
+    ClanMembersStore, DirectChannel, DirectKind, DirectMessageStore, GroupMembersStore, InboxStore,
     MessageSearchEvent, MessageSearchStore, MessagesStore, PinnedEvent, PinnedMessagesStore,
     Settings, ThreadsEvent, ThreadsStore, TopicsEvent, TopicsStore, VoiceConnection, VoiceMember,
     VoiceModerationError, VoiceStore, expand_mention_name_tokens,
@@ -58,6 +58,7 @@ pub struct ChatLayout {
     inbox_context_ids: Option<(Option<ClanId>, Option<ChannelId>)>,
     _voice_frame_pump: Option<Task<()>>,
     show_member_list: bool,
+    media_channel_view_mode: bool,
     message_search_expanded: bool,
     show_search_options: bool,
     show_results_panel: bool,
@@ -274,7 +275,14 @@ impl ChatLayout {
             this.ensure_active_channel_for_clan(cx);
             this.sync_inbox_context(cx);
             this.sync_voice_frame_pump(cx);
+            let prev_channel_id = this.displayed_active_channel.as_ref().map(|slice| slice.id);
             if this.active_channel_display_changed(cx) {
+                if let Some(channel_id) = prev_channel_id {
+                    ChannelMediaStore::global(cx).update(cx, |store, cx| {
+                        store.clear_channel(channel_id, cx);
+                    });
+                }
+                this.media_channel_view_mode = false;
                 this.dismiss_topic_panel(cx);
                 this.dismiss_threads_popover(cx);
                 this.pin_popover_handle.hide(cx);
@@ -287,6 +295,7 @@ impl ChatLayout {
                 Router::global(cx).read(cx).route(),
                 Route::Direct | Route::Friends | Route::DirectMessage { .. }
             ) {
+                this.media_channel_view_mode = false;
                 this.dismiss_topic_panel(cx);
                 this.dismiss_threads_popover(cx);
                 this.pin_popover_handle.hide(cx);
@@ -373,6 +382,7 @@ impl ChatLayout {
             inbox_context_ids: None,
             _voice_frame_pump: None,
             show_member_list: true,
+            media_channel_view_mode: false,
             message_search_expanded: false,
             show_search_options: false,
             show_results_panel: false,
@@ -775,6 +785,29 @@ impl ChatLayout {
     pub(crate) fn toggle_member_list(&mut self, cx: &mut Context<Self>) {
         self.show_member_list = !self.show_member_list;
         cx.notify();
+    }
+
+    pub(crate) fn toggle_media_channel_view(&mut self, cx: &mut Context<Self>) {
+        self.media_channel_view_mode = !self.media_channel_view_mode;
+        if self.media_channel_view_mode {
+            self.show_member_list = false;
+        }
+        cx.notify();
+    }
+
+    fn channel_supports_timeline_view(&self, cx: &Context<Self>) -> bool {
+        if self.is_dm_route(cx) {
+            return false;
+        }
+        self.channel_list
+            .read(cx)
+            .active_channel()
+            .is_some_and(|ch| {
+                matches!(
+                    ch.channel_type,
+                    ChannelType::Text | ChannelType::Thread | ChannelType::App
+                )
+            })
     }
 
     fn dismiss_inbox_popover(&self, cx: &mut App) {
@@ -2008,6 +2041,10 @@ impl ChatLayout {
                             && !show_results_panel
                             && !side_panel_open,
                         false,
+                        false,
+                        false,
+                        false,
+                        None,
                         None,
                         None,
                         Some(pin_handle),
@@ -2036,6 +2073,10 @@ impl ChatLayout {
                         false,
                         false,
                         false,
+                        false,
+                        false,
+                        false,
+                        None,
                         None,
                         None,
                         Some(pin_handle),
@@ -2118,6 +2159,9 @@ impl ChatLayout {
 
             let channel_name = ch.name.clone();
             let channel_id = ch.id;
+            let timeline_action = self.channel_supports_timeline_view(cx);
+            let timeline_active = self.media_channel_view_mode;
+            let media_channel_view = timeline_action && timeline_active;
             return self
                 .chat_area
                 .render(
@@ -2127,8 +2171,19 @@ impl ChatLayout {
                     None,
                     Some(channel_id),
                     true,
-                    self.show_member_list && !show_results_panel && !side_panel_open,
+                    self.show_member_list
+                        && !show_results_panel
+                        && !side_panel_open
+                        && !media_channel_view,
                     true,
+                    timeline_action,
+                    timeline_active,
+                    media_channel_view,
+                    if media_channel_view {
+                        Some(ch.clan_id)
+                    } else {
+                        None
+                    },
                     Some(inbox_handle),
                     active_clan_id,
                     Some(pin_handle),
@@ -2161,6 +2216,10 @@ impl ChatLayout {
                     true,
                     self.show_member_list && !show_results_panel && !side_panel_open,
                     true,
+                    false,
+                    false,
+                    false,
+                    None,
                     Some(inbox_handle),
                     active_clan_id,
                     None,
