@@ -107,13 +107,10 @@ impl ClanMembersPage {
 
     fn ensure_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let locale = self.settings.read(cx).language.clone();
-        if self.search.is_some() {
+        if let Some(search) = &self.search {
             if self.search_locale != locale {
                 let placeholder = tr(&locale, "memberTable.topBar.searchPlaceholder");
-                self.search
-                    .as_ref()
-                    .expect("search initialized")
-                    .update(cx, |input, cx| input.set_placeholder(placeholder, cx));
+                search.update(cx, |input, cx| input.set_placeholder(placeholder, cx));
                 self.search_locale = locale;
             }
             return;

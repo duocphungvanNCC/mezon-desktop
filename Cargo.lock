@@ -5940,6 +5940,7 @@ dependencies = [
  "tokio",
  "tracing",
  "windows-capture 2.0.0",
+ "xcb",
  "yuv",
  "zed-scap",
 ]
