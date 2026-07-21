@@ -7461,13 +7461,18 @@ impl MezonTransport {
         channel_id: i64,
         clan_id: i64,
         question: &str,
+        answers: Vec<String>,
+        expire_hours: i32,
+        poll_type: i32,
     ) -> Result<api::CreatePollResponse> {
         let cid = self.generate_cid();
         let body = api::CreatePollRequest {
             channel_id,
             clan_id,
             question: question.to_string(),
-            ..Default::default()
+            answers,
+            expire_hours,
+            r#type: poll_type,
         }
         .encode_to_vec();
         let (code, response) = self.send_api_request(cid, "CreatePoll", body).await?;

@@ -452,6 +452,7 @@ struct ChannelMessages {
     has_more: bool,
 }
 
+const POLL_RESULT_ANIMATION_WINDOW: Duration = Duration::from_millis(1200);
 const STREAM_MODE_CHANNEL: i32 = 2;
 const STREAM_MODE_THREAD: i32 = 6;
 
@@ -767,6 +768,9 @@ pub struct PollUiState {
     pub selected: Vec<i32>,
     pub show_results: bool,
     pub voting: bool,
+    /// When this viewer's own vote landed. Drives the one-shot result animation
+    /// so it plays right after voting instead of every time the card mounts.
+    pub voted_at: Option<std::time::Instant>,
 }
 
 struct GlobalMessagesStore(Entity<MessagesStore>);
@@ -3320,6 +3324,7 @@ impl MessagesStore {
                     AppConfig::try_global(cx),
                     viewer_id,
                 );
+                log_poll_broadcast("update", message_id, &incoming);
                 let presign_keys = presign::parse_presign_finish_keys(&m.content);
                 self.apply_message_update(target_id, message_id, incoming, presign_keys, cx);
             }
@@ -3338,19 +3343,25 @@ impl MessagesStore {
                     self.set_last_message(storage_id, message_id);
                     return;
                 }
-                if self.is_viewing_older(storage_id) {
-                    self.set_last_message(storage_id, message_id);
-                    return;
-                }
-                let tail_loaded = self.cache.get(&storage_id).is_some_and(|channel| {
-                    !has_more_bottom_for(
-                        self.last_message_by_channel.get(&storage_id).copied(),
-                        &channel.messages,
-                    )
-                });
-                if !tail_loaded {
-                    self.set_last_message(storage_id, message_id);
-                    return;
+                let already_cached = self
+                    .cache
+                    .get(&storage_id)
+                    .is_some_and(|channel| channel.messages.contains_id(message_id));
+                if !already_cached {
+                    if self.is_viewing_older(storage_id) {
+                        self.set_last_message(storage_id, message_id);
+                        return;
+                    }
+                    let tail_loaded = self.cache.get(&storage_id).is_some_and(|channel| {
+                        !has_more_bottom_for(
+                            self.last_message_by_channel.get(&storage_id).copied(),
+                            &channel.messages,
+                        )
+                    });
+                    if !tail_loaded {
+                        self.set_last_message(storage_id, message_id);
+                        return;
+                    }
                 }
                 let incoming = message_from_channel_proto(
                     m,
@@ -3358,6 +3369,7 @@ impl MessagesStore {
                     AppConfig::try_global(cx),
                     viewer_id,
                 );
+                log_poll_broadcast("append", message_id, &incoming);
                 self.apply_incoming_message(storage_id, incoming, cx);
             }
         }
@@ -3797,6 +3809,16 @@ impl MessagesStore {
         self.poll_my_vote.get(&message_id).map(Vec::as_slice)
     }
 
+    /// True only for a short window after this viewer voted, so the poll card can
+    /// play its fill animation once instead of on every mount (each running bar
+    /// drives a per-frame repaint of the visible rows).
+    pub fn poll_result_animating(&self, message_id: MessageId) -> bool {
+        self.poll_ui
+            .get(&message_id)
+            .and_then(|state| state.voted_at)
+            .is_some_and(|at| at.elapsed() < POLL_RESULT_ANIMATION_WINDOW)
+    }
+
     pub fn toggle_poll_answer(
         &mut self,
         message_id: MessageId,
@@ -3814,12 +3836,19 @@ impl MessagesStore {
         } else {
             state.selected = vec![index];
         }
-        cx.notify();
+        self.notify_poll_row(message_id, cx);
     }
 
     pub fn toggle_poll_results(&mut self, message_id: MessageId, cx: &mut Context<Self>) {
         let state = self.poll_ui.entry(message_id).or_default();
         state.show_results = !state.show_results;
+        self.notify_poll_row(message_id, cx);
+    }
+
+    fn notify_poll_row(&mut self, message_id: MessageId, cx: &mut Context<Self>) {
+        cx.emit(MessagesEvent::Updated {
+            message_id: Some(message_id),
+        });
         cx.notify();
     }
 
@@ -3860,12 +3889,20 @@ impl MessagesStore {
             return;
         };
         self.poll_ui.entry(message_id).or_default().voting = true;
-        cx.notify();
+        self.notify_poll_row(message_id, cx);
         let api = self.api.clone();
         let cid = channel_id.get();
         let mid = message_id.get();
+        let started = std::time::Instant::now();
+        tracing::info!(target: "poll_perf", "vote_send message_id={mid}");
         cx.spawn(async move |this, cx| {
             let result = api.vote_poll(poll_id, mid, cid, answer_indices).await;
+            tracing::info!(
+                target: "poll_perf",
+                "vote_ack message_id={mid} took={}ms ok={}",
+                started.elapsed().as_millis(),
+                result.is_ok()
+            );
             let _ = this.update(cx, |store, cx| {
                 if let Some(state) = store.poll_ui.get_mut(&message_id) {
                     state.voting = false;
@@ -3877,10 +3914,12 @@ impl MessagesStore {
                         store
                             .poll_my_vote
                             .insert(message_id, resp.my_answer_indices);
+                        store.poll_ui.entry(message_id).or_default().voted_at =
+                            Some(std::time::Instant::now());
                     }
                     Err(e) => tracing::error!("vote_poll failed: {e}"),
                 }
-                cx.notify();
+                store.notify_poll_row(message_id, cx);
             });
         })
         .detach();
@@ -3896,6 +3935,31 @@ impl MessagesStore {
         cx.spawn(async move |_this, _cx| {
             if let Err(e) = api.close_poll(poll_id, mid, cid).await {
                 tracing::error!("close_poll failed: {e}");
+            }
+        })
+        .detach();
+    }
+
+    pub fn create_poll(
+        &mut self,
+        question: String,
+        answers: Vec<String>,
+        expire_hours: i32,
+        poll_type: i32,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(channel_id) = self.active_channel_id else {
+            return;
+        };
+        let clan_id = self.active_clan_id.map_or(0, |clan| clan.get());
+        let api = self.api.clone();
+        let cid = channel_id.get();
+        cx.spawn(async move |_this, _cx| {
+            if let Err(e) = api
+                .create_poll(cid, clan_id, question, answers, expire_hours, poll_type)
+                .await
+            {
+                tracing::error!("create_poll failed: {e}");
             }
         })
         .detach();
@@ -4364,6 +4428,20 @@ pub(crate) fn message_from_channel_proto(
     let mut api_msg = MezonTransport::message_from_proto(m);
     api_msg.message_id = message_id;
     message_from_api(api_msg, cfg, viewer_id)
+}
+
+fn log_poll_broadcast(path: &str, message_id: MessageId, incoming: &Message) {
+    let Some(poll) = incoming.poll.as_ref() else {
+        return;
+    };
+    tracing::info!(
+        target: "poll_perf",
+        "poll_broadcast path={path} message_id={} counts={:?} total={} closed={}",
+        message_id.get(),
+        poll.answer_counts,
+        poll.total_votes,
+        poll.is_closed
+    );
 }
 
 fn merge_message_update(existing: &mut Message, incoming: &Message) {
