@@ -770,10 +770,99 @@ fn json_to_i32(value: &serde_json::Value) -> Option<i32> {
 }
 
 fn parse_message_text(content: &str) -> String {
-    serde_json::from_str::<serde_json::Value>(content)
-        .ok()
-        .and_then(|v| v.get("t").and_then(|t| t.as_str().map(|s| s.to_string())))
-        .unwrap_or_else(|| content.to_string())
+    parse_message_content_tokens(content).t
+}
+
+pub fn parse_message_content_tokens(raw: &str) -> ApiMessageContent {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return ApiMessageContent::default();
+    }
+    if let Ok(tokens) = serde_json::from_str::<ApiMessageContent>(trimmed) {
+        return sanitize_embed_only_content_tokens(tokens, trimmed);
+    }
+    if let Ok(serde_json::Value::String(inner)) = serde_json::from_str::<serde_json::Value>(trimmed)
+        && let Ok(tokens) = serde_json::from_str::<ApiMessageContent>(&inner)
+    {
+        return sanitize_embed_only_content_tokens(tokens, trimmed);
+    }
+    recover_message_content_tokens(trimmed)
+}
+
+fn sanitize_embed_only_content_tokens(
+    mut tokens: ApiMessageContent,
+    raw: &str,
+) -> ApiMessageContent {
+    if !tokens.embed.is_empty() && tokens.t.trim().is_empty() {
+        return tokens;
+    }
+    if !tokens.embed.is_empty() && tokens.t.trim() == raw.trim() {
+        tokens.t.clear();
+    }
+    tokens
+}
+
+fn recover_message_content_tokens(trimmed: &str) -> ApiMessageContent {
+    let root = match serde_json::from_str::<serde_json::Value>(trimmed) {
+        Ok(serde_json::Value::String(inner)) => serde_json::from_str(&inner).ok(),
+        Ok(value) => Some(value),
+        Err(_) => {
+            return ApiMessageContent {
+                t: trimmed.to_string(),
+                ..Default::default()
+            };
+        }
+    };
+    let mut tokens = ApiMessageContent::default();
+    if let Some(serde_json::Value::Object(map)) = root {
+        if let Some(text) = map.get("t").and_then(json_value_as_string) {
+            tokens.t = text;
+        }
+        tokens.embed = recover_embed_array(map.get("embed"));
+        tokens.components = recover_component_rows(map.get("components"));
+        if let Some(call_log) = map.get("callLog").or_else(|| map.get("call_log")) {
+            tokens.call_log = serde_json::from_value(call_log.clone()).ok();
+        }
+        tokens.is_card = map
+            .get("isCard")
+            .or_else(|| map.get("is_card"))
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false);
+    }
+    if tokens.t.is_empty() && tokens.embed.is_empty() && tokens.components.is_empty() {
+        tokens.t = trimmed.to_string();
+    } else if !tokens.embed.is_empty() && tokens.t.trim() == trimmed.trim() {
+        tokens.t.clear();
+    }
+    tokens
+}
+
+fn json_value_as_string(value: &serde_json::Value) -> Option<String> {
+    match value {
+        serde_json::Value::String(text) => Some(text.clone()),
+        serde_json::Value::Number(number) => Some(number.to_string()),
+        _ => None,
+    }
+}
+
+fn recover_embed_array(value: Option<&serde_json::Value>) -> Vec<ApiEmbed> {
+    let Some(serde_json::Value::Array(items)) = value else {
+        return Vec::new();
+    };
+    items
+        .iter()
+        .filter_map(|item| serde_json::from_value::<ApiEmbed>(item.clone()).ok())
+        .collect()
+}
+
+fn recover_component_rows(value: Option<&serde_json::Value>) -> Vec<ApiActionRow> {
+    let Some(serde_json::Value::Array(items)) = value else {
+        return Vec::new();
+    };
+    items
+        .iter()
+        .filter_map(|item| serde_json::from_value::<ApiActionRow>(item.clone()).ok())
+        .collect()
 }
 
 pub fn prioritize_avatar(clan_avatar: &str, user_avatar: &str) -> String {
@@ -1392,7 +1481,7 @@ pub struct ApiEmbedInputWrapper {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ApiEmbed {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "string_or_number::deserialize")]
     pub color: Option<String>,
     #[serde(default)]
     pub title: Option<String>,
@@ -2575,11 +2664,7 @@ impl MezonTransport {
     }
 
     pub fn message_from_proto(message: &api::ChannelMessage) -> ApiMessage {
-        let content_tokens = serde_json::from_str::<ApiMessageContent>(&message.content)
-            .unwrap_or_else(|_| ApiMessageContent {
-                t: message.content.clone(),
-                ..Default::default()
-            });
+        let content_tokens = parse_message_content_tokens(&message.content);
         let entity_mentions = parse_message_mentions(&message.mentions);
         let mut content_tokens = content_tokens;
         enrich_content_tokens(&mut content_tokens, &entity_mentions);
@@ -8071,6 +8156,39 @@ mod tests {
             parsed.content_tokens.presign_finish,
             Some(vec!["a/b/photo.png".to_string()])
         );
+    }
+
+    #[test]
+    fn message_from_proto_parses_embed_only_payload_with_numeric_color() {
+        let raw = r#"{"embed":[{"color":49151,"title":"Saved","description":"```Name: Walk```","author":{"name":"Nhan Nguyen","icon_url":"https://example.com/a.png"},"thumbnail":{"url":"https://example.com/t.png"},"timestamp":"2026-07-21T00:52:54.094Z","footer":{"text":"Powered by Mezon Bot Strava","icon_url":"https://example.com/f.png"}}]}"#;
+        let msg = api::ChannelMessage {
+            message_id: 1,
+            content: raw.into(),
+            ..Default::default()
+        };
+        let parsed = MezonTransport::message_from_proto(&msg);
+        assert!(
+            parsed.content.is_empty(),
+            "embed-only payload must not leak raw JSON"
+        );
+        assert_eq!(parsed.content_tokens.embed.len(), 1);
+        assert_eq!(
+            parsed.content_tokens.embed[0].color.as_deref(),
+            Some("49151")
+        );
+        assert_eq!(
+            parsed.content_tokens.embed[0].title.as_deref(),
+            Some("Saved")
+        );
+    }
+
+    #[test]
+    fn parse_message_content_tokens_recovers_embed_when_struct_parse_fails() {
+        let raw = r#"{"embed":[{"color":"00BFFF","title":"Recovered"}]}"#;
+        let tokens = parse_message_content_tokens(raw);
+        assert!(tokens.t.is_empty());
+        assert_eq!(tokens.embed.len(), 1);
+        assert_eq!(tokens.embed[0].title.as_deref(), Some("Recovered"));
     }
 
     #[test]

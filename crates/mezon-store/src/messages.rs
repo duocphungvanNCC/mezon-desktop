@@ -5142,11 +5142,17 @@ fn edit_content_spans(content: &str, content_tokens: OutgoingContent) -> EditTra
 }
 
 fn parse_embed_accent(color: Option<&str>) -> Option<Rgba> {
-    let raw = color?.trim().trim_start_matches('#');
-    if raw.len() != 6 || !raw.bytes().all(|b| b.is_ascii_hexdigit()) {
+    let raw = color?.trim();
+    if raw.is_empty() {
         return None;
     }
-    u32::from_str_radix(raw, 16).ok().map(gpui::rgb)
+    let hex = raw.trim_start_matches('#');
+    if hex.len() == 6 && hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return u32::from_str_radix(hex, 16).ok().map(gpui::rgb);
+    }
+    raw.parse::<u32>()
+        .ok()
+        .map(|value| gpui::rgb(value & 0x00_ff_ff))
 }
 
 fn build_call_log(content: &ApiMessageContent) -> Option<CallLog> {
@@ -5674,6 +5680,33 @@ mod tests {
     use super::*;
     use crate::ids::UserId;
     use crate::message::MessageSpan;
+
+    #[test]
+    fn parse_embed_accent_accepts_decimal_embed_colors() {
+        let accent = parse_embed_accent(Some("49151")).expect("decimal color");
+        assert_eq!(accent, gpui::rgb(0x00_bf_ff));
+    }
+
+    #[test]
+    fn parse_embed_accent_accepts_hex_embed_colors() {
+        let accent = parse_embed_accent(Some("#00BFFF")).expect("hex color");
+        assert_eq!(accent, gpui::rgb(0x00_bf_ff));
+    }
+
+    #[test]
+    fn build_embeds_maps_numeric_color_to_accent() {
+        let content = ApiMessageContent {
+            embed: vec![ApiEmbed {
+                color: Some("49151".into()),
+                title: Some("Saved".into()),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let embeds = build_embeds(&content, None);
+        let embed = embeds.first().expect("one embed");
+        assert_eq!(embed.accent, Some(gpui::rgb(0x00_bf_ff)));
+    }
 
     #[test]
     fn parse_embed_input_extracts_text_input() {
