@@ -3216,7 +3216,7 @@
   "notification.permissionRequest.permissionDenied": "Autorizzazione notifiche negata.",
   "notification.permissionRequest.title": "Autorizzazione notifiche",
   "notification.removeNotification": "Rimuovi notifica",
-  "notification.repliedTo": "Risposta a: ",
+  "notification.repliedTo": "Messaggio originale: ",
   "notification.seeWhenAnswersAppear": "Vedi quando compaiono le risposte",
   "notification.sender": "Mittente: ",
   "notification.tabNotify.forYou": "Per te",

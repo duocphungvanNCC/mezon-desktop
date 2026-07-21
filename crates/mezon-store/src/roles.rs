@@ -797,6 +797,13 @@ mod tests {
         }
     }
 
+    fn make_role_with_order(id: i64, title: &str, color: &str, order_role: i32) -> api::Role {
+        api::Role {
+            order_role,
+            ..make_role(id, title, color)
+        }
+    }
+
     #[test]
     fn maps_proto_roles_to_domain() {
         let roles = roles_map_from_proto(vec![
@@ -818,6 +825,16 @@ mod tests {
         let mut low = make_role(7, "Mike", "");
         low.order_role = 2;
         let roles = roles_map_from_proto(vec![high, mid, low]);
+        assert_eq!(roles.order, vec![RoleId(3), RoleId(7), RoleId(9)]);
+    }
+
+    #[test]
+    fn sorts_roles_by_order_role_ascending() {
+        let roles = roles_map_from_proto(vec![
+            make_role_with_order(9, "Zulu", "", 5),
+            make_role_with_order(3, "Alpha", "", 1),
+            make_role_with_order(7, "Mike", "", 3),
+        ]);
         assert_eq!(roles.order, vec![RoleId(3), RoleId(7), RoleId(9)]);
     }
 

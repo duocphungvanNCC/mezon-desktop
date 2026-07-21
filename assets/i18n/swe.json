@@ -3216,7 +3216,7 @@
   "notification.permissionRequest.permissionDenied": "Notisbehörighet avvisad.",
   "notification.permissionRequest.title": "Notisbehörighet",
   "notification.removeNotification": "Ta bort notis",
-  "notification.repliedTo": "Svarade: ",
+  "notification.repliedTo": "Ursprungligt meddelande: ",
   "notification.seeWhenAnswersAppear": "Se när svar dyker upp",
   "notification.sender": "Avsändare: ",
   "notification.tabNotify.forYou": "För dig",

@@ -3216,7 +3216,7 @@
   "notification.permissionRequest.permissionDenied": "Benachrichtigungsberechtigung verweigert.",
   "notification.permissionRequest.title": "Benachrichtigungsberechtigung",
   "notification.removeNotification": "Benachrichtigung löschen",
-  "notification.repliedTo": "Geantwortet auf: ",
+  "notification.repliedTo": "Ursprüngliche Nachricht: ",
   "notification.seeWhenAnswersAppear": "Sehen, wenn Antworten erscheinen",
   "notification.sender": "Absender: ",
   "notification.tabNotify.forYou": "Für dich",
