@@ -3296,7 +3296,7 @@
   "notification.permissionRequest.permissionDenied": "Quyền thông báo bị từ chối.",
   "notification.permissionRequest.title": "Quyền thông báo",
   "notification.removeNotification": "Xóa thông báo",
-  "notification.repliedTo": "Trả lời: ",
+  "notification.repliedTo": "Tin nhắn gốc: ",
   "notification.seeWhenAnswersAppear": "Xem khi nào câu trả lời xuất hiện",
   "notification.sender": "Người gửi: ",
   "notification.tabNotify.forYou": "Dành cho bạn",

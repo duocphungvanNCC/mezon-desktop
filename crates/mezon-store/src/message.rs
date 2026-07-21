@@ -976,6 +976,18 @@ pub fn parse_spans(content: &ApiMessageContent) -> Vec<MessageSpan> {
     apply_headings(spans)
 }
 
+pub fn inbox_spans_from_raw(raw_content: &str) -> Option<Vec<MessageSpan>> {
+    let trimmed = raw_content.trim();
+    if trimmed.is_empty() || !trimmed.starts_with('{') {
+        return None;
+    }
+    let content: ApiMessageContent = serde_json::from_str(trimmed).ok()?;
+    if content.t.is_empty() {
+        return None;
+    }
+    Some(parse_spans(&content))
+}
+
 fn link_kind_from_marker(marker: &str) -> LinkKind {
     match marker {
         "lk_yt" => LinkKind::YouTube,
@@ -2234,5 +2246,16 @@ mod tests {
     #[test]
     fn rich_layout_none_for_empty_spans() {
         assert!(build_rich_layout(&[]).is_none());
+    }
+
+    #[test]
+    fn inbox_spans_from_raw_parses_code_block() {
+        let raw = r#"{"t":"intro\n```\n#680066 line\n```","mk":[{"s":7,"e":26,"type":"t"}]}"#;
+        let spans = inbox_spans_from_raw(raw).expect("spans");
+        assert!(
+            spans
+                .iter()
+                .any(|span| matches!(span, MessageSpan::CodeBlock { .. }))
+        );
     }
 }

@@ -3226,7 +3226,7 @@
   "notification.permissionRequest.permissionDenied": "Разрешение на уведомления отклонено.",
   "notification.permissionRequest.title": "Разрешение на уведомления",
   "notification.removeNotification": "Удалить уведомление",
-  "notification.repliedTo": "Ответили на: ",
+  "notification.repliedTo": "Оригинальное сообщение: ",
   "notification.seeWhenAnswersAppear": "Смотреть, когда появляются ответы",
   "notification.sender": "Отправитель: ",
   "notification.tabNotify.forYou": "Для Вас",

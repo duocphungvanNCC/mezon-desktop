@@ -3331,7 +3331,7 @@
   "notification.permissionRequest.permissionDenied": "Notification permission denied.",
   "notification.permissionRequest.title": "Notification Permission",
   "notification.removeNotification": "Remove Notification",
-  "notification.repliedTo": "Replied To: ",
+  "notification.repliedTo": "Original message: ",
   "notification.seeWhenAnswersAppear": "See when the answers appear",
   "notification.sender": "Sender: ",
   "notification.tabNotify.forYou": "For you",
