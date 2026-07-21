@@ -1063,7 +1063,7 @@ fn render_banner_and_events(
             let all_apps: Vec<AppChannelSlot> = app_channels.to_vec();
             let sidebar_more = sidebar.clone();
             let channel_apps_label =
-                SharedString::from(mezon_i18n::t(locale, "channelList.channelApps").to_string());
+                SharedString::from(mezon_i18n::t(&locale, "channelList.channelApps").to_string());
             app_row = app_row.child(
                 div()
                     .id("app-channels-more")
