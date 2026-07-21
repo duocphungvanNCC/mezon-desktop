@@ -964,12 +964,9 @@ fn render_banner_and_events(
             .read(cx)
             .check_permission(clan_id, PERMISSION_ADMINISTRATOR, cx)
     });
-    let locale = Settings::try_global(cx)
-        .map(|settings| settings.read(cx).language.clone())
-        .unwrap_or_else(|| "en".to_string());
     let channels_row = nav_row(
         IconName::ChannelBrowser,
-        mezon_i18n::t(&locale, "channelList.navigation.channels"),
+        mezon_i18n::t(locale, "channelList.navigation.channels"),
         theme,
         channels_active,
     )

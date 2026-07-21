@@ -195,7 +195,7 @@ fn request_channel_app_from_store(
         let Some(url) = task.await else {
             return;
         };
-        let _ = cx.update(|cx| {
+        cx.update(|cx| {
             present_channel_app_window(
                 OpenChannelAppRequest {
                     app_id,
@@ -308,7 +308,6 @@ fn spawn_channel_app_window(request: OpenChannelAppRequest, cx: &mut App) {
         Ok(handle) => {
             #[cfg(target_os = "macos")]
             {
-                let handle = handle.clone();
                 cx.defer(move |cx| {
                     let _ = handle.update(cx, |_, window, _| {
                         window_controls::macos::disable_window_fullscreen(window);
