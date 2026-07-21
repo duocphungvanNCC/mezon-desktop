@@ -376,14 +376,15 @@ fn init_windows() {
 #[cfg(target_os = "windows")]
 fn ensure_start_menu_shortcut() -> anyhow::Result<()> {
     use windows::Win32::Storage::EnhancedStorage::PKEY_AppUserModel_ID;
-    use windows::Win32::System::Com::StructuredStorage::InitPropVariantFromStringAsVector;
+    use windows::Win32::System::Com::StructuredStorage::{
+        InitPropVariantFromStringAsVector, PROPVARIANT,
+    };
     use windows::Win32::System::Com::{
         CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx,
         IPersistFile,
     };
     use windows::Win32::UI::Shell::PropertiesSystem::IPropertyStore;
     use windows::Win32::UI::Shell::{IShellLinkW, ShellLink};
-    use windows::core::PROPVARIANT;
     use windows::core::{HSTRING, Interface};
 
     let Some(appdata) = dirs::data_dir() else {
