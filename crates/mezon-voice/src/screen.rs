@@ -17,10 +17,14 @@ type CapturedScreenFrame = scap::capturer::engine::mac::PixelBuffer;
 #[cfg(not(target_os = "macos"))]
 type CapturedScreenFrame = BGRAFrame;
 
-use crate::screen_picker::{PickedScreen, scap_target_for_pick};
+use crate::screen_picker::{PickedScreen, portal_source_types_for_pick, scap_target_for_pick};
 #[cfg(not(target_os = "macos"))]
 use crate::video::bgra_to_i420;
-use crate::video::{VideoFrameStore, local_screen_key, nv12_full_to_i420};
+#[cfg(target_os = "macos")]
+use crate::video::i420_to_bgra_into;
+#[cfg(target_os = "macos")]
+use crate::video::nv12_full_to_i420;
+use crate::video::{VideoFrameStore, local_screen_key};
 
 const CAPTURE_FPS: u32 = 15;
 #[cfg(not(target_os = "macos"))]
@@ -132,6 +136,7 @@ pub fn start_screen(
                 return;
             }
 
+            let portal_source_types = portal_source_types_for_pick(&pick);
             let capture_target = match scap_target_for_pick(pick) {
                 Ok(target) => target,
                 Err(e) => {
@@ -151,6 +156,7 @@ pub fn start_screen(
                 #[cfg(not(target_os = "macos"))]
                 output_type: FrameType::BGRAFrame,
                 output_resolution: Resolution::_1080p,
+                portal_source_types,
                 ..Default::default()
             };
 
@@ -208,12 +214,17 @@ pub fn start_screen(
             let mut src_w = 0u32;
             let mut src_h = 0u32;
             let mut sent_track = false;
-            #[cfg(not(target_os = "macos"))]
             let mut display_buf = Vec::new();
 
             while let Some(captured) = slot.take_latest(&thread_stop) {
                 #[cfg(target_os = "macos")]
-                let (width, height) = (captured.width() as u32 & !1, captured.height() as u32 & !1);
+                let (full_w, full_h) =
+                    (captured.width() as u32 & !1, captured.height() as u32 & !1);
+                #[cfg(target_os = "macos")]
+                let (width, height) = match captured.content_size() {
+                    Some((cw, ch)) => ((cw as u32).min(full_w) & !1, (ch as u32).min(full_h) & !1),
+                    None => (full_w, full_h),
+                };
                 #[cfg(not(target_os = "macos"))]
                 let (width, height, row_stride) = (
                     captured.width as u32 & !1,
@@ -249,6 +260,7 @@ pub fn start_screen(
                 if width != src_w || height != src_h {
                     src_w = width;
                     src_h = height;
+                    tracing::info!("screen capture resized: {src_w}x{src_h}");
                 }
 
                 let mut i420 = I420Buffer::new(src_w, src_h);
@@ -294,18 +306,41 @@ pub fn start_screen(
                         );
                     }
                 }
+                let frame = VideoFrame {
+                    rotation: VideoRotation::VideoRotation0,
+                    timestamp_us: started.elapsed().as_micros() as i64,
+                    frame_metadata: None,
+                    buffer: i420,
+                };
                 if let Some(source) = &source {
-                    let frame = VideoFrame {
-                        rotation: VideoRotation::VideoRotation0,
-                        timestamp_us: started.elapsed().as_micros() as i64,
-                        frame_metadata: None,
-                        buffer: i420,
-                    };
                     source.capture_frame(&frame);
                 }
 
                 #[cfg(target_os = "macos")]
-                frame_store.publish_surface(key, src_w, src_h, captured.core_video_buffer());
+                if width == full_w && height == full_h {
+                    frame_store.publish_surface(key, src_w, src_h, captured.core_video_buffer());
+                } else {
+                    let i420 = &frame.buffer;
+                    let (sy, su, sv) = i420.strides();
+                    let (y, u, v) = i420.data();
+                    display_buf.resize((src_w * src_h * 4) as usize, 0);
+                    i420_to_bgra_into(
+                        &mut display_buf,
+                        y,
+                        u,
+                        v,
+                        sy as usize,
+                        su as usize,
+                        sv as usize,
+                        src_w as usize,
+                        src_h as usize,
+                    );
+                    if let Some(recycled) =
+                        frame_store.publish(key, src_w, src_h, std::mem::take(&mut display_buf))
+                    {
+                        display_buf = recycled;
+                    }
+                }
 
                 #[cfg(not(target_os = "macos"))]
                 let (pw, ph) = if _full_res.load(Ordering::Relaxed) {

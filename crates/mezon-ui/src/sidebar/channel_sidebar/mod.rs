@@ -9,9 +9,11 @@ use gpui::{
 };
 use mezon_store::{
     ChannelId, ChannelList, ClanId, ClanList, ClanMembersStore, FAVOR_CATE_ID,
-    PERMISSION_MANAGE_CLAN, PermissionStore, Settings, VoiceMember,
+    PERMISSION_ADMINISTRATOR, PERMISSION_MANAGE_CLAN, PermissionStore, Settings, VoiceMember,
 };
-use ui::{ScrollAxes, Scrollbars, WithScrollbar};
+
+use crate::channel_app::{is_channel_app_open, launch_channel_app_from_store};
+use ui::{ScrollAxes, Scrollbars, Tooltip, WithScrollbar};
 
 use crate::clan::clan_menu::{build_clan_menu, clan_menu_overlay};
 use crate::components::compositions::channel_row::{channel_type_icon, shows_left_unread_nub};
@@ -21,9 +23,11 @@ use crate::components::compositions::channel_row_element::{
 use crate::components::primitives::{Avatar, Icon, IconName, Sizable, Size, context_menu_at};
 use crate::theme::{ActiveTheme, Theme};
 
+mod app_list_popover;
 mod items;
 mod menu;
 mod skeleton;
+use app_list_popover::app_list_popover_overlay;
 use items::{AppChannelSlot, SidebarItem, VoiceMemberSlot};
 use menu::{OpenMenu, build_channel_menu, on_category_click, on_channel_click};
 
@@ -66,6 +70,8 @@ pub struct ChannelSidebar {
     channel_list_handle: Entity<ChannelList>,
     open_menu: Option<OpenMenu>,
     pub(super) clan_menu_open: bool,
+    app_list_open: bool,
+    app_list_apps: Vec<AppChannelSlot>,
     skeleton_phase: skeleton::Phase,
     skeleton_clan: Option<ClanId>,
     _skeleton_timer: Option<Task<()>>,
@@ -77,6 +83,7 @@ pub struct ChannelSidebar {
     _settings_observe: Subscription,
     _router_observe: Subscription,
     _members_observe: Subscription,
+    _permissions_observe: Subscription,
 }
 
 impl ChannelSidebar {
@@ -138,6 +145,7 @@ impl ChannelSidebar {
                 cx.notify();
             }
         });
+        let permissions_observe = cx.observe(&PermissionStore::global(cx), |_, _, cx| cx.notify());
 
         let initial_locale = settings.read(cx).language.clone();
         let initial_route_channel = route_active_channel(cx);
@@ -156,6 +164,8 @@ impl ChannelSidebar {
             channel_list_handle,
             open_menu: None,
             clan_menu_open: false,
+            app_list_open: false,
+            app_list_apps: Vec::new(),
             skeleton_phase: skeleton::Phase::default(),
             skeleton_clan: None,
             _skeleton_timer: None,
@@ -167,6 +177,7 @@ impl ChannelSidebar {
             _settings_observe: settings_observe,
             _router_observe: router_observe,
             _members_observe: members_observe,
+            _permissions_observe: permissions_observe,
         };
         this.rebuild_items(cx);
         this
@@ -183,6 +194,8 @@ impl ChannelSidebar {
         let clan_changed = self.active_clan_id != new_clan_id;
         if clan_changed {
             self.clan_menu_open = false;
+            self.app_list_open = false;
+            self.app_list_apps.clear();
         }
 
         let new_clan_name = clans
@@ -441,6 +454,46 @@ impl ChannelSidebar {
             cx.notify();
         }
     }
+
+    pub(crate) fn dismiss_app_list(&mut self, cx: &mut Context<Self>) {
+        if self.app_list_open {
+            self.app_list_open = false;
+            self.app_list_apps.clear();
+            cx.notify();
+        }
+    }
+
+    fn open_app_list(&mut self, apps: Vec<AppChannelSlot>, cx: &mut Context<Self>) {
+        if self.app_list_open && self.app_list_apps == apps {
+            self.dismiss_app_list(cx);
+            return;
+        }
+        self.app_list_open = true;
+        self.app_list_apps = apps;
+        cx.notify();
+    }
+
+    pub(crate) fn launch_channel_app(&self, app: AppChannelSlot, cx: &mut Context<Self>) {
+        if app.app_id.is_empty() || app.app_url.is_empty() || app.channel_id.0 == 0 {
+            return;
+        }
+        let Ok(app_id) = app.app_id.parse::<i64>() else {
+            tracing::warn!("Invalid channel app id: {}", app.app_id);
+            return;
+        };
+        let Some(clan_id) = self.active_clan_id else {
+            return;
+        };
+        launch_channel_app_from_store(
+            app_id,
+            app.app_url.clone(),
+            app.app_name.clone(),
+            clan_id,
+            self.active_clan_name.clone(),
+            self.channel_list.clone(),
+            cx,
+        );
+    }
 }
 
 impl Render for ChannelSidebar {
@@ -498,8 +551,13 @@ impl Render for ChannelSidebar {
             )
         });
 
+        let app_list_overlay = self
+            .app_list_open
+            .then(|| (self.app_list_apps.clone(), locale.clone()));
+
         let list_element = list(list_state, {
             let sidebar = sidebar.clone();
+            let locale = locale.clone();
             move |ix, _window, cx| {
                 render_sidebar_item(
                     &items,
@@ -509,6 +567,7 @@ impl Render for ChannelSidebar {
                     active_clan_id_for_nav,
                     sidebar.clone(),
                     suppress_hover,
+                    &locale,
                 )
             }
         })
@@ -575,6 +634,7 @@ impl Render for ChannelSidebar {
         });
 
         div()
+            .relative()
             .flex()
             .flex_col()
             .w_full()
@@ -704,6 +764,15 @@ impl Render for ChannelSidebar {
                     ))
                 },
             )
+            .when_some(app_list_overlay, move |el, (apps, locale)| {
+                el.child(app_list_popover_overlay(
+                    &apps,
+                    &locale,
+                    sidebar.clone(),
+                    suppress_hover,
+                    cx,
+                ))
+            })
     }
 }
 
@@ -766,7 +835,13 @@ fn sidebar_skeleton_layer(theme: &Theme, cx: &App) -> gpui::Div {
         .child(render_skeleton(cx))
 }
 
-fn nav_row(icon: IconName, label: &'static str, theme: &crate::theme::Theme) -> gpui::Div {
+fn nav_row(
+    icon: IconName,
+    label: impl Into<SharedString>,
+    theme: &crate::theme::Theme,
+    active: bool,
+) -> gpui::Div {
+    let label = label.into();
     div()
         .flex()
         .flex_row()
@@ -777,12 +852,18 @@ fn nav_row(icon: IconName, label: &'static str, theme: &crate::theme::Theme) -> 
         .gap_2()
         .rounded(px(4.))
         .cursor_pointer()
-        .text_color(theme.text_secondary)
-        .child(
-            Icon::new(icon)
-                .size(px(20.))
-                .text_color(theme.text_secondary),
-        )
+        .when(active, |element| element.bg(theme.bg_hover))
+        .hover(|style| style.bg(theme.bg_hover))
+        .text_color(if active {
+            theme.text_primary
+        } else {
+            theme.text_secondary
+        })
+        .child(Icon::new(icon).size(px(20.)).text_color(if active {
+            theme.text_primary
+        } else {
+            theme.text_secondary
+        }))
         .child(
             div()
                 .text_base()
@@ -830,11 +911,25 @@ fn truncate_channel_label(name: &str) -> String {
     }
 }
 
+pub(crate) fn app_channel_open_dot(theme: &Theme) -> gpui::Div {
+    div()
+        .absolute()
+        .top(px(2.))
+        .right(px(2.))
+        .size(px(8.))
+        .rounded_full()
+        .border_2()
+        .border_color(theme.bg_secondary)
+        .bg(theme.status_online)
+}
+
 fn render_banner_and_events(
     banner_url: Option<&str>,
     app_channels: &[AppChannelSlot],
+    sidebar: WeakEntity<ChannelSidebar>,
     cx: &App,
     suppress_hover: bool,
+    _locale: &str,
 ) -> AnyElement {
     let theme = cx.theme();
     let divider_color = theme.border;
@@ -854,21 +949,45 @@ fn render_banner_and_events(
     }
 
     let members_clan_id = ClanList::global(cx).read(cx).active_clan_id;
-    let members_row = nav_row(IconName::MemberList, "Members", theme)
+    let route = crate::router::Router::global(cx).read(cx).route();
+    let members_active = matches!(route, crate::router::Route::ClanMembers { .. });
+    let channels_active = matches!(route, crate::router::Route::ClanChannels { .. });
+    let members_row = nav_row(IconName::MemberList, "Members", theme, members_active)
         .id("clan-members-nav")
         .on_click(move |_, _, cx| {
             if let Some(clan_id) = members_clan_id {
                 crate::router::navigate(cx, crate::router::Route::ClanMembers { clan_id });
             }
         });
+    let can_view_channels = members_clan_id.is_some_and(|clan_id| {
+        PermissionStore::global(cx)
+            .read(cx)
+            .check_permission(clan_id, PERMISSION_ADMINISTRATOR, cx)
+    });
+    let locale = Settings::try_global(cx)
+        .map(|settings| settings.read(cx).language.clone())
+        .unwrap_or_else(|| "en".to_string());
+    let channels_row = nav_row(
+        IconName::ChannelBrowser,
+        mezon_i18n::t(&locale, "channelList.navigation.channels"),
+        theme,
+        channels_active,
+    )
+    .id("clan-channels-nav")
+    .on_click(move |_, _, cx| {
+        if let Some(clan_id) = members_clan_id {
+            crate::router::navigate(cx, crate::router::Route::ClanChannels { clan_id });
+        }
+    });
     let nav_col = div()
         .flex()
         .flex_col()
         .w_full()
         .p_2()
         .gap_1()
-        .child(nav_row(IconName::IconEvents, "Events", theme))
-        .child(members_row);
+        .child(nav_row(IconName::IconEvents, "Events", theme, false))
+        .child(members_row)
+        .when(can_view_channels, |element| element.child(channels_row));
 
     col = col.child(nav_col);
 
@@ -894,6 +1013,13 @@ fn render_banner_and_events(
 
         let mut app_row = app_row;
         for (ix, slot) in show_list.iter().enumerate() {
+            let app = (*slot).clone();
+            let sidebar_for_click = sidebar.clone();
+            let tooltip_name = if app.app_name.is_empty() {
+                SharedString::from("Channel App")
+            } else {
+                SharedString::from(app.app_name.clone())
+            };
             let icon_el: AnyElement = if let Some(logo) = &slot.app_logo {
                 gpui::img(logo.clone())
                     .w(px(24.))
@@ -907,9 +1033,11 @@ fn render_banner_and_events(
                     .text_color(theme.text_primary)
                     .into_any_element()
             };
+            let is_open = is_channel_app_open(&app.app_id, cx);
             app_row = app_row.child(
                 div()
                     .id(SharedString::from(format!("app-channel-{ix}")))
+                    .relative()
                     .w(px(40.))
                     .h(px(40.))
                     .p_2()
@@ -918,11 +1046,24 @@ fn render_banner_and_events(
                     .items_center()
                     .justify_center()
                     .cursor_pointer()
-                    .when(!suppress_hover, |app| app.hover(|s| s.bg(hover_bg)))
-                    .child(icon_el),
+                    .when(!suppress_hover, |app| {
+                        app.hover(|s| s.bg(hover_bg))
+                            .tooltip(Tooltip::text(tooltip_name))
+                    })
+                    .on_click(move |_, _, cx| {
+                        let _ = sidebar_for_click.update(cx, |sidebar, cx| {
+                            sidebar.launch_channel_app(app.clone(), cx);
+                        });
+                    })
+                    .child(icon_el)
+                    .when(is_open, |cell| cell.child(app_channel_open_dot(theme))),
             );
         }
         if has_more {
+            let all_apps: Vec<AppChannelSlot> = app_channels.to_vec();
+            let sidebar_more = sidebar.clone();
+            let channel_apps_label =
+                SharedString::from(mezon_i18n::t(&locale, "channelList.channelApps").to_string());
             app_row = app_row.child(
                 div()
                     .id("app-channels-more")
@@ -934,7 +1075,15 @@ fn render_banner_and_events(
                     .items_center()
                     .justify_center()
                     .cursor_pointer()
-                    .when(!suppress_hover, |more| more.hover(|s| s.bg(hover_bg)))
+                    .when(!suppress_hover, |more| {
+                        more.hover(|s| s.bg(hover_bg))
+                            .tooltip(Tooltip::text(channel_apps_label))
+                    })
+                    .on_click(move |_, _, cx| {
+                        let _ = sidebar_more.update(cx, |sidebar, cx| {
+                            sidebar.open_app_list(all_apps.clone(), cx);
+                        });
+                    })
                     .child(
                         Icon::new(IconName::RightIcon)
                             .size(px(24.))
@@ -959,6 +1108,7 @@ fn render_sidebar_item(
     active_clan_id_for_nav: Option<ClanId>,
     sidebar: WeakEntity<ChannelSidebar>,
     suppress_hover: bool,
+    locale: &str,
 ) -> AnyElement {
     let theme = cx.theme();
     let Some(item) = items.get(ix) else {
@@ -969,7 +1119,14 @@ fn render_sidebar_item(
         SidebarItem::BannerAndEvents {
             banner_url,
             app_channels,
-        } => render_banner_and_events(banner_url.as_deref(), app_channels, cx, suppress_hover),
+        } => render_banner_and_events(
+            banner_url.as_deref(),
+            app_channels,
+            sidebar,
+            cx,
+            suppress_hover,
+            locale,
+        ),
 
         SidebarItem::Category {
             elem_id,

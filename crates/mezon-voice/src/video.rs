@@ -309,6 +309,7 @@ pub fn i420_to_bgra_into(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub fn nv12_full_to_i420(
     src_y: &[u8],
     src_uv: &[u8],

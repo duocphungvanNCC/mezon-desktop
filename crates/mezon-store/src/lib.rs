@@ -7,6 +7,7 @@ pub mod cache;
 pub mod channel;
 pub mod channel_members;
 pub mod channel_permissions;
+pub mod channel_settings;
 pub mod clan;
 pub mod clan_members;
 pub mod config;
@@ -40,6 +41,7 @@ pub mod topics;
 pub mod user_profile;
 pub mod users_by_user;
 pub mod voice;
+pub mod webhook;
 
 use anyhow::{Context, Result};
 use dirs::config_dir;
@@ -69,6 +71,7 @@ pub use channel_permissions::{
     ChannelPermissionsEvent, ChannelPermissionsStore, PERMISSION_DELETE_MESSAGE,
     PERMISSION_MANAGE_THREAD,
 };
+pub use channel_settings::{ChannelSetting, ChannelSettingsEvent, ChannelSettingsStore};
 pub use clan::*;
 pub use clan_members::{
     ClanMember, ClanMembersEvent, ClanMembersStore, User, split_members_by_status,
@@ -144,6 +147,10 @@ pub use voice::{
     VideoFrameStore, VoiceCallStatus, VoiceConnection, VoiceModerationError, VoiceParticipant,
     VoiceRenderFrame, VoiceStore, camera_tile_id, capture_screen_share_preview,
     list_screen_share_options, peek_screen_share_options, screen_tile_id,
+};
+pub use webhook::{
+    ChannelWebhook, ClanWebhook, MAX_WEBHOOK_AVATAR_BYTES, WEBHOOK_NAME_MAX_LENGTH, WebhookEvent,
+    WebhookStore,
 };
 
 pub const CACHE_TTL: Duration = Duration::from_secs(20 * 60);

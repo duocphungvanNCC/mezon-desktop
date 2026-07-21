@@ -23,7 +23,7 @@ impl ScreenShareOption {
     pub fn is_portal(&self) -> bool {
         #[cfg(target_os = "linux")]
         {
-            matches!(self.pick, PickedScreen::LinuxPortal)
+            matches!(self.pick, PickedScreen::LinuxPortal(_))
         }
         #[cfg(not(target_os = "linux"))]
         {
@@ -86,12 +86,20 @@ fn fetch_screen_share_options() -> Result<Vec<ScreenShareOption>, ScreenShareLis
 fn list_scap_options() -> Result<Vec<ScreenShareOption>, String> {
     #[cfg(target_os = "linux")]
     if std::env::var("WAYLAND_DISPLAY").is_ok() {
-        return Ok(vec![ScreenShareOption {
-            id: 0,
-            title: String::new(),
-            kind: ScreenShareKind::Display,
-            pick: PickedScreen::LinuxPortal,
-        }]);
+        return Ok(vec![
+            ScreenShareOption {
+                id: 0,
+                title: String::new(),
+                kind: ScreenShareKind::Window,
+                pick: PickedScreen::LinuxPortal(ScreenShareKind::Window),
+            },
+            ScreenShareOption {
+                id: 1,
+                title: String::new(),
+                kind: ScreenShareKind::Display,
+                pick: PickedScreen::LinuxPortal(ScreenShareKind::Display),
+            },
+        ]);
     }
 
     let mut options = Vec::new();
@@ -101,8 +109,12 @@ fn list_scap_options() -> Result<Vec<ScreenShareOption>, String> {
                 if window.title.trim().is_empty() {
                     continue;
                 }
+                #[cfg(target_os = "linux")]
+                let id = xcb::Xid::resource_id(&window.raw_handle);
+                #[cfg(not(target_os = "linux"))]
+                let id = window.id;
                 options.push(ScreenShareOption {
-                    id: window.id,
+                    id,
                     title: window.title.clone(),
                     kind: ScreenShareKind::Window,
                     pick: PickedScreen::Target(Target::Window(window)),

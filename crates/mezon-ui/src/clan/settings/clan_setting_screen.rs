@@ -7,6 +7,7 @@ use mezon_store::{
     ChannelList, ClanId, ClanList, ClanSettingsPermissions, PermissionStore, Settings,
 };
 
+use super::integration_setting_page::IntegrationSettingPage;
 use super::overview_setting_page::{OverviewSettingPage, render_clan_overview_save_bar};
 use super::role_icon_picker::render_role_icon_picker_modal;
 use super::role_setting_page::{RoleSettingPage, render_role_save_bar};
@@ -158,6 +159,7 @@ pub struct ClanSettingScreen {
     current_page: ClanSettingsPage,
     overview_page: Option<Entity<OverviewSettingPage>>,
     roles_page: Option<Entity<RoleSettingPage>>,
+    integrations_page: Option<Entity<IntegrationSettingPage>>,
     scroll: ScrollHandle,
     nav_scroll: ScrollHandle,
     focus_handle: FocusHandle,
@@ -188,6 +190,7 @@ impl ClanSettingScreen {
             current_page: page,
             overview_page: None,
             roles_page: None,
+            integrations_page: None,
             scroll: ScrollHandle::new(),
             nav_scroll: ScrollHandle::new(),
             focus_handle: cx.focus_handle(),
@@ -267,6 +270,7 @@ impl ClanSettingScreen {
             if clan_changed {
                 self.release_page(ClanSettingsPage::Overview, cx);
                 self.release_page(ClanSettingsPage::Roles, cx);
+                self.release_page(ClanSettingsPage::Integrations, cx);
             }
             self.reset_content_scroll();
         }
@@ -284,6 +288,11 @@ impl ClanSettingScreen {
         }
         if page == ClanSettingsPage::Roles
             && let Some(entity) = self.roles_page.take()
+        {
+            entity.update(cx, |page, _| page.release());
+        }
+        if page == ClanSettingsPage::Integrations
+            && let Some(entity) = self.integrations_page.take()
         {
             entity.update(cx, |page, _| page.release());
         }
@@ -314,6 +323,28 @@ impl ClanSettingScreen {
                 cx.observe(roles, |_, _, cx| cx.notify()).detach();
             }
         }
+        if page == ClanSettingsPage::Integrations && self.integrations_page.is_none() {
+            let channel_list = self.channel_list.clone();
+            let settings = self.settings.clone();
+            let clan_id = self.clan_id;
+            let can_manage_clan_webhooks = {
+                let store = PermissionStore::global(cx).read(cx);
+                let perms = store.clan_settings_permissions(clan_id, cx);
+                perms.is_clan_owner || perms.has_manage_clan
+            };
+            self.integrations_page = Some(cx.new(|cx| {
+                IntegrationSettingPage::new(
+                    clan_id,
+                    channel_list,
+                    settings,
+                    can_manage_clan_webhooks,
+                    cx,
+                )
+            }));
+            if let Some(integrations) = &self.integrations_page {
+                cx.observe(integrations, |_, _, cx| cx.notify()).detach();
+            }
+        }
     }
 
     fn page_title(&self, page: ClanSettingsPage, locale: &str) -> SharedString {
@@ -328,6 +359,10 @@ impl ClanSettingScreen {
                 .map(|p| p.clone().into_any_element()),
             ClanSettingsPage::Roles => self
                 .roles_page
+                .as_ref()
+                .map(|p| p.clone().into_any_element()),
+            ClanSettingsPage::Integrations => self
+                .integrations_page
                 .as_ref()
                 .map(|p| p.clone().into_any_element()),
             _ => None,
@@ -617,10 +652,12 @@ impl Render for ClanSettingScreen {
                                         }
                                         scroll.child(
                                             div()
+                                                .flex()
+                                                .flex_col()
+                                                .w_full()
                                                 .max_w(px(740.0))
-                                                .when(roles_edit_mode, |el| {
-                                                    el.w_full().h_full().min_h_0()
-                                                })
+                                                .items_stretch()
+                                                .when(roles_edit_mode, |el| el.h_full().min_h_0())
                                                 .child(content),
                                         )
                                     }),

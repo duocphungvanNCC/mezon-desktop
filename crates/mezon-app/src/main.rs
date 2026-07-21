@@ -577,6 +577,7 @@ fn open_main_window(
     mezon_store::ClanList::init(api.clone(), cx);
     mezon_store::ClanMembersStore::init(api.clone(), cx);
     mezon_store::ChannelList::init(api.clone(), cx);
+    mezon_store::ChannelSettingsStore::init(api.clone(), cx);
     mezon_store::DirectMessageStore::init(api.clone(), cx);
     mezon_store::FriendStore::init(api.clone(), cx);
     mezon_store::ActivityStore::init(api.clone(), cx);
@@ -599,6 +600,7 @@ fn open_main_window(
     mezon_store::GroupMembersStore::init(api.clone(), cx);
     mezon_store::UsersByUserStore::init(api.clone(), cx);
     mezon_store::RolesStore::init(api.clone(), cx);
+    mezon_store::WebhookStore::init(api.clone(), cx);
     mezon_store::GalleryStore::init(api.clone(), cx);
     mezon_store::FilesStore::init(api.clone(), cx);
     mezon_store::PermissionStore::init(api.clone(), auth_state.clone(), cx);

@@ -267,7 +267,7 @@ impl ClanMembersPage {
         cell.into_any_element()
     }
 
-    fn render_member_row(&self, row: &MemberRow, locale: &str, cx: &Context<Self>) -> AnyElement {
+    fn render_member_row(&self, row: &MemberRow, cx: &Context<Self>) -> AnyElement {
         let theme = cx.theme();
         let roles = self.visible_roles(&row.role_ids, cx);
         let name_color = roles
@@ -322,15 +322,6 @@ impl ClanMembersPage {
                 true,
             ))
             .child(weighted_column(self.role_cell(row, cx), 2., true))
-            .child(weighted_column(
-                div()
-                    .text_size(px(12.))
-                    .text_color(theme.text_secondary)
-                    .child(tr(locale, "memberTable.headers.signals").to_uppercase())
-                    .into_any_element(),
-                1.,
-                true,
-            ))
             .into_any_element()
     }
 
@@ -411,14 +402,6 @@ impl ClanMembersPage {
                     cx,
                 ),
                 2.,
-                true,
-            ))
-            .child(weighted_column(
-                header_with_filter(
-                    tr(locale, "memberTable.headers.signals").to_uppercase(),
-                    theme,
-                ),
-                1.,
                 true,
             ))
             .into_any_element()
@@ -677,13 +660,12 @@ impl Render for ClanMembersPage {
             self.list_state.reset(item_count);
         }
         let entity = cx.entity();
-        let locale_for_list = Arc::<str>::from(locale.clone());
         let visible_for_list = visible.clone();
         let member_list = list(self.list_state.clone(), move |index, _window, cx| {
             entity.update(cx, |this, cx| {
                 visible_for_list
                     .get(index)
-                    .map(|row| this.render_member_row(row, &locale_for_list, cx))
+                    .map(|row| this.render_member_row(row, cx))
                     .unwrap_or_else(|| div().into_any_element())
             })
         })
@@ -743,24 +725,6 @@ fn weighted_column(content: AnyElement, weight: f32, centered: bool) -> gpui::Di
             element.flex().items_center().justify_center().text_center()
         })
         .child(content)
-}
-
-fn header_with_filter(label: String, theme: &crate::theme::Theme) -> AnyElement {
-    div()
-        .flex()
-        .items_center()
-        .justify_center()
-        .gap_1()
-        .child(label)
-        .child(
-            Icon::new(IconName::FiltersIcon)
-                .size(px(16.))
-                .text_color(theme.text_secondary)
-                .with_transformation(gpui::Transformation::rotate(gpui::radians(
-                    std::f32::consts::FRAC_PI_2,
-                ))),
-        )
-        .into_any_element()
 }
 
 fn date_cell(value: String, theme: &crate::theme::Theme) -> AnyElement {
@@ -841,7 +805,7 @@ fn parse_hex_color(raw: &str) -> Option<gpui::Rgba> {
 }
 
 fn pagination_items(current: usize, pages: usize) -> Vec<Option<usize>> {
-    if pages <= 5 {
+    if pages <= 6 {
         return (0..pages).map(Some).collect();
     }
     if current <= 2 {
@@ -967,6 +931,10 @@ mod tests {
 
     #[test]
     fn pagination_matches_react_at_the_edges() {
+        assert_eq!(
+            pagination_items(5, 6),
+            vec![Some(0), Some(1), Some(2), Some(3), Some(4), Some(5)]
+        );
         assert_eq!(
             pagination_items(0, 10),
             vec![Some(0), Some(1), Some(2), Some(3), Some(4), None, Some(9)]

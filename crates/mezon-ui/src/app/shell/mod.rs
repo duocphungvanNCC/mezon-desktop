@@ -16,11 +16,13 @@ use crate::components::primitives::{Toast, ToastKind};
 mod coming_soon_modal;
 mod confirm_delete_message_modal;
 mod confirm_delete_role_modal;
+mod confirm_delete_webhook_modal;
 mod confirm_remove_friend_modal;
 mod upload_limit_modal;
 use coming_soon_modal::ComingSoonModal;
 use confirm_delete_message_modal::ConfirmDeleteMessageModal;
 use confirm_delete_role_modal::ConfirmDeleteRoleModal;
+use confirm_delete_webhook_modal::{ConfirmDeleteWebhookModal, WebhookDeleteTarget};
 pub use confirm_remove_friend_modal::FriendRemovalKind;
 use confirm_remove_friend_modal::{ConfirmRemoveFriendModal, interpolate_username};
 use upload_limit_modal::UploadLimitModal;
@@ -259,6 +261,65 @@ impl Shell {
         let focus_handle = view.read(cx).focus_handle.clone();
         window.focus(&focus_handle, cx);
         self.show_modal(view.into(), cx);
+    }
+
+    fn confirm_delete_webhook(
+        &mut self,
+        target: WebhookDeleteTarget,
+        locale: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let name = target.webhook_name();
+        let title: SharedString = mezon_i18n::t(locale, target.delete_title_key())
+            .to_string()
+            .into();
+        let description: SharedString = mezon_i18n::t(
+            locale,
+            "clanIntegrationsSetting.webhooksEdit.deleteWebhookConfirmation",
+        )
+        .replace("{{webhookName}}", name)
+        .into();
+        let cancel_label: SharedString =
+            mezon_i18n::t(locale, "clanIntegrationsSetting.webhooksEdit.cancel")
+                .to_string()
+                .into();
+        let delete_label: SharedString =
+            mezon_i18n::t(locale, "clanIntegrationsSetting.webhooksEdit.yes")
+                .to_string()
+                .into();
+        let view = cx.new(|cx| ConfirmDeleteWebhookModal {
+            focus_handle: cx.focus_handle(),
+            target,
+            locale: locale.to_string(),
+            title,
+            description,
+            cancel_label,
+            delete_label,
+        });
+        let focus_handle = view.read(cx).focus_handle.clone();
+        window.focus(&focus_handle, cx);
+        self.show_modal(view.into(), cx);
+    }
+
+    pub fn confirm_delete_channel_webhook(
+        &mut self,
+        webhook: mezon_store::ChannelWebhook,
+        locale: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.confirm_delete_webhook(WebhookDeleteTarget::Channel(webhook), locale, window, cx);
+    }
+
+    pub fn confirm_delete_clan_webhook(
+        &mut self,
+        webhook: mezon_store::ClanWebhook,
+        locale: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.confirm_delete_webhook(WebhookDeleteTarget::Clan(webhook), locale, window, cx);
     }
 
     pub fn confirm_remove_friend(

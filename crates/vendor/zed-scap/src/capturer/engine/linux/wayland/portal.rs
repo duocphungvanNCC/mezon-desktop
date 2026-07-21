@@ -224,6 +224,7 @@ pub struct ScreenCastPortal<'a> {
     proxy: Proxy<'a, &'a Connection>,
     token: String,
     cursor_mode: u32,
+    requested_source_types: Option<u32>,
 }
 
 impl<'a> ScreenCastPortal<'a> {
@@ -240,7 +241,13 @@ impl<'a> ScreenCastPortal<'a> {
             proxy,
             token,
             cursor_mode: 1,
+            requested_source_types: None,
         }
+    }
+
+    pub fn source_types(mut self, types: Option<u32>) -> Self {
+        self.requested_source_types = types;
+        self
     }
 
     fn create_session_args(&self) -> arg::PropMap {
@@ -262,10 +269,12 @@ impl<'a> ScreenCastPortal<'a> {
             String::from("handle_token"),
             Variant(Box::new(self.token.clone())),
         );
-        map.insert(
-            String::from("types"),
-            Variant(Box::new(self.proxy.available_source_types()?)),
-        );
+        let available_types = self.proxy.available_source_types()?;
+        let types = match self.requested_source_types {
+            Some(requested) if requested & available_types != 0 => requested & available_types,
+            _ => available_types,
+        };
+        map.insert(String::from("types"), Variant(Box::new(types)));
         map.insert(String::from("multiple"), Variant(Box::new(false)));
         map.insert(
             String::from("cursor_mode"),
