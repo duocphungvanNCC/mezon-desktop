@@ -625,6 +625,95 @@ impl TransportClient {
             .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
     }
 
+    pub async fn get_notification_channel(
+        &self,
+        channel_id: i64,
+    ) -> Result<mezon_proto::api::NotificationUserChannel> {
+        let transport = self.inner.clone();
+        runtime()
+            .spawn(async move { transport.get_notification_channel(channel_id).await })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
+    pub async fn set_notification_channel_setting(
+        &self,
+        channel_id: i64,
+        notification_type: i32,
+        clan_id: i64,
+    ) -> Result<()> {
+        let transport = self.inner.clone();
+        runtime()
+            .spawn(async move {
+                transport
+                    .set_notification_channel_setting(channel_id, notification_type, clan_id)
+                    .await
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
+    pub async fn delete_notification_channel(&self, channel_id: i64) -> Result<()> {
+        let transport = self.inner.clone();
+        runtime()
+            .spawn(async move { transport.delete_notification_channel(channel_id).await })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
+    pub async fn set_mute_channel(
+        &self,
+        channel_id: i64,
+        mute_seconds: i32,
+        clan_id: i64,
+    ) -> Result<()> {
+        let transport = self.inner.clone();
+        runtime()
+            .spawn(async move {
+                transport
+                    .set_mute_channel(channel_id, mute_seconds, clan_id)
+                    .await
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
+    pub fn spawn_gotify_stream(
+        &self,
+        ws_base: String,
+        token: String,
+    ) -> tokio::sync::mpsc::UnboundedReceiver<crate::gotify::GotifyNotification> {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        runtime().spawn(crate::gotify::run_stream(ws_base, token, tx));
+        rx
+    }
+
+    pub async fn regist_fcm_device_token(
+        &self,
+        token: String,
+        device_id: String,
+        platform: String,
+    ) -> Result<String> {
+        let transport = self.inner.clone();
+        runtime()
+            .spawn(async move {
+                transport
+                    .regist_fcm_device_token(&token, &device_id, &platform)
+                    .await
+                    .map(|resp| resp.token)
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
+    pub async fn list_muted_channels(&self, clan_id: i64) -> Result<Vec<String>> {
+        let transport = self.inner.clone();
+        runtime()
+            .spawn(async move { transport.list_muted_channels(clan_id).await })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
     pub async fn list_clan_descs(&self) -> Result<Vec<crate::transport::ApiClanDesc>> {
         tracing::debug!("TransportClient::list_clan_descs() called");
 

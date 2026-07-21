@@ -36,8 +36,25 @@ enum Item {
         on_react: QuickReactionHandler,
         on_view_more: MenuHandler,
     },
+    Submenu {
+        label: SharedString,
+        sub_text: Option<SharedString>,
+        options: Vec<SubmenuOption>,
+        open: bool,
+        on_open: MenuHandler,
+        on_select: SubmenuHandler,
+    },
     Separator,
 }
+
+#[derive(Clone)]
+pub struct SubmenuOption {
+    pub value: i32,
+    pub label: SharedString,
+    pub selected: bool,
+}
+
+type SubmenuHandler = Rc<dyn Fn(i32, &mut Window, &mut App)>;
 
 #[derive(IntoElement, Default)]
 pub struct ContextMenu {
@@ -228,6 +245,26 @@ impl ContextMenu {
         });
         self
     }
+
+    pub fn submenu(
+        mut self,
+        label: impl Into<SharedString>,
+        sub_text: Option<SharedString>,
+        options: Vec<SubmenuOption>,
+        open: bool,
+        on_open: impl Fn(&mut Window, &mut App) + 'static,
+        on_select: impl Fn(i32, &mut Window, &mut App) + 'static,
+    ) -> Self {
+        self.items.push(Item::Submenu {
+            label: label.into(),
+            sub_text,
+            options,
+            open,
+            on_open: Rc::new(on_open),
+            on_select: Rc::new(on_select),
+        });
+        self
+    }
 }
 
 impl RenderOnce for ContextMenu {
@@ -362,6 +399,103 @@ impl RenderOnce for ContextMenu {
                                     dismiss(window, cx);
                                 }
                             }),
+                    );
+                }
+                Item::Submenu {
+                    label,
+                    sub_text,
+                    options,
+                    open,
+                    on_open,
+                    on_select,
+                } => {
+                    let dismiss = dismiss.clone();
+                    let submenu = if open {
+                        let mut sub = v_flex()
+                            .absolute()
+                            .top(px(-6.))
+                            .when(submenu_open_left, |el| el.right(relative(1.)).mr(px(4.)))
+                            .when(!submenu_open_left, |el| el.left(relative(1.)).ml(px(4.)))
+                            .w(px(SUBMENU_WIDTH))
+                            .p(px(6.))
+                            .rounded_md()
+                            .border_1()
+                            .border_color(border)
+                            .bg(bg)
+                            .shadow_lg()
+                            .occlude();
+                        for (oi, option) in options.iter().enumerate() {
+                            let value = option.value;
+                            let on_select = on_select.clone();
+                            let dismiss_o = dismiss.clone();
+                            sub = sub.child(
+                                h_flex()
+                                    .id(("submenu-option", oi))
+                                    .w_full()
+                                    .items_center()
+                                    .gap_2()
+                                    .px(px(8.))
+                                    .py(px(6.))
+                                    .rounded(px(4.))
+                                    .cursor_pointer()
+                                    .hover(|s| s.bg(hover))
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .text_sm()
+                                            .text_color(text)
+                                            .truncate()
+                                            .child(option.label.clone()),
+                                    )
+                                    .when(option.selected, |el| {
+                                        el.child(
+                                            Icon::new(IconName::Check).size_4().text_color(text),
+                                        )
+                                    })
+                                    .on_click(move |_: &ClickEvent, window, cx| {
+                                        on_select(value, window, cx);
+                                        if let Some(dismiss) = &dismiss_o {
+                                            dismiss(window, cx);
+                                        }
+                                    }),
+                            );
+                        }
+                        Some(sub)
+                    } else {
+                        None
+                    };
+                    let mut label_col = v_flex().flex_1().child(div().child(label));
+                    if let Some(sub_text) = sub_text {
+                        label_col = label_col.child(
+                            div()
+                                .ml(px(8.))
+                                .mb(px(4.))
+                                .text_xs()
+                                .text_color(text)
+                                .child(sub_text),
+                        );
+                    }
+                    panel = panel.child(
+                        h_flex()
+                            .id(("context-menu-item", index))
+                            .relative()
+                            .w_full()
+                            .items_center()
+                            .px(px(10.))
+                            .py(px(8.))
+                            .rounded(px(4.))
+                            .text_sm()
+                            .text_color(text)
+                            .cursor_pointer()
+                            .hover(|s| s.bg(hover))
+                            .on_hover(move |hovered, window, cx| {
+                                if *hovered {
+                                    on_open(window, cx);
+                                }
+                            })
+                            .child(label_col)
+                            .child(Icon::new(IconName::ChevronRight).size_4().text_color(muted))
+                            .children(submenu),
                     );
                 }
                 Item::ReactionSubmenu {
