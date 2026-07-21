@@ -8,6 +8,7 @@ use mezon_store::{ChannelId, InVoiceInfo, MessagesEvent, MessagesStore, Settings
 use ui::PopoverMenuHandle;
 
 use crate::chat::ReplyTarget;
+use crate::chat::channel_app_bar::{ChannelAppBarTarget, render_channel_app_bar};
 use crate::chat::channel_header::ChatHeader;
 use crate::chat::channel_typing::ChannelTyping;
 use crate::chat::inbox::InboxPopoverPanel;
@@ -19,6 +20,7 @@ use crate::chat::message_search::{MESSAGE_SEARCH_PANEL_WIDTH, MessageSearchPanel
 use crate::chat::pinned_popover::PinnedPopoverPanel;
 use crate::components::primitives::{Icon, IconName, InputState};
 use crate::image_cache::LruImageCache;
+use crate::theme::ActiveTheme;
 
 pub struct ChatArea {
     pub(crate) timeline: Entity<ChannelMessages>,
@@ -184,6 +186,7 @@ impl ChatArea {
         search_input: Option<Entity<InputState>>,
         show_results_panel: bool,
         message_search_panel: Option<Entity<MessageSearchPanel>>,
+        app_channel_bar: Option<ChannelAppBarTarget>,
         cx: &mut Context<crate::ChatLayout>,
     ) -> gpui::AnyElement {
         let (input_bar, mention_input) = match (self.input_bar.clone(), self.mention_input.clone())
@@ -329,7 +332,15 @@ impl ChatArea {
             .child(div().flex_1().min_h_0().overflow_hidden().child(
                 AnyView::from(self.timeline.clone()).cached(StyleRefinement::default().size_full()),
             ))
-            .child(input_bar)
+            .when_some(app_channel_bar.as_ref(), |col, target| {
+                col.child(render_channel_app_bar(
+                    locale,
+                    target.clone(),
+                    cx.theme(),
+                    cx,
+                ))
+            })
+            .when(app_channel_bar.is_none(), |col| col.child(input_bar))
             .child(
                 AnyView::from(self.typing.clone()).cached(
                     StyleRefinement::default()

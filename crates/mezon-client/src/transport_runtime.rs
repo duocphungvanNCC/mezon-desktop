@@ -1945,6 +1945,17 @@ impl TransportClient {
             .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
     }
 
+    pub async fn generate_hash_channel_apps(
+        &self,
+        app_id: i64,
+    ) -> Result<mezon_proto::api::GenerateHashChannelAppsResponse> {
+        let transport = self.inner.clone();
+        runtime()
+            .spawn(async move { transport.generate_hash_channel_apps(app_id).await })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub async fn list_channel_attachment(
         &self,

@@ -1,4 +1,5 @@
 pub mod area;
+pub mod channel_app_bar;
 pub mod channel_header;
 pub mod channel_typing;
 pub mod chat_sending;

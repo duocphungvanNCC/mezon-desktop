@@ -1723,6 +1723,13 @@ impl AppApi {
         self.transport.list_channel_apps(clan_id).await
     }
 
+    pub async fn generate_hash_channel_apps(
+        &self,
+        app_id: i64,
+    ) -> Result<mezon_proto::api::GenerateHashChannelAppsResponse> {
+        self.transport.generate_hash_channel_apps(app_id).await
+    }
+
     pub async fn list_favorite_channels(&self, clan_id: i64) -> Result<Vec<String>> {
         let resp = self.transport.get_list_favorite_channel(clan_id).await?;
         Ok(resp
