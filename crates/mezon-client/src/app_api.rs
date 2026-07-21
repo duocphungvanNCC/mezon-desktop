@@ -1738,6 +1738,68 @@ impl AppApi {
         self.transport.get_notification_clan(clan_id).await
     }
 
+    pub async fn get_notification_channel(
+        &self,
+        channel_id: i64,
+    ) -> Result<crate::ChannelNotificationSetting> {
+        let dto = self.transport.get_notification_channel(channel_id).await?;
+        Ok(crate::ChannelNotificationSetting::from_api(&dto))
+    }
+
+    pub async fn set_notification_channel_setting(
+        &self,
+        channel_id: i64,
+        notification_type: i32,
+        clan_id: i64,
+    ) -> Result<()> {
+        self.transport
+            .set_notification_channel_setting(channel_id, notification_type, clan_id)
+            .await
+    }
+
+    pub async fn delete_notification_channel(&self, channel_id: i64) -> Result<()> {
+        self.transport.delete_notification_channel(channel_id).await
+    }
+
+    pub async fn set_mute_channel(
+        &self,
+        channel_id: i64,
+        mute_seconds: i32,
+        clan_id: i64,
+    ) -> Result<()> {
+        self.transport
+            .set_mute_channel(channel_id, mute_seconds, clan_id)
+            .await
+    }
+
+    pub async fn list_muted_channels(&self, clan_id: i64) -> Result<Vec<String>> {
+        self.transport.list_muted_channels(clan_id).await
+    }
+
+    pub fn spawn_gotify_stream(
+        &self,
+        ws_base: String,
+        token: String,
+    ) -> tokio::sync::mpsc::UnboundedReceiver<crate::gotify::GotifyNotification> {
+        self.transport.spawn_gotify_stream(ws_base, token)
+    }
+
+    /// Register a device token and return the Gotify notification-stream token.
+    pub async fn regist_fcm_device_token(
+        &self,
+        token: &str,
+        device_id: &str,
+        platform: &str,
+    ) -> Result<String> {
+        self.transport
+            .regist_fcm_device_token(
+                token.to_string(),
+                device_id.to_string(),
+                platform.to_string(),
+            )
+            .await
+    }
+
     pub async fn list_notifications(
         &self,
         clan_id: &str,

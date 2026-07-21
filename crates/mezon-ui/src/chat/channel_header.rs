@@ -26,6 +26,7 @@ const HEADER_POPOVER_Y_OFFSET: f32 = 4.;
 pub struct ChannelHeader {
     name: String,
     dm: bool,
+    muted: bool,
     in_voice: Option<(SharedString, InVoiceInfo)>,
     members_action: bool,
     members_active: bool,
@@ -41,6 +42,7 @@ pub struct ChannelHeader {
     settings: Option<Entity<Settings>>,
     gallery_trigger: Option<AnyElement>,
     files_trigger: Option<AnyElement>,
+    notification_trigger: Option<AnyElement>,
     search_bar: Option<AnyElement>,
 }
 
@@ -49,6 +51,7 @@ impl ChannelHeader {
         Self {
             name: name.into(),
             dm: false,
+            muted: false,
             in_voice: None,
             members_action: true,
             members_active: false,
@@ -64,6 +67,7 @@ impl ChannelHeader {
             settings: None,
             gallery_trigger: None,
             files_trigger: None,
+            notification_trigger: None,
             search_bar: None,
         }
     }
@@ -144,6 +148,11 @@ impl ChannelHeader {
         self
     }
 
+    pub fn notification_trigger(mut self, trigger: Option<AnyElement>) -> Self {
+        self.notification_trigger = trigger;
+        self
+    }
+
     pub fn files_trigger(mut self, trigger: AnyElement) -> Self {
         self.files_trigger = Some(trigger);
         self
@@ -154,19 +163,34 @@ impl ChannelHeader {
         let bg_active = theme.bg_tertiary;
         let icon_color = theme.text_muted;
         let icon_active = theme.text_primary;
-        let actions = [
+        let bell_icon = if self.muted {
+            IconName::MuteBell
+        } else {
+            IconName::Bell
+        };
+        let channel_only_actions: &[(&str, IconName)] = &[
             ("hdr-canvas", IconName::CanvasIcon),
             ("hdr-timeline", IconName::History),
             ("hdr-thread", IconName::ThreadIcon),
             ("hdr-members", IconName::MemberList),
             ("hdr-pin", IconName::PinRight),
-            ("hdr-bell", IconName::Bell),
+            ("hdr-bell", bell_icon),
             ("hdr-gallery", IconName::ImageThumbnail),
             ("hdr-files", IconName::FileIcon),
         ];
+        let dm_actions: &[(&str, IconName)] = &[
+            ("hdr-members", IconName::MemberList),
+            ("hdr-pin", IconName::PinRight),
+        ];
+        let actions: Vec<(&str, IconName)> = if self.dm {
+            dm_actions.to_vec()
+        } else {
+            channel_only_actions.to_vec()
+        };
         let ChannelHeader {
             name,
             dm,
+            muted: _,
             in_voice,
             members_action,
             members_active,
@@ -182,6 +206,7 @@ impl ChannelHeader {
             settings,
             gallery_trigger,
             files_trigger,
+            notification_trigger,
             search_bar,
         } = self;
         let inbox_el = if show_inbox && !dm {
@@ -212,6 +237,7 @@ impl ChannelHeader {
             settings,
             gallery_trigger,
             files_trigger,
+            notification_trigger,
             cx,
         );
 
@@ -318,6 +344,8 @@ impl ChannelHeader {
         locale: Option<String>,
     ) -> gpui::AnyElement {
         let header = ChannelHeader {
+            muted: false,
+            notification_trigger: None,
             name: String::new(),
             dm: false,
             in_voice: None,
@@ -341,7 +369,7 @@ impl ChannelHeader {
     }
 
     fn build_action_buttons(
-        actions: [(&'static str, IconName); 8],
+        actions: Vec<(&'static str, IconName)>,
         theme: &Theme,
         icon_color: gpui::Rgba,
         icon_active: gpui::Rgba,
@@ -357,9 +385,12 @@ impl ChannelHeader {
         settings: Option<Entity<Settings>>,
         gallery_trigger: Option<AnyElement>,
         files_trigger: Option<AnyElement>,
+        notification_trigger: Option<AnyElement>,
         cx: &App,
     ) -> Vec<AnyElement> {
         let header = ChannelHeader {
+            muted: false,
+            notification_trigger,
             name: String::new(),
             dm: false,
             in_voice: None,
@@ -392,7 +423,7 @@ impl ChannelHeader {
 
     fn action_buttons(
         self,
-        actions: [(&'static str, IconName); 8],
+        actions: Vec<(&'static str, IconName)>,
         theme: &Theme,
         icon_color: gpui::Rgba,
         icon_active: gpui::Rgba,
@@ -410,6 +441,7 @@ impl ChannelHeader {
         let settings = self.settings;
         let mut gallery_trigger = self.gallery_trigger;
         let mut files_trigger = self.files_trigger;
+        let mut notification_trigger = self.notification_trigger;
         let mut buttons: Vec<AnyElement> = Vec::new();
         for (id, icon) in actions {
             if id == "hdr-members" && !members_action {
@@ -486,6 +518,12 @@ impl ChannelHeader {
                 && let Some(trigger) = gallery_trigger.take()
             {
                 buttons.push(trigger);
+                continue;
+            }
+            if id == "hdr-bell" {
+                if let Some(trigger) = notification_trigger.take() {
+                    buttons.push(trigger);
+                }
                 continue;
             }
             if id == "hdr-files" {
@@ -709,6 +747,41 @@ impl Render for ChatHeader {
             .clone()
             .unwrap_or_else(|| SharedString::from("en"));
 
+        let muted = crate::chat::files_popover::active_files_channel(cx)
+            .map(|(clan_id, channel_id)| {
+                mezon_store::NotificationSettingStore::global(cx)
+                    .read(cx)
+                    .is_muted(channel_id, clan_id)
+            })
+            .unwrap_or(false);
+        let notification_trigger = if self.dm {
+            None
+        } else {
+            Some(
+                PopoverMenu::new("hdr-bell-popover")
+                    .anchor(Anchor::TopRight)
+                    .attach(Anchor::BottomRight)
+                    .offset(point(px(0.), px(HEADER_POPOVER_Y_OFFSET)))
+                    .trigger(NotificationSettingTrigger::new(&theme, muted))
+                    .menu({
+                        let settings = settings.clone();
+                        move |_window, cx| {
+                            let (clan_id, channel_id) =
+                                crate::chat::files_popover::active_files_channel(cx)?;
+                            Some(cx.new(|cx| {
+                                crate::chat::notification_setting_popover::NotificationSettingPanel::new(
+                                    clan_id,
+                                    channel_id,
+                                    settings.clone(),
+                                    cx,
+                                )
+                            }))
+                        }
+                    })
+                    .into_any_element(),
+            )
+        };
+
         let gallery_trigger = PopoverMenu::new("hdr-gallery-popover")
             .anchor(Anchor::TopRight)
             .attach(Anchor::BottomRight)
@@ -759,6 +832,7 @@ impl Render for ChatHeader {
             .members_action(self.members_action)
             .members_active(self.members_active)
             .gallery_trigger(gallery_trigger)
+            .notification_trigger(notification_trigger)
             .show_inbox(self.show_inbox)
             .on_toggle_members(members_toggle)
             .show_threads(show_threads);
@@ -1226,6 +1300,90 @@ impl IntoElement for FilesPopoverTrigger {
             .hover(move |s| s.bg(bg_hover))
             .occlude()
             .child(Icon::new(IconName::FileIcon).size(px(20.)).text_color(tint));
+        if self.selected {
+            button = button.bg(self.bg_active);
+        }
+        if let Some(cursor) = self.cursor {
+            button = button.cursor(cursor);
+        }
+        if let Some(handler) = self.on_click {
+            button = button.on_click(handler);
+        }
+        button
+    }
+}
+
+pub struct NotificationSettingTrigger {
+    icon: IconName,
+    icon_idle: gpui::Rgba,
+    icon_active: gpui::Rgba,
+    bg_hover: gpui::Rgba,
+    bg_active: gpui::Rgba,
+    selected: bool,
+    on_click: Option<Box<dyn Fn(&ClickEvent, &mut Window, &mut App) + 'static>>,
+    cursor: Option<CursorStyle>,
+}
+
+impl NotificationSettingTrigger {
+    fn new(theme: &Theme, muted: bool) -> Self {
+        Self {
+            icon: if muted {
+                IconName::MuteBell
+            } else {
+                IconName::Bell
+            },
+            icon_idle: theme.text_muted,
+            icon_active: theme.text_primary,
+            bg_hover: theme.bg_hover,
+            bg_active: theme.bg_tertiary,
+            selected: false,
+            on_click: None,
+            cursor: None,
+        }
+    }
+}
+
+impl Clickable for NotificationSettingTrigger {
+    fn on_click(mut self, handler: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static) -> Self {
+        self.on_click = Some(Box::new(handler));
+        self
+    }
+
+    fn cursor_style(mut self, cursor_style: CursorStyle) -> Self {
+        self.cursor = Some(cursor_style);
+        self
+    }
+}
+
+impl Toggleable for NotificationSettingTrigger {
+    fn toggle_state(mut self, selected: bool) -> Self {
+        self.selected = selected;
+        self
+    }
+}
+
+impl IntoElement for NotificationSettingTrigger {
+    type Element = Stateful<Div>;
+
+    fn into_element(self) -> Self::Element {
+        let bg_hover = self.bg_hover;
+        let tint = if self.selected {
+            self.icon_active
+        } else {
+            self.icon_idle
+        };
+        let mut button = div()
+            .id("hdr-bell")
+            .flex()
+            .items_center()
+            .justify_center()
+            .w(px(32.))
+            .h(px(32.))
+            .rounded_md()
+            .cursor_pointer()
+            .hover(move |s| s.bg(bg_hover))
+            .occlude()
+            .child(Icon::new(self.icon).size(px(20.)).text_color(tint));
         if self.selected {
             button = button.bg(self.bg_active);
         }

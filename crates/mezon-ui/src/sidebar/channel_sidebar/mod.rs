@@ -84,6 +84,7 @@ pub struct ChannelSidebar {
     _router_observe: Subscription,
     _members_observe: Subscription,
     _permissions_observe: Subscription,
+    _notification_setting_observe: Subscription,
 }
 
 impl ChannelSidebar {
@@ -134,6 +135,14 @@ impl ChannelSidebar {
                 cx.notify();
             }
         });
+        let notification_setting_observe = cx.observe(
+            &mezon_store::NotificationSettingStore::global(cx),
+            |this, _, cx| {
+                if this.open_menu.is_some() {
+                    cx.notify();
+                }
+            },
+        );
         let members_observe = cx.observe(&ClanMembersStore::global(cx), |this, _, cx| {
             let resolves_members = this.items.iter().any(|item| {
                 matches!(item, SidebarItem::Channel { voice_members, .. } if !voice_members.is_empty())
@@ -178,6 +187,7 @@ impl ChannelSidebar {
             _router_observe: router_observe,
             _members_observe: members_observe,
             _permissions_observe: permissions_observe,
+            _notification_setting_observe: notification_setting_observe,
         };
         this.rebuild_items(cx);
         this
@@ -524,6 +534,26 @@ impl Render for ChannelSidebar {
                 menu.channel_type,
                 menu.is_thread,
                 locale.clone(),
+                menu.channel_id,
+                menu.clan_id,
+                mezon_store::NotificationSettingStore::try_global(cx)
+                    .is_some_and(|store| store.read(cx).is_muted(menu.channel_id, menu.clan_id)),
+                mezon_store::NotificationSettingStore::try_global(cx)
+                    .and_then(|store| store.read(cx).muted_until_ms(menu.channel_id))
+                    .map(|ms| {
+                        format!(
+                            "{} {}",
+                            mezon_i18n::t(&locale, "channelMenu.menu.notification.mutedUntil"),
+                            crate::chat::notification_setting_popover::format_muted_until(ms)
+                        )
+                    }),
+                mezon_store::NotificationSettingStore::try_global(cx)
+                    .map(|store| store.read(cx).level(menu.channel_id))
+                    .unwrap_or(0),
+                menu.mute_sub_open,
+                menu.noti_sub_open,
+                mezon_store::NotificationSettingStore::try_global(cx)
+                    .and_then(|store| store.read(cx).clan_default(menu.clan_id)),
             )
         });
         let clan_menu_data = self.clan_menu_open.then(|| {
@@ -752,7 +782,21 @@ impl Render for ChannelSidebar {
             )
             .when_some(
                 menu_overlay,
-                move |el, (position, channel_type, is_thread, locale)| {
+                move |el,
+                      (
+                    position,
+                    channel_type,
+                    is_thread,
+                    locale,
+                    channel_id,
+                    clan_id,
+                    muted,
+                    muted_until,
+                    level,
+                    mute_sub_open,
+                    noti_sub_open,
+                    clan_default,
+                )| {
                     el.child(context_menu_at(
                         position,
                         build_channel_menu(
@@ -760,6 +804,14 @@ impl Render for ChannelSidebar {
                             &locale,
                             channel_type,
                             is_thread,
+                            channel_id,
+                            clan_id,
+                            muted,
+                            muted_until,
+                            level,
+                            mute_sub_open,
+                            noti_sub_open,
+                            clan_default,
                         ),
                     ))
                 },
@@ -929,7 +981,7 @@ fn render_banner_and_events(
     sidebar: WeakEntity<ChannelSidebar>,
     cx: &App,
     suppress_hover: bool,
-    locale: &str,
+    _locale: &str,
 ) -> AnyElement {
     let theme = cx.theme();
     let divider_color = theme.border;
@@ -1063,7 +1115,7 @@ fn render_banner_and_events(
             let all_apps: Vec<AppChannelSlot> = app_channels.to_vec();
             let sidebar_more = sidebar.clone();
             let channel_apps_label =
-                SharedString::from(mezon_i18n::t(locale, "channelList.channelApps").to_string());
+                SharedString::from(mezon_i18n::t(&locale, "channelList.channelApps").to_string());
             app_row = app_row.child(
                 div()
                     .id("app-channels-more")
@@ -1194,6 +1246,8 @@ fn render_sidebar_item(
         } => {
             let ch_id = id.clone();
             let clan_id_inner = active_clan_id_for_nav;
+            let menu_channel_id: ChannelId = ch_id.parse().unwrap_or_default();
+            let menu_clan_id: ClanId = clan_id_inner.unwrap_or_default();
 
             let make_channel_element = || {
                 let icon = channel_type_icon(*channel_type, *private);
@@ -1340,6 +1394,10 @@ fn render_sidebar_item(
                                     channel_type: menu_channel_type,
                                     is_thread: menu_is_thread,
                                     position,
+                                    channel_id: menu_channel_id,
+                                    clan_id: menu_clan_id,
+                                    mute_sub_open: false,
+                                    noti_sub_open: false,
                                 });
                                 cx.notify();
                             });
@@ -1406,6 +1464,10 @@ fn render_sidebar_item(
                                 channel_type,
                                 is_thread,
                                 position,
+                                channel_id: menu_channel_id,
+                                clan_id: menu_clan_id,
+                                mute_sub_open: false,
+                                noti_sub_open: false,
                             });
                             cx.notify();
                         });

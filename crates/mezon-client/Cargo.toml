@@ -8,6 +8,7 @@ edition = "2024"
 mezon-proto.workspace = true
 tokio.workspace = true
 tokio-rustls = { version = "0.26", features = ["ring"] }
+tokio-tungstenite = { version = "0.29", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
 webpki-roots = "1.0.7"
 http_client.workspace = true
 reqwest_client.workspace = true

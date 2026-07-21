@@ -56,6 +56,25 @@ fn main() -> Result<()> {
 
     tracing::info!("Starting Mezon desktop app v{}", env!("CARGO_PKG_VERSION"));
 
+    #[cfg(debug_assertions)]
+    if std::env::args().any(|a| a == "--notify-test") {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        mezon_native::notifications::init();
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        mezon_native::notifications::show(&mezon_native::notifications::Notification {
+            title: "Mezon".to_string(),
+            body: format!("Test notification #{nonce} — desktop notifications work."),
+            channel_id: Some(nonce.to_string()),
+            clan_id: Some("456".to_string()),
+            link: None,
+        });
+        std::thread::sleep(std::time::Duration::from_secs(3));
+        return Ok(());
+    }
+
     // Check if a mezonapp:// deep link URL was passed as argv[1].
     let deep_link_url: Option<String> = std::env::args()
         .nth(1)
@@ -342,6 +361,7 @@ fn run_app(lock: SingleInstance, initial_url: Option<String>) {
                 .spawn(async move {
                     mezon_native::autostart::sync_auto_start(auto_start);
                     mezon_native::deep_link::register_deep_link_scheme();
+                    mezon_native::notifications::init();
                 })
                 .detach();
         }
@@ -604,6 +624,8 @@ fn open_main_window(
     mezon_store::GalleryStore::init(api.clone(), cx);
     mezon_store::FilesStore::init(api.clone(), cx);
     mezon_store::PermissionStore::init(api.clone(), auth_state.clone(), cx);
+    mezon_store::NotificationSettingStore::init(api.clone(), cx);
+    mezon_store::NotificationPushStore::init(api.clone(), auth_state.clone(), cx);
     mezon_store::AccountStore::init(api, cx);
 
     let platform_store = mezon_store::PlatformStore::init(cx);
@@ -624,10 +646,38 @@ fn open_main_window(
                 title: n.title,
                 body: n.body,
                 channel_id: n.channel_id,
+                clan_id: n.clan_id,
+                link: n.link,
             });
         }),
         cx,
     );
+
+    {
+        let (click_tx, mut click_rx) =
+            futures::channel::mpsc::unbounded::<mezon_native::notifications::NotificationTarget>();
+        mezon_native::notifications::set_click_handler(Box::new(move |target| {
+            let _ = click_tx.unbounded_send(target);
+        }));
+        let task = cx.spawn(async move |cx: &mut AsyncApp| {
+            while let Some(target) = click_rx.next().await {
+                let _ = cx.update(|cx| {
+                    activate_main_window(cx);
+                    tracing::debug!(
+                        clan_id = ?target.clan_id,
+                        channel_id = %target.channel_id,
+                        link = ?target.link,
+                        "notification clicked"
+                    );
+                    match notification_route(&target) {
+                        Some(route) => mezon_ui::router::navigate(cx, route),
+                        None => tracing::warn!("notification click with unroutable target"),
+                    }
+                });
+            }
+        });
+        cx.set_global(NotificationClickGlobal(task));
+    }
 
     let audio_store = mezon_store::AudioStore::init(cx);
     mezon_store::AudioStore::set_device_enumerator(
@@ -700,21 +750,25 @@ impl gpui::Global for SingleInstanceGlobal {}
 struct BadgeBridgeGlobal {
     _clan: gpui::Subscription,
     _dm: gpui::Subscription,
+    _friends: gpui::Subscription,
 }
 impl gpui::Global for BadgeBridgeGlobal {}
 
 fn install_badge_bridge(cx: &mut App) {
     let clan_list = mezon_store::ClanList::global(cx);
     let dm_store = mezon_store::DirectMessageStore::global(cx);
+    let friend_store = mezon_store::FriendStore::global(cx);
 
     update_native_badge(cx);
 
     let clan_sub = cx.observe(&clan_list, |_, cx| update_native_badge(cx));
     let dm_sub = cx.observe(&dm_store, |_, cx| update_native_badge(cx));
+    let friends_sub = cx.observe(&friend_store, |_, cx| update_native_badge(cx));
 
     cx.set_global(BadgeBridgeGlobal {
         _clan: clan_sub,
         _dm: dm_sub,
+        _friends: friends_sub,
     });
 }
 
@@ -734,7 +788,12 @@ fn update_native_badge(cx: &App) {
         .iter()
         .map(|channel| channel.unread_count)
         .sum();
-    let total = clan_total.saturating_add(dm_total);
+    let pending_friend_requests = mezon_store::FriendStore::try_global(cx)
+        .map(|store| store.read(cx).pending_incoming_count() as u32)
+        .unwrap_or(0);
+    let total = clan_total
+        .saturating_add(dm_total)
+        .saturating_add(pending_friend_requests);
 
     if LAST_BADGE.swap(total, Ordering::Relaxed) != total {
         mezon_native::badge::set_badge_count(total);
@@ -743,6 +802,41 @@ fn update_native_badge(cx: &App) {
 
 fn show_main_window(cx: &mut App) {
     activate_main_window(cx);
+}
+
+struct NotificationClickGlobal(#[allow(dead_code)] gpui::Task<()>);
+impl gpui::Global for NotificationClickGlobal {}
+
+fn notification_route(
+    target: &mezon_native::notifications::NotificationTarget,
+) -> Option<mezon_ui::Route> {
+    // Prefer the server-rendered path (React `extras.link`), which routes correctly
+    // regardless of whether the clan is cached locally. The link is an absolute URL
+    // (`https://mezon.ai/chat/...`), so route on its path component.
+    if let Some(link) = target.link.as_deref().filter(|l| !l.is_empty()) {
+        let path = link
+            .split_once("://")
+            .map(|(_, rest)| rest.find('/').map_or("/", |i| &rest[i..]))
+            .unwrap_or(link);
+        let route = mezon_ui::Route::from_path(path);
+        if !matches!(route, mezon_ui::Route::NotFound { .. }) {
+            return Some(route);
+        }
+    }
+    let channel_id = target.channel_id.parse::<mezon_store::ChannelId>().ok()?;
+    match target.clan_id.as_deref() {
+        Some(clan) => {
+            let clan_id = clan.parse::<mezon_store::ClanId>().ok()?;
+            Some(mezon_ui::Route::Channel {
+                clan_id,
+                channel_id,
+            })
+        }
+        None => Some(mezon_ui::Route::DirectMessage {
+            direct_id: channel_id,
+            message_type: "3".into(),
+        }),
+    }
 }
 
 struct TrayGlobal(#[allow(dead_code)] mezon_native::tray::MezonTray);
