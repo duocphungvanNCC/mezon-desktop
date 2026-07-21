@@ -37,6 +37,12 @@ pub(crate) struct ForYouLine {
     subject_suffix: SharedString,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum InboxInlineHighlight {
+    Mention { is_role: bool },
+    Link,
+}
+
 #[derive(Clone)]
 pub(crate) struct NotificationRowView {
     sender_name: SharedString,
@@ -47,9 +53,10 @@ pub(crate) struct NotificationRowView {
     messages_clan_name: Option<SharedString>,
     for_you_line: Option<ForYouLine>,
     body_text: SharedString,
-    body_raw_content: String,
     body_is_attachment: bool,
     body_spans: Vec<MessageSpan>,
+    body_link_ranges: Vec<Range<usize>>,
+    body_inline_span_ranges: Vec<(Range<usize>, InboxInlineHighlight)>,
     mention_spans: Vec<InboxMentionSpan>,
     sender_name_color: Hsla,
     attachment_link: String,
@@ -233,14 +240,35 @@ fn parse_hex_role_color(raw: &str) -> Option<gpui::Rgba> {
         return None;
     }
     let hex = trimmed.strip_prefix('#').unwrap_or(trimmed);
-    if hex.len() != 6 {
-        return None;
-    }
-    let value = u32::from_str_radix(hex, 16).ok()?;
+    let (r, g, b) = match hex.len() {
+        6 => {
+            let value = u32::from_str_radix(hex, 16).ok()?;
+            (
+                ((value >> 16) & 0xff) as u8,
+                ((value >> 8) & 0xff) as u8,
+                (value & 0xff) as u8,
+            )
+        }
+        3 => {
+            let r = u8::from_str_radix(&hex[0..1], 16).ok()?;
+            let g = u8::from_str_radix(&hex[1..2], 16).ok()?;
+            let b = u8::from_str_radix(&hex[2..3], 16).ok()?;
+            (r * 17, g * 17, b * 17)
+        }
+        8 => {
+            let value = u32::from_str_radix(&hex[0..6], 16).ok()?;
+            (
+                ((value >> 16) & 0xff) as u8,
+                ((value >> 8) & 0xff) as u8,
+                (value & 0xff) as u8,
+            )
+        }
+        _ => return None,
+    };
     Some(gpui::Rgba {
-        r: ((value >> 16) & 0xff) as f32 / 255.,
-        g: ((value >> 8) & 0xff) as f32 / 255.,
-        b: (value & 0xff) as f32 / 255.,
+        r: r as f32 / 255.,
+        g: g as f32 / 255.,
+        b: b as f32 / 255.,
         a: 1.,
     })
 }
@@ -263,13 +291,12 @@ fn resolve_inbox_sender_color(clan_id: ClanId, sender_id: UserId, cx: &App) -> H
         .into_iter()
         .find(|(id, _)| role_ids.contains(id))
         .map(|(_, role)| role);
-    if let Some(role) = matched_role {
-        if let Some(color) = (!role.color.is_empty())
+    if let Some(role) = matched_role
+        && let Some(color) = (!role.color.is_empty())
             .then(|| parse_hex_role_color(&role.color))
             .flatten()
-        {
-            return Hsla::from(color);
-        }
+    {
+        return Hsla::from(color);
     }
     Hsla::from(rgb(DEFAULT_ROLE_COLOR))
 }
@@ -350,21 +377,24 @@ pub(crate) fn build_notification_row_view(
         .map(sender_display_name)
         .unwrap_or_default();
 
-    let (mut sender_name, mut avatar_url, _) = clan_id
+    let is_mentions = notification.category == InboxCategory::Mentions;
+    let is_messages = notification.category == InboxCategory::Messages;
+    let (resolved_name, mut avatar_url, _) = clan_id
         .map(|clan| resolve_sender(clan, sender_id, fallback_avatar, &fallback_name, cx))
         .unwrap_or((
             fallback_name.clone().into(),
             avatar_from(fallback_avatar),
             false,
         ));
-    if sender_name.is_empty() && !fallback_name.is_empty() {
-        sender_name = fallback_name.clone().into();
-    }
-    let is_mentions = notification.category == InboxCategory::Mentions;
-    let is_messages = notification.category == InboxCategory::Messages;
-    if (is_mentions || is_messages) && !fallback_name.is_empty() {
-        sender_name = fallback_name.into();
-    }
+    let mut sender_name = if (is_mentions || is_messages) && !fallback_name.is_empty() {
+        fallback_name.into()
+    } else if !resolved_name.is_empty() {
+        resolved_name
+    } else if !fallback_name.is_empty() {
+        fallback_name.into()
+    } else {
+        SharedString::default()
+    };
 
     let message_ts = notification.message_timestamp();
     let time_label = format_inbox_time(message_ts, locale).into();
@@ -388,9 +418,12 @@ pub(crate) fn build_notification_row_view(
     let body_spans = message_preview
         .and_then(|m| inbox_spans_from_raw(&m.raw_content))
         .unwrap_or_default();
+    let body_text_str = body_text.to_string();
     let body_raw_content = message_preview
-        .map(|m| m.raw_content.clone())
-        .unwrap_or_default();
+        .map(|m| m.raw_content.as_str())
+        .unwrap_or("");
+    let body_link_ranges = inbox_link_ranges(&body_text_str, body_raw_content);
+    let body_inline_span_ranges = inbox_inline_span_ranges(&body_text_str, &body_spans);
     let attachment_link = message_preview
         .map(|m| m.attachment_link.clone())
         .unwrap_or_default();
@@ -443,9 +476,10 @@ pub(crate) fn build_notification_row_view(
         messages_clan_name,
         for_you_line,
         body_text,
-        body_raw_content,
         body_is_attachment,
         body_spans,
+        body_link_ranges,
+        body_inline_span_ranges,
         mention_spans,
         sender_name_color,
         attachment_link,
@@ -617,7 +651,10 @@ fn clip_highlights(
         .collect()
 }
 
-fn span_ranges_in_text(text: &str, spans: &[MessageSpan]) -> Vec<(Range<usize>, MessageSpan)> {
+fn span_ranges_in_text(
+    text: &str,
+    spans: &[MessageSpan],
+) -> Vec<(Range<usize>, InboxInlineHighlight)> {
     let mut cursor = 0usize;
     let mut out = Vec::new();
     for span in spans {
@@ -630,15 +667,59 @@ fn span_ranges_in_text(text: &str, spans: &[MessageSpan]) -> Vec<(Range<usize>, 
         if piece.is_empty() {
             continue;
         }
-        let Some(rel) = text[cursor..].find(piece) else {
-            continue;
-        };
-        let start = cursor + rel;
+        if !text[cursor..].starts_with(piece) {
+            break;
+        }
+        let start = cursor;
         let end = start + piece.len();
-        out.push((start..end, span.clone()));
+        match span {
+            MessageSpan::Mention { role_id, .. } => {
+                let is_role = role_id.as_deref().is_some_and(|id| !id.is_empty());
+                out.push((start..end, InboxInlineHighlight::Mention { is_role }));
+            }
+            MessageSpan::Link { .. } => {
+                out.push((start..end, InboxInlineHighlight::Link));
+            }
+            _ => {}
+        }
         cursor = end;
     }
     out
+}
+
+fn inbox_inline_span_ranges(
+    text: &str,
+    body_spans: &[MessageSpan],
+) -> Vec<(Range<usize>, InboxInlineHighlight)> {
+    span_ranges_in_text(text, body_spans)
+}
+
+fn inbox_link_ranges(text: &str, raw_content: &str) -> Vec<Range<usize>> {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(raw_content.trim()) else {
+        return Vec::new();
+    };
+    let mut ranges = Vec::new();
+    for key in ["lk", "vk", "lky"] {
+        let Some(items) = value.get(key).and_then(|v| v.as_array()) else {
+            continue;
+        };
+        for item in items {
+            let Some(start) = item.get("s").and_then(|v| v.as_i64()) else {
+                continue;
+            };
+            let Some(end) = item.get("e").and_then(|v| v.as_i64()) else {
+                continue;
+            };
+            let Some((byte_start, byte_end)) = mention_byte_range(text, start as i32, end as i32)
+            else {
+                continue;
+            };
+            if byte_end > byte_start {
+                ranges.push(byte_start..byte_end);
+            }
+        }
+    }
+    ranges
 }
 
 fn ranges_overlap(a: &Range<usize>, b: &Range<usize>) -> bool {
@@ -703,8 +784,8 @@ fn inbox_content_highlights(
     theme: &Theme,
     text: &str,
     mention_spans: &[InboxMentionSpan],
-    raw_content: &str,
-    body_spans: &[MessageSpan],
+    body_link_ranges: &[Range<usize>],
+    body_inline_span_ranges: &[(Range<usize>, InboxInlineHighlight)],
 ) -> Vec<(Range<usize>, HighlightStyle)> {
     let body_color: Hsla = theme.tokens.text_theme_message.into();
     let body_style = HighlightStyle {
@@ -722,16 +803,19 @@ fn inbox_content_highlights(
         }
     }
 
-    for (range, span) in span_ranges_in_text(text, body_spans) {
-        match span {
-            MessageSpan::Mention { .. } | MessageSpan::Link { .. } => {
-                tokens.push((range, inline_span_highlight(theme, &span)));
-            }
-            _ => {}
-        }
+    for (range, kind) in body_inline_span_ranges {
+        let style = match kind {
+            InboxInlineHighlight::Mention { is_role } => mention_highlight_style(theme, *is_role),
+            InboxInlineHighlight::Link => link_highlight_style(theme),
+        };
+        tokens.push((range.clone(), style));
     }
 
-    tokens.extend(inbox_link_highlights(theme, text, raw_content));
+    for range in body_link_ranges {
+        if range.end > range.start {
+            tokens.push((range.clone(), link_highlight_style(theme)));
+        }
+    }
     tokens.extend(inbox_auto_link_highlights(theme, text, &tokens));
     merge_sorted_highlights(text, tokens, body_style)
 }
@@ -938,11 +1022,12 @@ fn strip_inline_code_markers(
     let mut display_highlights: Vec<(Range<usize>, HighlightStyle)> =
         Vec::with_capacity(raw_spans.len());
     for (range, style) in raw_spans {
-        if let Some(last) = display_highlights.last_mut() {
-            if last.1 == style && last.0.end == range.start {
-                last.0.end = range.end;
-                continue;
-            }
+        if let Some(last) = display_highlights.last_mut()
+            && last.1 == style
+            && last.0.end == range.start
+        {
+            last.0.end = range.end;
+            continue;
         }
         display_highlights.push((range, style));
     }
@@ -992,43 +1077,11 @@ fn inject_link_word_joiners(
     let remapped = highlights
         .into_iter()
         .filter_map(|(range, style)| {
-            let range = char_boundary_range(&text, range)?;
+            let range = char_boundary_range(text, range)?;
             Some((orig_to_new[range.start]..orig_to_new[range.end], style))
         })
         .collect();
     (display, remapped)
-}
-
-fn inbox_link_highlights(
-    theme: &Theme,
-    text: &str,
-    raw_content: &str,
-) -> Vec<(Range<usize>, HighlightStyle)> {
-    let Ok(value) = serde_json::from_str::<serde_json::Value>(raw_content.trim()) else {
-        return Vec::new();
-    };
-    let mut ranges = Vec::new();
-    for key in ["lk", "vk", "lky"] {
-        let Some(items) = value.get(key).and_then(|v| v.as_array()) else {
-            continue;
-        };
-        for item in items {
-            let Some(start) = item.get("s").and_then(|v| v.as_i64()) else {
-                continue;
-            };
-            let Some(end) = item.get("e").and_then(|v| v.as_i64()) else {
-                continue;
-            };
-            let Some((byte_start, byte_end)) = mention_byte_range(text, start as i32, end as i32)
-            else {
-                continue;
-            };
-            if byte_end > byte_start {
-                ranges.push((byte_start..byte_end, link_highlight_style(theme)));
-            }
-        }
-    }
-    ranges
 }
 
 fn span_inline_text(span: &MessageSpan) -> Option<&str> {
@@ -1052,27 +1105,6 @@ fn inline_code_highlight_style(theme: &Theme) -> HighlightStyle {
     }
 }
 
-fn inline_span_highlight(theme: &Theme, span: &MessageSpan) -> HighlightStyle {
-    let body_color: Hsla = theme.tokens.text_theme_message.into();
-    match span {
-        MessageSpan::Bold(_) => HighlightStyle {
-            color: Some(body_color),
-            font_weight: Some(FontWeight::BOLD),
-            ..Default::default()
-        },
-        MessageSpan::Code(_) => inline_code_highlight_style(theme),
-        MessageSpan::Mention { role_id, .. } => {
-            let is_role = role_id.as_deref().is_some_and(|id| !id.is_empty());
-            mention_highlight_style(theme, is_role)
-        }
-        MessageSpan::Link { .. } => link_highlight_style(theme),
-        _ => HighlightStyle {
-            color: Some(body_color),
-            ..Default::default()
-        },
-    }
-}
-
 fn take_inbox_inline_element(
     theme: &Theme,
     text: &str,
@@ -1088,7 +1120,10 @@ fn take_inbox_inline_element(
         batch.clear();
         return None;
     }
-    let rel = text[*offset..].find(&batch_text)?;
+    let Some(rel) = text[*offset..].find(&batch_text) else {
+        batch.clear();
+        return None;
+    };
     let start = *offset + rel;
     let end = start + batch_text.len();
     let clipped = clip_highlights(full_highlights, start, end);
@@ -1101,14 +1136,20 @@ fn render_inbox_message_spans(
     theme: &Theme,
     text: &str,
     mention_spans: &[InboxMentionSpan],
-    raw_content: &str,
+    body_link_ranges: &[Range<usize>],
+    body_inline_span_ranges: &[(Range<usize>, InboxInlineHighlight)],
     body_spans: &[MessageSpan],
 ) -> gpui::AnyElement {
     if body_spans.is_empty() {
         return div().into_any_element();
     }
-    let full_highlights =
-        inbox_content_highlights(theme, text, mention_spans, raw_content, body_spans);
+    let full_highlights = inbox_content_highlights(
+        theme,
+        text,
+        mention_spans,
+        body_link_ranges,
+        body_inline_span_ranges,
+    );
     let mut children: Vec<gpui::AnyElement> = Vec::new();
     let mut inline_batch: Vec<MessageSpan> = Vec::new();
     let mut offset = 0usize;
@@ -1158,8 +1199,9 @@ fn render_inbox_message_spans(
 fn render_message_content(
     theme: &Theme,
     text: &SharedString,
-    spans: &[InboxMentionSpan],
-    raw_content: &str,
+    mention_spans: &[InboxMentionSpan],
+    body_link_ranges: &[Range<usize>],
+    body_inline_span_ranges: &[(Range<usize>, InboxInlineHighlight)],
     body_spans: &[MessageSpan],
 ) -> impl IntoElement {
     let text_str = text.to_string();
@@ -1170,9 +1212,22 @@ fn render_message_content(
         .iter()
         .any(|span| matches!(span, MessageSpan::CodeBlock { .. }));
     if has_code_block {
-        return render_inbox_message_spans(theme, &text_str, spans, raw_content, body_spans);
+        return render_inbox_message_spans(
+            theme,
+            &text_str,
+            mention_spans,
+            body_link_ranges,
+            body_inline_span_ranges,
+            body_spans,
+        );
     }
-    let highlights = inbox_content_highlights(theme, &text_str, spans, raw_content, body_spans);
+    let highlights = inbox_content_highlights(
+        theme,
+        &text_str,
+        mention_spans,
+        body_link_ranges,
+        body_inline_span_ranges,
+    );
     render_inbox_styled_body(theme, &text_str, highlights)
 }
 
@@ -1393,7 +1448,8 @@ pub fn render_notification_body(
                                             theme,
                                             &view.body_text,
                                             &view.mention_spans,
-                                            &view.body_raw_content,
+                                            &view.body_link_ranges,
+                                            &view.body_inline_span_ranges,
                                             &view.body_spans,
                                         ))
                                     },
@@ -1520,7 +1576,7 @@ mod tests {
                 is_role: false,
             },
         ];
-        let highlights = inbox_content_highlights(&theme, text, &spans, "", &[]);
+        let highlights = inbox_content_highlights(&theme, text, &spans, &[], &[]);
         assert!(highlights.iter().any(|(range, _)| range == &(0..7)));
         assert!(highlights.iter().any(|(range, style)| {
             range == &(7..12) && style.font_weight == Some(FontWeight::MEDIUM)
@@ -1546,7 +1602,7 @@ mod tests {
     fn inbox_auto_link_highlights_detect_plain_urls() {
         let theme = Theme::dark();
         let text = "see https://checkin.nccsoft.vn and http://example.com ok";
-        let highlights = inbox_content_highlights(&theme, text, &[], "", &[]);
+        let highlights = inbox_content_highlights(&theme, text, &[], &[], &[]);
         assert!(highlights.iter().any(|(range, style)| {
             is_link_highlight(style) && &text[range.clone()] == "https://checkin.nccsoft.vn"
         }));
@@ -1559,7 +1615,7 @@ mod tests {
     fn inbox_content_highlights_handle_vietnamese_plain_text() {
         let theme = Theme::dark();
         let text = "thua nên hơi buồn a, không muốn kéo dài nỗi đau";
-        let highlights = inbox_content_highlights(&theme, text, &[], "", &[]);
+        let highlights = inbox_content_highlights(&theme, text, &[], &[], &[]);
         assert!(highlights.iter().all(|(range, _)| {
             text.is_char_boundary(range.start) && text.is_char_boundary(range.end)
         }));
@@ -1608,5 +1664,38 @@ mod tests {
             strip_inline_code_markers(text, highlights.clone(), HighlightStyle::default());
         assert_eq!(display_text, text);
         assert_eq!(display_highlights, highlights);
+    }
+
+    #[test]
+    fn parse_hex_role_color_accepts_shorthand_and_ignores_alpha() {
+        let rgb = parse_hex_role_color("#fff").expect("3-digit hex");
+        assert_eq!(rgb.r, 1.);
+        assert_eq!(rgb.g, 1.);
+        assert_eq!(rgb.b, 1.);
+        let rgb = parse_hex_role_color("#ff000080").expect("8-digit hex");
+        assert_eq!(rgb.r, 1.);
+        assert_eq!(rgb.g, 0.);
+        assert_eq!(rgb.b, 0.);
+    }
+
+    #[test]
+    fn inbox_inline_span_ranges_use_sequential_alignment() {
+        let text = "hello @user world";
+        let spans = vec![
+            MessageSpan::Text("hello ".into()),
+            MessageSpan::Mention {
+                display: "@user".into(),
+                user_id: Some("1".into()),
+                role_id: None,
+            },
+            MessageSpan::Text(" world".into()),
+        ];
+        let ranges = inbox_inline_span_ranges(text, &spans);
+        assert_eq!(ranges.len(), 1);
+        assert_eq!(ranges[0].0, 6..11);
+        assert_eq!(
+            ranges[0].1,
+            InboxInlineHighlight::Mention { is_role: false }
+        );
     }
 }

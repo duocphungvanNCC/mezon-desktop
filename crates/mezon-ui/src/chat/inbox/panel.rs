@@ -182,13 +182,19 @@ impl InboxPopoverPanel {
 
     fn sync_list_state(&mut self, tab_changed: bool) {
         let count = self.cached_items.len();
-        let count_changed = self.list_state.item_count() != count;
+        let old_count = self.list_state.item_count();
+        let count_changed = old_count != count;
         if count_changed {
-            self.list_state.reset(count);
+            if !tab_changed && count > old_count {
+                self.list_state
+                    .splice(old_count..old_count, count - old_count);
+            } else {
+                self.list_state.reset(count);
+            }
         } else if tab_changed && count > 0 {
             self.list_state.remeasure();
         }
-        if tab_changed || count_changed {
+        if tab_changed {
             self.list_state.scroll_to(gpui::ListOffset {
                 item_ix: 0,
                 offset_in_item: px(0.),
