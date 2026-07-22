@@ -46,6 +46,7 @@ const EMOJI_REACTION_RATE_LIMIT: Duration = Duration::from_millis(150);
 const EMOJI_REACTION_TAIL: Duration = Duration::from_millis(500);
 const MAX_DISPLAYED_REACTIONS: usize = 20;
 const DEFAULT_NOISE_SUPPRESSION_LEVEL: u8 = 20;
+const KICK_SUPPRESS_TIMEOUT: Duration = Duration::from_secs(5);
 static RAISE_HAND_SOUND: &[u8] = include_bytes!("../assets/audio/raising-hand.mp3");
 
 fn parse_raise_token(token: &str) -> Option<bool> {
@@ -155,6 +156,7 @@ pub struct VoiceStore {
     room_name: String,
     participant_menu: Option<(String, gpui::Point<gpui::Pixels>)>,
     pending_kick: Option<(String, String)>,
+    pending_removals: HashMap<String, Instant>,
     moderation_error: Option<VoiceModerationError>,
     participants: Vec<VoiceParticipant>,
     join_ranks: Vec<String>,
@@ -293,6 +295,7 @@ impl VoiceStore {
             room_name: String::new(),
             participant_menu: None,
             pending_kick: None,
+            pending_removals: HashMap::new(),
             moderation_error: None,
             participants: Vec::new(),
             join_ranks: Vec::new(),
@@ -1315,6 +1318,8 @@ impl VoiceStore {
         let Some((identity, _)) = self.pending_kick.take() else {
             return;
         };
+        self.pending_removals.insert(identity.clone(), Instant::now());
+        self.participants.retain(|p| p.identity != identity);
         cx.notify();
         self.moderate_participant(identity, ModerationAction::Kick, cx);
     }
@@ -1349,6 +1354,9 @@ impl VoiceStore {
             if let Err(e) = result {
                 tracing::warn!("participant moderation failed: {e:#}");
                 let _ = this.update(cx, |this, cx| {
+                    if matches!(action, ModerationAction::Kick) {
+                        this.pending_removals.remove(&identity);
+                    }
                     this.moderation_error = Some(action.error());
                     cx.notify();
                 });
@@ -1595,7 +1603,15 @@ impl VoiceStore {
                     self.call_status = VoiceCallStatus::Stable;
                 }
             }
-            VoiceEvent::Participants(list) => {
+            VoiceEvent::Participants(mut list) => {
+                if !self.pending_removals.is_empty() {
+                    let now = Instant::now();
+                    self.pending_removals.retain(|identity, issued_at| {
+                        list.iter().any(|p| &p.identity == identity)
+                            && now.duration_since(*issued_at) < KICK_SUPPRESS_TIMEOUT
+                    });
+                    list.retain(|p| !self.pending_removals.contains_key(&p.identity));
+                }
                 if self.participants == list {
                     return;
                 }
@@ -1837,6 +1853,7 @@ impl VoiceStore {
         self.device_submenu = None;
         self.participant_menu = None;
         self.pending_kick = None;
+        self.pending_removals.clear();
         self.moderation_error = None;
         self.participants.clear();
         self.join_ranks.clear();
