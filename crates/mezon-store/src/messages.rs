@@ -5634,9 +5634,17 @@ fn message_reference_from_api(
 
 impl MessageAttachment {
     pub(crate) fn from_api(
-        a: mezon_client::transport::ApiAttachment,
+        mut a: mezon_client::transport::ApiAttachment,
         cfg: Option<&AppConfig>,
     ) -> Self {
+        if let Some(cfg) = cfg {
+            if let std::borrow::Cow::Owned(url) = cfg.read_media_url(&a.url) {
+                a.url = url;
+            }
+            if let std::borrow::Cow::Owned(thumbnail) = cfg.read_media_url(&a.thumbnail) {
+                a.thumbnail = thumbnail;
+            }
+        }
         let width = a.width.max(0) as u32;
         let height = a.height.max(0) as u32;
         let (proxied_src, display_width, display_height) = cfg
@@ -6120,6 +6128,31 @@ mod tests {
         assert_eq!(attachment.duration, 42);
         assert_eq!(attachment.thumbnail, "https://cdn/clip-thumb.jpg");
         assert_eq!(attachment.thumbnail_proxied, "https://cdn/clip-thumb.jpg");
+    }
+
+    #[test]
+    fn attachment_get_urls_use_the_read_cdn() {
+        let cfg = AppConfig::dev_defaults();
+        let attachment = MessageAttachment::from_api(
+            mezon_client::transport::ApiAttachment {
+                url: format!("{}/clip.mp4", cfg.upload_img_url),
+                filename: "clip.mp4".into(),
+                filetype: "video/mp4".into(),
+                width: 1280,
+                height: 720,
+                thumbnail: format!("{}/clip-thumb.jpg", cfg.upload_img_url),
+                duration: 42,
+                size: 0,
+            },
+            Some(&cfg),
+        );
+        assert_eq!(attachment.url, format!("{}/clip.mp4", cfg.base_img_url));
+        assert_eq!(
+            attachment.thumbnail,
+            format!("{}/clip-thumb.jpg", cfg.base_img_url)
+        );
+        assert!(attachment.thumbnail_proxied.contains(&cfg.base_img_url));
+        assert!(!attachment.thumbnail_proxied.contains(&cfg.upload_img_url));
     }
 
     #[test]
