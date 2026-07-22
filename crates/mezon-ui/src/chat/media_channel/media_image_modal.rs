@@ -123,16 +123,36 @@ pub fn open_media_image_modal(
         return;
     };
 
+    let mut pending = Some((uploaded, index));
     if let Some(handle) = cx.try_global::<GlobalMediaImageModal>().map(|g| g.0) {
         let _ = handle.update(cx, |modal, window, cx| {
-            window.activate_window();
-            window.focus(&modal.focus_handle, cx);
-            modal.set_attachments(uploaded, index, window, cx);
+            if let Some((uploaded, index)) = pending.take() {
+                window.activate_window();
+                window.focus(&modal.focus_handle, cx);
+                modal.set_attachments(uploaded, index, window, cx);
+            }
         });
-        return;
+        if pending.is_none() {
+            return;
+        }
+        clear_media_image_modal_global(cx);
     }
 
+    let Some((uploaded, index)) = pending else {
+        return;
+    };
+
     let bounds = prior_media_modal_bounds(cx).unwrap_or_else(|| default_media_modal_bounds(cx));
+    spawn_media_image_modal_window(uploaded, index, settings, bounds, cx);
+}
+
+fn spawn_media_image_modal_window(
+    uploaded: Vec<ChannelTimelineAttachment>,
+    index: usize,
+    settings: Entity<Settings>,
+    bounds: Bounds<Pixels>,
+    cx: &mut App,
+) {
     let options = WindowOptions {
         window_bounds: Some(WindowBounds::Windowed(bounds)),
         window_min_size: Some(size(px(640.0), px(480.0))),
@@ -145,9 +165,8 @@ pub fn open_media_image_modal(
         ..Default::default()
     };
 
-    let uploaded_for_window = uploaded;
     match cx.open_window(options, move |window, cx| {
-        cx.new(|cx| MediaImageModal::new(uploaded_for_window, index, settings, window, cx))
+        cx.new(|cx| MediaImageModal::new(uploaded, index, settings, window, cx))
     }) {
         Ok(handle) => {
             cx.set_global(GlobalMediaImageModal(handle));
@@ -241,6 +260,7 @@ impl MediaImageModal {
             cache_for_release.update(cx, |cache, cx| cache.clear_app(cx));
             thumb_cache_for_release.update(cx, |cache, cx| cache.clear_app(cx));
             crate::image_cache::release_freed_memory_to_os(cx);
+            clear_media_image_modal_global(cx);
         });
         let show_list = attachments.len() > 1;
         let title_bar = cx.new(|cx| TitleBar::new(settings.clone(), cx));
