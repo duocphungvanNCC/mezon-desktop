@@ -1773,6 +1773,78 @@ impl AppApi {
         self.transport.get_notification_clan(clan_id).await
     }
 
+    pub async fn get_notification_category(&self, category_id: i64) -> Result<i32> {
+        let dto = self
+            .transport
+            .get_notification_category(category_id)
+            .await?;
+        Ok(dto.notification_setting_type)
+    }
+
+    pub async fn get_notification_category_setting(
+        &self,
+        category_id: i64,
+    ) -> Result<crate::ChannelNotificationSetting> {
+        let dto = self
+            .transport
+            .get_notification_category(category_id)
+            .await?;
+        Ok(crate::ChannelNotificationSetting::from_api(&dto))
+    }
+
+    pub async fn set_notification_clan_setting(
+        &self,
+        clan_id: i64,
+        notification_type: i32,
+    ) -> Result<()> {
+        self.transport
+            .set_notification_clan_setting(clan_id, notification_type)
+            .await
+    }
+
+    pub async fn set_notification_category_setting(
+        &self,
+        category_id: i64,
+        notification_type: i32,
+        clan_id: i64,
+    ) -> Result<()> {
+        self.transport
+            .set_notification_category_setting(category_id, notification_type, clan_id)
+            .await
+    }
+
+    pub async fn set_mute_category(
+        &self,
+        category_id: i64,
+        mute_seconds: i32,
+        clan_id: i64,
+    ) -> Result<()> {
+        self.transport
+            .set_mute_category(category_id, mute_seconds, clan_id)
+            .await
+    }
+
+    pub async fn delete_notification_category_setting(&self, category_id: i64) -> Result<()> {
+        self.transport
+            .delete_notification_category_setting(category_id)
+            .await
+    }
+
+    pub async fn get_channel_category_noti_settings_list(
+        &self,
+        clan_id: i64,
+    ) -> Result<Vec<crate::NotificationOverride>> {
+        let list = self
+            .transport
+            .get_channel_category_noti_settings_list(clan_id)
+            .await?;
+        Ok(list
+            .notification_channel_category_settings_list
+            .iter()
+            .map(crate::NotificationOverride::from_api)
+            .collect())
+    }
+
     pub async fn get_notification_channel(
         &self,
         channel_id: i64,
@@ -1819,13 +1891,26 @@ impl AppApi {
         self.transport.spawn_gotify_stream(ws_base, token)
     }
 
-    /// Register a device token and return the Gotify notification-stream token.
+    /// Download a notification's sender avatar to a temp file for use as the OS
+    /// notification icon. Rejects non-https URLs; size/timeout are bounded by
+    /// [`crate::transport_runtime::fetch_bytes`].
+    pub async fn download_notification_icon(&self, url: &str) -> Result<std::path::PathBuf> {
+        if !url.starts_with("https://") {
+            anyhow::bail!("notification icon url must be https");
+        }
+        let (bytes, _) = crate::transport_runtime::fetch_bytes(url).await?;
+        crate::transport_runtime::write_temp_icon(bytes).await
+    }
+
+    /// Register a device token and return `(notify_token, device_id)`. The notify
+    /// token opens the Gotify stream; the device id is cached and reused as the
+    /// request token on the next registration, matching React.
     pub async fn regist_fcm_device_token(
         &self,
         token: &str,
         device_id: &str,
         platform: &str,
-    ) -> Result<String> {
+    ) -> Result<(String, String)> {
         self.transport
             .regist_fcm_device_token(
                 token.to_string(),
@@ -2021,24 +2106,24 @@ mod tests {
     fn attachment_url_uses_base_img_host_not_presigned() {
         assert_eq!(
             attachment_cdn_url(
-                "https://cdn.mezon.ai",
+                "https://cdn.example",
                 "mezon/1826814768338440192/2074336632294608896.png",
             )
             .unwrap(),
-            "https://cdn.mezon.ai/mezon/1826814768338440192/2074336632294608896.png"
+            "https://cdn.example/mezon/1826814768338440192/2074336632294608896.png"
         );
     }
 
     #[test]
     fn attachment_url_trims_trailing_slash_on_base() {
         assert_eq!(
-            attachment_cdn_url("https://cdn.mezon.ai/", "x.png").unwrap(),
-            "https://cdn.mezon.ai/x.png"
+            attachment_cdn_url("https://cdn.example/", "x.png").unwrap(),
+            "https://cdn.example/x.png"
         );
     }
 
     #[test]
     fn attachment_url_errors_when_filename_empty() {
-        assert!(attachment_cdn_url("https://cdn.mezon.ai", "").is_err());
+        assert!(attachment_cdn_url("https://cdn.example", "").is_err());
     }
 }

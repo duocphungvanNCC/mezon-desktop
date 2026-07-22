@@ -1165,6 +1165,61 @@ impl ChannelList {
         cx.notify();
     }
 
+    pub fn muted(&self, clan_id: ClanId, channel_id: ChannelId) -> bool {
+        self.channel(clan_id, channel_id)
+            .map(|ch| ch.muted)
+            .unwrap_or(false)
+    }
+
+    pub fn set_channel_muted(
+        &mut self,
+        clan_id: ClanId,
+        channel_id: ChannelId,
+        muted: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let mut changed = false;
+        if let Some(categories) = self.cache.get_mut(&clan_id) {
+            for ch in categories
+                .iter_mut()
+                .flat_map(|c| c.channels.iter_mut())
+                .filter(|ch| ch.id == channel_id)
+            {
+                if ch.muted != muted {
+                    ch.muted = muted;
+                    changed = true;
+                }
+            }
+        }
+        if changed {
+            cx.notify();
+        }
+    }
+
+    pub fn set_channel_muted_any_clan(
+        &mut self,
+        channel_id: ChannelId,
+        muted: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let mut changed = false;
+        for categories in self.cache.values_mut() {
+            for ch in categories
+                .iter_mut()
+                .flat_map(|c| c.channels.iter_mut())
+                .filter(|ch| ch.id == channel_id)
+            {
+                if ch.muted != muted {
+                    ch.muted = muted;
+                    changed = true;
+                }
+            }
+        }
+        if changed {
+            cx.notify();
+        }
+    }
+
     pub fn apply_last_seen(
         &mut self,
         clan_id: ClanId,

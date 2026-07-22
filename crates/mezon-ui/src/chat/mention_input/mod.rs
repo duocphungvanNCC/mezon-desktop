@@ -2462,7 +2462,7 @@ mod suggest_tests {
     #[test]
     fn sale_id_is_source_basename_without_extension() {
         assert_eq!(
-            sale_item_id_from_source("https://cdn.mezon.ai/emojis/1750123.webp"),
+            sale_item_id_from_source("https://cdn.example/emojis/1750123.webp"),
             "1750123"
         );
         assert_eq!(sale_item_id_from_source("1750123.webp"), "1750123");
@@ -2471,7 +2471,7 @@ mod suggest_tests {
 
     #[test]
     fn sale_id_is_empty_without_extension() {
-        assert_eq!(sale_item_id_from_source("https://cdn.mezon.ai/emojis"), "");
+        assert_eq!(sale_item_id_from_source("https://cdn.example/emojis"), "");
         assert_eq!(sale_item_id_from_source(""), "");
     }
 }

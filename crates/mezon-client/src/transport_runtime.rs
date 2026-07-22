@@ -140,6 +140,24 @@ pub async fn fetch_bytes(url: &str) -> Result<(Vec<u8>, Option<String>)> {
         .map_err(|e| anyhow::anyhow!("fetch task failed: {e}"))?
 }
 
+/// Write bytes to a uniquely-named temp file for use as a notification icon
+/// attachment. The OS notification system copies the file into its own store, so
+/// the returned path is safe to delete afterwards.
+pub async fn write_temp_icon(bytes: Vec<u8>) -> Result<std::path::PathBuf> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+    let path =
+        std::env::temp_dir().join(format!("mezon-noti-icon-{}-{seq}.img", std::process::id()));
+    runtime()
+        .spawn_blocking(move || {
+            std::fs::write(&path, &bytes)?;
+            Ok(path)
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("icon write task failed: {e}"))?
+}
+
 pub async fn read_file(path: std::path::PathBuf) -> Result<Vec<u8>> {
     runtime()
         .spawn_blocking(move || std::fs::read(&path))
@@ -625,6 +643,17 @@ impl TransportClient {
             .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
     }
 
+    pub async fn get_notification_category(
+        &self,
+        category_id: i64,
+    ) -> Result<mezon_proto::api::NotificationUserChannel> {
+        let transport = self.inner.clone();
+        runtime()
+            .spawn(async move { transport.get_notification_category(category_id).await })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
     pub async fn get_notification_channel(
         &self,
         channel_id: i64,
@@ -678,6 +707,83 @@ impl TransportClient {
             .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
     }
 
+    pub async fn set_notification_clan_setting(
+        &self,
+        clan_id: i64,
+        notification_type: i32,
+    ) -> Result<()> {
+        let transport = self.inner.clone();
+        runtime()
+            .spawn(async move {
+                transport
+                    .set_notification_clan_setting(clan_id, notification_type)
+                    .await
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
+    pub async fn set_notification_category_setting(
+        &self,
+        category_id: i64,
+        notification_type: i32,
+        clan_id: i64,
+    ) -> Result<()> {
+        let transport = self.inner.clone();
+        runtime()
+            .spawn(async move {
+                transport
+                    .set_notification_category_setting(category_id, notification_type, clan_id)
+                    .await
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
+    pub async fn set_mute_category(
+        &self,
+        category_id: i64,
+        mute_seconds: i32,
+        clan_id: i64,
+    ) -> Result<()> {
+        let transport = self.inner.clone();
+        runtime()
+            .spawn(async move {
+                transport
+                    .set_mute_category(category_id, mute_seconds, clan_id)
+                    .await
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
+    pub async fn delete_notification_category_setting(&self, category_id: i64) -> Result<()> {
+        let transport = self.inner.clone();
+        runtime()
+            .spawn(async move {
+                transport
+                    .delete_notification_category_setting(category_id)
+                    .await
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
+    pub async fn get_channel_category_noti_settings_list(
+        &self,
+        clan_id: i64,
+    ) -> Result<mezon_proto::api::NotificationChannelCategorySettingList> {
+        let transport = self.inner.clone();
+        runtime()
+            .spawn(async move {
+                transport
+                    .get_channel_category_noti_settings_list(clan_id)
+                    .await
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
     pub fn spawn_gotify_stream(
         &self,
         ws_base: String,
@@ -693,14 +799,14 @@ impl TransportClient {
         token: String,
         device_id: String,
         platform: String,
-    ) -> Result<String> {
+    ) -> Result<(String, String)> {
         let transport = self.inner.clone();
         runtime()
             .spawn(async move {
                 transport
                     .regist_fcm_device_token(&token, &device_id, &platform)
                     .await
-                    .map(|resp| resp.token)
+                    .map(|resp| (resp.token, resp.device_id))
             })
             .await
             .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?

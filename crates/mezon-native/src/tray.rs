@@ -57,12 +57,16 @@ impl MezonTray {
                                         .await
                                     {
                                         Ok(Some(version)) => {
-                                            let download_url = "https://mezon.ai/download";
-                                            tracing::info!(
-                                                "Update available: v{version} — download from {download_url}"
-                                            );
-                                            match mezon_updater::validate_update_url(download_url) {
-                                                Ok(()) => {
+                                            match mezon_updater::download_url()
+                                                .and_then(|url| {
+                                                    mezon_updater::validate_update_url(url)?;
+                                                    Ok(url)
+                                                })
+                                            {
+                                                Ok(download_url) => {
+                                                    tracing::info!(
+                                                        "Update available: v{version} — download from {download_url}"
+                                                    );
                                                     let _ = open::that_detached(download_url);
                                                 }
                                                 Err(e) => {
