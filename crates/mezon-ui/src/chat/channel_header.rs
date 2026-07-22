@@ -6,7 +6,7 @@ use gpui::{
     px,
 };
 use mezon_store::{InVoiceInfo, Settings, ThreadsStore};
-use ui::{Clickable, PopoverMenu, PopoverMenuHandle, Toggleable};
+use ui::{Clickable, PopoverMenu, PopoverMenuHandle, Toggleable, Tooltip};
 
 use crate::app::window_controls;
 use crate::chat::files_popover::{FilesPopoverPanel, files_popover_on_open};
@@ -44,6 +44,10 @@ pub struct ChannelHeader {
     files_trigger: Option<AnyElement>,
     notification_trigger: Option<AnyElement>,
     search_bar: Option<AnyElement>,
+    timeline_action: bool,
+    timeline_active: bool,
+    timeline_tooltip: SharedString,
+    on_toggle_timeline: Option<ToggleHandler>,
 }
 
 impl ChannelHeader {
@@ -69,6 +73,10 @@ impl ChannelHeader {
             files_trigger: None,
             notification_trigger: None,
             search_bar: None,
+            timeline_action: false,
+            timeline_active: false,
+            timeline_tooltip: SharedString::default(),
+            on_toggle_timeline: None,
         }
     }
 
@@ -158,6 +166,26 @@ impl ChannelHeader {
         self
     }
 
+    pub fn timeline_action(mut self, show: bool) -> Self {
+        self.timeline_action = show;
+        self
+    }
+
+    pub fn timeline_active(mut self, active: bool) -> Self {
+        self.timeline_active = active;
+        self
+    }
+
+    pub fn timeline_tooltip(mut self, tooltip: impl Into<SharedString>) -> Self {
+        self.timeline_tooltip = tooltip.into();
+        self
+    }
+
+    pub fn on_toggle_timeline(mut self, handler: ToggleHandler) -> Self {
+        self.on_toggle_timeline = Some(handler);
+        self
+    }
+
     pub fn render(self, theme: &Theme, cx: &App) -> impl IntoElement {
         let bg_hover = theme.bg_hover;
         let bg_active = theme.bg_tertiary;
@@ -208,6 +236,10 @@ impl ChannelHeader {
             files_trigger,
             notification_trigger,
             search_bar,
+            timeline_action,
+            timeline_active,
+            timeline_tooltip,
+            on_toggle_timeline,
         } = self;
         let inbox_el = if show_inbox && !dm {
             Some(Self::render_inbox_button_for(
@@ -237,6 +269,10 @@ impl ChannelHeader {
             settings,
             gallery_trigger,
             files_trigger,
+            timeline_action,
+            timeline_active,
+            timeline_tooltip,
+            on_toggle_timeline,
             notification_trigger,
             cx,
         );
@@ -364,6 +400,10 @@ impl ChannelHeader {
             gallery_trigger: None,
             files_trigger: None,
             search_bar: None,
+            timeline_action: false,
+            timeline_active: false,
+            timeline_tooltip: SharedString::default(),
+            on_toggle_timeline: None,
         };
         header.render_inbox_button(theme, cx)
     }
@@ -385,6 +425,10 @@ impl ChannelHeader {
         settings: Option<Entity<Settings>>,
         gallery_trigger: Option<AnyElement>,
         files_trigger: Option<AnyElement>,
+        timeline_action: bool,
+        timeline_active: bool,
+        timeline_tooltip: SharedString,
+        on_toggle_timeline: Option<ToggleHandler>,
         notification_trigger: Option<AnyElement>,
         cx: &App,
     ) -> Vec<AnyElement> {
@@ -409,6 +453,10 @@ impl ChannelHeader {
             gallery_trigger,
             files_trigger,
             search_bar: None,
+            timeline_action,
+            timeline_active,
+            timeline_tooltip,
+            on_toggle_timeline,
         };
         header.action_buttons(
             actions,
@@ -441,9 +489,42 @@ impl ChannelHeader {
         let settings = self.settings;
         let mut gallery_trigger = self.gallery_trigger;
         let mut files_trigger = self.files_trigger;
+        let timeline_action = self.timeline_action;
+        let timeline_active = self.timeline_active;
+        let timeline_tooltip = self.timeline_tooltip.clone();
+        let on_toggle_timeline = self.on_toggle_timeline;
         let mut notification_trigger = self.notification_trigger;
         let mut buttons: Vec<AnyElement> = Vec::new();
         for (id, icon) in actions {
+            if id == "hdr-timeline" {
+                if !timeline_action {
+                    continue;
+                }
+                let active = timeline_active;
+                let tint = if active { icon_active } else { icon_color };
+                let tooltip = timeline_tooltip.clone();
+                let mut button = div()
+                    .id(id)
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .w(px(32.))
+                    .h(px(32.))
+                    .rounded_md()
+                    .cursor_pointer()
+                    .hover(move |s| s.bg(bg_hover))
+                    .tooltip(Tooltip::text(tooltip))
+                    .occlude()
+                    .child(Icon::new(icon).size(px(20.)).text_color(tint));
+                if active {
+                    button = button.bg(bg_active);
+                }
+                if let Some(handler) = on_toggle_timeline.clone() {
+                    button = button.on_click(move |_, window, cx| handler(window, cx));
+                }
+                buttons.push(button.into_any_element());
+                continue;
+            }
             if id == "hdr-members" && !members_action {
                 continue;
             }
@@ -633,6 +714,8 @@ pub struct ChatHeader {
     clan_id: Option<String>,
     locale: Option<SharedString>,
     show_threads: bool,
+    timeline_action: bool,
+    timeline_active: bool,
     pin_handle: Option<PopoverMenuHandle<PinnedPopoverPanel>>,
     layout: WeakEntity<ChatLayout>,
     settings: Entity<Settings>,
@@ -666,6 +749,8 @@ impl ChatHeader {
             clan_id: None,
             locale: None,
             show_threads: false,
+            timeline_action: false,
+            timeline_active: false,
             pin_handle: None,
             layout,
             settings: settings.clone(),
@@ -685,6 +770,8 @@ impl ChatHeader {
         inbox_handle: Option<PopoverMenuHandle<InboxPopoverPanel>>,
         clan_id: Option<String>,
         pin_handle: Option<PopoverMenuHandle<PinnedPopoverPanel>>,
+        timeline_action: bool,
+        timeline_active: bool,
         show_search_bar: bool,
         search_expanded: bool,
         show_search_options: bool,
@@ -719,6 +806,8 @@ impl ChatHeader {
             && self.clan_id == clan_id
             && self.locale.as_deref() == locale
             && self.show_threads == show_threads
+            && self.timeline_action == timeline_action
+            && self.timeline_active == timeline_active
         {
             return;
         }
@@ -734,6 +823,8 @@ impl ChatHeader {
         self.clan_id = clan_id;
         self.locale = locale.map(|locale| SharedString::from(locale.to_string()));
         self.show_threads = show_threads;
+        self.timeline_action = timeline_action;
+        self.timeline_active = timeline_active;
         cx.notify();
     }
 }
@@ -834,6 +925,15 @@ impl Render for ChatHeader {
         let members_toggle = Arc::new(move |_window: &mut Window, cx: &mut App| {
             let _ = layout_weak.update(cx, |this, cx| this.toggle_member_list(cx));
         });
+        let layout_weak_timeline = self.layout.clone();
+        let timeline_toggle = Arc::new(move |_window: &mut Window, cx: &mut App| {
+            let _ = layout_weak_timeline.update(cx, |this, cx| this.toggle_media_channel_view(cx));
+        });
+        let timeline_tooltip: SharedString = if self.timeline_active {
+            mezon_i18n::t(&locale, "channelTopbar.tooltips.defaultView").into()
+        } else {
+            mezon_i18n::t(&locale, "channelTopbar.tooltips.timelineView").into()
+        };
         let mut header = ChannelHeader::new(self.name.to_string())
             .dm(self.dm)
             .members_action(self.members_action)
@@ -843,6 +943,13 @@ impl Render for ChatHeader {
             .show_inbox(self.show_inbox)
             .on_toggle_members(members_toggle)
             .show_threads(show_threads);
+        if self.timeline_action {
+            header = header
+                .timeline_action(true)
+                .timeline_active(self.timeline_active)
+                .timeline_tooltip(timeline_tooltip)
+                .on_toggle_timeline(timeline_toggle);
+        }
         if let Some(files_trigger) = files_trigger {
             header = header.files_trigger(files_trigger);
         }

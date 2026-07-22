@@ -2256,6 +2256,64 @@ impl TransportClient {
             .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
     }
 
+    pub async fn list_channel_timeline(
+        &self,
+        clan_id: i64,
+        channel_id: i64,
+        year: i32,
+        limit: i32,
+    ) -> Result<mezon_proto::api::ListChannelTimelineResponse> {
+        let transport = self.inner.clone();
+        runtime()
+            .spawn(async move {
+                transport
+                    .list_channel_timeline(clan_id, channel_id, year, limit)
+                    .await
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
+    pub async fn create_channel_timeline(
+        &self,
+        req: mezon_proto::api::CreateChannelTimelineRequest,
+    ) -> Result<mezon_proto::api::CreateChannelTimelineResponse> {
+        let transport = self.inner.clone();
+        runtime()
+            .spawn(async move { transport.create_channel_timeline(req).await })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
+    pub async fn update_channel_timeline(
+        &self,
+        req: mezon_proto::api::UpdateChannelTimelineRequest,
+    ) -> Result<mezon_proto::api::UpdateChannelTimelineResponse> {
+        let transport = self.inner.clone();
+        runtime()
+            .spawn(async move { transport.update_channel_timeline(req).await })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
+    pub async fn detail_channel_timeline(
+        &self,
+        clan_id: i64,
+        channel_id: i64,
+        id: i64,
+        start_time_seconds: u32,
+    ) -> Result<mezon_proto::api::ChannelTimelineDetailResponse> {
+        let transport = self.inner.clone();
+        runtime()
+            .spawn(async move {
+                transport
+                    .detail_channel_timeline(clan_id, channel_id, id, start_time_seconds)
+                    .await
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
     pub async fn add_channel_favorite(&self, channel_id: i64, clan_id: i64) -> Result<()> {
         let transport = self.inner.clone();
         runtime()
