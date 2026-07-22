@@ -334,6 +334,11 @@ impl ClanMembersPage {
         cx: &Context<Self>,
     ) -> AnyElement {
         let active = self.sort_field == field;
+        let direction = if active && !self.sort_descending {
+            std::f32::consts::PI
+        } else {
+            0.
+        };
         div()
             .id(format!("member-sort-{field:?}"))
             .flex()
@@ -348,16 +353,14 @@ impl ClanMembersPage {
             })
             .child(label)
             .child(
-                Icon::new(IconName::FiltersIcon)
+                Icon::new(IconName::ArrowDown)
                     .size(px(14.))
                     .text_color(if active {
                         cx.theme().text_primary
                     } else {
                         cx.theme().text_secondary
                     })
-                    .with_transformation(gpui::Transformation::rotate(gpui::radians(
-                        std::f32::consts::FRAC_PI_2,
-                    ))),
+                    .with_transformation(gpui::Transformation::rotate(gpui::radians(direction))),
             )
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.select_sort(field);
@@ -511,59 +514,60 @@ impl ClanMembersPage {
     fn page_size_control(&self, cx: &Context<Self>) -> AnyElement {
         let open = self.page_size_picker_open;
         let locale = &self.settings.read(cx).language;
-        let mut control = div()
-            .id("member-page-size-control")
-            .relative()
-            .flex()
-            .items_center()
-            .gap_2()
-            .child(tr(locale, "memberPage.show"))
-            .child(
-                div()
-                    .id("member-page-size")
-                    .cursor_pointer()
-                    .px_2()
-                    .py_1()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .gap_1()
-                    .rounded(px(4.))
-                    .hover(|style| style.bg(cx.theme().bg_hover))
-                    .child(self.page_size.to_string())
-                    .child(Icon::new(IconName::ArrowDown).size(px(14.)))
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.page_size_picker_open = !open;
-                        cx.notify();
-                    })),
-            )
-            .on_mouse_down_out(cx.listener(|this, _, _, cx| {
-                if this.page_size_picker_open {
-                    this.page_size_picker_open = false;
+        let chevron_angle = if open { std::f32::consts::PI } else { 0. };
+        let mut control = div().relative().w(px(68.)).child(
+            div()
+                .id("member-page-size")
+                .w_full()
+                .h(px(32.))
+                .px_2()
+                .flex()
+                .items_center()
+                .justify_between()
+                .rounded(px(6.))
+                .border_1()
+                .border_color(cx.theme().border)
+                .cursor_pointer()
+                .hover(|style| style.bg(cx.theme().bg_hover))
+                .child(self.page_size.to_string())
+                .child(
+                    Icon::new(IconName::ChevronDown)
+                        .size(px(14.))
+                        .text_color(cx.theme().text_secondary)
+                        .with_transformation(gpui::Transformation::rotate(gpui::radians(
+                            chevron_angle,
+                        ))),
+                )
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.page_size_picker_open = !open;
                     cx.notify();
-                }
-            }));
+                })),
+        );
         if open {
             let mut menu = div()
                 .absolute()
-                .bottom(px(34.))
-                .left(px(48.))
-                .w(px(64.))
+                .bottom(px(36.))
+                .left_0()
+                .w(px(68.))
                 .p_1()
-                .rounded(px(5.))
+                .rounded(px(6.))
                 .bg(cx.theme().bg_floating)
                 .border_1()
                 .border_color(cx.theme().border)
                 .shadow_lg()
                 .occlude();
             for size in PAGE_SIZES {
+                let selected = size == self.page_size;
                 menu = menu.child(
                     div()
                         .id(format!("member-page-size-{size}"))
-                        .cursor_pointer()
+                        .h(px(28.))
                         .px_2()
-                        .py_1()
-                        .rounded(px(3.))
+                        .flex()
+                        .items_center()
+                        .rounded(px(4.))
+                        .cursor_pointer()
+                        .when(selected, |style| style.bg(cx.theme().bg_hover))
                         .hover(|style| style.bg(cx.theme().bg_hover))
                         .child(size.to_string())
                         .on_mouse_down(
@@ -580,7 +584,20 @@ impl ClanMembersPage {
             }
             control = control.child(deferred(menu));
         }
-        control.into_any_element()
+        div()
+            .id("member-page-size-control")
+            .flex()
+            .items_center()
+            .gap_2()
+            .child(tr(locale, "memberPage.show"))
+            .child(control)
+            .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                if this.page_size_picker_open {
+                    this.page_size_picker_open = false;
+                    cx.notify();
+                }
+            }))
+            .into_any_element()
     }
 
     fn pagination(&self, pages: usize, cx: &Context<Self>) -> AnyElement {
