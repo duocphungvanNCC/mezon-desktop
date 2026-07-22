@@ -5142,17 +5142,11 @@ fn edit_content_spans(content: &str, content_tokens: OutgoingContent) -> EditTra
 }
 
 fn parse_embed_accent(color: Option<&str>) -> Option<Rgba> {
-    let raw = color?.trim();
-    if raw.is_empty() {
+    let raw = color?.trim().trim_start_matches('#');
+    if raw.len() != 6 || !raw.bytes().all(|b| b.is_ascii_hexdigit()) {
         return None;
     }
-    let hex = raw.trim_start_matches('#');
-    if hex.len() == 6 && hex.bytes().all(|b| b.is_ascii_hexdigit()) {
-        return u32::from_str_radix(hex, 16).ok().map(gpui::rgb);
-    }
-    raw.parse::<u32>()
-        .ok()
-        .map(|value| gpui::rgb(value & 0x00_ff_ff))
+    u32::from_str_radix(raw, 16).ok().map(gpui::rgb)
 }
 
 fn build_call_log(content: &ApiMessageContent) -> Option<CallLog> {
@@ -5682,22 +5676,22 @@ mod tests {
     use crate::message::MessageSpan;
 
     #[test]
-    fn parse_embed_accent_accepts_decimal_embed_colors() {
-        let accent = parse_embed_accent(Some("49151")).expect("decimal color");
+    fn parse_embed_accent_accepts_normalized_hex_colors() {
+        let accent = parse_embed_accent(Some("#00BFFF")).expect("hex color");
         assert_eq!(accent, gpui::rgb(0x00_bf_ff));
     }
 
     #[test]
-    fn parse_embed_accent_accepts_hex_embed_colors() {
-        let accent = parse_embed_accent(Some("#00BFFF")).expect("hex color");
-        assert_eq!(accent, gpui::rgb(0x00_bf_ff));
+    fn parse_embed_accent_preserves_red_channel() {
+        let accent = parse_embed_accent(Some("#FF0000")).expect("red color");
+        assert_eq!(accent, gpui::rgb(0xff_00_00));
     }
 
     #[test]
     fn build_embeds_maps_numeric_color_to_accent() {
         let content = ApiMessageContent {
             embed: vec![ApiEmbed {
-                color: Some("49151".into()),
+                color: Some("#00BFFF".into()),
                 title: Some("Saved".into()),
                 ..Default::default()
             }],
@@ -5706,6 +5700,21 @@ mod tests {
         let embeds = build_embeds(&content, None);
         let embed = embeds.first().expect("one embed");
         assert_eq!(embed.accent, Some(gpui::rgb(0x00_bf_ff)));
+    }
+
+    #[test]
+    fn build_embeds_maps_discord_red_decimal_to_accent() {
+        let content = ApiMessageContent {
+            embed: vec![ApiEmbed {
+                color: Some("#FF0000".into()),
+                title: Some("Alert".into()),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let embeds = build_embeds(&content, None);
+        let embed = embeds.first().expect("one embed");
+        assert_eq!(embed.accent, Some(gpui::rgb(0xff_00_00)));
     }
 
     #[test]

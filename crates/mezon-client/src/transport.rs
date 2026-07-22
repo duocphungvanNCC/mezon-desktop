@@ -779,27 +779,61 @@ pub fn parse_message_content_tokens(raw: &str) -> ApiMessageContent {
         return ApiMessageContent::default();
     }
     if let Ok(tokens) = serde_json::from_str::<ApiMessageContent>(trimmed) {
-        return sanitize_embed_only_content_tokens(tokens, trimmed);
+        return tokens;
     }
     if let Ok(serde_json::Value::String(inner)) = serde_json::from_str::<serde_json::Value>(trimmed)
         && let Ok(tokens) = serde_json::from_str::<ApiMessageContent>(&inner)
     {
-        return sanitize_embed_only_content_tokens(tokens, trimmed);
+        return tokens;
     }
     recover_message_content_tokens(trimmed)
 }
 
-fn sanitize_embed_only_content_tokens(
-    mut tokens: ApiMessageContent,
-    raw: &str,
-) -> ApiMessageContent {
-    if !tokens.embed.is_empty() && tokens.t.trim().is_empty() {
-        return tokens;
+pub fn extract_message_text_content(trimmed: &str) -> Option<String> {
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed) {
+        return value.get("t").and_then(json_value_as_string);
     }
-    if !tokens.embed.is_empty() && tokens.t.trim() == raw.trim() {
-        tokens.t.clear();
+    extract_json_t_field_loose(trimmed)
+}
+
+fn extract_json_t_field_loose(raw: &str) -> Option<String> {
+    const MARKERS: &[&str] = &[r#"{"t":""#, r#"{"t": ""#, r#"{"t" : ""#];
+    for marker in MARKERS {
+        if let Some(pos) = raw.find(marker) {
+            let text = parse_json_string_tail(&raw[pos + marker.len()..]);
+            if !text.is_empty() {
+                return Some(text);
+            }
+        }
     }
-    tokens
+    None
+}
+
+fn parse_json_string_tail(rest: &str) -> String {
+    let mut out = String::new();
+    let mut chars = rest.chars();
+    while let Some(ch) = chars.next() {
+        match ch {
+            '\\' => {
+                if let Some(next) = chars.next() {
+                    match next {
+                        'n' => out.push('\n'),
+                        't' => out.push('\t'),
+                        'r' => out.push('\r'),
+                        '"' => out.push('"'),
+                        '\\' => out.push('\\'),
+                        other => {
+                            out.push('\\');
+                            out.push(other);
+                        }
+                    }
+                }
+            }
+            '"' => break,
+            other => out.push(other),
+        }
+    }
+    out
 }
 
 fn recover_message_content_tokens(trimmed: &str) -> ApiMessageContent {
@@ -818,21 +852,43 @@ fn recover_message_content_tokens(trimmed: &str) -> ApiMessageContent {
         if let Some(text) = map.get("t").and_then(json_value_as_string) {
             tokens.t = text;
         }
+        tokens.mentions = recover_content_token_array(map.get("mentions"));
+        tokens.hg = recover_content_token_array(map.get("hg"));
+        tokens.ej = recover_content_token_array(map.get("ej"));
+        tokens.mk = recover_content_token_array(map.get("mk"));
+        tokens.lk = recover_content_token_array(map.get("lk"));
+        tokens.vk = recover_content_token_array(map.get("vk"));
+        tokens.lky = recover_content_token_array(map.get("lky"));
         tokens.embed = recover_embed_array(map.get("embed"));
         tokens.components = recover_component_rows(map.get("components"));
         if let Some(call_log) = map.get("callLog").or_else(|| map.get("call_log")) {
             tokens.call_log = serde_json::from_value(call_log.clone()).ok();
         }
+        tokens.fwd = map
+            .get("fwd")
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false);
         tokens.is_card = map
             .get("isCard")
             .or_else(|| map.get("is_card"))
             .and_then(|value| value.as_bool())
             .unwrap_or(false);
+        tokens.question = map
+            .get("question")
+            .and_then(|value| value.as_str())
+            .map(str::to_owned);
+        if let Some(poll_id) = map.get("id").or_else(|| map.get("poll_id")) {
+            tokens.poll_id = poll_id
+                .as_i64()
+                .or_else(|| poll_id.as_str().and_then(|s| s.parse().ok()));
+        }
     }
-    if tokens.t.is_empty() && tokens.embed.is_empty() && tokens.components.is_empty() {
-        tokens.t = trimmed.to_string();
-    } else if !tokens.embed.is_empty() && tokens.t.trim() == trimmed.trim() {
-        tokens.t.clear();
+    if tokens.t.is_empty() {
+        if let Some(text) = extract_message_text_content(trimmed) {
+            tokens.t = text;
+        } else if !trimmed.starts_with('{') && !trimmed.starts_with('"') {
+            tokens.t = trimmed.to_string();
+        }
     }
     tokens
 }
@@ -843,6 +899,16 @@ fn json_value_as_string(value: &serde_json::Value) -> Option<String> {
         serde_json::Value::Number(number) => Some(number.to_string()),
         _ => None,
     }
+}
+
+fn recover_content_token_array(value: Option<&serde_json::Value>) -> Vec<ContentToken> {
+    let Some(serde_json::Value::Array(items)) = value else {
+        return Vec::new();
+    };
+    items
+        .iter()
+        .filter_map(|item| serde_json::from_value::<ContentToken>(item.clone()).ok())
+        .collect()
 }
 
 fn recover_embed_array(value: Option<&serde_json::Value>) -> Vec<ApiEmbed> {
@@ -1481,7 +1547,7 @@ pub struct ApiEmbedInputWrapper {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ApiEmbed {
-    #[serde(default, deserialize_with = "string_or_number::deserialize")]
+    #[serde(default, deserialize_with = "embed_color::deserialize")]
     pub color: Option<String>,
     #[serde(default)]
     pub title: Option<String>,
@@ -1739,6 +1805,81 @@ pub const MENTION_HERE_USER_ID: &str = "1775731111020111321";
 
 pub fn is_here_user_id(user_id: &str) -> bool {
     user_id == MENTION_HERE_ID || user_id == MENTION_HERE_USER_ID
+}
+
+mod embed_color {
+    use serde::de::{self, Visitor};
+    use std::fmt;
+
+    fn normalize_decimal(value: u32) -> String {
+        format!("#{:06X}", value & 0x00FF_FFFF)
+    }
+
+    fn normalize_hex(raw: &str) -> Option<String> {
+        let hex = raw.trim_start_matches('#');
+        if hex.len() != 6 || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return None;
+        }
+        u32::from_str_radix(hex, 16)
+            .ok()
+            .map(|value| format!("#{:06X}", value & 0x00FF_FFFF))
+    }
+
+    fn normalize_string(raw: &str) -> Option<String> {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            return None;
+        }
+        let body = trimmed.strip_prefix('#').unwrap_or(trimmed);
+        if body.is_empty() {
+            return None;
+        }
+        if body.bytes().all(|b| b.is_ascii_digit()) {
+            return body.parse::<u32>().ok().map(normalize_decimal);
+        }
+        normalize_hex(body)
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+    where
+        D: de::Deserializer<'de>,
+    {
+        struct OptVisitor;
+
+        impl<'de> Visitor<'de> for OptVisitor {
+            type Value = Option<String>;
+
+            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str("embed color as number or string")
+            }
+
+            fn visit_none<E: de::Error>(self) -> Result<Self::Value, E> {
+                Ok(None)
+            }
+
+            fn visit_unit<E: de::Error>(self) -> Result<Self::Value, E> {
+                Ok(None)
+            }
+
+            fn visit_i64<E: de::Error>(self, v: i64) -> Result<Self::Value, E> {
+                Ok((v != 0).then(|| normalize_decimal(v.max(0) as u32)))
+            }
+
+            fn visit_u64<E: de::Error>(self, v: u64) -> Result<Self::Value, E> {
+                Ok((v != 0).then(|| normalize_decimal(v as u32)))
+            }
+
+            fn visit_str<E: de::Error>(self, v: &str) -> Result<Self::Value, E> {
+                Ok(normalize_string(v))
+            }
+
+            fn visit_string<E: de::Error>(self, v: String) -> Result<Self::Value, E> {
+                Ok(normalize_string(&v))
+            }
+        }
+
+        deserializer.deserialize_any(OptVisitor)
+    }
 }
 
 mod string_or_number {
@@ -8174,7 +8315,7 @@ mod tests {
         assert_eq!(parsed.content_tokens.embed.len(), 1);
         assert_eq!(
             parsed.content_tokens.embed[0].color.as_deref(),
-            Some("49151")
+            Some("#00BFFF")
         );
         assert_eq!(
             parsed.content_tokens.embed[0].title.as_deref(),
@@ -8184,11 +8325,43 @@ mod tests {
 
     #[test]
     fn parse_message_content_tokens_recovers_embed_when_struct_parse_fails() {
-        let raw = r#"{"embed":[{"color":"00BFFF","title":"Recovered"}]}"#;
+        let raw = r#"{"t":123,"embed":[{"color":49151,"title":"Recovered"}]}"#;
         let tokens = parse_message_content_tokens(raw);
-        assert!(tokens.t.is_empty());
+        assert_eq!(tokens.t, "123");
         assert_eq!(tokens.embed.len(), 1);
         assert_eq!(tokens.embed[0].title.as_deref(), Some("Recovered"));
+        assert_eq!(tokens.embed[0].color.as_deref(), Some("#00BFFF"));
+    }
+
+    #[test]
+    fn parse_message_content_tokens_does_not_leak_bare_json_object() {
+        let raw = r#"{"unknown":1}"#;
+        let tokens = parse_message_content_tokens(raw);
+        assert!(tokens.t.is_empty());
+        assert!(tokens.embed.is_empty());
+    }
+
+    #[test]
+    fn embed_color_normalizes_decimal_and_hex_strings() {
+        let decimal: ApiEmbed =
+            serde_json::from_value(serde_json::json!({ "color": 49151 })).unwrap();
+        assert_eq!(decimal.color.as_deref(), Some("#00BFFF"));
+
+        let red: ApiEmbed =
+            serde_json::from_value(serde_json::json!({ "color": 16_711_680 })).unwrap();
+        assert_eq!(red.color.as_deref(), Some("#FF0000"));
+
+        let hex: ApiEmbed =
+            serde_json::from_value(serde_json::json!({ "color": "00BFFF" })).unwrap();
+        assert_eq!(hex.color.as_deref(), Some("#00BFFF"));
+
+        let decimal_string: ApiEmbed =
+            serde_json::from_value(serde_json::json!({ "color": "123456" })).unwrap();
+        assert_eq!(decimal_string.color.as_deref(), Some("#01E240"));
+
+        let hash_decimal: ApiEmbed =
+            serde_json::from_value(serde_json::json!({ "color": "#49151" })).unwrap();
+        assert_eq!(hash_decimal.color.as_deref(), Some("#00BFFF"));
     }
 
     #[test]
