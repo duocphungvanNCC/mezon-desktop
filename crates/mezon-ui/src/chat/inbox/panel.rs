@@ -1064,12 +1064,13 @@ fn render_topic_item(
                 .p_2()
                 .rounded(px(8.))
                 .bg(theme.bg_secondary)
+                .max_h(px(150.))
+                .overflow_hidden()
                 .child(
                     div()
                         .relative()
                         .w_full()
                         .min_w_0()
-                        .pr(px(56.))
                         .child(render_topic_body(
                             theme,
                             locale,

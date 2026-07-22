@@ -1053,7 +1053,7 @@ fn render_banner_and_events(
     sidebar: WeakEntity<ChannelSidebar>,
     cx: &App,
     suppress_hover: bool,
-    _locale: &str,
+    locale: &str,
 ) -> AnyElement {
     let theme = cx.theme();
     let divider_color = theme.border;

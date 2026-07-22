@@ -36,10 +36,10 @@ pub use channel_app_launch::{ChannelAppLaunchParams, build_channel_app_url};
 pub use gotify::{GotifyExtras, GotifyNotification};
 pub use inbox::{
     DIRECTION_AROUND_TIMESTAMP, DIRECTION_BEFORE_TIMESTAMP, INBOX_PAGE_LIMIT, InboxCategory,
-    InboxMentionSpan, InboxMessagePreview, InboxNotification, TopicDiscussion,
+    InboxMentionSpan, InboxMessagePreview, InboxNotification, TopicDiscussion, TopicReplyPreview,
     attachment_link_is_image, display_text_from_message_content, inbox_notification_from_api,
     inbox_notifications_from_list, message_content_is_attachment, topic_discussion_from_api,
-    topics_from_list,
+    topic_reply_preview, topics_from_list,
 };
 pub use network_monitor::NetworkMonitor;
 pub use network_probe::{
