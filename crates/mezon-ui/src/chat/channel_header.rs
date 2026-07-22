@@ -6,7 +6,7 @@ use gpui::{
     px,
 };
 use mezon_store::{InVoiceInfo, Settings, ThreadsStore};
-use ui::{ButtonLike, Clickable, PopoverMenu, PopoverMenuHandle, Toggleable, Tooltip};
+use ui::{Clickable, PopoverMenu, PopoverMenuHandle, Toggleable, Tooltip};
 
 use crate::app::window_controls;
 use crate::chat::files_popover::{FilesPopoverPanel, files_popover_on_open};

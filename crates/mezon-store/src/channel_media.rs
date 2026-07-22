@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use gpui::{App, AppContext, Context, Entity, EventEmitter, Global};
-use mezon_client::AppApi;
+use mezon_client::{AppApi, UploadFile};
 use mezon_proto::api;
 use prost::Message;
 
@@ -295,7 +295,7 @@ pub struct ChannelMediaStore {
     by_key: KeyedCache<CacheKey, ChannelMediaBucket>,
     active_key: Option<CacheKey>,
     detail_cache: HashMap<i64, DetailCacheEntry>,
-    detail_loading: HashMap<i64, bool>,
+    detail_loading: HashMap<i64, ChannelId>,
     detail_errors: HashMap<i64, String>,
     api: Arc<AppApi>,
 }
@@ -363,8 +363,7 @@ impl ChannelMediaStore {
         let needs_fetch = match self.by_key.get(&key) {
             Some(bucket) => {
                 !bucket.is_loading
-                    && (bucket.events.is_empty()
-                        || !self.by_key.is_fresh(&key, CHANNEL_MEDIA_CACHE_TTL)
+                    && (!self.by_key.is_fresh(&key, CHANNEL_MEDIA_CACHE_TTL)
                         || bucket.error.is_some())
             }
             None => true,
@@ -424,20 +423,24 @@ impl ChannelMediaStore {
             {
                 return;
             }
-            if self.by_key.is_fresh(&key, CHANNEL_MEDIA_CACHE_TTL)
-                && self.by_key.get(&key).is_some_and(|b| !b.events.is_empty())
-            {
+            if self.by_key.is_fresh(&key, CHANNEL_MEDIA_CACHE_TTL) && self.by_key.contains(&key) {
                 self.by_key.touch(&key);
                 return;
             }
         }
 
-        let bucket = self.by_key.get_mut(&key).cloned().unwrap_or_default();
-        let mut bucket = bucket;
-        bucket.is_loading = true;
-        bucket.error = None;
-        self.by_key
-            .insert(key.clone(), bucket, self.active_key.as_ref());
+        if self.by_key.contains(&key) {
+            self.by_key.mark_stale(&key);
+        }
+        if let Some(bucket) = self.by_key.get_mut(&key) {
+            bucket.is_loading = true;
+            bucket.error = None;
+        } else {
+            let mut bucket = ChannelMediaBucket::default();
+            bucket.is_loading = true;
+            self.by_key
+                .insert(key.clone(), bucket, self.active_key.as_ref());
+        }
         cx.emit(ChannelMediaEvent::Changed(channel_id));
         cx.notify();
 
@@ -448,22 +451,23 @@ impl ChannelMediaStore {
                 .await;
 
             this.update(cx, |store, cx| {
-                let mut bucket = store.by_key.get(&key).cloned().unwrap_or_default();
-                bucket.is_loading = false;
-                match result {
-                    Ok(response) => {
-                        bucket.events = response
-                            .events
-                            .into_iter()
-                            .map(ChannelTimeline::from_proto)
-                            .collect();
-                        bucket.error = None;
-                    }
-                    Err(e) => {
-                        bucket.error = Some(e.to_string());
+                if let Some(bucket) = store.by_key.get_mut(&key) {
+                    bucket.is_loading = false;
+                    match result {
+                        Ok(response) => {
+                            bucket.events = response
+                                .events
+                                .into_iter()
+                                .map(ChannelTimeline::from_proto)
+                                .collect();
+                            bucket.error = None;
+                        }
+                        Err(e) => {
+                            bucket.error = Some(e.to_string());
+                        }
                     }
                 }
-                store.by_key.insert(key, bucket, store.active_key.as_ref());
+                store.by_key.mark_fetched(&key);
                 cx.emit(ChannelMediaEvent::Changed(channel_id));
                 cx.notify();
             })
@@ -491,7 +495,8 @@ impl ChannelMediaStore {
         }
         self.detail_cache
             .retain(|_, entry| entry.event.channel_id != channel_id);
-        self.detail_loading.clear();
+        self.detail_loading
+            .retain(|_, loading_channel| *loading_channel != channel_id);
         self.detail_errors
             .retain(|id, _| self.detail_cache.contains_key(id));
         if self
@@ -509,8 +514,12 @@ impl ChannelMediaStore {
         self.detail_cache.get(&event_id).map(|entry| &entry.event)
     }
 
+    pub fn has_detail(&self, event_id: i64) -> bool {
+        self.detail_cache.contains_key(&event_id)
+    }
+
     pub fn is_detail_loading(&self, event_id: i64) -> bool {
-        self.detail_loading.get(&event_id).copied().unwrap_or(false)
+        self.detail_loading.contains_key(&event_id)
     }
 
     pub fn patch_event_detail(&mut self, event: ChannelTimeline, cx: &mut Context<Self>) {
@@ -547,12 +556,12 @@ impl ChannelMediaStore {
             {
                 return;
             }
-            if self.detail_loading.get(&event_id).copied().unwrap_or(false) {
+            if self.detail_loading.contains_key(&event_id) {
                 return;
             }
         }
 
-        self.detail_loading.insert(event_id, true);
+        self.detail_loading.insert(event_id, channel_id);
         cx.emit(ChannelMediaEvent::Changed(channel_id));
         cx.notify();
 
@@ -563,7 +572,7 @@ impl ChannelMediaStore {
                 .await;
 
             this.update(cx, |store, cx| {
-                store.detail_loading.insert(event_id, false);
+                store.detail_loading.remove(&event_id);
                 match result {
                     Ok(response) => {
                         store.detail_errors.remove(&event_id);
@@ -787,12 +796,12 @@ fn merge_timeline_event(existing: &ChannelTimeline, incoming: &ChannelTimeline) 
 }
 
 fn event_year(start_time_seconds: u32) -> i32 {
-    use chrono::{Datelike, TimeZone};
-    chrono::Utc
+    use chrono::{Datelike, Local, TimeZone};
+    Local
         .timestamp_opt(start_time_seconds as i64, 0)
         .single()
         .map(|dt| dt.year())
-        .unwrap_or_else(|| chrono::Utc::now().year())
+        .unwrap_or_else(|| Local::now().year())
 }
 
 fn pending_timeline_event(
@@ -837,18 +846,15 @@ fn mime_from_extension(path: &Path) -> String {
     }
 }
 
-fn image_dimensions(data: &[u8]) -> (i32, i32) {
-    image::ImageReader::new(std::io::Cursor::new(data))
-        .with_guessed_format()
-        .ok()
-        .and_then(|reader| reader.into_dimensions().ok())
+fn image_dimensions_from_path(path: &Path) -> (i32, i32) {
+    image::image_dimensions(path)
         .map(|(w, h)| (i32::try_from(w).unwrap_or(0), i32::try_from(h).unwrap_or(0)))
         .unwrap_or((0, 0))
 }
 
 async fn upload_timeline_file(
     api: &AppApi,
-    base_img_url: &str,
+    _base_img_url: &str,
     path: &Path,
 ) -> Result<ChannelTimelineAttachment, String> {
     let filetype = mime_from_extension(path);
@@ -856,12 +862,10 @@ async fn upload_timeline_file(
         return Err("Unsupported file type".into());
     }
     let path_buf = path.to_path_buf();
-    let data = mezon_client::transport_runtime::handle()
-        .spawn_blocking(move || std::fs::read(&path_buf))
+    let file_size = mezon_client::transport_runtime::file_len(path_buf.clone())
         .await
-        .map_err(|e| e.to_string())?
         .map_err(|e| e.to_string())?;
-    if data.is_empty() {
+    if file_size == 0 {
         return Err("File is empty".into());
     }
     let filename = path
@@ -869,34 +873,41 @@ async fn upload_timeline_file(
         .and_then(|n| n.to_str())
         .unwrap_or("upload")
         .to_string();
-    let size = i32::try_from(data.len()).map_err(|_| "File is too large".to_string())?;
     let (width, height) = if filetype.starts_with("image/") {
-        image_dimensions(&data)
+        let path_for_dims = path_buf.clone();
+        mezon_client::transport_runtime::handle()
+            .spawn_blocking(move || image_dimensions_from_path(&path_for_dims))
+            .await
+            .map_err(|e| e.to_string())?
     } else {
         (0, 0)
     };
-    let upload = api
-        .upload_attachment_file(&filename, &filetype, size, width, height)
+    let presigned = api
+        .presign_file(UploadFile {
+            path: path_buf,
+            filename,
+            filetype: filetype.clone(),
+            width,
+            height,
+            duration: 0,
+            thumbnail: None,
+        })
         .await
         .map_err(|e| e.to_string())?;
-    mezon_client::transport_runtime::put_bytes_to_content_type(&upload.url, data, &filetype)
+    let att = presigned.attachment.clone();
+    api.execute_upload(presigned)
         .await
         .map_err(|e| e.to_string())?;
-    if upload.filename.is_empty() {
-        return Err("Upload returned empty filename".into());
-    }
-    let base = base_img_url.trim_end_matches('/');
-    let file_url = format!("{base}/{}", upload.filename);
     Ok(ChannelTimelineAttachment {
         id: 0,
-        file_name: upload.filename.clone(),
-        file_url,
-        file_type: filetype,
-        file_size: size as i64,
-        thumbnail: String::new(),
-        width,
-        height,
-        duration: 0,
+        file_name: att.filename,
+        file_url: att.url,
+        file_type: att.filetype,
+        file_size: i64::from(att.size),
+        thumbnail: att.thumbnail,
+        width: att.width,
+        height: att.height,
+        duration: att.duration,
         message_id: 0,
     })
 }

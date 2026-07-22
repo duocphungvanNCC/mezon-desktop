@@ -2,12 +2,13 @@ use std::sync::Arc;
 
 use gpui::http_client::HttpClient;
 use gpui::{
-    App, BackgroundExecutor, Bounds, Context, Corners, Entity, FocusHandle, Focusable, ImageCache,
-    KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, ObjectFit, Pixels, Point, Render,
-    RenderImage, Resource, ScrollDelta, ScrollWheelEvent, SharedString, SharedUri,
+    App, Bounds, Context, Corners, Entity, FocusHandle, Focusable, ImageCache, KeyDownEvent,
+    MouseButton, MouseDownEvent, MouseMoveEvent, ObjectFit, Pixels, Point, Render, RenderImage,
+    Resource, ScrollDelta, ScrollHandle, ScrollWheelEvent, SharedString, SharedUri,
     Size as GpuiSize, Window, canvas, div, img, point, prelude::*, px, size,
 };
 use mezon_store::{AppConfig, ChannelTimelineAttachment};
+use ui::{ScrollAxes, Scrollbars, WithScrollbar};
 
 use crate::app::shell::Shell;
 use crate::components::primitives::{Icon, IconName, Spinner};
@@ -23,6 +24,9 @@ const MIN_ZOOM: f32 = 1.0;
 const MAX_ZOOM: f32 = 5.0;
 const ZOOM_WHEEL_STEP: f32 = 0.05;
 const ZOOM_BUTTON_STEP: f32 = 1.5;
+const THUMB_SIDEBAR_WIDTH: f32 = 100.;
+const THUMB_SCROLLBAR_GUTTER: f32 = 14.;
+const THUMB_SIDEBAR_BG: u32 = 0x1a1a1a;
 
 fn uploaded_attachment_index(
     attachments: &[ChannelTimelineAttachment],
@@ -89,8 +93,10 @@ struct MediaImageModal {
     drag_from: Option<Point<Pixels>>,
     rotation_deg: i32,
     rotated_image: Option<Arc<RenderImage>>,
+    decoded_rgba: Option<(usize, Arc<image::RgbaImage>)>,
     rotation_loading: bool,
     show_list: bool,
+    thumb_scroll: ScrollHandle,
     image_cache: Entity<LruImageCache>,
     rotation_session: u64,
 }
@@ -120,8 +126,10 @@ impl MediaImageModal {
             drag_from: None,
             rotation_deg: 0,
             rotated_image: None,
+            decoded_rgba: None,
             rotation_loading: false,
             show_list,
+            thumb_scroll: ScrollHandle::new(),
             image_cache: cx.new(|cx| {
                 LruImageCache::labeled(
                     "media-modal",
@@ -135,7 +143,9 @@ impl MediaImageModal {
         }
     }
 
-    fn close(&self, cx: &mut Context<Self>) {
+    fn close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.clear_rotated_image(Some(window), cx);
+        self.decoded_rgba = None;
         Shell::global(cx).update(cx, |shell, cx| shell.close_modal(cx));
     }
 
@@ -149,6 +159,7 @@ impl MediaImageModal {
         self.drag_from = None;
         self.rotation_deg = 0;
         self.rotated_image = None;
+        self.decoded_rgba = None;
         self.rotation_loading = false;
         cx.notify();
     }
@@ -156,6 +167,7 @@ impl MediaImageModal {
     fn select(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
         if index < self.attachments.len() && index != self.index {
             self.clear_rotated_image(Some(window), cx);
+            self.decoded_rgba = None;
             self.index = index;
             self.reset_view(cx);
         }
@@ -213,25 +225,53 @@ impl MediaImageModal {
         };
         let url = self.viewer_source(att);
         let degrees = self.rotation_deg;
+        let cached_rgba = self
+            .decoded_rgba
+            .as_ref()
+            .filter(|(index, _)| *index == self.index)
+            .map(|(_, rgba)| rgba.clone());
         self.rotation_loading = true;
         self.rotation_session = self.rotation_session.wrapping_add(1);
         let session = self.rotation_session;
         let client = cx.http_client();
         let executor = cx.background_executor().clone();
         cx.spawn(async move |this, cx| {
-            let result = fetch_rotated_image(&url, degrees, client, executor).await;
+            let result: anyhow::Result<(Arc<RenderImage>, Option<Arc<image::RgbaImage>>)> =
+                match cached_rgba {
+                    Some(rgba) => {
+                        executor
+                            .spawn(async move {
+                                render_rotated_image(&rgba, degrees).map(|image| (image, None))
+                            })
+                            .await
+                    }
+                    None => match fetch_decoded_rgba(&url, client.clone()).await {
+                        Ok(rgba) => {
+                            let rgba_for_cache = rgba.clone();
+                            executor
+                                .spawn(async move { render_rotated_image(&rgba, degrees) })
+                                .await
+                                .map(|image| (image, Some(rgba_for_cache)))
+                        }
+                        Err(error) => Err(error),
+                    },
+                };
             let _ = this.update(cx, |this, cx| {
                 if this.rotation_session != session {
                     return;
                 }
                 this.rotation_loading = false;
                 match result {
-                    Ok(image) => {
+                    Ok((image, rgba)) => {
+                        if let Some(rgba) = rgba {
+                            this.decoded_rgba = Some((this.index, rgba));
+                        }
                         this.clear_rotated_image(None, cx);
                         this.rotated_image = Some(image);
                     }
                     Err(_) => {
                         this.rotation_deg = 0;
+                        this.decoded_rgba = None;
                         this.clear_rotated_image(None, cx);
                     }
                 }
@@ -288,7 +328,7 @@ impl MediaImageModal {
 
     fn on_key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         match event.keystroke.key.as_str() {
-            "escape" => self.close(cx),
+            "escape" => self.close(window, cx),
             "left" | "up" => {
                 if self.index > 0 {
                     self.select(self.index - 1, window, cx);
@@ -330,7 +370,7 @@ impl Render for MediaImageModal {
         div()
             .track_focus(&self.focus_handle)
             .key_context("menu")
-            .on_action(cx.listener(|this, _: &::menu::Cancel, _, cx| this.close(cx)))
+            .on_action(cx.listener(|this, _: &::menu::Cancel, window, cx| this.close(window, cx)))
             .on_key_down(cx.listener(Self::on_key_down))
             .relative()
             .flex()
@@ -439,41 +479,66 @@ impl Render for MediaImageModal {
                         row.child(
                             div()
                                 .id("media-modal-thumbs")
-                                .w(px(100.))
-                                .overflow_y_scroll()
-                                .bg(gpui::rgb(0x1a1a1a))
-                                .children(self.attachments.iter().enumerate().map(|(idx, att)| {
-                                    let active = idx == self.index;
-                                    let thumb = self.thumb_url(att);
+                                .w(px(THUMB_SIDEBAR_WIDTH + THUMB_SCROLLBAR_GUTTER))
+                                .flex_shrink_0()
+                                .min_h_0()
+                                .overflow_hidden()
+                                .bg(gpui::rgb(THUMB_SIDEBAR_BG))
+                                .child(
                                     div()
-                                        .id(SharedString::from(format!("media-modal-thumb-{idx}")))
-                                        .p_1()
-                                        .cursor_pointer()
-                                        .on_click(cx.listener(move |this, _, window, cx| {
-                                            this.select(idx, window, cx);
-                                        }))
-                                        .child(
-                                            div()
-                                                .rounded_md()
-                                                .overflow_hidden()
-                                                .border_2()
-                                                .when(active, |el| {
-                                                    el.border_color(theme.text_primary)
-                                                })
-                                                .when(!active, |el| {
-                                                    el.border_color(theme.border)
-                                                        .opacity(0.6)
-                                                        .hover(|el| el.opacity(0.9))
-                                                })
-                                                .child(render_media_image(
-                                                    bg,
-                                                    muted,
-                                                    thumb,
-                                                    px(92.),
-                                                    px(80.),
-                                                )),
-                                        )
-                                })),
+                                        .id("media-modal-thumbs-scroll")
+                                        .overflow_y_scroll()
+                                        .track_scroll(&self.thumb_scroll)
+                                        .size_full()
+                                        .children(self.attachments.iter().enumerate().map(
+                                            |(idx, att)| {
+                                                let active = idx == self.index;
+                                                let thumb = self.thumb_url(att);
+                                                div()
+                                                    .id(SharedString::from(format!(
+                                                        "media-modal-thumb-{idx}"
+                                                    )))
+                                                    .p_1()
+                                                    .cursor_pointer()
+                                                    .on_click(cx.listener(
+                                                        move |this, _, window, cx| {
+                                                            this.select(idx, window, cx);
+                                                        },
+                                                    ))
+                                                    .child(
+                                                        div()
+                                                            .rounded_md()
+                                                            .overflow_hidden()
+                                                            .border_2()
+                                                            .when(active, |el| {
+                                                                el.border_color(theme.text_primary)
+                                                            })
+                                                            .when(!active, |el| {
+                                                                el.border_color(theme.border)
+                                                                    .opacity(0.6)
+                                                                    .hover(|el| el.opacity(0.9))
+                                                            })
+                                                            .child(render_media_image(
+                                                                bg,
+                                                                muted,
+                                                                thumb,
+                                                                px(92.),
+                                                                px(80.),
+                                                            )),
+                                                    )
+                                            },
+                                        )),
+                                )
+                                .custom_scrollbars(
+                                    Scrollbars::always_visible(ScrollAxes::Vertical)
+                                        .tracked_scroll_handle(&self.thumb_scroll)
+                                        .with_stable_track_along(
+                                            ScrollAxes::Vertical,
+                                            gpui::rgb(THUMB_SIDEBAR_BG).into(),
+                                        ),
+                                    window,
+                                    cx,
+                                ),
                         )
                     }),
             )
@@ -558,7 +623,7 @@ impl Render for MediaImageModal {
                     .justify_end()
                     .cursor_pointer()
                     .hover(|el| el.opacity(0.8))
-                    .on_click(cx.listener(|this, _, _, cx| this.close(cx)))
+                    .on_click(cx.listener(|this, _, window, cx| this.close(window, cx)))
                     .child(
                         Icon::new(IconName::Close)
                             .size(px(24.))
@@ -637,7 +702,7 @@ impl MediaImageModal {
             )
             .on_mouse_down(
                 MouseButton::Left,
-                cx.listener(|this, ev: &MouseDownEvent, _, cx| {
+                cx.listener(|this, ev: &MouseDownEvent, _, _cx| {
                     if this.zoom > MIN_ZOOM {
                         this.drag_from = Some(ev.position);
                     }
@@ -696,12 +761,10 @@ fn fit_contain(container: GpuiSize<Pixels>, content: GpuiSize<Pixels>) -> GpuiSi
     size(px(iw * scale), px(ih * scale))
 }
 
-async fn fetch_rotated_image(
+async fn fetch_decoded_rgba(
     url: &str,
-    degrees: i32,
     client: Arc<dyn HttpClient>,
-    executor: BackgroundExecutor,
-) -> anyhow::Result<Arc<RenderImage>> {
+) -> anyhow::Result<Arc<image::RgbaImage>> {
     if !url.starts_with("https://") {
         anyhow::bail!("rotation fetch rejected: only https scheme is allowed");
     }
@@ -714,20 +777,21 @@ async fn fetch_rotated_image(
         crate::image_cache::VIEWER_FETCH_MAX_BYTES,
     )
     .await?;
-    executor
-        .spawn(async move {
-            let decoded = image::load_from_memory(&bytes)?;
-            let rotated = match degrees.rem_euclid(360) {
-                90 => decoded.rotate90(),
-                180 => decoded.rotate180(),
-                270 => decoded.rotate270(),
-                _ => decoded,
-            };
-            let mut rgba = rotated.to_rgba8();
-            for pixel in rgba.chunks_exact_mut(4) {
-                pixel.swap(0, 2);
-            }
-            anyhow::Ok(Arc::new(RenderImage::new(vec![image::Frame::new(rgba)])))
-        })
-        .await
+    let rgba = image::load_from_memory(&bytes)?.to_rgba8();
+    Ok(Arc::new(rgba))
+}
+
+fn render_rotated_image(rgba: &image::RgbaImage, degrees: i32) -> anyhow::Result<Arc<RenderImage>> {
+    let decoded = image::DynamicImage::ImageRgba8(rgba.clone());
+    let rotated = match degrees.rem_euclid(360) {
+        90 => decoded.rotate90(),
+        180 => decoded.rotate180(),
+        270 => decoded.rotate270(),
+        _ => decoded,
+    };
+    let mut buffer = rotated.to_rgba8();
+    for pixel in buffer.chunks_exact_mut(4) {
+        pixel.swap(0, 2);
+    }
+    Ok(Arc::new(RenderImage::new(vec![image::Frame::new(buffer)])))
 }

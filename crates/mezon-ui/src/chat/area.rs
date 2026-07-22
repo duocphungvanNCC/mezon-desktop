@@ -383,7 +383,7 @@ impl ChatArea {
             })
             .when(media_channel_view, |col| {
                 if let Some(panel) = self.media_channel_panel.clone() {
-                    col.child(AnyView::from(panel).cached(StyleRefinement::default().size_full()))
+                    col.child(div().size_full().child(AnyView::from(panel)))
                 } else {
                     col
                 }

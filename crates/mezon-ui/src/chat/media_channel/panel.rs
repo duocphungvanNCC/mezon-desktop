@@ -5,8 +5,8 @@ use gpui::{
     point, prelude::*, px,
 };
 use mezon_store::{
-    AppConfig, ChannelId, ChannelMediaStore, ChannelPermissionsStore, ChannelTimeline, ClanId,
-    Settings, first_event_year,
+    AppConfig, ChannelId, ChannelMediaStore, ChannelPermissionsStore, ClanId, Settings,
+    first_event_year,
 };
 
 use crate::app::shell::Shell;
@@ -196,13 +196,14 @@ impl MediaChannelPanel {
 
     fn navigate_event_detail(
         &mut self,
-        event: &ChannelTimeline,
+        event_id: i64,
+        start_time_seconds: u32,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         self.view = MediaChannelView::EventDetail;
-        self.detail_event_id = Some(event.id);
-        self.detail_start_time = event.start_time_seconds;
+        self.detail_event_id = Some(event_id);
+        self.detail_start_time = start_time_seconds;
         let panel = cx.weak_entity();
         let on_back = Arc::new(move |_: &mut Window, cx: &mut App| {
             panel.update(cx, |this, cx| this.navigate_timeline(cx)).ok();
@@ -211,8 +212,8 @@ impl MediaChannelPanel {
             EventDetailView::new(
                 self.clan_id,
                 self.channel_id,
-                event.id,
-                event.start_time_seconds,
+                event_id,
+                start_time_seconds,
                 self.settings.clone(),
                 self.preview_image_cache.clone(),
                 on_back,
@@ -284,9 +285,11 @@ impl Render for MediaChannelPanel {
         });
         let panel_detail = panel.clone();
         let on_event_click = Arc::new(
-            move |event: &ChannelTimeline, window: &mut Window, cx: &mut App| {
+            move |event_id: i64, start_time_seconds: u32, window: &mut Window, cx: &mut App| {
                 panel_detail
-                    .update(cx, |this, cx| this.navigate_event_detail(event, window, cx))
+                    .update(cx, |this, cx| {
+                        this.navigate_event_detail(event_id, start_time_seconds, window, cx)
+                    })
                     .ok();
             },
         );
@@ -348,7 +351,7 @@ impl Render for MediaChannelPanel {
                                     &theme,
                                     &locale,
                                     events,
-                                    &config,
+                                    config,
                                     self.preview_image_cache.clone(),
                                     Some(on_event_click),
                                 ),
@@ -425,9 +428,11 @@ impl MediaChannelPanel {
         });
         let panel_detail = panel.clone();
         let on_event_click = Arc::new(
-            move |event: &ChannelTimeline, window: &mut Window, cx: &mut App| {
+            move |event_id: i64, start_time_seconds: u32, window: &mut Window, cx: &mut App| {
                 panel_detail
-                    .update(cx, |this, cx| this.navigate_event_detail(event, window, cx))
+                    .update(cx, |this, cx| {
+                        this.navigate_event_detail(event_id, start_time_seconds, window, cx)
+                    })
                     .ok();
             },
         );
@@ -454,7 +459,7 @@ impl MediaChannelPanel {
                             .size_full()
                             .child(render_events_list_header(theme, locale, self.events_year))
                             .when(loading && events.is_empty(), |el| {
-                                el.child(render_events_loading(theme))
+                                el.child(render_events_loading())
                             })
                             .when(!loading && events.is_empty(), |el| {
                                 el.child(render_events_empty(theme, locale, self.events_year))
@@ -622,10 +627,10 @@ fn render_empty_state(
 fn render_timeline_body(
     theme: &Theme,
     locale: &str,
-    events: &[ChannelTimeline],
+    events: &[mezon_store::ChannelTimeline],
     config: &AppConfig,
     image_cache: Entity<LruImageCache>,
-    on_click: Option<Arc<dyn Fn(&ChannelTimeline, &mut Window, &mut App)>>,
+    on_click: Option<Arc<dyn Fn(i64, u32, &mut Window, &mut App)>>,
 ) -> impl IntoElement {
     div()
         .relative()

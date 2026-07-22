@@ -122,7 +122,7 @@ pub fn render_events_list_card(
     event: &ChannelTimeline,
     config: &AppConfig,
     image_cache: Entity<LruImageCache>,
-    on_click: Arc<dyn Fn(&ChannelTimeline, &mut gpui::Window, &mut gpui::App)>,
+    on_click: Arc<dyn Fn(i64, u32, &mut gpui::Window, &mut gpui::App)>,
 ) -> impl IntoElement {
     let raw_preview_urls = event.preview_urls();
     let is_album = raw_preview_urls.len() > 1;
@@ -144,8 +144,8 @@ pub fn render_events_list_card(
         .start_time_seconds
         .gt(&0)
         .then(|| format_event_date_label(event.start_time_seconds, locale));
-    let event_for_click = event.clone();
-    let on_click = on_click.clone();
+    let event_id = event.id;
+    let start_time_seconds = event.start_time_seconds;
 
     div()
         .id(SharedString::from(format!("events-card-{}", event.id)))
@@ -160,7 +160,7 @@ pub fn render_events_list_card(
         })
         .p_4()
         .hover(|el| el.bg(theme.bg_hover))
-        .on_click(move |_, window, cx| on_click(&event_for_click, window, cx))
+        .on_click(move |_, window, cx| on_click(event_id, start_time_seconds, window, cx))
         .child(
             div()
                 .flex()
@@ -293,7 +293,7 @@ fn render_list_previews(
     }
 }
 
-pub fn render_events_loading(theme: &Theme) -> impl IntoElement {
+pub fn render_events_loading() -> impl IntoElement {
     div()
         .flex()
         .items_center()

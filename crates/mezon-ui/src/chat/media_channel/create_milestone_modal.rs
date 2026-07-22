@@ -278,7 +278,7 @@ impl CreateMilestoneModal {
 }
 
 impl Render for CreateMilestoneModal {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().as_ref().clone();
         let locale = &self.locale;
         let title_len = self.title_input.read(cx).value().len();
@@ -288,7 +288,7 @@ impl Render for CreateMilestoneModal {
         v_flex()
             .track_focus(&self.focus_handle)
             .key_context("menu")
-            .on_action(cx.listener(|this, _: &::menu::Cancel, _window, cx| {
+            .on_action(cx.listener(|_this, _: &::menu::Cancel, _window, cx| {
                 Shell::global(cx).update(cx, |shell, cx| shell.close_modal(cx));
             }))
             .w(px(768.))
@@ -579,8 +579,8 @@ fn render_attachment_cell(
                 img(url)
                     .size_full()
                     .object_fit(ObjectFit::Cover)
-                    .with_loading({ move || image_placeholder(bg, muted, px(160.), px(160.)) })
-                    .with_fallback({ move || image_placeholder(bg, muted, px(160.), px(160.)) }),
+                    .with_loading(move || image_placeholder(bg, muted, px(160.), px(160.)))
+                    .with_fallback(move || image_placeholder(bg, muted, px(160.), px(160.))),
             )
         })
         .when(!uploaded && is_image, |el| {
@@ -697,10 +697,10 @@ fn mime_from_path(path: &Path) -> String {
 }
 
 fn truncate_to_chars(value: &str, max: usize) -> String {
-    if value.len() <= max {
+    if value.chars().count() <= max {
         value.to_string()
     } else {
-        value[..max].to_string()
+        value.chars().take(max).collect()
     }
 }
 

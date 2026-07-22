@@ -17,8 +17,8 @@ pub fn render_media_image(
         .h(height)
         .object_fit(ObjectFit::Cover)
         .bg(Hsla::from(bg))
-        .with_loading({ move || image_placeholder(bg, muted, width, height) })
-        .with_fallback({ move || image_placeholder(bg, muted, width, height) })
+        .with_loading(move || image_placeholder(bg, muted, width, height))
+        .with_fallback(move || image_placeholder(bg, muted, width, height))
 }
 
 pub fn render_media_image_cover(

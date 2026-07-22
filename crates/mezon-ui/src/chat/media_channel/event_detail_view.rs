@@ -2,9 +2,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use gpui::{
-    App, Context, Entity, FocusHandle, Focusable, FontWeight, Hsla, ObjectFit, PathPromptOptions,
-    ScrollHandle, SharedString, Subscription, Task, WeakEntity, Window, div, img, prelude::*, px,
-    rgb,
+    App, Context, Entity, FocusHandle, Focusable, FontWeight, Hsla, ListAlignment, ListState,
+    ObjectFit, PathPromptOptions, SharedString, Subscription, Task, WeakEntity, Window, div, img,
+    list, prelude::*, px, rgb,
 };
 
 use crate::app::shell::Shell;
@@ -29,7 +29,7 @@ pub struct EventDetailView {
     event_id: i64,
     start_time_seconds: u32,
     settings: Entity<Settings>,
-    scroll: ScrollHandle,
+    body_list_state: ListState,
     edit_title: bool,
     edit_description: bool,
     title_input: Entity<InputState>,
@@ -104,7 +104,7 @@ impl EventDetailView {
             event_id,
             start_time_seconds,
             settings,
-            scroll: ScrollHandle::new(),
+            body_list_state: ListState::new(0, ListAlignment::Top, px(320.)),
             edit_title: false,
             edit_description: false,
             title_input,
@@ -153,22 +153,37 @@ impl EventDetailView {
     }
 
     fn is_loading(&self, cx: &App) -> bool {
-        self.event(cx).is_none()
-            && ChannelMediaStore::global(cx)
-                .read(cx)
-                .is_detail_loading(self.event_id)
+        let store = ChannelMediaStore::global(cx).read(cx);
+        !store.has_detail(self.event_id) && store.is_detail_loading(self.event_id)
+    }
+
+    fn sync_body_list(&mut self, item_count: usize) {
+        let current = self.body_list_state.item_count();
+        if item_count == current {
+            return;
+        }
+        if item_count > current {
+            self.body_list_state
+                .splice(current..current, item_count - current);
+        } else {
+            self.body_list_state.reset(item_count);
+        }
     }
 
     fn sync_inputs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(event) = self.event(cx) {
             if !self.edit_title {
                 self.title_input.update(cx, |input, cx| {
-                    input.set_value(&event.title, window, cx);
+                    if input.value() != event.title {
+                        input.set_value(&event.title, window, cx);
+                    }
                 });
             }
             if !self.edit_description {
                 self.description_input.update(cx, |input, cx| {
-                    input.set_value(&event.description, window, cx);
+                    if input.value() != event.description {
+                        input.set_value(&event.description, window, cx);
+                    }
                 });
             }
         }
@@ -532,6 +547,14 @@ impl Render for EventDetailView {
                 .child(Spinner::new())
                 .into_any_element()
         } else if let Some(event) = event {
+            let attachment_count = event.media_attachments().len();
+            let grid_cells = attachment_count.saturating_sub(1) + usize::from(can_edit);
+            let grid_rows = if grid_cells == 0 {
+                0
+            } else {
+                (grid_cells + MEDIA_GRID_COLS - 1) / MEDIA_GRID_COLS
+            };
+            self.sync_body_list(1 + grid_rows);
             render_detail_body(
                 &theme,
                 &locale,
@@ -542,7 +565,9 @@ impl Render for EventDetailView {
                 edit_title,
                 &self.description_input,
                 self.saving,
+                self.event_id,
                 self.preview_image_cache.clone(),
+                self.body_list_state.clone(),
                 cx,
             )
             .into_any_element()
@@ -564,21 +589,13 @@ impl Render for EventDetailView {
                     .overflow_hidden()
                     .child(
                         div()
-                            .id("event-detail-scroll-inner")
-                            .overflow_y_scroll()
-                            .track_scroll(&self.scroll)
                             .size_full()
-                            .child(
-                                div()
-                                    .w_full()
-                                    .flex_none()
-                                    .image_cache(self.preview_image_cache.clone())
-                                    .child(scroll_child),
-                            ),
+                            .image_cache(self.preview_image_cache.clone())
+                            .child(scroll_child),
                     )
                     .custom_scrollbars(
                         Scrollbars::always_visible(ScrollAxes::Vertical)
-                            .tracked_scroll_handle(&self.scroll),
+                            .tracked_scroll_handle(&self.body_list_state),
                         window,
                         cx,
                     ),
@@ -596,15 +613,69 @@ fn render_detail_body(
     edit_title: bool,
     description_input: &Entity<InputState>,
     saving: bool,
+    event_id: i64,
     preview_image_cache: Entity<LruImageCache>,
+    body_list_state: ListState,
     cx: &mut Context<EventDetailView>,
 ) -> impl IntoElement {
     let attachments = event.media_attachments();
     let featured = attachments.first().cloned();
-    let grid: Vec<(usize, ChannelTimelineAttachment)> =
-        attachments.into_iter().enumerate().skip(1).collect();
+    let description = event.description.clone();
     let view = cx.weak_entity();
+    let theme = theme.clone();
+    let locale = locale.to_string();
+    let config = config.clone();
+    let description_input = description_input.clone();
 
+    div().size_full().child(
+        list(body_list_state.clone(), move |ix, window, cx| {
+            if ix == 0 {
+                render_detail_top(
+                    &theme,
+                    &locale,
+                    &description,
+                    &config,
+                    can_edit,
+                    edit_description,
+                    edit_title,
+                    &description_input,
+                    saving,
+                    featured.clone(),
+                    preview_image_cache.clone(),
+                    view.clone(),
+                )
+                .into_any_element()
+            } else {
+                render_media_grid_row(
+                    &theme,
+                    event_id,
+                    ix - 1,
+                    &config,
+                    can_edit,
+                    view.clone(),
+                    window,
+                    cx,
+                )
+            }
+        })
+        .size_full(),
+    )
+}
+
+fn render_detail_top(
+    theme: &Theme,
+    locale: &str,
+    description: &str,
+    config: &AppConfig,
+    can_edit: bool,
+    edit_description: bool,
+    edit_title: bool,
+    description_input: &Entity<InputState>,
+    saving: bool,
+    featured: Option<ChannelTimelineAttachment>,
+    preview_image_cache: Entity<LruImageCache>,
+    view: WeakEntity<EventDetailView>,
+) -> impl IntoElement {
     v_flex()
         .px_6()
         .py_4()
@@ -613,7 +684,7 @@ fn render_detail_body(
         .w_full()
         .child(if edit_description {
             Input::new(description_input).into_any_element()
-        } else if !event.description.is_empty() {
+        } else if !description.is_empty() {
             div()
                 .id("event-detail-description")
                 .w_full()
@@ -626,15 +697,17 @@ fn render_detail_body(
                     el.cursor_pointer().hover(|el| el.bg(theme.bg_hover))
                 })
                 .when(can_edit, |el| {
-                    el.on_click(cx.listener(|this, _, window, cx| {
-                        this.begin_edit_description(window, cx);
-                    }))
+                    let view = view.clone();
+                    el.on_click(move |_, window, cx| {
+                        view.update(cx, |this, cx| this.begin_edit_description(window, cx))
+                            .ok();
+                    })
                 })
                 .child(
                     div()
                         .text_sm()
                         .text_color(theme.text_secondary)
-                        .child(event.description.clone()),
+                        .child(description.to_string()),
                 )
                 .into_any_element()
         } else if can_edit {
@@ -656,9 +729,13 @@ fn render_detail_body(
                     el.border_color(Hsla::from(theme.brand).opacity(0.5))
                         .text_color(theme.brand)
                 })
-                .on_click(cx.listener(|this, _, window, cx| {
-                    this.begin_edit_description(window, cx);
-                }))
+                .on_click({
+                    let view = view.clone();
+                    move |_, window, cx| {
+                        view.update(cx, |this, cx| this.begin_edit_description(window, cx))
+                            .ok();
+                    }
+                })
                 .child(
                     Icon::new(IconName::PenEdit)
                         .size(px(16.))
@@ -702,12 +779,18 @@ fn render_detail_body(
                                     .hover(|el| el.text_color(theme.status_dnd).bg(cancel_hover_bg))
                             })
                             .when(saving, |el| el.opacity(0.5))
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                if this.saving {
-                                    return;
+                            .on_click({
+                                let view = view.clone();
+                                move |_, _, cx| {
+                                    view.update(cx, |this, cx| {
+                                        if this.saving {
+                                            return;
+                                        }
+                                        this.cancel_edits(cx);
+                                    })
+                                    .ok();
                                 }
-                                this.cancel_edits(cx);
-                            }))
+                            })
                             .child(
                                 Icon::new(IconName::CloseIcon)
                                     .size(px(16.))
@@ -737,12 +820,18 @@ fn render_detail_body(
                                 el.cursor_pointer()
                                     .hover(|el| el.bg(theme.tokens.bg_button_primary_hover))
                             })
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                if this.saving {
-                                    return;
+                            .on_click({
+                                let view = view.clone();
+                                move |_, _, cx| {
+                                    view.update(cx, |this, cx| {
+                                        if this.saving {
+                                            return;
+                                        }
+                                        this.save_edits(cx);
+                                    })
+                                    .ok();
                                 }
-                                this.save_edits(cx);
-                            }))
+                            })
                             .child(if saving {
                                 Spinner::new().into_any_element()
                             } else {
@@ -766,52 +855,69 @@ fn render_detail_body(
                 &att,
                 config,
                 preview_image_cache,
-                view.clone(),
+                view,
             ))
         })
-        .child(render_media_grid(theme, &grid, config, can_edit, view, cx))
 }
 
 const MEDIA_GRID_COLS: usize = 4;
 
-fn render_media_grid(
+fn render_media_grid_row(
     theme: &Theme,
-    grid: &[(usize, ChannelTimelineAttachment)],
+    event_id: i64,
+    row_index: usize,
     config: &AppConfig,
     can_edit: bool,
     view: WeakEntity<EventDetailView>,
-    cx: &mut Context<EventDetailView>,
-) -> impl IntoElement {
-    let mut cells: Vec<gpui::AnyElement> = grid
-        .iter()
-        .map(|(index, att)| {
-            render_grid_image(theme, *index, att, config, view.clone()).into_any_element()
+    _window: &mut Window,
+    cx: &mut App,
+) -> gpui::AnyElement {
+    let Some(event) = ChannelMediaStore::global(cx)
+        .read(cx)
+        .event_detail(event_id)
+        .cloned()
+    else {
+        return div().into_any_element();
+    };
+    let attachments = event.media_attachments();
+    let grid: Vec<(usize, ChannelTimelineAttachment)> =
+        attachments.into_iter().enumerate().skip(1).collect();
+    let total_cells = grid.len() + usize::from(can_edit);
+    let start = row_index * MEDIA_GRID_COLS;
+    if start >= total_cells {
+        return div().into_any_element();
+    }
+    let end = (start + MEDIA_GRID_COLS).min(total_cells);
+    let row: Vec<gpui::AnyElement> = (start..end)
+        .map(|cell_index| {
+            if cell_index < grid.len() {
+                let (attachment_index, att) = &grid[cell_index];
+                render_grid_image(theme, *attachment_index, att, config, view.clone())
+                    .into_any_element()
+            } else {
+                render_add_media_tile(theme, view.clone()).into_any_element()
+            }
         })
         .collect();
-    if can_edit {
-        cells.push(render_add_media_tile(theme, cx).into_any_element());
-    }
-
-    let mut rows: Vec<gpui::AnyElement> = Vec::new();
-    while !cells.is_empty() {
-        let take = MEDIA_GRID_COLS.min(cells.len());
-        let row: Vec<gpui::AnyElement> = cells.drain(..take).collect();
-        let filler_count = MEDIA_GRID_COLS - row.len();
-        rows.push(
+    let filler_count = MEDIA_GRID_COLS.saturating_sub(row.len());
+    v_flex()
+        .px_6()
+        .pt(if row_index == 0 { px(12.) } else { px(0.) })
+        .pb(px(12.))
+        .flex_none()
+        .w_full()
+        .child(
             h_flex()
                 .gap_3()
                 .w_full()
                 .flex_none()
                 .children(row)
-                .children((0..filler_count).map(|_| div().flex_1().min_w_0().into_any_element()))
-                .into_any_element(),
-        );
-    }
-
-    v_flex().gap_3().w_full().flex_none().children(rows)
+                .children((0..filler_count).map(|_| div().flex_1().min_w_0().into_any_element())),
+        )
+        .into_any_element()
 }
 
-fn render_add_media_tile(theme: &Theme, cx: &mut Context<EventDetailView>) -> impl IntoElement {
+fn render_add_media_tile(theme: &Theme, view: WeakEntity<EventDetailView>) -> impl IntoElement {
     let hover_border = Hsla::from(theme.brand).opacity(0.5);
     div().flex_1().min_w_0().child(
         div()
@@ -829,9 +935,9 @@ fn render_add_media_tile(theme: &Theme, cx: &mut Context<EventDetailView>) -> im
             .cursor_pointer()
             .text_color(theme.text_secondary)
             .hover(|el| el.border_color(hover_border).text_color(theme.brand))
-            .on_click(cx.listener(|this, _, window, cx| {
-                this.pick_files(window, cx);
-            }))
+            .on_click(move |_, window, cx| {
+                view.update(cx, |this, cx| this.pick_files(window, cx)).ok();
+            })
             .child(
                 Icon::new(IconName::PlusIcon)
                     .size(px(32.))

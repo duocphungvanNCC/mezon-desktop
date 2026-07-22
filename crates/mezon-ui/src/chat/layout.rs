@@ -6,8 +6,8 @@ use gpui::{
     StyleRefinement, Subscription, Task, Window, canvas, deferred, div, prelude::*, px,
 };
 use mezon_store::{
-    AuthState, Channel, ChannelId, ChannelList, ChannelMediaStore, ChannelType, ClanId, ClanList,
-    ClanMembersStore, DirectChannel, DirectKind, DirectMessageStore, GroupMembersStore, InboxStore,
+    AuthState, Channel, ChannelId, ChannelList, ChannelType, ClanId, ClanList, ClanMembersStore,
+    DirectChannel, DirectKind, DirectMessageStore, GroupMembersStore, InboxStore,
     MessageSearchEvent, MessageSearchStore, MessagesStore, PinnedEvent, PinnedMessagesStore,
     Settings, ThreadsEvent, ThreadsStore, TopicsEvent, TopicsStore, VoiceConnection, VoiceMember,
     VoiceModerationError, VoiceStore, expand_mention_name_tokens,
@@ -283,13 +283,7 @@ impl ChatLayout {
             this.ensure_active_channel_for_clan(cx);
             this.sync_inbox_context(cx);
             this.sync_voice_frame_pump(cx);
-            let prev_channel_id = this.displayed_active_channel.as_ref().map(|slice| slice.id);
             if this.active_channel_display_changed(cx) {
-                if let Some(channel_id) = prev_channel_id {
-                    ChannelMediaStore::global(cx).update(cx, |store, cx| {
-                        store.clear_channel(channel_id, cx);
-                    });
-                }
                 this.media_channel_view_mode = false;
                 this.dismiss_topic_panel(cx);
                 this.dismiss_threads_popover(cx);

@@ -79,7 +79,7 @@ pub fn render_event_card(
     index: usize,
     config: &AppConfig,
     image_cache: Entity<LruImageCache>,
-    on_click: Option<std::sync::Arc<dyn Fn(&ChannelTimeline, &mut gpui::Window, &mut gpui::App)>>,
+    on_click: Option<std::sync::Arc<dyn Fn(i64, u32, &mut gpui::Window, &mut gpui::App)>>,
 ) -> impl IntoElement {
     let side = timeline_card_position(index);
     let raw_preview_urls = event.preview_urls();
@@ -246,9 +246,10 @@ fn render_event_card_body(
     is_album: bool,
     interactive: bool,
     image_cache: Entity<LruImageCache>,
-    on_click: Option<std::sync::Arc<dyn Fn(&ChannelTimeline, &mut gpui::Window, &mut gpui::App)>>,
+    on_click: Option<std::sync::Arc<dyn Fn(i64, u32, &mut gpui::Window, &mut gpui::App)>>,
 ) -> impl IntoElement {
-    let event_for_click = event.clone();
+    let event_id = event.id;
+    let start_time_seconds = event.start_time_seconds;
     let mut card = div()
         .id(SharedString::from(format!("timeline-event-{}", event.id)))
         .w_full()
@@ -265,7 +266,7 @@ fn render_event_card_body(
             card = card
                 .cursor_pointer()
                 .hover(|el| el.bg(theme.bg_hover))
-                .on_click(move |_, window, cx| handler(&event_for_click, window, cx));
+                .on_click(move |_, window, cx| handler(event_id, start_time_seconds, window, cx));
         }
     }
     card.child(
