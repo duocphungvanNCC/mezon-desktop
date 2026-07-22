@@ -757,7 +757,7 @@ mod tests {
             clan_id: ClanId(1),
             message_id: MessageId(id),
             uploader_id: UserId(7),
-            url: format!("https://cdn.mezon.ai/{id}.png"),
+            url: format!("https://cdn.example/{id}.png"),
             filename: format!("{id}.png"),
             filetype: filetype.to_string(),
             width: 100,
@@ -781,7 +781,7 @@ mod tests {
         use mezon_client::transport::ApiChannelAttachment;
 
         let cfg = AppConfig::dev_defaults();
-        let url = "https://cdn.mezon.ai/2016174228608389120/2072236531032002560.mov";
+        let url = "https://cdn.example/2016174228608389120/2072236531032002560.mov";
         let api = ApiChannelAttachment {
             url: url.into(),
             filetype: "video/quicktime".into(),
@@ -800,7 +800,7 @@ mod tests {
 
         let cfg = AppConfig::dev_defaults();
         let api = ApiChannelAttachment {
-            url: "https://cdn.mezon.ai/photo.png".into(),
+            url: format!("{}/photo.png", cfg.base_img_url),
             filetype: "image/png".into(),
             width: 800,
             height: 600,
@@ -808,8 +808,8 @@ mod tests {
         };
         let att = ChannelAttachment::from_api(api, ChannelId(1), ClanId(1), &cfg);
         assert!(att.is_image);
-        assert!(att.thumb_src.contains("dev-imgproxy"));
-        assert!(att.viewer_src.contains("dev-imgproxy"));
+        assert!(att.thumb_src.starts_with(&cfg.imgproxy_base_url));
+        assert!(att.viewer_src.starts_with(&cfg.imgproxy_base_url));
     }
 
     #[test]
@@ -895,12 +895,12 @@ mod tests {
     #[test]
     fn detects_video_and_image_types() {
         assert!(is_video_type("video/mp4", ""));
-        assert!(is_video_type("", "https://cdn.mezon.ai/clip.mov"));
+        assert!(is_video_type("", "https://cdn.example/clip.mov"));
         assert!(is_image_type("image/png", ""));
-        assert!(is_image_type("", "https://cdn.mezon.ai/pic.JPG"));
+        assert!(is_image_type("", "https://cdn.example/pic.JPG"));
         assert!(!is_image_type(
             "application/pdf",
-            "https://cdn.mezon.ai/a.pdf"
+            "https://cdn.example/a.pdf"
         ));
     }
 

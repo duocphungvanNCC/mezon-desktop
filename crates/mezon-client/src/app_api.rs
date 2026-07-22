@@ -388,6 +388,45 @@ impl AppApi {
     }
 
     #[allow(clippy::too_many_arguments)]
+    pub async fn list_channel_timeline(
+        &self,
+        clan_id: i64,
+        channel_id: i64,
+        year: i32,
+        limit: i32,
+    ) -> Result<mezon_proto::api::ListChannelTimelineResponse> {
+        self.transport
+            .list_channel_timeline(clan_id, channel_id, year, limit)
+            .await
+    }
+
+    pub async fn create_channel_timeline(
+        &self,
+        req: mezon_proto::api::CreateChannelTimelineRequest,
+    ) -> Result<mezon_proto::api::CreateChannelTimelineResponse> {
+        self.transport.create_channel_timeline(req).await
+    }
+
+    pub async fn update_channel_timeline(
+        &self,
+        req: mezon_proto::api::UpdateChannelTimelineRequest,
+    ) -> Result<mezon_proto::api::UpdateChannelTimelineResponse> {
+        self.transport.update_channel_timeline(req).await
+    }
+
+    pub async fn detail_channel_timeline(
+        &self,
+        clan_id: i64,
+        channel_id: i64,
+        id: i64,
+        start_time_seconds: u32,
+    ) -> Result<mezon_proto::api::ChannelTimelineDetailResponse> {
+        self.transport
+            .detail_channel_timeline(clan_id, channel_id, id, start_time_seconds)
+            .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
     pub async fn list_channel_attachments(
         &self,
         clan_id: i64,
@@ -451,6 +490,27 @@ impl AppApi {
                 is_public,
                 topic_id,
                 is_update_msg_topic,
+            )
+            .await
+    }
+
+    pub async fn create_poll(
+        &self,
+        channel_id: i64,
+        clan_id: i64,
+        question: String,
+        answers: Vec<String>,
+        expire_hours: i32,
+        poll_type: i32,
+    ) -> Result<mezon_proto::api::CreatePollResponse> {
+        self.transport
+            .create_poll(
+                channel_id,
+                clan_id,
+                question,
+                answers,
+                expire_hours,
+                poll_type,
             )
             .await
     }
@@ -911,6 +971,41 @@ impl AppApi {
         self.transport.list_roles(clan_id, limit, cursor).await
     }
 
+    pub async fn create_role(
+        &self,
+        request: mezon_proto::api::CreateRoleRequest,
+    ) -> Result<mezon_proto::api::Role> {
+        self.transport.create_role(request).await
+    }
+
+    pub async fn update_role(&self, request: mezon_proto::api::UpdateRoleRequest) -> Result<()> {
+        self.transport.update_role(request).await
+    }
+
+    pub async fn list_role_users(
+        &self,
+        role_id: i64,
+        limit: i32,
+        cursor: &str,
+    ) -> Result<mezon_proto::api::RoleUserList> {
+        self.transport.list_role_users(role_id, limit, cursor).await
+    }
+
+    pub async fn delete_role(&self, role_id: i64, clan_id: i64) -> Result<()> {
+        self.transport.delete_role(role_id, clan_id).await
+    }
+
+    pub async fn update_role_order(&self, clan_id: i64, roles: &[(i32, i64)]) -> Result<()> {
+        self.transport.update_role_order(clan_id, roles).await
+    }
+
+    pub async fn list_role_permissions(
+        &self,
+        role_id: i64,
+    ) -> Result<mezon_proto::api::PermissionList> {
+        self.transport.list_role_permissions(role_id).await
+    }
+
     pub async fn get_list_permission(&self) -> Result<mezon_proto::api::PermissionList> {
         self.transport.get_list_permission().await
     }
@@ -934,6 +1029,65 @@ impl AppApi {
     pub async fn list_stickers_by_user_id(&self) -> Result<Vec<mezon_proto::api::ClanSticker>> {
         let resp = self.transport.list_stickers_by_user_id().await?;
         Ok(resp.stickers)
+    }
+
+    pub async fn list_webhooks_by_channel(
+        &self,
+        channel_id: i64,
+        clan_id: i64,
+    ) -> Result<Vec<mezon_proto::api::Webhook>> {
+        let resp = self
+            .transport
+            .list_webhook_by_channel_id(channel_id, clan_id)
+            .await?;
+        Ok(resp.webhooks)
+    }
+
+    pub async fn generate_webhook(
+        &self,
+        request: mezon_proto::api::WebhookCreateRequest,
+    ) -> Result<mezon_proto::api::WebhookGenerateResponse> {
+        self.transport.generate_webhook(request).await
+    }
+
+    pub async fn update_webhook(
+        &self,
+        request: mezon_proto::api::WebhookUpdateRequestById,
+    ) -> Result<()> {
+        self.transport.update_webhook_by_id(request).await
+    }
+
+    pub async fn delete_webhook(
+        &self,
+        request: mezon_proto::api::WebhookDeleteRequestById,
+    ) -> Result<()> {
+        self.transport.delete_webhook_by_id(request).await
+    }
+
+    pub async fn list_clan_webhooks(
+        &self,
+        clan_id: i64,
+    ) -> Result<Vec<mezon_proto::api::ClanWebhook>> {
+        let resp = self.transport.list_clan_webhook(clan_id).await?;
+        Ok(resp.list_clan_webhooks)
+    }
+
+    pub async fn generate_clan_webhook(
+        &self,
+        request: mezon_proto::api::GenerateClanWebhookRequest,
+    ) -> Result<mezon_proto::api::GenerateClanWebhookResponse> {
+        self.transport.generate_clan_webhook(request).await
+    }
+
+    pub async fn update_clan_webhook(
+        &self,
+        request: mezon_proto::api::UpdateClanWebhookRequest,
+    ) -> Result<()> {
+        self.transport.update_clan_webhook_by_id(request).await
+    }
+
+    pub async fn delete_clan_webhook(&self, id: i64, clan_id: i64) -> Result<()> {
+        self.transport.delete_clan_webhook_by_id(id, clan_id).await
     }
 
     pub async fn create_channel(
@@ -1658,6 +1812,153 @@ impl AppApi {
         self.transport.get_notification_clan(clan_id).await
     }
 
+    pub async fn get_notification_category(&self, category_id: i64) -> Result<i32> {
+        let dto = self
+            .transport
+            .get_notification_category(category_id)
+            .await?;
+        Ok(dto.notification_setting_type)
+    }
+
+    pub async fn get_notification_category_setting(
+        &self,
+        category_id: i64,
+    ) -> Result<crate::ChannelNotificationSetting> {
+        let dto = self
+            .transport
+            .get_notification_category(category_id)
+            .await?;
+        Ok(crate::ChannelNotificationSetting::from_api(&dto))
+    }
+
+    pub async fn set_notification_clan_setting(
+        &self,
+        clan_id: i64,
+        notification_type: i32,
+    ) -> Result<()> {
+        self.transport
+            .set_notification_clan_setting(clan_id, notification_type)
+            .await
+    }
+
+    pub async fn set_notification_category_setting(
+        &self,
+        category_id: i64,
+        notification_type: i32,
+        clan_id: i64,
+    ) -> Result<()> {
+        self.transport
+            .set_notification_category_setting(category_id, notification_type, clan_id)
+            .await
+    }
+
+    pub async fn set_mute_category(
+        &self,
+        category_id: i64,
+        mute_seconds: i32,
+        clan_id: i64,
+    ) -> Result<()> {
+        self.transport
+            .set_mute_category(category_id, mute_seconds, clan_id)
+            .await
+    }
+
+    pub async fn delete_notification_category_setting(&self, category_id: i64) -> Result<()> {
+        self.transport
+            .delete_notification_category_setting(category_id)
+            .await
+    }
+
+    pub async fn get_channel_category_noti_settings_list(
+        &self,
+        clan_id: i64,
+    ) -> Result<Vec<crate::NotificationOverride>> {
+        let list = self
+            .transport
+            .get_channel_category_noti_settings_list(clan_id)
+            .await?;
+        Ok(list
+            .notification_channel_category_settings_list
+            .iter()
+            .map(crate::NotificationOverride::from_api)
+            .collect())
+    }
+
+    pub async fn get_notification_channel(
+        &self,
+        channel_id: i64,
+    ) -> Result<crate::ChannelNotificationSetting> {
+        let dto = self.transport.get_notification_channel(channel_id).await?;
+        Ok(crate::ChannelNotificationSetting::from_api(&dto))
+    }
+
+    pub async fn set_notification_channel_setting(
+        &self,
+        channel_id: i64,
+        notification_type: i32,
+        clan_id: i64,
+    ) -> Result<()> {
+        self.transport
+            .set_notification_channel_setting(channel_id, notification_type, clan_id)
+            .await
+    }
+
+    pub async fn delete_notification_channel(&self, channel_id: i64) -> Result<()> {
+        self.transport.delete_notification_channel(channel_id).await
+    }
+
+    pub async fn set_mute_channel(
+        &self,
+        channel_id: i64,
+        mute_seconds: i32,
+        clan_id: i64,
+    ) -> Result<()> {
+        self.transport
+            .set_mute_channel(channel_id, mute_seconds, clan_id)
+            .await
+    }
+
+    pub async fn list_muted_channels(&self, clan_id: i64) -> Result<Vec<String>> {
+        self.transport.list_muted_channels(clan_id).await
+    }
+
+    pub fn spawn_gotify_stream(
+        &self,
+        ws_base: String,
+        token: String,
+    ) -> tokio::sync::mpsc::UnboundedReceiver<crate::gotify::GotifyNotification> {
+        self.transport.spawn_gotify_stream(ws_base, token)
+    }
+
+    /// Download a notification's sender avatar to a temp file for use as the OS
+    /// notification icon. Rejects non-https URLs; size/timeout are bounded by
+    /// [`crate::transport_runtime::fetch_bytes`].
+    pub async fn download_notification_icon(&self, url: &str) -> Result<std::path::PathBuf> {
+        if !url.starts_with("https://") {
+            anyhow::bail!("notification icon url must be https");
+        }
+        let (bytes, _) = crate::transport_runtime::fetch_bytes(url).await?;
+        crate::transport_runtime::write_temp_icon(bytes).await
+    }
+
+    /// Register a device token and return `(notify_token, device_id)`. The notify
+    /// token opens the Gotify stream; the device id is cached and reused as the
+    /// request token on the next registration, matching React.
+    pub async fn regist_fcm_device_token(
+        &self,
+        token: &str,
+        device_id: &str,
+        platform: &str,
+    ) -> Result<(String, String)> {
+        self.transport
+            .regist_fcm_device_token(
+                token.to_string(),
+                device_id.to_string(),
+                platform.to_string(),
+            )
+            .await
+    }
+
     pub async fn list_notifications(
         &self,
         clan_id: &str,
@@ -1844,24 +2145,24 @@ mod tests {
     fn attachment_url_uses_base_img_host_not_presigned() {
         assert_eq!(
             attachment_cdn_url(
-                "https://cdn.mezon.ai",
+                "https://cdn.example",
                 "mezon/1826814768338440192/2074336632294608896.png",
             )
             .unwrap(),
-            "https://cdn.mezon.ai/mezon/1826814768338440192/2074336632294608896.png"
+            "https://cdn.example/mezon/1826814768338440192/2074336632294608896.png"
         );
     }
 
     #[test]
     fn attachment_url_trims_trailing_slash_on_base() {
         assert_eq!(
-            attachment_cdn_url("https://cdn.mezon.ai/", "x.png").unwrap(),
-            "https://cdn.mezon.ai/x.png"
+            attachment_cdn_url("https://cdn.example/", "x.png").unwrap(),
+            "https://cdn.example/x.png"
         );
     }
 
     #[test]
     fn attachment_url_errors_when_filename_empty() {
-        assert!(attachment_cdn_url("https://cdn.mezon.ai", "").is_err());
+        assert!(attachment_cdn_url("https://cdn.example", "").is_err());
     }
 }

@@ -976,6 +976,18 @@ pub fn parse_spans(content: &ApiMessageContent) -> Vec<MessageSpan> {
     apply_headings(spans)
 }
 
+pub fn inbox_spans_from_raw(raw_content: &str) -> Option<Vec<MessageSpan>> {
+    let trimmed = raw_content.trim();
+    if trimmed.is_empty() || !trimmed.starts_with('{') {
+        return None;
+    }
+    let content: ApiMessageContent = serde_json::from_str(trimmed).ok()?;
+    if content.t.is_empty() {
+        return None;
+    }
+    Some(parse_spans(&content))
+}
+
 fn link_kind_from_marker(marker: &str) -> LinkKind {
     match marker {
         "lk_yt" => LinkKind::YouTube,
@@ -1954,24 +1966,24 @@ mod tests {
 
     #[test]
     fn is_video_detects_mp4_and_quicktime() {
-        assert!(attachment("video/mp4", "https://cdn.mezon.ai/clip.mp4").is_video());
-        assert!(attachment("video/quicktime", "https://cdn.mezon.ai/clip.mov").is_video());
+        assert!(attachment("video/mp4", "https://cdn.example/clip.mp4").is_video());
+        assert!(attachment("video/quicktime", "https://cdn.example/clip.mov").is_video());
     }
 
     #[test]
     fn is_video_matches_video_prefix() {
-        assert!(attachment("video/webm", "https://cdn.mezon.ai/clip.webm").is_video());
+        assert!(attachment("video/webm", "https://cdn.example/clip.webm").is_video());
     }
 
     #[test]
     fn is_video_excludes_mpeg_ts_stream() {
-        assert!(!attachment("video/vnd.dlna.mpeg-tts", "https://cdn.mezon.ai/x.ts").is_video());
+        assert!(!attachment("video/vnd.dlna.mpeg-tts", "https://cdn.example/x.ts").is_video());
     }
 
     #[test]
     fn is_video_false_for_image_and_bare_url() {
-        assert!(!attachment("image/png", "https://cdn.mezon.ai/x.png").is_video());
-        assert!(!attachment("", "https://cdn.mezon.ai/x.mp4").is_video());
+        assert!(!attachment("image/png", "https://cdn.example/x.png").is_video());
+        assert!(!attachment("", "https://cdn.example/x.mp4").is_video());
     }
 
     #[test]
@@ -1991,7 +2003,7 @@ mod tests {
 
     #[test]
     fn tenor_mp4_url_rejects_non_tenor_and_malformed() {
-        assert_eq!(tenor_mp4_url("https://cdn.mezon.ai/uploaded.gif"), None);
+        assert_eq!(tenor_mp4_url("https://cdn.example/uploaded.gif"), None);
         assert_eq!(
             tenor_mp4_url("https://media.tenor.com/rmtqGXO15tYAAAAC/clip.mp4"),
             None
@@ -2015,9 +2027,9 @@ mod tests {
 
     #[test]
     fn is_audio_true_for_audio_mime_false_for_unsupported_and_others() {
-        assert!(attachment("audio/mpeg", "https://cdn.mezon.ai/x.mp3").is_audio());
-        assert!(!attachment("audio/wma", "https://cdn.mezon.ai/x.wma").is_audio());
-        assert!(!attachment("image/png", "https://cdn.mezon.ai/x.png").is_audio());
+        assert!(attachment("audio/mpeg", "https://cdn.example/x.mp3").is_audio());
+        assert!(!attachment("audio/wma", "https://cdn.example/x.wma").is_audio());
+        assert!(!attachment("image/png", "https://cdn.example/x.png").is_audio());
     }
 
     #[test]
@@ -2099,22 +2111,22 @@ mod tests {
 
     #[test]
     fn unsupported_media_takes_precedence_over_video_and_image() {
-        let avi = attachment("video/avi", "https://cdn.mezon.ai/x.avi");
+        let avi = attachment("video/avi", "https://cdn.example/x.avi");
         assert!(avi.is_unsupported_media());
         assert!(avi.is_video());
 
-        let bmp = attachment("image/bmp", "https://cdn.mezon.ai/x.bmp");
+        let bmp = attachment("image/bmp", "https://cdn.example/x.bmp");
         assert!(bmp.is_unsupported_media());
         assert!(bmp.is_image());
     }
 
     #[test]
     fn supported_video_and_image_are_not_unsupported() {
-        let mp4 = attachment("video/mp4", "https://cdn.mezon.ai/x.mp4");
+        let mp4 = attachment("video/mp4", "https://cdn.example/x.mp4");
         assert!(!mp4.is_unsupported_media());
         assert!(mp4.is_video());
 
-        let png = attachment("image/png", "https://cdn.mezon.ai/x.png");
+        let png = attachment("image/png", "https://cdn.example/x.png");
         assert!(!png.is_unsupported_media());
         assert!(png.is_image());
     }
@@ -2234,5 +2246,16 @@ mod tests {
     #[test]
     fn rich_layout_none_for_empty_spans() {
         assert!(build_rich_layout(&[]).is_none());
+    }
+
+    #[test]
+    fn inbox_spans_from_raw_parses_code_block() {
+        let raw = r#"{"t":"intro\n```\n#680066 line\n```","mk":[{"s":7,"e":26,"type":"t"}]}"#;
+        let spans = inbox_spans_from_raw(raw).expect("spans");
+        assert!(
+            spans
+                .iter()
+                .any(|span| matches!(span, MessageSpan::CodeBlock { .. }))
+        );
     }
 }

@@ -289,13 +289,13 @@ impl HttpClient for DiskImageCacheClient {
 mod tests {
     use super::*;
 
-    const AVATAR: &str = "https://dev-imgproxy.nccsoft.vn/k/rs:fill:100:100:1/mb:2097152/plain/https://cdn.mezon.ai/a.png@webp";
-    const PROFILE: &str = "https://dev-imgproxy.nccsoft.vn/k/rs:fit:300:300:1/mb:2097152/plain/https://cdn.mezon.ai/a.png@webp";
-    const MESSAGE_RENDITION: &str = "https://imgproxy.mezon.ai/k/rs:fill:800:600:1/mb:2097152/plain/https://cdn.mezon.ai/x.jpg@webp";
-    const RAW_CDN: &str = "https://cdn.mezon.ai/1700000000_0photo.png";
+    const AVATAR: &str = "https://dev-imgproxy.nccsoft.vn/k/rs:fill:100:100:1/mb:2097152/plain/https://cdn.komu.vn/a.png@webp";
+    const PROFILE: &str = "https://dev-imgproxy.nccsoft.vn/k/rs:fit:300:300:1/mb:2097152/plain/https://cdn.komu.vn/a.png@webp";
+    const MESSAGE_RENDITION: &str = "https://imgproxy.komu.vn/k/rs:fill:800:600:1/mb:2097152/plain/https://cdn.komu.vn/x.jpg@webp";
+    const RAW_CDN: &str = "https://cdn.komu.vn/1700000000_0photo.png";
     const RAW_PROFILE: &str = "https://profile.mezon.ai/1700000000_0avatar.jpg";
-    const VIDEO: &str = "https://cdn.mezon.ai/1700000000_0clip.mp4";
-    const PDF: &str = "https://cdn.mezon.ai/1700000000_0doc.pdf";
+    const VIDEO: &str = "https://cdn.komu.vn/1700000000_0clip.mp4";
+    const PDF: &str = "https://cdn.komu.vn/1700000000_0doc.pdf";
     const API: &str = "https://api.mezon.ai/v2/account";
     const TENOR: &str = "https://media.tenor.com/abc.gif";
 

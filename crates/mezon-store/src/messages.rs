@@ -452,6 +452,7 @@ struct ChannelMessages {
     has_more: bool,
 }
 
+const POLL_RESULT_ANIMATION_WINDOW: Duration = Duration::from_millis(1200);
 const STREAM_MODE_CHANNEL: i32 = 2;
 const STREAM_MODE_THREAD: i32 = 6;
 
@@ -767,6 +768,7 @@ pub struct PollUiState {
     pub selected: Vec<i32>,
     pub show_results: bool,
     pub voting: bool,
+    pub voted_at: Option<std::time::Instant>,
 }
 
 struct GlobalMessagesStore(Entity<MessagesStore>);
@@ -3797,6 +3799,13 @@ impl MessagesStore {
         self.poll_my_vote.get(&message_id).map(Vec::as_slice)
     }
 
+    pub fn poll_result_animating(&self, message_id: MessageId) -> bool {
+        self.poll_ui
+            .get(&message_id)
+            .and_then(|state| state.voted_at)
+            .is_some_and(|at| at.elapsed() < POLL_RESULT_ANIMATION_WINDOW)
+    }
+
     pub fn toggle_poll_answer(
         &mut self,
         message_id: MessageId,
@@ -3814,12 +3823,19 @@ impl MessagesStore {
         } else {
             state.selected = vec![index];
         }
-        cx.notify();
+        self.notify_poll_row(message_id, cx);
     }
 
     pub fn toggle_poll_results(&mut self, message_id: MessageId, cx: &mut Context<Self>) {
         let state = self.poll_ui.entry(message_id).or_default();
         state.show_results = !state.show_results;
+        self.notify_poll_row(message_id, cx);
+    }
+
+    fn notify_poll_row(&mut self, message_id: MessageId, cx: &mut Context<Self>) {
+        cx.emit(MessagesEvent::Updated {
+            message_id: Some(message_id),
+        });
         cx.notify();
     }
 
@@ -3860,7 +3876,7 @@ impl MessagesStore {
             return;
         };
         self.poll_ui.entry(message_id).or_default().voting = true;
-        cx.notify();
+        self.notify_poll_row(message_id, cx);
         let api = self.api.clone();
         let cid = channel_id.get();
         let mid = message_id.get();
@@ -3877,10 +3893,12 @@ impl MessagesStore {
                         store
                             .poll_my_vote
                             .insert(message_id, resp.my_answer_indices);
+                        store.poll_ui.entry(message_id).or_default().voted_at =
+                            Some(std::time::Instant::now());
                     }
                     Err(e) => tracing::error!("vote_poll failed: {e}"),
                 }
-                cx.notify();
+                store.notify_poll_row(message_id, cx);
             });
         })
         .detach();
@@ -3896,6 +3914,31 @@ impl MessagesStore {
         cx.spawn(async move |_this, _cx| {
             if let Err(e) = api.close_poll(poll_id, mid, cid).await {
                 tracing::error!("close_poll failed: {e}");
+            }
+        })
+        .detach();
+    }
+
+    pub fn create_poll(
+        &mut self,
+        question: String,
+        answers: Vec<String>,
+        expire_hours: i32,
+        poll_type: i32,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(channel_id) = self.active_channel_id else {
+            return;
+        };
+        let clan_id = self.active_clan_id.map_or(0, |clan| clan.get());
+        let api = self.api.clone();
+        let cid = channel_id.get();
+        cx.spawn(async move |_this, _cx| {
+            if let Err(e) = api
+                .create_poll(cid, clan_id, question, answers, expire_hours, poll_type)
+                .await
+            {
+                tracing::error!("create_poll failed: {e}");
             }
         })
         .detach();
@@ -5676,6 +5719,38 @@ mod tests {
     use crate::message::MessageSpan;
 
     #[test]
+    fn parse_embed_accent_accepts_normalized_hex_colors() {
+        let accent = parse_embed_accent(Some("#00BFFF")).expect("hex color");
+        assert_eq!(accent, gpui::rgb(0x00_bf_ff));
+    }
+
+    #[test]
+    fn parse_embed_accent_preserves_red_channel() {
+        let accent = parse_embed_accent(Some("#FF0000")).expect("red color");
+        assert_eq!(accent, gpui::rgb(0xff_00_00));
+    }
+
+    #[test]
+    fn build_embeds_maps_numeric_json_color_to_accent() {
+        let content: ApiMessageContent =
+            serde_json::from_str(r#"{"embed":[{"color":49151,"title":"Saved"}]}"#)
+                .expect("embed json");
+        let embeds = build_embeds(&content, None);
+        let embed = embeds.first().expect("one embed");
+        assert_eq!(embed.accent, Some(gpui::rgb(0x00_bf_ff)));
+    }
+
+    #[test]
+    fn build_embeds_maps_discord_red_numeric_json_to_accent() {
+        let content: ApiMessageContent =
+            serde_json::from_str(r#"{"embed":[{"color":16711680,"title":"Alert"}]}"#)
+                .expect("embed json");
+        let embeds = build_embeds(&content, None);
+        let embed = embeds.first().expect("one embed");
+        assert_eq!(embed.accent, Some(gpui::rgb(0xff_00_00)));
+    }
+
+    #[test]
     fn parse_embed_input_extracts_text_input() {
         let value = serde_json::json!({
             "type": 3,
@@ -6189,7 +6264,7 @@ mod tests {
     #[test]
     fn message_from_api_gates_cdn_attachment_until_presign_finished() {
         let cfg = AppConfig {
-            base_img_url: "https://cdn.mezon.ai".into(),
+            base_img_url: "https://cdn.example".into(),
             ..AppConfig::dev_defaults()
         };
         let msg = |finish: Option<Vec<String>>| ApiMessage {
@@ -6209,7 +6284,7 @@ mod tests {
             update_time: 0,
             hide_editted: false,
             attachments: vec![mezon_client::transport::ApiAttachment {
-                url: "https://cdn.mezon.ai/uploads/photo.png".into(),
+                url: "https://cdn.example/uploads/photo.png".into(),
                 filename: "photo.png".into(),
                 filetype: "image/png".into(),
                 width: 800,
@@ -6239,10 +6314,10 @@ mod tests {
 
     #[test]
     fn partial_update_recomputes_presign_pending_on_kept_attachments() {
-        let base = "https://cdn.mezon.ai";
+        let base = "https://cdn.example";
         let mut existing = Message::new(MessageId(1), "hi", "u1", "U1", 100);
         existing.attachments = vec![MessageAttachment {
-            url: "https://cdn.mezon.ai/uploads/photo.png".into(),
+            url: "https://cdn.example/uploads/photo.png".into(),
             presign_pending: true,
             ..Default::default()
         }];
@@ -6343,7 +6418,7 @@ mod tests {
         let confirmed = Message::new(MessageId(99), "", "42", "Me", 500).with_attachments(vec![
             MessageAttachment {
                 filename: "sanitized_photo.png".into(),
-                url: "https://cdn.mezon.ai/photo.png".into(),
+                url: "https://cdn.example/photo.png".into(),
                 ..Default::default()
             },
         ]);
@@ -6402,7 +6477,7 @@ mod tests {
         let mut confirmed = Message::new(MessageId(7), "", "42", "Me", 500).with_attachments(vec![
             MessageAttachment {
                 filename: "1700_0_photo.png".into(),
-                url: "https://cdn.mezon.ai/photo.png".into(),
+                url: "https://cdn.example/photo.png".into(),
                 ..Default::default()
             },
         ]);
@@ -7087,11 +7162,11 @@ mod tests {
         }
     }
 
-    const TEST_CDN: &str = "https://cdn.mezon.ai";
+    const TEST_CDN: &str = "https://cdn.example";
 
     #[test]
     fn presign_gate_keeps_attachment_pending_when_the_finish_list_is_empty() {
-        let mut attachments = vec![cdn_attachment("https://cdn.mezon.ai/uploads/photo.png")];
+        let mut attachments = vec![cdn_attachment("https://cdn.example/uploads/photo.png")];
         apply_presign_gate_at(&mut attachments, &[], TEST_CDN, 1000, 1000);
         assert_eq!(attachments.len(), 1);
         assert!(
@@ -7102,7 +7177,7 @@ mod tests {
 
     #[test]
     fn presign_gate_clears_pending_when_the_finish_list_contains_the_key() {
-        let mut attachments = vec![cdn_attachment("https://cdn.mezon.ai/uploads/photo.png")];
+        let mut attachments = vec![cdn_attachment("https://cdn.example/uploads/photo.png")];
         attachments[0].presign_pending = true;
         apply_presign_gate_at(
             &mut attachments,
@@ -7117,7 +7192,7 @@ mod tests {
 
     #[test]
     fn presign_gate_short_circuits_on_key_count_even_when_the_key_does_not_match() {
-        let mut attachments = vec![cdn_attachment("https://cdn.mezon.ai/uploads/photo.png")];
+        let mut attachments = vec![cdn_attachment("https://cdn.example/uploads/photo.png")];
         attachments[0].presign_pending = true;
         apply_presign_gate_at(
             &mut attachments,
@@ -7132,8 +7207,8 @@ mod tests {
     #[test]
     fn presign_gate_keeps_second_attachment_pending_until_both_keys_arrive() {
         let mut attachments = vec![
-            cdn_attachment("https://cdn.mezon.ai/uploads/a.png"),
-            cdn_attachment("https://cdn.mezon.ai/uploads/b.png"),
+            cdn_attachment("https://cdn.example/uploads/a.png"),
+            cdn_attachment("https://cdn.example/uploads/b.png"),
         ];
         apply_presign_gate_at(&mut attachments, &["a".to_string()], TEST_CDN, 1000, 1000);
         assert_eq!(attachments.len(), 2);
@@ -7143,7 +7218,7 @@ mod tests {
 
     #[test]
     fn presign_gate_drops_a_pending_attachment_that_never_finished_uploading() {
-        let mut attachments = vec![cdn_attachment("https://cdn.mezon.ai/uploads/photo.png")];
+        let mut attachments = vec![cdn_attachment("https://cdn.example/uploads/photo.png")];
         apply_presign_gate_at(
             &mut attachments,
             &[],
@@ -7175,12 +7250,12 @@ mod tests {
     fn topic_ack_marks_only_presign_pending_attachments_as_uploading() {
         let mut attachments = vec![
             MessageAttachment {
-                url: "https://cdn.mezon.ai/uploads/pending.png".into(),
+                url: "https://cdn.example/uploads/pending.png".into(),
                 presign_pending: true,
                 ..Default::default()
             },
             MessageAttachment {
-                url: "https://cdn.mezon.ai/uploads/done.png".into(),
+                url: "https://cdn.example/uploads/done.png".into(),
                 presign_pending: false,
                 ..Default::default()
             },
@@ -7202,7 +7277,7 @@ mod tests {
     fn test_profile() -> (String, String, SharedString) {
         (
             "Alice".to_string(),
-            "https://cdn.mezon.ai/alice.png".to_string(),
+            "https://cdn.example/alice.png".to_string(),
             SharedString::from("https://proxy/alice.png"),
         )
     }
@@ -7212,7 +7287,7 @@ mod tests {
         assert!(sparse_topic_ack_gaps(&sparse_ack_message()).is_some());
 
         let mut zero_sender = Message::new(MessageId(7), "hi", "0", "Alice", 100);
-        zero_sender.avatar_url = "https://cdn.mezon.ai/alice.png".into();
+        zero_sender.avatar_url = "https://cdn.example/alice.png".into();
         let gaps = sparse_topic_ack_gaps(&zero_sender).expect("sender id 0 is sparse");
         assert!(gaps.sender);
         assert!(!gaps.name);
@@ -7222,7 +7297,7 @@ mod tests {
     #[test]
     fn sparse_topic_ack_gaps_is_none_for_a_complete_ack() {
         let mut complete = Message::new(MessageId(7), "hi", "42", "Alice", 100);
-        complete.avatar_url = "https://cdn.mezon.ai/alice.png".into();
+        complete.avatar_url = "https://cdn.example/alice.png".into();
         assert!(
             sparse_topic_ack_gaps(&complete).is_none(),
             "a fully populated ack must not be rewritten"
@@ -7245,7 +7320,7 @@ mod tests {
         assert_eq!(msg.sender_id, "42");
         assert_eq!(msg.sender_user_id, Some(UserId(42)));
         assert_eq!(msg.sender_name, "Alice");
-        assert_eq!(msg.avatar_url, "https://cdn.mezon.ai/alice.png");
+        assert_eq!(msg.avatar_url, "https://cdn.example/alice.png");
         assert_eq!(msg.avatar_proxied, "https://proxy/alice.png");
         assert_eq!(msg.create_time, 1_700_000_000);
         assert!(!msg.day_label.is_empty());
@@ -7291,7 +7366,7 @@ mod tests {
         );
         assert_eq!(msg.sender_name, "Bob");
         assert_eq!(msg.create_time, 500);
-        assert_eq!(msg.avatar_url, "https://cdn.mezon.ai/alice.png");
+        assert_eq!(msg.avatar_url, "https://cdn.example/alice.png");
     }
 
     #[test]

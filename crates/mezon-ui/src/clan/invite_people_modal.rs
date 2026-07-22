@@ -529,7 +529,7 @@ impl Render for InvitePeopleModal {
                             .truncate()
                             .text_size(px(20.))
                             .font_weight(FontWeight::BOLD)
-                            .text_color(gpui::white())
+                            .text_color(theme.tokens.text_theme_primary)
                             .child(title),
                     )
                     .child(
@@ -577,7 +577,7 @@ impl Render for InvitePeopleModal {
                                 .mb(px(8.))
                                 .text_size(px(14.))
                                 .font_weight(FontWeight::BOLD)
-                                .text_color(gpui::white())
+                                .text_color(theme.tokens.text_theme_primary)
                                 .child(invite_send_link_label(&self.locale))
                                 .child(
                                     div()
@@ -799,7 +799,7 @@ fn render_friend_row(
                         .truncate()
                         .text_size(px(14.))
                         .font_weight(FontWeight::MEDIUM)
-                        .text_color(gpui::white())
+                        .text_color(theme.tokens.text_theme_primary)
                         .child(row.label),
                 ),
         )
@@ -905,7 +905,7 @@ fn render_copy_link(
                 .px(px(16.))
                 .truncate()
                 .text_size(px(14.))
-                .text_color(gpui::white())
+                .text_color(theme.tokens.text_theme_primary)
                 .child(display_text),
         )
         .child(
