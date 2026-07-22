@@ -330,6 +330,50 @@ impl ChannelSidebar {
                                     .iter()
                                     .map(|m| resolve_voice_member_slot(cx, new_clan_id, m))
                                     .collect(),
+                                voice_compact: false,
+                            });
+                        }
+                    } else {
+                        for ch in &category.channels {
+                            if ch.voice_members.is_empty() {
+                                continue;
+                            }
+                            let badge_count = ch.badge_count;
+                            let badge_label = if badge_count > 99 {
+                                SharedString::from("99+")
+                            } else if badge_count > 0 {
+                                SharedString::from(badge_count.to_string())
+                            } else {
+                                SharedString::from("")
+                            };
+                            items.push(SidebarItem::Channel {
+                                elem_id: SharedString::from(format!(
+                                    "ch-{}-{}",
+                                    &category.id, &ch.id
+                                )),
+                                row_elem_id: SharedString::from(format!(
+                                    "channel-row-{}-{}",
+                                    &category.id, ch.id
+                                )),
+                                id: ch.id.to_string(),
+                                name: truncate_channel_label(&ch.name),
+                                channel_type: ch.channel_type,
+                                unread: ch.is_unread(),
+                                private: ch.private,
+                                selected: active_channel_id == Some(ch.id),
+                                badge_count,
+                                badge_label,
+                                muted: ch.muted,
+                                is_thread: false,
+                                is_favorite: is_favorites,
+                                line_above: false,
+                                line_below: false,
+                                voice_members: ch
+                                    .voice_members
+                                    .iter()
+                                    .map(|m| resolve_voice_member_slot(cx, new_clan_id, m))
+                                    .collect(),
+                                voice_compact: true,
                             });
                         }
                     }
@@ -1184,7 +1228,7 @@ fn render_banner_and_events(
             let all_apps: Vec<AppChannelSlot> = app_channels.to_vec();
             let sidebar_more = sidebar.clone();
             let channel_apps_label =
-                SharedString::from(mezon_i18n::t(&locale, "channelList.channelApps").to_string());
+                SharedString::from(mezon_i18n::t(locale, "channelList.channelApps").to_string());
             app_row = app_row.child(
                 div()
                     .id("app-channels-more")
@@ -1339,6 +1383,7 @@ fn render_sidebar_item(
             line_above,
             line_below,
             voice_members,
+            voice_compact,
         } => {
             let ch_id = id.clone();
             let clan_id_inner = active_clan_id_for_nav;
@@ -1519,8 +1564,45 @@ fn render_sidebar_item(
                 .child(row_content);
 
             if !voice_members.is_empty() {
-                let voice_pl = if *is_thread { px(40.) } else { px(32.) };
-                let members_el =
+                let members_el = if *voice_compact {
+                    let mut cluster = div()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .pl(px(32.))
+                        .py(px(2.));
+                    for (index, m) in voice_members.iter().take(5).enumerate() {
+                        let name_text = if m.display_name.is_empty() {
+                            m.user_id.clone()
+                        } else {
+                            m.display_name.clone()
+                        };
+                        let avatar = if m.avatar_url.is_empty() {
+                            Avatar::new().name(name_text)
+                        } else {
+                            Avatar::new()
+                                .src(SharedString::from(m.avatar_url.clone()))
+                                .name(name_text)
+                        };
+                        cluster = cluster.child(
+                            div()
+                                .when(index > 0, |el| el.ml(px(-6.)))
+                                .child(avatar.with_size(Size::XSmall)),
+                        );
+                    }
+                    if voice_members.len() > 5 {
+                        let extra = (voice_members.len() - 5).min(99);
+                        cluster = cluster.child(
+                            div()
+                                .ml(px(4.))
+                                .text_xs()
+                                .text_color(theme.text_muted)
+                                .child(format!("+{extra}")),
+                        );
+                    }
+                    cluster
+                } else {
+                    let voice_pl = if *is_thread { px(40.) } else { px(32.) };
                     div()
                         .flex()
                         .flex_col()
@@ -1539,6 +1621,8 @@ fn render_sidebar_item(
                                     .name(name_text.clone())
                             };
                             div()
+                                .w_full()
+                                .min_w_0()
                                 .flex()
                                 .flex_row()
                                 .items_center()
@@ -1548,11 +1632,15 @@ fn render_sidebar_item(
                                 .child(avatar.with_size(Size::XSmall))
                                 .child(
                                     div()
+                                        .min_w_0()
+                                        .flex_1()
+                                        .truncate()
                                         .text_sm()
                                         .text_color(theme.text_muted)
                                         .child(name_text),
                                 )
-                        }));
+                        }))
+                };
                 channel_col = channel_col.child(members_el);
             }
 

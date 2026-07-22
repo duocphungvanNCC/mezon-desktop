@@ -68,5 +68,6 @@ pub(super) enum SidebarItem {
         line_above: bool,
         line_below: bool,
         voice_members: Vec<VoiceMemberSlot>,
+        voice_compact: bool,
     },
 }
