@@ -1129,6 +1129,8 @@ impl TransportClient {
         is_public: bool,
         topic_id: i64,
         is_update_msg_topic: bool,
+        hide_editted: bool,
+        create_time_seconds: u32,
     ) -> Result<()> {
         let transport = self.inner.clone();
         let content = content.to_string();
@@ -1147,6 +1149,8 @@ impl TransportClient {
                         is_public,
                         topic_id,
                         is_update_msg_topic,
+                        hide_editted,
+                        create_time_seconds,
                     )
                     .await
             })
@@ -1354,6 +1358,159 @@ impl TransportClient {
             .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
     }
 
+    pub async fn write_message_typing(
+        &self,
+        clan_id: i64,
+        channel_id: i64,
+        mode: i32,
+        is_public: bool,
+        sender_display_name: &str,
+        topic_id: i64,
+    ) -> Result<()> {
+        let transport = self.inner.clone();
+        let sender_display_name = sender_display_name.to_string();
+        runtime()
+            .spawn(async move {
+                transport
+                    .write_message_typing(
+                        clan_id,
+                        channel_id,
+                        mode,
+                        is_public,
+                        &sender_display_name,
+                        topic_id,
+                    )
+                    .await
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn write_quick_menu_event(
+        &self,
+        menu_name: &str,
+        clan_id: i64,
+        channel_id: i64,
+        mode: i32,
+        is_public: bool,
+        content_json: &str,
+        mentions: Vec<mezon_proto::api::MessageMention>,
+        attachments: Vec<mezon_proto::api::MessageAttachment>,
+        references: Vec<mezon_proto::api::MessageRef>,
+        anonymous_message: bool,
+        mention_everyone: bool,
+        avatar: &str,
+        message_code: i32,
+        topic_id: i64,
+        message_id: i64,
+        message_sender_id: i64,
+    ) -> Result<()> {
+        let transport = self.inner.clone();
+        let menu_name = menu_name.to_string();
+        let content_json = content_json.to_string();
+        let avatar = avatar.to_string();
+        runtime()
+            .spawn(async move {
+                transport
+                    .write_quick_menu_event(
+                        &menu_name,
+                        clan_id,
+                        channel_id,
+                        mode,
+                        is_public,
+                        &content_json,
+                        mentions,
+                        attachments,
+                        references,
+                        anonymous_message,
+                        mention_everyone,
+                        &avatar,
+                        message_code,
+                        topic_id,
+                        message_id,
+                        message_sender_id,
+                    )
+                    .await
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
+    pub async fn list_quick_menu_access(
+        &self,
+        bot_id: i64,
+        channel_id: i64,
+        menu_type: i32,
+    ) -> Result<mezon_proto::api::QuickMenuAccessList> {
+        let transport = self.inner.clone();
+        runtime()
+            .spawn(async move {
+                transport
+                    .list_quick_menu_access(bot_id, channel_id, menu_type)
+                    .await
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn send_channel_message_with_flags(
+        &self,
+        clan_id: i64,
+        channel_id: i64,
+        content: &str,
+        is_public: bool,
+        mode: i32,
+        mentions: Vec<crate::transport::OutgoingMention>,
+        hashtags: Vec<crate::transport::OutgoingHashtag>,
+        emojis: Vec<crate::transport::OutgoingEmoji>,
+        ogp: Option<crate::transport::OutgoingOgp>,
+        flags: crate::transport::OutgoingMessageFlags,
+    ) -> Result<crate::transport::ApiMessage> {
+        let transport = self.inner.clone();
+        let content = content.to_string();
+        runtime()
+            .spawn(async move {
+                transport
+                    .send_channel_message_with_flags(
+                        clan_id, channel_id, &content, is_public, mode, mentions, hashtags, emojis,
+                        ogp, flags,
+                    )
+                    .await
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
+    pub async fn send_channel_message_prebuilt(
+        &self,
+        clan_id: i64,
+        channel_id: i64,
+        content_json: &str,
+        is_public: bool,
+        mode: i32,
+        flags: crate::transport::OutgoingMessageFlags,
+    ) -> Result<crate::transport::ApiMessage> {
+        let transport = self.inner.clone();
+        let content_json = content_json.to_string();
+        runtime()
+            .spawn(async move {
+                transport
+                    .send_channel_message_prebuilt(
+                        clan_id,
+                        channel_id,
+                        &content_json,
+                        is_public,
+                        mode,
+                        flags,
+                    )
+                    .await
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub async fn forward_channel_message(
         &self,
@@ -1400,6 +1557,7 @@ impl TransportClient {
         is_public: bool,
         topic_id: i64,
         is_update_msg_topic: bool,
+        create_time_seconds: u32,
     ) -> Result<()> {
         let transport = self.inner.clone();
         let content = content.to_string();
@@ -1416,6 +1574,7 @@ impl TransportClient {
                         is_public,
                         topic_id,
                         is_update_msg_topic,
+                        create_time_seconds,
                     )
                     .await
             })

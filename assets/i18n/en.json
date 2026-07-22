@@ -2117,6 +2117,7 @@
   "contextMenu.copyImage": "Copy Image",
   "contextMenu.copyLink": "Copy Link",
   "contextMenu.copyText": "Copy Text",
+  "contextMenu.copyTextSelected": "Copy Selected Text",
   "contextMenu.copyUserId": "Copy User ID",
   "contextMenu.createThread": "Create Thread",
   "contextMenu.deleteCategory": "Delete Category",

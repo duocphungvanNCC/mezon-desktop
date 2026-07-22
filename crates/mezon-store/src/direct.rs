@@ -4,7 +4,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use gpui::{App, AppContext, Context, Entity, EventEmitter, Global, Task};
-use mezon_client::transport::{ApiChannelDesc, ApiDirectChannel};
+use mezon_client::transport::{
+    ApiChannelDesc, ApiDirectChannel, ApiMessageContent, build_send_content,
+};
 use mezon_client::{AppApi, ConnectionStatus, RealtimeEvent};
 
 use crate::Freshness;
@@ -433,13 +435,86 @@ impl DirectMessageStore {
                 }
             };
 
+            let content_json = direct_message_content_json(&content);
             let sent = api
-                .send_channel_message_structured(channel_id.get(), &content, mode)
+                .send_channel_message_structured(channel_id.get(), &content_json, mode)
                 .await?;
             this.update(cx, |this, cx| {
                 this.note_message(channel_id, sent.create_time, true, false, cx);
             })?;
             Ok(())
+        })
+    }
+
+    pub fn create_dm_and_send_text(
+        &self,
+        user_id: UserId,
+        member_label: String,
+        member_avatar: String,
+        member_username: String,
+        content: String,
+        cx: &mut Context<Self>,
+    ) -> Task<anyhow::Result<(ChannelId, i32)>> {
+        let api = self.api.clone();
+        cx.spawn(async move |this, cx| {
+            let desc = api.create_direct_channel(&[user_id.0]).await?;
+            let channel_id = ChannelId(desc.channel_id);
+            let channel_type = desc.channel_type as i32;
+            let send_mode = DirectKind::Dm.stream_mode();
+
+            this.update(cx, |this, cx| {
+                let (peer_username, peer_avatar) =
+                    if !member_username.is_empty() && !member_avatar.is_empty() {
+                        (member_username.clone(), member_avatar.clone())
+                    } else {
+                        UsersByUserStore::try_global(cx)
+                            .and_then(|store| store.read(cx).user(user_id))
+                            .map(|user| {
+                                (
+                                    if user.username.is_empty() {
+                                        member_username.clone()
+                                    } else {
+                                        user.username.clone()
+                                    },
+                                    if user.avatar_url.is_empty() {
+                                        member_avatar.clone()
+                                    } else {
+                                        user.avatar_url.clone()
+                                    },
+                                )
+                            })
+                            .unwrap_or((member_username.clone(), member_avatar.clone()))
+                    };
+                let label = if !member_label.is_empty() {
+                    member_label
+                } else if !peer_username.is_empty() {
+                    peer_username.clone()
+                } else {
+                    desc.channel_label.clone()
+                };
+                let channel =
+                    direct_from_created(&desc, user_id, &label, &peer_avatar, &peer_username);
+                this.channels.upsert_created(channel);
+                this.freshness.mark_fetched();
+                cx.emit(DirectEvent::Changed { channel_id: None });
+                cx.notify();
+            })?;
+
+            if let Err(e) = api
+                .join_chat(0, channel_id.get(), channel_type, false)
+                .await
+            {
+                tracing::warn!("join_chat after create DM failed: {e}");
+            }
+
+            let content_json = direct_message_content_json(&content);
+            let sent = api
+                .send_channel_message_structured(channel_id.get(), &content_json, send_mode)
+                .await?;
+            this.update(cx, |this, cx| {
+                this.note_message(channel_id, sent.create_time, true, false, cx);
+            })?;
+            Ok((channel_id, channel_type))
         })
     }
 
@@ -628,6 +703,14 @@ impl DirectMessageStore {
                 cx.notify();
             });
         }));
+    }
+}
+
+fn direct_message_content_json(content: &str) -> String {
+    if serde_json::from_str::<ApiMessageContent>(content).is_ok() {
+        content.to_string()
+    } else {
+        build_send_content(content, &[], &[], &[]).json
     }
 }
 
@@ -1225,5 +1308,17 @@ mod tests {
         let ids: Vec<ChannelId> = list.channels.iter().map(|c| c.id).collect();
         assert_eq!(ids, vec![ChannelId(1)]);
         assert_index_consistent(&list);
+    }
+
+    #[test]
+    fn direct_message_content_json_wraps_plain_text() {
+        let json = direct_message_content_json("hello");
+        assert!(serde_json::from_str::<ApiMessageContent>(&json).is_ok());
+    }
+
+    #[test]
+    fn direct_message_content_json_passes_through_structured() {
+        let structured = build_send_content("hello", &[], &[], &[]).json;
+        assert_eq!(direct_message_content_json(&structured), structured);
     }
 }

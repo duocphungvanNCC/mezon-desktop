@@ -135,10 +135,6 @@ impl Global for SharedAvatarCache {}
 struct SharedOgpCache(Entity<LruImageCache>);
 impl Global for SharedOgpCache {}
 
-#[derive(Default)]
-struct OgpSweepScheduled(bool);
-impl Global for OgpSweepScheduled {}
-
 const OGP_SHARED_CACHE_CAPACITY: usize = 16;
 const OGP_SHARED_CACHE_BYTES: u64 = 8 * 1024 * 1024;
 const OGP_SHARED_ENTRY_MAX_BYTES: u64 = 2 * 1024 * 1024;
@@ -171,15 +167,9 @@ pub fn ogp_image_cache(app: &App) -> Option<Entity<LruImageCache>> {
 }
 
 pub fn sweep_ogp_cache(window: &mut Window, cx: &mut App) {
-    let scheduled = &mut cx.default_global::<OgpSweepScheduled>().0;
-    if *scheduled {
-        return;
-    }
-    *scheduled = true;
     if let Some(cache) = ogp_image_cache(cx) {
-        cache.update(cx, |cache, cx| cache.sweep(window, cx));
+        cache.update(cx, |cache, cx| cache.sweep_once_per_frame(window, cx));
     }
-    window.on_next_frame(|_, cx| cx.default_global::<OgpSweepScheduled>().0 = false);
 }
 
 pub fn shared_avatar_cache(cx: &mut App) -> Entity<LruImageCache> {
@@ -376,17 +366,8 @@ pub const SHARED_IMAGE_CACHE_BYTES: u64 = 24 * 1024 * 1024;
 pub const GALLERY_IMAGE_CACHE_CAPACITY: usize = 48;
 pub const GALLERY_IMAGE_CACHE_BYTES: u64 = 12 * 1024 * 1024;
 
-/// Cache for Timeline/Events card previews and Event Detail featured+grid
-/// images. Uses an aspect-preserving loader (unlike the square-cropped
-/// [`GalleryImageLoader`]) since these render as landscape banners/cards as
-/// well as square grid cells, all via `object-fit: cover` at display time.
-/// Bounded higher than [`GALLERY_IMAGE_CACHE_CAPACITY`]/`_BYTES` because a
-/// single multi-day merged event can hold dozens of attachments that all
-/// render (unvirtualized) at once; each entry stays small since decode is
-/// capped at [`GALLERY_PREVIEW_DECODE_MAX_PX`], so this budget comfortably
-/// covers realistic event sizes without cache thrashing.
-pub const PREVIEW_IMAGE_CACHE_CAPACITY: usize = 160;
-pub const PREVIEW_IMAGE_CACHE_BYTES: u64 = 96 * 1024 * 1024;
+pub const PREVIEW_IMAGE_CACHE_CAPACITY: usize = 64;
+pub const PREVIEW_IMAGE_CACHE_BYTES: u64 = 32 * 1024 * 1024;
 pub const PREVIEW_ENTRY_MAX_BYTES: u64 = 4 * 1024 * 1024;
 
 /// Per-image decoded-size caps. A compressed file is tiny on the wire but is
@@ -512,6 +493,7 @@ pub struct LruImageCache {
     total_bytes: u64,
     epoch: u64,
     sweeps: u64,
+    sweep_scheduled: bool,
     metrics: CacheMetrics,
     cache: IndexMap<u64, CacheEntry>,
 }
@@ -698,6 +680,7 @@ impl LruImageCache {
             total_bytes: 0,
             epoch: 0,
             sweeps: 0,
+            sweep_scheduled: false,
             metrics: CacheMetrics::default(),
             cache: IndexMap::with_capacity(max_items),
         }
@@ -739,6 +722,15 @@ impl LruImageCache {
     /// next sweep, so only the currently-visible images stay in RAM.
     pub fn sweep(&mut self, window: &mut Window, cx: &mut App) {
         self.sweep_with_grace(GRACE_PERIOD, window, cx);
+    }
+
+    pub fn sweep_once_per_frame(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.sweep_scheduled {
+            return;
+        }
+        self.sweep_scheduled = true;
+        self.sweep(window, cx);
+        cx.on_next_frame(window, |cache, _, _| cache.sweep_scheduled = false);
     }
 
     fn sweep_with_grace(&mut self, grace: Duration, window: &mut Window, cx: &mut App) {
@@ -1754,6 +1746,8 @@ mod tests {
         assert_eq!(MESSAGE_IMAGE_CACHE_BYTES, 32 * 1024 * 1024);
         assert_eq!(VIEWER_IMAGE_CACHE_BYTES, 32 * 1024 * 1024);
         assert_eq!(GALLERY_IMAGE_CACHE_BYTES, 12 * 1024 * 1024);
+        assert_eq!(PREVIEW_IMAGE_CACHE_CAPACITY, 64);
+        assert_eq!(PREVIEW_IMAGE_CACHE_BYTES, 32 * 1024 * 1024);
         assert_eq!(SHARED_IMAGE_CACHE_BYTES, 24 * 1024 * 1024);
         assert_eq!(OGP_SHARED_CACHE_BYTES, 8 * 1024 * 1024);
         assert_eq!(IDLE_TRIM_INTERVAL, Duration::from_secs(30));

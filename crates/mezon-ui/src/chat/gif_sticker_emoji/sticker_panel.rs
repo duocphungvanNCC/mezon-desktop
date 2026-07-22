@@ -94,7 +94,7 @@ impl StickerPanel {
                 &locale,
                 "chat.stickerPicker.noStickers",
             )),
-            list_state: ListState::new(0, ListAlignment::Top, px(200.)).measure_all(),
+            list_state: ListState::new(0, ListAlignment::Top, px(200.)),
             list_dirty: true,
             image_cache,
             _sub: sub,
@@ -225,7 +225,7 @@ impl StickerPanel {
 impl Render for StickerPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.image_cache
-            .update(cx, |cache, cx| cache.sweep(window, cx));
+            .update(cx, |cache, cx| cache.sweep_once_per_frame(window, cx));
         let theme = cx.theme().clone();
         let entity = cx.entity();
         let show_rail = !self.searching() && !self.categories.is_empty();

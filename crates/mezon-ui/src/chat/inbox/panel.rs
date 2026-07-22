@@ -60,7 +60,7 @@ impl InboxPopoverPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let list_state = ListState::new(0, ListAlignment::Top, px(LIST_OVERDRAW)).measure_all();
+        let list_state = ListState::new(0, ListAlignment::Top, px(LIST_OVERDRAW));
         let weak = cx.weak_entity();
         Self::attach_list_scroll_handler(&list_state, weak);
         let avatar_image_cache = crate::image_cache::shared_avatar_cache(cx);
@@ -333,6 +333,8 @@ impl Focusable for InboxPopoverPanel {
 
 impl Render for InboxPopoverPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.message_image_cache
+            .update(cx, |cache, cx| cache.sweep_once_per_frame(window, cx));
         let theme = cx.theme().clone();
         let theme_ref = theme.as_ref();
         let items = self.cached_items.clone();

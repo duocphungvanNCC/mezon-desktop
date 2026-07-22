@@ -261,13 +261,11 @@ fn render_event_card_body(
             el.border_2().border_color(theme.brand)
         })
         .p_4();
-    if interactive {
-        if let Some(handler) = on_click {
-            card = card
-                .cursor_pointer()
-                .hover(|el| el.bg(theme.bg_hover))
-                .on_click(move |_, window, cx| handler(event_id, start_time_seconds, window, cx));
-        }
+    if interactive && let Some(handler) = on_click {
+        card = card
+            .cursor_pointer()
+            .hover(|el| el.bg(theme.bg_hover))
+            .on_click(move |_, window, cx| handler(event_id, start_time_seconds, window, cx));
     }
     card.child(
         div()

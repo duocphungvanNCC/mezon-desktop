@@ -1,5 +1,5 @@
 use gpui::{
-    App, ClickEvent, Context, Entity, FocusHandle, Focusable, FontWeight, SharedString,
+    App, ClickEvent, Context, Entity, FocusHandle, Focusable, FontWeight, Render, SharedString,
     Subscription, Window, div, prelude::*, px,
 };
 use mezon_store::MessagesStore;
@@ -25,21 +25,22 @@ impl Focusable for MessageBuzzModal {
 
 impl MessageBuzzModal {
     pub fn open(locale: SharedString, window: &mut Window, cx: &mut App) {
-        if Shell::global(cx).read(cx).has_modal() {
-            return;
-        }
         let view = cx.new(|cx| {
             let placeholder = mezon_i18n::t(&locale, "messageBuzz.enterMessage").to_string();
             let message = cx.new(|cx| {
                 InputState::new(window, cx)
                     .placeholder(placeholder)
+                    .height(px(42.))
                     .validate(|value, _cx| value.chars().count() <= MAX_BUZZ_LEN)
             });
-            let message_sub = cx.subscribe(&message, |_this, _input, event: &InputEvent, cx| {
-                if matches!(event, InputEvent::Change) {
-                    cx.notify();
-                }
-            });
+            let message_sub = cx.subscribe(
+                &message,
+                |this: &mut Self, _input, event: &InputEvent, cx| match event {
+                    InputEvent::Change => cx.notify(),
+                    InputEvent::PressEnter => this.send(cx),
+                },
+            );
+            message.update(cx, |input, cx| input.focus(window, cx));
             Self {
                 focus_handle: cx.focus_handle(),
                 locale,
@@ -47,9 +48,12 @@ impl MessageBuzzModal {
                 _message_sub: message_sub,
             }
         });
-        let focus_handle = view.read(cx).focus_handle.clone();
-        window.focus(&focus_handle, cx);
-        Shell::global(cx).update(cx, |shell, cx| shell.show_modal(view.into(), cx));
+        Shell::global(cx).update(cx, |shell, cx| shell.show_modal(view.clone().into(), cx));
+        view.update(cx, |modal, cx| {
+            modal
+                .message
+                .update(cx, |input, cx| input.focus(window, cx));
+        });
     }
 
     fn close(cx: &mut App) {

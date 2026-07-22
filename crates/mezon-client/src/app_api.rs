@@ -476,6 +476,8 @@ impl AppApi {
         is_public: bool,
         topic_id: i64,
         is_update_msg_topic: bool,
+        hide_editted: bool,
+        create_time_seconds: u32,
     ) -> Result<()> {
         self.transport
             .update_channel_message(
@@ -490,6 +492,8 @@ impl AppApi {
                 is_public,
                 topic_id,
                 is_update_msg_topic,
+                hide_editted,
+                create_time_seconds,
             )
             .await
     }
@@ -871,6 +875,124 @@ impl AppApi {
             .await
     }
 
+    pub async fn write_message_typing(
+        &self,
+        clan_id: i64,
+        channel_id: i64,
+        mode: i32,
+        is_public: bool,
+        sender_display_name: &str,
+        topic_id: i64,
+    ) -> Result<()> {
+        self.transport
+            .write_message_typing(
+                clan_id,
+                channel_id,
+                mode,
+                is_public,
+                sender_display_name,
+                topic_id,
+            )
+            .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn write_quick_menu_event(
+        &self,
+        menu_name: &str,
+        clan_id: i64,
+        channel_id: i64,
+        mode: i32,
+        is_public: bool,
+        content_json: &str,
+        mentions: Vec<mezon_proto::api::MessageMention>,
+        attachments: Vec<mezon_proto::api::MessageAttachment>,
+        references: Vec<mezon_proto::api::MessageRef>,
+        anonymous_message: bool,
+        mention_everyone: bool,
+        avatar: &str,
+        message_code: i32,
+        topic_id: i64,
+        message_id: i64,
+        message_sender_id: i64,
+    ) -> Result<()> {
+        self.transport
+            .write_quick_menu_event(
+                menu_name,
+                clan_id,
+                channel_id,
+                mode,
+                is_public,
+                content_json,
+                mentions,
+                attachments,
+                references,
+                anonymous_message,
+                mention_everyone,
+                avatar,
+                message_code,
+                topic_id,
+                message_id,
+                message_sender_id,
+            )
+            .await
+    }
+
+    pub async fn list_quick_menu_access(
+        &self,
+        channel_id: i64,
+        menu_type: i32,
+    ) -> Result<Vec<mezon_proto::api::QuickMenuAccess>> {
+        let list = self
+            .transport
+            .list_quick_menu_access(0, channel_id, menu_type)
+            .await?;
+        Ok(list.list_menus)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn send_channel_message_with_flags(
+        &self,
+        clan_id: i64,
+        channel_id: i64,
+        content: &str,
+        is_public: bool,
+        mode: i32,
+        mentions: Vec<crate::transport::OutgoingMention>,
+        hashtags: Vec<crate::transport::OutgoingHashtag>,
+        emojis: Vec<crate::transport::OutgoingEmoji>,
+        ogp: Option<crate::transport::OutgoingOgp>,
+        flags: crate::transport::OutgoingMessageFlags,
+    ) -> Result<ApiMessage> {
+        self.transport
+            .send_channel_message_with_flags(
+                clan_id, channel_id, content, is_public, mode, mentions, hashtags, emojis, ogp,
+                flags,
+            )
+            .await
+    }
+
+    pub async fn send_channel_message_prebuilt(
+        &self,
+        clan_id: i64,
+        channel_id: i64,
+        content_json: &str,
+        is_public: bool,
+        mode: i32,
+        flags: crate::transport::OutgoingMessageFlags,
+    ) -> Result<ApiMessage> {
+        self.transport
+            .send_channel_message_prebuilt(
+                clan_id,
+                channel_id,
+                content_json,
+                is_public,
+                mode,
+                flags,
+            )
+            .await
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub async fn forward_channel_message(
         &self,
@@ -923,6 +1045,7 @@ impl AppApi {
         is_public: bool,
         topic_id: i64,
         is_update_msg_topic: bool,
+        create_time_seconds: u32,
     ) -> Result<()> {
         let proto = attachments
             .into_iter()
@@ -948,6 +1071,7 @@ impl AppApi {
                 is_public,
                 topic_id,
                 is_update_msg_topic,
+                create_time_seconds,
             )
             .await
     }
