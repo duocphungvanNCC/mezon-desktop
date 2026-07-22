@@ -1,9 +1,10 @@
 use std::cell::Cell;
 use std::rc::Rc;
+use std::time::Duration;
 
 use gpui::{
-    AnyElement, Bounds, FontWeight, ObjectFit, Pixels, SharedString, div, img, prelude::*, px,
-    relative, rgb, rgba,
+    Animation, AnimationExt as _, AnyElement, Bounds, FontWeight, ObjectFit, Pixels, SharedString,
+    div, img, prelude::*, px, relative, rgb, rgba,
 };
 use mezon_store::{Message, MessageId, MessagesStore, PollAnswerView, PollData, PollLabelSegment};
 
@@ -20,6 +21,23 @@ const BLUE_500: u32 = 0x3b82f6;
 const RED_500: u32 = 0xef4444;
 const RED_500_10: u32 = 0xef44_4419;
 const ANSWERS_SCROLL_AFTER: usize = 5;
+const POLL_SCROLL_HANDLE_LIMIT: usize = 64;
+const BAR_FILL_MS: u64 = 650;
+const PERCENT_POP_MS: u64 = 400;
+
+fn poll_ease_out(delta: f32) -> f32 {
+    1.0 - (1.0 - delta).powi(5)
+}
+
+fn inner_scroll_has_room(before_offset_y: Pixels, max_offset_y: Pixels, delta_y: Pixels) -> bool {
+    if delta_y < px(0.) {
+        before_offset_y > -max_offset_y
+    } else if delta_y > px(0.) {
+        before_offset_y < px(0.)
+    } else {
+        false
+    }
+}
 
 pub fn render_poll_card(
     msg: &Message,
@@ -41,6 +59,7 @@ pub fn render_poll_card(
     let show_results = ui.map(|s| s.show_results).unwrap_or(false);
     let voting = ui.map(|s| s.voting).unwrap_or(false);
     let voted: &[i32] = store.poll_my_vote(msg.id).unwrap_or(&[]);
+    let animate_results = store.poll_result_animating(msg.id);
 
     let has_voted = !voted.is_empty();
     let can_select = !has_voted && !show_results && !is_closed && !is_expired;
@@ -114,6 +133,7 @@ pub fn render_poll_card(
                 should_show_results,
                 can_select,
                 has_voted,
+                animate_results,
                 answer_base,
                 selection_context,
                 answer_clip.as_ref(),
@@ -121,14 +141,33 @@ pub fn render_poll_card(
         })
         .collect();
     let answers_col = if let Some(clip) = answer_clip {
+        let scroll_handle = {
+            let mut memo = ctx.row_memo.borrow_mut();
+            if memo.poll_scrolls.len() >= POLL_SCROLL_HANDLE_LIMIT
+                && !memo.poll_scrolls.contains_key(&msg_id)
+            {
+                memo.poll_scrolls.clear();
+            }
+            memo.poll_scrolls.entry(msg_id).or_default().clone()
+        };
+        let chain_handle = scroll_handle.clone();
         let scroll = div()
             .id(("poll-answers", msg_id.get() as usize))
             .flex()
             .flex_col()
             .gap_2()
             .mb_3()
+            .min_h_0()
             .max_h(px(280.))
             .overflow_y_scroll()
+            .track_scroll(&scroll_handle)
+            .on_scroll_wheel(move |event, window, cx| {
+                let delta_y = event.delta.pixel_delta(window.line_height()).y;
+                let before_offset_y = chain_handle.offset().y - delta_y;
+                if inner_scroll_has_room(before_offset_y, chain_handle.max_offset().y, delta_y) {
+                    cx.stop_propagation();
+                }
+            })
             .pr_1()
             .children(answer_rows)
             .into_any_element();
@@ -190,6 +229,7 @@ fn render_answer_row(
     should_show_results: bool,
     can_select: bool,
     has_voted: bool,
+    animate_results: bool,
     answer_base: Option<usize>,
     selection_context: &SelectableTextContext,
     answer_clip: Option<&Rc<Cell<Option<Bounds<Pixels>>>>>,
@@ -217,6 +257,7 @@ fn render_answer_row(
         .flex_row()
         .items_center()
         .justify_between()
+        .flex_shrink_0()
         .px_3()
         .py(px(10.))
         .rounded(px(4.))
@@ -238,15 +279,23 @@ fn render_answer_row(
     }
 
     if should_show_results {
-        row = row.child(
-            div()
-                .absolute()
-                .left_0()
-                .top_0()
-                .bottom_0()
-                .w(relative(percentage as f32 / 100.0))
-                .bg(rgb(BLUE_600)),
-        );
+        let target = percentage as f32 / 100.0;
+        let bar = div()
+            .absolute()
+            .left_0()
+            .top_0()
+            .bottom_0()
+            .bg(rgb(BLUE_600));
+        row = row.child(if animate_results {
+            bar.with_animation(
+                ("poll-bar", position),
+                Animation::new(Duration::from_millis(BAR_FILL_MS)).with_easing(poll_ease_out),
+                move |el, delta| el.w(relative(target * delta)).opacity(0.6 + 0.4 * delta),
+            )
+            .into_any_element()
+        } else {
+            bar.w(relative(target)).into_any_element()
+        });
     }
 
     row = row.child(
@@ -278,13 +327,23 @@ fn render_answer_row(
         .pl_2();
     if should_show_results {
         let vote_word = vote_word(ctx, count);
-        right = right.child(
-            div()
-                .text_xs()
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_color(theme.tokens.text_secondary)
-                .child(format!("{percentage}% {count} {vote_word}")),
-        );
+        let percent_label = div()
+            .text_xs()
+            .font_weight(FontWeight::SEMIBOLD)
+            .text_color(theme.tokens.text_secondary)
+            .child(format!("{percentage}% {count} {vote_word}"));
+        right = right.child(if animate_results {
+            percent_label
+                .with_animation(
+                    ("poll-percent", position),
+                    Animation::new(Duration::from_millis(PERCENT_POP_MS))
+                        .with_easing(poll_ease_out),
+                    move |el, delta| el.opacity(delta),
+                )
+                .into_any_element()
+        } else {
+            percent_label.into_any_element()
+        });
     }
     if can_select {
         let mut circle = div()
@@ -594,4 +653,35 @@ fn time_remaining_label(expire_at: Option<i64>, now_secs: i64, locale: &str) -> 
 
 fn fmt_count(template: &str, count: i64) -> String {
     template.replace("{{count}}", &count.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::inner_scroll_has_room;
+    use gpui::px;
+
+    #[test]
+    fn holds_scroll_while_inner_list_can_move_down() {
+        assert!(inner_scroll_has_room(px(-100.), px(200.), px(-40.)));
+    }
+
+    #[test]
+    fn releases_scroll_at_inner_bottom() {
+        assert!(!inner_scroll_has_room(px(-200.), px(200.), px(-40.)));
+    }
+
+    #[test]
+    fn holds_scroll_while_inner_list_can_move_up() {
+        assert!(inner_scroll_has_room(px(-100.), px(200.), px(40.)));
+    }
+
+    #[test]
+    fn releases_scroll_at_inner_top() {
+        assert!(!inner_scroll_has_room(px(0.), px(200.), px(40.)));
+    }
+
+    #[test]
+    fn zero_delta_never_holds() {
+        assert!(!inner_scroll_has_room(px(-50.), px(200.), px(0.)));
+    }
 }

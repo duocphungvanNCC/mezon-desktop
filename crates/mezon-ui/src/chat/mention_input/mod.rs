@@ -17,7 +17,7 @@ use mezon_store::{
     AccountEvent, AccountStore, AudioStore, BadgeService, Channel, ChannelEvent, ChannelId,
     ChannelList, ChannelMembersEvent, ChannelMembersStore, ClanList, ClanMembersEvent,
     ClanMembersStore, DirectEvent, DirectMessageStore, Emoji, EmojiEvent, EmojiStore,
-    GroupMembersEvent, GroupMembersStore, MENTION_HERE_ID, MessageSpan, OgpResult,
+    GroupMembersEvent, GroupMembersStore, MENTION_HERE_ID, MessageSpan, MessagesStore, OgpResult,
     OutgoingAttachment, OutgoingContent, OutgoingEmoji, OutgoingHashtag, OutgoingMention,
     OutgoingOgp, RolesEvent, RolesStore, Settings, fetch_ogp, first_previewable_url,
 };
@@ -35,6 +35,7 @@ use crate::chat::member_list::{
     MentionMemberRaw, MentionScope, ensure_mention_members_loaded, mention_direct_id,
     mention_member_pool, mention_private_channel, mention_role_clan, mention_scope,
 };
+use crate::chat::message::CreatePollModal;
 use crate::components::primitives::{Avatar, Icon, IconName, ToastKind};
 use crate::image_cache::{
     AVATAR_ENTRY_MAX_BYTES, AVATAR_IMAGE_CACHE_BYTES, AVATAR_IMAGE_CACHE_CAPACITY, LruImageCache,
@@ -59,6 +60,7 @@ const MENTION_HERE_DISPLAY: &str = "@here";
 const MENTION_HERE_NORM: &str = "@HERE";
 const CONVERT_TO_FILE_THRESHOLD: usize = 3700;
 const CONVERT_PREFIX_LEN: usize = 8;
+const STREAM_MODE_DM: i32 = 4;
 const MENTION_ROW_PX: f32 = 36.;
 const MENTION_POPUP_MAX_PX: f32 = MENTION_ROW_PX * 6.;
 
@@ -293,6 +295,7 @@ pub struct MentionInput {
     encoding_recording: bool,
     _record_task: Option<RecordTask>,
     compact: bool,
+    file_menu_open: bool,
     overflow_to_file: bool,
     overflow_counter: Option<isize>,
     last_content: SharedString,
@@ -479,6 +482,7 @@ impl MentionInput {
             encoding_recording: false,
             _record_task: None,
             compact,
+            file_menu_open: false,
             overflow_to_file: false,
             overflow_counter: None,
             last_content: SharedString::default(),
@@ -590,6 +594,99 @@ impl MentionInput {
             input.set_value("", window, cx);
         });
         Some((text, content, attachments, ogp))
+    }
+
+    fn toggle_file_menu(&mut self, cx: &mut Context<Self>) {
+        self.file_menu_open = !self.file_menu_open;
+        cx.notify();
+    }
+
+    fn open_create_poll(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.file_menu_open = false;
+        let locale = SharedString::from(self.settings.read(cx).language.clone());
+        window.defer(cx, move |window, cx| {
+            CreatePollModal::open(locale, window, cx);
+        });
+        cx.notify();
+    }
+
+    fn render_file_menu(&self, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme().clone();
+        let locale = SharedString::from(self.settings.read(cx).language.clone());
+        let show_poll = MessagesStore::global(cx).read(cx).mode() != STREAM_MODE_DM;
+        let text_color = theme.text_muted;
+        let text_hover = theme.text_primary;
+        let bg_hover = theme.bg_hover;
+
+        let mut menu = div()
+            .absolute()
+            .bottom_full()
+            .left_0()
+            .mb_2()
+            .min_w(px(200.))
+            .flex()
+            .flex_col()
+            .p_2()
+            .rounded_lg()
+            .bg(theme.tokens.theme_setting_primary)
+            .shadow_lg()
+            .occlude()
+            .child(
+                div()
+                    .id("file-menu-upload")
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_3()
+                    .px_4()
+                    .py_3()
+                    .rounded_md()
+                    .cursor_pointer()
+                    .text_color(text_color)
+                    .hover(|s| s.bg(bg_hover).text_color(text_hover))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _, window, cx| {
+                            this.file_menu_open = false;
+                            this.open_file_picker(window, cx);
+                        }),
+                    )
+                    .child(
+                        Icon::new(IconName::SelectFileIcon)
+                            .size_5()
+                            .flex_none()
+                            .text_color(text_color)
+                            .hover(|s| s.text_color(text_hover)),
+                    )
+                    .child(div().text_sm().font_weight(FontWeight::MEDIUM).child(
+                        mezon_i18n::t(&locale, "message.fileSelection.uploadFile").to_string(),
+                    )),
+            );
+        if show_poll {
+            menu = menu.child(
+                div()
+                    .id("file-menu-poll")
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_3()
+                    .px_4()
+                    .py_3()
+                    .rounded_md()
+                    .cursor_pointer()
+                    .text_color(text_color)
+                    .hover(|s| s.bg(bg_hover).text_color(text_hover))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _, window, cx| this.open_create_poll(window, cx)),
+                    )
+                    .child(img("icons/check-list-icon.svg").size(px(20.)).flex_none())
+                    .child(div().text_sm().font_weight(FontWeight::MEDIUM).child(
+                        mezon_i18n::t(&locale, "message.fileSelection.createPoll").to_string(),
+                    )),
+            );
+        }
+        menu.into_any_element()
     }
 
     fn open_file_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1258,8 +1355,9 @@ impl MentionInput {
         ];
         if let Some(store) = RolesStore::try_global(cx) {
             subs.push(cx.subscribe(&store, |this, _, event: &RolesEvent, cx| {
-                let RolesEvent::Changed { clan_id } = event;
-                if mention_role_clan(cx) == Some(*clan_id) {
+                if let RolesEvent::Changed { clan_id } = event
+                    && mention_role_clan(cx) == Some(*clan_id)
+                {
                     this.invalidate_pool(Sigil::At, cx);
                 }
             }));
@@ -1686,6 +1784,9 @@ impl MentionInput {
     fn on_dismiss(&mut self, _: &MentionDismiss, window: &mut Window, cx: &mut Context<Self>) {
         if self.popup_open() {
             self.hide(cx);
+        } else if self.file_menu_open {
+            self.file_menu_open = false;
+            cx.notify();
         } else if self.ephemeral_mode || self.ephemeral_target.is_some() {
             self.clear_ephemeral(cx);
             self.committed.clear();
@@ -2159,6 +2260,7 @@ impl Render for MentionInput {
 
         let picker = self.render_popup(cx);
         let previews = has_pending.then(|| self.render_attachment_previews(cx));
+        let file_menu = self.file_menu_open.then(|| self.render_file_menu(cx));
 
         let input_area = div()
             .relative()
@@ -2169,26 +2271,36 @@ impl Render for MentionInput {
             .child(MentionInputField::new(&self.input))
             .child(
                 div()
-                    .id("attachment-add")
                     .absolute()
                     .left(px(12.))
                     .top(px(10.))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .size(px(24.))
-                    .rounded(px(4.))
-                    .cursor_pointer()
-                    .hover(|s| s.bg(icon_bg_hover))
+                    .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                        if this.file_menu_open {
+                            this.file_menu_open = false;
+                            cx.notify();
+                        }
+                    }))
                     .child(
-                        Icon::new(IconName::AddCircle)
-                            .size_5()
-                            .text_color(theme.text_muted)
-                            .hover(|s| s.text_color(icon_hover)),
+                        div()
+                            .id("attachment-add")
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .size(px(24.))
+                            .rounded(px(4.))
+                            .cursor_pointer()
+                            .hover(|s| s.bg(icon_bg_hover))
+                            .child(
+                                Icon::new(IconName::AddCircle)
+                                    .size_5()
+                                    .text_color(theme.text_muted)
+                                    .hover(|s| s.text_color(icon_hover)),
+                            )
+                            .on_click(
+                                cx.listener(|this, _event, _window, cx| this.toggle_file_menu(cx)),
+                            ),
                     )
-                    .on_click(
-                        cx.listener(|this, _event, window, cx| this.open_file_picker(window, cx)),
-                    ),
+                    .when_some(file_menu, |el, menu| el.child(menu)),
             )
             .child(
                 div()
@@ -2350,7 +2462,7 @@ mod suggest_tests {
     #[test]
     fn sale_id_is_source_basename_without_extension() {
         assert_eq!(
-            sale_item_id_from_source("https://cdn.mezon.ai/emojis/1750123.webp"),
+            sale_item_id_from_source("https://cdn.example/emojis/1750123.webp"),
             "1750123"
         );
         assert_eq!(sale_item_id_from_source("1750123.webp"), "1750123");
@@ -2359,7 +2471,7 @@ mod suggest_tests {
 
     #[test]
     fn sale_id_is_empty_without_extension() {
-        assert_eq!(sale_item_id_from_source("https://cdn.mezon.ai/emojis"), "");
+        assert_eq!(sale_item_id_from_source("https://cdn.example/emojis"), "");
         assert_eq!(sale_item_id_from_source(""), "");
     }
 }

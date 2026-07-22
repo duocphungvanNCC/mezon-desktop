@@ -183,26 +183,28 @@ fn mention_spans_from_json_content(content: &str) -> Vec<InboxMentionSpan> {
         return Vec::new();
     };
     value
-        .get("mk")
-        .and_then(|mk| mk.as_array())
+        .get("mentions")
+        .and_then(|mentions| mentions.as_array())
         .map(|items| {
             items
                 .iter()
                 .filter_map(|item| {
+                    let role_id = item
+                        .get("role_id")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let user_id = item
+                        .get("user_id")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
                     Some(InboxMentionSpan {
                         start: item.get("s")?.as_i64()? as i32,
                         end: item.get("e")?.as_i64()? as i32,
-                        user_id: item
-                            .get("user_id")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("")
-                            .to_string(),
-                        role_id: item
-                            .get("role_id")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("")
-                            .to_string(),
-                        is_role: item.get("type").and_then(|v| v.as_str()) == Some("role"),
+                        user_id,
+                        role_id: role_id.clone(),
+                        is_role: !role_id.is_empty(),
                     })
                 })
                 .collect()
@@ -239,6 +241,72 @@ pub fn message_content_is_attachment(content: &str) -> bool {
                     .and_then(|t| t.as_str())
                     .is_none_or(str::is_empty)
         })
+}
+
+const SHARE_CONTACT_KEY: &str = "share_contact";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TopicReplyPreview {
+    Text(String),
+    Contact,
+    Attachment,
+    Interactive,
+}
+
+fn embed_value_is_share_contact(embed: &serde_json::Value) -> bool {
+    embed
+        .get("fields")
+        .and_then(|fields| fields.as_array())
+        .is_some_and(|fields| {
+            fields.iter().any(|field| {
+                field.get("name").and_then(|n| n.as_str()) == Some("key")
+                    && field.get("value").and_then(|v| v.as_str()) == Some(SHARE_CONTACT_KEY)
+            })
+        })
+}
+
+pub fn topic_reply_preview(content: &str) -> TopicReplyPreview {
+    let trimmed = content.trim();
+    if trimmed.is_empty() {
+        return TopicReplyPreview::Attachment;
+    }
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed) else {
+        return TopicReplyPreview::Text(trimmed.to_string());
+    };
+    if !value.is_object() {
+        return TopicReplyPreview::Text(trimmed.to_string());
+    }
+    let embeds = value
+        .get("embed")
+        .and_then(|embed| embed.as_array())
+        .map(|items| items.as_slice())
+        .unwrap_or(&[]);
+    if embeds.first().is_some_and(embed_value_is_share_contact) {
+        return TopicReplyPreview::Contact;
+    }
+    let has_attachments = value
+        .get("attachments")
+        .and_then(|items| items.as_array())
+        .is_some_and(|items| !items.is_empty());
+    let has_components = value
+        .get("components")
+        .and_then(|items| items.as_array())
+        .is_some_and(|items| !items.is_empty());
+    if has_attachments || has_components {
+        return TopicReplyPreview::Attachment;
+    }
+    if !embeds.is_empty() {
+        return TopicReplyPreview::Interactive;
+    }
+    let text = value
+        .get("t")
+        .and_then(|text| text.as_str())
+        .unwrap_or("")
+        .trim();
+    if text.is_empty() {
+        return TopicReplyPreview::Attachment;
+    }
+    TopicReplyPreview::Text(text.to_string())
 }
 
 fn parse_notification_content(bytes: &[u8]) -> Option<InboxMessagePreview> {
@@ -376,16 +444,19 @@ impl InboxNotification {
 }
 
 impl TopicDiscussion {
+    pub fn reply_preview(&self) -> TopicReplyPreview {
+        topic_reply_preview(&self.content)
+    }
+
     pub fn reply_preview_text(&self) -> String {
-        let raw = self.content.as_str();
-        if message_content_is_attachment(raw) {
-            return String::new();
+        match self.reply_preview() {
+            TopicReplyPreview::Text(text) => text,
+            _ => String::new(),
         }
-        display_text_from_message_content(raw)
     }
 
     pub fn reply_is_attachment(&self) -> bool {
-        message_content_is_attachment(&self.content)
+        matches!(self.reply_preview(), TopicReplyPreview::Attachment)
     }
 }
 
@@ -513,7 +584,7 @@ mod tests {
 
     #[test]
     fn parse_mention_content_json() {
-        let bytes = br#"{"t":"@gia.chuvan","mk":[{"s":0,"e":11,"type":"pre"}]}"#;
+        let bytes = br#"{"t":"@gia.chuvan","mentions":[{"s":0,"e":11,"user_id":"1"}]}"#;
         let preview = parse_notification_content(bytes).expect("preview");
         assert_eq!(preview.content, "@gia.chuvan");
     }
@@ -545,7 +616,41 @@ mod tests {
         assert_eq!(topic.id, "10");
         assert_eq!(topic.message_id, "20");
         assert_eq!(topic.content, "topic title");
-        assert_eq!(topic.reply_preview_text(), "topic title");
+        assert_eq!(
+            topic.reply_preview(),
+            TopicReplyPreview::Text("topic title".into())
+        );
         assert!(!topic.reply_is_attachment());
+    }
+
+    #[test]
+    fn topic_reply_preview_classifies_content_kinds() {
+        assert_eq!(
+            topic_reply_preview(r#"{"t":"hello #mezon 😀"}"#),
+            TopicReplyPreview::Text("hello #mezon 😀".into())
+        );
+        assert_eq!(
+            topic_reply_preview(r#"{"t":""}"#),
+            TopicReplyPreview::Attachment
+        );
+        assert_eq!(
+            topic_reply_preview(r#"{"t":"","attachments":[{"url":"a.png"}]}"#),
+            TopicReplyPreview::Attachment
+        );
+        assert_eq!(
+            topic_reply_preview(r#"{"t":"x","components":[{"type":1}]}"#),
+            TopicReplyPreview::Attachment
+        );
+        assert_eq!(
+            topic_reply_preview(r#"{"t":"","embed":[{"title":"card"}]}"#),
+            TopicReplyPreview::Interactive
+        );
+        assert_eq!(
+            topic_reply_preview(
+                r#"{"embed":[{"fields":[{"name":"key","value":"share_contact"}]}]}"#
+            ),
+            TopicReplyPreview::Contact
+        );
+        assert_eq!(topic_reply_preview(""), TopicReplyPreview::Attachment);
     }
 }

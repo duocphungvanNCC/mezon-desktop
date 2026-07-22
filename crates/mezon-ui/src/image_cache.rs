@@ -341,6 +341,19 @@ pub const SHARED_IMAGE_CACHE_BYTES: u64 = 64 * 1024 * 1024;
 pub const GALLERY_IMAGE_CACHE_CAPACITY: usize = 48;
 pub const GALLERY_IMAGE_CACHE_BYTES: u64 = 48 * 1024 * 1024;
 
+/// Cache for Timeline/Events card previews and Event Detail featured+grid
+/// images. Uses an aspect-preserving loader (unlike the square-cropped
+/// [`GalleryImageLoader`]) since these render as landscape banners/cards as
+/// well as square grid cells, all via `object-fit: cover` at display time.
+/// Bounded higher than [`GALLERY_IMAGE_CACHE_CAPACITY`]/`_BYTES` because a
+/// single multi-day merged event can hold dozens of attachments that all
+/// render (unvirtualized) at once; each entry stays small since decode is
+/// capped at [`GALLERY_PREVIEW_DECODE_MAX_PX`], so this budget comfortably
+/// covers realistic event sizes without cache thrashing.
+pub const PREVIEW_IMAGE_CACHE_CAPACITY: usize = 160;
+pub const PREVIEW_IMAGE_CACHE_BYTES: u64 = 96 * 1024 * 1024;
+pub const PREVIEW_ENTRY_MAX_BYTES: u64 = 4 * 1024 * 1024;
+
 /// Per-image decoded-size caps. A compressed file is tiny on the wire but is
 /// stored uncompressed in RAM as `width * height * 4` bytes *per frame*. An
 /// animated GIF/WebP therefore explodes: a ~400 KB animated avatar can decode
@@ -436,6 +449,9 @@ enum LoaderKind {
     /// Aspect-preserving thumbnail for OGP link previews, capped at
     /// [`OGP_THUMB_DECODE_MAX_PX`].
     OgpThumbnail,
+    /// Aspect-preserving thumbnail for Timeline/Events/Event-Detail preview
+    /// cards, capped at [`GALLERY_PREVIEW_DECODE_MAX_PX`].
+    GalleryPreview,
     Message,
     /// The image-viewer loader: still images keep near-full resolution
     /// ([`VIEWER_STATIC_MAX_PX`]); animated GIF/WebP keep every frame so they
@@ -546,6 +562,27 @@ impl LruImageCache {
         Self::with_loader(
             label,
             LoaderKind::OgpThumbnail,
+            max_items,
+            max_bytes,
+            max_entry_bytes,
+            cx,
+        )
+    }
+
+    /// A cache for Timeline/Events/Event-Detail preview cards: aspect-preserving,
+    /// downscaled to [`GALLERY_PREVIEW_DECODE_MAX_PX`] so landscape banners and
+    /// square grid cells both stay sharp under `object-fit: cover` without the
+    /// full-resolution decode blowing the cache's byte budget.
+    pub fn gallery_preview(
+        label: &'static str,
+        max_items: usize,
+        max_bytes: u64,
+        max_entry_bytes: u64,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        Self::with_loader(
+            label,
+            LoaderKind::GalleryPreview,
             max_items,
             max_bytes,
             max_entry_bytes,
@@ -884,6 +921,9 @@ impl LruImageCache {
             LoaderKind::OgpThumbnail => {
                 AssetLogger::<OgpImageLoader>::load(resource.clone(), cx).boxed()
             }
+            LoaderKind::GalleryPreview => {
+                AssetLogger::<GalleryPreviewLoader>::load(resource.clone(), cx).boxed()
+            }
             LoaderKind::Message => {
                 AssetLogger::<MessageImageLoader>::load(resource.clone(), cx).boxed()
             }
@@ -941,6 +981,11 @@ const GALLERY_THUMB_DECODE_MAX_PX: u32 = 320;
 /// side (aspect-preserving, ~2x for retina) so a large external OG image
 /// (typically 1200×630) can never decode oversized in the preview card.
 const OGP_THUMB_DECODE_MAX_PX: u32 = 512;
+/// Timeline/Events/Event-Detail preview cards render up to ~900px wide
+/// (featured banner) at aspect ratio; decode to this longest side so the
+/// featured image stays sharp while grid/card thumbnails (much smaller on
+/// screen) downscale further for free via `object-fit: cover`.
+const GALLERY_PREVIEW_DECODE_MAX_PX: u32 = 768;
 
 /// An [`Asset`] loader for avatars that, unlike GPUI's stock [`ImageAssetLoader`],
 /// decodes **only the first frame** and **downscales** to avatar size before
@@ -1422,6 +1467,20 @@ impl Asset for OgpImageLoader {
         cx: &mut App,
     ) -> impl Future<Output = Self::Output> + Send + 'static {
         load_scaled_aspect(source, OGP_THUMB_DECODE_MAX_PX, cx)
+    }
+}
+
+pub enum GalleryPreviewLoader {}
+
+impl Asset for GalleryPreviewLoader {
+    type Source = Resource;
+    type Output = Result<Arc<RenderImage>, ImageCacheError>;
+
+    fn load(
+        source: Self::Source,
+        cx: &mut App,
+    ) -> impl Future<Output = Self::Output> + Send + 'static {
+        load_scaled_aspect(source, GALLERY_PREVIEW_DECODE_MAX_PX, cx)
     }
 }
 

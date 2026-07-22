@@ -4,8 +4,8 @@ use gpui::{
     uniform_list,
 };
 use mezon_store::{
-    BadgeService, ClanId, ClanMembersEvent, ClanMembersStore, PermissionStore, Settings, Sticker,
-    StickerEvent, StickerStore, UserId,
+    BadgeService, ClanId, ClanMembersEvent, ClanMembersStore, ClanSettingsPermissions,
+    PermissionEvent, PermissionStore, Settings, Sticker, StickerEvent, StickerStore, UserId,
 };
 
 use super::emoji_sticker_picker::{
@@ -15,9 +15,7 @@ use crate::app::shell::Shell;
 use crate::components::primitives::{
     Avatar, Button, ButtonVariants, Icon, IconName, Sizable, Size, h_flex, v_flex,
 };
-use crate::image_cache::{
-    AVATAR_ENTRY_MAX_BYTES, AVATAR_IMAGE_CACHE_BYTES, AVATAR_IMAGE_CACHE_CAPACITY, LruImageCache,
-};
+use crate::image_cache::{AVATAR_ENTRY_MAX_BYTES, LruImageCache};
 use crate::theme::{ActiveTheme, Theme};
 
 const MAX_STICKER_SLOTS: usize = 250;
@@ -32,6 +30,8 @@ const STICKER_GRID_MIN_COLUMNS: u16 = 3;
 const STICKER_GRID_MAX_COLUMNS: u16 = 5;
 const STICKER_GRID_OVERFLOW_INSET: f32 = 8.0;
 const STICKER_ROW_HEIGHT: f32 = CARD_HEIGHT + STICKER_GRID_GAP_Y;
+const STICKER_LIST_CACHE_CAPACITY: usize = 512;
+const STICKER_LIST_CACHE_BYTES: u64 = 32 * 1024 * 1024;
 
 #[derive(Clone)]
 struct StickerCardData {
@@ -42,6 +42,18 @@ struct StickerCardData {
     creator_avatar: Option<SharedString>,
     can_manage: bool,
     is_for_sale: bool,
+}
+
+impl StickerCardData {
+    fn same_as(&self, other: &Self) -> bool {
+        self.id == other.id
+            && self.shortname == other.shortname
+            && self.src == other.src
+            && self.creator_name == other.creator_name
+            && self.creator_avatar == other.creator_avatar
+            && self.can_manage == other.can_manage
+            && self.is_for_sale == other.is_for_sale
+    }
 }
 
 enum StickerGridCell {
@@ -96,8 +108,8 @@ pub struct StickerSettingPage {
     grid_scroll: UniformListScrollHandle,
     grid_cells: Vec<StickerGridCell>,
     grid_columns: usize,
+    last_permissions: Option<ClanSettingsPermissions>,
     _sticker_sub: Subscription,
-    _sticker_observe: Subscription,
     _members_sub: Subscription,
     _perm_sub: Subscription,
     _modal_sub: Option<Subscription>,
@@ -114,40 +126,39 @@ impl StickerSettingPage {
         let sticker_sub = cx.subscribe(
             &StickerStore::global(cx),
             |this, _, _: &StickerEvent, cx| {
-                this.rebuild_grid(cx);
-                cx.notify();
+                if this.rebuild_grid(cx) {
+                    cx.notify();
+                }
             },
         );
-        let sticker_observe = cx.observe(&StickerStore::global(cx), |this, _, cx| {
-            let count = StickerStore::global(cx)
-                .read(cx)
-                .for_clan(&this.clan_id_str)
-                .len();
-            let grid_count = this
-                .grid_cells
-                .iter()
-                .filter(|cell| matches!(cell, StickerGridCell::Sticker(_)))
-                .count();
-            if count != grid_count {
-                this.rebuild_grid(cx);
-                cx.notify();
-            }
-        });
         let members_sub = cx.subscribe(&ClanMembersStore::global(cx), |this, _, event, cx| {
-            if matches!(event, ClanMembersEvent::Changed { clan_id } if *clan_id == this.clan_id) {
-                this.rebuild_grid(cx);
+            if matches!(event, ClanMembersEvent::Changed { clan_id } if *clan_id == this.clan_id)
+                && this.rebuild_grid(cx)
+            {
                 cx.notify();
             }
         });
-        let perm_sub = cx.observe(&PermissionStore::global(cx), |this, _, cx| {
-            this.rebuild_grid(cx);
-            cx.notify();
+        let perm_sub = cx.subscribe(&PermissionStore::global(cx), |this, _, event, cx| {
+            let PermissionEvent::Changed { clan_id } = event;
+            if !clan_id.is_none_or(|id| id == this.clan_id) {
+                return;
+            }
+            let perms = PermissionStore::global(cx)
+                .read(cx)
+                .clan_settings_permissions(this.clan_id, cx);
+            if this.last_permissions == Some(perms) {
+                return;
+            }
+            this.last_permissions = Some(perms);
+            if this.rebuild_grid(cx) {
+                cx.notify();
+            }
         });
         let image_cache = cx.new(|cx| {
             LruImageCache::avatar_thumbnail(
-                "clan-sticker-settings",
-                AVATAR_IMAGE_CACHE_CAPACITY,
-                AVATAR_IMAGE_CACHE_BYTES,
+                "clan-sticker-settings-thumbs",
+                STICKER_LIST_CACHE_CAPACITY,
+                STICKER_LIST_CACHE_BYTES,
                 AVATAR_ENTRY_MAX_BYTES,
                 cx,
             )
@@ -164,13 +175,18 @@ impl StickerSettingPage {
             grid_scroll: UniformListScrollHandle::new(),
             grid_cells: Vec::new(),
             grid_columns,
+            last_permissions: None,
             _sticker_sub: sticker_sub,
-            _sticker_observe: sticker_observe,
             _members_sub: members_sub,
             _perm_sub: perm_sub,
             _modal_sub: None,
         };
         this.rebuild_grid(cx);
+        this.last_permissions = Some(
+            PermissionStore::global(cx)
+                .read(cx)
+                .clan_settings_permissions(clan_id, cx),
+        );
         this
     }
 
@@ -185,16 +201,35 @@ impl StickerSettingPage {
             .count()
     }
 
-    fn rebuild_grid(&mut self, cx: &App) {
-        self.grid_columns = sticker_grid_columns();
+    fn rebuild_grid(&mut self, cx: &App) -> bool {
+        let grid_columns = sticker_grid_columns();
         let stickers = StickerStore::global(cx)
             .read(cx)
             .for_clan(&self.clan_id_str);
-        self.grid_cells = stickers
+        let mut next: Vec<StickerGridCell> = stickers
             .iter()
             .map(|sticker| StickerGridCell::Sticker(self.card_data(sticker, cx)))
             .collect();
-        self.grid_cells.push(StickerGridCell::Add);
+        next.push(StickerGridCell::Add);
+
+        if self.grid_columns == grid_columns
+            && self.grid_cells.len() == next.len()
+            && self
+                .grid_cells
+                .iter()
+                .zip(&next)
+                .all(|(left, right)| match (left, right) {
+                    (StickerGridCell::Sticker(a), StickerGridCell::Sticker(b)) => a.same_as(b),
+                    (StickerGridCell::Add, StickerGridCell::Add) => true,
+                    _ => false,
+                })
+        {
+            return false;
+        }
+
+        self.grid_columns = grid_columns;
+        self.grid_cells = next;
+        true
     }
 
     fn grid_row_count(&self) -> usize {
@@ -391,6 +426,7 @@ fn render_sticker_card(
                 .justify_center()
                 .child(
                     img(sticker.src.clone())
+                        .id(SharedString::from(format!("sticker-thumb-{}", sticker.id)))
                         .h(px(STICKER_IMAGE_SIZE))
                         .max_w(px(STICKER_IMAGE_SIZE))
                         .object_fit(gpui::ObjectFit::Contain),

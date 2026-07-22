@@ -41,8 +41,15 @@ extern "C" {
     ) -> Boolean;
     pub fn CMTimeGetSeconds(time: CMTime) -> Float64;
     pub static SCStreamFrameInfoStatus: SCStreamFrameInfo;
+    pub static SCStreamFrameInfoContentRect: SCStreamFrameInfo;
+    pub static SCStreamFrameInfoScaleFactor: SCStreamFrameInfo;
+    pub fn CGRectMakeWithDictionaryRepresentation(
+        dict: CFDictionaryRef,
+        rect: *mut screencapturekit_sys::os_types::geometry::CGRect,
+    ) -> Boolean;
 }
 pub const CFNumberType_kCFNumberSInt64Type: CFNumberType = 4;
+pub const CFNumberType_kCFNumberFloat64Type: CFNumberType = 13;
 pub type NSInteger = ::std::os::raw::c_long;
 pub type SCFrameStatus = NSInteger;
 pub const SCFrameStatus_SCFrameStatusComplete: SCFrameStatus = 0;

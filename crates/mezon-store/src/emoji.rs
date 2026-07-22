@@ -636,10 +636,10 @@ fn box_blur_rgba(img: &mut image::RgbaImage, radius: u32) {
                     x,
                     y,
                     image::Rgba([
-                        (channels[0] / count) as u8,
-                        (channels[1] / count) as u8,
-                        (channels[2] / count) as u8,
-                        (channels[3] / count) as u8,
+                        (channels[0].checked_div(count).unwrap_or(0)) as u8,
+                        (channels[1].checked_div(count).unwrap_or(0)) as u8,
+                        (channels[2].checked_div(count).unwrap_or(0)) as u8,
+                        (channels[3].checked_div(count).unwrap_or(0)) as u8,
                     ]),
                 );
             }

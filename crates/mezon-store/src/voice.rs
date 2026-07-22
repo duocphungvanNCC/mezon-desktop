@@ -160,6 +160,9 @@ pub struct VoiceStore {
     pending_kick: Option<(String, String)>,
     moderation_error: Option<VoiceModerationError>,
     participants: Vec<VoiceParticipant>,
+    join_ranks: Vec<String>,
+    speak_ranks: HashMap<String, u64>,
+    speak_seq: u64,
     raised_hands: Vec<String>,
     raised_hand_timers: HashMap<String, Task<()>>,
     raising_hand_player: Option<AudioPlayer>,
@@ -296,6 +299,9 @@ impl VoiceStore {
             pending_kick: None,
             moderation_error: None,
             participants: Vec::new(),
+            join_ranks: Vec::new(),
+            speak_ranks: HashMap::new(),
+            speak_seq: 0,
             raised_hands: Vec::new(),
             raised_hand_timers: HashMap::new(),
             raising_hand_player: None,
@@ -375,6 +381,37 @@ impl VoiceStore {
 
     pub fn participants(&self) -> &[VoiceParticipant] {
         &self.participants
+    }
+
+    pub fn join_rank(&self, identity: &str) -> usize {
+        self.join_ranks
+            .iter()
+            .position(|id| id == identity)
+            .unwrap_or(usize::MAX)
+    }
+
+    pub fn last_spoke_rank(&self, identity: &str) -> u64 {
+        self.speak_ranks.get(identity).copied().unwrap_or(0)
+    }
+
+    fn track_visual_ranks(&mut self, list: &[VoiceParticipant]) {
+        self.join_ranks
+            .retain(|id| list.iter().any(|p| p.identity == *id));
+        for p in list {
+            if !self.join_ranks.contains(&p.identity) {
+                self.join_ranks.push(p.identity.clone());
+            }
+            let was_speaking = self
+                .participants
+                .iter()
+                .any(|old| old.identity == p.identity && old.speaking);
+            if p.speaking && !was_speaking {
+                self.speak_seq += 1;
+                self.speak_ranks.insert(p.identity.clone(), self.speak_seq);
+            }
+        }
+        self.speak_ranks
+            .retain(|id, _| list.iter().any(|p| p.identity == *id));
     }
 
     pub fn mic_enabled(&self) -> bool {
@@ -476,6 +513,7 @@ impl VoiceStore {
             }
         });
         let mut render_image = RenderImage::new_recyclable(image::Frame::new(buffer), recycler);
+        #[cfg_attr(not(target_os = "macos"), allow(clippy::bind_instead_of_map))]
         let previous_id = self
             .render_cache
             .lock()
@@ -1423,6 +1461,8 @@ impl VoiceStore {
         self.mic_enabled = false;
         self.mic_permission_denied = false;
         self.participants.clear();
+        self.join_ranks.clear();
+        self.speak_ranks.clear();
         cx.notify();
 
         let api = self.api.clone();
@@ -1605,6 +1645,7 @@ impl VoiceStore {
                 if self.participants == list {
                     return;
                 }
+                self.track_visual_ranks(&list);
                 self.participants = list;
                 if let Some(local) = self.participants.iter().find(|p| p.is_local) {
                     self.mic_enabled = !local.muted;
@@ -1809,6 +1850,7 @@ impl VoiceStore {
         self.fullscreen_screen = None;
         self.session = None;
         self.frame_store = None;
+        #[cfg_attr(not(target_os = "macos"), allow(clippy::unnecessary_filter_map))]
         let stale: Vec<Arc<RenderImage>> = {
             let mut cache = self.render_cache.lock();
             cache
@@ -1843,6 +1885,8 @@ impl VoiceStore {
         self.pending_kick = None;
         self.moderation_error = None;
         self.participants.clear();
+        self.join_ranks.clear();
+        self.speak_ranks.clear();
         self.raised_hands.clear();
         self.raised_hand_timers.clear();
         self.active_sounds.clear();
@@ -1982,6 +2026,7 @@ mod tests {
             identity: identity.to_string(),
             name: identity.to_string(),
             is_local: false,
+            is_agent: false,
             speaking: false,
             muted: false,
             camera: None,
