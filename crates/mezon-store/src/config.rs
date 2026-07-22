@@ -435,11 +435,54 @@ impl AppConfig {
     pub fn viewer_thumb_proxy(&self, source: &str) -> String {
         self.imgproxy_url(source, VIEWER_THUMB_SIZE, VIEWER_THUMB_SIZE, "fill")
     }
+
+    pub fn event_detail_featured_proxy(&self, source: &str) -> String {
+        self.imgproxy_url(
+            source,
+            EVENT_DETAIL_FEATURED_WIDTH,
+            EVENT_DETAIL_FEATURED_HEIGHT,
+            "fill",
+        )
+    }
+
+    pub fn event_detail_grid_proxy(&self, source: &str) -> String {
+        self.imgproxy_url(
+            source,
+            EVENT_DETAIL_GRID_THUMB_SIZE,
+            EVENT_DETAIL_GRID_THUMB_SIZE,
+            "fill",
+        )
+    }
+
+    pub fn timeline_album_thumb_proxy(&self, source: &str) -> String {
+        self.imgproxy_url(
+            source,
+            TIMELINE_ALBUM_THUMB_WIDTH,
+            TIMELINE_ALBUM_THUMB_HEIGHT,
+            "fill",
+        )
+    }
+
+    pub fn timeline_single_thumb_proxy(&self, source: &str) -> String {
+        self.imgproxy_url(
+            source,
+            TIMELINE_SINGLE_THUMB_WIDTH,
+            TIMELINE_SINGLE_THUMB_HEIGHT,
+            "fill",
+        )
+    }
 }
 
 pub const VIEWER_MAX_DIMENSION: u32 = 1600;
 pub const GALLERY_THUMB_SIZE: u32 = 120;
 pub const VIEWER_THUMB_SIZE: u32 = 80;
+pub const EVENT_DETAIL_FEATURED_WIDTH: u32 = 600;
+pub const EVENT_DETAIL_FEATURED_HEIGHT: u32 = 400;
+pub const EVENT_DETAIL_GRID_THUMB_SIZE: u32 = 300;
+pub const TIMELINE_ALBUM_THUMB_WIDTH: u32 = 150;
+pub const TIMELINE_ALBUM_THUMB_HEIGHT: u32 = 150;
+pub const TIMELINE_SINGLE_THUMB_WIDTH: u32 = 300;
+pub const TIMELINE_SINGLE_THUMB_HEIGHT: u32 = 200;
 
 /// Viewer imgproxy target dimensions: clamp the longest side to
 /// [`VIEWER_MAX_DIMENSION`], preserving aspect ratio. `0` means "let imgproxy
