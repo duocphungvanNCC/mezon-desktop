@@ -1355,8 +1355,9 @@ impl MentionInput {
         ];
         if let Some(store) = RolesStore::try_global(cx) {
             subs.push(cx.subscribe(&store, |this, _, event: &RolesEvent, cx| {
-                let RolesEvent::Changed { clan_id } = event;
-                if mention_role_clan(cx) == Some(*clan_id) {
+                if let RolesEvent::Changed { clan_id } = event
+                    && mention_role_clan(cx) == Some(*clan_id)
+                {
                     this.invalidate_pool(Sigil::At, cx);
                 }
             }));

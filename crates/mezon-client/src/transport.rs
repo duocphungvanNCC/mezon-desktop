@@ -4844,11 +4844,17 @@ impl MezonTransport {
     }
 
     /// List role users.
-    pub async fn list_role_users(&self, role_id: i64) -> Result<api::RoleUserList> {
+    pub async fn list_role_users(
+        &self,
+        role_id: i64,
+        limit: i32,
+        cursor: &str,
+    ) -> Result<api::RoleUserList> {
         let cid = self.generate_cid();
         let body = api::ListRoleUsersRequest {
             role_id,
-            ..Default::default()
+            limit,
+            cursor: cursor.to_string(),
         }
         .encode_to_vec();
         let (code, response) = self.send_api_request(cid, "ListRoleUsers", body).await?;
@@ -6555,14 +6561,9 @@ impl MezonTransport {
     }
 
     /// Create role.
-    pub async fn create_role(&self, title: &str, clan_id: i64) -> Result<api::Role> {
+    pub async fn create_role(&self, request: api::CreateRoleRequest) -> Result<api::Role> {
         let cid = self.generate_cid();
-        let body = api::CreateRoleRequest {
-            title: title.to_string(),
-            clan_id,
-            ..Default::default()
-        }
-        .encode_to_vec();
+        let body = request.encode_to_vec();
         let (code, response) = self.send_api_request(cid, "CreateRole", body).await?;
         if code != 0 {
             return Err(anyhow::anyhow!("API error: code={}", code));
@@ -6587,14 +6588,9 @@ impl MezonTransport {
     }
 
     /// Update role.
-    pub async fn update_role(&self, role_id: i64, title: &str) -> Result<()> {
+    pub async fn update_role(&self, request: api::UpdateRoleRequest) -> Result<()> {
         let cid = self.generate_cid();
-        let body = api::UpdateRoleRequest {
-            role_id,
-            title: Some(title.to_string()),
-            ..Default::default()
-        }
-        .encode_to_vec();
+        let body = request.encode_to_vec();
         let (code, _) = self.send_api_request(cid, "UpdateRole", body).await?;
         if code != 0 {
             return Err(anyhow::anyhow!("API error: code={}", code));

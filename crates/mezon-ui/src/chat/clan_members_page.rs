@@ -229,7 +229,6 @@ impl ClanMembersPage {
             .roles_for(self.clan_id, role_ids)
             .into_iter()
             .filter(|role| !is_everyone(role))
-            .cloned()
             .collect::<Vec<_>>();
         roles.sort_by_key(|role| role.order);
         roles

@@ -1355,6 +1355,67 @@ impl TransportClient {
             .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
     }
 
+    pub async fn list_role_users(
+        &self,
+        role_id: i64,
+        limit: i32,
+        cursor: &str,
+    ) -> Result<mezon_proto::api::RoleUserList> {
+        let transport = self.inner.clone();
+        let cursor = cursor.to_string();
+        runtime()
+            .spawn(async move { transport.list_role_users(role_id, limit, &cursor).await })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
+    pub async fn create_role(
+        &self,
+        request: mezon_proto::api::CreateRoleRequest,
+    ) -> Result<mezon_proto::api::Role> {
+        let transport = self.inner.clone();
+        runtime()
+            .spawn(async move { transport.create_role(request).await })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
+    pub async fn update_role(&self, request: mezon_proto::api::UpdateRoleRequest) -> Result<()> {
+        let transport = self.inner.clone();
+        runtime()
+            .spawn(async move { transport.update_role(request).await })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
+    pub async fn delete_role(&self, role_id: i64, clan_id: i64) -> Result<()> {
+        let transport = self.inner.clone();
+        runtime()
+            .spawn(async move { transport.delete_role(role_id, clan_id).await })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
+    pub async fn update_role_order(&self, clan_id: i64, roles: &[(i32, i64)]) -> Result<()> {
+        let transport = self.inner.clone();
+        let roles = roles.to_vec();
+        runtime()
+            .spawn(async move { transport.update_role_order(clan_id, &roles).await })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
+    pub async fn list_role_permissions(
+        &self,
+        role_id: i64,
+    ) -> Result<mezon_proto::api::PermissionList> {
+        let transport = self.inner.clone();
+        runtime()
+            .spawn(async move { transport.list_role_permissions(role_id).await })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
     pub async fn get_list_permission(&self) -> Result<mezon_proto::api::PermissionList> {
         let transport = self.inner.clone();
         runtime()
