@@ -269,6 +269,13 @@ fn run_app(lock: SingleInstance, initial_url: Option<String>) {
                 mezon_client::transport_runtime::new_http_client_with_user_agent(
                     IMAGE_CLIENT_USER_AGENT,
                 ),
+                app_config
+                    .media_origins()
+                    .into_iter()
+                    .map(str::to_owned)
+                    .collect(),
+                app_config.upload_img_url.clone(),
+                app_config.base_img_url.clone(),
             ),
         ))
         .with_assets(mezon_ui::util::assets::Assets);

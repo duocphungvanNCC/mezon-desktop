@@ -2,19 +2,23 @@ use std::sync::Arc;
 
 use gpui::http_client::HttpClient;
 use gpui::{
-    App, Bounds, Context, Corners, Entity, FocusHandle, Focusable, ImageCache, KeyDownEvent,
-    MouseButton, MouseDownEvent, MouseMoveEvent, ObjectFit, Pixels, Point, Render, RenderImage,
-    Resource, ScrollDelta, ScrollHandle, ScrollWheelEvent, SharedString, SharedUri,
-    Size as GpuiSize, Window, canvas, div, img, point, prelude::*, px, size,
+    AnyView, App, AppContext, Bounds, Context, Corners, Entity, FocusHandle, Focusable, ImageCache,
+    KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, ObjectFit, Pixels, Point, Render,
+    RenderImage, Resource, ScrollDelta, ScrollWheelEvent, SharedString, SharedUri,
+    Size as GpuiSize, StyleRefinement, Subscription, UniformListScrollHandle, Window, WindowBounds,
+    WindowHandle, WindowKind, WindowOptions, canvas, div, img, point, prelude::*, px, size,
+    uniform_list,
 };
-use mezon_store::{AppConfig, ChannelTimelineAttachment};
-use ui::{ScrollAxes, Scrollbars, WithScrollbar};
+use mezon_store::{AppConfig, ChannelTimelineAttachment, Settings};
+use ui::{ScrollAxes, Scrollbars, WithScrollbar, utils::ROUNDED_BORDER_WINDOW};
 
-use crate::app::shell::Shell;
+use crate::app::main_window::{activate_main_window, main_window_bounds};
+use crate::app::title_bar::TitleBar;
+use crate::app::window_controls;
 use crate::components::primitives::{Icon, IconName, Spinner};
 use crate::image_cache::{
-    LruImageCache, VIEWER_IMAGE_CACHE_BYTES, VIEWER_IMAGE_CACHE_CAPACITY,
-    VIEWER_IMAGE_ENTRY_MAX_BYTES,
+    GALLERY_IMAGE_CACHE_BYTES, GALLERY_IMAGE_CACHE_CAPACITY, LruImageCache, SHARED_ENTRY_MAX_BYTES,
+    VIEWER_IMAGE_CACHE_BYTES, VIEWER_IMAGE_CACHE_CAPACITY, VIEWER_IMAGE_ENTRY_MAX_BYTES,
 };
 use crate::theme::ActiveTheme;
 
@@ -27,6 +31,7 @@ const ZOOM_BUTTON_STEP: f32 = 1.5;
 const THUMB_SIDEBAR_WIDTH: f32 = 100.;
 const THUMB_SCROLLBAR_GUTTER: f32 = 14.;
 const THUMB_SIDEBAR_BG: u32 = 0x1a1a1a;
+const THUMB_ROW_HEIGHT: f32 = 88.;
 
 fn uploaded_attachment_index(
     attachments: &[ChannelTimelineAttachment],
@@ -58,10 +63,49 @@ fn is_video_attachment(att: &ChannelTimelineAttachment) -> bool {
         .any(|ext| url.contains(ext))
 }
 
+struct GlobalMediaImageModal(WindowHandle<MediaImageModal>);
+impl gpui::Global for GlobalMediaImageModal {}
+
+fn clear_media_image_modal_global(cx: &mut App) {
+    if cx.try_global::<GlobalMediaImageModal>().is_some() {
+        cx.remove_global::<GlobalMediaImageModal>();
+    }
+}
+
+fn prior_media_modal_bounds(cx: &mut App) -> Option<Bounds<Pixels>> {
+    let handle = cx.try_global::<GlobalMediaImageModal>().map(|g| g.0)?;
+    match handle.update(cx, |_, window, _| window.window_bounds()) {
+        Ok(WindowBounds::Windowed(bounds)) => Some(bounds),
+        _ => None,
+    }
+}
+
+fn default_media_modal_bounds(cx: &mut App) -> Bounds<Pixels> {
+    const MIN_W: f32 = 640.0;
+    const MIN_H: f32 = 480.0;
+    if let Some(main) = main_window_bounds(cx) {
+        let w = (f32::from(main.size.width) * 0.8).max(MIN_W);
+        let h = (f32::from(main.size.height) * 0.8).max(MIN_H);
+        return Bounds::centered(None, size(px(w), px(h)), cx);
+    }
+    Bounds::centered(None, size(px(1100.0), px(740.0)), cx)
+}
+
+pub fn close_media_image_modal(cx: &mut App) {
+    let Some(handle) = cx.try_global::<GlobalMediaImageModal>().map(|g| g.0) else {
+        return;
+    };
+    let _ = handle.update(cx, |modal, window, cx| {
+        modal.release_resources(window, cx);
+        window.remove_window();
+    });
+    clear_media_image_modal_global(cx);
+}
+
 pub fn open_media_image_modal(
     attachments: Vec<ChannelTimelineAttachment>,
     attachment_index: usize,
-    window: &mut Window,
+    _window: &mut Window,
     cx: &mut App,
 ) {
     let uploaded: Vec<_> = attachments
@@ -75,16 +119,77 @@ pub fn open_media_image_modal(
     let Some(index) = uploaded_attachment_index(&attachments, attachment_index) else {
         return;
     };
-    let modal = cx.new(|cx| MediaImageModal::new(uploaded, index, window, cx));
-    let focus_handle = modal.read(cx).focus_handle.clone();
-    Shell::global(cx).update(cx, |shell, cx| {
-        shell.show_fullscreen_modal(modal.into(), cx)
-    });
-    window.focus(&focus_handle, cx);
+    let Some(settings) = Settings::try_global(cx) else {
+        return;
+    };
+
+    let mut pending = Some((uploaded, index));
+    if let Some(handle) = cx.try_global::<GlobalMediaImageModal>().map(|g| g.0) {
+        let _ = handle.update(cx, |modal, window, cx| {
+            if let Some((uploaded, index)) = pending.take() {
+                window.activate_window();
+                window.focus(&modal.focus_handle, cx);
+                modal.set_attachments(uploaded, index, window, cx);
+            }
+        });
+        if pending.is_none() {
+            return;
+        }
+        clear_media_image_modal_global(cx);
+    }
+
+    let Some((uploaded, index)) = pending else {
+        return;
+    };
+
+    let bounds = prior_media_modal_bounds(cx).unwrap_or_else(|| default_media_modal_bounds(cx));
+    spawn_media_image_modal_window(uploaded, index, settings, bounds, cx);
+}
+
+fn spawn_media_image_modal_window(
+    uploaded: Vec<ChannelTimelineAttachment>,
+    index: usize,
+    settings: Entity<Settings>,
+    bounds: Bounds<Pixels>,
+    cx: &mut App,
+) {
+    let options = WindowOptions {
+        window_bounds: Some(WindowBounds::Windowed(bounds)),
+        window_min_size: Some(size(px(640.0), px(480.0))),
+        kind: WindowKind::Normal,
+        focus: true,
+        show: true,
+        titlebar: Some(window_controls::window_title_options()),
+        window_decorations: window_controls::main_window_decorations(),
+        app_id: window_controls::linux_app_id(),
+        ..Default::default()
+    };
+
+    match cx.open_window(options, move |window, cx| {
+        cx.new(|cx| MediaImageModal::new(uploaded, index, settings, window, cx))
+    }) {
+        Ok(handle) => {
+            cx.set_global(GlobalMediaImageModal(handle));
+            let _ = handle.update(cx, |modal, window, cx| {
+                window.activate_window();
+                window.focus(&modal.focus_handle, cx);
+            });
+        }
+        Err(error) => tracing::error!("failed to open media image modal window: {error}"),
+    }
+}
+
+fn render_title_bar(title_bar: Entity<TitleBar>) -> AnyView {
+    let view = AnyView::from(title_bar);
+    #[cfg(not(target_os = "windows"))]
+    return view.cached(StyleRefinement::default().w_full().h_8());
+    #[cfg(target_os = "windows")]
+    view
 }
 
 struct MediaImageModal {
     focus_handle: FocusHandle,
+    title_bar: Entity<TitleBar>,
     attachments: Vec<ChannelTimelineAttachment>,
     index: usize,
     config: AppConfig,
@@ -96,9 +201,12 @@ struct MediaImageModal {
     decoded_rgba: Option<(usize, Arc<image::RgbaImage>)>,
     rotation_loading: bool,
     show_list: bool,
-    thumb_scroll: ScrollHandle,
+    pending_thumb_scroll: bool,
+    list_scroll: UniformListScrollHandle,
     image_cache: Entity<LruImageCache>,
+    thumb_image_cache: Entity<LruImageCache>,
     rotation_session: u64,
+    _release: Subscription,
 }
 
 impl Focusable for MediaImageModal {
@@ -111,13 +219,54 @@ impl MediaImageModal {
     fn new(
         attachments: Vec<ChannelTimelineAttachment>,
         index: usize,
+        settings: Entity<Settings>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        window.focus(&cx.focus_handle(), cx);
+        let focus_handle = cx.focus_handle();
+        window.focus(&focus_handle, cx);
+        let weak = cx.weak_entity();
+        window.on_window_should_close(cx, move |window, app| {
+            let _ = weak.update(app, |modal, cx| {
+                modal.release_resources(window, cx);
+            });
+            clear_media_image_modal_global(app);
+            activate_main_window(app);
+            true
+        });
+        let image_cache = cx.new(|cx| {
+            LruImageCache::viewer(
+                "media-modal",
+                VIEWER_IMAGE_CACHE_CAPACITY,
+                VIEWER_IMAGE_CACHE_BYTES,
+                VIEWER_IMAGE_ENTRY_MAX_BYTES,
+                cx,
+            )
+        });
+        let thumb_image_cache = cx.new(|cx| {
+            LruImageCache::gallery_thumbnail(
+                "media-modal-thumbs",
+                GALLERY_IMAGE_CACHE_CAPACITY,
+                GALLERY_IMAGE_CACHE_BYTES,
+                SHARED_ENTRY_MAX_BYTES,
+                cx,
+            )
+        });
+        let cache_for_release = image_cache.clone();
+        let thumb_cache_for_release = thumb_image_cache.clone();
+        let release = cx.on_release(move |modal, cx| {
+            modal.clear_rotated_image(None, cx);
+            modal.decoded_rgba = None;
+            cache_for_release.update(cx, |cache, cx| cache.clear_app(cx));
+            thumb_cache_for_release.update(cx, |cache, cx| cache.clear_app(cx));
+            crate::image_cache::release_freed_memory_to_os(cx);
+            clear_media_image_modal_global(cx);
+        });
         let show_list = attachments.len() > 1;
+        let title_bar = cx.new(|cx| TitleBar::new(settings.clone(), cx));
         Self {
-            focus_handle: cx.focus_handle(),
+            focus_handle,
+            title_bar,
             attachments,
             index,
             config: AppConfig::global(cx).clone(),
@@ -129,24 +278,45 @@ impl MediaImageModal {
             decoded_rgba: None,
             rotation_loading: false,
             show_list,
-            thumb_scroll: ScrollHandle::new(),
-            image_cache: cx.new(|cx| {
-                LruImageCache::labeled(
-                    "media-modal",
-                    VIEWER_IMAGE_CACHE_CAPACITY,
-                    VIEWER_IMAGE_CACHE_BYTES,
-                    VIEWER_IMAGE_ENTRY_MAX_BYTES,
-                    cx,
-                )
-            }),
+            pending_thumb_scroll: show_list,
+            list_scroll: UniformListScrollHandle::new(),
+            image_cache,
+            thumb_image_cache,
             rotation_session: 0,
+            _release: release,
         }
     }
 
-    fn close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn set_attachments(
+        &mut self,
+        attachments: Vec<ChannelTimelineAttachment>,
+        index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.clear_rotated_image(Some(window), cx);
         self.decoded_rgba = None;
-        Shell::global(cx).update(cx, |shell, cx| shell.close_modal(cx));
+        self.attachments = attachments;
+        self.index = index.min(self.attachments.len().saturating_sub(1));
+        self.show_list = self.attachments.len() > 1;
+        self.pending_thumb_scroll = self.show_list;
+        self.reset_view(cx);
+        cx.notify();
+    }
+
+    fn release_resources(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.clear_rotated_image(Some(window), cx);
+        self.decoded_rgba = None;
+        self.image_cache.update(cx, |cache, cx| cache.clear_app(cx));
+        self.thumb_image_cache
+            .update(cx, |cache, cx| cache.clear_app(cx));
+    }
+
+    fn close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.release_resources(window, cx);
+        clear_media_image_modal_global(cx);
+        activate_main_window(cx);
+        window.remove_window();
     }
 
     fn current(&self) -> Option<&ChannelTimelineAttachment> {
@@ -169,6 +339,8 @@ impl MediaImageModal {
             self.clear_rotated_image(Some(window), cx);
             self.decoded_rgba = None;
             self.index = index;
+            self.list_scroll
+                .scroll_to_item(self.index, gpui::ScrollStrategy::Center);
             self.reset_view(cx);
         }
     }
@@ -320,10 +492,94 @@ impl MediaImageModal {
     fn thumb_url(&self, att: &ChannelTimelineAttachment) -> SharedString {
         let url = att.display_url();
         if url.starts_with("http") {
-            self.config.gallery_thumb_proxy(url).into()
+            self.config.viewer_thumb_proxy(url).into()
         } else {
             url.into()
         }
+    }
+
+    fn render_thumb_sidebar(
+        &self,
+        theme: &crate::theme::Theme,
+        bg: gpui::Rgba,
+        muted: gpui::Rgba,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let count = self.attachments.len();
+        let entity = cx.entity();
+        let active_index = self.index;
+        let sidebar_bg = gpui::rgb(THUMB_SIDEBAR_BG);
+        let text_primary = theme.text_primary;
+        let border = theme.border;
+
+        let list = uniform_list("media-modal-thumbs", count, move |range, _window, cx| {
+            range
+                .map(|idx| {
+                    let Some(att) = entity.read(cx).attachments.get(idx) else {
+                        return div().into_any_element();
+                    };
+                    let is_active = idx == active_index;
+                    let thumb = entity.read(cx).thumb_url(att);
+                    div()
+                        .id(SharedString::from(format!("media-modal-thumb-{idx}")))
+                        .h(px(THUMB_ROW_HEIGHT))
+                        .w_full()
+                        .p_1()
+                        .on_mouse_down(MouseButton::Left, {
+                            let entity = entity.clone();
+                            move |_: &MouseDownEvent, window, cx| {
+                                entity.update(cx, |this, cx| this.select(idx, window, cx));
+                            }
+                        })
+                        .child(
+                            div()
+                                .rounded_md()
+                                .overflow_hidden()
+                                .border_2()
+                                .when(is_active, |el| el.border_color(text_primary))
+                                .when(!is_active, |el| {
+                                    el.border_color(border)
+                                        .opacity(0.6)
+                                        .hover(|el| el.opacity(0.9))
+                                })
+                                .child(render_media_image(bg, muted, thumb, px(92.), px(80.))),
+                        )
+                        .into_any_element()
+                })
+                .collect::<Vec<_>>()
+        })
+        .track_scroll(&self.list_scroll)
+        .w_full()
+        .flex_1()
+        .h_full()
+        .min_h_0();
+
+        div()
+            .id("media-modal-thumbs")
+            .w(px(THUMB_SIDEBAR_WIDTH + THUMB_SCROLLBAR_GUTTER))
+            .h_full()
+            .flex_shrink_0()
+            .min_h_0()
+            .flex()
+            .flex_col()
+            .bg(sidebar_bg)
+            .child(
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .relative()
+                    .overflow_hidden()
+                    .image_cache(self.thumb_image_cache.clone())
+                    .child(list)
+                    .custom_scrollbars(
+                        Scrollbars::always_visible(ScrollAxes::Vertical)
+                            .tracked_scroll_handle(&self.list_scroll)
+                            .with_stable_track_along(ScrollAxes::Vertical, sidebar_bg.into()),
+                        window,
+                        cx,
+                    ),
+            )
     }
 
     fn on_key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
@@ -356,6 +612,11 @@ impl MediaImageModal {
 
 impl Render for MediaImageModal {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.pending_thumb_scroll && self.show_list {
+            self.list_scroll
+                .scroll_to_item(self.index, gpui::ScrollStrategy::Center);
+            self.pending_thumb_scroll = false;
+        }
         let theme = cx.theme().clone();
         let modal_fg = gpui::rgb(0xffffff);
         let bg = theme.bg_tertiary;
@@ -369,20 +630,31 @@ impl Render for MediaImageModal {
 
         div()
             .track_focus(&self.focus_handle)
-            .key_context("menu")
+            .key_context("MediaImageModal")
             .on_action(cx.listener(|this, _: &::menu::Cancel, window, cx| this.close(window, cx)))
             .on_key_down(cx.listener(Self::on_key_down))
             .relative()
             .flex()
             .flex_col()
             .size_full()
+            .overflow_hidden()
+            .rounded(px(ROUNDED_BORDER_WINDOW))
             .bg(gpui::rgb(0x141414))
+            .when(window_controls::HAS_CUSTOM_TITLE_BAR, |el| {
+                el.child(render_title_bar(self.title_bar.clone()))
+            })
+            .when(!window_controls::HAS_CUSTOM_TITLE_BAR, |el| {
+                el.child(window_controls::window_drag_handle(
+                    div().flex_shrink_0().h_8().w_full().bg(theme.title_bar_bg),
+                ))
+            })
             .child(
                 div()
                     .flex()
                     .flex_row()
                     .items_center()
                     .justify_center()
+                    .flex_shrink_0()
                     .w_full()
                     .h(px(30.))
                     .bg(gpui::rgb(0x2e2e2e))
@@ -476,70 +748,7 @@ impl Render for MediaImageModal {
                             }),
                     )
                     .when(self.show_list && total > 1, |row| {
-                        row.child(
-                            div()
-                                .id("media-modal-thumbs")
-                                .w(px(THUMB_SIDEBAR_WIDTH + THUMB_SCROLLBAR_GUTTER))
-                                .flex_shrink_0()
-                                .min_h_0()
-                                .overflow_hidden()
-                                .bg(gpui::rgb(THUMB_SIDEBAR_BG))
-                                .child(
-                                    div()
-                                        .id("media-modal-thumbs-scroll")
-                                        .overflow_y_scroll()
-                                        .track_scroll(&self.thumb_scroll)
-                                        .size_full()
-                                        .children(self.attachments.iter().enumerate().map(
-                                            |(idx, att)| {
-                                                let active = idx == self.index;
-                                                let thumb = self.thumb_url(att);
-                                                div()
-                                                    .id(SharedString::from(format!(
-                                                        "media-modal-thumb-{idx}"
-                                                    )))
-                                                    .p_1()
-                                                    .cursor_pointer()
-                                                    .on_click(cx.listener(
-                                                        move |this, _, window, cx| {
-                                                            this.select(idx, window, cx);
-                                                        },
-                                                    ))
-                                                    .child(
-                                                        div()
-                                                            .rounded_md()
-                                                            .overflow_hidden()
-                                                            .border_2()
-                                                            .when(active, |el| {
-                                                                el.border_color(theme.text_primary)
-                                                            })
-                                                            .when(!active, |el| {
-                                                                el.border_color(theme.border)
-                                                                    .opacity(0.6)
-                                                                    .hover(|el| el.opacity(0.9))
-                                                            })
-                                                            .child(render_media_image(
-                                                                bg,
-                                                                muted,
-                                                                thumb,
-                                                                px(92.),
-                                                                px(80.),
-                                                            )),
-                                                    )
-                                            },
-                                        )),
-                                )
-                                .custom_scrollbars(
-                                    Scrollbars::always_visible(ScrollAxes::Vertical)
-                                        .tracked_scroll_handle(&self.thumb_scroll)
-                                        .with_stable_track_along(
-                                            ScrollAxes::Vertical,
-                                            gpui::rgb(THUMB_SIDEBAR_BG).into(),
-                                        ),
-                                    window,
-                                    cx,
-                                ),
-                        )
+                        row.child(self.render_thumb_sidebar(&theme, bg, muted, window, cx))
                     }),
             )
             .child(
@@ -610,26 +819,10 @@ impl Render for MediaImageModal {
                         )
                     })),
             )
-            .child(
-                div()
-                    .id("media-modal-close")
-                    .absolute()
-                    .top_0()
-                    .right_0()
-                    .w(px(32.))
-                    .h(px(32.))
-                    .flex()
-                    .items_start()
-                    .justify_end()
-                    .cursor_pointer()
-                    .hover(|el| el.opacity(0.8))
-                    .on_click(cx.listener(|this, _, window, cx| this.close(window, cx)))
-                    .child(
-                        Icon::new(IconName::Close)
-                            .size(px(24.))
-                            .text_color(modal_fg),
-                    ),
-            )
+            .child(window_controls::render_app_drag_header())
+            .when(window_controls::is_edge_resizable(), |el| {
+                el.child(window_controls::render_resize_edges(window))
+            })
     }
 }
 

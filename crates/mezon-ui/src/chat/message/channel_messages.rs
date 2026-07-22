@@ -4026,6 +4026,7 @@ impl ChannelMessages {
 
 impl Render for ChannelMessages {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        crate::image_cache::sweep_ogp_cache(window, cx);
         {
             let mut selection = self.selection.borrow_mut();
             selection.begin_render();
