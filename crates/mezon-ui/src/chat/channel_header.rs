@@ -637,6 +637,7 @@ pub struct ChatHeader {
     layout: WeakEntity<ChatLayout>,
     settings: Entity<Settings>,
     _settings_observe: Subscription,
+    _notification_observe: Subscription,
 }
 
 impl ChatHeader {
@@ -646,6 +647,10 @@ impl ChatHeader {
         cx: &mut Context<Self>,
     ) -> Self {
         let _settings_observe = cx.observe(settings, |_, _, cx| cx.notify());
+        let _notification_observe = cx.observe(
+            &mezon_store::NotificationSettingStore::global(cx),
+            |_, _, cx| cx.notify(),
+        );
         Self {
             name: SharedString::default(),
             dm: false,
@@ -665,6 +670,7 @@ impl ChatHeader {
             layout,
             settings: settings.clone(),
             _settings_observe,
+            _notification_observe,
         }
     }
 
@@ -751,7 +757,7 @@ impl Render for ChatHeader {
             .map(|(clan_id, channel_id)| {
                 mezon_store::NotificationSettingStore::global(cx)
                     .read(cx)
-                    .is_muted(channel_id, clan_id)
+                    .is_muted(channel_id, clan_id, cx)
             })
             .unwrap_or(false);
         let notification_trigger = if self.dm {
@@ -765,7 +771,7 @@ impl Render for ChatHeader {
                     .trigger(NotificationSettingTrigger::new(&theme, muted))
                     .menu({
                         let settings = settings.clone();
-                        move |_window, cx| {
+                        move |window, cx| {
                             let (clan_id, channel_id) =
                                 crate::chat::files_popover::active_files_channel(cx)?;
                             Some(cx.new(|cx| {
@@ -773,6 +779,7 @@ impl Render for ChatHeader {
                                     clan_id,
                                     channel_id,
                                     settings.clone(),
+                                    window,
                                     cx,
                                 )
                             }))

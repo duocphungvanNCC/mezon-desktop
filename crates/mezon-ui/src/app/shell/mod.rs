@@ -15,11 +15,13 @@ use crate::components::primitives::{Toast, ToastKind};
 
 mod coming_soon_modal;
 mod confirm_delete_message_modal;
+mod confirm_delete_role_modal;
 mod confirm_delete_webhook_modal;
 mod confirm_remove_friend_modal;
 mod upload_limit_modal;
 use coming_soon_modal::ComingSoonModal;
 use confirm_delete_message_modal::ConfirmDeleteMessageModal;
+use confirm_delete_role_modal::ConfirmDeleteRoleModal;
 use confirm_delete_webhook_modal::{ConfirmDeleteWebhookModal, WebhookDeleteTarget};
 pub use confirm_remove_friend_modal::FriendRemovalKind;
 use confirm_remove_friend_modal::{ConfirmRemoveFriendModal, interpolate_username};
@@ -217,6 +219,40 @@ impl Shell {
         let view = cx.new(|cx| ConfirmDeleteMessageModal {
             focus_handle: cx.focus_handle(),
             message_id,
+            title,
+            description,
+            cancel_label,
+            delete_label,
+        });
+        let focus_handle = view.read(cx).focus_handle.clone();
+        window.focus(&focus_handle, cx);
+        self.show_modal(view.into(), cx);
+    }
+
+    pub fn confirm_delete_role(
+        &mut self,
+        clan_id: mezon_store::ClanId,
+        role_id: mezon_store::RoleId,
+        locale: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let title: SharedString = mezon_i18n::t(locale, "confirmations.deleteRole.title")
+            .to_string()
+            .into();
+        let description: SharedString = mezon_i18n::t(locale, "confirmations.deleteRole.message")
+            .to_string()
+            .into();
+        let cancel_label: SharedString = mezon_i18n::t(locale, "confirmations.deleteRole.cancel")
+            .to_string()
+            .into();
+        let delete_label: SharedString = mezon_i18n::t(locale, "confirmations.deleteRole.confirm")
+            .to_string()
+            .into();
+        let view = cx.new(|cx| ConfirmDeleteRoleModal {
+            focus_handle: cx.focus_handle(),
+            clan_id,
+            role_id,
             title,
             description,
             cancel_label,

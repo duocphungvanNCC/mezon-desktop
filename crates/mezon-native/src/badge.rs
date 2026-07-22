@@ -12,6 +12,43 @@ pub fn set_badge_count(count: u32) {
 
     #[cfg(target_os = "windows")]
     set_badge_windows(count);
+
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    set_badge_linux(count);
+}
+
+// ─── Linux ──────────────────────────────────────────────────────────────────────
+//
+// The Unity LauncherEntry D-Bus API (`com.canonical.Unity.LauncherEntry.Update`)
+// is honoured by GNOME (Dash-to-Dock), KDE Plasma, Unity and others.
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+fn set_badge_linux(count: u32) {
+    std::thread::spawn(move || {
+        if let Err(e) = try_set_badge_linux(count) {
+            tracing::warn!("Linux badge update failed: {e}");
+        }
+    });
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+fn try_set_badge_linux(count: u32) -> Result<(), Box<dyn std::error::Error>> {
+    use std::collections::HashMap;
+    use zbus::zvariant::Value;
+
+    let connection = zbus::blocking::Connection::session()?;
+    let mut props: HashMap<&str, Value> = HashMap::new();
+    props.insert("count", Value::I64(i64::from(count)));
+    props.insert("count-visible", Value::Bool(count > 0));
+
+    connection.emit_signal(
+        None::<&str>,
+        "/com/canonical/unity/launcherentry/mezon",
+        "com.canonical.Unity.LauncherEntry",
+        "Update",
+        &("application://mezon.desktop", props),
+    )?;
+    Ok(())
 }
 
 #[cfg(target_os = "windows")]

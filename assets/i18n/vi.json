@@ -3330,6 +3330,7 @@
   "notificationSetting.menu.notification.nothing": "Không có gì",
   "notificationSetting.menu.notification.onlyMention": "Chỉ @mention",
   "notificationSetting.notificationOverrides": "GHI ĐÈ THÔNG BÁO",
+  "notificationSetting.selectChannelOrCategory": "Chọn kênh hoặc danh mục...",
   "notificationSetting.notifySettingThreadModal.description": "Bạn đang nhận được thông báo từ tất cả tin nhắn trong clan này, nhưng bạn có thể thay đổi cài đặt tại đây",
   "notificationSetting.notifySettingThreadModal.headerTitleMuteChannel": "Tắt thông báo kênh này",
   "notificationSetting.notifySettingThreadModal.headerTitleMuteThread": "Tắt thông báo chủ đề này",

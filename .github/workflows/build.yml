@@ -35,10 +35,10 @@ jobs:
       NX_CHAT_APP_GOOGLE_CLIENT_ID: 391688022389-1k9kb377ea6dccpqii7m5pifjj0agsjc.apps.googleusercontent.com
       NX_DOMAIN_URL: https://mezon.ai
       NX_CHAT_APP_REDIRECT_URI: https://mezon.ai
-      NX_LOGO_MEZON: https://cdn.mezon.ai/images/mezon_logo.png
-      NX_BASE_IMG_URL: https://cdn.mezon.ai
+      NX_LOGO_MEZON: https://cdn.komu.vn/images/mezon_logo.png
+      NX_BASE_IMG_URL: https://cdn.komu.vn
       NX_PROFILE_IMG_URL: https://profile.mezon.ai
-      NX_IMGPROXY_BASE_URL: https://imgproxy.mezon.ai
+      NX_IMGPROXY_BASE_URL: https://imgproxy.komu.vn
       NX_IMGPROXY_KEY: ${{ secrets.NX_IMGPROXY_KEY }}
       NX_CHAT_APP_API_KLIPY_KEY: ${{ secrets.NX_CHAT_APP_API_KLIPY_KEY }}
       NX_CHAT_APP_API_KLIPY_URL: https://api.klipy.com/api/v1
@@ -61,7 +61,7 @@ jobs:
       NX_CHAT_SENTRY_DSN: ${{ secrets.NX_CHAT_SENTRY_DSN }}
       NX_CHAT_APP_ANNONYMOUS_USER_ID: "1767478432163172999"
       NX_MAX_LENGTH_NAME_ALLOWED: "64"
-      NX_UPDATE_URL: https://cdn.mezon.ai/release/
+      NX_UPDATE_URL: https://cdn.komu.vn/release/
     strategy:
       fail-fast: false
       matrix:

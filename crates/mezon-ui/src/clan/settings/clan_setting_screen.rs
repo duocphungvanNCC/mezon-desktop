@@ -9,6 +9,8 @@ use mezon_store::{
 
 use super::integration_setting_page::IntegrationSettingPage;
 use super::overview_setting_page::{OverviewSettingPage, render_clan_overview_save_bar};
+use super::role_icon_picker::render_role_icon_picker_modal;
+use super::role_setting_page::{RoleSettingPage, render_role_save_bar};
 use crate::theme::{ActiveTheme, Theme};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -156,6 +158,7 @@ pub struct ClanSettingScreen {
     channel_list: Entity<ChannelList>,
     current_page: ClanSettingsPage,
     overview_page: Option<Entity<OverviewSettingPage>>,
+    roles_page: Option<Entity<RoleSettingPage>>,
     integrations_page: Option<Entity<IntegrationSettingPage>>,
     scroll: ScrollHandle,
     nav_scroll: ScrollHandle,
@@ -186,6 +189,7 @@ impl ClanSettingScreen {
             channel_list,
             current_page: page,
             overview_page: None,
+            roles_page: None,
             integrations_page: None,
             scroll: ScrollHandle::new(),
             nav_scroll: ScrollHandle::new(),
@@ -265,6 +269,8 @@ impl ClanSettingScreen {
             self.release_page(self.current_page, cx);
             if clan_changed {
                 self.release_page(ClanSettingsPage::Overview, cx);
+                self.release_page(ClanSettingsPage::Roles, cx);
+                self.release_page(ClanSettingsPage::Integrations, cx);
             }
             self.reset_content_scroll();
         }
@@ -277,6 +283,11 @@ impl ClanSettingScreen {
     fn release_page(&mut self, page: ClanSettingsPage, cx: &mut Context<Self>) {
         if page == ClanSettingsPage::Overview
             && let Some(entity) = self.overview_page.take()
+        {
+            entity.update(cx, |page, _| page.release());
+        }
+        if page == ClanSettingsPage::Roles
+            && let Some(entity) = self.roles_page.take()
         {
             entity.update(cx, |page, _| page.release());
         }
@@ -302,6 +313,14 @@ impl ClanSettingScreen {
             }));
             if let Some(overview) = &self.overview_page {
                 cx.observe(overview, |_, _, cx| cx.notify()).detach();
+            }
+        }
+        if page == ClanSettingsPage::Roles && self.roles_page.is_none() {
+            let settings = self.settings.clone();
+            let clan_id = self.clan_id;
+            self.roles_page = Some(cx.new(|cx| RoleSettingPage::new(clan_id, settings, cx)));
+            if let Some(roles) = &self.roles_page {
+                cx.observe(roles, |_, _, cx| cx.notify()).detach();
             }
         }
         if page == ClanSettingsPage::Integrations && self.integrations_page.is_none() {
@@ -338,6 +357,10 @@ impl ClanSettingScreen {
                 .overview_page
                 .as_ref()
                 .map(|p| p.clone().into_any_element()),
+            ClanSettingsPage::Roles => self
+                .roles_page
+                .as_ref()
+                .map(|p| p.clone().into_any_element()),
             ClanSettingsPage::Integrations => self
                 .integrations_page
                 .as_ref()
@@ -368,7 +391,10 @@ impl Render for ClanSettingScreen {
         let perms = PermissionStore::global(cx)
             .read(cx)
             .clan_settings_permissions(clan_id, cx);
-        let hide_page_title = matches!(page, ClanSettingsPage::AuditLog);
+        let hide_page_title = matches!(
+            page,
+            ClanSettingsPage::Integrations | ClanSettingsPage::AuditLog
+        );
 
         let content = self.current_page_view().unwrap_or_else(|| {
             div()
@@ -389,6 +415,23 @@ impl Render for ClanSettingScreen {
                 .as_ref()
                 .is_some_and(|overview| overview.read(cx).should_show_save_bar(cx));
         let overview_save_bar = self.overview_page.clone().filter(|_| show_overview_save);
+        let roles_edit_mode = page == ClanSettingsPage::Roles
+            && self
+                .roles_page
+                .as_ref()
+                .is_some_and(|roles| roles.read(cx).is_in_edit_mode());
+        let show_role_save = page == ClanSettingsPage::Roles
+            && self
+                .roles_page
+                .as_ref()
+                .is_some_and(|roles| roles.read(cx).should_show_save_bar(cx));
+        let role_save_bar = self.roles_page.clone().filter(|_| show_role_save);
+        let show_role_icon_picker = page == ClanSettingsPage::Roles
+            && self
+                .roles_page
+                .as_ref()
+                .is_some_and(|roles| roles.read(cx).is_role_icon_picker_open());
+        let role_icon_picker = self.roles_page.clone().filter(|_| show_role_icon_picker);
 
         fn nav_item(
             id: &str,
@@ -591,27 +634,33 @@ impl Render for ClanSettingScreen {
                                                 ),
                                         )
                                     })
-                                    .child(
-                                        div()
+                                    .child({
+                                        let mut scroll = div()
                                             .id("clan-settings-scroll")
                                             .flex_1()
                                             .min_h_0()
-                                            .overflow_y_scroll()
-                                            .track_scroll(&self.scroll)
                                             .pb(px(28.0))
                                             .pl(px(40.0))
                                             .pr(px(28.0))
-                                            .when(hide_page_title, |el| el.pt(px(60.0)))
-                                            .child(
-                                                div()
-                                                    .flex()
-                                                    .flex_col()
-                                                    .w_full()
-                                                    .max_w(px(740.0))
-                                                    .items_stretch()
-                                                    .child(content),
-                                            ),
-                                    ),
+                                            .when(hide_page_title, |el| el.pt(px(60.0)));
+                                        if roles_edit_mode {
+                                            scroll = scroll.overflow_hidden();
+                                        } else {
+                                            scroll = scroll
+                                                .overflow_y_scroll()
+                                                .track_scroll(&self.scroll);
+                                        }
+                                        scroll.child(
+                                            div()
+                                                .flex()
+                                                .flex_col()
+                                                .w_full()
+                                                .max_w(px(740.0))
+                                                .items_stretch()
+                                                .when(roles_edit_mode, |el| el.h_full().min_h_0())
+                                                .child(content),
+                                        )
+                                    }),
                             )
                             .child(
                                 div()
@@ -654,6 +703,14 @@ impl Render for ClanSettingScreen {
                 panel.child(deferred(render_clan_overview_save_bar(
                     overview, &locale, &theme, cx,
                 )))
+            })
+            .when_some(role_save_bar, |panel, roles| {
+                panel.child(deferred(render_role_save_bar(roles, &locale, &theme, cx)))
+            })
+            .when_some(role_icon_picker, |panel, roles| {
+                panel.child(render_role_icon_picker_modal(
+                    roles, &locale, &theme, window, cx,
+                ))
             })
     }
 }

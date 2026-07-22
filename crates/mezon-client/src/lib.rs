@@ -46,6 +46,7 @@ pub use network_probe::{
     RECONNECT_NETWORK_PROBE_TIMEOUT, favicon_probe_url, probe_network_reachability,
 };
 pub use notification_setting::ChannelNotificationSetting;
+pub use notification_setting::NotificationOverride;
 pub use ogp::{OgpResult, fetch_ogp};
 pub use search_message::{
     SEARCH_PAGE_SIZE, SearchDropdownMode, SearchPageToken, active_search_trigger,
