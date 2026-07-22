@@ -585,15 +585,9 @@ impl MediaImageModal {
     fn on_key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         match event.keystroke.key.as_str() {
             "escape" => self.close(window, cx),
-            "left" | "up" => {
-                if self.index > 0 {
-                    self.select(self.index - 1, window, cx);
-                }
-            }
-            "right" | "down" => {
-                if self.index + 1 < self.attachments.len() {
-                    self.select(self.index + 1, window, cx);
-                }
+            "left" | "up" if self.index > 0 => self.select(self.index - 1, window, cx),
+            "right" | "down" if self.index + 1 < self.attachments.len() => {
+                self.select(self.index + 1, window, cx);
             }
             _ => {}
         }
@@ -612,6 +606,10 @@ impl MediaImageModal {
 
 impl Render for MediaImageModal {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.image_cache
+            .update(cx, |cache, cx| cache.sweep_once_per_frame(window, cx));
+        self.thumb_image_cache
+            .update(cx, |cache, cx| cache.sweep_once_per_frame(window, cx));
         if self.pending_thumb_scroll && self.show_list {
             self.list_scroll
                 .scroll_to_item(self.index, gpui::ScrollStrategy::Center);

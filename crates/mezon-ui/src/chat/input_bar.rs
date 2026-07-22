@@ -3,7 +3,7 @@ use crate::components::primitives::{Icon, IconName};
 use crate::theme::{ActiveTheme, Theme};
 use gpui::{
     Context, Entity, FontWeight, ObjectFit, Render, SharedString, Subscription, Window, div, img,
-    prelude::*, px,
+    prelude::*, px, radians,
 };
 use mezon_store::{MessagesStore, OgpResult, Settings, TopicsStore};
 
@@ -21,6 +21,7 @@ pub struct InputBar {
     reply_clear: ReplyClearSource,
     _settings_observe: Subscription,
     _mention_observe: Subscription,
+    _messages_observe: Subscription,
 }
 
 impl InputBar {
@@ -32,6 +33,7 @@ impl InputBar {
     ) -> Self {
         let settings_observe = cx.observe(settings, |_, _, cx| cx.notify());
         let mention_observe = cx.observe(&mention_input, |_, _, cx| cx.notify());
+        let messages_observe = cx.observe(&MessagesStore::global(cx), |_, _, cx| cx.notify());
         Self {
             mention_input,
             locale,
@@ -39,6 +41,7 @@ impl InputBar {
             reply_clear: ReplyClearSource::Messages,
             _settings_observe: settings_observe,
             _mention_observe: mention_observe,
+            _messages_observe: messages_observe,
         }
     }
 
@@ -211,6 +214,7 @@ impl InputBar {
         let replying = self.replying_to.is_some();
         let reply_clear = self.reply_clear;
         let ogp_preview = self.mention_input.read(cx).ogp_preview().cloned();
+        let anonymous = MessagesStore::global(cx).read(cx).is_anonymous_mode();
         div()
             .flex()
             .flex_col()
@@ -231,6 +235,7 @@ impl InputBar {
             })
             .child(
                 div()
+                    .relative()
                     .flex()
                     .flex_row()
                     .items_center()
@@ -240,7 +245,19 @@ impl InputBar {
                     .border_color(theme.tokens.border_primary)
                     .bg(theme.tokens.bg_surface)
                     .shadow_md()
-                    .child(div().flex_1().child(self.mention_input.clone())),
+                    .child(div().flex_1().child(self.mention_input.clone()))
+                    .when(anonymous, |composer| {
+                        composer.child(
+                            div().absolute().top(px(-12.)).right(px(-12.)).child(
+                                Icon::new(IconName::HatIcon)
+                                    .size(px(28.))
+                                    .text_color(theme.tokens.text_theme_primary)
+                                    .with_transformation(gpui::Transformation::rotate(radians(
+                                        std::f32::consts::FRAC_PI_4,
+                                    ))),
+                            ),
+                        )
+                    }),
             )
     }
 }

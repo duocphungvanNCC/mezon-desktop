@@ -321,7 +321,8 @@ impl RenderOnce for ContextMenu {
         let text = theme.tokens.text_theme_primary;
         let muted = theme.text_secondary;
         let hover = theme.bg_hover;
-        let danger = theme.status_dnd;
+        let danger_text = theme.danger_text;
+        let danger_hover_bg = theme.danger_hover_bg;
         let brand = theme.brand;
         let dismiss = self.on_dismiss.clone();
         let on_reaction_close = self.on_reaction_close;
@@ -405,8 +406,8 @@ impl RenderOnce for ContextMenu {
                     on_click,
                 } => {
                     let dismiss = dismiss.clone();
-                    let label_color = if is_danger { danger } else { text };
-                    let icon_color = if is_danger { danger } else { muted };
+                    let label_color = if is_danger { danger_text } else { text };
+                    let icon_color = if is_danger { danger_text } else { muted };
                     panel = panel.child(
                         h_flex()
                             .id(("context-menu-item", index))
@@ -418,7 +419,13 @@ impl RenderOnce for ContextMenu {
                             .text_sm()
                             .text_color(label_color)
                             .cursor_pointer()
-                            .hover(|s| s.bg(hover))
+                            .hover(|s| {
+                                if is_danger {
+                                    s.bg(danger_hover_bg)
+                                } else {
+                                    s.bg(hover)
+                                }
+                            })
                             .when_some(on_reaction_close.clone(), |row, close| {
                                 row.on_hover(move |hovered, window, cx| {
                                     if *hovered {

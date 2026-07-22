@@ -189,7 +189,7 @@ impl GifPanel {
 impl Render for GifPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.image_cache
-            .update(cx, |cache, cx| cache.sweep(window, cx));
+            .update(cx, |cache, cx| cache.sweep_once_per_frame(window, cx));
         let theme = cx.theme();
         let entity = cx.entity();
         let searching = self.searching();

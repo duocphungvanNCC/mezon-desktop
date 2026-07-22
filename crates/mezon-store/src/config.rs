@@ -418,8 +418,13 @@ impl AppConfig {
         source: &str,
         real_width: u32,
         real_height: u32,
+        is_video: bool,
     ) -> (String, f32, f32) {
-        let (display_w, display_h) = attachment_display_dimensions(real_width, real_height);
+        let (display_w, display_h) = if is_video {
+            video_attachment_display_dimensions(real_width, real_height)
+        } else {
+            attachment_display_dimensions(real_width, real_height)
+        };
         if source.is_empty() {
             return (String::new(), display_w, display_h);
         }
@@ -537,6 +542,8 @@ const MESSAGE_MAX_WIDTH_REM: f32 = 29.0;
 const MESSAGE_OWN_MAX_WIDTH_REM: f32 = 30.0;
 const AVAILABLE_HEIGHT_REM: f32 = 27.0;
 const DEFAULT_MEDIA_SIDE: f32 = 100.0;
+pub const DEFAULT_VIDEO_HEIGHT: f32 = 150.0;
+pub const DEFAULT_VIDEO_WIDTH: f32 = DEFAULT_VIDEO_HEIGHT * 16.0 / 9.0;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct MediaDimensions {
@@ -617,6 +624,13 @@ pub fn calculate_media_dimensions(
 pub fn attachment_display_dimensions(real_width: u32, real_height: u32) -> (f32, f32) {
     let dimensions = calculate_media_dimensions(real_width, real_height, false, 0);
     (dimensions.width, dimensions.height)
+}
+
+pub fn video_attachment_display_dimensions(real_width: u32, real_height: u32) -> (f32, f32) {
+    if real_width == 0 || real_height == 0 {
+        return (DEFAULT_VIDEO_WIDTH, DEFAULT_VIDEO_HEIGHT);
+    }
+    attachment_display_dimensions(real_width, real_height)
 }
 
 struct GlobalAppConfig(Arc<AppConfig>);
@@ -716,6 +730,17 @@ mod tests {
     #[test]
     fn media_dimensions_unknown_defaults_to_hundred_square() {
         assert_eq!(dims(0, 0), (100.0, 100.0, true));
+    }
+
+    #[test]
+    fn video_attachment_display_dimensions_unknown_matches_react() {
+        let (w, h) = video_attachment_display_dimensions(0, 0);
+        assert_eq!(h, DEFAULT_VIDEO_HEIGHT);
+        assert!((w - DEFAULT_VIDEO_WIDTH).abs() < 0.01);
+        assert_eq!(
+            video_attachment_display_dimensions(0, 720),
+            (DEFAULT_VIDEO_WIDTH, DEFAULT_VIDEO_HEIGHT)
+        );
     }
 
     #[test]
@@ -896,7 +921,7 @@ mod tests {
             ..AppConfig::dev_defaults()
         };
         let src = &format!("{}/images/photo.png", cfg.base_img_url);
-        let (url, display_w, display_h) = cfg.attachment_proxy(src, 1200, 800);
+        let (url, display_w, display_h) = cfg.attachment_proxy(src, 1200, 800, false);
         let pw = display_w.ceil() as u32;
         let ph = display_h.ceil() as u32;
         assert!(

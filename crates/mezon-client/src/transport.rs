@@ -177,6 +177,33 @@ fn push_varint(buf: &mut Vec<u8>, mut value: u64) {
 
 /// `TypeMessage.Ephemeral` — the message code carried by an ephemeral send.
 const EPHEMERAL_MESSAGE_CODE: i32 = 12;
+pub const MESSAGE_BUZZ_CODE: i32 = 8;
+pub const SHARE_CONTACT_CODE: i32 = 16;
+pub const SHARE_CONTACT_KEY: &str = "share_contact";
+pub const LOCATION_CODE: i32 = 17;
+
+pub fn build_location_maps_link(latitude: f64, longitude: f64) -> String {
+    format!("https://www.google.com/maps?q={latitude},{longitude}&z=14&t=m&mapclient=embed")
+}
+
+pub fn build_location_content_json(latitude: f64, longitude: f64) -> String {
+    let link = build_location_maps_link(latitude, longitude);
+    let end = link.encode_utf16().count() as i64;
+    serde_json::json!({
+        "t": link,
+        "lk": [{"s": 0, "e": end}],
+        "mk": [{"s": 0, "e": end, "type": "lk"}],
+    })
+    .to_string()
+}
+pub const QUICK_MENU_TYPE_FLASH: i32 = 1;
+pub const QUICK_MENU_TYPE_QUICK: i32 = 2;
+
+#[derive(Clone, Copy, Default)]
+pub struct OutgoingMessageFlags {
+    pub anonymous_message: bool,
+    pub message_code: i32,
+}
 
 fn encode_envelope_cid_last(mut envelope: realtime::Envelope) -> Vec<u8> {
     let cid = envelope.cid;
@@ -2402,6 +2429,12 @@ pub fn build_send_content(
         &emojis,
         &stripped.markdowns,
     );
+    let cvtt = canvas_titles_for_text(&stripped.text);
+    let json = if cvtt.is_empty() {
+        json
+    } else {
+        with_cvtt(json, &cvtt)
+    };
     SendContent {
         json,
         text: stripped.text,
@@ -2443,6 +2476,101 @@ fn with_create_time_seconds(content_json: String, create_time_seconds: u32) -> S
         serde_json::Value::Number(create_time_seconds.into()),
     );
     serde_json::to_string(&value).unwrap_or(content_json)
+}
+
+pub fn extract_canvas_ids_from_text(text: &str) -> Vec<String> {
+    let marker = "/chat/clans/";
+    let mut ids = Vec::new();
+    let mut search_from = 0usize;
+    while let Some(rel) = text.get(search_from..).and_then(|hay| hay.find(marker)) {
+        let base = search_from + rel + marker.len();
+        let Some(rest) = text.get(base..) else {
+            break;
+        };
+        let mut parts = rest.split('/');
+        let Some(clan_id) = parts.next() else {
+            break;
+        };
+        if clan_id.is_empty() || !clan_id.bytes().all(|b| b.is_ascii_digit()) {
+            search_from = base + 1;
+            continue;
+        }
+        if parts.next() != Some("channels") {
+            search_from = base + 1;
+            continue;
+        }
+        let Some(channel_id) = parts.next() else {
+            break;
+        };
+        if channel_id.is_empty() || !channel_id.bytes().all(|b| b.is_ascii_digit()) {
+            search_from = base + 1;
+            continue;
+        }
+        if parts.next() != Some("canvas") {
+            search_from = base + 1;
+            continue;
+        }
+        let Some(canvas_id) = parts.next() else {
+            break;
+        };
+        let canvas_id = canvas_id
+            .split(['?', '#'])
+            .next()
+            .unwrap_or(canvas_id)
+            .trim();
+        if !canvas_id.is_empty() {
+            ids.push(canvas_id.to_string());
+        }
+        search_from = base + rest.len();
+    }
+    ids.sort();
+    ids.dedup();
+    ids
+}
+
+pub fn canvas_titles_for_text(text: &str) -> HashMap<String, String> {
+    extract_canvas_ids_from_text(text)
+        .into_iter()
+        .map(|id| (id, "Untitled".to_string()))
+        .collect()
+}
+
+fn with_cvtt(content_json: String, cvtt: &HashMap<String, String>) -> String {
+    if cvtt.is_empty() {
+        return content_json;
+    }
+    let mut value: serde_json::Value =
+        serde_json::from_str(&content_json).unwrap_or_else(|_| serde_json::json!({}));
+    let Some(obj) = value.as_object_mut() else {
+        return content_json;
+    };
+    let map: serde_json::Map<String, serde_json::Value> = cvtt
+        .iter()
+        .map(|(k, v)| (k.clone(), serde_json::Value::String(v.clone())))
+        .collect();
+    obj.insert("cvtt".into(), serde_json::Value::Object(map));
+    serde_json::to_string(&value).unwrap_or(content_json)
+}
+
+pub fn build_share_contact_content_json(
+    user_id: &str,
+    username: &str,
+    display_name: &str,
+    avatar: &str,
+) -> String {
+    serde_json::json!({
+        "t": "",
+        "embed": [{
+            "fields": [
+                {"name": "key", "value": SHARE_CONTACT_KEY, "inline": true},
+                {"name": "user_id", "value": user_id, "inline": true},
+                {"name": "username", "value": username, "inline": true},
+                {"name": "display_name", "value": display_name, "inline": true},
+                {"name": "avatar", "value": avatar, "inline": true},
+            ]
+        }]
+    })
+    .to_string()
 }
 
 fn with_ogp_token(content_json: String, ogp: &OutgoingOgp) -> String {
@@ -3607,6 +3735,7 @@ impl MezonTransport {
             false,
             0,
             ogp,
+            OutgoingMessageFlags::default(),
         )
         .await
     }
@@ -3634,6 +3763,7 @@ impl MezonTransport {
             true,
             0,
             None,
+            OutgoingMessageFlags::default(),
         )
         .await
     }
@@ -3683,6 +3813,7 @@ impl MezonTransport {
             false,
             topic_id,
             None,
+            OutgoingMessageFlags::default(),
         )
         .await
     }
@@ -3733,6 +3864,7 @@ impl MezonTransport {
             false,
             topic_id,
             None,
+            OutgoingMessageFlags::default(),
         )
         .await
     }
@@ -3782,6 +3914,7 @@ impl MezonTransport {
             false,
             0,
             None,
+            OutgoingMessageFlags::default(),
         )
         .await
     }
@@ -3828,6 +3961,71 @@ impl MezonTransport {
             false,
             0,
             ogp,
+            OutgoingMessageFlags::default(),
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn send_channel_message_prebuilt(
+        &self,
+        clan_id: i64,
+        channel_id: i64,
+        content_json: &str,
+        is_public: bool,
+        mode: i32,
+        flags: OutgoingMessageFlags,
+    ) -> Result<ApiMessage> {
+        self.send_channel_message_inner(
+            clan_id,
+            channel_id,
+            content_json,
+            is_public,
+            mode,
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            None,
+            true,
+            0,
+            None,
+            flags,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn send_channel_message_with_flags(
+        &self,
+        clan_id: i64,
+        channel_id: i64,
+        content: &str,
+        is_public: bool,
+        mode: i32,
+        mentions: Vec<OutgoingMention>,
+        hashtags: Vec<OutgoingHashtag>,
+        emojis: Vec<OutgoingEmoji>,
+        ogp: Option<OutgoingOgp>,
+        flags: OutgoingMessageFlags,
+    ) -> Result<ApiMessage> {
+        self.send_channel_message_inner(
+            clan_id,
+            channel_id,
+            content,
+            is_public,
+            mode,
+            Vec::new(),
+            Vec::new(),
+            mentions,
+            hashtags,
+            emojis,
+            None,
+            false,
+            0,
+            ogp,
+            flags,
         )
         .await
     }
@@ -3849,6 +4047,7 @@ impl MezonTransport {
         content_is_json: bool,
         topic_id: i64,
         ogp: Option<OutgoingOgp>,
+        flags: OutgoingMessageFlags,
     ) -> Result<ApiMessage> {
         let cid = self.generate_cid();
 
@@ -3907,6 +4106,8 @@ impl MezonTransport {
             is_public,
             mention_everyone,
             topic_id,
+            anonymous_message: flags.anonymous_message,
+            code: flags.message_code,
             ..Default::default()
         }
         .encode_to_vec();
@@ -4859,9 +5060,13 @@ impl MezonTransport {
         is_public: bool,
         topic_id: i64,
         is_update_msg_topic: bool,
+        create_time_seconds: u32,
     ) -> Result<()> {
         let cid = self.generate_cid();
-        let content_json = build_send_content(content, &[], &[], &[]).json;
+        let mut content_json = build_send_content(content, &[], &[], &[]).json;
+        if create_time_seconds > 0 {
+            content_json = with_create_time_seconds(content_json, create_time_seconds);
+        }
         let body = realtime::ChannelMessageUpdate {
             clan_id,
             channel_id,
@@ -4870,6 +5075,8 @@ impl MezonTransport {
             attachments,
             mode,
             is_public,
+            hide_editted: true,
+            create_time_seconds,
             topic_id,
             is_update_msg_topic,
             ..Default::default()
@@ -6470,6 +6677,93 @@ impl MezonTransport {
         Ok(())
     }
 
+    pub async fn write_message_typing(
+        &self,
+        clan_id: i64,
+        channel_id: i64,
+        mode: i32,
+        is_public: bool,
+        sender_display_name: &str,
+        topic_id: i64,
+    ) -> Result<()> {
+        let cid = self.generate_cid();
+        let envelope = realtime::Envelope {
+            cid: i32::from(cid),
+            message: Some(realtime::envelope::Message::MessageTypingEvent(
+                realtime::MessageTypingEvent {
+                    clan_id,
+                    channel_id,
+                    mode,
+                    is_public,
+                    sender_display_name: sender_display_name.to_string(),
+                    topic_id,
+                    ..Default::default()
+                },
+            )),
+        };
+        let (code, _) = self.send(cid, encode_envelope_cid_last(envelope)).await?;
+        if code != 0 {
+            return Err(anyhow::anyhow!("API error: code={}", code));
+        }
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn write_quick_menu_event(
+        &self,
+        menu_name: &str,
+        clan_id: i64,
+        channel_id: i64,
+        mode: i32,
+        is_public: bool,
+        content_json: &str,
+        mentions: Vec<api::MessageMention>,
+        attachments: Vec<api::MessageAttachment>,
+        references: Vec<api::MessageRef>,
+        anonymous_message: bool,
+        mention_everyone: bool,
+        avatar: &str,
+        message_code: i32,
+        topic_id: i64,
+        message_id: i64,
+        message_sender_id: i64,
+    ) -> Result<()> {
+        let cid = self.generate_cid();
+        let message = realtime::ChannelMessageSend {
+            clan_id,
+            channel_id,
+            content: content_json.to_string(),
+            mentions,
+            attachments,
+            references,
+            mode,
+            is_public,
+            anonymous_message,
+            mention_everyone,
+            avatar: avatar.to_string(),
+            code: message_code,
+            topic_id,
+            id: message_id,
+        };
+        let mut event = realtime::QuickMenuDataEvent {
+            menu_name: menu_name.to_string(),
+            message: Some(message),
+            ..Default::default()
+        };
+        if message_sender_id != 0 {
+            event.message_sender_id = message_sender_id;
+        }
+        let envelope = realtime::Envelope {
+            cid: i32::from(cid),
+            message: Some(realtime::envelope::Message::QuickMenuEvent(event)),
+        };
+        let (code, _) = self.send(cid, encode_envelope_cid_last(envelope)).await?;
+        if code != 0 {
+            return Err(anyhow::anyhow!("API error: code={}", code));
+        }
+        Ok(())
+    }
+
     /// Dropdown box selected.
     pub async fn dropdown_box_selected(
         &self,
@@ -7596,10 +7890,15 @@ impl MezonTransport {
         is_public: bool,
         topic_id: i64,
         is_update_msg_topic: bool,
+        hide_editted: bool,
+        create_time_seconds: u32,
     ) -> Result<()> {
         let cid = self.generate_cid();
         let sent = build_send_content(content, &mentions, &hashtags, &emojis);
-        let content_json = sent.json;
+        let mut content_json = sent.json;
+        if create_time_seconds > 0 {
+            content_json = with_create_time_seconds(content_json, create_time_seconds);
+        }
         let mentions = sent.mentions;
         let proto_mentions: Vec<api::MessageMention> = mentions
             .iter()
@@ -7613,6 +7912,8 @@ impl MezonTransport {
             mentions: proto_mentions,
             mode,
             is_public,
+            hide_editted,
+            create_time_seconds,
             topic_id,
             is_update_msg_topic,
             ..Default::default()
@@ -9196,5 +9497,15 @@ mod tests {
         let parsed = parse_search_attachment_field(raw);
         assert_eq!(parsed.len(), 1);
         assert_eq!(parsed[0].url, "https://cdn/b.png");
+    }
+
+    #[test]
+    fn build_location_content_json_matches_android_shape() {
+        let json = build_location_content_json(10.5, 106.2);
+        let value: serde_json::Value = serde_json::from_str(&json).expect("json");
+        let link = value["t"].as_str().expect("text");
+        assert!(link.contains("10.5,106.2"));
+        assert_eq!(value["lk"][0]["s"], 0);
+        assert_eq!(value["mk"][0]["type"], "lk");
     }
 }

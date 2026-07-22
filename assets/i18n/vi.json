@@ -2099,6 +2099,7 @@
   "contextMenu.copyImage": "Sao chép hình ảnh",
   "contextMenu.copyLink": "Sao chép liên kết",
   "contextMenu.copyText": "Sao chép văn bản",
+  "contextMenu.copyTextSelected": "Sao chép văn bản đã chọn",
   "contextMenu.createThread": "Tạo chủ đề",
   "contextMenu.deleteCategory": "Xóa danh mục",
   "contextMenu.deleteMessage": "Xóa tin nhắn",

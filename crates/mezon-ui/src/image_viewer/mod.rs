@@ -941,9 +941,9 @@ impl Render for ImageViewer {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if !self.closing {
             self.image_cache
-                .update(cx, |cache, cx| cache.sweep(window, cx));
+                .update(cx, |cache, cx| cache.sweep_once_per_frame(window, cx));
             self.thumb_image_cache
-                .update(cx, |cache, cx| cache.sweep(window, cx));
+                .update(cx, |cache, cx| cache.sweep_once_per_frame(window, cx));
             self.schedule_video_player_sync(window, cx);
         }
         let theme = cx.theme().clone();

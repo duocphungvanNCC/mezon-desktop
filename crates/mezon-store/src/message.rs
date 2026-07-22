@@ -62,10 +62,14 @@ impl MessageAttachment {
             )
     }
 
+    pub fn media_is_video(filetype: &str, url: &str) -> bool {
+        ((filetype.contains("video/mp4") || filetype.contains("video/quicktime"))
+            && !url.contains("tenor.com"))
+            || (filetype.starts_with("video") && !filetype.ends_with("vnd.dlna.mpeg-tts"))
+    }
+
     pub fn is_video(&self) -> bool {
-        ((self.filetype.contains("video/mp4") || self.filetype.contains("video/quicktime"))
-            && !self.url.contains("tenor.com"))
-            || (self.filetype.starts_with("video") && !self.filetype.ends_with("vnd.dlna.mpeg-tts"))
+        Self::media_is_video(&self.filetype, &self.url)
     }
 
     pub fn is_unsupported_media(&self) -> bool {
@@ -196,7 +200,7 @@ pub struct ReactionSender {
     pub count: u32,
 }
 
-const REACTION_EMOJI_PROXY_PX: u32 = 32;
+const REACTION_EMOJI_PROXY_PX: u32 = 100;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Reaction {

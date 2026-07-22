@@ -211,8 +211,7 @@ impl MessageSearchPanel {
             clan_id,
             is_direct,
             locale,
-            list_state: ListState::new(0, ListAlignment::Top, px(SEARCH_LIST_OVERDRAW))
-                .measure_all(),
+            list_state: ListState::new(0, ListAlignment::Top, px(SEARCH_LIST_OVERDRAW)),
             last_results_page: 0,
             cached_rows: Rc::new(Vec::new()),
             cached_highlights: Rc::new(Vec::new()),
@@ -275,6 +274,10 @@ impl MessageSearchPanel {
 impl Render for MessageSearchPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         crate::image_cache::sweep_ogp_cache(window, cx);
+        self.avatar_image_cache
+            .update(cx, |cache, cx| cache.sweep_once_per_frame(window, cx));
+        self.attachment_image_cache
+            .update(cx, |cache, cx| cache.sweep_once_per_frame(window, cx));
         let theme = cx.theme().clone();
         let locale = self.locale.clone();
         let channel_id = self.channel_id;

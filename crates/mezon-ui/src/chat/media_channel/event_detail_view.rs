@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use gpui::{
@@ -344,7 +344,7 @@ impl EventDetailView {
             };
             let media_paths: Vec<PathBuf> = paths
                 .into_iter()
-                .filter(|path| is_allowed_media(path))
+                .filter(|path| is_allowed_media(path.as_path()))
                 .collect();
             if media_paths.is_empty() {
                 return;
@@ -363,10 +363,10 @@ impl EventDetailView {
                             .update(cx, |store, cx| store.upload_attachment(&path, cx))
                     })
                     .ok();
-                if let Some(task) = upload_task {
-                    if let Ok(att) = task.await {
-                        uploaded.push(att);
-                    }
+                if let Some(task) = upload_task
+                    && let Ok(att) = task.await
+                {
+                    uploaded.push(att);
                 }
             }
 
@@ -392,13 +392,13 @@ impl EventDetailView {
                     store.update_timeline(this.clan_id, this.channel_id, input, cx)
                 })
             });
-            if let Ok(task) = update_task {
-                if let Err(message) = task.await {
-                    this.update(cx, |_, cx| {
-                        Shell::global(cx).update(cx, |shell, cx| shell.error(message, cx));
-                    })
-                    .ok();
-                }
+            if let Ok(task) = update_task
+                && let Err(message) = task.await
+            {
+                this.update(cx, |_, cx| {
+                    Shell::global(cx).update(cx, |shell, cx| shell.error(message, cx));
+                })
+                .ok();
             }
             this.update(cx, |_, cx| cx.notify()).ok();
         })
@@ -408,6 +408,8 @@ impl EventDetailView {
 
 impl Render for EventDetailView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.preview_image_cache
+            .update(cx, |cache, cx| cache.sweep_once_per_frame(window, cx));
         self.sync_inputs(window, cx);
         let theme = cx.theme().clone();
         let locale = self.settings.read(cx).language.clone();
@@ -552,7 +554,7 @@ impl Render for EventDetailView {
             let grid_rows = if grid_cells == 0 {
                 0
             } else {
-                (grid_cells + MEDIA_GRID_COLS - 1) / MEDIA_GRID_COLS
+                grid_cells.div_ceil(MEDIA_GRID_COLS)
             };
             self.sync_body_list(1 + grid_rows);
             render_detail_body(
@@ -1100,7 +1102,7 @@ fn format_event_date_label(
     super::timeline_view::format_event_date_label(seconds, locale)
 }
 
-fn is_allowed_media(path: &PathBuf) -> bool {
+fn is_allowed_media(path: &Path) -> bool {
     let ext = path
         .extension()
         .and_then(|e| e.to_str())
