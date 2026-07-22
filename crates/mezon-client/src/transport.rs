@@ -840,12 +840,7 @@ fn recover_message_content_tokens(trimmed: &str) -> ApiMessageContent {
     let root = match serde_json::from_str::<serde_json::Value>(trimmed) {
         Ok(serde_json::Value::String(inner)) => serde_json::from_str(&inner).ok(),
         Ok(value) => Some(value),
-        Err(_) => {
-            return ApiMessageContent {
-                t: trimmed.to_string(),
-                ..Default::default()
-            };
-        }
+        Err(_) => None,
     };
     let mut tokens = ApiMessageContent::default();
     if let Some(serde_json::Value::Object(map)) = root {
@@ -878,10 +873,20 @@ fn recover_message_content_tokens(trimmed: &str) -> ApiMessageContent {
             .and_then(|value| value.as_str())
             .map(str::to_owned);
         if let Some(poll_id) = map.get("id").or_else(|| map.get("poll_id")) {
-            tokens.poll_id = poll_id
-                .as_i64()
-                .or_else(|| poll_id.as_str().and_then(|s| s.parse().ok()));
+            tokens.poll_id = json_value_as_i64(poll_id);
         }
+        tokens.answers = recover_poll_answers(map.get("answers"));
+        tokens.answer_counts = recover_i32_array(map.get("answer_counts"));
+        tokens.expire_at = map.get("expire_at").and_then(json_value_as_i64);
+        tokens.is_closed = map
+            .get("is_closed")
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false);
+        tokens.total_votes = map.get("total_votes").and_then(json_value_as_i32);
+        tokens.poll_type = map.get("type").and_then(json_value_as_i64);
+        tokens.tp = map.get("tp").and_then(json_value_as_string);
+        tokens.cid = map.get("cid").and_then(json_value_as_string);
+        tokens.cvtt = recover_string_map(map.get("cvtt"));
     }
     if tokens.t.is_empty() {
         if let Some(text) = extract_message_text_content(trimmed) {
@@ -899,6 +904,53 @@ fn json_value_as_string(value: &serde_json::Value) -> Option<String> {
         serde_json::Value::Number(number) => Some(number.to_string()),
         _ => None,
     }
+}
+
+fn json_value_as_i64(value: &serde_json::Value) -> Option<i64> {
+    value
+        .as_i64()
+        .or_else(|| value.as_str().and_then(|s| s.parse().ok()))
+}
+
+fn json_value_as_i32(value: &serde_json::Value) -> Option<i32> {
+    json_value_as_i64(value).and_then(|value| i32::try_from(value).ok())
+}
+
+fn recover_i32_array(value: Option<&serde_json::Value>) -> Vec<i32> {
+    let Some(serde_json::Value::Array(items)) = value else {
+        return Vec::new();
+    };
+    items.iter().filter_map(json_value_as_i32).collect()
+}
+
+fn recover_poll_answers(value: Option<&serde_json::Value>) -> Vec<ApiPollAnswer> {
+    let Some(serde_json::Value::Array(items)) = value else {
+        return Vec::new();
+    };
+    items
+        .iter()
+        .map(|value| match value {
+            serde_json::Value::String(label) => ApiPollAnswer {
+                index: None,
+                label: label.clone(),
+            },
+            serde_json::Value::Object(map) => ApiPollAnswer {
+                index: map.get("index").and_then(json_value_as_i64),
+                label: map
+                    .get("label")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string(),
+            },
+            _ => ApiPollAnswer::default(),
+        })
+        .collect()
+}
+
+fn recover_string_map(value: Option<&serde_json::Value>) -> HashMap<String, String> {
+    value
+        .and_then(|value| serde_json::from_value(value.clone()).ok())
+        .unwrap_or_default()
 }
 
 fn recover_content_token_array(value: Option<&serde_json::Value>) -> Vec<ContentToken> {
@@ -1830,14 +1882,17 @@ mod embed_color {
         if trimmed.is_empty() {
             return None;
         }
-        let body = trimmed.strip_prefix('#').unwrap_or(trimmed);
-        if body.is_empty() {
-            return None;
+        if trimmed.starts_with('#') {
+            let body = trimmed.trim_start_matches('#');
+            if body.is_empty() {
+                return None;
+            }
+            return normalize_hex(body);
         }
-        if body.bytes().all(|b| b.is_ascii_digit()) {
-            return body.parse::<u32>().ok().map(normalize_decimal);
+        if trimmed.bytes().all(|b| b.is_ascii_digit()) {
+            return trimmed.parse::<u32>().ok().map(normalize_decimal);
         }
-        normalize_hex(body)
+        normalize_hex(trimmed)
     }
 
     pub fn deserialize<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
@@ -1862,7 +1917,7 @@ mod embed_color {
             }
 
             fn visit_i64<E: de::Error>(self, v: i64) -> Result<Self::Value, E> {
-                Ok((v != 0).then(|| normalize_decimal(v.max(0) as u32)))
+                Ok((v > 0).then(|| normalize_decimal(v as u32)))
             }
 
             fn visit_u64<E: de::Error>(self, v: u64) -> Result<Self::Value, E> {
@@ -8334,6 +8389,30 @@ mod tests {
     }
 
     #[test]
+    fn parse_message_content_tokens_recovers_truncated_json_text() {
+        let raw = r#"{"t":"*daily Yesterday: Add pagination"#;
+        let tokens = parse_message_content_tokens(raw);
+        assert_eq!(tokens.t, "*daily Yesterday: Add pagination");
+    }
+
+    #[test]
+    fn parse_message_content_tokens_recovers_poll_fields_when_struct_parse_fails() {
+        let raw = r#"{"t":123,"question":"Pick one","answers":["A","B"],"answer_counts":[1,0],"expire_at":1700000000,"is_closed":true,"total_votes":1,"type":2,"tp":"99","cid":"42","cvtt":{"1":"Canvas"}}"#;
+        let tokens = parse_message_content_tokens(raw);
+        assert_eq!(tokens.t, "123");
+        assert_eq!(tokens.question.as_deref(), Some("Pick one"));
+        assert_eq!(tokens.answers.len(), 2);
+        assert_eq!(tokens.answer_counts, vec![1, 0]);
+        assert_eq!(tokens.expire_at, Some(1_700_000_000));
+        assert!(tokens.is_closed);
+        assert_eq!(tokens.total_votes, Some(1));
+        assert_eq!(tokens.poll_type, Some(2));
+        assert_eq!(tokens.tp.as_deref(), Some("99"));
+        assert_eq!(tokens.cid.as_deref(), Some("42"));
+        assert_eq!(tokens.cvtt.get("1").map(String::as_str), Some("Canvas"));
+    }
+
+    #[test]
     fn parse_message_content_tokens_does_not_leak_bare_json_object() {
         let raw = r#"{"unknown":1}"#;
         let tokens = parse_message_content_tokens(raw);
@@ -8359,9 +8438,13 @@ mod tests {
             serde_json::from_value(serde_json::json!({ "color": "123456" })).unwrap();
         assert_eq!(decimal_string.color.as_deref(), Some("#01E240"));
 
-        let hash_decimal: ApiEmbed =
-            serde_json::from_value(serde_json::json!({ "color": "#49151" })).unwrap();
-        assert_eq!(hash_decimal.color.as_deref(), Some("#00BFFF"));
+        let hash_hex: ApiEmbed =
+            serde_json::from_value(serde_json::json!({ "color": "#123456" })).unwrap();
+        assert_eq!(hash_hex.color.as_deref(), Some("#123456"));
+
+        let negative: ApiEmbed =
+            serde_json::from_value(serde_json::json!({ "color": -1 })).unwrap();
+        assert_eq!(negative.color, None);
     }
 
     #[test]

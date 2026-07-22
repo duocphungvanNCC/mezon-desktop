@@ -480,7 +480,7 @@ fn parse_search_hit_content(
     cfg: Option<&AppConfig>,
 ) -> ParsedSearchContent {
     let trimmed = content_raw.trim();
-    let mut tokens = parse_search_content_tokens(trimmed);
+    let mut tokens = parse_message_content_tokens(trimmed);
     if tokens.t.is_empty()
         && let Some(text) = extract_message_text_content(trimmed)
     {
@@ -507,10 +507,6 @@ fn parse_search_hit_content(
         ogp,
         embeds,
     }
-}
-
-fn parse_search_content_tokens(trimmed: &str) -> ApiMessageContent {
-    parse_message_content_tokens(trimmed)
 }
 
 fn merge_detected_markdown_links(tokens: &mut ApiMessageContent) {

@@ -5688,30 +5688,20 @@ mod tests {
     }
 
     #[test]
-    fn build_embeds_maps_numeric_color_to_accent() {
-        let content = ApiMessageContent {
-            embed: vec![ApiEmbed {
-                color: Some("#00BFFF".into()),
-                title: Some("Saved".into()),
-                ..Default::default()
-            }],
-            ..Default::default()
-        };
+    fn build_embeds_maps_numeric_json_color_to_accent() {
+        let content: ApiMessageContent =
+            serde_json::from_str(r#"{"embed":[{"color":49151,"title":"Saved"}]}"#)
+                .expect("embed json");
         let embeds = build_embeds(&content, None);
         let embed = embeds.first().expect("one embed");
         assert_eq!(embed.accent, Some(gpui::rgb(0x00_bf_ff)));
     }
 
     #[test]
-    fn build_embeds_maps_discord_red_decimal_to_accent() {
-        let content = ApiMessageContent {
-            embed: vec![ApiEmbed {
-                color: Some("#FF0000".into()),
-                title: Some("Alert".into()),
-                ..Default::default()
-            }],
-            ..Default::default()
-        };
+    fn build_embeds_maps_discord_red_numeric_json_to_accent() {
+        let content: ApiMessageContent =
+            serde_json::from_str(r#"{"embed":[{"color":16711680,"title":"Alert"}]}"#)
+                .expect("embed json");
         let embeds = build_embeds(&content, None);
         let embed = embeds.first().expect("one embed");
         assert_eq!(embed.accent, Some(gpui::rgb(0xff_00_00)));
