@@ -114,6 +114,7 @@ pub struct RowMemo {
     pub selection_layouts: HashMap<MessageId, super::content::SelectableMessageLayoutCacheEntry>,
     pub selection_text_pieces:
         HashMap<SharedString, Rc<[super::content::CachedSelectableTextPiece]>>,
+    pub poll_scrolls: HashMap<MessageId, gpui::ScrollHandle>,
 }
 
 #[derive(Clone)]

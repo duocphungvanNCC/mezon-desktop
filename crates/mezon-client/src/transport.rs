@@ -64,6 +64,7 @@ pub enum RealtimeEvent {
     VoiceReaction(realtime::VoiceReactionSend),
     UserChannelAdded(realtime::UserChannelAdded),
     UserChannelRemoved(realtime::UserChannelRemoved),
+    NotifUserChannel(api::NotificationUserChannel),
     AddClanUser(realtime::AddClanUserEvent),
     UserClanRemoved(realtime::UserClanRemoved),
     ClanUpdated(realtime::ClanUpdatedEvent),
@@ -115,6 +116,7 @@ impl TryFrom<realtime::envelope::Message> for RealtimeEvent {
             realtime::envelope::Message::UserChannelRemovedEvent(m) => {
                 Ok(Self::UserChannelRemoved(m))
             }
+            realtime::envelope::Message::NotiUserChannel(m) => Ok(Self::NotifUserChannel(m)),
             realtime::envelope::Message::AddClanUserEvent(m) => Ok(Self::AddClanUser(m)),
             realtime::envelope::Message::UserClanRemovedEvent(m) => Ok(Self::UserClanRemoved(m)),
             realtime::envelope::Message::ClanUpdatedEvent(m) => Ok(Self::ClanUpdated(m)),
@@ -770,10 +772,217 @@ fn json_to_i32(value: &serde_json::Value) -> Option<i32> {
 }
 
 fn parse_message_text(content: &str) -> String {
-    serde_json::from_str::<serde_json::Value>(content)
-        .ok()
-        .and_then(|v| v.get("t").and_then(|t| t.as_str().map(|s| s.to_string())))
-        .unwrap_or_else(|| content.to_string())
+    parse_message_content_tokens(content).t
+}
+
+pub fn parse_message_content_tokens(raw: &str) -> ApiMessageContent {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return ApiMessageContent::default();
+    }
+    if let Ok(tokens) = serde_json::from_str::<ApiMessageContent>(trimmed) {
+        return tokens;
+    }
+    if let Ok(serde_json::Value::String(inner)) = serde_json::from_str::<serde_json::Value>(trimmed)
+        && let Ok(tokens) = serde_json::from_str::<ApiMessageContent>(&inner)
+    {
+        return tokens;
+    }
+    recover_message_content_tokens(trimmed)
+}
+
+pub fn extract_message_text_content(trimmed: &str) -> Option<String> {
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed) {
+        return value.get("t").and_then(json_value_as_string);
+    }
+    extract_json_t_field_loose(trimmed)
+}
+
+fn extract_json_t_field_loose(raw: &str) -> Option<String> {
+    const MARKERS: &[&str] = &[r#"{"t":""#, r#"{"t": ""#, r#"{"t" : ""#];
+    for marker in MARKERS {
+        if let Some(pos) = raw.find(marker) {
+            let text = parse_json_string_tail(&raw[pos + marker.len()..]);
+            if !text.is_empty() {
+                return Some(text);
+            }
+        }
+    }
+    None
+}
+
+fn parse_json_string_tail(rest: &str) -> String {
+    let mut out = String::new();
+    let mut chars = rest.chars();
+    while let Some(ch) = chars.next() {
+        match ch {
+            '\\' => {
+                if let Some(next) = chars.next() {
+                    match next {
+                        'n' => out.push('\n'),
+                        't' => out.push('\t'),
+                        'r' => out.push('\r'),
+                        '"' => out.push('"'),
+                        '\\' => out.push('\\'),
+                        other => {
+                            out.push('\\');
+                            out.push(other);
+                        }
+                    }
+                }
+            }
+            '"' => break,
+            other => out.push(other),
+        }
+    }
+    out
+}
+
+fn recover_message_content_tokens(trimmed: &str) -> ApiMessageContent {
+    let root = match serde_json::from_str::<serde_json::Value>(trimmed) {
+        Ok(serde_json::Value::String(inner)) => serde_json::from_str(&inner).ok(),
+        Ok(value) => Some(value),
+        Err(_) => None,
+    };
+    let mut tokens = ApiMessageContent::default();
+    if let Some(serde_json::Value::Object(map)) = root {
+        if let Some(text) = map.get("t").and_then(json_value_as_string) {
+            tokens.t = text;
+        }
+        tokens.mentions = recover_content_token_array(map.get("mentions"));
+        tokens.hg = recover_content_token_array(map.get("hg"));
+        tokens.ej = recover_content_token_array(map.get("ej"));
+        tokens.mk = recover_content_token_array(map.get("mk"));
+        tokens.lk = recover_content_token_array(map.get("lk"));
+        tokens.vk = recover_content_token_array(map.get("vk"));
+        tokens.lky = recover_content_token_array(map.get("lky"));
+        tokens.embed = recover_embed_array(map.get("embed"));
+        tokens.components = recover_component_rows(map.get("components"));
+        if let Some(call_log) = map.get("callLog").or_else(|| map.get("call_log")) {
+            tokens.call_log = serde_json::from_value(call_log.clone()).ok();
+        }
+        tokens.fwd = map
+            .get("fwd")
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false);
+        tokens.is_card = map
+            .get("isCard")
+            .or_else(|| map.get("is_card"))
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false);
+        tokens.question = map
+            .get("question")
+            .and_then(|value| value.as_str())
+            .map(str::to_owned);
+        if let Some(poll_id) = map.get("id").or_else(|| map.get("poll_id")) {
+            tokens.poll_id = json_value_as_i64(poll_id);
+        }
+        tokens.answers = recover_poll_answers(map.get("answers"));
+        tokens.answer_counts = recover_i32_array(map.get("answer_counts"));
+        tokens.expire_at = map.get("expire_at").and_then(json_value_as_i64);
+        tokens.is_closed = map
+            .get("is_closed")
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false);
+        tokens.total_votes = map.get("total_votes").and_then(json_value_as_i32);
+        tokens.poll_type = map.get("type").and_then(json_value_as_i64);
+        tokens.tp = map.get("tp").and_then(json_value_as_string);
+        tokens.cid = map.get("cid").and_then(json_value_as_string);
+        tokens.cvtt = recover_string_map(map.get("cvtt"));
+    }
+    if tokens.t.is_empty() {
+        if let Some(text) = extract_message_text_content(trimmed) {
+            tokens.t = text;
+        } else if !trimmed.starts_with('{') && !trimmed.starts_with('"') {
+            tokens.t = trimmed.to_string();
+        }
+    }
+    tokens
+}
+
+fn json_value_as_string(value: &serde_json::Value) -> Option<String> {
+    match value {
+        serde_json::Value::String(text) => Some(text.clone()),
+        serde_json::Value::Number(number) => Some(number.to_string()),
+        _ => None,
+    }
+}
+
+fn json_value_as_i64(value: &serde_json::Value) -> Option<i64> {
+    value
+        .as_i64()
+        .or_else(|| value.as_str().and_then(|s| s.parse().ok()))
+}
+
+fn json_value_as_i32(value: &serde_json::Value) -> Option<i32> {
+    json_value_as_i64(value).and_then(|value| i32::try_from(value).ok())
+}
+
+fn recover_i32_array(value: Option<&serde_json::Value>) -> Vec<i32> {
+    let Some(serde_json::Value::Array(items)) = value else {
+        return Vec::new();
+    };
+    items.iter().filter_map(json_value_as_i32).collect()
+}
+
+fn recover_poll_answers(value: Option<&serde_json::Value>) -> Vec<ApiPollAnswer> {
+    let Some(serde_json::Value::Array(items)) = value else {
+        return Vec::new();
+    };
+    items
+        .iter()
+        .map(|value| match value {
+            serde_json::Value::String(label) => ApiPollAnswer {
+                index: None,
+                label: label.clone(),
+            },
+            serde_json::Value::Object(map) => ApiPollAnswer {
+                index: map.get("index").and_then(json_value_as_i64),
+                label: map
+                    .get("label")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string(),
+            },
+            _ => ApiPollAnswer::default(),
+        })
+        .collect()
+}
+
+fn recover_string_map(value: Option<&serde_json::Value>) -> HashMap<String, String> {
+    value
+        .and_then(|value| serde_json::from_value(value.clone()).ok())
+        .unwrap_or_default()
+}
+
+fn recover_content_token_array(value: Option<&serde_json::Value>) -> Vec<ContentToken> {
+    let Some(serde_json::Value::Array(items)) = value else {
+        return Vec::new();
+    };
+    items
+        .iter()
+        .filter_map(|item| serde_json::from_value::<ContentToken>(item.clone()).ok())
+        .collect()
+}
+
+fn recover_embed_array(value: Option<&serde_json::Value>) -> Vec<ApiEmbed> {
+    let Some(serde_json::Value::Array(items)) = value else {
+        return Vec::new();
+    };
+    items
+        .iter()
+        .filter_map(|item| serde_json::from_value::<ApiEmbed>(item.clone()).ok())
+        .collect()
+}
+
+fn recover_component_rows(value: Option<&serde_json::Value>) -> Vec<ApiActionRow> {
+    let Some(serde_json::Value::Array(items)) = value else {
+        return Vec::new();
+    };
+    items
+        .iter()
+        .filter_map(|item| serde_json::from_value::<ApiActionRow>(item.clone()).ok())
+        .collect()
 }
 
 pub fn prioritize_avatar(clan_avatar: &str, user_avatar: &str) -> String {
@@ -1392,7 +1601,7 @@ pub struct ApiEmbedInputWrapper {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ApiEmbed {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "embed_color::deserialize")]
     pub color: Option<String>,
     #[serde(default)]
     pub title: Option<String>,
@@ -1650,6 +1859,84 @@ pub const MENTION_HERE_USER_ID: &str = "1775731111020111321";
 
 pub fn is_here_user_id(user_id: &str) -> bool {
     user_id == MENTION_HERE_ID || user_id == MENTION_HERE_USER_ID
+}
+
+mod embed_color {
+    use serde::de::{self, Visitor};
+    use std::fmt;
+
+    fn normalize_decimal(value: u32) -> String {
+        format!("#{:06X}", value & 0x00FF_FFFF)
+    }
+
+    fn normalize_hex(raw: &str) -> Option<String> {
+        let hex = raw.trim_start_matches('#');
+        if hex.len() != 6 || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return None;
+        }
+        u32::from_str_radix(hex, 16)
+            .ok()
+            .map(|value| format!("#{:06X}", value & 0x00FF_FFFF))
+    }
+
+    fn normalize_string(raw: &str) -> Option<String> {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            return None;
+        }
+        if trimmed.starts_with('#') {
+            let body = trimmed.trim_start_matches('#');
+            if body.is_empty() {
+                return None;
+            }
+            return normalize_hex(body);
+        }
+        if trimmed.bytes().all(|b| b.is_ascii_digit()) {
+            return trimmed.parse::<u32>().ok().map(normalize_decimal);
+        }
+        normalize_hex(trimmed)
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+    where
+        D: de::Deserializer<'de>,
+    {
+        struct OptVisitor;
+
+        impl<'de> Visitor<'de> for OptVisitor {
+            type Value = Option<String>;
+
+            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str("embed color as number or string")
+            }
+
+            fn visit_none<E: de::Error>(self) -> Result<Self::Value, E> {
+                Ok(None)
+            }
+
+            fn visit_unit<E: de::Error>(self) -> Result<Self::Value, E> {
+                Ok(None)
+            }
+
+            fn visit_i64<E: de::Error>(self, v: i64) -> Result<Self::Value, E> {
+                Ok((v > 0).then(|| normalize_decimal(v as u32)))
+            }
+
+            fn visit_u64<E: de::Error>(self, v: u64) -> Result<Self::Value, E> {
+                Ok((v != 0).then(|| normalize_decimal(v as u32)))
+            }
+
+            fn visit_str<E: de::Error>(self, v: &str) -> Result<Self::Value, E> {
+                Ok(normalize_string(v))
+            }
+
+            fn visit_string<E: de::Error>(self, v: String) -> Result<Self::Value, E> {
+                Ok(normalize_string(&v))
+            }
+        }
+
+        deserializer.deserialize_any(OptVisitor)
+    }
 }
 
 mod string_or_number {
@@ -2575,11 +2862,7 @@ impl MezonTransport {
     }
 
     pub fn message_from_proto(message: &api::ChannelMessage) -> ApiMessage {
-        let content_tokens = serde_json::from_str::<ApiMessageContent>(&message.content)
-            .unwrap_or_else(|_| ApiMessageContent {
-                t: message.content.clone(),
-                ..Default::default()
-            });
+        let content_tokens = parse_message_content_tokens(&message.content);
         let entity_mentions = parse_message_mentions(&message.mentions);
         let mut content_tokens = content_tokens;
         enrich_content_tokens(&mut content_tokens, &entity_mentions);
@@ -4844,11 +5127,17 @@ impl MezonTransport {
     }
 
     /// List role users.
-    pub async fn list_role_users(&self, role_id: i64) -> Result<api::RoleUserList> {
+    pub async fn list_role_users(
+        &self,
+        role_id: i64,
+        limit: i32,
+        cursor: &str,
+    ) -> Result<api::RoleUserList> {
         let cid = self.generate_cid();
         let body = api::ListRoleUsersRequest {
             role_id,
-            ..Default::default()
+            limit,
+            cursor: cursor.to_string(),
         }
         .encode_to_vec();
         let (code, response) = self.send_api_request(cid, "ListRoleUsers", body).await?;
@@ -6555,14 +6844,9 @@ impl MezonTransport {
     }
 
     /// Create role.
-    pub async fn create_role(&self, title: &str, clan_id: i64) -> Result<api::Role> {
+    pub async fn create_role(&self, request: api::CreateRoleRequest) -> Result<api::Role> {
         let cid = self.generate_cid();
-        let body = api::CreateRoleRequest {
-            title: title.to_string(),
-            clan_id,
-            ..Default::default()
-        }
-        .encode_to_vec();
+        let body = request.encode_to_vec();
         let (code, response) = self.send_api_request(cid, "CreateRole", body).await?;
         if code != 0 {
             return Err(anyhow::anyhow!("API error: code={}", code));
@@ -6587,14 +6871,9 @@ impl MezonTransport {
     }
 
     /// Update role.
-    pub async fn update_role(&self, role_id: i64, title: &str) -> Result<()> {
+    pub async fn update_role(&self, request: api::UpdateRoleRequest) -> Result<()> {
         let cid = self.generate_cid();
-        let body = api::UpdateRoleRequest {
-            role_id,
-            title: Some(title.to_string()),
-            ..Default::default()
-        }
-        .encode_to_vec();
+        let body = request.encode_to_vec();
         let (code, _) = self.send_api_request(cid, "UpdateRole", body).await?;
         if code != 0 {
             return Err(anyhow::anyhow!("API error: code={}", code));
@@ -6763,34 +7042,21 @@ impl MezonTransport {
     /// Generate webhook.
     pub async fn generate_webhook(
         &self,
-        webhook_name: &str,
-        channel_id: i64,
-        clan_id: i64,
-    ) -> Result<()> {
+        request: api::WebhookCreateRequest,
+    ) -> Result<api::WebhookGenerateResponse> {
         let cid = self.generate_cid();
-        let body = api::WebhookCreateRequest {
-            webhook_name: webhook_name.to_string(),
-            channel_id,
-            clan_id,
-            ..Default::default()
-        }
-        .encode_to_vec();
-        let (code, _) = self.send_api_request(cid, "GenerateWebhook", body).await?;
+        let body = request.encode_to_vec();
+        let (code, response) = self.send_api_request(cid, "GenerateWebhook", body).await?;
         if code != 0 {
             return Err(anyhow::anyhow!("API error: code={}", code));
         }
-        Ok(())
+        Ok(api::WebhookGenerateResponse::decode(response.as_slice())?)
     }
 
     /// Update webhook by ID.
-    pub async fn update_webhook_by_id(&self, id: i64, webhook_name: &str) -> Result<()> {
+    pub async fn update_webhook_by_id(&self, request: api::WebhookUpdateRequestById) -> Result<()> {
         let cid = self.generate_cid();
-        let body = api::WebhookUpdateRequestById {
-            id,
-            webhook_name: webhook_name.to_string(),
-            ..Default::default()
-        }
-        .encode_to_vec();
+        let body = request.encode_to_vec();
         let (code, _) = self
             .send_api_request(cid, "UpdateWebhookById", body)
             .await?;
@@ -6801,13 +7067,9 @@ impl MezonTransport {
     }
 
     /// Delete webhook by ID.
-    pub async fn delete_webhook_by_id(&self, id: i64) -> Result<()> {
+    pub async fn delete_webhook_by_id(&self, request: api::WebhookDeleteRequestById) -> Result<()> {
         let cid = self.generate_cid();
-        let body = api::WebhookDeleteRequestById {
-            id,
-            ..Default::default()
-        }
-        .encode_to_vec();
+        let body = request.encode_to_vec();
         let (code, _) = self
             .send_api_request(cid, "DeleteWebhookById", body)
             .await?;
@@ -6820,16 +7082,10 @@ impl MezonTransport {
     /// Generate clan webhook.
     pub async fn generate_clan_webhook(
         &self,
-        clan_id: i64,
-        webhook_name: &str,
+        request: api::GenerateClanWebhookRequest,
     ) -> Result<api::GenerateClanWebhookResponse> {
         let cid = self.generate_cid();
-        let body = api::GenerateClanWebhookRequest {
-            clan_id,
-            webhook_name: webhook_name.to_string(),
-            ..Default::default()
-        }
-        .encode_to_vec();
+        let body = request.encode_to_vec();
         let (code, response) = self
             .send_api_request(cid, "GenerateClanWebhook", body)
             .await?;
@@ -6844,18 +7100,10 @@ impl MezonTransport {
     /// Update clan webhook by ID.
     pub async fn update_clan_webhook_by_id(
         &self,
-        id: i64,
-        clan_id: i64,
-        webhook_name: &str,
+        request: api::UpdateClanWebhookRequest,
     ) -> Result<()> {
         let cid = self.generate_cid();
-        let body = api::UpdateClanWebhookRequest {
-            id,
-            clan_id,
-            webhook_name: webhook_name.to_string(),
-            ..Default::default()
-        }
-        .encode_to_vec();
+        let body = request.encode_to_vec();
         let (code, _) = self
             .send_api_request(cid, "UpdateClanWebhookById", body)
             .await?;
@@ -7461,13 +7709,18 @@ impl MezonTransport {
         channel_id: i64,
         clan_id: i64,
         question: &str,
+        answers: Vec<String>,
+        expire_hours: i32,
+        poll_type: i32,
     ) -> Result<api::CreatePollResponse> {
         let cid = self.generate_cid();
         let body = api::CreatePollRequest {
             channel_id,
             clan_id,
             question: question.to_string(),
-            ..Default::default()
+            answers,
+            expire_hours,
+            r#type: poll_type,
         }
         .encode_to_vec();
         let (code, response) = self.send_api_request(cid, "CreatePoll", body).await?;
@@ -7540,18 +7793,10 @@ impl MezonTransport {
     /// Create channel timeline.
     pub async fn create_channel_timeline(
         &self,
-        clan_id: i64,
-        channel_id: i64,
-        title: &str,
+        req: api::CreateChannelTimelineRequest,
     ) -> Result<api::CreateChannelTimelineResponse> {
         let cid = self.generate_cid();
-        let body = api::CreateChannelTimelineRequest {
-            clan_id,
-            channel_id,
-            title: title.to_string(),
-            ..Default::default()
-        }
-        .encode_to_vec();
+        let body = req.encode_to_vec();
         let (code, response) = self
             .send_api_request(cid, "CreateChannelTimeline", body)
             .await?;
@@ -7566,20 +7811,10 @@ impl MezonTransport {
     /// Update channel timeline.
     pub async fn update_channel_timeline(
         &self,
-        clan_id: i64,
-        channel_id: i64,
-        id: i64,
-        title: &str,
+        req: api::UpdateChannelTimelineRequest,
     ) -> Result<api::UpdateChannelTimelineResponse> {
         let cid = self.generate_cid();
-        let body = api::UpdateChannelTimelineRequest {
-            clan_id,
-            channel_id,
-            id,
-            title: title.to_string(),
-            ..Default::default()
-        }
-        .encode_to_vec();
+        let body = req.encode_to_vec();
         let (code, response) = self
             .send_api_request(cid, "UpdateChannelTimeline", body)
             .await?;
@@ -7597,13 +7832,14 @@ impl MezonTransport {
         clan_id: i64,
         channel_id: i64,
         id: i64,
+        start_time_seconds: u32,
     ) -> Result<api::ChannelTimelineDetailResponse> {
         let cid = self.generate_cid();
         let body = api::ChannelTimelineDetailRequest {
             clan_id,
             channel_id,
             id,
-            ..Default::default()
+            start_time_seconds,
         }
         .encode_to_vec();
         let (code, response) = self
@@ -8086,6 +8322,99 @@ mod tests {
             parsed.content_tokens.presign_finish,
             Some(vec!["a/b/photo.png".to_string()])
         );
+    }
+
+    #[test]
+    fn message_from_proto_parses_embed_only_payload_with_numeric_color() {
+        let raw = r#"{"embed":[{"color":49151,"title":"Saved","description":"```Name: Walk```","author":{"name":"Nhan Nguyen","icon_url":"https://example.com/a.png"},"thumbnail":{"url":"https://example.com/t.png"},"timestamp":"2026-07-21T00:52:54.094Z","footer":{"text":"Powered by Mezon Bot Strava","icon_url":"https://example.com/f.png"}}]}"#;
+        let msg = api::ChannelMessage {
+            message_id: 1,
+            content: raw.into(),
+            ..Default::default()
+        };
+        let parsed = MezonTransport::message_from_proto(&msg);
+        assert!(
+            parsed.content.is_empty(),
+            "embed-only payload must not leak raw JSON"
+        );
+        assert_eq!(parsed.content_tokens.embed.len(), 1);
+        assert_eq!(
+            parsed.content_tokens.embed[0].color.as_deref(),
+            Some("#00BFFF")
+        );
+        assert_eq!(
+            parsed.content_tokens.embed[0].title.as_deref(),
+            Some("Saved")
+        );
+    }
+
+    #[test]
+    fn parse_message_content_tokens_recovers_embed_when_struct_parse_fails() {
+        let raw = r#"{"t":123,"embed":[{"color":49151,"title":"Recovered"}]}"#;
+        let tokens = parse_message_content_tokens(raw);
+        assert_eq!(tokens.t, "123");
+        assert_eq!(tokens.embed.len(), 1);
+        assert_eq!(tokens.embed[0].title.as_deref(), Some("Recovered"));
+        assert_eq!(tokens.embed[0].color.as_deref(), Some("#00BFFF"));
+    }
+
+    #[test]
+    fn parse_message_content_tokens_recovers_truncated_json_text() {
+        let raw = r#"{"t":"*daily Yesterday: Add pagination"#;
+        let tokens = parse_message_content_tokens(raw);
+        assert_eq!(tokens.t, "*daily Yesterday: Add pagination");
+    }
+
+    #[test]
+    fn parse_message_content_tokens_recovers_poll_fields_when_struct_parse_fails() {
+        let raw = r#"{"t":123,"question":"Pick one","answers":["A","B"],"answer_counts":[1,0],"expire_at":1700000000,"is_closed":true,"total_votes":1,"type":2,"tp":"99","cid":"42","cvtt":{"1":"Canvas"}}"#;
+        let tokens = parse_message_content_tokens(raw);
+        assert_eq!(tokens.t, "123");
+        assert_eq!(tokens.question.as_deref(), Some("Pick one"));
+        assert_eq!(tokens.answers.len(), 2);
+        assert_eq!(tokens.answer_counts, vec![1, 0]);
+        assert_eq!(tokens.expire_at, Some(1_700_000_000));
+        assert!(tokens.is_closed);
+        assert_eq!(tokens.total_votes, Some(1));
+        assert_eq!(tokens.poll_type, Some(2));
+        assert_eq!(tokens.tp.as_deref(), Some("99"));
+        assert_eq!(tokens.cid.as_deref(), Some("42"));
+        assert_eq!(tokens.cvtt.get("1").map(String::as_str), Some("Canvas"));
+    }
+
+    #[test]
+    fn parse_message_content_tokens_does_not_leak_bare_json_object() {
+        let raw = r#"{"unknown":1}"#;
+        let tokens = parse_message_content_tokens(raw);
+        assert!(tokens.t.is_empty());
+        assert!(tokens.embed.is_empty());
+    }
+
+    #[test]
+    fn embed_color_normalizes_decimal_and_hex_strings() {
+        let decimal: ApiEmbed =
+            serde_json::from_value(serde_json::json!({ "color": 49151 })).unwrap();
+        assert_eq!(decimal.color.as_deref(), Some("#00BFFF"));
+
+        let red: ApiEmbed =
+            serde_json::from_value(serde_json::json!({ "color": 16_711_680 })).unwrap();
+        assert_eq!(red.color.as_deref(), Some("#FF0000"));
+
+        let hex: ApiEmbed =
+            serde_json::from_value(serde_json::json!({ "color": "00BFFF" })).unwrap();
+        assert_eq!(hex.color.as_deref(), Some("#00BFFF"));
+
+        let decimal_string: ApiEmbed =
+            serde_json::from_value(serde_json::json!({ "color": "123456" })).unwrap();
+        assert_eq!(decimal_string.color.as_deref(), Some("#01E240"));
+
+        let hash_hex: ApiEmbed =
+            serde_json::from_value(serde_json::json!({ "color": "#123456" })).unwrap();
+        assert_eq!(hash_hex.color.as_deref(), Some("#123456"));
+
+        let negative: ApiEmbed =
+            serde_json::from_value(serde_json::json!({ "color": -1 })).unwrap();
+        assert_eq!(negative.color, None);
     }
 
     #[test]
@@ -8624,16 +8953,16 @@ mod tests {
                 "color": "#5865F2",
                 "title": "Release notes",
                 "url": "https://mezon.ai/blog",
-                "author": {"name": "Mezon Bot", "icon_url": "https://cdn.mezon.ai/a.png", "url": "https://mezon.ai"},
+                "author": {"name": "Mezon Bot", "icon_url": "https://cdn.example/a.png", "url": "https://mezon.ai"},
                 "description": "**Bold** body",
-                "thumbnail": {"url": "https://cdn.mezon.ai/thumb.png"},
+                "thumbnail": {"url": "https://cdn.example/thumb.png"},
                 "fields": [
                     {"name": "Version", "value": "1.4.69", "inline": true},
                     {"name": "Notes", "value": "line1\nline2"}
                 ],
-                "image": {"url": "https://cdn.mezon.ai/img.png", "width": 640, "height": 360},
+                "image": {"url": "https://cdn.example/img.png", "width": 640, "height": 360},
                 "timestamp": "2026-07-04T00:00:00Z",
-                "footer": {"text": "Mezon", "icon_url": "https://cdn.mezon.ai/f.png"}
+                "footer": {"text": "Mezon", "icon_url": "https://cdn.example/f.png"}
             }]
         }"##;
         let c: ApiMessageContent = serde_json::from_str(json).expect("content");
@@ -8646,12 +8975,12 @@ mod tests {
         assert_eq!(author.name, "Mezon Bot");
         assert_eq!(
             author.icon_url.as_deref(),
-            Some("https://cdn.mezon.ai/a.png")
+            Some("https://cdn.example/a.png")
         );
         assert_eq!(e.description.as_deref(), Some("**Bold** body"));
         assert_eq!(
             e.thumbnail.as_ref().map(|t| t.url.as_str()),
-            Some("https://cdn.mezon.ai/thumb.png")
+            Some("https://cdn.example/thumb.png")
         );
         assert_eq!(e.fields.len(), 2);
         assert_eq!(e.fields[0].name, "Version");
@@ -8659,7 +8988,7 @@ mod tests {
         assert!(e.fields[0].inline);
         assert!(!e.fields[1].inline);
         let img = e.image.as_ref().expect("image");
-        assert_eq!(img.url, "https://cdn.mezon.ai/img.png");
+        assert_eq!(img.url, "https://cdn.example/img.png");
         assert_eq!(img.width, Some(640));
         assert_eq!(img.height, Some(360));
         assert_eq!(e.timestamp.as_deref(), Some("2026-07-04T00:00:00Z"));
@@ -8808,9 +9137,9 @@ mod tests {
                 "type": "ogp",
                 "title": "Cool Clan",
                 "description": "come in",
-                "image": "https://cdn.mezon.ai/i.png",
+                "image": "https://cdn.example/i.png",
                 "url": "https://mezon.ai/invite/abc",
-                "banner": "https://cdn.mezon.ai/b.png",
+                "banner": "https://cdn.example/b.png",
                 "member_count": 128,
                 "is_community": true,
                 "clanId": "1775731111020111321"
@@ -8819,7 +9148,7 @@ mod tests {
         let c: ApiMessageContent = serde_json::from_str(json).expect("content");
         assert_eq!(c.mk.len(), 1);
         let tok = &c.mk[0];
-        assert_eq!(tok.banner.as_deref(), Some("https://cdn.mezon.ai/b.png"));
+        assert_eq!(tok.banner.as_deref(), Some("https://cdn.example/b.png"));
         assert_eq!(tok.member_count, Some(128));
         assert!(tok.is_community);
         assert_eq!(tok.clan_id.as_deref(), Some("1775731111020111321"));
@@ -8828,7 +9157,7 @@ mod tests {
     #[test]
     fn attachment_size_round_trips() {
         let att = ApiAttachment {
-            url: "https://cdn.mezon.ai/f.pdf".into(),
+            url: "https://cdn.example/f.pdf".into(),
             filename: "f.pdf".into(),
             filetype: "application/pdf".into(),
             width: 0,

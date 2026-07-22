@@ -8,7 +8,7 @@ pub use row::{
 
 use mezon_store::InboxCategory;
 
-pub fn row_height_for_tab(tab: InboxTab) -> f32 {
+pub const fn row_height_for_tab(tab: InboxTab) -> f32 {
     match tab {
         InboxTab::ForYou => FOR_YOU_ROW_HEIGHT,
         InboxTab::Mentions => MENTION_ROW_HEIGHT,

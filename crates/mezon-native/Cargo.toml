@@ -25,6 +25,7 @@ auto-launch = "0.5"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc.workspace = true
+block = "0.1"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows.workspace = true
@@ -32,3 +33,4 @@ windows.workspace = true
 [target.'cfg(not(any(target_os = "macos", target_os = "windows")))'.dependencies]
 notify-rust = "4"
 gtk = "0.18"
+zbus = "4"

@@ -8,7 +8,7 @@ use gpui::{
 };
 use mezon_store::{
     ChannelId, ChannelList, ClanId, ClanList, ClanMembersEvent, ClanMembersStore, InboxCategory,
-    InboxEvent, InboxNotification, InboxStore, MessageId, MessagesEvent, MessagesStore,
+    InboxEvent, InboxNotification, InboxStore, MessageId, MessagesEvent, MessagesStore, RolesStore,
     TopicBadgeEvent, TopicBadgeStore, TopicDiscussion, TopicsEvent, TopicsStore, UsersByUserEvent,
     UsersByUserStore,
 };
@@ -23,14 +23,14 @@ use crate::chat::inbox::row::{
     NotificationRowView, TopicRowView, build_notification_row_view, build_topic_row_view,
     notification_copy_text, render_notification_body, render_topic_body,
 };
-use crate::chat::inbox::{InboxTab, MESSAGE_ROW_HEIGHT};
+use crate::chat::inbox::{InboxTab, row_height_for_tab};
 use crate::components::primitives::{Icon, IconName};
 use crate::router::{Route, navigate};
 use crate::theme::{ActiveTheme, Theme};
 
 const PANEL_WIDTH: f32 = 480.;
 const LIST_BODY_HEIGHT: f32 = 520.;
-const LIST_OVERDRAW: f32 = MESSAGE_ROW_HEIGHT + 40.;
+const LIST_OVERDRAW: f32 = row_height_for_tab(InboxTab::Mentions) + 40.;
 const PREFETCH_THRESHOLD: usize = 5;
 const EMPTY_PROTIP_COLOR: u32 = 0x2dc770;
 
@@ -96,6 +96,9 @@ impl InboxPopoverPanel {
             });
             ChannelList::global(cx).update(cx, |store, cx| {
                 store.load_for_clan(clan, cx);
+            });
+            RolesStore::global(cx).update(cx, |store, cx| {
+                store.ensure_loaded(clan, cx);
             });
         }
 
@@ -179,8 +182,15 @@ impl InboxPopoverPanel {
 
     fn sync_list_state(&mut self, tab_changed: bool) {
         let count = self.cached_items.len();
-        if self.list_state.item_count() != count {
-            self.list_state.reset(count);
+        let old_count = self.list_state.item_count();
+        let count_changed = old_count != count;
+        if count_changed {
+            if !tab_changed && count > old_count {
+                self.list_state
+                    .splice(old_count..old_count, count - old_count);
+            } else {
+                self.list_state.reset(count);
+            }
         } else if tab_changed && count > 0 {
             self.list_state.remeasure();
         }
@@ -199,6 +209,9 @@ impl InboxPopoverPanel {
             });
             ChannelList::global(cx).update(cx, |store, cx| {
                 store.load_for_clan(clan, cx);
+            });
+            RolesStore::global(cx).update(cx, |store, cx| {
+                store.ensure_loaded(clan, cx);
             });
         }
         if self.tab == InboxTab::Topics {
@@ -839,6 +852,42 @@ fn schedule_topic_jump(
     );
 }
 
+fn render_inbox_jump_overlay(
+    theme: &Theme,
+    group: &'static str,
+    jump_label: SharedString,
+    on_jump: impl Fn(&mut Window, &mut App) + 'static,
+) -> gpui::AnyElement {
+    div()
+        .absolute()
+        .inset_0()
+        .flex()
+        .items_end()
+        .justify_end()
+        .child(
+            div()
+                .mb(px(6.))
+                .mr(px(6.))
+                .px_2()
+                .py_1()
+                .rounded(px(6.))
+                .bg(theme.bg_hover)
+                .border_1()
+                .border_color(theme.border)
+                .text_xs()
+                .text_color(theme.text_primary)
+                .cursor_pointer()
+                .opacity(0.)
+                .group_hover(group, |s| s.opacity(1.))
+                .child(jump_label)
+                .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+                    cx.stop_propagation();
+                    on_jump(window, cx);
+                }),
+        )
+        .into_any_element()
+}
+
 fn render_notification_item(
     theme: &Theme,
     locale: &SharedString,
@@ -948,40 +997,18 @@ fn render_notification_item(
                             }),
                     )
                 })
-                .when(show_jump, |card| {
-                    card.child(
-                        div()
-                            .absolute()
-                            .bottom(px(10.))
-                            .right(px(12.))
-                            .px_2()
-                            .py_1()
-                            .rounded(px(6.))
-                            .cursor_pointer()
-                            .bg(theme.bg_hover)
-                            .border_1()
-                            .border_color(theme.border)
-                            .text_xs()
-                            .text_color(theme.text_primary)
-                            .opacity(0.)
-                            .group_hover("inbox-item", |s| s.opacity(1.))
-                            .child(jump_label)
-                            .on_mouse_down(MouseButton::Left, {
-                                move |_, _, cx| {
-                                    cx.stop_propagation();
-                                    schedule_notification_jump(
-                                        cx,
-                                        inbox_handle_jump.clone(),
-                                        jump_notification.clone(),
-                                    );
-                                }
-                            }),
-                    )
-                })
                 .child(
                     div()
-                        .pr(if show_copy { px(52.) } else { px(28.) })
-                        .when(show_jump, |content| content.pb(px(28.)))
+                        .relative()
+                        .w_full()
+                        .min_w_0()
+                        .pr(if show_copy {
+                            px(52.)
+                        } else if show_jump {
+                            px(56.)
+                        } else {
+                            px(28.)
+                        })
                         .child(render_notification_body(
                             theme,
                             locale,
@@ -990,7 +1017,21 @@ fn render_notification_item(
                             avatar_cache,
                             message_cache,
                             cx,
-                        )),
+                        ))
+                        .when(show_jump, |wrap| {
+                            wrap.child(render_inbox_jump_overlay(
+                                theme,
+                                "inbox-item",
+                                jump_label.into(),
+                                move |_, cx| {
+                                    schedule_notification_jump(
+                                        cx,
+                                        inbox_handle_jump.clone(),
+                                        jump_notification.clone(),
+                                    );
+                                },
+                            ))
+                        }),
                 ),
         )
         .into_any_element()
@@ -1023,42 +1064,34 @@ fn render_topic_item(
                 .p_2()
                 .rounded(px(8.))
                 .bg(theme.bg_secondary)
+                .max_h(px(150.))
+                .overflow_hidden()
                 .child(
                     div()
-                        .absolute()
-                        .bottom(px(10.))
-                        .right(px(12.))
-                        .px_2()
-                        .py_1()
-                        .rounded(px(6.))
-                        .cursor_pointer()
-                        .bg(theme.bg_hover)
-                        .border_1()
-                        .border_color(theme.border)
-                        .text_xs()
-                        .text_color(theme.text_primary)
-                        .opacity(0.)
-                        .group_hover("inbox-topic", |s| s.opacity(1.))
-                        .child(jump_label)
-                        .on_mouse_down(MouseButton::Left, {
-                            move |_, _, cx| {
-                                cx.stop_propagation();
+                        .relative()
+                        .w_full()
+                        .min_w_0()
+                        .child(render_topic_body(
+                            theme,
+                            locale,
+                            &topic,
+                            &view,
+                            avatar_cache,
+                            cx,
+                        ))
+                        .child(render_inbox_jump_overlay(
+                            theme,
+                            "inbox-topic",
+                            jump_label.into(),
+                            move |_, cx| {
                                 schedule_topic_jump(
                                     cx,
                                     inbox_handle_jump.clone(),
                                     jump_topic.clone(),
                                 );
-                            }
-                        }),
-                )
-                .child(render_topic_body(
-                    theme,
-                    locale,
-                    &topic,
-                    &view,
-                    avatar_cache,
-                    cx,
-                )),
+                            },
+                        )),
+                ),
         )
         .into_any_element()
 }

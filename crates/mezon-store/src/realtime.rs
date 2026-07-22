@@ -44,6 +44,7 @@ pub enum RealtimeKind {
     LastSeenUpdated,
     UserChannelAdded,
     UserChannelRemoved,
+    NotifUserChannel,
     Notifications,
     AddFriend,
     RemoveFriend,
@@ -82,6 +83,7 @@ impl RealtimeKind {
             RealtimeEvent::LastSeenUpdated(_) => Self::LastSeenUpdated,
             RealtimeEvent::UserChannelAdded(_) => Self::UserChannelAdded,
             RealtimeEvent::UserChannelRemoved(_) => Self::UserChannelRemoved,
+            RealtimeEvent::NotifUserChannel(_) => Self::NotifUserChannel,
             RealtimeEvent::Notifications(_) => Self::Notifications,
             RealtimeEvent::AddFriend(_) => Self::AddFriend,
             RealtimeEvent::RemoveFriend(_) => Self::RemoveFriend,
@@ -249,6 +251,16 @@ mod tests {
                 realtime::UserChannelAdded::default()
             )),
             Some(RealtimeKind::UserChannelAdded)
+        );
+    }
+
+    #[test]
+    fn kind_of_maps_notif_user_channel() {
+        assert_eq!(
+            RealtimeKind::of(&RealtimeEvent::NotifUserChannel(
+                api::NotificationUserChannel::default()
+            )),
+            Some(RealtimeKind::NotifUserChannel)
         );
     }
 

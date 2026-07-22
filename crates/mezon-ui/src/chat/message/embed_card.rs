@@ -157,6 +157,23 @@ pub fn render_embed_card(
         .into_any_element()
 }
 
+fn render_embed_circle_icon(url: SharedString, size: f32, ctx: &RowCtx) -> AnyElement {
+    let size = px(size);
+    div()
+        .size(size)
+        .flex_shrink_0()
+        .rounded_full()
+        .overflow_hidden()
+        .image_cache(ctx.avatar_cache.clone())
+        .child(
+            img(url)
+                .size(size)
+                .rounded_full()
+                .object_fit(ObjectFit::Cover),
+        )
+        .into_any_element()
+}
+
 fn render_embed_author(
     author: &EmbedAuthor,
     name: Option<gpui::StyledText>,
@@ -164,19 +181,11 @@ fn render_embed_author(
 ) -> AnyElement {
     let mut row = div().flex().items_center().gap_2().mt_2();
     if !author.icon_proxied.is_empty() {
-        row = row.child(
-            div()
-                .size(px(AUTHOR_ICON_SIZE))
-                .flex_shrink_0()
-                .rounded_full()
-                .overflow_hidden()
-                .image_cache(ctx.avatar_cache.clone())
-                .child(
-                    img(author.icon_proxied.clone())
-                        .size(px(AUTHOR_ICON_SIZE))
-                        .object_fit(ObjectFit::Cover),
-                ),
-        );
+        row = row.child(render_embed_circle_icon(
+            author.icon_proxied.clone(),
+            AUTHOR_ICON_SIZE,
+            ctx,
+        ));
     }
     row.child(
         div()
@@ -263,19 +272,7 @@ fn render_embed_footer(
         .gap_2()
         .w_full();
     if let Some(icon_url) = icon {
-        row = row.child(
-            div()
-                .size(px(FOOTER_ICON_SIZE))
-                .flex_shrink_0()
-                .rounded_full()
-                .overflow_hidden()
-                .image_cache(ctx.avatar_cache.clone())
-                .child(
-                    img(icon_url)
-                        .size(px(FOOTER_ICON_SIZE))
-                        .object_fit(ObjectFit::Cover),
-                ),
-        );
+        row = row.child(render_embed_circle_icon(icon_url, FOOTER_ICON_SIZE, ctx));
     }
 
     let mut inner = div()

@@ -1,5 +1,8 @@
 use gpui::{App, Global};
+use std::borrow::Cow;
 use std::sync::Arc;
+
+const LEGACY_MEDIA_ORIGINS: [&str; 2] = ["https://cdn.mezon.ai", "http://cdn.mezon.ai"];
 
 #[allow(dead_code)]
 mod baked_env {
@@ -39,6 +42,7 @@ pub struct AppConfig {
     pub redirect_uri: String,
     pub logo_mezon: String,
     pub base_img_url: String,
+    pub upload_img_url: String,
     pub profile_img_url: String,
     pub imgproxy_base_url: String,
     pub imgproxy_key: String,
@@ -113,8 +117,9 @@ impl AppConfig {
             redirect_uri: "https://mezon.ai".into(),
             logo_mezon: "https://cdn.komu.vn/images/mezon_logo.png".into(),
             base_img_url: "https://cdn.komu.vn".into(),
+            upload_img_url: "https://cdn-api.mezon.ai".into(),
             profile_img_url: "https://profile.mezon.ai".into(),
-            imgproxy_base_url: "https://dev-imgproxy.nccsoft.vn".into(),
+            imgproxy_base_url: "https://imgproxy.komu.vn".into(),
             imgproxy_key: "_AEhOrrckkG-NjqIdVLtzc-dtLFuE4u6ClM0P46ICEY".into(),
 
             klipy_key: String::new(),
@@ -205,6 +210,7 @@ impl AppConfig {
             redirect_uri: opt_str(baked_env::NX_CHAT_APP_REDIRECT_URI, &defaults.redirect_uri),
             logo_mezon: opt_str(baked_env::NX_LOGO_MEZON, &defaults.logo_mezon),
             base_img_url: opt_str(baked_env::NX_BASE_IMG_URL, &defaults.base_img_url),
+            upload_img_url: opt_str(baked_env::NX_UPLOAD_IMG_URL, &defaults.upload_img_url),
             profile_img_url: opt_str(baked_env::NX_PROFILE_IMG_URL, &defaults.profile_img_url),
             imgproxy_base_url: opt_str(
                 baked_env::NX_IMGPROXY_BASE_URL,
@@ -322,6 +328,42 @@ impl AppConfig {
         cx.try_global::<GlobalAppConfig>().map(|g| g.0.clone())
     }
 
+    pub fn media_origins(&self) -> Vec<&str> {
+        let mut origins = Vec::with_capacity(4);
+        for origin in [
+            self.base_img_url.trim_end_matches('/'),
+            self.profile_img_url.trim_end_matches('/'),
+            LEGACY_MEDIA_ORIGINS[0],
+            LEGACY_MEDIA_ORIGINS[1],
+        ] {
+            if !origin.is_empty() && !origins.contains(&origin) {
+                origins.push(origin);
+            }
+        }
+        origins
+    }
+
+    pub fn is_own_media_origin(&self, url: &str) -> bool {
+        self.media_origins()
+            .into_iter()
+            .any(|origin| url_has_origin(url, origin))
+    }
+
+    pub fn read_media_url<'a>(&self, url: &'a str) -> Cow<'a, str> {
+        if let Some(suffix) = url_origin_suffix(url, LEGACY_MEDIA_ORIGINS[1]) {
+            return Cow::Owned(format!("{}{}", LEGACY_MEDIA_ORIGINS[0], suffix));
+        }
+        let upload_origin = self.upload_img_url.trim_end_matches('/');
+        let Some(suffix) = url_origin_suffix(url, upload_origin) else {
+            return Cow::Borrowed(url);
+        };
+        Cow::Owned(format!(
+            "{}{}",
+            self.base_img_url.trim_end_matches('/'),
+            suffix
+        ))
+    }
+
     pub fn imgproxy_url(
         &self,
         source_image_url: &str,
@@ -332,9 +374,8 @@ impl AppConfig {
         if source_image_url.is_empty() {
             return String::new();
         }
-        if !source_image_url.starts_with("https://cdn.mezon")
-            && !source_image_url.starts_with("https://profile.mezon")
-        {
+        let source_image_url = self.read_media_url(source_image_url);
+        if !self.is_own_media_origin(source_image_url.as_ref()) {
             return source_image_url.to_string();
         }
         let processing_options = format!("rs:{}:{}:{}:1/mb:2097152", resize_type, width, height);
@@ -418,11 +459,54 @@ impl AppConfig {
     pub fn viewer_thumb_proxy(&self, source: &str) -> String {
         self.imgproxy_url(source, VIEWER_THUMB_SIZE, VIEWER_THUMB_SIZE, "fill")
     }
+
+    pub fn event_detail_featured_proxy(&self, source: &str) -> String {
+        self.imgproxy_url(
+            source,
+            EVENT_DETAIL_FEATURED_WIDTH,
+            EVENT_DETAIL_FEATURED_HEIGHT,
+            "fill",
+        )
+    }
+
+    pub fn event_detail_grid_proxy(&self, source: &str) -> String {
+        self.imgproxy_url(
+            source,
+            EVENT_DETAIL_GRID_THUMB_SIZE,
+            EVENT_DETAIL_GRID_THUMB_SIZE,
+            "fill",
+        )
+    }
+
+    pub fn timeline_album_thumb_proxy(&self, source: &str) -> String {
+        self.imgproxy_url(
+            source,
+            TIMELINE_ALBUM_THUMB_WIDTH,
+            TIMELINE_ALBUM_THUMB_HEIGHT,
+            "fill",
+        )
+    }
+
+    pub fn timeline_single_thumb_proxy(&self, source: &str) -> String {
+        self.imgproxy_url(
+            source,
+            TIMELINE_SINGLE_THUMB_WIDTH,
+            TIMELINE_SINGLE_THUMB_HEIGHT,
+            "fill",
+        )
+    }
 }
 
 pub const VIEWER_MAX_DIMENSION: u32 = 1600;
 pub const GALLERY_THUMB_SIZE: u32 = 120;
 pub const VIEWER_THUMB_SIZE: u32 = 80;
+pub const EVENT_DETAIL_FEATURED_WIDTH: u32 = 600;
+pub const EVENT_DETAIL_FEATURED_HEIGHT: u32 = 400;
+pub const EVENT_DETAIL_GRID_THUMB_SIZE: u32 = 300;
+pub const TIMELINE_ALBUM_THUMB_WIDTH: u32 = 150;
+pub const TIMELINE_ALBUM_THUMB_HEIGHT: u32 = 150;
+pub const TIMELINE_SINGLE_THUMB_WIDTH: u32 = 300;
+pub const TIMELINE_SINGLE_THUMB_HEIGHT: u32 = 200;
 
 /// Viewer imgproxy target dimensions: clamp the longest side to
 /// [`VIEWER_MAX_DIMENSION`], preserving aspect ratio. `0` means "let imgproxy
@@ -537,6 +621,21 @@ pub fn attachment_display_dimensions(real_width: u32, real_height: u32) -> (f32,
 
 struct GlobalAppConfig(Arc<AppConfig>);
 impl Global for GlobalAppConfig {}
+
+pub fn url_has_origin(url: &str, origin: &str) -> bool {
+    url_origin_suffix(url, origin).is_some()
+}
+
+fn url_origin_suffix<'a>(url: &'a str, origin: &str) -> Option<&'a str> {
+    let origin = origin.trim_end_matches('/');
+    if origin.is_empty() {
+        return None;
+    }
+    match url.strip_prefix(origin) {
+        Some(rest) if rest.is_empty() || rest.starts_with('/') => Some(rest),
+        _ => None,
+    }
+}
 
 fn normalize(value: Option<&'static str>) -> Option<&'static str> {
     value.map(str::trim).filter(|v| !v.is_empty())
@@ -660,7 +759,7 @@ mod tests {
             imgproxy_key: "sig".into(),
             ..AppConfig::dev_defaults()
         };
-        let src = "https://cdn.komu.vn/images/avatar.png";
+        let src = &format!("{}/images/avatar.png", cfg.base_img_url);
         let out = cfg.imgproxy_url(src, 100, 100, "fit");
         assert!(out.starts_with("https://imgproxy.example/sig/rs:fit:100:100:1/mb:2097152/plain/"));
         assert!(out.ends_with("@webp"));
@@ -675,11 +774,95 @@ mod tests {
     }
 
     #[test]
+    fn media_origins_only_cover_read_origins() {
+        let cfg = AppConfig::dev_defaults();
+        let origins = cfg.media_origins();
+        assert!(origins.contains(&cfg.base_img_url.as_str()));
+        assert!(origins.contains(&cfg.profile_img_url.as_str()));
+        assert!(origins.contains(&"https://cdn.mezon.ai"));
+        assert!(origins.contains(&"http://cdn.mezon.ai"));
+        assert!(!origins.contains(&cfg.upload_img_url.as_str()));
+    }
+
+    #[test]
+    fn legacy_cdn_images_use_imgproxy_without_rewriting_the_source() {
+        let cfg = AppConfig::dev_defaults();
+        let https_source = "https://cdn.mezon.ai/stickers/hellomezon.gif";
+        let https_output = cfg.imgproxy_url(https_source, 120, 120, "fit");
+        assert!(https_output.starts_with(&cfg.imgproxy_base_url));
+        assert!(https_output.contains(https_source));
+
+        let http_source = "http://cdn.mezon.ai/landing-page-mezon/legacy.gif";
+        let upgraded_source = "https://cdn.mezon.ai/landing-page-mezon/legacy.gif";
+        let http_output = cfg.imgproxy_url(http_source, 120, 120, "fit");
+        assert!(http_output.starts_with(&cfg.imgproxy_base_url));
+        assert!(http_output.contains(upgraded_source));
+        assert!(!http_output.contains(http_source));
+    }
+
+    #[test]
+    fn stored_attachment_urls_use_the_read_cdn() {
+        let cfg = AppConfig::dev_defaults();
+        let emoji = cfg.emoji_src("123");
+        assert!(
+            emoji.contains(&format!("{}/emojis/123.webp", cfg.base_img_url)),
+            "every url this app builds is a url something will fetch: {emoji}"
+        );
+        assert!(
+            cfg.is_own_media_origin(&format!("{}/uploads/photo.png", cfg.base_img_url)),
+            "an attachment resolves to the read cdn, so resize and disk cache must accept it"
+        );
+    }
+
+    #[test]
+    fn imgproxy_url_proxies_the_upload_origin() {
+        let cfg = AppConfig {
+            imgproxy_base_url: "https://imgproxy.example".into(),
+            imgproxy_key: "sig".into(),
+            ..AppConfig::dev_defaults()
+        };
+        let src = format!("{}/images/photo.png", cfg.upload_img_url);
+        let out = cfg.imgproxy_url(&src, 100, 100, "fit");
+        assert!(
+            out.starts_with("https://imgproxy.example/sig/rs:fit:100:100:1/"),
+            "an uploaded attachment must use a resized read-CDN source: {out}"
+        );
+        assert!(out.contains(&format!("{}/images/photo.png", cfg.base_img_url)));
+        assert!(!out.contains(&src));
+    }
+
+    #[test]
+    fn read_media_url_rewrites_only_the_upload_origin() {
+        let cfg = AppConfig::dev_defaults();
+        let upload = format!("{}/images/photo.png?version=1", cfg.upload_img_url);
+        let expected = format!("{}/images/photo.png?version=1", cfg.base_img_url);
+        assert_eq!(cfg.read_media_url(&upload), expected);
+        assert_eq!(
+            cfg.read_media_url("https://example.com/photo.png"),
+            "https://example.com/photo.png"
+        );
+        assert_eq!(
+            cfg.read_media_url("https://cdn-api.mezon.ai.attacker.com/photo.png"),
+            "https://cdn-api.mezon.ai.attacker.com/photo.png"
+        );
+    }
+
+    #[test]
+    fn media_origins_reject_lookalike_and_unrelated_hosts() {
+        let cfg = AppConfig::dev_defaults();
+        for origin in cfg.media_origins() {
+            assert!(!cfg.is_own_media_origin(&format!("{origin}.attacker.com/x.png")));
+            assert!(!cfg.is_own_media_origin(&format!("{origin}-evil.com/x.png")));
+        }
+        assert!(!cfg.is_own_media_origin("https://example.com/x.png"));
+    }
+
+    #[test]
     fn imgproxy_url_proxies_cdn_on_dev_base() {
         let cfg = AppConfig::dev_defaults();
-        let src = "https://cdn.komu.vn/images/avatar.png";
+        let src = &format!("{}/images/avatar.png", cfg.base_img_url);
         let out = cfg.imgproxy_url(src, 100, 100, "fit");
-        assert!(out.starts_with("https://dev-imgproxy.nccsoft.vn/"));
+        assert!(out.starts_with(&format!("{}/", cfg.imgproxy_base_url)));
         assert!(out.contains("/rs:fit:100:100:1/mb:2097152/plain/"));
         assert!(out.contains(src));
         assert!(out.ends_with("@webp"));
@@ -698,7 +881,7 @@ mod tests {
             imgproxy_key: "sig".into(),
             ..AppConfig::dev_defaults()
         };
-        let out = cfg.avatar_proxy("https://cdn.komu.vn/a.png");
+        let out = cfg.avatar_proxy(&format!("{}/a.png", cfg.base_img_url));
         assert!(
             out.contains("rs:fit:100:100:1/mb:2097152/plain/"),
             "avatar must be 100x100 fit like React MessageAvatar: {out}"
@@ -712,7 +895,7 @@ mod tests {
             imgproxy_key: "sig".into(),
             ..AppConfig::dev_defaults()
         };
-        let src = "https://cdn.komu.vn/images/photo.png";
+        let src = &format!("{}/images/photo.png", cfg.base_img_url);
         let (url, display_w, display_h) = cfg.attachment_proxy(src, 1200, 800);
         let pw = display_w.ceil() as u32;
         let ph = display_h.ceil() as u32;

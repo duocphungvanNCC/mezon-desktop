@@ -82,6 +82,11 @@ pub fn init(cx: &mut gpui::App) {
         ::menu::Cancel,
         Some("menu"),
     )]);
+    cx.bind_keys([gpui::KeyBinding::new(
+        "escape",
+        ::menu::Cancel,
+        Some("modal_backdrop"),
+    )]);
     #[cfg(debug_assertions)]
     cx.bind_keys([gpui::KeyBinding::new("cmd-alt-i", ToggleInspector, None)]);
     cx.bind_keys([gpui::KeyBinding::new(
