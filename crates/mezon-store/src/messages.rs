@@ -5719,6 +5719,38 @@ mod tests {
     use crate::message::MessageSpan;
 
     #[test]
+    fn parse_embed_accent_accepts_normalized_hex_colors() {
+        let accent = parse_embed_accent(Some("#00BFFF")).expect("hex color");
+        assert_eq!(accent, gpui::rgb(0x00_bf_ff));
+    }
+
+    #[test]
+    fn parse_embed_accent_preserves_red_channel() {
+        let accent = parse_embed_accent(Some("#FF0000")).expect("red color");
+        assert_eq!(accent, gpui::rgb(0xff_00_00));
+    }
+
+    #[test]
+    fn build_embeds_maps_numeric_json_color_to_accent() {
+        let content: ApiMessageContent =
+            serde_json::from_str(r#"{"embed":[{"color":49151,"title":"Saved"}]}"#)
+                .expect("embed json");
+        let embeds = build_embeds(&content, None);
+        let embed = embeds.first().expect("one embed");
+        assert_eq!(embed.accent, Some(gpui::rgb(0x00_bf_ff)));
+    }
+
+    #[test]
+    fn build_embeds_maps_discord_red_numeric_json_to_accent() {
+        let content: ApiMessageContent =
+            serde_json::from_str(r#"{"embed":[{"color":16711680,"title":"Alert"}]}"#)
+                .expect("embed json");
+        let embeds = build_embeds(&content, None);
+        let embed = embeds.first().expect("one embed");
+        assert_eq!(embed.accent, Some(gpui::rgb(0xff_00_00)));
+    }
+
+    #[test]
     fn parse_embed_input_extracts_text_input() {
         let value = serde_json::json!({
             "type": 3,
