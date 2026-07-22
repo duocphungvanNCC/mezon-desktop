@@ -2,7 +2,26 @@ use sha2::{Digest, Sha512};
 use std::sync::OnceLock;
 use std::time::Duration;
 
-pub const UPDATE_URL: &str = "https://cdn.mezon.ai/release/";
+pub struct UpdaterEndpoints {
+    pub manifest_base_url: String,
+    pub download_url: String,
+}
+
+static ENDPOINTS: OnceLock<UpdaterEndpoints> = OnceLock::new();
+
+pub fn configure_endpoints(endpoints: UpdaterEndpoints) {
+    let _ = ENDPOINTS.set(endpoints);
+}
+
+fn endpoints() -> anyhow::Result<&'static UpdaterEndpoints> {
+    ENDPOINTS
+        .get()
+        .ok_or_else(|| anyhow::anyhow!("updater endpoints not configured"))
+}
+
+pub fn download_url() -> anyhow::Result<&'static str> {
+    Ok(endpoints()?.download_url.as_str())
+}
 
 fn http_client() -> &'static reqwest::Client {
     static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
@@ -15,7 +34,22 @@ fn http_client() -> &'static reqwest::Client {
     })
 }
 
-const ALLOWED_DOWNLOAD_HOSTS: &[&str] = &["mezon.ai", "cdn.mezon.ai"];
+fn host_of(url: &str) -> Option<String> {
+    url::Url::parse(url)
+        .ok()
+        .and_then(|parsed| parsed.host_str().map(str::to_string))
+}
+
+fn allowed_download_hosts() -> anyhow::Result<Vec<String>> {
+    let endpoints = endpoints()?;
+    Ok([
+        host_of(&endpoints.manifest_base_url),
+        host_of(&endpoints.download_url),
+    ]
+    .into_iter()
+    .flatten()
+    .collect())
+}
 
 pub struct UpdateManifest {
     pub version: String,
@@ -23,7 +57,7 @@ pub struct UpdateManifest {
     pub path: String,
 }
 
-pub fn validate_update_url(url: &str) -> anyhow::Result<()> {
+fn validate_url_against(url: &str, allowed_hosts: &[String]) -> anyhow::Result<()> {
     let parsed = url::Url::parse(url).map_err(|e| anyhow::anyhow!("invalid URL: {e}"))?;
     if parsed.scheme() != "https" {
         return Err(anyhow::anyhow!("rejected update URL: scheme must be https"));
@@ -31,12 +65,16 @@ pub fn validate_update_url(url: &str) -> anyhow::Result<()> {
     let host = parsed
         .host_str()
         .ok_or_else(|| anyhow::anyhow!("rejected update URL: no host"))?;
-    if !ALLOWED_DOWNLOAD_HOSTS.contains(&host) {
+    if !allowed_hosts.iter().any(|allowed| allowed == host) {
         return Err(anyhow::anyhow!(
             "rejected update URL: host not in allowlist"
         ));
     }
     Ok(())
+}
+
+pub fn validate_update_url(url: &str) -> anyhow::Result<()> {
+    validate_url_against(url, &allowed_download_hosts()?)
 }
 
 pub fn verify_file_checksum(file_bytes: &[u8], expected_sha512_b64: &str) -> anyhow::Result<()> {
@@ -113,7 +151,8 @@ pub async fn check_for_updates_with_manifest(
     let current = semver::Version::parse(current_version)
         .map_err(|e| anyhow::anyhow!("invalid current version '{current_version}': {e}"))?;
 
-    let manifest_url = format!("{}{}", UPDATE_URL, manifest_filename());
+    let base = endpoints()?.manifest_base_url.trim_end_matches('/');
+    let manifest_url = format!("{}/{}", base, manifest_filename());
     validate_update_url(&manifest_url)?;
 
     tracing::debug!("fetching update manifest from {}", manifest_filename());
@@ -153,44 +192,63 @@ pub async fn check_for_updates_with_manifest(
 mod tests {
     use super::*;
 
-    #[test]
-    fn validate_accepts_mezon_ai_https() {
-        assert!(validate_update_url("https://mezon.ai/download").is_ok());
+    fn hosts() -> Vec<String> {
+        vec!["site.example".to_string(), "cdn.example".to_string()]
     }
 
     #[test]
-    fn validate_accepts_cdn_mezon_ai_https() {
-        assert!(validate_update_url("https://cdn.mezon.ai/release/1.0.0/mezon.dmg").is_ok());
+    fn validate_accepts_configured_site_host() {
+        assert!(validate_url_against("https://site.example/download", &hosts()).is_ok());
+    }
+
+    #[test]
+    fn validate_accepts_configured_cdn_host() {
+        assert!(
+            validate_url_against("https://cdn.example/release/1.0.0/mezon.dmg", &hosts()).is_ok()
+        );
     }
 
     #[test]
     fn validate_rejects_http_scheme() {
-        assert!(validate_update_url("http://mezon.ai/download").is_err());
+        assert!(validate_url_against("http://site.example/download", &hosts()).is_err());
     }
 
     #[test]
     fn validate_rejects_unknown_host() {
-        assert!(validate_update_url("https://evil.com/mezon.dmg").is_err());
+        assert!(validate_url_against("https://evil.com/mezon.dmg", &hosts()).is_err());
     }
 
     #[test]
     fn validate_rejects_subdomain_bypass() {
-        assert!(validate_update_url("https://mezon.ai.evil.com/download").is_err());
+        assert!(validate_url_against("https://site.example.evil.com/download", &hosts()).is_err());
     }
 
     #[test]
     fn validate_rejects_file_scheme() {
-        assert!(validate_update_url("file:///tmp/malware").is_err());
+        assert!(validate_url_against("file:///tmp/malware", &hosts()).is_err());
     }
 
     #[test]
     fn validate_rejects_no_host() {
-        assert!(validate_update_url("https:///no-host").is_err());
+        assert!(validate_url_against("https:///no-host", &hosts()).is_err());
     }
 
     #[test]
     fn validate_rejects_malformed_url() {
-        assert!(validate_update_url("not a url").is_err());
+        assert!(validate_url_against("not a url", &hosts()).is_err());
+    }
+
+    #[test]
+    fn validate_rejects_everything_when_unconfigured() {
+        assert!(validate_url_against("https://site.example/download", &[]).is_err());
+    }
+
+    #[test]
+    fn allowed_hosts_derive_from_endpoint_urls() {
+        assert_eq!(
+            host_of("https://cdn.example/release/").as_deref(),
+            Some("cdn.example")
+        );
     }
 
     #[test]

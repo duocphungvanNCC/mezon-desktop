@@ -56,25 +56,6 @@ fn main() -> Result<()> {
 
     tracing::info!("Starting Mezon desktop app v{}", env!("CARGO_PKG_VERSION"));
 
-    #[cfg(debug_assertions)]
-    if std::env::args().any(|a| a == "--notify-test") {
-        let nonce = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-        mezon_native::notifications::init();
-        std::thread::sleep(std::time::Duration::from_millis(500));
-        mezon_native::notifications::show(&mezon_native::notifications::Notification {
-            title: "Mezon".to_string(),
-            body: format!("Test notification #{nonce} — desktop notifications work."),
-            channel_id: Some(nonce.to_string()),
-            clan_id: Some("456".to_string()),
-            link: None,
-        });
-        std::thread::sleep(std::time::Duration::from_secs(3));
-        return Ok(());
-    }
-
     // Check if a mezonapp:// deep link URL was passed as argv[1].
     let deep_link_url: Option<String> = std::env::args()
         .nth(1)
@@ -251,6 +232,10 @@ fn run_app(lock: SingleInstance, initial_url: Option<String>) {
         app_config.api_secure,
         app_config.api_host,
     );
+    mezon_updater::configure_endpoints(mezon_updater::UpdaterEndpoints {
+        manifest_base_url: app_config.update_url.clone(),
+        download_url: format!("{}/download", app_config.domain_url.trim_end_matches('/')),
+    });
     let client = MezonClient::new(
         app_config.client_host(),
         app_config.client_port(),
@@ -624,7 +609,7 @@ fn open_main_window(
     mezon_store::GalleryStore::init(api.clone(), cx);
     mezon_store::FilesStore::init(api.clone(), cx);
     mezon_store::PermissionStore::init(api.clone(), auth_state.clone(), cx);
-    mezon_store::NotificationSettingStore::init(api.clone(), cx);
+    mezon_store::NotificationSettingStore::init(api.clone(), auth_state.clone(), cx);
     mezon_store::NotificationPushStore::init(api.clone(), auth_state.clone(), cx);
     mezon_store::AccountStore::init(api, cx);
 
@@ -648,8 +633,14 @@ fn open_main_window(
                 channel_id: n.channel_id,
                 clan_id: n.clan_id,
                 link: n.link,
+                icon_path: n.icon_path,
             });
         }),
+        cx,
+    );
+    mezon_store::PlatformStore::set_notification_permit(
+        &platform_store,
+        std::sync::Arc::new(mezon_native::notifications::notifications_permitted),
         cx,
     );
 
@@ -661,7 +652,7 @@ fn open_main_window(
         }));
         let task = cx.spawn(async move |cx: &mut AsyncApp| {
             while let Some(target) = click_rx.next().await {
-                let _ = cx.update(|cx| {
+                cx.update(|cx| {
                     activate_main_window(cx);
                     tracing::debug!(
                         clan_id = ?target.clan_id,

@@ -64,6 +64,7 @@ pub enum RealtimeEvent {
     VoiceReaction(realtime::VoiceReactionSend),
     UserChannelAdded(realtime::UserChannelAdded),
     UserChannelRemoved(realtime::UserChannelRemoved),
+    NotifUserChannel(api::NotificationUserChannel),
     AddClanUser(realtime::AddClanUserEvent),
     UserClanRemoved(realtime::UserClanRemoved),
     ClanUpdated(realtime::ClanUpdatedEvent),
@@ -115,6 +116,7 @@ impl TryFrom<realtime::envelope::Message> for RealtimeEvent {
             realtime::envelope::Message::UserChannelRemovedEvent(m) => {
                 Ok(Self::UserChannelRemoved(m))
             }
+            realtime::envelope::Message::NotiUserChannel(m) => Ok(Self::NotifUserChannel(m)),
             realtime::envelope::Message::AddClanUserEvent(m) => Ok(Self::AddClanUser(m)),
             realtime::envelope::Message::UserClanRemovedEvent(m) => Ok(Self::UserClanRemoved(m)),
             realtime::envelope::Message::ClanUpdatedEvent(m) => Ok(Self::ClanUpdated(m)),
@@ -8594,16 +8596,16 @@ mod tests {
                 "color": "#5865F2",
                 "title": "Release notes",
                 "url": "https://mezon.ai/blog",
-                "author": {"name": "Mezon Bot", "icon_url": "https://cdn.mezon.ai/a.png", "url": "https://mezon.ai"},
+                "author": {"name": "Mezon Bot", "icon_url": "https://cdn.example/a.png", "url": "https://mezon.ai"},
                 "description": "**Bold** body",
-                "thumbnail": {"url": "https://cdn.mezon.ai/thumb.png"},
+                "thumbnail": {"url": "https://cdn.example/thumb.png"},
                 "fields": [
                     {"name": "Version", "value": "1.4.69", "inline": true},
                     {"name": "Notes", "value": "line1\nline2"}
                 ],
-                "image": {"url": "https://cdn.mezon.ai/img.png", "width": 640, "height": 360},
+                "image": {"url": "https://cdn.example/img.png", "width": 640, "height": 360},
                 "timestamp": "2026-07-04T00:00:00Z",
-                "footer": {"text": "Mezon", "icon_url": "https://cdn.mezon.ai/f.png"}
+                "footer": {"text": "Mezon", "icon_url": "https://cdn.example/f.png"}
             }]
         }"##;
         let c: ApiMessageContent = serde_json::from_str(json).expect("content");
@@ -8616,12 +8618,12 @@ mod tests {
         assert_eq!(author.name, "Mezon Bot");
         assert_eq!(
             author.icon_url.as_deref(),
-            Some("https://cdn.mezon.ai/a.png")
+            Some("https://cdn.example/a.png")
         );
         assert_eq!(e.description.as_deref(), Some("**Bold** body"));
         assert_eq!(
             e.thumbnail.as_ref().map(|t| t.url.as_str()),
-            Some("https://cdn.mezon.ai/thumb.png")
+            Some("https://cdn.example/thumb.png")
         );
         assert_eq!(e.fields.len(), 2);
         assert_eq!(e.fields[0].name, "Version");
@@ -8629,7 +8631,7 @@ mod tests {
         assert!(e.fields[0].inline);
         assert!(!e.fields[1].inline);
         let img = e.image.as_ref().expect("image");
-        assert_eq!(img.url, "https://cdn.mezon.ai/img.png");
+        assert_eq!(img.url, "https://cdn.example/img.png");
         assert_eq!(img.width, Some(640));
         assert_eq!(img.height, Some(360));
         assert_eq!(e.timestamp.as_deref(), Some("2026-07-04T00:00:00Z"));
@@ -8778,9 +8780,9 @@ mod tests {
                 "type": "ogp",
                 "title": "Cool Clan",
                 "description": "come in",
-                "image": "https://cdn.mezon.ai/i.png",
+                "image": "https://cdn.example/i.png",
                 "url": "https://mezon.ai/invite/abc",
-                "banner": "https://cdn.mezon.ai/b.png",
+                "banner": "https://cdn.example/b.png",
                 "member_count": 128,
                 "is_community": true,
                 "clanId": "1775731111020111321"
@@ -8789,7 +8791,7 @@ mod tests {
         let c: ApiMessageContent = serde_json::from_str(json).expect("content");
         assert_eq!(c.mk.len(), 1);
         let tok = &c.mk[0];
-        assert_eq!(tok.banner.as_deref(), Some("https://cdn.mezon.ai/b.png"));
+        assert_eq!(tok.banner.as_deref(), Some("https://cdn.example/b.png"));
         assert_eq!(tok.member_count, Some(128));
         assert!(tok.is_community);
         assert_eq!(tok.clan_id.as_deref(), Some("1775731111020111321"));
@@ -8798,7 +8800,7 @@ mod tests {
     #[test]
     fn attachment_size_round_trips() {
         let att = ApiAttachment {
-            url: "https://cdn.mezon.ai/f.pdf".into(),
+            url: "https://cdn.example/f.pdf".into(),
             filename: "f.pdf".into(),
             filetype: "application/pdf".into(),
             width: 0,

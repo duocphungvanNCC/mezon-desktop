@@ -114,7 +114,7 @@ impl AppConfig {
             logo_mezon: "https://cdn.komu.vn/images/mezon_logo.png".into(),
             base_img_url: "https://cdn.komu.vn".into(),
             profile_img_url: "https://profile.mezon.ai".into(),
-            imgproxy_base_url: "https://dev-imgproxy.nccsoft.vn".into(),
+            imgproxy_base_url: "https://imgproxy.komu.vn".into(),
             imgproxy_key: "_AEhOrrckkG-NjqIdVLtzc-dtLFuE4u6ClM0P46ICEY".into(),
 
             klipy_key: String::new(),
@@ -322,6 +322,25 @@ impl AppConfig {
         cx.try_global::<GlobalAppConfig>().map(|g| g.0.clone())
     }
 
+    pub fn media_origins(&self) -> Vec<&str> {
+        let mut origins = Vec::with_capacity(3);
+        for origin in [
+            self.base_img_url.trim_end_matches('/'),
+            self.profile_img_url.trim_end_matches('/'),
+        ] {
+            if !origin.is_empty() && !origins.contains(&origin) {
+                origins.push(origin);
+            }
+        }
+        origins
+    }
+
+    pub fn is_own_media_origin(&self, url: &str) -> bool {
+        self.media_origins()
+            .iter()
+            .any(|origin| url_has_origin(url, origin))
+    }
+
     pub fn imgproxy_url(
         &self,
         source_image_url: &str,
@@ -332,9 +351,7 @@ impl AppConfig {
         if source_image_url.is_empty() {
             return String::new();
         }
-        if !source_image_url.starts_with("https://cdn.mezon")
-            && !source_image_url.starts_with("https://profile.mezon")
-        {
+        if !self.is_own_media_origin(source_image_url) {
             return source_image_url.to_string();
         }
         let processing_options = format!("rs:{}:{}:{}:1/mb:2097152", resize_type, width, height);
@@ -538,6 +555,17 @@ pub fn attachment_display_dimensions(real_width: u32, real_height: u32) -> (f32,
 struct GlobalAppConfig(Arc<AppConfig>);
 impl Global for GlobalAppConfig {}
 
+pub fn url_has_origin(url: &str, origin: &str) -> bool {
+    let origin = origin.trim_end_matches('/');
+    if origin.is_empty() {
+        return false;
+    }
+    match url.strip_prefix(origin) {
+        Some(rest) => rest.is_empty() || rest.starts_with('/'),
+        None => false,
+    }
+}
+
 fn normalize(value: Option<&'static str>) -> Option<&'static str> {
     value.map(str::trim).filter(|v| !v.is_empty())
 }
@@ -660,7 +688,7 @@ mod tests {
             imgproxy_key: "sig".into(),
             ..AppConfig::dev_defaults()
         };
-        let src = "https://cdn.komu.vn/images/avatar.png";
+        let src = &format!("{}/images/avatar.png", cfg.base_img_url);
         let out = cfg.imgproxy_url(src, 100, 100, "fit");
         assert!(out.starts_with("https://imgproxy.example/sig/rs:fit:100:100:1/mb:2097152/plain/"));
         assert!(out.ends_with("@webp"));
@@ -675,11 +703,59 @@ mod tests {
     }
 
     #[test]
+    fn media_origins_cover_read_write_and_profile_origins() {
+        let cfg = AppConfig::dev_defaults();
+        let origins = cfg.media_origins();
+        assert!(origins.contains(&cfg.base_img_url.as_str()));
+        assert!(origins.contains(&cfg.profile_img_url.as_str()));
+    }
+
+    #[test]
+    fn stored_attachment_urls_use_the_read_cdn() {
+        let cfg = AppConfig::dev_defaults();
+        let emoji = cfg.emoji_src("123");
+        assert!(
+            emoji.contains(&format!("{}/emojis/123.webp", cfg.base_img_url)),
+            "every url this app builds is a url something will fetch: {emoji}"
+        );
+        assert!(
+            cfg.is_own_media_origin(&format!("{}/uploads/photo.png", cfg.base_img_url)),
+            "an attachment resolves to the read cdn, so resize and disk cache must accept it"
+        );
+    }
+
+    #[test]
+    fn imgproxy_url_proxies_the_upload_origin() {
+        let cfg = AppConfig {
+            imgproxy_base_url: "https://imgproxy.example".into(),
+            imgproxy_key: "sig".into(),
+            ..AppConfig::dev_defaults()
+        };
+        let src = format!("{}/images/photo.png", cfg.base_img_url);
+        let out = cfg.imgproxy_url(&src, 100, 100, "fit");
+        assert!(
+            out.starts_with("https://imgproxy.example/sig/rs:fit:100:100:1/"),
+            "an uploaded attachment keeps the upload origin and must still resize: {out}"
+        );
+        assert!(out.contains(&src));
+    }
+
+    #[test]
+    fn media_origins_reject_lookalike_and_unrelated_hosts() {
+        let cfg = AppConfig::dev_defaults();
+        for origin in cfg.media_origins() {
+            assert!(!cfg.is_own_media_origin(&format!("{origin}.attacker.com/x.png")));
+            assert!(!cfg.is_own_media_origin(&format!("{origin}-evil.com/x.png")));
+        }
+        assert!(!cfg.is_own_media_origin("https://example.com/x.png"));
+    }
+
+    #[test]
     fn imgproxy_url_proxies_cdn_on_dev_base() {
         let cfg = AppConfig::dev_defaults();
-        let src = "https://cdn.komu.vn/images/avatar.png";
+        let src = &format!("{}/images/avatar.png", cfg.base_img_url);
         let out = cfg.imgproxy_url(src, 100, 100, "fit");
-        assert!(out.starts_with("https://dev-imgproxy.nccsoft.vn/"));
+        assert!(out.starts_with(&format!("{}/", cfg.imgproxy_base_url)));
         assert!(out.contains("/rs:fit:100:100:1/mb:2097152/plain/"));
         assert!(out.contains(src));
         assert!(out.ends_with("@webp"));
@@ -698,7 +774,7 @@ mod tests {
             imgproxy_key: "sig".into(),
             ..AppConfig::dev_defaults()
         };
-        let out = cfg.avatar_proxy("https://cdn.komu.vn/a.png");
+        let out = cfg.avatar_proxy(&format!("{}/a.png", cfg.base_img_url));
         assert!(
             out.contains("rs:fit:100:100:1/mb:2097152/plain/"),
             "avatar must be 100x100 fit like React MessageAvatar: {out}"
@@ -712,7 +788,7 @@ mod tests {
             imgproxy_key: "sig".into(),
             ..AppConfig::dev_defaults()
         };
-        let src = "https://cdn.komu.vn/images/photo.png";
+        let src = &format!("{}/images/photo.png", cfg.base_img_url);
         let (url, display_w, display_h) = cfg.attachment_proxy(src, 1200, 800);
         let pw = display_w.ceil() as u32;
         let ph = display_h.ceil() as u32;

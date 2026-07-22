@@ -103,6 +103,8 @@ pub type OpenUrlFn = Arc<dyn Fn(&str) -> anyhow::Result<()> + Send + Sync>;
 /// Download `url` and save it locally under the given suggested filename.
 pub type SaveAttachmentFn = Arc<dyn Fn(&str, &str) -> anyhow::Result<()> + Send + Sync>;
 pub type NotifyFn = Arc<dyn Fn(DesktopNotification) + Send + Sync>;
+/// Returns whether the OS permits desktop notifications (false only when explicitly denied).
+pub type NotificationPermitFn = Arc<dyn Fn() -> bool + Send + Sync>;
 
 pub struct DesktopNotification {
     pub title: String,
@@ -110,12 +112,15 @@ pub struct DesktopNotification {
     pub channel_id: Option<String>,
     pub clan_id: Option<String>,
     pub link: Option<String>,
+    /// Local path to a downloaded sender-avatar image, attached as the icon.
+    pub icon_path: Option<String>,
 }
 
 pub struct PlatformStore {
     open_url: Option<OpenUrlFn>,
     save_attachment: Option<SaveAttachmentFn>,
     notifier: Option<NotifyFn>,
+    notification_permit: Option<NotificationPermitFn>,
 }
 
 impl PlatformStore {
@@ -124,6 +129,7 @@ impl PlatformStore {
             open_url: None,
             save_attachment: None,
             notifier: None,
+            notification_permit: None,
         });
         cx.set_global(GlobalPlatformStore(entity.clone()));
         entity
@@ -176,6 +182,19 @@ impl PlatformStore {
         if let Some(f) = &self.notifier {
             f(notification);
         }
+    }
+
+    pub fn set_notification_permit(entity: &Entity<Self>, f: NotificationPermitFn, cx: &mut App) {
+        entity.update(cx, |store, cx| {
+            store.notification_permit = Some(f);
+            cx.notify();
+        });
+    }
+
+    /// Whether OS notifications are permitted; `true` when unknown (no callback yet),
+    /// so a pending authorization does not block the notification stream.
+    pub fn notifications_permitted(&self) -> bool {
+        self.notification_permit.as_ref().is_none_or(|f| f())
     }
 }
 

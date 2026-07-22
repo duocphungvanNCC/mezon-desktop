@@ -59,8 +59,7 @@ fn workspace_dotenv() -> Option<PathBuf> {
     let manifest = env::var("CARGO_MANIFEST_DIR").ok()?;
     let manifest_dir = PathBuf::from(manifest);
     let root = manifest_dir.parent()?.parent()?;
-    let dotenv = root.join(".env");
-    dotenv.is_file().then_some(dotenv)
+    Some(root.join(".env"))
 }
 
 fn parse_dotenv(path: &Path) -> HashMap<String, String> {

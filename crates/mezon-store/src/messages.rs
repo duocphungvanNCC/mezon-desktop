@@ -768,8 +768,6 @@ pub struct PollUiState {
     pub selected: Vec<i32>,
     pub show_results: bool,
     pub voting: bool,
-    /// When this viewer's own vote landed. Drives the one-shot result animation
-    /// so it plays right after voting instead of every time the card mounts.
     pub voted_at: Option<std::time::Instant>,
 }
 
@@ -3324,7 +3322,6 @@ impl MessagesStore {
                     AppConfig::try_global(cx),
                     viewer_id,
                 );
-                log_poll_broadcast("update", message_id, &incoming);
                 let presign_keys = presign::parse_presign_finish_keys(&m.content);
                 self.apply_message_update(target_id, message_id, incoming, presign_keys, cx);
             }
@@ -3343,25 +3340,19 @@ impl MessagesStore {
                     self.set_last_message(storage_id, message_id);
                     return;
                 }
-                let already_cached = self
-                    .cache
-                    .get(&storage_id)
-                    .is_some_and(|channel| channel.messages.contains_id(message_id));
-                if !already_cached {
-                    if self.is_viewing_older(storage_id) {
-                        self.set_last_message(storage_id, message_id);
-                        return;
-                    }
-                    let tail_loaded = self.cache.get(&storage_id).is_some_and(|channel| {
-                        !has_more_bottom_for(
-                            self.last_message_by_channel.get(&storage_id).copied(),
-                            &channel.messages,
-                        )
-                    });
-                    if !tail_loaded {
-                        self.set_last_message(storage_id, message_id);
-                        return;
-                    }
+                if self.is_viewing_older(storage_id) {
+                    self.set_last_message(storage_id, message_id);
+                    return;
+                }
+                let tail_loaded = self.cache.get(&storage_id).is_some_and(|channel| {
+                    !has_more_bottom_for(
+                        self.last_message_by_channel.get(&storage_id).copied(),
+                        &channel.messages,
+                    )
+                });
+                if !tail_loaded {
+                    self.set_last_message(storage_id, message_id);
+                    return;
                 }
                 let incoming = message_from_channel_proto(
                     m,
@@ -3369,7 +3360,6 @@ impl MessagesStore {
                     AppConfig::try_global(cx),
                     viewer_id,
                 );
-                log_poll_broadcast("append", message_id, &incoming);
                 self.apply_incoming_message(storage_id, incoming, cx);
             }
         }
@@ -3809,9 +3799,6 @@ impl MessagesStore {
         self.poll_my_vote.get(&message_id).map(Vec::as_slice)
     }
 
-    /// True only for a short window after this viewer voted, so the poll card can
-    /// play its fill animation once instead of on every mount (each running bar
-    /// drives a per-frame repaint of the visible rows).
     pub fn poll_result_animating(&self, message_id: MessageId) -> bool {
         self.poll_ui
             .get(&message_id)
@@ -3893,16 +3880,8 @@ impl MessagesStore {
         let api = self.api.clone();
         let cid = channel_id.get();
         let mid = message_id.get();
-        let started = std::time::Instant::now();
-        tracing::info!(target: "poll_perf", "vote_send message_id={mid}");
         cx.spawn(async move |this, cx| {
             let result = api.vote_poll(poll_id, mid, cid, answer_indices).await;
-            tracing::info!(
-                target: "poll_perf",
-                "vote_ack message_id={mid} took={}ms ok={}",
-                started.elapsed().as_millis(),
-                result.is_ok()
-            );
             let _ = this.update(cx, |store, cx| {
                 if let Some(state) = store.poll_ui.get_mut(&message_id) {
                     state.voting = false;
@@ -4428,20 +4407,6 @@ pub(crate) fn message_from_channel_proto(
     let mut api_msg = MezonTransport::message_from_proto(m);
     api_msg.message_id = message_id;
     message_from_api(api_msg, cfg, viewer_id)
-}
-
-fn log_poll_broadcast(path: &str, message_id: MessageId, incoming: &Message) {
-    let Some(poll) = incoming.poll.as_ref() else {
-        return;
-    };
-    tracing::info!(
-        target: "poll_perf",
-        "poll_broadcast path={path} message_id={} counts={:?} total={} closed={}",
-        message_id.get(),
-        poll.answer_counts,
-        poll.total_votes,
-        poll.is_closed
-    );
 }
 
 fn merge_message_update(existing: &mut Message, incoming: &Message) {
@@ -6267,7 +6232,7 @@ mod tests {
     #[test]
     fn message_from_api_gates_cdn_attachment_until_presign_finished() {
         let cfg = AppConfig {
-            base_img_url: "https://cdn.mezon.ai".into(),
+            base_img_url: "https://cdn.example".into(),
             ..AppConfig::dev_defaults()
         };
         let msg = |finish: Option<Vec<String>>| ApiMessage {
@@ -6287,7 +6252,7 @@ mod tests {
             update_time: 0,
             hide_editted: false,
             attachments: vec![mezon_client::transport::ApiAttachment {
-                url: "https://cdn.mezon.ai/uploads/photo.png".into(),
+                url: "https://cdn.example/uploads/photo.png".into(),
                 filename: "photo.png".into(),
                 filetype: "image/png".into(),
                 width: 800,
@@ -6317,10 +6282,10 @@ mod tests {
 
     #[test]
     fn partial_update_recomputes_presign_pending_on_kept_attachments() {
-        let base = "https://cdn.mezon.ai";
+        let base = "https://cdn.example";
         let mut existing = Message::new(MessageId(1), "hi", "u1", "U1", 100);
         existing.attachments = vec![MessageAttachment {
-            url: "https://cdn.mezon.ai/uploads/photo.png".into(),
+            url: "https://cdn.example/uploads/photo.png".into(),
             presign_pending: true,
             ..Default::default()
         }];
@@ -6421,7 +6386,7 @@ mod tests {
         let confirmed = Message::new(MessageId(99), "", "42", "Me", 500).with_attachments(vec![
             MessageAttachment {
                 filename: "sanitized_photo.png".into(),
-                url: "https://cdn.mezon.ai/photo.png".into(),
+                url: "https://cdn.example/photo.png".into(),
                 ..Default::default()
             },
         ]);
@@ -6480,7 +6445,7 @@ mod tests {
         let mut confirmed = Message::new(MessageId(7), "", "42", "Me", 500).with_attachments(vec![
             MessageAttachment {
                 filename: "1700_0_photo.png".into(),
-                url: "https://cdn.mezon.ai/photo.png".into(),
+                url: "https://cdn.example/photo.png".into(),
                 ..Default::default()
             },
         ]);
@@ -7165,11 +7130,11 @@ mod tests {
         }
     }
 
-    const TEST_CDN: &str = "https://cdn.mezon.ai";
+    const TEST_CDN: &str = "https://cdn.example";
 
     #[test]
     fn presign_gate_keeps_attachment_pending_when_the_finish_list_is_empty() {
-        let mut attachments = vec![cdn_attachment("https://cdn.mezon.ai/uploads/photo.png")];
+        let mut attachments = vec![cdn_attachment("https://cdn.example/uploads/photo.png")];
         apply_presign_gate_at(&mut attachments, &[], TEST_CDN, 1000, 1000);
         assert_eq!(attachments.len(), 1);
         assert!(
@@ -7180,7 +7145,7 @@ mod tests {
 
     #[test]
     fn presign_gate_clears_pending_when_the_finish_list_contains_the_key() {
-        let mut attachments = vec![cdn_attachment("https://cdn.mezon.ai/uploads/photo.png")];
+        let mut attachments = vec![cdn_attachment("https://cdn.example/uploads/photo.png")];
         attachments[0].presign_pending = true;
         apply_presign_gate_at(
             &mut attachments,
@@ -7195,7 +7160,7 @@ mod tests {
 
     #[test]
     fn presign_gate_short_circuits_on_key_count_even_when_the_key_does_not_match() {
-        let mut attachments = vec![cdn_attachment("https://cdn.mezon.ai/uploads/photo.png")];
+        let mut attachments = vec![cdn_attachment("https://cdn.example/uploads/photo.png")];
         attachments[0].presign_pending = true;
         apply_presign_gate_at(
             &mut attachments,
@@ -7210,8 +7175,8 @@ mod tests {
     #[test]
     fn presign_gate_keeps_second_attachment_pending_until_both_keys_arrive() {
         let mut attachments = vec![
-            cdn_attachment("https://cdn.mezon.ai/uploads/a.png"),
-            cdn_attachment("https://cdn.mezon.ai/uploads/b.png"),
+            cdn_attachment("https://cdn.example/uploads/a.png"),
+            cdn_attachment("https://cdn.example/uploads/b.png"),
         ];
         apply_presign_gate_at(&mut attachments, &["a".to_string()], TEST_CDN, 1000, 1000);
         assert_eq!(attachments.len(), 2);
@@ -7221,7 +7186,7 @@ mod tests {
 
     #[test]
     fn presign_gate_drops_a_pending_attachment_that_never_finished_uploading() {
-        let mut attachments = vec![cdn_attachment("https://cdn.mezon.ai/uploads/photo.png")];
+        let mut attachments = vec![cdn_attachment("https://cdn.example/uploads/photo.png")];
         apply_presign_gate_at(
             &mut attachments,
             &[],
@@ -7253,12 +7218,12 @@ mod tests {
     fn topic_ack_marks_only_presign_pending_attachments_as_uploading() {
         let mut attachments = vec![
             MessageAttachment {
-                url: "https://cdn.mezon.ai/uploads/pending.png".into(),
+                url: "https://cdn.example/uploads/pending.png".into(),
                 presign_pending: true,
                 ..Default::default()
             },
             MessageAttachment {
-                url: "https://cdn.mezon.ai/uploads/done.png".into(),
+                url: "https://cdn.example/uploads/done.png".into(),
                 presign_pending: false,
                 ..Default::default()
             },
@@ -7280,7 +7245,7 @@ mod tests {
     fn test_profile() -> (String, String, SharedString) {
         (
             "Alice".to_string(),
-            "https://cdn.mezon.ai/alice.png".to_string(),
+            "https://cdn.example/alice.png".to_string(),
             SharedString::from("https://proxy/alice.png"),
         )
     }
@@ -7290,7 +7255,7 @@ mod tests {
         assert!(sparse_topic_ack_gaps(&sparse_ack_message()).is_some());
 
         let mut zero_sender = Message::new(MessageId(7), "hi", "0", "Alice", 100);
-        zero_sender.avatar_url = "https://cdn.mezon.ai/alice.png".into();
+        zero_sender.avatar_url = "https://cdn.example/alice.png".into();
         let gaps = sparse_topic_ack_gaps(&zero_sender).expect("sender id 0 is sparse");
         assert!(gaps.sender);
         assert!(!gaps.name);
@@ -7300,7 +7265,7 @@ mod tests {
     #[test]
     fn sparse_topic_ack_gaps_is_none_for_a_complete_ack() {
         let mut complete = Message::new(MessageId(7), "hi", "42", "Alice", 100);
-        complete.avatar_url = "https://cdn.mezon.ai/alice.png".into();
+        complete.avatar_url = "https://cdn.example/alice.png".into();
         assert!(
             sparse_topic_ack_gaps(&complete).is_none(),
             "a fully populated ack must not be rewritten"
@@ -7323,7 +7288,7 @@ mod tests {
         assert_eq!(msg.sender_id, "42");
         assert_eq!(msg.sender_user_id, Some(UserId(42)));
         assert_eq!(msg.sender_name, "Alice");
-        assert_eq!(msg.avatar_url, "https://cdn.mezon.ai/alice.png");
+        assert_eq!(msg.avatar_url, "https://cdn.example/alice.png");
         assert_eq!(msg.avatar_proxied, "https://proxy/alice.png");
         assert_eq!(msg.create_time, 1_700_000_000);
         assert!(!msg.day_label.is_empty());
@@ -7369,7 +7334,7 @@ mod tests {
         );
         assert_eq!(msg.sender_name, "Bob");
         assert_eq!(msg.create_time, 500);
-        assert_eq!(msg.avatar_url, "https://cdn.mezon.ai/alice.png");
+        assert_eq!(msg.avatar_url, "https://cdn.example/alice.png");
     }
 
     #[test]
