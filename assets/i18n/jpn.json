@@ -2919,6 +2919,7 @@
   "memberTable.timeAgo": "{{time}}前",
   "memberTable.topBar.recentMembers": "最近のメンバー",
   "memberTable.topBar.searchPlaceholder": "検索",
+  "memberPage.noSearchResults": "これらの検索結果に一致するメンバーはいません。",
   "memberTable.topBar.sort": "ソート",
   "memberTable.transferOwnership": "所有権を転送",
   "menuCustomDM.closeDM": "メッセージを閉じる",

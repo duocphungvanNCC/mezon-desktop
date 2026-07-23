@@ -2919,6 +2919,7 @@
   "memberTable.timeAgo": "{{time}} fa",
   "memberTable.topBar.recentMembers": "Membri recenti",
   "memberTable.topBar.searchPlaceholder": "Cerca",
+  "memberPage.noSearchResults": "Nessun membro corrisponde a questi risultati di ricerca.",
   "memberTable.topBar.sort": "Ordina",
   "memberTable.transferOwnership": "Trasferisci la proprietà",
   "menuCustomDM.closeDM": "Chiudi chat",

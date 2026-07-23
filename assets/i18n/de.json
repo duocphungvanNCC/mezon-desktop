@@ -2919,6 +2919,7 @@
   "memberTable.timeAgo": "vor {{time}}",
   "memberTable.topBar.recentMembers": "Kürzliche Mitglieder",
   "memberTable.topBar.searchPlaceholder": "Suche",
+  "memberPage.noSearchResults": "Aucun membre ne correspond à ces résultats de recherche.",
   "memberTable.topBar.sort": "Sortieren",
   "memberTable.transferOwnership": "Besitz übertragen",
   "menuCustomDM.closeDM": "Chat schließen",

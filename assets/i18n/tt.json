@@ -2491,6 +2491,7 @@
   "memberTable.removeMember": "Катнашучыны бетерү",
   "memberTable.topBar.recentMembers": "Соңгы катнашучылар",
   "memberTable.topBar.searchPlaceholder": "Клан исеме, күрсәтелә торган исем яки кулланучы исеме буенча эзләү",
+  "memberPage.noSearchResults": "Бу эзләү нәтиҗәләренә туры килгән әгъзалар юк.",
   "memberTable.topBar.sort": "Сортлау",
   "memberTable.transferOwnership": "Хокукларны тапшыру",
   "menuCustomDM.closeDM": "Шәхси хәбәрләрне ябу",

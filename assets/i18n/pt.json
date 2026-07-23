@@ -2919,6 +2919,7 @@
   "memberTable.timeAgo": "{{time}} atrás",
   "memberTable.topBar.recentMembers": "Membros recentes",
   "memberTable.topBar.searchPlaceholder": "Pesquisar",
+  "memberPage.noSearchResults": "Nenhum membro corresponde a estes resultados de pesquisa.",
   "memberTable.topBar.sort": "Ordenar",
   "memberTable.transferOwnership": "Transferir propriedade",
   "menuCustomDM.closeDM": "Fechar conversa",

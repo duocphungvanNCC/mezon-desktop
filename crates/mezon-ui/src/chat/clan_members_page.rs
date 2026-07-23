@@ -97,6 +97,9 @@ impl ClanMembersPage {
             return;
         }
         self.clan_id = clan_id;
+        self.search = None;
+        self.search_sub = None;
+        self.search_locale.clear();
         self.page = 0;
         self.rows_dirty = true;
         self.page_size_picker_open = false;
@@ -658,6 +661,10 @@ impl Render for ClanMembersPage {
         self.ensure_search(window, cx);
         let theme = cx.theme();
         let locale = self.settings.read(cx).language.clone();
+        let has_search_query = self
+            .search
+            .as_ref()
+            .is_some_and(|input| !input.read(cx).value().trim().is_empty());
         let total = self.rows(cx).len();
         let pages = total.div_ceil(self.page_size).max(1);
         self.page = self.page.min(pages - 1);
@@ -678,15 +685,27 @@ impl Render for ClanMembersPage {
         }
         let entity = cx.entity();
         let visible_for_list = visible.clone();
-        let member_list = list(self.list_state.clone(), move |index, _window, cx| {
-            entity.update(cx, |this, cx| {
-                visible_for_list
-                    .get(index)
-                    .map(|row| this.render_member_row(row, cx))
-                    .unwrap_or_else(|| div().into_any_element())
+        let member_list = if has_search_query && item_count == 0 {
+            div()
+                .size_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                .text_color(theme.text_secondary)
+                .child(tr(&locale, "memberPage.noSearchResults"))
+                .into_any_element()
+        } else {
+            list(self.list_state.clone(), move |index, _window, cx| {
+                entity.update(cx, |this, cx| {
+                    visible_for_list
+                        .get(index)
+                        .map(|row| this.render_member_row(row, cx))
+                        .unwrap_or_else(|| div().into_any_element())
+                })
             })
-        })
-        .size_full();
+            .size_full()
+            .into_any_element()
+        };
         let body = div()
             .flex()
             .flex_col()

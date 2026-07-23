@@ -2928,6 +2928,7 @@
   "memberTable.timeAgo": "hace {{time}}",
   "memberTable.topBar.recentMembers": "Miembros Recientes",
   "memberTable.topBar.searchPlaceholder": "Buscar por clannick, nombre de visualización o nombre de usuario",
+  "memberPage.noSearchResults": "Neniuj membroj kongruas kun ĉi tiuj serĉrezultoj.",
   "memberTable.topBar.sort": "Ordenar",
   "memberTable.transferOwnership": "Transferir propiedad",
   "menuCustomDM.closeDM": "Cerrar DM",

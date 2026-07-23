@@ -2912,6 +2912,7 @@
   "memberTable.timeAgo": "{{time}} 전",
   "memberTable.topBar.recentMembers": "최근 멤버",
   "memberTable.topBar.searchPlaceholder": "검색",
+  "memberPage.noSearchResults": "이 검색 결과와 일치하는 회원이 없습니다.",
   "memberTable.topBar.sort": "정렬",
   "memberTable.transferOwnership": "소유권 이전",
   "menuCustomDM.closeDM": "메시지 닫기",

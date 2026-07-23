@@ -2919,6 +2919,7 @@
   "memberTable.timeAgo": "{{time}} sedan",
   "memberTable.topBar.recentMembers": "Senaste medlemmar",
   "memberTable.topBar.searchPlaceholder": "Sök",
+  "memberPage.noSearchResults": "Inga medlemmar matchar dessa sökresultat.",
   "memberTable.topBar.sort": "Sortera",
   "memberTable.transferOwnership": "Överför ägande",
   "menuCustomDM.closeDM": "Stäng meddelande",

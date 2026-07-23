@@ -2929,6 +2929,7 @@
   "memberTable.timeAgo": "{{time}} назад",
   "memberTable.topBar.recentMembers": "Недавние участники",
   "memberTable.topBar.searchPlaceholder": "Поиск по названию клана, отображаемому имени или имени пользователя",
+  "memberPage.noSearchResults": "Нет участников, соответствующих этим результатам поиска.",
   "memberTable.topBar.sort": "Сортировать",
   "memberTable.transferOwnership": "Передать права",
   "menuCustomDM.closeDM": "Закрыть личные сообщения",
