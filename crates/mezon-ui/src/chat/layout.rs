@@ -13,7 +13,6 @@ use mezon_store::{
     VoiceMember, VoiceModerationError, VoiceStore, expand_mention_name_tokens,
 };
 use ui::PopoverMenuHandle;
-use ui::utils::ROUNDED_BORDER_WINDOW;
 
 use crate::app::shell::Shell;
 use crate::chat::area::ChatArea;
@@ -1366,7 +1365,6 @@ impl Render for ChatLayout {
                             .flex_1()
                             .min_h_0()
                             .bg(theme.bg_tertiary)
-                            .rounded_bl(px(ROUNDED_BORDER_WINDOW))
                             .overflow_hidden()
                             .child(
                                 div().w(px(72.0)).h_full().pb(nav_bottom_pad).child(
