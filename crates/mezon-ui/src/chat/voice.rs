@@ -16,7 +16,7 @@ use crate::components::primitives::{
     Avatar, ContextMenu, Icon, IconName, Sizable, Size, Spinner, context_menu_at,
 };
 use crate::theme::Theme;
-use ui::Tooltip;
+use ui::{ScrollAxes, Scrollbars, Tooltip, WithScrollbar};
 
 /// Shared brand accent (Discord-style blurple) used across the voice UI and
 /// the screen-share modal. Single source of truth — do not duplicate.
@@ -54,15 +54,19 @@ pub fn render_voice_channel(
     show_members: bool,
     visual: &mut VoiceVisualState,
     window_width: Pixels,
-    cx: &Context<ChatLayout>,
+    window: &mut Window,
+    cx: &mut Context<ChatLayout>,
 ) -> AnyElement {
-    let store = voice.read(cx);
-    let connecting = matches!(
-        store.connection(),
-        VoiceConnection::Connecting { channel_id, .. } if *channel_id == channel.id.to_string()
-    );
+    let connecting = {
+        let store = voice.read(cx);
+        matches!(
+            store.connection(),
+            VoiceConnection::Connecting { channel_id, .. } if *channel_id == channel.id.to_string()
+        )
+    };
+    let in_call = voice.read(cx).is_connected_to(&channel.id.to_string()) || connecting;
 
-    if store.is_connected_to(&channel.id.to_string()) || connecting {
+    if in_call {
         let chat = cx.entity();
         return render_in_call(
             theme,
@@ -70,7 +74,6 @@ pub fn render_voice_channel(
             channel,
             voice,
             settings,
-            store,
             connecting,
             &chat,
             strip_scroll,
@@ -78,11 +81,12 @@ pub fn render_voice_channel(
             grid_size,
             show_members,
             visual,
+            window,
             cx,
         );
     }
 
-    let error = match store.connection() {
+    let error = match voice.read(cx).connection() {
         VoiceConnection::Failed {
             channel_id,
             message,
@@ -978,6 +982,16 @@ fn reactions_overlay(store: &VoiceStore) -> Option<AnyElement> {
     )
 }
 
+enum InCallBodyLayout {
+    Focus {
+        cells: Vec<VideoCell>,
+        focused_idx: usize,
+    },
+    Grid {
+        cells: Vec<VideoCell>,
+    },
+}
+
 #[allow(clippy::too_many_arguments)]
 fn render_in_call(
     theme: &Theme,
@@ -985,7 +999,6 @@ fn render_in_call(
     channel: &Channel,
     voice: &Entity<VoiceStore>,
     settings: &Entity<Settings>,
-    store: &VoiceStore,
     connecting: bool,
     chat: &Entity<ChatLayout>,
     strip_scroll: &ScrollHandle,
@@ -993,11 +1006,13 @@ fn render_in_call(
     grid_size: gpui::Size<Pixels>,
     show_members: bool,
     visual: &mut VoiceVisualState,
-    cx: &App,
+    window: &mut Window,
+    cx: &mut App,
 ) -> AnyElement {
-    let fullscreen_active = store.fullscreen_screen().is_some();
+    let fullscreen_active = voice.read(cx).fullscreen_screen().is_some();
 
-    let body = (!fullscreen_active).then(|| {
+    let body_layout = (!fullscreen_active).then(|| {
+        let store = voice.read(cx);
         let participants = store.participants();
         let focused = store.focused_tile();
 
@@ -1038,9 +1053,8 @@ fn render_in_call(
                 };
                 let bounds = strip_scroll.bounds();
                 let viewport_w = f32::from(bounds.size.width);
+                let aside_h = carousel_aside_height(f32::from(bounds.size.height));
                 let max_items = if viewport_w > 0. {
-                    let overflows = strip_scroll.max_offset().x > px(0.);
-                    let aside_h = f32::from(bounds.size.height) + if overflows { 6. } else { 0. };
                     carousel_max_visible_tiles(viewport_w, aside_h)
                 } else {
                     0
@@ -1059,34 +1073,41 @@ fn render_in_call(
         }
 
         let focused_idx = focused_id.and_then(|fid| cells.iter().position(|c| c.id == fid));
-
         match focused_idx {
-            Some(idx) => render_focus_layout(
-                theme,
-                locale,
-                store,
-                voice,
-                &cells,
-                idx,
-                chat,
-                show_members,
-                strip_scroll,
-            ),
-            None => render_grid(
-                theme,
-                locale,
-                store,
-                voice,
-                &cells,
-                &channel.voice_members,
-                connecting,
-                channel.clan_id,
-                chat,
-                grid_page,
-                grid_size,
-                cx,
-            ),
+            Some(idx) => InCallBodyLayout::Focus {
+                cells,
+                focused_idx: idx,
+            },
+            None => InCallBodyLayout::Grid { cells },
         }
+    });
+
+    let body = body_layout.map(|layout| match layout {
+        InCallBodyLayout::Focus { cells, focused_idx } => render_focus_layout(
+            theme,
+            locale,
+            voice,
+            &cells,
+            focused_idx,
+            chat,
+            show_members,
+            strip_scroll,
+            window,
+            cx,
+        ),
+        InCallBodyLayout::Grid { cells } => render_grid(
+            theme,
+            locale,
+            voice,
+            &cells,
+            &channel.voice_members,
+            connecting,
+            channel.clan_id,
+            chat,
+            grid_page,
+            grid_size,
+            cx,
+        ),
     });
 
     let connection_status: Option<(SharedString, Hsla, bool)> = if connecting {
@@ -1096,7 +1117,7 @@ fn render_in_call(
             true,
         ))
     } else {
-        match store.call_status() {
+        match voice.read(cx).call_status() {
             VoiceCallStatus::Reconnecting => Some((
                 SharedString::from(mezon_i18n::t(locale, "channelVoice.reconnecting").to_string()),
                 theme.status_idle.into(),
@@ -1147,28 +1168,35 @@ fn render_in_call(
             .into_any_element()
     });
 
-    let mic_modal = store
+    let mic_modal = voice
+        .read(cx)
         .mic_permission_denied()
         .then(|| mic_permission_modal(theme, locale, voice));
 
-    let participant_menu = store.participant_menu().and_then(|(identity, position)| {
-        let participant = store
-            .participants()
-            .iter()
-            .find(|p| p.identity == identity)?;
-        let (name, _) = resolve_voice_identity(cx, channel.clan_id, identity, &participant.name);
-        let menu = build_participant_menu(
-            voice,
-            identity.to_string(),
-            name,
-            participant.is_local,
-            participant.muted,
-            locale,
-        );
-        Some(context_menu_at(position, menu).into_any_element())
-    });
+    let participant_menu = voice
+        .read(cx)
+        .participant_menu()
+        .and_then(|(identity, position)| {
+            let participant = voice
+                .read(cx)
+                .participants()
+                .iter()
+                .find(|p| p.identity == identity)?;
+            let (name, _) =
+                resolve_voice_identity(cx, channel.clan_id, identity, &participant.name);
+            let menu = build_participant_menu(
+                voice,
+                identity.to_string(),
+                name,
+                participant.is_local,
+                participant.muted,
+                locale,
+            );
+            Some(context_menu_at(position, menu).into_any_element())
+        });
 
-    let kick_modal = store
+    let kick_modal = voice
+        .read(cx)
         .pending_kick()
         .map(|(_, name)| kick_confirm_modal(theme, locale, voice, name));
 
@@ -1181,11 +1209,19 @@ fn render_in_call(
         .child(voice_header(theme, &channel.name, true))
         .children(body)
         .when(!fullscreen_active, |this| {
-            this.child(control_bar(theme, locale, voice, settings, store, chat, cx))
+            this.child(control_bar(
+                theme,
+                locale,
+                voice,
+                settings,
+                voice.read(cx),
+                chat,
+                cx,
+            ))
         })
         .children(connection_toast)
-        .children(reactions_overlay(store))
-        .children(raised_hands_overlay(cx, channel.clan_id, store))
+        .children(reactions_overlay(voice.read(cx)))
+        .children(raised_hands_overlay(cx, channel.clan_id, voice.read(cx)))
         .children(mic_modal)
         .children(participant_menu)
         .children(kick_modal)
@@ -1550,7 +1586,6 @@ fn in_call_placeholder_cells(
 fn render_grid(
     theme: &Theme,
     locale: &str,
-    store: &VoiceStore,
     voice: &Entity<VoiceStore>,
     cells: &[VideoCell],
     room_members: &[VoiceMember],
@@ -1561,6 +1596,7 @@ fn render_grid(
     grid_size: gpui::Size<Pixels>,
     cx: &App,
 ) -> AnyElement {
+    let store = voice.read(cx);
     let placeholder_cells: Vec<VideoCell>;
     let cells: &[VideoCell] = if !cells.is_empty() {
         cells
@@ -1768,7 +1804,35 @@ fn select_grid_layout(
 
 const CAROUSEL_MIN_TILE_WIDTH: f32 = 140.;
 const CAROUSEL_MAX_ROW_HEIGHT: f32 = 93.;
+const CAROUSEL_SCROLLBAR_RESERVE: f32 = 14.;
+const CAROUSEL_SCROLLBAR_GAP_MIN: f32 = 10.;
 const CAROUSEL_ASPECT_RATIO: f32 = 16. / 10.;
+
+fn carousel_tile_width(aside_height: f32) -> f32 {
+    (aside_height.max(1.) * CAROUSEL_ASPECT_RATIO).max(CAROUSEL_MIN_TILE_WIDTH)
+}
+
+fn carousel_content_width(tile_count: usize, tile_width: f32, gap: f32) -> f32 {
+    if tile_count == 0 {
+        0.
+    } else {
+        tile_count as f32 * (tile_width + gap) - gap
+    }
+}
+
+fn carousel_aside_height(strip_height: f32) -> f32 {
+    if strip_height > 0. {
+        strip_height
+    } else {
+        CAROUSEL_MAX_ROW_HEIGHT - 4.
+    }
+}
+
+fn carousel_overflows(viewport_width: f32, tile_count: usize, aside_height: f32, gap: f32) -> bool {
+    viewport_width > 0.
+        && carousel_content_width(tile_count, carousel_tile_width(aside_height), gap)
+            > viewport_width
+}
 
 fn carousel_max_visible_tiles(viewport_width: f32, aside_height: f32) -> usize {
     let target = (aside_height * CAROUSEL_ASPECT_RATIO).max(CAROUSEL_MIN_TILE_WIDTH);
@@ -1779,15 +1843,21 @@ fn carousel_max_visible_tiles(viewport_width: f32, aside_height: f32) -> usize {
 fn render_focus_layout(
     theme: &Theme,
     locale: &str,
-    store: &VoiceStore,
     voice: &Entity<VoiceStore>,
     cells: &[VideoCell],
     focused_idx: usize,
     chat: &Entity<ChatLayout>,
     show_members: bool,
     strip_scroll: &ScrollHandle,
+    window: &mut Window,
+    cx: &mut App,
 ) -> AnyElement {
     let focused = &cells[focused_idx];
+
+    let focused_tile = {
+        let store = voice.read(cx);
+        focus_main_tile(theme, locale, store, voice, focused)
+    };
 
     let main = div()
         .flex()
@@ -1795,7 +1865,7 @@ fn render_focus_layout(
         .flex_basis(px(0.))
         .min_h_0()
         .w_full()
-        .child(focus_main_tile(theme, locale, store, voice, focused));
+        .child(focused_tile);
 
     let member_count = cells.iter().filter(|c| !c.is_screen).count();
     let toggle_pill = {
@@ -1862,81 +1932,95 @@ fn render_focus_layout(
 
         let strip_bounds = strip_scroll.bounds();
         let viewport = strip_bounds.size.width;
-        let max_x = strip_scroll.max_offset().x;
-        let overflows = max_x > px(0.);
-
-        let total = strip_cells.len();
+        let mut viewport_w = f32::from(viewport);
+        if viewport_w <= 0. {
+            viewport_w = (f32::from(window.viewport_size().width) * 0.55).max(400.);
+        }
         let gap = 8.;
-        let viewport_w = f32::from(viewport);
-        let measured = viewport_w > 0.;
-        let aside_h = f32::from(strip_bounds.size.height) + if overflows { 6. } else { 0. };
-        let tile_w = if measured {
-            let max_tiles = carousel_max_visible_tiles(viewport_w, aside_h);
-            (viewport_w - gap * (max_tiles as f32 - 1.)) / max_tiles as f32
-        } else {
-            CAROUSEL_MIN_TILE_WIDTH
-        };
-        let tile_step = tile_w + gap;
-        let tile_h = f32::from(strip_bounds.size.height) - 4.;
-        let avatar_size = if tile_h > 0. {
-            px((tile_h * 0.6).clamp(24., 80.))
-        } else {
-            px(48.)
-        };
-        let (start, end) = if measured {
-            let scrolled = f32::from(-strip_scroll.offset().x).max(0.);
-            let first = (scrolled / tile_step) as usize;
-            let visible = (viewport_w / tile_step).ceil() as usize + 1;
-            (
-                first.saturating_sub(2).min(total),
-                (first + visible + 2).min(total),
-            )
-        } else {
-            (0, total.min(16))
-        };
-        let lead_spacer =
-            (start > 0).then(|| div().flex_none().w(px(start as f32 * tile_step - gap)));
-        let trail_spacer = (end < total).then(|| {
-            div()
-                .flex_none()
-                .w(px((total - end) as f32 * tile_step - gap))
-        });
+        let total = strip_cells.len();
+        let strip_h = f32::from(strip_bounds.size.height);
+        let aside_h = carousel_aside_height(strip_h);
+        let tile_w = carousel_tile_width(aside_h);
+        let content_w = carousel_content_width(total, tile_w, gap);
+        let overflows = carousel_overflows(viewport_w, total, aside_h, gap);
+        let avatar_size = px((aside_h * 0.6).clamp(24., 80.));
 
-        let carousel = div()
+        let strip_tiles = {
+            let store = voice.read(cx);
+            strip_cells
+                .iter()
+                .copied()
+                .map(|c| strip_tile(theme, locale, store, voice, c, tile_w, avatar_size))
+                .collect::<Vec<_>>()
+        };
+
+        let tiles_row = div()
             .id("voice-carousel")
-            .flex_1()
-            .min_h_0()
-            .w_full()
             .flex()
             .flex_row()
-            .gap_2()
-            .pb_1()
-            .when(!overflows, |this| this.justify_center())
-            .overflow_x_scroll()
-            .track_scroll(strip_scroll)
-            .children(lead_spacer)
-            .children(
-                strip_cells[start..end]
-                    .iter()
-                    .copied()
-                    .map(|c| strip_tile(theme, locale, store, voice, c, tile_w, avatar_size)),
-            )
-            .children(trail_spacer);
+            .flex_none()
+            .w(px(content_w))
+            .h(px(aside_h))
+            .gap(px(gap))
+            .children(strip_tiles);
 
-        let scrollbar = overflows.then(|| {
-            let content = viewport + max_x;
-            let thumb = viewport * (viewport / content).clamp(0., 1.);
-            let scrolled = ((-strip_scroll.offset().x) / max_x).clamp(0., 1.);
-            let thumb_x = (viewport - thumb) * scrolled;
-            div().h(px(6.)).w_full().child(
-                div()
-                    .ml(thumb_x)
-                    .w(thumb)
-                    .h_full()
-                    .rounded(px(4.))
-                    .bg(gpui::rgb(0x6d6f77)),
-            )
-        });
+        let carousel: AnyElement = if overflows {
+            div()
+                .flex_1()
+                .min_h_0()
+                .min_w_0()
+                .w_full()
+                .flex()
+                .flex_col()
+                .child(
+                    div()
+                        .id("voice-carousel-scroll")
+                        .w_full()
+                        .h(px(aside_h))
+                        .overflow_x_scroll()
+                        .track_scroll(strip_scroll)
+                        .child(tiles_row),
+                )
+                .child(
+                    div()
+                        .id("voice-carousel-scrollbar-gap")
+                        .flex_1()
+                        .min_h(px(CAROUSEL_SCROLLBAR_GAP_MIN))
+                        .w_full()
+                        .flex()
+                        .items_center()
+                        .child(
+                            div()
+                                .id("voice-carousel-scrollbar")
+                                .w_full()
+                                .h(px(CAROUSEL_SCROLLBAR_RESERVE))
+                                .custom_scrollbars(
+                                    Scrollbars::always_visible(ScrollAxes::Horizontal)
+                                        .tracked_scroll_handle(strip_scroll),
+                                    window,
+                                    cx,
+                                ),
+                        ),
+                )
+                .into_any_element()
+        } else {
+            div()
+                .flex_1()
+                .min_h_0()
+                .min_w_0()
+                .w_full()
+                .flex()
+                .flex_row()
+                .justify_center()
+                .child(tiles_row)
+                .into_any_element()
+        };
+
+        let strip_max_h = if overflows {
+            CAROUSEL_MAX_ROW_HEIGHT + CAROUSEL_SCROLLBAR_GAP_MIN + CAROUSEL_SCROLLBAR_RESERVE
+        } else {
+            CAROUSEL_MAX_ROW_HEIGHT
+        };
 
         let strip = div()
             .relative()
@@ -1945,10 +2029,9 @@ fn render_focus_layout(
             .flex_col()
             .flex_basis(px(0.))
             .min_h_0()
-            .max_h(px(CAROUSEL_MAX_ROW_HEIGHT))
+            .max_h(px(strip_max_h))
             .w_full()
             .child(carousel)
-            .children(scrollbar)
             .child(
                 div()
                     .absolute()
@@ -3013,6 +3096,32 @@ fn kind_slug(kind: DeviceKind) -> &'static str {
         DeviceKind::AudioInput => "input",
         DeviceKind::AudioOutput => "output",
         DeviceKind::VideoInput => "camera",
+    }
+}
+
+#[cfg(test)]
+mod carousel_tests {
+    use super::{
+        CAROUSEL_MIN_TILE_WIDTH, carousel_content_width, carousel_overflows, carousel_tile_width,
+    };
+
+    #[test]
+    fn uses_fixed_min_tile_width_like_react() {
+        let tile_w = carousel_tile_width(89.);
+        assert!(tile_w >= CAROUSEL_MIN_TILE_WIDTH);
+        assert!(tile_w > carousel_tile_width(50.));
+    }
+
+    #[test]
+    fn eleven_participants_overflow_typical_strip_viewport() {
+        let tile_w = carousel_tile_width(89.);
+        assert!(carousel_overflows(1200., 11, 89., 8.));
+        assert!(carousel_content_width(11, tile_w, 8.) > 1200.);
+    }
+
+    #[test]
+    fn participants_fit_without_scroll_on_wide_viewport() {
+        assert!(!carousel_overflows(3000., 11, 89., 8.));
     }
 }
 
