@@ -8,8 +8,9 @@ pub fn file_type_icon_for(filetype: &str, filename: &str) -> IconName {
     let key = filetype.trim().to_ascii_lowercase();
     let from_mime = match key.as_str() {
         "text/plain" | "txt" => Some(IconName::FileThumbDoc),
-        "text/html" | "text/css" | "application/xml" | "image/svg+xml" | "html" | "css"
-        | "xml" => Some(IconName::FileThumbCode),
+        "text/html" | "text/css" | "application/xml" | "image/svg+xml" | "html" | "css" | "xml" => {
+            Some(IconName::FileThumbCode)
+        }
         "application/javascript" | "application/json" | "json" | "js" => {
             Some(IconName::FileThumbJson)
         }

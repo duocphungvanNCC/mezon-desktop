@@ -12,8 +12,8 @@ use mezon_voice::{IceServerConfig, VoiceEvent, VoiceSession};
 use parking_lot::Mutex;
 
 pub use mezon_voice::{
-    NetworkQuality, PickedScreen, ScreenShareKind, ScreenShareListError, ScreenShareOption,
-    ScreenSharePreview, VideoFrameData, VideoFrameStore, VoiceParticipant,
+    CameraDeviceInfo, NetworkQuality, PickedScreen, ScreenShareKind, ScreenShareListError,
+    ScreenShareOption, ScreenSharePreview, VideoFrameData, VideoFrameStore, VoiceParticipant,
     capture_screen_share_preview, list_screen_share_options, peek_screen_share_options,
 };
 
@@ -21,6 +21,19 @@ use crate::AppConfig;
 use crate::clan_members::ClanMembersStore;
 use crate::ids::{ClanId, UserId};
 use crate::realtime::{RealtimeDispatch, RealtimeKind};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeviceKind {
+    AudioInput,
+    AudioOutput,
+    VideoInput,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeviceMenuKind {
+    Microphone,
+    Camera,
+}
 
 const MEET_TOKEN_CACHE_TTL: Duration = Duration::from_secs(45);
 const RAISE_HAND_TTL: Duration = Duration::from_secs(10);
@@ -33,6 +46,7 @@ const EMOJI_REACTION_RATE_LIMIT: Duration = Duration::from_millis(150);
 const EMOJI_REACTION_TAIL: Duration = Duration::from_millis(500);
 const MAX_DISPLAYED_REACTIONS: usize = 20;
 const DEFAULT_NOISE_SUPPRESSION_LEVEL: u8 = 20;
+const KICK_SUPPRESS_TIMEOUT: Duration = Duration::from_secs(5);
 static RAISE_HAND_SOUND: &[u8] = include_bytes!("../assets/audio/raising-hand.mp3");
 
 fn parse_raise_token(token: &str) -> Option<bool> {
@@ -136,13 +150,18 @@ pub struct VoiceStore {
     noise_suppression_enabled: bool,
     noise_suppression_level: u8,
     focused_tile: Option<String>,
+    auto_focused_screen: Option<String>,
     fullscreen_screen: Option<u64>,
     pip: Option<PipWindow>,
     room_name: String,
     participant_menu: Option<(String, gpui::Point<gpui::Pixels>)>,
     pending_kick: Option<(String, String)>,
+    pending_removals: HashMap<String, Instant>,
     moderation_error: Option<VoiceModerationError>,
     participants: Vec<VoiceParticipant>,
+    join_ranks: Vec<String>,
+    speak_ranks: HashMap<String, u64>,
+    speak_seq: u64,
     raised_hands: Vec<String>,
     raised_hand_timers: HashMap<String, Task<()>>,
     raising_hand_player: Option<AudioPlayer>,
@@ -157,6 +176,10 @@ pub struct VoiceStore {
     last_emoji_at: Option<Instant>,
     session: Option<VoiceSession>,
     frame_store: Option<Arc<VideoFrameStore>>,
+    camera_devices: Vec<CameraDeviceInfo>,
+    device_menu: Option<DeviceMenuKind>,
+    device_submenu: Option<DeviceKind>,
+    _camera_enum_task: Option<Task<()>>,
     render_cache: Mutex<HashMap<u64, CachedRenderFrame>>,
     pending_texture_drops: Mutex<Vec<Arc<RenderImage>>>,
     pending_texture_replaces: Mutex<Vec<Arc<RenderImage>>>,
@@ -207,6 +230,36 @@ pub fn camera_tile_id(identity: &str) -> String {
     format!("{identity}\u{1}camera")
 }
 
+#[derive(Debug, PartialEq)]
+enum ScreenAutoFocus {
+    Keep,
+    Clear,
+    Focus(String),
+}
+
+fn screen_auto_focus_transition(
+    participants: &[VoiceParticipant],
+    auto_focused: Option<&str>,
+) -> ScreenAutoFocus {
+    let auto_still_live = auto_focused.is_some_and(|id| {
+        participants
+            .iter()
+            .any(|p| p.screenshare.is_some() && screen_tile_id(&p.identity) == id)
+    });
+    if auto_still_live {
+        return ScreenAutoFocus::Keep;
+    }
+    let next = participants
+        .iter()
+        .find(|p| p.screenshare.is_some())
+        .map(|p| screen_tile_id(&p.identity));
+    match next {
+        Some(id) => ScreenAutoFocus::Focus(id),
+        None if auto_focused.is_some() => ScreenAutoFocus::Clear,
+        None => ScreenAutoFocus::Keep,
+    }
+}
+
 impl VoiceStore {
     pub fn init(api: Arc<AppApi>, cx: &mut App) -> Entity<Self> {
         let entity = cx.new(|cx| Self::new(api, cx));
@@ -236,13 +289,18 @@ impl VoiceStore {
             noise_suppression_enabled: false,
             noise_suppression_level: DEFAULT_NOISE_SUPPRESSION_LEVEL,
             focused_tile: None,
+            auto_focused_screen: None,
             fullscreen_screen: None,
             pip: None,
             room_name: String::new(),
             participant_menu: None,
             pending_kick: None,
+            pending_removals: HashMap::new(),
             moderation_error: None,
             participants: Vec::new(),
+            join_ranks: Vec::new(),
+            speak_ranks: HashMap::new(),
+            speak_seq: 0,
             raised_hands: Vec::new(),
             raised_hand_timers: HashMap::new(),
             raising_hand_player: None,
@@ -257,6 +315,10 @@ impl VoiceStore {
             last_emoji_at: None,
             session: None,
             frame_store: None,
+            camera_devices: Vec::new(),
+            device_menu: None,
+            device_submenu: None,
+            _camera_enum_task: None,
             render_cache: Mutex::new(HashMap::new()),
             pending_texture_drops: Mutex::new(Vec::new()),
             pending_texture_replaces: Mutex::new(Vec::new()),
@@ -318,6 +380,37 @@ impl VoiceStore {
 
     pub fn participants(&self) -> &[VoiceParticipant] {
         &self.participants
+    }
+
+    pub fn join_rank(&self, identity: &str) -> usize {
+        self.join_ranks
+            .iter()
+            .position(|id| id == identity)
+            .unwrap_or(usize::MAX)
+    }
+
+    pub fn last_spoke_rank(&self, identity: &str) -> u64 {
+        self.speak_ranks.get(identity).copied().unwrap_or(0)
+    }
+
+    fn track_visual_ranks(&mut self, list: &[VoiceParticipant]) {
+        self.join_ranks
+            .retain(|id| list.iter().any(|p| p.identity == *id));
+        for p in list {
+            if !self.join_ranks.contains(&p.identity) {
+                self.join_ranks.push(p.identity.clone());
+            }
+            let was_speaking = self
+                .participants
+                .iter()
+                .any(|old| old.identity == p.identity && old.speaking);
+            if p.speaking && !was_speaking {
+                self.speak_seq += 1;
+                self.speak_ranks.insert(p.identity.clone(), self.speak_seq);
+            }
+        }
+        self.speak_ranks
+            .retain(|id, _| list.iter().any(|p| p.identity == *id));
     }
 
     pub fn mic_enabled(&self) -> bool {
@@ -419,6 +512,7 @@ impl VoiceStore {
             }
         });
         let mut render_image = RenderImage::new_recyclable(image::Frame::new(buffer), recycler);
+        #[cfg_attr(not(target_os = "macos"), allow(clippy::bind_instead_of_map))]
         let previous_id = self
             .render_cache
             .lock()
@@ -1063,6 +1157,21 @@ impl VoiceStore {
         }
     }
 
+    fn sync_screen_auto_focus(&mut self) {
+        match screen_auto_focus_transition(&self.participants, self.auto_focused_screen.as_deref())
+        {
+            ScreenAutoFocus::Keep => {}
+            ScreenAutoFocus::Clear => {
+                self.focused_tile = None;
+                self.auto_focused_screen = None;
+            }
+            ScreenAutoFocus::Focus(id) => {
+                self.focused_tile = Some(id.clone());
+                self.auto_focused_screen = Some(id);
+            }
+        }
+    }
+
     pub fn toggle_focus(&mut self, id: String, cx: &mut Context<Self>) {
         if self.focused_tile.as_deref() == Some(id.as_str()) {
             self.focused_tile = None;
@@ -1209,6 +1318,9 @@ impl VoiceStore {
         let Some((identity, _)) = self.pending_kick.take() else {
             return;
         };
+        self.pending_removals
+            .insert(identity.clone(), Instant::now());
+        self.participants.retain(|p| p.identity != identity);
         cx.notify();
         self.moderate_participant(identity, ModerationAction::Kick, cx);
     }
@@ -1243,6 +1355,9 @@ impl VoiceStore {
             if let Err(e) = result {
                 tracing::warn!("participant moderation failed: {e:#}");
                 let _ = this.update(cx, |this, cx| {
+                    if matches!(action, ModerationAction::Kick) {
+                        this.pending_removals.remove(&identity);
+                    }
                     this.moderation_error = Some(action.error());
                     cx.notify();
                 });
@@ -1280,6 +1395,7 @@ impl VoiceStore {
         channel_label: String,
         input_device_id: Option<String>,
         output_device_id: Option<String>,
+        camera_device_id: Option<String>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -1308,6 +1424,8 @@ impl VoiceStore {
         self.mic_enabled = false;
         self.mic_permission_denied = false;
         self.participants.clear();
+        self.join_ranks.clear();
+        self.speak_ranks.clear();
         cx.notify();
 
         let api = self.api.clone();
@@ -1319,6 +1437,7 @@ impl VoiceStore {
                 channel_id,
                 input_device_id,
                 output_device_id,
+                camera_device_id,
                 cx,
             );
             return;
@@ -1338,6 +1457,7 @@ impl VoiceStore {
                         channel_id,
                         input_device_id,
                         output_device_id,
+                        camera_device_id,
                         cx,
                     );
                 }
@@ -1361,6 +1481,7 @@ impl VoiceStore {
         channel_id: String,
         input_device_id: Option<String>,
         output_device_id: Option<String>,
+        camera_device_id: Option<String>,
         cx: &mut Context<Self>,
     ) {
         if self.connection.active_channel_id() != Some(channel_id.as_str()) {
@@ -1373,6 +1494,7 @@ impl VoiceStore {
             token,
             input_device_id,
             output_device_id,
+            camera_device_id,
             ice_servers,
         );
         let events = session.events();
@@ -1482,16 +1604,26 @@ impl VoiceStore {
                     self.call_status = VoiceCallStatus::Stable;
                 }
             }
-            VoiceEvent::Participants(list) => {
+            VoiceEvent::Participants(mut list) => {
+                if !self.pending_removals.is_empty() {
+                    let now = Instant::now();
+                    self.pending_removals.retain(|identity, issued_at| {
+                        list.iter().any(|p| &p.identity == identity)
+                            && now.duration_since(*issued_at) < KICK_SUPPRESS_TIMEOUT
+                    });
+                    list.retain(|p| !self.pending_removals.contains_key(&p.identity));
+                }
                 if self.participants == list {
                     return;
                 }
+                self.track_visual_ranks(&list);
                 self.participants = list;
                 if let Some(local) = self.participants.iter().find(|p| p.is_local) {
                     self.mic_enabled = !local.muted;
                     self.camera_enabled = local.camera.is_some();
                     self.screen_share_enabled = local.screenshare.is_some();
                 }
+                self.sync_screen_auto_focus();
                 self.evict_stale_render_cache();
                 self.flush_texture_drops(None, cx);
                 self.prune_screen_targets(cx);
@@ -1558,6 +1690,107 @@ impl VoiceStore {
         cx.notify();
     }
 
+    pub fn set_input_device(&mut self, device_id: Option<String>, cx: &mut Context<Self>) {
+        Self::persist_device(DeviceKind::AudioInput, device_id.clone(), cx);
+        if let Some(session) = &self.session {
+            session.set_input_device(device_id);
+        }
+        self.device_menu = None;
+        self.device_submenu = None;
+        cx.notify();
+    }
+
+    pub fn set_output_device(&mut self, device_id: Option<String>, cx: &mut Context<Self>) {
+        Self::persist_device(DeviceKind::AudioOutput, device_id.clone(), cx);
+        if let Some(session) = &self.session {
+            session.set_output_device(device_id);
+        }
+        self.device_menu = None;
+        self.device_submenu = None;
+        cx.notify();
+    }
+
+    pub fn set_camera_device(&mut self, device_id: Option<String>, cx: &mut Context<Self>) {
+        Self::persist_device(DeviceKind::VideoInput, device_id.clone(), cx);
+        if let Some(session) = &self.session {
+            session.set_camera_device(device_id);
+        }
+        self.device_menu = None;
+        self.device_submenu = None;
+        cx.notify();
+    }
+
+    fn persist_device(kind: DeviceKind, device_id: Option<String>, cx: &mut Context<Self>) {
+        let Some(settings) = crate::Settings::try_global(cx) else {
+            return;
+        };
+        settings.update(cx, |s, _| match kind {
+            DeviceKind::AudioInput => s.input_device_id = device_id,
+            DeviceKind::AudioOutput => s.output_device_id = device_id,
+            DeviceKind::VideoInput => s.camera_device_id = device_id,
+        });
+        crate::schedule_settings_save(&settings, cx);
+    }
+
+    pub fn device_menu(&self) -> Option<DeviceMenuKind> {
+        self.device_menu
+    }
+
+    pub fn device_submenu(&self) -> Option<DeviceKind> {
+        self.device_submenu
+    }
+
+    pub fn camera_devices(&self) -> &[CameraDeviceInfo] {
+        &self.camera_devices
+    }
+
+    pub fn toggle_device_menu(&mut self, kind: DeviceMenuKind, cx: &mut Context<Self>) {
+        if self.device_menu == Some(kind) {
+            self.device_menu = None;
+            self.device_submenu = None;
+        } else {
+            self.device_menu = Some(kind);
+            self.device_submenu = None;
+            self.refresh_devices(cx);
+        }
+        cx.notify();
+    }
+
+    pub fn close_device_menu(&mut self, cx: &mut Context<Self>) {
+        if self.device_menu.is_some() || self.device_submenu.is_some() {
+            self.device_menu = None;
+            self.device_submenu = None;
+            cx.notify();
+        }
+    }
+
+    pub fn set_device_submenu(&mut self, submenu: Option<DeviceKind>, cx: &mut Context<Self>) {
+        if self.device_submenu != submenu {
+            self.device_submenu = submenu;
+            cx.notify();
+        }
+    }
+
+    fn refresh_devices(&mut self, cx: &mut Context<Self>) {
+        if let Some(audio_store) = crate::AudioStore::try_global(cx) {
+            crate::AudioStore::refresh_devices(&audio_store, cx);
+        }
+        self.refresh_cameras(cx);
+    }
+
+    fn refresh_cameras(&mut self, cx: &mut Context<Self>) {
+        self._camera_enum_task = Some(cx.spawn(async move |this, cx| {
+            let devices = cx
+                .background_executor()
+                .spawn(async move { mezon_voice::enumerate_cameras() })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                this.camera_devices = devices;
+                cx.notify();
+            });
+        }));
+    }
+
     pub fn start_screen_share(
         &mut self,
         pick: PickedScreen,
@@ -1588,6 +1821,7 @@ impl VoiceStore {
         self.fullscreen_screen = None;
         self.session = None;
         self.frame_store = None;
+        #[cfg_attr(not(target_os = "macos"), allow(clippy::unnecessary_filter_map))]
         let stale: Vec<Arc<RenderImage>> = {
             let mut cache = self.render_cache.lock();
             cache
@@ -1614,11 +1848,17 @@ impl VoiceStore {
         self.noise_suppression_enabled = false;
         self.noise_suppression_level = DEFAULT_NOISE_SUPPRESSION_LEVEL;
         self.focused_tile = None;
+        self.auto_focused_screen = None;
         self.room_name.clear();
+        self.device_menu = None;
+        self.device_submenu = None;
         self.participant_menu = None;
         self.pending_kick = None;
+        self.pending_removals.clear();
         self.moderation_error = None;
         self.participants.clear();
+        self.join_ranks.clear();
+        self.speak_ranks.clear();
         self.raised_hands.clear();
         self.raised_hand_timers.clear();
         self.active_sounds.clear();
@@ -1642,7 +1882,90 @@ mod tests {
     use gpui::RenderImage;
     use parking_lot::Mutex;
 
-    use super::parse_raise_token;
+    use super::{ScreenAutoFocus, parse_raise_token, screen_auto_focus_transition, screen_tile_id};
+    use crate::{NetworkQuality, VoiceParticipant};
+
+    fn voice_participant(identity: &str, screenshare: Option<u64>) -> VoiceParticipant {
+        VoiceParticipant {
+            identity: identity.to_string(),
+            name: identity.to_string(),
+            is_local: false,
+            is_agent: false,
+            speaking: false,
+            muted: false,
+            camera: None,
+            screenshare,
+            quality: NetworkQuality::Unknown,
+        }
+    }
+
+    #[test]
+    fn auto_focuses_first_screen_share() {
+        let participants = vec![
+            voice_participant("a", None),
+            voice_participant("b", Some(1)),
+            voice_participant("c", Some(2)),
+        ];
+        assert_eq!(
+            screen_auto_focus_transition(&participants, None),
+            ScreenAutoFocus::Focus(screen_tile_id("b"))
+        );
+    }
+
+    #[test]
+    fn keeps_state_while_auto_focused_share_lives() {
+        let participants = vec![voice_participant("b", Some(1))];
+        let auto = screen_tile_id("b");
+        assert_eq!(
+            screen_auto_focus_transition(&participants, Some(&auto)),
+            ScreenAutoFocus::Keep
+        );
+    }
+
+    #[test]
+    fn does_not_steal_focus_for_second_share() {
+        let participants = vec![
+            voice_participant("b", Some(1)),
+            voice_participant("c", Some(2)),
+        ];
+        let auto = screen_tile_id("b");
+        assert_eq!(
+            screen_auto_focus_transition(&participants, Some(&auto)),
+            ScreenAutoFocus::Keep
+        );
+    }
+
+    #[test]
+    fn clears_focus_when_auto_focused_share_ends() {
+        let participants = vec![voice_participant("b", None)];
+        let auto = screen_tile_id("b");
+        assert_eq!(
+            screen_auto_focus_transition(&participants, Some(&auto)),
+            ScreenAutoFocus::Clear
+        );
+    }
+
+    #[test]
+    fn moves_focus_to_remaining_share_when_auto_focused_share_ends() {
+        let participants = vec![
+            voice_participant("b", None),
+            voice_participant("c", Some(2)),
+        ];
+        let auto = screen_tile_id("b");
+        assert_eq!(
+            screen_auto_focus_transition(&participants, Some(&auto)),
+            ScreenAutoFocus::Focus(screen_tile_id("c"))
+        );
+    }
+
+    #[test]
+    fn stays_idle_without_screen_shares() {
+        let participants = vec![voice_participant("a", None)];
+        assert_eq!(
+            screen_auto_focus_transition(&participants, None),
+            ScreenAutoFocus::Keep
+        );
+    }
 
     #[test]
     fn parse_raise_token_classifies_prefixes() {

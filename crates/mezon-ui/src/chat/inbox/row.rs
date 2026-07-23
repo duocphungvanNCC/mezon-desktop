@@ -1,20 +1,26 @@
+use std::ops::Range;
+
 use chrono::{Local, TimeZone};
-use gpui::{App, Entity, FontWeight, SharedString, div, img, prelude::*, px, rgb};
+use gpui::{
+    App, Entity, FontWeight, HighlightStyle, Hsla, SharedString, StyledText, UnderlineStyle, div,
+    img, prelude::*, px, rgb,
+};
 use mezon_store::{
-    Channel, ChannelId, ChannelList, ChannelType, ClanId, ClanList, InboxCategory,
-    InboxMentionSpan, InboxNotification, ProfileContext, TopicDiscussion, UserId, UsersByUserStore,
-    attachment_link_is_image, message_content_is_attachment, resolve_user_profile,
+    Channel, ChannelId, ChannelList, ChannelType, ClanId, ClanList, ClanMembersStore,
+    InboxCategory, InboxMentionSpan, InboxNotification, MessageSpan, ProfileContext, RolesStore,
+    TopicDiscussion, TopicReplyPreview, UserId, UsersByUserStore, attachment_link_is_image,
+    inbox_spans_from_raw, message_content_is_attachment, resolve_user_profile,
 };
 
 use crate::components::primitives::{Avatar, Sizable, Size, h_flex, v_flex};
 use crate::image_cache::LruImageCache;
 use crate::theme::Theme;
 
-const DISPLAY_NAME_COLOR: u32 = 0x17ac86;
+const DEFAULT_ROLE_COLOR: u32 = 0x99_aab5;
 pub const FOR_YOU_ROW_HEIGHT: f32 = 76.;
 pub const MENTION_ROW_HEIGHT: f32 = 120.;
 pub const MESSAGE_ROW_HEIGHT: f32 = 128.;
-pub const TOPIC_ROW_HEIGHT: f32 = 96.;
+pub const TOPIC_ROW_HEIGHT: f32 = 150.;
 pub const ROW_HEIGHT: f32 = MENTION_ROW_HEIGHT;
 
 #[derive(Clone)]
@@ -31,6 +37,12 @@ pub(crate) struct ForYouLine {
     subject_suffix: SharedString,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum InboxInlineHighlight {
+    Mention { is_role: bool },
+    Link,
+}
+
 #[derive(Clone)]
 pub(crate) struct NotificationRowView {
     sender_name: SharedString,
@@ -42,7 +54,11 @@ pub(crate) struct NotificationRowView {
     for_you_line: Option<ForYouLine>,
     body_text: SharedString,
     body_is_attachment: bool,
+    body_spans: Vec<MessageSpan>,
+    body_link_ranges: Vec<Range<usize>>,
+    body_inline_span_ranges: Vec<(Range<usize>, InboxInlineHighlight)>,
     mention_spans: Vec<InboxMentionSpan>,
+    sender_name_color: Hsla,
     attachment_link: String,
     attachment_type: String,
     has_more_attachment: bool,
@@ -52,8 +68,7 @@ pub(crate) struct NotificationRowView {
 pub(crate) struct TopicRowView {
     avatar_name: SharedString,
     avatar_url: Option<SharedString>,
-    reply_preview: SharedString,
-    reply_is_attachment: bool,
+    reply_preview: TopicReplyPreview,
 }
 
 fn format_inbox_time(ts: u32, locale: &SharedString) -> String {
@@ -218,6 +233,73 @@ fn avatar_from(url: &str) -> Option<SharedString> {
     }
 }
 
+fn parse_hex_role_color(raw: &str) -> Option<gpui::Rgba> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let hex = trimmed.strip_prefix('#').unwrap_or(trimmed);
+    let (r, g, b) = match hex.len() {
+        6 => {
+            let value = u32::from_str_radix(hex, 16).ok()?;
+            (
+                ((value >> 16) & 0xff) as u8,
+                ((value >> 8) & 0xff) as u8,
+                (value & 0xff) as u8,
+            )
+        }
+        3 => {
+            let r = u8::from_str_radix(&hex[0..1], 16).ok()?;
+            let g = u8::from_str_radix(&hex[1..2], 16).ok()?;
+            let b = u8::from_str_radix(&hex[2..3], 16).ok()?;
+            (r * 17, g * 17, b * 17)
+        }
+        8 => {
+            let value = u32::from_str_radix(&hex[0..6], 16).ok()?;
+            (
+                ((value >> 16) & 0xff) as u8,
+                ((value >> 8) & 0xff) as u8,
+                (value & 0xff) as u8,
+            )
+        }
+        _ => return None,
+    };
+    Some(gpui::Rgba {
+        r: r as f32 / 255.,
+        g: g as f32 / 255.,
+        b: b as f32 / 255.,
+        a: 1.,
+    })
+}
+
+fn resolve_inbox_sender_color(clan_id: ClanId, sender_id: UserId, cx: &App) -> Hsla {
+    let role_ids = ClanMembersStore::global(cx)
+        .read(cx)
+        .member(clan_id, sender_id)
+        .map(|member| member.role_ids.clone())
+        .unwrap_or_default();
+    if role_ids.is_empty() {
+        return Hsla::from(rgb(DEFAULT_ROLE_COLOR));
+    }
+    let Some(roles_store) = RolesStore::try_global(cx) else {
+        return Hsla::from(rgb(DEFAULT_ROLE_COLOR));
+    };
+    let store = roles_store.read(cx);
+    let matched_role = store
+        .roles_in_clan(clan_id)
+        .into_iter()
+        .find(|(id, _)| role_ids.contains(id))
+        .map(|(_, role)| role);
+    if let Some(role) = matched_role
+        && let Some(color) = (!role.color.is_empty())
+            .then(|| parse_hex_role_color(&role.color))
+            .flatten()
+    {
+        return Hsla::from(color);
+    }
+    Hsla::from(rgb(DEFAULT_ROLE_COLOR))
+}
+
 fn is_direct_message_mention(notification: &InboxNotification, cx: &App) -> bool {
     match notification
         .effective_clan_id()
@@ -294,16 +376,24 @@ pub(crate) fn build_notification_row_view(
         .map(sender_display_name)
         .unwrap_or_default();
 
-    let (mut sender_name, mut avatar_url, _) = clan_id
+    let is_mentions = notification.category == InboxCategory::Mentions;
+    let is_messages = notification.category == InboxCategory::Messages;
+    let (resolved_name, mut avatar_url, _) = clan_id
         .map(|clan| resolve_sender(clan, sender_id, fallback_avatar, &fallback_name, cx))
         .unwrap_or((
             fallback_name.clone().into(),
             avatar_from(fallback_avatar),
             false,
         ));
-    if sender_name.is_empty() && !fallback_name.is_empty() {
-        sender_name = fallback_name.into();
-    }
+    let mut sender_name = if (is_mentions || is_messages) && !fallback_name.is_empty() {
+        fallback_name.into()
+    } else if !resolved_name.is_empty() {
+        resolved_name
+    } else if !fallback_name.is_empty() {
+        fallback_name.into()
+    } else {
+        SharedString::default()
+    };
 
     let message_ts = notification.message_timestamp();
     let time_label = format_inbox_time(message_ts, locale).into();
@@ -324,6 +414,15 @@ pub(crate) fn build_notification_row_view(
     let mention_spans = message_preview
         .map(|m| m.mention_spans_for_render())
         .unwrap_or_default();
+    let body_spans = message_preview
+        .and_then(|m| inbox_spans_from_raw(&m.raw_content))
+        .unwrap_or_default();
+    let body_text_str = body_text.to_string();
+    let body_raw_content = message_preview
+        .map(|m| m.raw_content.as_str())
+        .unwrap_or("");
+    let body_link_ranges = inbox_link_ranges(&body_text_str, body_raw_content);
+    let body_inline_span_ranges = inbox_inline_span_ranges(&body_text_str, &body_spans);
     let attachment_link = message_preview
         .map(|m| m.attachment_link.clone())
         .unwrap_or_default();
@@ -362,6 +461,11 @@ pub(crate) fn build_notification_row_view(
         None
     };
 
+    let sender_name_color = clan_id
+        .zip(sender_id.parse::<UserId>().ok())
+        .map(|(clan, user_id)| resolve_inbox_sender_color(clan, user_id, cx))
+        .unwrap_or_else(|| Hsla::from(rgb(DEFAULT_ROLE_COLOR)));
+
     NotificationRowView {
         sender_name,
         avatar_url,
@@ -372,7 +476,11 @@ pub(crate) fn build_notification_row_view(
         for_you_line,
         body_text,
         body_is_attachment,
+        body_spans,
+        body_link_ranges,
+        body_inline_span_ranges,
         mention_spans,
+        sender_name_color,
         attachment_link,
         attachment_type,
         has_more_attachment,
@@ -389,17 +497,10 @@ pub(crate) fn build_topic_row_view(topic: &TopicDiscussion, cx: &App) -> TopicRo
     let (avatar_name, avatar_url, _) = clan_id
         .map(|clan| resolve_sender(clan, sender_id, "", "", cx))
         .unwrap_or((SharedString::default(), None, false));
-    let reply_is_attachment = topic.reply_is_attachment();
-    let reply_preview = if reply_is_attachment {
-        SharedString::default()
-    } else {
-        topic.reply_preview_text().into()
-    };
     TopicRowView {
         avatar_name,
         avatar_url,
-        reply_preview,
-        reply_is_attachment,
+        reply_preview: topic.reply_preview(),
     }
 }
 
@@ -422,45 +523,39 @@ fn render_avatar(
 fn render_mention_breadcrumb(theme: &Theme, breadcrumb: &MentionBreadcrumb) -> impl IntoElement {
     let has_category = !breadcrumb.category_name.is_empty();
     let has_channel = !breadcrumb.channel_label.is_empty();
+    let clan_line = if has_category {
+        format!("{} > {}", breadcrumb.clan_name, breadcrumb.category_name)
+    } else {
+        breadcrumb.clan_name.to_string()
+    };
+    let channel_line = if !has_channel {
+        None
+    } else if let Some(thread) = breadcrumb.thread_label.as_ref() {
+        Some(format!("{} > {}", breadcrumb.channel_label, thread))
+    } else {
+        Some(breadcrumb.channel_label.to_string())
+    };
     v_flex()
+        .w_full()
+        .min_w_0()
         .gap(px(2.))
         .child(
-            h_flex()
-                .gap_1()
+            div()
+                .w_full()
+                .min_w_0()
                 .text_xs()
                 .font_weight(FontWeight::BOLD)
                 .text_color(theme.text_primary)
-                .child(
-                    div()
-                        .max_w(px(120.))
-                        .overflow_hidden()
-                        .child(breadcrumb.clan_name.clone()),
-                )
-                .when(has_category, |row| {
-                    row.child(">").child(
-                        div()
-                            .max_w(px(130.))
-                            .overflow_hidden()
-                            .child(breadcrumb.category_name.clone()),
-                    )
-                }),
+                .child(clan_line),
         )
-        .when(has_channel, |col| {
+        .when_some(channel_line, |col, line| {
             col.child(
-                h_flex()
-                    .gap_1()
+                div()
+                    .w_full()
+                    .min_w_0()
                     .text_sm()
                     .text_color(theme.text_primary)
-                    .child(
-                        div()
-                            .max_w(px(120.))
-                            .overflow_hidden()
-                            .child(breadcrumb.channel_label.clone()),
-                    )
-                    .when_some(breadcrumb.thread_label.clone(), |row, thread| {
-                        row.child(">")
-                            .child(div().max_w(px(130.)).overflow_hidden().child(thread))
-                    }),
+                    .child(line),
             )
         })
 }
@@ -484,83 +579,657 @@ fn mention_byte_range(text: &str, start: i32, end: i32) -> Option<(usize, usize)
     (byte_start <= byte_end && byte_end <= text.len()).then_some((byte_start, byte_end))
 }
 
-fn render_message_content(
+fn mention_highlight_style(theme: &Theme, is_role: bool) -> HighlightStyle {
+    let (color, bg) = if is_role {
+        (
+            theme.tokens.color_mention_evryone.into(),
+            theme.tokens.bg_mention_evryone.into(),
+        )
+    } else {
+        (
+            theme.tokens.mention_color.into(),
+            theme.tokens.mention_primary.into(),
+        )
+    };
+    HighlightStyle {
+        color: Some(color),
+        background_color: Some(bg),
+        font_weight: Some(FontWeight::MEDIUM),
+        ..Default::default()
+    }
+}
+
+fn link_highlight_style(theme: &Theme) -> HighlightStyle {
+    let link_color: Hsla = theme.tokens.mention_color.into();
+    HighlightStyle {
+        color: Some(link_color),
+        underline: Some(UnderlineStyle {
+            thickness: px(1.),
+            color: Some(link_color),
+            wavy: false,
+        }),
+        ..Default::default()
+    }
+}
+
+fn is_link_highlight(style: &HighlightStyle) -> bool {
+    style.underline.is_some()
+}
+
+fn clip_highlights(
+    highlights: &[(Range<usize>, HighlightStyle)],
+    start: usize,
+    end: usize,
+) -> Vec<(Range<usize>, HighlightStyle)> {
+    if start >= end {
+        return Vec::new();
+    }
+    highlights
+        .iter()
+        .filter_map(|(range, style)| {
+            let s = range.start.max(start);
+            let e = range.end.min(end);
+            if e <= s {
+                return None;
+            }
+            Some((s - start..e - start, *style))
+        })
+        .collect()
+}
+
+fn span_ranges_in_text(
+    text: &str,
+    spans: &[MessageSpan],
+) -> Vec<(Range<usize>, InboxInlineHighlight)> {
+    let mut cursor = 0usize;
+    let mut out = Vec::new();
+    for span in spans {
+        if matches!(span, MessageSpan::CodeBlock { .. }) {
+            continue;
+        }
+        let Some(piece) = span_inline_text(span) else {
+            continue;
+        };
+        if piece.is_empty() {
+            continue;
+        }
+        if !text[cursor..].starts_with(piece) {
+            break;
+        }
+        let start = cursor;
+        let end = start + piece.len();
+        match span {
+            MessageSpan::Mention { role_id, .. } => {
+                let is_role = role_id.as_deref().is_some_and(|id| !id.is_empty());
+                out.push((start..end, InboxInlineHighlight::Mention { is_role }));
+            }
+            MessageSpan::Link { .. } => {
+                out.push((start..end, InboxInlineHighlight::Link));
+            }
+            _ => {}
+        }
+        cursor = end;
+    }
+    out
+}
+
+fn inbox_inline_span_ranges(
+    text: &str,
+    body_spans: &[MessageSpan],
+) -> Vec<(Range<usize>, InboxInlineHighlight)> {
+    span_ranges_in_text(text, body_spans)
+}
+
+fn inbox_link_ranges(text: &str, raw_content: &str) -> Vec<Range<usize>> {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(raw_content.trim()) else {
+        return Vec::new();
+    };
+    let mut ranges = Vec::new();
+    for key in ["lk", "vk", "lky"] {
+        let Some(items) = value.get(key).and_then(|v| v.as_array()) else {
+            continue;
+        };
+        for item in items {
+            let Some(start) = item.get("s").and_then(|v| v.as_i64()) else {
+                continue;
+            };
+            let Some(end) = item.get("e").and_then(|v| v.as_i64()) else {
+                continue;
+            };
+            let Some((byte_start, byte_end)) = mention_byte_range(text, start as i32, end as i32)
+            else {
+                continue;
+            };
+            if byte_end > byte_start {
+                ranges.push(byte_start..byte_end);
+            }
+        }
+    }
+    ranges
+}
+
+fn ranges_overlap(a: &Range<usize>, b: &Range<usize>) -> bool {
+    a.start < b.end && b.start < a.end
+}
+
+fn merge_sorted_highlights(
+    text: &str,
+    tokens: Vec<(Range<usize>, HighlightStyle)>,
+    body_style: HighlightStyle,
+) -> Vec<(Range<usize>, HighlightStyle)> {
+    let text_len = text.len();
+    let mut mentions = Vec::new();
+    let mut links = Vec::new();
+    for (range, style) in tokens {
+        if range.start >= range.end || range.end > text_len {
+            continue;
+        }
+        if !text.is_char_boundary(range.start) || !text.is_char_boundary(range.end) {
+            continue;
+        }
+        if style.background_color.is_some() {
+            mentions.push((range, style));
+        } else if is_link_highlight(&style) {
+            links.push((range, style));
+        }
+    }
+    mentions.sort_by_key(|(range, _)| range.start);
+    links.sort_by_key(|(range, _)| range.start);
+    let mut picked = mentions;
+    for (link_range, link_style) in links {
+        if !picked
+            .iter()
+            .any(|(range, _)| ranges_overlap(range, &link_range))
+        {
+            picked.push((link_range, link_style));
+        }
+    }
+    picked.sort_by_key(|(range, _)| range.start);
+    let mut highlights = Vec::with_capacity(picked.len() * 2 + 1);
+    let mut cursor = 0usize;
+    for (range, style) in picked {
+        if range.start < cursor {
+            continue;
+        }
+        if cursor < range.start {
+            highlights.push((cursor..range.start, body_style));
+        }
+        highlights.push((range.clone(), style));
+        cursor = range.end;
+    }
+    if cursor < text_len {
+        highlights.push((cursor..text_len, body_style));
+    }
+    if highlights.is_empty() && text_len > 0 {
+        highlights.push((0..text_len, body_style));
+    }
+    highlights
+}
+
+fn inbox_content_highlights(
     theme: &Theme,
-    text: &SharedString,
-    spans: &[InboxMentionSpan],
-) -> impl IntoElement {
+    text: &str,
+    mention_spans: &[InboxMentionSpan],
+    body_link_ranges: &[Range<usize>],
+    body_inline_span_ranges: &[(Range<usize>, InboxInlineHighlight)],
+) -> Vec<(Range<usize>, HighlightStyle)> {
+    let body_color: Hsla = theme.tokens.text_theme_message.into();
+    let body_style = HighlightStyle {
+        color: Some(body_color),
+        ..Default::default()
+    };
+    let mut tokens: Vec<(Range<usize>, HighlightStyle)> = Vec::new();
+
+    for span in mention_spans {
+        let Some((start, end)) = mention_byte_range(text, span.start, span.end) else {
+            continue;
+        };
+        if end > start {
+            tokens.push((start..end, mention_highlight_style(theme, span.is_role)));
+        }
+    }
+
+    for (range, kind) in body_inline_span_ranges {
+        let style = match kind {
+            InboxInlineHighlight::Mention { is_role } => mention_highlight_style(theme, *is_role),
+            InboxInlineHighlight::Link => link_highlight_style(theme),
+        };
+        tokens.push((range.clone(), style));
+    }
+
+    for range in body_link_ranges {
+        if range.end > range.start {
+            tokens.push((range.clone(), link_highlight_style(theme)));
+        }
+    }
+    tokens.extend(inbox_auto_link_highlights(theme, text, &tokens));
+    merge_sorted_highlights(text, tokens, body_style)
+}
+
+fn next_char_index(text: &str, index: usize) -> usize {
+    if index >= text.len() {
+        return text.len();
+    }
+    let Some(ch) = text[index..].chars().next() else {
+        return text.len();
+    };
+    index + ch.len_utf8()
+}
+
+fn char_boundary_range(text: &str, range: Range<usize>) -> Option<Range<usize>> {
+    if range.start >= range.end || range.end > text.len() {
+        return None;
+    }
+    if !text.is_char_boundary(range.start) || !text.is_char_boundary(range.end) {
+        return None;
+    }
+    Some(range)
+}
+
+fn inbox_auto_link_highlights(
+    theme: &Theme,
+    text: &str,
+    occupied: &[(Range<usize>, HighlightStyle)],
+) -> Vec<(Range<usize>, HighlightStyle)> {
+    let mut out = Vec::new();
+    let mut index = 0usize;
+    while index < text.len() {
+        if !text.is_char_boundary(index) {
+            index = next_char_index(text, index);
+            continue;
+        }
+        let rest = &text[index..];
+        let scheme_len = if rest.starts_with("https://") {
+            8
+        } else if rest.starts_with("http://") {
+            7
+        } else {
+            index = next_char_index(text, index);
+            continue;
+        };
+        let start = index;
+        let mut end = index + scheme_len;
+        while end < text.len() {
+            if !text.is_char_boundary(end) {
+                break;
+            }
+            let Some(ch) = text[end..].chars().next() else {
+                break;
+            };
+            if ch.is_whitespace() || matches!(ch, '<' | '>' | '"' | '(' | '[') {
+                break;
+            }
+            if matches!(ch, ')' | ']') {
+                break;
+            }
+            end += ch.len_utf8();
+        }
+        while end > start + scheme_len {
+            if !text.is_char_boundary(end) {
+                break;
+            }
+            let Some(ch) = text[..end].chars().last() else {
+                break;
+            };
+            if matches!(ch, '.' | ',' | ';' | '!' | '?' | ')' | ']') {
+                end -= ch.len_utf8();
+            } else {
+                break;
+            }
+        }
+        let range = start..end;
+        if end > start + scheme_len
+            && char_boundary_range(text, range.clone()).is_some()
+            && !occupied
+                .iter()
+                .any(|(occupied_range, _)| ranges_overlap(occupied_range, &range))
+            && !out
+                .iter()
+                .any(|(existing, _)| ranges_overlap(existing, &range))
+        {
+            out.push((range, link_highlight_style(theme)));
+            index = end;
+        } else {
+            index = next_char_index(text, index);
+        }
+    }
+    out
+}
+
+fn render_inbox_styled_body(
+    theme: &Theme,
+    text: &str,
+    highlights: Vec<(Range<usize>, HighlightStyle)>,
+) -> gpui::AnyElement {
     if text.is_empty() {
         return div().into_any_element();
     }
-    if spans.is_empty() {
-        return div()
-            .text_sm()
-            .text_color(theme.tokens.text_theme_message)
-            .overflow_hidden()
-            .child(text.clone())
-            .into_any_element();
+    let code_style = inline_code_highlight_style(theme);
+    let (text, highlights) = strip_inline_code_markers(text, highlights, code_style);
+    let (display_text, display_highlights) = inject_link_word_joiners(&text, highlights);
+    div()
+        .w_full()
+        .min_w_0()
+        .text_sm()
+        .child(StyledText::new(display_text).with_highlights(display_highlights))
+        .into_any_element()
+}
+
+fn backtick_run_len(bytes: &[u8], at: usize) -> usize {
+    bytes[at..].iter().take_while(|&&b| b == b'`').count()
+}
+
+fn find_backtick_code_pairs(text: &str) -> Vec<(usize, usize)> {
+    let bytes = text.as_bytes();
+    let mut pairs = Vec::new();
+    let mut i = 0usize;
+    while i < bytes.len() {
+        if bytes[i] != b'`' {
+            i += 1;
+            continue;
+        }
+        let run = backtick_run_len(bytes, i);
+        if run != 1 {
+            i += run;
+            continue;
+        }
+        let content_start = i + 1;
+        match text[content_start..].find('`') {
+            Some(rel) => {
+                let close = content_start + rel;
+                if backtick_run_len(bytes, close) == 1 {
+                    pairs.push((i, close));
+                    i = close + 1;
+                } else {
+                    i = close + backtick_run_len(bytes, close);
+                }
+            }
+            None => i += 1,
+        }
     }
-    let text_str = text.to_string();
-    let mut children: Vec<gpui::AnyElement> = Vec::new();
+    pairs
+}
+
+fn strip_inline_code_markers(
+    text: &str,
+    highlights: Vec<(Range<usize>, HighlightStyle)>,
+    code_style: HighlightStyle,
+) -> (String, Vec<(Range<usize>, HighlightStyle)>) {
+    let pairs = find_backtick_code_pairs(text);
+    if pairs.is_empty() {
+        return (text.to_string(), highlights);
+    }
+    let mut boundaries: Vec<usize> = vec![0, text.len()];
+    for (open, close) in &pairs {
+        boundaries.push(*open);
+        boundaries.push(open + 1);
+        boundaries.push(*close);
+        boundaries.push(close + 1);
+    }
+    for (range, _) in &highlights {
+        boundaries.push(range.start);
+        boundaries.push(range.end);
+    }
+    boundaries.retain(|b| *b <= text.len());
+    boundaries.sort_unstable();
+    boundaries.dedup();
+
+    let style_at = |pos: usize| -> HighlightStyle {
+        highlights
+            .iter()
+            .find(|(range, _)| range.start <= pos && pos < range.end)
+            .map(|(_, style)| *style)
+            .unwrap_or_default()
+    };
+    let is_backtick_byte = |pos: usize| pairs.iter().any(|(o, c)| pos == *o || pos == *c);
+    let in_code_inner = |pos: usize| pairs.iter().any(|(o, c)| pos > *o && pos < *c);
+
+    let mut display_text = String::with_capacity(text.len());
+    let mut raw_spans: Vec<(Range<usize>, HighlightStyle)> = Vec::new();
     let mut cursor = 0usize;
-    let mut ordered = spans.to_vec();
-    ordered.sort_by_key(|span| span.start);
-    for span in ordered {
-        let Some((start, end)) = mention_byte_range(&text_str, span.start, span.end) else {
+    for window in boundaries.windows(2) {
+        let (start, end) = (window[0], window[1]);
+        if start >= end {
+            continue;
+        }
+        if end == start + 1 && is_backtick_byte(start) {
+            continue;
+        }
+        display_text.push_str(&text[start..end]);
+        let style = if in_code_inner(start) {
+            code_style
+        } else {
+            style_at(start)
+        };
+        let len = end - start;
+        raw_spans.push((cursor..cursor + len, style));
+        cursor += len;
+    }
+    let mut display_highlights: Vec<(Range<usize>, HighlightStyle)> =
+        Vec::with_capacity(raw_spans.len());
+    for (range, style) in raw_spans {
+        if let Some(last) = display_highlights.last_mut()
+            && last.1 == style
+            && last.0.end == range.start
+        {
+            last.0.end = range.end;
+            continue;
+        }
+        display_highlights.push((range, style));
+    }
+    (display_text, display_highlights)
+}
+
+const LINK_WORD_JOINER: char = '\u{2060}';
+
+fn inject_link_word_joiners(
+    text: &str,
+    highlights: Vec<(Range<usize>, HighlightStyle)>,
+) -> (String, Vec<(Range<usize>, HighlightStyle)>) {
+    let mut break_after = std::collections::BTreeSet::new();
+    for (range, style) in &highlights {
+        if !is_link_highlight(style) {
+            continue;
+        }
+        let Some(range) = char_boundary_range(text, range.clone()) else {
             continue;
         };
-        if start > cursor {
-            children.push(
-                div()
-                    .text_sm()
-                    .text_color(theme.tokens.text_theme_message)
-                    .child(SharedString::from(text_str[cursor..start].to_string()))
-                    .into_any_element(),
-            );
-        }
-        if end > start {
-            let mention_text = SharedString::from(text_str[start..end].to_string());
-            if span.is_role {
-                children.push(
-                    div()
-                        .text_sm()
-                        .font_weight(FontWeight::MEDIUM)
-                        .text_color(theme.tokens.color_mention_evryone)
-                        .bg(theme.tokens.bg_mention_evryone)
-                        .rounded(px(2.))
-                        .px(px(1.6))
-                        .child(mention_text)
-                        .into_any_element(),
-                );
-            } else {
-                children.push(
-                    div()
-                        .text_sm()
-                        .font_weight(FontWeight::MEDIUM)
-                        .text_color(theme.tokens.mention_color)
-                        .bg(theme.tokens.mention_primary)
-                        .rounded(px(2.))
-                        .px(px(1.6))
-                        .child(mention_text)
-                        .into_any_element(),
-                );
+        let mut index = range.start;
+        while index < range.end.min(text.len()) {
+            let Some(ch) = text[index..].chars().next() else {
+                break;
+            };
+            let next = index + ch.len_utf8();
+            if next < range.end {
+                break_after.insert(next);
             }
-            cursor = end;
+            index = next;
         }
     }
-    if cursor < text_str.len() {
-        children.push(
-            div()
-                .text_sm()
-                .text_color(theme.tokens.text_theme_message)
-                .child(SharedString::from(text_str[cursor..].to_string()))
-                .into_any_element(),
+    if break_after.is_empty() {
+        return (text.to_string(), highlights);
+    }
+    let mut display = String::new();
+    let mut orig_to_new = vec![0usize; text.len() + 1];
+    for (index, ch) in text.char_indices() {
+        orig_to_new[index] = display.len();
+        display.push(ch);
+        let next = index + ch.len_utf8();
+        if break_after.contains(&next) {
+            display.push(LINK_WORD_JOINER);
+        }
+    }
+    orig_to_new[text.len()] = display.len();
+    let remapped = highlights
+        .into_iter()
+        .filter_map(|(range, style)| {
+            let range = char_boundary_range(text, range)?;
+            Some((orig_to_new[range.start]..orig_to_new[range.end], style))
+        })
+        .collect();
+    (display, remapped)
+}
+
+fn span_inline_text(span: &MessageSpan) -> Option<&str> {
+    match span {
+        MessageSpan::Text(text)
+        | MessageSpan::Bold(text)
+        | MessageSpan::Code(text)
+        | MessageSpan::Link { text, .. }
+        | MessageSpan::Mention { display: text, .. }
+        | MessageSpan::Hashtag { display: text, .. }
+        | MessageSpan::Heading { text, .. } => Some(text.as_ref()),
+        _ => None,
+    }
+}
+
+fn inline_code_highlight_style(theme: &Theme) -> HighlightStyle {
+    HighlightStyle {
+        color: Some(theme.tokens.text_secondary.into()),
+        background_color: Some(theme.tokens.bg_active_member_channel.into()),
+        ..Default::default()
+    }
+}
+
+fn take_inbox_inline_element(
+    theme: &Theme,
+    text: &str,
+    batch: &mut Vec<MessageSpan>,
+    offset: &mut usize,
+    full_highlights: &[(Range<usize>, HighlightStyle)],
+) -> Option<gpui::AnyElement> {
+    if batch.is_empty() {
+        return None;
+    }
+    let batch_text: String = batch.iter().filter_map(span_inline_text).collect();
+    if batch_text.is_empty() {
+        batch.clear();
+        return None;
+    }
+    let Some(rel) = text[*offset..].find(&batch_text) else {
+        batch.clear();
+        return None;
+    };
+    let start = *offset + rel;
+    let end = start + batch_text.len();
+    let clipped = clip_highlights(full_highlights, start, end);
+    *offset = end;
+    batch.clear();
+    Some(render_inbox_styled_body(theme, &text[start..end], clipped))
+}
+
+fn render_inbox_message_spans(
+    theme: &Theme,
+    text: &str,
+    mention_spans: &[InboxMentionSpan],
+    body_link_ranges: &[Range<usize>],
+    body_inline_span_ranges: &[(Range<usize>, InboxInlineHighlight)],
+    body_spans: &[MessageSpan],
+) -> gpui::AnyElement {
+    if body_spans.is_empty() {
+        return div().into_any_element();
+    }
+    let full_highlights = inbox_content_highlights(
+        theme,
+        text,
+        mention_spans,
+        body_link_ranges,
+        body_inline_span_ranges,
+    );
+    let mut children: Vec<gpui::AnyElement> = Vec::new();
+    let mut inline_batch: Vec<MessageSpan> = Vec::new();
+    let mut offset = 0usize;
+
+    for span in body_spans {
+        if matches!(span, MessageSpan::CodeBlock { .. }) {
+            if let Some(element) = take_inbox_inline_element(
+                theme,
+                text,
+                &mut inline_batch,
+                &mut offset,
+                &full_highlights,
+            ) {
+                children.push(element);
+            }
+            if let MessageSpan::CodeBlock {
+                text: code_text, ..
+            } = span
+            {
+                if let Some(rel) = text[offset..].find(code_text.as_ref()) {
+                    offset += rel + code_text.len();
+                }
+                children.push(render_inbox_code_block(theme, code_text));
+            }
+            continue;
+        }
+        inline_batch.push(span.clone());
+    }
+    if let Some(element) = take_inbox_inline_element(
+        theme,
+        text,
+        &mut inline_batch,
+        &mut offset,
+        &full_highlights,
+    ) {
+        children.push(element);
+    }
+
+    v_flex()
+        .w_full()
+        .min_w_0()
+        .gap_1()
+        .children(children)
+        .into_any_element()
+}
+
+fn render_message_content(
+    theme: &Theme,
+    text: &SharedString,
+    mention_spans: &[InboxMentionSpan],
+    body_link_ranges: &[Range<usize>],
+    body_inline_span_ranges: &[(Range<usize>, InboxInlineHighlight)],
+    body_spans: &[MessageSpan],
+) -> impl IntoElement {
+    let text_str = text.to_string();
+    if text_str.is_empty() {
+        return div().into_any_element();
+    }
+    let has_code_block = body_spans
+        .iter()
+        .any(|span| matches!(span, MessageSpan::CodeBlock { .. }));
+    if has_code_block {
+        return render_inbox_message_spans(
+            theme,
+            &text_str,
+            mention_spans,
+            body_link_ranges,
+            body_inline_span_ranges,
+            body_spans,
         );
     }
-    h_flex()
-        .flex_wrap()
-        .overflow_hidden()
-        .children(children)
+    let highlights = inbox_content_highlights(
+        theme,
+        &text_str,
+        mention_spans,
+        body_link_ranges,
+        body_inline_span_ranges,
+    );
+    render_inbox_styled_body(theme, &text_str, highlights)
+}
+
+fn render_inbox_code_block(theme: &Theme, text: &SharedString) -> gpui::AnyElement {
+    div()
+        .w_full()
+        .min_w_0()
+        .my_1()
+        .p_3()
+        .rounded_lg()
+        .border_1()
+        .border_color(theme.tokens.border_primary)
+        .bg(theme.tokens.bg_markdown_code)
+        .text_size(px(14.))
+        .text_color(theme.tokens.text_theme_message)
+        .child(text.clone())
         .into_any_element()
 }
 
@@ -625,26 +1294,48 @@ fn render_message_head(
     theme: &Theme,
     sender_name: &SharedString,
     time_label: &SharedString,
+    sender_name_color: Hsla,
 ) -> impl IntoElement {
-    h_flex()
-        .items_baseline()
-        .gap_1()
-        .child(
-            div()
-                .text_sm()
-                .font_weight(FontWeight::MEDIUM)
-                .text_color(rgb(DISPLAY_NAME_COLOR))
-                .child(sender_name.clone()),
-        )
-        .when(!time_label.is_empty(), |row| {
-            row.child(
-                div()
-                    .text_xs()
-                    .font_weight(FontWeight::MEDIUM)
-                    .text_color(theme.tokens.text_secondary)
-                    .child(time_label.clone()),
-            )
-        })
+    if time_label.is_empty() {
+        return div()
+            .w_full()
+            .min_w_0()
+            .text_sm()
+            .font_weight(FontWeight::MEDIUM)
+            .text_color(sender_name_color)
+            .child(sender_name.clone())
+            .into_any_element();
+    }
+    let name = sender_name.as_ref();
+    let time = time_label.as_ref();
+    let combined = format!("{name} {time}");
+    let name_end = name.len();
+    let time_start = name_end + 1;
+    let time_color: Hsla = theme.tokens.text_secondary.into();
+    let highlights = vec![
+        (
+            0..name_end,
+            HighlightStyle {
+                color: Some(sender_name_color),
+                font_weight: Some(FontWeight::MEDIUM),
+                ..Default::default()
+            },
+        ),
+        (
+            time_start..combined.len(),
+            HighlightStyle {
+                color: Some(time_color),
+                font_weight: Some(FontWeight::MEDIUM),
+                ..Default::default()
+            },
+        ),
+    ];
+    div()
+        .w_full()
+        .min_w_0()
+        .text_sm()
+        .child(StyledText::new(combined).with_highlights(highlights))
+        .into_any_element()
 }
 
 pub fn render_notification_body(
@@ -703,12 +1394,22 @@ pub fn render_notification_body(
                         col.child(
                             div().text_sm().text_color(theme.text_primary).child(
                                 h_flex()
+                                    .w_full()
+                                    .min_w_0()
+                                    .flex_wrap()
                                     .child(
                                         div()
+                                            .max_w_full()
+                                            .min_w_0()
                                             .font_weight(FontWeight::BOLD)
                                             .child(for_you.display_name.clone()),
                                     )
-                                    .child(for_you.subject_suffix.clone()),
+                                    .child(
+                                        div()
+                                            .max_w_full()
+                                            .min_w_0()
+                                            .child(for_you.subject_suffix.clone()),
+                                    ),
                             ),
                         )
                         .when(!view.time_label.is_empty(), |c| {
@@ -724,39 +1425,49 @@ pub fn render_notification_body(
                     }
                 })
                 .when(is_mentions || is_messages, |col| {
-                    col.child(render_message_head(
-                        theme,
-                        &view.sender_name,
-                        &view.time_label,
-                    ))
-                    .when(view.body_is_attachment, |c| {
-                        c.child(
-                            div()
-                                .text_sm()
-                                .text_color(theme.text_muted)
-                                .child(attachment_label),
-                        )
-                    })
-                    .when(
-                        !view.body_is_attachment && !view.body_text.is_empty(),
-                        |c| {
-                            c.child(render_message_content(
-                                theme,
-                                &view.body_text,
-                                &view.mention_spans,
-                            ))
-                        },
+                    col.child(
+                        div().w_full().min_w_0().child(
+                            v_flex()
+                                .gap(px(2.))
+                                .child(render_message_head(
+                                    theme,
+                                    &view.sender_name,
+                                    &view.time_label,
+                                    view.sender_name_color,
+                                ))
+                                .when(view.body_is_attachment, |c| {
+                                    c.child(
+                                        div()
+                                            .text_sm()
+                                            .text_color(theme.text_muted)
+                                            .child(attachment_label),
+                                    )
+                                })
+                                .when(
+                                    !view.body_is_attachment && !view.body_text.is_empty(),
+                                    |c| {
+                                        c.child(render_message_content(
+                                            theme,
+                                            &view.body_text,
+                                            &view.mention_spans,
+                                            &view.body_link_ranges,
+                                            &view.body_inline_span_ranges,
+                                            &view.body_spans,
+                                        ))
+                                    },
+                                )
+                                .when(!view.attachment_link.is_empty(), |c| {
+                                    c.child(render_attachment_preview(
+                                        theme,
+                                        locale,
+                                        &view.attachment_link,
+                                        &view.attachment_type,
+                                        view.has_more_attachment,
+                                        image_cache.clone(),
+                                    ))
+                                }),
+                        ),
                     )
-                    .when(!view.attachment_link.is_empty(), |c| {
-                        c.child(render_attachment_preview(
-                            theme,
-                            locale,
-                            &view.attachment_link,
-                            &view.attachment_type,
-                            view.has_more_attachment,
-                            image_cache.clone(),
-                        ))
-                    })
                 }),
         )
 }
@@ -771,15 +1482,36 @@ pub fn render_topic_body(
 ) -> impl IntoElement {
     let topic_title = mezon_i18n::t(locale, "notification.topicAndYou");
     let replied_label = mezon_i18n::t(locale, "notification.repliedTo");
-    let attachment_label: SharedString =
-        mezon_i18n::t(locale, "message.clickToSeeAttachment").into();
-    let reply_text = if view.reply_is_attachment {
-        attachment_label
-    } else if view.reply_preview.is_empty() {
-        SharedString::from("—")
-    } else {
-        view.reply_preview.clone()
+    let reply_text: SharedString = match &view.reply_preview {
+        TopicReplyPreview::Text(text) => text.clone().into(),
+        TopicReplyPreview::Contact => mezon_i18n::t(locale, "notification.contactMessage").into(),
+        TopicReplyPreview::Attachment => {
+            mezon_i18n::t(locale, "notification.attachmentMessage").into()
+        }
+        TopicReplyPreview::Interactive => {
+            mezon_i18n::t(locale, "notification.interactiveMessage").into()
+        }
     };
+    let combined = format!("{replied_label}{reply_text}");
+    let label_end = replied_label.len();
+    let muted: Hsla = theme.text_muted.into();
+    let highlights = vec![
+        (
+            0..label_end,
+            HighlightStyle {
+                color: Some(muted),
+                font_weight: Some(FontWeight::SEMIBOLD),
+                ..Default::default()
+            },
+        ),
+        (
+            label_end..combined.len(),
+            HighlightStyle {
+                color: Some(muted),
+                ..Default::default()
+            },
+        ),
+    ];
 
     h_flex()
         .gap_4()
@@ -805,12 +1537,13 @@ pub fn render_topic_body(
                         .child(topic_title),
                 )
                 .child(
-                    div().text_xs().text_color(theme.text_muted).child(
-                        h_flex()
-                            .child(div().font_weight(FontWeight::SEMIBOLD).child(replied_label))
-                            .child(": ")
-                            .child(reply_text),
-                    ),
+                    div()
+                        .w_full()
+                        .min_w_0()
+                        .text_xs()
+                        .line_clamp(5)
+                        .text_ellipsis()
+                        .child(StyledText::new(combined).with_highlights(highlights)),
                 ),
         )
 }
@@ -843,5 +1576,148 @@ mod tests {
         let text = "hello 📢 world";
         let (start, end) = mention_byte_range(text, 6, 8).expect("valid range");
         assert_eq!(&text[start..end], "📢");
+    }
+
+    #[test]
+    fn inbox_mention_highlights_preserve_plain_text_gaps() {
+        let theme = Theme::dark();
+        let text = "- line @VINH tail @user.name end";
+        let spans = vec![
+            InboxMentionSpan {
+                start: 7,
+                end: 12,
+                user_id: String::new(),
+                role_id: "1".into(),
+                is_role: true,
+            },
+            InboxMentionSpan {
+                start: 18,
+                end: 28,
+                user_id: "2".into(),
+                role_id: String::new(),
+                is_role: false,
+            },
+        ];
+        let highlights = inbox_content_highlights(&theme, text, &spans, &[], &[]);
+        assert!(highlights.iter().any(|(range, _)| range == &(0..7)));
+        assert!(highlights.iter().any(|(range, style)| {
+            range == &(7..12) && style.font_weight == Some(FontWeight::MEDIUM)
+        }));
+        assert!(highlights.iter().any(|(range, _)| range == &(12..18)));
+        assert!(
+            highlights
+                .iter()
+                .any(|(range, _)| range == &(28..text.len()))
+        );
+    }
+
+    #[test]
+    fn clip_highlights_skips_ranges_before_clip_window() {
+        let theme = Theme::dark();
+        let style = link_highlight_style(&theme);
+        let highlights = vec![(0..5, style)];
+        let clipped = clip_highlights(&highlights, 10, 20);
+        assert!(clipped.is_empty());
+    }
+
+    #[test]
+    fn inbox_auto_link_highlights_detect_plain_urls() {
+        let theme = Theme::dark();
+        let text = "see https://checkin.nccsoft.vn and http://example.com ok";
+        let highlights = inbox_content_highlights(&theme, text, &[], &[], &[]);
+        assert!(highlights.iter().any(|(range, style)| {
+            is_link_highlight(style) && &text[range.clone()] == "https://checkin.nccsoft.vn"
+        }));
+        assert!(highlights.iter().any(|(range, style)| {
+            is_link_highlight(style) && &text[range.clone()] == "http://example.com"
+        }));
+    }
+
+    #[test]
+    fn inbox_content_highlights_handle_vietnamese_plain_text() {
+        let theme = Theme::dark();
+        let text = "thua nên hơi buồn a, không muốn kéo dài nỗi đau";
+        let highlights = inbox_content_highlights(&theme, text, &[], &[], &[]);
+        assert!(highlights.iter().all(|(range, _)| {
+            text.is_char_boundary(range.start) && text.is_char_boundary(range.end)
+        }));
+        assert_eq!(
+            highlights.last().map(|(range, _)| range.end),
+            Some(text.len())
+        );
+    }
+
+    #[test]
+    fn strip_inline_code_markers_removes_backticks_and_styles_inner_text() {
+        let theme = Theme::dark();
+        let text = "Bạn đã đặt `Matcha latte xoài` !!!";
+        let body_style = HighlightStyle {
+            color: Some(theme.tokens.text_theme_message.into()),
+            ..Default::default()
+        };
+        let code_style = inline_code_highlight_style(&theme);
+        let highlights = vec![(0..text.len(), body_style)];
+        let (display_text, display_highlights) =
+            strip_inline_code_markers(text, highlights, code_style);
+        assert_eq!(display_text, "Bạn đã đặt Matcha latte xoài !!!");
+        assert!(!display_text.contains('`'));
+        let code_range = display_text.find("Matcha latte xoài").unwrap();
+        let code_end = code_range + "Matcha latte xoài".len();
+        assert!(display_highlights.iter().any(|(range, style)| {
+            range == &(code_range..code_end)
+                && style.background_color == code_style.background_color
+        }));
+    }
+
+    #[test]
+    fn strip_inline_code_markers_ignores_triple_backtick_fences() {
+        let text = "before ```block``` after";
+        let highlights = vec![(0..text.len(), HighlightStyle::default())];
+        let (display_text, _) =
+            strip_inline_code_markers(text, highlights, HighlightStyle::default());
+        assert_eq!(display_text, text);
+    }
+
+    #[test]
+    fn strip_inline_code_markers_leaves_plain_text_unchanged() {
+        let text = "no backticks here";
+        let highlights = vec![(0..text.len(), HighlightStyle::default())];
+        let (display_text, display_highlights) =
+            strip_inline_code_markers(text, highlights.clone(), HighlightStyle::default());
+        assert_eq!(display_text, text);
+        assert_eq!(display_highlights, highlights);
+    }
+
+    #[test]
+    fn parse_hex_role_color_accepts_shorthand_and_ignores_alpha() {
+        let rgb = parse_hex_role_color("#fff").expect("3-digit hex");
+        assert_eq!(rgb.r, 1.);
+        assert_eq!(rgb.g, 1.);
+        assert_eq!(rgb.b, 1.);
+        let rgb = parse_hex_role_color("#ff000080").expect("8-digit hex");
+        assert_eq!(rgb.r, 1.);
+        assert_eq!(rgb.g, 0.);
+        assert_eq!(rgb.b, 0.);
+    }
+
+    #[test]
+    fn inbox_inline_span_ranges_use_sequential_alignment() {
+        let text = "hello @user world";
+        let spans = vec![
+            MessageSpan::Text("hello ".into()),
+            MessageSpan::Mention {
+                display: "@user".into(),
+                user_id: Some("1".into()),
+                role_id: None,
+            },
+            MessageSpan::Text(" world".into()),
+        ];
+        let ranges = inbox_inline_span_ranges(text, &spans);
+        assert_eq!(ranges.len(), 1);
+        assert_eq!(ranges[0].0, 6..11);
+        assert_eq!(
+            ranges[0].1,
+            InboxInlineHighlight::Mention { is_role: false }
+        );
     }
 }

@@ -1,15 +1,16 @@
 use std::collections::HashMap;
 
+use crate::chat::channel_app_bar::ChannelAppBarTarget;
 use gpui::{
-    AnyView, App, Context, DismissEvent, Entity, Focusable, StyleRefinement, Subscription, Task,
-    Window, deferred, div, prelude::*, px,
+    AnyView, App, Context, DismissEvent, Entity, Focusable, Pixels, ScrollHandle, Size,
+    StyleRefinement, Subscription, Task, Window, canvas, deferred, div, prelude::*, px,
 };
 use mezon_store::{
     AuthState, Channel, ChannelId, ChannelList, ChannelType, ClanId, ClanList, ClanMembersStore,
     DirectChannel, DirectKind, DirectMessageStore, GroupMembersStore, InboxStore,
     MessageSearchEvent, MessageSearchStore, MessagesStore, PinnedEvent, PinnedMessagesStore,
-    Settings, ThreadsEvent, ThreadsStore, TopicsEvent, TopicsStore, VoiceMember, VoiceModerationError, VoiceStore,
-    expand_mention_name_tokens,
+    Settings, ThreadsEvent, ThreadsStore, TopicsEvent, TopicsStore, UiState, VoiceConnection,
+    VoiceMember, VoiceModerationError, VoiceStore, expand_mention_name_tokens,
 };
 use ui::PopoverMenuHandle;
 use ui::utils::ROUNDED_BORDER_WINDOW;
@@ -39,18 +40,30 @@ pub struct ChatLayout {
     channel_sidebar: Entity<ChannelSidebar>,
     direct_sidebar: Entity<DirectSidebar>,
     friends_page: Entity<crate::chat::FriendsPage>,
+    clan_members_page: Entity<crate::chat::clan_members_page::ClanMembersPage>,
+    clan_channels_page: Entity<crate::chat::clan_channels_page::ClanChannelsPage>,
     direct_store: Entity<DirectMessageStore>,
     user_info_bar: Entity<UserInfoBar>,
     clan_list: Entity<ClanList>,
     auth_state: Entity<AuthState>,
     settings: Entity<Settings>,
     voice_store: Entity<VoiceStore>,
+    voice_strip_scroll: ScrollHandle,
+    voice_grid_page: usize,
+    voice_grid_wheel_accum: f32,
+    voice_grid_size: Size<Pixels>,
+    voice_show_members: bool,
+    voice_session_key: Option<String>,
+    voice_visual: crate::chat::voice::VoiceVisualState,
+    voice_mini_bar_height: Pixels,
     pending_channel_id: Option<ChannelId>,
     prefetched_voice_channel: Option<ChannelId>,
     dm_view_fingerprint: Option<(ChannelId, DirectKind, String)>,
     inbox_context_ids: Option<(Option<ClanId>, Option<ChannelId>)>,
     _voice_frame_pump: Option<Task<()>>,
     show_member_list: bool,
+    ui_state: UiState,
+    media_channel_view_mode: bool,
     message_search_expanded: bool,
     show_search_options: bool,
     show_results_panel: bool,
@@ -177,8 +190,16 @@ impl ChatLayout {
         let settings_for_friends = settings.clone();
         let friends_page =
             cx.new(move |cx| crate::chat::FriendsPage::new(settings_for_friends, cx));
+        let members_settings = settings.clone();
+        let clan_members_page = cx.new(move |cx| {
+            crate::chat::clan_members_page::ClanMembersPage::new(members_settings, cx)
+        });
 
         let user_info_bar = cx.new(|cx| UserInfoBar::new(auth_state.clone(), cx));
+        let channels_settings = settings.clone();
+        let clan_channels_page = cx.new(move |cx| {
+            crate::chat::clan_channels_page::ClanChannelsPage::new(channels_settings, cx)
+        });
 
         let direct_store = DirectMessageStore::global(cx);
 
@@ -264,6 +285,7 @@ impl ChatLayout {
             this.sync_inbox_context(cx);
             this.sync_voice_frame_pump(cx);
             if this.active_channel_display_changed(cx) {
+                this.media_channel_view_mode = false;
                 this.dismiss_topic_panel(cx);
                 this.dismiss_threads_popover(cx);
                 this.pin_popover_handle.hide(cx);
@@ -276,6 +298,7 @@ impl ChatLayout {
                 Router::global(cx).read(cx).route(),
                 Route::Direct | Route::Friends | Route::DirectMessage { .. }
             ) {
+                this.media_channel_view_mode = false;
                 this.dismiss_topic_panel(cx);
                 this.dismiss_threads_popover(cx);
                 this.pin_popover_handle.hide(cx);
@@ -336,12 +359,16 @@ impl ChatLayout {
                 });
             },
         );
+        let ui_state = UiState::load_sync();
+        let show_member_list = ui_state.show_member_list;
         let mut this = Self {
             channel_list,
             clan_sidebar,
             channel_sidebar,
             direct_sidebar,
             friends_page,
+            clan_members_page,
+            clan_channels_page,
             direct_store,
             user_info_bar,
             clan_list,
@@ -349,12 +376,22 @@ impl ChatLayout {
             chat_area,
             settings,
             voice_store,
+            voice_strip_scroll: ScrollHandle::new(),
+            voice_grid_page: 0,
+            voice_grid_wheel_accum: 0.,
+            voice_grid_size: Size::default(),
+            voice_show_members: true,
+            voice_session_key: None,
+            voice_visual: Default::default(),
+            voice_mini_bar_height: px(0.),
             pending_channel_id: None,
             prefetched_voice_channel: None,
             dm_view_fingerprint: None,
             inbox_context_ids: None,
             _voice_frame_pump: None,
-            show_member_list: true,
+            show_member_list,
+            ui_state,
+            media_channel_view_mode: false,
             message_search_expanded: false,
             show_search_options: false,
             show_results_panel: false,
@@ -394,6 +431,7 @@ impl ChatLayout {
             _ns_popover_close: None,
         };
         this.sync_active_from_route(cx);
+        this.sync_member_list_visibility(cx);
         this.sync_inbox_context(cx);
         this.sync_voice_frame_pump(cx);
         register_chat_layout(cx.weak_entity(), cx);
@@ -755,8 +793,57 @@ impl ChatLayout {
     }
 
     pub(crate) fn toggle_member_list(&mut self, cx: &mut Context<Self>) {
+        let dm = self.is_dm_route(cx);
         self.show_member_list = !self.show_member_list;
+        if dm {
+            self.ui_state.show_member_list_dm = self.show_member_list;
+        } else {
+            self.ui_state.show_member_list = self.show_member_list;
+        }
+        self.persist_ui_state(cx);
         cx.notify();
+    }
+
+    fn persist_ui_state(&self, cx: &mut Context<Self>) {
+        let snapshot = self.ui_state.clone();
+        cx.background_executor()
+            .spawn(async move {
+                snapshot.save_sync();
+            })
+            .detach();
+    }
+
+    pub(crate) fn toggle_media_channel_view(&mut self, cx: &mut Context<Self>) {
+        self.media_channel_view_mode = !self.media_channel_view_mode;
+        if self.media_channel_view_mode {
+            self.show_member_list = false;
+        } else {
+            self.sync_member_list_visibility(cx);
+        }
+        cx.notify();
+    }
+
+    fn sync_member_list_visibility(&mut self, cx: &Context<Self>) {
+        self.show_member_list = if self.is_dm_route(cx) {
+            self.ui_state.show_member_list_dm
+        } else {
+            self.ui_state.show_member_list
+        };
+    }
+
+    fn channel_supports_timeline_view(&self, cx: &Context<Self>) -> bool {
+        if self.is_dm_route(cx) {
+            return false;
+        }
+        self.channel_list
+            .read(cx)
+            .active_channel()
+            .is_some_and(|ch| {
+                matches!(
+                    ch.channel_type,
+                    ChannelType::Text | ChannelType::Thread | ChannelType::App
+                )
+            })
     }
 
     fn dismiss_inbox_popover(&self, cx: &mut App) {
@@ -851,6 +938,7 @@ impl ChatLayout {
                 self.chat_area.clear_member_panel();
             }
         }
+        self.sync_member_list_visibility(cx);
     }
 
     fn sync_channel_route(
@@ -1207,7 +1295,7 @@ impl Render for ChatLayout {
             self.build_create_thread_panel(&locale, window, cx)
         };
         let right_panel = topic_panel.or(create_panel);
-        let chat_content = self.render_content(cx);
+        let chat_content = self.render_content(window.viewport_size().width, cx);
         let main_content = if let Some(panel) = right_panel {
             div()
                 .flex()
@@ -1235,6 +1323,11 @@ impl Render for ChatLayout {
             chat_content
         };
         let voice_mini_bar = self.render_voice_mini_bar(cx);
+        let nav_bottom_pad = if voice_mini_bar.is_some() {
+            self.voice_mini_bar_height
+        } else {
+            px(0.)
+        };
         let fullscreen = if self.connected_call_is_active(cx) {
             let chat = cx.entity();
             crate::chat::voice::render_screen_fullscreen_overlay(
@@ -1244,6 +1337,7 @@ impl Render for ChatLayout {
                 &self.settings,
                 self.voice_store.read(cx),
                 &chat,
+                cx,
             )
         } else {
             None
@@ -1275,12 +1369,18 @@ impl Render for ChatLayout {
                             .rounded_bl(px(ROUNDED_BORDER_WINDOW))
                             .overflow_hidden()
                             .child(
-                                div().w(px(72.0)).h_full().child(
+                                div().w(px(72.0)).h_full().pb(nav_bottom_pad).child(
                                     AnyView::from(self.clan_sidebar.clone())
                                         .cached(StyleRefinement::default().size_full()),
                                 ),
                             )
-                            .child(div().w(px(272.0)).h_full().child(nav_body)),
+                            .child(
+                                div()
+                                    .w(px(272.0))
+                                    .h_full()
+                                    .pb(nav_bottom_pad)
+                                    .child(nav_body),
+                            ),
                     )
                     .child(
                         div()
@@ -1297,7 +1397,24 @@ impl Render for ChatLayout {
                             .shadow_lg()
                             .bg(theme.tokens.bg_surface)
                             .occlude()
-                            .children(voice_mini_bar)
+                            .children(voice_mini_bar.map(|bar| {
+                                let chat = cx.entity();
+                                div().relative().w_full().child(bar).child(
+                                    canvas(
+                                        move |bounds, _, cx| {
+                                            chat.update(cx, |layout, cx| {
+                                                layout.record_voice_mini_bar_height(
+                                                    bounds.size.height,
+                                                    cx,
+                                                )
+                                            })
+                                        },
+                                        |_, _, _, _| {},
+                                    )
+                                    .absolute()
+                                    .size_full(),
+                                )
+                            }))
                             .child(
                                 AnyView::from(self.user_info_bar.clone())
                                     .cached(StyleRefinement::default().w_full().h(px(56.0))),
@@ -1324,17 +1441,25 @@ impl ChatLayout {
         let Some(mention_input) = self.chat_area.mention_input.clone() else {
             return;
         };
-        let Some((content, content_tokens, attachments)) = mention_input
+        let Some((content, content_tokens, attachments, ogp)) = mention_input
             .update(cx, |mention_input, cx| {
                 mention_input.take_payload(window, cx)
             })
         else {
             return;
         };
+        let ephemeral_receiver = mention_input.update(cx, |mention_input, cx| {
+            mention_input.take_ephemeral_receiver(cx)
+        });
+        if let Some(receiver_id) = ephemeral_receiver {
+            crate::chat::ChatSending::send_ephemeral(receiver_id, content, content_tokens, cx);
+            return;
+        }
         crate::chat::ChatSending::send_text(
             content,
             content_tokens,
             attachments,
+            ogp,
             &self.auth_state,
             cx,
         );
@@ -1652,6 +1777,66 @@ impl ChatLayout {
             .into_any_element()
     }
 
+    fn record_voice_mini_bar_height(&mut self, height: Pixels, cx: &mut Context<Self>) {
+        if self.voice_mini_bar_height != height {
+            self.voice_mini_bar_height = height;
+            cx.notify();
+        }
+    }
+
+    fn sync_voice_session_defaults(&mut self, cx: &App) {
+        let key = match self.voice_store.read(cx).connection() {
+            VoiceConnection::Connecting { channel_id, .. }
+            | VoiceConnection::Connected { channel_id, .. } => Some(channel_id.clone()),
+            _ => None,
+        };
+        if self.voice_session_key != key {
+            self.voice_session_key = key;
+            self.voice_show_members = true;
+            self.voice_grid_page = 0;
+            self.voice_grid_wheel_accum = 0.;
+            self.voice_visual = Default::default();
+            self.voice_strip_scroll
+                .set_offset(gpui::point(px(0.), px(0.)));
+        }
+    }
+
+    pub(crate) fn toggle_voice_member_strip(&mut self, cx: &mut Context<Self>) {
+        self.voice_show_members = !self.voice_show_members;
+        cx.notify();
+    }
+
+    pub(crate) fn record_voice_grid_size(&mut self, size: Size<Pixels>, cx: &mut Context<Self>) {
+        if self.voice_grid_size != size {
+            self.voice_grid_size = size;
+            cx.notify();
+        }
+    }
+
+    pub(crate) fn scroll_voice_grid_page(
+        &mut self,
+        delta: f32,
+        total_pages: usize,
+        cx: &mut Context<Self>,
+    ) {
+        const STEP: f32 = 100.;
+        let last_page = total_pages.saturating_sub(1);
+        self.voice_grid_wheel_accum += delta;
+        let mut page = self.voice_grid_page.min(last_page);
+        while self.voice_grid_wheel_accum <= -STEP {
+            self.voice_grid_wheel_accum += STEP;
+            page = (page + 1).min(last_page);
+        }
+        while self.voice_grid_wheel_accum >= STEP {
+            self.voice_grid_wheel_accum -= STEP;
+            page = page.saturating_sub(1);
+        }
+        if page != self.voice_grid_page {
+            self.voice_grid_page = page;
+            cx.notify();
+        }
+    }
+
     pub(crate) fn toggle_voice_emoji_picker(
         &mut self,
         window: &mut Window,
@@ -1874,7 +2059,27 @@ impl ChatLayout {
         root.into_any_element()
     }
 
-    fn render_content(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
+    fn get_app_channel_bar(&self, cx: &Context<Self>) -> Option<ChannelAppBarTarget> {
+        let channel = self.channel_list.read(cx).active_channel()?;
+        if channel.channel_type != ChannelType::App {
+            return None;
+        }
+        let app = self
+            .channel_list
+            .read(cx)
+            .app_channel_for_id(channel.clan_id, channel.id)?;
+        let app_id = app.app_id.parse().ok()?;
+        Some(ChannelAppBarTarget {
+            app_id,
+            app_url: app.app_url.clone(),
+            app_name: app.app_name.clone(),
+            clan_id: channel.clan_id,
+            clan_name: channel.clan_name.clone(),
+            channel_list: self.channel_list.clone(),
+        })
+    }
+
+    fn render_content(&mut self, window_width: Pixels, cx: &mut Context<Self>) -> gpui::AnyElement {
         let theme = cx.theme();
         let locale = self.settings.read(cx).language.clone();
         let inbox_handle = self.inbox_handle.clone();
@@ -1882,6 +2087,8 @@ impl ChatLayout {
         let pin_handle = self.pin_popover_handle.clone();
         let show_results_panel = self.show_results_panel;
         let topic_open = TopicsStore::global(cx).read(cx).is_panel_open();
+        let create_thread_open = ThreadsStore::global(cx).read(cx).is_creating();
+        let side_panel_open = topic_open || create_thread_open;
         let search_expanded = self.message_search_expanded;
         let show_search_options = self.show_search_options;
         let search_input = self.message_search_input.clone();
@@ -1891,6 +2098,18 @@ impl ChatLayout {
         } else {
             None
         };
+
+        if let Route::ClanMembers { clan_id } = Router::global(cx).read(cx).route() {
+            self.clan_members_page
+                .update(cx, |page, cx| page.set_clan(clan_id, cx));
+            return self.clan_members_page.clone().into_any_element();
+        }
+
+        if let Route::ClanChannels { clan_id } = Router::global(cx).read(cx).route() {
+            self.clan_channels_page
+                .update(cx, |page, cx| page.set_clan(clan_id, cx));
+            return self.clan_channels_page.clone().into_any_element();
+        }
 
         if self.is_dm_route(cx) {
             if matches!(
@@ -1916,8 +2135,15 @@ impl ChatLayout {
                         in_voice,
                         Some(dm.id),
                         is_group,
-                        is_group && self.show_member_list && !show_results_panel && !topic_open,
+                        is_group
+                            && self.show_member_list
+                            && !show_results_panel
+                            && !side_panel_open,
                         false,
+                        false,
+                        false,
+                        false,
+                        None,
                         None,
                         None,
                         Some(pin_handle),
@@ -1927,6 +2153,7 @@ impl ChatLayout {
                         search_input.clone(),
                         show_results_panel,
                         search_panel.clone(),
+                        None,
                         cx,
                     )
                     .into_any_element();
@@ -1946,6 +2173,10 @@ impl ChatLayout {
                         false,
                         false,
                         false,
+                        false,
+                        false,
+                        false,
+                        None,
                         None,
                         None,
                         Some(pin_handle),
@@ -1955,6 +2186,7 @@ impl ChatLayout {
                         None,
                         show_results_panel,
                         search_panel.clone(),
+                        None,
                         cx,
                     )
                     .into_any_element();
@@ -1964,12 +2196,14 @@ impl ChatLayout {
 
         if let Some(ch) = self.channel_list.read(cx).active_channel() {
             if ch.channel_type == ChannelType::Voice {
+                self.sync_voice_session_defaults(cx);
                 let channel = ch.clone();
-                let (input_device_id, output_device_id) = {
+                let (input_device_id, output_device_id, camera_device_id) = {
                     let settings = self.settings.read(cx);
                     (
                         settings.input_device_id.clone(),
                         settings.output_device_id.clone(),
+                        settings.camera_device_id.clone(),
                     )
                 };
                 let voice_view = crate::chat::voice::render_voice_channel(
@@ -1980,6 +2214,13 @@ impl ChatLayout {
                     &self.settings,
                     input_device_id,
                     output_device_id,
+                    camera_device_id,
+                    &self.voice_strip_scroll,
+                    self.voice_grid_page,
+                    self.voice_grid_size,
+                    self.voice_show_members,
+                    &mut self.voice_visual,
+                    window_width,
                     cx,
                 );
                 return div()
@@ -2020,6 +2261,10 @@ impl ChatLayout {
 
             let channel_name = ch.name.clone();
             let channel_id = ch.id;
+            let timeline_action = self.channel_supports_timeline_view(cx);
+            let timeline_active = self.media_channel_view_mode;
+            let media_channel_view = timeline_action && timeline_active;
+            let app_channel_bar = self.get_app_channel_bar(cx);
             return self
                 .chat_area
                 .render(
@@ -2029,8 +2274,19 @@ impl ChatLayout {
                     None,
                     Some(channel_id),
                     true,
-                    self.show_member_list && !show_results_panel && !topic_open,
+                    self.show_member_list
+                        && !show_results_panel
+                        && !side_panel_open
+                        && !media_channel_view,
                     true,
+                    timeline_action,
+                    timeline_active,
+                    media_channel_view,
+                    if media_channel_view {
+                        Some(ch.clan_id)
+                    } else {
+                        None
+                    },
                     Some(inbox_handle),
                     active_clan_id,
                     Some(pin_handle),
@@ -2040,6 +2296,7 @@ impl ChatLayout {
                     search_input.clone(),
                     show_results_panel,
                     search_panel.clone(),
+                    app_channel_bar,
                     cx,
                 )
                 .into_any_element();
@@ -2061,8 +2318,12 @@ impl ChatLayout {
                     None,
                     None,
                     true,
-                    self.show_member_list && !show_results_panel && !topic_open,
+                    self.show_member_list && !show_results_panel && !side_panel_open,
                     true,
+                    false,
+                    false,
+                    false,
+                    None,
                     Some(inbox_handle),
                     active_clan_id,
                     None,
@@ -2072,6 +2333,7 @@ impl ChatLayout {
                     search_input.clone(),
                     show_results_panel,
                     search_panel,
+                    None,
                     cx,
                 )
                 .into_any_element();
@@ -2101,7 +2363,9 @@ impl ChatLayout {
                 &format!("Direct {direct_id}"),
                 &current_path,
             ),
-            Route::Channel { .. } => div().into_any_element(),
+            Route::Channel { .. } | Route::ClanMembers { .. } | Route::ClanChannels { .. } => {
+                div().into_any_element()
+            }
             Route::Friends => self.render_placeholder(
                 theme,
                 crate::components::primitives::IconName::IconFriends,

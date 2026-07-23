@@ -9,6 +9,12 @@ pub enum Route {
     Chat,
     Direct,
     Friends,
+    ClanMembers {
+        clan_id: ClanId,
+    },
+    ClanChannels {
+        clan_id: ClanId,
+    },
     DirectMessage {
         direct_id: ChannelId,
         message_type: String,
@@ -57,6 +63,8 @@ impl Route {
             Route::Chat => "/chat".to_string(),
             Route::Direct => "/chat/direct".to_string(),
             Route::Friends => "/chat/direct/friends".to_string(),
+            Route::ClanMembers { clan_id } => format!("/chat/clans/{clan_id}/members"),
+            Route::ClanChannels { clan_id } => format!("/chat/clans/{clan_id}/channel-setting"),
             Route::DirectMessage {
                 direct_id,
                 message_type,
@@ -112,6 +120,12 @@ impl Route {
             ["chat"] => Route::Chat,
             ["chat", "direct"] => Route::Direct,
             ["chat", "direct", "friends"] => Route::Friends,
+            ["chat", "clans", clan_id, "members"] => Route::ClanMembers {
+                clan_id: ClanId(clan_id.parse().ok()?),
+            },
+            ["chat", "clans", clan_id, "channel-setting"] => Route::ClanChannels {
+                clan_id: ClanId(clan_id.parse().ok()?),
+            },
             ["chat", "direct", "message", direct_id, message_type] => Route::DirectMessage {
                 direct_id: direct_id.parse().ok()?,
                 message_type: message_type.to_string(),
@@ -232,6 +246,10 @@ impl Router {
 
     pub fn replace(&mut self, route: Route) {
         self.current = route;
+    }
+
+    pub fn reset(&mut self) {
+        *self = Router::new();
     }
 
     pub fn go_back(&mut self) {

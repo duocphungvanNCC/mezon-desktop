@@ -1,5 +1,6 @@
 mod avatar;
 mod badge;
+mod blink_manager;
 mod button;
 mod checkbox;
 mod context_menu;
@@ -19,6 +20,7 @@ mod spinner;
 mod stack;
 mod switch;
 mod tab_bar;
+mod textarea;
 mod toast;
 mod tooltip;
 
@@ -27,7 +29,7 @@ pub(crate) use avatar::{avatar_color, name_initials};
 pub use badge::Badge;
 pub use button::{Button, ButtonVariant, ButtonVariants};
 pub use checkbox::{Checkbox, Radio};
-pub use context_menu::{ContextMenu, context_menu_at};
+pub use context_menu::{ContextMenu, SubmenuOption, context_menu_at};
 pub use date_picker::{DatePicker, DatePickerEvent};
 pub use divider::Divider;
 pub use dropdown::{Dropdown, DropdownTriggerStyle};
@@ -44,7 +46,9 @@ pub use spinner::Spinner;
 pub use stack::{h_flex, v_flex};
 pub use switch::Switch;
 pub use tab_bar::TabBar;
+pub use textarea::{TextArea, TextAreaEvent, TextAreaField};
 pub use toast::{Toast, ToastKind};
 pub use tooltip::Tooltip;
 
 pub use input::init as init_input;
+pub use textarea::init as init_textarea;

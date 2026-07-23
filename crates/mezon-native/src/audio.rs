@@ -22,13 +22,7 @@ pub fn enumerate_input_devices() -> Vec<AudioDeviceInfo> {
         tracing::warn!("Failed to enumerate input devices");
         return vec![];
     };
-    devices
-        .filter_map(|d| {
-            let id = d.id().ok()?.to_string();
-            let name = d.description().ok()?.to_string();
-            Some(AudioDeviceInfo { id, name })
-        })
-        .collect()
+    collect_devices(devices)
 }
 
 /// Enumerate all available audio output (speaker/headphone) devices.
@@ -40,13 +34,75 @@ pub fn enumerate_output_devices() -> Vec<AudioDeviceInfo> {
         tracing::warn!("Failed to enumerate output devices");
         return vec![];
     };
+    collect_devices(devices)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn collect_devices(devices: impl Iterator<Item = cpal::Device>) -> Vec<AudioDeviceInfo> {
     devices
-        .filter_map(|d| {
-            let id = d.id().ok()?.to_string();
-            let name = d.description().ok()?.to_string();
+        .filter_map(|device| {
+            let id = device.id().ok()?.to_string();
+            let name = device.description().ok()?.to_string();
             Some(AudioDeviceInfo { id, name })
         })
         .collect()
+}
+
+#[cfg(target_os = "linux")]
+fn alsa_pcm_is_hardware(pcm_id: &str) -> bool {
+    pcm_id.contains("CARD=")
+}
+
+#[cfg(target_os = "linux")]
+fn alsa_pcm_is_digital_output(pcm_id: &str) -> bool {
+    pcm_id.starts_with("hdmi:") || pcm_id.starts_with("iec958:")
+}
+
+#[cfg(target_os = "linux")]
+fn collect_devices(devices: impl Iterator<Item = cpal::Device>) -> Vec<AudioDeviceInfo> {
+    let mut analog = Vec::new();
+    let mut analog_names = std::collections::HashSet::new();
+    let mut hardware = Vec::new();
+    let mut hardware_names = std::collections::HashSet::new();
+    let mut all = Vec::new();
+    let mut all_names = std::collections::HashSet::new();
+
+    for device in devices {
+        let (Ok(id), Ok(description)) = (device.id(), device.description()) else {
+            continue;
+        };
+        let id = id.to_string();
+        let name = description.to_string();
+        let pcm_id = description.driver();
+
+        if all_names.insert(name.clone()) {
+            all.push(AudioDeviceInfo {
+                id: id.clone(),
+                name: name.clone(),
+            });
+        }
+
+        if pcm_id.is_some_and(alsa_pcm_is_hardware) {
+            if hardware_names.insert(name.clone()) {
+                hardware.push(AudioDeviceInfo {
+                    id: id.clone(),
+                    name: name.clone(),
+                });
+            }
+            if !pcm_id.is_some_and(alsa_pcm_is_digital_output) && analog_names.insert(name.clone())
+            {
+                analog.push(AudioDeviceInfo { id, name });
+            }
+        }
+    }
+
+    if !analog.is_empty() {
+        analog
+    } else if !hardware.is_empty() {
+        hardware
+    } else {
+        all
+    }
 }
 
 /// A live microphone capture handle.

@@ -1,6 +1,4 @@
-use gpui::{
-    Context, Entity, FontWeight, Render, SharedString, Task, Window, div, prelude::*, px,
-};
+use gpui::{Context, Entity, FontWeight, Render, SharedString, Task, Window, div, prelude::*, px};
 use mezon_store::{ChannelList, ClanId, Settings};
 use ui::utils::{DateTimeType, format_distance_from_now};
 
@@ -165,13 +163,11 @@ impl ArchivedChannelPage {
             .justify_center()
             .py(px(48.0))
             .child(
-                div()
-                    .opacity(0.6)
-                    .child(
-                        Icon::new(IconName::Hashtag)
-                            .size(px(48.0))
-                            .text_color(theme.text_primary),
-                    ),
+                div().opacity(0.6).child(
+                    Icon::new(IconName::Hashtag)
+                        .size(px(48.0))
+                        .text_color(theme.text_primary),
+                ),
             )
             .child(
                 div()
@@ -253,7 +249,10 @@ impl ArchivedChannelPage {
             )
             .child(
                 Button::new(format!("archived-channel-restore-{channel_id}"))
-                    .label(mezon_i18n::t(locale, "clanSettings.archivedChannels.restore"))
+                    .label(mezon_i18n::t(
+                        locale,
+                        "clanSettings.archivedChannels.restore",
+                    ))
                     .primary()
                     .with_size(Size::Medium)
                     .disabled(restoring)

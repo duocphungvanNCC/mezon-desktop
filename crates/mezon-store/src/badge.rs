@@ -5,7 +5,6 @@ use mezon_client::RealtimeEvent;
 use mezon_proto::api::{ChannelMessage, Notification};
 
 use crate::AuthState;
-use crate::Settings;
 use crate::channel::ChannelList;
 use crate::clan::ClanList;
 use crate::clan_members::ClanMembersStore;
@@ -13,7 +12,6 @@ use crate::direct::DirectMessageStore;
 use crate::ids::{ChannelId, ClanId, MessageId, UserId};
 use crate::message::MessageCode;
 use crate::messages::MessagesStore;
-use crate::platform::{DesktopNotification, PlatformStore};
 use crate::realtime::{RealtimeDispatch, RealtimeKind};
 
 const STREAM_MODE_GROUP: i32 = 3;
@@ -121,53 +119,6 @@ fn is_viewing_channel(cx: &App, channel_id: ChannelId) -> bool {
         return false;
     }
     messages.active_channel_id() == Some(channel_id)
-}
-
-fn maybe_show_desktop_notification(cx: &App, notif: &Notification, channel_id: ChannelId) {
-    if cx.active_window().is_some() {
-        return;
-    }
-    let Some(settings) = Settings::try_global(cx) else {
-        return;
-    };
-    let (enabled, hide_content) = {
-        let s = settings.read(cx);
-        (s.notifications_enabled, s.notifications_hide_content)
-    };
-    if !enabled {
-        return;
-    }
-    let Some(platform) = PlatformStore::try_global(cx) else {
-        return;
-    };
-    let title = notif
-        .channel
-        .as_ref()
-        .map(|c| c.channel_label.clone())
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "Mezon".to_string());
-    let body = if hide_content || notif.subject.is_empty() {
-        "New message".to_string()
-    } else {
-        notif.subject.clone()
-    };
-    platform.read(cx).show_notification(DesktopNotification {
-        title,
-        body,
-        channel_id: Some(channel_id.to_string()),
-    });
-}
-
-fn dm_message_preview(m: &ChannelMessage) -> String {
-    let text = serde_json::from_str::<mezon_client::transport::ApiMessageContent>(&m.content)
-        .map(|c| c.t)
-        .unwrap_or_default();
-    let trimmed = text.trim();
-    if trimmed.is_empty() {
-        "New message".to_string()
-    } else {
-        trimmed.chars().take(140).collect()
-    }
 }
 
 fn is_message_already_seen(
@@ -280,57 +231,6 @@ impl BadgeService {
         )
     }
 
-    fn maybe_show_dm_notification(
-        &mut self,
-        cx: &App,
-        m: &ChannelMessage,
-        channel_id: ChannelId,
-        message_id: MessageId,
-    ) {
-        if cx.active_window().is_some() {
-            return;
-        }
-        let Some(settings) = Settings::try_global(cx) else {
-            return;
-        };
-        let (enabled, hide_content) = {
-            let s = settings.read(cx);
-            (s.notifications_enabled, s.notifications_hide_content)
-        };
-        if !enabled {
-            return;
-        }
-        if !mark_badge_processed(
-            &mut self.processed_badge_messages,
-            &mut self.processed_badge_order,
-            (channel_id, message_id),
-        ) {
-            return;
-        }
-        let Some(platform) = PlatformStore::try_global(cx) else {
-            return;
-        };
-        let title = if !m.display_name.is_empty() {
-            m.display_name.clone()
-        } else if !m.username.is_empty() {
-            m.username.clone()
-        } else if !m.channel_label.is_empty() {
-            m.channel_label.clone()
-        } else {
-            "Mezon".to_string()
-        };
-        let body = if hide_content {
-            "New message".to_string()
-        } else {
-            dm_message_preview(m)
-        };
-        platform.read(cx).show_notification(DesktopNotification {
-            title,
-            body,
-            channel_id: Some(channel_id.to_string()),
-        });
-    }
-
     fn handle_event(&mut self, event: &RealtimeEvent, cx: &mut Context<Self>) {
         match event {
             RealtimeEvent::ChannelMessage(m) => {
@@ -360,9 +260,6 @@ impl BadgeService {
                                 cx,
                             );
                         });
-                        if !from_me && increment_unread {
-                            self.maybe_show_dm_notification(cx, m, channel_id, message_id);
-                        }
                     }
                 } else {
                     let clan_id = ClanId(m.clan_id);
@@ -604,7 +501,6 @@ impl BadgeService {
             message_id = message_id.get(),
             "badge: apply notification increment"
         );
-        maybe_show_desktop_notification(cx, notif, badge_channel);
         ChannelList::global(cx).update(cx, |cl, cx| {
             cl.note_channel_message(
                 clan_id,

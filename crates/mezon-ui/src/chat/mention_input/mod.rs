@@ -6,19 +6,25 @@ use std::cell::Cell;
 use std::path::PathBuf;
 use std::rc::Rc;
 
+use crate::router::{Route, Router};
 use gpui::{
     AnyElement, App, Bounds, Context, DismissEvent, Div, Entity, EventEmitter, Focusable,
     FontWeight, Image, ImageFormat, IntoElement, KeyBinding, MouseButton, PathPromptOptions,
-    Pixels, Rgba, ScrollStrategy, SharedString, Stateful, Subscription, UniformListScrollHandle,
-    Window, actions, canvas, deferred, div, img, prelude::*, px, uniform_list,
+    Pixels, Rgba, ScrollStrategy, SharedString, Stateful, Subscription, Task,
+    UniformListScrollHandle, Window, actions, canvas, deferred, div, img, prelude::*, px,
+    uniform_list,
 };
+use mezon_client::transport::QUICK_MENU_TYPE_FLASH;
 use mezon_store::{
-    AccountEvent, AccountStore, AudioStore, Channel, ChannelEvent, ChannelId, ChannelList,
-    ChannelMembersEvent, ChannelMembersStore, ClanList, ClanMembersEvent, ClanMembersStore,
-    DirectEvent, DirectMessageStore, Emoji, EmojiEvent, EmojiStore, GroupMembersEvent,
-    GroupMembersStore, MENTION_HERE_ID, MessageSpan, OutgoingAttachment, OutgoingContent,
-    OutgoingEmoji, OutgoingHashtag, OutgoingMention, RolesEvent, RolesStore, Settings,
+    AccountEvent, AccountStore, AudioStore, BadgeService, Channel, ChannelEvent, ChannelId,
+    ChannelList, ChannelMembersEvent, ChannelMembersStore, ClanList, ClanMembersEvent,
+    ClanMembersStore, DirectEvent, DirectMessageStore, Emoji, EmojiEvent, EmojiStore,
+    GroupMembersEvent, GroupMembersStore, MENTION_HERE_ID, MessageSpan, MessagesStore, OgpResult,
+    OutgoingAttachment, OutgoingContent, OutgoingEmoji, OutgoingHashtag, OutgoingMention,
+    OutgoingOgp, QuickMenuStore, RolesEvent, RolesStore, Settings, fetch_ogp,
+    first_previewable_url,
 };
+use std::time::Duration;
 
 use attachments::{
     AttachmentLimit, MAX_FILE_ATTACHMENTS, PendingAttachment, build_pending, mime_from_extension,
@@ -32,6 +38,9 @@ use crate::chat::member_list::{
     MentionMemberRaw, MentionScope, ensure_mention_members_loaded, mention_direct_id,
     mention_member_pool, mention_private_channel, mention_role_clan, mention_scope,
 };
+use crate::chat::message::CreatePollModal;
+use crate::chat::message::MessageBuzzModal;
+use crate::chat::message::ShareLocationModal;
 use crate::components::primitives::{Avatar, Icon, IconName, ToastKind};
 use crate::image_cache::{
     AVATAR_ENTRY_MAX_BYTES, AVATAR_IMAGE_CACHE_BYTES, AVATAR_IMAGE_CACHE_CAPACITY, LruImageCache,
@@ -56,17 +65,76 @@ const MENTION_HERE_DISPLAY: &str = "@here";
 const MENTION_HERE_NORM: &str = "@HERE";
 const CONVERT_TO_FILE_THRESHOLD: usize = 3700;
 const CONVERT_PREFIX_LEN: usize = 8;
+const STREAM_MODE_DM: i32 = 4;
 const MENTION_ROW_PX: f32 = 36.;
 const MENTION_POPUP_MAX_PX: f32 = MENTION_ROW_PX * 6.;
 
-actions!(mezon_mention, [MentionAccept, MentionDismiss]);
+actions!(
+    mezon_mention,
+    [
+        MentionAccept,
+        MentionDismiss,
+        ToggleAnonymous,
+        OpenMessageBuzz
+    ]
+);
 
 pub fn init(cx: &mut App) {
     text_field::init(cx);
     cx.bind_keys([
         KeyBinding::new("tab", MentionAccept, Some(KEY_CONTEXT)),
         KeyBinding::new("escape", MentionDismiss, Some(KEY_CONTEXT)),
+        KeyBinding::new("cmd-shift-enter", ToggleAnonymous, None),
+        KeyBinding::new("ctrl-shift-enter", ToggleAnonymous, None),
+        KeyBinding::new("ctrl-g", OpenMessageBuzz, None),
     ]);
+    cx.on_action(|_: &ToggleAnonymous, cx: &mut App| {
+        toggle_anonymous_shortcut(cx);
+    });
+    cx.on_action(|_: &OpenMessageBuzz, cx: &mut App| {
+        let Some(window_handle) =
+            crate::app::main_window::handle(cx).or_else(|| cx.active_window())
+        else {
+            return;
+        };
+        cx.defer(move |cx| {
+            let _ = cx.update_window(window_handle, |_, window, cx| {
+                open_message_buzz(window, cx);
+            });
+        });
+    });
+}
+
+fn toggle_anonymous_shortcut(cx: &mut App) {
+    if matches!(
+        Router::global(cx).read(cx).route(),
+        Route::DirectMessage { .. } | Route::Direct | Route::Friends
+    ) {
+        return;
+    }
+    if ClanList::global(cx)
+        .read(cx)
+        .active_clan_id
+        .and_then(|clan_id| ClanList::global(cx).read(cx).clan(clan_id))
+        .is_some_and(|clan| clan.prevent_anonymous)
+    {
+        return;
+    }
+    MessagesStore::global(cx).update(cx, |store, cx| store.toggle_anonymous_mode(cx));
+}
+
+fn open_message_buzz(window: &mut Window, cx: &mut App) {
+    if MessagesStore::global(cx)
+        .read(cx)
+        .active_channel_id()
+        .is_none()
+    {
+        return;
+    }
+    let locale = Settings::try_global(cx)
+        .map(|settings| SharedString::from(settings.read(cx).language.clone()))
+        .unwrap_or_else(|| SharedString::from("en"));
+    MessageBuzzModal::open(locale, window, cx);
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -74,6 +142,7 @@ enum Sigil {
     At,
     Hash,
     Colon,
+    Slash,
 }
 
 impl Sigil {
@@ -82,6 +151,7 @@ impl Sigil {
             Sigil::At => 0,
             Sigil::Hash => 1,
             Sigil::Colon => 2,
+            Sigil::Slash => 3,
         }
     }
 
@@ -90,6 +160,7 @@ impl Sigil {
             b'@' => Some(Self::At),
             b'#' => Some(Self::Hash),
             b':' => Some(Self::Colon),
+            b'/' => Some(Self::Slash),
             _ => None,
         }
     }
@@ -147,18 +218,31 @@ struct EmojiSuggestRaw {
 }
 
 #[derive(Clone)]
+struct SlashCommandRaw {
+    id: SharedString,
+    display: SharedString,
+    display_lc: String,
+    description: SharedString,
+    action_msg: Option<SharedString>,
+}
+
+#[derive(Clone)]
 enum Suggestion {
     Here,
     Member(Rc<MentionMemberRaw>, SharedString),
     Role(Rc<RoleSuggestRaw>),
     Channel(Rc<ChannelSuggestRaw>),
     Emoji(Rc<EmojiSuggestRaw>, SharedString),
+    SlashCommand(Rc<SlashCommandRaw>),
 }
 
 impl Suggestion {
     fn group_order(&self) -> u8 {
         match self {
-            Suggestion::Member(..) | Suggestion::Channel(_) | Suggestion::Emoji(..) => 0,
+            Suggestion::Member(..)
+            | Suggestion::Channel(_)
+            | Suggestion::Emoji(..)
+            | Suggestion::SlashCommand(_) => 0,
             Suggestion::Role(_) => 1,
             Suggestion::Here => 2,
         }
@@ -171,6 +255,7 @@ impl Suggestion {
             Suggestion::Role(role) => (2, role.role_id.as_str()),
             Suggestion::Channel(channel) => (3, channel.channel_id.as_str()),
             Suggestion::Emoji(emoji, _) => (4, emoji.emoji_id.as_str()),
+            Suggestion::SlashCommand(command) => (5, command.id.as_ref()),
         }
     }
 
@@ -181,6 +266,7 @@ impl Suggestion {
             Suggestion::Role(role) => (&role.title_lc, ""),
             Suggestion::Channel(channel) => (&channel.name_lc, ""),
             Suggestion::Emoji(emoji, _) => (&emoji.shortname_lc, ""),
+            Suggestion::SlashCommand(command) => (command.display_lc.as_str(), ""),
         }
     }
 
@@ -191,6 +277,7 @@ impl Suggestion {
             Suggestion::Role(role) => (&role.title_norm, ""),
             Suggestion::Channel(channel) => (&channel.name_norm, &channel.sub_text_norm),
             Suggestion::Emoji(emoji, _) => (&emoji.shortname, ""),
+            Suggestion::SlashCommand(command) => (command.display_lc.as_str(), ""),
         }
     }
 
@@ -247,7 +334,7 @@ pub struct MentionInput {
     committed: Vec<CommittedToken>,
     active_at: Option<usize>,
     active_sigil: Sigil,
-    pooled: [Option<MentionScope>; 3],
+    pooled: [Option<MentionScope>; 4],
     query_len: usize,
     suggestions: Vec<Suggestion>,
     selected: usize,
@@ -256,6 +343,10 @@ pub struct MentionInput {
     session_roles: Vec<Rc<RoleSuggestRaw>>,
     session_channels: Vec<Rc<ChannelSuggestRaw>>,
     session_emojis: Vec<Rc<EmojiSuggestRaw>>,
+    session_commands: Vec<Rc<SlashCommandRaw>>,
+    ephemeral_mode: bool,
+    ephemeral_target: Option<(i64, SharedString)>,
+    base_placeholder: SharedString,
     popup: Option<Entity<GifStickerEmojiPopup>>,
     toggle_bounds: Rc<Cell<Bounds<Pixels>>>,
     _popup_subs: Vec<Subscription>,
@@ -268,9 +359,14 @@ pub struct MentionInput {
     encoding_recording: bool,
     _record_task: Option<RecordTask>,
     compact: bool,
+    file_menu_open: bool,
     overflow_to_file: bool,
     overflow_counter: Option<isize>,
     last_content: SharedString,
+    ogp_preview: Option<OgpResult>,
+    ogp_url: Option<String>,
+    ogp_generation: u64,
+    _ogp_task: Option<Task<()>>,
     _input_sub: Subscription,
     _store_subs: Vec<Subscription>,
 }
@@ -387,6 +483,7 @@ impl MentionInput {
         cx: &mut Context<Self>,
     ) -> Self {
         let placeholder = placeholder.into();
+        let base_placeholder = placeholder.clone();
         let input = cx.new(|cx| {
             let state = MentionInputState::new(window, cx).placeholder(placeholder);
             if compact { state.compact() } else { state }
@@ -424,7 +521,7 @@ impl MentionInput {
             committed: Vec::new(),
             active_at: None,
             active_sigil: Sigil::At,
-            pooled: [None; 3],
+            pooled: [None; 4],
             query_len: 0,
             suggestions: Vec::new(),
             selected: 0,
@@ -433,6 +530,10 @@ impl MentionInput {
             session_roles: Vec::new(),
             session_channels: Vec::new(),
             session_emojis: Vec::new(),
+            session_commands: Vec::new(),
+            ephemeral_mode: false,
+            ephemeral_target: None,
+            base_placeholder,
             popup: None,
             toggle_bounds: Rc::new(Cell::new(Bounds::default())),
             _popup_subs: Vec::new(),
@@ -445,9 +546,14 @@ impl MentionInput {
             encoding_recording: false,
             _record_task: None,
             compact,
+            file_menu_open: false,
             overflow_to_file: false,
             overflow_counter: None,
             last_content: SharedString::default(),
+            ogp_preview: None,
+            ogp_url: None,
+            ogp_generation: 0,
+            _ogp_task: None,
             _input_sub: input_sub,
             _store_subs: store_subs,
         }
@@ -476,7 +582,12 @@ impl MentionInput {
         &mut self,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> Option<(String, OutgoingContent, Vec<OutgoingAttachment>)> {
+    ) -> Option<(
+        String,
+        OutgoingContent,
+        Vec<OutgoingAttachment>,
+        Option<OutgoingOgp>,
+    )> {
         let raw = self.input.read(cx).value().to_string();
         if raw.trim().is_empty() && self.pending_attachments.is_empty() {
             return None;
@@ -494,6 +605,7 @@ impl MentionInput {
             self.committed.clear();
             self.reset_popup();
             self.close_popup();
+            self.clear_ogp_preview(cx);
             self.input.update(cx, |input, cx| {
                 input.set_mention_spans(Vec::new(), cx);
                 input.set_value("", window, cx);
@@ -537,6 +649,7 @@ impl MentionInput {
                 poster_jpeg: p.poster_jpeg,
             })
             .collect();
+        let ogp = self.take_outgoing_ogp();
         self.committed.clear();
         self.reset_popup();
         self.close_popup();
@@ -544,7 +657,151 @@ impl MentionInput {
             input.set_mention_spans(Vec::new(), cx);
             input.set_value("", window, cx);
         });
-        Some((text, content, attachments))
+        Some((text, content, attachments, ogp))
+    }
+
+    fn toggle_file_menu(&mut self, cx: &mut Context<Self>) {
+        self.file_menu_open = !self.file_menu_open;
+        cx.notify();
+    }
+
+    fn open_create_poll(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.file_menu_open = false;
+        let locale = SharedString::from(self.settings.read(cx).language.clone());
+        window.defer(cx, move |window, cx| {
+            CreatePollModal::open(locale, window, cx);
+        });
+        cx.notify();
+    }
+
+    fn open_share_location(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.file_menu_open = false;
+        if MessagesStore::global(cx).read(cx).is_anonymous_mode() {
+            let locale = self.settings.read(cx).language.clone();
+            let message = SharedString::from(mezon_i18n::t(
+                &locale,
+                "common.cannotSendLocationWithAnonymous",
+            ));
+            Shell::global(cx).update(cx, |shell, cx| shell.info(message, cx));
+            cx.notify();
+            return;
+        }
+        let locale = SharedString::from(self.settings.read(cx).language.clone());
+        window.defer(cx, move |window, cx| {
+            ShareLocationModal::open(locale, window, cx);
+        });
+        cx.notify();
+    }
+
+    fn render_file_menu(&self, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme().clone();
+        let locale = SharedString::from(self.settings.read(cx).language.clone());
+        let show_poll = MessagesStore::global(cx).read(cx).mode() != STREAM_MODE_DM;
+        let show_location = !MessagesStore::global(cx).read(cx).is_anonymous_mode();
+        let text_color = theme.text_muted;
+        let text_hover = theme.text_primary;
+        let bg_hover = theme.bg_hover;
+
+        let mut menu = div()
+            .absolute()
+            .bottom_full()
+            .left_0()
+            .mb_2()
+            .min_w(px(200.))
+            .flex()
+            .flex_col()
+            .p_2()
+            .rounded_lg()
+            .bg(theme.tokens.theme_setting_primary)
+            .shadow_lg()
+            .occlude()
+            .child(
+                div()
+                    .id("file-menu-upload")
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_3()
+                    .px_4()
+                    .py_3()
+                    .rounded_md()
+                    .cursor_pointer()
+                    .text_color(text_color)
+                    .hover(|s| s.bg(bg_hover).text_color(text_hover))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _, window, cx| {
+                            this.file_menu_open = false;
+                            this.open_file_picker(window, cx);
+                        }),
+                    )
+                    .child(
+                        Icon::new(IconName::SelectFileIcon)
+                            .size_5()
+                            .flex_none()
+                            .text_color(text_color)
+                            .hover(|s| s.text_color(text_hover)),
+                    )
+                    .child(div().text_sm().font_weight(FontWeight::MEDIUM).child(
+                        mezon_i18n::t(&locale, "message.fileSelection.uploadFile").to_string(),
+                    )),
+            );
+        if show_location {
+            menu =
+                menu.child(
+                    div()
+                        .id("file-menu-location")
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap_3()
+                        .px_4()
+                        .py_3()
+                        .rounded_md()
+                        .cursor_pointer()
+                        .text_color(text_color)
+                        .hover(|s| s.bg(bg_hover).text_color(text_hover))
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|this, _, window, cx| this.open_share_location(window, cx)),
+                        )
+                        .child(
+                            Icon::new(IconName::Location)
+                                .size_5()
+                                .flex_none()
+                                .text_color(text_color)
+                                .hover(|s| s.text_color(text_hover)),
+                        )
+                        .child(div().text_sm().font_weight(FontWeight::MEDIUM).child(
+                            mezon_i18n::t(&locale, "message.attachments.location").to_string(),
+                        )),
+                );
+        }
+        if show_poll {
+            menu = menu.child(
+                div()
+                    .id("file-menu-poll")
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_3()
+                    .px_4()
+                    .py_3()
+                    .rounded_md()
+                    .cursor_pointer()
+                    .text_color(text_color)
+                    .hover(|s| s.bg(bg_hover).text_color(text_hover))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _, window, cx| this.open_create_poll(window, cx)),
+                    )
+                    .child(img("icons/check-list-icon.svg").size(px(20.)).flex_none())
+                    .child(div().text_sm().font_weight(FontWeight::MEDIUM).child(
+                        mezon_i18n::t(&locale, "message.fileSelection.createPoll").to_string(),
+                    )),
+            );
+        }
+        menu.into_any_element()
     }
 
     fn open_file_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -918,6 +1175,7 @@ impl MentionInput {
             }
             Sigil::Hash => self.session_channels = Vec::new(),
             Sigil::Colon => self.session_emojis = Vec::new(),
+            Sigil::Slash => self.session_commands = Vec::new(),
         }
     }
 
@@ -951,7 +1209,105 @@ impl MentionInput {
                 None
             }
         };
+        self.update_ogp_preview(&content, cx);
         self.last_content = content;
+        MessagesStore::global(cx).update(cx, |store, cx| store.notify_typing(cx));
+    }
+
+    fn update_ogp_preview(&mut self, content: &str, cx: &mut Context<Self>) {
+        if self.compact {
+            return;
+        }
+        let candidate = first_previewable_url(content, None);
+        let Some(url) = candidate else {
+            if self.ogp_url.take().is_some() || self.ogp_preview.take().is_some() {
+                self._ogp_task = None;
+                self.ogp_generation += 1;
+                cx.notify();
+            }
+            return;
+        };
+        if self.ogp_url.as_deref() == Some(url.as_str()) {
+            return;
+        }
+        self.ogp_url = Some(url.clone());
+        self.ogp_preview = None;
+        self.ogp_generation += 1;
+        let generation = self.ogp_generation;
+        cx.notify();
+        self._ogp_task = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis(300))
+                .await;
+            let current = this
+                .read_with(cx, |this, _| this.ogp_generation == generation)
+                .unwrap_or(false);
+            if !current {
+                return;
+            }
+            let result = fetch_ogp(&url).await;
+            let _ = this.update(cx, |this, cx| {
+                if this.ogp_generation != generation {
+                    return;
+                }
+                this.ogp_preview = result.ok();
+                cx.notify();
+            });
+        }));
+    }
+
+    pub fn ogp_preview(&self) -> Option<&OgpResult> {
+        self.ogp_preview.as_ref()
+    }
+
+    fn apply_ephemeral_placeholder(&mut self, cx: &mut Context<Self>) {
+        let placeholder = match &self.ephemeral_target {
+            Some((_, display)) => {
+                let template = mezon_i18n::t(
+                    &self.settings.read(cx).language,
+                    "messageBox.ephemeralMessage",
+                );
+                SharedString::from(template.replace("{{username}}", display))
+            }
+            None => self.base_placeholder.clone(),
+        };
+        self.input
+            .update(cx, |input, cx| input.set_placeholder(placeholder, cx));
+    }
+
+    pub fn take_ephemeral_receiver(&mut self, cx: &mut Context<Self>) -> Option<i64> {
+        let receiver = self.ephemeral_target.take().map(|(id, _)| id);
+        if receiver.is_some() {
+            self.apply_ephemeral_placeholder(cx);
+        }
+        receiver
+    }
+
+    pub fn clear_ephemeral(&mut self, cx: &mut Context<Self>) {
+        let had = self.ephemeral_mode || self.ephemeral_target.is_some();
+        self.ephemeral_mode = false;
+        self.ephemeral_target = None;
+        if had {
+            self.apply_ephemeral_placeholder(cx);
+            cx.notify();
+        }
+    }
+
+    pub fn clear_ogp_preview(&mut self, cx: &mut Context<Self>) {
+        let had = self.ogp_url.take().is_some() | self.ogp_preview.take().is_some();
+        self._ogp_task = None;
+        self.ogp_generation += 1;
+        if had {
+            cx.notify();
+        }
+    }
+
+    fn take_outgoing_ogp(&mut self) -> Option<OutgoingOgp> {
+        let ogp = self.ogp_preview.take().map(|preview| preview.to_outgoing());
+        self.ogp_url = None;
+        self._ogp_task = None;
+        self.ogp_generation += 1;
+        ogp
     }
 
     fn revalidate(&mut self, content: &str, cx: &mut Context<Self>) {
@@ -1034,6 +1390,11 @@ impl MentionInput {
             return;
         };
 
+        if sigil == Sigil::Slash && at != 0 {
+            self.end_mention(cx);
+            return;
+        }
+
         let query = &content[at + 1..cursor];
         if sigil == Sigil::Colon && query.is_empty() {
             self.hide(cx);
@@ -1110,8 +1471,9 @@ impl MentionInput {
         ];
         if let Some(store) = RolesStore::try_global(cx) {
             subs.push(cx.subscribe(&store, |this, _, event: &RolesEvent, cx| {
-                let RolesEvent::Changed { clan_id } = event;
-                if mention_role_clan(cx) == Some(*clan_id) {
+                if let RolesEvent::Changed { clan_id } = event
+                    && mention_role_clan(cx) == Some(*clan_id)
+                {
                     this.invalidate_pool(Sigil::At, cx);
                 }
             }));
@@ -1135,11 +1497,12 @@ impl MentionInput {
     }
 
     fn drop_pool(&mut self) {
-        self.pooled = [None; 3];
+        self.pooled = [None; 4];
         self.session_members = Vec::new();
         self.session_roles = Vec::new();
         self.session_channels = Vec::new();
         self.session_emojis = Vec::new();
+        self.session_commands = Vec::new();
     }
 
     fn refresh_pool(&mut self, sigil: Sigil, cx: &mut Context<Self>) {
@@ -1165,6 +1528,15 @@ impl MentionInput {
                 }
                 self.session_emojis = emoji_suggest_pool(cx).into_iter().map(Rc::new).collect();
             }
+            Sigil::Slash => {
+                let locale = self.settings.read(cx).language.clone();
+                if let Some(channel_id) = MessagesStore::global(cx).read(cx).active_channel_id() {
+                    QuickMenuStore::global(cx).update(cx, |store, cx| {
+                        store.ensure_loaded(channel_id, QUICK_MENU_TYPE_FLASH, cx);
+                    });
+                }
+                self.session_commands = slash_command_pool(&locale, cx);
+            }
         }
     }
 
@@ -1173,15 +1545,36 @@ impl MentionInput {
             Sigil::At => self.session_members.is_empty() && self.session_roles.is_empty(),
             Sigil::Hash => self.session_channels.is_empty(),
             Sigil::Colon => self.session_emojis.is_empty(),
+            Sigil::Slash => self.session_commands.is_empty(),
         }
     }
 
+    fn slash_candidates(&self, query: &str) -> Vec<Suggestion> {
+        let query_lc = query.to_lowercase();
+        self.session_commands
+            .iter()
+            .filter(|command| command.display_lc.starts_with(&query_lc))
+            .map(|command| Suggestion::SlashCommand(command.clone()))
+            .collect()
+    }
+
     fn build_suggestions(&mut self, query: &str, cx: &App) {
-        let candidates = match self.active_sigil {
+        let mut candidates = match self.active_sigil {
             Sigil::At => self.at_candidates(query),
             Sigil::Hash => self.hash_candidates(query),
             Sigil::Colon => self.colon_candidates(query, cx),
+            Sigil::Slash => self.slash_candidates(query),
         };
+        if self.ephemeral_mode && self.active_sigil == Sigil::At {
+            let self_id = BadgeService::try_global(cx)
+                .and_then(|badge| badge.read(cx).current_user_id(cx))
+                .map(|uid| uid.to_string());
+            candidates.retain(|suggestion| match suggestion {
+                Suggestion::Here => false,
+                Suggestion::Member(member, _) => Some(&member.user_id) != self_id.as_ref(),
+                _ => true,
+            });
+        }
         let mut suggestions = prioritize_and_limit(candidates, query);
         resolve_suggestion_media(&mut suggestions, cx);
         let same_items = suggestions.len() == self.suggestions.len()
@@ -1274,7 +1667,44 @@ impl MentionInput {
         };
         let content_len = self.input.read(cx).value().len();
         let replace_end = (at + self.query_len).min(content_len);
+        if let Suggestion::SlashCommand(command) = &suggestion {
+            if command.id.as_ref() == "ephemeral" {
+                self.input.update(cx, |input, cx| {
+                    input.replace_range(at..replace_end, "@", window, cx)
+                });
+                self.ephemeral_mode = true;
+                self.reset_popup();
+                self.sync_ranges(cx);
+                cx.notify();
+            } else if let Some(action_msg) = command.action_msg.as_ref() {
+                self.input.update(cx, |input, cx| {
+                    input.replace_range(at..replace_end, action_msg.as_ref(), window, cx)
+                });
+                self.reset_popup();
+                self.sync_ranges(cx);
+                cx.notify();
+            }
+            return;
+        }
+        if self.ephemeral_mode {
+            if let Suggestion::Member(member, _) = &suggestion {
+                if let Ok(user_id) = member.user_id.parse::<i64>() {
+                    self.ephemeral_target = Some((user_id, member.display.clone().into()));
+                }
+                self.ephemeral_mode = false;
+                self.input.update(cx, |input, cx| {
+                    input.replace_range(at..replace_end, "", window, cx)
+                });
+                self.apply_ephemeral_placeholder(cx);
+                self.reset_popup();
+                self.sync_ranges(cx);
+                cx.notify();
+                return;
+            }
+            self.ephemeral_mode = false;
+        }
         let (display, kind) = match suggestion {
+            Suggestion::SlashCommand(_) => return,
             Suggestion::Here => (
                 "@here".to_string(),
                 TokenKind::Mention {
@@ -1479,9 +1909,19 @@ impl MentionInput {
         }
     }
 
-    fn on_dismiss(&mut self, _: &MentionDismiss, _window: &mut Window, cx: &mut Context<Self>) {
+    fn on_dismiss(&mut self, _: &MentionDismiss, window: &mut Window, cx: &mut Context<Self>) {
         if self.popup_open() {
             self.hide(cx);
+        } else if self.file_menu_open {
+            self.file_menu_open = false;
+            cx.notify();
+        } else if self.ephemeral_mode || self.ephemeral_target.is_some() {
+            self.clear_ephemeral(cx);
+            self.committed.clear();
+            self.input.update(cx, |input, cx| {
+                input.set_mention_spans(Vec::new(), cx);
+                input.set_value("", window, cx);
+            });
         } else if self.popup.is_some() {
             self.close_popup();
             cx.notify();
@@ -1568,6 +2008,22 @@ impl MentionInput {
                         SharedString::default(),
                     )
                 }
+                Suggestion::SlashCommand(command) => (
+                    Some(
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .size(px(24.))
+                            .text_size(px(16.))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(text_muted)
+                            .child("/")
+                            .into_any_element(),
+                    ),
+                    command.display.clone(),
+                    command.description.clone(),
+                ),
             };
 
         div()
@@ -1818,6 +2274,35 @@ fn emoji_suggest_id(emoji: &Emoji) -> String {
     emoji.id.clone()
 }
 
+fn slash_command_pool(locale: &str, cx: &App) -> Vec<Rc<SlashCommandRaw>> {
+    let description: SharedString =
+        mezon_i18n::t(locale, "messageBox.slashCommands.ephemeral.description").into();
+    let mut commands = vec![Rc::new(SlashCommandRaw {
+        id: "ephemeral".into(),
+        display: "ephemeral".into(),
+        display_lc: "ephemeral".to_string(),
+        description,
+        action_msg: None,
+    })];
+    let Some(channel_id) = MessagesStore::global(cx).read(cx).active_channel_id() else {
+        return commands;
+    };
+    for item in QuickMenuStore::global(cx)
+        .read(cx)
+        .items(channel_id, QUICK_MENU_TYPE_FLASH)
+    {
+        let display = item.menu_name.to_string();
+        commands.push(Rc::new(SlashCommandRaw {
+            id: format!("quick_menu_{}", item.id).into(),
+            display: display.clone().into(),
+            display_lc: display.to_lowercase(),
+            description: item.action_msg.clone(),
+            action_msg: Some(item.action_msg.clone()),
+        }));
+    }
+    commands
+}
+
 fn emoji_suggest_pool(cx: &App) -> Vec<EmojiSuggestRaw> {
     let Some(store) = EmojiStore::try_global(cx) else {
         return Vec::new();
@@ -1921,6 +2406,7 @@ impl Render for MentionInput {
 
         let picker = self.render_popup(cx);
         let previews = has_pending.then(|| self.render_attachment_previews(cx));
+        let file_menu = self.file_menu_open.then(|| self.render_file_menu(cx));
 
         let input_area = div()
             .relative()
@@ -1931,26 +2417,36 @@ impl Render for MentionInput {
             .child(MentionInputField::new(&self.input))
             .child(
                 div()
-                    .id("attachment-add")
                     .absolute()
                     .left(px(12.))
                     .top(px(10.))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .size(px(24.))
-                    .rounded(px(4.))
-                    .cursor_pointer()
-                    .hover(|s| s.bg(icon_bg_hover))
+                    .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                        if this.file_menu_open {
+                            this.file_menu_open = false;
+                            cx.notify();
+                        }
+                    }))
                     .child(
-                        Icon::new(IconName::AddCircle)
-                            .size_5()
-                            .text_color(theme.text_muted)
-                            .hover(|s| s.text_color(icon_hover)),
+                        div()
+                            .id("attachment-add")
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .size(px(24.))
+                            .rounded(px(4.))
+                            .cursor_pointer()
+                            .hover(|s| s.bg(icon_bg_hover))
+                            .child(
+                                Icon::new(IconName::AddCircle)
+                                    .size_5()
+                                    .text_color(theme.text_muted)
+                                    .hover(|s| s.text_color(icon_hover)),
+                            )
+                            .on_click(
+                                cx.listener(|this, _event, _window, cx| this.toggle_file_menu(cx)),
+                            ),
                     )
-                    .on_click(
-                        cx.listener(|this, _event, window, cx| this.open_file_picker(window, cx)),
-                    ),
+                    .when_some(file_menu, |el, menu| el.child(menu)),
             )
             .child(
                 div()
@@ -2112,7 +2608,7 @@ mod suggest_tests {
     #[test]
     fn sale_id_is_source_basename_without_extension() {
         assert_eq!(
-            sale_item_id_from_source("https://cdn.mezon.ai/emojis/1750123.webp"),
+            sale_item_id_from_source("https://cdn.example/emojis/1750123.webp"),
             "1750123"
         );
         assert_eq!(sale_item_id_from_source("1750123.webp"), "1750123");
@@ -2121,7 +2617,7 @@ mod suggest_tests {
 
     #[test]
     fn sale_id_is_empty_without_extension() {
-        assert_eq!(sale_item_id_from_source("https://cdn.mezon.ai/emojis"), "");
+        assert_eq!(sale_item_id_from_source("https://cdn.example/emojis"), "");
         assert_eq!(sale_item_id_from_source(""), "");
     }
 }

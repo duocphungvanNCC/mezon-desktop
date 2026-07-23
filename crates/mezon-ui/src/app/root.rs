@@ -76,7 +76,13 @@ impl RootView {
         cx.observe(&auth_state, |_, auth_state, cx| {
             if matches!(*auth_state.read(cx), AuthState::NotAuthenticated) {
                 crate::image_viewer::close_image_viewer(cx);
+                crate::chat::media_channel::close_media_image_modal(cx);
+                crate::channel_app::close_channel_app_window(cx);
                 crate::image_cache::clear_all_image_caches(cx);
+                Router::global(cx).update(cx, |router, cx| {
+                    router.reset();
+                    cx.notify();
+                });
             }
             cx.notify();
         })

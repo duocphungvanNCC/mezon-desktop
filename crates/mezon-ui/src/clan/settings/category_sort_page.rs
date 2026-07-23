@@ -89,23 +89,20 @@ fn render_category_row_surface(
 
 fn drag_grip_icon(color: impl Into<gpui::Background>) -> impl IntoElement {
     fn dot(color: gpui::Background) -> gpui::Div {
-        div()
-            .size(px(GRIP_DOT_SIZE))
-            .rounded_full()
-            .bg(color)
+        div().size(px(GRIP_DOT_SIZE)).rounded_full().bg(color)
     }
     fn row(color: gpui::Background) -> gpui::Div {
         h_flex()
             .gap(px(GRIP_DOT_GAP))
-            .child(dot(color.clone()))
+            .child(dot(color))
             .child(dot(color))
     }
     let color = color.into();
     v_flex()
         .gap(px(GRIP_DOT_GAP))
         .flex_shrink_0()
-        .child(row(color.clone()))
-        .child(row(color.clone()))
+        .child(row(color))
+        .child(row(color))
         .child(row(color))
 }
 
@@ -122,11 +119,7 @@ pub struct CategorySortPage {
 }
 
 impl CategorySortPage {
-    pub fn new(
-        clan_id: ClanId,
-        channel_list: Entity<ChannelList>,
-        cx: &mut Context<Self>,
-    ) -> Self {
+    pub fn new(clan_id: ClanId, channel_list: Entity<ChannelList>, cx: &mut Context<Self>) -> Self {
         channel_list.update(cx, |list, cx| list.load_for_clan(clan_id, cx));
         let categories = Self::build_categories(channel_list.read(cx), clan_id);
         let saved_categories = categories.clone();
@@ -190,30 +183,32 @@ impl CategorySortPage {
         cx.notify();
 
         let clan_id = self.clan_id;
-        let category_ids: Vec<i64> = self.categories.iter().map(|item| item.category_id).collect();
+        let category_ids: Vec<i64> = self
+            .categories
+            .iter()
+            .map(|item| item.category_id)
+            .collect();
         let task = self.channel_list.update(cx, |list, cx| {
             list.update_categories_order(clan_id, &category_ids, cx)
         });
 
-        cx.spawn(async move |this, cx| {
-            match task.await {
-                Ok(()) => {
-                    let _ = this.update(cx, |this, cx| {
-                        this.saved_categories = this.categories.clone();
-                        this.has_changed = false;
-                        this.saving = false;
-                        cx.notify();
-                    });
-                }
-                Err(err) => {
-                    tracing::error!("update categories order failed: {err}");
-                    let _ = this.update(cx, |this, cx| {
-                        this.categories = this.saved_categories.clone();
-                        this.has_changed = false;
-                        this.saving = false;
-                        cx.notify();
-                    });
-                }
+        cx.spawn(async move |this, cx| match task.await {
+            Ok(()) => {
+                let _ = this.update(cx, |this, cx| {
+                    this.saved_categories = this.categories.clone();
+                    this.has_changed = false;
+                    this.saving = false;
+                    cx.notify();
+                });
+            }
+            Err(err) => {
+                tracing::error!("update categories order failed: {err}");
+                let _ = this.update(cx, |this, cx| {
+                    this.categories = this.saved_categories.clone();
+                    this.has_changed = false;
+                    this.saving = false;
+                    cx.notify();
+                });
             }
         })
         .detach();
@@ -275,13 +270,15 @@ impl CategorySortPage {
 
         let mut row = render_category_row_surface(&name, theme, style, None)
             .when(is_drag_active && !is_dragging, |el| el.opacity(0.72))
-            .when(!is_dragging, |el| el.hover(|style| style.bg(theme.bg_hover)))
+            .when(!is_dragging, |el| {
+                el.hover(|style| style.bg(theme.bg_hover))
+            })
             .id(("category-sort-row", index));
 
         row = row.on_drag(CategoryDrag(index), |_, _, _, cx| {
-                cx.stop_propagation();
-                cx.new(|_| CategoryDragPreview)
-            });
+            cx.stop_propagation();
+            cx.new(|_| CategoryDragPreview)
+        });
 
         row
     }
@@ -297,48 +294,47 @@ impl Render for CategorySortPage {
         let categories = self.categories.clone();
         let dragging_index = self.dragging_index;
         let drag_pointer_y = self.drag_pointer_y;
-        let drag_preview = dragging_index.zip(drag_pointer_y).and_then(|(index, y)| {
-            categories.get(index).map(|item| (item.name.clone(), y))
-        });
+        let drag_preview = dragging_index
+            .zip(drag_pointer_y)
+            .and_then(|(index, y)| categories.get(index).map(|item| (item.name.clone(), y)));
 
-        v_flex()
-            .relative()
-            .w_full()
-            .child(
-                div()
-                    .id("category-sort-list")
-                    .relative()
-                    .w_full()
-                    .on_drag_move(cx.listener(|this, event: &DragMoveEvent<CategoryDrag>, _, cx| {
+        v_flex().relative().w_full().child(
+            div()
+                .id("category-sort-list")
+                .relative()
+                .w_full()
+                .on_drag_move(
+                    cx.listener(|this, event: &DragMoveEvent<CategoryDrag>, _, cx| {
                         this.handle_drag_move(event, cx);
-                    }))
-                    .on_drop(cx.listener(|this, _: &CategoryDrag, _, cx| {
-                        this.finish_drag(cx);
-                    }))
-                    .child(
-                        v_flex()
-                            .gap(px(ROW_GAP))
-                            .children(categories.iter().enumerate().map(|(index, item)| {
-                                self.render_category_row(index, item, &theme)
-                                    .into_any_element()
-                            })),
-                    )
-                    .when_some(drag_preview, |list, (name, y)| {
-                        list.child(
-                            div()
-                                .absolute()
-                                .left_0()
-                                .right_0()
-                                .top(y - px(ROW_HEIGHT / 2.0))
-                                .occlude()
-                                .child(render_category_row_surface(
-                                    &name,
-                                    &theme,
-                                    RowSurfaceStyle::DragPreview,
-                                    None,
-                                )),
-                        )
                     }),
-            )
+                )
+                .on_drop(cx.listener(|this, _: &CategoryDrag, _, cx| {
+                    this.finish_drag(cx);
+                }))
+                .child(
+                    v_flex()
+                        .gap(px(ROW_GAP))
+                        .children(categories.iter().enumerate().map(|(index, item)| {
+                            self.render_category_row(index, item, &theme)
+                                .into_any_element()
+                        })),
+                )
+                .when_some(drag_preview, |list, (name, y)| {
+                    list.child(
+                        div()
+                            .absolute()
+                            .left_0()
+                            .right_0()
+                            .top(y - px(ROW_HEIGHT / 2.0))
+                            .occlude()
+                            .child(render_category_row_surface(
+                                &name,
+                                &theme,
+                                RowSurfaceStyle::DragPreview,
+                                None,
+                            )),
+                    )
+                }),
+        )
     }
 }

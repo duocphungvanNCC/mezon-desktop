@@ -12,6 +12,16 @@ pub const PERMISSION_CLAN_OWNER: &str = "clan-owner";
 pub const PERMISSION_ADMINISTRATOR: &str = "administrator";
 pub const PERMISSION_MANAGE_CHANNEL: &str = "manage-channel";
 pub const PERMISSION_MANAGE_CLAN: &str = "manage-clan";
+pub const PERMISSION_SEND_MESSAGE: &str = "send-message";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PermissionDefinition {
+    pub id: i64,
+    pub slug: String,
+    pub title: String,
+    pub description: String,
+    pub level: i32,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ClanSettingsPermissions {
@@ -37,6 +47,7 @@ pub enum PermissionEvent {
 
 pub struct PermissionStore {
     catalog: HashMap<String, i32>,
+    definitions: Vec<PermissionDefinition>,
     catalog_loaded: bool,
     catalog_loading: bool,
     max_level_by_clan: HashMap<ClanId, i32>,
@@ -80,6 +91,7 @@ impl PermissionStore {
 
         Self {
             catalog: HashMap::new(),
+            definitions: Vec::new(),
             catalog_loaded: false,
             catalog_loading: false,
             max_level_by_clan: HashMap::new(),
@@ -160,8 +172,23 @@ impl PermissionStore {
         self.has_permission_level(max_level, slug)
     }
 
+    pub fn current_permission_level(&self, clan_id: ClanId, cx: &App) -> Option<i32> {
+        if self.is_clan_owner(clan_id, cx) {
+            return Some(i32::MAX);
+        }
+        self.max_level_by_clan.get(&clan_id).copied()
+    }
+
     pub fn has_clan_permissions_loaded(&self, clan_id: ClanId, cx: &App) -> bool {
         self.is_clan_owner(clan_id, cx) || self.max_level_by_clan.contains_key(&clan_id)
+    }
+
+    pub fn permission_definitions(&self) -> &[PermissionDefinition] {
+        &self.definitions
+    }
+
+    pub fn ensure_catalog_loaded(&mut self, cx: &mut Context<Self>) {
+        self.load_permission_catalog(cx);
     }
 
     pub fn clan_settings_permissions(&self, clan_id: ClanId, cx: &App) -> ClanSettingsPermissions {
@@ -224,12 +251,23 @@ impl PermissionStore {
                 this.catalog_loading = false;
                 match result {
                     Ok(list) => {
-                        this.catalog = list
-                            .permissions
-                            .into_iter()
-                            .filter(|p| !p.slug.is_empty())
-                            .map(|p| (p.slug, p.level))
-                            .collect();
+                        let mut catalog = HashMap::new();
+                        let mut definitions = Vec::new();
+                        for p in list.permissions {
+                            if p.slug.is_empty() {
+                                continue;
+                            }
+                            catalog.insert(p.slug.clone(), p.level);
+                            definitions.push(PermissionDefinition {
+                                id: p.id,
+                                slug: p.slug,
+                                title: p.title,
+                                description: p.description,
+                                level: p.level,
+                            });
+                        }
+                        this.catalog = catalog;
+                        this.definitions = definitions;
                         this.catalog_loaded = true;
                         cx.emit(PermissionEvent::Changed { clan_id: None });
                         cx.notify();

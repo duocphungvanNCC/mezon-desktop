@@ -147,9 +147,13 @@ pub struct Theme {
     pub status_dnd: Rgba,     // #f23f43
     pub status_offline: Rgba, // #80848e
 
+    pub danger: Rgba,          // #DA363C — React delete/destructive buttons
+    pub danger_text: Rgba,     // #E13542 — report/delete context menu labels
+    pub danger_hover_bg: Rgba, // #f67e882a — danger menu row hover
+
     // Unread / notification
-    pub unread_dot: Rgba,    // #f2f3f5
-    pub mention_badge: Rgba, // #f23f43
+    pub unread_dot: Rgba, // #f2f3f5
+    pub mention_badge: Rgba,
 
     // Borders
     pub border: Rgba, // rgba(255,255,255,0.08)
@@ -215,8 +219,12 @@ impl Theme {
             status_dnd: rgba(225, 2, 79, 1.0),
             status_offline: rgba(128, 132, 142, 1.0),
 
+            danger: rgba(218, 54, 60, 1.0),
+            danger_text: rgba(225, 53, 66, 1.0),
+            danger_hover_bg: rgba(246, 126, 136, 42.0 / 255.0),
+
             unread_dot: rgba(242, 243, 245, 1.0),
-            mention_badge: rgba(242, 63, 67, 1.0),
+            mention_badge: rgba(218, 55, 60, 1.0),
 
             border: rgba(100, 100, 100, 0.4),
             title_bar_bg: rgba(30, 31, 34, 1.0),
@@ -249,8 +257,12 @@ impl Theme {
             status_dnd: rgba(225, 2, 79, 1.0),
             status_offline: rgba(128, 132, 142, 1.0),
 
+            danger: rgba(218, 54, 60, 1.0),
+            danger_text: rgba(225, 53, 66, 1.0),
+            danger_hover_bg: rgba(246, 126, 136, 42.0 / 255.0),
+
             unread_dot: rgba(6, 6, 7, 1.0),
-            mention_badge: rgba(242, 63, 67, 1.0),
+            mention_badge: rgba(218, 55, 60, 1.0),
 
             border: rgba(218, 220, 224, 1.0),
             title_bar_bg: rgba(227, 229, 232, 1.0),
@@ -268,7 +280,6 @@ impl Theme {
         base.brand_hover = t.bg_button_primary_hover;
         base.border = t.border_primary;
         base.text_link = t.color_mention_hover;
-        base.mention_badge = t.mention_color;
         base.title_bar_bg = t.bg_primary;
         base.tokens = t;
         base
