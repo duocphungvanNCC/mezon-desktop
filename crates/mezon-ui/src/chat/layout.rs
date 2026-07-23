@@ -812,6 +812,9 @@ impl ChatLayout {
     }
 
     fn sync_active_from_route(&mut self, cx: &mut Context<Self>) {
+        if !matches!(Router::global(cx).read(cx).route(), Route::Canvas { .. }) {
+            self.canvas_view = None;
+        }
         match Router::global(cx).read(cx).route() {
             Route::Channel {
                 clan_id,
@@ -2104,7 +2107,7 @@ impl ChatLayout {
             return self.friends_page.clone().into_any_element();
         }
 
-        if let Some(ch) = self.channel_list.read(cx).active_channel().cloned() {
+        if let Some(ch) = self.channel_list.read(cx).active_channel() {
             if let Route::Canvas {
                 clan_id,
                 channel_id,

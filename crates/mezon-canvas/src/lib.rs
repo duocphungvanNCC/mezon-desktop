@@ -7,6 +7,7 @@ mod quill;
 mod view;
 
 pub use editor::{CanvasEditor, CanvasEditorState, init as init_editor};
+pub use image::reset_canvas_image_caches;
 pub use navigation::{
     CanvasNavigationHooks, CanvasRoute, confirm_delete_canvas, navigate_to_canvas,
     navigate_to_channel, set_navigation,

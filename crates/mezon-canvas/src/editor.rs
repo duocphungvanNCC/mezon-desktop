@@ -1,4 +1,6 @@
+use std::cell::RefCell;
 use std::ops::Range;
+use std::sync::Arc;
 
 #[path = "blink.rs"]
 mod blink;
@@ -182,7 +184,7 @@ struct StyledMark {
 }
 
 struct DocLine {
-    line: Option<WrappedLine>,
+    line: Option<Arc<WrappedLine>>,
     text_start: usize,
     start: usize,
     prefix_width: Pixels,
@@ -231,6 +233,10 @@ pub struct CanvasEditorState {
     link_menu_open: bool,
     link_input: Entity<InputState>,
     is_selecting: bool,
+    layout_generation: u64,
+    layout_cache: RefCell<Option<Arc<EditorShapeCache>>>,
+    doc_json_cache: RefCell<Option<String>>,
+    content_dirty: RefCell<bool>,
 }
 
 impl CanvasEditorState {
@@ -270,8 +276,13 @@ impl CanvasEditorState {
             link_menu_open: false,
             link_input,
             is_selecting: false,
+            layout_generation: 0,
+            layout_cache: RefCell::new(None),
+            doc_json_cache: RefCell::new(None),
+            content_dirty: RefCell::new(false),
         };
         state.rebuild_buffer();
+        *state.content_dirty.borrow_mut() = false;
         cx.on_focus(&focus_handle, window, |this, _window, cx| {
             this.caret_blink.sync_focused(cx);
             cx.notify();
@@ -402,6 +413,7 @@ impl CanvasEditorState {
             self.lines.push(EditorLine::default());
         }
         self.rebuild_buffer();
+        *self.content_dirty.borrow_mut() = false;
         self.selected_range = 0..0;
         self.selection_reversed = false;
         self.marked_range = None;
@@ -412,8 +424,22 @@ impl CanvasEditorState {
         cx.notify();
     }
 
+    pub fn is_content_dirty(&self) -> bool {
+        *self.content_dirty.borrow()
+    }
+
+    pub fn mark_content_saved(&mut self, cx: &mut Context<Self>) {
+        *self.content_dirty.borrow_mut() = false;
+        cx.notify();
+    }
+
     pub fn doc_json(&self) -> String {
-        lines_to_tiptap_json(&self.lines)
+        if let Some(cached) = self.doc_json_cache.borrow().as_ref() {
+            return cached.clone();
+        }
+        let json = lines_to_tiptap_json(&self.lines);
+        *self.doc_json_cache.borrow_mut() = Some(json.clone());
+        json
     }
 
     pub fn is_empty(&self) -> bool {
@@ -496,6 +522,10 @@ impl CanvasEditorState {
     }
 
     fn rebuild_buffer(&mut self) {
+        self.layout_generation = self.layout_generation.wrapping_add(1);
+        *self.doc_json_cache.borrow_mut() = None;
+        *self.layout_cache.borrow_mut() = None;
+        *self.content_dirty.borrow_mut() = true;
         let mut content = String::new();
         let mut line_starts = Vec::with_capacity(self.lines.len());
         let mut styled_marks = Vec::new();
@@ -1331,24 +1361,30 @@ impl CanvasEditorState {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis())
             .unwrap_or(0);
-        let payloads: Vec<(Vec<u8>, String, String)> = images
-            .into_iter()
-            .enumerate()
-            .filter_map(|(index, image)| clipboard_image_upload_payload(&image, base, index))
-            .collect();
-        if payloads.is_empty() {
-            return;
-        }
-        let uploads: Vec<gpui::Task<Result<mezon_store::UploadedCanvasImage, String>>> = payloads
-            .into_iter()
-            .map(|(data, filetype, filename)| {
-                CanvasStore::global(cx).update(cx, |store, cx| {
-                    store.upload_canvas_image(data, filetype, filename, cx)
-                })
-            })
-            .collect();
         cx.spawn(async move |this, cx| {
-            for task in uploads {
+            let payloads = cx
+                .background_spawn(async move {
+                    images
+                        .into_iter()
+                        .enumerate()
+                        .filter_map(|(index, image)| {
+                            clipboard_image_upload_payload(&image, base, index)
+                        })
+                        .collect::<Vec<(Vec<u8>, String, String)>>()
+                })
+                .await;
+            if payloads.is_empty() {
+                return;
+            }
+            for (data, filetype, filename) in payloads {
+                let upload = this.update(cx, |_, cx| {
+                    CanvasStore::global(cx).update(cx, |store, cx| {
+                        store.upload_canvas_image(data, filetype, filename, cx)
+                    })
+                });
+                let Ok(task) = upload else {
+                    continue;
+                };
                 match task.await {
                     Ok(uploaded) => {
                         let _ = this.update(cx, |this, cx| {
@@ -1692,8 +1728,9 @@ impl IntoElement for CanvasEditorElement {
     }
 }
 
+#[derive(Clone)]
 struct PreparedLine {
-    line: Option<WrappedLine>,
+    line: Option<Arc<WrappedLine>>,
     origin: Point<Pixels>,
     start: usize,
     prefix_width: Pixels,
@@ -1708,11 +1745,22 @@ struct PreparedPrefix {
     height: Pixels,
 }
 
+#[derive(Clone)]
 struct PreparedImage {
     top: Pixels,
     width: Pixels,
     height: Pixels,
     src: SharedString,
+}
+
+struct EditorShapeCache {
+    generation: u64,
+    width: Pixels,
+    layout: Vec<PreparedLine>,
+    prefix_layout: Vec<(Pixels, Pixels, ShapedLine, Pixels)>,
+    images: Vec<PreparedImage>,
+    total_h: Pixels,
+    missing_dim_srcs: Vec<String>,
 }
 
 #[derive(Clone, Default)]
@@ -1840,7 +1888,7 @@ impl Element for CanvasEditorElement {
                 }
                 let y = bounds.top() + content_top - scroll_offset.y;
                 painted.push(PreparedLine {
-                    line: Some(line),
+                    line: Some(Arc::new(line)),
                     origin: point(bounds.left() - scroll_offset.x, y),
                     start: span_start,
                     prefix_width: Pixels::ZERO,
@@ -1901,130 +1949,160 @@ impl Element for CanvasEditorElement {
             strikethrough: None,
         };
         let display_selection = selected_range.clone();
-        let mut images = Vec::new();
-        let mut layout: Vec<PreparedLine> = Vec::new();
-        let mut prefix_layout: Vec<(Pixels, Pixels, ShapedLine, Pixels)> = Vec::new();
-        let mut content_y = Pixels::ZERO;
-        let mut missing_dim_srcs: Vec<String> = Vec::new();
+        let layout_generation = editor.layout_generation;
+        let cached_layout = editor
+            .layout_cache
+            .borrow()
+            .as_ref()
+            .filter(|cache| cache.generation == layout_generation && cache.width == available_w)
+            .cloned();
 
-        for (logical_ix, editor_line) in editor.lines.iter().enumerate() {
-            let line_start = editor.line_starts.get(logical_ix).copied().unwrap_or(0);
-            if editor_line.block == BlockKind::Image {
-                let src = editor_line.image_src.as_deref().unwrap_or("");
-                let (image_w, image_h) = canvas_image_display_size(cx, src, available_w);
-                if !src.is_empty()
-                    && !is_data_image_url(src)
-                    && canvas_image_known_size(cx, src).is_none()
-                {
-                    missing_dim_srcs.push(src.to_string());
-                }
-                let block_h = image_h + CANVAS_IMAGE_MARGIN * 2.;
-                layout.push(PreparedLine {
-                    line: None,
-                    origin: point(Pixels::ZERO, content_y),
-                    start: line_start,
-                    prefix_width: Pixels::ZERO,
-                    top: content_y,
-                    height: block_h,
-                    row_height: default_line_height,
-                });
-                if !src.is_empty() {
-                    images.push(PreparedImage {
-                        top: content_y + CANVAS_IMAGE_MARGIN,
-                        width: image_w,
-                        height: image_h,
-                        src: canvas_image_display_src(src).into(),
-                    });
-                }
-                content_y += block_h;
-                continue;
-            }
-            let meta = block_paint_meta(editor_line, logical_ix, &editor.lines, rem_size);
-            let line_h = meta.line_height;
-            let font_size = meta.font_size;
-
-            let mut prefix_width = Pixels::ZERO;
-            if !meta.prefix.is_empty() {
-                let prefix_run = TextRun {
-                    len: meta.prefix.len(),
-                    font: {
-                        let mut font = base_font.clone();
-                        font.weight = meta.font_weight;
-                        font
-                    },
-                    color: text_color,
-                    background_color: None,
-                    underline: None,
-                    strikethrough: None,
-                };
-                let shaped = window.text_system().shape_line(
-                    meta.prefix.clone(),
-                    font_size,
-                    &[prefix_run],
-                    None,
-                );
-                prefix_width = shaped.width();
-                prefix_layout.push((content_y, meta.indent, shaped, line_h));
-            }
-            let text_x = meta.indent + prefix_width;
-            let wrap_width = (available_w - text_x).max(Pixels::ZERO);
-
-            let runs = build_line_runs(editor_line, &base_run, &meta, link_color, code_bg);
-            let wrapped = if editor_line.text.is_empty() {
-                Vec::new()
+        let (layout, prefix_layout, images, total_h, missing_dim_srcs) =
+            if let Some(cache) = cached_layout {
+                (
+                    cache.layout.clone(),
+                    cache.prefix_layout.clone(),
+                    cache.images.clone(),
+                    cache.total_h,
+                    cache.missing_dim_srcs.clone(),
+                )
             } else {
-                window
-                    .text_system()
-                    .shape_text(
-                        SharedString::from(editor_line.text.clone()),
-                        font_size,
-                        &runs,
-                        Some(wrap_width),
-                        None,
-                    )
-                    .unwrap_or_default()
-                    .into_iter()
-                    .collect()
+                let mut images = Vec::new();
+                let mut layout: Vec<PreparedLine> = Vec::new();
+                let mut prefix_layout: Vec<(Pixels, Pixels, ShapedLine, Pixels)> = Vec::new();
+                let mut content_y = Pixels::ZERO;
+                let mut missing_dim_srcs: Vec<String> = Vec::new();
+
+                for (logical_ix, editor_line) in editor.lines.iter().enumerate() {
+                    let line_start = editor.line_starts.get(logical_ix).copied().unwrap_or(0);
+                    if editor_line.block == BlockKind::Image {
+                        let src = editor_line.image_src.as_deref().unwrap_or("");
+                        let (image_w, image_h) = canvas_image_display_size(cx, src, available_w);
+                        if !src.is_empty()
+                            && !is_data_image_url(src)
+                            && canvas_image_known_size(cx, src).is_none()
+                        {
+                            missing_dim_srcs.push(src.to_string());
+                        }
+                        let block_h = image_h + CANVAS_IMAGE_MARGIN * 2.;
+                        layout.push(PreparedLine {
+                            line: None,
+                            origin: point(Pixels::ZERO, content_y),
+                            start: line_start,
+                            prefix_width: Pixels::ZERO,
+                            top: content_y,
+                            height: block_h,
+                            row_height: default_line_height,
+                        });
+                        if !src.is_empty() {
+                            images.push(PreparedImage {
+                                top: content_y + CANVAS_IMAGE_MARGIN,
+                                width: image_w,
+                                height: image_h,
+                                src: canvas_image_display_src(src).into(),
+                            });
+                        }
+                        content_y += block_h;
+                        continue;
+                    }
+                    let meta = block_paint_meta(editor_line, logical_ix, &editor.lines, rem_size);
+                    let line_h = meta.line_height;
+                    let font_size = meta.font_size;
+
+                    let mut prefix_width = Pixels::ZERO;
+                    if !meta.prefix.is_empty() {
+                        let prefix_run = TextRun {
+                            len: meta.prefix.len(),
+                            font: {
+                                let mut font = base_font.clone();
+                                font.weight = meta.font_weight;
+                                font
+                            },
+                            color: text_color,
+                            background_color: None,
+                            underline: None,
+                            strikethrough: None,
+                        };
+                        let shaped = window.text_system().shape_line(
+                            meta.prefix.clone(),
+                            font_size,
+                            &[prefix_run],
+                            None,
+                        );
+                        prefix_width = shaped.width();
+                        prefix_layout.push((content_y, meta.indent, shaped, line_h));
+                    }
+                    let text_x = meta.indent + prefix_width;
+                    let wrap_width = (available_w - text_x).max(Pixels::ZERO);
+
+                    let runs = build_line_runs(editor_line, &base_run, &meta, link_color, code_bg);
+                    let wrapped = if editor_line.text.is_empty() {
+                        Vec::new()
+                    } else {
+                        window
+                            .text_system()
+                            .shape_text(
+                                SharedString::from(editor_line.text.as_str()),
+                                font_size,
+                                &runs,
+                                Some(wrap_width),
+                                None,
+                            )
+                            .unwrap_or_default()
+                            .into_iter()
+                            .collect()
+                    };
+
+                    if wrapped.is_empty() {
+                        layout.push(PreparedLine {
+                            line: None,
+                            origin: point(Pixels::ZERO, content_y),
+                            start: line_start,
+                            prefix_width: text_x,
+                            top: content_y,
+                            height: line_h,
+                            row_height: line_h,
+                        });
+                        content_y += line_h;
+                        continue;
+                    }
+
+                    let wrapped_count = wrapped.len();
+                    let mut byte_off = 0usize;
+                    for (wrap_ix, line) in wrapped.into_iter().enumerate() {
+                        let seg_start = line_start + byte_off;
+                        let seg_len = line.len();
+                        let block_height = line.size(line_h).height;
+                        layout.push(PreparedLine {
+                            line: Some(Arc::new(line)),
+                            origin: point(text_x, content_y),
+                            start: seg_start,
+                            prefix_width: text_x,
+                            top: content_y,
+                            height: block_height,
+                            row_height: line_h,
+                        });
+                        byte_off += seg_len;
+                        if wrap_ix + 1 < wrapped_count {
+                            byte_off += 1;
+                        }
+                        content_y += block_height;
+                    }
+                }
+
+                let total_h = content_y.max(default_line_height);
+                *editor.layout_cache.borrow_mut() = Some(Arc::new(EditorShapeCache {
+                    generation: layout_generation,
+                    width: available_w,
+                    layout: layout.clone(),
+                    prefix_layout: prefix_layout.clone(),
+                    images: images.clone(),
+                    total_h,
+                    missing_dim_srcs: missing_dim_srcs.clone(),
+                }));
+                (layout, prefix_layout, images, total_h, missing_dim_srcs)
             };
 
-            if wrapped.is_empty() {
-                layout.push(PreparedLine {
-                    line: None,
-                    origin: point(Pixels::ZERO, content_y),
-                    start: line_start,
-                    prefix_width: text_x,
-                    top: content_y,
-                    height: line_h,
-                    row_height: line_h,
-                });
-                content_y += line_h;
-                continue;
-            }
-
-            let wrapped_count = wrapped.len();
-            let mut byte_off = 0usize;
-            for (wrap_ix, line) in wrapped.into_iter().enumerate() {
-                let seg_start = line_start + byte_off;
-                let seg_len = line.len();
-                let block_height = line.size(line_h).height;
-                layout.push(PreparedLine {
-                    line: Some(line),
-                    origin: point(text_x, content_y),
-                    start: seg_start,
-                    prefix_width: text_x,
-                    top: content_y,
-                    height: block_height,
-                    row_height: line_h,
-                });
-                byte_off += seg_len;
-                if wrap_ix + 1 < wrapped_count {
-                    byte_off += 1;
-                }
-                content_y += block_height;
-            }
-        }
-
-        let total_h = content_y.max(default_line_height);
         let mut caret_x = Pixels::ZERO;
         let mut caret_top = Pixels::ZERO;
         let mut caret_h = default_line_height;
@@ -2191,7 +2269,7 @@ impl Element for CanvasEditorElement {
                 }
             }
             painted.push(PreparedLine {
-                line: prepared.line,
+                line: prepared.line.clone(),
                 origin,
                 start: prepared.start,
                 prefix_width: prepared.prefix_width,
@@ -3307,9 +3385,12 @@ fn inline_to_marks(content: Option<&Vec<TipTapNode>>) -> Vec<EditorMark> {
             let text = node.text.as_deref().unwrap_or("");
             if let Some(node_marks) = &node.marks {
                 for mark in node_marks {
+                    let Some(kind) = mark_kind_from_tiptap(mark) else {
+                        continue;
+                    };
                     marks.push(EditorMark {
                         range: offset..offset + text.len(),
-                        kind: mark_kind_from_tiptap(mark),
+                        kind,
                         href: mark
                             .attrs
                             .as_ref()
@@ -3327,14 +3408,14 @@ fn inline_to_marks(content: Option<&Vec<TipTapNode>>) -> Vec<EditorMark> {
     marks
 }
 
-fn mark_kind_from_tiptap(mark: &TipTapMark) -> MarkKind {
+fn mark_kind_from_tiptap(mark: &TipTapMark) -> Option<MarkKind> {
     match mark.kind.as_str() {
-        "bold" => MarkKind::Bold,
-        "italic" => MarkKind::Italic,
-        "strike" => MarkKind::Strike,
-        "code" => MarkKind::Code,
-        "link" => MarkKind::Link,
-        _ => MarkKind::Bold,
+        "bold" => Some(MarkKind::Bold),
+        "italic" => Some(MarkKind::Italic),
+        "strike" => Some(MarkKind::Strike),
+        "code" => Some(MarkKind::Code),
+        "link" => Some(MarkKind::Link),
+        _ => None,
     }
 }
 

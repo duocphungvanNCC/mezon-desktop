@@ -7,7 +7,7 @@ use serde::Deserialize;
 use serde_json::Value;
 use ui::{ScrollAxes, Scrollbars, WithScrollbar};
 
-use crate::doc_view::render_tiptap_doc;
+use crate::doc_view::render_tiptap_node;
 use crate::editor::{CanvasEditor, CanvasEditorState};
 use crate::navigation::{CanvasRoute, navigate_to_canvas, navigate_to_channel};
 use crate::quill::{is_quill_delta, quill_delta_to_tiptap_json};
@@ -39,6 +39,8 @@ pub struct CanvasView {
     creator_id: UserId,
     content_scroll: ScrollHandle,
     pending_detail: Option<CanvasDetail>,
+    view_doc_source: SharedString,
+    view_doc: Option<TipTapNode>,
     _load_task: Option<gpui::Task<()>>,
 }
 
@@ -83,6 +85,8 @@ impl CanvasView {
             creator_id: UserId(0),
             content_scroll: ScrollHandle::new(),
             pending_detail: None,
+            view_doc_source: SharedString::default(),
+            view_doc: None,
             _load_task: None,
         };
         view.start_load(window, cx);
@@ -195,9 +199,14 @@ impl CanvasView {
 
     fn has_changes(&self, cx: &App) -> bool {
         let title_changed = self.title_input.read(cx).value() != self.original_title.as_ref();
-        let content_changed =
-            self.content_editor.read(cx).doc_json() != self.original_content.as_ref();
-        title_changed || content_changed
+        if title_changed {
+            return true;
+        }
+        let editor = self.content_editor.read(cx);
+        if !editor.is_content_dirty() {
+            return false;
+        }
+        editor.doc_json() != self.original_content.as_ref()
     }
 
     fn save(&mut self, cx: &mut Context<Self>) {
@@ -235,6 +244,9 @@ impl CanvasView {
                             this.original_title = title.into();
                             this.original_content = content.clone().into();
                             this.loaded_content = content.into();
+                            this.content_editor.update(cx, |editor, cx| {
+                                editor.mark_content_saved(cx);
+                            });
                             this.editing = false;
                         }
                         Err(e) => {
@@ -262,6 +274,9 @@ impl CanvasView {
                         this.original_title = title.into();
                         this.original_content = content.clone().into();
                         this.loaded_content = content.into();
+                        this.content_editor.update(cx, |editor, cx| {
+                            editor.mark_content_saved(cx);
+                        });
                         this.editing = false;
                     }
                     Err(e) => {
@@ -464,13 +479,18 @@ impl gpui::Render for CanvasView {
                 .child(CanvasEditor::new(&self.content_editor))
                 .into_any_element()
         } else {
-            let content = self.content_editor.read(cx).doc_json();
+            if self.view_doc_source.as_ref() != self.loaded_content.as_ref() {
+                self.view_doc = parse_tiptap_doc(self.loaded_content.as_ref());
+                self.view_doc_source = self.loaded_content.clone();
+            }
             div()
                 .id("canvas-body")
                 .w_full()
                 .min_w_0()
                 .py_2()
-                .child(render_tiptap_doc(&content, theme.as_ref(), cx))
+                .when_some(self.view_doc.clone(), |el, doc| {
+                    el.child(render_tiptap_node(doc, theme.as_ref(), cx))
+                })
                 .into_any_element()
         };
 

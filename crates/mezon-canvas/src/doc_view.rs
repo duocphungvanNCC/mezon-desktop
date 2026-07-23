@@ -32,17 +32,8 @@ fn paragraph_is_empty(content: Option<&Vec<TipTapNode>>) -> bool {
 
 pub fn render_tiptap_doc(raw: &str, theme: &Theme, cx: &App) -> gpui::AnyElement {
     match parse_tiptap_doc(raw) {
-        Some(doc) if doc.kind == "doc" => {
-            let children = doc.content.unwrap_or_default();
-            if children.is_empty() {
-                return div().into_any_element();
-            }
-            v_flex()
-                .w_full()
-                .children(children.into_iter().map(|n| render_node(n, theme, cx, 0)))
-                .into_any_element()
-        }
-        _ => div()
+        Some(doc) => render_tiptap_node(doc, theme, cx),
+        None => div()
             .text_sm()
             .text_color(theme.tokens.text_theme_message)
             .child(raw.to_string())
@@ -50,7 +41,40 @@ pub fn render_tiptap_doc(raw: &str, theme: &Theme, cx: &App) -> gpui::AnyElement
     }
 }
 
-fn render_node(node: TipTapNode, theme: &Theme, cx: &App, depth: usize) -> gpui::AnyElement {
+pub fn render_tiptap_node(doc: TipTapNode, theme: &Theme, cx: &App) -> gpui::AnyElement {
+    if doc.kind == "doc" {
+        let children = doc.content.unwrap_or_default();
+        if children.is_empty() {
+            return div().into_any_element();
+        }
+        return v_flex()
+            .w_full()
+            .children(
+                children
+                    .into_iter()
+                    .enumerate()
+                    .map(|(i, n)| render_node(n, theme, cx, 0, i as u64)),
+            )
+            .into_any_element();
+    }
+    div()
+        .text_sm()
+        .text_color(theme.tokens.text_theme_message)
+        .child(doc.kind)
+        .into_any_element()
+}
+
+fn inline_scope(parent: u64, index: usize) -> u64 {
+    parent.wrapping_mul(31).wrapping_add(index as u64 + 1)
+}
+
+fn render_node(
+    node: TipTapNode,
+    theme: &Theme,
+    cx: &App,
+    depth: usize,
+    scope_id: u64,
+) -> gpui::AnyElement {
     let tokens = &theme.tokens;
     match node.kind.as_str() {
         "paragraph" => {
@@ -62,7 +86,7 @@ fn render_node(node: TipTapNode, theme: &Theme, cx: &App, depth: usize) -> gpui:
                 .text_size(CANVAS_BODY_FONT_SIZE)
                 .line_height(CANVAS_BODY_LINE_HEIGHT)
                 .text_color(tokens.text_theme_message)
-                .child(render_inline_children(node.content, theme, cx))
+                .child(render_inline_children(node.content, theme, scope_id))
                 .into_any_element()
         }
         "heading" => {
@@ -84,7 +108,7 @@ fn render_node(node: TipTapNode, theme: &Theme, cx: &App, depth: usize) -> gpui:
                 .line_height(line_height)
                 .font_weight(weight)
                 .text_color(tokens.text_theme_message)
-                .child(render_inline_children(node.content, theme, cx))
+                .child(render_inline_children(node.content, theme, scope_id))
                 .into_any_element()
         }
         "bulletList" | "taskList" => v_flex()
@@ -94,7 +118,10 @@ fn render_node(node: TipTapNode, theme: &Theme, cx: &App, depth: usize) -> gpui:
                 node.content
                     .unwrap_or_default()
                     .into_iter()
-                    .map(|n| render_list_item(n, theme, cx, depth, false)),
+                    .enumerate()
+                    .map(|(i, n)| {
+                        render_list_item(n, theme, cx, depth, false, inline_scope(scope_id, i))
+                    }),
             )
             .into_any_element(),
         "orderedList" => {
@@ -102,12 +129,9 @@ fn render_node(node: TipTapNode, theme: &Theme, cx: &App, depth: usize) -> gpui:
             v_flex()
                 .w_full()
                 .pl(px(8. + depth as f32 * 8.))
-                .children(
-                    items
-                        .into_iter()
-                        .enumerate()
-                        .map(|(i, n)| render_list_item_numbered(n, theme, cx, depth, i + 1)),
-                )
+                .children(items.into_iter().enumerate().map(|(i, n)| {
+                    render_list_item_numbered(n, theme, cx, depth, i + 1, inline_scope(scope_id, i))
+                }))
                 .into_any_element()
         }
         "blockquote" => div()
@@ -117,7 +141,13 @@ fn render_node(node: TipTapNode, theme: &Theme, cx: &App, depth: usize) -> gpui:
             .border_l_2()
             .border_color(tokens.button_theme_primary)
             .text_color(tokens.text_secondary)
-            .child(render_block_children(node.content, theme, cx, depth))
+            .child(render_block_children(
+                node.content,
+                theme,
+                cx,
+                depth,
+                scope_id,
+            ))
             .into_any_element(),
         "codeBlock" => {
             let text = tip_tap_to_plain_text_node(&node);
@@ -154,9 +184,9 @@ fn render_node(node: TipTapNode, theme: &Theme, cx: &App, depth: usize) -> gpui:
                 v_flex()
                     .w_full()
                     .children(
-                        children
-                            .into_iter()
-                            .map(|n| render_node(n, theme, cx, depth)),
+                        children.into_iter().enumerate().map(|(i, n)| {
+                            render_node(n, theme, cx, depth, inline_scope(scope_id, i))
+                        }),
                     )
                     .into_any_element()
             } else {
@@ -171,6 +201,7 @@ fn render_block_children(
     theme: &Theme,
     cx: &App,
     depth: usize,
+    scope_id: u64,
 ) -> gpui::AnyElement {
     let Some(children) = content else {
         return div().into_any_element();
@@ -183,7 +214,8 @@ fn render_block_children(
         .children(
             children
                 .into_iter()
-                .map(|n| render_node(n, theme, cx, depth)),
+                .enumerate()
+                .map(|(i, n)| render_node(n, theme, cx, depth, inline_scope(scope_id, i))),
         )
         .into_any_element()
 }
@@ -194,6 +226,7 @@ fn render_list_item(
     cx: &App,
     depth: usize,
     checked: bool,
+    scope_id: u64,
 ) -> gpui::AnyElement {
     let prefix = if node.kind == "taskItem" {
         let done = node
@@ -222,7 +255,8 @@ fn render_list_item(
                 node.content
                     .unwrap_or_default()
                     .into_iter()
-                    .map(|n| render_node(n, theme, cx, depth + 1)),
+                    .enumerate()
+                    .map(|(i, n)| render_node(n, theme, cx, depth + 1, inline_scope(scope_id, i))),
             ),
         )
         .into_any_element()
@@ -234,6 +268,7 @@ fn render_list_item_numbered(
     cx: &App,
     depth: usize,
     number: usize,
+    scope_id: u64,
 ) -> gpui::AnyElement {
     h_flex()
         .w_full()
@@ -251,7 +286,8 @@ fn render_list_item_numbered(
                 node.content
                     .unwrap_or_default()
                     .into_iter()
-                    .map(|n| render_node(n, theme, cx, depth + 1)),
+                    .enumerate()
+                    .map(|(i, n)| render_node(n, theme, cx, depth + 1, inline_scope(scope_id, i))),
             ),
         )
         .into_any_element()
@@ -346,7 +382,7 @@ fn append_text_node(node: &TipTapNode, theme: &Theme, parts: &mut InlineTextPart
 fn render_inline_children(
     content: Option<Vec<TipTapNode>>,
     theme: &Theme,
-    _cx: &App,
+    scope_id: u64,
 ) -> gpui::AnyElement {
     let Some(children) = content else {
         return div().into_any_element();
@@ -379,17 +415,18 @@ fn render_inline_children(
         .map(|(range, _)| range.clone())
         .collect();
     let urls: Arc<[String]> = parts.link_ranges.into_iter().map(|(_, url)| url).collect();
-    let interactive = InteractiveText::new("canvas-view-inline", styled).on_click_shared(
-        click_ranges,
-        move |range_ix, _, cx| {
-            let Some(url) = urls.get(range_ix) else {
-                return;
-            };
-            if let Some(store) = PlatformStore::try_global(cx) {
-                let _ = store.read(cx).open_url_external(url);
-            }
-        },
-    );
+    let interactive = InteractiveText::new(
+        SharedString::from(format!("canvas-view-inline-{scope_id}")),
+        styled,
+    )
+    .on_click_shared(click_ranges, move |range_ix, _, cx| {
+        let Some(url) = urls.get(range_ix) else {
+            return;
+        };
+        if let Some(store) = PlatformStore::try_global(cx) {
+            let _ = store.read(cx).open_url_external(url);
+        }
+    });
     container.child(interactive).into_any_element()
 }
 

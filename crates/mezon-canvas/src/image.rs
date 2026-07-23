@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
 
 use base64::Engine as _;
 use futures::AsyncReadExt as _;
@@ -15,6 +15,8 @@ use mezon_widgets::{Icon, IconName};
 pub const CANVAS_IMAGE_FALLBACK_HEIGHT: Pixels = px(200.);
 
 const IMAGE_DIMENSION_PROBE_MAX_BYTES: u64 = 24 * 1024 * 1024;
+const CANVAS_IMAGE_DIM_CACHE_MAX: usize = 512;
+const CANVAS_DATA_IMAGE_CACHE_MAX: usize = 64;
 
 #[derive(Clone, Copy)]
 enum ImageDimState {
@@ -29,6 +31,28 @@ struct CanvasImageDimCache {
 }
 impl Global for CanvasImageDimCache {}
 
+fn trim_dim_cache(entries: &mut HashMap<String, ImageDimState>) {
+    if entries.len() <= CANVAS_IMAGE_DIM_CACHE_MAX {
+        return;
+    }
+    entries.retain(|_, state| matches!(state, ImageDimState::Ready(_, _)));
+    while entries.len() > CANVAS_IMAGE_DIM_CACHE_MAX {
+        let Some(key) = entries.keys().next().cloned() else {
+            break;
+        };
+        entries.remove(&key);
+    }
+}
+
+pub fn reset_canvas_image_caches(cx: &mut App) {
+    cx.default_global::<CanvasImageDimCache>().entries.clear();
+    if let Some(cache) = CANVAS_DATA_IMAGE_CACHE.get()
+        && let Ok(mut entries) = cache.lock()
+    {
+        entries.clear();
+    }
+}
+
 pub fn canvas_image_known_size(cx: &App, src: &str) -> Option<(u32, u32)> {
     match cx.try_global::<CanvasImageDimCache>()?.entries.get(src)? {
         ImageDimState::Ready(width, height) => Some((*width, *height)),
@@ -40,9 +64,11 @@ pub fn remember_canvas_image_size(cx: &mut App, src: &str, width: u32, height: u
     if src.is_empty() || width == 0 || height == 0 {
         return;
     }
-    cx.default_global::<CanvasImageDimCache>()
+    let cache = cx.default_global::<CanvasImageDimCache>();
+    cache
         .entries
         .insert(src.to_string(), ImageDimState::Ready(width, height));
+    trim_dim_cache(&mut cache.entries);
 }
 
 pub fn ensure_canvas_image_dimensions_loaded(cx: &mut App, src: &str, notify: EntityId) {
@@ -68,9 +94,9 @@ pub fn ensure_canvas_image_dimensions_loaded(cx: &mut App, src: &str, notify: En
                 }
                 _ => ImageDimState::Failed,
             };
-            cx.default_global::<CanvasImageDimCache>()
-                .entries
-                .insert(src_owned, state);
+            let cache = cx.default_global::<CanvasImageDimCache>();
+            cache.entries.insert(src_owned, state);
+            trim_dim_cache(&mut cache.entries);
             cx.notify(notify);
         });
     })
@@ -163,6 +189,39 @@ pub fn canvas_image_display_size(cx: &App, src: &str, max_width: Pixels) -> (Pix
     (max_width, fallback_h)
 }
 
+static CANVAS_DATA_IMAGE_CACHE: OnceLock<Mutex<HashMap<String, Arc<RenderImage>>>> =
+    OnceLock::new();
+
+fn canvas_image_element_id(src: &str) -> SharedString {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut hasher = DefaultHasher::new();
+    src.hash(&mut hasher);
+    SharedString::from(format!("canvas-img-{:x}", hasher.finish()))
+}
+
+fn trim_data_image_cache(entries: &mut HashMap<String, Arc<RenderImage>>) {
+    while entries.len() > CANVAS_DATA_IMAGE_CACHE_MAX {
+        let Some(key) = entries.keys().next().cloned() else {
+            break;
+        };
+        entries.remove(&key);
+    }
+}
+
+fn canvas_data_render_image(src: &str) -> Option<Arc<RenderImage>> {
+    let cache = CANVAS_DATA_IMAGE_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut entries = cache.lock().ok()?;
+    if let Some(cached) = entries.get(src) {
+        return Some(cached.clone());
+    }
+    let bytes = decode_data_image(src)?;
+    let render = bytes_to_render_image(&bytes)?;
+    entries.insert(src.to_string(), render.clone());
+    trim_data_image_cache(&mut entries);
+    Some(render)
+}
+
 fn bytes_to_render_image(bytes: &[u8]) -> Option<Arc<RenderImage>> {
     let decoded = image::load_from_memory(bytes).ok()?;
     let mut data = decoded.into_rgba8();
@@ -205,11 +264,9 @@ pub fn canvas_img(
         let (display_w, display_h) = canvas_image_display_size(cx, src, max_w);
         let height = display_height.unwrap_or(display_h);
         if is_data_image_url(src) {
-            if let Some(bytes) = decode_data_image(src)
-                && let Some(render) = bytes_to_render_image(&bytes)
-            {
+            if let Some(render) = canvas_data_render_image(src) {
                 return img(render)
-                    .id(img_id)
+                    .id(canvas_image_element_id(src))
                     .w(display_w)
                     .h(height)
                     .object_fit(ObjectFit::Contain)
@@ -228,11 +285,9 @@ pub fn canvas_img(
     }
 
     if is_data_image_url(src) {
-        if let Some(bytes) = decode_data_image(src)
-            && let Some(render) = bytes_to_render_image(&bytes)
-        {
+        if let Some(render) = canvas_data_render_image(src) {
             return img(render)
-                .id(img_id)
+                .id(canvas_image_element_id(src))
                 .max_w_full()
                 .object_fit(ObjectFit::Contain)
                 .with_fallback(move || canvas_image_fallback_inner(fallback_fg, fallback_bg))
@@ -254,7 +309,7 @@ pub fn render_canvas_image(src: &str, theme: &Theme, cx: &App) -> AnyElement {
     }
     let fallback_fg = theme.text_muted;
     let fallback_bg = theme.bg_tertiary;
-    let img_id = SharedString::from(format!("canvas-img-{}", src.len().min(64)));
+    let img_id = canvas_image_element_id(src);
     div()
         .w_full()
         .py(px(16.))

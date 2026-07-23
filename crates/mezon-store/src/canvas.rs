@@ -249,6 +249,10 @@ impl CanvasStore {
                 )
                 .await?;
             let _ = this.update(cx, |this, cx| {
+                if this.channel_id.as_deref() != Some(channel_id.as_str()) {
+                    cx.notify();
+                    return;
+                }
                 this.canvases.insert(
                     0,
                     CanvasSummary {

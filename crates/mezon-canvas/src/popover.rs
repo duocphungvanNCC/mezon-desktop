@@ -159,7 +159,7 @@ impl Render for CanvasPopoverPanel {
             .bg(tokens.theme_setting_primary)
             .text_color(tokens.text_theme_message)
             .child(render_header(
-                &theme,
+                theme.as_ref(),
                 &locale,
                 search_input,
                 handle.clone(),
@@ -168,7 +168,7 @@ impl Render for CanvasPopoverPanel {
             .child(render_body(
                 canvases,
                 loading,
-                (*theme).clone(),
+                theme.as_ref(),
                 locale,
                 handle,
                 clan_id,
@@ -297,7 +297,7 @@ fn render_header(
 fn render_body(
     canvases: Rc<Vec<CanvasSummary>>,
     loading: bool,
-    theme: Theme,
+    theme: &Theme,
     locale: String,
     handle: PopoverMenuHandle<CanvasPopoverPanel>,
     clan_id: Option<String>,
@@ -311,7 +311,7 @@ fn render_body(
     window: &mut Window,
     cx: &mut Context<CanvasPopoverPanel>,
 ) -> impl IntoElement {
-    let tokens = theme.tokens.clone();
+    let tokens = &theme.tokens;
 
     let body: gpui::AnyElement = if canvases.is_empty() {
         if loading {
@@ -323,11 +323,10 @@ fn render_body(
                 .child(Spinner::new().with_size(Size::Small))
                 .into_any_element()
         } else {
-            render_empty(&theme, &locale, handle.clone(), cx).into_any_element()
+            render_empty(theme, &locale, handle.clone(), cx).into_any_element()
         }
     } else {
         let canvases_for_list = canvases.clone();
-        let theme_for_list = theme.clone();
         let locale_for_list = locale.clone();
         let handle_for_list = handle.clone();
         let clan_for_list = clan_id.clone();
@@ -340,7 +339,8 @@ fn render_body(
             .overflow_hidden()
             .p_2()
             .child(
-                list(list_state.clone(), move |ix, _window, _cx| {
+                list(list_state.clone(), move |ix, _window, cx| {
+                    let theme = cx.theme();
                     let Some(canvas) = canvases_for_list.get(ix) else {
                         return div().into_any_element();
                     };
@@ -350,7 +350,7 @@ fn render_body(
                         .child(canvas_row(
                             ix,
                             canvas,
-                            &theme_for_list,
+                            theme.as_ref(),
                             &locale_for_list,
                             handle_for_list.clone(),
                             clan_for_list.clone(),
