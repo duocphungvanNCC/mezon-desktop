@@ -480,6 +480,25 @@ impl TransportClient {
             .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
     }
 
+    pub async fn list_streaming_channel_users(
+        &self,
+        clan_id: i64,
+        channel_id: i64,
+        channel_type: i32,
+        state: i32,
+        limit: i32,
+    ) -> Result<mezon_proto::api::StreamingChannelUserList> {
+        let transport = self.inner.clone();
+        runtime()
+            .spawn(async move {
+                transport
+                    .list_streaming_channel_users(clan_id, channel_id, channel_type, state, limit)
+                    .await
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
     pub async fn list_clan_users(
         &self,
         clan_id: i64,

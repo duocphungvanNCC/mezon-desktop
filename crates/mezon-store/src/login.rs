@@ -177,6 +177,9 @@ impl LoginStore {
         if let Some(e) = crate::voice::VoiceStore::try_global(cx) {
             e.update(cx, |s, cx| s.logout_teardown(cx));
         }
+        if let Some(e) = crate::stream::StreamStore::try_global(cx) {
+            e.update(cx, |s, cx| s.on_logout(cx));
+        }
     }
 }
 

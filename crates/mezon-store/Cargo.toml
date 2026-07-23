@@ -11,6 +11,7 @@ workspace = true
 mezon-client.workspace = true
 mezon-proto.workspace = true
 mezon-voice.workspace = true
+mezon-stream = { path = "../mezon-stream" }
 mezon-audio.workspace = true
 gpui.workspace = true
 image.workspace = true

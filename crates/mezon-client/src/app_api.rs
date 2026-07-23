@@ -2120,6 +2120,19 @@ impl AppApi {
         self.transport.list_voice_channel_users(clan_id).await
     }
 
+    pub async fn list_streaming_channel_users(
+        &self,
+        clan_id: i64,
+        channel_id: i64,
+        channel_type: i32,
+        state: i32,
+        limit: i32,
+    ) -> Result<mezon_proto::api::StreamingChannelUserList> {
+        self.transport
+            .list_streaming_channel_users(clan_id, channel_id, channel_type, state, limit)
+            .await
+    }
+
     pub async fn generate_meet_token(&self, channel_id: &str, room_name: &str) -> Result<String> {
         self.transport
             .generate_meet_token(channel_id, room_name)

@@ -2,15 +2,15 @@ use std::collections::HashMap;
 
 use crate::chat::channel_app_bar::ChannelAppBarTarget;
 use gpui::{
-    AnyView, App, Context, DismissEvent, Entity, Focusable, Pixels, ScrollHandle, Size,
-    StyleRefinement, Subscription, Task, Window, canvas, deferred, div, prelude::*, px,
+    AnyView, App, Context, DismissEvent, Entity, FocusHandle, Focusable, Pixels, ScrollHandle,
+    Size, StyleRefinement, Subscription, Task, Window, canvas, deferred, div, prelude::*, px,
 };
 use mezon_store::{
     AuthState, Channel, ChannelId, ChannelList, ChannelType, ClanId, ClanList, ClanMembersStore,
     DirectChannel, DirectKind, DirectMessageStore, GroupMembersStore, InboxStore,
     MessageSearchEvent, MessageSearchStore, MessagesStore, PinnedEvent, PinnedMessagesStore,
-    Settings, ThreadsEvent, ThreadsStore, TopicsEvent, TopicsStore, UiState, VoiceConnection,
-    VoiceMember, VoiceModerationError, VoiceStore, expand_mention_name_tokens,
+    Settings, StreamStore, ThreadsEvent, ThreadsStore, TopicsEvent, TopicsStore, UiState,
+    VoiceConnection, VoiceMember, VoiceModerationError, VoiceStore, expand_mention_name_tokens,
 };
 use ui::PopoverMenuHandle;
 use ui::utils::ROUNDED_BORDER_WINDOW;
@@ -48,6 +48,7 @@ pub struct ChatLayout {
     auth_state: Entity<AuthState>,
     settings: Entity<Settings>,
     voice_store: Entity<VoiceStore>,
+    stream_store: Entity<StreamStore>,
     voice_strip_scroll: ScrollHandle,
     voice_grid_page: usize,
     voice_grid_wheel_accum: f32,
@@ -56,11 +57,17 @@ pub struct ChatLayout {
     voice_session_key: Option<String>,
     voice_visual: crate::chat::voice::VoiceVisualState,
     voice_mini_bar_height: Pixels,
+    displayed_stream_joined: bool,
+    displayed_stream_connecting: bool,
+    displayed_stream_fullscreen: bool,
+    stream_fullscreen_focus: FocusHandle,
+    stream_fullscreen_focused: bool,
     pending_channel_id: Option<ChannelId>,
     prefetched_voice_channel: Option<ChannelId>,
     dm_view_fingerprint: Option<(ChannelId, DirectKind, String)>,
     inbox_context_ids: Option<(Option<ClanId>, Option<ChannelId>)>,
     _voice_frame_pump: Option<Task<()>>,
+    _stream_frame_pump: Option<Task<()>>,
     show_member_list: bool,
     ui_state: UiState,
     media_channel_view_mode: bool,
@@ -97,6 +104,8 @@ pub struct ChatLayout {
     _voice_sound_picker_dismiss_sub: Option<Subscription>,
     ns_slider: Entity<SliderState>,
     _ns_slider_sub: Subscription,
+    stream_volume_slider: Entity<SliderState>,
+    _stream_volume_slider_sub: Subscription,
     ns_popover_open: bool,
     ns_hovered: bool,
     ns_dragging: bool,
@@ -220,6 +229,7 @@ impl ChatLayout {
         .detach();
 
         let voice_store = VoiceStore::global(cx);
+        let stream_store = StreamStore::global(cx);
         cx.observe(&voice_store, |this, voice, cx| {
             if let Some(err) = voice.update(cx, |store, _| store.take_moderation_error()) {
                 let locale = this.settings.read(cx).language.clone();
@@ -232,9 +242,27 @@ impl ChatLayout {
             }
             let mini_changed = this.voice_mini_display_changed(cx);
             this.sync_voice_frame_pump(cx);
+            this.sync_stream_frame_pump(cx);
             if mini_changed || this.is_voice_frame_relevant(cx) {
                 cx.notify();
             }
+        })
+        .detach();
+
+        let stream_store = StreamStore::global(cx);
+        cx.observe(&stream_store, |this, store, cx| {
+            let store = store.read(cx);
+            let joined = store.is_joined();
+            let joining = store.is_joining();
+            let fullscreen = store.fullscreen();
+            this.displayed_stream_joined = joined;
+            this.displayed_stream_connecting = joining;
+            this.displayed_stream_fullscreen = fullscreen;
+            if !fullscreen {
+                this.stream_fullscreen_focused = false;
+            }
+            this.sync_stream_frame_pump(cx);
+            cx.notify();
         })
         .detach();
 
@@ -283,7 +311,9 @@ impl ChatLayout {
             this.apply_pending_channel(cx);
             this.ensure_active_channel_for_clan(cx);
             this.sync_inbox_context(cx);
+            this.sync_stream_session(cx);
             this.sync_voice_frame_pump(cx);
+            this.sync_stream_frame_pump(cx);
             if this.active_channel_display_changed(cx) {
                 this.media_channel_view_mode = false;
                 this.dismiss_topic_panel(cx);
@@ -306,7 +336,9 @@ impl ChatLayout {
             this.reset_message_search(cx);
             this.sync_active_from_route(cx);
             this.ensure_active_channel_for_clan(cx);
+            this.sync_stream_session(cx);
             this.sync_voice_frame_pump(cx);
+            this.sync_stream_frame_pump(cx);
             this.dismiss_inbox_popover(cx);
             cx.notify();
         })
@@ -359,6 +391,22 @@ impl ChatLayout {
                 });
             },
         );
+        let stream_volume_slider = cx.new(|_| {
+            SliderState::new()
+                .min(0.)
+                .max(1.)
+                .step(0.01)
+                .default_value(1.)
+        });
+        let stream_volume_slider_sub = cx.subscribe(
+            &stream_volume_slider,
+            |_this, _slider: Entity<SliderState>, event: &SliderEvent, cx| {
+                let SliderEvent::Change(value) = event;
+                StreamStore::global(cx).update(cx, |store, cx| {
+                    store.set_volume(value.end().clamp(0., 1.), cx);
+                });
+            },
+        );
         let ui_state = UiState::load_sync();
         let show_member_list = ui_state.show_member_list;
         let mut this = Self {
@@ -376,6 +424,7 @@ impl ChatLayout {
             chat_area,
             settings,
             voice_store,
+            stream_store,
             voice_strip_scroll: ScrollHandle::new(),
             voice_grid_page: 0,
             voice_grid_wheel_accum: 0.,
@@ -384,11 +433,17 @@ impl ChatLayout {
             voice_session_key: None,
             voice_visual: Default::default(),
             voice_mini_bar_height: px(0.),
+            displayed_stream_joined: false,
+            displayed_stream_connecting: false,
+            displayed_stream_fullscreen: false,
+            stream_fullscreen_focus: cx.focus_handle(),
+            stream_fullscreen_focused: false,
             pending_channel_id: None,
             prefetched_voice_channel: None,
             dm_view_fingerprint: None,
             inbox_context_ids: None,
             _voice_frame_pump: None,
+            _stream_frame_pump: None,
             show_member_list,
             ui_state,
             media_channel_view_mode: false,
@@ -425,6 +480,8 @@ impl ChatLayout {
             _voice_sound_picker_dismiss_sub: None,
             ns_slider,
             _ns_slider_sub: ns_slider_sub,
+            stream_volume_slider,
+            _stream_volume_slider_sub: stream_volume_slider_sub,
             ns_popover_open: false,
             ns_hovered: false,
             ns_dragging: false,
@@ -434,6 +491,7 @@ impl ChatLayout {
         this.sync_member_list_visibility(cx);
         this.sync_inbox_context(cx);
         this.sync_voice_frame_pump(cx);
+        this.sync_stream_frame_pump(cx);
         register_chat_layout(cx.weak_entity(), cx);
         this
     }
@@ -857,6 +915,9 @@ impl ChatLayout {
             return;
         }
         self.inbox_context_ids = Some((clan, channel));
+        self.stream_store.update(cx, |store, cx| {
+            store.set_active_clan(clan, cx);
+        });
         let clan_id = clan.map(|id| id.to_string());
         let channel_id = channel.map(|id| id.to_string());
         InboxStore::global(cx).update(cx, |store, cx| {
@@ -1165,6 +1226,55 @@ impl ChatLayout {
         }));
     }
 
+    fn sync_stream_session(&mut self, cx: &mut Context<Self>) {
+        let active = self
+            .channel_list
+            .read(cx)
+            .active_channel()
+            .map(|ch| (ch.channel_type, ch.id));
+        let should_leave = self
+            .stream_store
+            .read(cx)
+            .should_leave_for_active_channel(active);
+        if should_leave {
+            self.stream_store
+                .update(cx, |store, cx| store.leave_stream(cx));
+        }
+    }
+
+    fn sync_stream_frame_pump(&mut self, cx: &mut Context<Self>) {
+        const STREAM_FRAME_INTERVAL: std::time::Duration = std::time::Duration::from_millis(33);
+        let stream = self.stream_store.read(cx);
+        let on_stream = self
+            .channel_list
+            .read(cx)
+            .active_channel()
+            .is_some_and(|ch| ch.channel_type == ChannelType::Stream);
+        let want_pump =
+            stream.is_joined() && stream.remote_video() && (on_stream || stream.fullscreen());
+        if !want_pump {
+            self._stream_frame_pump = None;
+            return;
+        }
+        if self._stream_frame_pump.is_some() {
+            return;
+        }
+        self._stream_frame_pump = Some(cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(STREAM_FRAME_INTERVAL).await;
+                let stepped = this.update(cx, |this, cx| {
+                    let seq = this.stream_store.read(cx).frame_store().publish_seq();
+                    if seq > 0 {
+                        cx.notify();
+                    }
+                });
+                if stepped.is_err() {
+                    break;
+                }
+            }
+        }));
+    }
+
     fn is_voice_frame_relevant(&self, cx: &Context<Self>) -> bool {
         if self.is_dm_route(cx) {
             return false;
@@ -1286,6 +1396,11 @@ impl Render for ChatLayout {
             window.defer(cx, move |window, cx| handle.show(window, cx));
         }
 
+        if self.stream_store.read(cx).fullscreen() && !self.stream_fullscreen_focused {
+            window.focus(&self.stream_fullscreen_focus, cx);
+            self.stream_fullscreen_focused = true;
+        }
+
         let nav_body = self.render_nav_body(cx);
         let locale = self.settings.read(cx).language.clone();
         let topic_panel = self.build_topic_panel(window, cx);
@@ -1295,7 +1410,7 @@ impl Render for ChatLayout {
             self.build_create_thread_panel(&locale, window, cx)
         };
         let right_panel = topic_panel.or(create_panel);
-        let chat_content = self.render_content(window.viewport_size().width, cx);
+        let chat_content = self.render_content(window, window.viewport_size().width, cx);
         let main_content = if let Some(panel) = right_panel {
             div()
                 .flex()
@@ -1323,11 +1438,18 @@ impl Render for ChatLayout {
             chat_content
         };
         let voice_mini_bar = self.render_voice_mini_bar(cx);
-        let nav_bottom_pad = if voice_mini_bar.is_some() {
-            self.voice_mini_bar_height
-        } else {
-            px(0.)
-        };
+        let stream_connected_bar = crate::chat::stream::render_stream_connected_bar(
+            cx.theme(),
+            self.stream_store.read(cx),
+            self.stream_store.clone(),
+            cx,
+        );
+        let nav_bottom_pad = self.voice_mini_bar_height
+            + if stream_connected_bar.is_some() {
+                px(crate::chat::stream::stream_connected_bar_height())
+            } else {
+                px(0.)
+            };
         let fullscreen = if self.connected_call_is_active(cx) {
             let chat = cx.entity();
             crate::chat::voice::render_screen_fullscreen_overlay(
@@ -1337,6 +1459,16 @@ impl Render for ChatLayout {
                 &self.settings,
                 self.voice_store.read(cx),
                 &chat,
+                cx,
+            )
+        } else if self.stream_store.read(cx).fullscreen() {
+            crate::chat::stream::render_stream_fullscreen_overlay(
+                window,
+                cx.theme(),
+                self.stream_store.read(cx),
+                self.stream_store.clone(),
+                &self.stream_volume_slider,
+                &self.stream_fullscreen_focus,
                 cx,
             )
         } else {
@@ -1397,6 +1529,7 @@ impl Render for ChatLayout {
                             .shadow_lg()
                             .bg(theme.tokens.bg_surface)
                             .occlude()
+                            .children(stream_connected_bar)
                             .children(voice_mini_bar.map(|bar| {
                                 let chat = cx.entity();
                                 div().relative().w_full().child(bar).child(
@@ -2079,8 +2212,13 @@ impl ChatLayout {
         })
     }
 
-    fn render_content(&mut self, window_width: Pixels, cx: &mut Context<Self>) -> gpui::AnyElement {
-        let theme = cx.theme();
+    fn render_content(
+        &mut self,
+        window: &mut Window,
+        window_width: Pixels,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let theme = cx.theme().clone();
         let locale = self.settings.read(cx).language.clone();
         let inbox_handle = self.inbox_handle.clone();
         let active_clan_id = self.active_clan_id(cx);
@@ -2154,6 +2292,7 @@ impl ChatLayout {
                         show_results_panel,
                         search_panel.clone(),
                         None,
+                        false,
                         cx,
                     )
                     .into_any_element();
@@ -2187,6 +2326,7 @@ impl ChatLayout {
                         show_results_panel,
                         search_panel.clone(),
                         None,
+                        false,
                         cx,
                     )
                     .into_any_element();
@@ -2207,7 +2347,7 @@ impl ChatLayout {
                     )
                 };
                 let voice_view = crate::chat::voice::render_voice_channel(
-                    theme,
+                    &theme,
                     &locale,
                     &channel,
                     &self.voice_store,
@@ -2259,6 +2399,95 @@ impl ChatLayout {
                     .into_any_element();
             }
 
+            if ch.channel_type == ChannelType::Stream {
+                let channel = ch.clone();
+                let show_chat = self.stream_store.read(cx).show_chat();
+                let layout_entity = cx.entity();
+                let output_device_id = self.settings.read(cx).output_device_id.clone();
+                let stream_view = crate::chat::stream::render_stream_channel(
+                    window,
+                    &theme,
+                    &locale,
+                    &channel,
+                    &self.stream_store,
+                    &self.auth_state,
+                    &layout_entity,
+                    &self.stream_volume_slider,
+                    output_device_id,
+                    f32::from(window_width),
+                    cx,
+                );
+                let chat_panel = if show_chat {
+                    Some(
+                        self.chat_area
+                            .render(
+                                &locale,
+                                Some(channel.name.as_str()),
+                                false,
+                                None,
+                                Some(channel.id),
+                                false,
+                                false,
+                                false,
+                                false,
+                                false,
+                                false,
+                                None,
+                                None,
+                                active_clan_id,
+                                None,
+                                false,
+                                false,
+                                false,
+                                None,
+                                false,
+                                None,
+                                None,
+                                true,
+                                cx,
+                            )
+                            .into_any_element(),
+                    )
+                } else {
+                    None
+                };
+                return div()
+                    .relative()
+                    .flex()
+                    .flex_row()
+                    .flex_1()
+                    .min_h_0()
+                    .min_w_0()
+                    .gap_2()
+                    .bg(theme.bg_secondary)
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .flex_1()
+                            .min_w_0()
+                            .min_h_0()
+                            .overflow_hidden()
+                            .child(stream_view),
+                    )
+                    .when_some(chat_panel, |row, panel| {
+                        row.child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .w(px(420.))
+                                .min_w(px(360.))
+                                .max_w(px(420.))
+                                .h_full()
+                                .flex_shrink_0()
+                                .overflow_hidden()
+                                .bg(theme.bg_primary)
+                                .child(panel),
+                        )
+                    })
+                    .into_any_element();
+            }
+
             let channel_name = ch.name.clone();
             let channel_id = ch.id;
             let timeline_action = self.channel_supports_timeline_view(cx);
@@ -2297,6 +2526,7 @@ impl ChatLayout {
                     show_results_panel,
                     search_panel.clone(),
                     app_channel_bar,
+                    false,
                     cx,
                 )
                 .into_any_element();
@@ -2334,6 +2564,7 @@ impl ChatLayout {
                     show_results_panel,
                     search_panel,
                     None,
+                    false,
                     cx,
                 )
                 .into_any_element();
@@ -2343,13 +2574,13 @@ impl ChatLayout {
 
         let placeholder = match route {
             Route::Chat => self.render_placeholder(
-                theme,
+                &theme,
                 crate::components::primitives::IconName::Inbox,
                 mezon_i18n::t(&locale, "nav.chat"),
                 &current_path,
             ),
             Route::Direct => self.render_placeholder(
-                theme,
+                &theme,
                 crate::components::primitives::IconName::People,
                 mezon_i18n::t(&locale, "dm.title"),
                 &current_path,
@@ -2358,7 +2589,7 @@ impl ChatLayout {
                 direct_id,
                 message_type: _,
             } => self.render_placeholder(
-                theme,
+                &theme,
                 crate::components::primitives::IconName::People,
                 &format!("Direct {direct_id}"),
                 &current_path,
@@ -2367,31 +2598,31 @@ impl ChatLayout {
                 div().into_any_element()
             }
             Route::Friends => self.render_placeholder(
-                theme,
+                &theme,
                 crate::components::primitives::IconName::IconFriends,
                 mezon_i18n::t(&locale, "directMessage.friends"),
                 &current_path,
             ),
             Route::Thread { channel_id, .. } => self.render_placeholder(
-                theme,
+                &theme,
                 crate::components::primitives::IconName::Hashtag,
                 &format!("Thread #{channel_id}"),
                 &current_path,
             ),
             Route::Canvas { channel_id, .. } => self.render_placeholder(
-                theme,
+                &theme,
                 crate::components::primitives::IconName::Hashtag,
                 &format!("Canvas #{channel_id}"),
                 &current_path,
             ),
             Route::AddFriend { username } => self.render_placeholder(
-                theme,
+                &theme,
                 crate::components::primitives::IconName::People,
                 &format!("Add Friend: {username}"),
                 &current_path,
             ),
             Route::Invite { invite_id } => self.render_placeholder(
-                theme,
+                &theme,
                 crate::components::primitives::IconName::People,
                 &format!("Invite: {invite_id}"),
                 &current_path,

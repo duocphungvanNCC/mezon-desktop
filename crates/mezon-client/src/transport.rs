@@ -57,6 +57,8 @@ pub enum RealtimeEvent {
     Unmute(realtime::UnmuteEvent),
     StreamingJoined(realtime::StreamingJoinedEvent),
     StreamingLeaved(realtime::StreamingLeavedEvent),
+    StreamingStarted(realtime::StreamingStartedEvent),
+    StreamingEnded(realtime::StreamingEndedEvent),
     VoiceStarted(realtime::VoiceStartedEvent),
     VoiceEnded(realtime::VoiceEndedEvent),
     VoiceJoined(realtime::VoiceJoinedEvent),
@@ -107,6 +109,8 @@ impl TryFrom<realtime::envelope::Message> for RealtimeEvent {
             realtime::envelope::Message::UnmuteEvent(m) => Ok(Self::Unmute(m)),
             realtime::envelope::Message::StreamingJoinedEvent(m) => Ok(Self::StreamingJoined(m)),
             realtime::envelope::Message::StreamingLeavedEvent(m) => Ok(Self::StreamingLeaved(m)),
+            realtime::envelope::Message::StreamingStartedEvent(m) => Ok(Self::StreamingStarted(m)),
+            realtime::envelope::Message::StreamingEndedEvent(m) => Ok(Self::StreamingEnded(m)),
             realtime::envelope::Message::VoiceStartedEvent(m) => Ok(Self::VoiceStarted(m)),
             realtime::envelope::Message::VoiceEndedEvent(m) => Ok(Self::VoiceEnded(m)),
             realtime::envelope::Message::VoiceJoinedEvent(m) => Ok(Self::VoiceJoined(m)),
@@ -500,6 +504,8 @@ pub struct ApiChannelDesc {
     pub creator_id: i64,
     #[serde(default)]
     pub clan_name: String,
+    #[serde(default)]
+    pub channel_avatar: String,
 }
 
 /// A direct-message / group conversation descriptor (clan_id = 0 namespace). Unlike
@@ -2934,6 +2940,7 @@ impl MezonTransport {
             badge_count: channel.count_mess_unread,
             creator_id: channel.creator_id,
             clan_name: channel.clan_name,
+            channel_avatar: channel.channel_avatar,
         }
     }
 
@@ -4666,16 +4673,22 @@ impl MezonTransport {
         Ok(api::ListUserOnlineResponse::decode(response.as_slice())?)
     }
 
-    /// List streaming channel users.
+    /// List streaming channel users (clan-wide presence).
     pub async fn list_streaming_channel_users(
         &self,
         clan_id: i64,
         channel_id: i64,
+        channel_type: i32,
+        state: i32,
+        limit: i32,
     ) -> Result<api::StreamingChannelUserList> {
         let cid = self.generate_cid();
         let body = api::ListChannelUsersRequest {
             clan_id,
             channel_id,
+            channel_type,
+            limit,
+            state,
             ..Default::default()
         }
         .encode_to_vec();

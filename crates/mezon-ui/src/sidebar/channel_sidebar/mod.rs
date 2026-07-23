@@ -8,8 +8,9 @@ use gpui::{
     prelude::*, px,
 };
 use mezon_store::{
-    ChannelId, ChannelList, ClanId, ClanList, ClanMembersStore, FAVOR_CATE_ID,
-    PERMISSION_ADMINISTRATOR, PERMISSION_MANAGE_CLAN, PermissionStore, Settings, VoiceMember,
+    ChannelId, ChannelList, ChannelType, ClanId, ClanList, ClanMembersStore, FAVOR_CATE_ID,
+    PERMISSION_ADMINISTRATOR, PERMISSION_MANAGE_CLAN, PermissionStore, Settings, StreamMember,
+    StreamStore, VoiceMember,
 };
 
 use crate::channel_app::{is_channel_app_open, launch_channel_app_from_store};
@@ -59,6 +60,59 @@ fn resolve_voice_member_slot(
     slot
 }
 
+fn resolve_stream_member_slot(
+    cx: &App,
+    clan_id: Option<ClanId>,
+    m: &StreamMember,
+) -> VoiceMemberSlot {
+    let mut slot = VoiceMemberSlot {
+        user_id: m.user_id.to_string(),
+        display_name: m.display_name.clone(),
+        avatar_url: String::new(),
+    };
+    if let Some(clan_id) = clan_id
+        && let Some(store) = ClanMembersStore::try_global(cx)
+        && let Some(member) = store.read(cx).member(clan_id, m.user_id)
+    {
+        let name = member.name();
+        if !name.is_empty() {
+            slot.display_name = name.to_string();
+        }
+        let avatar = member.avatar();
+        if !avatar.is_empty() {
+            slot.avatar_url = avatar.to_string();
+        }
+    }
+    if !slot.avatar_url.is_empty() {
+        slot.avatar_url = crate::util::imgproxy::avatar_url(cx, &slot.avatar_url);
+    }
+    slot
+}
+
+fn channel_sidebar_members(
+    cx: &App,
+    clan_id: Option<ClanId>,
+    ch: &mezon_store::Channel,
+) -> Vec<VoiceMemberSlot> {
+    if ch.channel_type == ChannelType::Stream {
+        StreamStore::try_global(cx)
+            .map(|store| {
+                store
+                    .read(cx)
+                    .members_for_channel(ch.id)
+                    .iter()
+                    .map(|m| resolve_stream_member_slot(cx, clan_id, m))
+                    .collect()
+            })
+            .unwrap_or_default()
+    } else {
+        ch.voice_members
+            .iter()
+            .map(|m| resolve_voice_member_slot(cx, clan_id, m))
+            .collect()
+    }
+}
+
 pub struct ChannelSidebar {
     clan_list: Entity<ClanList>,
     channel_list: Entity<ChannelList>,
@@ -87,6 +141,7 @@ pub struct ChannelSidebar {
     _settings_observe: Subscription,
     _router_observe: Subscription,
     _members_observe: Subscription,
+    _stream_observe: Subscription,
     _permissions_observe: Subscription,
     _notification_setting_observe: Subscription,
 }
@@ -158,6 +213,11 @@ impl ChannelSidebar {
                 cx.notify();
             }
         });
+        let stream_observe = cx.observe(&StreamStore::global(cx), |this, _, cx| {
+            if this.rebuild_items(cx) {
+                cx.notify();
+            }
+        });
         let permissions_observe = cx.observe(&PermissionStore::global(cx), |_, _, cx| cx.notify());
 
         let initial_locale = settings.read(cx).language.clone();
@@ -191,6 +251,7 @@ impl ChannelSidebar {
             _settings_observe: settings_observe,
             _router_observe: router_observe,
             _members_observe: members_observe,
+            _stream_observe: stream_observe,
             _permissions_observe: permissions_observe,
             _notification_setting_observe: notification_setting_observe,
         };
@@ -325,17 +386,14 @@ impl ChannelSidebar {
                                 is_favorite: is_favorites,
                                 line_above,
                                 line_below,
-                                voice_members: ch
-                                    .voice_members
-                                    .iter()
-                                    .map(|m| resolve_voice_member_slot(cx, new_clan_id, m))
-                                    .collect(),
+                                voice_members: channel_sidebar_members(cx, new_clan_id, ch),
                                 voice_compact: false,
                             });
                         }
                     } else {
                         for ch in &category.channels {
-                            if ch.voice_members.is_empty() {
+                            let sidebar_members = channel_sidebar_members(cx, new_clan_id, ch);
+                            if sidebar_members.is_empty() {
                                 continue;
                             }
                             let badge_count = ch.badge_count;
@@ -368,11 +426,7 @@ impl ChannelSidebar {
                                 is_favorite: is_favorites,
                                 line_above: false,
                                 line_below: false,
-                                voice_members: ch
-                                    .voice_members
-                                    .iter()
-                                    .map(|m| resolve_voice_member_slot(cx, new_clan_id, m))
-                                    .collect(),
+                                voice_members: sidebar_members,
                                 voice_compact: true,
                             });
                         }

@@ -5834,6 +5834,7 @@ dependencies = [
  "mezon-audio",
  "mezon-client",
  "mezon-proto",
+ "mezon-stream",
  "mezon-voice",
  "parking_lot",
  "prost 0.13.5",
@@ -5842,6 +5843,24 @@ dependencies = [
  "serde_json",
  "smallvec",
  "tokio",
+ "tracing",
+ "url",
+]
+
+[[package]]
+name = "mezon-stream"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "flume",
+ "futures",
+ "livekit",
+ "mezon-voice",
+ "parking_lot",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-tungstenite",
  "tracing",
  "url",
 ]
@@ -5866,6 +5885,7 @@ dependencies = [
  "mezon-i18n",
  "mezon-store",
  "mezon-video",
+ "mezon-voice",
  "mezon-webview",
  "objc",
  "qrcode",

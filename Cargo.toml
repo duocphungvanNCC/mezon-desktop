@@ -6,6 +6,7 @@ members = [
     "crates/mezon-client",
     "crates/mezon-store",
     "crates/mezon-voice",
+    "crates/mezon-stream",
     "crates/mezon-video",
     "crates/mezon-audio",
     "crates/mezon-native",

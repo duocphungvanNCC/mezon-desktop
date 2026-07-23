@@ -199,6 +199,7 @@ impl ChatArea {
         show_results_panel: bool,
         message_search_panel: Option<Entity<MessageSearchPanel>>,
         app_channel_bar: Option<ChannelAppBarTarget>,
+        stream_sidebar: bool,
         cx: &mut Context<crate::ChatLayout>,
     ) -> gpui::AnyElement {
         let (input_bar, mention_input) = if media_channel_view {
@@ -234,6 +235,7 @@ impl ChatArea {
                 search_expanded,
                 show_search_options,
                 search_input,
+                stream_sidebar,
                 Some(locale),
                 cx,
             );

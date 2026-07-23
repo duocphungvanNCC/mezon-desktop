@@ -27,6 +27,7 @@ pub mod notification_setting_popover;
 pub mod pinned_popover;
 pub mod screen_share_modal;
 pub mod screen_share_pip;
+pub mod stream;
 pub mod threads_popover;
 pub mod user_profile_popover;
 pub mod voice;
