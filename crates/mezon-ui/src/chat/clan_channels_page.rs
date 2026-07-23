@@ -113,10 +113,7 @@ impl ClanChannelsPage {
             return;
         }
         self.clan_id = clan_id;
-        self.search = None;
-        self.search_sub = None;
-        self.search_locale.clear();
-        self.page = 0;
+        self.reset_search(cx);
         self.expanded.clear();
         self.visible_row_keys.clear();
         self.rows_dirty = true;
@@ -127,6 +124,17 @@ impl ClanChannelsPage {
         ClanMembersStore::global(cx).update(cx, |store, cx| store.ensure_loaded(clan_id, cx));
         PermissionStore::global(cx)
             .update(cx, |store, cx| store.load_clan_permissions(clan_id, cx));
+        cx.notify();
+    }
+
+    pub fn reset_search(&mut self, cx: &mut Context<Self>) {
+        self.search = None;
+        self.search_sub = None;
+        self.search_locale.clear();
+        self.page = 0;
+        self.rows_dirty = true;
+        self.page_size_picker_open = false;
+        self.scroll_to_top();
         cx.notify();
     }
 

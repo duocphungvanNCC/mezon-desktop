@@ -97,14 +97,22 @@ impl ClanMembersPage {
             return;
         }
         self.clan_id = clan_id;
+        self.reset_search(cx);
+        self.rows_dirty = true;
+        self.page_size_picker_open = false;
+        ClanMembersStore::global(cx).update(cx, |store, cx| store.ensure_loaded(clan_id, cx));
+        RolesStore::global(cx).update(cx, |store, cx| store.ensure_loaded(clan_id, cx));
+        cx.notify();
+    }
+
+    pub fn reset_search(&mut self, cx: &mut Context<Self>) {
         self.search = None;
         self.search_sub = None;
         self.search_locale.clear();
         self.page = 0;
         self.rows_dirty = true;
         self.page_size_picker_open = false;
-        ClanMembersStore::global(cx).update(cx, |store, cx| store.ensure_loaded(clan_id, cx));
-        RolesStore::global(cx).update(cx, |store, cx| store.ensure_loaded(clan_id, cx));
+        self.scroll_to_top();
         cx.notify();
     }
 

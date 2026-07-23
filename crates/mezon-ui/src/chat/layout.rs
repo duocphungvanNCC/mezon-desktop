@@ -294,6 +294,10 @@ impl ChatLayout {
         })
         .detach();
         cx.observe(&Router::global(cx), |this, _, cx| {
+            this.clan_members_page
+                .update(cx, |page, cx| page.reset_search(cx));
+            this.clan_channels_page
+                .update(cx, |page, cx| page.reset_search(cx));
             if matches!(
                 Router::global(cx).read(cx).route(),
                 Route::Direct | Route::Friends | Route::DirectMessage { .. }
