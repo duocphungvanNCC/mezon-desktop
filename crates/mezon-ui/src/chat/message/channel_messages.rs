@@ -1465,6 +1465,9 @@ impl ChannelMessages {
                     if following_new {
                         this.list_state.scroll_to_end();
                         this.at_bottom = true;
+                        if let Some(last) = _store.read(cx).viewport_messages().last() {
+                            this.last_seen_at_bottom = Some(last.id);
+                        }
                         this.sync_channel_seen(cx);
                     } else if *added_top > 0 || *removed_top > 0 {
                         let anchor = preserved_message_anchor.or_else(|| {
@@ -1531,7 +1534,9 @@ impl ChannelMessages {
                 }
                 MessagesEvent::ReplyTargetChanged
                 | MessagesEvent::ForwardProgress { .. }
-                | MessagesEvent::ForwardFinished { .. } => return,
+                | MessagesEvent::ForwardFinished { .. }
+                | MessagesEvent::ShareContactFinished { .. }
+                | MessagesEvent::AnonymousModeChanged => return,
                 MessagesEvent::TopicUpdated { .. } => {}
             }
             if structural {
@@ -4000,6 +4005,16 @@ impl ChannelMessages {
                 let Some(target_msg) = self.find_local_message(message_id, cx) else {
                     return el;
                 };
+                let selected_text = {
+                    let state = self.selection.borrow();
+                    selected_text_for_messages(
+                        &state,
+                        &self.topic_messages,
+                        &self.cached_locale,
+                        &self.cached_current_user_id,
+                        cx,
+                    )
+                };
                 let menu = message_context_menu::build(
                     &target_msg,
                     &self.cached_current_user_id,
@@ -4008,6 +4023,7 @@ impl ChannelMessages {
                     self.context_menu_forward_all,
                     true,
                     self.reaction_submenu_open,
+                    selected_text,
                     cx.entity().downgrade(),
                     cx,
                 );
@@ -4026,6 +4042,7 @@ impl ChannelMessages {
 
 impl Render for ChannelMessages {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        crate::image_cache::sweep_ogp_cache(window, cx);
         {
             let mut selection = self.selection.borrow_mut();
             selection.begin_render();
@@ -4050,7 +4067,7 @@ impl Render for ChannelMessages {
                 .is_none_or(|at| at.elapsed() >= IDLE_CACHE_SWEEP_INTERVAL)
         {
             self.image_cache
-                .update(cx, |cache, cx| cache.sweep(window, cx));
+                .update(cx, |cache, cx| cache.sweep_once_per_frame(window, cx));
             self.last_image_cache_sweep = Some(Instant::now());
         }
         if !scroll_active {
@@ -4242,6 +4259,16 @@ impl Render for ChannelMessages {
                 let Some(target_msg) = store_ref.viewport_message_by_id(message_id) else {
                     return el;
                 };
+                let selected_text = {
+                    let state = self.selection.borrow();
+                    selected_text_for_messages(
+                        &state,
+                        store_ref.viewport_messages(),
+                        &self.cached_locale,
+                        &self.cached_current_user_id,
+                        cx,
+                    )
+                };
                 let menu = message_context_menu::build(
                     target_msg,
                     &self.cached_current_user_id,
@@ -4250,6 +4277,7 @@ impl Render for ChannelMessages {
                     self.context_menu_forward_all,
                     false,
                     self.reaction_submenu_open,
+                    selected_text,
                     cx.entity().downgrade(),
                     cx,
                 );
@@ -4307,6 +4335,9 @@ pub(crate) fn unread_boundary_for_messages(
     for i in 1..messages.len() {
         let prev = &messages[i - 1];
         let curr = &messages[i];
+        if curr.id.is_optimistic() {
+            continue;
+        }
         if prev.id != last_read {
             continue;
         }

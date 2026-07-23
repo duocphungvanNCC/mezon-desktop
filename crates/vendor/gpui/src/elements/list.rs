@@ -1995,12 +1995,14 @@ impl Element for List {
         cx: &mut App,
     ) {
         let current_view = window.current_view();
-        window.with_content_mask(Some(ContentMask { bounds }), |window| {
-            for item in &mut prepaint.layout.item_layouts {
-                item.element.paint(window, cx);
-            }
-        });
 
+        // mezon vendor edit: register the list's own scroll listener BEFORE painting
+        // children. Bubble-phase listeners dispatch in reverse registration order, so
+        // registering after the children made the list swallow the wheel before any
+        // nested scrollable (e.g. a poll card's answer list) could handle it. With the
+        // list registered first, children run first and a child that scrolls can
+        // `stop_propagation` to keep the list still; if no child handles it the list
+        // still scrolls exactly as before.
         let list_state = self.state.clone();
         let height = bounds.size.height;
         let hitbox_id = prepaint.hitbox.id;
@@ -2030,6 +2032,12 @@ impl Element for List {
                         true,
                     );
                 }
+            }
+        });
+
+        window.with_content_mask(Some(ContentMask { bounds }), |window| {
+            for item in &mut prepaint.layout.item_layouts {
+                item.element.paint(window, cx);
             }
         });
 

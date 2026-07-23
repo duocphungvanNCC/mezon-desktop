@@ -5,11 +5,14 @@ pub mod abridged_tcp_adapter;
 pub mod app_api;
 pub mod attachment_download;
 pub mod auth;
+pub mod channel_app_launch;
+pub mod gotify;
 pub mod image_disk_cache;
 pub mod inbox;
 pub mod keychain;
 pub mod network_monitor;
 pub mod network_probe;
+pub mod notification_setting;
 pub mod ogp;
 pub mod search_message;
 pub mod session;
@@ -29,17 +32,21 @@ pub use attachment_download::{
 pub use auth::MezonClient;
 pub use auth::QrLoginId;
 pub use auth::{DEFAULT_API_HOST, DEFAULT_API_PORT, DEFAULT_API_SECURE, DEFAULT_SERVER_KEY};
+pub use channel_app_launch::{ChannelAppLaunchParams, build_channel_app_url};
+pub use gotify::{GotifyExtras, GotifyNotification};
 pub use inbox::{
     DIRECTION_AROUND_TIMESTAMP, DIRECTION_BEFORE_TIMESTAMP, INBOX_PAGE_LIMIT, InboxCategory,
-    InboxMentionSpan, InboxMessagePreview, InboxNotification, TopicDiscussion,
+    InboxMentionSpan, InboxMessagePreview, InboxNotification, TopicDiscussion, TopicReplyPreview,
     attachment_link_is_image, display_text_from_message_content, inbox_notification_from_api,
     inbox_notifications_from_list, message_content_is_attachment, topic_discussion_from_api,
-    topics_from_list,
+    topic_reply_preview, topics_from_list,
 };
 pub use network_monitor::NetworkMonitor;
 pub use network_probe::{
     RECONNECT_NETWORK_PROBE_TIMEOUT, favicon_probe_url, probe_network_reachability,
 };
+pub use notification_setting::ChannelNotificationSetting;
+pub use notification_setting::NotificationOverride;
 pub use ogp::{OgpResult, fetch_ogp};
 pub use search_message::{
     SEARCH_PAGE_SIZE, SearchDropdownMode, SearchPageToken, active_search_trigger,

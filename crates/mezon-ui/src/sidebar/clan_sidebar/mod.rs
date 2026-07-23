@@ -1,21 +1,30 @@
 use std::rc::Rc;
 
 use gpui::{
-    AnyElement, App, Context, Entity, ListState, SharedString, Subscription, Window, div, img,
-    list, prelude::*, px,
+    AnyElement, App, Context, Entity, ListState, Pixels, Point, SharedString, Subscription, Window,
+    div, img, list, prelude::*, px,
 };
-use mezon_store::{AccountStore, ClanList, DirectMessageStore, FriendStore, Settings};
+use mezon_store::{
+    AccountStore, ClanId, ClanList, DirectMessageStore, FriendStore, NotificationSettingStore,
+    Settings,
+};
 use ui::Tooltip;
 
 use crate::app::shell::Shell;
 use crate::app::window_controls;
-use crate::components::primitives::{Icon, IconName};
+use crate::components::primitives::{Icon, IconName, context_menu_at};
 use crate::router::{Route, Router};
 use crate::theme::{ActiveTheme, Theme};
 
 mod clan_row;
 mod direct_unread_list;
-use clan_row::{ClanRow, render_clan_row, render_pill};
+use clan_row::{ClanRow, build_clan_rail_menu, render_clan_row, render_pill};
+
+pub(super) struct ClanPanelMenu {
+    position: Point<Pixels>,
+    clan_id: ClanId,
+    noti_sub_open: bool,
+}
 
 use super::friend_request_badge;
 use direct_unread_list::{
@@ -36,12 +45,14 @@ pub struct ClanSidebar {
     discover_title: SharedString,
     create_clan_title: SharedString,
     image_cache: Entity<crate::image_cache::LruImageCache>,
+    clan_menu: Option<ClanPanelMenu>,
     _clan_sub: Subscription,
     _direct_sub: Subscription,
     _settings_sub: Subscription,
     _router_sub: Subscription,
     _account_sub: Subscription,
     _friend_sub: Subscription,
+    _notification_sub: Subscription,
 }
 
 impl ClanSidebar {
@@ -78,6 +89,11 @@ impl ClanSidebar {
             cx.notify();
         });
         let friend_sub = cx.observe(&FriendStore::global(cx), |_, _, cx| cx.notify());
+        let notification_sub = cx.observe(&NotificationSettingStore::global(cx), |this, _, cx| {
+            if this.clan_menu.is_some() {
+                cx.notify();
+            }
+        });
         let router_sub = cx.observe(&Router::global(cx), |this, router, cx| {
             let router = router.read(cx);
             let new_dm_active = matches!(
@@ -130,17 +146,45 @@ impl ClanSidebar {
                     cx,
                 )
             }),
+            clan_menu: None,
             _clan_sub: clan_sub,
             _direct_sub: direct_sub,
             _settings_sub: settings_sub,
             _router_sub: router_sub,
             _account_sub: account_sub,
             _friend_sub: friend_sub,
+            _notification_sub: notification_sub,
         };
         let clan_list_handle = this.clan_list.clone();
         this.sync_rows(clan_list_handle.read(cx), cx);
         this.sync_chrome(cx);
         this
+    }
+
+    pub(super) fn open_clan_menu(
+        &mut self,
+        clan_id: ClanId,
+        position: Point<Pixels>,
+        cx: &mut Context<Self>,
+    ) {
+        self.clan_menu = Some(ClanPanelMenu {
+            position,
+            clan_id,
+            noti_sub_open: false,
+        });
+        NotificationSettingStore::global(cx).update(cx, |store, cx| {
+            store.prefetch_clan(clan_id, cx);
+        });
+        cx.notify();
+    }
+
+    pub(super) fn set_clan_noti_sub_open(&mut self, cx: &mut Context<Self>) {
+        if let Some(menu) = self.clan_menu.as_mut()
+            && !menu.noti_sub_open
+        {
+            menu.noti_sub_open = true;
+            cx.notify();
+        }
     }
 
     fn sync_chrome(&mut self, cx: &App) {
@@ -155,11 +199,11 @@ impl ClanSidebar {
             .as_ref()
             .and_then(|account| account.logo.clone())
             .filter(|logo| !logo.is_empty());
+        let default_logo =
+            crate::util::imgproxy::cdn_asset_url(cx, "landing-page-mezon/logodefault.webp");
         self.home_logo = SharedString::from(crate::util::imgproxy::proxied(
             cx,
-            custom_logo
-                .as_deref()
-                .unwrap_or("https://cdn.mezon.ai/landing-page-mezon/logodefault.webp"),
+            custom_logo.as_deref().unwrap_or(&default_logo),
             100,
             100,
             "fill-down",
@@ -233,9 +277,18 @@ impl Render for ClanSidebar {
         let friend_pending = FriendStore::global(cx).read(cx).pending_incoming_count();
 
         let clan_count = rows.len();
+        let sidebar = cx.entity().downgrade();
+        let sidebar_for_rows = sidebar.clone();
         let list_element = list(list_state, move |ix, _window, cx| {
             if ix < clan_count {
-                render_clan_row(&rows, ix, cx, clan_list_handle.clone(), suppress_hover)
+                render_clan_row(
+                    &rows,
+                    ix,
+                    cx,
+                    clan_list_handle.clone(),
+                    suppress_hover,
+                    sidebar_for_rows.clone(),
+                )
             } else {
                 render_clan_footer(
                     cx,
@@ -251,6 +304,20 @@ impl Render for ClanSidebar {
         .size_full();
 
         let unread_list = self.direct_unread.render();
+
+        let sidebar_for_menu = sidebar.clone();
+        let menu_locale = self.settings.read(cx).language.clone();
+        let clan_menu_overlay = self.clan_menu.as_ref().map(|menu| {
+            let clan_default = NotificationSettingStore::global(cx)
+                .read(cx)
+                .clan_default(menu.clan_id);
+            (
+                menu.position,
+                menu.clan_id,
+                menu.noti_sub_open,
+                clan_default,
+            )
+        });
 
         div()
             .image_cache(avatar_cache)
@@ -321,6 +388,21 @@ impl Render for ClanSidebar {
                     .child(div().w(px(40.)).h(px(1.)).bg(theme.border).mt_3().mb_3()),
             )
             .child(div().flex_1().min_h_0().w_full().child(list_element))
+            .when_some(
+                clan_menu_overlay,
+                move |el, (position, clan_id, noti_sub_open, clan_default)| {
+                    el.child(context_menu_at(
+                        position,
+                        build_clan_rail_menu(
+                            sidebar_for_menu.clone(),
+                            clan_id,
+                            clan_default,
+                            noti_sub_open,
+                            &menu_locale,
+                        ),
+                    ))
+                },
+            )
     }
 }
 

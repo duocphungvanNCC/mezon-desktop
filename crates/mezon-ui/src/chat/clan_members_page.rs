@@ -107,13 +107,10 @@ impl ClanMembersPage {
 
     fn ensure_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let locale = self.settings.read(cx).language.clone();
-        if self.search.is_some() {
+        if let Some(search) = &self.search {
             if self.search_locale != locale {
                 let placeholder = tr(&locale, "memberTable.topBar.searchPlaceholder");
-                self.search
-                    .as_ref()
-                    .expect("search initialized")
-                    .update(cx, |input, cx| input.set_placeholder(placeholder, cx));
+                search.update(cx, |input, cx| input.set_placeholder(placeholder, cx));
                 self.search_locale = locale;
             }
             return;
@@ -232,7 +229,6 @@ impl ClanMembersPage {
             .roles_for(self.clan_id, role_ids)
             .into_iter()
             .filter(|role| !is_everyone(role))
-            .cloned()
             .collect::<Vec<_>>();
         roles.sort_by_key(|role| role.order);
         roles
@@ -271,7 +267,7 @@ impl ClanMembersPage {
         cell.into_any_element()
     }
 
-    fn render_member_row(&self, row: &MemberRow, locale: &str, cx: &Context<Self>) -> AnyElement {
+    fn render_member_row(&self, row: &MemberRow, cx: &Context<Self>) -> AnyElement {
         let theme = cx.theme();
         let roles = self.visible_roles(&row.role_ids, cx);
         let name_color = roles
@@ -326,15 +322,6 @@ impl ClanMembersPage {
                 true,
             ))
             .child(weighted_column(self.role_cell(row, cx), 2., true))
-            .child(weighted_column(
-                div()
-                    .text_size(px(12.))
-                    .text_color(theme.text_secondary)
-                    .child(tr(locale, "memberTable.headers.signals").to_uppercase())
-                    .into_any_element(),
-                1.,
-                true,
-            ))
             .into_any_element()
     }
 
@@ -346,6 +333,11 @@ impl ClanMembersPage {
         cx: &Context<Self>,
     ) -> AnyElement {
         let active = self.sort_field == field;
+        let direction = if active && !self.sort_descending {
+            std::f32::consts::PI
+        } else {
+            0.
+        };
         div()
             .id(format!("member-sort-{field:?}"))
             .flex()
@@ -360,16 +352,14 @@ impl ClanMembersPage {
             })
             .child(label)
             .child(
-                Icon::new(IconName::FiltersIcon)
+                Icon::new(IconName::ArrowDown)
                     .size(px(14.))
                     .text_color(if active {
                         cx.theme().text_primary
                     } else {
                         cx.theme().text_secondary
                     })
-                    .with_transformation(gpui::Transformation::rotate(gpui::radians(
-                        std::f32::consts::FRAC_PI_2,
-                    ))),
+                    .with_transformation(gpui::Transformation::rotate(gpui::radians(direction))),
             )
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.select_sort(field);
@@ -415,14 +405,6 @@ impl ClanMembersPage {
                     cx,
                 ),
                 2.,
-                true,
-            ))
-            .child(weighted_column(
-                header_with_filter(
-                    tr(locale, "memberTable.headers.signals").to_uppercase(),
-                    theme,
-                ),
-                1.,
                 true,
             ))
             .into_any_element()
@@ -531,59 +513,60 @@ impl ClanMembersPage {
     fn page_size_control(&self, cx: &Context<Self>) -> AnyElement {
         let open = self.page_size_picker_open;
         let locale = &self.settings.read(cx).language;
-        let mut control = div()
-            .id("member-page-size-control")
-            .relative()
-            .flex()
-            .items_center()
-            .gap_2()
-            .child(tr(locale, "memberPage.show"))
-            .child(
-                div()
-                    .id("member-page-size")
-                    .cursor_pointer()
-                    .px_2()
-                    .py_1()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .gap_1()
-                    .rounded(px(4.))
-                    .hover(|style| style.bg(cx.theme().bg_hover))
-                    .child(self.page_size.to_string())
-                    .child(Icon::new(IconName::ArrowDown).size(px(14.)))
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.page_size_picker_open = !open;
-                        cx.notify();
-                    })),
-            )
-            .on_mouse_down_out(cx.listener(|this, _, _, cx| {
-                if this.page_size_picker_open {
-                    this.page_size_picker_open = false;
+        let chevron_angle = if open { std::f32::consts::PI } else { 0. };
+        let mut control = div().relative().w(px(68.)).child(
+            div()
+                .id("member-page-size")
+                .w_full()
+                .h(px(32.))
+                .px_2()
+                .flex()
+                .items_center()
+                .justify_between()
+                .rounded(px(6.))
+                .border_1()
+                .border_color(cx.theme().border)
+                .cursor_pointer()
+                .hover(|style| style.bg(cx.theme().bg_hover))
+                .child(self.page_size.to_string())
+                .child(
+                    Icon::new(IconName::ChevronDown)
+                        .size(px(14.))
+                        .text_color(cx.theme().text_secondary)
+                        .with_transformation(gpui::Transformation::rotate(gpui::radians(
+                            chevron_angle,
+                        ))),
+                )
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.page_size_picker_open = !open;
                     cx.notify();
-                }
-            }));
+                })),
+        );
         if open {
             let mut menu = div()
                 .absolute()
-                .bottom(px(34.))
-                .left(px(48.))
-                .w(px(64.))
+                .bottom(px(36.))
+                .left_0()
+                .w(px(68.))
                 .p_1()
-                .rounded(px(5.))
+                .rounded(px(6.))
                 .bg(cx.theme().bg_floating)
                 .border_1()
                 .border_color(cx.theme().border)
                 .shadow_lg()
                 .occlude();
             for size in PAGE_SIZES {
+                let selected = size == self.page_size;
                 menu = menu.child(
                     div()
                         .id(format!("member-page-size-{size}"))
-                        .cursor_pointer()
+                        .h(px(28.))
                         .px_2()
-                        .py_1()
-                        .rounded(px(3.))
+                        .flex()
+                        .items_center()
+                        .rounded(px(4.))
+                        .cursor_pointer()
+                        .when(selected, |style| style.bg(cx.theme().bg_hover))
                         .hover(|style| style.bg(cx.theme().bg_hover))
                         .child(size.to_string())
                         .on_mouse_down(
@@ -600,7 +583,20 @@ impl ClanMembersPage {
             }
             control = control.child(deferred(menu));
         }
-        control.into_any_element()
+        div()
+            .id("member-page-size-control")
+            .flex()
+            .items_center()
+            .gap_2()
+            .child(tr(locale, "memberPage.show"))
+            .child(control)
+            .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                if this.page_size_picker_open {
+                    this.page_size_picker_open = false;
+                    cx.notify();
+                }
+            }))
+            .into_any_element()
     }
 
     fn pagination(&self, pages: usize, cx: &Context<Self>) -> AnyElement {
@@ -681,13 +677,12 @@ impl Render for ClanMembersPage {
             self.list_state.reset(item_count);
         }
         let entity = cx.entity();
-        let locale_for_list = Arc::<str>::from(locale.clone());
         let visible_for_list = visible.clone();
         let member_list = list(self.list_state.clone(), move |index, _window, cx| {
             entity.update(cx, |this, cx| {
                 visible_for_list
                     .get(index)
-                    .map(|row| this.render_member_row(row, &locale_for_list, cx))
+                    .map(|row| this.render_member_row(row, cx))
                     .unwrap_or_else(|| div().into_any_element())
             })
         })
@@ -747,24 +742,6 @@ fn weighted_column(content: AnyElement, weight: f32, centered: bool) -> gpui::Di
             element.flex().items_center().justify_center().text_center()
         })
         .child(content)
-}
-
-fn header_with_filter(label: String, theme: &crate::theme::Theme) -> AnyElement {
-    div()
-        .flex()
-        .items_center()
-        .justify_center()
-        .gap_1()
-        .child(label)
-        .child(
-            Icon::new(IconName::FiltersIcon)
-                .size(px(16.))
-                .text_color(theme.text_secondary)
-                .with_transformation(gpui::Transformation::rotate(gpui::radians(
-                    std::f32::consts::FRAC_PI_2,
-                ))),
-        )
-        .into_any_element()
 }
 
 fn date_cell(value: String, theme: &crate::theme::Theme) -> AnyElement {
@@ -845,7 +822,7 @@ fn parse_hex_color(raw: &str) -> Option<gpui::Rgba> {
 }
 
 fn pagination_items(current: usize, pages: usize) -> Vec<Option<usize>> {
-    if pages <= 5 {
+    if pages <= 6 {
         return (0..pages).map(Some).collect();
     }
     if current <= 2 {
@@ -971,6 +948,10 @@ mod tests {
 
     #[test]
     fn pagination_matches_react_at_the_edges() {
+        assert_eq!(
+            pagination_items(5, 6),
+            vec![Some(0), Some(1), Some(2), Some(3), Some(4), Some(5)]
+        );
         assert_eq!(
             pagination_items(0, 10),
             vec![Some(0), Some(1), Some(2), Some(3), Some(4), None, Some(9)]
