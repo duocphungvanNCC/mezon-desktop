@@ -1300,41 +1300,34 @@ fn render_message_head(
         return div()
             .w_full()
             .min_w_0()
-            .text_sm()
+            .text_size(px(16.))
             .font_weight(FontWeight::MEDIUM)
             .text_color(sender_name_color)
             .child(sender_name.clone())
             .into_any_element();
     }
-    let name = sender_name.as_ref();
-    let time = time_label.as_ref();
-    let combined = format!("{name} {time}");
-    let name_end = name.len();
-    let time_start = name_end + 1;
-    let time_color: Hsla = theme.tokens.text_secondary.into();
-    let highlights = vec![
-        (
-            0..name_end,
-            HighlightStyle {
-                color: Some(sender_name_color),
-                font_weight: Some(FontWeight::MEDIUM),
-                ..Default::default()
-            },
-        ),
-        (
-            time_start..combined.len(),
-            HighlightStyle {
-                color: Some(time_color),
-                font_weight: Some(FontWeight::MEDIUM),
-                ..Default::default()
-            },
-        ),
-    ];
     div()
+        .flex()
+        .flex_row()
+        .items_center()
         .w_full()
         .min_w_0()
-        .text_sm()
-        .child(StyledText::new(combined).with_highlights(highlights))
+        .child(
+            div()
+                .flex_none()
+                .text_size(px(16.))
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(sender_name_color)
+                .child(sender_name.clone()),
+        )
+        .child(
+            div()
+                .flex_none()
+                .ml_1()
+                .text_size(px(10.))
+                .text_color(theme.tokens.text_secondary)
+                .child(time_label.clone()),
+        )
         .into_any_element()
 }
 
