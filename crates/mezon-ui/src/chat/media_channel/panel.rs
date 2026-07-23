@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
 use gpui::{
-    App, Context, Entity, FontWeight, Render, ScrollHandle, Subscription, WeakEntity, Window, div,
-    point, prelude::*, px,
+    App, Context, Entity, FontWeight, ListAlignment, ListOffset, ListState, Render, Subscription,
+    WeakEntity, Window, div, list, prelude::*, px,
 };
 use mezon_store::{
     AppConfig, ChannelId, ChannelMediaStore, ChannelPermissionsStore, ClanId, Settings,
@@ -25,6 +25,8 @@ use super::events_view::{
 };
 use super::timeline_view::{render_event_card, render_timeline_header};
 
+const MEDIA_LIST_OVERDRAW: f32 = 400.;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum MediaChannelView {
     Timeline,
@@ -42,8 +44,8 @@ pub struct MediaChannelPanel {
     detail_event_id: Option<i64>,
     detail_start_time: u32,
     detail_view: Option<Entity<EventDetailView>>,
-    scroll: ScrollHandle,
-    events_scroll: ScrollHandle,
+    timeline_list_state: ListState,
+    events_list_state: ListState,
     _store_sub: Subscription,
     _window_activation: Option<Subscription>,
     last_fetch_error: Option<String>,
@@ -77,6 +79,8 @@ impl MediaChannelPanel {
                 }
                 this.last_fetch_error = err;
             }
+            this.timeline_list_state.remeasure();
+            this.events_list_state.remeasure();
             cx.notify();
         });
         let _permissions_sub =
@@ -91,8 +95,10 @@ impl MediaChannelPanel {
             detail_event_id: None,
             detail_start_time: 0,
             detail_view: None,
-            scroll: ScrollHandle::new(),
-            events_scroll: ScrollHandle::new(),
+            timeline_list_state: ListState::new(0, ListAlignment::Top, px(MEDIA_LIST_OVERDRAW))
+                .measure_all(),
+            events_list_state: ListState::new(0, ListAlignment::Top, px(MEDIA_LIST_OVERDRAW))
+                .measure_all(),
             _store_sub,
             _window_activation: None,
             last_fetch_error: None,
@@ -119,8 +125,8 @@ impl MediaChannelPanel {
 
     pub fn on_enter(&mut self, cx: &mut Context<Self>) {
         self.reset_view(cx);
-        self.scroll.set_offset(point(px(0.), px(0.)));
-        self.events_scroll.set_offset(point(px(0.), px(0.)));
+        scroll_list_to_start(&self.timeline_list_state);
+        scroll_list_to_start(&self.events_list_state);
         ChannelMediaStore::global(cx).update(cx, |store, cx| {
             store.refresh_if_stale(self.clan_id, self.channel_id, self.timeline_year, cx);
         });
@@ -156,8 +162,8 @@ impl MediaChannelPanel {
         self.channel_id = channel_id;
         self.timeline_year = current_year();
         self.events_year = self.timeline_year;
-        self.scroll.set_offset(point(px(0.), px(0.)));
-        self.events_scroll.set_offset(point(px(0.), px(0.)));
+        self.timeline_list_state.reset(0);
+        self.events_list_state.reset(0);
         self.reset_view(cx);
         ChannelMediaStore::global(cx).update(cx, |store, cx| {
             store.ensure_loaded(clan_id, channel_id, self.timeline_year, cx);
@@ -181,6 +187,7 @@ impl MediaChannelPanel {
     fn navigate_events(&mut self, cx: &mut Context<Self>) {
         self.view = MediaChannelView::Events;
         self.events_year = self.timeline_year;
+        scroll_list_to_start(&self.events_list_state);
         ChannelMediaStore::global(cx).update(cx, |store, cx| {
             store.ensure_loaded(self.clan_id, self.channel_id, self.events_year, cx);
         });
@@ -226,6 +233,7 @@ impl MediaChannelPanel {
 
     fn select_events_year(&mut self, year: i32, cx: &mut Context<Self>) {
         self.events_year = year;
+        self.events_list_state.reset(0);
         ChannelMediaStore::global(cx).update(cx, |store, cx| {
             store.ensure_loaded(self.clan_id, self.channel_id, year, cx);
         });
@@ -235,6 +243,8 @@ impl MediaChannelPanel {
 
 impl Render for MediaChannelPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.preview_image_cache
+            .update(cx, |cache, cx| cache.sweep_once_per_frame(window, cx));
         let theme = cx.theme().clone();
         let locale = self.settings.read(cx).language.clone();
         let panel = cx.weak_entity();
@@ -259,7 +269,7 @@ impl Render for MediaChannelPanel {
         let fetch_error = store
             .error(self.channel_id, self.timeline_year)
             .map(str::to_string);
-        let config = AppConfig::global(cx);
+        let config = AppConfig::global(cx).clone();
         let first_year = first_event_year(events);
         let can_create = self.can_create_events(cx);
 
@@ -296,6 +306,52 @@ impl Render for MediaChannelPanel {
         let panel_fab = panel.clone();
         let panel_retry = panel.clone();
         let retry_error = fetch_error.map(|e| e.to_string());
+        sync_media_list(&self.timeline_list_state, events.len());
+        let timeline_list_state = self.timeline_list_state.clone();
+        let timeline_store = ChannelMediaStore::global(cx);
+        let timeline_channel_id = self.channel_id;
+        let timeline_year = self.timeline_year;
+        let timeline_theme = theme.clone();
+        let timeline_locale = locale.clone();
+        let timeline_cache = self.preview_image_cache.clone();
+        let timeline_config = config.clone();
+        let timeline_body = list(timeline_list_state.clone(), move |index, _window, cx| {
+            let store = timeline_store.read(cx);
+            let Some(event) = store.events(timeline_channel_id, timeline_year).get(index) else {
+                return div().into_any_element();
+            };
+            div()
+                .relative()
+                .w_full()
+                .child(
+                    div()
+                        .absolute()
+                        .left(px(0.))
+                        .right(px(0.))
+                        .top(px(0.))
+                        .bottom(px(0.))
+                        .flex()
+                        .justify_center()
+                        .child(
+                            div()
+                                .w(px(2.))
+                                .h_full()
+                                .bg(timeline_theme.brand)
+                                .opacity(0.3),
+                        ),
+                )
+                .child(render_event_card(
+                    &timeline_theme,
+                    &timeline_locale,
+                    event,
+                    index,
+                    &timeline_config,
+                    timeline_cache.clone(),
+                    Some(on_event_click.clone()),
+                ))
+                .into_any_element()
+        })
+        .size_full();
 
         div()
             .relative()
@@ -334,32 +390,17 @@ impl Render for MediaChannelPanel {
             ))
             .child(
                 div()
+                    .image_cache(self.preview_image_cache.clone())
                     .id("timeline-scroll")
                     .flex_1()
                     .min_h_0()
                     .overflow_hidden()
-                    .child(
-                        div()
-                            .id("timeline-scroll-inner")
-                            .overflow_y_scroll()
-                            .track_scroll(&self.scroll)
-                            .size_full()
-                            .px_6()
-                            .py_4()
-                            .child(div().image_cache(self.preview_image_cache.clone()).child(
-                                render_timeline_body(
-                                    &theme,
-                                    &locale,
-                                    events,
-                                    config,
-                                    self.preview_image_cache.clone(),
-                                    Some(on_event_click),
-                                ),
-                            )),
-                    )
+                    .px_6()
+                    .py_4()
+                    .child(timeline_body)
                     .custom_scrollbars(
                         Scrollbars::always_visible(ScrollAxes::Vertical)
-                            .tracked_scroll_handle(&self.scroll),
+                            .tracked_scroll_handle(&timeline_list_state),
                         window,
                         cx,
                     ),
@@ -402,7 +443,7 @@ impl Render for MediaChannelPanel {
 impl MediaChannelPanel {
     fn render_events(
         &self,
-        theme: &Theme,
+        theme: &Arc<Theme>,
         locale: &str,
         panel: WeakEntity<Self>,
         window: &mut Window,
@@ -411,7 +452,7 @@ impl MediaChannelPanel {
         let store = ChannelMediaStore::global(cx).read(cx);
         let events = store.events(self.channel_id, self.events_year);
         let loading = store.is_loading(self.channel_id, self.events_year);
-        let config = AppConfig::global(cx);
+        let config = AppConfig::global(cx).clone();
         let years = year_list();
 
         let panel_back = panel.clone();
@@ -437,6 +478,67 @@ impl MediaChannelPanel {
             },
         );
 
+        let body = if events.is_empty() {
+            sync_media_list(&self.events_list_state, 0);
+            div()
+                .size_full()
+                .child(render_events_list_header(theme, locale, self.events_year))
+                .when(loading, |el| el.child(render_events_loading()))
+                .when(!loading, |el| {
+                    el.child(render_events_empty(theme, locale, self.events_year))
+                })
+                .into_any_element()
+        } else {
+            sync_media_list(&self.events_list_state, events.len() + 1);
+            let list_state = self.events_list_state.clone();
+            let event_store = ChannelMediaStore::global(cx);
+            let channel_id = self.channel_id;
+            let events_year = self.events_year;
+            let event_theme = theme.clone();
+            let event_locale = locale.to_string();
+            let event_cache = self.preview_image_cache.clone();
+            let event_count = events.len();
+            div()
+                .size_full()
+                .image_cache(self.preview_image_cache.clone())
+                .child(
+                    list(list_state.clone(), move |index, _window, cx| {
+                        if index == 0 {
+                            return render_events_list_header(
+                                &event_theme,
+                                &event_locale,
+                                events_year,
+                            )
+                            .into_any_element();
+                        }
+                        let event_index = index - 1;
+                        let store = event_store.read(cx);
+                        let Some(event) = store.events(channel_id, events_year).get(event_index)
+                        else {
+                            return div().into_any_element();
+                        };
+                        div()
+                            .px_6()
+                            .pb(if event_index + 1 == event_count {
+                                px(80.)
+                            } else {
+                                px(16.)
+                            })
+                            .child(render_events_list_card(
+                                &event_theme,
+                                &event_locale,
+                                event,
+                                &config,
+                                event_cache.clone(),
+                                on_event_click.clone(),
+                            ))
+                            .into_any_element()
+                    })
+                    .size_full(),
+                )
+                .into_any_element()
+        };
+
         div()
             .flex()
             .flex_col()
@@ -451,37 +553,10 @@ impl MediaChannelPanel {
                     .flex_1()
                     .min_h_0()
                     .overflow_hidden()
-                    .child(
-                        div()
-                            .id("events-scroll-inner")
-                            .overflow_y_scroll()
-                            .track_scroll(&self.events_scroll)
-                            .size_full()
-                            .child(render_events_list_header(theme, locale, self.events_year))
-                            .when(loading && events.is_empty(), |el| {
-                                el.child(render_events_loading())
-                            })
-                            .when(!loading && events.is_empty(), |el| {
-                                el.child(render_events_empty(theme, locale, self.events_year))
-                            })
-                            .child(div().image_cache(self.preview_image_cache.clone()).child(
-                                div().px_6().pb_20().flex().flex_col().gap_4().children(
-                                    events.iter().map(|event| {
-                                        render_events_list_card(
-                                            theme,
-                                            locale,
-                                            event,
-                                            config,
-                                            self.preview_image_cache.clone(),
-                                            on_event_click.clone(),
-                                        )
-                                    }),
-                                ),
-                            )),
-                    )
+                    .child(body)
                     .custom_scrollbars(
                         Scrollbars::always_visible(ScrollAxes::Vertical)
-                            .tracked_scroll_handle(&self.events_scroll),
+                            .tracked_scroll_handle(&self.events_list_state),
                         window,
                         cx,
                     ),
@@ -492,6 +567,25 @@ impl MediaChannelPanel {
 fn current_year() -> i32 {
     use chrono::Datelike;
     chrono::Utc::now().year()
+}
+
+fn sync_media_list(state: &ListState, item_count: usize) {
+    let current = state.item_count();
+    if item_count > current {
+        state.splice(current..current, item_count - current);
+    } else if item_count < current {
+        state.reset(item_count);
+    }
+}
+
+fn scroll_list_to_start(state: &ListState) {
+    if state.item_count() == 0 {
+        return;
+    }
+    state.scroll_to(ListOffset {
+        item_ix: 0,
+        offset_in_item: px(0.),
+    });
 }
 
 fn centered_spinner(theme: &Theme) -> impl IntoElement {
@@ -622,38 +716,4 @@ fn render_empty_state(
                     ),
             )
         })
-}
-
-fn render_timeline_body(
-    theme: &Theme,
-    locale: &str,
-    events: &[mezon_store::ChannelTimeline],
-    config: &AppConfig,
-    image_cache: Entity<LruImageCache>,
-    on_click: Option<Arc<dyn Fn(i64, u32, &mut Window, &mut App)>>,
-) -> impl IntoElement {
-    div()
-        .relative()
-        .child(
-            div()
-                .absolute()
-                .left(px(0.))
-                .right(px(0.))
-                .top(px(0.))
-                .bottom(px(0.))
-                .flex()
-                .justify_center()
-                .child(div().w(px(2.)).h_full().bg(theme.brand).opacity(0.3)),
-        )
-        .children(events.iter().enumerate().map(|(index, event)| {
-            render_event_card(
-                theme,
-                locale,
-                event,
-                index,
-                config,
-                image_cache.clone(),
-                on_click.clone(),
-            )
-        }))
 }

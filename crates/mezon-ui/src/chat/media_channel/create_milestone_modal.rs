@@ -147,7 +147,7 @@ impl CreateMilestoneModal {
             };
             let media_paths: Vec<PathBuf> = paths
                 .into_iter()
-                .filter(|path| is_allowed_media(path))
+                .filter(|path| is_allowed_media(path.as_path()))
                 .collect();
             if media_paths.is_empty() {
                 return;
@@ -278,7 +278,9 @@ impl CreateMilestoneModal {
 }
 
 impl Render for CreateMilestoneModal {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.preview_image_cache
+            .update(cx, |cache, cx| cache.sweep_once_per_frame(window, cx));
         let theme = cx.theme().as_ref().clone();
         let locale = &self.locale;
         let title_len = self.title_input.read(cx).value().len();

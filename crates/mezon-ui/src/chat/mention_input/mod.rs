@@ -6,6 +6,7 @@ use std::cell::Cell;
 use std::path::PathBuf;
 use std::rc::Rc;
 
+use crate::router::{Route, Router};
 use gpui::{
     AnyElement, App, Bounds, Context, DismissEvent, Div, Entity, EventEmitter, Focusable,
     FontWeight, Image, ImageFormat, IntoElement, KeyBinding, MouseButton, PathPromptOptions,
@@ -13,13 +14,15 @@ use gpui::{
     UniformListScrollHandle, Window, actions, canvas, deferred, div, img, prelude::*, px,
     uniform_list,
 };
+use mezon_client::transport::QUICK_MENU_TYPE_FLASH;
 use mezon_store::{
     AccountEvent, AccountStore, AudioStore, BadgeService, Channel, ChannelEvent, ChannelId,
     ChannelList, ChannelMembersEvent, ChannelMembersStore, ClanList, ClanMembersEvent,
     ClanMembersStore, DirectEvent, DirectMessageStore, Emoji, EmojiEvent, EmojiStore,
     GroupMembersEvent, GroupMembersStore, MENTION_HERE_ID, MessageSpan, MessagesStore, OgpResult,
     OutgoingAttachment, OutgoingContent, OutgoingEmoji, OutgoingHashtag, OutgoingMention,
-    OutgoingOgp, RolesEvent, RolesStore, Settings, fetch_ogp, first_previewable_url,
+    OutgoingOgp, QuickMenuStore, RolesEvent, RolesStore, Settings, fetch_ogp,
+    first_previewable_url,
 };
 use std::time::Duration;
 
@@ -36,6 +39,8 @@ use crate::chat::member_list::{
     mention_member_pool, mention_private_channel, mention_role_clan, mention_scope,
 };
 use crate::chat::message::CreatePollModal;
+use crate::chat::message::MessageBuzzModal;
+use crate::chat::message::ShareLocationModal;
 use crate::components::primitives::{Avatar, Icon, IconName, ToastKind};
 use crate::image_cache::{
     AVATAR_ENTRY_MAX_BYTES, AVATAR_IMAGE_CACHE_BYTES, AVATAR_IMAGE_CACHE_CAPACITY, LruImageCache,
@@ -64,14 +69,72 @@ const STREAM_MODE_DM: i32 = 4;
 const MENTION_ROW_PX: f32 = 36.;
 const MENTION_POPUP_MAX_PX: f32 = MENTION_ROW_PX * 6.;
 
-actions!(mezon_mention, [MentionAccept, MentionDismiss]);
+actions!(
+    mezon_mention,
+    [
+        MentionAccept,
+        MentionDismiss,
+        ToggleAnonymous,
+        OpenMessageBuzz
+    ]
+);
 
 pub fn init(cx: &mut App) {
     text_field::init(cx);
     cx.bind_keys([
         KeyBinding::new("tab", MentionAccept, Some(KEY_CONTEXT)),
         KeyBinding::new("escape", MentionDismiss, Some(KEY_CONTEXT)),
+        KeyBinding::new("cmd-shift-enter", ToggleAnonymous, None),
+        KeyBinding::new("ctrl-shift-enter", ToggleAnonymous, None),
+        KeyBinding::new("ctrl-g", OpenMessageBuzz, None),
     ]);
+    cx.on_action(|_: &ToggleAnonymous, cx: &mut App| {
+        toggle_anonymous_shortcut(cx);
+    });
+    cx.on_action(|_: &OpenMessageBuzz, cx: &mut App| {
+        let Some(window_handle) =
+            crate::app::main_window::handle(cx).or_else(|| cx.active_window())
+        else {
+            return;
+        };
+        cx.defer(move |cx| {
+            let _ = cx.update_window(window_handle, |_, window, cx| {
+                open_message_buzz(window, cx);
+            });
+        });
+    });
+}
+
+fn toggle_anonymous_shortcut(cx: &mut App) {
+    if matches!(
+        Router::global(cx).read(cx).route(),
+        Route::DirectMessage { .. } | Route::Direct | Route::Friends
+    ) {
+        return;
+    }
+    if ClanList::global(cx)
+        .read(cx)
+        .active_clan_id
+        .and_then(|clan_id| ClanList::global(cx).read(cx).clan(clan_id))
+        .is_some_and(|clan| clan.prevent_anonymous)
+    {
+        return;
+    }
+    MessagesStore::global(cx).update(cx, |store, cx| store.toggle_anonymous_mode(cx));
+}
+
+fn open_message_buzz(window: &mut Window, cx: &mut App) {
+    if MessagesStore::global(cx)
+        .read(cx)
+        .active_channel_id()
+        .is_none()
+    {
+        return;
+    }
+    let locale = Settings::try_global(cx)
+        .map(|settings| SharedString::from(settings.read(cx).language.clone()))
+        .unwrap_or_else(|| SharedString::from("en"));
+    MessageBuzzModal::open(locale, window, cx);
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -156,10 +219,11 @@ struct EmojiSuggestRaw {
 
 #[derive(Clone)]
 struct SlashCommandRaw {
-    id: &'static str,
-    display: &'static str,
-    display_lc: &'static str,
+    id: SharedString,
+    display: SharedString,
+    display_lc: String,
     description: SharedString,
+    action_msg: Option<SharedString>,
 }
 
 #[derive(Clone)]
@@ -191,7 +255,7 @@ impl Suggestion {
             Suggestion::Role(role) => (2, role.role_id.as_str()),
             Suggestion::Channel(channel) => (3, channel.channel_id.as_str()),
             Suggestion::Emoji(emoji, _) => (4, emoji.emoji_id.as_str()),
-            Suggestion::SlashCommand(command) => (5, command.id),
+            Suggestion::SlashCommand(command) => (5, command.id.as_ref()),
         }
     }
 
@@ -202,7 +266,7 @@ impl Suggestion {
             Suggestion::Role(role) => (&role.title_lc, ""),
             Suggestion::Channel(channel) => (&channel.name_lc, ""),
             Suggestion::Emoji(emoji, _) => (&emoji.shortname_lc, ""),
-            Suggestion::SlashCommand(command) => (command.display_lc, ""),
+            Suggestion::SlashCommand(command) => (command.display_lc.as_str(), ""),
         }
     }
 
@@ -213,7 +277,7 @@ impl Suggestion {
             Suggestion::Role(role) => (&role.title_norm, ""),
             Suggestion::Channel(channel) => (&channel.name_norm, &channel.sub_text_norm),
             Suggestion::Emoji(emoji, _) => (&emoji.shortname, ""),
-            Suggestion::SlashCommand(command) => (command.display_lc, ""),
+            Suggestion::SlashCommand(command) => (command.display_lc.as_str(), ""),
         }
     }
 
@@ -610,10 +674,30 @@ impl MentionInput {
         cx.notify();
     }
 
+    fn open_share_location(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.file_menu_open = false;
+        if MessagesStore::global(cx).read(cx).is_anonymous_mode() {
+            let locale = self.settings.read(cx).language.clone();
+            let message = SharedString::from(mezon_i18n::t(
+                &locale,
+                "common.cannotSendLocationWithAnonymous",
+            ));
+            Shell::global(cx).update(cx, |shell, cx| shell.info(message, cx));
+            cx.notify();
+            return;
+        }
+        let locale = SharedString::from(self.settings.read(cx).language.clone());
+        window.defer(cx, move |window, cx| {
+            ShareLocationModal::open(locale, window, cx);
+        });
+        cx.notify();
+    }
+
     fn render_file_menu(&self, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().clone();
         let locale = SharedString::from(self.settings.read(cx).language.clone());
         let show_poll = MessagesStore::global(cx).read(cx).mode() != STREAM_MODE_DM;
+        let show_location = !MessagesStore::global(cx).read(cx).is_anonymous_mode();
         let text_color = theme.text_muted;
         let text_hover = theme.text_primary;
         let bg_hover = theme.bg_hover;
@@ -662,6 +746,37 @@ impl MentionInput {
                         mezon_i18n::t(&locale, "message.fileSelection.uploadFile").to_string(),
                     )),
             );
+        if show_location {
+            menu =
+                menu.child(
+                    div()
+                        .id("file-menu-location")
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap_3()
+                        .px_4()
+                        .py_3()
+                        .rounded_md()
+                        .cursor_pointer()
+                        .text_color(text_color)
+                        .hover(|s| s.bg(bg_hover).text_color(text_hover))
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|this, _, window, cx| this.open_share_location(window, cx)),
+                        )
+                        .child(
+                            Icon::new(IconName::Location)
+                                .size_5()
+                                .flex_none()
+                                .text_color(text_color)
+                                .hover(|s| s.text_color(text_hover)),
+                        )
+                        .child(div().text_sm().font_weight(FontWeight::MEDIUM).child(
+                            mezon_i18n::t(&locale, "message.attachments.location").to_string(),
+                        )),
+                );
+        }
         if show_poll {
             menu = menu.child(
                 div()
@@ -1096,6 +1211,7 @@ impl MentionInput {
         };
         self.update_ogp_preview(&content, cx);
         self.last_content = content;
+        MessagesStore::global(cx).update(cx, |store, cx| store.notify_typing(cx));
     }
 
     fn update_ogp_preview(&mut self, content: &str, cx: &mut Context<Self>) {
@@ -1414,7 +1530,12 @@ impl MentionInput {
             }
             Sigil::Slash => {
                 let locale = self.settings.read(cx).language.clone();
-                self.session_commands = slash_command_pool(&locale);
+                if let Some(channel_id) = MessagesStore::global(cx).read(cx).active_channel_id() {
+                    QuickMenuStore::global(cx).update(cx, |store, cx| {
+                        store.ensure_loaded(channel_id, QUICK_MENU_TYPE_FLASH, cx);
+                    });
+                }
+                self.session_commands = slash_command_pool(&locale, cx);
             }
         }
     }
@@ -1547,11 +1668,18 @@ impl MentionInput {
         let content_len = self.input.read(cx).value().len();
         let replace_end = (at + self.query_len).min(content_len);
         if let Suggestion::SlashCommand(command) = &suggestion {
-            if command.id == "ephemeral" {
+            if command.id.as_ref() == "ephemeral" {
                 self.input.update(cx, |input, cx| {
                     input.replace_range(at..replace_end, "@", window, cx)
                 });
                 self.ephemeral_mode = true;
+                self.reset_popup();
+                self.sync_ranges(cx);
+                cx.notify();
+            } else if let Some(action_msg) = command.action_msg.as_ref() {
+                self.input.update(cx, |input, cx| {
+                    input.replace_range(at..replace_end, action_msg.as_ref(), window, cx)
+                });
                 self.reset_popup();
                 self.sync_ranges(cx);
                 cx.notify();
@@ -1893,7 +2021,7 @@ impl MentionInput {
                             .child("/")
                             .into_any_element(),
                     ),
-                    command.display.into(),
+                    command.display.clone(),
                     command.description.clone(),
                 ),
             };
@@ -2146,15 +2274,33 @@ fn emoji_suggest_id(emoji: &Emoji) -> String {
     emoji.id.clone()
 }
 
-fn slash_command_pool(locale: &str) -> Vec<Rc<SlashCommandRaw>> {
+fn slash_command_pool(locale: &str, cx: &App) -> Vec<Rc<SlashCommandRaw>> {
     let description: SharedString =
         mezon_i18n::t(locale, "messageBox.slashCommands.ephemeral.description").into();
-    vec![Rc::new(SlashCommandRaw {
-        id: "ephemeral",
-        display: "ephemeral",
-        display_lc: "ephemeral",
+    let mut commands = vec![Rc::new(SlashCommandRaw {
+        id: "ephemeral".into(),
+        display: "ephemeral".into(),
+        display_lc: "ephemeral".to_string(),
         description,
-    })]
+        action_msg: None,
+    })];
+    let Some(channel_id) = MessagesStore::global(cx).read(cx).active_channel_id() else {
+        return commands;
+    };
+    for item in QuickMenuStore::global(cx)
+        .read(cx)
+        .items(channel_id, QUICK_MENU_TYPE_FLASH)
+    {
+        let display = item.menu_name.to_string();
+        commands.push(Rc::new(SlashCommandRaw {
+            id: format!("quick_menu_{}", item.id).into(),
+            display: display.clone().into(),
+            display_lc: display.to_lowercase(),
+            description: item.action_msg.clone(),
+            action_msg: Some(item.action_msg.clone()),
+        }));
+    }
+    commands
 }
 
 fn emoji_suggest_pool(cx: &App) -> Vec<EmojiSuggestRaw> {

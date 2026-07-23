@@ -344,7 +344,7 @@ impl EventDetailView {
             };
             let media_paths: Vec<PathBuf> = paths
                 .into_iter()
-                .filter(|path| is_allowed_media(path))
+                .filter(|path| is_allowed_media(path.as_path()))
                 .collect();
             if media_paths.is_empty() {
                 return;
@@ -408,6 +408,8 @@ impl EventDetailView {
 
 impl Render for EventDetailView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.preview_image_cache
+            .update(cx, |cache, cx| cache.sweep_once_per_frame(window, cx));
         self.sync_inputs(window, cx);
         let theme = cx.theme().clone();
         let locale = self.settings.read(cx).language.clone();

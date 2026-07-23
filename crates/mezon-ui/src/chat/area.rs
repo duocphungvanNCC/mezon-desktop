@@ -418,6 +418,7 @@ impl ChatArea {
             });
 
         let has_search_panel = show_results_panel && message_search_panel.is_some();
+        let member_visible = show_member_panel && !has_search_panel && !media_channel_view;
         let body = div()
             .flex()
             .flex_row()
@@ -437,20 +438,20 @@ impl ChatArea {
                     ),
                 )
             })
-            .when(
-                show_member_panel && !has_search_panel && !media_channel_view,
-                |row| match &self.member_panel {
-                    Some(panel) => row.child(
-                        AnyView::from(panel.clone()).cached(
-                            StyleRefinement::default()
-                                .w(px(245.))
-                                .h_full()
-                                .flex_shrink_0(),
+            .when_some(self.member_panel.clone(), |row, panel| {
+                row.child(
+                    div()
+                        .h_full()
+                        .flex_shrink_0()
+                        .overflow_hidden()
+                        .when(member_visible, |slot| slot.w(px(245.)))
+                        .when(!member_visible, |slot| slot.w(px(0.)).invisible())
+                        .child(
+                            AnyView::from(panel)
+                                .cached(StyleRefinement::default().w(px(245.)).h_full()),
                         ),
-                    ),
-                    None => row.child(div().w(px(245.)).h_full().flex_shrink_0()),
-                },
-            );
+                )
+            });
 
         div()
             .flex()

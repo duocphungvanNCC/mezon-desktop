@@ -105,6 +105,7 @@ pub type SaveAttachmentFn = Arc<dyn Fn(&str, &str) -> anyhow::Result<()> + Send 
 pub type NotifyFn = Arc<dyn Fn(DesktopNotification) + Send + Sync>;
 /// Returns whether the OS permits desktop notifications (false only when explicitly denied).
 pub type NotificationPermitFn = Arc<dyn Fn() -> bool + Send + Sync>;
+pub type CurrentLocationFn = Arc<dyn Fn() -> anyhow::Result<(f64, f64)> + Send + Sync>;
 
 pub struct DesktopNotification {
     pub title: String,
@@ -121,6 +122,7 @@ pub struct PlatformStore {
     save_attachment: Option<SaveAttachmentFn>,
     notifier: Option<NotifyFn>,
     notification_permit: Option<NotificationPermitFn>,
+    current_location: Option<CurrentLocationFn>,
 }
 
 impl PlatformStore {
@@ -130,6 +132,7 @@ impl PlatformStore {
             save_attachment: None,
             notifier: None,
             notification_permit: None,
+            current_location: None,
         });
         cx.set_global(GlobalPlatformStore(entity.clone()));
         entity
@@ -195,6 +198,24 @@ impl PlatformStore {
     /// so a pending authorization does not block the notification stream.
     pub fn notifications_permitted(&self) -> bool {
         self.notification_permit.as_ref().is_none_or(|f| f())
+    }
+
+    pub fn set_current_location(entity: &Entity<Self>, f: CurrentLocationFn, cx: &mut App) {
+        entity.update(cx, |store, cx| {
+            store.current_location = Some(f);
+            cx.notify();
+        });
+    }
+
+    pub fn current_location(&self) -> anyhow::Result<(f64, f64)> {
+        match &self.current_location {
+            Some(f) => f(),
+            None => Err(anyhow::anyhow!("current_location not registered")),
+        }
+    }
+
+    pub fn current_location_fn(&self) -> Option<CurrentLocationFn> {
+        self.current_location.clone()
     }
 }
 

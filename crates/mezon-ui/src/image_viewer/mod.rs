@@ -941,7 +941,9 @@ impl Render for ImageViewer {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if !self.closing {
             self.image_cache
-                .update(cx, |cache, cx| cache.sweep(window, cx));
+                .update(cx, |cache, cx| cache.sweep_once_per_frame(window, cx));
+            self.thumb_image_cache
+                .update(cx, |cache, cx| cache.sweep_once_per_frame(window, cx));
             self.schedule_video_player_sync(window, cx);
         }
         let theme = cx.theme().clone();
@@ -1230,11 +1232,10 @@ impl ImageViewer {
         let list = uniform_list("viewer-thumbnails", count, move |range, _window, cx| {
             range
                 .map(|ix| {
-                    let info = entity
-                        .read(cx)
-                        .attachments
-                        .get(ix)
-                        .map(|att| (att.is_video, SharedUri::from(att.thumb_src.as_ref())));
+                    let info =
+                        entity.read(cx).attachments.get(ix).map(|att| {
+                            (att.is_video, SharedUri::from(att.viewer_thumb_src.as_ref()))
+                        });
                     let Some((is_video, src)) = info else {
                         return div().into_any_element();
                     };

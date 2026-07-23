@@ -436,14 +436,12 @@ impl ChannelMediaStore {
             bucket.is_loading = true;
             bucket.error = None;
         } else {
-            self.by_key.insert(
-                key.clone(),
-                ChannelMediaBucket {
-                    is_loading: true,
-                    ..Default::default()
-                },
-                self.active_key.as_ref(),
-            );
+            let bucket = ChannelMediaBucket {
+                is_loading: true,
+                ..Default::default()
+            };
+            self.by_key
+                .insert(key.clone(), bucket, self.active_key.as_ref());
         }
         cx.emit(ChannelMediaEvent::Changed(channel_id));
         cx.notify();

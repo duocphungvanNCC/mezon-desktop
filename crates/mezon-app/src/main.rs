@@ -269,6 +269,13 @@ fn run_app(lock: SingleInstance, initial_url: Option<String>) {
                 mezon_client::transport_runtime::new_http_client_with_user_agent(
                     IMAGE_CLIENT_USER_AGENT,
                 ),
+                app_config
+                    .media_origins()
+                    .into_iter()
+                    .map(str::to_owned)
+                    .collect(),
+                app_config.upload_img_url.clone(),
+                app_config.base_img_url.clone(),
             ),
         ))
         .with_assets(mezon_ui::util::assets::Assets);
@@ -612,6 +619,7 @@ fn open_main_window(
     mezon_store::PermissionStore::init(api.clone(), auth_state.clone(), cx);
     mezon_store::NotificationSettingStore::init(api.clone(), auth_state.clone(), cx);
     mezon_store::NotificationPushStore::init(api.clone(), auth_state.clone(), cx);
+    mezon_store::QuickMenuStore::init(api.clone(), cx);
     mezon_store::AccountStore::init(api, cx);
 
     let platform_store = mezon_store::PlatformStore::init(cx);
@@ -642,6 +650,11 @@ fn open_main_window(
     mezon_store::PlatformStore::set_notification_permit(
         &platform_store,
         std::sync::Arc::new(mezon_native::notifications::notifications_permitted),
+        cx,
+    );
+    mezon_store::PlatformStore::set_current_location(
+        &platform_store,
+        std::sync::Arc::new(mezon_native::location::current_location),
         cx,
     );
 

@@ -35,12 +35,14 @@ pub mod pinned;
 pub mod platform;
 pub mod presence;
 pub mod presign;
+pub mod quick_menu;
 pub mod realtime;
 pub mod roles;
 pub mod sticker;
 pub mod threads;
 pub mod topic_badges;
 pub mod topics;
+pub mod ui_state;
 pub mod user_profile;
 pub mod users_by_user;
 pub mod voice;
@@ -86,7 +88,7 @@ pub use clan_members::{
 };
 pub use config::AppConfig;
 pub use connection::{ConnectionStore, resolve_initial_auth_state};
-pub use direct::{DirectChannel, DirectEvent, DirectKind, DirectMessageStore};
+pub use direct::{DirectChannel, DirectEvent, DirectKind, DirectMessageBody, DirectMessageStore};
 pub use emoji::{
     EMOJI_UPLOAD_MAX_PX, EMOTICON_ALLOWED_EXTENSIONS, EMOTICON_SHORTNAME_MAX,
     EMOTICON_SHORTNAME_MIN, Emoji, EmojiEvent, EmojiStore, MAX_EMOJI_BYTES, MAX_STICKER_BYTES,
@@ -143,6 +145,7 @@ pub use platform::{
     copy_image_url_to_clipboard, download_url_with_dialog,
 };
 pub use presence::*;
+pub use quick_menu::{QuickMenuItem, QuickMenuStore};
 pub use realtime::{RealtimeDispatch, RealtimeKind};
 pub use roles::{
     ClanRoleDetail, DEFAULT_ROLE_COLOR, MAX_ROLE_ICON_BYTES, Role, RoleDraft, RolePermission,
@@ -152,6 +155,7 @@ pub use sticker::{ClanSound, Sticker, StickerEvent, StickerStore};
 pub use threads::{THREAD_STATUS_JOINED, ThreadSummary, ThreadsEvent, ThreadsStore, group_threads};
 pub use topic_badges::{TopicBadgeEvent, TopicBadgeStore};
 pub use topics::{TopicsEvent, TopicsStore};
+pub use ui_state::UiState;
 pub use user_profile::{
     ProfileContext, UserProfileView, active_clan_id, current_user_clan_avatar, resolve_avatar_url,
     resolve_user_profile,

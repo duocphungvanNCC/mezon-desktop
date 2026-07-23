@@ -9,8 +9,8 @@ use mezon_store::{
     AuthState, Channel, ChannelId, ChannelList, ChannelType, ClanId, ClanList, ClanMembersStore,
     DirectChannel, DirectKind, DirectMessageStore, GroupMembersStore, InboxStore,
     MessageSearchEvent, MessageSearchStore, MessagesStore, PinnedEvent, PinnedMessagesStore,
-    Settings, ThreadsEvent, ThreadsStore, TopicsEvent, TopicsStore, VoiceConnection, VoiceMember,
-    VoiceModerationError, VoiceStore, expand_mention_name_tokens,
+    Settings, ThreadsEvent, ThreadsStore, TopicsEvent, TopicsStore, UiState, VoiceConnection,
+    VoiceMember, VoiceModerationError, VoiceStore, expand_mention_name_tokens,
 };
 use ui::PopoverMenuHandle;
 use ui::utils::ROUNDED_BORDER_WINDOW;
@@ -62,6 +62,7 @@ pub struct ChatLayout {
     inbox_context_ids: Option<(Option<ClanId>, Option<ChannelId>)>,
     _voice_frame_pump: Option<Task<()>>,
     show_member_list: bool,
+    ui_state: UiState,
     media_channel_view_mode: bool,
     message_search_expanded: bool,
     show_search_options: bool,
@@ -358,6 +359,8 @@ impl ChatLayout {
                 });
             },
         );
+        let ui_state = UiState::load_sync();
+        let show_member_list = ui_state.show_member_list;
         let mut this = Self {
             channel_list,
             clan_sidebar,
@@ -386,7 +389,8 @@ impl ChatLayout {
             dm_view_fingerprint: None,
             inbox_context_ids: None,
             _voice_frame_pump: None,
-            show_member_list: true,
+            show_member_list,
+            ui_state,
             media_channel_view_mode: false,
             message_search_expanded: false,
             show_search_options: false,
@@ -427,6 +431,7 @@ impl ChatLayout {
             _ns_popover_close: None,
         };
         this.sync_active_from_route(cx);
+        this.sync_member_list_visibility(cx);
         this.sync_inbox_context(cx);
         this.sync_voice_frame_pump(cx);
         register_chat_layout(cx.weak_entity(), cx);
@@ -788,16 +793,42 @@ impl ChatLayout {
     }
 
     pub(crate) fn toggle_member_list(&mut self, cx: &mut Context<Self>) {
+        let dm = self.is_dm_route(cx);
         self.show_member_list = !self.show_member_list;
+        if dm {
+            self.ui_state.show_member_list_dm = self.show_member_list;
+        } else {
+            self.ui_state.show_member_list = self.show_member_list;
+        }
+        self.persist_ui_state(cx);
         cx.notify();
+    }
+
+    fn persist_ui_state(&self, cx: &mut Context<Self>) {
+        let snapshot = self.ui_state.clone();
+        cx.background_executor()
+            .spawn(async move {
+                snapshot.save_sync();
+            })
+            .detach();
     }
 
     pub(crate) fn toggle_media_channel_view(&mut self, cx: &mut Context<Self>) {
         self.media_channel_view_mode = !self.media_channel_view_mode;
         if self.media_channel_view_mode {
             self.show_member_list = false;
+        } else {
+            self.sync_member_list_visibility(cx);
         }
         cx.notify();
+    }
+
+    fn sync_member_list_visibility(&mut self, cx: &Context<Self>) {
+        self.show_member_list = if self.is_dm_route(cx) {
+            self.ui_state.show_member_list_dm
+        } else {
+            self.ui_state.show_member_list
+        };
     }
 
     fn channel_supports_timeline_view(&self, cx: &Context<Self>) -> bool {
@@ -907,6 +938,7 @@ impl ChatLayout {
                 self.chat_area.clear_member_panel();
             }
         }
+        self.sync_member_list_visibility(cx);
     }
 
     fn sync_channel_route(

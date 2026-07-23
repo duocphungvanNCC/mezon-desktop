@@ -1,6 +1,6 @@
 use std::future::Future;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, LazyLock};
 use std::time::{Duration, Instant};
 
 use futures::future::{AbortHandle, Abortable};
@@ -57,8 +57,8 @@ pub fn flush_atlas_drops(window: &mut Window, cx: &mut App) {
     }
 }
 
-const IDLE_TRIM_INTERVAL: Duration = Duration::from_secs(120);
-const IDLE_TRIM_TTL: Duration = Duration::from_secs(600);
+const IDLE_TRIM_INTERVAL: Duration = Duration::from_secs(30);
+const IDLE_TRIM_TTL: Duration = Duration::from_secs(60);
 
 /// Decode-completion notifies are coalesced per view: a burst of images
 /// finishing across many frames (fast scroll, channel open) would otherwise
@@ -107,13 +107,18 @@ pub fn start_idle_trim(cx: &mut App) {
             cx.update(|cx| {
                 let registry = std::mem::take(&mut cx.default_global::<IdleTrimRegistry>().0);
                 let mut live = Vec::with_capacity(registry.len());
+                let mut evicted = false;
                 for weak in registry {
                     if let Some(cache) = weak.upgrade() {
-                        cache.update(cx, |cache, cx| cache.evict_idle(IDLE_TRIM_TTL, cx));
+                        evicted |=
+                            cache.update(cx, |cache, cx| cache.evict_idle(IDLE_TRIM_TTL, cx));
                         live.push(weak);
                     }
                 }
                 cx.default_global::<IdleTrimRegistry>().0.extend(live);
+                if evicted {
+                    cx.refresh_windows();
+                }
             });
         }
     })
@@ -121,8 +126,8 @@ pub fn start_idle_trim(cx: &mut App) {
 }
 
 const SHARED_AVATAR_CACHE_CAPACITY: usize = 512;
-const SHARED_AVATAR_CACHE_BYTES: u64 = 40 * 1024 * 1024;
-const SHARED_SMALL_AVATAR_CACHE_BYTES: u64 = 20 * 1024 * 1024;
+const SHARED_AVATAR_CACHE_BYTES: u64 = 24 * 1024 * 1024;
+const SHARED_SMALL_AVATAR_CACHE_BYTES: u64 = 12 * 1024 * 1024;
 
 struct SharedAvatarCache(Entity<LruImageCache>);
 impl Global for SharedAvatarCache {}
@@ -130,8 +135,8 @@ impl Global for SharedAvatarCache {}
 struct SharedOgpCache(Entity<LruImageCache>);
 impl Global for SharedOgpCache {}
 
-const OGP_SHARED_CACHE_CAPACITY: usize = 64;
-const OGP_SHARED_CACHE_BYTES: u64 = 16 * 1024 * 1024;
+const OGP_SHARED_CACHE_CAPACITY: usize = 16;
+const OGP_SHARED_CACHE_BYTES: u64 = 8 * 1024 * 1024;
 const OGP_SHARED_ENTRY_MAX_BYTES: u64 = 2 * 1024 * 1024;
 
 /// App-global, bounded, aspect-preserving cache for OGP link-preview images
@@ -159,6 +164,12 @@ pub fn shared_ogp_cache(cx: &mut App) -> Entity<LruImageCache> {
 pub fn ogp_image_cache(app: &App) -> Option<Entity<LruImageCache>> {
     app.try_global::<SharedOgpCache>()
         .map(|cache| cache.0.clone())
+}
+
+pub fn sweep_ogp_cache(window: &mut Window, cx: &mut App) {
+    if let Some(cache) = ogp_image_cache(cx) {
+        cache.update(cx, |cache, cx| cache.sweep_once_per_frame(window, cx));
+    }
 }
 
 pub fn shared_avatar_cache(cx: &mut App) -> Entity<LruImageCache> {
@@ -292,8 +303,22 @@ pub fn release_freed_memory_to_os(cx: &mut App) {
 
 pub(crate) const AVATAR_FETCH_MAX_BYTES: usize = 8 * 1024 * 1024;
 pub(crate) const GALLERY_FETCH_MAX_BYTES: usize = 16 * 1024 * 1024;
-pub(crate) const MESSAGE_FETCH_MAX_BYTES: usize = 64 * 1024 * 1024;
-pub(crate) const VIEWER_FETCH_MAX_BYTES: usize = 64 * 1024 * 1024;
+pub(crate) const MESSAGE_FETCH_MAX_BYTES: usize = 32 * 1024 * 1024;
+pub(crate) const VIEWER_FETCH_MAX_BYTES: usize = 32 * 1024 * 1024;
+const IMAGE_PIPELINE_CONCURRENCY: usize = 3;
+static IMAGE_PIPELINE_PERMITS: LazyLock<Arc<tokio::sync::Semaphore>> =
+    LazyLock::new(|| Arc::new(tokio::sync::Semaphore::new(IMAGE_PIPELINE_CONCURRENCY)));
+
+async fn acquire_image_pipeline_permit()
+-> Result<tokio::sync::OwnedSemaphorePermit, ImageCacheError> {
+    IMAGE_PIPELINE_PERMITS
+        .clone()
+        .acquire_owned()
+        .await
+        .map_err(|_| {
+            ImageCacheError::Other(Arc::new(anyhow::anyhow!("image pipeline semaphore closed")))
+        })
+}
 
 pub(crate) async fn read_body_limited(
     response: &mut gpui::http_client::Response<gpui::http_client::AsyncBody>,
@@ -325,33 +350,24 @@ pub(crate) async fn read_body_limited(
 }
 
 pub const MESSAGE_IMAGE_CACHE_CAPACITY: usize = 48;
-pub const MESSAGE_IMAGE_CACHE_BYTES: u64 = 48 * 1024 * 1024;
+pub const MESSAGE_IMAGE_CACHE_BYTES: u64 = 32 * 1024 * 1024;
 pub const AVATAR_IMAGE_CACHE_CAPACITY: usize = 256;
-pub const AVATAR_IMAGE_CACHE_BYTES: u64 = 16 * 1024 * 1024;
+pub const AVATAR_IMAGE_CACHE_BYTES: u64 = 8 * 1024 * 1024;
 
 pub const VIEWER_IMAGE_CACHE_CAPACITY: usize = 24;
-pub const VIEWER_IMAGE_CACHE_BYTES: u64 = 96 * 1024 * 1024;
-pub const VIEWER_IMAGE_ENTRY_MAX_BYTES: u64 = 32 * 1024 * 1024;
+pub const VIEWER_IMAGE_CACHE_BYTES: u64 = 32 * 1024 * 1024;
+pub const VIEWER_IMAGE_ENTRY_MAX_BYTES: u64 = 24 * 1024 * 1024;
 
 /// App-wide fallback cache attached at the root, so any `img`/avatar that does
 /// not declare its own cache uses this bounded LRU instead of GPUI's unbounded
 /// global asset cache (which never evicts and leaks RAM for every URL seen).
 pub const SHARED_IMAGE_CACHE_CAPACITY: usize = 384;
-pub const SHARED_IMAGE_CACHE_BYTES: u64 = 64 * 1024 * 1024;
+pub const SHARED_IMAGE_CACHE_BYTES: u64 = 24 * 1024 * 1024;
 pub const GALLERY_IMAGE_CACHE_CAPACITY: usize = 48;
-pub const GALLERY_IMAGE_CACHE_BYTES: u64 = 48 * 1024 * 1024;
+pub const GALLERY_IMAGE_CACHE_BYTES: u64 = 12 * 1024 * 1024;
 
-/// Cache for Timeline/Events card previews and Event Detail featured+grid
-/// images. Uses an aspect-preserving loader (unlike the square-cropped
-/// [`GalleryImageLoader`]) since these render as landscape banners/cards as
-/// well as square grid cells, all via `object-fit: cover` at display time.
-/// Bounded higher than [`GALLERY_IMAGE_CACHE_CAPACITY`]/`_BYTES` because a
-/// single multi-day merged event can hold dozens of attachments that all
-/// render (unvirtualized) at once; each entry stays small since decode is
-/// capped at [`GALLERY_PREVIEW_DECODE_MAX_PX`], so this budget comfortably
-/// covers realistic event sizes without cache thrashing.
-pub const PREVIEW_IMAGE_CACHE_CAPACITY: usize = 160;
-pub const PREVIEW_IMAGE_CACHE_BYTES: u64 = 96 * 1024 * 1024;
+pub const PREVIEW_IMAGE_CACHE_CAPACITY: usize = 64;
+pub const PREVIEW_IMAGE_CACHE_BYTES: u64 = 32 * 1024 * 1024;
 pub const PREVIEW_ENTRY_MAX_BYTES: u64 = 4 * 1024 * 1024;
 
 /// Per-image decoded-size caps. A compressed file is tiny on the wire but is
@@ -362,9 +378,9 @@ pub const PREVIEW_ENTRY_MAX_BYTES: u64 = 4 * 1024 * 1024;
 /// full-resolution file, so we guard against a single pathological image
 /// blowing up RAM by refusing to retain anything decoded larger than this and
 /// negatively caching it (shown as the initials fallback instead).
-pub const AVATAR_ENTRY_MAX_BYTES: u64 = 8 * 1024 * 1024;
-pub const MESSAGE_ENTRY_MAX_BYTES: u64 = 64 * 1024 * 1024;
-pub const SHARED_ENTRY_MAX_BYTES: u64 = 16 * 1024 * 1024;
+pub const AVATAR_ENTRY_MAX_BYTES: u64 = 2 * 1024 * 1024;
+pub const MESSAGE_ENTRY_MAX_BYTES: u64 = 32 * 1024 * 1024;
+pub const SHARED_ENTRY_MAX_BYTES: u64 = 12 * 1024 * 1024;
 
 const GRACE_PERIOD: Duration = Duration::from_secs(2);
 const STATS_LOG_INTERVAL: u64 = 600;
@@ -425,6 +441,10 @@ fn entry_is_stale(touched_epoch: u64, epoch: u64, age: Duration, grace: Duration
     touched_epoch != epoch && age > grace
 }
 
+fn entry_is_idle(touched_epoch: u64, epoch: u64, age: Duration, ttl: Duration) -> bool {
+    touched_epoch != epoch && age > ttl
+}
+
 /// An LRU image cache bounded by both an item count and a decoded-byte budget.
 ///
 /// The byte budget is what actually keeps RAM in check: large attachments are
@@ -473,6 +493,7 @@ pub struct LruImageCache {
     total_bytes: u64,
     epoch: u64,
     sweeps: u64,
+    sweep_scheduled: bool,
     metrics: CacheMetrics,
     cache: IndexMap<u64, CacheEntry>,
 }
@@ -659,6 +680,7 @@ impl LruImageCache {
             total_bytes: 0,
             epoch: 0,
             sweeps: 0,
+            sweep_scheduled: false,
             metrics: CacheMetrics::default(),
             cache: IndexMap::with_capacity(max_items),
         }
@@ -699,16 +721,24 @@ impl LruImageCache {
     /// scrolled out of the viewport stops being requested and is freed on the
     /// next sweep, so only the currently-visible images stay in RAM.
     pub fn sweep(&mut self, window: &mut Window, cx: &mut App) {
+        self.sweep_with_grace(GRACE_PERIOD, window, cx);
+    }
+
+    pub fn sweep_once_per_frame(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.sweep_scheduled {
+            return;
+        }
+        self.sweep_scheduled = true;
+        self.sweep(window, cx);
+        cx.on_next_frame(window, |cache, _, _| cache.sweep_scheduled = false);
+    }
+
+    fn sweep_with_grace(&mut self, grace: Duration, window: &mut Window, cx: &mut App) {
         let epoch = self.epoch;
         let metrics = &self.metrics;
         let total_bytes = &mut self.total_bytes;
         self.cache.retain(|_, entry| {
-            if !entry_is_stale(
-                entry.touched_epoch,
-                epoch,
-                entry.last_used.elapsed(),
-                GRACE_PERIOD,
-            ) {
+            if !entry_is_stale(entry.touched_epoch, epoch, entry.last_used.elapsed(), grace) {
                 return true;
             }
             entry.abort.abort();
@@ -738,11 +768,17 @@ impl LruImageCache {
         }
     }
 
-    fn evict_idle(&mut self, ttl: Duration, cx: &mut App) {
+    fn evict_idle(&mut self, ttl: Duration, cx: &mut App) -> bool {
+        let previous_len = self.cache.len();
         let metrics = &self.metrics;
         let total_bytes = &mut self.total_bytes;
         self.cache.retain(|_, entry| {
-            if entry.last_used.elapsed() <= ttl {
+            if !entry_is_idle(
+                entry.touched_epoch,
+                self.epoch,
+                entry.last_used.elapsed(),
+                ttl,
+            ) {
                 return true;
             }
             entry.abort.abort();
@@ -755,6 +791,7 @@ impl LruImageCache {
             }
             false
         });
+        self.cache.len() < previous_len
     }
 
     pub fn shrink_to(&mut self, max_bytes: u64, window: &mut Window, cx: &mut App) {
@@ -1008,6 +1045,7 @@ fn load_avatar_scaled(
     let svg_renderer = cx.svg_renderer();
     let asset_source = cx.asset_source().clone();
     async move {
+        let _permit = acquire_image_pipeline_permit().await?;
         let bytes = match source.clone() {
             Resource::Path(uri) => {
                 if let Some(decoded) = decode_scaled_dynamic_path(uri.as_ref(), max_px) {
@@ -1101,6 +1139,7 @@ impl Asset for GalleryImageLoader {
         let svg_renderer = cx.svg_renderer();
         let asset_source = cx.asset_source().clone();
         async move {
+            let _permit = acquire_image_pipeline_permit().await?;
             let bytes = match source.clone() {
                 Resource::Path(uri) => std::fs::read(uri.as_ref())?,
                 Resource::Uri(uri) => {
@@ -1408,6 +1447,7 @@ fn load_scaled_aspect(
     let svg_renderer = cx.svg_renderer();
     let asset_source = cx.asset_source().clone();
     async move {
+        let _permit = acquire_image_pipeline_permit().await?;
         use anyhow::Context as _;
         let bytes = match source.clone() {
             Resource::Path(uri) => std::fs::read(uri.as_ref())?,
@@ -1498,6 +1538,7 @@ impl Asset for MessageImageLoader {
         let svg_renderer = cx.svg_renderer();
         let asset_source = cx.asset_source().clone();
         async move {
+            let _permit = acquire_image_pipeline_permit().await?;
             let bytes = match source.clone() {
                 Resource::Path(uri) => {
                     if !message_path_maybe_animated(uri.as_ref())
@@ -1576,6 +1617,7 @@ impl Asset for SharedImageLoader {
         let svg_renderer = cx.svg_renderer();
         let asset_source = cx.asset_source().clone();
         async move {
+            let _permit = acquire_image_pipeline_permit().await?;
             let bytes = match source.clone() {
                 Resource::Path(uri) => std::fs::read(uri.as_ref())?,
                 Resource::Uri(uri) => {
@@ -1643,6 +1685,7 @@ impl Asset for ViewerImageLoader {
         let svg_renderer = cx.svg_renderer();
         let asset_source = cx.asset_source().clone();
         async move {
+            let _permit = acquire_image_pipeline_permit().await?;
             let bytes = match source.clone() {
                 Resource::Path(uri) => std::fs::read(uri.as_ref())?,
                 Resource::Uri(uri) => {
@@ -1696,6 +1739,22 @@ mod tests {
     use super::*;
 
     #[test]
+    fn image_cache_budgets_bound_the_visible_working_set() {
+        assert_eq!(IMAGE_PIPELINE_CONCURRENCY, 3);
+        assert_eq!(MESSAGE_FETCH_MAX_BYTES, 32 * 1024 * 1024);
+        assert_eq!(VIEWER_FETCH_MAX_BYTES, 32 * 1024 * 1024);
+        assert_eq!(MESSAGE_IMAGE_CACHE_BYTES, 32 * 1024 * 1024);
+        assert_eq!(VIEWER_IMAGE_CACHE_BYTES, 32 * 1024 * 1024);
+        assert_eq!(GALLERY_IMAGE_CACHE_BYTES, 12 * 1024 * 1024);
+        assert_eq!(PREVIEW_IMAGE_CACHE_CAPACITY, 64);
+        assert_eq!(PREVIEW_IMAGE_CACHE_BYTES, 32 * 1024 * 1024);
+        assert_eq!(SHARED_IMAGE_CACHE_BYTES, 24 * 1024 * 1024);
+        assert_eq!(OGP_SHARED_CACHE_BYTES, 8 * 1024 * 1024);
+        assert_eq!(IDLE_TRIM_INTERVAL, Duration::from_secs(30));
+        assert_eq!(IDLE_TRIM_TTL, Duration::from_secs(60));
+    }
+
+    #[test]
     fn touched_this_epoch_is_never_stale() {
         assert!(!entry_is_stale(
             7,
@@ -1717,6 +1776,22 @@ mod tests {
             7,
             GRACE_PERIOD + Duration::from_millis(1),
             GRACE_PERIOD
+        ));
+    }
+
+    #[test]
+    fn idle_trim_never_evicts_the_current_visible_epoch() {
+        assert!(!entry_is_idle(
+            7,
+            7,
+            IDLE_TRIM_TTL + Duration::from_secs(1),
+            IDLE_TRIM_TTL
+        ));
+        assert!(entry_is_idle(
+            6,
+            7,
+            IDLE_TRIM_TTL + Duration::from_secs(1),
+            IDLE_TRIM_TTL
         ));
     }
 

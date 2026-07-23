@@ -79,20 +79,17 @@ pub fn render_embed_card(
     if !embed.description_spans.is_empty() {
         let description = selectable_spans_text(&embed.description_spans, ctx.locale, ctx.app);
         if let Some(range) = selection_cursor.section(&description) {
-            left = left.child(
-                div()
-                    .mt_2()
-                    .w_full()
-                    .child(render_selectable_embed_description(
-                        &embed.description_spans,
-                        msg,
-                        range.start,
-                        selection_context,
-                        ctx,
-                        theme.tokens.text_theme_primary,
-                        px(14.),
-                    )),
-            );
+            left = left.child(div().mt_2().w_full().min_w_0().overflow_hidden().child(
+                render_selectable_embed_description(
+                    &embed.description_spans,
+                    msg,
+                    range.start,
+                    selection_context,
+                    ctx,
+                    theme.tokens.text_theme_primary,
+                    px(14.),
+                ),
+            ));
         }
     }
     if !embed.fields.is_empty() {
@@ -133,6 +130,7 @@ pub fn render_embed_card(
 
     div()
         .relative()
+        .w_full()
         .max_w(px(CARD_MAX_WIDTH))
         .mt_2()
         .rounded(px(CARD_RADIUS))
@@ -179,7 +177,13 @@ fn render_embed_author(
     name: Option<gpui::StyledText>,
     ctx: &RowCtx,
 ) -> AnyElement {
-    let mut row = div().flex().items_center().gap_2().mt_2();
+    let mut row = div()
+        .flex()
+        .items_center()
+        .gap_2()
+        .mt_2()
+        .min_w_0()
+        .w_full();
     if !author.icon_proxied.is_empty() {
         row = row.child(render_embed_circle_icon(
             author.icon_proxied.clone(),
@@ -200,6 +204,8 @@ fn render_embed_author(
 fn render_embed_title(title: gpui::StyledText, ctx: &RowCtx) -> AnyElement {
     div()
         .mt_2()
+        .min_w_0()
+        .w_full()
         .font_weight(FontWeight::SEMIBOLD)
         .text_color(ctx.theme.tokens.text_theme_message)
         .child(title)
