@@ -50,7 +50,39 @@ impl tracing_tracy::Config for TracyConfig {
     }
 }
 
+#[cfg(target_os = "linux")]
+fn configure_linux_session() {
+    let session = std::env::var("MEZON_LINUX_SESSION")
+        .ok()
+        .map(|value| value.to_ascii_lowercase());
+
+    match session.as_deref() {
+        Some("wayland") => {}
+        Some("x11") => {
+            if std::env::var_os("DISPLAY").is_some() {
+                unsafe { std::env::remove_var("WAYLAND_DISPLAY") };
+            }
+        }
+        Some(other) => {
+            tracing::warn!(
+                "Unknown MEZON_LINUX_SESSION={other}; expected x11 or wayland. Using x11."
+            );
+            if std::env::var_os("DISPLAY").is_some() {
+                unsafe { std::env::remove_var("WAYLAND_DISPLAY") };
+            }
+        }
+        None => {
+            if std::env::var_os("DISPLAY").is_some() {
+                unsafe { std::env::remove_var("WAYLAND_DISPLAY") };
+            }
+        }
+    }
+}
+
 fn main() -> Result<()> {
+    #[cfg(target_os = "linux")]
+    configure_linux_session();
+
     init_logging();
     install_panic_hook();
 
@@ -297,6 +329,39 @@ fn run_app(lock: SingleInstance, initial_url: Option<String>) {
     app.run(move |cx: &mut App| {
         tracing::debug!("App started");
         install_foreground_watchdog(cx);
+
+        #[cfg(target_os = "linux")]
+        {
+            if let Err(error) = mezon_webview::init_gtk() {
+                tracing::error!("gtk init failed: {error:#}");
+            }
+            cx.spawn(async move |async_cx| {
+                loop {
+                    async_cx
+                        .background_executor()
+                        .timer(std::time::Duration::from_millis(16))
+                        .await;
+                    async_cx.update(|_| {
+                        mezon_webview::pump_gtk_events();
+                    });
+                }
+            })
+            .detach();
+        }
+
+        #[cfg(target_os = "windows")]
+        {
+            cx.spawn(async move |async_cx| {
+                loop {
+                    async_cx
+                        .background_executor()
+                        .timer(std::time::Duration::from_millis(16))
+                        .await;
+                    mezon_ui::channel_app::process_pending_windows_webviews(async_cx);
+                }
+            })
+            .detach();
+        }
 
         #[cfg(target_os = "linux")]
         cx.set_text_rendering_mode(gpui::TextRenderingMode::Grayscale);

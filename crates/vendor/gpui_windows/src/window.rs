@@ -482,6 +482,8 @@ impl WindowsWindow {
         .or_else(WindowsDisplay::primary_monitor)
         .context("failed to find any monitor")?;
         let appearance = system_appearance().unwrap_or_default();
+        let disable_direct_composition =
+            disable_direct_composition || params.disable_direct_composition;
         let mut context = WindowCreateContext {
             inner: None,
             handle,
