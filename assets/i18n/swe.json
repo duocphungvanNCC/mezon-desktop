@@ -1579,6 +1579,7 @@
   "common.canvas.loadingCanvas": "Laddar canvas...",
   "common.canvas.titlePlaceholder": "Din canvas titel",
   "common.canvas.typePlaceholder": "Ange / för att infoga...",
+  "common.canvas.deleteTitle": "Ta bort {{name}}",
   "common.canvas.untitled": "Namnlös",
   "common.cardConversationMessage.aliceJohnson": "Kan du skicka mig filerna från förra veckan?",
   "common.cardConversationMessage.bobBrown": "Vi äter lunch tillsammans nästa vecka.",

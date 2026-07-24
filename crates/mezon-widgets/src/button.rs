@@ -69,7 +69,7 @@ impl ButtonVariant {
                 label_color: theme.text_secondary.into(),
             },
             ButtonVariant::Danger => ButtonLikeStyles {
-                background: theme.status_dnd.into(),
+                background: theme.danger.into(),
                 label_color: gpui::white(),
             },
             ButtonVariant::Warning => ButtonLikeStyles {
@@ -99,7 +99,7 @@ impl ButtonVariant {
                 label_color: theme.text_primary.into(),
             },
             ButtonVariant::Danger => ButtonLikeStyles {
-                background: Hsla::from(theme.status_dnd).opacity(0.85),
+                background: Hsla::from(theme.danger).opacity(0.85),
                 label_color: gpui::white(),
             },
             ButtonVariant::Warning => ButtonLikeStyles {
@@ -127,7 +127,7 @@ impl ButtonVariant {
                 }
             }
             ButtonVariant::Danger => ButtonLikeStyles {
-                background: Hsla::from(theme.status_dnd).opacity(0.85),
+                background: Hsla::from(theme.danger).opacity(0.85),
                 label_color: gpui::white(),
             },
             ButtonVariant::Warning => ButtonLikeStyles {

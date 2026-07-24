@@ -9,14 +9,28 @@ use gpui::{
 };
 use smallvec::smallvec;
 
+use mezon_store::AppConfig;
+use mezon_store::config::url_has_origin;
 use mezon_theme::Theme;
 use mezon_widgets::{Icon, IconName};
 
 pub const CANVAS_IMAGE_FALLBACK_HEIGHT: Pixels = px(200.);
+const CANVAS_VIEW_IMAGE_MAX_WIDTH: Pixels = px(720.);
 
 const IMAGE_DIMENSION_PROBE_MAX_BYTES: u64 = 24 * 1024 * 1024;
 const CANVAS_IMAGE_DIM_CACHE_MAX: usize = 512;
 const CANVAS_DATA_IMAGE_CACHE_MAX: usize = 64;
+const CANVAS_DECODE_MAX_WIDTH: u32 = 16_384;
+const CANVAS_DECODE_MAX_HEIGHT: u32 = 16_384;
+const CANVAS_DECODE_MAX_PIXELS: u64 = 48_000_000;
+const CANVAS_DECODE_MAX_ALLOC: u64 = 256 * 1024 * 1024;
+
+const STATIC_CANVAS_IMAGE_ORIGINS: [&str; 4] = [
+    "https://cdn.mezon.ai",
+    "http://cdn.mezon.ai",
+    "https://profile.mezon.ai",
+    "http://profile.mezon.ai",
+];
 
 #[derive(Clone, Copy)]
 enum ImageDimState {
@@ -75,6 +89,10 @@ pub fn ensure_canvas_image_dimensions_loaded(cx: &mut App, src: &str, notify: En
     if src.is_empty() || is_data_image_url(src) {
         return;
     }
+    let url = canvas_image_display_src_with_app(cx, src);
+    if url.is_empty() {
+        return;
+    }
     let cache = cx.default_global::<CanvasImageDimCache>();
     if cache.entries.contains_key(src) {
         return;
@@ -83,7 +101,6 @@ pub fn ensure_canvas_image_dimensions_loaded(cx: &mut App, src: &str, notify: En
         .entries
         .insert(src.to_string(), ImageDimState::Loading);
     let client = cx.http_client();
-    let url = canvas_image_display_src(src);
     let src_owned = src.to_string();
     cx.spawn(async move |cx| {
         let dims = fetch_remote_image_dimensions(client, url).await;
@@ -107,7 +124,7 @@ async fn fetch_remote_image_dimensions(
     client: Arc<dyn gpui::http_client::HttpClient>,
     url: String,
 ) -> Option<(u32, u32)> {
-    let mut response = client.get(&url, Default::default(), true).await.ok()?;
+    let mut response = client.get(&url, Default::default(), false).await.ok()?;
     if !response.status().is_success() {
         return None;
     }
@@ -118,24 +135,78 @@ async fn fetch_remote_image_dimensions(
         .read_to_end(&mut body)
         .await
         .ok()?;
-    image::ImageReader::new(std::io::Cursor::new(body))
+    let (width, height) = image::ImageReader::new(std::io::Cursor::new(body))
         .with_guessed_format()
         .ok()?
         .into_dimensions()
-        .ok()
+        .ok()?;
+    if !canvas_decode_dims_allowed(width, height) {
+        return None;
+    }
+    Some((width, height))
+}
+
+fn canvas_decode_dims_allowed(width: u32, height: u32) -> bool {
+    width > 0
+        && height > 0
+        && width <= CANVAS_DECODE_MAX_WIDTH
+        && height <= CANVAS_DECODE_MAX_HEIGHT
+        && (width as u64).saturating_mul(height as u64) <= CANVAS_DECODE_MAX_PIXELS
+}
+
+fn canvas_image_decode_limits() -> image::Limits {
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(CANVAS_DECODE_MAX_WIDTH);
+    limits.max_image_height = Some(CANVAS_DECODE_MAX_HEIGHT);
+    limits.max_alloc = Some(CANVAS_DECODE_MAX_ALLOC);
+    limits
+}
+
+fn is_allowed_canvas_image_origin(src: &str, cx: Option<&App>) -> bool {
+    if is_data_image_url(src) {
+        return true;
+    }
+    if !(src.starts_with("https://") || src.starts_with("http://")) {
+        return false;
+    }
+    if let Some(cx) = cx
+        && let Some(cfg) = AppConfig::try_global(cx)
+    {
+        if cfg.is_own_media_origin(src) {
+            return true;
+        }
+        let imgproxy = cfg.imgproxy_base_url.trim_end_matches('/');
+        if !imgproxy.is_empty() && url_has_origin(src, imgproxy) {
+            return true;
+        }
+    }
+    STATIC_CANVAS_IMAGE_ORIGINS
+        .iter()
+        .any(|origin| url_has_origin(src, origin))
 }
 
 pub fn canvas_image_display_src(src: &str) -> String {
+    canvas_image_display_src_checked(src, None)
+}
+
+pub fn canvas_image_display_src_with_app(cx: &App, src: &str) -> String {
+    canvas_image_display_src_checked(src, Some(cx))
+}
+
+fn canvas_image_display_src_checked(src: &str, cx: Option<&App>) -> String {
     if src.is_empty() {
         return String::new();
     }
-    if src.starts_with("data:") {
+    if is_data_image_url(src) {
         return src.to_string();
     }
-    if src.starts_with("http://cdn.mezon") {
+    if !is_allowed_canvas_image_origin(src, cx) {
+        return String::new();
+    }
+    if url_has_origin(src, "http://cdn.mezon.ai") {
         return src.replacen("http://", "https://", 1);
     }
-    if src.starts_with("http://profile.mezon") {
+    if url_has_origin(src, "http://profile.mezon.ai") {
         return src.replacen("http://", "https://", 1);
     }
     src.to_string()
@@ -158,8 +229,15 @@ fn decode_data_image(src: &str) -> Option<Vec<u8>> {
 fn image_pixel_size(src: &str) -> Option<(u32, u32)> {
     if is_data_image_url(src) {
         let bytes = decode_data_image(src)?;
-        let decoded = image::load_from_memory(&bytes).ok()?;
-        return Some((decoded.width(), decoded.height()));
+        let mut reader = image::ImageReader::new(std::io::Cursor::new(&bytes))
+            .with_guessed_format()
+            .ok()?;
+        reader.limits(canvas_image_decode_limits());
+        let (width, height) = reader.into_dimensions().ok()?;
+        if !canvas_decode_dims_allowed(width, height) {
+            return None;
+        }
+        return Some((width, height));
     }
     None
 }
@@ -223,7 +301,19 @@ fn canvas_data_render_image(src: &str) -> Option<Arc<RenderImage>> {
 }
 
 fn bytes_to_render_image(bytes: &[u8]) -> Option<Arc<RenderImage>> {
-    let decoded = image::load_from_memory(bytes).ok()?;
+    let mut reader = image::ImageReader::new(std::io::Cursor::new(bytes))
+        .with_guessed_format()
+        .ok()?;
+    reader.limits(canvas_image_decode_limits());
+    let (width, height) = reader.into_dimensions().ok()?;
+    if !canvas_decode_dims_allowed(width, height) {
+        return None;
+    }
+    let mut reader = image::ImageReader::new(std::io::Cursor::new(bytes))
+        .with_guessed_format()
+        .ok()?;
+    reader.limits(canvas_image_decode_limits());
+    let decoded = reader.decode().ok()?;
     let mut data = decoded.into_rgba8();
     for pixel in data.chunks_exact_mut(4) {
         pixel.swap(0, 2);
@@ -275,7 +365,11 @@ pub fn canvas_img(
             }
             return canvas_image_fallback_inner(fallback_fg, fallback_bg);
         }
-        return img(SharedString::from(canvas_image_display_src(src)))
+        let display_src = canvas_image_display_src_with_app(cx, src);
+        if display_src.is_empty() {
+            return canvas_image_fallback_inner(fallback_fg, fallback_bg);
+        }
+        return img(SharedString::from(display_src))
             .id(img_id)
             .w(display_w)
             .h(height)
@@ -295,7 +389,11 @@ pub fn canvas_img(
         }
         return canvas_image_fallback_inner(fallback_fg, fallback_bg);
     }
-    img(SharedString::from(canvas_image_display_src(src)))
+    let display_src = canvas_image_display_src_with_app(cx, src);
+    if display_src.is_empty() {
+        return canvas_image_fallback_inner(fallback_fg, fallback_bg);
+    }
+    img(SharedString::from(display_src))
         .id(img_id)
         .max_w_full()
         .object_fit(ObjectFit::Contain)
@@ -310,6 +408,8 @@ pub fn render_canvas_image(src: &str, theme: &Theme, cx: &App) -> AnyElement {
     let fallback_fg = theme.text_muted;
     let fallback_bg = theme.bg_tertiary;
     let img_id = canvas_image_element_id(src);
+    let max_w = CANVAS_VIEW_IMAGE_MAX_WIDTH;
+    let (_, reserved_h) = canvas_image_display_size(cx, src, max_w);
     div()
         .w_full()
         .py(px(16.))
@@ -321,8 +421,8 @@ pub fn render_canvas_image(src: &str, theme: &Theme, cx: &App) -> AnyElement {
             img_id,
             fallback_fg,
             fallback_bg,
-            None,
-            None,
+            Some(max_w),
+            Some(reserved_h),
         ))
         .into_any_element()
 }
@@ -350,6 +450,14 @@ mod tests {
     fn passes_through_data_url() {
         let src = "data:image/png;base64,abcd";
         assert_eq!(canvas_image_display_src(src), src);
+    }
+
+    #[test]
+    fn rejects_external_and_lookalike_hosts() {
+        assert!(canvas_image_display_src("https://example.com/x.png").is_empty());
+        assert!(canvas_image_display_src("https://cdn.mezon.ai.attacker.com/x.png").is_empty());
+        assert!(canvas_image_display_src("file:///etc/passwd").is_empty());
+        assert!(canvas_image_display_src("http://127.0.0.1/secret.png").is_empty());
     }
 
     #[test]

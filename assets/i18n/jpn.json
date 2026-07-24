@@ -1579,6 +1579,7 @@
   "common.canvas.loadingCanvas": "キャンバスを読み込んでいます...",
   "common.canvas.titlePlaceholder": "キャンバスのタイトル",
   "common.canvas.typePlaceholder": "挿入するには/を入力...",
+  "common.canvas.deleteTitle": "{{name}}を削除",
   "common.canvas.untitled": "無題",
   "common.cardConversationMessage.aliceJohnson": "先週からのファイルを私に送ることができますか?",
   "common.cardConversationMessage.bobBrown": "来週一緒にランチを食べましょう。",

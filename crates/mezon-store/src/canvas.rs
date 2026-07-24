@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use gpui::{App, AppContext, Context, Entity, Global, Subscription, Task};
@@ -6,9 +7,12 @@ use mezon_client::transport::{
 };
 use mezon_client::{AppApi, ConnectionStatus};
 
+use crate::KeyedCache;
 use crate::channel::{ChannelEvent, ChannelList};
 use crate::config::AppConfig;
 use crate::ids::{ChannelId, ClanId, UserId};
+
+const MAX_CACHED_CHANNELS: usize = 32;
 
 #[derive(Debug, Clone)]
 pub struct CanvasSummary {
@@ -40,9 +44,8 @@ pub struct CanvasDetail {
 pub struct CanvasStore {
     channel_id: Option<String>,
     clan_id: Option<String>,
-    canvases: Vec<CanvasSummary>,
-    loaded_channel: Option<String>,
-    loading: bool,
+    cache: KeyedCache<String, Vec<CanvasSummary>>,
+    loading: HashSet<String>,
     api: Arc<AppApi>,
     _channel_sub: Subscription,
     _conn_watch: Task<()>,
@@ -69,9 +72,8 @@ impl CanvasStore {
     pub fn reset(&mut self, cx: &mut Context<Self>) {
         self.channel_id = None;
         self.clan_id = None;
-        self.canvases.clear();
-        self.loaded_channel = None;
-        self.loading = false;
+        self.cache.clear();
+        self.loading.clear();
         cx.notify();
     }
 
@@ -85,9 +87,8 @@ impl CanvasStore {
         let mut store = Self {
             channel_id: None,
             clan_id: None,
-            canvases: Vec::new(),
-            loaded_channel: None,
-            loading: false,
+            cache: KeyedCache::new(Some(MAX_CACHED_CHANNELS)),
+            loading: HashSet::new(),
             api,
             _channel_sub: channel_sub,
             _conn_watch: conn_watch,
@@ -110,7 +111,13 @@ impl CanvasStore {
                 let connected = *status_rx.borrow() == ConnectionStatus::Connected;
                 if connected && !was_connected {
                     was_connected = true;
-                    if this.update(cx, |this, cx| this.refresh(cx)).is_err() {
+                    if this
+                        .update(cx, |this, cx| {
+                            this.cache.mark_all_stale();
+                            this.refresh(cx);
+                        })
+                        .is_err()
+                    {
                         break;
                     }
                 } else if !connected {
@@ -121,11 +128,17 @@ impl CanvasStore {
     }
 
     pub fn canvases(&self) -> &[CanvasSummary] {
-        &self.canvases
+        self.channel_id
+            .as_ref()
+            .and_then(|id| self.cache.get(id))
+            .map(|v| v.as_slice())
+            .unwrap_or(&[])
     }
 
     pub fn is_loading(&self) -> bool {
-        self.loading
+        self.channel_id
+            .as_ref()
+            .is_some_and(|id| self.loading.contains(id))
     }
 
     pub fn channel_id(&self) -> Option<&str> {
@@ -155,8 +168,6 @@ impl CanvasStore {
                 self.clan_id = Some(clan_id.to_string());
             }
         }
-        self.canvases.clear();
-        self.loaded_channel = None;
         cx.notify();
     }
 
@@ -164,14 +175,17 @@ impl CanvasStore {
         let Some(channel_id) = self.channel_id.clone() else {
             return;
         };
-        if self.loading || self.loaded_channel.as_deref() == Some(channel_id.as_str()) {
+        self.cache.touch(&channel_id);
+        if self.cache.is_fresh(&channel_id, crate::CACHE_TTL) {
             return;
         }
         self.fetch(cx);
     }
 
     pub fn refresh(&mut self, cx: &mut Context<Self>) {
-        self.loaded_channel = None;
+        if let Some(channel_id) = self.channel_id.clone() {
+            self.cache.mark_stale(&channel_id);
+        }
         self.fetch(cx);
     }
 
@@ -187,10 +201,9 @@ impl CanvasStore {
         else {
             return;
         };
-        if self.loading {
+        if !self.loading.insert(channel_id.clone()) {
             return;
         }
-        self.loading = true;
         cx.notify();
 
         let api = self.api.clone();
@@ -199,16 +212,13 @@ impl CanvasStore {
                 .get_channel_canvas_list(channel_id_i64, clan_id_i64, CANVAS_LIST_LIMIT, 1)
                 .await;
             let _ = this.update(cx, |this, cx| {
-                this.loading = false;
-                if this.channel_id.as_deref() != Some(channel_id.as_str()) {
-                    cx.notify();
-                    return;
-                }
+                this.loading.remove(&channel_id);
                 match result {
                     Ok(list) => {
-                        this.canvases = list.into_iter().map(summary_from_api).collect();
-                        sort_canvases(&mut this.canvases);
-                        this.loaded_channel = Some(channel_id);
+                        let mut canvases: Vec<_> = list.into_iter().map(summary_from_api).collect();
+                        sort_canvases(&mut canvases);
+                        let protect = this.channel_id.clone();
+                        this.cache.insert(channel_id, canvases, protect.as_ref());
                     }
                     Err(e) => tracing::error!("get_channel_canvas_list failed: {e}"),
                 }
@@ -249,22 +259,21 @@ impl CanvasStore {
                 )
                 .await?;
             let _ = this.update(cx, |this, cx| {
-                if this.channel_id.as_deref() != Some(channel_id.as_str()) {
-                    cx.notify();
-                    return;
+                let summary = CanvasSummary {
+                    id: id.clone(),
+                    title,
+                    is_default: false,
+                    creator_id: UserId(0),
+                    update_time: chrono::Utc::now().timestamp(),
+                    create_time: chrono::Utc::now().timestamp(),
+                };
+                if let Some(list) = this.cache.get_mut(&channel_id) {
+                    list.insert(0, summary);
+                    this.cache.mark_fetched(&channel_id);
+                } else {
+                    this.cache
+                        .insert(channel_id, vec![summary], this.channel_id.as_ref());
                 }
-                this.canvases.insert(
-                    0,
-                    CanvasSummary {
-                        id: id.clone(),
-                        title,
-                        is_default: false,
-                        creator_id: UserId(0),
-                        update_time: chrono::Utc::now().timestamp(),
-                        create_time: chrono::Utc::now().timestamp(),
-                    },
-                );
-                this.loaded_channel = Some(channel_id);
                 cx.notify();
             });
             Ok(id)
@@ -307,9 +316,11 @@ impl CanvasStore {
                 )
                 .await?;
             let _ = this.update(cx, |this, cx| {
-                if let Some(item) = this.canvases.iter_mut().find(|c| c.id == canvas_id) {
-                    item.title = title;
-                    item.update_time = chrono::Utc::now().timestamp();
+                if let Some(list) = this.cache.get_mut(&channel_id) {
+                    if let Some(item) = list.iter_mut().find(|c| c.id == canvas_id) {
+                        item.title = title;
+                        item.update_time = chrono::Utc::now().timestamp();
+                    }
                 }
                 cx.notify();
             });
@@ -345,7 +356,9 @@ impl CanvasStore {
         ) else {
             return;
         };
-        self.canvases.retain(|c| c.id != canvas_id);
+        if let Some(list) = self.cache.get_mut(&channel_id) {
+            list.retain(|c| c.id != canvas_id);
+        }
         cx.notify();
 
         let api = self.api.clone();
@@ -355,7 +368,10 @@ impl CanvasStore {
                 .await
             {
                 tracing::error!("delete_channel_canvas failed: {e}");
-                let _ = this.update(cx, |this, cx| this.refresh(cx));
+                let _ = this.update(cx, |this, cx| {
+                    this.cache.mark_stale(&channel_id);
+                    this.refresh(cx);
+                });
             }
         })
         .detach();

@@ -1690,6 +1690,7 @@
   "common.canvas.loadingCanvas": "Loading canvas...",
   "common.canvas.titlePlaceholder": "Your canvas title",
   "common.canvas.typePlaceholder": "Type / to insert...",
+  "common.canvas.deleteTitle": "Delete {{name}}",
   "common.canvas.untitled": "Untitled",
   "common.cardConversationMessage.aliceJohnson": "Can you send me the files from last week?",
   "common.cardConversationMessage.bobBrown": "Let's grab lunch sometime next week.",

@@ -1579,6 +1579,7 @@
   "common.canvas.loadingCanvas": "Carregando canvas...",
   "common.canvas.titlePlaceholder": "Título do seu canvas",
   "common.canvas.typePlaceholder": "Digite / para inserir...",
+  "common.canvas.deleteTitle": "Excluir {{name}}",
   "common.canvas.untitled": "Sem título",
   "common.cardConversationMessage.aliceJohnson": "Você pode me enviar os arquivos da semana passada?",
   "common.cardConversationMessage.bobBrown": "Vamos almoçar juntos na semana que vem.",

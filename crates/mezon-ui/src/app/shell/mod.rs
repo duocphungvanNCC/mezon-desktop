@@ -264,7 +264,9 @@ impl Shell {
         } else {
             canvas_title
         };
-        let title: SharedString = format!("Delete {display_title}").into();
+        let title: SharedString = mezon_i18n::t(locale, "common.canvas.deleteTitle")
+            .replace("{{name}}", &display_title)
+            .into();
         let description: SharedString = mezon_i18n::t(locale, "common.canvas.deleteMessage")
             .to_string()
             .into();

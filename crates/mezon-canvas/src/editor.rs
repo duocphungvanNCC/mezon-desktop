@@ -1737,6 +1737,7 @@ struct PreparedLine {
     top: Pixels,
     height: Pixels,
     row_height: Pixels,
+    logical_ix: usize,
 }
 
 struct PreparedPrefix {
@@ -1895,6 +1896,7 @@ impl Element for CanvasEditorElement {
                     top: content_top,
                     height: block_height,
                     row_height: default_line_height,
+                    logical_ix: 0,
                 });
                 content_top += block_height;
             }
@@ -1993,6 +1995,7 @@ impl Element for CanvasEditorElement {
                             top: content_y,
                             height: block_h,
                             row_height: default_line_height,
+                            logical_ix,
                         });
                         if !src.is_empty() {
                             images.push(PreparedImage {
@@ -2062,6 +2065,7 @@ impl Element for CanvasEditorElement {
                             top: content_y,
                             height: line_h,
                             row_height: line_h,
+                            logical_ix,
                         });
                         content_y += line_h;
                         continue;
@@ -2081,6 +2085,7 @@ impl Element for CanvasEditorElement {
                             top: content_y,
                             height: block_height,
                             row_height: line_h,
+                            logical_ix,
                         });
                         byte_off += seg_len;
                         if wrap_ix + 1 < wrapped_count {
@@ -2191,8 +2196,7 @@ impl Element for CanvasEditorElement {
             let line_start = prepared.start;
             let line_len = prepared.line.as_ref().map(|l| l.len()).unwrap_or(0);
             let line_end = line_start + line_len;
-            let logical_ix =
-                logical_line_for_offset(line_start, &editor.line_starts, &editor.lines);
+            let logical_ix = prepared.logical_ix;
             let meta = block_paint_meta(
                 editor
                     .lines
@@ -2276,6 +2280,7 @@ impl Element for CanvasEditorElement {
                 top: prepared.top,
                 height: prepared.height,
                 row_height: prepared.row_height,
+                logical_ix: prepared.logical_ix,
             });
         }
 
@@ -2608,15 +2613,6 @@ fn locate_span(spans: &[(usize, usize)], off: usize) -> (usize, usize) {
         Some(&(start, _)) => (spans.len().saturating_sub(1), off.saturating_sub(start)),
         None => (0, 0),
     }
-}
-
-fn logical_line_for_offset(offset: usize, line_starts: &[usize], _lines: &[EditorLine]) -> usize {
-    for (ix, &start) in line_starts.iter().enumerate().rev() {
-        if offset >= start {
-            return ix;
-        }
-    }
-    0
 }
 
 fn build_line_runs(

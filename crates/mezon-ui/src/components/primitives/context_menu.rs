@@ -321,8 +321,8 @@ impl RenderOnce for ContextMenu {
         let text = theme.tokens.text_theme_primary;
         let muted = theme.text_secondary;
         let hover = theme.bg_hover;
-        let danger_text = theme.status_dnd;
-        let danger_hover_bg = gpui::Hsla::from(theme.status_dnd).opacity(0.12);
+        let danger_text = theme.danger_text;
+        let danger_hover_bg = theme.danger_hover_bg;
         let brand = theme.brand;
         let dismiss = self.on_dismiss.clone();
         let on_reaction_close = self.on_reaction_close;

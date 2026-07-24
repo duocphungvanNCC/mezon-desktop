@@ -1670,6 +1670,7 @@
   "common.canvas.loadingCanvas": "Đang tải canvas...",
   "common.canvas.titlePlaceholder": "Tiêu đề canvas của bạn",
   "common.canvas.typePlaceholder": "Nhập / để chèn...",
+  "common.canvas.deleteTitle": "Xóa {{name}}",
   "common.canvas.untitled": "Chưa đặt tên",
   "common.cardConversationMessage.aliceJohnson": "Bạn có thể gửi cho tôi các tập tin từ tuần trước không?",
   "common.cardConversationMessage.bobBrown": "Tuần tới chúng mình đi ăn trưa với nhau nhé.",

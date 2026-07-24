@@ -141,10 +141,15 @@ pub struct Theme {
     pub brand: Rgba,       // #5865f2 — brand purple (Mezon accent)
     pub brand_hover: Rgba, // #4752c4
 
+    // Destructive actions (React colorDanger / menu danger labels)
+    pub danger: Rgba,          // #DA363C
+    pub danger_text: Rgba,     // #E13542
+    pub danger_hover_bg: Rgba, // #f67e882a
+
     // Status
     pub status_online: Rgba,  // #23a55a
     pub status_idle: Rgba,    // #f0b232
-    pub status_dnd: Rgba,     // #f23f43
+    pub status_dnd: Rgba,     // #E1024F
     pub status_offline: Rgba, // #80848e
 
     // Unread / notification
@@ -210,6 +215,10 @@ impl Theme {
             brand: rgba(82, 101, 236, 1.0),
             brand_hover: rgba(71, 82, 196, 1.0),
 
+            danger: rgba(218, 54, 60, 1.0),
+            danger_text: rgba(225, 53, 66, 1.0),
+            danger_hover_bg: rgba(246, 126, 136, 42.0 / 255.0),
+
             status_online: rgba(35, 165, 90, 1.0),
             status_idle: rgba(240, 178, 50, 1.0),
             status_dnd: rgba(225, 2, 79, 1.0),
@@ -243,6 +252,10 @@ impl Theme {
 
             brand: rgba(82, 101, 236, 1.0),
             brand_hover: rgba(71, 82, 196, 1.0),
+
+            danger: rgba(218, 54, 60, 1.0),
+            danger_text: rgba(225, 53, 66, 1.0),
+            danger_hover_bg: rgba(246, 126, 136, 42.0 / 255.0),
 
             status_online: rgba(35, 165, 90, 1.0),
             status_idle: rgba(240, 178, 50, 1.0),
