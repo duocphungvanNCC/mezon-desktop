@@ -15,7 +15,7 @@ use crate::ChatLayout;
 use crate::components::primitives::{
     Avatar, ContextMenu, Icon, IconName, Sizable, Size, Spinner, context_menu_at,
 };
-use crate::theme::Theme;
+use crate::theme::{ActiveTheme, Theme};
 use ui::{ScrollAxes, Scrollbars, Tooltip, WithScrollbar};
 
 /// Shared brand accent (Discord-style blurple) used across the voice UI and
@@ -40,7 +40,6 @@ fn speaking_border_color(cell: &VideoCell) -> Hsla {
 
 #[allow(clippy::too_many_arguments)]
 pub fn render_voice_channel(
-    theme: &Theme,
     locale: &str,
     channel: &Channel,
     voice: &Entity<VoiceStore>,
@@ -69,7 +68,6 @@ pub fn render_voice_channel(
     if in_call {
         let chat = cx.entity();
         return render_in_call(
-            theme,
             locale,
             channel,
             voice,
@@ -95,7 +93,7 @@ pub fn render_voice_channel(
     };
 
     render_pre_join(
-        theme,
+        cx.theme(),
         locale,
         channel,
         voice,
@@ -994,7 +992,6 @@ enum InCallBodyLayout {
 
 #[allow(clippy::too_many_arguments)]
 fn render_in_call(
-    theme: &Theme,
     locale: &str,
     channel: &Channel,
     voice: &Entity<VoiceStore>,
@@ -1084,7 +1081,6 @@ fn render_in_call(
 
     let body = body_layout.map(|layout| match layout {
         InCallBodyLayout::Focus { cells, focused_idx } => render_focus_layout(
-            theme,
             locale,
             voice,
             &cells,
@@ -1096,7 +1092,7 @@ fn render_in_call(
             cx,
         ),
         InCallBodyLayout::Grid { cells } => render_grid(
-            theme,
+            cx.theme(),
             locale,
             voice,
             &cells,
@@ -1110,6 +1106,7 @@ fn render_in_call(
         ),
     });
 
+    let theme = cx.theme();
     let connection_status: Option<(SharedString, Hsla, bool)> = if connecting {
         Some((
             SharedString::from(mezon_i18n::t(locale, "channelVoice.connecting").to_string()),
@@ -1839,9 +1836,26 @@ fn carousel_max_visible_tiles(viewport_width: f32, aside_height: f32) -> usize {
     ((viewport_width / target).floor() as usize).max(1)
 }
 
+fn carousel_visible_range(
+    total: usize,
+    viewport_w: f32,
+    tile_step: f32,
+    scroll_offset_x: f32,
+) -> (usize, usize) {
+    if total == 0 || viewport_w <= 0. || tile_step <= 0. {
+        return (0, total.min(16));
+    }
+    let scrolled = (-scroll_offset_x).max(0.);
+    let first = (scrolled / tile_step) as usize;
+    let visible = (viewport_w / tile_step).ceil() as usize + 1;
+    (
+        first.saturating_sub(2).min(total),
+        (first + visible + 2).min(total),
+    )
+}
+
 #[allow(clippy::too_many_arguments)]
 fn render_focus_layout(
-    theme: &Theme,
     locale: &str,
     voice: &Entity<VoiceStore>,
     cells: &[VideoCell],
@@ -1854,9 +1868,13 @@ fn render_focus_layout(
 ) -> AnyElement {
     let focused = &cells[focused_idx];
 
-    let focused_tile = {
+    let (focused_tile, bg_tertiary) = {
+        let theme = cx.theme();
         let store = voice.read(cx);
-        focus_main_tile(theme, locale, store, voice, focused)
+        (
+            focus_main_tile(theme, locale, store, voice, focused),
+            theme.bg_tertiary,
+        )
     };
 
     let main = div()
@@ -1915,7 +1933,7 @@ fn render_focus_layout(
         .min_h_0()
         .p_2()
         .gap_2()
-        .bg(theme.bg_tertiary)
+        .bg(bg_tertiary)
         .child(main);
 
     let container = if show_members {
@@ -1941,13 +1959,53 @@ fn render_focus_layout(
         let strip_h = f32::from(strip_bounds.size.height);
         let aside_h = carousel_aside_height(strip_h);
         let tile_w = carousel_tile_width(aside_h);
-        let content_w = carousel_content_width(total, tile_w, gap);
+        let tile_step = tile_w + gap;
         let overflows = carousel_overflows(viewport_w, total, aside_h, gap);
         let avatar_size = px((aside_h * 0.6).clamp(24., 80.));
+        let (start, end) = if overflows {
+            carousel_visible_range(
+                total,
+                viewport_w,
+                tile_step,
+                f32::from(strip_scroll.offset().x),
+            )
+        } else {
+            (0, total)
+        };
+        let lead_spacer =
+            (start > 0).then(|| div().flex_none().w(px(start as f32 * tile_step - gap)));
+        let trail_spacer = (end < total).then(|| {
+            div()
+                .flex_none()
+                .w(px((total - end) as f32 * tile_step - gap))
+        });
 
+        let scrollbar_gap = overflows.then(|| {
+            div()
+                .id("voice-carousel-scrollbar-gap")
+                .flex_1()
+                .min_h(px(CAROUSEL_SCROLLBAR_GAP_MIN))
+                .w_full()
+                .flex()
+                .items_center()
+                .child(
+                    div()
+                        .id("voice-carousel-scrollbar")
+                        .w_full()
+                        .h(px(CAROUSEL_SCROLLBAR_RESERVE))
+                        .custom_scrollbars(
+                            Scrollbars::always_visible(ScrollAxes::Horizontal)
+                                .tracked_scroll_handle(strip_scroll),
+                            window,
+                            cx,
+                        ),
+                )
+        });
+
+        let theme = cx.theme();
         let strip_tiles = {
             let store = voice.read(cx);
-            strip_cells
+            strip_cells[start..end]
                 .iter()
                 .copied()
                 .map(|c| strip_tile(theme, locale, store, voice, c, tile_w, avatar_size))
@@ -1959,10 +2017,12 @@ fn render_focus_layout(
             .flex()
             .flex_row()
             .flex_none()
-            .w(px(content_w))
             .h(px(aside_h))
             .gap(px(gap))
-            .children(strip_tiles);
+            .when(!overflows, |this| this.justify_center())
+            .children(lead_spacer)
+            .children(strip_tiles)
+            .children(trail_spacer);
 
         let carousel: AnyElement = if overflows {
             div()
@@ -1981,27 +2041,7 @@ fn render_focus_layout(
                         .track_scroll(strip_scroll)
                         .child(tiles_row),
                 )
-                .child(
-                    div()
-                        .id("voice-carousel-scrollbar-gap")
-                        .flex_1()
-                        .min_h(px(CAROUSEL_SCROLLBAR_GAP_MIN))
-                        .w_full()
-                        .flex()
-                        .items_center()
-                        .child(
-                            div()
-                                .id("voice-carousel-scrollbar")
-                                .w_full()
-                                .h(px(CAROUSEL_SCROLLBAR_RESERVE))
-                                .custom_scrollbars(
-                                    Scrollbars::always_visible(ScrollAxes::Horizontal)
-                                        .tracked_scroll_handle(strip_scroll),
-                                    window,
-                                    cx,
-                                ),
-                        ),
-                )
+                .children(scrollbar_gap)
                 .into_any_element()
         } else {
             div()
@@ -3103,6 +3143,7 @@ fn kind_slug(kind: DeviceKind) -> &'static str {
 mod carousel_tests {
     use super::{
         CAROUSEL_MIN_TILE_WIDTH, carousel_content_width, carousel_overflows, carousel_tile_width,
+        carousel_visible_range,
     };
 
     #[test]
@@ -3122,6 +3163,15 @@ mod carousel_tests {
     #[test]
     fn participants_fit_without_scroll_on_wide_viewport() {
         assert!(!carousel_overflows(3000., 11, 89., 8.));
+    }
+
+    #[test]
+    fn visible_range_windows_large_strip() {
+        let tile_step = 148.;
+        let (start, end) = carousel_visible_range(100, 600., tile_step, -450.);
+        assert!(start < end);
+        assert!(end - start < 20);
+        assert!(start >= 1);
     }
 }
 
