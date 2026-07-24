@@ -517,6 +517,118 @@ impl TransportClient {
             .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
     }
 
+    pub async fn create_clan_emoji(
+        &self,
+        clan_id: i64,
+        source: &str,
+        shortname: &str,
+        category: &str,
+        id: i64,
+        is_for_sale: bool,
+    ) -> Result<()> {
+        let transport = self.inner.clone();
+        let source = source.to_string();
+        let shortname = shortname.to_string();
+        let category = category.to_string();
+        runtime()
+            .spawn(async move {
+                transport
+                    .create_clan_emoji(clan_id, &source, &shortname, &category, id, is_for_sale)
+                    .await
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
+    pub async fn update_clan_emoji_by_id(
+        &self,
+        id: i64,
+        shortname: &str,
+        clan_id: i64,
+    ) -> Result<()> {
+        let transport = self.inner.clone();
+        let shortname = shortname.to_string();
+        runtime()
+            .spawn(async move {
+                transport
+                    .update_clan_emoji_by_id(id, &shortname, clan_id)
+                    .await
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
+    pub async fn delete_clan_emoji_by_id(&self, id: i64, clan_id: i64) -> Result<()> {
+        let transport = self.inner.clone();
+        runtime()
+            .spawn(async move { transport.delete_clan_emoji_by_id(id, clan_id).await })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn add_clan_sticker(
+        &self,
+        clan_id: i64,
+        source: &str,
+        shortname: &str,
+        category: &str,
+        id: i64,
+        media_type: i32,
+        is_for_sale: bool,
+    ) -> Result<()> {
+        let transport = self.inner.clone();
+        let source = source.to_string();
+        let shortname = shortname.to_string();
+        let category = category.to_string();
+        runtime()
+            .spawn(async move {
+                transport
+                    .add_clan_sticker(
+                        clan_id,
+                        &source,
+                        &shortname,
+                        &category,
+                        id,
+                        media_type,
+                        is_for_sale,
+                    )
+                    .await
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
+    pub async fn update_clan_sticker_by_id(
+        &self,
+        id: i64,
+        clan_id: i64,
+        source: &str,
+        shortname: &str,
+        category: &str,
+    ) -> Result<()> {
+        let transport = self.inner.clone();
+        let source = source.to_string();
+        let shortname = shortname.to_string();
+        let category = category.to_string();
+        runtime()
+            .spawn(async move {
+                transport
+                    .update_clan_sticker_by_id(id, clan_id, &source, &shortname, &category)
+                    .await
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
+    pub async fn delete_clan_sticker_by_id(&self, id: i64, clan_id: i64) -> Result<()> {
+        let transport = self.inner.clone();
+        runtime()
+            .spawn(async move { transport.delete_clan_sticker_by_id(id, clan_id).await })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
     pub async fn list_channel_users(
         &self,
         clan_id: i64,
@@ -623,6 +735,24 @@ impl TransportClient {
                     .mute_participant_mezon_meet(channel_id, clan_id, &room_name, &username)
                     .await
             })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
+    pub async fn add_agent_to_channel(&self, channel_id: i64, room_name: &str) -> Result<()> {
+        let transport = self.inner.clone();
+        let room_name = room_name.to_string();
+        runtime()
+            .spawn(async move { transport.add_agent_to_channel(channel_id, &room_name).await })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
+    pub async fn disconnect_agent(&self, channel_id: i64, room_name: &str) -> Result<()> {
+        let transport = self.inner.clone();
+        let room_name = room_name.to_string();
+        runtime()
+            .spawn(async move { transport.disconnect_agent(channel_id, &room_name).await })
             .await
             .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
     }

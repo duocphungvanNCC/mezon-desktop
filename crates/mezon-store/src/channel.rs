@@ -532,6 +532,8 @@ impl ChannelList {
                         this.loading.remove(&clan_id);
                         this.app_channels_cache.insert(clan_id, app_channels);
                         this.merge_pending_badges(&mut categories);
+                        let previous_voice = collect_voice_members(&this.cache, clan_id);
+                        merge_previous_voice_members(&mut categories, &previous_voice);
                         if seed_in_voice_from_categories(&mut this.in_voice, clan_id, &categories) {
                             cx.emit(ChannelEvent::InVoiceChanged);
                         }
@@ -1415,16 +1417,13 @@ impl ChannelList {
                 let clan_id = ClanId(e.clan_id);
                 let channel_id = ChannelId(e.voice_channel_id);
                 let user_id = UserId(e.user_id);
-                let display_name = if !e.participant.is_empty() {
-                    e.participant.clone()
-                } else {
-                    user_id.to_string()
-                };
                 let member = VoiceMember {
                     user_id,
-                    display_name,
+                    display_name: e.participant.clone(),
                     avatar_url: String::new(),
                 };
+                let clan_cached = self.cache.contains(&clan_id);
+                let mut channel_found = false;
                 let mut changed = false;
                 if let Some(cats) = self.cache.get_mut(&clan_id) {
                     for ch in cats
@@ -1432,12 +1431,22 @@ impl ChannelList {
                         .flat_map(|c| c.channels.iter_mut())
                         .filter(|ch| ch.id == channel_id)
                     {
+                        channel_found = true;
                         if !ch.voice_members.iter().any(|m| m.user_id == user_id) {
                             ch.voice_members.push(member.clone());
                             changed = true;
                         }
                     }
                 }
+                tracing::debug!(
+                    %clan_id,
+                    %channel_id,
+                    %user_id,
+                    clan_cached,
+                    channel_found,
+                    added = changed,
+                    "realtime VoiceJoined"
+                );
                 let in_voice_changed = apply_in_voice_joined(
                     &mut self.in_voice,
                     user_id,
@@ -1452,6 +1461,8 @@ impl ChannelList {
                 let clan_id = ClanId(e.clan_id);
                 let channel_id = ChannelId(e.voice_channel_id);
                 let user_id = UserId(e.voice_user_id);
+                let clan_cached = self.cache.contains(&clan_id);
+                let mut channel_found = false;
                 let mut changed = false;
                 if let Some(cats) = self.cache.get_mut(&clan_id) {
                     for ch in cats
@@ -1459,6 +1470,7 @@ impl ChannelList {
                         .flat_map(|c| c.channels.iter_mut())
                         .filter(|ch| ch.id == channel_id)
                     {
+                        channel_found = true;
                         let before = ch.voice_members.len();
                         ch.voice_members.retain(|m| m.user_id != user_id);
                         if ch.voice_members.len() != before {
@@ -1466,6 +1478,15 @@ impl ChannelList {
                         }
                     }
                 }
+                tracing::debug!(
+                    %clan_id,
+                    %channel_id,
+                    %user_id,
+                    clan_cached,
+                    channel_found,
+                    removed = changed,
+                    "realtime VoiceLeaved"
+                );
                 let in_voice_changed =
                     apply_in_voice_leaved(&mut self.in_voice, user_id, channel_id);
                 notify_in_voice_change(changed, in_voice_changed, cx);
@@ -1907,7 +1928,7 @@ fn channel_from_desc(
     let voice_members = voice_ids
         .into_iter()
         .map(|uid| VoiceMember {
-            display_name: uid.to_string(),
+            display_name: String::new(),
             avatar_url: String::new(),
             user_id: uid,
         })
@@ -2210,6 +2231,39 @@ fn remove_in_voice_in_channel(
     let before = in_voice.len();
     in_voice.retain(|_, info| info.channel_id != channel_id);
     in_voice.len() != before
+}
+
+fn collect_voice_members(
+    cache: &KeyedCache<ClanId, Vec<Category>>,
+    clan_id: ClanId,
+) -> HashMap<ChannelId, Vec<VoiceMember>> {
+    cache
+        .get(&clan_id)
+        .map(|categories| {
+            categories
+                .iter()
+                .flat_map(|c| &c.channels)
+                .filter(|ch| !ch.voice_members.is_empty())
+                .map(|ch| (ch.id, ch.voice_members.clone()))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn merge_previous_voice_members(
+    categories: &mut [Category],
+    previous: &HashMap<ChannelId, Vec<VoiceMember>>,
+) {
+    for ch in categories.iter_mut().flat_map(|c| c.channels.iter_mut()) {
+        let Some(prev) = previous.get(&ch.id) else {
+            continue;
+        };
+        for member in prev {
+            if !ch.voice_members.iter().any(|m| m.user_id == member.user_id) {
+                ch.voice_members.push(member.clone());
+            }
+        }
+    }
 }
 
 fn seed_in_voice_from_categories(
@@ -2521,6 +2575,40 @@ mod tests {
                 make_channel(11, "beta", "cat1"),
             ],
         }]
+    }
+
+    #[test]
+    fn merge_previous_voice_members_preserves_realtime_join() {
+        let mut fresh = categories();
+        fresh[0].channels[0].voice_members = vec![VoiceMember {
+            user_id: UserId(1),
+            display_name: "u1".into(),
+            avatar_url: String::new(),
+        }];
+
+        let mut previous: HashMap<ChannelId, Vec<VoiceMember>> = HashMap::new();
+        previous.insert(
+            ChannelId(10),
+            vec![
+                VoiceMember {
+                    user_id: UserId(1),
+                    display_name: "u1".into(),
+                    avatar_url: String::new(),
+                },
+                VoiceMember {
+                    user_id: UserId(2),
+                    display_name: "u2".into(),
+                    avatar_url: String::new(),
+                },
+            ],
+        );
+
+        merge_previous_voice_members(&mut fresh, &previous);
+
+        let members = &fresh[0].channels[0].voice_members;
+        assert_eq!(members.len(), 2);
+        assert!(members.iter().any(|m| m.user_id == UserId(2)));
+        assert_eq!(members.iter().filter(|m| m.user_id == UserId(1)).count(), 1);
     }
 
     #[test]
@@ -2993,13 +3081,31 @@ mod tests {
     }
 
     #[test]
-    fn voice_member_resolution_fallback_to_user_id() {
-        let vm = VoiceMember {
-            user_id: UserId(42),
-            display_name: "42".into(),
-            avatar_url: String::new(),
+    fn channel_from_desc_leaves_voice_member_name_unresolved() {
+        let desc = ApiChannelDesc {
+            channel_id: 10,
+            channel_label: "voice".into(),
+            channel_type: 10,
+            clan_id: 1,
+            category_name: String::new(),
+            category_id: 0,
+            channel_private: 0,
+            count_mess_unread: 0,
+            member_count: 0,
+            parent_id: 0,
+            is_mute: false,
+            last_seen_message_id: 0,
+            last_seen_timestamp: 0,
+            last_sent_message_id: 0,
+            last_sent_timestamp: 0,
+            badge_count: 0,
+            creator_id: 0,
+            clan_name: String::new(),
         };
-        assert_eq!(vm.display_name, vm.user_id.to_string());
+        let channel = channel_from_desc(desc, 0, vec![UserId(42)], false);
+        let vm = &channel.voice_members[0];
+        assert_eq!(vm.user_id, UserId(42));
+        assert!(vm.display_name.is_empty());
         assert!(vm.avatar_url.is_empty());
     }
 
