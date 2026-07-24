@@ -1301,6 +1301,7 @@ fn render_message_head(
             .w_full()
             .min_w_0()
             .text_size(px(16.))
+            .line_height(px(20.))
             .font_weight(FontWeight::MEDIUM)
             .text_color(sender_name_color)
             .child(sender_name.clone())
@@ -1316,6 +1317,7 @@ fn render_message_head(
             div()
                 .flex_none()
                 .text_size(px(16.))
+                .line_height(px(20.))
                 .font_weight(FontWeight::MEDIUM)
                 .text_color(sender_name_color)
                 .child(sender_name.clone()),
@@ -1324,7 +1326,9 @@ fn render_message_head(
             div()
                 .flex_none()
                 .ml_1()
+                .pt(px(4.))
                 .text_size(px(10.))
+                .line_height(px(20.))
                 .text_color(theme.tokens.text_secondary)
                 .child(time_label.clone()),
         )
