@@ -627,6 +627,24 @@ impl TransportClient {
             .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
     }
 
+    pub async fn add_agent_to_channel(&self, channel_id: i64, room_name: &str) -> Result<()> {
+        let transport = self.inner.clone();
+        let room_name = room_name.to_string();
+        runtime()
+            .spawn(async move { transport.add_agent_to_channel(channel_id, &room_name).await })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
+    pub async fn disconnect_agent(&self, channel_id: i64, room_name: &str) -> Result<()> {
+        let transport = self.inner.clone();
+        let room_name = room_name.to_string();
+        runtime()
+            .spawn(async move { transport.disconnect_agent(channel_id, &room_name).await })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
     pub async fn list_clan_badge_count(&self) -> Result<Vec<(String, i32, bool)>> {
         let transport = self.inner.clone();
         runtime()

@@ -17,7 +17,9 @@ type CapturedScreenFrame = scap::capturer::engine::mac::PixelBuffer;
 #[cfg(not(target_os = "macos"))]
 type CapturedScreenFrame = BGRAFrame;
 
-use crate::screen_picker::{PickedScreen, portal_source_types_for_pick, scap_target_for_pick};
+use crate::screen_picker::{
+    PickedScreen, pick_is_window, portal_source_types_for_pick, scap_target_for_pick,
+};
 #[cfg(not(target_os = "macos"))]
 use crate::video::bgra_to_i420;
 #[cfg(target_os = "macos")]
@@ -136,7 +138,7 @@ pub fn start_screen(
                 return;
             }
 
-            let is_window_share = matches!(&pick, PickedScreen::Target(scap::Target::Window(_)));
+            let is_window_share = pick_is_window(&pick);
             let portal_source_types = portal_source_types_for_pick(&pick);
             let capture_target = match scap_target_for_pick(pick) {
                 Ok(target) => target,

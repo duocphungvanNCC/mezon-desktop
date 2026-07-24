@@ -7,8 +7,9 @@ use gpui::{
 };
 use mezon_store::{
     AppConfig, AudioStore, Channel, ChannelId, ClanId, ClanMembersStore, DeviceKind,
-    DeviceMenuKind, DisplayedReaction, NetworkQuality, Settings, UserId, VoiceCallStatus,
-    VoiceConnection, VoiceMember, VoiceParticipant, VoiceRenderFrame, VoiceStore,
+    DeviceMenuKind, DisplayedReaction, NetworkQuality, PERMISSION_MANAGE_CHANNEL, PermissionStore,
+    Settings, UserId, VoiceCallStatus, VoiceConnection, VoiceMember, VoiceParticipant,
+    VoiceRenderFrame, VoiceStore,
 };
 
 use crate::ChatLayout;
@@ -2496,6 +2497,49 @@ fn control_bar(
         .on_click(move |_, _, cx| voice.update(cx, |store, cx| store.send_raising_hand(cx)))
     };
 
+    let agent_active = store.agent_active();
+    let agent_clan_id = store
+        .connection()
+        .connected_channel()
+        .and_then(|(_, clan)| clan.parse::<i64>().ok())
+        .map(ClanId);
+    let can_manage_agent = agent_clan_id.is_some_and(|clan_id| {
+        PermissionStore::try_global(cx).is_some_and(|store| {
+            store
+                .read(cx)
+                .check_permission(clan_id, PERMISSION_MANAGE_CHANNEL, cx)
+        })
+    });
+    let agent_button = can_manage_agent.then(|| {
+        let voice = voice.clone();
+        let (bg, hover, color): (Hsla, Hsla, Hsla) = if agent_active {
+            (
+                gpui::rgb(ACCENT_BLUE).into(),
+                darken(gpui::rgb(ACCENT_BLUE), 0.1),
+                gpui::rgb(0xffffff).into(),
+            )
+        } else {
+            (neutral_bg.into(), neutral_hover, theme.text_primary.into())
+        };
+        let agent_tooltip = mezon_i18n::t(
+            locale,
+            if agent_active {
+                "channelVoice.removeAgent"
+            } else {
+                "channelVoice.addAgent"
+            },
+        );
+        circle_button(
+            "voice-agent-btn",
+            bg,
+            hover,
+            IconName::VoiceAgentIcon,
+            color,
+        )
+        .tooltip(Tooltip::text(agent_tooltip))
+        .on_click(move |_, _, cx| voice.update(cx, |store, cx| store.toggle_agent(cx)))
+    });
+
     let mut right = div()
         .flex()
         .flex_row()
@@ -2607,6 +2651,7 @@ fn control_bar(
         .child(mic_button)
         .child(camera_button)
         .child(screen_button)
+        .children(agent_button)
         .child(raise_hand_button)
         .child(leave_button);
 

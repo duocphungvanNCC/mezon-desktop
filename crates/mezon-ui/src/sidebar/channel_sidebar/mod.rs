@@ -8,8 +8,9 @@ use gpui::{
     prelude::*, px,
 };
 use mezon_store::{
-    ChannelId, ChannelList, ClanId, ClanList, ClanMembersStore, FAVOR_CATE_ID,
-    PERMISSION_ADMINISTRATOR, PERMISSION_MANAGE_CLAN, PermissionStore, Settings, VoiceMember,
+    AccountStore, BadgeService, ChannelId, ChannelList, ClanId, ClanList, ClanMembersStore,
+    FAVOR_CATE_ID, PERMISSION_ADMINISTRATOR, PERMISSION_MANAGE_CLAN, PermissionStore, Settings,
+    VoiceMember,
 };
 
 use crate::channel_app::{is_channel_app_open, launch_channel_app_from_store};
@@ -51,6 +52,22 @@ fn resolve_voice_member_slot(
         let avatar = member.avatar();
         if !avatar.is_empty() {
             slot.avatar_url = avatar.to_string();
+        }
+    }
+    if slot.display_name.is_empty()
+        && BadgeService::global(cx).read(cx).current_user_id(cx) == Some(m.user_id)
+        && let Some(account) = AccountStore::try_global(cx)
+        && let Some(me) = account.read(cx).account.as_ref()
+    {
+        slot.display_name = if me.display_name.is_empty() {
+            me.username.clone()
+        } else {
+            me.display_name.clone()
+        };
+        if slot.avatar_url.is_empty()
+            && let Some(url) = me.avatar_url.as_ref().filter(|u| !u.is_empty())
+        {
+            slot.avatar_url = url.clone();
         }
     }
     if !slot.avatar_url.is_empty() {
@@ -1572,11 +1589,7 @@ fn render_sidebar_item(
                         .pl(px(32.))
                         .py(px(2.));
                     for (index, m) in voice_members.iter().take(5).enumerate() {
-                        let name_text = if m.display_name.is_empty() {
-                            m.user_id.clone()
-                        } else {
-                            m.display_name.clone()
-                        };
+                        let name_text = m.display_name.clone();
                         let avatar = if m.avatar_url.is_empty() {
                             Avatar::new().name(name_text)
                         } else {
@@ -1604,15 +1617,13 @@ fn render_sidebar_item(
                 } else {
                     let voice_pl = if *is_thread { px(40.) } else { px(32.) };
                     div()
+                        .w_full()
+                        .min_w_0()
                         .flex()
                         .flex_col()
                         .pl(voice_pl)
                         .children(voice_members.iter().map(|m| {
-                            let name_text = if m.display_name.is_empty() {
-                                m.user_id.clone()
-                            } else {
-                                m.display_name.clone()
-                            };
+                            let name_text = m.display_name.clone();
                             let avatar = if m.avatar_url.is_empty() {
                                 Avatar::new().name(name_text.clone())
                             } else {

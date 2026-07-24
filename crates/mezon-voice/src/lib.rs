@@ -1101,7 +1101,11 @@ fn emit_participants(
         identity: local.identity().as_str().to_string(),
         name: display_name(&local.name(), local.identity().as_str()),
         is_local: true,
-        is_agent: local.kind() == ParticipantKind::Agent,
+        is_agent: {
+            #[allow(deprecated)]
+            let has_agent_permission = local.permission().is_some_and(|p| p.agent);
+            has_agent_permission || local.kind() == ParticipantKind::Agent
+        },
         speaking: local.is_speaking(),
         muted: !local_mic_enabled || local_mic_muted(&local),
         camera: local_camera_on.then(|| local_camera_key(local_identity)),
@@ -1117,7 +1121,11 @@ fn emit_participants(
         participants.push(VoiceParticipant {
             name: display_name(&participant.name(), &identity),
             is_local: false,
-            is_agent: participant.kind() == ParticipantKind::Agent,
+            is_agent: {
+                #[allow(deprecated)]
+                let has_agent_permission = participant.permission().is_some_and(|p| p.agent);
+                has_agent_permission || participant.kind() == ParticipantKind::Agent
+            },
             speaking: participant.is_speaking(),
             muted: remote_mic_muted(participant),
             camera,
