@@ -149,7 +149,7 @@ pub struct Theme {
 
     // Unread / notification
     pub unread_dot: Rgba,    // #f2f3f5
-    pub mention_badge: Rgba, // #f23f43
+    pub mention_badge: Rgba, // #DA373C
 
     // Borders
     pub border: Rgba, // rgba(255,255,255,0.08)
@@ -216,7 +216,7 @@ impl Theme {
             status_offline: rgba(128, 132, 142, 1.0),
 
             unread_dot: rgba(242, 243, 245, 1.0),
-            mention_badge: rgba(242, 63, 67, 1.0),
+            mention_badge: rgba(218, 55, 60, 1.0),
 
             border: rgba(100, 100, 100, 0.4),
             title_bar_bg: rgba(30, 31, 34, 1.0),
@@ -250,7 +250,7 @@ impl Theme {
             status_offline: rgba(128, 132, 142, 1.0),
 
             unread_dot: rgba(6, 6, 7, 1.0),
-            mention_badge: rgba(242, 63, 67, 1.0),
+            mention_badge: rgba(218, 55, 60, 1.0),
 
             border: rgba(218, 220, 224, 1.0),
             title_bar_bg: rgba(227, 229, 232, 1.0),
@@ -268,7 +268,6 @@ impl Theme {
         base.brand_hover = t.bg_button_primary_hover;
         base.border = t.border_primary;
         base.text_link = t.color_mention_hover;
-        base.mention_badge = t.mention_color;
         base.title_bar_bg = t.bg_primary;
         base.tokens = t;
         base
