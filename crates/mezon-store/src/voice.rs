@@ -160,6 +160,7 @@ pub struct VoiceStore {
     pending_kick: Option<(String, String)>,
     pending_removals: HashMap<String, Instant>,
     moderation_error: Option<VoiceModerationError>,
+    agent_pending: bool,
     participants: Vec<VoiceParticipant>,
     join_ranks: Vec<String>,
     speak_ranks: HashMap<String, u64>,
@@ -302,6 +303,7 @@ impl VoiceStore {
             pending_kick: None,
             pending_removals: HashMap::new(),
             moderation_error: None,
+            agent_pending: false,
             participants: Vec::new(),
             join_ranks: Vec::new(),
             speak_ranks: HashMap::new(),
@@ -1369,6 +1371,9 @@ impl VoiceStore {
     }
 
     pub fn toggle_agent(&mut self, cx: &mut Context<Self>) {
+        if self.agent_pending {
+            return;
+        }
         let Some((channel_id, _clan_id)) = self.connection.connected_channel() else {
             return;
         };
@@ -1381,19 +1386,23 @@ impl VoiceStore {
         let room_name = self.room_name.clone();
         let on_agent = self.agent_active();
         let api = self.api.clone();
+        self.agent_pending = true;
         cx.spawn(async move |this, cx| {
             let result = if on_agent {
                 api.disconnect_agent(channel_id, &room_name).await
             } else {
                 api.add_agent_to_channel(channel_id, &room_name).await
             };
-            if let Err(e) = result {
+            if let Err(e) = &result {
                 tracing::warn!("toggle agent failed: {e:#}");
-                let _ = this.update(cx, |this, cx| {
-                    this.moderation_error = Some(VoiceModerationError::AgentFailed);
-                    cx.notify();
-                });
             }
+            let _ = this.update(cx, |this, cx| {
+                this.agent_pending = false;
+                if result.is_err() {
+                    this.moderation_error = Some(VoiceModerationError::AgentFailed);
+                }
+                cx.notify();
+            });
         })
         .detach();
     }
@@ -1658,9 +1667,9 @@ impl VoiceStore {
                         channel_id: channel_id.clone(),
                         clan_id: clan_id.clone(),
                     };
+                    self.play_join_sound(cx);
                 }
                 self.call_status = VoiceCallStatus::Stable;
-                self.play_join_sound(cx);
             }
             VoiceEvent::Reconnecting => {
                 self.call_status = VoiceCallStatus::Reconnecting;
@@ -1943,6 +1952,7 @@ impl VoiceStore {
         self.pending_kick = None;
         self.pending_removals.clear();
         self.moderation_error = None;
+        self.agent_pending = false;
         self.participants.clear();
         self.join_ranks.clear();
         self.speak_ranks.clear();

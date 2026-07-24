@@ -1156,17 +1156,25 @@ impl ChatLayout {
                     cx.background_executor().timer(VOICE_FRAME_FALLBACK).await;
                     continue;
                 };
-                {
-                    let mut rx = store.frame_watch();
-                    let changed = std::pin::pin!(rx.changed());
-                    let fallback =
-                        std::pin::pin!(cx.background_executor().timer(VOICE_FRAME_FALLBACK));
-                    let _ = futures::future::select(changed, fallback).await;
-                }
-                let seq = store.publish_seq();
-                if seq != last_seq {
-                    last_seq = seq;
-                    if this.update(cx, |_, cx| cx.notify()).is_err() {
+                let mut rx = store.frame_watch();
+                loop {
+                    let seq = store.publish_seq();
+                    if seq != last_seq {
+                        last_seq = seq;
+                        if this.update(cx, |_, cx| cx.notify()).is_err() {
+                            return;
+                        }
+                    }
+                    let frame_published = {
+                        let changed = std::pin::pin!(rx.changed());
+                        let fallback =
+                            std::pin::pin!(cx.background_executor().timer(VOICE_FRAME_FALLBACK));
+                        matches!(
+                            futures::future::select(changed, fallback).await,
+                            futures::future::Either::Left((Ok(()), _))
+                        )
+                    };
+                    if !frame_published {
                         break;
                     }
                 }

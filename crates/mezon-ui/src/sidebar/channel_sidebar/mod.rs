@@ -8,9 +8,8 @@ use gpui::{
     prelude::*, px,
 };
 use mezon_store::{
-    AccountStore, BadgeService, ChannelId, ChannelList, ClanId, ClanList, ClanMembersStore,
-    FAVOR_CATE_ID, PERMISSION_ADMINISTRATOR, PERMISSION_MANAGE_CLAN, PermissionStore, Settings,
-    VoiceMember,
+    ChannelId, ChannelList, ClanId, ClanList, ClanMembersStore, FAVOR_CATE_ID,
+    PERMISSION_ADMINISTRATOR, PERMISSION_MANAGE_CLAN, PermissionStore, Settings, VoiceMember,
 };
 
 use crate::channel_app::{is_channel_app_open, launch_channel_app_from_store};
@@ -40,40 +39,12 @@ fn resolve_voice_member_slot(
     clan_id: Option<ClanId>,
     m: &VoiceMember,
 ) -> VoiceMemberSlot {
-    let mut slot = VoiceMemberSlot::from(m);
-    if let Some(clan_id) = clan_id
-        && let Some(store) = ClanMembersStore::try_global(cx)
-        && let Some(member) = store.read(cx).member(clan_id, m.user_id)
-    {
-        let name = member.name();
-        if !name.is_empty() {
-            slot.display_name = name.to_string();
-        }
-        let avatar = member.avatar();
-        if !avatar.is_empty() {
-            slot.avatar_url = avatar.to_string();
-        }
+    let (display_name, avatar_url) = crate::util::voice_member::resolve_display(cx, clan_id, m);
+    VoiceMemberSlot {
+        user_id: m.user_id.to_string(),
+        display_name,
+        avatar_url,
     }
-    if slot.display_name.is_empty()
-        && BadgeService::global(cx).read(cx).current_user_id(cx) == Some(m.user_id)
-        && let Some(account) = AccountStore::try_global(cx)
-        && let Some(me) = account.read(cx).account.as_ref()
-    {
-        slot.display_name = if me.display_name.is_empty() {
-            me.username.clone()
-        } else {
-            me.display_name.clone()
-        };
-        if slot.avatar_url.is_empty()
-            && let Some(url) = me.avatar_url.as_ref().filter(|u| !u.is_empty())
-        {
-            slot.avatar_url = url.clone();
-        }
-    }
-    if !slot.avatar_url.is_empty() {
-        slot.avatar_url = crate::util::imgproxy::avatar_url(cx, &slot.avatar_url);
-    }
-    slot
 }
 
 pub struct ChannelSidebar {

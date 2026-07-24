@@ -827,23 +827,7 @@ fn resolve_voice_identity(
 }
 
 fn resolve_voice_member(cx: &App, clan_id: ClanId, m: &VoiceMember) -> (String, String) {
-    if let Some(store) = ClanMembersStore::try_global(cx)
-        && let Some(member) = store.read(cx).member(clan_id, m.user_id)
-    {
-        let name = if member.name().is_empty() {
-            m.display_name.clone()
-        } else {
-            member.name().to_string()
-        };
-        let avatar = member.avatar();
-        let avatar_url = if avatar.is_empty() {
-            m.avatar_url.clone()
-        } else {
-            crate::util::imgproxy::avatar_url(cx, avatar)
-        };
-        return (name, avatar_url);
-    }
-    (m.display_name.clone(), m.avatar_url.clone())
+    crate::util::voice_member::resolve_display(cx, Some(clan_id), m)
 }
 
 fn raised_hands_overlay(cx: &App, clan_id: ClanId, store: &VoiceStore) -> Option<AnyElement> {
