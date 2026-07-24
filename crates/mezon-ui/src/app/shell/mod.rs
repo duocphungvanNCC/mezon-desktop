@@ -15,15 +15,21 @@ use crate::components::primitives::{Toast, ToastKind};
 
 mod coming_soon_modal;
 mod confirm_delete_canvas_modal;
+mod confirm_delete_emoji_modal;
 mod confirm_delete_message_modal;
 mod confirm_delete_role_modal;
+mod confirm_delete_sound_modal;
+mod confirm_delete_sticker_modal;
 mod confirm_delete_webhook_modal;
 mod confirm_remove_friend_modal;
 mod upload_limit_modal;
 use coming_soon_modal::ComingSoonModal;
 use confirm_delete_canvas_modal::ConfirmDeleteCanvasModal;
+use confirm_delete_emoji_modal::ConfirmDeleteEmojiModal;
 use confirm_delete_message_modal::ConfirmDeleteMessageModal;
 use confirm_delete_role_modal::ConfirmDeleteRoleModal;
+use confirm_delete_sound_modal::ConfirmDeleteSoundModal;
+use confirm_delete_sticker_modal::ConfirmDeleteStickerModal;
 use confirm_delete_webhook_modal::{ConfirmDeleteWebhookModal, WebhookDeleteTarget};
 pub use confirm_remove_friend_modal::FriendRemovalKind;
 use confirm_remove_friend_modal::{ConfirmRemoveFriendModal, interpolate_username};
@@ -281,6 +287,37 @@ impl Shell {
         self.show_modal(view.into(), cx);
     }
 
+    pub fn confirm_delete_emoji(
+        &mut self,
+        clan_id: mezon_store::ClanId,
+        emoji_id: SharedString,
+        shortname: SharedString,
+        locale: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let description = mezon_i18n::t(locale, "clanEmojiSetting.deleteModal.description")
+            .replace("{{shortname}}", shortname.as_ref());
+        let view = cx.new(|cx| ConfirmDeleteEmojiModal {
+            focus_handle: cx.focus_handle(),
+            clan_id,
+            emoji_id,
+            title: mezon_i18n::t(locale, "clanEmojiSetting.deleteModal.title")
+                .to_string()
+                .into(),
+            description: description.into(),
+            cancel_label: mezon_i18n::t(locale, "clanEmojiSetting.deleteModal.cancel")
+                .to_string()
+                .into(),
+            delete_label: mezon_i18n::t(locale, "clanEmojiSetting.deleteModal.confirm")
+                .to_string()
+                .into(),
+        });
+        let focus_handle = view.read(cx).focus_handle.clone();
+        window.focus(&focus_handle, cx);
+        self.show_modal(view.into(), cx);
+    }
+
     pub fn confirm_delete_role(
         &mut self,
         clan_id: mezon_store::ClanId,
@@ -309,6 +346,37 @@ impl Shell {
             description,
             cancel_label,
             delete_label,
+        });
+        let focus_handle = view.read(cx).focus_handle.clone();
+        window.focus(&focus_handle, cx);
+        self.show_modal(view.into(), cx);
+    }
+
+    pub fn confirm_delete_sticker(
+        &mut self,
+        clan_id: mezon_store::ClanId,
+        sticker_id: SharedString,
+        shortname: SharedString,
+        locale: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let description = mezon_i18n::t(locale, "clanStickerSetting.deleteModal.description")
+            .replace("{{shortname}}", shortname.as_ref());
+        let view = cx.new(|cx| ConfirmDeleteStickerModal {
+            focus_handle: cx.focus_handle(),
+            clan_id,
+            sticker_id,
+            title: mezon_i18n::t(locale, "clanStickerSetting.deleteModal.title")
+                .to_string()
+                .into(),
+            description: description.into(),
+            cancel_label: mezon_i18n::t(locale, "clanStickerSetting.deleteModal.cancel")
+                .to_string()
+                .into(),
+            delete_label: mezon_i18n::t(locale, "clanStickerSetting.deleteModal.confirm")
+                .to_string()
+                .into(),
         });
         let focus_handle = view.read(cx).focus_handle.clone();
         window.focus(&focus_handle, cx);
@@ -348,6 +416,37 @@ impl Shell {
             description,
             cancel_label,
             delete_label,
+        });
+        let focus_handle = view.read(cx).focus_handle.clone();
+        window.focus(&focus_handle, cx);
+        self.show_modal(view.into(), cx);
+    }
+
+    pub fn confirm_delete_sound(
+        &mut self,
+        clan_id: mezon_store::ClanId,
+        sound_id: SharedString,
+        shortname: SharedString,
+        locale: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let description = mezon_i18n::t(locale, "clanSoundSetting.deleteModal.description")
+            .replace("{{shortname}}", shortname.as_ref());
+        let view = cx.new(|cx| ConfirmDeleteSoundModal {
+            focus_handle: cx.focus_handle(),
+            clan_id,
+            sound_id,
+            title: mezon_i18n::t(locale, "clanSoundSetting.deleteModal.title")
+                .to_string()
+                .into(),
+            description: description.into(),
+            cancel_label: mezon_i18n::t(locale, "clanSoundSetting.deleteModal.cancel")
+                .to_string()
+                .into(),
+            delete_label: mezon_i18n::t(locale, "clanSoundSetting.deleteModal.confirm")
+                .to_string()
+                .into(),
         });
         let focus_handle = view.read(cx).focus_handle.clone();
         window.focus(&focus_handle, cx);

@@ -7269,13 +7269,18 @@ impl MezonTransport {
         clan_id: i64,
         source: &str,
         shortname: &str,
+        category: &str,
+        id: i64,
+        is_for_sale: bool,
     ) -> Result<()> {
         let cid = self.generate_cid();
         let body = api::ClanEmojiCreateRequest {
             clan_id,
             source: source.to_string(),
             shortname: shortname.to_string(),
-            ..Default::default()
+            category: category.to_string(),
+            id,
+            is_for_sale,
         }
         .encode_to_vec();
         let (code, _) = self.send_api_request(cid, "CreateClanEmoji", body).await?;
@@ -7326,19 +7331,27 @@ impl MezonTransport {
         Ok(())
     }
 
-    /// Add clan sticker.
+    /// Add clan sticker (or sound when `media_type == 1`).
+    #[allow(clippy::too_many_arguments)]
     pub async fn add_clan_sticker(
         &self,
         clan_id: i64,
         source: &str,
         shortname: &str,
+        category: &str,
+        id: i64,
+        media_type: i32,
+        is_for_sale: bool,
     ) -> Result<()> {
         let cid = self.generate_cid();
         let body = api::ClanStickerAddRequest {
             clan_id,
             source: source.to_string(),
             shortname: shortname.to_string(),
-            ..Default::default()
+            category: category.to_string(),
+            id,
+            media_type,
+            is_for_sale,
         }
         .encode_to_vec();
         let (code, _) = self.send_api_request(cid, "AddClanSticker", body).await?;
@@ -7349,12 +7362,21 @@ impl MezonTransport {
     }
 
     /// Update clan sticker by ID.
-    pub async fn update_clan_sticker_by_id(&self, id: i64, clan_id: i64) -> Result<()> {
+    pub async fn update_clan_sticker_by_id(
+        &self,
+        id: i64,
+        clan_id: i64,
+        source: &str,
+        shortname: &str,
+        category: &str,
+    ) -> Result<()> {
         let cid = self.generate_cid();
         let body = api::ClanStickerUpdateByIdRequest {
             id,
             clan_id,
-            ..Default::default()
+            source: source.to_string(),
+            shortname: shortname.to_string(),
+            category: category.to_string(),
         }
         .encode_to_vec();
         let (code, _) = self
