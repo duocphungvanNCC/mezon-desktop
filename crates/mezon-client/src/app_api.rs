@@ -2260,6 +2260,16 @@ impl AppApi {
             .await
     }
 
+    pub async fn add_agent_to_channel(&self, channel_id: i64, room_name: &str) -> Result<()> {
+        self.transport
+            .add_agent_to_channel(channel_id, room_name)
+            .await
+    }
+
+    pub async fn disconnect_agent(&self, channel_id: i64, room_name: &str) -> Result<()> {
+        self.transport.disconnect_agent(channel_id, room_name).await
+    }
+
     pub async fn list_channel_apps(&self, clan_id: i64) -> Result<Vec<ApiChannelApp>> {
         self.transport.list_channel_apps(clan_id).await
     }
