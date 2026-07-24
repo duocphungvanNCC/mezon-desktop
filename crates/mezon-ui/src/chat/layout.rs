@@ -1556,15 +1556,35 @@ impl ChatLayout {
         let Ok(clan_id) = clan_id.parse::<ClanId>() else {
             return;
         };
-        self.thread_popover_handle.hide(cx);
-        self.clear_thread_search(cx);
+        self.dismiss_threads_popover(cx);
         let label = label.to_string();
         let parent = parent_id.parse::<ChannelId>().ok();
+        let (active, active_confirmed) = match ThreadsStore::global(cx)
+            .read(cx)
+            .thread_active(&channel_id.to_string())
+        {
+            Some(active) => (active, true),
+            None => (mezon_store::CHANNEL_ACTIVE_JOINED, false),
+        };
         self.channel_list.update(cx, |list, cx| {
             if let Some(parent) = parent {
-                list.ensure_thread_with_parent(channel_id, parent, clan_id, label.clone(), cx);
+                list.ensure_thread_with_parent_active(
+                    channel_id,
+                    parent,
+                    clan_id,
+                    label.clone(),
+                    active,
+                    active_confirmed,
+                    cx,
+                );
             } else {
-                list.ensure_thread_channel(channel_id, label.clone(), cx);
+                list.ensure_thread_channel_with_active(
+                    channel_id,
+                    label.clone(),
+                    active,
+                    active_confirmed,
+                    cx,
+                );
             }
         });
         crate::router::navigate(

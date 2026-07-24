@@ -138,6 +138,7 @@ impl ThreadsStore {
                 RealtimeKind::ChannelUpdated,
                 RealtimeKind::ChannelMessage,
                 RealtimeKind::ChannelDeleted,
+                RealtimeKind::ChannelArchive,
             ] {
                 dispatch.on(kind, &entity, |this, event, cx| {
                     this.on_realtime_event(event, cx);
@@ -177,6 +178,9 @@ impl ThreadsStore {
 
     fn on_realtime_event(&mut self, event: &RealtimeEvent, cx: &mut Context<Self>) {
         let Some(list_id) = self.list_channel_id.clone() else {
+            if let RealtimeEvent::ChannelArchive(ev) = event {
+                self.apply_channel_archive(ev, cx);
+            }
             return;
         };
         match event {
@@ -192,8 +196,68 @@ impl ThreadsStore {
             RealtimeEvent::ChannelDeleted(ev) => {
                 self.apply_thread_deleted(&ev.channel_id.to_string(), cx);
             }
+            RealtimeEvent::ChannelArchive(ev) => {
+                self.apply_channel_archive(ev, cx);
+            }
             _ => {}
         }
+    }
+
+    pub fn mark_thread_active(&mut self, channel_id: &str, cx: &mut Context<Self>) {
+        self.set_thread_active(channel_id, THREAD_STATUS_JOINED, cx);
+    }
+
+    pub fn mark_thread_archived(&mut self, channel_id: &str, cx: &mut Context<Self>) {
+        self.set_thread_active(channel_id, THREAD_STATUS_ARCHIVED, cx);
+    }
+
+    pub fn thread_active(&self, channel_id: &str) -> Option<i32> {
+        self.threads
+            .iter()
+            .find(|t| t.channel_id == channel_id)
+            .map(|t| t.active)
+            .or_else(|| {
+                self.search_results.as_ref().and_then(|results| {
+                    results
+                        .iter()
+                        .find(|t| t.channel_id == channel_id)
+                        .map(|t| t.active)
+                })
+            })
+    }
+
+    fn set_thread_active(&mut self, channel_id: &str, active: i32, cx: &mut Context<Self>) {
+        let mut changed = false;
+        if let Some(thread) = self.threads.iter_mut().find(|t| t.channel_id == channel_id)
+            && thread.active != active
+        {
+            thread.active = active;
+            changed = true;
+        }
+        if let Some(results) = self.search_results.as_mut()
+            && let Some(thread) = results.iter_mut().find(|t| t.channel_id == channel_id)
+            && thread.active != active
+        {
+            thread.active = active;
+            changed = true;
+        }
+        if changed {
+            cx.notify();
+        }
+    }
+
+    fn apply_channel_archive(
+        &mut self,
+        ev: &realtime::ChannelArchiveEvent,
+        cx: &mut Context<Self>,
+    ) {
+        let channel_id = ev.channel_id.to_string();
+        let active = if ev.active == THREAD_STATUS_ARCHIVED {
+            THREAD_STATUS_ARCHIVED
+        } else {
+            THREAD_STATUS_JOINED
+        };
+        self.set_thread_active(&channel_id, active, cx);
     }
 
     fn apply_thread_message(&mut self, msg: &api::ChannelMessage, cx: &mut Context<Self>) {
@@ -1066,5 +1130,60 @@ mod tests {
         assert_eq!(thread.last_sent_timestamp, 50);
         assert_eq!(thread.last_message_content, "keep");
         assert_eq!(thread.last_message_sender_id, "9");
+    }
+
+    #[test]
+    fn group_threads_moves_archived_to_older_bucket() {
+        let threads = vec![
+            ThreadSummary {
+                channel_id: "1".into(),
+                channel_label: "joined".into(),
+                clan_id: "c".into(),
+                parent_id: "p".into(),
+                channel_private: 0,
+                active: THREAD_STATUS_JOINED,
+                creator_id: String::new(),
+                last_message_content: String::new(),
+                last_message_sender_id: String::new(),
+                last_message_sender_name: String::new(),
+                last_message_sender_avatar: String::new(),
+                last_sent_timestamp: 3,
+                member_count: 0,
+            },
+            ThreadSummary {
+                channel_id: "2".into(),
+                channel_label: "archived".into(),
+                clan_id: "c".into(),
+                parent_id: "p".into(),
+                channel_private: 0,
+                active: THREAD_STATUS_ARCHIVED,
+                creator_id: String::new(),
+                last_message_content: String::new(),
+                last_message_sender_id: String::new(),
+                last_message_sender_name: String::new(),
+                last_message_sender_avatar: String::new(),
+                last_sent_timestamp: 2,
+                member_count: 0,
+            },
+            ThreadSummary {
+                channel_id: "3".into(),
+                channel_label: "public".into(),
+                clan_id: "c".into(),
+                parent_id: "p".into(),
+                channel_private: 0,
+                active: THREAD_STATUS_ACTIVE_PUBLIC,
+                creator_id: String::new(),
+                last_message_content: String::new(),
+                last_message_sender_id: String::new(),
+                last_message_sender_name: String::new(),
+                last_message_sender_avatar: String::new(),
+                last_sent_timestamp: 1,
+                member_count: 0,
+            },
+        ];
+        let (joined, active, older) = group_threads(&threads);
+        assert_eq!(joined, vec![0]);
+        assert_eq!(active, vec![2]);
+        assert_eq!(older, vec![1]);
     }
 }

@@ -2302,6 +2302,20 @@ impl AppApi {
             .await
     }
 
+    pub async fn active_archived_thread(&self, clan_id: i64, channel_id: i64) -> Result<()> {
+        self.transport
+            .active_archived_thread(clan_id, channel_id)
+            .await
+    }
+
+    pub async fn archive_channel(&self, clan_id: i64, channel_id: i64) -> Result<()> {
+        self.transport.archive_channel(clan_id, channel_id).await
+    }
+
+    pub async fn leave_thread(&self, clan_id: i64, channel_id: i64) -> Result<()> {
+        self.transport.leave_thread(clan_id, channel_id).await
+    }
+
     pub async fn list_loged_device(&self) -> Result<Vec<mezon_proto::api::LogedDevice>> {
         self.transport.list_loged_device().await
     }

@@ -260,7 +260,11 @@ impl ChannelSidebar {
                         collapsed,
                     });
                     if !collapsed {
-                        let ch_slice = &category.channels;
+                        let ch_slice: Vec<_> = category
+                            .channels
+                            .iter()
+                            .filter(|ch| ch.visible_in_sidebar())
+                            .collect();
                         let mut seen_parents: HashSet<ChannelId> = HashSet::new();
                         let mut has_prev_sibling = vec![false; ch_slice.len()];
                         for (idx, ch) in ch_slice.iter().enumerate() {

@@ -1069,7 +1069,6 @@ impl TransportClient {
             .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
     }
 
-    /// List threads for a parent channel.
     pub async fn list_thread_descs(
         &self,
         channel_id: &str,
@@ -1087,9 +1086,26 @@ impl TransportClient {
 
         runtime()
             .spawn(async move {
-                transport
-                    .list_thread_descs(channel_id, clan_id, THREAD_LIST_LIMIT, page, 0, None)
-                    .await
+                const MAX_RETRIES: u32 = 3;
+                const INITIAL_DELAY_MS: u64 = 1000;
+                let mut attempt = 0u32;
+                loop {
+                    match transport
+                        .list_thread_descs(channel_id, clan_id, THREAD_LIST_LIMIT, page, 0, None)
+                        .await
+                    {
+                        Ok(list) => return Ok(list),
+                        Err(e) if is_request_timeout(&e) && attempt < MAX_RETRIES => {
+                            attempt += 1;
+                            let delay_ms = INITIAL_DELAY_MS << (attempt - 1).min(2);
+                            tracing::warn!(
+                                "list_thread_descs page {page} timed out (attempt {attempt}/{MAX_RETRIES}), retrying in {delay_ms}ms: {e}"
+                            );
+                            tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+                        }
+                        Err(e) => return Err(e),
+                    }
+                }
             })
             .await
             .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
@@ -2619,6 +2635,30 @@ impl TransportClient {
             .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
     }
 
+    pub async fn active_archived_thread(&self, clan_id: i64, channel_id: i64) -> Result<()> {
+        let transport = self.inner.clone();
+        runtime()
+            .spawn(async move { transport.active_archived_thread(clan_id, channel_id).await })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
+    pub async fn archive_channel(&self, clan_id: i64, channel_id: i64) -> Result<()> {
+        let transport = self.inner.clone();
+        runtime()
+            .spawn(async move { transport.archive_channel(clan_id, channel_id).await })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
+    pub async fn leave_thread(&self, clan_id: i64, channel_id: i64) -> Result<()> {
+        let transport = self.inner.clone();
+        runtime()
+            .spawn(async move { transport.leave_thread(clan_id, channel_id).await })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
     pub async fn list_user_permission_in_channel(
         &self,
         clan_id: i64,
@@ -2789,5 +2829,27 @@ impl TransportClient {
             .spawn(async move { transport.delete_clan_webhook_by_id(id, clan_id).await })
             .await
             .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+}
+
+fn is_request_timeout(err: &anyhow::Error) -> bool {
+    err.chain().any(|cause| {
+        let msg = cause.to_string();
+        msg.contains("Request timed out") || msg.contains("timed out")
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_request_timeout;
+
+    #[test]
+    fn detects_socket_request_timeout() {
+        assert!(is_request_timeout(&anyhow::anyhow!("Request timed out")));
+        assert!(is_request_timeout(&anyhow::anyhow!(
+            "list failed: Request timed out"
+        )));
+        assert!(!is_request_timeout(&anyhow::anyhow!("API error: code=3")));
+        assert!(!is_request_timeout(&anyhow::anyhow!("user not in channel")));
     }
 }

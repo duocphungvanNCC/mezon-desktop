@@ -3423,6 +3423,7 @@ impl MessagesStore {
                     let confirmed =
                         message_from_api(sent, AppConfig::try_global(cx), viewer_user_id(cx));
                     this.reconcile_temp(channel_id, temp_id, confirmed, cx);
+                    this.maybe_reactivate_archived_thread(channel_id, clan_id, mode, cx);
                 });
                 let (on_complete, mut completions) =
                     tokio::sync::mpsc::unbounded_channel::<AttachmentUploadOutcome>();
@@ -3495,6 +3496,7 @@ impl MessagesStore {
                                 viewer_user_id(cx),
                             );
                             this.reconcile_temp(channel_id, temp_id, confirmed, cx);
+                            this.maybe_reactivate_archived_thread(channel_id, clan_id, mode, cx);
                         });
                     }
                     Err(e) => {
@@ -3646,6 +3648,7 @@ impl MessagesStore {
                         let confirmed =
                             message_from_api(sent, AppConfig::try_global(cx), viewer_user_id(cx));
                         this.reconcile_temp(channel_id, temp_id, confirmed, cx);
+                        this.maybe_reactivate_archived_thread(channel_id, clan_id, mode, cx);
                     });
                 }
                 Err(e) => {
@@ -4663,6 +4666,18 @@ impl MessagesStore {
             self.pending_self_adds.remove(&entry_key);
         }
         true
+    }
+
+    fn maybe_reactivate_archived_thread(
+        &self,
+        channel_id: ChannelId,
+        clan_id: ClanId,
+        mode: i32,
+        cx: &mut Context<Self>,
+    ) {
+        ChannelList::global(cx).update(cx, |list, cx| {
+            list.maybe_reactivate_after_send(channel_id, clan_id, mode, cx);
+        });
     }
 
     fn reconcile_temp(
