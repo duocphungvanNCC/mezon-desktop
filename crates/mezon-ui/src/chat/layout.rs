@@ -87,6 +87,7 @@ pub struct ChatLayout {
     displayed_threads_panel: ThreadsPanelSlice,
     threads_creating_gate: bool,
     displayed_inbox: InboxDisplaySlice,
+    last_route: Route,
     pending_open_threads_popover: bool,
     pending_open_pin_popover: bool,
     voice_emoji_picker: Option<Entity<ReactionPicker>>,
@@ -294,12 +295,21 @@ impl ChatLayout {
         })
         .detach();
         cx.observe(&Router::global(cx), |this, _, cx| {
-            this.clan_members_page
-                .update(cx, |page, cx| page.reset_search(cx));
-            this.clan_channels_page
-                .update(cx, |page, cx| page.reset_search(cx));
+            let next_route = Router::global(cx).read(cx).route().clone();
+            if next_route != this.last_route {
+                match &this.last_route {
+                    Route::ClanMembers { .. } => this
+                        .clan_members_page
+                        .update(cx, |page, cx| page.reset_search(cx)),
+                    Route::ClanChannels { .. } => this
+                        .clan_channels_page
+                        .update(cx, |page, cx| page.reset_search(cx)),
+                    _ => {}
+                }
+                this.last_route = next_route.clone();
+            }
             if matches!(
-                Router::global(cx).read(cx).route(),
+                next_route,
                 Route::Direct | Route::Friends | Route::DirectMessage { .. }
             ) {
                 this.media_channel_view_mode = false;
@@ -419,6 +429,7 @@ impl ChatLayout {
             displayed_threads_panel: ThreadsPanelSlice::default(),
             threads_creating_gate: false,
             displayed_inbox: InboxDisplaySlice::default(),
+            last_route: Router::global(cx).read(cx).route().clone(),
             pending_open_threads_popover: false,
             pending_open_pin_popover: false,
             voice_emoji_picker: None,

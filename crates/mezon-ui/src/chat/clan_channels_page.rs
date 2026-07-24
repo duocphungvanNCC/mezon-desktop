@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use gpui::{
     AnyElement, Context, Entity, FontWeight, ListAlignment, ListOffset, ListState, MouseButton,
-    Render, Subscription, Window, deferred, div, img, list, prelude::*, px,
+    Render, Subscription, Window, deferred, div, img, list, prelude::*, px, size,
 };
 use mezon_store::{
     ChannelId, ChannelList, ChannelSetting, ChannelSettingsStore, ChannelType, ClanId,
@@ -20,6 +20,7 @@ use crate::components::primitives::{Avatar, Icon, IconName, Input, InputEvent, I
 use crate::theme::ActiveTheme;
 
 const PAGE_SIZES: [usize; 3] = [10, 50, 100];
+const CHANNEL_ROW_HEIGHT: f32 = 60.;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SortField {
@@ -102,7 +103,6 @@ impl ClanChannelsPage {
             rows_dirty: true,
             visible_row_keys: Vec::new(),
             list_state: ListState::new(0, ListAlignment::Top, px(60.))
-                .measure_all()
                 .smooth_line_scroll()
                 .suppress_hover_while_scrolling(),
         }
@@ -747,7 +747,11 @@ impl Render for ClanChannelsPage {
         let visible_row_keys = visible.iter().map(VisibleRow::key).collect::<Vec<_>>();
         if self.visible_row_keys != visible_row_keys {
             let (old_range, new_count) = changed_range(&self.visible_row_keys, &visible_row_keys);
-            self.list_state.splice(old_range, new_count);
+            self.list_state.splice_with_size_hint(
+                old_range,
+                new_count,
+                size(px(0.), px(CHANNEL_ROW_HEIGHT)),
+            );
             self.visible_row_keys = visible_row_keys;
         }
         let entity = cx.entity();

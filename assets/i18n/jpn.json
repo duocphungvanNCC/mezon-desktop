@@ -3729,6 +3729,7 @@
   "setting.autoStart.title": "アプリを自動起動",
   "setting.channelSetting.recentChannels": "最近のチャンネル",
   "setting.channelSetting.searchByChannelLabel": "チャンネルラベルで検索",
+  "setting.channelSetting.noSearchResults": "この検索結果に一致するチャンネルはありません。",
   "setting.clanProfile.avatarUploadFailed": "アバターのアップロードに失敗しました:",
   "setting.clanProfile.chooseClan": "クランを選択",
   "setting.clanProfile.clanNickname": "クランのニックネーム",

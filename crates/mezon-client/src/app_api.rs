@@ -52,6 +52,12 @@ fn attachment_cdn_url(base_img_url: &str, filename: &str) -> Result<String> {
     ))
 }
 
+fn emoticon_id_from_filename(filename: &str) -> Option<i64> {
+    let file_name = filename.rsplit('/').next().filter(|s| !s.is_empty())?;
+    let stem = file_name.rsplit_once('.').map(|(stem, _)| stem)?;
+    stem.parse().ok()
+}
+
 fn image_dimensions(data: &[u8]) -> (i32, i32) {
     image::ImageReader::new(std::io::Cursor::new(data))
         .with_guessed_format()
@@ -1084,6 +1090,104 @@ impl AppApi {
     pub async fn emoji_recent_list(&self) -> Result<Vec<mezon_proto::api::EmojiRecent>> {
         let resp = self.transport.emoji_recent_list().await?;
         Ok(resp.emoji_recents)
+    }
+
+    pub async fn create_clan_emoji(
+        &self,
+        clan_id: i64,
+        source: &str,
+        shortname: &str,
+        category: &str,
+        id: i64,
+        is_for_sale: bool,
+    ) -> Result<()> {
+        self.transport
+            .create_clan_emoji(clan_id, source, shortname, category, id, is_for_sale)
+            .await
+    }
+
+    pub async fn update_clan_emoji_by_id(
+        &self,
+        id: i64,
+        shortname: &str,
+        clan_id: i64,
+    ) -> Result<()> {
+        self.transport
+            .update_clan_emoji_by_id(id, shortname, clan_id)
+            .await
+    }
+
+    pub async fn delete_clan_emoji_by_id(&self, id: i64, clan_id: i64) -> Result<()> {
+        self.transport.delete_clan_emoji_by_id(id, clan_id).await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn add_clan_sticker(
+        &self,
+        clan_id: i64,
+        source: &str,
+        shortname: &str,
+        category: &str,
+        id: i64,
+        media_type: i32,
+        is_for_sale: bool,
+    ) -> Result<()> {
+        self.transport
+            .add_clan_sticker(
+                clan_id,
+                source,
+                shortname,
+                category,
+                id,
+                media_type,
+                is_for_sale,
+            )
+            .await
+    }
+
+    pub async fn update_clan_sticker_by_id(
+        &self,
+        id: i64,
+        clan_id: i64,
+        source: &str,
+        shortname: &str,
+        category: &str,
+    ) -> Result<()> {
+        self.transport
+            .update_clan_sticker_by_id(id, clan_id, source, shortname, category)
+            .await
+    }
+
+    pub async fn delete_clan_sticker_by_id(&self, id: i64, clan_id: i64) -> Result<()> {
+        self.transport.delete_clan_sticker_by_id(id, clan_id).await
+    }
+
+    pub async fn upload_emoticon(
+        &self,
+        folder: &str,
+        id: i64,
+        extension: &str,
+        filetype: &str,
+        data: Vec<u8>,
+    ) -> Result<(i64, String)> {
+        let ext = extension.trim_start_matches('.');
+        let filename = format!("{}/{id}.{ext}", folder.trim_matches('/'));
+        let size = clamp_i32(data.len());
+        let (width, height) = if filetype.starts_with("image/") {
+            image_dimensions(&data)
+        } else {
+            (0, 0)
+        };
+        let upload = self
+            .transport
+            .upload_attachment_file(&filename, filetype, size, width, height)
+            .await?;
+        crate::transport_runtime::put_bytes_to_content_type(&upload.url, data, filetype).await?;
+        let resolved_id = emoticon_id_from_filename(&upload.filename).ok_or_else(|| {
+            anyhow::anyhow!("invalid emoticon upload filename: {}", upload.filename)
+        })?;
+        let url = attachment_cdn_url(&self.base_img_url, &upload.filename)?;
+        Ok((resolved_id, url))
     }
 
     pub async fn list_roles(

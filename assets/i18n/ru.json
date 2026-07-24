@@ -3739,6 +3739,7 @@
   "setting.autoStart.title": "Автозагрузка приложения",
   "setting.channelSetting.recentChannels": "Недавние каналы",
   "setting.channelSetting.searchByChannelLabel": "Поиск по метке канала",
+  "setting.channelSetting.noSearchResults": "Нет каналов, соответствующих этим результатам поиска.",
   "setting.clanProfile.avatarUploadFailed": "Не удалось загрузить аватар:",
   "setting.clanProfile.chooseClan": "ВЫБЕРИТЕ КЛАН",
   "setting.clanProfile.clanNickname": "НИК В КЛАНЕ",

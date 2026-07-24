@@ -3198,6 +3198,7 @@
   "setting.autoStart.title": "Кушымтаны автоҗөкләү",
   "setting.channelSetting.recentChannels": "Соңгы каналлар",
   "setting.channelSetting.searchByChannelLabel": "Канал билгесе буенча эзләү",
+  "setting.channelSetting.noSearchResults": "Бу эзләү нәтиҗәләренә туры килгән каналлар юк.",
   "setting.clanProfile.avatarUploadFailed": "Аватарны йөкләп булмады:",
   "setting.clanProfile.chooseClan": "КЛАН САЙЛАГЫЗ",
   "setting.clanProfile.clanNickname": "КЛАНДАГЫ КУШАМАТ",

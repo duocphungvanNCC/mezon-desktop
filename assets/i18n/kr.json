@@ -3722,6 +3722,7 @@
   "setting.autoStart.title": "앱 자동 시작",
   "setting.channelSetting.recentChannels": "최근 채널",
   "setting.channelSetting.searchByChannelLabel": "채널 레이블로 검색",
+  "setting.channelSetting.noSearchResults": "이 검색 결과와 일치하는 채널이 없습니다.",
   "setting.clanProfile.avatarUploadFailed": "아바타 업로드에 실패했습니다:",
   "setting.clanProfile.chooseClan": "클랜 선택",
   "setting.clanProfile.clanNickname": "클랜 닉네임",

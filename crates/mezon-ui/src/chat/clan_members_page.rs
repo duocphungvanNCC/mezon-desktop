@@ -5,7 +5,7 @@ use crate::components::primitives::{Avatar, Icon, IconName, Input, InputEvent, I
 use crate::theme::ActiveTheme;
 use gpui::{
     AnyElement, Context, Entity, FontWeight, Hsla, ListAlignment, ListOffset, ListState,
-    MouseButton, Render, Subscription, Window, deferred, div, img, list, prelude::*, px,
+    MouseButton, Render, Subscription, Window, deferred, div, img, list, prelude::*, px, size,
 };
 use mezon_store::{ClanId, ClanMembersStore, Role, RoleId, RolesStore, Settings, UserId};
 use unicode_normalization::{UnicodeNormalization, char::is_combining_mark};
@@ -278,7 +278,12 @@ impl ClanMembersPage {
         cell.into_any_element()
     }
 
-    fn render_member_row(&self, row: &MemberRow, cx: &Context<Self>) -> AnyElement {
+    fn render_member_row(
+        &self,
+        row: &MemberRow,
+        fill_available_height: bool,
+        cx: &Context<Self>,
+    ) -> AnyElement {
         let theme = cx.theme();
         let roles = self.visible_roles(&row.role_ids, cx);
         let name_color = roles
@@ -287,7 +292,7 @@ impl ClanMembersPage {
             .map(Hsla::from)
             .unwrap_or_else(|| Hsla::from(theme.text_secondary));
         let subtitle = row.username.clone();
-        table_row(theme, false)
+        table_row(theme, false, fill_available_height)
             .id(format!("member-row-{}", row.id.get()))
             .hover(|style| style.bg(theme.bg_hover))
             .child(name_column(
@@ -381,7 +386,7 @@ impl ClanMembersPage {
 
     fn render_header(&self, locale: &str, cx: &Context<Self>) -> AnyElement {
         let theme = cx.theme();
-        table_row(theme, true)
+        table_row(theme, true, false)
             .child(name_column(self.render_sort_header(
                 tr(locale, "memberTable.headers.name").to_uppercase(),
                 MemberSortField::Name,
@@ -689,11 +694,13 @@ impl Render for ClanMembersPage {
         let visible = Arc::new(visible);
         let item_count = visible.len();
         if self.list_state.item_count() != item_count {
-            self.list_state.reset(item_count);
+            let old_count = self.list_state.item_count();
+            self.list_state
+                .splice_with_size_hint(0..old_count, item_count, size(px(0.), px(48.)));
         }
         let entity = cx.entity();
         let visible_for_list = visible.clone();
-        let member_list = if has_search_query && item_count == 0 {
+        let member_list = if has_search_query && total == 0 {
             div()
                 .size_full()
                 .flex()
@@ -702,12 +709,24 @@ impl Render for ClanMembersPage {
                 .text_color(theme.text_secondary)
                 .child(tr(&locale, "memberPage.noSearchResults"))
                 .into_any_element()
+        } else if self.page_size == 10 {
+            let mut rows = div()
+                .id("member-ten-row-list")
+                .flex()
+                .flex_col()
+                .size_full()
+                .min_h_0()
+                .overflow_y_scroll();
+            for row in visible.iter() {
+                rows = rows.child(self.render_member_row(row, true, cx));
+            }
+            rows.into_any_element()
         } else {
             list(self.list_state.clone(), move |index, _window, cx| {
                 entity.update(cx, |this, cx| {
                     visible_for_list
                         .get(index)
-                        .map(|row| this.render_member_row(row, cx))
+                        .map(|row| this.render_member_row(row, false, cx))
                         .unwrap_or_else(|| div().into_any_element())
                 })
             })
@@ -724,14 +743,22 @@ impl Render for ClanMembersPage {
             .text_color(theme.text_secondary)
             .child(self.render_toolbar(&locale, cx))
             .child(self.render_header(&locale, cx))
-            .child(div().flex_1().min_h_0().child(member_list))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_hidden()
+                    .child(member_list),
+            )
             .child(self.render_footer(total, pages, &locale, cx))
             .into_any_element();
         management_page(tr(&locale, "common.members"), body, theme)
     }
 }
 
-fn table_row(theme: &crate::theme::Theme, header: bool) -> gpui::Div {
+fn table_row(theme: &crate::theme::Theme, header: bool, fill_available_height: bool) -> gpui::Div {
     let row = div()
         .w_full()
         .flex()
@@ -745,6 +772,8 @@ fn table_row(theme: &crate::theme::Theme, header: bool) -> gpui::Div {
             .text_size(px(12.))
             .font_weight(FontWeight::BOLD)
             .text_color(theme.text_secondary)
+    } else if fill_available_height {
+        row.flex_1().min_h(px(48.))
     } else {
         row.h(px(48.))
     }

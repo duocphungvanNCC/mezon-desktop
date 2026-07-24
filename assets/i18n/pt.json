@@ -3729,6 +3729,7 @@
   "setting.autoStart.title": "Inicialização automática",
   "setting.channelSetting.recentChannels": "Canais recentes",
   "setting.channelSetting.searchByChannelLabel": "Pesquisar por nome do canal",
+  "setting.channelSetting.noSearchResults": "Nenhum canal corresponde a estes resultados de pesquisa.",
   "setting.clanProfile.avatarUploadFailed": "Falha ao enviar o avatar:",
   "setting.clanProfile.chooseClan": "ESCOLHA UM CLÃ",
   "setting.clanProfile.clanNickname": "APELIDO NO CLÃ",
