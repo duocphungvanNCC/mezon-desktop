@@ -1,16 +1,9 @@
-use crate::components::primitives::Sizable;
-use gpui::{
-    AnyView, App, ClickEvent, Context, Entity, FontWeight, MouseButton, NavigationDirection,
-    StyleRefinement, Window, div, img, prelude::*, px,
-};
-use mezon_store::{AuthState, ChannelList, ClanId, ClanList, ConnectionStore, Settings};
-use ui::utils::ROUNDED_BORDER_WINDOW;
-
 use crate::app::title_bar::TitleBar;
 use crate::app::window_controls;
 use crate::auth::login_view::LoginView;
 use crate::chat::layout::ChatLayout;
 use crate::clan::settings::{ClanSettingScreen, ClanSettingsPage};
+use crate::components::primitives::Sizable;
 use crate::components::primitives::{Button, Icon, IconName, Size, Spinner};
 use crate::image_cache::{
     LruImageCache, SHARED_ENTRY_MAX_BYTES, SHARED_IMAGE_CACHE_BYTES, SHARED_IMAGE_CACHE_CAPACITY,
@@ -18,6 +11,11 @@ use crate::image_cache::{
 use crate::router::{Route, Router};
 use crate::settings::SettingsScreen;
 use crate::theme::{ActiveTheme, Theme, resolve_theme};
+use gpui::{
+    AnyView, App, ClickEvent, Context, Entity, FontWeight, MouseButton, NavigationDirection,
+    StyleRefinement, Window, div, img, prelude::*, px,
+};
+use mezon_store::{AuthState, ChannelList, ClanId, ClanList, ConnectionStore, Settings};
 
 pub struct RootView {
     title_bar: Entity<TitleBar>,
@@ -250,7 +248,6 @@ impl Render for RootView {
             .bg(theme.bg_primary)
             .font_family(base_font_family)
             .text_color(theme.text_primary)
-            .rounded(px(ROUNDED_BORDER_WINDOW))
             .overflow_hidden()
             .child(window_controls::render_app_drag_header())
             .image_cache(self.image_cache.clone())

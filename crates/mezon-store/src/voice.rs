@@ -51,6 +51,7 @@ pub const MAX_SOUND_BYTES: u64 = 1024 * 1024;
 pub const SOUND_ALLOWED_EXTENSIONS: &[&str] = &["mp3", "wav", "mpeg"];
 const KICK_SUPPRESS_TIMEOUT: Duration = Duration::from_secs(5);
 static RAISE_HAND_SOUND: &[u8] = include_bytes!("../assets/audio/raising-hand.mp3");
+static JOIN_VOICE_SOUND: &[u8] = include_bytes!("../assets/audio/joincallsound.mp3");
 
 fn parse_raise_token(token: &str) -> Option<bool> {
     if token.starts_with("raising-up:") {
@@ -104,6 +105,7 @@ pub enum VoiceCallStatus {
 pub enum VoiceModerationError {
     MuteFailed,
     KickFailed,
+    AgentFailed,
 }
 
 #[derive(Clone, Copy)]
@@ -161,6 +163,7 @@ pub struct VoiceStore {
     pending_kick: Option<(String, String)>,
     pending_removals: HashMap<String, Instant>,
     moderation_error: Option<VoiceModerationError>,
+    agent_pending: bool,
     participants: Vec<VoiceParticipant>,
     join_ranks: Vec<String>,
     speak_ranks: HashMap<String, u64>,
@@ -169,6 +172,9 @@ pub struct VoiceStore {
     raised_hand_timers: HashMap<String, Task<()>>,
     raising_hand_player: Option<AudioPlayer>,
     raising_hand_sound_loading: bool,
+    join_voice_player: Option<AudioPlayer>,
+    join_voice_sound_loading: bool,
+    join_sound_baseline_set: bool,
     last_reaction_send: Option<Instant>,
     active_sounds: HashMap<String, ActiveSound>,
     sound_throttle: HashMap<String, Instant>,
@@ -301,6 +307,7 @@ impl VoiceStore {
             pending_kick: None,
             pending_removals: HashMap::new(),
             moderation_error: None,
+            agent_pending: false,
             participants: Vec::new(),
             join_ranks: Vec::new(),
             speak_ranks: HashMap::new(),
@@ -309,6 +316,9 @@ impl VoiceStore {
             raised_hand_timers: HashMap::new(),
             raising_hand_player: None,
             raising_hand_sound_loading: false,
+            join_voice_player: None,
+            join_voice_sound_loading: false,
+            join_sound_baseline_set: false,
             last_reaction_send: None,
             active_sounds: HashMap::new(),
             sound_throttle: HashMap::new(),
@@ -787,6 +797,37 @@ impl VoiceStore {
                 player.set_data(pcm);
                 player.play();
                 this.raising_hand_player = Some(player);
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn play_join_sound(&mut self, cx: &mut Context<Self>) {
+        if let Some(player) = &self.join_voice_player {
+            player.play();
+            return;
+        }
+        if self.join_voice_sound_loading {
+            return;
+        }
+        self.join_voice_sound_loading = true;
+        cx.spawn(async move |this, cx| {
+            let decoded = cx
+                .background_executor()
+                .spawn(async move { mezon_audio::decode_audio(JOIN_VOICE_SOUND.to_vec()) })
+                .await;
+            this.update(cx, |this, _| {
+                this.join_voice_sound_loading = false;
+                let Ok(pcm) = decoded else {
+                    return;
+                };
+                let Ok(player) = AudioPlayer::new() else {
+                    return;
+                };
+                player.set_data(pcm);
+                player.play();
+                this.join_voice_player = Some(player);
             })
             .ok();
         })
@@ -1371,6 +1412,47 @@ impl VoiceStore {
         self.moderate_participant(identity, ModerationAction::Kick, cx);
     }
 
+    pub fn agent_active(&self) -> bool {
+        self.participants.iter().any(|p| p.is_agent)
+    }
+
+    pub fn toggle_agent(&mut self, cx: &mut Context<Self>) {
+        if self.agent_pending {
+            return;
+        }
+        let Some((channel_id, _clan_id)) = self.connection.connected_channel() else {
+            return;
+        };
+        let Ok(channel_id) = channel_id.parse::<i64>() else {
+            return;
+        };
+        if self.room_name.is_empty() {
+            return;
+        }
+        let room_name = self.room_name.clone();
+        let on_agent = self.agent_active();
+        let api = self.api.clone();
+        self.agent_pending = true;
+        cx.spawn(async move |this, cx| {
+            let result = if on_agent {
+                api.disconnect_agent(channel_id, &room_name).await
+            } else {
+                api.add_agent_to_channel(channel_id, &room_name).await
+            };
+            if let Err(e) = &result {
+                tracing::warn!("toggle agent failed: {e:#}");
+            }
+            let _ = this.update(cx, |this, cx| {
+                this.agent_pending = false;
+                if result.is_err() {
+                    this.moderation_error = Some(VoiceModerationError::AgentFailed);
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
     fn moderate_participant(
         &mut self,
         identity: String,
@@ -1631,6 +1713,7 @@ impl VoiceStore {
                         channel_id: channel_id.clone(),
                         clan_id: clan_id.clone(),
                     };
+                    self.play_join_sound(cx);
                 }
                 self.call_status = VoiceCallStatus::Stable;
             }
@@ -1662,8 +1745,21 @@ impl VoiceStore {
                 if self.participants == list {
                     return;
                 }
+                let remote_joined = self.join_sound_baseline_set
+                    && list.iter().any(|p| {
+                        !p.is_local
+                            && !p.is_agent
+                            && !self
+                                .participants
+                                .iter()
+                                .any(|old| old.identity == p.identity)
+                    });
+                self.join_sound_baseline_set = true;
                 self.track_visual_ranks(&list);
                 self.participants = list;
+                if remote_joined {
+                    self.play_join_sound(cx);
+                }
                 if let Some(local) = self.participants.iter().find(|p| p.is_local) {
                     self.mic_enabled = !local.muted;
                     self.camera_enabled = local.camera.is_some();
@@ -1902,6 +1998,7 @@ impl VoiceStore {
         self.pending_kick = None;
         self.pending_removals.clear();
         self.moderation_error = None;
+        self.agent_pending = false;
         self.participants.clear();
         self.join_ranks.clear();
         self.speak_ranks.clear();
@@ -1913,6 +2010,9 @@ impl VoiceStore {
         self.sound_preview = None;
         self.raising_hand_player = None;
         self.raising_hand_sound_loading = false;
+        self.join_voice_player = None;
+        self.join_voice_sound_loading = false;
+        self.join_sound_baseline_set = false;
         self.displayed_reactions.clear();
         self.last_emoji_at = None;
         self.meet_token_prefetching = None;

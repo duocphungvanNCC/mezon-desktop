@@ -13,7 +13,6 @@ use mezon_store::{
     VoiceMember, VoiceModerationError, VoiceStore, expand_mention_name_tokens,
 };
 use ui::PopoverMenuHandle;
-use ui::utils::ROUNDED_BORDER_WINDOW;
 
 use crate::app::shell::Shell;
 use crate::chat::area::ChatArea;
@@ -230,6 +229,7 @@ impl ChatLayout {
                 let key = match err {
                     VoiceModerationError::MuteFailed => "channelVoice.muteMemberFailed",
                     VoiceModerationError::KickFailed => "channelVoice.kickMemberFailed",
+                    VoiceModerationError::AgentFailed => "channelVoice.agentActionFailed",
                 };
                 let msg = mezon_i18n::t(&locale, key).to_string();
                 Shell::global(cx).update(cx, |shell, cx| shell.error(msg, cx));
@@ -1145,7 +1145,7 @@ impl ChatLayout {
     }
 
     fn sync_voice_frame_pump(&mut self, cx: &mut Context<Self>) {
-        const VOICE_FRAME_INTERVAL: std::time::Duration = std::time::Duration::from_millis(33);
+        const VOICE_FRAME_FALLBACK: std::time::Duration = std::time::Duration::from_millis(200);
         let want_pump =
             self.is_voice_frame_relevant(cx) && self.voice_store.read(cx).has_active_video();
         if !want_pump {
@@ -1158,20 +1158,36 @@ impl ChatLayout {
         self._voice_frame_pump = Some(cx.spawn(async move |this, cx| {
             let mut last_seq = 0u64;
             loop {
-                cx.background_executor().timer(VOICE_FRAME_INTERVAL).await;
-                let stepped = this.update(cx, |_, cx| {
-                    let seq = VoiceStore::global(cx)
-                        .read(cx)
-                        .frame_store()
-                        .map(|store| store.publish_seq())
-                        .unwrap_or(0);
+                let store =
+                    match this.update(cx, |_, cx| VoiceStore::global(cx).read(cx).frame_store()) {
+                        Ok(store) => store,
+                        Err(_) => break,
+                    };
+                let Some(store) = store else {
+                    cx.background_executor().timer(VOICE_FRAME_FALLBACK).await;
+                    continue;
+                };
+                let mut rx = store.frame_watch();
+                loop {
+                    let seq = store.publish_seq();
                     if seq != last_seq {
                         last_seq = seq;
-                        cx.notify();
+                        if this.update(cx, |_, cx| cx.notify()).is_err() {
+                            return;
+                        }
                     }
-                });
-                if stepped.is_err() {
-                    break;
+                    let frame_published = {
+                        let changed = std::pin::pin!(rx.changed());
+                        let fallback =
+                            std::pin::pin!(cx.background_executor().timer(VOICE_FRAME_FALLBACK));
+                        matches!(
+                            futures::future::select(changed, fallback).await,
+                            futures::future::Either::Left((Ok(()), _))
+                        )
+                    };
+                    if !frame_published {
+                        break;
+                    }
                 }
             }
         }));
@@ -1378,7 +1394,6 @@ impl Render for ChatLayout {
                             .flex_1()
                             .min_h_0()
                             .bg(theme.bg_tertiary)
-                            .rounded_bl(px(ROUNDED_BORDER_WINDOW))
                             .overflow_hidden()
                             .child(
                                 div().w(px(72.0)).h_full().pb(nav_bottom_pad).child(
