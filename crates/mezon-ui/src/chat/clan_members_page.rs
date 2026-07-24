@@ -709,7 +709,7 @@ impl Render for ClanMembersPage {
                 .text_color(theme.text_secondary)
                 .child(tr(&locale, "memberPage.noSearchResults"))
                 .into_any_element()
-        } else if self.page_size == 10 {
+        } else if self.page_size == 10 && visible.len() == self.page_size {
             let mut rows = div()
                 .id("member-ten-row-list")
                 .flex()
