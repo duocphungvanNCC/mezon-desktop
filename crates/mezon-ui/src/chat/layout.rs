@@ -1416,8 +1416,10 @@ impl Render for ChatLayout {
                                 )
                             }))
                             .child(
-                                AnyView::from(self.user_info_bar.clone())
-                                    .cached(StyleRefinement::default().w_full().h(px(56.0))),
+                                div()
+                                    .w_full()
+                                    .h(px(56.0))
+                                    .child(AnyView::from(self.user_info_bar.clone())),
                             ),
                     ),
             )

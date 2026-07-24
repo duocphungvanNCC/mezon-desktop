@@ -4324,5 +4324,12 @@
   "userProfile.voiceInfo.inVoice": "Trong kênh thoại",
   "userProfile.voiceInfo.joinVoice": "Tham gia thoại",
   "common.login.genericError": "Đã có lỗi xảy ra. Vui lòng thử lại.",
-  "common.login.invalidEmail": "Vui lòng nhập địa chỉ email hợp lệ."
+  "common.login.invalidEmail": "Vui lòng nhập địa chỉ email hợp lệ.",
+  "token.history.title": "Lịch sử giao dịch",
+  "token.history.empty": "Chưa có giao dịch",
+  "token.history.loading": "Đang tải…",
+  "token.history.all": "Tất cả",
+  "token.history.sent": "Đã gửi",
+  "token.history.received": "Đã nhận",
+  "token.history.walletUnavailable": "Ví không khả dụng"
 }

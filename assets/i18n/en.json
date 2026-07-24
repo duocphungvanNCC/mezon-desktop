@@ -4364,5 +4364,12 @@
   "userProfile.voiceInfo.inVoice": "In voice",
   "userProfile.voiceInfo.joinVoice": "Join Voice",
   "common.login.genericError": "Something went wrong. Please try again.",
-  "common.login.invalidEmail": "Please enter a valid email address."
+  "common.login.invalidEmail": "Please enter a valid email address.",
+  "token.history.title": "Transaction History",
+  "token.history.empty": "No transactions yet",
+  "token.history.loading": "Loading…",
+  "token.history.all": "All",
+  "token.history.sent": "Sent",
+  "token.history.received": "Received",
+  "token.history.walletUnavailable": "Wallet is not available"
 }

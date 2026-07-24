@@ -50,6 +50,7 @@ pub enum RealtimeKind {
     RemoveFriend,
     BlockFriend,
     UnblockFriend,
+    TokenSent,
 }
 
 impl RealtimeKind {
@@ -89,6 +90,7 @@ impl RealtimeKind {
             RealtimeEvent::RemoveFriend(_) => Self::RemoveFriend,
             RealtimeEvent::BlockFriend(_) => Self::BlockFriend,
             RealtimeEvent::UnblockFriend(_) => Self::UnblockFriend,
+            RealtimeEvent::TokenSent(_) => Self::TokenSent,
             _ => return None,
         })
     }
@@ -271,6 +273,22 @@ mod tests {
                 realtime::VoiceReactionSend::default()
             )),
             Some(RealtimeKind::VoiceReaction)
+        );
+    }
+
+    #[test]
+    fn kind_of_maps_token_sent() {
+        assert_eq!(
+            RealtimeKind::of(&RealtimeEvent::TokenSent(api::TokenSentEvent::default())),
+            Some(RealtimeKind::TokenSent)
+        );
+    }
+
+    #[test]
+    fn kind_of_returns_none_for_give_coffee() {
+        assert_eq!(
+            RealtimeKind::of(&RealtimeEvent::GiveCoffee(api::GiveCoffeeEvent::default())),
+            None
         );
     }
 

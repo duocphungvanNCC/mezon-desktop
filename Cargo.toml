@@ -13,6 +13,7 @@ members = [
     "crates/mezon-updater",
     "crates/mezon-proto",
     "crates/mezon-i18n",
+    "crates/mmn-client",
     # "crates/mezon-active-windows" excluded: orphan (unused) + does not compile (Rust 2024
     # `unsafe extern` + core_foundation API mismatch). Re-add once fixed & wired for rich-presence.
     # Vendored GPUI crates
@@ -119,6 +120,7 @@ mezon-webview = { path = "crates/mezon-webview" }
 mezon-proto   = { path = "crates/mezon-proto" }
 mezon-updater = { path = "crates/mezon-updater" }
 mezon-i18n    = { path = "crates/mezon-i18n" }
+mmn-client    = { path = "crates/mmn-client" }
 # mezon-active-windows = { path = "crates/mezon-active-windows" }  # excluded — see [workspace.members]
 
 # ---------- Async runtime ----------
@@ -146,6 +148,11 @@ serde_urlencoded    = "0.7"
 bytes               = "1.0"
 sha2                = "0.10"
 url                 = "2.2"
+
+# ---------- MMN blockchain SDK crypto ----------
+ed25519-dalek       = "2"
+bs58                = "0.5"
+hex                 = "0.4"
 
 # ---------- Protobuf ----------
 prost                = "0.13"
