@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 
 use gpui::{
     App, AppContext, AsyncApp, Context, Entity, EventEmitter, Global, Rgba, SharedString,
-    Subscription, Task,
+    Subscription, Task, WeakEntity,
 };
 use mezon_audio::{AudioPlayer, decode_audio};
 use mezon_client::transport::{
@@ -3356,6 +3356,7 @@ impl MessagesStore {
             message_sender_display_name: draft.sender_name,
         });
         cx.spawn(async move |this, cx| {
+            ensure_archived_thread_reactivated(&api, &this, channel_id, clan_id, mode, cx).await;
             if has_attachments {
                 let files: Vec<UploadFile> = attachments
                     .into_iter()
@@ -3627,6 +3628,7 @@ impl MessagesStore {
 
         let api = self.api.clone();
         cx.spawn(async move |this, cx| {
+            ensure_archived_thread_reactivated(&api, &this, channel_id, clan_id, mode, cx).await;
             let result = api
                 .send_message_with_attachment_urls(
                     clan_id.get(),
@@ -4679,7 +4681,45 @@ impl MessagesStore {
             list.maybe_reactivate_after_send(channel_id, clan_id, mode, cx);
         });
     }
+}
 
+async fn ensure_archived_thread_reactivated(
+    api: &AppApi,
+    this: &WeakEntity<MessagesStore>,
+    channel_id: ChannelId,
+    clan_id: ClanId,
+    mode: i32,
+    cx: &mut AsyncApp,
+) {
+    let needs = this
+        .update(cx, |_this, cx| {
+            ChannelList::global(cx).update(cx, |list, cx| {
+                list.needs_reactivate_for_send(channel_id, clan_id, mode, cx)
+            })
+        })
+        .ok()
+        .unwrap_or(false);
+    if !needs {
+        return;
+    }
+    match api
+        .active_archived_thread(clan_id.get(), channel_id.get())
+        .await
+    {
+        Ok(()) => {
+            let _ = this.update(cx, |_this, cx| {
+                ChannelList::global(cx).update(cx, |list, cx| {
+                    list.apply_thread_reactivated(clan_id, channel_id, None, cx);
+                });
+            });
+        }
+        Err(e) => {
+            tracing::error!("active_archived_thread before send failed: {e}");
+        }
+    }
+}
+
+impl MessagesStore {
     fn reconcile_temp(
         &mut self,
         channel_id: ChannelId,

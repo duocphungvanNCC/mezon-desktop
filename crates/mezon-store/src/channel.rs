@@ -1843,6 +1843,16 @@ impl ChannelList {
         self.channel(clan_id, channel_id).map(|ch| ch.active)
     }
 
+    pub fn needs_reactivate_for_send(
+        &mut self,
+        channel_id: ChannelId,
+        clan_id: ClanId,
+        mode: i32,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        self.prepare_archived_thread_for_reactivate(channel_id, clan_id, mode, cx)
+    }
+
     pub fn maybe_reactivate_after_send(
         &mut self,
         channel_id: ChannelId,
@@ -1850,22 +1860,8 @@ impl ChannelList {
         mode: i32,
         cx: &mut Context<Self>,
     ) {
-        let Some(channel) = self.channel(clan_id, channel_id).cloned() else {
+        if !self.prepare_archived_thread_for_reactivate(channel_id, clan_id, mode, cx) {
             return;
-        };
-        let threads_archived = crate::threads::ThreadsStore::global(cx)
-            .read(cx)
-            .thread_active(&channel_id.to_string())
-            == Some(CHANNEL_ACTIVE_ARCHIVED);
-        let archived = threads_archived || channel.is_archived();
-        if !should_reactivate_thread_after_send(mode, &channel, archived) {
-            return;
-        }
-        if threads_archived
-            && !channel.is_archived()
-            && let Some(existing) = self.channel_mut(clan_id, channel_id)
-        {
-            let _ = sync_thread_active_status(existing, CHANNEL_ACTIVE_ARCHIVED, true);
         }
         if !self.reactivating.insert(channel_id) {
             return;
@@ -1889,6 +1885,33 @@ impl ChannelList {
             });
         })
         .detach();
+    }
+
+    fn prepare_archived_thread_for_reactivate(
+        &mut self,
+        channel_id: ChannelId,
+        clan_id: ClanId,
+        mode: i32,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(channel) = self.channel(clan_id, channel_id).cloned() else {
+            return false;
+        };
+        let threads_archived = crate::threads::ThreadsStore::global(cx)
+            .read(cx)
+            .thread_active(&channel_id.to_string())
+            == Some(CHANNEL_ACTIVE_ARCHIVED);
+        let archived = threads_archived || channel.is_archived();
+        if !should_reactivate_thread_after_send(mode, &channel, archived) {
+            return false;
+        }
+        if threads_archived
+            && !channel.is_archived()
+            && let Some(existing) = self.channel_mut(clan_id, channel_id)
+        {
+            let _ = sync_thread_active_status(existing, CHANNEL_ACTIVE_ARCHIVED, true);
+        }
+        true
     }
 
     pub fn apply_thread_reactivated(
