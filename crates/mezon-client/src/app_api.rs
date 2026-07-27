@@ -6,9 +6,9 @@ use anyhow::Result;
 use crate::{
     TransportClient,
     transport::{
-        ApiAccount, ApiAttachment, ApiCategoryDesc, ApiChannelApp, ApiChannelAttachment,
-        ApiChannelDesc, ApiClanDesc, ApiDirectChannel, ApiFriend, ApiMessage, ApiPinMessage,
-        ApiThreadDesc, ApiVoiceChannelUser, RealtimeEvent,
+        ApiAccount, ApiAttachment, ApiCanvas, ApiCanvasDetail, ApiCategoryDesc, ApiChannelApp,
+        ApiChannelAttachment, ApiChannelDesc, ApiClanDesc, ApiDirectChannel, ApiFriend, ApiMessage,
+        ApiPinMessage, ApiThreadDesc, ApiVoiceChannelUser, RealtimeEvent,
     },
 };
 
@@ -500,6 +500,56 @@ impl AppApi {
             .create_pin_message(message_id, channel_id, clan_id)
             .await?;
         Ok(())
+    }
+
+    pub async fn get_channel_canvas_list(
+        &self,
+        channel_id: i64,
+        clan_id: i64,
+        limit: i32,
+        page: i32,
+    ) -> Result<Vec<ApiCanvas>> {
+        self.transport
+            .get_channel_canvas_list(channel_id, clan_id, limit, page)
+            .await
+    }
+
+    pub async fn get_channel_canvas_detail(
+        &self,
+        id: i64,
+        clan_id: i64,
+        channel_id: i64,
+    ) -> Result<ApiCanvasDetail> {
+        self.transport
+            .get_channel_canvas_detail(id, clan_id, channel_id)
+            .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn edit_channel_canvas(
+        &self,
+        id: i64,
+        channel_id: i64,
+        clan_id: i64,
+        title: &str,
+        content: &str,
+        is_default: bool,
+        status: i32,
+    ) -> Result<String> {
+        self.transport
+            .edit_channel_canvas(id, channel_id, clan_id, title, content, is_default, status)
+            .await
+    }
+
+    pub async fn delete_channel_canvas(
+        &self,
+        canvas_id: i64,
+        clan_id: i64,
+        channel_id: i64,
+    ) -> Result<()> {
+        self.transport
+            .delete_channel_canvas(canvas_id, clan_id, channel_id)
+            .await
     }
 
     #[allow(clippy::too_many_arguments)]

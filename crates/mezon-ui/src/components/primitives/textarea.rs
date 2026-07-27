@@ -10,8 +10,9 @@ use gpui::{
 };
 use unicode_segmentation::UnicodeSegmentation;
 
-use super::blink_manager::{CaretBlink, HasCaretBlink};
-use crate::theme::ActiveTheme;
+use mezon_theme::ActiveTheme;
+use mezon_widgets::blink_manager::{CaretBlink, HasCaretBlink};
+
 use crate::util::text_edit::{
     EditKind, HistoryEntry, MAX_UNDO_HISTORY, home_target, line_end, line_start,
     next_word_boundary, previous_word_boundary,
