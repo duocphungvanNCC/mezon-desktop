@@ -1006,7 +1006,7 @@ impl Render for ChatHeader {
 fn render_stream_chat_sidebar_header(
     theme: &Theme,
     name: &SharedString,
-    cx: &App,
+    _cx: &App,
 ) -> impl IntoElement {
     let label = if name.len() > 30 {
         format!("{}...", &name[..30])

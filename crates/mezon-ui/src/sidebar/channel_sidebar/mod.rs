@@ -40,11 +40,12 @@ fn resolve_voice_member_slot(
     clan_id: Option<ClanId>,
     m: &VoiceMember,
 ) -> VoiceMemberSlot {
-    let (display_name, avatar_url) = crate::util::voice_member::resolve_display(cx, clan_id, m);
+    let resolved = crate::util::voice_member::resolve_display(cx, clan_id, m);
     VoiceMemberSlot {
         user_id: m.user_id.to_string(),
-        display_name,
-        avatar_url,
+        display_name: resolved.name,
+        avatar_url: resolved.avatar_src,
+        avatar_raw: resolved.avatar_raw,
     }
 }
 
@@ -53,28 +54,13 @@ fn resolve_stream_member_slot(
     clan_id: Option<ClanId>,
     m: &StreamMember,
 ) -> VoiceMemberSlot {
-    let mut slot = VoiceMemberSlot {
+    let resolved = crate::util::voice_member::resolve_stream_display(cx, clan_id, m);
+    VoiceMemberSlot {
         user_id: m.user_id.to_string(),
-        display_name: m.display_name.clone(),
-        avatar_url: String::new(),
-    };
-    if let Some(clan_id) = clan_id
-        && let Some(store) = ClanMembersStore::try_global(cx)
-        && let Some(member) = store.read(cx).member(clan_id, m.user_id)
-    {
-        let name = member.name();
-        if !name.is_empty() {
-            slot.display_name = name.to_string();
-        }
-        let avatar = member.avatar();
-        if !avatar.is_empty() {
-            slot.avatar_url = avatar.to_string();
-        }
+        display_name: resolved.name,
+        avatar_url: resolved.avatar_src,
+        avatar_raw: resolved.avatar_raw,
     }
-    if !slot.avatar_url.is_empty() {
-        slot.avatar_url = crate::util::imgproxy::avatar_url(cx, &slot.avatar_url);
-    }
-    slot
 }
 
 fn channel_sidebar_members(
@@ -1632,13 +1618,16 @@ fn render_sidebar_item(
                         .py(px(2.));
                     for (index, m) in voice_members.iter().take(5).enumerate() {
                         let name_text = m.display_name.clone();
-                        let avatar = if m.avatar_url.is_empty() {
-                            Avatar::new().name(name_text)
-                        } else {
-                            Avatar::new()
-                                .src(SharedString::from(m.avatar_url.clone()))
-                                .name(name_text)
-                        };
+                        let mut avatar = Avatar::new().name(name_text);
+                        if !m.avatar_url.is_empty() {
+                            avatar = avatar.src(SharedString::from(m.avatar_url.clone()));
+                            if !m.avatar_raw.is_empty() && m.avatar_raw != m.avatar_url {
+                                avatar =
+                                    avatar.fallback_src(SharedString::from(m.avatar_raw.clone()));
+                            }
+                        } else if !m.avatar_raw.is_empty() {
+                            avatar = avatar.src(SharedString::from(m.avatar_raw.clone()));
+                        }
                         cluster = cluster.child(
                             div()
                                 .when(index > 0, |el| el.ml(px(-6.)))
@@ -1666,13 +1655,16 @@ fn render_sidebar_item(
                         .pl(voice_pl)
                         .children(voice_members.iter().map(|m| {
                             let name_text = m.display_name.clone();
-                            let avatar = if m.avatar_url.is_empty() {
-                                Avatar::new().name(name_text.clone())
-                            } else {
-                                Avatar::new()
-                                    .src(SharedString::from(m.avatar_url.clone()))
-                                    .name(name_text.clone())
-                            };
+                            let mut avatar = Avatar::new().name(name_text.clone());
+                            if !m.avatar_url.is_empty() {
+                                avatar = avatar.src(SharedString::from(m.avatar_url.clone()));
+                                if !m.avatar_raw.is_empty() && m.avatar_raw != m.avatar_url {
+                                    avatar = avatar
+                                        .fallback_src(SharedString::from(m.avatar_raw.clone()));
+                                }
+                            } else if !m.avatar_raw.is_empty() {
+                                avatar = avatar.src(SharedString::from(m.avatar_raw.clone()));
+                            }
                             div()
                                 .w_full()
                                 .min_w_0()

@@ -287,6 +287,12 @@ impl StreamStore {
                                 },
                             );
                         }
+                        if let Some(store) = crate::ClanMembersStore::try_global(cx) {
+                            store.update(cx, |store, cx| store.ensure_loaded(clan_id, cx));
+                        }
+                        if let Some(store) = crate::UsersByUserStore::try_global(cx) {
+                            store.update(cx, |store, cx| store.ensure_loaded(cx));
+                        }
                     }
                     Err(err) => tracing::warn!("list_streaming_channel_users failed: {err:#}"),
                 }

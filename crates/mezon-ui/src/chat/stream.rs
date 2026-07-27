@@ -5,15 +5,15 @@ use gpui::{
     div, img, prelude::*, px, relative,
 };
 use mezon_store::{
-    AppConfig, AuthState, Channel, ChannelId, ChannelList, ClanId, ClanList, ClanMembersStore,
-    StreamMember, StreamPhase, StreamStore, UsersByUserStore, user_profile::ProfileContext,
+    AppConfig, AuthState, Channel, ChannelId, ChannelList, ClanId, ClanList, StreamMember,
+    StreamPhase, StreamStore,
 };
 use mezon_voice::VideoFrameData;
 
 use crate::chat::layout::ChatLayout;
 use crate::components::primitives::{Avatar, Icon, IconName, Slider, SliderState};
 use crate::theme::Theme;
-use crate::util::assets::MEZON_LOGO;
+use crate::util::assets::STREAM_THUMBNAIL;
 use ui::Tooltip;
 
 const STREAM_VIDEO_KEY: u64 = 1;
@@ -680,6 +680,7 @@ fn render_joined(
                                 .w(video_width)
                                 .max_w_full()
                                 .min_h(px(160.))
+                                .aspect_ratio(16. / 9.)
                                 .child(player)
                                 .when(store.playback_blocked(), |el| {
                                     el.child(
@@ -852,7 +853,7 @@ fn render_members_toggle_button(
 
 fn render_stream_player(
     window: &mut Window,
-    theme: &Theme,
+    _theme: &Theme,
     channel: &Channel,
     store: &StreamStore,
     is_live: bool,
@@ -888,11 +889,11 @@ fn render_stream_player(
 }
 
 fn render_controls_bar(
-    window: &mut Window,
+    _window: &mut Window,
     store: &StreamStore,
     stream: Entity<StreamStore>,
     volume_slider: &Entity<SliderState>,
-    cx: &App,
+    _cx: &App,
     always_show: bool,
 ) -> AnyElement {
     let volume = store.effective_volume();
@@ -984,27 +985,23 @@ fn volume_icon(volume: f32, muted: bool) -> IconName {
     }
 }
 
-fn render_stream_thumbnail(channel: &Channel, cx: &App) -> AnyElement {
-    if !channel.avatar_url.is_empty() {
-        let raw = channel.avatar_url.clone();
-        let proxied = crate::util::imgproxy::stream_cover_url(cx, &raw);
-        return img(SharedString::from(proxied))
+fn render_stream_thumbnail(channel: &Channel, _cx: &App) -> AnyElement {
+    let raw = channel.avatar_url.trim();
+    if !raw.is_empty() && raw != "0" {
+        let raw = SharedString::from(raw.to_string());
+        return img(raw)
             .size_full()
             .object_fit(ObjectFit::Cover)
+            .with_fallback(stream_thumbnail_fallback)
             .into_any_element();
     }
-    div()
+    stream_thumbnail_fallback()
+}
+
+fn stream_thumbnail_fallback() -> AnyElement {
+    img(STREAM_THUMBNAIL)
         .size_full()
-        .bg(gpui::rgb(0x000000))
-        .flex()
-        .items_center()
-        .justify_center()
-        .child(
-            img(MEZON_LOGO)
-                .w_full()
-                .h_full()
-                .object_fit(ObjectFit::Contain),
-        )
+        .object_fit(ObjectFit::Cover)
         .into_any_element()
 }
 
@@ -1066,71 +1063,31 @@ fn member_row(
 
 fn stream_member_avatar(display: &MemberDisplay) -> AnyElement {
     let size = px(MEMBER_AVATAR_SIZE);
+    let mut avatar = Avatar::new().name(display.name.clone()).size_px(size);
     if !display.avatar_src.is_empty() {
-        return img(display.avatar_src.clone())
-            .size(size)
-            .flex_shrink_0()
-            .rounded_full()
-            .object_fit(ObjectFit::Cover)
-            .into_any_element();
+        avatar = avatar.src(display.avatar_src.clone());
+        if !display.avatar_raw.is_empty() && display.avatar_raw != display.avatar_src {
+            avatar = avatar.fallback_src(display.avatar_raw.clone());
+        }
+    } else if !display.avatar_raw.is_empty() {
+        avatar = avatar.src(display.avatar_raw.clone());
     }
-    Avatar::new()
-        .name(display.name.clone())
-        .size_px(size)
-        .into_any_element()
+    avatar.into_any_element()
 }
 
 fn resolve_member_display(cx: &App, clan_id: ClanId, member: &StreamMember) -> MemberDisplay {
-    let mut name = member.display_name.clone();
-    let mut raw_avatar = String::new();
-
-    if let Some(store) = ClanMembersStore::try_global(cx)
-        && let Some(clan_member) = store.read(cx).member(clan_id, member.user_id)
-    {
-        let resolved = clan_member.name();
-        if !resolved.is_empty() {
-            name = resolved.to_string();
-        }
-        raw_avatar = clan_member.avatar().to_string();
-    } else if let Some(user) = UsersByUserStore::try_global(cx)
-        && let Some(user) = user.read(cx).user(member.user_id)
-    {
-        if !user.display_name.is_empty() {
-            name = user.display_name.clone();
-        } else if !user.username.is_empty() {
-            name = user.username.clone();
-        }
-        raw_avatar = user.avatar_url.clone();
-    }
-
-    if raw_avatar.is_empty()
-        && let Some(url) =
-            mezon_store::resolve_avatar_url(member.user_id, ProfileContext::Clan(clan_id), cx)
-    {
-        raw_avatar = url;
-    }
-
-    let avatar_src = if raw_avatar.is_empty() {
-        SharedString::default()
-    } else {
-        SharedString::from(crate::util::imgproxy::proxied(
-            cx,
-            &raw_avatar,
-            300,
-            300,
-            "fit",
-        ))
-    };
-
+    let resolved = crate::util::voice_member::resolve_stream_display(cx, Some(clan_id), member);
     MemberDisplay {
-        name: SharedString::from(name),
-        avatar_src,
+        name: SharedString::from(resolved.name),
+        avatar_src: SharedString::from(resolved.avatar_src),
+        avatar_raw: SharedString::from(resolved.avatar_raw),
     }
 }
 
 struct MemberDisplay {
     name: SharedString,
     avatar_src: SharedString,
+    avatar_raw: SharedString,
 }
 
 fn truncate_label(label: &str, max: usize) -> SharedString {

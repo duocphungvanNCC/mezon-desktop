@@ -129,6 +129,7 @@ struct ActiveChannelSlice {
     id: ChannelId,
     name: String,
     channel_type: ChannelType,
+    avatar_url: String,
     voice_members: Vec<VoiceMember>,
 }
 
@@ -138,6 +139,7 @@ impl ActiveChannelSlice {
             id: channel.id,
             name: channel.name.clone(),
             channel_type: channel.channel_type,
+            avatar_url: channel.avatar_url.clone(),
             voice_members: channel.voice_members.clone(),
         }
     }
@@ -146,6 +148,7 @@ impl ActiveChannelSlice {
         self.id != channel.id
             || self.channel_type != channel.channel_type
             || self.name != channel.name
+            || self.avatar_url != channel.avatar_url
             || self.voice_members != channel.voice_members
     }
 }
@@ -228,7 +231,6 @@ impl ChatLayout {
         .detach();
 
         let voice_store = VoiceStore::global(cx);
-        let stream_store = StreamStore::global(cx);
         cx.observe(&voice_store, |this, voice, cx| {
             if let Some(err) = voice.update(cx, |store, _| store.take_moderation_error()) {
                 let locale = this.settings.read(cx).language.clone();
@@ -299,7 +301,7 @@ impl ChatLayout {
             &mezon_store::ClanMembersStore::global(cx),
             |this, _, event: &mezon_store::ClanMembersEvent, cx| {
                 let mezon_store::ClanMembersEvent::Changed { clan_id } = event;
-                if this.visible_voice_clan_id(cx) == Some(*clan_id) {
+                if this.visible_media_clan_id(cx) == Some(*clan_id) {
                     cx.notify();
                 }
             },
@@ -1323,14 +1325,19 @@ impl ChatLayout {
             })
     }
 
-    fn visible_voice_clan_id(&self, cx: &Context<Self>) -> Option<ClanId> {
+    fn visible_media_clan_id(&self, cx: &Context<Self>) -> Option<ClanId> {
         if self.is_dm_route(cx) {
             return None;
         }
         self.channel_list
             .read(cx)
             .active_channel()
-            .filter(|ch| ch.channel_type == ChannelType::Voice)
+            .filter(|ch| {
+                matches!(
+                    ch.channel_type,
+                    ChannelType::Voice | ChannelType::Stream | ChannelType::App
+                )
+            })
             .map(|ch| ch.clan_id)
     }
 
