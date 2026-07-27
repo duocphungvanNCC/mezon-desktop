@@ -35,10 +35,11 @@ jobs:
       NX_CHAT_APP_GOOGLE_CLIENT_ID: 391688022389-1k9kb377ea6dccpqii7m5pifjj0agsjc.apps.googleusercontent.com
       NX_DOMAIN_URL: https://mezon.ai
       NX_CHAT_APP_REDIRECT_URI: https://mezon.ai
-      NX_LOGO_MEZON: https://cdn.komu.vn/images/mezon_logo.png
-      NX_BASE_IMG_URL: https://cdn.komu.vn
+      NX_LOGO_MEZON: https://cdn.mezon.ai/images/mezon_logo.png
+      NX_BASE_IMG_URL: https://cdn.mezon.ai
+      NX_UPLOAD_IMG_URL: https://cdn-api.mezon.ai
       NX_PROFILE_IMG_URL: https://profile.mezon.ai
-      NX_IMGPROXY_BASE_URL: https://imgproxy.komu.vn
+      NX_IMGPROXY_BASE_URL: https://imgproxy.mezon.ai
       NX_IMGPROXY_KEY: ${{ secrets.NX_IMGPROXY_KEY }}
       NX_CHAT_APP_API_KLIPY_KEY: ${{ secrets.NX_CHAT_APP_API_KLIPY_KEY }}
       NX_CHAT_APP_API_KLIPY_URL: https://api.klipy.com/api/v1
@@ -46,6 +47,9 @@ jobs:
       NX_CHAT_APP_API_MEZONTREASURY_KEY: ${{ secrets.NX_CHAT_APP_API_MEZONTREASURY_KEY }}
       NX_CHAT_APP_CONTRACT_ADDRESS: "0x4F17a94dD6E1B2D6241C4D1956C6c7a07ba2Ec50"
       NX_CHAT_APP_MEZON_TREASURY_URL_NETWORK: https://sepolia.etherscan.io
+      NX_CHAT_APP_MMN_API_URL: https://dong.mezon.ai/mmn-api/
+      NX_CHAT_APP_ZK_API_URL: https://dong.mezon.ai/zk-api/
+      NX_CHAT_APP_INDEXER_API_URL: https://dong.mezon.ai/indexer-api/
       NX_WEBRTC_ICESERVERS_URL: turn:relay.mezon.ai:5349
       NX_WEBRTC_ICESERVERS_USERNAME: turnmezon
       NX_WEBRTC_ICESERVERS_CREDENTIAL: ${{ secrets.NX_WEBRTC_ICESERVERS_CREDENTIAL }}
