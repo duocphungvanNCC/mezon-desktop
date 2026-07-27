@@ -8,8 +8,9 @@ use gpui::{
     prelude::*, px,
 };
 use mezon_store::{
-    ChannelId, ChannelList, ClanId, ClanList, ClanMembersStore, FAVOR_CATE_ID,
-    PERMISSION_ADMINISTRATOR, PERMISSION_MANAGE_CLAN, PermissionStore, Settings, VoiceMember,
+    BadgeService, ChannelId, ChannelList, ClanId, ClanList, ClanMembersStore, EventsStore,
+    FAVOR_CATE_ID, PERMISSION_ADMINISTRATOR, PERMISSION_MANAGE_CLAN, PermissionStore, Settings,
+    VoiceMember,
 };
 
 use crate::channel_app::{is_channel_app_open, launch_channel_app_from_store};
@@ -87,6 +88,7 @@ pub struct ChannelSidebar {
     _settings_observe: Subscription,
     _router_observe: Subscription,
     _members_observe: Subscription,
+    _events_observe: Subscription,
     _permissions_observe: Subscription,
     _notification_setting_observe: Subscription,
 }
@@ -158,6 +160,7 @@ impl ChannelSidebar {
                 cx.notify();
             }
         });
+        let events_observe = cx.observe(&EventsStore::global(cx), |_, _, cx| cx.notify());
         let permissions_observe = cx.observe(&PermissionStore::global(cx), |_, _, cx| cx.notify());
 
         let initial_locale = settings.read(cx).language.clone();
@@ -191,6 +194,7 @@ impl ChannelSidebar {
             _settings_observe: settings_observe,
             _router_observe: router_observe,
             _members_observe: members_observe,
+            _events_observe: events_observe,
             _permissions_observe: permissions_observe,
             _notification_setting_observe: notification_setting_observe,
         };
@@ -202,6 +206,9 @@ impl ChannelSidebar {
         let locale = self.settings.read(cx).language.clone();
         self.last_locale = locale.clone();
         self.last_clan_inputs = clan_inputs_fingerprint(self.clan_list.read(cx));
+        if let Some(clan_id) = self.clan_list.read(cx).active_clan_id {
+            EventsStore::global(cx).update(cx, |store, cx| store.ensure_loaded(clan_id, cx));
+        }
         let clans = self.clan_list.read(cx);
         let channels = self.channel_list.read(cx);
 
@@ -1127,6 +1134,48 @@ fn render_banner_and_events(
                 crate::router::navigate(cx, crate::router::Route::ClanMembers { clan_id });
             }
         });
+    let current_user = BadgeService::global(cx).read(cx).current_user_id(cx);
+    let event_count = members_clan_id.map_or(0, |clan_id| {
+        EventsStore::global(cx)
+            .read(cx)
+            .visible_events(clan_id, current_user, cx)
+            .len()
+    });
+    let settings = sidebar
+        .upgrade()
+        .map(|entity| entity.read(cx).settings.clone());
+    let event_label = if event_count == 1 {
+        "1 Event".to_string()
+    } else {
+        format!("{event_count} Events")
+    };
+    let events_row = nav_row(IconName::IconEvents, event_label, theme, false)
+        .id("clan-events-nav")
+        .child(div().flex_1())
+        .when(event_count > 0, |row| {
+            row.child(
+                div()
+                    .min_w(px(22.))
+                    .h(px(22.))
+                    .px_1()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded_full()
+                    .bg(theme.status_dnd)
+                    .text_color(gpui::white())
+                    .text_size(px(12.))
+                    .font_weight(gpui::FontWeight::BOLD)
+                    .child(event_count.to_string()),
+            )
+        })
+        .on_click(move |_, window, cx| {
+            if let (Some(clan_id), Some(settings)) = (members_clan_id, settings.clone()) {
+                crate::chat::clan_events_page::open_clan_events_modal(
+                    clan_id, settings, window, cx,
+                );
+            }
+        });
     let can_view_channels = members_clan_id.is_some_and(|clan_id| {
         PermissionStore::global(cx)
             .read(cx)
@@ -1150,7 +1199,7 @@ fn render_banner_and_events(
         .w_full()
         .p_2()
         .gap_1()
-        .child(nav_row(IconName::IconEvents, "Events", theme, false))
+        .child(events_row)
         .child(members_row)
         .when(can_view_channels, |element| element.child(channels_row));
 

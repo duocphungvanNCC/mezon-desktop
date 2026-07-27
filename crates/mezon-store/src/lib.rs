@@ -15,6 +15,7 @@ pub mod config;
 pub mod connection;
 pub mod direct;
 pub mod emoji;
+pub mod events;
 pub mod files;
 pub mod friend;
 pub mod gallery;
@@ -90,6 +91,7 @@ pub use config::AppConfig;
 pub use connection::{ConnectionStore, resolve_initial_auth_state};
 pub use direct::{DirectChannel, DirectEvent, DirectKind, DirectMessageBody, DirectMessageStore};
 pub use emoji::{Emoji, EmojiEvent, EmojiStore};
+pub use events::{ClanEventItem, EventsEvent, EventsStore};
 pub use files::{
     ChannelDocument, FILES_BROAD_QUERY, FILES_CACHE_TTL, FILES_PAGE_SIZE, FILES_TYPED_QUERY,
     FilesEvent, FilesStore, filename_matches_query, is_document, short_file_type_label,

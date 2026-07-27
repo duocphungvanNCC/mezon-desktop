@@ -1081,6 +1081,13 @@ impl AppApi {
         Ok(resp.emoji_list)
     }
 
+    pub async fn list_events(
+        &self,
+        clan_id: i64,
+    ) -> Result<Vec<mezon_proto::api::EventManagement>> {
+        Ok(self.transport.list_events(clan_id).await?.events)
+    }
+
     pub async fn emoji_recent_list(&self) -> Result<Vec<mezon_proto::api::EmojiRecent>> {
         let resp = self.transport.emoji_recent_list().await?;
         Ok(resp.emoji_recents)
