@@ -5929,6 +5929,7 @@ dependencies = [
  "flume",
  "gpui",
  "image",
+ "keyring",
  "mezon-audio",
  "mezon-client",
  "mezon-i18n",
