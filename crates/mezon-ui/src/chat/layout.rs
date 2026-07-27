@@ -1261,7 +1261,7 @@ impl ChatLayout {
     }
 
     fn sync_stream_frame_pump(&mut self, cx: &mut Context<Self>) {
-        const STREAM_FRAME_INTERVAL: std::time::Duration = std::time::Duration::from_millis(33);
+        const STREAM_FRAME_FALLBACK: std::time::Duration = std::time::Duration::from_millis(200);
         let stream = self.stream_store.read(cx);
         let on_stream = self
             .channel_list
@@ -1277,16 +1277,28 @@ impl ChatLayout {
         if self._stream_frame_pump.is_some() {
             return;
         }
+        let frame_store = stream.frame_store().clone();
         self._stream_frame_pump = Some(cx.spawn(async move |this, cx| {
+            let mut last_seq = 0u64;
+            let mut rx = frame_store.frame_watch();
             loop {
-                cx.background_executor().timer(STREAM_FRAME_INTERVAL).await;
-                let stepped = this.update(cx, |this, cx| {
-                    let seq = this.stream_store.read(cx).frame_store().publish_seq();
-                    if seq > 0 {
-                        cx.notify();
+                let seq = frame_store.publish_seq();
+                if seq != last_seq {
+                    last_seq = seq;
+                    if this.update(cx, |_, cx| cx.notify()).is_err() {
+                        return;
                     }
-                });
-                if stepped.is_err() {
+                }
+                let frame_published = {
+                    let changed = std::pin::pin!(rx.changed());
+                    let fallback =
+                        std::pin::pin!(cx.background_executor().timer(STREAM_FRAME_FALLBACK));
+                    matches!(
+                        futures::future::select(changed, fallback).await,
+                        futures::future::Either::Left((Ok(()), _))
+                    )
+                };
+                if !frame_published {
                     break;
                 }
             }

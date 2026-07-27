@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 
 use gpui::{App, AppContext, Context, Entity, Global, Task};
 use mezon_client::{AppApi, RealtimeEvent};
-use mezon_stream::{StreamEvent, StreamSession, StreamSessionConfig};
+use mezon_stream::{STREAM_FRAME_KEY, StreamEvent, StreamSession, StreamSessionConfig};
 use mezon_voice::VideoFrameStore;
 
 use crate::AppConfig;
@@ -376,10 +376,6 @@ impl StreamStore {
             cx.notify();
             return;
         }
-        if self.members_for_channel(channel_id).is_empty() {
-            return;
-        }
-
         self.disconnect_session();
         self.session_channel_label = channel_label.to_string();
         self.session_clan_name = clan_name.to_string();
@@ -422,7 +418,6 @@ impl StreamStore {
         let events = stream_session.events().clone();
         self.session = Some(stream_session);
 
-        let _label = channel_label.to_string();
         self._session_task = Some(cx.spawn(async move |this, cx| {
             while let Ok(event) = events.recv_async().await {
                 let stop = this
@@ -472,7 +467,7 @@ impl StreamStore {
         self.remote_video = false;
         self.playback_blocked = false;
         self.join_started = None;
-        self.frame_store.remove(1);
+        self.frame_store.remove(STREAM_FRAME_KEY);
     }
 
     fn fail_stream(&mut self, message: String, cx: &mut Context<Self>) {
@@ -574,6 +569,9 @@ impl StreamStore {
             return;
         };
         let channel_id = ChannelId(e.channel_id);
+        if let Some(clan_id) = self.active_clan {
+            self.fetch_members(clan_id, cx);
+        }
         if let StreamPhase::Joined {
             channel_id: active,
             is_live,

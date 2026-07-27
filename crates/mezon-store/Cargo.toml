@@ -13,7 +13,7 @@ mezon-proto.workspace = true
 mezon-i18n.workspace = true
 mmn-client.workspace = true
 mezon-voice.workspace = true
-mezon-stream = { path = "../mezon-stream" }
+mezon-stream.workspace = true
 mezon-audio.workspace = true
 gpui.workspace = true
 image = { workspace = true, features = ["webp"] }

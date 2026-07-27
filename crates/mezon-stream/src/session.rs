@@ -19,6 +19,7 @@ use mezon_voice::{StreamAudioOutput, VideoFrameStore, i420_to_bgra_into};
 use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message;
 
+use crate::STREAM_FRAME_KEY;
 use crate::signaling::{
     InboundMessage, OutboundMessage, parse_channels, parse_ice_candidate, parse_sdp_answer,
     ws_connect_url,
@@ -75,12 +76,14 @@ impl StreamSession {
                 let _ = event_tx.send(StreamEvent::Error("stream runtime failed".into()));
                 return;
             };
+            let runtime_handle = runtime.handle().clone();
             runtime.block_on(run_session(
                 config,
                 frame_store,
                 audio_for_thread,
                 stop_rx,
                 event_tx,
+                runtime_handle,
             ));
         });
         Ok(Self {
@@ -115,11 +118,20 @@ async fn run_session(
     audio: Arc<StreamAudioOutput>,
     stop_rx: Receiver<()>,
     event_tx: Sender<StreamEvent>,
+    runtime_handle: tokio::runtime::Handle,
 ) {
-    if let Err(err) = run_session_inner(config, frame_store, audio, stop_rx, event_tx.clone()).await
+    if let Err(_err) = run_session_inner(
+        config,
+        frame_store,
+        audio,
+        stop_rx,
+        event_tx.clone(),
+        runtime_handle,
+    )
+    .await
     {
-        tracing::warn!("stream session ended: {err:#}");
-        let _ = event_tx.send(StreamEvent::Error(err.to_string()));
+        tracing::warn!("stream session ended with error");
+        let _ = event_tx.send(StreamEvent::Error("Stream connection failed".to_string()));
     }
     let _ = event_tx.send(StreamEvent::Disconnected);
 }
@@ -130,6 +142,7 @@ async fn run_session_inner(
     audio: Arc<StreamAudioOutput>,
     stop_rx: Receiver<()>,
     event_tx: Sender<StreamEvent>,
+    runtime_handle: tokio::runtime::Handle,
 ) -> anyhow::Result<()> {
     let url = ws_connect_url(&config.ws_base_url, &config.username, &config.token)?;
     let (ws_stream, _) = connect_async(url.as_str())
@@ -172,8 +185,9 @@ async fn run_session_inner(
             let _ = event_for_track.send(StreamEvent::RemoteVideo(true));
             let store = frame_store_for_track.clone();
             let events = event_for_track.clone();
+            let runtime_handle = runtime_handle.clone();
             std::thread::spawn(move || {
-                pump_video_track(video_track, store, events);
+                pump_video_track(video_track, store, events, runtime_handle);
             });
         }
         MediaStreamTrack::Audio(audio_track) => {
@@ -181,8 +195,9 @@ async fn run_session_inner(
             let player = audio_for_track.clone();
             let out_fmt = player.format();
             let events = event_for_track.clone();
+            let runtime_handle = runtime_handle.clone();
             std::thread::spawn(move || {
-                pump_audio_track(audio_track, player, out_fmt, events);
+                pump_audio_track(audio_track, player, out_fmt, events, runtime_handle);
             });
         }
     })));
@@ -245,8 +260,13 @@ async fn run_session_inner(
                     break;
                 }
                 let Message::Text(text) = msg else { continue; };
-                let inbound: InboundMessage = serde_json::from_str(&text)
-                    .context("invalid websocket payload")?;
+                let inbound: InboundMessage = match serde_json::from_str(&text) {
+                    Ok(inbound) => inbound,
+                    Err(_) => {
+                        tracing::warn!("invalid websocket payload");
+                        continue;
+                    }
+                };
                 match inbound.key.as_str() {
                     "channels" => {
                         let Some(value) = inbound.value.as_ref() else { continue; };
@@ -323,15 +343,10 @@ fn pump_video_track(
     video_track: livekit::webrtc::video_track::RtcVideoTrack,
     frame_store: Arc<VideoFrameStore>,
     event_tx: Sender<StreamEvent>,
+    runtime_handle: tokio::runtime::Handle,
 ) {
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build();
-    let Ok(runtime) = runtime else {
-        return;
-    };
-    runtime.block_on(async {
-        let key = 1u64;
+    runtime_handle.block_on(async {
+        let mut bgra: Vec<u8> = Vec::new();
         let mut stream = NativeVideoStream::new(video_track);
         while let Some(frame) = stream.next().await {
             let buffer = frame.buffer.to_i420();
@@ -339,7 +354,8 @@ fn pump_video_track(
             let height = buffer.height();
             let (sy, su, sv) = buffer.strides();
             let (y, u, v) = buffer.data();
-            let mut bgra = vec![0u8; width as usize * height as usize * 4];
+            bgra.clear();
+            bgra.resize(width as usize * height as usize * 4, 0);
             i420_to_bgra_into(
                 &mut bgra,
                 y,
@@ -351,7 +367,11 @@ fn pump_video_track(
                 width as usize,
                 height as usize,
             );
-            frame_store.publish(key, width, height, bgra);
+            if let Some(recycled) =
+                frame_store.publish(STREAM_FRAME_KEY, width, height, std::mem::take(&mut bgra))
+            {
+                bgra = recycled;
+            }
         }
         let _ = event_tx.send(StreamEvent::RemoteVideo(false));
     });
@@ -362,14 +382,9 @@ fn pump_audio_track(
     player: Arc<StreamAudioOutput>,
     out_fmt: mezon_voice::AudioFormat,
     event_tx: Sender<StreamEvent>,
+    runtime_handle: tokio::runtime::Handle,
 ) {
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build();
-    let Ok(runtime) = runtime else {
-        return;
-    };
-    runtime.block_on(async {
+    runtime_handle.block_on(async {
         let mut stream = NativeAudioStream::new(
             audio_track,
             out_fmt.sample_rate as i32,
