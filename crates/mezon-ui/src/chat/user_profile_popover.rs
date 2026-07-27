@@ -10,7 +10,7 @@ use mezon_store::{
 use ui::{Clickable, PopoverMenu, Toggleable};
 
 use crate::app::shell::{FriendRemovalKind, Shell};
-use crate::chat::message::{ShareContactModal, share_contact_subject};
+use crate::chat::message::{SendTokenModal, ShareContactModal, share_contact_subject};
 use crate::components::primitives::{Avatar, Icon, IconName, Input, InputEvent, InputState};
 use crate::image_cache::LruImageCache;
 use crate::router::{Route, navigate};
@@ -540,16 +540,30 @@ fn render_banner_actions(
     let mut buttons = Vec::new();
     let entity = cx.entity();
 
-    buttons.push(
-        banner_icon_button("profile-transfer", IconName::Transaction, false, true, {
-            let locale = locale.clone();
-            move |_: &ClickEvent, _window, cx| {
-                let msg = mezon_i18n::t(&locale, "common.comingSoon").to_string();
-                Shell::global(cx).update(cx, move |shell, cx| shell.info(msg, cx));
-            }
-        })
-        .into_any_element(),
-    );
+    buttons.push(banner_icon_shell(
+        "profile-transfer",
+        false,
+        cx.listener(|this, _: &ClickEvent, window, cx| {
+            let profile = resolve_user_profile(this.user_id, this.context, cx);
+            let username = profile
+                .as_ref()
+                .map(|p| {
+                    if !p.display_name.is_empty() {
+                        p.display_name.clone()
+                    } else {
+                        p.username.clone()
+                    }
+                })
+                .unwrap_or_default();
+            let recipient_id = this.user_id.0.to_string();
+            let locale: SharedString = this.settings.read(cx).language.clone().into();
+            SendTokenModal::open(locale, Some((recipient_id, username)), window, cx);
+        }),
+        Icon::new(IconName::Transaction)
+            .size(px(16.))
+            .text_color(gpui::white())
+            .into_any_element(),
+    ));
 
     if show_share_contact {
         buttons.push(banner_icon_shell(

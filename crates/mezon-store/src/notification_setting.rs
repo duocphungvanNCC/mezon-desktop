@@ -49,7 +49,6 @@ pub struct NotificationSettingStore {
     api: Arc<AppApi>,
     auth_state: Entity<AuthState>,
     _channel_sub: Subscription,
-    _clan_sub: Subscription,
     _auth_sub: Subscription,
 }
 
@@ -76,14 +75,6 @@ impl NotificationSettingStore {
                     }
                 },
             );
-            let clan_sub = cx.subscribe(
-                &crate::clan::ClanList::global(cx),
-                |this: &mut Self, _, event: &crate::clan::ClanEvent, cx| {
-                    if let crate::clan::ClanEvent::ActiveClanChanged(Some(clan_id)) = event {
-                        this.prefetch_clan(*clan_id, cx);
-                    }
-                },
-            );
             let this = Self {
                 settings: HashMap::new(),
                 clan_defaults: HashMap::new(),
@@ -97,7 +88,6 @@ impl NotificationSettingStore {
                 api,
                 auth_state: auth_state.clone(),
                 _channel_sub: channel_sub,
-                _clan_sub: clan_sub,
                 _auth_sub: auth_sub,
             };
             let entity = cx.entity();
@@ -225,8 +215,10 @@ impl NotificationSettingStore {
         }
         let api = self.api.clone();
         let task = cx.spawn(async move |this, cx| {
-            let muted = api.list_muted_channels(clan_id.get()).await;
-            let clan_default = api.get_notification_clan(clan_id.get()).await;
+            let (muted, clan_default) = tokio::join!(
+                api.list_muted_channels(clan_id.get()),
+                api.get_notification_clan(clan_id.get()),
+            );
             let _ = this.update(cx, |store, cx| {
                 store.clan_prefetch.remove(&clan_id);
                 match muted {

@@ -285,15 +285,6 @@ pub(super) fn render_clan_row(
                     ),
             )
         })
-        .when(!suppress_hover, |row| {
-            row.on_hover(move |hovered, _window, cx| {
-                if *hovered {
-                    ChannelList::global(cx).update(cx, |channels, cx| {
-                        channels.load_for_clan(prefetch_clan_id, cx)
-                    });
-                }
-            })
-        })
         .on_click(on_clan_click(clan_list_handle, clan_id))
         .on_mouse_down(MouseButton::Right, {
             let clan_num = prefetch_clan_id;
