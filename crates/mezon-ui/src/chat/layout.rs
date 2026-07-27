@@ -1443,8 +1443,10 @@ impl Render for ChatLayout {
                                 )
                             }))
                             .child(
-                                AnyView::from(self.user_info_bar.clone())
-                                    .cached(StyleRefinement::default().w_full().h(px(56.0))),
+                                div()
+                                    .w_full()
+                                    .h(px(56.0))
+                                    .child(AnyView::from(self.user_info_bar.clone())),
                             ),
                     ),
             )
@@ -2147,7 +2149,6 @@ impl ChatLayout {
 
     fn render_content(&mut self, window: &mut Window, cx: &mut Context<Self>) -> gpui::AnyElement {
         let window_width = window.viewport_size().width;
-        let theme = cx.theme();
         let locale = self.settings.read(cx).language.clone();
         let inbox_handle = self.inbox_handle.clone();
         let active_clan_id = self.active_clan_id(cx);
@@ -2311,7 +2312,6 @@ impl ChatLayout {
                     )
                 };
                 let voice_view = crate::chat::voice::render_voice_channel(
-                    theme,
                     &locale,
                     &channel,
                     &self.voice_store,
@@ -2325,6 +2325,7 @@ impl ChatLayout {
                     self.voice_show_members,
                     &mut self.voice_visual,
                     window_width,
+                    window,
                     cx,
                 );
                 return div()
@@ -2446,6 +2447,7 @@ impl ChatLayout {
         }
 
         let current_path = router.read(cx).current_path();
+        let theme = cx.theme();
 
         let placeholder = match route {
             Route::Chat => self.render_placeholder(

@@ -5,6 +5,7 @@ pub mod input;
 mod sizing;
 mod spinner;
 mod stack;
+pub mod text_edit;
 
 pub use button::{Button, ButtonVariant, ButtonVariants};
 pub use icon::{Icon, IconName};

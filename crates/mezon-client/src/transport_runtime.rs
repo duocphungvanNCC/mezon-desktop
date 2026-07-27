@@ -9,17 +9,28 @@ use anyhow::Result;
 use futures::AsyncReadExt as _;
 use http_client::{AsyncBody, HttpClient, http};
 use reqwest_client::ReqwestClient;
+use std::sync::Arc;
 use std::sync::OnceLock;
 use tokio::io::AsyncWriteExt as _;
 use tokio::runtime::Runtime;
 
 static TRANSPORT_RUNTIME: OnceLock<Runtime> = OnceLock::new();
 static HTTP_CLIENT: OnceLock<ReqwestClient> = OnceLock::new();
+static HTTP_CLIENT_ARC: OnceLock<Arc<dyn HttpClient>> = OnceLock::new();
 
 const HTTP_TRANSFER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
 
 pub(crate) fn http_client() -> &'static ReqwestClient {
     HTTP_CLIENT.get_or_init(new_http_client)
+}
+
+pub fn http_client_arc() -> Arc<dyn HttpClient> {
+    HTTP_CLIENT_ARC
+        .get_or_init(|| {
+            let _guard = runtime().enter();
+            Arc::new(ReqwestClient::new()) as Arc<dyn HttpClient>
+        })
+        .clone()
 }
 
 pub fn new_http_client() -> ReqwestClient {
@@ -329,6 +340,30 @@ impl TransportClient {
             .await
             .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
     }
+
+    pub async fn send_channel_message_structured_with_code(
+        &self,
+        channel_id: i64,
+        content_json: &str,
+        mode: i32,
+        message_code: i32,
+    ) -> Result<crate::transport::ApiMessage> {
+        let transport = self.inner.clone();
+        let content_json = content_json.to_string();
+        runtime()
+            .spawn(async move {
+                transport
+                    .send_channel_message_structured_with_code(
+                        channel_id,
+                        &content_json,
+                        mode,
+                        message_code,
+                    )
+                    .await
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
     pub fn new(base_path: String) -> Self {
         let adapter = Box::new(AbridgedTcpAdapter::new());
         let transport = MezonTransport::new(adapter, base_path);
@@ -441,6 +476,40 @@ impl TransportClient {
             .spawn(async move {
                 transport
                     .mark_as_read(channel_id, category_id, clan_id)
+                    .await
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
+    pub async fn update_user_status(
+        &self,
+        status: String,
+        minutes: i32,
+        until_turn_on: bool,
+    ) -> Result<()> {
+        let transport = self.inner.clone();
+        runtime()
+            .spawn(async move {
+                transport
+                    .update_user_status(&status, minutes, until_turn_on)
+                    .await
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
+    pub async fn update_user_custom_status(
+        &self,
+        status: String,
+        minutes: i32,
+        until_turn_on: bool,
+    ) -> Result<()> {
+        let transport = self.inner.clone();
+        runtime()
+            .spawn(async move {
+                transport
+                    .update_user_custom_status(&status, minutes, until_turn_on)
                     .await
             })
             .await

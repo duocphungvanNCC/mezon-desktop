@@ -24,6 +24,7 @@ use mezon_client::{
 
 use crate::AppConfig;
 use crate::KeyedCache;
+use crate::Settings;
 use crate::account::AccountStore;
 use crate::album_layout::{AlbumLayout, calculate_album_layout};
 use crate::badge::BadgeService;
@@ -46,6 +47,7 @@ use crate::message_time::{
 use crate::presign;
 use crate::realtime::{RealtimeDispatch, RealtimeKind};
 use crate::topics::TopicsStore;
+use crate::wallet::{SendTokenRequest, WalletEvent, WalletStore};
 
 const MESSAGE_PAGE_LIMIT: u32 = 50;
 const MAX_COUNTED_TOPIC_REPLIES: usize = 2048;
@@ -2398,12 +2400,133 @@ impl MessagesStore {
     }
 
     pub fn give_coffee_reaction(&mut self, message_id: MessageId, cx: &mut Context<Self>) {
-        self.add_reaction(
-            message_id,
-            GIVE_COFFEE_EMOJI_ID.to_string(),
-            GIVE_COFFEE_EMOJI.to_string(),
-            cx,
+        let wallet = WalletStore::try_global(cx);
+        let wallet_available = wallet
+            .as_ref()
+            .map(|w| w.read(cx).is_available())
+            .unwrap_or(false);
+
+        if !wallet_available {
+            self.add_reaction(
+                message_id,
+                GIVE_COFFEE_EMOJI_ID.to_string(),
+                GIVE_COFFEE_EMOJI.to_string(),
+                cx,
+            );
+            return;
+        }
+
+        let wallet = wallet.expect("wallet_available implies Some");
+        if wallet.read(cx).pending_give_coffee() {
+            return;
+        }
+
+        let Some(sender_user) = viewer_user_id(cx) else {
+            return;
+        };
+        let sender = sender_user.0.to_string();
+        let (receiver, receiver_username) = {
+            let Some(message) = self.viewport_message_by_id(message_id) else {
+                return;
+            };
+            (message.sender_id.clone(), message.sender_name.to_string())
+        };
+        if receiver.is_empty() || receiver == sender {
+            return;
+        }
+        let receiver_id = receiver.parse::<i64>().ok().map(UserId);
+        let locale = Settings::try_global(cx)
+            .map(|s| s.read(cx).language.clone())
+            .unwrap_or_default();
+        let coffee_card_text = format!(
+            "{} {}₫ | {}",
+            mezon_i18n::t(&locale, "token.tokensSent"),
+            format_thousands(WalletStore::give_coffee_amount()),
+            mezon_i18n::t(&locale, "token.giveCoffeeAction"),
         );
+        let channel_id = self
+            .active_channel_id
+            .map(|c| c.0.to_string())
+            .unwrap_or_else(|| "0".to_string());
+        let clan_id = self
+            .active_clan_id
+            .map(|c| c.0.to_string())
+            .unwrap_or_else(|| "0".to_string());
+        let username = AccountStore::global(cx)
+            .read(cx)
+            .account
+            .as_ref()
+            .map(|acct| acct.username.clone())
+            .unwrap_or_default();
+
+        let extra_info = mmn_client::ExtraInfo {
+            transfer_type: mmn_client::TRANSFER_TYPE_GIVE_COFFEE.to_string(),
+            channel_id: Some(channel_id),
+            clan_id: Some(clan_id),
+            message_ref_id: Some(message_id.0.to_string()),
+            user_receiver_id: Some(receiver.clone()),
+            user_sender_id: Some(sender.clone()),
+            user_sender_username: Some(username),
+            ..Default::default()
+        };
+        let request = SendTokenRequest {
+            sender,
+            recipient: receiver,
+            amount: WalletStore::give_coffee_amount(),
+            note: Some("givecoffee".to_string()),
+            extra_info: Some(extra_info),
+            by_address: false,
+        };
+
+        let coffee_generation = wallet.read(cx).reset_generation();
+        wallet.update(cx, |w, _| w.set_pending_give_coffee(true));
+        let task = wallet.update(cx, |w, cx| w.send_transaction(request, cx));
+        let wallet_weak = wallet.downgrade();
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            wallet_weak
+                .update(cx, |_w, cx| match &result {
+                    Ok(_) => cx.emit(WalletEvent::CoffeeSent),
+                    Err(message) => cx.emit(WalletEvent::SendFailed {
+                        message: message.clone(),
+                    }),
+                })
+                .ok();
+            if result.is_ok() {
+                this.update(cx, |this, cx| {
+                    let current_generation =
+                        wallet_weak.upgrade().map(|w| w.read(cx).reset_generation());
+                    if current_generation != Some(coffee_generation) {
+                        return;
+                    }
+                    this.add_reaction(
+                        message_id,
+                        GIVE_COFFEE_EMOJI_ID.to_string(),
+                        GIVE_COFFEE_EMOJI.to_string(),
+                        cx,
+                    );
+                    if let Some(user_id) = receiver_id {
+                        let card = DirectMessageStore::global(cx).update(cx, |store, cx| {
+                            store.create_dm_and_send_token_card(
+                                user_id,
+                                receiver_username.clone(),
+                                coffee_card_text.clone(),
+                                cx,
+                            )
+                        });
+                        card.detach();
+                    }
+                })
+                .ok();
+            }
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(300))
+                .await;
+            wallet_weak
+                .update(cx, |w, _| w.set_pending_give_coffee(false))
+                .ok();
+        })
+        .detach();
     }
 
     pub fn execute_quick_menu(
@@ -5437,6 +5560,19 @@ fn optimistic_create_time_at(messages: &MessageList, sender_id: &str, now: i64) 
 
 pub(crate) fn viewer_user_id(cx: &App) -> Option<UserId> {
     BadgeService::try_global(cx)?.read(cx).current_user_id(cx)
+}
+
+fn format_thousands(n: i64) -> String {
+    let digits = n.unsigned_abs().to_string();
+    let bytes = digits.as_bytes();
+    let mut out = String::new();
+    for (index, byte) in bytes.iter().enumerate() {
+        if index > 0 && (bytes.len() - index).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(*byte as char);
+    }
+    if n < 0 { format!("-{out}") } else { out }
 }
 
 fn now_unix_seconds() -> i64 {

@@ -158,6 +158,18 @@ impl AppApi {
             .send_channel_message_structured(channel_id, content_json, mode)
             .await
     }
+
+    pub async fn send_channel_message_structured_with_code(
+        &self,
+        channel_id: i64,
+        content_json: &str,
+        mode: i32,
+        message_code: i32,
+    ) -> Result<ApiMessage> {
+        self.transport
+            .send_channel_message_structured_with_code(channel_id, content_json, mode, message_code)
+            .await
+    }
     pub fn new(transport: Arc<TransportClient>, base_img_url: String) -> Self {
         let (realtime_tx, _) = tokio::sync::broadcast::channel(1024);
         let (status_tx, _) = tokio::sync::watch::channel(ConnectionStatus::Disconnected);
@@ -221,6 +233,28 @@ impl AppApi {
     ) -> Result<()> {
         self.transport
             .mark_as_read(channel_id, category_id, clan_id)
+            .await
+    }
+
+    pub async fn update_user_status(
+        &self,
+        status: String,
+        minutes: i32,
+        until_turn_on: bool,
+    ) -> Result<()> {
+        self.transport
+            .update_user_status(status, minutes, until_turn_on)
+            .await
+    }
+
+    pub async fn update_user_custom_status(
+        &self,
+        status: String,
+        minutes: i32,
+        until_turn_on: bool,
+    ) -> Result<()> {
+        self.transport
+            .update_user_custom_status(status, minutes, until_turn_on)
             .await
     }
 
