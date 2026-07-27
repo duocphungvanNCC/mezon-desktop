@@ -23,6 +23,7 @@ PKGS=(
     -p mezon-canvas
     -p mezon-updater
     -p mezon-audio
+    -p mezon-webview
     -p mezon-voice
     -p mmn-client
 )
