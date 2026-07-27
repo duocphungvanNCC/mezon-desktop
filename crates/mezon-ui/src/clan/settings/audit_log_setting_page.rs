@@ -4,10 +4,11 @@ use gpui::{
     deferred, div, prelude::*, px, size, uniform_list,
 };
 use mezon_store::{
-    ALL_ACTION_INDEX, AUDIT_ACTION_OPTIONS, AuditLogEntry, AuditLogQuery, AuditLogStore, ClanId,
-    ClanMember, ClanMembersStore, Settings, UserId, audit_action_i18n_key,
+    ALL_ACTION_INDEX, AUDIT_ACTION_OPTIONS, AuditLogEntry, AuditLogQuery, AuditLogStateView,
+    AuditLogStore, ClanId, ClanMembersStore, Settings, UserId, audit_action_i18n_key,
     audit_action_index_for_api_log,
 };
+use std::sync::Arc;
 
 use crate::components::primitives::{
     Avatar, DatePicker, DatePickerEvent, Icon, IconName, InputState, Sizable, Size, Spinner,
@@ -23,6 +24,12 @@ const CARD_GAP: f32 = 16.0;
 const ROW_HEIGHT: f32 = 68.0;
 const FILTER_MENU_MAX_HEIGHT: f32 = 280.0;
 const FILTER_CHIP_HEIGHT: f32 = 36.0;
+const FILTER_MENU_ROW_HEIGHT: f32 = 40.0;
+const FILTER_DROPDOWN_INNER_WIDTH: f32 = 284.0;
+
+fn filter_menu_list_height(row_count: usize) -> gpui::Pixels {
+    px((row_count as f32 * FILTER_MENU_ROW_HEIGHT).min(FILTER_MENU_MAX_HEIGHT))
+}
 
 fn localized_audit_action(locale: &str, action_log: &str) -> String {
     if let Some(index) = audit_action_index_for_api_log(action_log) {
@@ -50,6 +57,7 @@ pub struct AuditLogSettingPage {
     action_search: Option<Entity<InputState>>,
     date_picker: Entity<DatePicker>,
     list_scroll: UniformListScrollHandle,
+    filter_menu_scroll: UniformListScrollHandle,
     _user_search_sub: Option<Subscription>,
     _action_search_sub: Option<Subscription>,
     _date_picker_sub: Subscription,
@@ -133,8 +141,7 @@ fn filter_dropdown_panel(
     theme: &Theme,
     on_dismiss: impl Fn(&gpui::MouseDownEvent, &mut Window, &mut App) + 'static,
     search: Option<Entity<InputState>>,
-    menu_id: impl Into<gpui::ElementId>,
-    rows: impl IntoIterator<Item = impl IntoElement>,
+    list: impl IntoElement,
 ) -> impl IntoElement {
     v_flex()
         .absolute()
@@ -153,13 +160,7 @@ fn filter_dropdown_panel(
         .when_some(search, |panel, search| {
             panel.child(div().mb(px(8.0)).child(search))
         })
-        .child(
-            div()
-                .id(menu_id)
-                .overflow_y_scroll()
-                .max_h(px(FILTER_MENU_MAX_HEIGHT))
-                .child(v_flex().children(rows)),
-        )
+        .child(list)
 }
 
 fn filter_menu_row(
@@ -201,11 +202,112 @@ fn filter_menu_row(
     row
 }
 
-fn resolve_member(clan_id: ClanId, user_id: UserId, cx: &App) -> Option<ClanMember> {
-    ClanMembersStore::global(cx)
-        .read(cx)
-        .member(clan_id, user_id)
-        .cloned()
+fn render_user_filter_menu_row(
+    index: usize,
+    row: &UserFilterRow,
+    selected_user_id: Option<UserId>,
+    theme: &Theme,
+    entity: Entity<AuditLogSettingPage>,
+) -> impl IntoElement {
+    let selected = row.user_id == selected_user_id;
+    let user_id = row.user_id;
+    let label = row.label.clone();
+    filter_menu_row(
+        ("audit-log-user-filter-item", index),
+        row.label.clone(),
+        selected,
+        theme,
+        move |_, _, cx| {
+            entity.update(cx, |this, cx| {
+                this.set_user_filter(user_id, label.clone(), cx);
+            });
+        },
+    )
+}
+
+fn render_action_filter_menu_row(
+    index: usize,
+    action_index: usize,
+    label: SharedString,
+    selected_action: usize,
+    theme: &Theme,
+    entity: Entity<AuditLogSettingPage>,
+) -> impl IntoElement {
+    let selected = action_index == selected_action;
+    filter_menu_row(
+        ("audit-log-action-filter-item", index),
+        label,
+        selected,
+        theme,
+        move |_, _, cx| {
+            entity.update(cx, |this, cx| {
+                this.set_action_filter(action_index, cx);
+            });
+        },
+    )
+}
+
+fn render_log_action_line(
+    entry: &AuditLogEntry,
+    username: &str,
+    locale: &str,
+    theme: &Theme,
+) -> impl IntoElement {
+    let action = localized_audit_action(locale, &entry.action_log);
+    let target = audit_log_entity_label(entry);
+    let has_channel = !entry.channel_id.is_zero();
+    let in_channel = mezon_i18n::t(locale, "auditLog.auditLogItem.inChannel");
+
+    h_flex()
+        .w_full()
+        .min_w(px(0.0))
+        .overflow_hidden()
+        .items_center()
+        .gap_1()
+        .child(
+            div()
+                .flex_shrink_0()
+                .text_sm()
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(theme.text_primary)
+                .child(username.to_string()),
+        )
+        .child(
+            div()
+                .flex_shrink_0()
+                .text_sm()
+                .text_color(theme.text_muted)
+                .child(format!(" {action} ")),
+        )
+        .child(
+            div()
+                .flex_shrink_0()
+                .text_sm()
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(theme.text_primary)
+                .child(target),
+        )
+        .when(has_channel, |row| {
+            row.child(
+                div()
+                    .flex_shrink_0()
+                    .text_sm()
+                    .text_color(theme.text_muted)
+                    .child(format!(" {in_channel} ")),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w(px(0.0))
+                    .overflow_hidden()
+                    .text_ellipsis()
+                    .whitespace_nowrap()
+                    .text_sm()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(theme.text_primary)
+                    .child(format!("#{}", entry.channel_label)),
+            )
+        })
 }
 
 fn format_audit_log_time(timestamp_sec: u32, locale: &str) -> String {
@@ -236,60 +338,6 @@ fn audit_log_entity_label(entry: &AuditLogEntry) -> String {
     }
 }
 
-fn render_discord_action_line(
-    entry: &AuditLogEntry,
-    username: &str,
-    locale: &str,
-    theme: &Theme,
-) -> impl IntoElement {
-    let action = localized_audit_action(locale, &entry.action_log);
-    let target = audit_log_entity_label(entry);
-    let has_channel = !entry.channel_id.is_zero();
-    let in_channel = mezon_i18n::t(locale, "auditLog.auditLogItem.inChannel");
-
-    h_flex()
-        .w_full()
-        .min_w(px(0.0))
-        .flex_wrap()
-        .items_baseline()
-        .gap_1()
-        .child(
-            div()
-                .text_sm()
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_color(theme.text_primary)
-                .child(username.to_string()),
-        )
-        .child(
-            div()
-                .text_sm()
-                .text_color(theme.text_muted)
-                .child(format!(" {action} ")),
-        )
-        .child(
-            div()
-                .text_sm()
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_color(theme.text_primary)
-                .child(target),
-        )
-        .when(has_channel, |row| {
-            row.child(
-                div()
-                    .text_sm()
-                    .text_color(theme.text_muted)
-                    .child(format!(" {in_channel} ")),
-            )
-            .child(
-                div()
-                    .text_sm()
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(theme.text_primary)
-                    .child(format!("#{}", entry.channel_label)),
-            )
-        })
-}
-
 fn render_audit_log_row(
     entry: &AuditLogEntry,
     clan_id: ClanId,
@@ -297,19 +345,16 @@ fn render_audit_log_row(
     theme: &Theme,
     cx: &App,
 ) -> impl IntoElement {
-    let member = resolve_member(clan_id, entry.user_id, cx);
-    let username = member
-        .as_ref()
+    let members = ClanMembersStore::global(cx).read(cx);
+    let member = members.member(clan_id, entry.user_id);
+    let username: String = member
         .map(|member| member.name().to_string())
         .unwrap_or_else(|| entry.user_id.get().to_string());
-    let avatar_raw = member
-        .as_ref()
-        .map(|member| member.avatar().to_string())
-        .unwrap_or_default();
+    let avatar_raw = member.map(|member| member.avatar()).unwrap_or("");
     let avatar_src = if avatar_raw.is_empty() {
         SharedString::default()
     } else {
-        imgproxy::avatar_url(cx, &avatar_raw).into()
+        imgproxy::avatar_url(cx, avatar_raw).into()
     };
     let time_label = format_audit_log_time(entry.time_log_seconds, locale);
 
@@ -321,7 +366,7 @@ fn render_audit_log_row(
             h_flex()
                 .w_full()
                 .h(px(ROW_HEIGHT))
-                .items_start()
+                .items_center()
                 .gap_3()
                 .p(px(CARD_PADDING))
                 .rounded_md()
@@ -341,8 +386,8 @@ fn render_audit_log_row(
                     v_flex()
                         .flex_1()
                         .min_w(px(0.0))
-                        .gap(px(4.0))
-                        .child(render_discord_action_line(entry, &username, locale, theme))
+                        .gap(px(3.0))
+                        .child(render_log_action_line(entry, &username, locale, theme))
                         .when(!time_label.is_empty(), |col| {
                             col.child(
                                 div()
@@ -356,7 +401,7 @@ fn render_audit_log_row(
 }
 
 impl AuditLogSettingPage {
-    fn audit_log_state(&self, cx: &App) -> mezon_store::AuditLogState {
+    fn audit_log_state<'a>(&self, cx: &'a App) -> AuditLogStateView<'a> {
         AuditLogStore::global(cx).read(cx).state(self.clan_id)
     }
 
@@ -411,6 +456,7 @@ impl AuditLogSettingPage {
             action_search: None,
             date_picker,
             list_scroll: UniformListScrollHandle::new(),
+            filter_menu_scroll: UniformListScrollHandle::new(),
             _user_search_sub: None,
             _action_search_sub: None,
             _date_picker_sub: date_picker_sub,
@@ -503,7 +549,7 @@ impl AuditLogSettingPage {
                 })
             })
             .collect();
-        members.sort_by_key(|member| member.label.to_lowercase());
+        members.sort_by_cached_key(|member| member.label.to_lowercase());
         rows.extend(members);
         rows
     }
@@ -543,9 +589,10 @@ impl AuditLogSettingPage {
             mezon_i18n::t(locale, "auditLog.filterUserAuditLog.allUsers").into()
         };
         let open = self.user_menu_open;
-        let rows = self.user_filter_rows(locale, cx);
         let selected_user_id = self.selected_user_id;
         let user_active = self.selected_user_id.is_some();
+        let entity = cx.entity();
+        let filter_menu_scroll = self.filter_menu_scroll.clone();
 
         div()
             .id("audit-log-user-filter")
@@ -568,6 +615,40 @@ impl AuditLogSettingPage {
                 }),
             )))
             .when(open, |menu| {
+                let rows: Arc<[UserFilterRow]> = self.user_filter_rows(locale, cx).into();
+                let row_count = rows.len();
+                let rows_for_list = Arc::clone(&rows);
+                let list = uniform_list(
+                    "audit-log-user-filter-menu",
+                    row_count,
+                    move |range, _window, cx| {
+                        let theme = cx.theme();
+                        range
+                            .map(|index| {
+                                rows_for_list.get(index).map_or_else(
+                                    || div().h(px(FILTER_MENU_ROW_HEIGHT)).into_any_element(),
+                                    |row| {
+                                        render_user_filter_menu_row(
+                                            index,
+                                            row,
+                                            selected_user_id,
+                                            theme,
+                                            entity.clone(),
+                                        )
+                                        .into_any_element()
+                                    },
+                                )
+                            })
+                            .collect::<Vec<_>>()
+                    },
+                )
+                .with_item_size(size(
+                    px(FILTER_DROPDOWN_INNER_WIDTH),
+                    px(FILTER_MENU_ROW_HEIGHT),
+                ))
+                .track_scroll(&filter_menu_scroll)
+                .h(filter_menu_list_height(row_count))
+                .w_full();
                 menu.child(deferred(filter_dropdown_panel(
                     theme,
                     cx.listener(|this, _, _, cx| {
@@ -577,21 +658,7 @@ impl AuditLogSettingPage {
                         }
                     }),
                     self.user_search.clone(),
-                    "audit-log-user-filter-menu",
-                    rows.into_iter().enumerate().map(|(index, row)| {
-                        let selected = row.user_id == selected_user_id;
-                        let user_id = row.user_id;
-                        let label = row.label.clone();
-                        filter_menu_row(
-                            ("audit-log-user-filter-item", index),
-                            row.label,
-                            selected,
-                            theme,
-                            cx.listener(move |this, _, _, cx| {
-                                this.set_user_filter(user_id, label.clone(), cx);
-                            }),
-                        )
-                    }),
+                    list,
                 )))
             })
     }
@@ -609,9 +676,10 @@ impl AuditLogSettingPage {
         let label: SharedString =
             mezon_i18n::t(locale, audit_action_i18n_key(self.selected_action)).into();
         let open = self.action_menu_open;
-        let rows = self.action_filter_rows(locale, cx);
         let selected_action = self.selected_action;
         let action_active = self.selected_action != ALL_ACTION_INDEX;
+        let entity = cx.entity();
+        let filter_menu_scroll = self.filter_menu_scroll.clone();
 
         div()
             .id("audit-log-action-filter")
@@ -634,6 +702,41 @@ impl AuditLogSettingPage {
                 }),
             )))
             .when(open, |menu| {
+                let rows: Arc<[(usize, SharedString)]> = self.action_filter_rows(locale, cx).into();
+                let row_count = rows.len();
+                let rows_for_list = Arc::clone(&rows);
+                let list = uniform_list(
+                    "audit-log-action-filter-menu",
+                    row_count,
+                    move |range, _window, cx| {
+                        let theme = cx.theme();
+                        range
+                            .map(|index| {
+                                rows_for_list.get(index).map_or_else(
+                                    || div().h(px(FILTER_MENU_ROW_HEIGHT)).into_any_element(),
+                                    |(action_index, label)| {
+                                        render_action_filter_menu_row(
+                                            index,
+                                            *action_index,
+                                            label.clone(),
+                                            selected_action,
+                                            theme,
+                                            entity.clone(),
+                                        )
+                                        .into_any_element()
+                                    },
+                                )
+                            })
+                            .collect::<Vec<_>>()
+                    },
+                )
+                .with_item_size(size(
+                    px(FILTER_DROPDOWN_INNER_WIDTH),
+                    px(FILTER_MENU_ROW_HEIGHT),
+                ))
+                .track_scroll(&filter_menu_scroll)
+                .h(filter_menu_list_height(row_count))
+                .w_full();
                 menu.child(deferred(filter_dropdown_panel(
                     theme,
                     cx.listener(|this, _, _, cx| {
@@ -643,21 +746,7 @@ impl AuditLogSettingPage {
                         }
                     }),
                     self.action_search.clone(),
-                    "audit-log-action-filter-menu",
-                    rows.into_iter()
-                        .enumerate()
-                        .map(|(index, (action, label))| {
-                            let selected = action == selected_action;
-                            filter_menu_row(
-                                ("audit-log-action-filter-item", index),
-                                label,
-                                selected,
-                                theme,
-                                cx.listener(move |this, _, _, cx| {
-                                    this.set_action_filter(action, cx);
-                                }),
-                            )
-                        }),
+                    list,
                 )))
             })
     }
@@ -746,7 +835,7 @@ impl AuditLogSettingPage {
         let row_count = audit_state.logs.len();
         uniform_list("audit-log-list", row_count, move |range, _window, cx| {
             let theme = cx.theme().clone();
-            let logs = AuditLogStore::global(cx).read(cx).state(clan_id).logs;
+            let logs = AuditLogStore::global(cx).read(cx).logs(clan_id);
             range
                 .map(|index| {
                     logs.get(index).map_or_else(
@@ -783,15 +872,6 @@ impl Render for AuditLogSettingPage {
             .min_h_0()
             .flex_1()
             .gap_5()
-            .child(
-                v_flex().flex_shrink_0().child(
-                    div()
-                        .text_xl()
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(theme.text_primary)
-                        .child(mezon_i18n::t(&locale, "auditLogSearch.title")),
-                ),
-            )
             .child(
                 div()
                     .flex_shrink_0()

@@ -74,7 +74,7 @@ pub use audio::{
 };
 pub use audit_log::{
     ALL_ACTION_INDEX, AUDIT_ACTION_OPTIONS, AuditActionOption, AuditLogEntry, AuditLogQuery,
-    AuditLogState, AuditLogStore, audit_action_api_value, audit_action_i18n_key,
+    AuditLogState, AuditLogStateView, AuditLogStore, audit_action_api_value, audit_action_i18n_key,
     audit_action_index_for_api_log,
 };
 pub use badge::BadgeService;

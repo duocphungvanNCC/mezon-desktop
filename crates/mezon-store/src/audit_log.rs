@@ -318,6 +318,14 @@ pub struct AuditLogState {
     pub generation: u64,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct AuditLogStateView<'a> {
+    pub logs: &'a [AuditLogEntry],
+    pub loading: bool,
+    pub fetch_failed: bool,
+    pub generation: u64,
+}
+
 pub struct AuditLogStore {
     states: KeyedCache<ClanId, AuditLogState>,
     api: Arc<AppApi>,
@@ -344,8 +352,35 @@ impl AuditLogStore {
         cx.global::<GlobalAuditLogStore>().0.clone()
     }
 
-    pub fn state(&self, clan_id: ClanId) -> AuditLogState {
-        self.states.get(&clan_id).cloned().unwrap_or_default()
+    pub fn try_global(cx: &App) -> Option<Entity<Self>> {
+        cx.try_global::<GlobalAuditLogStore>()
+            .map(|global| global.0.clone())
+    }
+
+    pub fn reset(&mut self, cx: &mut Context<Self>) {
+        self.fetch_generation = self.fetch_generation.wrapping_add(1);
+        self.states = KeyedCache::new(Some(8));
+        self._fetch_task = Task::ready(());
+        cx.notify();
+    }
+
+    pub fn state(&self, clan_id: ClanId) -> AuditLogStateView<'_> {
+        self.states
+            .get(&clan_id)
+            .map(|state| AuditLogStateView {
+                logs: &state.logs,
+                loading: state.loading,
+                fetch_failed: state.fetch_failed,
+                generation: state.generation,
+            })
+            .unwrap_or_default()
+    }
+
+    pub fn logs(&self, clan_id: ClanId) -> &[AuditLogEntry] {
+        self.states
+            .get(&clan_id)
+            .map(|state| state.logs.as_slice())
+            .unwrap_or(&[])
     }
 
     pub fn cancel(&mut self, clan_id: ClanId) {
@@ -360,11 +395,14 @@ impl AuditLogStore {
         self.fetch_generation = self.fetch_generation.wrapping_add(1);
         let generation = self.fetch_generation;
 
-        let mut state = self.state(clan_id);
-        state.loading = true;
-        state.fetch_failed = false;
-        state.generation = generation;
-        self.states.insert(clan_id, state, None);
+        if !self.states.contains(&clan_id) {
+            self.states.insert(clan_id, AuditLogState::default(), None);
+        }
+        if let Some(state) = self.states.get_mut(&clan_id) {
+            state.loading = true;
+            state.fetch_failed = false;
+            state.generation = generation;
+        }
         cx.notify();
 
         let api = self.api.clone();
@@ -415,7 +453,8 @@ impl AuditLogStore {
                             state.logs = logs;
                             state.fetch_failed = false;
                         }
-                        Err(_) => {
+                        Err(error) => {
+                            tracing::error!(?error, %clan_id, "audit log fetch failed");
                             state.logs.clear();
                             state.fetch_failed = true;
                         }

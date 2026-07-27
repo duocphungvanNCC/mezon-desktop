@@ -472,12 +472,7 @@ impl Render for ClanSettingScreen {
         let perms = PermissionStore::global(cx)
             .read(cx)
             .clan_settings_permissions(clan_id, cx);
-        let hide_page_title = matches!(
-            page,
-            ClanSettingsPage::Integrations | ClanSettingsPage::AuditLog
-        );
         let audit_log_layout = page == ClanSettingsPage::AuditLog;
-
         let content = self.current_page_view().unwrap_or_else(|| {
             div()
                 .flex_1()
@@ -697,25 +692,23 @@ impl Render for ClanSettingScreen {
                                     .h_full()
                                     .min_h_0()
                                     .w(px(SETTINGS_CONTENT_WIDTH))
-                                    .when(!hide_page_title, |panel| {
-                                        panel.child(
-                                            div()
-                                                .flex_shrink_0()
-                                                .w_full()
-                                                .pl(px(40.0))
-                                                .pr(px(28.0))
-                                                .pt(px(60.0))
-                                                .child(
-                                                    div()
-                                                        .max_w(px(740.0))
-                                                        .text_xl()
-                                                        .font_weight(gpui::FontWeight::SEMIBOLD)
-                                                        .mb_5()
-                                                        .text_color(theme.text_primary)
-                                                        .child(self.page_title(page, &locale)),
-                                                ),
-                                        )
-                                    })
+                                    .child(
+                                        div()
+                                            .flex_shrink_0()
+                                            .w_full()
+                                            .pl(px(40.0))
+                                            .pr(px(28.0))
+                                            .pt(px(60.0))
+                                            .child(
+                                                div()
+                                                    .max_w(px(740.0))
+                                                    .text_xl()
+                                                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                                                    .mb_5()
+                                                    .text_color(theme.text_primary)
+                                                    .child(self.page_title(page, &locale)),
+                                            ),
+                                    )
                                     .child(
                                         if matches!(
                                             page,
@@ -749,7 +742,6 @@ impl Render for ClanSettingScreen {
                                                 .pb(px(28.0))
                                                 .pl(px(40.0))
                                                 .pr(px(28.0))
-                                                .when(hide_page_title, |el| el.pt(px(60.0)))
                                                 .child(
                                                     v_flex()
                                                         .max_w(px(740.0))
@@ -767,8 +759,7 @@ impl Render for ClanSettingScreen {
                                                 .min_h_0()
                                                 .pb(px(28.0))
                                                 .pl(px(40.0))
-                                                .pr(px(28.0))
-                                                .when(hide_page_title, |el| el.pt(px(60.0)));
+                                                .pr(px(28.0));
                                             if roles_edit_mode {
                                                 scroll = scroll.overflow_hidden();
                                             } else {
