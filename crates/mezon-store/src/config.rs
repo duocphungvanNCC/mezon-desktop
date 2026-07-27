@@ -8,6 +8,8 @@ const LEGACY_MEDIA_ORIGINS: [&str; 2] = ["https://cdn.mezon.ai", "http://cdn.mez
 mod baked_env {
     include!(concat!(env!("OUT_DIR"), "/baked_env.rs"));
 }
+
+pub const INDEXER_CHAIN_ID: &str = "1337";
 // No `Debug` derive: AppConfig holds secrets (api_key, imgproxy_key, fcm/tenor/treasury keys,
 // webrtc credential). Deny `{:?}` so they can't leak into logs; log specific non-secret fields.
 #[derive(Clone)]
@@ -56,6 +58,12 @@ pub struct AppConfig {
     pub mezon_treasury_key: String,
     pub contract_address: String,
     pub mezon_treasury_url_network: String,
+
+    // ── MMN blockchain SDK (wallet / token) ───────────────────────────────────
+    pub mmn_api_url: String,
+    pub indexer_api_url: String,
+    pub zk_api_url: String,
+    pub dong_service_api_url: String,
 
     // ── WebRTC (voice/video) ──────────────────────────────────────────────────
     pub webrtc_ice_servers_url: String,
@@ -130,7 +138,12 @@ impl AppConfig {
             contract_address: String::new(),
             mezon_treasury_url_network: "https://polygonscan.com".into(),
 
-            webrtc_ice_servers_url: "turn:relay.mezon.ai:5349".into(),
+            mmn_api_url: String::new(),
+            indexer_api_url: String::new(),
+            zk_api_url: String::new(),
+            dong_service_api_url: String::new(),
+
+            webrtc_ice_servers_url: "turn:relay.mezon.vn:5349".into(),
             webrtc_ice_servers_username: "turnmezon".into(),
             webrtc_ice_servers_credential: String::new(),
 
@@ -239,6 +252,17 @@ impl AppConfig {
             mezon_treasury_url_network: opt_str(
                 baked_env::NX_CHAT_APP_MEZON_TREASURY_URL_NETWORK,
                 &defaults.mezon_treasury_url_network,
+            ),
+
+            mmn_api_url: opt_str(baked_env::NX_CHAT_APP_MMN_API_URL, &defaults.mmn_api_url),
+            indexer_api_url: opt_str(
+                baked_env::NX_CHAT_APP_INDEXER_API_URL,
+                &defaults.indexer_api_url,
+            ),
+            zk_api_url: opt_str(baked_env::NX_CHAT_APP_ZK_API_URL, &defaults.zk_api_url),
+            dong_service_api_url: opt_str(
+                baked_env::NX_CHAT_APP_DONG_SERVICE_API_URL,
+                &defaults.dong_service_api_url,
             ),
 
             webrtc_ice_servers_url: opt_str(

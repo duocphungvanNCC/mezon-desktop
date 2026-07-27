@@ -10,7 +10,7 @@ use gpui::{
     uniform_list,
 };
 use mezon_store::{AppConfig, ChannelTimelineAttachment, Settings};
-use ui::{ScrollAxes, Scrollbars, WithScrollbar, utils::ROUNDED_BORDER_WINDOW};
+use ui::{ScrollAxes, Scrollbars, WithScrollbar};
 
 use crate::app::main_window::{activate_main_window, main_window_bounds};
 use crate::app::title_bar::TitleBar;
@@ -636,7 +636,6 @@ impl Render for MediaImageModal {
             .flex_col()
             .size_full()
             .overflow_hidden()
-            .rounded(px(ROUNDED_BORDER_WINDOW))
             .bg(gpui::rgb(0x141414))
             .when(window_controls::HAS_CUSTOM_TITLE_BAR, |el| {
                 el.child(render_title_bar(self.title_bar.clone()))

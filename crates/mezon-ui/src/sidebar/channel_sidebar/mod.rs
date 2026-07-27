@@ -40,24 +40,12 @@ fn resolve_voice_member_slot(
     clan_id: Option<ClanId>,
     m: &VoiceMember,
 ) -> VoiceMemberSlot {
-    let mut slot = VoiceMemberSlot::from(m);
-    if let Some(clan_id) = clan_id
-        && let Some(store) = ClanMembersStore::try_global(cx)
-        && let Some(member) = store.read(cx).member(clan_id, m.user_id)
-    {
-        let name = member.name();
-        if !name.is_empty() {
-            slot.display_name = name.to_string();
-        }
-        let avatar = member.avatar();
-        if !avatar.is_empty() {
-            slot.avatar_url = avatar.to_string();
-        }
+    let (display_name, avatar_url) = crate::util::voice_member::resolve_display(cx, clan_id, m);
+    VoiceMemberSlot {
+        user_id: m.user_id.to_string(),
+        display_name,
+        avatar_url,
     }
-    if !slot.avatar_url.is_empty() {
-        slot.avatar_url = crate::util::imgproxy::avatar_url(cx, &slot.avatar_url);
-    }
-    slot
 }
 
 fn resolve_stream_member_slot(
@@ -391,9 +379,26 @@ impl ChannelSidebar {
                             });
                         }
                     } else {
+                        let active_parent_id = active_channel_id.and_then(|id| {
+                            category
+                                .channels
+                                .iter()
+                                .find(|ch| ch.id == id)
+                                .and_then(|ch| ch.parent_id)
+                        });
                         for ch in &category.channels {
                             let sidebar_members = channel_sidebar_members(cx, new_clan_id, ch);
-                            if sidebar_members.is_empty() {
+                            let is_voice_or_streaming = matches!(
+                                ch.channel_type,
+                                ChannelType::Voice | ChannelType::Stream | ChannelType::App
+                            );
+                            let has_members_in_voice =
+                                is_voice_or_streaming && !sidebar_members.is_empty();
+                            let should_show = (ch.is_unread() && !is_voice_or_streaming)
+                                || active_channel_id == Some(ch.id)
+                                || active_parent_id == Some(ch.id)
+                                || has_members_in_voice;
+                            if !should_show {
                                 continue;
                             }
                             let badge_count = ch.badge_count;
@@ -1626,11 +1631,7 @@ fn render_sidebar_item(
                         .pl(px(32.))
                         .py(px(2.));
                     for (index, m) in voice_members.iter().take(5).enumerate() {
-                        let name_text = if m.display_name.is_empty() {
-                            m.user_id.clone()
-                        } else {
-                            m.display_name.clone()
-                        };
+                        let name_text = m.display_name.clone();
                         let avatar = if m.avatar_url.is_empty() {
                             Avatar::new().name(name_text)
                         } else {
@@ -1658,15 +1659,13 @@ fn render_sidebar_item(
                 } else {
                     let voice_pl = if *is_thread { px(40.) } else { px(32.) };
                     div()
+                        .w_full()
+                        .min_w_0()
                         .flex()
                         .flex_col()
                         .pl(voice_pl)
                         .children(voice_members.iter().map(|m| {
-                            let name_text = if m.display_name.is_empty() {
-                                m.user_id.clone()
-                            } else {
-                                m.display_name.clone()
-                            };
+                            let name_text = m.display_name.clone();
                             let avatar = if m.avatar_url.is_empty() {
                                 Avatar::new().name(name_text.clone())
                             } else {

@@ -52,6 +52,12 @@ fn attachment_cdn_url(base_img_url: &str, filename: &str) -> Result<String> {
     ))
 }
 
+fn emoticon_id_from_filename(filename: &str) -> Option<i64> {
+    let file_name = filename.rsplit('/').next().filter(|s| !s.is_empty())?;
+    let stem = file_name.rsplit_once('.').map(|(stem, _)| stem)?;
+    stem.parse().ok()
+}
+
 fn image_dimensions(data: &[u8]) -> (i32, i32) {
     image::ImageReader::new(std::io::Cursor::new(data))
         .with_guessed_format()
@@ -152,6 +158,18 @@ impl AppApi {
             .send_channel_message_structured(channel_id, content_json, mode)
             .await
     }
+
+    pub async fn send_channel_message_structured_with_code(
+        &self,
+        channel_id: i64,
+        content_json: &str,
+        mode: i32,
+        message_code: i32,
+    ) -> Result<ApiMessage> {
+        self.transport
+            .send_channel_message_structured_with_code(channel_id, content_json, mode, message_code)
+            .await
+    }
     pub fn new(transport: Arc<TransportClient>, base_img_url: String) -> Self {
         let (realtime_tx, _) = tokio::sync::broadcast::channel(1024);
         let (status_tx, _) = tokio::sync::watch::channel(ConnectionStatus::Disconnected);
@@ -215,6 +233,28 @@ impl AppApi {
     ) -> Result<()> {
         self.transport
             .mark_as_read(channel_id, category_id, clan_id)
+            .await
+    }
+
+    pub async fn update_user_status(
+        &self,
+        status: String,
+        minutes: i32,
+        until_turn_on: bool,
+    ) -> Result<()> {
+        self.transport
+            .update_user_status(status, minutes, until_turn_on)
+            .await
+    }
+
+    pub async fn update_user_custom_status(
+        &self,
+        status: String,
+        minutes: i32,
+        until_turn_on: bool,
+    ) -> Result<()> {
+        self.transport
+            .update_user_custom_status(status, minutes, until_turn_on)
             .await
     }
 
@@ -1084,6 +1124,104 @@ impl AppApi {
     pub async fn emoji_recent_list(&self) -> Result<Vec<mezon_proto::api::EmojiRecent>> {
         let resp = self.transport.emoji_recent_list().await?;
         Ok(resp.emoji_recents)
+    }
+
+    pub async fn create_clan_emoji(
+        &self,
+        clan_id: i64,
+        source: &str,
+        shortname: &str,
+        category: &str,
+        id: i64,
+        is_for_sale: bool,
+    ) -> Result<()> {
+        self.transport
+            .create_clan_emoji(clan_id, source, shortname, category, id, is_for_sale)
+            .await
+    }
+
+    pub async fn update_clan_emoji_by_id(
+        &self,
+        id: i64,
+        shortname: &str,
+        clan_id: i64,
+    ) -> Result<()> {
+        self.transport
+            .update_clan_emoji_by_id(id, shortname, clan_id)
+            .await
+    }
+
+    pub async fn delete_clan_emoji_by_id(&self, id: i64, clan_id: i64) -> Result<()> {
+        self.transport.delete_clan_emoji_by_id(id, clan_id).await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn add_clan_sticker(
+        &self,
+        clan_id: i64,
+        source: &str,
+        shortname: &str,
+        category: &str,
+        id: i64,
+        media_type: i32,
+        is_for_sale: bool,
+    ) -> Result<()> {
+        self.transport
+            .add_clan_sticker(
+                clan_id,
+                source,
+                shortname,
+                category,
+                id,
+                media_type,
+                is_for_sale,
+            )
+            .await
+    }
+
+    pub async fn update_clan_sticker_by_id(
+        &self,
+        id: i64,
+        clan_id: i64,
+        source: &str,
+        shortname: &str,
+        category: &str,
+    ) -> Result<()> {
+        self.transport
+            .update_clan_sticker_by_id(id, clan_id, source, shortname, category)
+            .await
+    }
+
+    pub async fn delete_clan_sticker_by_id(&self, id: i64, clan_id: i64) -> Result<()> {
+        self.transport.delete_clan_sticker_by_id(id, clan_id).await
+    }
+
+    pub async fn upload_emoticon(
+        &self,
+        folder: &str,
+        id: i64,
+        extension: &str,
+        filetype: &str,
+        data: Vec<u8>,
+    ) -> Result<(i64, String)> {
+        let ext = extension.trim_start_matches('.');
+        let filename = format!("{}/{id}.{ext}", folder.trim_matches('/'));
+        let size = clamp_i32(data.len());
+        let (width, height) = if filetype.starts_with("image/") {
+            image_dimensions(&data)
+        } else {
+            (0, 0)
+        };
+        let upload = self
+            .transport
+            .upload_attachment_file(&filename, filetype, size, width, height)
+            .await?;
+        crate::transport_runtime::put_bytes_to_content_type(&upload.url, data, filetype).await?;
+        let resolved_id = emoticon_id_from_filename(&upload.filename).ok_or_else(|| {
+            anyhow::anyhow!("invalid emoticon upload filename: {}", upload.filename)
+        })?;
+        let url = attachment_cdn_url(&self.base_img_url, &upload.filename)?;
+        Ok((resolved_id, url))
     }
 
     pub async fn list_roles(
@@ -2167,6 +2305,16 @@ impl AppApi {
         self.transport
             .mute_participant_mezon_meet(channel_id, clan_id, room_name, username)
             .await
+    }
+
+    pub async fn add_agent_to_channel(&self, channel_id: i64, room_name: &str) -> Result<()> {
+        self.transport
+            .add_agent_to_channel(channel_id, room_name)
+            .await
+    }
+
+    pub async fn disconnect_agent(&self, channel_id: i64, room_name: &str) -> Result<()> {
+        self.transport.disconnect_agent(channel_id, room_name).await
     }
 
     pub async fn list_channel_apps(&self, clan_id: i64) -> Result<Vec<ApiChannelApp>> {
