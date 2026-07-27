@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use gpui::{
     Animation, AnimationExt, AnyElement, App, ClipboardItem, Context, Entity, FontWeight, Hsla,
     MouseButton, MouseDownEvent, ObjectFit, Pixels, ScrollHandle, SharedString, StyledImage,
@@ -5,16 +7,17 @@ use gpui::{
 };
 use mezon_store::{
     AppConfig, AudioStore, Channel, ChannelId, ClanId, ClanMembersStore, DeviceKind,
-    DeviceMenuKind, DisplayedReaction, NetworkQuality, Settings, UserId, VoiceCallStatus,
-    VoiceConnection, VoiceMember, VoiceParticipant, VoiceRenderFrame, VoiceStore,
+    DeviceMenuKind, DisplayedReaction, NetworkQuality, PERMISSION_MANAGE_CHANNEL, PermissionStore,
+    Settings, UserId, VoiceCallStatus, VoiceConnection, VoiceMember, VoiceParticipant,
+    VoiceRenderFrame, VoiceStore,
 };
 
 use crate::ChatLayout;
 use crate::components::primitives::{
     Avatar, ContextMenu, Icon, IconName, Sizable, Size, Spinner, context_menu_at,
 };
-use crate::theme::Theme;
-use ui::Tooltip;
+use crate::theme::{ActiveTheme, Theme};
+use ui::{ScrollAxes, Scrollbars, Tooltip, WithScrollbar};
 
 /// Shared brand accent (Discord-style blurple) used across the voice UI and
 /// the screen-share modal. Single source of truth — do not duplicate.
@@ -25,9 +28,19 @@ const RAISE_HAND_GOLD: u32 = 0xefbc39;
 const LEAVE_RED: u32 = 0xda373c;
 const LEAVE_RED_HOVER: u32 = 0xa12829;
 
+const SPEAKING_BLUE: u32 = 0x1f8cf9;
+const SPEAKING_BORDER_WIDTH: f32 = 2.5;
+
+fn speaking_border_color(cell: &VideoCell) -> Hsla {
+    if cell.speaking && !cell.muted && !cell.is_screen {
+        gpui::rgb(SPEAKING_BLUE).into()
+    } else {
+        gpui::transparent_black()
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn render_voice_channel(
-    theme: &Theme,
     locale: &str,
     channel: &Channel,
     voice: &Entity<VoiceStore>,
@@ -39,35 +52,40 @@ pub fn render_voice_channel(
     grid_page: usize,
     grid_size: gpui::Size<Pixels>,
     show_members: bool,
+    visual: &mut VoiceVisualState,
     window_width: Pixels,
-    cx: &Context<ChatLayout>,
+    window: &mut Window,
+    cx: &mut Context<ChatLayout>,
 ) -> AnyElement {
-    let store = voice.read(cx);
-    let connecting = matches!(
-        store.connection(),
-        VoiceConnection::Connecting { channel_id, .. } if *channel_id == channel.id.to_string()
-    );
+    let connecting = {
+        let store = voice.read(cx);
+        matches!(
+            store.connection(),
+            VoiceConnection::Connecting { channel_id, .. } if *channel_id == channel.id.to_string()
+        )
+    };
+    let in_call = voice.read(cx).is_connected_to(&channel.id.to_string()) || connecting;
 
-    if store.is_connected_to(&channel.id.to_string()) || connecting {
+    if in_call {
         let chat = cx.entity();
         return render_in_call(
-            theme,
             locale,
             channel,
             voice,
             settings,
-            store,
             connecting,
             &chat,
             strip_scroll,
             grid_page,
             grid_size,
             show_members,
+            visual,
+            window,
             cx,
         );
     }
 
-    let error = match store.connection() {
+    let error = match voice.read(cx).connection() {
         VoiceConnection::Failed {
             channel_id,
             message,
@@ -76,7 +94,7 @@ pub fn render_voice_channel(
     };
 
     render_pre_join(
-        theme,
+        cx.theme(),
         locale,
         channel,
         voice,
@@ -341,8 +359,8 @@ pub fn render_mini_bar(
         .gap_2()
         .px_3()
         .py_2()
-        .border_b_1()
-        .border_color(theme.border)
+        .border_b_2()
+        .border_color(theme.tokens.border_primary)
         .child(header)
         .child(
             div()
@@ -605,6 +623,7 @@ struct VideoCell {
     avatar_url: String,
     key: Option<u64>,
     is_screen: bool,
+    is_local: bool,
     speaking: bool,
     muted: bool,
     quality: NetworkQuality,
@@ -619,6 +638,7 @@ impl VideoCell {
             avatar_url,
             key: p.camera,
             is_screen: false,
+            is_local: p.is_local,
             speaking: p.speaking,
             muted: p.muted,
             quality: p.quality,
@@ -633,6 +653,7 @@ impl VideoCell {
             avatar_url,
             key: p.screenshare,
             is_screen: true,
+            is_local: p.is_local,
             speaking: p.speaking,
             muted: p.muted,
             quality: p.quality,
@@ -647,6 +668,7 @@ impl VideoCell {
             avatar_url,
             key: None,
             is_screen: false,
+            is_local: false,
             speaking: false,
             muted: false,
             quality: NetworkQuality::Unknown,
@@ -654,13 +676,130 @@ impl VideoCell {
     }
 }
 
-fn voice_grid_order(participants: &[VoiceParticipant]) -> Vec<usize> {
-    let mut order: Vec<usize> = (0..participants.len()).collect();
-    order.sort_by_key(|&i| {
-        let p = &participants[i];
-        (!p.is_local, !p.speaking, p.muted, p.camera.is_none(), i)
+#[derive(Default)]
+pub struct VoiceVisualState {
+    order: Vec<String>,
+    max_items: usize,
+}
+
+fn cell_category(cell: &VideoCell) -> u8 {
+    match (cell.is_local, cell.is_screen) {
+        (true, false) => 0,
+        (false, true) => 1,
+        (true, true) => 2,
+        (false, false) => 3,
+    }
+}
+
+fn target_visual_order(
+    cells: &[VideoCell],
+    join_rank: &dyn Fn(&str) -> usize,
+    last_spoke_rank: &dyn Fn(&str) -> u64,
+) -> Vec<String> {
+    let mut idx: Vec<usize> = (0..cells.len()).collect();
+    idx.sort_by(|&a, &b| {
+        let ca = &cells[a];
+        let cb = &cells[b];
+        cell_category(ca)
+            .cmp(&cell_category(cb))
+            .then_with(|| match cell_category(ca) {
+                1 | 2 => join_rank(&ca.identity).cmp(&join_rank(&cb.identity)),
+                3 => cb
+                    .speaking
+                    .cmp(&ca.speaking)
+                    .then_with(|| last_spoke_rank(&cb.identity).cmp(&last_spoke_rank(&ca.identity)))
+                    .then_with(|| cb.key.is_some().cmp(&ca.key.is_some()))
+                    .then_with(|| join_rank(&ca.identity).cmp(&join_rank(&cb.identity))),
+                _ => std::cmp::Ordering::Equal,
+            })
     });
-    order
+    idx.into_iter().map(|i| cells[i].id.clone()).collect()
+}
+
+fn stable_visual_order(
+    state: &mut VoiceVisualState,
+    target: &[String],
+    max_items: usize,
+) -> Vec<String> {
+    if max_items == 0 || max_items != state.max_items {
+        state.order = target.to_vec();
+        state.max_items = max_items;
+        return state.order.clone();
+    }
+    state.order = update_pages(&state.order, target, max_items);
+    state.order.clone()
+}
+
+fn update_pages(current: &[String], next: &[String], max_items: usize) -> Vec<String> {
+    let mut updated: Vec<String> = current.to_vec();
+    if updated.len() < next.len() {
+        let missing: Vec<String> = next
+            .iter()
+            .filter(|id| !updated.contains(id))
+            .cloned()
+            .collect();
+        updated.extend(missing);
+    }
+    let page_count = updated
+        .len()
+        .div_ceil(max_items)
+        .min(next.len().div_ceil(max_items));
+    for page in 0..page_count {
+        let page_of = |list: &[String]| -> Vec<String> {
+            list.iter()
+                .skip(page * max_items)
+                .take(max_items)
+                .cloned()
+                .collect()
+        };
+        let updated_page = page_of(&updated);
+        let next_page = page_of(next);
+        let dropped: Vec<String> = updated_page
+            .iter()
+            .filter(|id| !next_page.contains(id))
+            .cloned()
+            .collect();
+        let added: Vec<String> = next_page
+            .iter()
+            .filter(|id| !updated_page.contains(id))
+            .cloned()
+            .collect();
+        if added.len() == dropped.len() {
+            for (add, drop) in added.iter().zip(dropped.iter()) {
+                let (Some(add_at), Some(drop_at)) = (
+                    updated.iter().position(|x| x == add),
+                    updated.iter().position(|x| x == drop),
+                ) else {
+                    return next.to_vec();
+                };
+                updated.swap(add_at, drop_at);
+            }
+        } else if added.is_empty() {
+            updated.retain(|id| !dropped.contains(id));
+        } else if dropped.is_empty() {
+            for add in added {
+                if !updated.contains(&add) {
+                    updated.push(add);
+                }
+            }
+        }
+    }
+    if updated.len() > next.len() {
+        updated.retain(|id| next.contains(id));
+    }
+    updated
+}
+
+const AGENT_AVATAR_PATH: &str = "0/0/1779484387973271600/1737423959329_undefined173740153013517374015248704886401586613166392.png";
+
+fn resolve_cell_identity(cx: &App, clan_id: ClanId, p: &VoiceParticipant) -> (String, String) {
+    let (name, avatar_url) = resolve_voice_identity(cx, clan_id, &p.identity, &p.name);
+    if p.is_agent {
+        let source = crate::util::imgproxy::cdn_asset_url(cx, AGENT_AVATAR_PATH);
+        (name, crate::util::imgproxy::avatar_url(cx, &source))
+    } else {
+        (name, avatar_url)
+    }
 }
 
 fn resolve_voice_identity(
@@ -690,23 +829,7 @@ fn resolve_voice_identity(
 }
 
 fn resolve_voice_member(cx: &App, clan_id: ClanId, m: &VoiceMember) -> (String, String) {
-    if let Some(store) = ClanMembersStore::try_global(cx)
-        && let Some(member) = store.read(cx).member(clan_id, m.user_id)
-    {
-        let name = if member.name().is_empty() {
-            m.display_name.clone()
-        } else {
-            member.name().to_string()
-        };
-        let avatar = member.avatar();
-        let avatar_url = if avatar.is_empty() {
-            m.avatar_url.clone()
-        } else {
-            crate::util::imgproxy::avatar_url(cx, avatar)
-        };
-        return (name, avatar_url);
-    }
-    (m.display_name.clone(), m.avatar_url.clone())
+    crate::util::voice_member::resolve_display(cx, Some(clan_id), m)
 }
 
 fn raised_hands_overlay(cx: &App, clan_id: ClanId, store: &VoiceStore) -> Option<AnyElement> {
@@ -842,75 +965,133 @@ fn reactions_overlay(store: &VoiceStore) -> Option<AnyElement> {
     )
 }
 
+enum InCallBodyLayout {
+    Focus {
+        cells: Vec<VideoCell>,
+        focused_idx: usize,
+    },
+    Grid {
+        cells: Vec<VideoCell>,
+    },
+}
+
 #[allow(clippy::too_many_arguments)]
 fn render_in_call(
-    theme: &Theme,
     locale: &str,
     channel: &Channel,
     voice: &Entity<VoiceStore>,
     settings: &Entity<Settings>,
-    store: &VoiceStore,
     connecting: bool,
     chat: &Entity<ChatLayout>,
     strip_scroll: &ScrollHandle,
     grid_page: usize,
     grid_size: gpui::Size<Pixels>,
     show_members: bool,
-    cx: &App,
+    visual: &mut VoiceVisualState,
+    window: &mut Window,
+    cx: &mut App,
 ) -> AnyElement {
-    let fullscreen_active = store.fullscreen_screen().is_some();
+    let fullscreen_active = voice.read(cx).fullscreen_screen().is_some();
 
-    let body = (!fullscreen_active).then(|| {
+    let body_layout = (!fullscreen_active).then(|| {
+        let store = voice.read(cx);
         let participants = store.participants();
         let focused = store.focused_tile();
-        let order = voice_grid_order(participants);
 
         let mut cells: Vec<VideoCell> = Vec::new();
-        for &i in &order {
-            let p = &participants[i];
+        for p in participants {
             if p.screenshare.is_some() {
-                let (name, avatar) =
-                    resolve_voice_identity(cx, channel.clan_id, &p.identity, &p.name);
+                let (name, avatar) = resolve_cell_identity(cx, channel.clan_id, p);
                 cells.push(VideoCell::screen(p, name, avatar));
             }
         }
-        for &i in &order {
-            let p = &participants[i];
-            let (name, avatar) = resolve_voice_identity(cx, channel.clan_id, &p.identity, &p.name);
+        for p in participants {
+            let (name, avatar) = resolve_cell_identity(cx, channel.clan_id, p);
             cells.push(VideoCell::camera(p, name, avatar));
         }
 
-        let focused_idx = focused.and_then(|id| cells.iter().position(|c| c.id == id));
+        let focused_id = focused
+            .filter(|id| cells.iter().any(|c| c.id == *id))
+            .map(|id| id.to_string());
+        let target = target_visual_order(&cells, &|id| store.join_rank(id), &|id| {
+            store.last_spoke_rank(id)
+        });
+        let stable = match &focused_id {
+            None => {
+                let (cols, rows) = select_grid_layout(
+                    GRID_LAYOUTS,
+                    cells.len().max(1),
+                    f32::from(grid_size.width),
+                    f32::from(grid_size.height),
+                );
+                Some(stable_visual_order(visual, &target, cols * rows))
+            }
+            Some(fid) if show_members => {
+                let screen_focus = cells.iter().any(|c| &c.id == fid && c.is_screen);
+                let strip_target: Vec<String> = if screen_focus {
+                    target
+                } else {
+                    target.into_iter().filter(|id| id != fid).collect()
+                };
+                let bounds = strip_scroll.bounds();
+                let viewport_w = f32::from(bounds.size.width);
+                let aside_h = carousel_aside_height(f32::from(bounds.size.height));
+                let max_items = if viewport_w > 0. {
+                    carousel_max_visible_tiles(viewport_w, aside_h)
+                } else {
+                    0
+                };
+                Some(stable_visual_order(visual, &strip_target, max_items))
+            }
+            Some(_) => None,
+        };
+        if let Some(order) = stable {
+            let ranks: HashMap<&str, usize> = order
+                .iter()
+                .enumerate()
+                .map(|(rank, id)| (id.as_str(), rank))
+                .collect();
+            cells.sort_by_key(|c| ranks.get(c.id.as_str()).copied().unwrap_or(usize::MAX));
+        }
 
+        let focused_idx = focused_id.and_then(|fid| cells.iter().position(|c| c.id == fid));
         match focused_idx {
-            Some(idx) => render_focus_layout(
-                theme,
-                locale,
-                store,
-                voice,
-                &cells,
-                idx,
-                chat,
-                show_members,
-                strip_scroll,
-            ),
-            None => render_grid(
-                theme,
-                locale,
-                store,
-                voice,
-                &cells,
-                &channel.voice_members,
-                connecting,
-                channel.clan_id,
-                chat,
-                grid_page,
-                grid_size,
-                cx,
-            ),
+            Some(idx) => InCallBodyLayout::Focus {
+                cells,
+                focused_idx: idx,
+            },
+            None => InCallBodyLayout::Grid { cells },
         }
     });
 
+    let body = body_layout.map(|layout| match layout {
+        InCallBodyLayout::Focus { cells, focused_idx } => render_focus_layout(
+            locale,
+            voice,
+            &cells,
+            focused_idx,
+            chat,
+            show_members,
+            strip_scroll,
+            window,
+            cx,
+        ),
+        InCallBodyLayout::Grid { cells } => render_grid(
+            cx.theme(),
+            locale,
+            voice,
+            &cells,
+            &channel.voice_members,
+            connecting,
+            channel.clan_id,
+            chat,
+            grid_page,
+            grid_size,
+            cx,
+        ),
+    });
+
+    let theme = cx.theme();
     let connection_status: Option<(SharedString, Hsla, bool)> = if connecting {
         Some((
             SharedString::from(mezon_i18n::t(locale, "channelVoice.connecting").to_string()),
@@ -918,7 +1099,7 @@ fn render_in_call(
             true,
         ))
     } else {
-        match store.call_status() {
+        match voice.read(cx).call_status() {
             VoiceCallStatus::Reconnecting => Some((
                 SharedString::from(mezon_i18n::t(locale, "channelVoice.reconnecting").to_string()),
                 theme.status_idle.into(),
@@ -969,28 +1150,35 @@ fn render_in_call(
             .into_any_element()
     });
 
-    let mic_modal = store
+    let mic_modal = voice
+        .read(cx)
         .mic_permission_denied()
         .then(|| mic_permission_modal(theme, locale, voice));
 
-    let participant_menu = store.participant_menu().and_then(|(identity, position)| {
-        let participant = store
-            .participants()
-            .iter()
-            .find(|p| p.identity == identity)?;
-        let (name, _) = resolve_voice_identity(cx, channel.clan_id, identity, &participant.name);
-        let menu = build_participant_menu(
-            voice,
-            identity.to_string(),
-            name,
-            participant.is_local,
-            participant.muted,
-            locale,
-        );
-        Some(context_menu_at(position, menu).into_any_element())
-    });
+    let participant_menu = voice
+        .read(cx)
+        .participant_menu()
+        .and_then(|(identity, position)| {
+            let participant = voice
+                .read(cx)
+                .participants()
+                .iter()
+                .find(|p| p.identity == identity)?;
+            let (name, _) =
+                resolve_voice_identity(cx, channel.clan_id, identity, &participant.name);
+            let menu = build_participant_menu(
+                voice,
+                identity.to_string(),
+                name,
+                participant.is_local,
+                participant.muted,
+                locale,
+            );
+            Some(context_menu_at(position, menu).into_any_element())
+        });
 
-    let kick_modal = store
+    let kick_modal = voice
+        .read(cx)
         .pending_kick()
         .map(|(_, name)| kick_confirm_modal(theme, locale, voice, name));
 
@@ -1003,11 +1191,19 @@ fn render_in_call(
         .child(voice_header(theme, &channel.name, true))
         .children(body)
         .when(!fullscreen_active, |this| {
-            this.child(control_bar(theme, locale, voice, settings, store, chat, cx))
+            this.child(control_bar(
+                theme,
+                locale,
+                voice,
+                settings,
+                voice.read(cx),
+                chat,
+                cx,
+            ))
         })
         .children(connection_toast)
-        .children(reactions_overlay(store))
-        .children(raised_hands_overlay(cx, channel.clan_id, store))
+        .children(reactions_overlay(voice.read(cx)))
+        .children(raised_hands_overlay(cx, channel.clan_id, voice.read(cx)))
         .children(mic_modal)
         .children(participant_menu)
         .children(kick_modal)
@@ -1372,7 +1568,6 @@ fn in_call_placeholder_cells(
 fn render_grid(
     theme: &Theme,
     locale: &str,
-    store: &VoiceStore,
     voice: &Entity<VoiceStore>,
     cells: &[VideoCell],
     room_members: &[VoiceMember],
@@ -1383,6 +1578,7 @@ fn render_grid(
     grid_size: gpui::Size<Pixels>,
     cx: &App,
 ) -> AnyElement {
+    let store = voice.read(cx);
     let placeholder_cells: Vec<VideoCell>;
     let cells: &[VideoCell] = if !cells.is_empty() {
         cells
@@ -1588,19 +1784,83 @@ fn select_grid_layout(
     (layout.columns, layout.rows)
 }
 
+const CAROUSEL_MIN_TILE_WIDTH: f32 = 140.;
+const CAROUSEL_MAX_ROW_HEIGHT: f32 = 93.;
+const CAROUSEL_SCROLLBAR_RESERVE: f32 = 14.;
+const CAROUSEL_SCROLLBAR_GAP_MIN: f32 = 10.;
+const CAROUSEL_ASPECT_RATIO: f32 = 16. / 10.;
+
+fn carousel_tile_width(aside_height: f32) -> f32 {
+    (aside_height.max(1.) * CAROUSEL_ASPECT_RATIO).max(CAROUSEL_MIN_TILE_WIDTH)
+}
+
+fn carousel_content_width(tile_count: usize, tile_width: f32, gap: f32) -> f32 {
+    if tile_count == 0 {
+        0.
+    } else {
+        tile_count as f32 * (tile_width + gap) - gap
+    }
+}
+
+fn carousel_aside_height(strip_height: f32) -> f32 {
+    if strip_height > 0. {
+        strip_height
+    } else {
+        CAROUSEL_MAX_ROW_HEIGHT - 4.
+    }
+}
+
+fn carousel_overflows(viewport_width: f32, tile_count: usize, aside_height: f32, gap: f32) -> bool {
+    viewport_width > 0.
+        && carousel_content_width(tile_count, carousel_tile_width(aside_height), gap)
+            > viewport_width
+}
+
+fn carousel_max_visible_tiles(viewport_width: f32, aside_height: f32) -> usize {
+    let target = (aside_height * CAROUSEL_ASPECT_RATIO).max(CAROUSEL_MIN_TILE_WIDTH);
+    ((viewport_width / target).floor() as usize).max(1)
+}
+
+fn carousel_visible_range(
+    total: usize,
+    viewport_w: f32,
+    tile_step: f32,
+    scroll_offset_x: f32,
+) -> (usize, usize) {
+    if total == 0 || viewport_w <= 0. || tile_step <= 0. {
+        return (0, total.min(16));
+    }
+    let scrolled = (-scroll_offset_x).max(0.);
+    let first = (scrolled / tile_step) as usize;
+    let visible = (viewport_w / tile_step).ceil() as usize + 1;
+    (
+        first.saturating_sub(2).min(total),
+        (first + visible + 2).min(total),
+    )
+}
+
 #[allow(clippy::too_many_arguments)]
 fn render_focus_layout(
-    theme: &Theme,
     locale: &str,
-    store: &VoiceStore,
     voice: &Entity<VoiceStore>,
     cells: &[VideoCell],
     focused_idx: usize,
     chat: &Entity<ChatLayout>,
     show_members: bool,
     strip_scroll: &ScrollHandle,
+    window: &mut Window,
+    cx: &mut App,
 ) -> AnyElement {
     let focused = &cells[focused_idx];
+
+    let (focused_tile, bg_tertiary) = {
+        let theme = cx.theme();
+        let store = voice.read(cx);
+        (
+            focus_main_tile(theme, locale, store, voice, focused),
+            theme.bg_tertiary,
+        )
+    };
 
     let main = div()
         .flex()
@@ -1608,7 +1868,7 @@ fn render_focus_layout(
         .flex_basis(px(0.))
         .min_h_0()
         .w_full()
-        .child(focus_main_tile(theme, locale, store, voice, focused));
+        .child(focused_tile);
 
     let member_count = cells.iter().filter(|c| !c.is_screen).count();
     let toggle_pill = {
@@ -1623,7 +1883,9 @@ fn render_focus_layout(
             .rounded(px(20.))
             .bg(gpui::rgb(0x2b2b2b))
             .cursor_pointer()
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .on_click(move |_, _, cx| {
+                cx.stop_propagation();
                 chat.update(cx, |layout, cx| layout.toggle_voice_member_strip(cx))
             })
             .child(
@@ -1656,7 +1918,7 @@ fn render_focus_layout(
         .min_h_0()
         .p_2()
         .gap_2()
-        .bg(theme.bg_tertiary)
+        .bg(bg_tertiary)
         .child(main);
 
     let container = if show_members {
@@ -1673,22 +1935,27 @@ fn render_focus_layout(
 
         let strip_bounds = strip_scroll.bounds();
         let viewport = strip_bounds.size.width;
-        let max_x = strip_scroll.max_offset().x;
-        let overflows = max_x > px(0.);
-
-        let total = strip_cells.len();
+        let mut viewport_w = f32::from(viewport);
+        if viewport_w <= 0. {
+            viewport_w = (f32::from(window.viewport_size().width) * 0.55).max(400.);
+        }
         let gap = 8.;
-        let tile_step = f32::from(strip_bounds.size.height - px(4.)) * 1.6 + gap;
-        let (start, end) = if f32::from(viewport) > 0. && tile_step > gap {
-            let scrolled = f32::from(-strip_scroll.offset().x).max(0.);
-            let first = (scrolled / tile_step) as usize;
-            let visible = (f32::from(viewport) / tile_step).ceil() as usize + 1;
-            (
-                first.saturating_sub(2).min(total),
-                (first + visible + 2).min(total),
+        let total = strip_cells.len();
+        let strip_h = f32::from(strip_bounds.size.height);
+        let aside_h = carousel_aside_height(strip_h);
+        let tile_w = carousel_tile_width(aside_h);
+        let tile_step = tile_w + gap;
+        let overflows = carousel_overflows(viewport_w, total, aside_h, gap);
+        let avatar_size = px((aside_h * 0.6).clamp(24., 80.));
+        let (start, end) = if overflows {
+            carousel_visible_range(
+                total,
+                viewport_w,
+                tile_step,
+                f32::from(strip_scroll.offset().x),
             )
         } else {
-            (0, total.min(16))
+            (0, total)
         };
         let lead_spacer =
             (start > 0).then(|| div().flex_none().w(px(start as f32 * tile_step - gap)));
@@ -1698,41 +1965,87 @@ fn render_focus_layout(
                 .w(px((total - end) as f32 * tile_step - gap))
         });
 
-        let carousel = div()
+        let scrollbar_gap = overflows.then(|| {
+            div()
+                .id("voice-carousel-scrollbar-gap")
+                .flex_1()
+                .min_h(px(CAROUSEL_SCROLLBAR_GAP_MIN))
+                .w_full()
+                .flex()
+                .items_center()
+                .child(
+                    div()
+                        .id("voice-carousel-scrollbar")
+                        .w_full()
+                        .h(px(CAROUSEL_SCROLLBAR_RESERVE))
+                        .custom_scrollbars(
+                            Scrollbars::always_visible(ScrollAxes::Horizontal)
+                                .tracked_scroll_handle(strip_scroll),
+                            window,
+                            cx,
+                        ),
+                )
+        });
+
+        let theme = cx.theme();
+        let strip_tiles = {
+            let store = voice.read(cx);
+            strip_cells[start..end]
+                .iter()
+                .copied()
+                .map(|c| strip_tile(theme, locale, store, voice, c, tile_w, avatar_size))
+                .collect::<Vec<_>>()
+        };
+
+        let tiles_row = div()
             .id("voice-carousel")
-            .flex_1()
-            .min_h_0()
-            .w_full()
             .flex()
             .flex_row()
-            .gap_2()
-            .pb_1()
+            .flex_none()
+            .h(px(aside_h))
+            .gap(px(gap))
             .when(!overflows, |this| this.justify_center())
-            .overflow_x_scroll()
-            .track_scroll(strip_scroll)
             .children(lead_spacer)
-            .children(
-                strip_cells[start..end]
-                    .iter()
-                    .copied()
-                    .map(|c| strip_tile(theme, locale, store, voice, c)),
-            )
+            .children(strip_tiles)
             .children(trail_spacer);
 
-        let scrollbar = overflows.then(|| {
-            let content = viewport + max_x;
-            let thumb = viewport * (viewport / content).clamp(0., 1.);
-            let scrolled = ((-strip_scroll.offset().x) / max_x).clamp(0., 1.);
-            let thumb_x = (viewport - thumb) * scrolled;
-            div().h(px(6.)).w_full().child(
-                div()
-                    .ml(thumb_x)
-                    .w(thumb)
-                    .h_full()
-                    .rounded(px(4.))
-                    .bg(gpui::rgb(0x6d6f77)),
-            )
-        });
+        let carousel: AnyElement = if overflows {
+            div()
+                .flex_1()
+                .min_h_0()
+                .min_w_0()
+                .w_full()
+                .flex()
+                .flex_col()
+                .child(
+                    div()
+                        .id("voice-carousel-scroll")
+                        .w_full()
+                        .h(px(aside_h))
+                        .overflow_x_scroll()
+                        .track_scroll(strip_scroll)
+                        .child(tiles_row),
+                )
+                .children(scrollbar_gap)
+                .into_any_element()
+        } else {
+            div()
+                .flex_1()
+                .min_h_0()
+                .min_w_0()
+                .w_full()
+                .flex()
+                .flex_row()
+                .justify_center()
+                .child(tiles_row)
+                .into_any_element()
+        };
+
+        let strip_max_h = if overflows {
+            CAROUSEL_MAX_ROW_HEIGHT + CAROUSEL_SCROLLBAR_GAP_MIN + CAROUSEL_SCROLLBAR_RESERVE
+        } else {
+            CAROUSEL_MAX_ROW_HEIGHT
+        };
 
         let strip = div()
             .relative()
@@ -1741,9 +2054,9 @@ fn render_focus_layout(
             .flex_col()
             .flex_basis(px(0.))
             .min_h_0()
+            .max_h(px(strip_max_h))
             .w_full()
             .child(carousel)
-            .children(scrollbar)
             .child(
                 div()
                     .absolute()
@@ -1850,7 +2163,7 @@ fn focus_main_tile(
     cell: &VideoCell,
 ) -> AnyElement {
     let voice = voice.clone();
-    let inner = tile_inner(theme, store, cell, true);
+    let inner = tile_inner(theme, store, cell, px(120.));
 
     div()
         .id(SharedString::from(format!("focus-main-{}", cell.id)))
@@ -1884,15 +2197,13 @@ fn strip_tile(
     store: &VoiceStore,
     voice: &Entity<VoiceStore>,
     cell: &VideoCell,
+    tile_width: f32,
+    avatar_size: Pixels,
 ) -> AnyElement {
     let voice = voice.clone();
     let id = cell.id.clone();
-    let inner = tile_inner(theme, store, cell, false);
-    let border_color: Hsla = if cell.speaking && !cell.is_screen {
-        theme.status_online.into()
-    } else {
-        gpui::transparent_black()
-    };
+    let inner = tile_inner(theme, store, cell, avatar_size);
+    let border_color = speaking_border_color(cell);
 
     div()
         .id(SharedString::from(format!("strip-{}", cell.id)))
@@ -1902,12 +2213,12 @@ fn strip_tile(
         .items_center()
         .justify_center()
         .h_full()
-        .aspect_ratio(16. / 10.)
+        .w(px(tile_width))
         .rounded_lg()
         .overflow_hidden()
         .bg(theme.bg_secondary)
         .cursor_pointer()
-        .border_2()
+        .border(px(SPEAKING_BORDER_WIDTH))
         .border_color(border_color)
         .child(inner)
         .child(tile_metadata(locale, cell))
@@ -1931,12 +2242,8 @@ fn video_tile(
 ) -> AnyElement {
     let voice = voice.clone();
     let id = cell.id.clone();
-    let inner = tile_inner(theme, store, cell, false);
-    let border_color: Hsla = if cell.speaking && !cell.is_screen {
-        theme.status_online.into()
-    } else {
-        gpui::transparent_black()
-    };
+    let inner = tile_inner(theme, store, cell, px(80.));
+    let border_color = speaking_border_color(cell);
 
     div()
         .id(SharedString::from(format!("tile-{}", cell.id)))
@@ -1949,7 +2256,7 @@ fn video_tile(
         .overflow_hidden()
         .bg(theme.bg_secondary)
         .cursor_pointer()
-        .border_2()
+        .border(px(SPEAKING_BORDER_WIDTH))
         .border_color(border_color)
         .child(inner)
         .child(tile_metadata(locale, cell))
@@ -1964,7 +2271,12 @@ fn video_tile(
         .into_any_element()
 }
 
-fn tile_inner(theme: &Theme, store: &VoiceStore, cell: &VideoCell, large: bool) -> AnyElement {
+fn tile_inner(
+    theme: &Theme,
+    store: &VoiceStore,
+    cell: &VideoCell,
+    avatar_size: Pixels,
+) -> AnyElement {
     if let Some(key) = cell.key
         && let Some(frame) = store.render_frame(key)
     {
@@ -1983,10 +2295,7 @@ fn tile_inner(theme: &Theme, store: &VoiceStore, cell: &VideoCell, large: bool) 
             .into_any_element();
     }
 
-    let mut avatar =
-        Avatar::new()
-            .name(cell.name.clone())
-            .size_px(if large { px(120.) } else { px(80.) });
+    let mut avatar = Avatar::new().name(cell.name.clone()).size_px(avatar_size);
     if !cell.avatar_url.is_empty() {
         avatar = avatar.src(cell.avatar_url.clone());
     }
@@ -2042,7 +2351,7 @@ fn tile_metadata(locale: &str, cell: &VideoCell) -> AnyElement {
                 .when(cell.muted && !cell.is_screen, |this| {
                     this.child(
                         Icon::new(IconName::VoiceMicDisabledIcon)
-                            .size(px(14.))
+                            .size(px(16.))
                             .flex_none()
                             .text_color(gpui::rgba(0xffffff80)),
                     )
@@ -2050,7 +2359,7 @@ fn tile_metadata(locale: &str, cell: &VideoCell) -> AnyElement {
                 .when(cell.is_screen, |this| {
                     this.child(
                         Icon::new(IconName::VoiceScreenShareIcon)
-                            .size(px(14.))
+                            .size(px(16.))
                             .flex_none()
                             .text_color(gpui::rgb(0xffffff)),
                     )
@@ -2061,6 +2370,7 @@ fn tile_metadata(locale: &str, cell: &VideoCell) -> AnyElement {
                         .min_w_0()
                         .py(px(2.))
                         .text_xs()
+                        .line_height(px(12.))
                         .text_color(gpui::rgb(0xffffff))
                         .child(div().invisible().whitespace_nowrap().child(label.clone()))
                         .child(
@@ -2294,6 +2604,49 @@ fn control_bar(
         .on_click(move |_, _, cx| voice.update(cx, |store, cx| store.send_raising_hand(cx)))
     };
 
+    let agent_active = store.agent_active();
+    let agent_clan_id = store
+        .connection()
+        .connected_channel()
+        .and_then(|(_, clan)| clan.parse::<i64>().ok())
+        .map(ClanId);
+    let can_manage_agent = agent_clan_id.is_some_and(|clan_id| {
+        PermissionStore::try_global(cx).is_some_and(|store| {
+            store
+                .read(cx)
+                .check_permission(clan_id, PERMISSION_MANAGE_CHANNEL, cx)
+        })
+    });
+    let agent_button = can_manage_agent.then(|| {
+        let voice = voice.clone();
+        let (bg, hover, color): (Hsla, Hsla, Hsla) = if agent_active {
+            (
+                gpui::rgb(ACCENT_BLUE).into(),
+                darken(gpui::rgb(ACCENT_BLUE), 0.1),
+                gpui::rgb(0xffffff).into(),
+            )
+        } else {
+            (neutral_bg.into(), neutral_hover, theme.text_primary.into())
+        };
+        let agent_tooltip = mezon_i18n::t(
+            locale,
+            if agent_active {
+                "channelVoice.removeAgent"
+            } else {
+                "channelVoice.addAgent"
+            },
+        );
+        circle_button(
+            "voice-agent-btn",
+            bg,
+            hover,
+            IconName::VoiceAgentIcon,
+            color,
+        )
+        .tooltip(Tooltip::text(agent_tooltip))
+        .on_click(move |_, _, cx| voice.update(cx, |store, cx| store.toggle_agent(cx)))
+    });
+
     let mut right = div()
         .flex()
         .flex_row()
@@ -2405,6 +2758,7 @@ fn control_bar(
         .child(mic_button)
         .child(camera_button)
         .child(screen_button)
+        .children(agent_button)
         .child(raise_hand_button)
         .child(leave_button);
 
@@ -2815,6 +3169,42 @@ fn kind_slug(kind: DeviceKind) -> &'static str {
 }
 
 #[cfg(test)]
+mod carousel_tests {
+    use super::{
+        CAROUSEL_MIN_TILE_WIDTH, carousel_content_width, carousel_overflows, carousel_tile_width,
+        carousel_visible_range,
+    };
+
+    #[test]
+    fn uses_fixed_min_tile_width_like_react() {
+        let tile_w = carousel_tile_width(89.);
+        assert!(tile_w >= CAROUSEL_MIN_TILE_WIDTH);
+        assert!(tile_w > carousel_tile_width(50.));
+    }
+
+    #[test]
+    fn eleven_participants_overflow_typical_strip_viewport() {
+        let tile_w = carousel_tile_width(89.);
+        assert!(carousel_overflows(1200., 11, 89., 8.));
+        assert!(carousel_content_width(11, tile_w, 8.) > 1200.);
+    }
+
+    #[test]
+    fn participants_fit_without_scroll_on_wide_viewport() {
+        assert!(!carousel_overflows(3000., 11, 89., 8.));
+    }
+
+    #[test]
+    fn visible_range_windows_large_strip() {
+        let tile_step = 148.;
+        let (start, end) = carousel_visible_range(100, 600., tile_step, -450.);
+        assert!(start < end);
+        assert!(end - start < 20);
+        assert!(start >= 1);
+    }
+}
+
+#[cfg(test)]
 mod device_menu_tests {
     use super::active_device_name;
 
@@ -2845,118 +3235,5 @@ mod device_menu_tests {
             active_device_name(&entries(), &Some("gone".to_string())),
             "System default"
         );
-    }
-}
-
-#[cfg(test)]
-mod grid_order_tests {
-    use super::voice_grid_order;
-    use mezon_store::{NetworkQuality, VoiceParticipant};
-
-    fn participant(
-        identity: &str,
-        is_local: bool,
-        speaking: bool,
-        muted: bool,
-        camera: bool,
-    ) -> VoiceParticipant {
-        VoiceParticipant {
-            identity: identity.to_string(),
-            name: identity.to_string(),
-            is_local,
-            speaking,
-            muted,
-            camera: camera.then_some(1),
-            screenshare: None,
-            quality: NetworkQuality::Unknown,
-        }
-    }
-
-    fn ordered_ids(participants: &[VoiceParticipant]) -> Vec<String> {
-        voice_grid_order(participants)
-            .into_iter()
-            .map(|i| participants[i].identity.clone())
-            .collect()
-    }
-
-    #[test]
-    fn local_first_then_speaking_then_mic_on_then_camera() {
-        let participants = vec![
-            participant("muted", false, false, true, false),
-            participant("speaking", false, true, false, false),
-            participant("local", true, false, true, false),
-            participant("mic-on", false, false, false, false),
-            participant("mic-on-camera", false, false, false, true),
-        ];
-        assert_eq!(
-            ordered_ids(&participants),
-            vec!["local", "speaking", "mic-on-camera", "mic-on", "muted"]
-        );
-    }
-
-    #[test]
-    fn preserves_input_order_for_equal_keys() {
-        let participants = vec![
-            participant("a", false, false, true, false),
-            participant("b", false, false, true, false),
-            participant("c", false, false, true, false),
-        ];
-        assert_eq!(ordered_ids(&participants), vec!["a", "b", "c"]);
-    }
-}
-
-#[cfg(test)]
-mod grid_layout_tests {
-    use super::{GRID_LAYOUTS, select_grid_layout};
-
-    fn wide(count: usize) -> (usize, usize) {
-        select_grid_layout(GRID_LAYOUTS, count, 1280., 800.)
-    }
-
-    #[test]
-    fn matches_livekit_grid_layouts() {
-        assert_eq!(wide(1), (1, 1));
-        assert_eq!(wide(2), (2, 1));
-        assert_eq!(wide(3), (2, 2));
-        assert_eq!(wide(4), (2, 2));
-        assert_eq!(wide(5), (3, 3));
-        assert_eq!(wide(9), (3, 3));
-        assert_eq!(wide(10), (4, 4));
-        assert_eq!(wide(16), (4, 4));
-        assert_eq!(wide(25), (5, 5));
-    }
-
-    #[test]
-    fn caps_at_five_by_five_for_large_rooms() {
-        assert_eq!(wide(26), (5, 5));
-        assert_eq!(wide(100), (5, 5));
-    }
-
-    #[test]
-    fn portrait_container_prefers_stacked_pair() {
-        assert_eq!(select_grid_layout(GRID_LAYOUTS, 2, 700., 1280.), (1, 2));
-    }
-
-    #[test]
-    fn narrow_container_falls_back_to_smaller_layout() {
-        assert_eq!(select_grid_layout(GRID_LAYOUTS, 100, 1000., 700.), (4, 4));
-        assert_eq!(select_grid_layout(GRID_LAYOUTS, 100, 900., 700.), (3, 3));
-        assert_eq!(select_grid_layout(GRID_LAYOUTS, 100, 600., 500.), (2, 2));
-    }
-
-    #[test]
-    fn unmeasured_container_uses_smallest_layout() {
-        assert_eq!(select_grid_layout(GRID_LAYOUTS, 10, 0., 0.), (1, 1));
-    }
-
-    #[test]
-    fn pre_join_avatar_cap_matches_react_breakpoints() {
-        use super::pre_join_max_members;
-        assert_eq!(pre_join_max_members(900.), 2);
-        assert_eq!(pre_join_max_members(1100.), 3);
-        assert_eq!(pre_join_max_members(1250.), 4);
-        assert_eq!(pre_join_max_members(1350.), 5);
-        assert_eq!(pre_join_max_members(1500.), 6);
-        assert_eq!(pre_join_max_members(1800.), 3);
     }
 }

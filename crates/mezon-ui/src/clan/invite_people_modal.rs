@@ -11,8 +11,8 @@ use gpui::{
 };
 use mezon_store::{
     AppConfig, ChannelId, ClanId, ClanInviteLink, ClanList, ClanMembersEvent, ClanMembersStore,
-    DirectEvent, DirectKind, DirectMessageStore, Friend, FriendEvent, FriendState, FriendStore,
-    UserId,
+    DirectEvent, DirectKind, DirectMessageBody, DirectMessageStore, Friend, FriendEvent,
+    FriendState, FriendStore, UserId,
 };
 use std::collections::HashSet;
 use std::io::Cursor;
@@ -325,9 +325,9 @@ impl InvitePeopleModal {
         let username = row.username.to_string();
         let user_id = row.user_id;
         let channel = row.channel;
-        let content = self.invite_message_content(cx);
+        let body = self.invite_message_body(cx);
         let task = store.update(cx, |store, cx| {
-            store.send_direct_text_to_target(user_id, channel, label, avatar, username, content, cx)
+            store.send_direct_text_to_target(user_id, channel, label, avatar, username, body, cx)
         });
         let locale = self.locale.clone();
         cx.spawn(async move |this, cx| match task.await {
@@ -353,17 +353,17 @@ impl InvitePeopleModal {
         .detach();
     }
 
-    fn invite_message_content(&self, cx: &App) -> String {
+    fn invite_message_body(&self, cx: &App) -> DirectMessageBody {
         let Some(clan) = ClanList::global(cx)
             .read(cx)
             .clan_by_id(self.clan_id)
             .cloned()
         else {
-            return self.invite_link();
+            return DirectMessageBody::Text(self.invite_link());
         };
         let url = self.invite_link();
         let end = url.chars().count();
-        serde_json::json!({
+        let json = serde_json::json!({
             "t": url,
             "mk": [
                 { "s": 0, "e": end, "type": "lk" },
@@ -376,7 +376,8 @@ impl InvitePeopleModal {
                 }
             ]
         })
-        .to_string()
+        .to_string();
+        DirectMessageBody::ContentJson(json)
     }
 
     fn copy_invite_link(&mut self, cx: &mut Context<Self>) {
@@ -529,7 +530,7 @@ impl Render for InvitePeopleModal {
                             .truncate()
                             .text_size(px(20.))
                             .font_weight(FontWeight::BOLD)
-                            .text_color(gpui::white())
+                            .text_color(theme.tokens.text_theme_primary)
                             .child(title),
                     )
                     .child(
@@ -577,7 +578,7 @@ impl Render for InvitePeopleModal {
                                 .mb(px(8.))
                                 .text_size(px(14.))
                                 .font_weight(FontWeight::BOLD)
-                                .text_color(gpui::white())
+                                .text_color(theme.tokens.text_theme_primary)
                                 .child(invite_send_link_label(&self.locale))
                                 .child(
                                     div()
@@ -799,7 +800,7 @@ fn render_friend_row(
                         .truncate()
                         .text_size(px(14.))
                         .font_weight(FontWeight::MEDIUM)
-                        .text_color(gpui::white())
+                        .text_color(theme.tokens.text_theme_primary)
                         .child(row.label),
                 ),
         )
@@ -905,7 +906,7 @@ fn render_copy_link(
                 .px(px(16.))
                 .truncate()
                 .text_size(px(14.))
-                .text_color(gpui::white())
+                .text_color(theme.tokens.text_theme_primary)
                 .child(display_text),
         )
         .child(

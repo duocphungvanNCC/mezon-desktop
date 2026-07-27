@@ -50,6 +50,27 @@ impl ClanImageMimeType {
     }
 }
 
+fn clan_image_extension(path: &Path) -> Option<String> {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .map(|ext| ext.to_ascii_lowercase())
+}
+
+pub fn validate_clan_image_file(path: &Path, max_bytes: u64) -> Result<ClanImageMimeType, String> {
+    let ext =
+        clan_image_extension(path).ok_or_else(|| "Unsupported image file type".to_string())?;
+    let mime_type = ClanImageMimeType::from_extension(&ext)
+        .ok_or_else(|| "Unsupported image file type".to_string())?;
+    let len = std::fs::metadata(path).map_err(|e| e.to_string())?.len();
+    if len == 0 {
+        return Err("File is empty".into());
+    }
+    if len > max_bytes {
+        return Err(format!("File exceeds {max_bytes}-byte limit ({len} bytes)"));
+    }
+    Ok(mime_type)
+}
+
 #[derive(Debug, Clone)]
 pub struct Clan {
     pub id: ClanId,
@@ -536,7 +557,6 @@ impl ClanList {
             return;
         }
         self.active_clan_id = Some(id);
-        self.fire_join_clan_chat(id, cx);
         cx.emit(ClanEvent::ActiveClanChanged(self.active_clan_id));
         cx.notify();
     }
@@ -597,9 +617,9 @@ impl ClanList {
         let base_img_url = AppConfig::global(cx).base_img_url.clone();
         cx.spawn(async move |_, cx| {
             cx.background_executor()
-                .spawn(async move {
-                    upload_clan_image_to_cdn(&api, &base_img_url, &path, max_bytes).await
-                })
+                .spawn(
+                    async move { upload_image_to_cdn(&api, &base_img_url, &path, max_bytes).await },
+                )
                 .await
         })
     }
@@ -774,7 +794,7 @@ fn read_clan_image_file(path: &Path, max_bytes: u64) -> Result<Vec<u8>, String> 
     std::fs::read(path).map_err(|e| e.to_string())
 }
 
-async fn upload_clan_image_to_cdn(
+pub(crate) async fn upload_image_to_cdn(
     api: &AppApi,
     base_img_url: &str,
     path: &Path,
@@ -791,13 +811,10 @@ async fn upload_clan_image_to_cdn(
         .and_then(|n| n.to_str())
         .unwrap_or("avatar");
     let filename = timestamped_upload_filename(raw_filename);
-    let ext = path
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("")
-        .to_ascii_lowercase();
+    let ext =
+        clan_image_extension(path).ok_or_else(|| "Unsupported image file type".to_string())?;
     let filetype = ClanImageMimeType::from_extension(&ext)
-        .ok_or_else(|| format!("Unsupported image extension: .{ext}"))?
+        .ok_or_else(|| "Unsupported image file type".to_string())?
         .as_str();
     let size = i32::try_from(data.len()).map_err(|_| "Image file is too large".to_string())?;
     let (width, height) = image_dimensions(&data);
@@ -1011,6 +1028,33 @@ mod tests {
             );
         }
         assert!(ClanImageMimeType::from_extension("bmp").is_none());
+    }
+
+    #[test]
+    fn validate_clan_image_file_rejects_unsupported_extension() {
+        let dir =
+            std::env::temp_dir().join(format!("mezon-clan-image-test-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("bad.bmp");
+        std::fs::write(&path, b"data").expect("write temp file");
+        let err = validate_clan_image_file(&path, MAX_CLAN_LOGO_BYTES)
+            .expect_err("unsupported extension must fail");
+        assert_eq!(err, "Unsupported image file type");
+        let _ = std::fs::remove_file(path);
+        let _ = std::fs::remove_dir(dir);
+    }
+
+    #[test]
+    fn validate_clan_image_file_rejects_oversized_file() {
+        let dir =
+            std::env::temp_dir().join(format!("mezon-clan-image-size-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("large.png");
+        std::fs::write(&path, vec![0_u8; 32]).expect("write temp file");
+        let err = validate_clan_image_file(&path, 16).expect_err("size limit must fail");
+        assert!(err.contains("byte limit"));
+        let _ = std::fs::remove_file(path);
+        let _ = std::fs::remove_dir(dir);
     }
 
     #[test]

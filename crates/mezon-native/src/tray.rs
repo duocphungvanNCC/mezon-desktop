@@ -22,7 +22,6 @@ const TRAY_ICON_BYTES: &[u8] = include_bytes!(concat!(
 ));
 
 pub struct MezonTray {
-    #[cfg(not(target_os = "linux"))]
     _icon: TrayIcon,
     update_task: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
     stop_tx: crossbeam_channel::Sender<()>,
@@ -57,12 +56,16 @@ impl MezonTray {
                                         .await
                                     {
                                         Ok(Some(version)) => {
-                                            let download_url = "https://mezon.ai/download";
-                                            tracing::info!(
-                                                "Update available: v{version} — download from {download_url}"
-                                            );
-                                            match mezon_updater::validate_update_url(download_url) {
-                                                Ok(()) => {
+                                            match mezon_updater::download_url()
+                                                .and_then(|url| {
+                                                    mezon_updater::validate_update_url(url)?;
+                                                    Ok(url)
+                                                })
+                                            {
+                                                Ok(download_url) => {
+                                                    tracing::info!(
+                                                        "Update available: v{version} — download from {download_url}"
+                                                    );
                                                     let _ = open::that_detached(download_url);
                                                 }
                                                 Err(e) => {
@@ -95,41 +98,10 @@ impl MezonTray {
             tracing::debug!("Tray event-loop thread exiting");
         });
 
-        #[cfg(not(target_os = "linux"))]
         let icon = build_menu_and_tray()?;
-
-        #[cfg(target_os = "linux")]
-        {
-            let (ready_tx, ready_rx) = crossbeam_channel::bounded::<Result<(), String>>(1);
-            std::thread::Builder::new()
-                .name("mezon-tray-gtk".into())
-                .spawn(move || {
-                    if let Err(e) = gtk::init() {
-                        let _ = ready_tx.send(Err(format!("gtk init failed: {e}")));
-                        return;
-                    }
-                    let _tray = match build_menu_and_tray() {
-                        Ok(tray) => tray,
-                        Err(e) => {
-                            let _ = ready_tx.send(Err(e.to_string()));
-                            return;
-                        }
-                    };
-                    let _ = ready_tx.send(Ok(()));
-                    gtk::main();
-                })
-                .map_err(|e| anyhow::anyhow!("Failed to spawn GTK tray thread: {e}"))?;
-
-            match ready_rx.recv() {
-                Ok(Ok(())) => {}
-                Ok(Err(e)) => return Err(anyhow::anyhow!(e)),
-                Err(e) => return Err(anyhow::anyhow!("GTK tray thread exited before init: {e}")),
-            }
-        }
 
         tracing::debug!("System tray created");
         Ok(Self {
-            #[cfg(not(target_os = "linux"))]
             _icon: icon,
             update_task,
             stop_tx,

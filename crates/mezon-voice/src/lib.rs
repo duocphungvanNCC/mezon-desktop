@@ -17,6 +17,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use anyhow::Result;
 use futures::StreamExt;
 use livekit::options::{TrackPublishOptions, VideoEncoding};
+use livekit::participant::ParticipantKind;
 use livekit::prelude::*;
 use livekit::track::{
     LocalAudioTrack, LocalTrack, LocalVideoTrack, RemoteVideoTrack, TrackKind, TrackSource,
@@ -73,6 +74,7 @@ pub struct VoiceParticipant {
     pub identity: String,
     pub name: String,
     pub is_local: bool,
+    pub is_agent: bool,
     pub speaking: bool,
     pub muted: bool,
     pub camera: Option<u64>,
@@ -1083,6 +1085,15 @@ fn bounded_dimensions(width: u32, height: u32, max_width: u32, max_height: u32) 
     (width, height)
 }
 
+fn is_agent_participant(
+    kind: ParticipantKind,
+    permission: Option<livekit_protocol::ParticipantPermission>,
+) -> bool {
+    #[allow(deprecated)]
+    let legacy_agent_permission = permission.is_some_and(|p| p.agent);
+    legacy_agent_permission || kind == ParticipantKind::Agent
+}
+
 fn emit_participants(
     room: &Room,
     evt_tx: &flume::Sender<VoiceEvent>,
@@ -1099,6 +1110,7 @@ fn emit_participants(
         identity: local.identity().as_str().to_string(),
         name: display_name(&local.name(), local.identity().as_str()),
         is_local: true,
+        is_agent: is_agent_participant(local.kind(), local.permission()),
         speaking: local.is_speaking(),
         muted: !local_mic_enabled || local_mic_muted(&local),
         camera: local_camera_on.then(|| local_camera_key(local_identity)),
@@ -1106,12 +1118,15 @@ fn emit_participants(
         quality: network_quality(local.connection_quality()),
     });
 
-    for participant in room.remote_participants().values() {
+    let mut remotes: Vec<RemoteParticipant> = room.remote_participants().into_values().collect();
+    remotes.sort_by(|a, b| a.identity().as_str().cmp(b.identity().as_str()));
+    for participant in &remotes {
         let identity = participant.identity().as_str().to_string();
         let (camera, screenshare) = remote_video_keys(participant, &identity);
         participants.push(VoiceParticipant {
             name: display_name(&participant.name(), &identity),
             is_local: false,
+            is_agent: is_agent_participant(participant.kind(), participant.permission()),
             speaking: participant.is_speaking(),
             muted: remote_mic_muted(participant),
             camera,

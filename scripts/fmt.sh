@@ -20,7 +20,9 @@ PKGS=(
     -p mezon-i18n
     -p mezon-updater
     -p mezon-audio
+    -p mezon-webview
     -p mezon-voice
+    -p mmn-client
 )
 
 case "${1:-check}" in

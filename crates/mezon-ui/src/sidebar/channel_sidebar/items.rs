@@ -1,5 +1,5 @@
 use gpui::SharedString;
-use mezon_store::{AppChannel, ChannelType, VoiceMember};
+use mezon_store::{AppChannel, ChannelType};
 
 #[derive(Clone, PartialEq)]
 pub(super) struct VoiceMemberSlot {
@@ -8,25 +8,23 @@ pub(super) struct VoiceMemberSlot {
     pub(super) avatar_url: String,
 }
 
-impl From<&VoiceMember> for VoiceMemberSlot {
-    fn from(m: &VoiceMember) -> Self {
-        Self {
-            user_id: m.user_id.to_string(),
-            display_name: m.display_name.clone(),
-            avatar_url: m.avatar_url.clone(),
-        }
-    }
-}
-
 #[derive(Clone, PartialEq)]
-pub(super) struct AppChannelSlot {
-    pub(super) app_logo: Option<String>,
+pub(crate) struct AppChannelSlot {
+    pub(crate) app_id: String,
+    pub(crate) app_name: String,
+    pub(crate) app_logo: Option<String>,
+    pub(crate) app_url: String,
+    pub(crate) channel_id: mezon_store::ChannelId,
 }
 
 impl From<&AppChannel> for AppChannelSlot {
     fn from(a: &AppChannel) -> Self {
         Self {
+            app_id: a.app_id.clone(),
+            app_name: a.app_name.clone(),
             app_logo: a.app_logo.clone(),
+            app_url: a.app_url.clone(),
+            channel_id: a.channel_id,
         }
     }
 }
@@ -60,5 +58,6 @@ pub(super) enum SidebarItem {
         line_above: bool,
         line_below: bool,
         voice_members: Vec<VoiceMemberSlot>,
+        voice_compact: bool,
     },
 }

@@ -12,6 +12,43 @@ pub fn set_badge_count(count: u32) {
 
     #[cfg(target_os = "windows")]
     set_badge_windows(count);
+
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    set_badge_linux(count);
+}
+
+// ─── Linux ──────────────────────────────────────────────────────────────────────
+//
+// The Unity LauncherEntry D-Bus API (`com.canonical.Unity.LauncherEntry.Update`)
+// is honoured by GNOME (Dash-to-Dock), KDE Plasma, Unity and others.
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+fn set_badge_linux(count: u32) {
+    std::thread::spawn(move || {
+        if let Err(e) = try_set_badge_linux(count) {
+            tracing::warn!("Linux badge update failed: {e}");
+        }
+    });
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+fn try_set_badge_linux(count: u32) -> Result<(), Box<dyn std::error::Error>> {
+    use std::collections::HashMap;
+    use zbus::zvariant::Value;
+
+    let connection = zbus::blocking::Connection::session()?;
+    let mut props: HashMap<&str, Value> = HashMap::new();
+    props.insert("count", Value::I64(i64::from(count)));
+    props.insert("count-visible", Value::Bool(count > 0));
+
+    connection.emit_signal(
+        None::<&str>,
+        "/com/canonical/unity/launcherentry/mezon",
+        "com.canonical.Unity.LauncherEntry",
+        "Update",
+        &("application://mezon.desktop", props),
+    )?;
+    Ok(())
 }
 
 #[cfg(target_os = "windows")]
@@ -124,70 +161,105 @@ fn try_set_overlay_icon(count: u32) -> windows::core::Result<()> {
     Ok(())
 }
 
-/// Generate a 16×16 `HICON` containing the badge count text.
+/// Generate a 16×16 `HICON` with the badge count centred on a red circle
+/// (matching the in-app `#DA373C` unread badges). A monochrome AND-mask makes
+/// the pixels outside the circle transparent so the overlay reads as a dot, not
+/// a square.
 #[cfg(target_os = "windows")]
 fn build_count_icon(
     count: u32,
 ) -> windows::core::Result<windows::Win32::UI::WindowsAndMessaging::HICON> {
     use windows::Win32::Foundation::{COLORREF, RECT};
     use windows::Win32::Graphics::Gdi::{
-        CreateCompatibleBitmap, CreateCompatibleDC, CreateSolidBrush, DeleteDC, DeleteObject,
-        FillRect, GetDC, ReleaseDC, SelectObject, SetBkMode, SetTextColor, TRANSPARENT, TextOutW,
+        CreateBitmap, CreateCompatibleBitmap, CreateCompatibleDC, CreateSolidBrush,
+        DEFAULT_GUI_FONT, DeleteDC, DeleteObject, Ellipse, FillRect, GetDC, GetStockObject,
+        NULL_PEN, ReleaseDC, SelectObject, SetBkMode, SetTextColor, TRANSPARENT, TextOutW,
     };
     use windows::Win32::UI::WindowsAndMessaging::{CreateIconIndirect, ICONINFO};
 
     const SIZE: i32 = 16;
-    // #5865F2 brand blue, white text
-    const BG_COLOR: u32 = 0x00F26558; // COLORREF is BGR
-    const TEXT_COLOR: u32 = 0x00FFFFFF;
+    // #DA373C danger red (matches every in-app badge); white text. COLORREF is 0x00BBGGRR.
+    const BG_COLOR: u32 = 0x003C_37DA;
+    const TEXT_COLOR: u32 = 0x00FF_FFFF;
+    const WHITE: u32 = 0x00FF_FFFF;
+    const BLACK: u32 = 0x0000_0000;
+
+    let label = if count > 99 {
+        "99+".to_owned()
+    } else {
+        count.to_string()
+    };
+    let text: Vec<u16> = label.encode_utf16().collect();
+    let text_x = match text.len() {
+        1 => 5,
+        2 => 2,
+        _ => 0,
+    };
+
+    let full = RECT {
+        left: 0,
+        top: 0,
+        right: SIZE,
+        bottom: SIZE,
+    };
 
     let hdc_screen = unsafe { GetDC(None) };
     let hdc = unsafe { CreateCompatibleDC(Some(hdc_screen)) };
     let hbmp_color = unsafe { CreateCompatibleBitmap(hdc_screen, SIZE, SIZE) };
-    let hbmp_mask = unsafe { CreateCompatibleBitmap(hdc_screen, SIZE, SIZE) };
+    // The AND-mask must be a 1bpp monochrome bitmap: white = transparent, black = opaque.
+    let hbmp_mask = unsafe { CreateBitmap(SIZE, SIZE, 1, 1, None) };
     unsafe { ReleaseDC(None, hdc_screen) };
 
     unsafe {
-        SelectObject(hdc, hbmp_color.into());
+        let old_bmp = SelectObject(hdc, hbmp_color.into());
+        let old_pen = SelectObject(hdc, GetStockObject(NULL_PEN));
 
-        // Fill background circle.
-        let brush = CreateSolidBrush(COLORREF(BG_COLOR));
-        let rc = RECT {
-            left: 0,
-            top: 0,
-            right: SIZE,
-            bottom: SIZE,
-        };
-        FillRect(hdc, &rc, brush);
-        let _ = DeleteObject(brush.into());
+        // ── Colour bitmap: transparent (black) background + red filled circle + text ──
+        let black_brush = CreateSolidBrush(COLORREF(BLACK));
+        FillRect(hdc, &full, black_brush);
+        let _ = DeleteObject(black_brush.into());
 
-        // Draw count text.
-        let label = if count > 99 {
-            "99+".to_owned()
-        } else {
-            count.to_string()
-        };
-        let text: Vec<u16> = label.encode_utf16().collect();
+        let red_brush = CreateSolidBrush(COLORREF(BG_COLOR));
+        let old_brush = SelectObject(hdc, red_brush.into());
+        let _ = Ellipse(hdc, 0, 0, SIZE, SIZE);
+        SelectObject(hdc, old_brush);
+        let _ = DeleteObject(red_brush.into());
+
+        let old_font = SelectObject(hdc, GetStockObject(DEFAULT_GUI_FONT));
         SetBkMode(hdc, TRANSPARENT);
         SetTextColor(hdc, COLORREF(TEXT_COLOR));
-        TextOutW(hdc, 1, 2, &text);
+        let _ = TextOutW(hdc, text_x, 2, &text);
+        SelectObject(hdc, old_font);
 
-        DeleteDC(hdc);
+        // ── Monochrome mask: white (transparent) everywhere, black (opaque) circle ──
+        SelectObject(hdc, hbmp_mask.into());
+        let white_brush = CreateSolidBrush(COLORREF(WHITE));
+        FillRect(hdc, &full, white_brush);
+        let _ = DeleteObject(white_brush.into());
+        let mask_black = CreateSolidBrush(COLORREF(BLACK));
+        let mask_old_brush = SelectObject(hdc, mask_black.into());
+        let _ = Ellipse(hdc, 0, 0, SIZE, SIZE);
+        SelectObject(hdc, mask_old_brush);
+        let _ = DeleteObject(mask_black.into());
+
+        SelectObject(hdc, old_pen);
+        SelectObject(hdc, old_bmp);
+        let _ = DeleteDC(hdc);
     }
 
     let icon_info = ICONINFO {
         fIcon: true.into(),
         xHotspot: 0,
         yHotspot: 0,
-        hbmMask: hbmp_mask.into(),
-        hbmColor: hbmp_color.into(),
+        hbmMask: hbmp_mask,
+        hbmColor: hbmp_color,
     };
 
     let hicon = unsafe { CreateIconIndirect(&icon_info)? };
 
     unsafe {
-        DeleteObject(hbmp_color.into());
-        DeleteObject(hbmp_mask.into());
+        let _ = DeleteObject(hbmp_color.into());
+        let _ = DeleteObject(hbmp_mask.into());
     }
 
     Ok(hicon)
