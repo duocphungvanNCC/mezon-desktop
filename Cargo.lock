@@ -5803,6 +5803,7 @@ dependencies = [
  "mezon-store",
  "mezon-ui",
  "mezon-updater",
+ "mezon-webview",
  "raw-window-handle",
  "reqwest_client",
  "serde",
@@ -6064,8 +6065,11 @@ name = "mezon-webview"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "gtk",
  "raw-window-handle",
+ "tracing",
  "url",
+ "webkit2gtk",
  "wry",
 ]
 
