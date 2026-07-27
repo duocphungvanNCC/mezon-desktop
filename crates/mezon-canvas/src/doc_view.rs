@@ -9,7 +9,7 @@ use mezon_store::PlatformStore;
 
 use crate::editor::italic_font_family;
 use crate::image::render_canvas_image;
-use crate::view::{CANVAS_BODY_FONT_SIZE, CANVAS_BODY_LINE_HEIGHT, TipTapNode, parse_tiptap_doc};
+use crate::view::{CANVAS_BODY_FONT_SIZE, CANVAS_BODY_LINE_HEIGHT, TipTapNode};
 use mezon_theme::Theme;
 use mezon_widgets::{h_flex, v_flex};
 
@@ -28,17 +28,6 @@ fn paragraph_is_empty(content: Option<&Vec<TipTapNode>>) -> bool {
     !content
         .iter()
         .any(|node| node.kind == "text" && node.text.as_ref().is_some_and(|text| !text.is_empty()))
-}
-
-pub fn render_tiptap_doc(raw: &str, theme: &Theme, cx: &App) -> gpui::AnyElement {
-    match parse_tiptap_doc(raw) {
-        Some(doc) => render_tiptap_node(doc, theme, cx),
-        None => div()
-            .text_sm()
-            .text_color(theme.tokens.text_theme_message)
-            .child(raw.to_string())
-            .into_any_element(),
-    }
 }
 
 pub fn render_tiptap_node(doc: TipTapNode, theme: &Theme, cx: &App) -> gpui::AnyElement {

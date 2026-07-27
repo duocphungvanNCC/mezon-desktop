@@ -1,5 +1,5 @@
-use gpui::{App, Window};
-use mezon_canvas::{CanvasNavigationHooks, CanvasRoute, set_navigation};
+use gpui::App;
+use mezon_canvas::{CanvasNavigationHooks, set_navigation};
 
 use crate::app::shell::Shell;
 use crate::router::{Route, Router, navigate};

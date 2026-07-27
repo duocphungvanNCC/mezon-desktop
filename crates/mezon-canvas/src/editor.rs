@@ -3435,6 +3435,7 @@ fn lines_to_tiptap_json(lines: &[EditorLine]) -> String {
                 let (items, next) = collect_list_lines(lines, i, BlockKind::OrderedItem);
                 content.push(json!({
                     "type": "orderedList",
+                    "attrs": { "start": 1, "type": null },
                     "content": items.iter().map(list_item_json).collect::<Vec<_>>()
                 }));
                 i = next;
@@ -3531,27 +3532,58 @@ fn line_to_block_json(line: &EditorLine) -> Value {
             let src = line.image_src.as_deref().unwrap_or("");
             json!({
                 "type": "image",
-                "attrs": { "src": src }
+                "attrs": {
+                    "src": src,
+                    "alt": null,
+                    "title": null,
+                    "width": null,
+                    "height": null
+                }
             })
         }
-        BlockKind::Heading(level) => json!({
-            "type": "heading",
-            "attrs": { "level": level },
-            "content": inline_json(&line.text, &line.marks)
-        }),
-        BlockKind::CodeBlock => json!({
-            "type": "codeBlock",
-            "content": [{ "type": "text", "text": line.text }]
-        }),
+        BlockKind::Heading(level) => {
+            let content = inline_json(&line.text, &line.marks);
+            if content.is_empty() {
+                json!({
+                    "type": "heading",
+                    "attrs": { "level": level }
+                })
+            } else {
+                json!({
+                    "type": "heading",
+                    "attrs": { "level": level },
+                    "content": content
+                })
+            }
+        }
+        BlockKind::CodeBlock => {
+            if line.text.is_empty() {
+                json!({
+                    "type": "codeBlock",
+                    "attrs": { "language": null }
+                })
+            } else {
+                json!({
+                    "type": "codeBlock",
+                    "attrs": { "language": null },
+                    "content": [{ "type": "text", "text": line.text }]
+                })
+            }
+        }
         _ => paragraph_json(line),
     }
 }
 
 fn paragraph_json(line: &EditorLine) -> Value {
-    json!({
-        "type": "paragraph",
-        "content": inline_json(&line.text, &line.marks)
-    })
+    let content = inline_json(&line.text, &line.marks);
+    if content.is_empty() {
+        json!({ "type": "paragraph" })
+    } else {
+        json!({
+            "type": "paragraph",
+            "content": content
+        })
+    }
 }
 
 fn inline_json(text: &str, marks: &[EditorMark]) -> Vec<Value> {
@@ -3594,13 +3626,22 @@ fn text_nodes_for_range(text: &str, base_offset: usize, marks: &[EditorMark]) ->
             let segment = &text[start..end];
             let abs_start = base_offset + start;
             let abs_end = base_offset + end;
-            Some(json!({
-                "type": "text",
-                "text": segment,
-                "marks": marks_for_range(abs_start..abs_end, marks)
-            }))
+            Some(text_node_json(
+                segment,
+                marks_for_range(abs_start..abs_end, marks),
+            ))
         })
         .collect()
+}
+
+fn text_node_json(text: &str, marks: Vec<Value>) -> Value {
+    let mut map = serde_json::Map::new();
+    map.insert("type".into(), Value::String("text".into()));
+    if !marks.is_empty() {
+        map.insert("marks".into(), Value::Array(marks));
+    }
+    map.insert("text".into(), Value::String(text.into()));
+    Value::Object(map)
 }
 
 fn marks_for_range(range: Range<usize>, marks: &[EditorMark]) -> Vec<Value> {
@@ -3617,7 +3658,13 @@ fn marks_for_range(range: Range<usize>, marks: &[EditorMark]) -> Vec<Value> {
             if mark.kind == MarkKind::Link {
                 out.push(json!({
                     "type": kind,
-                    "attrs": { "href": mark.href.clone().unwrap_or_else(|| "https://".into()) }
+                    "attrs": {
+                        "href": mark.href.clone().unwrap_or_else(|| "https://".into()),
+                        "target": "_blank",
+                        "rel": "noopener noreferrer nofollow",
+                        "class": null,
+                        "title": null
+                    }
                 }));
             } else {
                 out.push(json!({ "type": kind }));
@@ -3773,6 +3820,114 @@ mod tests {
     }
 
     #[test]
+    fn serializes_like_tiptap_get_json() {
+        let lines = vec![
+            EditorLine {
+                block: BlockKind::Heading(1),
+                text: "G10".into(),
+                marks: Vec::new(),
+                image_src: None,
+            },
+            EditorLine {
+                block: BlockKind::Paragraph,
+                text: "Chu Van Gia".into(),
+                marks: vec![
+                    EditorMark {
+                        range: 0..11,
+                        kind: MarkKind::Bold,
+                        href: None,
+                    },
+                    EditorMark {
+                        range: 4..7,
+                        kind: MarkKind::Strike,
+                        href: None,
+                    },
+                ],
+                image_src: None,
+            },
+            EditorLine::default(),
+        ];
+        let json = lines_to_tiptap_json(&lines);
+        let expected = r#"{"type":"doc","content":[{"type":"heading","attrs":{"level":1},"content":[{"type":"text","text":"G10"}]},{"type":"paragraph","content":[{"type":"text","marks":[{"type":"bold"}],"text":"Chu "},{"type":"text","marks":[{"type":"bold"},{"type":"strike"}],"text":"Van"},{"type":"text","marks":[{"type":"bold"}],"text":" Gia"}]},{"type":"paragraph"}]}"#;
+        assert_eq!(
+            json, expected,
+            "desktop serialize must match TipTap getJSON exactly"
+        );
+        assert!(
+            !json.contains(r#""marks":[]"#),
+            "empty marks arrays make web TipTap dirty on load: {json}"
+        );
+        assert!(
+            json.contains(r#"{"type":"text","text":"G10"}"#),
+            "plain text should omit marks: {json}"
+        );
+        assert!(
+            json.contains(r#"{"type":"text","marks":[{"type":"bold"}],"text":"Chu "}"#),
+            "marks should precede text like TipTap getJSON: {json}"
+        );
+        assert!(
+            json.contains(r#"{"type":"paragraph"}"#) || json.ends_with(r#"{"type":"paragraph"}]}"#),
+            "empty paragraph should omit empty content array: {json}"
+        );
+    }
+
+    #[test]
+    fn serializes_image_code_ordered_like_tiptap() {
+        let image = EditorLine {
+            block: BlockKind::Image,
+            text: String::new(),
+            marks: Vec::new(),
+            image_src: Some("https://cdn.mezon.ai/x.png".into()),
+        };
+        let code = EditorLine {
+            block: BlockKind::CodeBlock,
+            text: "fn main() {}".into(),
+            marks: Vec::new(),
+            image_src: None,
+        };
+        let ordered = EditorLine {
+            block: BlockKind::OrderedItem,
+            text: "1".into(),
+            marks: Vec::new(),
+            image_src: None,
+        };
+        let link = EditorLine {
+            block: BlockKind::Paragraph,
+            text: "Mezon".into(),
+            marks: vec![EditorMark {
+                range: 0..5,
+                kind: MarkKind::Link,
+                href: Some("https://mezon.ai".into()),
+            }],
+            image_src: None,
+        };
+
+        let image_json = lines_to_tiptap_json(&[image]);
+        assert_eq!(
+            image_json,
+            r#"{"type":"doc","content":[{"type":"image","attrs":{"src":"https://cdn.mezon.ai/x.png","alt":null,"title":null,"width":null,"height":null}}]}"#
+        );
+
+        let code_json = lines_to_tiptap_json(&[code]);
+        assert_eq!(
+            code_json,
+            r#"{"type":"doc","content":[{"type":"codeBlock","attrs":{"language":null},"content":[{"type":"text","text":"fn main() {}"}]}]}"#
+        );
+
+        let ordered_json = lines_to_tiptap_json(&[ordered]);
+        assert_eq!(
+            ordered_json,
+            r#"{"type":"doc","content":[{"type":"orderedList","attrs":{"start":1,"type":null},"content":[{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"1"}]}]}]}]}"#
+        );
+
+        let link_json = lines_to_tiptap_json(&[link]);
+        assert_eq!(
+            link_json,
+            r#"{"type":"doc","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"link","attrs":{"href":"https://mezon.ai","target":"_blank","rel":"noopener noreferrer nofollow","class":null,"title":null}}],"text":"Mezon"}]}]}"#
+        );
+    }
+
+    #[test]
     fn code_block_serializes_as_codeblock() {
         let line = EditorLine {
             block: BlockKind::CodeBlock,
@@ -3889,7 +4044,7 @@ mod tests {
         let entity = cx.update(|window, cx| {
             cx.new(|cx| CanvasEditorState::new(window, cx, "placeholder", "en"))
         });
-        cx.update(|window, cx| {
+        cx.update(|_window, cx| {
             entity.update(cx, |state, cx| {
                 state.set_doc(
                     r#"{"type":"doc","content":[{"type":"paragraph","content":[{"type":"text","text":"Chu Văn Giá"}]}]}"#,

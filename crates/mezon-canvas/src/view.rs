@@ -639,7 +639,8 @@ pub fn is_tiptap_content_empty(raw: &str) -> bool {
                 .unwrap_or(true))
 }
 
-pub fn tip_tap_to_plain_text(raw: &str) -> String {
+#[cfg(test)]
+fn tip_tap_to_plain_text(raw: &str) -> String {
     let Some(doc) = parse_tiptap_doc(raw) else {
         return raw.to_string();
     };
@@ -648,6 +649,7 @@ pub fn tip_tap_to_plain_text(raw: &str) -> String {
     out
 }
 
+#[cfg(test)]
 fn collect_plain(node: &TipTapNode, out: &mut String) {
     if node.kind == "text" {
         if let Some(text) = &node.text {
@@ -665,6 +667,7 @@ fn collect_plain(node: &TipTapNode, out: &mut String) {
     }
 }
 
+#[cfg(test)]
 fn is_block(kind: &str) -> bool {
     matches!(
         kind,
@@ -681,7 +684,8 @@ fn is_block(kind: &str) -> bool {
     )
 }
 
-pub fn plain_text_to_tiptap(text: &str) -> String {
+#[cfg(test)]
+fn plain_text_to_tiptap(text: &str) -> String {
     if text.is_empty() {
         return r#"{"type":"doc","content":[{"type":"paragraph"}]}"#.to_string();
     }
