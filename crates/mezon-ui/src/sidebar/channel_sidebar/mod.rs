@@ -8,7 +8,7 @@ use gpui::{
     prelude::*, px,
 };
 use mezon_store::{
-    ChannelId, ChannelList, ClanId, ClanList, ClanMembersStore, FAVOR_CATE_ID,
+    ChannelId, ChannelList, ChannelType, ClanId, ClanList, ClanMembersStore, FAVOR_CATE_ID,
     PERMISSION_ADMINISTRATOR, PERMISSION_MANAGE_CLAN, PermissionStore, Settings, VoiceMember,
 };
 
@@ -322,8 +322,25 @@ impl ChannelSidebar {
                             });
                         }
                     } else {
+                        let active_parent_id = active_channel_id.and_then(|id| {
+                            category
+                                .channels
+                                .iter()
+                                .find(|ch| ch.id == id)
+                                .and_then(|ch| ch.parent_id)
+                        });
                         for ch in &category.channels {
-                            if ch.voice_members.is_empty() {
+                            let is_voice_or_streaming = matches!(
+                                ch.channel_type,
+                                ChannelType::Voice | ChannelType::Stream | ChannelType::App
+                            );
+                            let has_members_in_voice =
+                                is_voice_or_streaming && !ch.voice_members.is_empty();
+                            let should_show = (ch.is_unread() && !is_voice_or_streaming)
+                                || active_channel_id == Some(ch.id)
+                                || active_parent_id == Some(ch.id)
+                                || has_members_in_voice;
+                            if !should_show {
                                 continue;
                             }
                             let badge_count = ch.badge_count;

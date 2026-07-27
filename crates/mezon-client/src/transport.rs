@@ -202,6 +202,7 @@ pub fn build_location_content_json(latitude: f64, longitude: f64) -> String {
 }
 pub const QUICK_MENU_TYPE_FLASH: i32 = 1;
 pub const QUICK_MENU_TYPE_QUICK: i32 = 2;
+const CHANNEL_TYPE_MEZON_VOICE: i32 = 10;
 
 #[derive(Clone, Copy, Default)]
 pub struct OutgoingMessageFlags {
@@ -5172,6 +5173,7 @@ impl MezonTransport {
         let cid = self.generate_cid();
         let body = api::ListChannelUsersRequest {
             clan_id,
+            channel_type: CHANNEL_TYPE_MEZON_VOICE,
             limit: 100,
             state: 1,
             ..Default::default()
