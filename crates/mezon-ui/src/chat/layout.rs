@@ -1433,7 +1433,7 @@ impl Render for ChatLayout {
             self.build_create_thread_panel(&locale, window, cx)
         };
         let right_panel = topic_panel.or(create_panel);
-        let chat_content = self.render_content(window, window.viewport_size().width, cx);
+        let chat_content = self.render_content(window, cx);
         let main_content = if let Some(panel) = right_panel {
             div()
                 .flex()
@@ -2236,12 +2236,8 @@ impl ChatLayout {
         })
     }
 
-    fn render_content(
-        &mut self,
-        window: &mut Window,
-        window_width: Pixels,
-        cx: &mut Context<Self>,
-    ) -> gpui::AnyElement {
+    fn render_content(&mut self, window: &mut Window, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let window_width = window.viewport_size().width;
         let theme = cx.theme().clone();
         let locale = self.settings.read(cx).language.clone();
         let inbox_handle = self.inbox_handle.clone();
@@ -2371,7 +2367,6 @@ impl ChatLayout {
                     )
                 };
                 let voice_view = crate::chat::voice::render_voice_channel(
-                    &theme,
                     &locale,
                     &channel,
                     &self.voice_store,
@@ -2385,6 +2380,7 @@ impl ChatLayout {
                     self.voice_show_members,
                     &mut self.voice_visual,
                     window_width,
+                    window,
                     cx,
                 );
                 return div()
@@ -2595,6 +2591,7 @@ impl ChatLayout {
         }
 
         let current_path = router.read(cx).current_path();
+        let theme = cx.theme();
 
         let placeholder = match route {
             Route::Chat => self.render_placeholder(
