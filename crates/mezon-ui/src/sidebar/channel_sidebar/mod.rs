@@ -8,8 +8,9 @@ use gpui::{
     prelude::*, px,
 };
 use mezon_store::{
-    ChannelId, ChannelList, ChannelType, ClanId, ClanList, ClanMembersStore, FAVOR_CATE_ID,
-    PERMISSION_ADMINISTRATOR, PERMISSION_MANAGE_CLAN, PermissionStore, Settings, VoiceMember,
+    BadgeService, ChannelId, ChannelList, ChannelType, ClanId, ClanList, ClanMembersStore,
+    EventsStore, FAVOR_CATE_ID, PERMISSION_ADMINISTRATOR, PERMISSION_MANAGE_CLAN, PermissionStore,
+    Settings, VoiceMember,
 };
 
 use crate::channel_app::{is_channel_app_open, launch_channel_app_from_store};
