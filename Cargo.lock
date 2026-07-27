@@ -5884,6 +5884,7 @@ dependencies = [
  "crossbeam-channel",
  "dirs 5.0.1",
  "flume",
+ "gtk",
  "image",
  "mezon-updater",
  "notify-rust",
@@ -6044,14 +6045,12 @@ name = "mezon-webview"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "gdkx11",
  "gtk",
  "raw-window-handle",
  "tracing",
  "url",
  "webkit2gtk",
  "wry",
- "x11-dl",
 ]
 
 [[package]]

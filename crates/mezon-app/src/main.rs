@@ -52,30 +52,29 @@ impl tracing_tracy::Config for TracyConfig {
 
 #[cfg(target_os = "linux")]
 fn configure_linux_session() {
-    let session = std::env::var("MEZON_LINUX_SESSION")
-        .ok()
-        .map(|value| value.to_ascii_lowercase());
+    if std::env::var_os("DISPLAY").is_none() {
+        return;
+    }
+    unsafe {
+        std::env::set_var("GDK_BACKEND", "x11");
+        std::env::remove_var("WAYLAND_DISPLAY");
+    }
+}
 
-    match session.as_deref() {
-        Some("wayland") => {}
-        Some("x11") => {
-            if std::env::var_os("DISPLAY").is_some() {
-                unsafe { std::env::remove_var("WAYLAND_DISPLAY") };
-            }
+#[cfg(target_os = "linux")]
+fn log_linux_session_notes() {
+    match std::env::var("MEZON_LINUX_SESSION")
+        .ok()
+        .map(|value| value.to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("wayland") => {
+            tracing::warn!("MEZON_LINUX_SESSION=wayland: channel app webviews require X11/XWayland")
         }
-        Some(other) => {
-            tracing::warn!(
-                "Unknown MEZON_LINUX_SESSION={other}; expected x11 or wayland. Using x11."
-            );
-            if std::env::var_os("DISPLAY").is_some() {
-                unsafe { std::env::remove_var("WAYLAND_DISPLAY") };
-            }
+        Some(other) if other != "x11" => {
+            tracing::warn!("Unknown MEZON_LINUX_SESSION={other}; expected x11 or wayland")
         }
-        None => {
-            if std::env::var_os("DISPLAY").is_some() {
-                unsafe { std::env::remove_var("WAYLAND_DISPLAY") };
-            }
-        }
+        _ => {}
     }
 }
 
@@ -85,6 +84,9 @@ fn main() -> Result<()> {
 
     init_logging();
     install_panic_hook();
+
+    #[cfg(target_os = "linux")]
+    log_linux_session_notes();
 
     tracing::info!("Starting Mezon desktop app v{}", env!("CARGO_PKG_VERSION"));
 
@@ -336,14 +338,19 @@ fn run_app(lock: SingleInstance, initial_url: Option<String>) {
                 tracing::error!("gtk init failed: {error:#}");
             }
             cx.spawn(async move |async_cx| {
+                let foreground = async_cx.foreground_executor().clone();
                 loop {
                     async_cx
                         .background_executor()
                         .timer(std::time::Duration::from_millis(16))
                         .await;
-                    async_cx.update(|_| {
-                        mezon_webview::pump_gtk_events();
-                    });
+                    foreground
+                        .spawn(async move {
+                            if mezon_webview::active_webview_count() > 0 {
+                                mezon_webview::pump_gtk_events();
+                            }
+                        })
+                        .detach();
                 }
             })
             .detach();

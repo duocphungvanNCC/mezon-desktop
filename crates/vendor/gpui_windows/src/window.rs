@@ -419,6 +419,8 @@ impl WindowsWindow {
             directx_devices,
             invalidate_devices,
         } = creation_info;
+        let disable_direct_composition =
+            disable_direct_composition || params.disable_direct_composition;
         register_window_class(icon);
         let parent_hwnd = if params.kind == WindowKind::Dialog {
             let parent_window = unsafe { GetActiveWindow() };
@@ -482,8 +484,6 @@ impl WindowsWindow {
         .or_else(WindowsDisplay::primary_monitor)
         .context("failed to find any monitor")?;
         let appearance = system_appearance().unwrap_or_default();
-        let disable_direct_composition =
-            disable_direct_composition || params.disable_direct_composition;
         let mut context = WindowCreateContext {
             inner: None,
             handle,

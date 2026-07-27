@@ -18,4 +18,4 @@ pub use webview::{
 pub use windows::{create_for_hwnd as create_for_win32_hwnd, win32_parent_hwnd};
 
 #[cfg(target_os = "linux")]
-pub use linux::{init_gtk, pump_gtk_events};
+pub use linux::{active_webview_count, init_gtk, pump_gtk_events};

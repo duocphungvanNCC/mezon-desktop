@@ -8,6 +8,8 @@ use gpui::{
 use mezon_webview::ChannelAppWebView;
 use std::collections::HashMap;
 #[cfg(target_os = "windows")]
+use std::collections::VecDeque;
+#[cfg(target_os = "windows")]
 use std::sync::Mutex;
 use std::time::Duration;
 
@@ -143,7 +145,6 @@ pub fn close_channel_app_window(cx: &mut App) {
     if handles.is_empty() {
         return;
     }
-    cx.remove_global::<GlobalChannelAppWindows>();
     for handle in handles {
         let _ = handle.update(cx, |viewer, window, cx| {
             viewer.close_window(window, cx);
@@ -329,6 +330,7 @@ pub struct ChannelAppWindow {
     url: SharedString,
     webview: Option<ChannelAppWebView>,
     webview_init_scheduled: bool,
+    webview_init_failed: bool,
     closing: bool,
     last_webview_bounds: Option<mezon_webview::ChannelAppWebViewBounds>,
     action_success: Option<TitleBarAction>,
@@ -361,6 +363,7 @@ impl ChannelAppWindow {
             url: SharedString::from(request.url),
             webview: None,
             webview_init_scheduled: false,
+            webview_init_failed: false,
             closing: false,
             last_webview_bounds: None,
             action_success: None,
@@ -378,6 +381,7 @@ impl ChannelAppWindow {
         cx: &mut Context<Self>,
     ) {
         self.drop_webview();
+        self.webview_init_failed = false;
         self.action_success = None;
         self._action_success_reset = None;
         self.title = request.title;
@@ -396,7 +400,11 @@ impl ChannelAppWindow {
     }
 
     fn schedule_webview_init(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.closing || self.webview.is_some() || self.webview_init_scheduled {
+        if self.closing
+            || self.webview.is_some()
+            || self.webview_init_scheduled
+            || self.webview_init_failed
+        {
             return;
         }
         self.webview_init_scheduled = true;
@@ -404,6 +412,7 @@ impl ChannelAppWindow {
         #[cfg(target_os = "windows")]
         {
             set_pending_windows_webview(window.window_handle(), self.url.clone());
+            let _ = cx;
             return;
         }
 
@@ -442,6 +451,7 @@ impl ChannelAppWindow {
             Ok(webview) => self.install_webview(webview, bounds, cx),
             Err(error) => {
                 self.webview_init_scheduled = false;
+                self.webview_init_failed = true;
                 tracing::error!("channel app webview failed: {error:#}");
                 cx.notify();
             }
@@ -453,8 +463,6 @@ impl ChannelAppWindow {
         mezon_webview::ChannelAppWebViewBounds {
             width: f64::from(bounds.size.width),
             height: f64::from(bounds.size.height),
-            window_x: f64::from(bounds.origin.x),
-            window_y: f64::from(bounds.origin.y),
         }
     }
 
@@ -473,8 +481,7 @@ impl ChannelAppWindow {
             self.last_webview_bounds = Some(webview_bounds);
         } else {
             tracing::warn!("Channel app webview resize failed; recreating on next frame");
-            self.webview = None;
-            self.last_webview_bounds = None;
+            self.drop_webview();
         }
     }
 
@@ -560,13 +567,14 @@ impl ChannelAppWindow {
         if self.closing {
             return;
         }
-        self.release_webview(window, cx);
+        self.prepare_close(window);
         unregister_channel_app_window(self.app_id, cx);
         let activate_main = !is_channel_app_window_open(cx);
 
         #[cfg(target_os = "linux")]
         {
-            cx.defer_in(window, move |_, window, cx| {
+            cx.defer_in(window, move |this, window, cx| {
+                this.drop_webview();
                 mezon_webview::pump_gtk_events();
                 window.remove_window();
                 if activate_main {
@@ -576,6 +584,7 @@ impl ChannelAppWindow {
             return;
         }
 
+        self.drop_webview();
         window.remove_window();
         if activate_main {
             cx.defer(activate_main_window);
@@ -590,7 +599,7 @@ impl ChannelAppWindow {
         }
     }
 
-    fn release_webview(&mut self, window: &Window, _cx: &mut Context<Self>) {
+    fn prepare_close(&mut self, window: &Window) {
         if self.closing && self.webview.is_none() {
             return;
         }
@@ -599,72 +608,10 @@ impl ChannelAppWindow {
         #[cfg(not(target_os = "windows"))]
         let _ = window;
         self.closing = true;
+        self.webview_init_scheduled = false;
         self.action_success = None;
         self._action_success_reset = None;
         self._bounds_observer = None;
-        self.drop_webview();
-    }
-
-    #[cfg(target_os = "linux")]
-    fn render_window_controls(
-        &self,
-        theme: &Theme,
-        window: &Window,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        use gpui::rgb;
-        use window_controls::{
-            CONTROL_CLOSE_HOVER, CONTROL_ICON_SIZE, control_button, controls_row,
-        };
-
-        let hover = theme.bg_hover;
-        let color = theme.text_secondary;
-        let icon_size = px(CONTROL_ICON_SIZE);
-        let zoom_icon = if window.is_maximized() {
-            IconName::WindowRestore
-        } else {
-            IconName::WindowMaximize
-        };
-
-        controls_row()
-            .child(
-                control_button(color)
-                    .hover(move |style| style.bg(hover))
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(|_, _, window, _| window.minimize_window()),
-                    )
-                    .child(
-                        Icon::new(IconName::WindowMinimize)
-                            .size(icon_size)
-                            .text_color(color),
-                    ),
-            )
-            .child(
-                control_button(color)
-                    .hover(move |style| style.bg(hover))
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(|_, _, window, _| window.zoom_window()),
-                    )
-                    .child(Icon::new(zoom_icon).size(icon_size).text_color(color)),
-            )
-            .child(
-                control_button(color)
-                    .hover(|style| style.bg(rgb(CONTROL_CLOSE_HOVER)).text_color(gpui::white()))
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(|this, _, window, cx| {
-                            cx.stop_propagation();
-                            this.close_window(window, cx);
-                        }),
-                    )
-                    .child(
-                        Icon::new(IconName::WindowClose)
-                            .size(icon_size)
-                            .text_color(color),
-                    ),
-            )
     }
 
     fn render_title_button(
@@ -775,13 +722,81 @@ impl ChannelAppWindow {
             .when(window_controls::HAS_CUSTOM_TITLE_BAR, |bar| {
                 #[cfg(target_os = "linux")]
                 {
-                    bar.child(self.render_window_controls(theme, window, cx))
+                    bar.child(self.render_channel_app_window_controls(theme, window, cx))
                 }
                 #[cfg(not(target_os = "linux"))]
                 {
                     bar.child(window_controls::render_controls(theme, window))
                 }
             })
+    }
+
+    #[cfg(target_os = "linux")]
+    fn render_channel_app_window_controls(
+        &self,
+        theme: &Theme,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        use crate::app::window_controls::{
+            CONTROL_CLOSE_HOVER, CONTROL_ICON_SIZE, control_button, controls_row,
+        };
+        use gpui::rgb;
+
+        let hover = theme.bg_hover;
+        let color = theme.text_secondary;
+        let icon_size = px(CONTROL_ICON_SIZE);
+        let zoom_icon = if window.is_maximized() {
+            IconName::WindowRestore
+        } else {
+            IconName::WindowMaximize
+        };
+
+        controls_row()
+            .child(
+                control_button(color)
+                    .hover(move |style| style.bg(hover))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|_, _, window, cx| {
+                            cx.stop_propagation();
+                            window.minimize_window();
+                        }),
+                    )
+                    .child(
+                        Icon::new(IconName::WindowMinimize)
+                            .size(icon_size)
+                            .text_color(color),
+                    ),
+            )
+            .child(
+                control_button(color)
+                    .hover(move |style| style.bg(hover))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|_, _, window, cx| {
+                            cx.stop_propagation();
+                            window.zoom_window();
+                        }),
+                    )
+                    .child(Icon::new(zoom_icon).size(icon_size).text_color(color)),
+            )
+            .child(
+                control_button(color)
+                    .hover(|style| style.bg(rgb(CONTROL_CLOSE_HOVER)).text_color(gpui::white()))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _, window, cx| {
+                            cx.stop_propagation();
+                            this.close_window(window, cx);
+                        }),
+                    )
+                    .child(
+                        Icon::new(IconName::WindowClose)
+                            .size(icon_size)
+                            .text_color(color),
+                    ),
+            )
     }
 
     fn render_app_title_strip(&self, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
@@ -811,6 +826,14 @@ impl ChannelAppWindow {
             .text_sm()
             .text_color(theme.text_secondary)
             .child(label)
+    }
+}
+
+impl Drop for ChannelAppWindow {
+    fn drop(&mut self) {
+        if self.webview.is_some() {
+            self.drop_webview();
+        }
     }
 }
 
@@ -861,8 +884,8 @@ struct PendingWindowsWebViewInit {
 }
 
 #[cfg(target_os = "windows")]
-static PENDING_WINDOWS_WEBVIEW_INITS: Mutex<Vec<PendingWindowsWebViewInit>> =
-    Mutex::new(Vec::new());
+static PENDING_WINDOWS_WEBVIEW_INITS: Mutex<VecDeque<PendingWindowsWebViewInit>> =
+    Mutex::new(VecDeque::new());
 
 #[cfg(target_os = "windows")]
 struct PendingWindowsWebViewToolbarAction {
@@ -871,11 +894,12 @@ struct PendingWindowsWebViewToolbarAction {
 }
 
 #[cfg(target_os = "windows")]
-static PENDING_WINDOWS_WEBVIEW_TOOLBAR_ACTIONS: Mutex<Vec<PendingWindowsWebViewToolbarAction>> =
-    Mutex::new(Vec::new());
+static PENDING_WINDOWS_WEBVIEW_TOOLBAR_ACTIONS: Mutex<
+    VecDeque<PendingWindowsWebViewToolbarAction>,
+> = Mutex::new(VecDeque::new());
 
 #[cfg(target_os = "windows")]
-fn config_windows_webviews<R>(f: impl FnOnce(&mut Vec<PendingWindowsWebViewInit>) -> R) -> R {
+fn config_windows_webviews<R>(f: impl FnOnce(&mut VecDeque<PendingWindowsWebViewInit>) -> R) -> R {
     f(&mut PENDING_WINDOWS_WEBVIEW_INITS
         .lock()
         .expect("pending webview init queue poisoned"))
@@ -884,7 +908,7 @@ fn config_windows_webviews<R>(f: impl FnOnce(&mut Vec<PendingWindowsWebViewInit>
 #[cfg(target_os = "windows")]
 fn set_pending_windows_webview(window: AnyWindowHandle, url: SharedString) {
     config_windows_webviews(|queue| {
-        queue.push(PendingWindowsWebViewInit { window, url });
+        queue.push_back(PendingWindowsWebViewInit { window, url });
     });
 }
 
@@ -896,7 +920,7 @@ fn cancel_pending_windows_webview_init(window: AnyWindowHandle) {
 
 #[cfg(target_os = "windows")]
 fn config_windows_webview_toolbar<R>(
-    f: impl FnOnce(&mut Vec<PendingWindowsWebViewToolbarAction>) -> R,
+    f: impl FnOnce(&mut VecDeque<PendingWindowsWebViewToolbarAction>) -> R,
 ) -> R {
     f(&mut PENDING_WINDOWS_WEBVIEW_TOOLBAR_ACTIONS
         .lock()
@@ -906,14 +930,14 @@ fn config_windows_webview_toolbar<R>(
 #[cfg(target_os = "windows")]
 fn schedule_windows_webview_toolbar(window: AnyWindowHandle, action: TitleBarAction) {
     config_windows_webview_toolbar(|queue| {
-        queue.push(PendingWindowsWebViewToolbarAction { window, action });
+        queue.push_back(PendingWindowsWebViewToolbarAction { window, action });
     });
 }
 
 #[cfg(target_os = "windows")]
 fn process_windows_webview_actions(cx: &mut AsyncApp) {
     loop {
-        let job = config_windows_webview_toolbar(Vec::pop);
+        let job = config_windows_webview_toolbar(|queue| queue.pop_front());
         let Some(job) = job else {
             break;
         };
@@ -954,7 +978,7 @@ pub fn process_pending_windows_webviews(cx: &mut AsyncApp) {
     process_windows_webview_actions(cx);
 
     loop {
-        let job = config_windows_webviews(Vec::pop);
+        let job = config_windows_webviews(|queue| queue.pop_front());
         let Some(job) = job else {
             break;
         };
@@ -975,7 +999,7 @@ pub fn process_pending_windows_webviews(cx: &mut AsyncApp) {
         });
 
         let Some((hwnd, bounds)) = prep.ok().flatten() else {
-            config_windows_webviews(|queue| queue.push(job));
+            config_windows_webviews(|queue| queue.push_back(job));
             break;
         };
 
@@ -1002,6 +1026,7 @@ pub fn process_pending_windows_webviews(cx: &mut AsyncApp) {
                 tracing::error!("channel app webview failed: {error:#}");
                 let _ = update_channel_app_root(cx, job.window, |this, cx| {
                     this.webview_init_scheduled = false;
+                    this.webview_init_failed = true;
                     cx.notify();
                 });
             }

@@ -6,6 +6,7 @@ use wry::{Rect, WebView, WebViewBuilder};
 
 pub const WEBVIEW_TOP_OFFSET: f64 = 36.0;
 pub const WEBVIEW_BOTTOM_OFFSET: f64 = 29.0;
+pub const CHANNEL_APP_INCOGNITO: bool = false;
 
 const MEDIA_DENY_SCRIPT: &str = r#"
 (function () {
@@ -30,8 +31,6 @@ const MEDIA_DENY_SCRIPT: &str = r#"
 pub struct ChannelAppWebViewBounds {
     pub width: f64,
     pub height: f64,
-    pub window_x: f64,
-    pub window_y: f64,
 }
 
 pub struct ChannelAppWebView {
@@ -126,12 +125,7 @@ pub(crate) fn apply_builder_settings<'a>(
 }
 
 pub(crate) fn configure_builder<'a>(url: &str, bounds: Rect) -> Result<WebViewBuilder<'a>> {
-    apply_builder_settings(
-        WebViewBuilder::new(),
-        url,
-        bounds,
-        !cfg!(target_os = "windows"),
-    )
+    apply_builder_settings(WebViewBuilder::new(), url, bounds, CHANNEL_APP_INCOGNITO)
 }
 
 pub fn create_as_window(
@@ -148,7 +142,7 @@ pub fn create_as_window(
                 WebViewBuilder::with_web_context(web_context),
                 url,
                 rect,
-                false,
+                CHANNEL_APP_INCOGNITO,
             )?;
             crate::linux::create(parent, builder)
         });
@@ -182,7 +176,6 @@ pub fn destroy_webview(webview: ChannelAppWebView) {
 }
 
 pub fn resize_webview(webview: &ChannelAppWebView, bounds: ChannelAppWebViewBounds) -> Result<()> {
-    let _ = bounds;
     webview
         .inner
         .set_bounds(webview_bounds(bounds.width, bounds.height))
@@ -228,5 +221,18 @@ mod tests {
     fn navigation_blocks_other_origins() {
         let origin = allowed_navigation_origin("https://app.example.com/launch").unwrap();
         assert!(!is_allowed_navigation("https://evil.example.com/", &origin));
+    }
+
+    #[test]
+    fn navigation_allows_about_blank() {
+        let origin = allowed_navigation_origin("https://app.example.com/launch").unwrap();
+        assert!(is_allowed_navigation("about:blank", &origin));
+    }
+
+    #[test]
+    fn navigation_blocks_bogus_about_urls() {
+        let origin = allowed_navigation_origin("https://app.example.com/launch").unwrap();
+        assert!(!is_allowed_navigation("about:srcdoc", &origin));
+        assert!(!is_allowed_navigation("about:config", &origin));
     }
 }

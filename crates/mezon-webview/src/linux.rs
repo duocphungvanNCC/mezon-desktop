@@ -2,8 +2,10 @@ use std::cell::RefCell;
 use std::ffi::c_ulong;
 use std::mem;
 use std::sync::Once;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use anyhow::{Context, Result, bail};
+use gtk::prelude::WidgetExtManual;
 use raw_window_handle::{
     HandleError, HasWindowHandle, RawWindowHandle, WindowHandle, XcbWindowHandle, XlibWindowHandle,
 };
@@ -13,9 +15,14 @@ use wry::{WebContext, WebViewBuilder, WebViewExtUnix};
 use crate::webview::ChannelAppWebView;
 
 static GTK_INIT: Once = Once::new();
+static ACTIVE_WEBVIEW_COUNT: AtomicUsize = AtomicUsize::new(0);
 
 thread_local! {
     static SHARED_WEB_CONTEXT: RefCell<Option<WebContext>> = RefCell::new(None);
+}
+
+pub fn active_webview_count() -> usize {
+    ACTIVE_WEBVIEW_COUNT.load(Ordering::Relaxed)
 }
 
 pub fn with_shared_web_context<R>(f: impl FnOnce(&mut WebContext) -> Result<R>) -> Result<R> {
@@ -47,8 +54,6 @@ pub fn pump_gtk_events() {
 }
 
 pub fn destroy_webview(webview: ChannelAppWebView) {
-    use gtk::prelude::WidgetExtManual;
-
     let gtk_webview = webview.webview();
     gtk_webview.try_close();
     if let Err(error) = webview.set_visible(false) {
@@ -70,6 +75,13 @@ pub fn destroy_webview(webview: ChannelAppWebView) {
     }
 
     sync_x11_display();
+
+    // Manual GTK destroy above already tore down the native widgets. Dropping the
+    // wry WebView would destroy them again and crash; leak the Rust shell instead.
+    // Tradeoff: small Rust allocation leak per close vs. double-free abort.
+    let _ = ACTIVE_WEBVIEW_COUNT.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
+        Some(count.saturating_sub(1))
+    });
     mem::forget(webview);
 }
 
@@ -87,23 +99,8 @@ fn wry_gtk_window(gtk_webview: &webkit2gtk::WebView) -> Option<gtk::Window> {
 }
 
 fn sync_x11_display() {
-    use gdkx11::X11Display;
-    use gtk::glib::object::{Cast, ObjectType};
-
-    let Some(display) = gtk::gdk::Display::default() else {
-        return;
-    };
-    let Some(x11_display) = display.downcast_ref::<X11Display>() else {
-        return;
-    };
-    unsafe {
-        let xdisplay = gdkx11::ffi::gdk_x11_display_get_xdisplay(x11_display.as_ptr());
-        if xdisplay.is_null() {
-            return;
-        }
-        if let Ok(xlib) = x11_dl::xlib::Xlib::open() {
-            (xlib.XSync)(xdisplay as _, x11_dl::xlib::False);
-        }
+    if let Some(display) = gtk::gdk::Display::default() {
+        display.sync();
     }
 }
 
@@ -115,18 +112,20 @@ pub fn create(
     pump_gtk_events();
 
     let handle = parent.window_handle()?.as_raw();
-    match handle {
-        RawWindowHandle::Xcb(xcb) => create_x11_child(&xcb, builder),
+    let webview = match handle {
+        RawWindowHandle::Xcb(xcb) => create_x11_child(&xcb, builder)?,
         RawWindowHandle::Xlib(_) => builder
             .build_as_child(parent)
             .map(ChannelAppWebView::new)
-            .context("Failed to create channel app webview"),
+            .context("Failed to create channel app webview")?,
         RawWindowHandle::Wayland(_) => bail!(
             "Channel app webviews require the X11 backend on Linux. \
-             Restart with DISPLAY set and MEZON_LINUX_BACKEND=x11, or unset WAYLAND_DISPLAY."
+             Restart with DISPLAY set and unset WAYLAND_DISPLAY."
         ),
         _ => bail!("Failed to create channel app webview: the window handle kind is not supported"),
-    }
+    };
+    ACTIVE_WEBVIEW_COUNT.fetch_add(1, Ordering::Relaxed);
+    Ok(webview)
 }
 
 fn create_x11_child(
