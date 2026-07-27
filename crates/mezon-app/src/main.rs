@@ -587,7 +587,6 @@ fn open_main_window(
     mezon_store::RealtimeDispatch::init(api.clone(), cx);
     mezon_store::ConnectionStore::init(transport, api.clone(), auth_state.clone(), cx);
     mezon_store::ClanList::init(api.clone(), cx);
-    mezon_store::ClanMembersStore::init(api.clone(), cx);
     mezon_store::ChannelList::init(api.clone(), cx);
     mezon_store::ChannelSettingsStore::init(api.clone(), cx);
     mezon_store::DirectMessageStore::init(api.clone(), cx);
@@ -619,6 +618,7 @@ fn open_main_window(
     mezon_store::PermissionStore::init(api.clone(), auth_state.clone(), cx);
     mezon_store::NotificationSettingStore::init(api.clone(), auth_state.clone(), cx);
     mezon_store::NotificationPushStore::init(api.clone(), auth_state.clone(), cx);
+    mezon_store::ClanLoadScheduler::init(cx);
     mezon_store::QuickMenuStore::init(api.clone(), cx);
     mezon_store::WalletStore::init(auth_state.clone(), cx);
     mezon_ui::WalletToastBridge::init(cx);

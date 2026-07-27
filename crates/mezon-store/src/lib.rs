@@ -10,6 +10,7 @@ pub mod channel_members;
 pub mod channel_permissions;
 pub mod channel_settings;
 pub mod clan;
+pub mod clan_load;
 pub mod clan_members;
 pub mod config;
 pub mod connection;
@@ -84,6 +85,7 @@ pub use channel_permissions::{
 };
 pub use channel_settings::{ChannelSetting, ChannelSettingsEvent, ChannelSettingsStore};
 pub use clan::*;
+pub use clan_load::ClanLoadScheduler;
 pub use clan_members::{
     ClanMember, ClanMembersEvent, ClanMembersStore, User, split_members_by_status,
 };
