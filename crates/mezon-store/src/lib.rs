@@ -3,6 +3,7 @@ pub mod activity;
 pub mod album_layout;
 pub mod audio;
 pub mod audit_log;
+pub mod auto_update;
 pub mod badge;
 pub mod cache;
 pub mod canvas;
@@ -78,6 +79,7 @@ pub use audit_log::{
     AuditLogState, AuditLogStateView, AuditLogStore, audit_action_api_value, audit_action_i18n_key,
     audit_action_index_for_api_log,
 };
+pub use auto_update::{AutoUpdateStatus, AutoUpdateStore};
 pub use badge::BadgeService;
 pub use cache::{Freshness, KeyedCache};
 pub use canvas::{CanvasDetail, CanvasStore, CanvasSummary, UploadedCanvasImage, canvas_web_link};

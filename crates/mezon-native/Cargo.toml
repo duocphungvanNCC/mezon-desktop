@@ -13,11 +13,9 @@ crossbeam-channel = "0.5"
 thiserror.workspace = true
 tracing.workspace = true
 serde.workspace = true
-tokio.workspace = true
 flume.workspace = true
 cpal.workspace = true
 open = "5"
-mezon-updater.workspace = true
 dirs = { workspace = true }
 tray-icon = { version = "0.19", features = ["common-controls-v6"] }
 image = { workspace = true }
