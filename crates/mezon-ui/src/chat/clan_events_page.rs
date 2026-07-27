@@ -641,7 +641,7 @@ impl Render for ClanEventsModal {
                             .on_click(cx.listener(|this, _, _, cx| this.close(cx)))
                             .child(
                                 Icon::new(IconName::CloseButton)
-                                    .size(px(28.))
+                                    .size(px(20.))
                                     .text_color(theme.text_secondary)
                                     .group_hover("close-events-modal", |style| {
                                         style.text_color(theme.text_primary)
