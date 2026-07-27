@@ -93,6 +93,7 @@ pub struct ClanInviteLink {
     pub id: i64,
     pub invite_link: String,
 }
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClanSystemMessage {
     pub channel_id: ChannelId,

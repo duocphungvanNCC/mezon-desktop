@@ -1083,6 +1083,26 @@ impl TransportClient {
             .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
     }
 
+    pub async fn list_audit_log(
+        &self,
+        clan_id: i64,
+        action_log: &str,
+        user_id: Option<i64>,
+        date_log: &str,
+    ) -> Result<mezon_proto::api::ListAuditLog> {
+        let transport = self.inner.clone();
+        let action_log = action_log.to_string();
+        let date_log = date_log.to_string();
+        runtime()
+            .spawn(async move {
+                transport
+                    .list_audit_log(clan_id, &action_log, user_id, &date_log)
+                    .await
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
     pub async fn ping_roundtrip(&self) -> Result<()> {
         tracing::debug!("TransportClient::ping_roundtrip() called");
 
