@@ -5822,7 +5822,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-canvas"
-version = "0.1.0"
+version = "0.1.25"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -5949,7 +5949,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-theme"
-version = "0.1.0"
+version = "0.1.25"
 dependencies = [
  "gpui",
  "theme",
@@ -6079,7 +6079,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-widgets"
-version = "0.1.0"
+version = "0.1.25"
 dependencies = [
  "gpui",
  "mezon-store",
