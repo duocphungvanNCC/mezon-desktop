@@ -308,9 +308,18 @@ impl BadgeService {
                         }
                     }
                     if !from_me && is_new_message {
-                        ClanList::global(cx).update(cx, |cls, cx| {
-                            cls.set_has_unread_message(clan_id, cx);
-                        });
+                        let code = MessageCode::from_raw(m.code);
+                        if !matches!(
+                            code,
+                            MessageCode::CreatePin
+                                | MessageCode::Typing
+                                | MessageCode::Indicator
+                                | MessageCode::Welcome
+                        ) {
+                            ClanList::global(cx).update(cx, |cls, cx| {
+                                cls.set_has_unread_message(clan_id, cx);
+                            });
+                        }
                     }
                     if !from_me && is_new_message && !seen && badge_mention {
                         ClanList::global(cx).update(cx, |cls, cx| {

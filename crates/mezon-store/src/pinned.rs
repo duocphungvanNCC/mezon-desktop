@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use gpui::{
@@ -10,9 +11,10 @@ use mezon_client::transport::ApiPinMessage;
 use mezon_proto::realtime::LastPinMessageEvent;
 
 use crate::AppConfig;
-use crate::ids::{ChannelId, ClanId};
+use crate::ids::{ChannelId, ClanId, MessageId, UserId};
 use crate::messages::{MessagesEvent, MessagesStore};
 use crate::realtime::{RealtimeDispatch, RealtimeKind};
+use crate::user_profile::{ProfileContext, resolve_avatar_url};
 
 #[derive(Debug, Clone)]
 pub struct PinnedMessage {
@@ -37,6 +39,7 @@ pub struct PinnedMessagesStore {
     messages: Vec<PinnedMessage>,
     loaded_channel: Option<String>,
     loading: bool,
+    pin_badges: HashSet<String>,
     api: Arc<AppApi>,
     _messages_sub: Subscription,
     _conn_watch: Task<()>,
@@ -69,6 +72,7 @@ impl PinnedMessagesStore {
         self.messages.clear();
         self.loaded_channel = None;
         self.loading = false;
+        self.pin_badges.clear();
         cx.notify();
     }
 
@@ -87,6 +91,7 @@ impl PinnedMessagesStore {
             messages: Vec::new(),
             loaded_channel: None,
             loading: false,
+            pin_badges: HashSet::new(),
             api,
             _messages_sub: messages_sub,
             _conn_watch: conn_watch,
@@ -225,6 +230,41 @@ impl PinnedMessagesStore {
         .detach();
     }
 
+    pub fn is_pinned(&self, message_id: &str) -> bool {
+        self.messages.iter().any(|m| m.message_id == message_id)
+    }
+
+    pub fn has_pin_badge(&self, channel_id: &str) -> bool {
+        self.pin_badges.contains(channel_id)
+    }
+
+    pub fn active_has_pin_badge(&self) -> bool {
+        self.channel_id
+            .as_ref()
+            .is_some_and(|id| self.pin_badges.contains(id))
+    }
+
+    pub fn clear_pin_badge(&mut self, channel_id: &str, cx: &mut Context<Self>) {
+        if self.pin_badges.remove(channel_id) {
+            cx.notify();
+        }
+    }
+
+    pub fn clear_active_pin_badge(&mut self, cx: &mut Context<Self>) {
+        if let Some(channel_id) = self.channel_id.clone() {
+            self.clear_pin_badge(&channel_id, cx);
+        }
+    }
+
+    fn set_pin_badge(&mut self, channel_id: &str, cx: &mut Context<Self>) {
+        if channel_id.is_empty() {
+            return;
+        }
+        if self.pin_badges.insert(channel_id.to_string()) {
+            cx.notify();
+        }
+    }
+
     fn handle_last_pin(&mut self, event: &RealtimeEvent, cx: &mut Context<Self>) {
         let RealtimeEvent::LastPinMessage(pin) = event else {
             return;
@@ -233,6 +273,7 @@ impl PinnedMessagesStore {
             return;
         }
         let channel_id = pin.channel_id.to_string();
+        self.set_pin_badge(&channel_id, cx);
         if self.channel_id.as_deref() != Some(channel_id.as_str()) {
             return;
         }
@@ -267,34 +308,137 @@ impl PinnedMessagesStore {
         }
     }
 
-    pub fn is_pinned(&self, message_id: &str) -> bool {
-        self.messages.iter().any(|m| m.message_id == message_id)
-    }
-
-    /// Pin a message. No optimistic local insert — the realtime `LastPinMessage`
-    /// echo carries the full sender/content/time metadata and idempotently inserts
-    /// the row (see `handle_last_pin`).
+    /// Pin a message. Mirrors React `setChannelPinMessage` + `joinPinMessage`:
+    /// create via API, broadcast `LastPinMessageEvent`, and optimistically insert locally.
     pub fn pin(&mut self, message_id: &str, cx: &mut Context<Self>) {
-        let Some(channel_id) = self.channel_id.clone() else {
+        let Some(channel_id_str) = self.channel_id.clone() else {
             return;
         };
-        let Some(clan_id) = self.clan_id.clone() else {
+        let Some(clan_id_str) = self.clan_id.clone() else {
             return;
         };
-        let (Ok(message_id), Ok(channel_id), Ok(clan_id)) = (
+        let (Ok(message_id_i64), Ok(channel_id_i64), Ok(clan_id_i64)) = (
             message_id.parse::<i64>(),
-            channel_id.parse::<i64>(),
-            clan_id.parse::<i64>(),
+            channel_id_str.parse::<i64>(),
+            clan_id_str.parse::<i64>(),
         ) else {
             return;
         };
+        if self.is_pinned(message_id) {
+            return;
+        }
+
+        let messages = MessagesStore::global(cx).read(cx);
+        let mode = messages.mode();
+        let is_public = messages.is_public();
+        let clan_id_opt = self.clan_id();
+        let channel_id_opt = self.channel_id();
+        let msg = messages
+            .messages()
+            .iter()
+            .find(|m| m.id.get() == message_id_i64)
+            .or_else(|| {
+                messages.message_in_channel(ChannelId(channel_id_i64), MessageId(message_id_i64))
+            })
+            .cloned();
+
+        let (
+            sender_id,
+            sender_name,
+            avatar_url,
+            content_plain,
+            content_wire,
+            create_time,
+            created_time_iso,
+        ) = if let Some(msg) = msg.as_ref() {
+            let sender_id = msg.sender_id.clone();
+            let sender_name = msg.sender_name.to_string();
+            let mut avatar = msg.avatar_url.to_string();
+            if let Ok(user_id) = sender_id.parse::<UserId>()
+                && !user_id.is_zero()
+            {
+                if let Some(clan_id) = clan_id_opt
+                    && let Some(url) =
+                        resolve_avatar_url(user_id, ProfileContext::Clan(clan_id), cx)
+                            .filter(|url| !url.is_empty())
+                {
+                    avatar = url;
+                } else if let Some(channel_id) = channel_id_opt
+                    && let Some(url) =
+                        resolve_avatar_url(user_id, ProfileContext::Direct(channel_id), cx)
+                            .filter(|url| !url.is_empty())
+                {
+                    avatar = url;
+                }
+            }
+            let content_plain = msg.content.clone();
+            let content_wire = serde_json::json!({ "t": content_plain }).to_string();
+            let create_time = msg.create_time;
+            let created_time_iso = chrono::DateTime::from_timestamp(create_time, 0)
+                .map(|dt| dt.to_rfc3339())
+                .unwrap_or_else(|| chrono::Utc::now().to_rfc3339());
+            (
+                sender_id,
+                sender_name,
+                avatar,
+                content_plain,
+                content_wire,
+                create_time,
+                created_time_iso,
+            )
+        } else {
+            return;
+        };
+
+        let cfg = AppConfig::try_global(cx);
+        let avatar_proxied = cfg
+            .map(|c| c.avatar_proxy(&avatar_url))
+            .unwrap_or_else(|| avatar_url.clone());
+        self.messages.insert(
+            0,
+            PinnedMessage {
+                id: message_id.to_string(),
+                message_id: message_id.to_string(),
+                sender_id: sender_id.clone(),
+                sender_name: sender_name.clone(),
+                avatar_url: avatar_url.clone(),
+                avatar_proxied: avatar_proxied.into(),
+                content: content_plain,
+                create_time,
+            },
+        );
+        self.set_pin_badge(&channel_id_str, cx);
+        cx.notify();
+
         let api = self.api.clone();
+        let attachment = "[]".to_string();
         cx.spawn(async move |_this, _cx| {
             if let Err(e) = api
-                .create_pin_message(message_id, channel_id, clan_id)
+                .create_pin_message(message_id_i64, channel_id_i64, clan_id_i64)
                 .await
             {
                 tracing::error!("create_pin_message failed: {e}");
+                return;
+            }
+            if let Err(e) = api
+                .write_last_pin_message(
+                    clan_id_i64,
+                    channel_id_i64,
+                    message_id_i64,
+                    mode,
+                    is_public,
+                    chrono::Utc::now().timestamp() as u32,
+                    1,
+                    &avatar_url,
+                    &sender_id,
+                    &sender_name,
+                    &content_wire,
+                    &attachment,
+                    &created_time_iso,
+                )
+                .await
+            {
+                tracing::error!("write_last_pin_message failed: {e}");
             }
         })
         .detach();
@@ -348,7 +492,15 @@ fn pinned_from_last_pin_event(pin: &LastPinMessageEvent, cfg: Option<&AppConfig>
     let avatar_proxied = cfg
         .map(|c| c.avatar_proxy(&avatar))
         .unwrap_or_else(|| avatar.clone());
-    let create_time = parse_pin_create_time(&pin.message_created_time);
+    let create_time = if pin.timestamp_seconds > 0 {
+        i64::from(pin.timestamp_seconds)
+    } else {
+        parse_pin_create_time(&pin.message_created_time)
+    };
+    let content = serde_json::from_str::<serde_json::Value>(&pin.message_content)
+        .ok()
+        .and_then(|v| v.get("t").and_then(|t| t.as_str().map(|s| s.to_string())))
+        .unwrap_or_else(|| pin.message_content.clone());
     PinnedMessage {
         id: message_id.clone(),
         message_id,
@@ -356,7 +508,7 @@ fn pinned_from_last_pin_event(pin: &LastPinMessageEvent, cfg: Option<&AppConfig>
         sender_name: pin.message_sender_username.clone(),
         avatar_url: avatar,
         avatar_proxied: avatar_proxied.into(),
-        content: pin.message_content.clone(),
+        content,
         create_time,
     }
 }

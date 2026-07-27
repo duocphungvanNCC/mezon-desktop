@@ -3726,6 +3726,57 @@ impl MezonTransport {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub async fn write_last_pin_message(
+        &self,
+        clan_id: i64,
+        channel_id: i64,
+        message_id: i64,
+        mode: i32,
+        is_public: bool,
+        timestamp_seconds: u32,
+        operation: i32,
+        avatar: &str,
+        sender_id: &str,
+        sender_username: &str,
+        content: &str,
+        attachment: &str,
+        created_time: &str,
+    ) -> Result<()> {
+        let cid = self.generate_cid();
+        tracing::debug!(
+            target: "socket",
+            "realtime_send: action=LastPinMessageEvent cid={} clan_id={clan_id} channel_id={channel_id} message_id={message_id}",
+            i32::from(cid)
+        );
+        let envelope = realtime::Envelope {
+            cid: i32::from(cid),
+            message: Some(realtime::envelope::Message::LastPinMessageEvent(
+                realtime::LastPinMessageEvent {
+                    clan_id,
+                    channel_id,
+                    message_id,
+                    mode,
+                    user_id: 0,
+                    timestamp_seconds,
+                    operation,
+                    is_public,
+                    message_sender_avatar: avatar.to_string(),
+                    message_sender_id: sender_id.to_string(),
+                    message_sender_username: sender_username.to_string(),
+                    message_content: content.to_string(),
+                    message_attachment: attachment.to_string(),
+                    message_created_time: created_time.to_string(),
+                },
+            )),
+        };
+        let (code, _response) = self.send(cid, encode_envelope_cid_last(envelope)).await?;
+        if code != 0 {
+            anyhow::bail!("write_last_pin_message error: code={code}");
+        }
+        Ok(())
+    }
+
     pub async fn join_clan_chat(&self, clan_id: i64) -> Result<()> {
         let cid = self.generate_cid();
         tracing::debug!(target: "socket", "realtime_send: action=ClanJoin cid={} clan_id={clan_id}", i32::from(cid));

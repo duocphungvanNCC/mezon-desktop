@@ -1504,6 +1504,54 @@ impl TransportClient {
             .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub async fn write_last_pin_message(
+        &self,
+        clan_id: i64,
+        channel_id: i64,
+        message_id: i64,
+        mode: i32,
+        is_public: bool,
+        timestamp_seconds: u32,
+        operation: i32,
+        avatar: &str,
+        sender_id: &str,
+        sender_username: &str,
+        content: &str,
+        attachment: &str,
+        created_time: &str,
+    ) -> Result<()> {
+        let transport = self.inner.clone();
+        let avatar = avatar.to_string();
+        let sender_id = sender_id.to_string();
+        let sender_username = sender_username.to_string();
+        let content = content.to_string();
+        let attachment = attachment.to_string();
+        let created_time = created_time.to_string();
+        runtime()
+            .spawn(async move {
+                transport
+                    .write_last_pin_message(
+                        clan_id,
+                        channel_id,
+                        message_id,
+                        mode,
+                        is_public,
+                        timestamp_seconds,
+                        operation,
+                        &avatar,
+                        &sender_id,
+                        &sender_username,
+                        &content,
+                        &attachment,
+                        &created_time,
+                    )
+                    .await
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
     pub async fn report_message_abuse(&self, message_id: i64, abuse_type: &str) -> Result<()> {
         let transport = self.inner.clone();
         let abuse_type = abuse_type.to_string();

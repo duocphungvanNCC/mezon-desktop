@@ -7,9 +7,10 @@ use gpui::{
     SharedString, Transformation, Window, div, img, prelude::*, px, radians, rems, rgba,
 };
 use mezon_store::{
-    AlbumLayout, AppConfig, ChannelType, ClanMembersStore, Message, MessageAttachment, MessageCode,
-    MessageId, MessageReference, MessagesStore, PlatformStore, ProfileContext, Reaction,
-    ThreadsStore, TopicsStore, ViewerMedia, resolve_avatar_url,
+    AccountStore, AlbumLayout, AppConfig, BadgeService, ChannelType, ClanId, ClanList,
+    ClanMembersStore, Message, MessageAttachment, MessageCode, MessageId, MessageReference,
+    MessagesStore, PlatformStore, ProfileContext, Reaction, ThreadsStore, TopicsStore, UserId,
+    UsersByUserStore, ViewerMedia, resolve_avatar_url, resolve_user_profile,
 };
 use smallvec::SmallVec;
 
@@ -30,6 +31,186 @@ use crate::theme::Theme;
 const DELETED_REPLY_PREVIEW: &str = "Original message was deleted";
 const FILE_NAME_COLOR: u32 = 0x3b_82_f6;
 
+pub fn effective_clan_id(clan_id: Option<ClanId>, cx: &App) -> Option<ClanId> {
+    clan_id
+        .or_else(|| MessagesStore::global(cx).read(cx).active_clan_id())
+        .or_else(|| ClanList::global(cx).read(cx).active_clan_id)
+        .filter(|id| !id.is_zero())
+}
+
+pub fn resolve_pin_sender_label_with_message(
+    sender_id: &str,
+    fallback_name: &str,
+    message_id: Option<&str>,
+    clan_id: Option<ClanId>,
+    channel_id: Option<mezon_store::ChannelId>,
+    cx: &App,
+) -> SharedString {
+    if let Some(config) = AppConfig::try_global(cx)
+        && !config.anonymous_user_id.is_empty()
+        && sender_id == config.anonymous_user_id
+    {
+        return SharedString::from("Anonymous");
+    }
+
+    let clan_id = effective_clan_id(clan_id, cx);
+    let user_id = sender_id.parse::<UserId>().ok().filter(|id| !id.is_zero());
+
+    if let (Some(user_id), Some(clan_id)) = (user_id, clan_id)
+        && let Some(name) = ClanMembersStore::global(cx)
+            .read(cx)
+            .member(clan_id, user_id)
+            .map(|member| member.name().to_string())
+            .filter(|name| !name.is_empty())
+    {
+        return name.into();
+    }
+
+    let stub = Message::new(MessageId(0), String::new(), sender_id, fallback_name, 0);
+    let resolved = resolve_message_sender_label(&stub, clan_id, channel_id, cx);
+    if !resolved.is_empty() {
+        return resolved;
+    }
+
+    if let Some(message_id) = message_id
+        && let Ok(message_id) = message_id.parse::<MessageId>()
+    {
+        let store = MessagesStore::global(cx).read(cx);
+        if let Some(msg) = store
+            .messages()
+            .iter()
+            .find(|m| m.id == message_id)
+            .or_else(|| {
+                channel_id.and_then(|channel_id| store.message_in_channel(channel_id, message_id))
+            })
+        {
+            let from_msg = resolve_message_sender_label(msg, clan_id, channel_id, cx);
+            if !from_msg.is_empty() {
+                return from_msg;
+            }
+            if !msg.sender_name.is_empty() {
+                return msg.sender_name.clone();
+            }
+        }
+    }
+
+    if !fallback_name.is_empty() {
+        return fallback_name.into();
+    }
+
+    SharedString::default()
+}
+
+pub fn resolve_pin_avatar_url(
+    sender_id: &str,
+    fallback_avatar: &str,
+    clan_id: Option<ClanId>,
+    channel_id: Option<mezon_store::ChannelId>,
+    cx: &App,
+) -> String {
+    let clan_id = effective_clan_id(clan_id, cx);
+    let user_id = sender_id.parse::<UserId>().ok().filter(|id| !id.is_zero());
+
+    if let Some(user_id) = user_id {
+        if let Some(clan_id) = clan_id
+            && let Some(url) = resolve_avatar_url(user_id, ProfileContext::Clan(clan_id), cx)
+                .filter(|url| !url.is_empty())
+        {
+            return url;
+        }
+        if let Some(channel_id) = channel_id
+            && let Some(url) = resolve_avatar_url(user_id, ProfileContext::Direct(channel_id), cx)
+                .filter(|url| !url.is_empty())
+        {
+            return url;
+        }
+    }
+
+    fallback_avatar.to_string()
+}
+
+pub fn resolve_message_sender_label(
+    msg: &Message,
+    clan_id: Option<ClanId>,
+    channel_id: Option<mezon_store::ChannelId>,
+    cx: &App,
+) -> SharedString {
+    let user_id = msg.sender_user_id.filter(|id| !id.is_zero()).or_else(|| {
+        msg.sender_id
+            .parse::<UserId>()
+            .ok()
+            .filter(|id| !id.is_zero())
+    });
+
+    if let Some(user_id) = user_id {
+        let clan_id = effective_clan_id(clan_id, cx);
+        if let Some(clan_id) = clan_id {
+            if let Some(name) = ClanMembersStore::global(cx)
+                .read(cx)
+                .member(clan_id, user_id)
+                .map(|member| member.name().to_string())
+                .filter(|name| !name.is_empty())
+            {
+                return name.into();
+            }
+            if let Some(profile) = resolve_user_profile(user_id, ProfileContext::Clan(clan_id), cx)
+                && !profile.display_name.is_empty()
+            {
+                return profile.display_name.into();
+            }
+        }
+
+        if BadgeService::global(cx)
+            .read(cx)
+            .current_user_id(cx)
+            .is_some_and(|me| me == user_id)
+        {
+            let account = AccountStore::global(cx).read(cx);
+            if let Some(profile) = account.clan_profile.as_ref()
+                && !profile.nick_name.is_empty()
+                && clan_id.is_none_or(|id| profile.clan_id == id)
+            {
+                return profile.nick_name.clone().into();
+            }
+            if let Some(acct) = account.account.as_ref() {
+                let name = if !acct.display_name.is_empty() {
+                    acct.display_name.clone()
+                } else {
+                    acct.username.clone()
+                };
+                if !name.is_empty() {
+                    return name.into();
+                }
+            }
+        }
+
+        if let Some(user) = UsersByUserStore::global(cx).read(cx).user(user_id) {
+            let name = if !user.display_name.is_empty() {
+                user.display_name.clone()
+            } else {
+                user.username.clone()
+            };
+            if !name.is_empty() {
+                return name.into();
+            }
+        }
+
+        if let Some(channel_id) = channel_id
+            && let Some(profile) =
+                resolve_user_profile(user_id, ProfileContext::Direct(channel_id), cx)
+            && !profile.display_name.is_empty()
+        {
+            return profile.display_name.into();
+        }
+    }
+
+    if !msg.sender_name.is_empty() {
+        return msg.sender_name.clone();
+    }
+
+    SharedString::default()
+}
+
 pub fn resolve_message_display_name(msg: &Message, ctx: &RowCtx, cx: &App) -> SharedString {
     let user_id = msg
         .sender_user_id
@@ -38,22 +219,16 @@ pub fn resolve_message_display_name(msg: &Message, ctx: &RowCtx, cx: &App) -> Sh
         Some(ProfileContext::Clan(clan_id)) => Some(clan_id),
         _ => None,
     };
+    let channel_id = match ctx.profile_context {
+        Some(ProfileContext::Direct(channel_id)) => Some(channel_id),
+        _ => None,
+    };
     if let Some(user_id) = user_id {
         let key = (clan_id, user_id);
         if let Some(cached) = ctx.row_memo.borrow().display_names.get(&key) {
             return cached.clone();
         }
-        let resolved = if let Some(clan_id) = clan_id {
-            ClanMembersStore::global(cx)
-                .read(cx)
-                .member(clan_id, user_id)
-                .map(|member| member.name())
-                .filter(|name| !name.is_empty())
-                .map(SharedString::from)
-                .unwrap_or_else(|| msg.sender_name.clone())
-        } else {
-            msg.sender_name.clone()
-        };
+        let resolved = resolve_message_sender_label(msg, clan_id, channel_id, cx);
         let mut memo = ctx.row_memo.borrow_mut();
         if memo.display_names.len() >= 4096 {
             memo.display_names.clear();
