@@ -13,7 +13,6 @@ use mezon_store::{
     VoiceMember, VoiceModerationError, VoiceStore, expand_mention_name_tokens,
 };
 use ui::PopoverMenuHandle;
-use ui::utils::ROUNDED_BORDER_WINDOW;
 
 use crate::app::shell::Shell;
 use crate::chat::area::ChatArea;
@@ -226,6 +225,7 @@ impl ChatLayout {
                 let key = match err {
                     VoiceModerationError::MuteFailed => "channelVoice.muteMemberFailed",
                     VoiceModerationError::KickFailed => "channelVoice.kickMemberFailed",
+                    VoiceModerationError::AgentFailed => "channelVoice.agentActionFailed",
                 };
                 let msg = mezon_i18n::t(&locale, key).to_string();
                 Shell::global(cx).update(cx, |shell, cx| shell.error(msg, cx));
@@ -1133,7 +1133,7 @@ impl ChatLayout {
     }
 
     fn sync_voice_frame_pump(&mut self, cx: &mut Context<Self>) {
-        const VOICE_FRAME_INTERVAL: std::time::Duration = std::time::Duration::from_millis(33);
+        const VOICE_FRAME_FALLBACK: std::time::Duration = std::time::Duration::from_millis(200);
         let want_pump =
             self.is_voice_frame_relevant(cx) && self.voice_store.read(cx).has_active_video();
         if !want_pump {
@@ -1146,20 +1146,36 @@ impl ChatLayout {
         self._voice_frame_pump = Some(cx.spawn(async move |this, cx| {
             let mut last_seq = 0u64;
             loop {
-                cx.background_executor().timer(VOICE_FRAME_INTERVAL).await;
-                let stepped = this.update(cx, |_, cx| {
-                    let seq = VoiceStore::global(cx)
-                        .read(cx)
-                        .frame_store()
-                        .map(|store| store.publish_seq())
-                        .unwrap_or(0);
+                let store =
+                    match this.update(cx, |_, cx| VoiceStore::global(cx).read(cx).frame_store()) {
+                        Ok(store) => store,
+                        Err(_) => break,
+                    };
+                let Some(store) = store else {
+                    cx.background_executor().timer(VOICE_FRAME_FALLBACK).await;
+                    continue;
+                };
+                let mut rx = store.frame_watch();
+                loop {
+                    let seq = store.publish_seq();
                     if seq != last_seq {
                         last_seq = seq;
-                        cx.notify();
+                        if this.update(cx, |_, cx| cx.notify()).is_err() {
+                            return;
+                        }
                     }
-                });
-                if stepped.is_err() {
-                    break;
+                    let frame_published = {
+                        let changed = std::pin::pin!(rx.changed());
+                        let fallback =
+                            std::pin::pin!(cx.background_executor().timer(VOICE_FRAME_FALLBACK));
+                        matches!(
+                            futures::future::select(changed, fallback).await,
+                            futures::future::Either::Left((Ok(()), _))
+                        )
+                    };
+                    if !frame_published {
+                        break;
+                    }
                 }
             }
         }));
@@ -1295,7 +1311,7 @@ impl Render for ChatLayout {
             self.build_create_thread_panel(&locale, window, cx)
         };
         let right_panel = topic_panel.or(create_panel);
-        let chat_content = self.render_content(window.viewport_size().width, cx);
+        let chat_content = self.render_content(window, cx);
         let main_content = if let Some(panel) = right_panel {
             div()
                 .flex()
@@ -1366,7 +1382,6 @@ impl Render for ChatLayout {
                             .flex_1()
                             .min_h_0()
                             .bg(theme.bg_tertiary)
-                            .rounded_bl(px(ROUNDED_BORDER_WINDOW))
                             .overflow_hidden()
                             .child(
                                 div().w(px(72.0)).h_full().pb(nav_bottom_pad).child(
@@ -1416,8 +1431,10 @@ impl Render for ChatLayout {
                                 )
                             }))
                             .child(
-                                AnyView::from(self.user_info_bar.clone())
-                                    .cached(StyleRefinement::default().w_full().h(px(56.0))),
+                                div()
+                                    .w_full()
+                                    .h(px(56.0))
+                                    .child(AnyView::from(self.user_info_bar.clone())),
                             ),
                     ),
             )
@@ -2079,8 +2096,8 @@ impl ChatLayout {
         })
     }
 
-    fn render_content(&mut self, window_width: Pixels, cx: &mut Context<Self>) -> gpui::AnyElement {
-        let theme = cx.theme();
+    fn render_content(&mut self, window: &mut Window, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let window_width = window.viewport_size().width;
         let locale = self.settings.read(cx).language.clone();
         let inbox_handle = self.inbox_handle.clone();
         let active_clan_id = self.active_clan_id(cx);
@@ -2207,7 +2224,6 @@ impl ChatLayout {
                     )
                 };
                 let voice_view = crate::chat::voice::render_voice_channel(
-                    theme,
                     &locale,
                     &channel,
                     &self.voice_store,
@@ -2221,6 +2237,7 @@ impl ChatLayout {
                     self.voice_show_members,
                     &mut self.voice_visual,
                     window_width,
+                    window,
                     cx,
                 );
                 return div()
@@ -2340,6 +2357,7 @@ impl ChatLayout {
         }
 
         let current_path = router.read(cx).current_path();
+        let theme = cx.theme();
 
         let placeholder = match route {
             Route::Chat => self.render_placeholder(

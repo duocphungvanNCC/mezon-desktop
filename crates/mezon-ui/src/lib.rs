@@ -19,6 +19,7 @@ pub mod window_layout;
 pub use app::root::RootView;
 pub use app::shell::Shell;
 pub use app::title_bar::TitleBar;
+pub use app::wallet_toast::WalletToastBridge;
 pub use auth::login_view::LoginView;
 pub use channel_app::{
     OpenChannelAppRequest, close_channel_app_window, focus_channel_app_window, is_channel_app_open,

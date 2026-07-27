@@ -11,7 +11,6 @@ use mezon_store::{
     DirectEvent, DirectKind, DirectMessageStore, GroupMember, GroupMembersEvent, GroupMembersStore,
     PresenceEvent, PresenceStore, ProfileContext, Settings, UserId, split_members_by_status,
 };
-use ui::utils::ROUNDED_BORDER_WINDOW;
 
 use crate::app::shell::Shell;
 use crate::chat::member_row_element::MemberRowElement;
@@ -997,7 +996,6 @@ impl Render for MemberListPanel {
             .h_full()
             .flex_shrink_0()
             .bg(theme.bg_secondary)
-            .rounded_br(px(ROUNDED_BORDER_WINDOW))
             .border_l_1()
             .border_color(theme.border)
             .child(list)

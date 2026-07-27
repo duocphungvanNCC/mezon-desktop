@@ -63,6 +63,14 @@ impl DirectChannel {
         self.unread_count > 0
             || (self.last_sent_timestamp > 0 && self.last_seen_timestamp < self.last_sent_timestamp)
     }
+
+    pub fn counts_toward_unread_badge(&self, muted: bool) -> bool {
+        dm_counts_toward_unread_badge(self.unread_count, muted)
+    }
+}
+
+pub fn dm_counts_toward_unread_badge(unread_count: u32, muted: bool) -> bool {
+    unread_count > 0 && !muted
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -74,6 +82,7 @@ pub enum DirectEvent {
 }
 
 const DM_PAGE_SIZE: i32 = 500;
+const MESSAGE_CODE_SEND_TOKEN: i32 = 11;
 /// Incoming DM traffic bumps last-message/unread state per message; the
 /// sidebar and unread rail only need to converge, not animate every packet,
 /// so per-message `Changed` notifies are coalesced into one flush.
@@ -453,6 +462,45 @@ impl DirectMessageStore {
         body: DirectMessageBody,
         cx: &mut Context<Self>,
     ) -> Task<anyhow::Result<(ChannelId, i32)>> {
+        self.create_dm_and_send_with_code(
+            user_id,
+            member_label,
+            member_avatar,
+            member_username,
+            body,
+            0,
+            cx,
+        )
+    }
+
+    pub fn create_dm_and_send_token_card(
+        &self,
+        user_id: UserId,
+        member_username: String,
+        text: String,
+        cx: &mut Context<Self>,
+    ) -> Task<anyhow::Result<(ChannelId, i32)>> {
+        self.create_dm_and_send_with_code(
+            user_id,
+            String::new(),
+            String::new(),
+            member_username,
+            DirectMessageBody::Text(text),
+            MESSAGE_CODE_SEND_TOKEN,
+            cx,
+        )
+    }
+
+    fn create_dm_and_send_with_code(
+        &self,
+        user_id: UserId,
+        member_label: String,
+        member_avatar: String,
+        member_username: String,
+        body: DirectMessageBody,
+        message_code: i32,
+        cx: &mut Context<Self>,
+    ) -> Task<anyhow::Result<(ChannelId, i32)>> {
         let api = self.api.clone();
         cx.spawn(async move |this, cx| {
             let desc = api.create_direct_channel(&[user_id.0]).await?;
@@ -507,7 +555,12 @@ impl DirectMessageStore {
 
             let content_json = body.into_content_json();
             let sent = api
-                .send_channel_message_structured(channel_id.get(), &content_json, send_mode)
+                .send_channel_message_structured_with_code(
+                    channel_id.get(),
+                    &content_json,
+                    send_mode,
+                    message_code,
+                )
                 .await?;
             this.update(cx, |this, cx| {
                 this.note_message(channel_id, sent.create_time, true, false, cx);
@@ -959,6 +1012,38 @@ mod tests {
         api.count_mess_unread = 3;
         let dm = direct_from_api(api);
         assert!(dm.is_unread());
+    }
+
+    #[test]
+    fn unread_dm_counts_toward_badge_when_not_muted() {
+        let mut api = api_dm(1, "Peer", 3);
+        api.count_mess_unread = 4;
+        let dm = direct_from_api(api);
+        assert!(dm.counts_toward_unread_badge(false));
+    }
+
+    #[test]
+    fn muted_dm_does_not_count_even_with_unread() {
+        let mut api = api_dm(1, "Peer", 3);
+        api.count_mess_unread = 4;
+        let dm = direct_from_api(api);
+        assert!(!dm.counts_toward_unread_badge(true));
+    }
+
+    #[test]
+    fn read_dm_never_counts_toward_badge() {
+        let dm = direct_from_api(api_dm(1, "Peer", 3));
+        assert_eq!(dm.unread_count, 0);
+        assert!(!dm.counts_toward_unread_badge(false));
+        assert!(!dm.counts_toward_unread_badge(true));
+    }
+
+    #[test]
+    fn dm_counts_predicate_matches_unread_and_unmuted() {
+        assert!(dm_counts_toward_unread_badge(1, false));
+        assert!(!dm_counts_toward_unread_badge(1, true));
+        assert!(!dm_counts_toward_unread_badge(0, false));
+        assert!(!dm_counts_toward_unread_badge(0, true));
     }
 
     #[test]

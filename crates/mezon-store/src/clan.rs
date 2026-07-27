@@ -556,7 +556,6 @@ impl ClanList {
             return;
         }
         self.active_clan_id = Some(id);
-        self.fire_join_clan_chat(id, cx);
         cx.emit(ClanEvent::ActiveClanChanged(self.active_clan_id));
         cx.notify();
     }
