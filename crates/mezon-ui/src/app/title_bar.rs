@@ -5,7 +5,7 @@ use gpui::{
     prelude::*,
 };
 use mezon_store::{AutoUpdateStatus, AutoUpdateStore, Settings};
-use ui::{px, utils::ROUNDED_BORDER_WINDOW};
+use ui::px;
 
 pub struct TitleBar {
     settings: Entity<Settings>,

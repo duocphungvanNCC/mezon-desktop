@@ -1881,11 +1881,11 @@ impl Element for CanvasEditorElement {
             for (ix, line) in wrapped.into_iter().enumerate() {
                 let (span_start, _) = spans[ix];
                 let block_height = line.size(default_line_height).height;
-                if ix == caret_line {
-                    if let Some(pos) = line.position_for_index(caret_local, default_line_height) {
-                        caret_x = pos.x;
-                        caret_top = content_top + pos.y;
-                    }
+                if ix == caret_line
+                    && let Some(pos) = line.position_for_index(caret_local, default_line_height)
+                {
+                    caret_x = pos.x;
+                    caret_top = content_top + pos.y;
                 }
                 let y = bounds.top() + content_top - scroll_offset.y;
                 painted.push(PreparedLine {
@@ -3308,19 +3308,19 @@ fn flatten_block(node: &TipTapNode, lines: &mut Vec<EditorLine>) {
 fn flatten_list(node: &TipTapNode, lines: &mut Vec<EditorLine>, kind: BlockKind) {
     if let Some(children) = &node.content {
         for child in children {
-            if child.kind == "listItem" {
-                if let Some(inner) = &child.content {
-                    for block in inner {
-                        if block.kind == "paragraph" {
-                            lines.push(EditorLine {
-                                block: kind,
-                                text: inline_to_text(block.content.as_ref()),
-                                marks: inline_to_marks(block.content.as_ref()),
-                                image_src: None,
-                            });
-                        } else {
-                            flatten_block(block, lines);
-                        }
+            if child.kind == "listItem"
+                && let Some(inner) = &child.content
+            {
+                for block in inner {
+                    if block.kind == "paragraph" {
+                        lines.push(EditorLine {
+                            block: kind,
+                            text: inline_to_text(block.content.as_ref()),
+                            marks: inline_to_marks(block.content.as_ref()),
+                            image_src: None,
+                        });
+                    } else {
+                        flatten_block(block, lines);
                     }
                 }
             }
@@ -3465,11 +3465,11 @@ fn lines_to_tiptap_json(lines: &[EditorLine]) -> String {
     json!({"type":"doc","content": content}).to_string()
 }
 
-fn collect_list_lines<'a>(
-    lines: &'a [EditorLine],
+fn collect_list_lines(
+    lines: &[EditorLine],
     start: usize,
     kind: BlockKind,
-) -> (Vec<&'a EditorLine>, usize) {
+) -> (Vec<&EditorLine>, usize) {
     let mut items = Vec::new();
     let mut i = start;
     while i < lines.len() && lines[i].block == kind {
@@ -3479,7 +3479,7 @@ fn collect_list_lines<'a>(
     (items, i)
 }
 
-fn collect_task_lines<'a>(lines: &'a [EditorLine], start: usize) -> (Vec<&'a EditorLine>, usize) {
+fn collect_task_lines(lines: &[EditorLine], start: usize) -> (Vec<&EditorLine>, usize) {
     let mut items = Vec::new();
     let mut i = start;
     while i < lines.len() {
@@ -3493,10 +3493,7 @@ fn collect_task_lines<'a>(lines: &'a [EditorLine], start: usize) -> (Vec<&'a Edi
     (items, i)
 }
 
-fn collect_blockquote_lines<'a>(
-    lines: &'a [EditorLine],
-    start: usize,
-) -> (Vec<&'a EditorLine>, usize) {
+fn collect_blockquote_lines(lines: &[EditorLine], start: usize) -> (Vec<&EditorLine>, usize) {
     let mut items = Vec::new();
     let mut i = start;
     while i < lines.len() {

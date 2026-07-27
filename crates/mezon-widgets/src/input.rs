@@ -1345,6 +1345,7 @@ struct TextElement {
     input: Entity<InputState>,
 }
 
+#[allow(clippy::large_enum_variant)]
 enum PrepaintState {
     Single {
         line: ShapedLine,

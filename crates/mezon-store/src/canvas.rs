@@ -316,11 +316,11 @@ impl CanvasStore {
                 )
                 .await?;
             let _ = this.update(cx, |this, cx| {
-                if let Some(list) = this.cache.get_mut(&channel_id) {
-                    if let Some(item) = list.iter_mut().find(|c| c.id == canvas_id) {
-                        item.title = title;
-                        item.update_time = chrono::Utc::now().timestamp();
-                    }
+                if let Some(list) = this.cache.get_mut(&channel_id)
+                    && let Some(item) = list.iter_mut().find(|c| c.id == canvas_id)
+                {
+                    item.title = title;
+                    item.update_time = chrono::Utc::now().timestamp();
                 }
                 cx.notify();
             });
