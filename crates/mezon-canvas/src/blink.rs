@@ -2,14 +2,11 @@ use std::time::Duration;
 
 use gpui::Context;
 
+use super::CanvasEditorState;
+
 const BLINK_INTERVAL: Duration = Duration::from_millis(500);
 const BLINK_PAUSE: Duration = Duration::from_millis(500);
 
-pub(crate) trait HasCaretBlink: 'static {
-    fn caret_blink_mut(&mut self) -> &mut CaretBlink;
-}
-
-/// Caret blink state — simplified from Zed's `editor::BlinkManager`.
 pub(crate) struct CaretBlink {
     blink_epoch: usize,
     visible: bool,
@@ -29,7 +26,7 @@ impl CaretBlink {
         self.enabled && self.visible
     }
 
-    pub fn sync_focused<T: HasCaretBlink>(&mut self, cx: &mut Context<T>) {
+    pub fn sync_focused(&mut self, cx: &mut Context<CanvasEditorState>) {
         if self.enabled {
             return;
         }
@@ -39,7 +36,7 @@ impl CaretBlink {
         self.schedule_blink(cx);
     }
 
-    pub fn sync_blurred<T: HasCaretBlink>(&mut self, cx: &mut Context<T>) {
+    pub fn sync_blurred(&mut self, cx: &mut Context<CanvasEditorState>) {
         if !self.enabled {
             return;
         }
@@ -49,7 +46,7 @@ impl CaretBlink {
         cx.notify();
     }
 
-    pub fn pause_blinking<T: HasCaretBlink>(&mut self, cx: &mut Context<T>) {
+    pub fn pause_blinking(&mut self, cx: &mut Context<CanvasEditorState>) {
         if !self.enabled {
             return;
         }
@@ -60,9 +57,8 @@ impl CaretBlink {
         cx.spawn(async move |this, cx| {
             cx.background_executor().timer(BLINK_PAUSE).await;
             this.update(cx, |this, cx| {
-                let blink = this.caret_blink_mut();
-                if blink.enabled && blink.blink_epoch == epoch {
-                    blink.schedule_blink(cx);
+                if this.caret_blink.enabled && this.caret_blink.blink_epoch == epoch {
+                    this.caret_blink.schedule_blink(cx);
                 }
             })
             .ok();
@@ -70,17 +66,17 @@ impl CaretBlink {
         .detach();
     }
 
-    fn schedule_blink<T: HasCaretBlink>(&mut self, cx: &mut Context<T>) {
+    fn schedule_blink(&mut self, cx: &mut Context<CanvasEditorState>) {
         let epoch = self.bump_epoch();
         cx.spawn(async move |this, cx| {
             cx.background_executor().timer(BLINK_INTERVAL).await;
-            this.update(cx, |this, cx| this.caret_blink_mut().blink_tick(epoch, cx))
+            this.update(cx, |this, cx| this.caret_blink.blink_tick(epoch, cx))
                 .ok();
         })
         .detach();
     }
 
-    fn blink_tick<T: HasCaretBlink>(&mut self, epoch: usize, cx: &mut Context<T>) {
+    fn blink_tick(&mut self, epoch: usize, cx: &mut Context<CanvasEditorState>) {
         if !self.enabled || epoch != self.blink_epoch {
             return;
         }

@@ -633,6 +633,8 @@ mod tests {
             phone_number: None,
             password_setted: false,
             logo: None,
+            status: String::new(),
+            user_status: String::new(),
         }
     }
 

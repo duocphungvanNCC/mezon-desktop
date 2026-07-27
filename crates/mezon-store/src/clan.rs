@@ -93,6 +93,7 @@ pub struct ClanInviteLink {
     pub id: i64,
     pub invite_link: String,
 }
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClanSystemMessage {
     pub channel_id: ChannelId,
@@ -556,7 +557,6 @@ impl ClanList {
             return;
         }
         self.active_clan_id = Some(id);
-        self.fire_join_clan_chat(id, cx);
         cx.emit(ClanEvent::ActiveClanChanged(self.active_clan_id));
         cx.notify();
     }

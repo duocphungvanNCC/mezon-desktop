@@ -1,12 +1,12 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use gpui::{App, AppContext, Context, Entity, EventEmitter, Global, Subscription, Task};
+use gpui::{App, AppContext, Context, Entity, EventEmitter, Global, Task};
 use mezon_client::{AppApi, ConnectionStatus};
 use mezon_proto::api;
 
 use crate::KeyedCache;
-use crate::clan::{ClanEvent, ClanList};
+use crate::clan::ClanList;
 use crate::clan_members::ClanMembersStore;
 use crate::ids::{ClanId, RoleId, UserId};
 use crate::permissions::PERMISSION_ADMINISTRATOR;
@@ -100,7 +100,6 @@ pub struct RolesStore {
     saving: HashSet<ClanId>,
     reset_generation: u64,
     api: Arc<AppApi>,
-    _clan_sub: Subscription,
     _conn_watch: Task<()>,
 }
 
@@ -151,12 +150,6 @@ impl RolesStore {
     fn new(api: Arc<AppApi>, cx: &mut Context<Self>) -> Self {
         Self::register_realtime(cx);
 
-        let clan_sub = cx.subscribe(&ClanList::global(cx), |this, _clan, event, cx| {
-            if let ClanEvent::ActiveClanChanged(Some(clan_id)) = event {
-                this.ensure_loaded(*clan_id, cx);
-            }
-        });
-
         let conn_watch = Self::spawn_connection_watch(api.clone(), cx);
 
         Self {
@@ -167,7 +160,6 @@ impl RolesStore {
             saving: HashSet::new(),
             reset_generation: 0,
             api,
-            _clan_sub: clan_sub,
             _conn_watch: conn_watch,
         }
     }
@@ -195,13 +187,13 @@ impl RolesStore {
 
     fn refresh_active(&mut self, clan_id: ClanId, cx: &mut Context<Self>) {
         if ClanList::global(cx).read(cx).active_clan_id == Some(clan_id) {
-            self.fetch(clan_id, true, cx);
+            self.fetch(clan_id, true, cx).detach();
         }
     }
 
     fn refresh_active_from_event(&mut self, cx: &mut Context<Self>) {
         if let Some(clan_id) = ClanList::global(cx).read(cx).active_clan_id {
-            self.fetch(clan_id, true, cx);
+            self.fetch(clan_id, true, cx).detach();
         }
     }
 
@@ -395,19 +387,24 @@ impl RolesStore {
     }
 
     pub fn ensure_loaded(&mut self, clan_id: ClanId, cx: &mut Context<Self>) {
+        self.ensure_loaded_task(clan_id, cx).detach();
+    }
+
+    pub fn ensure_loaded_task(&mut self, clan_id: ClanId, cx: &mut Context<Self>) -> Task<()> {
         self.cache.touch(&clan_id);
-        if !self.cache.is_fresh(&clan_id, crate::CACHE_TTL) {
-            self.fetch(clan_id, false, cx);
+        if self.cache.is_fresh(&clan_id, crate::CACHE_TTL) {
+            return Task::ready(());
         }
+        self.fetch(clan_id, false, cx)
     }
 
     pub fn reload(&mut self, clan_id: ClanId, cx: &mut Context<Self>) {
-        self.fetch(clan_id, true, cx);
+        self.fetch(clan_id, true, cx).detach();
     }
 
-    fn fetch(&mut self, clan_id: ClanId, force: bool, cx: &mut Context<Self>) {
+    fn fetch(&mut self, clan_id: ClanId, force: bool, cx: &mut Context<Self>) -> Task<()> {
         if !force && !self.loading.insert(clan_id) {
-            return;
+            return Task::ready(());
         }
         if force {
             self.loading.insert(clan_id);
@@ -433,7 +430,6 @@ impl RolesStore {
                 }
             });
         })
-        .detach();
     }
 
     pub fn roles_for(&self, clan_id: ClanId, role_ids: &[RoleId]) -> Vec<Role> {

@@ -10,7 +10,7 @@ use mezon_store::{
 };
 
 use super::channel_sidebar::menu::{MUTE_DURATIONS, apply_mute, mute_label, submenu_options};
-use super::friend_request_badge;
+use ui::{ScrollAxes, Scrollbars, WithScrollbar};
 
 use crate::components::compositions::{DM_ROW_HEIGHT, DmRow};
 use crate::components::primitives::{ContextMenu, Icon, IconName, context_menu_at};
@@ -83,17 +83,12 @@ fn dm_items_fingerprint(store: &DirectMessageStore, cx: &App) -> u64 {
                 u8::from(ch.is_unread()),
                 u8::from(ch.online),
                 u8::from(dm_in_voice(ch, channels)),
-                u8::from(dm_muted(ch.id, cx)),
+                u8::from(super::dm_muted(ch.id, cx)),
             ],
         );
         let h = fold(h, ch.label.as_bytes());
         fold(h, ch.avatar.as_bytes())
     })
-}
-
-fn dm_muted(channel_id: ChannelId, cx: &App) -> bool {
-    NotificationSettingStore::try_global(cx)
-        .is_some_and(|store| store.read(cx).is_time_muted(channel_id))
 }
 
 fn build_dm_items(store: &DirectMessageStore, cx: &App) -> Rc<Vec<DmItem>> {
@@ -114,7 +109,7 @@ fn build_dm_items(store: &DirectMessageStore, cx: &App) -> Rc<Vec<DmItem>> {
                 unread: ch.is_unread(),
                 online: ch.online,
                 in_voice: dm_in_voice(ch, channels),
-                muted: dm_muted(ch.id, cx),
+                muted: super::dm_muted(ch.id, cx),
                 avatar_src: SharedString::from(crate::util::imgproxy::avatar_url(cx, &ch.avatar)),
                 avatar_raw: SharedString::from(ch.avatar.clone()),
             })
@@ -294,6 +289,7 @@ impl DirectSidebar {
         let bg_hover = theme.bg_hover;
         div()
             .id("dm-friends")
+            .relative()
             .w_full()
             .flex()
             .flex_row()
@@ -315,7 +311,22 @@ impl DirectSidebar {
                     .child(mezon_i18n::t(locale, "directMessage.friends")),
             )
             .when(pending > 0, |el| {
-                el.child(friend_request_badge(pending, px(11.)).ml_auto())
+                el.child(
+                    div()
+                        .absolute()
+                        .right(px(25.))
+                        .size(px(16.))
+                        .rounded_full()
+                        .bg(gpui::rgb(0xda_37_3c))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .text_size(px(9.))
+                        .line_height(px(9.))
+                        .font_weight(FontWeight::BOLD)
+                        .text_color(gpui::white())
+                        .child(SharedString::from(pending.to_string())),
+                )
             })
     }
 
@@ -357,7 +368,7 @@ impl DirectSidebar {
 }
 
 impl Render for DirectSidebar {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         crate::trace_render!("DirectSidebar");
         let theme = cx.theme();
         let locale = self.settings.read(cx).language.clone();
@@ -485,7 +496,19 @@ impl Render for DirectSidebar {
                 friend_pending,
             )))
             .child(self.render_section_header(theme, &locale))
-            .child(div().flex_1().min_h_0().relative().child(list))
+            .child(
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .relative()
+                    .child(list)
+                    .custom_scrollbars(
+                        Scrollbars::always_visible(ScrollAxes::Vertical)
+                            .tracked_scroll_handle(&self.list_scroll),
+                        window,
+                        cx,
+                    ),
+            )
             .when_some(
                 menu_overlay,
                 move |el, (position, channel_id, muted, muted_until, mute_open)| {

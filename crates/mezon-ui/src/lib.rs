@@ -1,5 +1,6 @@
 pub mod app;
 pub mod auth;
+pub mod canvas_navigation;
 pub mod channel_app;
 pub mod chat;
 pub mod clan;
@@ -19,6 +20,7 @@ pub mod window_layout;
 pub use app::root::RootView;
 pub use app::shell::Shell;
 pub use app::title_bar::TitleBar;
+pub use app::wallet_toast::WalletToastBridge;
 pub use auth::login_view::LoginView;
 pub use channel_app::{
     OpenChannelAppRequest, close_channel_app_window, focus_channel_app_window, is_channel_app_open,
@@ -100,6 +102,8 @@ pub fn init(cx: &mut gpui::App) {
     components::primitives::init_input(cx);
     components::primitives::init_textarea(cx);
     chat::mention_input::init(cx);
+    mezon_canvas::init(cx);
+    canvas_navigation::init(cx);
     chat::message_search::init(cx);
     command_palette::init(cx);
     router::Router::init(cx);
