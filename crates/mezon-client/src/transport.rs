@@ -82,6 +82,8 @@ pub enum RealtimeEvent {
     UnpinMessage(realtime::UnpinMessageEvent),
     SdTopicEvent(realtime::SdTopicEvent),
     TopicInMessageEvent(realtime::TopicInMessageEvent),
+    TokenSent(api::TokenSentEvent),
+    GiveCoffee(api::GiveCoffeeEvent),
     Unhandled(realtime::envelope::Message),
 }
 
@@ -134,6 +136,8 @@ impl TryFrom<realtime::envelope::Message> for RealtimeEvent {
             realtime::envelope::Message::UnpinMessageEvent(m) => Ok(Self::UnpinMessage(m)),
             realtime::envelope::Message::SdTopicEvent(m) => Ok(Self::SdTopicEvent(m)),
             realtime::envelope::Message::TopicInMessageEvent(m) => Ok(Self::TopicInMessageEvent(m)),
+            realtime::envelope::Message::TokenSentEvent(m) => Ok(Self::TokenSent(m)),
+            realtime::envelope::Message::GiveCoffeeEvent(m) => Ok(Self::GiveCoffee(m)),
             other => Ok(Self::Unhandled(other)),
         }
     }
@@ -459,6 +463,10 @@ pub struct ApiAccount {
     pub phone_number: Option<String>,
     pub password_setted: bool,
     pub logo: Option<String>,
+    #[serde(default)]
+    pub status: String,
+    #[serde(default)]
+    pub user_status: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2873,6 +2881,8 @@ impl MezonTransport {
             phone_number: (!user.phone_number.is_empty()).then_some(user.phone_number),
             password_setted,
             logo,
+            status: user.status,
+            user_status: user.user_status,
         }
     }
 
@@ -3747,6 +3757,17 @@ impl MezonTransport {
         content_json: &str,
         mode: i32,
     ) -> Result<ApiMessage> {
+        self.send_channel_message_structured_with_code(channel_id, content_json, mode, 0)
+            .await
+    }
+
+    pub async fn send_channel_message_structured_with_code(
+        &self,
+        channel_id: i64,
+        content_json: &str,
+        mode: i32,
+        message_code: i32,
+    ) -> Result<ApiMessage> {
         serde_json::from_str::<ApiMessageContent>(content_json)
             .context("invalid structured message content")?;
         self.send_channel_message_inner(
@@ -3764,7 +3785,10 @@ impl MezonTransport {
             true,
             0,
             None,
-            OutgoingMessageFlags::default(),
+            OutgoingMessageFlags {
+                anonymous_message: false,
+                message_code,
+            },
         )
         .await
     }
@@ -6185,11 +6209,17 @@ impl MezonTransport {
     }
 
     /// Update user status.
-    pub async fn update_user_status(&self, status: &str) -> Result<()> {
+    pub async fn update_user_status(
+        &self,
+        status: &str,
+        minutes: i32,
+        until_turn_on: bool,
+    ) -> Result<()> {
         let cid = self.generate_cid();
         let body = api::UserStatusUpdate {
             status: status.to_string(),
-            ..Default::default()
+            minutes,
+            until_turn_on,
         }
         .encode_to_vec();
         let (code, _) = self.send_api_request(cid, "UpdateUserStatus", body).await?;
@@ -6200,11 +6230,17 @@ impl MezonTransport {
     }
 
     /// Update user custom status.
-    pub async fn update_user_custom_status(&self, status: &str) -> Result<()> {
+    pub async fn update_user_custom_status(
+        &self,
+        status: &str,
+        minutes: i32,
+        until_turn_on: bool,
+    ) -> Result<()> {
         let cid = self.generate_cid();
         let body = api::UserStatusUpdate {
             status: status.to_string(),
-            ..Default::default()
+            minutes,
+            until_turn_on,
         }
         .encode_to_vec();
         let (code, _) = self

@@ -620,6 +620,8 @@ fn open_main_window(
     mezon_store::NotificationSettingStore::init(api.clone(), auth_state.clone(), cx);
     mezon_store::NotificationPushStore::init(api.clone(), auth_state.clone(), cx);
     mezon_store::QuickMenuStore::init(api.clone(), cx);
+    mezon_store::WalletStore::init(auth_state.clone(), cx);
+    mezon_ui::WalletToastBridge::init(cx);
     mezon_store::AccountStore::init(api, cx);
 
     let platform_store = mezon_store::PlatformStore::init(cx);
@@ -756,6 +758,7 @@ struct BadgeBridgeGlobal {
     _clan: gpui::Subscription,
     _dm: gpui::Subscription,
     _friends: gpui::Subscription,
+    _notification: gpui::Subscription,
 }
 impl gpui::Global for BadgeBridgeGlobal {}
 
@@ -763,18 +766,38 @@ fn install_badge_bridge(cx: &mut App) {
     let clan_list = mezon_store::ClanList::global(cx);
     let dm_store = mezon_store::DirectMessageStore::global(cx);
     let friend_store = mezon_store::FriendStore::global(cx);
+    let notification_store = mezon_store::NotificationSettingStore::global(cx);
 
     update_native_badge(cx);
 
     let clan_sub = cx.observe(&clan_list, |_, cx| update_native_badge(cx));
     let dm_sub = cx.observe(&dm_store, |_, cx| update_native_badge(cx));
     let friends_sub = cx.observe(&friend_store, |_, cx| update_native_badge(cx));
+    let notification_sub = cx.observe(&notification_store, |_, cx| update_native_badge(cx));
 
     cx.set_global(BadgeBridgeGlobal {
         _clan: clan_sub,
         _dm: dm_sub,
         _friends: friends_sub,
+        _notification: notification_sub,
     });
+}
+
+/// Aggregate the OS dock/taskbar badge total: clan mention badges + unread DMs
+/// that are not muted + pending friend requests. Muted DMs are excluded (React
+/// parity: `selectTotalUnreadDM` filters `isMute`), summed with saturation.
+fn badge_total(
+    clan_total: u32,
+    dm_unread: impl Iterator<Item = (u32, bool)>,
+    pending_friend_requests: u32,
+) -> u32 {
+    let dm_total: u32 = dm_unread
+        .filter(|&(unread, muted)| mezon_store::dm_counts_toward_unread_badge(unread, muted))
+        .map(|(unread, _)| unread)
+        .sum();
+    clan_total
+        .saturating_add(dm_total)
+        .saturating_add(pending_friend_requests)
 }
 
 fn update_native_badge(cx: &App) {
@@ -787,18 +810,23 @@ fn update_native_badge(cx: &App) {
         .iter()
         .map(|clan| clan.badge_count)
         .sum();
-    let dm_total: u32 = mezon_store::DirectMessageStore::global(cx)
-        .read(cx)
-        .channels()
-        .iter()
-        .map(|channel| channel.unread_count)
-        .sum();
+    let notification_store = mezon_store::NotificationSettingStore::try_global(cx);
+    let muted = notification_store.as_ref().map(|store| store.read(cx));
+    let dm_store = mezon_store::DirectMessageStore::global(cx);
+    let dm_read = dm_store.read(cx);
     let pending_friend_requests = mezon_store::FriendStore::try_global(cx)
         .map(|store| store.read(cx).pending_incoming_count() as u32)
         .unwrap_or(0);
-    let total = clan_total
-        .saturating_add(dm_total)
-        .saturating_add(pending_friend_requests);
+    let total = badge_total(
+        clan_total,
+        dm_read.channels().iter().map(|ch| {
+            (
+                ch.unread_count,
+                muted.is_some_and(|s| s.is_time_muted(ch.id)),
+            )
+        }),
+        pending_friend_requests,
+    );
 
     if LAST_BADGE.swap(total, Ordering::Relaxed) != total {
         mezon_native::badge::set_badge_count(total);
@@ -917,4 +945,39 @@ fn save_attachment(url: &str, filename: &str) -> anyhow::Result<()> {
         }
     });
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::badge_total;
+
+    #[test]
+    fn badge_total_sums_clan_dm_and_friend_requests() {
+        let dms = [(2u32, false), (0, false)];
+        assert_eq!(badge_total(4, dms.into_iter(), 3), 9);
+    }
+
+    #[test]
+    fn badge_total_excludes_muted_dms() {
+        // clan 2 + unread DMs 3 and 1 (non-muted) + muted DM 5 (ignored) + 1 friend req.
+        let dms = [(3u32, false), (5, true), (1, false)];
+        assert_eq!(badge_total(2, dms.into_iter(), 1), 7);
+    }
+
+    #[test]
+    fn badge_total_all_muted_dms_contribute_zero() {
+        let dms = [(9u32, true), (4, true)];
+        assert_eq!(badge_total(0, dms.into_iter(), 0), 0);
+    }
+
+    #[test]
+    fn badge_total_is_zero_when_everything_empty() {
+        assert_eq!(badge_total(0, std::iter::empty(), 0), 0);
+    }
+
+    #[test]
+    fn badge_total_saturates_instead_of_overflowing() {
+        let dms = [(10u32, false)];
+        assert_eq!(badge_total(u32::MAX, dms.into_iter(), 5), u32::MAX);
+    }
 }
