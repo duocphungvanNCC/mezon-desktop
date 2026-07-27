@@ -9,7 +9,7 @@ use crate::chat::message::{CustomStatusModal, SendTokenModal, TransactionHistory
 use crate::components::primitives::{Avatar, Icon, IconName};
 use crate::theme::ActiveTheme;
 
-const DECIMAL_FACTOR: i128 = 1_000_000;
+use mezon_store::TOKEN_DECIMAL_FACTOR as DECIMAL_FACTOR;
 const CURRENCY_SYMBOL: &str = "đồng";
 
 const STATUS_ONLINE: &str = "Online";

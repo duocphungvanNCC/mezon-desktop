@@ -923,5 +923,4 @@ mod tests {
         let body = "version: 1.5.0\nsha512: abc=\n";
         assert!(parse_manifest(body).is_err());
     }
-
 }

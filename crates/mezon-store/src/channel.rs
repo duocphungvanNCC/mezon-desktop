@@ -498,12 +498,12 @@ impl ChannelList {
     fn consume_badge_seed(&mut self, clan_id: ClanId, categories: &mut [Category]) {
         if let Some(seed) = self.pending_badge_seed.remove(&clan_id) {
             let applied = apply_unread_seed_into(&seed, categories);
-            tracing::info!(
-                target: "unread_seed",
+            tracing::debug!(
+                target: "clan_load",
                 clan_id = clan_id.get(),
                 seeded = seed.len(),
                 applied,
-                "CONSUME parked badge seed on structure insert"
+                "consumed parked badge seed on structure insert"
             );
         }
     }
@@ -514,6 +514,10 @@ impl ChannelList {
         }
     }
 
+    pub fn cancel_badge_seed(&mut self, clan_id: ClanId) {
+        self.badge_seeding.remove(&clan_id);
+    }
+
     pub fn seed_badges(&mut self, clan_id: ClanId, cx: &mut Context<Self>) -> Task<()> {
         if self.badge_seeded.contains(&clan_id) || !self.badge_seeding.insert(clan_id) {
             return Task::ready(());
@@ -522,7 +526,7 @@ impl ChannelList {
         let generation = self.reset_generation;
         cx.spawn(async move |this, cx| {
             if let Err(e) = api.join_clan_chat(clan_id.get()).await {
-                tracing::error!(target: "unread_seed", "join_clan_chat failed for clan {clan_id}: {e}");
+                tracing::error!(target: "clan_load", "join_clan_chat failed for clan {clan_id}: {e}");
             }
             let mut attempt = 0u32;
             let descs = loop {
@@ -561,43 +565,40 @@ impl ChannelList {
                     .filter(|(_, s)| !s.last_sent_message_id.is_zero())
                     .map(|(id, s)| (*id, s.last_sent_message_id))
                     .collect();
-                let badged: Vec<ChannelId> = seed
-                    .iter()
-                    .filter(|(_, s)| s.badge_count > 0)
-                    .map(|(id, _)| *id)
-                    .collect();
-                let with_badge = badged.len();
                 let applied = match this.cache.get_mut(&clan_id) {
                     Some(categories) => apply_unread_seed_into(&seed, categories),
                     None => false,
                 };
-                let badged_rows: Vec<String> = badged
-                    .iter()
-                    .map(|id| match this.channel(clan_id, *id) {
-                        Some(ch) => format!(
-                            "{}#{} type={:?} badge={} muted={} thread={}",
-                            ch.name,
-                            id.get(),
-                            ch.channel_type,
-                            ch.badge_count,
-                            ch.muted,
-                            ch.parent_id.is_some()
-                        ),
-                        None => format!("MISSING#{}", id.get()),
-                    })
-                    .collect();
-                tracing::info!(
-                    target: "unread_seed",
-                    clan_id = clan_id.get(),
-                    desc_count,
-                    seeded = seed.len(),
-                    with_badge,
-                    cached = this.cache.contains(&clan_id),
-                    applied,
-                    active = this.active_clan_id == Some(clan_id),
-                    rows = ?badged_rows,
-                    "SEED badge counts"
-                );
+                if tracing::enabled!(target: "clan_load", tracing::Level::DEBUG) {
+                    let badged_rows: Vec<String> = seed
+                        .iter()
+                        .filter(|(_, s)| s.badge_count > 0)
+                        .map(|(id, _)| match this.channel(clan_id, *id) {
+                            Some(ch) => format!(
+                                "{}#{} type={:?} badge={} muted={} thread={}",
+                                ch.name,
+                                id.get(),
+                                ch.channel_type,
+                                ch.badge_count,
+                                ch.muted,
+                                ch.parent_id.is_some()
+                            ),
+                            None => format!("MISSING#{}", id.get()),
+                        })
+                        .collect();
+                    tracing::debug!(
+                        target: "clan_load",
+                        clan_id = clan_id.get(),
+                        desc_count,
+                        seeded = seed.len(),
+                        with_badge = badged_rows.len(),
+                        cached = this.cache.contains(&clan_id),
+                        applied,
+                        active = this.active_clan_id == Some(clan_id),
+                        rows = ?badged_rows,
+                        "seeded badge counts"
+                    );
+                }
                 this.pending_badge_seed.insert(clan_id, seed);
                 if applied {
                     this.notify_channel_list(clan_id, cx);
@@ -867,6 +868,8 @@ impl ChannelList {
     }
 
     fn apply_clan_extras(&mut self, clan_id: ClanId, extras: ClanExtras, cx: &mut Context<Self>) {
+        let app_channels_changed =
+            self.app_channels_cache.get(&clan_id) != Some(&extras.app_channels);
         self.app_channels_cache.insert(clan_id, extras.app_channels);
 
         let Some(slot) = self.cache.get_mut(&clan_id) else {
@@ -877,7 +880,7 @@ impl ChannelList {
         let mut owned = std::mem::take(slot);
         owned.retain(|category| category.id != FAVOR_CATE_ID);
 
-        let mut changed = false;
+        let mut changed = app_channels_changed;
         for ch in owned
             .iter_mut()
             .flat_map(|category| category.channels.iter_mut())
@@ -916,15 +919,17 @@ impl ChannelList {
         if in_voice_changed {
             cx.emit(ChannelEvent::InVoiceChanged);
         }
-        tracing::info!(
-            target: "unread_seed",
+        tracing::debug!(
+            target: "clan_load",
             clan_id = clan_id.get(),
             favorites = extras.favorite_ids.len(),
             voice_channels = extras.voice_map.len(),
             changed,
-            "EXTRAS patched into cached clan structure"
+            "extras patched into cached clan structure"
         );
-        cx.notify();
+        if changed || in_voice_changed {
+            cx.notify();
+        }
     }
 
     fn notify_channel_list(&self, clan_id: ClanId, cx: &mut Context<Self>) {

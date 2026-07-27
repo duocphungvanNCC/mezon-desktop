@@ -1,6 +1,8 @@
 use std::collections::BTreeMap;
+use std::fmt;
 
 use serde::{Deserialize, Serialize};
+use zeroize::Zeroize as _;
 
 pub const TRANSFER_TYPE_GIVE_COFFEE: &str = "give_coffee";
 pub const TRANSFER_TYPE_TRANSFER_TOKEN: &str = "transfer_token";
@@ -11,11 +13,29 @@ pub const TX_TYPE_TRANSFER_BY_KEY: u8 = 1;
 pub const TX_TYPE_USER_CONTENT: u8 = 2;
 
 pub const DECIMALS: u32 = 6;
+pub const DECIMAL_FACTOR: i128 = 10i128.pow(DECIMALS);
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+const REDACTED: &str = "<redacted>";
+
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EphemeralKeyPair {
     pub private_key: String,
     pub public_key: String,
+}
+
+impl fmt::Debug for EphemeralKeyPair {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("EphemeralKeyPair")
+            .field("private_key", &REDACTED)
+            .field("public_key", &self.public_key)
+            .finish()
+    }
+}
+
+impl Drop for EphemeralKeyPair {
+    fn drop(&mut self) {
+        self.private_key.zeroize();
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -84,7 +104,7 @@ pub struct SignedTx {
     pub signature: String,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default)]
 pub struct SendTransactionBase {
     pub sender: String,
     pub recipient: String,
@@ -96,7 +116,22 @@ pub struct SendTransactionBase {
     pub extra_info: Option<ExtraInfo>,
 }
 
-#[derive(Debug, Clone, Default)]
+impl fmt::Debug for SendTransactionBase {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SendTransactionBase")
+            .field("sender", &self.sender)
+            .field("recipient", &self.recipient)
+            .field("amount", &self.amount)
+            .field("nonce", &self.nonce)
+            .field("timestamp", &self.timestamp)
+            .field("text_data", &self.text_data)
+            .field("private_key", &REDACTED)
+            .field("extra_info", &self.extra_info)
+            .finish()
+    }
+}
+
+#[derive(Clone, Default)]
 pub struct SendTransactionRequest {
     pub sender: String,
     pub recipient: String,
@@ -109,6 +144,24 @@ pub struct SendTransactionRequest {
     pub zk_proof: String,
     pub zk_pub: String,
     pub public_key: String,
+}
+
+impl fmt::Debug for SendTransactionRequest {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SendTransactionRequest")
+            .field("sender", &self.sender)
+            .field("recipient", &self.recipient)
+            .field("amount", &self.amount)
+            .field("nonce", &self.nonce)
+            .field("timestamp", &self.timestamp)
+            .field("text_data", &self.text_data)
+            .field("private_key", &REDACTED)
+            .field("extra_info", &self.extra_info)
+            .field("zk_proof", &self.zk_proof)
+            .field("zk_pub", &self.zk_pub)
+            .field("public_key", &self.public_key)
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -269,13 +322,25 @@ impl ZkClientType {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct GetZkProofRequest {
     pub user_id: String,
     pub ephemeral_public_key: String,
     pub jwt: String,
     pub address: String,
     pub client_type: ZkClientType,
+}
+
+impl fmt::Debug for GetZkProofRequest {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("GetZkProofRequest")
+            .field("user_id", &self.user_id)
+            .field("ephemeral_public_key", &self.ephemeral_public_key)
+            .field("jwt", &REDACTED)
+            .field("address", &self.address)
+            .field("client_type", &self.client_type)
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

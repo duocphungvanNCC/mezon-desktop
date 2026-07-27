@@ -5,10 +5,10 @@ use mezon_audio::{AudioPlayer, decode_audio};
 use mezon_client::RealtimeEvent;
 use mezon_client::transport_runtime::http_client_arc;
 use mmn_client::{
-    AddTxResponse, ClaimRedEnvelopeQrRequest, ClaimRedEnvelopeQrResponse, DongClient,
+    AddTxResponse, ClaimRedEnvelopeQrRequest, ClaimRedEnvelopeQrResponse, DECIMALS, DongClient,
     EphemeralKeyPair, ExtraInfo, GetZkProofRequest, IndexerClient, MmnClient,
     SendTransactionRequest, ZkClient, ZkClientType, ZkProof, address_from_user_id,
-    generate_ephemeral_key_pair, scale_amount_to_decimals,
+    generate_ephemeral_key_pair, is_secure_endpoint, scale_amount_to_decimals,
 };
 
 use mezon_client::Session;
@@ -18,7 +18,6 @@ use crate::config::{AppConfig, INDEXER_CHAIN_ID};
 use crate::realtime::{RealtimeDispatch, RealtimeKind};
 use crate::wallet_persist::{self, PersistedWalletState};
 
-const DECIMALS: u32 = 6;
 const GIVE_COFFEE_AMOUNT: i64 = 10_000;
 
 static BANK_SOUND: &[u8] = include_bytes!("../assets/audio/bankSound.mp3");
@@ -160,6 +159,18 @@ impl WalletStore {
         if config.mmn_api_url.is_empty() || config.zk_api_url.is_empty() {
             return None;
         }
+        let endpoints = [
+            ("mmn_api_url", config.mmn_api_url.as_str()),
+            ("zk_api_url", config.zk_api_url.as_str()),
+            ("indexer_api_url", config.indexer_api_url.as_str()),
+            ("dong_service_api_url", config.dong_service_api_url.as_str()),
+        ];
+        for (name, url) in endpoints {
+            if !url.is_empty() && !is_secure_endpoint(url) {
+                tracing::error!("wallet disabled: {name} is not an https endpoint");
+                return None;
+            }
+        }
         let http = http_client_arc();
         Some(Arc::new(WalletClients {
             mmn: MmnClient::new(http.clone(), config.mmn_api_url.clone()),
@@ -264,6 +275,14 @@ impl WalletStore {
         let Some(clients) = self.clients.clone() else {
             return;
         };
+        let switching_user = self
+            .enabled_user
+            .as_deref()
+            .or(self.enabling_user.as_deref())
+            .is_some_and(|current| current != user_id.as_str());
+        if switching_user {
+            self.reset(cx);
+        }
         let generation = self.reset_generation;
         self.enabling_user = Some(user_id.clone());
         self.enable_task = Some(cx.spawn(async move |this, cx| {
@@ -329,13 +348,18 @@ impl WalletStore {
                 if this.reset_generation != generation {
                     return;
                 }
-                if let Ok(account) = account {
-                    this.wallet = Some(WalletDetail {
-                        address: account.address,
-                        balance: account.balance,
-                    });
-                    cx.emit(WalletEvent::BalanceChanged);
-                    cx.notify();
+                match account {
+                    Ok(account) => {
+                        this.wallet = Some(WalletDetail {
+                            address: account.address,
+                            balance: account.balance,
+                        });
+                        cx.emit(WalletEvent::BalanceChanged);
+                        cx.notify();
+                    }
+                    Err(error) => {
+                        tracing::warn!(%error, "wallet: balance refresh failed");
+                    }
                 }
             })
             .ok();

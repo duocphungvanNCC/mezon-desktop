@@ -15,22 +15,20 @@ use tokio::io::AsyncWriteExt as _;
 use tokio::runtime::Runtime;
 
 static TRANSPORT_RUNTIME: OnceLock<Runtime> = OnceLock::new();
-static HTTP_CLIENT: OnceLock<ReqwestClient> = OnceLock::new();
-static HTTP_CLIENT_ARC: OnceLock<Arc<dyn HttpClient>> = OnceLock::new();
+static HTTP_CLIENT: OnceLock<Arc<ReqwestClient>> = OnceLock::new();
 
 const HTTP_TRANSFER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
 
+fn shared_http_client() -> &'static Arc<ReqwestClient> {
+    HTTP_CLIENT.get_or_init(|| Arc::new(new_http_client()))
+}
+
 pub(crate) fn http_client() -> &'static ReqwestClient {
-    HTTP_CLIENT.get_or_init(new_http_client)
+    shared_http_client()
 }
 
 pub fn http_client_arc() -> Arc<dyn HttpClient> {
-    HTTP_CLIENT_ARC
-        .get_or_init(|| {
-            let _guard = runtime().enter();
-            Arc::new(ReqwestClient::new()) as Arc<dyn HttpClient>
-        })
-        .clone()
+    shared_http_client().clone()
 }
 
 pub fn new_http_client() -> ReqwestClient {
