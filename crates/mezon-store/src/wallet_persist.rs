@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::Result;
 use mmn_client::{EphemeralKeyPair, ZkProof};
 use serde::{Deserialize, Serialize};
 
@@ -27,6 +27,8 @@ fn parse_wallet(json: &str) -> Option<PersistedWalletState> {
 #[cfg(debug_assertions)]
 mod dev_file {
     use std::path::PathBuf;
+
+    use anyhow::Context;
 
     use super::*;
 
