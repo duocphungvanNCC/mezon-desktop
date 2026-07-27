@@ -8,7 +8,7 @@ use crate::app::shell::Shell;
 use crate::components::primitives::{Icon, IconName};
 use crate::theme::ActiveTheme;
 
-const DECIMAL_FACTOR: i128 = 1_000_000;
+use mezon_store::TOKEN_DECIMAL_FACTOR as DECIMAL_FACTOR;
 const PAGE_LIMIT: i64 = 50;
 const FILTER_ALL: i32 = 0;
 const FILTER_RECEIVED: i32 = 1;

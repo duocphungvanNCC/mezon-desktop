@@ -39,3 +39,9 @@ pub fn emoji_url(cx: &App, emoji_id: &str) -> String {
         .map(|cfg| cfg.emoji_src(emoji_id))
         .unwrap_or_default()
 }
+
+pub fn emoji_url_sized(cx: &App, emoji_id: &str, size: u32) -> String {
+    AppConfig::try_global(cx)
+        .map(|cfg| cfg.emoji_src_sized(emoji_id, size))
+        .unwrap_or_default()
+}

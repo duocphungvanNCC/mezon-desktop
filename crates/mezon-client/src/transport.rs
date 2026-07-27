@@ -318,7 +318,14 @@ impl MezonTransport {
                         Some(executor) => {
                             let _ = executor.sender.send((code, message));
                         }
-                        None => dispatch_realtime_push(cid, &message, on_event.as_ref()),
+                        None => {
+                            tracing::debug!(
+                                target: "cid_match",
+                                "no pending request for cid={cid} code={code} len={}; routing as push",
+                                message.len()
+                            );
+                            dispatch_realtime_push(cid, &message, on_event.as_ref())
+                        }
                     }
                 } else {
                     dispatch_realtime_push(cid, &message, on_event.as_ref());
@@ -390,7 +397,7 @@ impl MezonTransport {
             .await
             .map_err(|_| {
                 self.pending_requests.lock().remove(&cid);
-                anyhow::anyhow!("Request timed out")
+                anyhow::anyhow!("Request timed out (cid={cid}, {}ms)", timeout.as_millis())
             })?
             .map_err(|_| anyhow::anyhow!("Response channel closed"))?;
         Ok(result)
@@ -4106,7 +4113,8 @@ impl MezonTransport {
         let parsed_clan_id: i64 = clan_id;
         let parsed_channel_id: i64 = channel_id;
         tracing::debug!(
-            "send_channel_message: clan_id={} channel_id={} is_public={} content_len={} attachments={}",
+            "send_channel_message: cid={} clan_id={} channel_id={} is_public={} content_len={} attachments={}",
+            cid,
             parsed_clan_id,
             parsed_channel_id,
             is_public,

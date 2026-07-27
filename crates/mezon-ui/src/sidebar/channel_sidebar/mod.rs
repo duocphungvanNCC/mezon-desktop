@@ -52,6 +52,7 @@ pub struct ChannelSidebar {
     channel_list: Entity<ChannelList>,
     settings: Entity<Settings>,
     items: Rc<Vec<SidebarItem>>,
+    icon_image_cache: Entity<crate::image_cache::LruImageCache>,
     list_state: ListState,
     first_badged_index: Option<usize>,
     active_clan_name: String,
@@ -156,6 +157,15 @@ impl ChannelSidebar {
             channel_list,
             settings,
             items: Rc::new(Vec::new()),
+            icon_image_cache: cx.new(|cx| {
+                crate::image_cache::LruImageCache::icon_thumbnail(
+                    "channel-app-icons",
+                    128,
+                    2 * 1024 * 1024,
+                    256 * 1024,
+                    cx,
+                )
+            }),
             list_state,
             first_badged_index: None,
             active_clan_name: String::new(),
@@ -676,6 +686,7 @@ impl Render for ChannelSidebar {
         let list_element = list(list_state, {
             let sidebar = sidebar.clone();
             let locale = locale.clone();
+            let icon_cache = self.icon_image_cache.clone();
             move |ix, _window, cx| {
                 render_sidebar_item(
                     &items,
@@ -686,6 +697,7 @@ impl Render for ChannelSidebar {
                     sidebar.clone(),
                     suppress_hover,
                     &locale,
+                    icon_cache.clone(),
                 )
             }
         })
@@ -1103,6 +1115,7 @@ fn render_banner_and_events(
     cx: &App,
     suppress_hover: bool,
     locale: &str,
+    icon_cache: Entity<crate::image_cache::LruImageCache>,
 ) -> AnyElement {
     let theme = cx.theme();
     let divider_color = theme.border;
@@ -1191,9 +1204,9 @@ fn render_banner_and_events(
                 SharedString::from(app.app_name.clone())
             };
             let icon_el: AnyElement = if let Some(logo) = &slot.app_logo {
-                gpui::img(logo.clone())
-                    .w(px(24.))
-                    .h(px(24.))
+                div()
+                    .image_cache(icon_cache.clone())
+                    .child(gpui::img(logo.clone()).w(px(24.)).h(px(24.)))
                     .into_any_element()
             } else {
                 gpui::svg()
@@ -1279,6 +1292,7 @@ fn render_sidebar_item(
     sidebar: WeakEntity<ChannelSidebar>,
     suppress_hover: bool,
     locale: &str,
+    icon_cache: Entity<crate::image_cache::LruImageCache>,
 ) -> AnyElement {
     let theme = cx.theme();
     let Some(item) = items.get(ix) else {
@@ -1296,6 +1310,7 @@ fn render_sidebar_item(
             cx,
             suppress_hover,
             locale,
+            icon_cache,
         ),
 
         SidebarItem::Category {

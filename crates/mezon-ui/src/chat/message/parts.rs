@@ -1270,11 +1270,14 @@ fn add_reaction_button(message_id: MessageId, ctx: &RowCtx) -> AnyElement {
         .into_any_element()
 }
 
+const REACTION_EMOJI_PX: f32 = 16.;
+const REACTION_EMOJI_SOURCE_PX: u32 = 32;
+
 fn reaction_emoji_src(reaction: &Reaction, app: &gpui::App) -> SharedString {
     if reaction.emoji_id.is_empty() || reaction.emoji_id.as_ref() == "0" {
         return SharedString::default();
     }
-    crate::util::imgproxy::emoji_url(app, &reaction.emoji_id).into()
+    crate::util::imgproxy::emoji_url_sized(app, &reaction.emoji_id, REACTION_EMOJI_SOURCE_PX).into()
 }
 
 fn reaction_pill(reaction: &Reaction, message_id: MessageId, ctx: &RowCtx) -> AnyElement {
@@ -1352,13 +1355,20 @@ fn reaction_pill(reaction: &Reaction, message_id: MessageId, ctx: &RowCtx) -> An
             .child(glyph)
             .into_any_element()
     } else {
-        img(src)
+        div()
             .absolute()
             .left(px(5.))
             .top(px(4.))
-            .size(px(16.))
-            .object_fit(ObjectFit::ScaleDown)
-            .with_fallback(emoji_error_fallback(px(16.), theme.text_muted))
+            .image_cache(ctx.icon_cache.clone())
+            .child(
+                img(src)
+                    .size(px(REACTION_EMOJI_PX))
+                    .object_fit(ObjectFit::ScaleDown)
+                    .with_fallback(emoji_error_fallback(
+                        px(REACTION_EMOJI_PX),
+                        theme.text_muted,
+                    )),
+            )
             .into_any_element()
     };
 

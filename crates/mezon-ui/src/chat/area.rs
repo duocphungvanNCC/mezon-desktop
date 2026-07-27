@@ -164,7 +164,9 @@ impl ChatArea {
                         if replying_to.is_some()
                             && let Some(input) = this.chat_area.mention_input.clone()
                         {
-                            input.update(cx, |input, cx| input.focus_input(window, cx));
+                            window.defer(cx, move |window, cx| {
+                                input.update(cx, |input, cx| input.focus_input(window, cx));
+                            });
                         }
                         this.chat_area.replying_to = replying_to;
                         cx.notify();

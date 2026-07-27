@@ -106,7 +106,7 @@ impl LoginStore {
 
     pub fn reset_all_user_stores(cx: &mut App) {
         if let Some(e) = crate::clan_load::ClanLoadScheduler::try_global(cx) {
-            e.update(cx, |s, _| s.reset());
+            e.update(cx, |s, cx| s.reset(cx));
         }
         if let Some(e) = crate::account::AccountStore::try_global(cx) {
             e.update(cx, |s, cx| s.reset(cx));
