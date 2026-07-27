@@ -2,6 +2,7 @@ mod attachments;
 mod recorder;
 mod text_field;
 
+use std::any::Any;
 use std::cell::Cell;
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -493,6 +494,7 @@ impl MentionInput {
             window,
             |this, _input, event: &MentionFieldEvent, window, cx| match event {
                 MentionFieldEvent::Change => this.on_change(cx),
+                MentionFieldEvent::HistoryRestored => this.on_history_restored(cx),
                 MentionFieldEvent::PressEnter => this.on_enter(window, cx),
                 MentionFieldEvent::NavUp => this.on_nav_up(cx),
                 MentionFieldEvent::NavDown => this.on_nav_down(cx),
@@ -571,6 +573,7 @@ impl MentionInput {
             input.set_value(content, window, cx);
         });
         self.sync_ranges(cx);
+        self.sync_history_payload(cx);
     }
 
     pub fn focus_input(&self, window: &mut Window, cx: &mut App) {
@@ -1199,6 +1202,10 @@ impl MentionInput {
     fn on_change(&mut self, cx: &mut Context<Self>) {
         let content = self.input.read(cx).value_shared();
         self.revalidate(&content, cx);
+        self.after_content_change(content, cx);
+    }
+
+    fn after_content_change(&mut self, content: SharedString, cx: &mut Context<Self>) {
         self.check_trigger(&content, cx);
         self.overflow_counter = {
             let threshold = CONVERT_TO_FILE_THRESHOLD - CONVERT_PREFIX_LEN;
@@ -1212,6 +1219,28 @@ impl MentionInput {
         self.update_ogp_preview(&content, cx);
         self.last_content = content;
         MessagesStore::global(cx).update(cx, |store, cx| store.notify_typing(cx));
+    }
+
+    fn on_history_restored(&mut self, cx: &mut Context<Self>) {
+        let payload = self.input.read(cx).history_payload();
+        self.committed = payload
+            .as_deref()
+            .and_then(|p| p.downcast_ref::<Vec<CommittedToken>>())
+            .cloned()
+            .unwrap_or_default();
+        self.sync_ranges(cx);
+        let content = self.input.read(cx).value_shared();
+        self.after_content_change(content, cx);
+    }
+
+    fn sync_history_payload(&self, cx: &mut Context<Self>) {
+        let payload: Option<Rc<dyn Any>> = if self.committed.is_empty() {
+            None
+        } else {
+            Some(Rc::new(self.committed.clone()))
+        };
+        self.input
+            .update(cx, |input, _| input.set_history_payload(payload));
     }
 
     fn update_ogp_preview(&mut self, content: &str, cx: &mut Context<Self>) {
@@ -1345,6 +1374,7 @@ impl MentionInput {
         });
         if reanchored || self.committed.len() != before {
             self.sync_ranges(cx);
+            self.sync_history_payload(cx);
         }
     }
 
@@ -1752,6 +1782,7 @@ impl MentionInput {
         });
         self.reset_popup();
         self.sync_ranges(cx);
+        self.sync_history_payload(cx);
         cx.notify();
     }
 

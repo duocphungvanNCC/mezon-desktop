@@ -295,6 +295,8 @@ mod tests {
             about_me: Some("about".into()),
             password_setted: false,
             logo: None,
+            status: String::new(),
+            user_status: String::new(),
         };
         let view = UserProfileView::from_account(UserId(1), &account, true);
         assert_eq!(view.display_name, "Hello Me");

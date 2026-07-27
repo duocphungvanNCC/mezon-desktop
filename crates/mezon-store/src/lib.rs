@@ -10,6 +10,7 @@ pub mod channel_members;
 pub mod channel_permissions;
 pub mod channel_settings;
 pub mod clan;
+pub mod clan_load;
 pub mod clan_members;
 pub mod config;
 pub mod connection;
@@ -46,6 +47,7 @@ pub mod ui_state;
 pub mod user_profile;
 pub mod users_by_user;
 pub mod voice;
+pub mod wallet;
 pub mod webhook;
 
 use anyhow::{Context, Result};
@@ -83,12 +85,16 @@ pub use channel_permissions::{
 };
 pub use channel_settings::{ChannelSetting, ChannelSettingsEvent, ChannelSettingsStore};
 pub use clan::*;
+pub use clan_load::ClanLoadScheduler;
 pub use clan_members::{
     ClanMember, ClanMembersEvent, ClanMembersStore, User, split_members_by_status,
 };
 pub use config::AppConfig;
 pub use connection::{ConnectionStore, resolve_initial_auth_state};
-pub use direct::{DirectChannel, DirectEvent, DirectKind, DirectMessageBody, DirectMessageStore};
+pub use direct::{
+    DirectChannel, DirectEvent, DirectKind, DirectMessageBody, DirectMessageStore,
+    dm_counts_toward_unread_badge,
+};
 pub use emoji::{
     EMOJI_UPLOAD_MAX_PX, EMOTICON_ALLOWED_EXTENSIONS, EMOTICON_SHORTNAME_MAX,
     EMOTICON_SHORTNAME_MIN, Emoji, EmojiEvent, EmojiStore, MAX_EMOJI_BYTES, MAX_STICKER_BYTES,
@@ -169,6 +175,7 @@ pub use voice::{
     capture_screen_share_preview, list_screen_share_options, peek_screen_share_options,
     screen_tile_id, upload_sound_file, validate_sound_file,
 };
+pub use wallet::{SendTokenRequest, WalletDetail, WalletEvent, WalletStore, WalletTransaction};
 pub use webhook::{
     ChannelWebhook, ClanWebhook, MAX_WEBHOOK_AVATAR_BYTES, WEBHOOK_NAME_MAX_LENGTH, WebhookEvent,
     WebhookStore,

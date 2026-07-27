@@ -2,12 +2,11 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 
-use gpui::{App, AppContext, Context, Entity, EventEmitter, Global, Subscription, Task};
+use gpui::{App, AppContext, Context, Entity, EventEmitter, Global, Task};
 use mezon_client::{AppApi, ConnectionStatus};
 use mezon_proto::api;
 
 use crate::Freshness;
-use crate::clan::{ClanEvent, ClanList};
 use crate::emoji::{MAX_STICKER_BYTES, is_valid_emoticon_shortname, upload_emoticon_file};
 use crate::ids::ClanId;
 use crate::voice::{MAX_SOUND_BYTES, upload_sound_file};
@@ -51,7 +50,6 @@ pub struct StickerStore {
     freshness: Freshness,
     loading: bool,
     api: Arc<AppApi>,
-    _clan_sub: Subscription,
     _conn_watch: Task<()>,
 }
 
@@ -85,12 +83,6 @@ impl StickerStore {
     }
 
     fn new(api: Arc<AppApi>, cx: &mut Context<Self>) -> Self {
-        let clan_sub = cx.subscribe(&ClanList::global(cx), |this, _clan, event, cx| {
-            if let ClanEvent::ActiveClanChanged(Some(_)) = event {
-                this.ensure_loaded(cx);
-            }
-        });
-
         let conn_watch = Self::spawn_connection_watch(api.clone(), cx);
 
         Self {
@@ -100,7 +92,6 @@ impl StickerStore {
             freshness: Freshness::new(),
             loading: false,
             api,
-            _clan_sub: clan_sub,
             _conn_watch: conn_watch,
         }
     }
@@ -127,18 +118,23 @@ impl StickerStore {
     }
 
     pub fn ensure_loaded(&mut self, cx: &mut Context<Self>) {
-        if !self.freshness.is_fresh(crate::CACHE_TTL) {
-            self.fetch(cx);
+        self.ensure_loaded_task(cx).detach();
+    }
+
+    pub fn ensure_loaded_task(&mut self, cx: &mut Context<Self>) -> Task<()> {
+        if self.freshness.is_fresh(crate::CACHE_TTL) {
+            return Task::ready(());
         }
+        self.fetch(cx)
     }
 
     pub fn refresh(&mut self, cx: &mut Context<Self>) {
-        self.fetch(cx);
+        self.fetch(cx).detach();
     }
 
-    fn fetch(&mut self, cx: &mut Context<Self>) {
+    fn fetch(&mut self, cx: &mut Context<Self>) -> Task<()> {
         if self.loading {
-            return;
+            return Task::ready(());
         }
         self.loading = true;
         let api = self.api.clone();
@@ -180,7 +176,6 @@ impl StickerStore {
                 }
             });
         })
-        .detach();
     }
 
     fn insert(&mut self, sticker: Sticker) {
