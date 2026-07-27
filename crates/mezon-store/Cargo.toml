@@ -15,7 +15,7 @@ mmn-client.workspace = true
 mezon-voice.workspace = true
 mezon-audio.workspace = true
 gpui.workspace = true
-image.workspace = true
+image = { workspace = true, features = ["webp"] }
 smallvec.workspace = true
 parking_lot.workspace = true
 chrono.workspace = true

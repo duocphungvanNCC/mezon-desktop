@@ -93,7 +93,13 @@ pub use direct::{
     DirectChannel, DirectEvent, DirectKind, DirectMessageBody, DirectMessageStore,
     dm_counts_toward_unread_badge,
 };
-pub use emoji::{Emoji, EmojiEvent, EmojiStore};
+pub use emoji::{
+    EMOJI_UPLOAD_MAX_PX, EMOTICON_ALLOWED_EXTENSIONS, EMOTICON_SHORTNAME_MAX,
+    EMOTICON_SHORTNAME_MIN, Emoji, EmojiEvent, EmojiStore, MAX_EMOJI_BYTES, MAX_STICKER_BYTES,
+    STICKER_UPLOAD_MAX_PX, generate_snowflake_id, is_valid_emoticon_shortname,
+    normalize_emoji_shortname, strip_emoji_colons, validate_emoji_create_shortname,
+    validate_emoticon_file,
+};
 pub use files::{
     ChannelDocument, FILES_BROAD_QUERY, FILES_CACHE_TTL, FILES_PAGE_SIZE, FILES_TYPED_QUERY,
     FilesEvent, FilesStore, filename_matches_query, is_document, short_file_type_label,
@@ -160,11 +166,12 @@ pub use user_profile::{
 };
 pub use users_by_user::{UsersByUserEvent, UsersByUserStore};
 pub use voice::{
-    CameraDeviceInfo, DeviceKind, DeviceMenuKind, DisplayedReaction, NetworkQuality, PickedScreen,
-    ScreenShareKind, ScreenShareListError, ScreenShareOption, ScreenSharePreview, VideoFrameData,
-    VideoFrameStore, VoiceCallStatus, VoiceConnection, VoiceModerationError, VoiceParticipant,
-    VoiceRenderFrame, VoiceStore, camera_tile_id, capture_screen_share_preview,
-    list_screen_share_options, peek_screen_share_options, screen_tile_id,
+    DeviceKind, DeviceMenuKind, DisplayedReaction, MAX_SOUND_BYTES, NetworkQuality, PickedScreen,
+    SOUND_ALLOWED_EXTENSIONS, ScreenShareKind, ScreenShareListError, ScreenShareOption,
+    ScreenSharePreview, VideoFrameData, VideoFrameStore, VoiceCallStatus, VoiceConnection,
+    VoiceModerationError, VoiceParticipant, VoiceRenderFrame, VoiceStore, camera_tile_id,
+    capture_screen_share_preview, list_screen_share_options, peek_screen_share_options,
+    screen_tile_id, upload_sound_file, validate_sound_file,
 };
 pub use wallet::{SendTokenRequest, WalletDetail, WalletEvent, WalletStore, WalletTransaction};
 pub use webhook::{
