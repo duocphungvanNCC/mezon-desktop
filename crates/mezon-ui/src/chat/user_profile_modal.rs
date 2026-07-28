@@ -1,5 +1,5 @@
 use gpui::{
-    AnyElement, App, Context, Entity, FocusHandle, Focusable, FontWeight, MouseButton,
+    AnyElement, App, ClickEvent, Context, Entity, FocusHandle, Focusable, FontWeight, MouseButton,
     MouseDownEvent, Render, Rgba, Subscription, Task, Window, deferred, div, prelude::*, px, svg,
 };
 use mezon_store::{
@@ -8,7 +8,8 @@ use mezon_store::{
 };
 use std::time::{Duration, Instant};
 
-use crate::app::shell::Shell;
+use crate::app::shell::{FriendRemovalKind, Shell};
+use crate::chat::message::SendTokenModal;
 use crate::components::primitives::{Avatar, Icon, IconName};
 use crate::image_cache::{LruImageCache, read_body_limited};
 use crate::router::{Route, navigate};
@@ -266,7 +267,7 @@ impl Render for UserProfileModal {
             .size_px(px(96.))
             .image_cache(self.avatar_image_cache.clone());
         if !avatar.is_empty() {
-            avatar_view = avatar_view.src(avatar);
+            avatar_view = avatar_view.src(avatar.clone());
         }
 
         let banner_color = self.banner_color.unwrap_or(gpui::rgb(0xF7E4F0));
@@ -311,6 +312,10 @@ impl Render for UserProfileModal {
                             .child(render_profile_actions(
                                 is_self,
                                 friend_state,
+                                self.user_id,
+                                &username,
+                                &display_name,
+                                &avatar,
                                 &locale,
                                 theme,
                             )),
@@ -415,6 +420,17 @@ impl Render for UserProfileModal {
                                             .size(px(19.))
                                             .text_color(status_color),
                                     ),
+                            )
+                            .child(
+                                div()
+                                    .absolute()
+                                    .right(px(-20.))
+                                    .top(px(25.))
+                                    .size(px(14.))
+                                    .rounded_full()
+                                    .bg(theme.tokens.bg_secondary)
+                                    .border_1()
+                                    .border_color(theme.bg_floating),
                             ),
                     ))
                     .when(!custom_status.is_empty(), |card| {
@@ -425,17 +441,22 @@ impl Render for UserProfileModal {
                                 .top(px(194.))
                                 .max_w(px(250.))
                                 .max_h(px(64.))
-                                .px_4()
-                                .py_3()
-                                .rounded_xl()
-                                .bg(theme.tokens.bg_secondary)
-                                .border_1()
-                                .border_color(theme.border)
-                                .shadow_md()
-                                .text_sm()
-                                .text_color(theme.text_secondary)
-                                .overflow_hidden()
-                                .child(custom_status),
+                                .child(
+                                    div()
+                                        .max_w(px(250.))
+                                        .max_h(px(64.))
+                                        .px_4()
+                                        .py_3()
+                                        .rounded_xl()
+                                        .bg(theme.tokens.bg_secondary)
+                                        .border_1()
+                                        .border_color(theme.border)
+                                        .shadow_md()
+                                        .text_sm()
+                                        .text_color(theme.text_secondary)
+                                        .overflow_hidden()
+                                        .child(custom_status),
+                                ),
                         ))
                     })
                     .when(is_self, |card| {
@@ -542,6 +563,10 @@ impl Render for UserProfileModal {
 fn render_profile_actions(
     is_self: bool,
     friend_state: Option<FriendState>,
+    user_id: UserId,
+    username: &str,
+    display_name: &str,
+    avatar: &str,
     locale: &str,
     theme: &crate::theme::Theme,
 ) -> AnyElement {
@@ -549,6 +574,8 @@ fn render_profile_actions(
         return div().into_any_element();
     }
 
+    let transfer_username = username.to_string();
+    let transfer_locale = locale.to_string();
     let mut actions = div()
         .absolute()
         .top(px(10.))
@@ -561,6 +588,15 @@ fn render_profile_actions(
             IconName::Transaction,
             mezon_i18n::t(locale, "common.transfer"),
             theme,
+            move |_, window, cx| {
+                UserProfileModal::close(cx);
+                SendTokenModal::open(
+                    transfer_locale.clone().into(),
+                    Some((user_id.0.to_string(), transfer_username.clone())),
+                    window,
+                    cx,
+                );
+            },
         ));
 
     if friend_state == Some(FriendState::Friend) {
@@ -571,13 +607,53 @@ fn render_profile_actions(
         ));
     }
 
+    if friend_state == Some(FriendState::InviteReceived) {
+        let ignore_username = username.to_string();
+        let ignore_locale = locale.to_string();
+        return actions
+            .child(profile_action_button(
+                "full-profile-accept-friend",
+                IconName::IConAcceptFriend,
+                mezon_i18n::t(locale, "common.accept"),
+                theme,
+                move |_, _, cx| {
+                    FriendStore::global(cx)
+                        .update(cx, |store, cx| store.accept_friend(user_id, cx));
+                },
+            ))
+            .child(profile_action_button(
+                "full-profile-ignore-friend",
+                IconName::IConIgnoreFriend,
+                mezon_i18n::t(locale, "common.ignore"),
+                theme,
+                move |_, window, cx| {
+                    UserProfileModal::close(cx);
+                    Shell::global(cx).update(cx, |shell, cx| {
+                        shell.confirm_remove_friend(
+                            user_id,
+                            &ignore_username,
+                            FriendRemovalKind::RejectRequest,
+                            &ignore_locale,
+                            window,
+                            cx,
+                        );
+                    });
+                },
+            ))
+            .into_any_element();
+    }
+
     let friend_icon = match friend_state {
         Some(FriendState::Friend) => IconName::IconFriend,
         Some(FriendState::InviteSent) => IconName::PendingFriend,
-        Some(FriendState::InviteReceived) => IconName::IConAcceptFriend,
         Some(FriendState::Blocked) => return actions.into_any_element(),
         None => IconName::AddPerson,
+        Some(FriendState::InviteReceived) => unreachable!(),
     };
+    let action_username = username.to_string();
+    let action_display_name = display_name.to_string();
+    let action_avatar = avatar.to_string();
+    let action_locale = locale.to_string();
     actions
         .child(profile_action_button(
             "full-profile-friend-state",
@@ -589,6 +665,46 @@ fn render_profile_actions(
                 _ => mezon_i18n::t(locale, "common.addFriend"),
             },
             theme,
+            move |_, window, cx| match friend_state {
+                Some(FriendState::Friend) => {
+                    UserProfileModal::close(cx);
+                    Shell::global(cx).update(cx, |shell, cx| {
+                        shell.confirm_remove_friend(
+                            user_id,
+                            &action_username,
+                            FriendRemovalKind::RemoveFriend,
+                            &action_locale,
+                            window,
+                            cx,
+                        );
+                    });
+                }
+                Some(FriendState::InviteSent) => {
+                    UserProfileModal::close(cx);
+                    Shell::global(cx).update(cx, |shell, cx| {
+                        shell.confirm_remove_friend(
+                            user_id,
+                            &action_username,
+                            FriendRemovalKind::CancelRequest,
+                            &action_locale,
+                            window,
+                            cx,
+                        );
+                    });
+                }
+                None => {
+                    FriendStore::global(cx).update(cx, |store, cx| {
+                        store.add_friend(
+                            user_id,
+                            action_username.clone(),
+                            action_display_name.clone(),
+                            action_avatar.clone(),
+                            cx,
+                        );
+                    });
+                }
+                _ => {}
+            },
         ))
         .into_any_element()
 }
@@ -598,6 +714,7 @@ fn profile_action_button(
     icon: IconName,
     tooltip: impl Into<gpui::SharedString> + 'static,
     _theme: &crate::theme::Theme,
+    on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
 ) -> AnyElement {
     div()
         .id(id)
@@ -608,9 +725,8 @@ fn profile_action_button(
         .rounded_full()
         .bg(gpui::rgb(0x272120))
         .cursor_pointer()
-        .hover(|style| style.bg(gpui::rgb(0x1e1a19)))
         .tooltip(Tooltip::text(tooltip))
-        .on_click(|_, _, _| {})
+        .on_click(on_click)
         .child(Icon::new(icon).size(px(16.)).text_color(gpui::white()))
         .into_any_element()
 }
@@ -629,7 +745,6 @@ fn profile_share_contact_button(
         .rounded_full()
         .bg(gpui::rgb(0x272120))
         .cursor_pointer()
-        .hover(|style| style.bg(gpui::rgb(0x1e1a19)))
         .tooltip(Tooltip::text(tooltip))
         .on_click(|_, _, _| {})
         .child(
@@ -649,7 +764,7 @@ fn profile_share_contact_button(
                         .top_0()
                         .left_0()
                         .size(px(16.))
-                        .text_color(gpui::rgb(0x549d5b)),
+                        .text_color(gpui::white()),
                 ),
         )
         .into_any_element()
