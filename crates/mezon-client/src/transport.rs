@@ -2764,10 +2764,12 @@ pub struct ApiPinMessage {
     pub id: String,
     pub message_id: String,
     pub content: String,
+    pub content_text: String,
     pub sender_id: String,
     pub sender_name: String,
     pub avatar: String,
     pub create_time: i64,
+    pub attachments: Vec<ApiAttachment>,
 }
 
 pub const CANVAS_LIST_LIMIT: i32 = 50;
@@ -3094,19 +3096,23 @@ impl MezonTransport {
     }
 
     fn pin_message_from_proto(pin: api::PinMessage) -> ApiPinMessage {
-        let content = serde_json::from_str::<serde_json::Value>(&pin.content)
+        let content = pin.content;
+        let content_text = serde_json::from_str::<serde_json::Value>(&content)
             .ok()
             .and_then(|v| v.get("t").and_then(|t| t.as_str().map(|s| s.to_string())))
-            .unwrap_or_else(|| pin.content.clone());
+            .unwrap_or_else(|| content.clone());
+        let attachments = parse_message_attachments(&pin.attachment);
 
         ApiPinMessage {
             id: pin.id.to_string(),
             message_id: pin.message_id.to_string(),
             content,
+            content_text,
             sender_id: pin.sender_id.to_string(),
             sender_name: pin.username,
             avatar: pin.avatar,
             create_time: i64::from(pin.create_time_seconds),
+            attachments,
         }
     }
 

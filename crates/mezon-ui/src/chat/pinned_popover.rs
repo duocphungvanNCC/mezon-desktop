@@ -3,24 +3,29 @@ use std::sync::Arc;
 
 use gpui::{
     App, ClickEvent, Context, DismissEvent, Entity, EventEmitter, FocusHandle, Focusable,
-    FontWeight, Hsla, ListAlignment, ListState, MouseDownEvent, SharedString, Window, div, list,
-    prelude::*, px,
+    FontWeight, HighlightStyle, Hsla, ListAlignment, ListState, MouseDownEvent, ObjectFit,
+    SharedString, StyledText, Window, div, img, list, prelude::*, px, relative, rems,
 };
 use mezon_store::{
-    AccountStore, ChannelId, ClanMembersStore, DirectMessageStore, MessageId, MessagesStore,
-    PinnedMessage, PinnedMessagesStore, Settings, UsersByUserStore,
+    AccountStore, ChannelId, ClanMembersStore, DirectMessageStore, Embed, MessageAttachment,
+    MessageId, MessageSpan, MessagesStore, PinnedMessage, PinnedMessagesStore, RichLayout,
+    RichRunKind, Settings, UsersByUserStore,
 };
 use ui::{PopoverMenuHandle, ScrollAxes, Scrollbars, WithScrollbar};
 
+use crate::chat::file_type_icon::file_type_icon_for;
 use crate::chat::message::parts::{
     effective_clan_id, resolve_pin_avatar_url, resolve_pin_sender_label_with_message,
 };
-use crate::chat::message::{ConfirmUnpinMessageModal, DEFAULT_DISPLAY_NAME_COLOR};
+use crate::chat::message::{
+    ConfirmUnpinMessageModal, DEFAULT_DISPLAY_NAME_COLOR, render_ogp_preview,
+};
 use crate::components::primitives::{
     Avatar, Button, ButtonVariants, Icon, IconName, Sizable, Size, Spinner, h_flex, v_flex,
 };
 use crate::image_cache::LruImageCache;
 use crate::theme::{ActiveTheme, Theme};
+use crate::util::download::save_with_progress_toast;
 
 const POPOVER_WIDTH: f32 = 420.;
 const HEADER_HEIGHT: f32 = 48.;
@@ -31,12 +36,12 @@ const LIST_OVERDRAW: f32 = 200.;
 const LIST_PAD_X: f32 = 16.;
 const LIST_PAD_Y: f32 = 8.;
 const EMPTY_BODY_HEIGHT: f32 = 144.;
+const FILE_NAME_COLOR: u32 = 0x3b_82_f6;
 
 #[derive(Clone)]
 struct PinCardVm {
     pin_id: SharedString,
     message_id: SharedString,
-    content: SharedString,
     create_time: i64,
 }
 
@@ -45,7 +50,6 @@ impl PinCardVm {
         Self {
             pin_id: msg.id.clone().into(),
             message_id: msg.message_id.clone().into(),
-            content: msg.content.clone().into(),
             create_time: msg.create_time,
         }
     }
@@ -393,7 +397,7 @@ fn pin_card(
     let mut avatar = Avatar::new()
         .name(&sender_label)
         .with_size(Size::Small)
-        .image_cache(avatar_cache);
+        .image_cache(avatar_cache.clone());
     if let Some(src) = &avatar_src {
         avatar = avatar.src(src.clone());
     }
@@ -425,10 +429,7 @@ fn pin_card(
                 .child(format_pin_time(vm.create_time, locale)),
         );
 
-    let content = div()
-        .text_sm()
-        .text_color(tokens.text_theme_message)
-        .child(vm.content.clone());
+    let content = render_pin_body(pin, theme, avatar_cache, cx);
 
     let jump_message_id = vm.message_id.clone();
     let jump_handle = popover_handle.clone();
@@ -450,7 +451,7 @@ fn pin_card(
     let sender_label_for_modal = sender_label.clone();
     let avatar_src_for_modal = avatar_src.clone();
     let avatar_fallback_for_modal = avatar_fallback.clone();
-    let preview_content = vm.content.clone();
+    let preview_content = SharedString::from(pin.content.clone());
     let locale_owned: SharedString = locale.to_string().into();
     let delete = Button::new(("pin-del", index))
         .label("✕")
@@ -497,15 +498,713 @@ fn pin_card(
         .child(avatar)
         .child(
             v_flex()
-                .flex_1()
+                .w(relative(0.85))
                 .min_w_0()
-                .pr(px(72.))
                 .gap_1()
                 .child(name_row)
                 .child(content),
         )
         .child(actions)
         .into_any_element()
+}
+
+fn render_pin_body(
+    pin: &PinnedMessage,
+    theme: &Theme,
+    image_cache: Entity<LruImageCache>,
+    cx: &App,
+) -> gpui::AnyElement {
+    let message_id = pin.message_id.parse::<MessageId>().unwrap_or(MessageId(0));
+    let text_body = render_pin_text_body(pin, theme);
+    let image_preview = pin
+        .attachments
+        .iter()
+        .find(|att| att.is_image() && !att.proxied_src.is_empty())
+        .map(|att| render_pin_image_attachment(att, image_cache.clone()));
+    let file_preview = pin
+        .attachments
+        .iter()
+        .find(|att| !att.is_image())
+        .map(|att| render_pin_file_attachment(att, theme));
+    let ogp = pin
+        .ogp
+        .as_ref()
+        .and_then(|ogp| render_ogp_preview(ogp, message_id, theme, cx));
+    let embeds = render_pin_embeds(&pin.embeds, theme, image_cache);
+
+    v_flex()
+        .w_full()
+        .min_w_0()
+        .max_w_full()
+        .overflow_hidden()
+        .gap_1()
+        .child(text_body)
+        .children(ogp)
+        .children(image_preview)
+        .children(file_preview)
+        .children(embeds)
+        .into_any_element()
+}
+
+fn render_pin_text_body(pin: &PinnedMessage, theme: &Theme) -> gpui::AnyElement {
+    let expanded = expand_pin_spans(&pin.spans);
+    let spans = if expanded.is_empty() {
+        pin.spans.as_ref()
+    } else {
+        expanded.as_slice()
+    };
+    if !spans.is_empty() {
+        return render_pin_spans(spans, theme);
+    }
+    if let Some(layout) = pin.rich_layout.as_ref()
+        && !layout.text.is_empty()
+        && !layout.text.contains("```")
+    {
+        return render_pin_rich_layout(layout, theme);
+    }
+    if pin.content.is_empty() {
+        return div().into_any_element();
+    }
+    if pin.content.contains('`') || text_has_block_markup(&pin.content) {
+        let fallback = expand_pin_spans(&[MessageSpan::Text(pin.content.clone().into())]);
+        if !fallback.is_empty() {
+            return render_pin_spans(&fallback, theme);
+        }
+    }
+    div()
+        .w_full()
+        .min_w_0()
+        .max_w_full()
+        .overflow_hidden()
+        .child(pin_plain_line(
+            &pin.content,
+            theme.tokens.text_theme_message,
+        ))
+        .into_any_element()
+}
+
+fn text_has_block_markup(text: &str) -> bool {
+    text.contains("```")
+        || text
+            .split('\n')
+            .any(|line| parse_pin_heading_line(line).is_some())
+}
+
+fn expand_pin_spans(spans: &[MessageSpan]) -> Vec<MessageSpan> {
+    let mut out = Vec::with_capacity(spans.len());
+    let mut changed = false;
+    for span in spans {
+        match span {
+            MessageSpan::Text(text) if text.contains('`') || text_has_block_markup(text) => {
+                let before = out.len();
+                split_pin_plain_text(text, &mut out);
+                if out.len() != before + 1
+                    || !matches!(out.last(), Some(MessageSpan::Text(t)) if t.as_ref() == text.as_ref())
+                {
+                    changed = true;
+                }
+            }
+            MessageSpan::CodeBlock { language, text } => {
+                let cleaned = normalize_pin_code_block(text);
+                if cleaned.as_ref() != text.as_ref() || language.is_some() {
+                    changed = true;
+                }
+                out.push(MessageSpan::CodeBlock {
+                    language: language.clone(),
+                    text: cleaned,
+                });
+            }
+            other => out.push(other.clone()),
+        }
+    }
+    if changed { out } else { Vec::new() }
+}
+
+fn split_pin_plain_text(text: &str, out: &mut Vec<MessageSpan>) {
+    let mut rest = text;
+    while let Some(start) = rest.find("```") {
+        if start > 0 {
+            split_pin_text_lines(&rest[..start], out);
+        }
+        let after_open = &rest[start + 3..];
+        if let Some(end) = after_open.find("```") {
+            let fence_body = &after_open[..end];
+            let cleaned = normalize_pin_code_block(fence_body);
+            out.push(MessageSpan::CodeBlock {
+                language: None,
+                text: cleaned,
+            });
+            rest = &after_open[end + 3..];
+        } else {
+            split_pin_text_lines(&rest[start..], out);
+            return;
+        }
+    }
+    if !rest.is_empty() {
+        split_pin_text_lines(rest, out);
+    }
+}
+
+fn split_pin_text_lines(text: &str, out: &mut Vec<MessageSpan>) {
+    if text.is_empty() {
+        return;
+    }
+    let mut buf = String::new();
+    for line in text.split('\n') {
+        if let Some((level, body)) = parse_pin_heading_line(line) {
+            flush_pin_text_buf(&mut buf, out);
+            out.push(MessageSpan::Heading {
+                level,
+                text: body.to_string().into(),
+            });
+        } else {
+            if !buf.is_empty() {
+                buf.push('\n');
+            }
+            buf.push_str(line);
+        }
+    }
+    flush_pin_text_buf(&mut buf, out);
+}
+
+fn flush_pin_text_buf(buf: &mut String, out: &mut Vec<MessageSpan>) {
+    if buf.is_empty() {
+        return;
+    }
+    out.push(MessageSpan::Text(std::mem::take(buf).into()));
+}
+
+fn normalize_pin_code_block(raw: &str) -> SharedString {
+    let mut body = raw.trim();
+    if let Some(rest) = body.strip_prefix("```") {
+        body = rest;
+        if let Some(rest) = body.strip_suffix("```") {
+            body = rest;
+        }
+    }
+    body = body.trim_matches('`');
+    body = body.strip_prefix('\n').unwrap_or(body);
+    body = body.strip_suffix('\n').unwrap_or(body);
+    let mut lines = body.splitn(2, '\n');
+    let first = lines.next().unwrap_or("");
+    let rest = lines.next();
+    if let Some(rest) = rest
+        && !first.is_empty()
+        && first.len() <= 32
+        && first
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'+' || b == b'-' || b == b'_' || b == b'#')
+    {
+        return rest.to_string().into();
+    }
+    body.to_string().into()
+}
+
+fn parse_pin_heading_line(line: &str) -> Option<(u8, &str)> {
+    let hashes = line.bytes().take_while(|&b| b == b'#').count();
+    if hashes == 0 || hashes > 6 {
+        return None;
+    }
+    let rest = &line[hashes..];
+    let body = rest.trim_start_matches([' ', '\t']);
+    if body.len() == rest.len() || body.is_empty() {
+        return None;
+    }
+    Some((hashes as u8, body))
+}
+
+fn soft_break_hints(text: &str) -> String {
+    let mut out = String::with_capacity(text.len() + text.len() / 8);
+    for ch in text.chars() {
+        out.push(ch);
+        if matches!(ch, '/' | '?' | '&' | '=' | '_' | '-') {
+            out.push('\u{200B}');
+        }
+    }
+    out
+}
+
+fn render_pin_rich_layout(layout: &RichLayout, theme: &Theme) -> gpui::AnyElement {
+    let mention_color: Hsla = theme.tokens.mention_color.into();
+    let mention_bg: Hsla = theme.tokens.mention_primary.into();
+    let code_bg: Hsla = theme.tokens.bg_markdown_code.into();
+    let link_color: Hsla = theme.tokens.mention_color.into();
+    let text = layout.text.clone();
+    let mut highlights: Vec<(std::ops::Range<usize>, HighlightStyle)> = Vec::new();
+    for run in layout.runs.iter() {
+        let style = match run.kind {
+            RichRunKind::Bold => HighlightStyle {
+                font_weight: Some(FontWeight::BOLD),
+                ..Default::default()
+            },
+            RichRunKind::Code => HighlightStyle {
+                background_color: Some(code_bg),
+                ..Default::default()
+            },
+            RichRunKind::Link => HighlightStyle {
+                color: Some(link_color),
+                underline: Some(gpui::UnderlineStyle {
+                    thickness: px(1.),
+                    color: Some(link_color),
+                    wavy: false,
+                }),
+                ..Default::default()
+            },
+            RichRunKind::Mention | RichRunKind::Hashtag => HighlightStyle {
+                color: Some(mention_color),
+                background_color: Some(mention_bg),
+                ..Default::default()
+            },
+        };
+        highlights.push((run.range.clone(), style));
+    }
+    div()
+        .w_full()
+        .min_w_0()
+        .max_w_full()
+        .overflow_hidden()
+        .text_sm()
+        .line_height(rems(1.25))
+        .text_color(theme.tokens.text_theme_message)
+        .child(StyledText::new(text).with_highlights(highlights))
+        .into_any_element()
+}
+
+fn pin_inline_row() -> gpui::Div {
+    div()
+        .w_full()
+        .min_w_0()
+        .max_w_full()
+        .overflow_hidden()
+        .flex()
+        .flex_row()
+        .flex_wrap()
+        .items_baseline()
+}
+
+fn pin_plain_line(text: &str, color: impl Into<Hsla>) -> gpui::AnyElement {
+    div()
+        .w_full()
+        .min_w_0()
+        .max_w_full()
+        .overflow_hidden()
+        .text_sm()
+        .line_height(rems(1.25))
+        .text_color(color)
+        .child(soft_break_hints(text))
+        .into_any_element()
+}
+
+fn pin_heading_size(level: u8) -> gpui::Pixels {
+    match level {
+        1 => px(36.),
+        2 => px(30.),
+        3 => px(24.),
+        4 => px(20.),
+        5 => px(18.),
+        _ => px(16.),
+    }
+}
+
+fn pin_heading_line_height(level: u8) -> impl Into<gpui::DefiniteLength> {
+    match level {
+        1 => rems(2.5),
+        2 => rems(2.25),
+        3 => rems(2.),
+        4 => rems(1.75),
+        5 => rems(1.75),
+        _ => rems(1.5),
+    }
+}
+
+fn render_pin_spans(spans: &[MessageSpan], theme: &Theme) -> gpui::AnyElement {
+    let link_color = theme.tokens.mention_color;
+    let mention_bg = theme.tokens.mention_primary;
+    let mention_color = theme.tokens.mention_color;
+    let code_bg = theme.tokens.bg_markdown_code;
+    let body_color = theme.tokens.text_theme_message;
+    let mut col = v_flex().w_full().min_w_0().max_w_full().overflow_hidden();
+    let mut row = pin_inline_row();
+    let mut has_inline = false;
+
+    for span in spans {
+        match span {
+            MessageSpan::Text(text) => {
+                for (line_index, line) in text.split('\n').enumerate() {
+                    if line_index > 0 {
+                        if has_inline {
+                            col = col.child(row);
+                            row = pin_inline_row();
+                            has_inline = false;
+                        } else if line.is_empty() {
+                            col = col.child(div().w_full().h(px(8.)));
+                            continue;
+                        }
+                    }
+                    if line.is_empty() {
+                        continue;
+                    }
+                    if has_inline {
+                        row = row.child(
+                            div()
+                                .text_sm()
+                                .line_height(rems(1.25))
+                                .text_color(body_color)
+                                .child(soft_break_hints(line)),
+                        );
+                    } else {
+                        col = col.child(pin_plain_line(line, body_color));
+                    }
+                }
+            }
+            MessageSpan::Bold(text) => {
+                has_inline = true;
+                row = row.child(
+                    div()
+                        .text_sm()
+                        .line_height(rems(1.25))
+                        .font_weight(FontWeight::BOLD)
+                        .text_color(body_color)
+                        .child(soft_break_hints(text)),
+                );
+            }
+            MessageSpan::Code(text) => {
+                has_inline = true;
+                row = row.child(
+                    div()
+                        .text_sm()
+                        .line_height(rems(1.25))
+                        .px_1()
+                        .rounded_sm()
+                        .bg(code_bg)
+                        .text_color(body_color)
+                        .child(soft_break_hints(text)),
+                );
+            }
+            MessageSpan::Link { text, .. } => {
+                has_inline = true;
+                row = row.child(
+                    div()
+                        .text_sm()
+                        .line_height(rems(1.25))
+                        .text_color(link_color)
+                        .underline()
+                        .child(soft_break_hints(text)),
+                );
+            }
+            MessageSpan::Mention { display, .. } | MessageSpan::Hashtag { display, .. } => {
+                has_inline = true;
+                row = row.child(
+                    div()
+                        .text_sm()
+                        .line_height(rems(1.25))
+                        .px_1()
+                        .rounded_sm()
+                        .bg(mention_bg)
+                        .text_color(mention_color)
+                        .child(display.to_string()),
+                );
+            }
+            MessageSpan::Emoji { name, .. } => {
+                has_inline = true;
+                row = row.child(
+                    div()
+                        .text_sm()
+                        .line_height(rems(1.25))
+                        .text_color(body_color)
+                        .child(name.to_string()),
+                );
+            }
+            MessageSpan::Canvas { title, .. } => {
+                has_inline = true;
+                row = row.child(
+                    div()
+                        .text_sm()
+                        .line_height(rems(1.25))
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(link_color)
+                        .child(title.to_string()),
+                );
+            }
+            MessageSpan::Heading { level, text } => {
+                if has_inline {
+                    col = col.child(row);
+                    row = pin_inline_row();
+                    has_inline = false;
+                }
+                col = col.child(
+                    div()
+                        .w_full()
+                        .min_w_0()
+                        .max_w_full()
+                        .overflow_hidden()
+                        .my(px(2.))
+                        .text_size(pin_heading_size(*level))
+                        .line_height(pin_heading_line_height(*level))
+                        .font_weight(FontWeight::BOLD)
+                        .text_color(body_color)
+                        .child(soft_break_hints(text)),
+                );
+            }
+            MessageSpan::CodeBlock { text, .. } => {
+                if has_inline {
+                    col = col.child(row);
+                    row = pin_inline_row();
+                    has_inline = false;
+                }
+                let code_text = normalize_pin_code_block(text);
+                let mut code_col = v_flex().w_full().min_w_0().overflow_hidden();
+                for (i, line) in code_text.split('\n').enumerate() {
+                    if i > 0 && line.is_empty() {
+                        code_col = code_col.child(div().w_full().h(px(8.)));
+                        continue;
+                    }
+                    code_col = code_col.child(
+                        div()
+                            .w_full()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .text_size(px(14.))
+                            .line_height(rems(1.25))
+                            .text_color(body_color)
+                            .child(soft_break_hints(line)),
+                    );
+                }
+                col = col.child(
+                    div()
+                        .w_full()
+                        .min_w_0()
+                        .max_w_full()
+                        .overflow_hidden()
+                        .mt(px(4.))
+                        .p_3()
+                        .rounded_lg()
+                        .border_1()
+                        .border_color(theme.tokens.border_primary)
+                        .bg(code_bg)
+                        .child(code_col),
+                );
+            }
+        }
+    }
+    if has_inline {
+        col = col.child(row);
+    }
+    col.into_any_element()
+}
+
+fn render_pin_image_attachment(
+    att: &MessageAttachment,
+    image_cache: Entity<LruImageCache>,
+) -> gpui::AnyElement {
+    let width = att.display_width.clamp(1., 280.);
+    let height = att.display_height.clamp(1., 200.);
+    div()
+        .mt_1()
+        .w(px(width))
+        .h(px(height))
+        .max_w_full()
+        .flex_shrink_0()
+        .overflow_hidden()
+        .rounded_md()
+        .image_cache(image_cache)
+        .child(
+            img(att.proxied_src.clone())
+                .size_full()
+                .object_fit(ObjectFit::Cover),
+        )
+        .into_any_element()
+}
+
+fn render_pin_file_attachment(att: &MessageAttachment, theme: &Theme) -> gpui::AnyElement {
+    let filename = if att.filename.is_empty() {
+        SharedString::from("Attachment")
+    } else {
+        SharedString::from(att.filename.clone())
+    };
+    let size_line = if att.size_label.is_empty() {
+        SharedString::from(format!("size: {}", mezon_store::format_file_size(att.size)))
+    } else {
+        SharedString::from(format!("size: {}", att.size_label))
+    };
+    let icon = file_type_icon_for(&att.filetype, &att.filename);
+    let file_id = SharedString::from(att.url.clone());
+    let download_url = file_id.clone();
+    let download_name = filename.clone();
+    let open_url = download_url.clone();
+    let open_name = download_name.clone();
+    let group_name = SharedString::from(format!("pin-file-{}", att.url));
+    let body_id = group_name.clone();
+    let dl_id = SharedString::from(format!("pin-file-dl-{}", att.url));
+
+    div()
+        .id(group_name.clone())
+        .group(group_name.clone())
+        .relative()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap_3()
+        .w_full()
+        .max_w_full()
+        .min_w_0()
+        .mt(px(10.))
+        .p_3()
+        .rounded_lg()
+        .bg(theme.tokens.bg_item_theme_hover)
+        .border_1()
+        .border_color(theme.tokens.border_primary)
+        .overflow_hidden()
+        .child(
+            div()
+                .relative()
+                .flex()
+                .flex_shrink_0()
+                .items_center()
+                .justify_center()
+                .w(px(32.))
+                .h(px(40.))
+                .child(img(icon.path()).w(px(32.)).h(px(40.)).flex_none()),
+        )
+        .child(
+            div()
+                .id(body_id)
+                .flex_1()
+                .min_w_0()
+                .overflow_hidden()
+                .cursor_pointer()
+                .on_click(move |_: &ClickEvent, _window, cx| {
+                    save_with_progress_toast(open_url.clone(), open_name.clone(), cx);
+                })
+                .child(
+                    div()
+                        .truncate()
+                        .text_size(px(16.))
+                        .text_color(gpui::rgb(FILE_NAME_COLOR))
+                        .hover(|s| s.underline())
+                        .child(filename),
+                )
+                .child(
+                    div()
+                        .text_size(px(14.))
+                        .text_color(theme.tokens.text_theme_primary)
+                        .child(size_line),
+                ),
+        )
+        .child(
+            div()
+                .absolute()
+                .right(px(12.))
+                .top_0()
+                .bottom_0()
+                .flex()
+                .items_center()
+                .opacity(0.)
+                .group_hover(group_name, |s| s.opacity(1.))
+                .child(
+                    div()
+                        .id(dl_id)
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .size(px(32.))
+                        .rounded_md()
+                        .bg(theme.tokens.bg_theme_contexify)
+                        .border_1()
+                        .border_color(theme.tokens.border_primary)
+                        .cursor_pointer()
+                        .hover(|s| s.opacity(0.8))
+                        .on_click(move |_: &ClickEvent, _window, cx| {
+                            cx.stop_propagation();
+                            save_with_progress_toast(
+                                download_url.clone(),
+                                download_name.clone(),
+                                cx,
+                            );
+                        })
+                        .child(
+                            Icon::new(IconName::Download)
+                                .size(px(16.))
+                                .text_color(theme.tokens.text_theme_primary),
+                        ),
+                ),
+        )
+        .into_any_element()
+}
+
+fn render_pin_embeds(
+    embeds: &[Embed],
+    theme: &Theme,
+    image_cache: Entity<LruImageCache>,
+) -> Vec<gpui::AnyElement> {
+    embeds
+        .iter()
+        .filter(|embed| {
+            !embed.title.is_empty()
+                || !embed.description_spans.is_empty()
+                || !embed.thumbnail_proxied.is_empty()
+        })
+        .map(|embed| {
+            let description = embed
+                .description_spans
+                .iter()
+                .filter_map(|span| match span {
+                    MessageSpan::Text(text) | MessageSpan::Bold(text) | MessageSpan::Code(text) => {
+                        Some(text.as_ref())
+                    }
+                    MessageSpan::Link { text, .. }
+                    | MessageSpan::Mention { display: text, .. }
+                    | MessageSpan::Hashtag { display: text, .. } => Some(text.as_ref()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("");
+            let mut card = v_flex()
+                .w_full()
+                .min_w_0()
+                .mt_1()
+                .gap_1()
+                .p_2()
+                .rounded_md()
+                .border_1()
+                .border_color(theme.tokens.border_primary)
+                .bg(theme.tokens.theme_setting_primary);
+            if !embed.title.is_empty() {
+                card = card.child(
+                    div()
+                        .text_sm()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(theme.tokens.text_theme_message)
+                        .child(embed.title.clone()),
+                );
+            }
+            if !description.is_empty() {
+                card = card.child(
+                    div()
+                        .text_sm()
+                        .text_color(theme.tokens.text_theme_primary)
+                        .child(description),
+                );
+            }
+            if !embed.thumbnail_proxied.is_empty() {
+                card = card.child(
+                    div()
+                        .max_w(px(220.))
+                        .max_h(px(120.))
+                        .overflow_hidden()
+                        .rounded_md()
+                        .image_cache(image_cache.clone())
+                        .child(
+                            img(embed.thumbnail_proxied.clone())
+                                .w_full()
+                                .h_full()
+                                .object_fit(ObjectFit::Cover),
+                        ),
+                );
+            }
+            card.into_any_element()
+        })
+        .collect()
 }
 
 /// Format a pin's create time (unix seconds): Today at HH:MM, Yesterday at HH:MM, otherwise dd/MM/yyyy, HH:MM (in the local timezone).

@@ -7,12 +7,15 @@ use gpui::{
 use mezon_client::AppApi;
 use mezon_client::ConnectionStatus;
 use mezon_client::RealtimeEvent;
-use mezon_client::transport::ApiPinMessage;
+use mezon_client::transport::{ApiPinMessage, parse_message_content_tokens};
 use mezon_proto::realtime::LastPinMessageEvent;
 
 use crate::AppConfig;
 use crate::ids::{ChannelId, ClanId, MessageId, UserId};
-use crate::messages::{MessagesEvent, MessagesStore};
+use crate::message::{
+    Embed, MessageAttachment, MessageSpan, OgpPreview, RichLayout, build_rich_layout, parse_spans,
+};
+use crate::messages::{MessagesEvent, MessagesStore, build_embeds, build_ogp_preview};
 use crate::realtime::{RealtimeDispatch, RealtimeKind};
 use crate::user_profile::{ProfileContext, resolve_avatar_url};
 
@@ -25,6 +28,12 @@ pub struct PinnedMessage {
     pub avatar_url: String,
     pub avatar_proxied: SharedString,
     pub content: String,
+    pub raw_content: String,
+    pub spans: Arc<[MessageSpan]>,
+    pub rich_layout: Option<Arc<RichLayout>>,
+    pub ogp: Option<Box<OgpPreview>>,
+    pub embeds: Arc<[Embed]>,
+    pub attachments: Vec<MessageAttachment>,
     pub create_time: i64,
 }
 
@@ -346,10 +355,11 @@ impl PinnedMessagesStore {
             sender_id,
             sender_name,
             avatar_url,
-            content_plain,
+            _content_plain,
             content_wire,
             create_time,
             created_time_iso,
+            pin_attachments,
         ) = if let Some(msg) = msg.as_ref() {
             let sender_id = msg.sender_id.clone();
             let sender_name = msg.sender_name.to_string();
@@ -372,11 +382,17 @@ impl PinnedMessagesStore {
                 }
             }
             let content_plain = msg.content.clone();
-            let content_wire = serde_json::json!({ "t": content_plain }).to_string();
+            let content_wire = msg
+                .raw_content
+                .as_ref()
+                .map(|raw| raw.to_string())
+                .filter(|raw| !raw.is_empty())
+                .unwrap_or_else(|| serde_json::json!({ "t": content_plain }).to_string());
             let create_time = msg.create_time;
             let created_time_iso = chrono::DateTime::from_timestamp(create_time, 0)
                 .map(|dt| dt.to_rfc3339())
                 .unwrap_or_else(|| chrono::Utc::now().to_rfc3339());
+            let pin_attachments = msg.attachments.clone();
             (
                 sender_id,
                 sender_name,
@@ -385,6 +401,7 @@ impl PinnedMessagesStore {
                 content_wire,
                 create_time,
                 created_time_iso,
+                pin_attachments,
             )
         } else {
             return;
@@ -394,6 +411,30 @@ impl PinnedMessagesStore {
         let avatar_proxied = cfg
             .map(|c| c.avatar_proxy(&avatar_url))
             .unwrap_or_else(|| avatar_url.clone());
+        let body = enrich_pin_body(&content_wire, pin_attachments, cfg);
+        let attachment = if body.attachments.is_empty() {
+            "[]".to_string()
+        } else {
+            serde_json::to_string(
+                &body
+                    .attachments
+                    .iter()
+                    .map(|a| {
+                        serde_json::json!({
+                            "url": a.url,
+                            "filename": a.filename,
+                            "filetype": a.filetype,
+                            "width": a.width,
+                            "height": a.height,
+                            "thumbnail": a.thumbnail,
+                            "duration": a.duration,
+                            "size": a.size,
+                        })
+                    })
+                    .collect::<Vec<_>>(),
+            )
+            .unwrap_or_else(|_| "[]".into())
+        };
         self.messages.insert(
             0,
             PinnedMessage {
@@ -403,7 +444,13 @@ impl PinnedMessagesStore {
                 sender_name: sender_name.clone(),
                 avatar_url: avatar_url.clone(),
                 avatar_proxied: avatar_proxied.into(),
-                content: content_plain,
+                content: body.text,
+                raw_content: content_wire.clone(),
+                spans: body.spans,
+                rich_layout: body.rich_layout,
+                ogp: body.ogp,
+                embeds: body.embeds,
+                attachments: body.attachments,
                 create_time,
             },
         );
@@ -411,7 +458,6 @@ impl PinnedMessagesStore {
         cx.notify();
 
         let api = self.api.clone();
-        let attachment = "[]".to_string();
         cx.spawn(async move |_this, _cx| {
             if let Err(e) = api
                 .create_pin_message(message_id_i64, channel_id_i64, clan_id_i64)
@@ -470,10 +516,54 @@ impl PinnedMessagesStore {
     }
 }
 
+fn enrich_pin_body(
+    raw_content: &str,
+    attachments: Vec<MessageAttachment>,
+    cfg: Option<&AppConfig>,
+) -> EnrichedPinBody {
+    let trimmed = raw_content.trim();
+    let tokens = parse_message_content_tokens(trimmed);
+    let spans = parse_spans(&tokens);
+    let rich_layout = build_rich_layout(&spans);
+    let ogp = build_ogp_preview(&tokens, cfg);
+    let embeds = build_embeds(&tokens, cfg);
+    let text = if tokens.t.is_empty() {
+        serde_json::from_str::<serde_json::Value>(trimmed)
+            .ok()
+            .and_then(|v| v.get("t").and_then(|t| t.as_str().map(|s| s.to_string())))
+            .unwrap_or_else(|| trimmed.to_string())
+    } else {
+        tokens.t
+    };
+    EnrichedPinBody {
+        text,
+        spans: spans.into(),
+        rich_layout,
+        ogp,
+        embeds,
+        attachments,
+    }
+}
+
+struct EnrichedPinBody {
+    text: String,
+    spans: Arc<[MessageSpan]>,
+    rich_layout: Option<Arc<RichLayout>>,
+    ogp: Option<Box<OgpPreview>>,
+    embeds: Arc<[Embed]>,
+    attachments: Vec<MessageAttachment>,
+}
+
 fn pinned_from_api(m: ApiPinMessage, cfg: Option<&AppConfig>) -> PinnedMessage {
     let avatar_proxied = cfg
         .map(|c| c.avatar_proxy(&m.avatar))
         .unwrap_or_else(|| m.avatar.clone());
+    let attachments = m
+        .attachments
+        .into_iter()
+        .map(|a| MessageAttachment::from_api(a, cfg))
+        .collect::<Vec<_>>();
+    let body = enrich_pin_body(&m.content, attachments, cfg);
     PinnedMessage {
         id: m.id,
         message_id: m.message_id,
@@ -481,7 +571,17 @@ fn pinned_from_api(m: ApiPinMessage, cfg: Option<&AppConfig>) -> PinnedMessage {
         sender_name: m.sender_name,
         avatar_url: m.avatar,
         avatar_proxied: avatar_proxied.into(),
-        content: m.content,
+        content: if body.text.is_empty() {
+            m.content_text
+        } else {
+            body.text
+        },
+        raw_content: m.content,
+        spans: body.spans,
+        rich_layout: body.rich_layout,
+        ogp: body.ogp,
+        embeds: body.embeds,
+        attachments: body.attachments,
         create_time: m.create_time,
     }
 }
@@ -497,10 +597,11 @@ fn pinned_from_last_pin_event(pin: &LastPinMessageEvent, cfg: Option<&AppConfig>
     } else {
         parse_pin_create_time(&pin.message_created_time)
     };
-    let content = serde_json::from_str::<serde_json::Value>(&pin.message_content)
-        .ok()
-        .and_then(|v| v.get("t").and_then(|t| t.as_str().map(|s| s.to_string())))
-        .unwrap_or_else(|| pin.message_content.clone());
+    let attachments = mezon_client::parse_search_attachment_field(&pin.message_attachment)
+        .into_iter()
+        .map(|a| MessageAttachment::from_api(a, cfg))
+        .collect::<Vec<_>>();
+    let body = enrich_pin_body(&pin.message_content, attachments, cfg);
     PinnedMessage {
         id: message_id.clone(),
         message_id,
@@ -508,7 +609,13 @@ fn pinned_from_last_pin_event(pin: &LastPinMessageEvent, cfg: Option<&AppConfig>
         sender_name: pin.message_sender_username.clone(),
         avatar_url: avatar,
         avatar_proxied: avatar_proxied.into(),
-        content,
+        content: body.text,
+        raw_content: pin.message_content.clone(),
+        spans: body.spans,
+        rich_layout: body.rich_layout,
+        ogp: body.ogp,
+        embeds: body.embeds,
+        attachments: body.attachments,
         create_time,
     }
 }
