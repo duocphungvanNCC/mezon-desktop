@@ -702,6 +702,8 @@ fn open_main_window(
     mezon_store::GifStore::init(cx);
     mezon_store::ChannelMembersStore::init(api.clone(), cx);
     mezon_store::ChannelPermissionsStore::init(api.clone(), cx);
+    mezon_store::ChannelUsersStore::init(api.clone(), cx);
+    mezon_store::ChannelRolePermissionsStore::init(api.clone(), cx);
     mezon_store::GroupMembersStore::init(api.clone(), cx);
     mezon_store::UsersByUserStore::init(api.clone(), cx);
     mezon_store::RolesStore::init(api.clone(), cx);
@@ -716,6 +718,7 @@ fn open_main_window(
     mezon_store::QuickMenuStore::init(api.clone(), cx);
     mezon_store::WalletStore::init(auth_state.clone(), cx);
     mezon_ui::WalletToastBridge::init(cx);
+    mezon_ui::chat::channel_settings::channel_acl::init(api.clone(), cx);
     mezon_store::AccountStore::init(api, cx);
 
     let platform_store = mezon_store::PlatformStore::init(cx);

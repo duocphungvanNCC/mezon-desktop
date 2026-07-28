@@ -134,14 +134,13 @@ impl NotificationPushStore {
                     }
                     continue;
                 };
-                let icon_path = if SHOW_SENDER_AVATAR && notification.image.starts_with("https://")
-                {
-                    api.download_notification_icon(&notification.image)
+                let icon_path = match prepared.icon_url.as_deref() {
+                    Some(url) => api
+                        .download_notification_icon(url)
                         .await
                         .ok()
-                        .map(|p| p.to_string_lossy().into_owned())
-                } else {
-                    None
+                        .map(|p| p.to_string_lossy().into_owned()),
+                    None => None,
                 };
                 let delivered = this.update(cx, |_, cx| show_prepared(cx, prepared, icon_path));
                 if delivered.is_err() {
@@ -158,6 +157,20 @@ struct PreparedNotification {
     channel_id: Option<String>,
     clan_id: Option<String>,
     link: Option<String>,
+    icon_url: Option<String>,
+}
+
+const SENDER_AVATAR_PX: u32 = 64;
+
+fn sender_avatar_url(cx: &App, image: &str) -> Option<String> {
+    if !SHOW_SENDER_AVATAR || !image.starts_with("https://") {
+        return None;
+    }
+    let proxied = AppConfig::try_global(cx)
+        .map(|config| config.imgproxy_url(image, SENDER_AVATAR_PX, SENDER_AVATAR_PX, "fill"))
+        .filter(|url| !url.is_empty())
+        .unwrap_or_else(|| image.to_owned());
+    Some(proxied)
 }
 
 /// Apply the suppressors and gather notification content on the foreground;
@@ -194,6 +207,7 @@ fn prepare(cx: &App, user_id: &str, n: &GotifyNotification) -> Option<PreparedNo
         channel_id,
         clan_id,
         link: Some(n.extras.link.clone()).filter(|l| !l.is_empty()),
+        icon_url: sender_avatar_url(cx, &n.image),
     })
 }
 

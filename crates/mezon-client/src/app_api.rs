@@ -1334,6 +1334,76 @@ impl AppApi {
         self.transport.get_list_permission().await
     }
 
+    pub async fn get_permission_by_role_id_channel_id(
+        &self,
+        role_id: i64,
+        channel_id: i64,
+        user_id: i64,
+    ) -> Result<mezon_proto::api::PermissionRoleChannelListEventResponse> {
+        self.transport
+            .get_permission_by_role_id_channel_id(role_id, channel_id, user_id)
+            .await
+    }
+
+    pub async fn set_role_channel_permission(
+        &self,
+        role_id: i64,
+        channel_id: i64,
+        user_id: i64,
+        max_permission_id: i64,
+        permission_update: Vec<mezon_proto::api::PermissionUpdate>,
+    ) -> Result<()> {
+        self.transport
+            .set_role_channel_permission(
+                role_id,
+                channel_id,
+                user_id,
+                max_permission_id,
+                permission_update,
+            )
+            .await
+    }
+
+    pub async fn add_roles_channel_desc(
+        &self,
+        role_ids: Vec<String>,
+        channel_id: i64,
+    ) -> Result<()> {
+        self.transport
+            .add_roles_channel_desc(role_ids, channel_id)
+            .await
+    }
+
+    pub async fn delete_role_channel_desc(
+        &self,
+        role_id: i64,
+        channel_id: i64,
+        clan_id: i64,
+    ) -> Result<()> {
+        self.transport
+            .delete_role_channel_desc(role_id, channel_id, clan_id)
+            .await
+    }
+
+    pub async fn update_channel_private(
+        &self,
+        clan_id: i64,
+        channel_id: i64,
+        channel_private: i32,
+        user_ids: Vec<i64>,
+        role_ids: Vec<i64>,
+    ) -> Result<()> {
+        self.transport
+            .update_channel_private(clan_id, channel_id, channel_private, user_ids, role_ids)
+            .await
+    }
+
+    pub async fn remove_channel_users(&self, channel_id: i64, user_ids: Vec<String>) -> Result<()> {
+        self.transport
+            .remove_channel_users(channel_id, user_ids)
+            .await
+    }
+
     pub async fn get_clan_user_role(&self, clan_id: i64) -> Result<mezon_proto::api::RoleList> {
         self.transport.get_clan_user_role(clan_id, 0).await
     }

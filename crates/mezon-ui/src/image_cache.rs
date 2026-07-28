@@ -128,9 +128,18 @@ pub fn start_idle_trim(cx: &mut App) {
 const SHARED_AVATAR_CACHE_CAPACITY: usize = 512;
 const SHARED_AVATAR_CACHE_BYTES: u64 = 24 * 1024 * 1024;
 const SHARED_SMALL_AVATAR_CACHE_BYTES: u64 = 12 * 1024 * 1024;
+const SHARED_ROLE_ICON_CACHE_CAPACITY: usize = 512;
+const SHARED_ROLE_ICON_CACHE_BYTES: u64 = 4 * 1024 * 1024;
+const ROLE_ICON_ENTRY_MAX_BYTES: u64 = 256 * 1024;
 
 struct SharedAvatarCache(Entity<LruImageCache>);
 impl Global for SharedAvatarCache {}
+
+struct SharedRoleIconCache(Entity<LruImageCache>);
+impl Global for SharedRoleIconCache {}
+
+struct SharedRoleIconPreviewCache(Entity<LruImageCache>);
+impl Global for SharedRoleIconPreviewCache {}
 
 struct SharedOgpCache(Entity<LruImageCache>);
 impl Global for SharedOgpCache {}
@@ -170,6 +179,47 @@ pub fn sweep_ogp_cache(window: &mut Window, cx: &mut App) {
     if let Some(cache) = ogp_image_cache(cx) {
         cache.update(cx, |cache, cx| cache.sweep_once_per_frame(window, cx));
     }
+}
+
+/// Shared decode cache for role icons. They render at 12-20px everywhere, so
+/// they go through the `IconThumbnail` loader (decodes at `ICON_DECODE_MAX_PX`)
+/// instead of the app-wide `"shared"` cache, whose `LoaderKind::Full` would keep
+/// the source resolution resident.
+/// Read-only view of the shared role-icon cache for render paths that only hold
+/// `&App`. Returns `None` before the first `shared_role_icon_cache` call.
+/// One 64pt preview lives in the role-icon picker modal. It needs a 128px decode,
+/// so it uses the avatar loader (`AVATAR_DECODE_MAX_PX` = 160) rather than the
+/// 64px icon loader, with a budget sized for the single image it holds.
+pub fn shared_role_icon_preview_cache(cx: &mut App) -> Entity<LruImageCache> {
+    if let Some(existing) = cx.try_global::<SharedRoleIconPreviewCache>() {
+        return existing.0.clone();
+    }
+    let cache = cx.new(|cx| {
+        LruImageCache::avatar_thumbnail("role-icon-preview", 16, 1024 * 1024, 256 * 1024, cx)
+    });
+    cx.set_global(SharedRoleIconPreviewCache(cache.clone()));
+    cache
+}
+
+pub fn role_icon_cache(cx: &App) -> Option<Entity<LruImageCache>> {
+    cx.try_global::<SharedRoleIconCache>().map(|c| c.0.clone())
+}
+
+pub fn shared_role_icon_cache(cx: &mut App) -> Entity<LruImageCache> {
+    if let Some(existing) = cx.try_global::<SharedRoleIconCache>() {
+        return existing.0.clone();
+    }
+    let cache = cx.new(|cx| {
+        LruImageCache::icon_thumbnail(
+            "role-icons-shared",
+            SHARED_ROLE_ICON_CACHE_CAPACITY,
+            SHARED_ROLE_ICON_CACHE_BYTES,
+            ROLE_ICON_ENTRY_MAX_BYTES,
+            cx,
+        )
+    });
+    cx.set_global(SharedRoleIconCache(cache.clone()));
+    cache
 }
 
 pub fn shared_avatar_cache(cx: &mut App) -> Entity<LruImageCache> {

@@ -193,11 +193,11 @@ impl Render for DevicePage {
                                         div()
                                             .id(format!("remove-device-{}", device_id))
                                             .cursor_pointer()
-                                            .text_color(theme.status_dnd)
+                                            .text_color(theme.danger_text)
                                             .child(
                                                 Icon::new(IconName::Close)
                                                     .size_4()
-                                                    .text_color(theme.status_dnd),
+                                                    .text_color(theme.danger_text),
                                             )
                                             .on_click(cx.listener(
                                                 move |this, _event, _window, cx| {

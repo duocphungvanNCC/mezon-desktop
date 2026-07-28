@@ -93,10 +93,12 @@ impl ClanSettingsPage {
     pub fn visible_in_sidebar(self, perms: ClanSettingsPermissions) -> bool {
         match self {
             Self::Integrations => perms.has_manage_clan || perms.has_manage_channel,
+            Self::ArchivedChannels => {
+                perms.has_manage_clan || perms.has_administrator || perms.is_clan_owner
+            }
             Self::Overview
             | Self::Roles
             | Self::AuditLog
-            | Self::ArchivedChannels
             | Self::Onboarding
             | Self::EnableCommunity => perms.has_manage_clan,
             Self::CategoryOrder | Self::Emoji | Self::ImageStickers | Self::VoiceStickers => true,
@@ -597,7 +599,7 @@ impl Render for ClanSettingScreen {
                     .rounded(px(4.0))
                     .text_base()
                     .font_weight(gpui::FontWeight::MEDIUM)
-                    .text_color(theme.status_dnd)
+                    .text_color(theme.danger_text)
                     .cursor_pointer()
                     .hover(|s| s.bg(theme.bg_hover))
                     .child(mezon_i18n::t(&locale, "clanSettings.sidebar.deleteClan"))

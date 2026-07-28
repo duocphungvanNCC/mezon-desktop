@@ -6,8 +6,8 @@ use gpui::{
 };
 
 use mezon_store::{
-    ClanId, ClanRoleDetail, DEFAULT_ROLE_COLOR, PermissionStore, RoleDraft, RoleId, RolesEvent,
-    RolesStore, Settings, UserId, everyone_slug,
+    ClanId, ClanMembersStore, ClanRoleDetail, DEFAULT_ROLE_COLOR, PermissionStore, RoleDraft,
+    RoleId, RolesEvent, RolesStore, Settings, UserId, everyone_slug,
 };
 
 use crate::components::primitives::{
@@ -17,9 +17,27 @@ use crate::theme::{ActiveTheme, Theme};
 
 use super::role_color_picker;
 use super::role_icon_picker::RoleIconPickerTab;
-use super::role_list_side_bar::{self, active_permission_ids as role_active_permission_ids};
+use super::role_list_side_bar::{
+    self, DRAG_INDICATOR_COLOR, RoleDragPreview, RoleReorderDrag,
+    active_permission_ids as role_active_permission_ids,
+};
 use crate::app::shell::Shell;
 use crate::chat::message::ReactionPicker;
+
+pub(crate) fn role_edit_allowed(
+    has_manage_clan: bool,
+    is_clan_owner: bool,
+    user_max_permission_level: Option<i32>,
+    role_max_level_permission: i32,
+) -> bool {
+    if !has_manage_clan {
+        return false;
+    }
+    if is_clan_owner {
+        return true;
+    }
+    user_max_permission_level.is_some_and(|level| role_max_level_permission < level)
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum RolePageMode {
@@ -39,6 +57,7 @@ pub struct RoleSettingPage {
     pub(super) settings: Entity<Settings>,
     pub(super) mode: RolePageMode,
     pub(super) selected_role_id: Option<RoleId>,
+    pub(super) pending_role_order: Option<Vec<RoleId>>,
     pub(super) creating_role: bool,
     pub(super) edit_tab: RoleEditTab,
     list_search_query: String,
@@ -97,6 +116,9 @@ impl RoleSettingPage {
         RolesStore::global(cx).update(cx, |store, cx| {
             store.ensure_loaded(clan_id, cx);
         });
+        ClanMembersStore::global(cx).update(cx, |store, cx| {
+            store.ensure_loaded(clan_id, cx);
+        });
         PermissionStore::global(cx).update(cx, |store, cx| {
             store.ensure_catalog_loaded(cx);
             store.load_clan_permissions(clan_id, cx);
@@ -114,6 +136,7 @@ impl RoleSettingPage {
                         {
                             this.mode = RolePageMode::Edit;
                             this.selected_role_id = Some(*role_id);
+                            this.clear_pending_role_order();
                             this.creating_role = false;
                             this.edit_tab = RoleEditTab::Display;
                             this.load_draft_from_role(&role);
@@ -133,6 +156,15 @@ impl RoleSettingPage {
                             .to_string();
                         Shell::global(cx).update(cx, |shell, cx| shell.error(message, cx));
                     }
+                    RolesEvent::RoleOrderSaveFailed { clan_id } if *clan_id == this.clan_id => {
+                        let locale = this.settings.read(cx).language.clone();
+                        let message = mezon_i18n::t(
+                            &locale,
+                            "clanRoles.roleManagement.failedToUpdateRoleOrder",
+                        )
+                        .to_string();
+                        Shell::global(cx).update(cx, |shell, cx| shell.error(message, cx));
+                    }
                     _ => {}
                 }
                 cx.notify();
@@ -145,6 +177,7 @@ impl RoleSettingPage {
             settings,
             mode: RolePageMode::List,
             selected_role_id: None,
+            pending_role_order: None,
             creating_role: false,
             edit_tab: RoleEditTab::Display,
             list_search_query: String::new(),
@@ -216,6 +249,7 @@ impl RoleSettingPage {
     }
 
     pub fn release(&mut self) {
+        self.clear_pending_role_order();
         self._icon_upload_task.take();
         self.icon_uploading = false;
         self.role_icon_picker_open = false;
@@ -245,7 +279,9 @@ impl RoleSettingPage {
     }
 
     pub fn should_show_save_bar(&self, cx: &App) -> bool {
-        self.mode == RolePageMode::Edit && self.is_dirty(cx) && !self.is_saving(cx)
+        self.mode == RolePageMode::Edit
+            && (self.is_dirty(cx) || self.has_pending_role_order())
+            && !self.is_saving(cx)
     }
 
     pub fn is_role_icon_picker_open(&self) -> bool {
@@ -253,7 +289,9 @@ impl RoleSettingPage {
     }
 
     pub fn is_saving(&self, cx: &App) -> bool {
-        RolesStore::global(cx).read(cx).is_saving(self.clan_id)
+        let roles = RolesStore::global(cx);
+        let roles = roles.read(cx);
+        roles.is_saving(self.clan_id) || roles.is_saving_order(self.clan_id)
     }
 
     pub(super) fn is_dirty(&self, cx: &App) -> bool {
@@ -283,43 +321,43 @@ impl RoleSettingPage {
         let Some(role) = self.selected_role_detail(cx) else {
             return true;
         };
-        if RolesStore::global(cx).read(cx).role_has_administrator(role) {
-            return false;
-        }
-        PermissionStore::global(cx)
-            .read(cx)
-            .current_permission_level(self.clan_id, cx)
-            .is_none_or(|level| role.max_level_permission < level)
+        role_edit_allowed(
+            perms.has_manage_clan,
+            perms.is_clan_owner,
+            PermissionStore::global(cx)
+                .read(cx)
+                .current_permission_level(self.clan_id, cx),
+            role.max_level_permission,
+        )
     }
 
-    fn can_manage_role(&self, role: &ClanRoleDetail, cx: &App) -> bool {
+    pub(super) fn can_manage_role(&self, role: &ClanRoleDetail, cx: &App) -> bool {
         let perms = PermissionStore::global(cx)
             .read(cx)
             .clan_settings_permissions(self.clan_id, cx);
-        if !perms.has_manage_clan {
-            return false;
-        }
-        if perms.is_clan_owner {
-            return true;
-        }
-        if RolesStore::global(cx).read(cx).role_has_administrator(role) {
-            return false;
-        }
-        PermissionStore::global(cx)
-            .read(cx)
-            .current_permission_level(self.clan_id, cx)
-            .is_none_or(|level| role.max_level_permission < level)
+        role_edit_allowed(
+            perms.has_manage_clan,
+            perms.is_clan_owner,
+            PermissionStore::global(cx)
+                .read(cx)
+                .current_permission_level(self.clan_id, cx),
+            role.max_level_permission,
+        )
     }
 
     fn filtered_roles(&self, cx: &App) -> Vec<(RoleId, ClanRoleDetail)> {
         let query = self.list_search_query.to_ascii_lowercase();
-        RolesStore::global(cx)
-            .read(cx)
-            .active_roles_in_clan(self.clan_id)
+        let store = RolesStore::global(cx);
+        let store = store.read(cx);
+        self.sidebar_roles(store)
             .into_iter()
             .filter(|(_, role)| query.is_empty() || role.name.to_ascii_lowercase().contains(&query))
             .map(|(id, role)| (id, role.clone()))
             .collect()
+    }
+
+    pub(super) fn list_reorder_enabled(&self) -> bool {
+        self.list_search_query.is_empty()
     }
 
     pub(super) fn select_role(&mut self, role_id: RoleId, cx: &mut Context<Self>) {
@@ -339,6 +377,9 @@ impl RoleSettingPage {
         RolesStore::global(cx).update(cx, |store, cx| {
             store.ensure_role_users_loaded(role_id, cx);
         });
+        ClanMembersStore::global(cx).update(cx, |store, cx| {
+            store.ensure_loaded(self.clan_id, cx);
+        });
         cx.notify();
     }
 
@@ -349,6 +390,7 @@ impl RoleSettingPage {
     pub(super) fn exit_edit_mode(&mut self, cx: &mut Context<Self>) {
         self.mode = RolePageMode::List;
         self.selected_role_id = None;
+        self.clear_pending_role_order();
         self.creating_role = false;
         self.custom_color_picker_open = false;
         self.clear_draft();
@@ -474,6 +516,7 @@ impl RoleSettingPage {
     }
 
     pub fn reset(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.clear_pending_role_order();
         self.draft_name = self.saved_name.clone();
         self.draft_color = self.saved_color.clone();
         self.draft_icon = self.saved_icon.clone();
@@ -483,7 +526,8 @@ impl RoleSettingPage {
     }
 
     pub fn save(&mut self, cx: &mut Context<Self>) {
-        if self.draft_name.trim().is_empty() {
+        self.commit_pending_role_order(cx);
+        if !self.is_dirty(cx) || self.draft_name.trim().is_empty() {
             return;
         }
         let add_permission_ids: Vec<i64> = self
@@ -730,6 +774,7 @@ impl RoleSettingPage {
                     .child(mezon_i18n::t(&locale, "clanRoles.mainRoles.noRoles"))
                     .into_any_element()
             } else {
+                let icon_cache = crate::image_cache::shared_role_icon_cache(cx);
                 uniform_list(
                     "clan-roles-table",
                     roles.len(),
@@ -747,6 +792,9 @@ impl RoleSettingPage {
                                         role,
                                         page.can_manage_role(role, cx),
                                         entity.clone(),
+                                        ix,
+                                        &icon_cache,
+                                        cx,
                                     )
                                     .into_any_element(),
                                 None => div().h(px(ROW_HEIGHT)).into_any_element(),
@@ -757,6 +805,8 @@ impl RoleSettingPage {
                 .with_item_size(size(px(0.0), px(ROW_HEIGHT)))
                 .with_sizing_behavior(ListSizingBehavior::Infer)
                 .track_scroll(&self.role_list_scroll)
+                .smooth_line_scroll()
+                .suppress_hover_while_scrolling()
                 .w_full()
                 .into_any_element()
             })
@@ -770,9 +820,16 @@ impl RoleSettingPage {
         role: &ClanRoleDetail,
         can_manage: bool,
         page: Entity<Self>,
+        index: usize,
+        icon_cache: &Entity<crate::image_cache::LruImageCache>,
+        cx: &App,
     ) -> impl IntoElement {
         let is_everyone = role.slug == everyone_slug(self.clan_id);
         let row_group = SharedString::from(format!("clan-role-row-{}", role_id.get()));
+        let can_reorder = can_manage && self.list_reorder_enabled();
+        let drag_name = SharedString::from(role.name.clone());
+        let drag_color = SharedString::from(role.color.clone());
+        let drop_page = page.clone();
         div()
             .id(("clan-role-row", role_id.get() as u64))
             .group(row_group.clone())
@@ -783,6 +840,38 @@ impl RoleSettingPage {
             .border_b_1()
             .border_color(theme.border)
             .hover(|s| s.bg(theme.tokens.bg_item_theme_hover))
+            .when(can_reorder, |el| {
+                el.on_drag(
+                    RoleReorderDrag {
+                        index,
+                        name: drag_name,
+                        color: drag_color,
+                    },
+                    |drag, _, _, cx| {
+                        cx.stop_propagation();
+                        let name = drag.name.clone();
+                        let color = drag.color.clone();
+                        cx.new(|_| RoleDragPreview { name, color })
+                    },
+                )
+                .drag_over::<RoleReorderDrag>(move |style, drag, _, _| {
+                    if drag.index > index {
+                        style
+                            .border_t_2()
+                            .border_color(gpui::rgb(DRAG_INDICATOR_COLOR))
+                    } else {
+                        style
+                            .border_b_2()
+                            .border_color(gpui::rgb(DRAG_INDICATOR_COLOR))
+                    }
+                })
+                .on_drop(move |drag: &RoleReorderDrag, _, cx| {
+                    let from = drag.index;
+                    drop_page.update(cx, |this, cx| {
+                        this.stage_role_reorder(from, index, cx);
+                    });
+                })
+            })
             .child(
                 h_flex()
                     .w(gpui::relative(0.5))
@@ -790,15 +879,14 @@ impl RoleSettingPage {
                     .gap_2()
                     .min_w_0()
                     .px_2()
-                    .child(role_list_side_bar::role_color_dot(
-                        role_list_side_bar::role_color_or_default(&role.color),
-                        theme,
+                    .child(role_list_side_bar::role_glyph(
+                        &role.icon,
+                        &role.color,
+                        icon_cache,
+                        cx,
                     ))
-                    .when(!role.icon.is_empty(), |row| {
-                        row.child(role_list_side_bar::role_icon_thumbnail(
-                            role.icon.clone(),
-                            theme,
-                        ))
+                    .when(!can_manage, |row| {
+                        row.child(role_list_side_bar::role_lock_icon())
                     })
                     .child(
                         div()
@@ -839,7 +927,7 @@ impl RoleSettingPage {
                                 .size(px(36.0))
                                 .rounded_full()
                                 .cursor_pointer()
-                                .bg(theme.status_dnd)
+                                .bg(theme.danger_text)
                                 .opacity(0.)
                                 .group_hover(row_group.clone(), |s| s.opacity(1.))
                                 .child(
@@ -874,7 +962,7 @@ impl RoleSettingPage {
                                         .size(px(36.0))
                                         .rounded_full()
                                         .cursor_pointer()
-                                        .bg(theme.status_dnd)
+                                        .bg(theme.danger_text)
                                         .child(
                                             Icon::new(IconName::DeleteMessageRightClick)
                                                 .size(px(20.))
@@ -1178,4 +1266,32 @@ pub fn render_role_save_bar(
                         ),
                 ),
         )
+}
+
+#[cfg(test)]
+mod role_edit_permission_tests {
+    use super::role_edit_allowed;
+
+    #[test]
+    fn manage_clan_is_required() {
+        assert!(!role_edit_allowed(false, true, Some(10), 1));
+        assert!(!role_edit_allowed(false, false, Some(10), 1));
+    }
+
+    #[test]
+    fn clan_owner_can_edit_any_role() {
+        assert!(role_edit_allowed(true, true, None, i32::MAX));
+    }
+
+    #[test]
+    fn unknown_level_fails_closed() {
+        assert!(!role_edit_allowed(true, false, None, 0));
+    }
+
+    #[test]
+    fn level_must_be_strictly_greater_than_role_level() {
+        assert!(role_edit_allowed(true, false, Some(5), 4));
+        assert!(!role_edit_allowed(true, false, Some(5), 5));
+        assert!(!role_edit_allowed(true, false, Some(5), 6));
+    }
 }

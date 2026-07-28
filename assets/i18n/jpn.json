@@ -836,6 +836,7 @@
   "channelSetting.tabs.overview": "概要",
   "channelSetting.tabs.permissions": "権限",
   "channelSetting.tabs.quickMenu": "クイックアクション",
+  "channelSetting.tabs.streamThumbnail": "ストリームサムネイル",
   "channelSetting.toast.updated": "正常に更新されました",
   "channelSetting.unsavedChanges.reset": "リセット",
   "channelSetting.unsavedChanges.saveChanges": "変更を保存",

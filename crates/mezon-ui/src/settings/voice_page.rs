@@ -311,7 +311,7 @@ impl Render for VoicePage {
                                                     .px_4()
                                                     .py_1()
                                                     .rounded_lg()
-                                                    .bg(if is_testing { theme.status_dnd } else { theme.brand })
+                                                    .bg(if is_testing { theme.danger_text } else { theme.brand })
                                                     .cursor_pointer()
                                                     .child(
                                                         Label::new(if is_testing {
@@ -384,7 +384,7 @@ impl Render for VoicePage {
                                         el.child(
                                             Label::new(err)
                                                 .text_sm()
-                                                .text_color(theme.status_dnd),
+                                                .text_color(theme.danger_text),
                                         )
                                     }),
                             ),

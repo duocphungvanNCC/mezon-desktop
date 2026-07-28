@@ -1,8 +1,9 @@
 use gpui::{App, ClipboardItem, SharedString, WeakEntity, Window};
 use mezon_client::transport::QUICK_MENU_TYPE_QUICK;
 use mezon_store::{
-    AppConfig, ChannelPermissionsStore, EmojiStore, Message, MessageCode, MessageId, MessagesStore,
-    PERMISSION_DELETE_MESSAGE, PinnedMessagesStore, QuickMenuStore, ThreadsStore, TopicsStore,
+    AppConfig, BadgeService, ChannelPermissionsStore, DirectKind, DirectMessageStore, EmojiStore,
+    Message, MessageCode, MessageId, MessagesStore, PERMISSION_DELETE_MESSAGE, PinnedMessagesStore,
+    QuickMenuStore, ThreadsStore, TopicsStore,
 };
 
 use super::channel_messages::ChannelMessages;
@@ -121,13 +122,40 @@ fn sender_allows_give_coffee(msg: &Message, current_user_id: &str, cx: &App) -> 
     true
 }
 
-fn can_delete_message(
-    msg: &Message,
-    current_user_id: &str,
-    is_clan_owner: bool,
-    is_topic_box: bool,
-    cx: &App,
+pub(crate) fn delete_message_allowed(
+    is_my_message: bool,
+    is_group_dm: bool,
+    is_owner_group_dm: bool,
+    is_channel_or_thread_or_topic: bool,
+    has_delete_permission: bool,
 ) -> bool {
+    if is_my_message {
+        return true;
+    }
+    if is_group_dm {
+        return is_owner_group_dm;
+    }
+    is_channel_or_thread_or_topic && has_delete_permission
+}
+
+fn active_group_dm_owner(cx: &App) -> (bool, bool) {
+    let Some(channel_id) = MessagesStore::global(cx).read(cx).active_channel_id() else {
+        return (false, false);
+    };
+    let Some(store) = DirectMessageStore::try_global(cx) else {
+        return (false, false);
+    };
+    let Some(direct) = store.read(cx).find(channel_id) else {
+        return (false, false);
+    };
+    if direct.kind != DirectKind::Group {
+        return (false, false);
+    }
+    let me = BadgeService::global(cx).read(cx).current_user_id(cx);
+    (true, me.is_some() && direct.creator_id == me)
+}
+
+fn can_delete_message(msg: &Message, current_user_id: &str, is_topic_box: bool, cx: &App) -> bool {
     if is_topic_box {
         if is_first_topic_message(msg.id, cx) {
             return false;
@@ -135,22 +163,21 @@ fn can_delete_message(
     } else if channel_delete_blocked(msg, cx) {
         return false;
     }
-    if current_user_id == msg.sender_id.as_str() {
-        return true;
-    }
-    if is_clan_owner {
-        return true;
-    }
+    let (is_group_dm, is_owner_group_dm) = active_group_dm_owner(cx);
     let messages = MessagesStore::global(cx).read(cx);
-    let (Some(channel_id), Some(clan_id)) =
-        (messages.active_channel_id(), messages.active_clan_id())
-    else {
-        return false;
+    let is_channel_or_thread_or_topic = is_topic_box || !messages.is_dm();
+    let has_delete_permission = match (messages.active_channel_id(), messages.active_clan_id()) {
+        (Some(channel_id), Some(clan_id)) => ChannelPermissionsStore::global(cx)
+            .read(cx)
+            .has_permission(PERMISSION_DELETE_MESSAGE, clan_id, channel_id),
+        _ => false,
     };
-    ChannelPermissionsStore::global(cx).read(cx).has_permission(
-        PERMISSION_DELETE_MESSAGE,
-        clan_id,
-        channel_id,
+    delete_message_allowed(
+        current_user_id == msg.sender_id.as_str(),
+        is_group_dm,
+        is_owner_group_dm,
+        is_channel_or_thread_or_topic,
+        has_delete_permission,
     )
 }
 
@@ -158,7 +185,7 @@ fn can_delete_message(
 pub(crate) fn build(
     msg: &Message,
     current_user_id: &str,
-    is_clan_owner: bool,
+    can_send_message: bool,
     locale: &str,
     show_forward_all: bool,
     is_topic_box: bool,
@@ -174,7 +201,6 @@ pub(crate) fn build(
         return build_topic_menu(
             msg,
             current_user_id,
-            is_clan_owner,
             locale,
             show_forward_all,
             reaction_submenu_open,
@@ -186,7 +212,7 @@ pub(crate) fn build(
     build_channel_menu(
         msg,
         current_user_id,
-        is_clan_owner,
+        can_send_message,
         locale,
         show_forward_all,
         reaction_submenu_open,
@@ -304,7 +330,6 @@ fn menu_with_reactions(
 fn build_topic_menu(
     msg: &Message,
     current_user_id: &str,
-    is_clan_owner: bool,
     locale: &str,
     show_forward_all: bool,
     reaction_submenu_open: bool,
@@ -463,7 +488,7 @@ fn build_topic_menu(
         );
     }
 
-    if can_delete_message(msg, current_user_id, is_clan_owner, true, cx) {
+    if can_delete_message(msg, current_user_id, true, cx) {
         let message_id = msg.id;
         let locale_owned = locale.to_string();
         menu = menu.separator().danger_item_trailing_icon(
@@ -485,7 +510,7 @@ fn build_topic_menu(
 fn build_channel_menu(
     msg: &Message,
     current_user_id: &str,
-    is_clan_owner: bool,
+    can_send_message: bool,
     locale: &str,
     show_forward_all: bool,
     reaction_submenu_open: bool,
@@ -582,7 +607,7 @@ fn build_channel_menu(
 
     menu = menu.separator();
 
-    {
+    if can_send_message || MessagesStore::global(cx).read(cx).is_dm() {
         let message_id = msg.id;
         menu = menu.item_trailing_icon(
             t("contextMenu.reply"),
@@ -782,7 +807,7 @@ fn build_channel_menu(
         });
     }
 
-    if can_delete_message(msg, current_user_id, is_clan_owner, false, cx) {
+    if can_delete_message(msg, current_user_id, false, cx) {
         let message_id = msg.id;
         let locale_owned = locale.to_string();
         menu = menu.separator().danger_item_trailing_icon(
@@ -798,4 +823,37 @@ fn build_channel_menu(
     }
 
     menu
+}
+
+#[cfg(test)]
+mod delete_permission_tests {
+    use super::delete_message_allowed;
+
+    #[test]
+    fn own_message_is_always_deletable() {
+        assert!(delete_message_allowed(true, false, false, false, false));
+        assert!(delete_message_allowed(true, true, false, false, false));
+    }
+
+    #[test]
+    fn group_dm_defers_to_group_owner() {
+        assert!(delete_message_allowed(false, true, true, false, false));
+        assert!(!delete_message_allowed(false, true, false, false, true));
+    }
+
+    #[test]
+    fn dm_never_allows_deleting_other_messages() {
+        assert!(!delete_message_allowed(false, false, false, false, true));
+    }
+
+    #[test]
+    fn channel_defers_to_overridden_permission() {
+        assert!(delete_message_allowed(false, false, false, true, true));
+        assert!(!delete_message_allowed(false, false, false, true, false));
+    }
+
+    #[test]
+    fn clan_owner_has_no_bypass() {
+        assert!(!delete_message_allowed(false, false, true, true, false));
+    }
 }
