@@ -2,13 +2,13 @@ use crate::ids::{ClanId, RoleId, UserId};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use gpui::{App, AppContext, Context, Entity, EventEmitter, Global, Subscription, Task};
+use gpui::{App, AppContext, Context, Entity, EventEmitter, Global, Task};
 use mezon_client::{AppApi, ConnectionStatus, RealtimeEvent};
 use mezon_proto::{api, realtime};
 
 use crate::KeyedCache;
 use crate::badge::BadgeService;
-use crate::clan::{ClanEvent, ClanList};
+use crate::clan::ClanList;
 use crate::presence::PresenceStore;
 use crate::realtime::{RealtimeDispatch, RealtimeKind};
 
@@ -22,6 +22,7 @@ pub struct User {
     pub avatar_url: String,
     pub about_me: String,
     pub create_time_seconds: u32,
+    pub join_time_seconds: u32,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -90,7 +91,6 @@ pub struct ClanMembersStore {
     self_role_ids: HashMap<ClanId, Vec<i64>>,
     loading: HashSet<ClanId>,
     api: Arc<AppApi>,
-    _clan_sub: Subscription,
     _conn_watch: Task<()>,
 }
 
@@ -129,12 +129,6 @@ impl ClanMembersStore {
     fn new(api: Arc<AppApi>, cx: &mut Context<Self>) -> Self {
         Self::register_realtime(cx);
 
-        let clan_sub = cx.subscribe(&ClanList::global(cx), |this, _clan, event, cx| {
-            if let ClanEvent::ActiveClanChanged(Some(clan_id)) = event {
-                this.ensure_loaded(*clan_id, cx);
-            }
-        });
-
         let conn_watch = Self::spawn_connection_watch(api.clone(), cx);
 
         Self {
@@ -142,7 +136,6 @@ impl ClanMembersStore {
             self_role_ids: HashMap::new(),
             loading: HashSet::new(),
             api,
-            _clan_sub: clan_sub,
             _conn_watch: conn_watch,
         }
     }
@@ -209,24 +202,29 @@ impl ClanMembersStore {
 
     fn refresh_active(&mut self, cx: &mut Context<Self>) {
         if let Some(clan_id) = ClanList::global(cx).read(cx).active_clan_id {
-            self.fetch(clan_id, cx);
+            self.fetch(clan_id, cx).detach();
         }
     }
 
     pub fn ensure_loaded(&mut self, clan_id: ClanId, cx: &mut Context<Self>) {
+        self.ensure_loaded_task(clan_id, cx).detach();
+    }
+
+    pub fn ensure_loaded_task(&mut self, clan_id: ClanId, cx: &mut Context<Self>) -> Task<()> {
         self.cache.touch(&clan_id);
-        if !self.cache.is_fresh(&clan_id, crate::CACHE_TTL) {
-            self.fetch(clan_id, cx);
+        if self.cache.is_fresh(&clan_id, crate::CACHE_TTL) {
+            return Task::ready(());
         }
+        self.fetch(clan_id, cx)
     }
 
     pub fn refresh(&mut self, clan_id: ClanId, cx: &mut Context<Self>) {
-        self.fetch(clan_id, cx);
+        self.fetch(clan_id, cx).detach();
     }
 
-    fn fetch(&mut self, clan_id: ClanId, cx: &mut Context<Self>) {
+    fn fetch(&mut self, clan_id: ClanId, cx: &mut Context<Self>) -> Task<()> {
         if !self.loading.insert(clan_id) {
-            return;
+            return Task::ready(());
         }
         let api = self.api.clone();
         cx.spawn(async move |this, cx| {
@@ -283,7 +281,6 @@ impl ClanMembersStore {
                 }
             });
         })
-        .detach();
     }
 
     fn handle_event(&mut self, event: &RealtimeEvent, cx: &mut Context<Self>) {
@@ -391,6 +388,7 @@ pub(crate) fn user_from_api(user: api::User) -> Option<User> {
         avatar_url: user.avatar_url,
         about_me: user.about_me,
         create_time_seconds: user.create_time_seconds,
+        join_time_seconds: user.join_time_seconds,
     })
 }
 
@@ -418,6 +416,7 @@ fn clan_member_from_redis(user: Option<&realtime::UserProfileRedis>) -> Option<C
             avatar_url: user.avatar.clone(),
             about_me: String::new(),
             create_time_seconds: user.create_time_second,
+            join_time_seconds: 0,
         },
         clan_nick: String::new(),
         clan_avatar: String::new(),
@@ -479,6 +478,8 @@ mod tests {
                 username: username.into(),
                 display_name: display.into(),
                 avatar_url: "avatar.png".into(),
+                create_time_seconds: 1_700_000_000,
+                join_time_seconds: 1_710_000_000,
                 ..Default::default()
             }),
             role_id: vec![10, 20],
@@ -493,6 +494,8 @@ mod tests {
         let member = clan_member_from_proto(proto_clan_user(42, "alice", "Alice", "")).unwrap();
         assert_eq!(member.id(), UserId(42));
         assert_eq!(member.user.username, "alice");
+        assert_eq!(member.user.create_time_seconds, 1_700_000_000);
+        assert_eq!(member.user.join_time_seconds, 1_710_000_000);
         assert_eq!(member.role_ids, vec![RoleId(10), RoleId(20)]);
     }
 

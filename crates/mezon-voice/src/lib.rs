@@ -17,6 +17,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use anyhow::Result;
 use futures::StreamExt;
 use livekit::options::{TrackPublishOptions, VideoEncoding};
+use livekit::participant::ParticipantKind;
 use livekit::prelude::*;
 use livekit::track::{
     LocalAudioTrack, LocalTrack, LocalVideoTrack, RemoteVideoTrack, TrackKind, TrackSource,
@@ -30,6 +31,7 @@ use livekit::webrtc::video_stream::native::NativeVideoStream;
 use parking_lot::{Condvar, Mutex};
 
 pub use audio::AudioFormat;
+pub use camera::{CameraDeviceInfo, enumerate_cameras};
 
 pub fn microphone_denied() -> bool {
     audio::microphone_denied()
@@ -44,7 +46,7 @@ pub use screen_targets::{
 pub use video::VideoSurface;
 pub use video::{VideoFrameData, VideoFrameStore};
 
-use crate::camera::CameraStopper;
+use crate::camera::CameraController;
 use crate::screen::ScreenStopper;
 use crate::video::{i420_to_bgra_into, local_camera_key, local_screen_key, track_frame_key};
 
@@ -72,6 +74,7 @@ pub struct VoiceParticipant {
     pub identity: String,
     pub name: String,
     pub is_local: bool,
+    pub is_agent: bool,
     pub speaking: bool,
     pub muted: bool,
     pub camera: Option<u64>,
@@ -94,6 +97,9 @@ pub enum VoiceEvent {
 enum Command {
     SetMicEnabled(bool),
     SetCameraEnabled(bool),
+    SetInputDevice(Option<String>),
+    SetOutputDevice(Option<String>),
+    SetCameraDevice(Option<String>),
     SetNoiseSuppression(bool, u8),
     StartScreenShare(PickedScreen, bool),
     StopScreenShare,
@@ -113,6 +119,7 @@ impl VoiceSession {
         token: String,
         input_device_id: Option<String>,
         output_device_id: Option<String>,
+        camera_device_id: Option<String>,
         ice_servers: Vec<IceServerConfig>,
     ) -> Self {
         let (cmd_tx, cmd_rx) = flume::unbounded();
@@ -128,6 +135,7 @@ impl VoiceSession {
                 token,
                 input_device_id,
                 output_device_id,
+                camera_device_id,
                 ice_servers,
                 cmd_rx,
                 &evt_tx,
@@ -168,6 +176,18 @@ impl VoiceSession {
         let _ = self.cmd_tx.send(Command::SetCameraEnabled(enabled));
     }
 
+    pub fn set_input_device(&self, device_id: Option<String>) {
+        let _ = self.cmd_tx.send(Command::SetInputDevice(device_id));
+    }
+
+    pub fn set_output_device(&self, device_id: Option<String>) {
+        let _ = self.cmd_tx.send(Command::SetOutputDevice(device_id));
+    }
+
+    pub fn set_camera_device(&self, device_id: Option<String>) {
+        let _ = self.cmd_tx.send(Command::SetCameraDevice(device_id));
+    }
+
     pub fn set_noise_suppression(&self, enabled: bool, level: u8) {
         let _ = self
             .cmd_tx
@@ -197,7 +217,7 @@ impl Drop for VoiceSession {
 
 struct CameraSession {
     track: LocalVideoTrack,
-    stopper: CameraStopper,
+    controller: CameraController,
 }
 
 struct ScreenSession {
@@ -242,7 +262,6 @@ fn room_options(ice_servers: Vec<IceServerConfig>) -> RoomOptions {
 
     let mut options = RoomOptions::default();
     options.rtc_config.ice_servers = ice_servers;
-    options.single_peer_connection = false;
     options
 }
 
@@ -252,6 +271,7 @@ async fn session_main(
     token: String,
     input_device_id: Option<String>,
     output_device_id: Option<String>,
+    camera_device_id: Option<String>,
     ice_servers: Vec<IceServerConfig>,
     cmd_rx: flume::Receiver<Command>,
     evt_tx: &flume::Sender<VoiceEvent>,
@@ -272,6 +292,7 @@ async fn session_main(
     let mut audio_mixer = None;
     let mut out_fmt = None;
     let mut audio_io: Option<audio::AudioIo> = None;
+    let mut out_change_rx: Option<flume::Receiver<AudioFormat>> = None;
 
     let audio = tokio::task::spawn_blocking(move || {
         audio::AudioIo::start(input_device_id, output_device_id)
@@ -283,6 +304,7 @@ async fn session_main(
         Ok(audio) => {
             audio_mixer = Some(audio.mixer.clone());
             out_fmt = Some(audio.output_format);
+            out_change_rx = Some(audio.output_format_rx.clone());
 
             let mic_enabled = mic_enabled.clone();
             let mic_publication_task = mic_publication.clone();
@@ -290,58 +312,78 @@ async fn session_main(
             let input_format_rx = audio.input_format_rx.clone();
             let room_for_mic = room.clone();
             runtime::runtime().spawn(async move {
-                let Ok(in_fmt) = input_format_rx.recv_async().await else {
-                    return;
-                };
-                let source = NativeAudioSource::new(
-                    AudioSourceOptions::default(),
-                    in_fmt.sample_rate,
-                    in_fmt.channels,
-                    1000,
-                );
-                let mic_track = LocalAudioTrack::create_audio_track(
-                    "microphone",
-                    RtcAudioSource::Native(source.clone()),
-                );
-                let publication = match room_for_mic
-                    .local_participant()
-                    .publish_track(
-                        LocalTrack::Audio(mic_track),
-                        TrackPublishOptions {
-                            source: TrackSource::Microphone,
-                            ..Default::default()
-                        },
-                    )
-                    .await
-                {
-                    Ok(publication) => publication,
-                    Err(e) => {
-                        tracing::warn!("failed to publish mic track: {e}");
-                        return;
+                let mut source: Option<NativeAudioSource> = None;
+                let mut channels: u32 = 1;
+                let mut sample_rate: u32 = 48_000;
+                loop {
+                    tokio::select! {
+                        biased;
+                        reconfigure = input_format_rx.recv_async() => {
+                            let Ok(in_fmt) = reconfigure else { break };
+                            let previous = mic_publication_task.lock().take();
+                            if let Some(previous) = previous {
+                                let _ = room_for_mic
+                                    .local_participant()
+                                    .unpublish_track(&previous.sid())
+                                    .await;
+                            }
+                            let new_source = NativeAudioSource::new(
+                                AudioSourceOptions::default(),
+                                in_fmt.sample_rate,
+                                in_fmt.channels,
+                                1000,
+                            );
+                            let mic_track = LocalAudioTrack::create_audio_track(
+                                "microphone",
+                                RtcAudioSource::Native(new_source.clone()),
+                            );
+                            match room_for_mic
+                                .local_participant()
+                                .publish_track(
+                                    LocalTrack::Audio(mic_track),
+                                    TrackPublishOptions {
+                                        source: TrackSource::Microphone,
+                                        ..Default::default()
+                                    },
+                                )
+                                .await
+                            {
+                                Ok(publication) => {
+                                    if !mic_enabled.load(Ordering::Relaxed) {
+                                        publication.mute();
+                                    }
+                                    *mic_publication_task.lock() = Some(publication);
+                                    channels = in_fmt.channels.max(1);
+                                    sample_rate = in_fmt.sample_rate;
+                                    source = Some(new_source);
+                                }
+                                Err(e) => {
+                                    tracing::warn!("failed to publish mic track: {e}");
+                                    source = None;
+                                }
+                            }
+                        }
+                        captured = mic_rx.recv_async() => {
+                            let Ok(samples) = captured else { break };
+                            if !mic_enabled.load(Ordering::Relaxed) {
+                                continue;
+                            }
+                            let Some(source) = source.as_ref() else {
+                                continue;
+                            };
+                            let samples_per_channel = samples.len() as u32 / channels;
+                            if samples_per_channel == 0 {
+                                continue;
+                            }
+                            let frame = AudioFrame {
+                                data: samples.into(),
+                                num_channels: channels,
+                                sample_rate,
+                                samples_per_channel,
+                            };
+                            let _ = source.capture_frame(&frame).await;
+                        }
                     }
-                };
-                if !mic_enabled.load(Ordering::Relaxed) {
-                    publication.mute();
-                }
-                *mic_publication_task.lock() = Some(publication);
-
-                let channels = in_fmt.channels.max(1);
-                let sample_rate = in_fmt.sample_rate;
-                while let Ok(samples) = mic_rx.recv_async().await {
-                    if !mic_enabled.load(Ordering::Relaxed) {
-                        continue;
-                    }
-                    let samples_per_channel = samples.len() as u32 / channels;
-                    if samples_per_channel == 0 {
-                        continue;
-                    }
-                    let frame = AudioFrame {
-                        data: samples.into(),
-                        num_channels: channels,
-                        sample_rate,
-                        samples_per_channel,
-                    };
-                    let _ = source.capture_frame(&frame).await;
                 }
             });
 
@@ -356,6 +398,8 @@ async fn session_main(
     }
 
     let mut mic_on = false;
+    let mut camera_device_id = camera_device_id;
+    let mut camera_switch_pending = false;
     let mut camera_session: Option<CameraSession> = None;
     let mut screen_session: Option<ScreenSession> = None;
     let (cam_tx, cam_rx) = flume::bounded::<(u64, Result<CameraSession>)>(1);
@@ -535,26 +579,49 @@ async fn session_main(
                     }
                     Ok(Command::SetCameraEnabled(true)) => {
                         if camera_session.is_none() && camera_task.is_none() {
+                            camera_switch_pending = false;
                             let room = room.clone();
                             let identity = local_identity.clone();
                             let store = frame_store.clone();
                             let tx = cam_tx.clone();
                             let generation = camera_gen;
+                            let device = camera_device_id.clone();
                             camera_task = Some(runtime::runtime().spawn(async move {
-                                let result = start_camera_track(&room, &identity, store).await;
+                                let result = start_camera_track(&room, &identity, store, device).await;
                                 let _ = tx.send_async((generation, result)).await;
                             }));
+                        }
+                    }
+                    Ok(Command::SetInputDevice(id)) => {
+                        if let Some(io) = &audio_io {
+                            io.set_input_device(id);
+                        }
+                    }
+                    Ok(Command::SetOutputDevice(id)) => {
+                        if let Some(io) = &audio_io {
+                            io.set_output_device(id);
+                        }
+                    }
+                    Ok(Command::SetCameraDevice(id)) => {
+                        if camera_device_id != id {
+                            camera_device_id = id;
+                            if let Some(session) = &camera_session {
+                                session.controller.switch(camera_device_id.clone());
+                            } else if camera_task.is_some() {
+                                camera_switch_pending = true;
+                            }
                         }
                     }
                     Ok(Command::SetCameraEnabled(false)) => {
                         let mut changed = false;
                         camera_gen = camera_gen.wrapping_add(1);
+                        camera_switch_pending = false;
                         if let Some(task) = camera_task.take() {
                             task.abort();
                             changed = true;
                         }
                         if let Some(session) = camera_session.take() {
-                            session.stopper.stop();
+                            session.controller.stop();
                             let _ = room.local_participant().unpublish_track(&session.track.sid()).await;
                             frame_store.remove(local_camera_key(&local_identity));
                             changed = true;
@@ -615,7 +682,7 @@ async fn session_main(
                             task.abort();
                         }
                         if let Some(session) = camera_session.take() {
-                            session.stopper.stop();
+                            session.controller.stop();
                         }
                         if let Some(session) = screen_session.take() {
                             session.stopper.stop();
@@ -633,6 +700,10 @@ async fn session_main(
                 match result {
                     Ok((generation, Ok(session))) if generation == camera_gen => {
                         camera_task = None;
+                        if camera_switch_pending {
+                            camera_switch_pending = false;
+                            session.controller.switch(camera_device_id.clone());
+                        }
                         camera_session = Some(session);
                         emit(
                             &room,
@@ -643,7 +714,7 @@ async fn session_main(
                         );
                     }
                     Ok((_, Ok(session))) => {
-                        session.stopper.stop();
+                        session.controller.stop();
                         let _ = room.local_participant().unpublish_track(&session.track.sid()).await;
                         if camera_session.is_none() {
                             frame_store.remove(local_camera_key(&local_identity));
@@ -686,6 +757,12 @@ async fn session_main(
                     Err(_) => {}
                 }
             }
+            change = recv_output_change(&out_change_rx) => {
+                if let (Some(new_fmt), Some(mixer)) = (change, &audio_mixer) {
+                    out_fmt = Some(new_fmt);
+                    respawn_audio_playback(&room, mixer, new_fmt, &mut audio_tracks);
+                }
+            }
         }
     }
 
@@ -706,8 +783,9 @@ async fn start_camera_track(
     room: &Room,
     identity: &str,
     frame_store: Arc<VideoFrameStore>,
+    device_id: Option<String>,
 ) -> Result<CameraSession> {
-    let (stopper, track_rx) = camera::start_camera(identity.to_string(), frame_store);
+    let (controller, track_rx) = camera::start_camera(identity.to_string(), frame_store, device_id);
     let track = track_rx
         .recv_async()
         .await
@@ -727,7 +805,7 @@ async fn start_camera_track(
             },
         )
         .await?;
-    Ok(CameraSession { track, stopper })
+    Ok(CameraSession { track, controller })
 }
 
 async fn start_screen_track(
@@ -846,6 +924,39 @@ fn spawn_playback(
         }
         mixer.remove(key);
     })
+}
+
+async fn recv_output_change(rx: &Option<flume::Receiver<AudioFormat>>) -> Option<AudioFormat> {
+    match rx {
+        Some(rx) => rx.recv_async().await.ok(),
+        None => std::future::pending().await,
+    }
+}
+
+fn respawn_audio_playback(
+    room: &Room,
+    mixer: &Arc<audio::PlaybackMixer>,
+    out_fmt: AudioFormat,
+    audio_tracks: &mut HashMap<u64, tokio::task::JoinHandle<()>>,
+) {
+    for (_, handle) in audio_tracks.drain() {
+        handle.abort();
+    }
+    for participant in room.remote_participants().values() {
+        let identity = participant.identity().as_str().to_string();
+        for publication in participant.track_publications().values() {
+            if publication.kind() != TrackKind::Audio || !publication.is_subscribed() {
+                continue;
+            }
+            let Some(RemoteTrack::Audio(track)) = publication.track() else {
+                continue;
+            };
+            let key = track_frame_key(&identity, publication.sid().as_str());
+            mixer.remove(key);
+            let handle = spawn_playback(track, key, mixer.clone(), out_fmt);
+            audio_tracks.insert(key, handle);
+        }
+    }
 }
 
 #[derive(Default)]
@@ -974,6 +1085,15 @@ fn bounded_dimensions(width: u32, height: u32, max_width: u32, max_height: u32) 
     (width, height)
 }
 
+fn is_agent_participant(
+    kind: ParticipantKind,
+    permission: Option<livekit_protocol::ParticipantPermission>,
+) -> bool {
+    #[allow(deprecated)]
+    let legacy_agent_permission = permission.is_some_and(|p| p.agent);
+    legacy_agent_permission || kind == ParticipantKind::Agent
+}
+
 fn emit_participants(
     room: &Room,
     evt_tx: &flume::Sender<VoiceEvent>,
@@ -990,6 +1110,7 @@ fn emit_participants(
         identity: local.identity().as_str().to_string(),
         name: display_name(&local.name(), local.identity().as_str()),
         is_local: true,
+        is_agent: is_agent_participant(local.kind(), local.permission()),
         speaking: local.is_speaking(),
         muted: !local_mic_enabled || local_mic_muted(&local),
         camera: local_camera_on.then(|| local_camera_key(local_identity)),
@@ -997,12 +1118,15 @@ fn emit_participants(
         quality: network_quality(local.connection_quality()),
     });
 
-    for participant in room.remote_participants().values() {
+    let mut remotes: Vec<RemoteParticipant> = room.remote_participants().into_values().collect();
+    remotes.sort_by(|a, b| a.identity().as_str().cmp(b.identity().as_str()));
+    for participant in &remotes {
         let identity = participant.identity().as_str().to_string();
         let (camera, screenshare) = remote_video_keys(participant, &identity);
         participants.push(VoiceParticipant {
             name: display_name(&participant.name(), &identity),
             is_local: false,
+            is_agent: is_agent_participant(participant.kind(), participant.permission()),
             speaking: participant.is_speaking(),
             muted: remote_mic_muted(participant),
             camera,
@@ -1026,7 +1150,10 @@ fn remote_video_keys(
     let mut camera = None;
     let mut screenshare = None;
     for publication in participant.track_publications().values() {
-        if publication.kind() != TrackKind::Video || !publication.is_subscribed() {
+        if publication.kind() != TrackKind::Video
+            || !publication.is_subscribed()
+            || publication.is_muted()
+        {
             continue;
         }
         let key = track_frame_key(identity, publication.sid().as_str());

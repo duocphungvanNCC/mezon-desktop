@@ -23,7 +23,8 @@ use pw::{
         },
         pod::{Pod, Property},
         sys::{
-            spa_buffer, spa_meta_header, SPA_META_Header, SPA_PARAM_META_size, SPA_PARAM_META_type,
+            spa_buffer, spa_meta_header, spa_meta_region, SPA_META_Header, SPA_META_VideoCrop,
+            SPA_PARAM_META_size, SPA_PARAM_META_type,
         },
         utils::{Direction, SpaTypes},
     },
@@ -45,6 +46,7 @@ mod portal;
 // TODO: Move to wayland capturer with Arc<>
 static CAPTURER_STATE: AtomicU8 = AtomicU8::new(0);
 static STREAM_STATE_CHANGED_TO_ERROR: AtomicBool = AtomicBool::new(false);
+static LOGGED_FIRST_FRAME: AtomicBool = AtomicBool::new(false);
 
 #[derive(Clone)]
 struct ListenerUserData {
@@ -53,7 +55,7 @@ struct ListenerUserData {
 }
 
 fn param_changed_callback(
-    _stream: &StreamRef,
+    stream: &StreamRef,
     user_data: &mut ListenerUserData,
     id: u32,
     param: Option<&Pod>,
@@ -78,6 +80,62 @@ fn param_changed_callback(
         .parse(param)
         // TODO: Tell library user of the error
         .expect("Failed to parse format parameter");
+
+    match serialize_meta_params() {
+        Ok((header_values, crop_values)) => {
+            let pods = (
+                pw::spa::pod::Pod::from_bytes(&header_values),
+                pw::spa::pod::Pod::from_bytes(&crop_values),
+            );
+            if let (Some(header_pod), Some(crop_pod)) = pods {
+                let mut params = [header_pod, crop_pod];
+                if let Err(e) = stream.update_params(&mut params) {
+                    log::error!("Failed to update stream meta params: {e}");
+                }
+            }
+        }
+        Err(e) => log::error!("Failed to serialize stream meta params: {e}"),
+    }
+}
+
+fn serialize_meta_params() -> Result<(Vec<u8>, Vec<u8>)> {
+    let metas_obj = pw::spa::pod::object!(
+        SpaTypes::ObjectParamMeta,
+        ParamType::Meta,
+        Property::new(
+            SPA_PARAM_META_type,
+            pw::spa::pod::Value::Id(pw::spa::utils::Id(SPA_META_Header))
+        ),
+        Property::new(
+            SPA_PARAM_META_size,
+            pw::spa::pod::Value::Int(size_of::<pw::spa::sys::spa_meta_header>() as i32)
+        ),
+    );
+    let crop_meta_obj = pw::spa::pod::object!(
+        SpaTypes::ObjectParamMeta,
+        ParamType::Meta,
+        Property::new(
+            SPA_PARAM_META_type,
+            pw::spa::pod::Value::Id(pw::spa::utils::Id(SPA_META_VideoCrop))
+        ),
+        Property::new(
+            SPA_PARAM_META_size,
+            pw::spa::pod::Value::Int(size_of::<spa_meta_region>() as i32)
+        ),
+    );
+    let header_values = pw::spa::pod::serialize::PodSerializer::serialize(
+        std::io::Cursor::new(Vec::new()),
+        &pw::spa::pod::Value::Object(metas_obj),
+    )?
+    .0
+    .into_inner();
+    let crop_values = pw::spa::pod::serialize::PodSerializer::serialize(
+        std::io::Cursor::new(Vec::new()),
+        &pw::spa::pod::Value::Object(crop_meta_obj),
+    )?
+    .0
+    .into_inner();
+    Ok((header_values, crop_values))
 }
 
 fn state_changed_callback(
@@ -112,6 +170,41 @@ unsafe fn get_timestamp(buffer: *mut spa_buffer) -> i64 {
     } else {
         0
     }
+}
+
+unsafe fn get_video_crop(buffer: *mut spa_buffer) -> Option<(u32, u32, u32, u32)> {
+    let n_metas = (*buffer).n_metas;
+    let mut meta_ptr = (*buffer).metas;
+    if meta_ptr.is_null() {
+        return None;
+    }
+    let metas_end = meta_ptr.wrapping_add(n_metas as usize);
+    while meta_ptr != metas_end {
+        if (*meta_ptr).type_ == SPA_META_VideoCrop
+            && (*meta_ptr).size as usize >= size_of::<spa_meta_region>()
+        {
+            let region_ptr = (*meta_ptr).data as *const spa_meta_region;
+            if region_ptr.is_null() {
+                return None;
+            }
+            let region = (*region_ptr).region;
+            if region.position.x >= 0
+                && region.position.y >= 0
+                && region.size.width > 0
+                && region.size.height > 0
+            {
+                return Some((
+                    region.position.x as u32,
+                    region.position.y as u32,
+                    region.size.width,
+                    region.size.height,
+                ));
+            }
+            return None;
+        }
+        meta_ptr = meta_ptr.wrapping_add(1);
+    }
+    None
 }
 
 fn process_callback(stream: &StreamRef, user_data: &mut ListenerUserData) {
@@ -153,37 +246,89 @@ fn process_callback_impl(
         return Ok(None);
     }
     let frame_size = user_data.format.size();
-    let frame_data: Vec<u8> = unsafe {
-        std::slice::from_raw_parts(
-            (*(*buffer).datas).data as *mut u8,
-            (*(*buffer).datas).maxsize as usize,
-        )
-        .to_vec()
-    };
+    let full_w = frame_size.width;
+    let full_h = frame_size.height;
+    if full_w == 0 || full_h == 0 {
+        return Ok(None);
+    }
 
-    match user_data.format.format() {
+    let format = user_data.format.format();
+    let bpp: usize = if format == VideoFormat::RGB { 3 } else { 4 };
+
+    let frame_data: Vec<u8>;
+    let out_w;
+    let out_h;
+    unsafe {
+        let datas = (*buffer).datas;
+        let data_ptr = (*datas).data as *const u8;
+        if data_ptr.is_null() {
+            return Ok(None);
+        }
+        let src = std::slice::from_raw_parts(data_ptr, (*datas).maxsize as usize);
+        let chunk = (*datas).chunk;
+        let (offset, stride) = if chunk.is_null() {
+            (0usize, 0usize)
+        } else {
+            ((*chunk).offset as usize, (*chunk).stride.max(0) as usize)
+        };
+        let stride = if stride > 0 {
+            stride
+        } else {
+            full_w as usize * bpp
+        };
+
+        let crop = get_video_crop(buffer).filter(|&(x, y, w, h)| {
+            x.checked_add(w).is_some_and(|right| right <= full_w)
+                && y.checked_add(h).is_some_and(|bottom| bottom <= full_h)
+        });
+        if !LOGGED_FIRST_FRAME.swap(true, std::sync::atomic::Ordering::Relaxed) {
+            log::info!(
+                "pipewire frame: stream {}x{}, stride {}, crop {:?}",
+                full_w,
+                full_h,
+                stride,
+                crop
+            );
+        }
+        let (crop_x, crop_y, w, h) = crop.unwrap_or((0, 0, full_w, full_h));
+        out_w = w;
+        out_h = h;
+
+        let mut data = Vec::with_capacity(w as usize * h as usize * bpp);
+        for row in 0..h as usize {
+            let start = offset + (crop_y as usize + row) * stride + crop_x as usize * bpp;
+            let end = start + w as usize * bpp;
+            if end > src.len() {
+                return Ok(None);
+            }
+            data.extend_from_slice(&src[start..end]);
+        }
+        frame_data = data;
+    }
+
+    match format {
         VideoFormat::RGBx => Ok(Some(Frame::RGBx(RGBxFrame {
             display_time: timestamp as u64,
-            width: frame_size.width as i32,
-            height: frame_size.height as i32,
+            width: out_w as i32,
+            height: out_h as i32,
             data: frame_data,
         }))),
         VideoFormat::RGB => Ok(Some(Frame::RGB(RGBFrame {
             display_time: timestamp as u64,
-            width: frame_size.width as i32,
-            height: frame_size.height as i32,
+            width: out_w as i32,
+            height: out_h as i32,
             data: frame_data,
         }))),
         VideoFormat::xBGR => Ok(Some(Frame::XBGR(XBGRFrame {
             display_time: timestamp as u64,
-            width: frame_size.width as i32,
-            height: frame_size.height as i32,
+            width: out_w as i32,
+            height: out_h as i32,
             data: frame_data,
         }))),
         VideoFormat::BGRx => Ok(Some(Frame::BGRx(BGRxFrame {
             display_time: timestamp as u64,
-            width: frame_size.width as i32,
-            height: frame_size.height as i32,
+            width: out_w as i32,
+            height: out_h as i32,
             data: frame_data,
         }))),
         _ => Err(anyhow!("Unsupported frame format received")),
@@ -284,37 +429,21 @@ fn start_pipewire_capturer(
         ),
     );
 
-    let metas_obj = pw::spa::pod::object!(
-        SpaTypes::ObjectParamMeta,
-        ParamType::Meta,
-        Property::new(
-            SPA_PARAM_META_type,
-            pw::spa::pod::Value::Id(pw::spa::utils::Id(SPA_META_Header))
-        ),
-        Property::new(
-            SPA_PARAM_META_size,
-            pw::spa::pod::Value::Int(size_of::<pw::spa::sys::spa_meta_header>() as i32)
-        ),
-    );
-
     let values: Vec<u8> = pw::spa::pod::serialize::PodSerializer::serialize(
         std::io::Cursor::new(Vec::new()),
         &pw::spa::pod::Value::Object(obj),
     )?
     .0
     .into_inner();
-    let metas_values: Vec<u8> = pw::spa::pod::serialize::PodSerializer::serialize(
-        std::io::Cursor::new(Vec::new()),
-        &pw::spa::pod::Value::Object(metas_obj),
-    )?
-    .0
-    .into_inner();
+    let (metas_values, crop_meta_values) = serialize_meta_params()?;
 
     let mut params = [
         pw::spa::pod::Pod::from_bytes(&values)
             .context("Not enough space in screen capture 'values' param.")?,
         pw::spa::pod::Pod::from_bytes(&metas_values)
             .context("Not enough space in screen capture 'metas_values' param.")?,
+        pw::spa::pod::Pod::from_bytes(&crop_meta_values)
+            .context("Not enough space in screen capture 'crop_meta_values' param.")?,
     ];
 
     stream.connect(
@@ -379,6 +508,7 @@ impl WaylandCapturer {
         let connection = dbus::blocking::Connection::new_session()
             .context("Failed to create dbus connection")?;
         let stream_id = ScreenCastPortal::new(&connection)
+            .source_types(options.portal_source_types)
             .show_cursor(options.show_cursor)
             .context("Unsupported screen capture cursor display mode")?
             .create_stream()

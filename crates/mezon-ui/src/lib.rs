@@ -1,5 +1,7 @@
 pub mod app;
 pub mod auth;
+pub mod canvas_navigation;
+pub mod channel_app;
 pub mod chat;
 pub mod clan;
 pub mod command_palette;
@@ -18,7 +20,13 @@ pub mod window_layout;
 pub use app::root::RootView;
 pub use app::shell::Shell;
 pub use app::title_bar::TitleBar;
+pub use app::wallet_toast::WalletToastBridge;
 pub use auth::login_view::LoginView;
+pub use channel_app::{
+    OpenChannelAppRequest, close_channel_app_window, focus_channel_app_window, is_channel_app_open,
+    is_channel_app_open_id, is_channel_app_window_open, launch_channel_app_from_store,
+    open_channel_app_window, reset_channel_app_from_store,
+};
 pub use chat::layout::ChatLayout;
 pub use dev::gallery::DevGallery;
 pub use gallery::GalleryModal;
@@ -76,6 +84,11 @@ pub fn init(cx: &mut gpui::App) {
         ::menu::Cancel,
         Some("menu"),
     )]);
+    cx.bind_keys([gpui::KeyBinding::new(
+        "escape",
+        ::menu::Cancel,
+        Some("modal_backdrop"),
+    )]);
     #[cfg(debug_assertions)]
     cx.bind_keys([gpui::KeyBinding::new("cmd-alt-i", ToggleInspector, None)]);
     cx.bind_keys([gpui::KeyBinding::new(
@@ -87,7 +100,10 @@ pub fn init(cx: &mut gpui::App) {
         command_palette::CommandPaletteModal::try_toggle_authenticated(cx);
     });
     components::primitives::init_input(cx);
+    components::primitives::init_textarea(cx);
     chat::mention_input::init(cx);
+    mezon_canvas::init(cx);
+    canvas_navigation::init(cx);
     chat::message_search::init(cx);
     command_palette::init(cx);
     router::Router::init(cx);

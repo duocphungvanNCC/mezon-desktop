@@ -1,8 +1,10 @@
 #[path = "blink_manager.rs"]
 mod blink_manager;
 
+use std::any::Any;
 use std::ops::Range;
 use std::path::PathBuf;
+use std::rc::Rc;
 
 use blink_manager::CaretBlink;
 
@@ -11,13 +13,17 @@ use gpui::{
     ElementInputHandler, Entity, EntityInputHandler, EventEmitter, FocusHandle, Focusable,
     FontWeight, GlobalElementId, Hsla, Image, InspectorElementId, IntoElement, KeyBinding,
     LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point,
-    Render, RenderOnce, SharedString, Style, StyleRefinement, Styled, Subscription, TextAlign,
-    TextRun, UTF16Selection, UnderlineStyle, Window, WrappedLine, actions, div, fill, point,
-    prelude::*, px, rgb, size,
+    Render, RenderOnce, ScrollWheelEvent, SharedString, Style, StyleRefinement, Styled,
+    Subscription, TextAlign, TextRun, UTF16Selection, UnderlineStyle, Window, WrappedLine, actions,
+    div, fill, point, prelude::*, px, rgb, size,
 };
 use unicode_segmentation::UnicodeSegmentation;
 
 use crate::theme::ActiveTheme;
+use crate::util::text_edit::{
+    EditKind, HistoryEntry, MAX_UNDO_HISTORY, home_target, line_end, line_start,
+    next_word_boundary, previous_word_boundary, should_coalesce,
+};
 
 const MASK: char = '\u{2022}';
 const KEY_CONTEXT: &str = "MezonMentionInput";
@@ -26,6 +32,12 @@ const MAX_VISIBLE_LINES: usize = 10;
 struct DocLine {
     line: WrappedLine,
     start: usize,
+    top: Pixels,
+    height: Pixels,
+}
+
+fn wrapped_line_height(line: &WrappedLine, line_height: Pixels) -> Pixels {
+    line_height * (line.wrap_boundaries.len() as f32 + 1.0)
 }
 
 fn locate_display_offset(lines: &[DocLine], display_off: usize) -> (usize, usize) {
@@ -161,6 +173,22 @@ actions!(
         SelectAll,
         Home,
         End,
+        MoveToPreviousWordStart,
+        MoveToNextWordEnd,
+        SelectToPreviousWordStart,
+        SelectToNextWordEnd,
+        DeleteToPreviousWordStart,
+        DeleteToNextWordEnd,
+        SelectToLineStart,
+        SelectToLineEnd,
+        MoveToDocStart,
+        MoveToDocEnd,
+        SelectToDocStart,
+        SelectToDocEnd,
+        DeleteToLineStart,
+        DeleteToLineEnd,
+        Undo,
+        Redo,
         ShowCharacterPalette,
         Paste,
         Cut,
@@ -169,7 +197,7 @@ actions!(
 );
 
 pub(crate) fn init(cx: &mut App) {
-    cx.bind_keys([
+    let mut bindings = vec![
         KeyBinding::new("backspace", Backspace, Some(KEY_CONTEXT)),
         KeyBinding::new("delete", Delete, Some(KEY_CONTEXT)),
         KeyBinding::new("enter", Enter, Some(KEY_CONTEXT)),
@@ -180,19 +208,77 @@ pub(crate) fn init(cx: &mut App) {
         KeyBinding::new("right", Right, Some(KEY_CONTEXT)),
         KeyBinding::new("shift-left", SelectLeft, Some(KEY_CONTEXT)),
         KeyBinding::new("shift-right", SelectRight, Some(KEY_CONTEXT)),
+        KeyBinding::new("home", Home, Some(KEY_CONTEXT)),
+        KeyBinding::new("end", End, Some(KEY_CONTEXT)),
+        KeyBinding::new("shift-home", SelectToLineStart, Some(KEY_CONTEXT)),
+        KeyBinding::new("shift-end", SelectToLineEnd, Some(KEY_CONTEXT)),
         KeyBinding::new("secondary-a", SelectAll, Some(KEY_CONTEXT)),
         KeyBinding::new("secondary-v", Paste, Some(KEY_CONTEXT)),
         KeyBinding::new("secondary-c", Copy, Some(KEY_CONTEXT)),
         KeyBinding::new("secondary-x", Cut, Some(KEY_CONTEXT)),
-        KeyBinding::new("home", Home, Some(KEY_CONTEXT)),
-        KeyBinding::new("end", End, Some(KEY_CONTEXT)),
+        KeyBinding::new("secondary-z", Undo, Some(KEY_CONTEXT)),
+        KeyBinding::new("secondary-shift-z", Redo, Some(KEY_CONTEXT)),
         KeyBinding::new("ctrl-cmd-space", ShowCharacterPalette, Some(KEY_CONTEXT)),
+    ];
+
+    #[cfg(target_os = "macos")]
+    bindings.extend([
+        KeyBinding::new("alt-left", MoveToPreviousWordStart, Some(KEY_CONTEXT)),
+        KeyBinding::new("alt-right", MoveToNextWordEnd, Some(KEY_CONTEXT)),
+        KeyBinding::new(
+            "alt-shift-left",
+            SelectToPreviousWordStart,
+            Some(KEY_CONTEXT),
+        ),
+        KeyBinding::new("alt-shift-right", SelectToNextWordEnd, Some(KEY_CONTEXT)),
+        KeyBinding::new(
+            "alt-backspace",
+            DeleteToPreviousWordStart,
+            Some(KEY_CONTEXT),
+        ),
+        KeyBinding::new("alt-delete", DeleteToNextWordEnd, Some(KEY_CONTEXT)),
+        KeyBinding::new("cmd-left", Home, Some(KEY_CONTEXT)),
+        KeyBinding::new("cmd-right", End, Some(KEY_CONTEXT)),
+        KeyBinding::new("cmd-shift-left", SelectToLineStart, Some(KEY_CONTEXT)),
+        KeyBinding::new("cmd-shift-right", SelectToLineEnd, Some(KEY_CONTEXT)),
+        KeyBinding::new("cmd-up", MoveToDocStart, Some(KEY_CONTEXT)),
+        KeyBinding::new("cmd-down", MoveToDocEnd, Some(KEY_CONTEXT)),
+        KeyBinding::new("cmd-shift-up", SelectToDocStart, Some(KEY_CONTEXT)),
+        KeyBinding::new("cmd-shift-down", SelectToDocEnd, Some(KEY_CONTEXT)),
+        KeyBinding::new("cmd-backspace", DeleteToLineStart, Some(KEY_CONTEXT)),
+        KeyBinding::new("cmd-delete", DeleteToLineEnd, Some(KEY_CONTEXT)),
     ]);
+
+    #[cfg(not(target_os = "macos"))]
+    bindings.extend([
+        KeyBinding::new("ctrl-left", MoveToPreviousWordStart, Some(KEY_CONTEXT)),
+        KeyBinding::new("ctrl-right", MoveToNextWordEnd, Some(KEY_CONTEXT)),
+        KeyBinding::new(
+            "ctrl-shift-left",
+            SelectToPreviousWordStart,
+            Some(KEY_CONTEXT),
+        ),
+        KeyBinding::new("ctrl-shift-right", SelectToNextWordEnd, Some(KEY_CONTEXT)),
+        KeyBinding::new(
+            "ctrl-backspace",
+            DeleteToPreviousWordStart,
+            Some(KEY_CONTEXT),
+        ),
+        KeyBinding::new("ctrl-delete", DeleteToNextWordEnd, Some(KEY_CONTEXT)),
+        KeyBinding::new("ctrl-home", MoveToDocStart, Some(KEY_CONTEXT)),
+        KeyBinding::new("ctrl-end", MoveToDocEnd, Some(KEY_CONTEXT)),
+        KeyBinding::new("ctrl-shift-home", SelectToDocStart, Some(KEY_CONTEXT)),
+        KeyBinding::new("ctrl-shift-end", SelectToDocEnd, Some(KEY_CONTEXT)),
+        KeyBinding::new("ctrl-y", Redo, Some(KEY_CONTEXT)),
+    ]);
+
+    cx.bind_keys(bindings);
 }
 
 #[derive(Clone, PartialEq, Eq)]
 pub(crate) enum MentionFieldEvent {
     Change,
+    HistoryRestored,
     PressEnter,
     NavUp,
     NavDown,
@@ -213,11 +299,18 @@ pub(crate) struct MentionInputState {
     last_bounds: Option<Bounds<Pixels>>,
     line_height: Pixels,
     scroll_offset: Point<Pixels>,
+    measured_rows: usize,
+    content_height: Pixels,
+    pending_caret_reveal: bool,
     is_selecting: bool,
     masked: bool,
     compact: bool,
     mention_spans: Vec<MentionSpan>,
     caret_blink: CaretBlink,
+    undo_stack: Vec<HistoryEntry>,
+    redo_stack: Vec<HistoryEntry>,
+    last_edit_kind: Option<EditKind>,
+    history_payload: Option<Rc<dyn Any>>,
     _window_activation_sub: Subscription,
 }
 
@@ -242,11 +335,18 @@ impl MentionInputState {
             last_bounds: None,
             line_height: px(20.),
             scroll_offset: Point::default(),
+            measured_rows: 1,
+            content_height: px(0.),
+            pending_caret_reveal: true,
             is_selecting: false,
             masked: false,
             compact: false,
             mention_spans: Vec::new(),
             caret_blink: CaretBlink::new(window.is_window_active()),
+            undo_stack: Vec::new(),
+            redo_stack: Vec::new(),
+            last_edit_kind: None,
+            history_payload: None,
             _window_activation_sub: window_activation_sub,
         };
 
@@ -266,6 +366,18 @@ impl MentionInputState {
     pub fn placeholder(mut self, placeholder: impl Into<SharedString>) -> Self {
         self.placeholder = placeholder.into();
         self
+    }
+
+    pub fn set_placeholder(
+        &mut self,
+        placeholder: impl Into<SharedString>,
+        cx: &mut Context<Self>,
+    ) {
+        let placeholder = placeholder.into();
+        if self.placeholder != placeholder {
+            self.placeholder = placeholder;
+            cx.notify();
+        }
     }
 
     pub(crate) fn compact(mut self) -> Self {
@@ -301,6 +413,7 @@ impl MentionInputState {
     ) {
         let start = range.start.min(self.content.len());
         let end = range.end.min(self.content.len()).max(start);
+        self.record_history(EditKind::Other);
         let mut next = String::with_capacity(self.content.len() - (end - start) + text.len());
         next.push_str(&self.content[..start]);
         next.push_str(text);
@@ -325,6 +438,8 @@ impl MentionInputState {
         let end = self.content.len();
         self.selected_range = end..end;
         self.marked_range = None;
+        self.clear_history();
+        self.history_payload = None;
         cx.notify();
         cx.emit(MentionFieldEvent::Change);
     }
@@ -359,11 +474,219 @@ impl MentionInputState {
     }
 
     fn home(&mut self, _: &Home, _: &mut Window, cx: &mut Context<Self>) {
-        self.move_to(0, cx);
+        self.move_to(home_target(&self.content, self.cursor_offset()), cx);
     }
 
     fn end(&mut self, _: &End, _: &mut Window, cx: &mut Context<Self>) {
+        self.move_to(line_end(&self.content, self.cursor_offset()), cx);
+    }
+
+    fn select_to_line_start(
+        &mut self,
+        _: &SelectToLineStart,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.select_to(home_target(&self.content, self.cursor_offset()), cx);
+    }
+
+    fn select_to_line_end(&mut self, _: &SelectToLineEnd, _: &mut Window, cx: &mut Context<Self>) {
+        self.select_to(line_end(&self.content, self.cursor_offset()), cx);
+    }
+
+    fn move_to_doc_start(&mut self, _: &MoveToDocStart, _: &mut Window, cx: &mut Context<Self>) {
+        self.move_to(0, cx);
+    }
+
+    fn move_to_doc_end(&mut self, _: &MoveToDocEnd, _: &mut Window, cx: &mut Context<Self>) {
         self.move_to(self.content.len(), cx);
+    }
+
+    fn select_to_doc_start(
+        &mut self,
+        _: &SelectToDocStart,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.select_to(0, cx);
+    }
+
+    fn select_to_doc_end(&mut self, _: &SelectToDocEnd, _: &mut Window, cx: &mut Context<Self>) {
+        self.select_to(self.content.len(), cx);
+    }
+
+    fn move_to_previous_word_start(
+        &mut self,
+        _: &MoveToPreviousWordStart,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.move_to(
+            previous_word_boundary(&self.content, self.cursor_offset()),
+            cx,
+        );
+    }
+
+    fn move_to_next_word_end(
+        &mut self,
+        _: &MoveToNextWordEnd,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.move_to(next_word_boundary(&self.content, self.cursor_offset()), cx);
+    }
+
+    fn select_to_previous_word_start(
+        &mut self,
+        _: &SelectToPreviousWordStart,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.select_to(
+            previous_word_boundary(&self.content, self.cursor_offset()),
+            cx,
+        );
+    }
+
+    fn select_to_next_word_end(
+        &mut self,
+        _: &SelectToNextWordEnd,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.select_to(next_word_boundary(&self.content, self.cursor_offset()), cx);
+    }
+
+    fn delete_to_previous_word_start(
+        &mut self,
+        _: &DeleteToPreviousWordStart,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.selected_range.is_empty() {
+            let prev = previous_word_boundary(&self.content, self.cursor_offset());
+            if prev == self.cursor_offset() {
+                window.play_system_bell();
+                return;
+            }
+            self.extend_selection(prev, cx);
+        }
+        self.replace_text_in_range(None, "", window, cx);
+    }
+
+    fn delete_to_next_word_end(
+        &mut self,
+        _: &DeleteToNextWordEnd,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.selected_range.is_empty() {
+            let next = next_word_boundary(&self.content, self.cursor_offset());
+            if next == self.cursor_offset() {
+                window.play_system_bell();
+                return;
+            }
+            self.extend_selection(next, cx);
+        }
+        self.replace_text_in_range(None, "", window, cx);
+    }
+
+    fn delete_to_line_start(
+        &mut self,
+        _: &DeleteToLineStart,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.selected_range.is_empty() {
+            let target = line_start(&self.content, self.cursor_offset());
+            if target == self.cursor_offset() {
+                window.play_system_bell();
+                return;
+            }
+            self.extend_selection(target, cx);
+        }
+        self.replace_text_in_range(None, "", window, cx);
+    }
+
+    fn delete_to_line_end(
+        &mut self,
+        _: &DeleteToLineEnd,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.selected_range.is_empty() {
+            let target = line_end(&self.content, self.cursor_offset());
+            if target == self.cursor_offset() {
+                window.play_system_bell();
+                return;
+            }
+            self.extend_selection(target, cx);
+        }
+        self.replace_text_in_range(None, "", window, cx);
+    }
+
+    fn undo(&mut self, _: &Undo, _: &mut Window, cx: &mut Context<Self>) {
+        if let Some(entry) = self.undo_stack.pop() {
+            self.redo_stack.push(self.history_snapshot());
+            self.restore_history(entry, cx);
+        }
+    }
+
+    fn redo(&mut self, _: &Redo, _: &mut Window, cx: &mut Context<Self>) {
+        if let Some(entry) = self.redo_stack.pop() {
+            self.undo_stack.push(self.history_snapshot());
+            self.restore_history(entry, cx);
+        }
+    }
+
+    fn history_snapshot(&self) -> HistoryEntry {
+        HistoryEntry {
+            content: self.content.clone(),
+            selected_range: self.selected_range.clone(),
+            selection_reversed: self.selection_reversed,
+            payload: self.history_payload.clone(),
+        }
+    }
+
+    pub(crate) fn set_history_payload(&mut self, payload: Option<Rc<dyn Any>>) {
+        self.history_payload = payload;
+    }
+
+    pub(crate) fn history_payload(&self) -> Option<Rc<dyn Any>> {
+        self.history_payload.clone()
+    }
+
+    fn record_history(&mut self, kind: EditKind) {
+        let coalesce = should_coalesce(self.last_edit_kind, kind);
+        self.redo_stack.clear();
+        if !coalesce {
+            self.undo_stack.push(self.history_snapshot());
+            if self.undo_stack.len() > MAX_UNDO_HISTORY {
+                let overflow = self.undo_stack.len() - MAX_UNDO_HISTORY;
+                self.undo_stack.drain(..overflow);
+            }
+        }
+        self.last_edit_kind = Some(kind);
+    }
+
+    fn restore_history(&mut self, entry: HistoryEntry, cx: &mut Context<Self>) {
+        self.content = entry.content;
+        self.line_count = self.content.split('\n').count().max(1);
+        self.selected_range = entry.selected_range;
+        self.selection_reversed = entry.selection_reversed;
+        self.marked_range = None;
+        self.last_edit_kind = None;
+        self.history_payload = entry.payload;
+        self.pending_caret_reveal = true;
+        self.pause_caret_blink(cx);
+        cx.notify();
+        cx.emit(MentionFieldEvent::HistoryRestored);
+    }
+
+    fn clear_history(&mut self) {
+        self.undo_stack.clear();
+        self.redo_stack.clear();
+        self.last_edit_kind = None;
     }
 
     fn backspace(&mut self, _: &Backspace, window: &mut Window, cx: &mut Context<Self>) {
@@ -373,7 +696,7 @@ impl MentionInputState {
                 window.play_system_bell();
                 return;
             }
-            self.select_to(prev, cx)
+            self.extend_selection(prev, cx)
         }
         self.replace_text_in_range(None, "", window, cx)
     }
@@ -437,7 +760,7 @@ impl MentionInputState {
                 window.play_system_bell();
                 return;
             }
-            self.select_to(next, cx)
+            self.extend_selection(next, cx)
         }
         self.replace_text_in_range(None, "", window, cx)
     }
@@ -536,6 +859,8 @@ impl MentionInputState {
 
     fn move_to(&mut self, offset: usize, cx: &mut Context<Self>) {
         self.selected_range = offset..offset;
+        self.last_edit_kind = None;
+        self.pending_caret_reveal = true;
         self.pause_caret_blink(cx);
         cx.notify()
     }
@@ -577,10 +902,37 @@ impl MentionInputState {
         if let Some(marked) = self.marked_range.clone() {
             self.marked_range = Some(self.clamp_range(marked));
         }
+        self.pending_caret_reveal = true;
+    }
+
+    fn on_scroll_wheel(
+        &mut self,
+        event: &ScrollWheelEvent,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(bounds) = self.last_bounds else {
+            return;
+        };
+        let max_scroll = (self.content_height - bounds.size.height).max(Pixels::ZERO);
+        if max_scroll <= Pixels::ZERO {
+            return;
+        }
+        let delta = event.delta.pixel_delta(self.line_height).y;
+        let next = (self.scroll_offset.y - delta).clamp(Pixels::ZERO, max_scroll);
+        if next != self.scroll_offset.y {
+            self.scroll_offset.y = next;
+            cx.stop_propagation();
+            cx.notify();
+        }
     }
 
     fn visible_line_count(&self) -> usize {
-        if self.is_masked() { 1 } else { self.line_count }
+        if self.is_masked() || self.content.is_empty() {
+            1
+        } else {
+            self.measured_rows.max(self.line_count)
+        }
     }
 
     fn display_text(&self) -> SharedString {
@@ -621,21 +973,30 @@ impl MentionInputState {
         };
         let line_height = self.line_height;
         let rel_y = position.y - bounds.top() + self.scroll_offset.y;
-        let rel_x = position.x - bounds.left() + self.scroll_offset.x;
-        let line_ix = if rel_y < Pixels::ZERO {
-            0
-        } else {
-            ((rel_y / line_height) as usize).min(self.last_lines.len() - 1)
-        };
-        let line = &self.last_lines[line_ix];
-        let local = line
+        let rel_x = (position.x - bounds.left() + self.scroll_offset.x).max(Pixels::ZERO);
+        if rel_y < Pixels::ZERO {
+            return self.display_to_content_offset(self.last_lines[0].start);
+        }
+        let doc = self
+            .last_lines
+            .iter()
+            .find(|doc| rel_y < doc.top + doc.height)
+            .unwrap_or_else(|| self.last_lines.last().expect("non-empty"));
+        let local_y =
+            (rel_y - doc.top).clamp(Pixels::ZERO, (doc.height - line_height).max(Pixels::ZERO));
+        let local = doc
             .line
-            .closest_index_for_position(point(rel_x.max(Pixels::ZERO), px(0.)), line_height)
+            .closest_index_for_position(point(rel_x, local_y), line_height)
             .unwrap_or_else(|ix| ix);
-        self.display_to_content_offset(line.start + local)
+        self.display_to_content_offset(doc.start + local)
     }
 
     fn select_to(&mut self, offset: usize, cx: &mut Context<Self>) {
+        self.last_edit_kind = None;
+        self.extend_selection(offset, cx);
+    }
+
+    fn extend_selection(&mut self, offset: usize, cx: &mut Context<Self>) {
         if self.selection_reversed {
             self.selected_range.start = offset
         } else {
@@ -645,6 +1006,7 @@ impl MentionInputState {
             self.selection_reversed = !self.selection_reversed;
             self.selected_range = self.selected_range.end..self.selected_range.start;
         }
+        self.pending_caret_reveal = true;
         self.pause_caret_blink(cx);
         cx.notify()
     }
@@ -743,6 +1105,17 @@ impl EntityInputHandler for MentionInputState {
             .unwrap_or(self.selected_range.clone());
         let range = self.clamp_range(range);
 
+        let kind = if self.marked_range.is_some() {
+            EditKind::Insert
+        } else if new_text.is_empty() {
+            EditKind::Delete
+        } else if range.is_empty() && !new_text.contains('\n') {
+            EditKind::Insert
+        } else {
+            EditKind::Other
+        };
+        self.record_history(kind);
+
         let next = self.content[0..range.start].to_owned() + new_text + &self.content[range.end..];
         self.set_content(next);
         self.selected_range = range.start + new_text.len()..range.start + new_text.len();
@@ -767,6 +1140,10 @@ impl EntityInputHandler for MentionInputState {
             .unwrap_or(self.selected_range.clone());
         let range = self.clamp_range(range);
 
+        if self.marked_range.is_none() {
+            self.record_history(EditKind::Insert);
+        }
+
         let next = self.content[0..range.start].to_owned() + new_text + &self.content[range.end..];
         self.set_content(next);
         if !new_text.is_empty() {
@@ -777,7 +1154,7 @@ impl EntityInputHandler for MentionInputState {
         self.selected_range = new_selected_range_utf16
             .as_ref()
             .map(|range_utf16| self.range_from_utf16(range_utf16))
-            .map(|new_range| new_range.start + range.start..new_range.end + range.end)
+            .map(|new_range| new_range.start + range.start..new_range.end + range.start)
             .unwrap_or_else(|| range.start + new_text.len()..range.start + new_text.len());
 
         self.pause_caret_blink(cx);
@@ -792,29 +1169,37 @@ impl EntityInputHandler for MentionInputState {
         _window: &mut Window,
         _cx: &mut Context<Self>,
     ) -> Option<Bounds<Pixels>> {
-        if self.last_lines.is_empty() {
-            return None;
-        }
         let line_height = self.line_height;
+        let caret_x = bounds.left() - self.scroll_offset.x;
+        let caret_top = bounds.top() - self.scroll_offset.y;
+        let fallback = Bounds::from_corners(
+            point(caret_x, caret_top),
+            point(caret_x, caret_top + line_height),
+        );
+        if self.last_lines.is_empty() {
+            return Some(fallback);
+        }
         let range = self.range_from_utf16(&range_utf16);
         let (s_line, s_local) =
             locate_display_offset(&self.last_lines, self.to_display_offset(range.start));
         let (e_line, e_local) =
             locate_display_offset(&self.last_lines, self.to_display_offset(range.end));
-        let x0 = self.last_lines[s_line]
+        let (Some(s_doc), Some(e_doc)) = (self.last_lines.get(s_line), self.last_lines.get(e_line))
+        else {
+            return Some(fallback);
+        };
+        let s_pos = s_doc
             .line
             .position_for_index(s_local, line_height)
-            .map(|p| p.x)
-            .unwrap_or(Pixels::ZERO);
-        let x1 = self.last_lines[e_line]
+            .unwrap_or_default();
+        let e_pos = e_doc
             .line
             .position_for_index(e_local, line_height)
-            .map(|p| p.x)
-            .unwrap_or(Pixels::ZERO);
-        let top = bounds.top() + (s_line as f32 * line_height) - self.scroll_offset.y;
+            .unwrap_or_default();
+        let top = bounds.top() + s_doc.top + s_pos.y - self.scroll_offset.y;
         Some(Bounds::from_corners(
-            point(bounds.left() + x0 - self.scroll_offset.x, top),
-            point(bounds.left() + x1 - self.scroll_offset.x, top + line_height),
+            point(bounds.left() + s_pos.x, top),
+            point(bounds.left() + e_pos.x, top + line_height),
         ))
     }
 
@@ -847,7 +1232,44 @@ impl Render for MentionInputState {
         let text_color: Hsla = cx.theme().text_primary.into();
         let compact = self.compact;
 
+        let viewport_h = self
+            .last_bounds
+            .map(|bounds| bounds.size.height)
+            .unwrap_or(Pixels::ZERO);
+        let content_h = self.content_height;
+        let scrollbar = (viewport_h > Pixels::ZERO && content_h > viewport_h + px(1.)).then(|| {
+            let ratio = viewport_h / content_h;
+            let thumb_h = (viewport_h * ratio).max(px(24.)).min(viewport_h);
+            let max_scroll = (content_h - viewport_h).max(px(1.));
+            let frac = (self.scroll_offset.y / max_scroll).clamp(0., 1.);
+            let thumb_top = (viewport_h - thumb_h) * frac;
+            let thumb_color: Hsla = cx.theme().tokens.thread_scroll.into();
+            div()
+                .absolute()
+                .top(px(9.))
+                .right(px(3.))
+                .w(px(4.))
+                .h(viewport_h)
+                .child(
+                    div()
+                        .id("mention-input-scrollbar-thumb")
+                        .absolute()
+                        .top(thumb_top)
+                        .w(px(4.))
+                        .h(thumb_h)
+                        .rounded_full()
+                        .bg(thumb_color)
+                        .when(!focused, |thumb| {
+                            thumb
+                                .opacity(0.)
+                                .group_hover("mention-input-scrollbar", |style| style.opacity(1.))
+                        }),
+                )
+        });
+
         div()
+            .relative()
+            .when(!focused, |input| input.group("mention-input-scrollbar"))
             .key_context(KEY_CONTEXT)
             .track_focus(&self.focus_handle)
             .cursor(CursorStyle::IBeam)
@@ -864,6 +1286,22 @@ impl Render for MentionInputState {
             .on_action(cx.listener(Self::select_all))
             .on_action(cx.listener(Self::home))
             .on_action(cx.listener(Self::end))
+            .on_action(cx.listener(Self::select_to_line_start))
+            .on_action(cx.listener(Self::select_to_line_end))
+            .on_action(cx.listener(Self::move_to_doc_start))
+            .on_action(cx.listener(Self::move_to_doc_end))
+            .on_action(cx.listener(Self::select_to_doc_start))
+            .on_action(cx.listener(Self::select_to_doc_end))
+            .on_action(cx.listener(Self::move_to_previous_word_start))
+            .on_action(cx.listener(Self::move_to_next_word_end))
+            .on_action(cx.listener(Self::select_to_previous_word_start))
+            .on_action(cx.listener(Self::select_to_next_word_end))
+            .on_action(cx.listener(Self::delete_to_previous_word_start))
+            .on_action(cx.listener(Self::delete_to_next_word_end))
+            .on_action(cx.listener(Self::delete_to_line_start))
+            .on_action(cx.listener(Self::delete_to_line_end))
+            .on_action(cx.listener(Self::undo))
+            .on_action(cx.listener(Self::redo))
             .on_action(cx.listener(Self::show_character_palette))
             .on_action(cx.listener(Self::paste))
             .on_action(cx.listener(Self::cut))
@@ -872,6 +1310,7 @@ impl Render for MentionInputState {
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_move(cx.listener(Self::on_mouse_move))
+            .on_scroll_wheel(cx.listener(Self::on_scroll_wheel))
             .flex()
             .items_start()
             .w_full()
@@ -887,6 +1326,7 @@ impl Render for MentionInputState {
                     .overflow_hidden()
                     .child(MentionTextElement { input: cx.entity() }),
             )
+            .when_some(scrollbar, |el, bar| el.child(bar))
     }
 }
 
@@ -898,6 +1338,8 @@ struct PreparedLine {
     line: WrappedLine,
     origin: Point<Pixels>,
     start: usize,
+    top: Pixels,
+    height: Pixels,
 }
 
 struct PrepaintState {
@@ -906,6 +1348,7 @@ struct PrepaintState {
     selection: Vec<PaintQuad>,
     line_height: Pixels,
     scroll_offset: Point<Pixels>,
+    content_height: Pixels,
 }
 
 impl IntoElement for MentionTextElement {
@@ -963,6 +1406,7 @@ impl Element for MentionTextElement {
         let selected_range = input.selected_range.clone();
         let cursor = input.cursor_offset();
         let masked = input.is_masked();
+        let reveal_caret = input.pending_caret_reveal;
         let resolved_spans: Vec<ResolvedSpan> = input
             .mention_spans
             .iter()
@@ -1008,9 +1452,12 @@ impl Element for MentionTextElement {
         let mut scroll_offset = input.scroll_offset;
         let line_height = window.line_height();
         let font_size = style.font_size.to_pixels(window.rem_size());
+        let visible_h = bounds.size.height;
+        let visible_w = bounds.size.width;
+        let wrap_width = if masked { None } else { Some(visible_w) };
         let wrapped = window
             .text_system()
-            .shape_text(display_text, font_size, &runs, None, None)
+            .shape_text(display_text, font_size, &runs, wrap_width, None)
             .unwrap_or_default();
 
         let spans: Vec<(usize, usize)> = {
@@ -1024,74 +1471,90 @@ impl Element for MentionTextElement {
                 })
                 .collect()
         };
-        let line_count = wrapped.len().max(1);
+
+        let mut tops: Vec<(Pixels, Pixels)> = Vec::with_capacity(wrapped.len());
+        let mut y_acc = Pixels::ZERO;
+        for line in wrapped.iter() {
+            let h = wrapped_line_height(line, line_height);
+            tops.push((y_acc, h));
+            y_acc += h;
+        }
+        let total_h = y_acc.max(line_height);
 
         let (caret_line, caret_local) = locate_span(&spans, display_cursor);
-        let caret_x = wrapped
+        let caret_point = wrapped
             .get(caret_line)
             .and_then(|line| line.position_for_index(caret_local, line_height))
-            .map(|p| p.x)
-            .unwrap_or(Pixels::ZERO);
-        let caret_top = caret_line as f32 * line_height;
+            .unwrap_or_default();
+        let caret_x = caret_point.x;
+        let caret_top = tops
+            .get(caret_line)
+            .map(|(t, _)| *t)
+            .unwrap_or(Pixels::ZERO)
+            + caret_point.y;
 
-        let visible_h = bounds.size.height;
-        let visible_w = bounds.size.width;
-        let total_h = line_count as f32 * line_height;
-        if caret_top < scroll_offset.y {
-            scroll_offset.y = caret_top;
-        }
-        if caret_top + line_height > scroll_offset.y + visible_h {
-            scroll_offset.y = caret_top + line_height - visible_h;
+        if reveal_caret {
+            if caret_top < scroll_offset.y {
+                scroll_offset.y = caret_top;
+            }
+            if caret_top + line_height > scroll_offset.y + visible_h {
+                scroll_offset.y = caret_top + line_height - visible_h;
+            }
         }
         scroll_offset.y = scroll_offset
             .y
             .clamp(Pixels::ZERO, (total_h - visible_h).max(Pixels::ZERO));
-        if caret_x < scroll_offset.x {
-            scroll_offset.x = caret_x;
-        }
-        if caret_x > scroll_offset.x + visible_w - px(6.) {
-            scroll_offset.x = caret_x - visible_w + px(6.);
-        }
-        scroll_offset.x = scroll_offset.x.max(Pixels::ZERO);
+        scroll_offset.x = Pixels::ZERO;
 
         let mut prepared = Vec::with_capacity(wrapped.len());
         let mut selection = Vec::new();
         for (ix, line) in wrapped.into_iter().enumerate() {
             let (line_start, line_len) = spans[ix];
             let line_end = line_start + line_len;
-            let y = bounds.top() + (ix as f32 * line_height) - scroll_offset.y;
-            let origin = point(bounds.left() - scroll_offset.x, y);
+            let (line_top, line_h) = tops[ix];
+            let origin = point(bounds.left(), bounds.top() + line_top - scroll_offset.y);
             if !display_selection.is_empty()
                 && display_selection.start <= line_end
                 && display_selection.end >= line_start
             {
-                let seg_start = display_selection.start.max(line_start) - line_start;
-                let x0 = line
-                    .position_for_index(seg_start, line_height)
-                    .map(|p| p.x)
-                    .unwrap_or(Pixels::ZERO);
-                let x1 = if display_selection.end > line_end {
-                    line.position_for_index(line_len, line_height)
-                        .map(|p| p.x)
-                        .unwrap_or(Pixels::ZERO)
-                        + px(4.)
+                let local_start = display_selection.start.max(line_start) - line_start;
+                let extends = display_selection.end > line_end;
+                let local_end = if extends {
+                    line_len
                 } else {
-                    line.position_for_index(display_selection.end - line_start, line_height)
-                        .map(|p| p.x)
-                        .unwrap_or(Pixels::ZERO)
+                    display_selection.end - line_start
                 };
-                selection.push(fill(
-                    Bounds::from_corners(
-                        point(bounds.left() + x0 - scroll_offset.x, y),
-                        point(bounds.left() + x1 - scroll_offset.x, y + line_height),
-                    ),
-                    selection_color.opacity(0.3),
-                ));
+                let p0 = line
+                    .position_for_index(local_start, line_height)
+                    .unwrap_or_default();
+                let p1 = line
+                    .position_for_index(local_end, line_height)
+                    .unwrap_or_default();
+                let row0 = (p0.y / line_height).round() as usize;
+                let row1 = (p1.y / line_height).round().max(row0 as f32) as usize;
+                for row in row0..=row1 {
+                    let row_y =
+                        bounds.top() + line_top + line_height * row as f32 - scroll_offset.y;
+                    let x_from = if row == row0 { p0.x } else { Pixels::ZERO };
+                    let mut x_to = if row == row1 { p1.x } else { visible_w };
+                    if row == row1 && extends {
+                        x_to += px(4.);
+                    }
+                    selection.push(fill(
+                        Bounds::from_corners(
+                            point(bounds.left() + x_from, row_y),
+                            point(bounds.left() + x_to, row_y + line_height),
+                        ),
+                        selection_color.opacity(0.3),
+                    ));
+                }
             }
             prepared.push(PreparedLine {
                 line,
                 origin,
                 start: line_start,
+                top: line_top,
+                height: line_h,
             });
         }
 
@@ -1099,7 +1562,7 @@ impl Element for MentionTextElement {
             Some(fill(
                 Bounds::new(
                     point(
-                        bounds.left() + caret_x - scroll_offset.x,
+                        bounds.left() + caret_x,
                         bounds.top() + caret_top - scroll_offset.y,
                     ),
                     size(px(2.), line_height),
@@ -1116,6 +1579,7 @@ impl Element for MentionTextElement {
             selection,
             line_height,
             scroll_offset,
+            content_height: total_h,
         }
     }
 
@@ -1139,10 +1603,11 @@ impl Element for MentionTextElement {
             window.paint_quad(quad);
         }
         let line_height = prepaint.line_height;
+        let content_height = prepaint.content_height;
         let lines = std::mem::take(&mut prepaint.lines);
         let mut stored = Vec::with_capacity(lines.len());
         for prepared in lines {
-            if prepared.origin.y + line_height >= bounds.top()
+            if prepared.origin.y + prepared.height >= bounds.top()
                 && prepared.origin.y <= bounds.bottom()
                 && let Err(e) = prepared.line.paint(
                     prepared.origin,
@@ -1158,6 +1623,8 @@ impl Element for MentionTextElement {
             stored.push(DocLine {
                 line: prepared.line,
                 start: prepared.start,
+                top: prepared.top,
+                height: prepared.height,
             });
         }
 
@@ -1169,11 +1636,20 @@ impl Element for MentionTextElement {
         }
 
         let scroll_offset = prepaint.scroll_offset;
-        self.input.update(cx, |input, _cx| {
+        let measured_rows = (content_height / line_height).round().max(1.) as usize;
+        self.input.update(cx, |input, cx| {
             input.last_lines = stored;
             input.last_bounds = Some(bounds);
             input.line_height = line_height;
             input.scroll_offset = scroll_offset;
+            input.content_height = content_height;
+            input.pending_caret_reveal = false;
+            if input.measured_rows != measured_rows {
+                input.measured_rows = measured_rows;
+                if !input.content.is_empty() {
+                    cx.notify();
+                }
+            }
         });
     }
 }

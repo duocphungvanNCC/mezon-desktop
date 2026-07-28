@@ -17,9 +17,11 @@ impl OtpInput {
         let inputs: Vec<Entity<InputState>> = (0..digit_count)
             .map(|_| {
                 cx.new(|cx| {
-                    InputState::new(window, cx).validate(|text, _cx| {
-                        text.is_empty() || text.chars().all(|c| c.is_ascii_digit())
-                    })
+                    InputState::new(window, cx)
+                        .text_align_center()
+                        .validate(|text, _cx| {
+                            text.is_empty() || text.chars().all(|c| c.is_ascii_digit())
+                        })
                 })
             })
             .collect();

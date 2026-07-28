@@ -155,6 +155,7 @@ mod tests {
             label: SharedString::from(label),
             subtext: SharedString::default(),
             avatar: SharedString::default(),
+            avatar_raw: SharedString::default(),
             unread_count: 0,
             last_sent_timestamp,
             last_seen_timestamp: 0,
@@ -169,6 +170,7 @@ mod tests {
             filter_name: normalize_search_string(name),
             filter_display: normalize_search_string(display),
             filter_blob: normalize_search_string(blob),
+            voice_busy: false,
         }
     }
 
@@ -214,6 +216,22 @@ mod tests {
         ];
         let indices = filter_and_sort_indices(&items, "#gen");
         assert_eq!(indices, vec![0]);
+    }
+
+    #[test]
+    fn channel_search_does_not_match_clan_subtext() {
+        let mut channel = item(
+            PaletteItemKind::Channel,
+            "general",
+            "general",
+            "",
+            "general",
+            0,
+        );
+        channel.subtext = SharedString::from("GIA_TEST");
+        let items = vec![channel];
+        assert!(filter_and_sort_indices(&items, "general").contains(&0));
+        assert!(filter_and_sort_indices(&items, "GIA_TEST").is_empty());
     }
 
     #[test]

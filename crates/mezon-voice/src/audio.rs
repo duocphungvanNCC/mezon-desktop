@@ -115,6 +115,10 @@ fn run_apm(
                 let _ = apm.process_reverse_stream(&mut chunk.data, chunk.rate, chunk.channels);
             }
             Event::Capture(mut chunk) => {
+                while let Ok(mut render) = reverse_rx.try_recv() {
+                    let _ =
+                        apm.process_reverse_stream(&mut render.data, render.rate, render.channels);
+                }
                 let _ = apm.set_stream_delay_ms(chunk.delay_ms);
                 let _ = apm.process_stream(&mut chunk.data, chunk.rate, chunk.channels);
                 let level = ns_level.load(Ordering::Relaxed).min(100);
@@ -185,6 +189,8 @@ impl PlaybackMixer {
 
 enum AudioCmd {
     SetInputActive(bool),
+    SetInputDevice(Option<String>),
+    SetOutputDevice(Option<String>),
     Shutdown,
 }
 
@@ -193,6 +199,7 @@ pub struct AudioIo {
     pub output_format: AudioFormat,
     pub mic_rx: flume::Receiver<Vec<i16>>,
     pub input_format_rx: flume::Receiver<AudioFormat>,
+    pub output_format_rx: flume::Receiver<AudioFormat>,
     pub mixer: Arc<PlaybackMixer>,
     ns_enabled: Arc<AtomicBool>,
     ns_level: Arc<AtomicU32>,
@@ -201,6 +208,14 @@ pub struct AudioIo {
 impl AudioIo {
     pub fn set_input_active(&self, active: bool) {
         let _ = self.ctrl_tx.send(AudioCmd::SetInputActive(active));
+    }
+
+    pub fn set_input_device(&self, device_id: Option<String>) {
+        let _ = self.ctrl_tx.send(AudioCmd::SetInputDevice(device_id));
+    }
+
+    pub fn set_output_device(&self, device_id: Option<String>) {
+        let _ = self.ctrl_tx.send(AudioCmd::SetOutputDevice(device_id));
     }
 
     pub fn set_noise_suppression(&self, enabled: bool, level: u8) {
@@ -219,7 +234,8 @@ impl AudioIo {
         let (reverse_tx, reverse_rx) = flume::bounded::<ReverseChunk>(128);
         let (ctrl_tx, ctrl_rx) = flume::unbounded::<AudioCmd>();
         let (out_fmt_tx, out_fmt_rx) = flume::bounded::<Result<AudioFormat, String>>(1);
-        let (in_fmt_tx, in_fmt_rx) = flume::bounded::<AudioFormat>(1);
+        let (in_fmt_tx, in_fmt_rx) = flume::unbounded::<AudioFormat>();
+        let (out_change_tx, out_change_rx) = flume::unbounded::<AudioFormat>();
         let ns_enabled = Arc::new(AtomicBool::new(false));
         let ns_level = Arc::new(AtomicU32::new(20));
 
@@ -234,60 +250,115 @@ impl AudioIo {
             .name("mezon-voice-audio".into())
             .spawn(move || {
                 let out_latency_ms = Arc::new(AtomicU32::new(0));
+                let mut current_input_id = input_device_id;
+                let mut current_output_id = output_device_id;
                 let prepared = prepare_output(
-                    output_device_id.as_deref(),
-                    mixer_for_thread,
-                    reverse_tx,
+                    current_output_id.as_deref(),
+                    mixer_for_thread.clone(),
+                    reverse_tx.clone(),
                     out_latency_ms.clone(),
                 );
-                match prepared {
-                    Ok((out_stream, out_fmt)) => {
-                        let _ = out_fmt_tx.send(Ok(out_fmt));
-                        let host = cpal::default_host();
-                        let mut in_stream: Option<cpal::Stream> = None;
-                        while let Ok(cmd) = ctrl_rx.recv() {
-                            match cmd {
-                                AudioCmd::SetInputActive(true) => {
-                                    if in_stream.is_none() {
-                                        request_macos_microphone_permission();
-                                        match build_input(
-                                            &host,
-                                            input_device_id.as_deref(),
-                                            capture_tx.clone(),
-                                            out_latency_ms.clone(),
-                                        ) {
-                                            Ok((stream, in_fmt)) => {
-                                                let _ = in_fmt_tx.try_send(in_fmt);
-                                                in_stream = Some(stream);
-                                            }
-                                            Err(e) => {
-                                                tracing::warn!("voice mic stream build failed: {e}")
-                                            }
-                                        }
-                                    }
-                                    if let Some(stream) = &in_stream
-                                        && let Err(e) = stream.play()
-                                    {
-                                        tracing::warn!("voice mic stream play failed: {e}");
-                                    }
-                                }
-                                AudioCmd::SetInputActive(false) => {
-                                    if let Some(stream) = &in_stream
-                                        && let Err(e) = stream.pause()
-                                    {
-                                        tracing::warn!("voice mic stream pause failed: {e}");
-                                    }
-                                }
-                                AudioCmd::Shutdown => break,
-                            }
-                        }
-                        drop(in_stream);
-                        drop(out_stream);
-                    }
+                let (mut out_stream, mut out_fmt) = match prepared {
+                    Ok(pair) => pair,
                     Err(e) => {
                         let _ = out_fmt_tx.send(Err(e.to_string()));
+                        return;
+                    }
+                };
+                let _ = out_fmt_tx.send(Ok(out_fmt));
+                let host = cpal::default_host();
+                let mut in_stream: Option<cpal::Stream> = None;
+                let mut input_active = false;
+                while let Ok(cmd) = ctrl_rx.recv() {
+                    match cmd {
+                        AudioCmd::SetInputActive(active) => {
+                            input_active = active;
+                            if active {
+                                if in_stream.is_none() {
+                                    request_macos_microphone_permission();
+                                    match build_input(
+                                        &host,
+                                        current_input_id.as_deref(),
+                                        capture_tx.clone(),
+                                        out_latency_ms.clone(),
+                                    ) {
+                                        Ok((stream, in_fmt)) => {
+                                            let _ = in_fmt_tx.send(in_fmt);
+                                            in_stream = Some(stream);
+                                        }
+                                        Err(e) => {
+                                            tracing::warn!("voice mic stream build failed: {e}")
+                                        }
+                                    }
+                                }
+                                if let Some(stream) = &in_stream
+                                    && let Err(e) = stream.play()
+                                {
+                                    tracing::warn!("voice mic stream play failed: {e}");
+                                }
+                            } else if let Some(stream) = &in_stream
+                                && let Err(e) = stream.pause()
+                            {
+                                tracing::warn!("voice mic stream pause failed: {e}");
+                            }
+                        }
+                        AudioCmd::SetInputDevice(device_id) => {
+                            if current_input_id == device_id {
+                                continue;
+                            }
+                            current_input_id = device_id;
+                            if in_stream.is_some() {
+                                in_stream = None;
+                                request_macos_microphone_permission();
+                                match build_input(
+                                    &host,
+                                    current_input_id.as_deref(),
+                                    capture_tx.clone(),
+                                    out_latency_ms.clone(),
+                                ) {
+                                    Ok((stream, in_fmt)) => {
+                                        let _ = in_fmt_tx.send(in_fmt);
+                                        if input_active && let Err(e) = stream.play() {
+                                            tracing::warn!("voice mic stream play failed: {e}");
+                                        }
+                                        in_stream = Some(stream);
+                                    }
+                                    Err(e) => {
+                                        tracing::warn!("voice mic stream rebuild failed: {e}")
+                                    }
+                                }
+                            }
+                        }
+                        AudioCmd::SetOutputDevice(device_id) => {
+                            if current_output_id == device_id {
+                                continue;
+                            }
+                            current_output_id = device_id;
+                            match prepare_output(
+                                current_output_id.as_deref(),
+                                mixer_for_thread.clone(),
+                                reverse_tx.clone(),
+                                out_latency_ms.clone(),
+                            ) {
+                                Ok((new_stream, new_fmt)) => {
+                                    out_stream = new_stream;
+                                    let changed = new_fmt.sample_rate != out_fmt.sample_rate
+                                        || new_fmt.channels != out_fmt.channels;
+                                    out_fmt = new_fmt;
+                                    if changed {
+                                        let _ = out_change_tx.send(new_fmt);
+                                    }
+                                }
+                                Err(e) => {
+                                    tracing::warn!("voice output stream rebuild failed: {e}")
+                                }
+                            }
+                        }
+                        AudioCmd::Shutdown => break,
                     }
                 }
+                drop(in_stream);
+                drop(out_stream);
             })?;
 
         let output_format = out_fmt_rx
@@ -306,6 +377,7 @@ impl AudioIo {
             output_format,
             mic_rx,
             input_format_rx: in_fmt_rx,
+            output_format_rx: out_change_rx,
             mixer,
             ns_enabled,
             ns_level,
@@ -428,6 +500,15 @@ fn select_output(host: &cpal::Host, id: Option<&str>) -> Result<cpal::Device> {
         .ok_or_else(|| anyhow!("no audio output device available"))
 }
 
+fn low_latency_buffer(supported: &cpal::SupportedStreamConfig) -> cpal::BufferSize {
+    match supported.buffer_size() {
+        cpal::SupportedBufferSize::Range { min, max } => {
+            cpal::BufferSize::Fixed((supported.sample_rate() / 100).clamp(*min, *max))
+        }
+        cpal::SupportedBufferSize::Unknown => cpal::BufferSize::Default,
+    }
+}
+
 fn build_input(
     host: &cpal::Host,
     id: Option<&str>,
@@ -440,7 +521,8 @@ fn build_input(
         sample_rate: supported.sample_rate(),
         channels: supported.channels() as u32,
     };
-    let config: cpal::StreamConfig = supported.config();
+    let mut config: cpal::StreamConfig = supported.config();
+    config.buffer_size = low_latency_buffer(&supported);
     let rate = in_fmt.sample_rate as i32;
     let channels = in_fmt.channels.max(1) as i32;
     let frame = (in_fmt.sample_rate as usize / 100) * in_fmt.channels.max(1) as usize;
@@ -499,7 +581,8 @@ fn build_output(
     reverse_tx: flume::Sender<ReverseChunk>,
     out_latency_ms: Arc<AtomicU32>,
 ) -> Result<cpal::Stream> {
-    let config: cpal::StreamConfig = supported.config();
+    let mut config: cpal::StreamConfig = supported.config();
+    config.buffer_size = low_latency_buffer(supported);
     let rate = supported.sample_rate() as i32;
     let channels = supported.channels().max(1) as i32;
     let frame = (supported.sample_rate() as usize / 100) * supported.channels().max(1) as usize;

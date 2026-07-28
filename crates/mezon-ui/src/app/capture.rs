@@ -80,6 +80,7 @@ fn capture_frame(target: &Target) -> anyhow::Result<BGRAFrame> {
         output_type: FrameType::BGRAFrame,
         output_resolution: Resolution::Captured,
         excluded_targets: None,
+        portal_source_types: None,
     };
 
     let mut capturer = Capturer::build(options).context("Building screen capturer")?;

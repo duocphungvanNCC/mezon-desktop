@@ -2,12 +2,18 @@ pub mod account;
 pub mod activity;
 pub mod album_layout;
 pub mod audio;
+pub mod audit_log;
+pub mod auto_update;
 pub mod badge;
 pub mod cache;
+pub mod canvas;
 pub mod channel;
+pub mod channel_media;
 pub mod channel_members;
 pub mod channel_permissions;
+pub mod channel_settings;
 pub mod clan;
+pub mod clan_load;
 pub mod clan_members;
 pub mod config;
 pub mod connection;
@@ -25,20 +31,28 @@ pub mod message;
 pub mod message_search;
 pub mod message_time;
 pub mod messages;
+pub mod notification_push;
+pub mod notification_setting;
+pub mod ogp;
 pub mod permissions;
 pub mod pinned;
 pub mod platform;
 pub mod presence;
 pub mod presign;
+pub mod quick_menu;
 pub mod realtime;
 pub mod roles;
 pub mod sticker;
 pub mod threads;
 pub mod topic_badges;
 pub mod topics;
+pub mod ui_state;
 pub mod user_profile;
 pub mod users_by_user;
 pub mod voice;
+pub mod wallet;
+mod wallet_persist;
+pub mod webhook;
 
 use anyhow::{Context, Result};
 use dirs::config_dir;
@@ -60,22 +74,45 @@ pub use audio::{
     AudioDeviceInfo, AudioStore, MicCaptureFactory, MicCaptureHandle, MicPcmCaptureFactory,
     MicPcmFormat,
 };
+pub use audit_log::{
+    ALL_ACTION_INDEX, AUDIT_ACTION_OPTIONS, AuditActionOption, AuditLogEntry, AuditLogQuery,
+    AuditLogState, AuditLogStateView, AuditLogStore, audit_action_api_value, audit_action_i18n_key,
+    audit_action_index_for_api_log,
+};
+pub use auto_update::{AutoUpdateStatus, AutoUpdateStore};
 pub use badge::BadgeService;
 pub use cache::{Freshness, KeyedCache};
+pub use canvas::{CanvasDetail, CanvasStore, CanvasSummary, UploadedCanvasImage, canvas_web_link};
 pub use channel::*;
+pub use channel_media::{
+    CHANNEL_MEDIA_CACHE_TTL, CHANNEL_MEDIA_PAGE_SIZE, ChannelMediaEvent, ChannelMediaStore,
+    ChannelTimeline, ChannelTimelineAttachment, CreateTimelineInput, TimelineCardSide,
+    UpdateTimelineInput, first_event_year, timeline_card_position,
+};
 pub use channel_members::{ChannelMember, ChannelMembersEvent, ChannelMembersStore};
 pub use channel_permissions::{
     ChannelPermissionsEvent, ChannelPermissionsStore, PERMISSION_DELETE_MESSAGE,
     PERMISSION_MANAGE_THREAD,
 };
+pub use channel_settings::{ChannelSetting, ChannelSettingsEvent, ChannelSettingsStore};
 pub use clan::*;
+pub use clan_load::ClanLoadScheduler;
 pub use clan_members::{
     ClanMember, ClanMembersEvent, ClanMembersStore, User, split_members_by_status,
 };
 pub use config::AppConfig;
 pub use connection::{ConnectionStore, resolve_initial_auth_state};
-pub use direct::{DirectChannel, DirectEvent, DirectKind, DirectMessageStore};
-pub use emoji::{Emoji, EmojiEvent, EmojiStore};
+pub use direct::{
+    DirectChannel, DirectEvent, DirectKind, DirectMessageBody, DirectMessageStore,
+    dm_counts_toward_unread_badge,
+};
+pub use emoji::{
+    EMOJI_UPLOAD_MAX_PX, EMOTICON_ALLOWED_EXTENSIONS, EMOTICON_SHORTNAME_MAX,
+    EMOTICON_SHORTNAME_MIN, Emoji, EmojiEvent, EmojiStore, MAX_EMOJI_BYTES, MAX_STICKER_BYTES,
+    STICKER_UPLOAD_MAX_PX, generate_snowflake_id, is_valid_emoticon_shortname,
+    normalize_emoji_shortname, strip_emoji_colons, validate_emoji_create_shortname,
+    validate_emoticon_file,
+};
 pub use files::{
     ChannelDocument, FILES_BROAD_QUERY, FILES_CACHE_TTL, FILES_PAGE_SIZE, FILES_TYPED_QUERY,
     FilesEvent, FilesStore, filename_matches_query, is_document, short_file_type_label,
@@ -103,7 +140,7 @@ pub use message_search::{
 pub use messages::*;
 pub use mezon_client::{
     InboxCategory, InboxMentionSpan, InboxMessagePreview, InboxNotification, TopicDiscussion,
-    attachment_link_is_image, message_content_is_attachment,
+    TopicReplyPreview, attachment_link_is_image, message_content_is_attachment,
 };
 pub use mezon_client::{
     SearchDropdownMode, SearchPageToken, autocomplete_needle, expand_mention_name_tokens,
@@ -111,9 +148,14 @@ pub use mezon_client::{
     search_content_highlight_terms, search_dropdown_mode, search_filter_chip_ranges,
     search_page_count, search_page_numbers, should_show_search_dropdown,
 };
+pub use mmn_client::{DECIMAL_FACTOR as TOKEN_DECIMAL_FACTOR, DECIMALS as TOKEN_DECIMALS};
+pub use notification_push::NotificationPushStore;
+pub use notification_setting::{NotificationSettingEvent, NotificationSettingStore};
+pub use ogp::{OgpResult, OutgoingOgp, fetch_ogp, first_previewable_url};
 pub use permissions::{
     ClanSettingsPermissions, PERMISSION_ADMINISTRATOR, PERMISSION_CLAN_OWNER,
-    PERMISSION_MANAGE_CHANNEL, PERMISSION_MANAGE_CLAN, PermissionEvent, PermissionStore,
+    PERMISSION_MANAGE_CHANNEL, PERMISSION_MANAGE_CLAN, PERMISSION_SEND_MESSAGE,
+    PermissionDefinition, PermissionEvent, PermissionStore,
 };
 pub use pinned::{PinnedEvent, PinnedMessage, PinnedMessagesStore};
 pub use platform::{
@@ -123,23 +165,34 @@ pub use platform::{
     download_url_with_dialog,
 };
 pub use presence::*;
+pub use quick_menu::{QuickMenuItem, QuickMenuStore};
 pub use realtime::{RealtimeDispatch, RealtimeKind};
-pub use roles::{Role, RolesEvent, RolesStore};
+pub use roles::{
+    ClanRoleDetail, DEFAULT_ROLE_COLOR, MAX_ROLE_ICON_BYTES, Role, RoleDraft, RolePermission,
+    RoleUser, RolesEvent, RolesStore, everyone_slug,
+};
 pub use sticker::{ClanSound, Sticker, StickerEvent, StickerStore};
 pub use threads::{THREAD_STATUS_JOINED, ThreadSummary, ThreadsEvent, ThreadsStore, group_threads};
 pub use topic_badges::{TopicBadgeEvent, TopicBadgeStore};
 pub use topics::{TopicsEvent, TopicsStore};
+pub use ui_state::UiState;
 pub use user_profile::{
     ProfileContext, UserProfileView, active_clan_id, current_user_clan_avatar, resolve_avatar_url,
     resolve_user_profile,
 };
 pub use users_by_user::{UsersByUserEvent, UsersByUserStore};
 pub use voice::{
-    DisplayedReaction, NetworkQuality, PickedScreen, ScreenShareKind, ScreenShareListError,
-    ScreenShareOption, ScreenSharePreview, VideoFrameData, VideoFrameStore, VoiceCallStatus,
-    VoiceConnection, VoiceModerationError, VoiceParticipant, VoiceRenderFrame, VoiceStore,
-    camera_tile_id, capture_screen_share_preview, list_screen_share_options,
-    peek_screen_share_options, screen_tile_id,
+    DeviceKind, DeviceMenuKind, DisplayedReaction, MAX_SOUND_BYTES, NetworkQuality, PickedScreen,
+    SOUND_ALLOWED_EXTENSIONS, ScreenShareKind, ScreenShareListError, ScreenShareOption,
+    ScreenSharePreview, VideoFrameData, VideoFrameStore, VoiceCallStatus, VoiceConnection,
+    VoiceModerationError, VoiceParticipant, VoiceRenderFrame, VoiceStore, camera_tile_id,
+    capture_screen_share_preview, list_screen_share_options, peek_screen_share_options,
+    screen_tile_id, upload_sound_file, validate_sound_file,
+};
+pub use wallet::{SendTokenRequest, WalletDetail, WalletEvent, WalletStore, WalletTransaction};
+pub use webhook::{
+    ChannelWebhook, ClanWebhook, MAX_WEBHOOK_AVATAR_BYTES, WEBHOOK_NAME_MAX_LENGTH, WebhookEvent,
+    WebhookStore,
 };
 
 pub const CACHE_TTL: Duration = Duration::from_secs(20 * 60);
@@ -233,6 +286,8 @@ pub struct Settings {
     pub input_device_id: Option<String>,
     /// Selected audio output device identifier
     pub output_device_id: Option<String>,
+    /// Selected camera (video input) device identifier
+    pub camera_device_id: Option<String>,
     /// User-defined clan ordering: list of clan_ids in display order
     #[serde(default)]
     pub clan_order: Vec<ClanId>,
@@ -263,6 +318,7 @@ impl Default for Settings {
             speaker_volume: 0.8,
             input_device_id: None,
             output_device_id: None,
+            camera_device_id: None,
             clan_order: Vec::new(),
             last_clan_id: None,
             last_channel_id: None,
@@ -436,4 +492,19 @@ pub enum AuthState {
     Connecting(Session),
     /// Token received, transport connected, and session is valid.
     Authenticated(Session),
+}
+
+impl AuthState {
+    pub fn session_credentials(&self) -> Option<(String, String)> {
+        match self {
+            Self::Authenticated(session) | Self::Connecting(session) => {
+                if session.id_token.is_empty() || session.user_id.is_empty() {
+                    None
+                } else {
+                    Some((session.id_token.clone(), session.user_id.clone()))
+                }
+            }
+            _ => None,
+        }
+    }
 }

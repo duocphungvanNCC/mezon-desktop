@@ -24,6 +24,15 @@ const CONNECT_CONFIRM_GRACE: std::time::Duration = std::time::Duration::from_sec
 const MAX_CONSECUTIVE_FAILURES: u32 = 5;
 const RECONNECT_BACKOFF_CAP_SECS: u64 = 60;
 const DEFAULT_TLS_PORT: u16 = 443;
+/// Result of a single reconnect attempt. Only a rejected credential (the server accepted the TCP
+/// connection but refused the handshake) is treated as a dead session; an unreachable server must
+/// never discard the persisted session.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum ConnectOutcome {
+    Confirmed,
+    HandshakeRejected,
+    TransportError,
+}
 
 /// Owns the transport connection manager task + the auth-state observation. Registered as a
 /// [`Global`] so it lives for the process; the held [`Task`]/[`Subscription`] cancel on drop.
@@ -120,6 +129,7 @@ impl ConnectionStore {
             let mut connected_user_id: Option<String> = None;
             let mut retry_backoff_secs = 1u64;
             let mut consecutive_failures = 0u32;
+            let mut handshake_rejections = 0u32;
             let mut connect_ack_rx = connect_ack_rx;
 
             loop {
@@ -146,6 +156,7 @@ impl ConnectionStore {
                     }
                     retry_backoff_secs = 1;
                     consecutive_failures = 0;
+                    handshake_rejections = 0;
                     wake.notified().await;
                     continue;
                 };
@@ -155,6 +166,7 @@ impl ConnectionStore {
                 {
                     retry_backoff_secs = 1;
                     consecutive_failures = 0;
+                    handshake_rejections = 0;
                     wake.notified().await;
                     continue;
                 }
@@ -216,7 +228,7 @@ impl ConnectionStore {
                     )
                     .await;
 
-                let confirmed = match connect_result {
+                let outcome = match connect_result {
                     Ok(()) => {
                         tracing::info!("Shared abridged TCP transport connected");
                         let signaled = tokio::select! {
@@ -224,24 +236,27 @@ impl ConnectionStore {
                             _ = exec.timer(CONNECT_CONFIRM_GRACE) => true,
                         };
                         let handshake_ok = signaled && transport.is_open().await;
-                        if !handshake_ok {
+                        if handshake_ok {
+                            ConnectOutcome::Confirmed
+                        } else {
                             tracing::warn!(
                                 "Connection not confirmed — handshake rejected or dropped"
                             );
                             let _ = transport.close().await;
+                            ConnectOutcome::HandshakeRejected
                         }
-                        handshake_ok
                     }
                     Err(e) => {
                         tracing::error!("Shared abridged TCP transport connect failed: {e}");
-                        false
+                        ConnectOutcome::TransportError
                     }
                 };
 
-                if confirmed {
+                if outcome == ConnectOutcome::Confirmed {
                     connected_user_id = Some(session.user_id.clone());
                     retry_backoff_secs = 1;
                     consecutive_failures = 0;
+                    handshake_rejections = 0;
                     api.set_status(ConnectionStatus::Connected);
                     tracing::info!("Connection confirmed — handshake accepted");
                     let api_for_join = api.clone();
@@ -270,22 +285,39 @@ impl ConnectionStore {
                 api.set_status(ConnectionStatus::Disconnected);
                 consecutive_failures += 1;
 
-                if reached_failure_limit(consecutive_failures) {
-                    tracing::warn!(
-                        "Reconnect failed {consecutive_failures} times consecutively — logging out"
-                    );
-                    let credentials = cx.update(|cx| session_credentials(auth_state.read(cx)));
-                    spawn_session_logout(api.clone(), credentials, &exec);
-                    cx.update(|cx| {
-                        auth_state.update(cx, |state, cx| {
-                            *state = AuthState::NotAuthenticated;
-                            cx.notify();
-                        });
-                        crate::login::LoginStore::reset_all_user_stores(cx);
-                    });
-                    consecutive_failures = 0;
-                    retry_backoff_secs = 1;
-                    continue;
+                match outcome {
+                    ConnectOutcome::HandshakeRejected => {
+                        handshake_rejections += 1;
+                        if reached_failure_limit(handshake_rejections) {
+                            tracing::warn!(
+                                "Handshake rejected {handshake_rejections} times consecutively — session credential is no longer valid, logging out"
+                            );
+                            let credentials =
+                                cx.update(|cx| session_credentials(auth_state.read(cx)));
+                            spawn_session_logout(api.clone(), credentials, &exec);
+                            cx.update(|cx| {
+                                auth_state.update(cx, |state, cx| {
+                                    *state = AuthState::NotAuthenticated;
+                                    cx.notify();
+                                });
+                                crate::login::LoginStore::reset_all_user_stores(cx);
+                            });
+                            consecutive_failures = 0;
+                            handshake_rejections = 0;
+                            retry_backoff_secs = 1;
+                            continue;
+                        }
+                    }
+                    ConnectOutcome::TransportError => {
+                        handshake_rejections = 0;
+                        if reached_failure_limit(consecutive_failures) {
+                            tracing::warn!(
+                                "Backend unreachable after {consecutive_failures} attempts — keeping session, retrying in the background"
+                            );
+                            promote_connecting_to_authenticated(&auth_state, cx);
+                        }
+                    }
+                    ConnectOutcome::Confirmed => {}
                 }
 
                 retry_backoff_secs = next_backoff_secs(retry_backoff_secs);
@@ -520,6 +552,7 @@ mod tests {
 
     struct ReconnectSim {
         consecutive_failures: u32,
+        handshake_rejections: u32,
         logout_count: u32,
         surface: Surface,
         displayed_attempt: u32,
@@ -529,6 +562,7 @@ mod tests {
         fn new() -> Self {
             Self {
                 consecutive_failures: 0,
+                handshake_rejections: 0,
                 logout_count: 0,
                 surface: Surface::Connecting,
                 displayed_attempt: 0,
@@ -551,58 +585,112 @@ mod tests {
             self.surface = Surface::AppShell;
         }
 
-        fn record_connect_failure(&mut self) {
+        fn record_handshake_rejection(&mut self) {
             self.consecutive_failures += 1;
-            if reached_failure_limit(self.consecutive_failures) {
+            self.handshake_rejections += 1;
+            if reached_failure_limit(self.handshake_rejections) {
                 self.logout_count += 1;
                 self.consecutive_failures = 0;
+                self.handshake_rejections = 0;
                 self.surface = Surface::LoggedOut;
+            }
+        }
+
+        fn record_transport_error(&mut self) {
+            self.consecutive_failures += 1;
+            self.handshake_rejections = 0;
+            if reached_failure_limit(self.consecutive_failures) {
+                self.surface = Surface::AppShell;
             }
         }
 
         fn record_connect_success(&mut self) {
             self.consecutive_failures = 0;
+            self.handshake_rejections = 0;
             self.surface = Surface::AppShell;
         }
     }
 
     #[test]
-    fn five_consecutive_failures_log_out_once_then_reset() {
+    fn five_consecutive_handshake_rejections_log_out_once_then_reset() {
         let mut sim = ReconnectSim::new();
         for _ in 0..4 {
-            sim.record_connect_failure();
+            sim.record_handshake_rejection();
             assert_eq!(sim.logout_count, 0);
         }
-        sim.record_connect_failure();
+        sim.record_handshake_rejection();
         assert_eq!(sim.logout_count, 1);
         assert_eq!(sim.consecutive_failures, 0);
+        assert_eq!(sim.handshake_rejections, 0);
         assert!(!sim.probe_required());
+    }
+
+    #[test]
+    fn transport_errors_never_log_out() {
+        let mut sim = ReconnectSim::new();
+        for _ in 0..50 {
+            sim.record_transport_error();
+        }
+        assert_eq!(sim.logout_count, 0);
+    }
+
+    #[test]
+    fn transport_error_at_limit_promotes_to_app_shell_keeping_session() {
+        let mut sim = ReconnectSim::new();
+        for _ in 0..4 {
+            sim.record_transport_error();
+            assert_eq!(sim.surface, Surface::Connecting);
+        }
+        sim.record_transport_error();
+        assert_eq!(sim.surface, Surface::AppShell);
+        assert_eq!(sim.logout_count, 0);
+    }
+
+    #[test]
+    fn transport_error_resets_handshake_rejection_streak() {
+        let mut sim = ReconnectSim::new();
+        for _ in 0..4 {
+            sim.record_handshake_rejection();
+        }
+        assert_eq!(sim.handshake_rejections, 4);
+
+        sim.record_transport_error();
+        assert_eq!(sim.handshake_rejections, 0);
+        assert_eq!(sim.logout_count, 0);
+
+        for _ in 0..4 {
+            sim.record_handshake_rejection();
+        }
+        assert_eq!(sim.logout_count, 0);
+        sim.record_handshake_rejection();
+        assert_eq!(sim.logout_count, 1);
     }
 
     #[test]
     fn success_resets_failure_counter() {
         let mut sim = ReconnectSim::new();
         for _ in 0..4 {
-            sim.record_connect_failure();
+            sim.record_handshake_rejection();
         }
         assert_eq!(sim.consecutive_failures, 4);
 
         sim.record_connect_success();
         assert_eq!(sim.consecutive_failures, 0);
+        assert_eq!(sim.handshake_rejections, 0);
         assert_eq!(sim.logout_count, 0);
 
         for _ in 0..4 {
-            sim.record_connect_failure();
+            sim.record_handshake_rejection();
         }
         assert_eq!(sim.logout_count, 0);
-        sim.record_connect_failure();
+        sim.record_handshake_rejection();
         assert_eq!(sim.logout_count, 1);
     }
 
     #[test]
     fn offline_skips_do_not_consume_attempts_or_log_out() {
         let mut sim = ReconnectSim::new();
-        sim.record_connect_failure();
+        sim.record_transport_error();
         assert!(sim.probe_required());
 
         for _ in 0..50 {
@@ -616,7 +704,7 @@ mod tests {
     fn online_failure_below_limit_keeps_connecting() {
         let mut sim = ReconnectSim::new();
         for expected in 1..=4 {
-            sim.record_connect_failure();
+            sim.record_handshake_rejection();
             assert_eq!(sim.consecutive_failures, expected);
             assert_eq!(sim.surface, Surface::Connecting);
         }
@@ -625,7 +713,7 @@ mod tests {
     #[test]
     fn offline_gate_promotes_to_app_shell_without_consuming_attempt() {
         let mut sim = ReconnectSim::new();
-        sim.record_connect_failure();
+        sim.record_transport_error();
         assert_eq!(sim.surface, Surface::Connecting);
         sim.begin_iteration();
         assert!(sim.probe_required());
@@ -637,13 +725,13 @@ mod tests {
     }
 
     #[test]
-    fn fifth_online_failure_logs_out_and_leaves_connecting() {
+    fn fifth_handshake_rejection_logs_out_and_leaves_connecting() {
         let mut sim = ReconnectSim::new();
         for _ in 0..4 {
-            sim.record_connect_failure();
+            sim.record_handshake_rejection();
             assert_eq!(sim.surface, Surface::Connecting);
         }
-        sim.record_connect_failure();
+        sim.record_handshake_rejection();
         assert_eq!(sim.surface, Surface::LoggedOut);
     }
 
@@ -653,8 +741,8 @@ mod tests {
         sim.begin_iteration();
         assert_eq!(sim.displayed_attempt, 0);
 
-        sim.record_connect_failure();
-        sim.record_connect_failure();
+        sim.record_handshake_rejection();
+        sim.record_handshake_rejection();
         sim.begin_iteration();
         assert_eq!(sim.displayed_attempt, 2);
 
@@ -669,7 +757,7 @@ mod tests {
         let mut sim = ReconnectSim::new();
         sim.record_connect_success();
         for _ in 0..4 {
-            sim.record_connect_failure();
+            sim.record_handshake_rejection();
             sim.begin_iteration();
             assert_eq!(sim.surface, Surface::AppShell);
             assert_eq!(sim.displayed_attempt, 0);

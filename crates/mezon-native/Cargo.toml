@@ -14,11 +14,9 @@ thiserror.workspace = true
 tracing.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-tokio.workspace = true
 flume.workspace = true
 cpal.workspace = true
 open = "5"
-mezon-updater.workspace = true
 dirs = { workspace = true }
 tray-icon = { version = "0.19", features = ["common-controls-v6"] }
 image = { workspace = true }
@@ -26,10 +24,12 @@ auto-launch = "0.5"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc.workspace = true
+block = "0.1"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows.workspace = true
 
 [target.'cfg(not(any(target_os = "macos", target_os = "windows")))'.dependencies]
 notify-rust = "4"
+zbus = "4"
 gtk = "0.18"

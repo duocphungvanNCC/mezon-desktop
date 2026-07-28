@@ -1,7 +1,7 @@
 use gpui::{AnyElement, FontWeight, SharedString, div, prelude::*, px, rgb};
 use mezon_store::Message;
 
-use super::coming_soon_toast;
+use super::content::{SelectableSectionCursor, SelectableTextContext};
 use super::context::RowCtx;
 use crate::components::primitives::{Icon, IconName};
 
@@ -10,12 +10,20 @@ const BLUE_500: u32 = 0x3b_82_f6;
 const CARD_WIDTH: f32 = 300.0;
 const DETAIL_MAX_WIDTH: f32 = 200.0;
 
-pub fn render_token_transaction_card(msg: &Message, ctx: &RowCtx) -> AnyElement {
+pub fn render_token_transaction_card(
+    msg: &Message,
+    ctx: &RowCtx,
+    base: usize,
+    selection_context: &SelectableTextContext,
+) -> AnyElement {
     let theme = ctx.theme;
     let (title, detail) = match msg.token_transaction.as_deref() {
         Some(tx) => (tx.title.clone(), tx.detail.clone()),
         None => msg.token_transaction_parts(),
     };
+    let mut cursor = SelectableSectionCursor::new(base);
+    let title_range = cursor.section(&title);
+    let detail_range = cursor.section(&detail);
 
     let body = div()
         .p_3()
@@ -38,9 +46,12 @@ pub fn render_token_transaction_card(msg: &Message, ctx: &RowCtx) -> AnyElement 
                 .min_w_0()
                 .child(
                     div()
+                        .cursor(gpui::CursorStyle::IBeam)
                         .font_weight(FontWeight::SEMIBOLD)
                         .text_color(theme.tokens.text_theme_primary)
-                        .child(title),
+                        .when_some(title_range, |div, range| {
+                            div.child(selection_context.text_node(&title, range))
+                        }),
                 )
                 .child(
                     div()
@@ -51,16 +62,22 @@ pub fn render_token_transaction_card(msg: &Message, ctx: &RowCtx) -> AnyElement 
                         .child(div().mr(px(4.)).text_color(rgb(BLUE_500)).child("Detail:"))
                         .child(
                             div()
+                                .cursor(gpui::CursorStyle::IBeam)
                                 .truncate()
                                 .max_w(px(DETAIL_MAX_WIDTH))
                                 .font_weight(FontWeight::SEMIBOLD)
                                 .text_color(theme.tokens.text_theme_primary)
-                                .child(detail),
+                                .when_some(detail_range, |div, range| {
+                                    div.child(
+                                        selection_context.end_truncated_text_node(&detail, range),
+                                    )
+                                }),
                         ),
                 ),
         );
 
-    let locale = SharedString::from(ctx.locale);
+    let selection = ctx.selection.clone();
+    let history_locale = SharedString::from(ctx.locale);
     let footer = div()
         .p_3()
         .flex()
@@ -75,7 +92,11 @@ pub fn render_token_transaction_card(msg: &Message, ctx: &RowCtx) -> AnyElement 
                 .text_size(px(15.))
                 .text_color(rgb(BLUE_500))
                 .child("Mezon transfer")
-                .on_click(move |_, _, cx| coming_soon_toast(&locale, cx)),
+                .on_click(move |_, window, cx| {
+                    if !selection.borrow().has_selection() {
+                        super::TransactionHistoryModal::open(history_locale.clone(), window, cx);
+                    }
+                }),
         );
 
     div()
@@ -93,4 +114,23 @@ pub fn render_token_transaction_card(msg: &Message, ctx: &RowCtx) -> AnyElement 
                 .child(footer),
         )
         .into_any_element()
+}
+
+pub(crate) fn selectable_token_transaction_text(msg: &Message) -> String {
+    let (title, detail) = match msg.token_transaction.as_deref() {
+        Some(tx) => (tx.title.as_ref(), tx.detail.as_ref()),
+        None => {
+            let (title, detail) = msg.token_transaction_parts();
+            return if detail.is_empty() {
+                title.to_string()
+            } else {
+                format!("{title}\n{detail}")
+            };
+        }
+    };
+    if detail.is_empty() {
+        title.to_string()
+    } else {
+        format!("{title}\n{detail}")
+    }
 }

@@ -700,6 +700,7 @@ impl McpBackend {
                 Vec::new(),
                 Vec::new(),
                 Vec::new(),
+                None,
             )
             .await?;
         Ok(serde_json::json!({
@@ -731,6 +732,7 @@ impl McpBackend {
                 Vec::new(),
                 Vec::new(),
                 Vec::new(),
+                None,
             )
             .await?;
         Ok(serde_json::json!({
@@ -875,6 +877,8 @@ impl McpBackend {
                 is_public,
                 topic_id,
                 is_update_msg_topic,
+                false,
+                0,
             )
             .await?;
         Ok(serde_json::json!({ "ok": true, "message_id": message_id }))

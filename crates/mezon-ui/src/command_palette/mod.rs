@@ -97,6 +97,7 @@ impl CommandPaletteModal {
             let search_input = cx.new(|cx| {
                 InputState::new(window, cx)
                     .placeholder(placeholder.clone())
+                    .embedded(true)
                     .borderless()
             });
             let search_sub = cx.subscribe_in(
@@ -293,6 +294,9 @@ impl CommandPaletteModal {
         if !self.items_dirty {
             return;
         }
+        ChannelList::global(cx).update(cx, |store, cx| {
+            items::ensure_palette_clans_loaded(store, cx);
+        });
         self.items = Rc::new(build_palette_items(cx));
         self.items_dirty = false;
         self.recompute_filtered(cx);
