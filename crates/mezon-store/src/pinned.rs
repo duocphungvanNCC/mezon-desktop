@@ -13,7 +13,8 @@ use mezon_proto::realtime::LastPinMessageEvent;
 use crate::AppConfig;
 use crate::ids::{ChannelId, ClanId, MessageId, UserId};
 use crate::message::{
-    Embed, MessageAttachment, MessageSpan, OgpPreview, RichLayout, build_rich_layout, parse_spans,
+    Embed, Message, MessageAttachment, MessageSpan, OgpPreview, RichLayout, build_rich_layout,
+    parse_spans,
 };
 use crate::messages::{MessagesEvent, MessagesStore, build_embeds, build_ogp_preview};
 use crate::realtime::{RealtimeDispatch, RealtimeKind};
@@ -243,10 +244,6 @@ impl PinnedMessagesStore {
         self.messages.iter().any(|m| m.message_id == message_id)
     }
 
-    pub fn has_pin_badge(&self, channel_id: &str) -> bool {
-        self.pin_badges.contains(channel_id)
-    }
-
     pub fn active_has_pin_badge(&self) -> bool {
         self.channel_id
             .as_ref()
@@ -381,13 +378,7 @@ impl PinnedMessagesStore {
                     avatar = url;
                 }
             }
-            let content_plain = msg.content.clone();
-            let content_wire = msg
-                .raw_content
-                .as_ref()
-                .map(|raw| raw.to_string())
-                .filter(|raw| !raw.is_empty())
-                .unwrap_or_else(|| serde_json::json!({ "t": content_plain }).to_string());
+            let content_wire = pin_content_wire(msg);
             let create_time = msg.create_time;
             let created_time_iso = chrono::DateTime::from_timestamp(create_time, 0)
                 .map(|dt| dt.to_rfc3339())
@@ -397,7 +388,7 @@ impl PinnedMessagesStore {
                 sender_id,
                 sender_name,
                 avatar,
-                content_plain,
+                msg.content.clone(),
                 content_wire,
                 create_time,
                 created_time_iso,
@@ -514,6 +505,124 @@ impl PinnedMessagesStore {
         })
         .detach();
     }
+}
+
+fn pin_content_wire(msg: &Message) -> String {
+    if let Some(raw) = msg.raw_content.as_deref().filter(|raw| !raw.is_empty()) {
+        return raw.to_string();
+    }
+    rebuild_pin_content_json(msg)
+}
+
+fn rebuild_pin_content_json(msg: &Message) -> String {
+    let mut obj = serde_json::Map::new();
+    obj.insert("t".into(), msg.content.clone().into());
+
+    if !msg.mention_targets.is_empty() {
+        let mentions: Vec<serde_json::Value> = msg
+            .mention_targets
+            .iter()
+            .map(|m| {
+                let mut item = serde_json::Map::new();
+                if let Some(user_id) = m.user_id.as_ref().filter(|id| !id.is_empty()) {
+                    item.insert("user_id".into(), user_id.clone().into());
+                }
+                if let Some(role_id) = m.role_id.as_ref().filter(|id| !id.is_empty()) {
+                    item.insert("role_id".into(), role_id.clone().into());
+                }
+                if !m.username.is_empty() {
+                    item.insert("username".into(), m.username.clone().into());
+                }
+                item.insert("s".into(), m.s.into());
+                item.insert("e".into(), m.e.into());
+                serde_json::Value::Object(item)
+            })
+            .collect();
+        obj.insert("mentions".into(), mentions.into());
+    }
+
+    let mut mk = Vec::new();
+    let mut hg = Vec::new();
+    let mut ej = Vec::new();
+    let mut lk = Vec::new();
+    let mut cursor = 0i64;
+    for span in &msg.spans {
+        let (kind, text) = match span {
+            MessageSpan::Text(text) => (None, text.as_ref()),
+            MessageSpan::Bold(text) => (Some("b"), text.as_ref()),
+            MessageSpan::Code(text) => (Some("c"), text.as_ref()),
+            MessageSpan::CodeBlock { text, .. } => (Some("pre"), text.as_ref()),
+            MessageSpan::Heading { text, .. } => (None, text.as_ref()),
+            MessageSpan::Mention { display, .. } => (None, display.as_ref()),
+            MessageSpan::Hashtag {
+                display,
+                channel_id,
+            } => {
+                let start = cursor;
+                let end = cursor + display.encode_utf16().count() as i64;
+                let mut item = serde_json::Map::new();
+                item.insert("s".into(), start.into());
+                item.insert("e".into(), end.into());
+                if let Some(channel_id) = channel_id.as_ref().filter(|id| !id.is_empty()) {
+                    item.insert("channelId".into(), channel_id.clone().into());
+                }
+                hg.push(serde_json::Value::Object(item));
+                cursor = end;
+                continue;
+            }
+            MessageSpan::Emoji { name, emoji_id, .. } => {
+                let start = cursor;
+                let end = cursor + name.encode_utf16().count() as i64;
+                let mut item = serde_json::Map::new();
+                item.insert("s".into(), start.into());
+                item.insert("e".into(), end.into());
+                if !emoji_id.is_empty() {
+                    item.insert("emojiid".into(), emoji_id.clone().into());
+                }
+                ej.push(serde_json::Value::Object(item));
+                cursor = end;
+                continue;
+            }
+            MessageSpan::Link { text, url, .. } => {
+                let start = cursor;
+                let end = cursor + text.encode_utf16().count() as i64;
+                let mut item = serde_json::Map::new();
+                item.insert("s".into(), start.into());
+                item.insert("e".into(), end.into());
+                if !url.is_empty() {
+                    item.insert("url".into(), url.clone().into());
+                }
+                lk.push(serde_json::Value::Object(item));
+                cursor = end;
+                continue;
+            }
+            MessageSpan::Canvas { title, .. } => (None, title.as_ref()),
+        };
+        let start = cursor;
+        let end = cursor + text.encode_utf16().count() as i64;
+        if let Some(kind) = kind {
+            mk.push(serde_json::json!({
+                "s": start,
+                "e": end,
+                "type": kind,
+            }));
+        }
+        cursor = end;
+    }
+    if !mk.is_empty() {
+        obj.insert("mk".into(), mk.into());
+    }
+    if !hg.is_empty() {
+        obj.insert("hg".into(), hg.into());
+    }
+    if !ej.is_empty() {
+        obj.insert("ej".into(), ej.into());
+    }
+    if !lk.is_empty() {
+        obj.insert("lk".into(), lk.into());
+    }
+
+    serde_json::Value::Object(obj).to_string()
 }
 
 fn enrich_pin_body(

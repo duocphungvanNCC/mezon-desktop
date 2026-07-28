@@ -43,14 +43,34 @@ struct PinCardVm {
     pin_id: SharedString,
     message_id: SharedString,
     create_time: i64,
+    sender_label: SharedString,
+    avatar_src: Option<SharedString>,
+    avatar_fallback: Option<SharedString>,
 }
 
 impl PinCardVm {
-    fn resolve(msg: &PinnedMessage) -> Self {
+    fn resolve(
+        msg: &PinnedMessage,
+        clan_id: Option<mezon_store::ClanId>,
+        channel_id: Option<ChannelId>,
+        cx: &App,
+    ) -> Self {
+        let sender_label = resolve_pin_sender_label_with_message(
+            &msg.sender_id,
+            &msg.sender_name,
+            Some(msg.message_id.as_str()),
+            clan_id,
+            channel_id,
+            cx,
+        );
+        let (avatar_src, avatar_fallback) = resolve_pin_avatar_urls(msg, clan_id, channel_id, cx);
         Self {
             pin_id: msg.id.clone().into(),
             message_id: msg.message_id.clone().into(),
             create_time: msg.create_time,
+            sender_label,
+            avatar_src,
+            avatar_fallback,
         }
     }
 }
@@ -113,19 +133,21 @@ impl PinnedPopoverPanel {
     }
 
     fn refresh_name_rows(&mut self, cx: &mut Context<Self>) {
-        let count = self.list_state.item_count();
-        if count > 0 {
-            self.list_state.reset(count);
+        self.pin_cards = Self::compute_pin_cards(cx);
+        if self.list_state.item_count() > 0 {
+            self.list_state.remeasure();
         }
         cx.notify();
     }
 
     fn compute_pin_cards(cx: &App) -> Vec<PinCardVm> {
-        PinnedMessagesStore::global(cx)
-            .read(cx)
+        let store = PinnedMessagesStore::global(cx).read(cx);
+        let clan_id = effective_clan_id(store.clan_id(), cx);
+        let channel_id = store.channel_id();
+        store
             .pinned()
             .iter()
-            .map(PinCardVm::resolve)
+            .map(|msg| PinCardVm::resolve(msg, clan_id, channel_id, cx))
             .collect()
     }
 }
@@ -293,8 +315,6 @@ fn render_body(
                     let Some(vm) = cards_for_list.get(ix) else {
                         return div().into_any_element();
                     };
-                    let clan_id = effective_clan_id(store.clan_id(), cx);
-                    let channel_id = store.channel_id();
                     div()
                         .w_full()
                         .pb(px(8.))
@@ -302,8 +322,6 @@ fn render_body(
                             ix,
                             pin,
                             vm,
-                            clan_id,
-                            channel_id,
                             &theme_for_list,
                             &locale_for_list,
                             handle_for_list.clone(),
@@ -373,8 +391,6 @@ fn pin_card(
     index: usize,
     pin: &PinnedMessage,
     vm: &PinCardVm,
-    clan_id: Option<mezon_store::ClanId>,
-    channel_id: Option<ChannelId>,
     theme: &Theme,
     locale: &str,
     popover_handle: PopoverMenuHandle<PinnedPopoverPanel>,
@@ -384,15 +400,9 @@ fn pin_card(
     let tokens = &theme.tokens;
     let group_name = SharedString::from(format!("pin-card-{index}"));
     let sender_color = Hsla::from(gpui::rgb(DEFAULT_DISPLAY_NAME_COLOR));
-    let sender_label = resolve_pin_sender_label_with_message(
-        &pin.sender_id,
-        &pin.sender_name,
-        Some(pin.message_id.as_str()),
-        clan_id,
-        channel_id,
-        cx,
-    );
-    let (avatar_src, avatar_fallback) = resolve_pin_avatar_urls(pin, clan_id, channel_id, cx);
+    let sender_label = vm.sender_label.clone();
+    let avatar_src = vm.avatar_src.clone();
+    let avatar_fallback = vm.avatar_fallback.clone();
 
     let mut avatar = Avatar::new()
         .name(&sender_label)
@@ -449,9 +459,6 @@ fn pin_card(
     let pin_id = vm.pin_id.clone();
     let message_id = vm.message_id.clone();
     let sender_label_for_modal = sender_label.clone();
-    let avatar_src_for_modal = avatar_src.clone();
-    let avatar_fallback_for_modal = avatar_fallback.clone();
-    let preview_content = SharedString::from(pin.content.clone());
     let locale_owned: SharedString = locale.to_string().into();
     let delete = Button::new(("pin-del", index))
         .label("✕")
@@ -462,9 +469,6 @@ fn pin_card(
                 pin_id.clone(),
                 message_id.clone(),
                 sender_label_for_modal.clone(),
-                avatar_src_for_modal.clone(),
-                avatar_fallback_for_modal.clone(),
-                preview_content.clone(),
                 locale_owned.clone(),
                 window,
                 cx,

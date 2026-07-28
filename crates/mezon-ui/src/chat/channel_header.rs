@@ -636,7 +636,7 @@ impl ChannelHeader {
                 let show_badge = PinnedMessagesStore::global(cx)
                     .read(cx)
                     .active_has_pin_badge();
-                let badge_color = gpui::rgb(0xda_37_3c);
+                let badge_color = theme.mention_badge;
                 buttons.push(
                     PopoverMenu::new("hdr-pin-popover")
                         .with_handle(handle)

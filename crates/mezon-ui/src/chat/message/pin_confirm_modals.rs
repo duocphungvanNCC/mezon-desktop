@@ -101,17 +101,20 @@ impl ConfirmPinMessageModal {
             return;
         }
 
-        let (message, is_dm, mut clan_id, channel_id) = {
+        let (is_dm, mut clan_id, channel_id) = {
             let messages = MessagesStore::global(cx).read(cx);
-            let Some(msg) = messages.messages().iter().find(|m| m.id == message_id) else {
-                return;
-            };
             (
-                msg.clone(),
                 messages.is_dm(),
                 messages.active_clan_id(),
                 messages.active_channel_id(),
             )
+        };
+        let Some(message) = find_channel_message(message_id, channel_id, cx) else {
+            tracing::warn!(
+                message_id = message_id.get(),
+                "confirm pin modal: message not found in active or channel cache"
+            );
+            return;
         };
         if clan_id.is_none() {
             clan_id = ClanList::global(cx).read(cx).active_clan_id;
@@ -188,9 +191,6 @@ impl ConfirmUnpinMessageModal {
         pin_id: SharedString,
         message_id: SharedString,
         sender_label: SharedString,
-        _avatar_src: Option<SharedString>,
-        _avatar_fallback: Option<SharedString>,
-        _content: SharedString,
         locale: SharedString,
         window: &mut Window,
         cx: &mut App,
@@ -440,6 +440,11 @@ fn render_preview(
         .child(
             v_flex().flex_1().min_w_0().gap_1().child(name_row).child(
                 div()
+                    .id("pin-confirm-preview")
+                    .w_full()
+                    .min_w_0()
+                    .max_h(px(320.))
+                    .overflow_y_scroll()
                     .text_sm()
                     .text_color(tokens.text_theme_message)
                     .child(preview.content.clone()),

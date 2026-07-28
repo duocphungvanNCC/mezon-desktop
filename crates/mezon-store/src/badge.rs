@@ -267,6 +267,14 @@ impl BadgeService {
                     let seen = is_clan_message_seen(cx, m, from_me);
                     let already_seen = is_message_already_seen(cx, clan_id, channel_id, ts);
                     let removed_by_other = is_chat_remove(m) && !from_me;
+                    let code = MessageCode::from_raw(m.code);
+                    let skip_unread_activity = matches!(
+                        code,
+                        MessageCode::CreatePin
+                            | MessageCode::Typing
+                            | MessageCode::Indicator
+                            | MessageCode::Welcome
+                    );
                     let needs_mention_check =
                         (is_new_message && !seen && !already_seen) || removed_by_other;
                     let mentions_me = needs_mention_check
@@ -289,7 +297,7 @@ impl BadgeService {
                             &mut self.processed_badge_order,
                             (channel_id, message_id),
                         );
-                    if m.topic_id == 0 {
+                    if m.topic_id == 0 && !skip_unread_activity {
                         ChannelList::global(cx).update(cx, |cl, cx| {
                             cl.note_channel_message(
                                 clan_id,
@@ -307,19 +315,10 @@ impl BadgeService {
                             });
                         }
                     }
-                    if !from_me && is_new_message {
-                        let code = MessageCode::from_raw(m.code);
-                        if !matches!(
-                            code,
-                            MessageCode::CreatePin
-                                | MessageCode::Typing
-                                | MessageCode::Indicator
-                                | MessageCode::Welcome
-                        ) {
-                            ClanList::global(cx).update(cx, |cls, cx| {
-                                cls.set_has_unread_message(clan_id, cx);
-                            });
-                        }
+                    if !from_me && is_new_message && !skip_unread_activity {
+                        ClanList::global(cx).update(cx, |cls, cx| {
+                            cls.set_has_unread_message(clan_id, cx);
+                        });
                     }
                     if !from_me && is_new_message && !seen && badge_mention {
                         ClanList::global(cx).update(cx, |cls, cx| {
