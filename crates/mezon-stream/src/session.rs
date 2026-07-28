@@ -16,6 +16,7 @@ use livekit::webrtc::rtp_transceiver::{RtpTransceiverDirection, RtpTransceiverIn
 use livekit::webrtc::session_description::{SdpType, SessionDescription};
 use livekit::webrtc::video_stream::native::NativeVideoStream;
 use mezon_voice::{StreamAudioOutput, VideoFrameStore, i420_to_bgra_into};
+use parking_lot::Mutex;
 use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message;
 
@@ -50,7 +51,7 @@ pub enum StreamEvent {
 pub struct StreamSession {
     stop_tx: Sender<()>,
     event_rx: Receiver<StreamEvent>,
-    audio: Arc<StreamAudioOutput>,
+    audio: Arc<Mutex<Option<Arc<StreamAudioOutput>>>>,
 }
 
 impl StreamSession {
@@ -60,41 +61,49 @@ impl StreamSession {
         output_device_id: Option<String>,
         volume: f32,
         muted: bool,
-    ) -> anyhow::Result<Self> {
-        let audio = Arc::new(
-            StreamAudioOutput::start(output_device_id, volume, muted)
-                .context("stream audio output failed")?,
-        );
+    ) -> Self {
         let (stop_tx, stop_rx) = flume::bounded(1);
         let (event_tx, event_rx) = flume::unbounded();
+        let audio = Arc::new(Mutex::new(None));
         let audio_for_thread = audio.clone();
         std::thread::spawn(move || {
+            let audio_output = match StreamAudioOutput::start(output_device_id, volume, muted) {
+                Ok(output) => Arc::new(output),
+                Err(_) => {
+                    let _ = event_tx.send(StreamEvent::Error("Stream audio failed".into()));
+                    let _ = event_tx.send(StreamEvent::Disconnected);
+                    return;
+                }
+            };
+            *audio_for_thread.lock() = Some(audio_output.clone());
+
             let runtime = tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
                 .build();
             let Ok(runtime) = runtime else {
                 let _ = event_tx.send(StreamEvent::Error("stream runtime failed".into()));
+                let _ = event_tx.send(StreamEvent::Disconnected);
                 return;
             };
             let runtime_handle = runtime.handle().clone();
             runtime.block_on(run_session(
                 config,
                 frame_store,
-                audio_for_thread,
+                audio_output,
                 stop_rx,
                 event_tx,
                 runtime_handle,
             ));
         });
-        Ok(Self {
+        Self {
             stop_tx,
             event_rx,
             audio,
-        })
+        }
     }
 
-    pub fn audio(&self) -> Arc<StreamAudioOutput> {
-        self.audio.clone()
+    pub fn audio(&self) -> Option<Arc<StreamAudioOutput>> {
+        self.audio.lock().clone()
     }
 
     pub fn events(&self) -> &Receiver<StreamEvent> {
@@ -246,7 +255,6 @@ async fn run_session_inner(
     loop {
         tokio::select! {
             _ = stop_rx.recv_async() => {
-                pc.close();
                 break;
             }
             outbound = outbound_rx.recv_async() => {
@@ -319,6 +327,7 @@ async fn run_session_inner(
         }
     }
 
+    pc.close();
     Ok(())
 }
 

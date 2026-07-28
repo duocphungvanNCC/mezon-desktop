@@ -1250,14 +1250,12 @@ impl ChatLayout {
             .read(cx)
             .active_channel()
             .map(|ch| (ch.channel_type, ch.id));
-        let should_leave = self
-            .stream_store
-            .read(cx)
-            .should_leave_for_active_channel(active);
-        if should_leave {
-            self.stream_store
-                .update(cx, |store, cx| store.leave_stream(cx));
-        }
+        self.stream_store.update(cx, |store, cx| {
+            if store.should_leave_for_active_channel(active) {
+                store.leave_stream(cx);
+            }
+            store.clear_error_on_active_channel_change(active, cx);
+        });
     }
 
     fn sync_stream_frame_pump(&mut self, cx: &mut Context<Self>) {
@@ -1280,26 +1278,28 @@ impl ChatLayout {
         let frame_store = stream.frame_store().clone();
         self._stream_frame_pump = Some(cx.spawn(async move |this, cx| {
             let mut last_seq = 0u64;
-            let mut rx = frame_store.frame_watch();
             loop {
-                let seq = frame_store.publish_seq();
-                if seq != last_seq {
-                    last_seq = seq;
-                    if this.update(cx, |_, cx| cx.notify()).is_err() {
-                        return;
+                let mut rx = frame_store.frame_watch();
+                loop {
+                    let seq = frame_store.publish_seq();
+                    if seq != last_seq {
+                        last_seq = seq;
+                        if this.update(cx, |_, cx| cx.notify()).is_err() {
+                            return;
+                        }
                     }
-                }
-                let frame_published = {
-                    let changed = std::pin::pin!(rx.changed());
-                    let fallback =
-                        std::pin::pin!(cx.background_executor().timer(STREAM_FRAME_FALLBACK));
-                    matches!(
-                        futures::future::select(changed, fallback).await,
-                        futures::future::Either::Left((Ok(()), _))
-                    )
-                };
-                if !frame_published {
-                    break;
+                    let frame_published = {
+                        let changed = std::pin::pin!(rx.changed());
+                        let fallback =
+                            std::pin::pin!(cx.background_executor().timer(STREAM_FRAME_FALLBACK));
+                        matches!(
+                            futures::future::select(changed, fallback).await,
+                            futures::future::Either::Left((Ok(()), _))
+                        )
+                    };
+                    if !frame_published {
+                        break;
+                    }
                 }
             }
         }));
@@ -1421,6 +1421,8 @@ impl Render for ChatLayout {
         self.maybe_prefetch_voice_token(cx);
         self.voice_store
             .update(cx, |store, cx| store.flush_texture_drops(Some(window), cx));
+        self.stream_store
+            .update(cx, |store, cx| store.flush_texture_drops(Some(window), cx));
 
         if std::mem::take(&mut self.pending_open_threads_popover) {
             let handle = self.thread_popover_handle.clone();
@@ -1479,12 +1481,15 @@ impl Render for ChatLayout {
             self.stream_store.clone(),
             cx,
         );
-        let nav_bottom_pad = self.voice_mini_bar_height
-            + if stream_connected_bar.is_some() {
-                px(crate::chat::stream::stream_connected_bar_height())
-            } else {
-                px(0.)
-            };
+        let nav_bottom_pad = if voice_mini_bar.is_some() {
+            self.voice_mini_bar_height
+        } else {
+            px(0.)
+        } + if stream_connected_bar.is_some() {
+            px(crate::chat::stream::stream_connected_bar_height())
+        } else {
+            px(0.)
+        };
         let fullscreen = if self.connected_call_is_active(cx) {
             let chat = cx.entity();
             crate::chat::voice::render_screen_fullscreen_overlay(

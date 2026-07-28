@@ -1,11 +1,15 @@
-use std::collections::HashMap;
-use std::sync::Arc;
+use std::collections::{HashMap, HashSet};
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 use std::time::{Duration, Instant};
 
-use gpui::{App, AppContext, Context, Entity, Global, Task};
+use gpui::{App, AppContext, Context, Entity, Global, RenderImage, Task, Window};
 use mezon_client::{AppApi, RealtimeEvent};
 use mezon_stream::{STREAM_FRAME_KEY, StreamEvent, StreamSession, StreamSessionConfig};
 use mezon_voice::VideoFrameStore;
+use parking_lot::Mutex;
 
 use crate::AppConfig;
 use crate::AuthState;
@@ -17,6 +21,7 @@ const STREAMING_CHANNEL_TYPE: i32 = 6;
 const STREAM_MEMBER_STATE_ACTIVE: i32 = 1;
 const STREAM_FETCH_LIMIT: i32 = 100;
 const JOIN_TIMEOUT: Duration = Duration::from_secs(30);
+const CONTROLS_HIDE_DELAY: Duration = Duration::from_secs(3);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StreamMember {
@@ -45,9 +50,11 @@ pub struct StreamStore {
     phase: StreamPhase,
     members: HashMap<(ChannelId, UserId), StreamMember>,
     active_clan: Option<ClanId>,
+    last_viewed_stream_channel: Option<ChannelId>,
     show_chat: bool,
     show_members: bool,
     controls_visible: bool,
+    controls_hide_at: Option<Instant>,
     remote_video: bool,
     playback_blocked: bool,
     volume: f32,
@@ -55,9 +62,14 @@ pub struct StreamStore {
     fullscreen: bool,
     error_message: Option<String>,
     frame_store: Arc<VideoFrameStore>,
+    render_cache: Mutex<Option<(u64, Arc<RenderImage>)>>,
+    pending_texture_drops: Mutex<Vec<Arc<RenderImage>>>,
+    pending_texture_replaces: Mutex<Vec<Arc<RenderImage>>>,
+    pending_texture_work: AtomicBool,
     session: Option<StreamSession>,
     session_channel_label: String,
     session_clan_name: String,
+    session_user_id: Option<UserId>,
     join_started: Option<Instant>,
     _fetch_task: Option<Task<()>>,
     _session_task: Option<Task<()>>,
@@ -90,9 +102,11 @@ impl StreamStore {
             phase: StreamPhase::Idle,
             members: HashMap::new(),
             active_clan: None,
+            last_viewed_stream_channel: None,
             show_chat: false,
             show_members: true,
             controls_visible: true,
+            controls_hide_at: None,
             remote_video: false,
             playback_blocked: false,
             volume: 1.0,
@@ -100,9 +114,14 @@ impl StreamStore {
             fullscreen: false,
             error_message: None,
             frame_store: Arc::new(VideoFrameStore::default()),
+            render_cache: Mutex::new(None),
+            pending_texture_drops: Mutex::new(Vec::new()),
+            pending_texture_replaces: Mutex::new(Vec::new()),
+            pending_texture_work: AtomicBool::new(false),
             session: None,
             session_channel_label: String::new(),
             session_clan_name: String::new(),
+            session_user_id: None,
             join_started: None,
             _fetch_task: None,
             _session_task: None,
@@ -183,16 +202,122 @@ impl StreamStore {
     pub fn bump_controls_visible(&mut self, cx: &mut Context<Self>) {
         let was_visible = self.controls_visible;
         self.controls_visible = true;
-        self._controls_hide_task = Some(cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(Duration::from_secs(3)).await;
-            this.update(cx, |this, cx| {
-                this.controls_visible = false;
-                cx.notify();
-            })
-            .ok();
-        }));
+        self.controls_hide_at = Some(Instant::now() + CONTROLS_HIDE_DELAY);
+        if self._controls_hide_task.is_none() {
+            self._controls_hide_task = Some(cx.spawn(async move |this, cx| {
+                loop {
+                    let wait = this
+                        .update(cx, |this, _| {
+                            this.controls_hide_at
+                                .map(|at| at.saturating_duration_since(Instant::now()))
+                        })
+                        .ok()
+                        .flatten();
+                    let Some(wait) = wait else {
+                        break;
+                    };
+                    if !wait.is_zero() {
+                        cx.background_executor().timer(wait).await;
+                    }
+                    let hide = this
+                        .update(cx, |this, _| {
+                            this.controls_hide_at.is_none_or(|at| Instant::now() >= at)
+                        })
+                        .unwrap_or(true);
+                    if hide {
+                        this.update(cx, |this, cx| {
+                            this.controls_visible = false;
+                            this.controls_hide_at = None;
+                            this._controls_hide_task = None;
+                            cx.notify();
+                        })
+                        .ok();
+                        break;
+                    }
+                }
+            }));
+        }
         if !was_visible {
             cx.notify();
+        }
+    }
+
+    pub fn clear_error_on_active_channel_change(
+        &mut self,
+        active: Option<(ChannelType, ChannelId)>,
+        cx: &mut Context<Self>,
+    ) {
+        let viewed = match active {
+            Some((ChannelType::Stream, channel_id)) => Some(channel_id),
+            _ => None,
+        };
+        if self.last_viewed_stream_channel == viewed {
+            return;
+        }
+        self.last_viewed_stream_channel = viewed;
+        if self.error_message.take().is_some() {
+            if matches!(self.phase, StreamPhase::Error(_)) {
+                self.phase = StreamPhase::Idle;
+            }
+            cx.notify();
+        }
+    }
+
+    pub fn render_frame(&self) -> Option<Arc<RenderImage>> {
+        let cached_seq = self.render_cache.lock().as_ref().map(|(seq, _)| *seq);
+        let Some(frame) = self.frame_store.take_new(STREAM_FRAME_KEY, cached_seq) else {
+            return self
+                .render_cache
+                .lock()
+                .as_ref()
+                .map(|(_, image)| image.clone());
+        };
+        let seq = frame.seq;
+        let buffer = image::RgbaImage::from_raw(frame.width, frame.height, frame.bgra)?;
+        let weak_store = Arc::downgrade(&self.frame_store);
+        let recycler = Arc::new(move |buffer| {
+            if let Some(store) = weak_store.upgrade() {
+                store.recycle(STREAM_FRAME_KEY, buffer);
+            }
+        });
+        let mut render_image = RenderImage::new_recyclable(image::Frame::new(buffer), recycler);
+        let previous_id = self.render_cache.lock().as_ref().map(|(_, image)| image.id);
+        if let Some(id) = previous_id {
+            render_image = render_image.with_id(id);
+        }
+        let image = Arc::new(render_image);
+        let previous = self.render_cache.lock().replace((seq, image.clone()));
+        if previous_id.is_some() {
+            let mut replaces = self.pending_texture_replaces.lock();
+            if let Some(existing) = replaces.iter_mut().find(|queued| queued.id == image.id) {
+                *existing = image.clone();
+            } else {
+                replaces.push(image.clone());
+            }
+            self.pending_texture_work.store(true, Ordering::Release);
+        } else if let Some((_, previous)) = previous {
+            self.pending_texture_drops.lock().push(previous);
+            self.pending_texture_work.store(true, Ordering::Release);
+        }
+        Some(image)
+    }
+
+    pub fn flush_texture_drops(&self, mut window: Option<&mut Window>, cx: &mut App) {
+        if !self.pending_texture_work.swap(false, Ordering::AcqRel) {
+            return;
+        }
+        let drops: Vec<Arc<RenderImage>> = std::mem::take(&mut *self.pending_texture_drops.lock());
+        let replaces: Vec<Arc<RenderImage>> =
+            std::mem::take(&mut *self.pending_texture_replaces.lock());
+        let dropped: HashSet<_> = drops.iter().map(|image| image.id).collect();
+        for image in drops {
+            cx.drop_image(image, window.as_deref_mut());
+        }
+        for image in replaces {
+            if dropped.contains(&image.id) {
+                continue;
+            }
+            cx.update_render_image(&image, window.as_deref_mut());
         }
     }
 
@@ -226,6 +351,10 @@ impl StreamStore {
 
     pub fn frame_store(&self) -> &Arc<VideoFrameStore> {
         &self.frame_store
+    }
+
+    pub fn has_video_frame(&self) -> bool {
+        self.frame_store.get(STREAM_FRAME_KEY).is_some() || self.render_cache.lock().is_some()
     }
 
     pub fn session_channel_label(&self) -> &str {
@@ -342,9 +471,11 @@ impl StreamStore {
     }
 
     fn sync_audio_playback(&self) {
-        if let Some(session) = &self.session {
-            session.audio().set_volume(self.volume);
-            session.audio().set_muted(self.muted);
+        if let Some(session) = &self.session
+            && let Some(audio) = session.audio()
+        {
+            audio.set_volume(self.volume);
+            audio.set_muted(self.muted);
         }
     }
 
@@ -399,22 +530,16 @@ impl StreamStore {
             stream_id: channel_id.to_string(),
         };
         let frame_store = self.frame_store.clone();
+        let session_user_id = session.user_id.parse::<i64>().ok().map(UserId);
+        self.session_user_id = session_user_id;
 
-        let stream_session = match StreamSession::start(
+        let stream_session = StreamSession::start(
             session_config,
             frame_store,
             output_device_id,
             self.volume,
             self.muted,
-        ) {
-            Ok(session) => session,
-            Err(err) => {
-                self.phase = StreamPhase::Error(err.to_string());
-                self.error_message = Some(err.to_string());
-                cx.notify();
-                return;
-            }
-        };
+        );
         let events = stream_session.events().clone();
         self.session = Some(stream_session);
 
@@ -447,14 +572,22 @@ impl StreamStore {
     }
 
     pub fn leave_stream(&mut self, cx: &mut Context<Self>) {
+        let channel_id = self.session_channel_id();
+        let user_id = self.session_user_id;
         self.disconnect_session();
         self.phase = StreamPhase::Idle;
         self.error_message = None;
         self.fullscreen = false;
         self.controls_visible = false;
+        self.controls_hide_at = None;
         self._controls_hide_task = None;
+        self.show_chat = false;
         self.session_channel_label.clear();
         self.session_clan_name.clear();
+        self.session_user_id = None;
+        if let (Some(channel_id), Some(user_id)) = (channel_id, user_id) {
+            self.members.remove(&(channel_id, user_id));
+        }
         cx.notify();
     }
 
@@ -468,6 +601,10 @@ impl StreamStore {
         self.playback_blocked = false;
         self.join_started = None;
         self.frame_store.remove(STREAM_FRAME_KEY);
+        if let Some((_, image)) = self.render_cache.lock().take() {
+            self.pending_texture_drops.lock().push(image);
+            self.pending_texture_work.store(true, Ordering::Release);
+        }
     }
 
     fn fail_stream(&mut self, message: String, cx: &mut Context<Self>) {
@@ -525,6 +662,7 @@ impl StreamStore {
                 }
             }
         }
+        self.sync_audio_playback();
         cx.notify();
     }
 

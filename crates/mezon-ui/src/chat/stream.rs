@@ -1,14 +1,11 @@
-use std::sync::Arc;
-
 use gpui::{
-    AnyElement, App, Entity, FocusHandle, FontWeight, ObjectFit, RenderImage, SharedString, Window,
-    div, img, prelude::*, px, relative,
+    AnyElement, App, Entity, FocusHandle, FontWeight, ObjectFit, SharedString, Window, div, img,
+    prelude::*, px, relative,
 };
 use mezon_store::{
     AppConfig, AuthState, Channel, ChannelId, ChannelList, ClanId, ClanList, StreamMember,
     StreamPhase, StreamStore,
 };
-use mezon_voice::VideoFrameData;
 
 use crate::chat::layout::ChatLayout;
 use crate::components::primitives::{Avatar, Icon, IconName, Slider, SliderState};
@@ -16,7 +13,6 @@ use crate::theme::Theme;
 use crate::util::assets::STREAM_THUMBNAIL;
 use ui::Tooltip;
 
-const STREAM_VIDEO_KEY: u64 = 1;
 const MEMBER_AVATAR_SIZE: f32 = 40.;
 const STREAM_CONNECTED_BAR_HEIGHT: f32 = 52.;
 
@@ -862,7 +858,7 @@ fn render_stream_player(
     cx: &App,
     always_show_controls: bool,
 ) -> AnyElement {
-    let has_video_frame = store.frame_store().get(STREAM_VIDEO_KEY).is_some();
+    let has_video_frame = store.has_video_frame();
     let media = if is_live && store.remote_video() && has_video_frame {
         render_stream_video(store, cx)
     } else {
@@ -1006,20 +1002,13 @@ fn stream_thumbnail_fallback() -> AnyElement {
 }
 
 fn render_stream_video(store: &StreamStore, _cx: &App) -> AnyElement {
-    if let Some(frame) = store.frame_store().get(STREAM_VIDEO_KEY) {
-        if let Some(image) = frame_to_render_image(&frame) {
-            return img(image)
-                .size_full()
-                .object_fit(ObjectFit::Contain)
-                .into_any_element();
-        }
+    if let Some(image) = store.render_frame() {
+        return img(image)
+            .size_full()
+            .object_fit(ObjectFit::Contain)
+            .into_any_element();
     }
     div().size_full().bg(gpui::rgb(0x111111)).into_any_element()
-}
-
-fn frame_to_render_image(frame: &VideoFrameData) -> Option<Arc<RenderImage>> {
-    let buffer = image::RgbaImage::from_raw(frame.width, frame.height, frame.bgra.clone())?;
-    Some(Arc::new(RenderImage::new(vec![image::Frame::new(buffer)])))
 }
 
 fn member_row(
@@ -1090,7 +1079,7 @@ struct MemberDisplay {
     avatar_raw: SharedString,
 }
 
-fn truncate_label(label: &str, max: usize) -> SharedString {
+pub(crate) fn truncate_label(label: &str, max: usize) -> SharedString {
     if label.chars().count() > max {
         SharedString::from(format!(
             "{}...",

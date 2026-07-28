@@ -1008,11 +1008,7 @@ fn render_stream_chat_sidebar_header(
     name: &SharedString,
     _cx: &App,
 ) -> impl IntoElement {
-    let label = if name.len() > 30 {
-        format!("{}...", &name[..30])
-    } else {
-        name.to_string()
-    };
+    let label = crate::chat::stream::truncate_label(name, 30);
     let hover = theme.bg_hover;
 
     div()
