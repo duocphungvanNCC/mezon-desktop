@@ -3,14 +3,16 @@ use std::collections::HashMap;
 use crate::chat::channel_app_bar::ChannelAppBarTarget;
 use gpui::{
     AnyView, App, Context, DismissEvent, Entity, FocusHandle, Focusable, Pixels, ScrollHandle,
-    Size, StyleRefinement, Subscription, Task, Window, canvas, deferred, div, prelude::*, px,
+    Size, StyleRefinement, Subscription, Task, Window, canvas, deferred, div, linear_color_stop,
+    linear_gradient, prelude::*, px,
 };
 use mezon_store::{
-    AuthState, Channel, ChannelId, ChannelList, ChannelType, ClanId, ClanList, ClanMembersStore,
-    DirectChannel, DirectKind, DirectMessageStore, GroupMembersStore, InboxStore,
-    MessageSearchEvent, MessageSearchStore, MessagesStore, PinnedEvent, PinnedMessagesStore,
-    Settings, StreamStore, ThreadsEvent, ThreadsStore, TopicsEvent, TopicsStore, UiState,
-    VoiceConnection, VoiceMember, VoiceModerationError, VoiceStore, expand_mention_name_tokens,
+    AuthState, AutoUpdateStatus, AutoUpdateStore, Channel, ChannelId, ChannelList, ChannelType,
+    ClanId, ClanList, ClanMembersStore, DirectChannel, DirectKind, DirectMessageStore,
+    GroupMembersStore, InboxStore, MessageSearchEvent, MessageSearchStore, MessagesStore,
+    PinnedEvent, PinnedMessagesStore, Settings, StreamStore, ThreadsEvent, ThreadsStore,
+    TopicsEvent, TopicsStore, UiState, VoiceConnection, VoiceMember, VoiceModerationError,
+    VoiceStore, expand_mention_name_tokens,
 };
 use ui::PopoverMenuHandle;
 
@@ -24,6 +26,7 @@ use crate::chat::message_search::{
 use crate::chat::pinned_popover::PinnedPopoverPanel;
 use crate::chat::threads_popover::ThreadsPopoverPanel;
 use crate::chat::voice_sound_picker::{VoiceSoundPicker, VoiceSoundPickerEvent};
+use crate::chat::{CanvasPopoverPanel, CanvasView};
 use crate::components::compositions::user_info_bar::UserInfoBar;
 use crate::components::primitives::{
     Icon, IconName, InputEvent, InputState, Slider, SliderEvent, SliderState,
@@ -83,10 +86,13 @@ pub struct ChatLayout {
     inbox_handle: PopoverMenuHandle<InboxPopoverPanel>,
     pub(crate) thread_popover_handle: PopoverMenuHandle<ThreadsPopoverPanel>,
     pub(crate) thread_search_input: Option<Entity<InputState>>,
+    pub(crate) canvas_search_input: Option<Entity<InputState>>,
     thread_name_input: Option<Entity<InputState>>,
     create_thread_message_input: Option<Entity<InputState>>,
     topic_panel: Option<Entity<crate::chat::create_topic_panel::TopicPanel>>,
     pin_popover_handle: PopoverMenuHandle<PinnedPopoverPanel>,
+    canvas_popover_handle: PopoverMenuHandle<CanvasPopoverPanel>,
+    canvas_view: Option<Entity<CanvasView>>,
     displayed_active_channel: Option<ActiveChannelSlice>,
     focused_channel_id: Option<ChannelId>,
     displayed_voice_mini: Option<VoiceMiniSlice>,
@@ -230,6 +236,10 @@ impl ChatLayout {
         })
         .detach();
 
+        if let Some(update_store) = AutoUpdateStore::try_global(cx) {
+            cx.observe(&update_store, |_, _, cx| cx.notify()).detach();
+        }
+
         let voice_store = VoiceStore::global(cx);
         cx.observe(&voice_store, |this, voice, cx| {
             if let Some(err) = voice.update(cx, |store, _| store.take_moderation_error()) {
@@ -321,6 +331,7 @@ impl ChatLayout {
                 this.dismiss_topic_panel(cx);
                 this.dismiss_threads_popover(cx);
                 this.pin_popover_handle.hide(cx);
+                this.canvas_popover_handle.hide(cx);
                 cx.notify();
             }
         })
@@ -334,6 +345,7 @@ impl ChatLayout {
                 this.dismiss_topic_panel(cx);
                 this.dismiss_threads_popover(cx);
                 this.pin_popover_handle.hide(cx);
+                this.canvas_popover_handle.hide(cx);
             }
             this.reset_message_search(cx);
             this.sync_active_from_route(cx);
@@ -462,10 +474,13 @@ impl ChatLayout {
             inbox_handle: PopoverMenuHandle::default(),
             thread_popover_handle: PopoverMenuHandle::default(),
             thread_search_input: None,
+            canvas_search_input: None,
             thread_name_input: None,
             create_thread_message_input: None,
             topic_panel: None,
             pin_popover_handle: PopoverMenuHandle::default(),
+            canvas_popover_handle: PopoverMenuHandle::default(),
+            canvas_view: None,
             displayed_active_channel: None,
             focused_channel_id: None,
             displayed_voice_mini: None,
@@ -935,6 +950,9 @@ impl ChatLayout {
     }
 
     fn sync_active_from_route(&mut self, cx: &mut Context<Self>) {
+        if !matches!(Router::global(cx).read(cx).route(), Route::Canvas { .. }) {
+            self.canvas_view = None;
+        }
         match Router::global(cx).read(cx).route() {
             Route::Channel {
                 clan_id,
@@ -1490,6 +1508,98 @@ impl Render for ChatLayout {
         } else {
             px(0.)
         };
+        fn update_banner_bg(hover: bool) -> gpui::Background {
+            if hover {
+                linear_gradient(
+                    90.,
+                    linear_color_stop(gpui::rgb(0x7c3aed), 0.),
+                    linear_color_stop(gpui::rgb(0xdb2777), 1.),
+                )
+            } else {
+                linear_gradient(
+                    90.,
+                    linear_color_stop(gpui::rgb(0x8b5cf6), 0.),
+                    linear_color_stop(gpui::rgb(0xec4899), 1.),
+                )
+            }
+        }
+        let update_pill = AutoUpdateStore::try_global(cx)
+            .filter(|store| matches!(store.read(cx).status(), AutoUpdateStatus::Updated { .. }))
+            .map(|_| {
+                let locale = self.settings.read(cx).language.clone();
+                div()
+                    .id("update-mezon-pill")
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .gap_2()
+                    .mx_2()
+                    .mt_3()
+                    .mb_2()
+                    .h(px(36.0))
+                    .flex_none()
+                    .rounded(px(8.0))
+                    .bg(update_banner_bg(false))
+                    .cursor_pointer()
+                    .hover(|s| s.bg(update_banner_bg(true)))
+                    .on_click(|_, _, cx| cx.restart())
+                    .child(
+                        Icon::new(IconName::ReloadIcon)
+                            .size(px(16.0))
+                            .text_color(gpui::white()),
+                    )
+                    .child(
+                        div()
+                            .text_sm()
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .text_color(gpui::white())
+                            .child(mezon_i18n::t(&locale, "common.updateMezon").to_string()),
+                    )
+            });
+        let update_available_pill = AutoUpdateStore::try_global(cx)
+            .and_then(|store| match store.read(cx).status() {
+                AutoUpdateStatus::UpdateAvailable { version } => Some(version.clone()),
+                _ => None,
+            })
+            .map(|version| {
+                let locale = self.settings.read(cx).language.clone();
+                div()
+                    .id("update-available-pill")
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .gap_2()
+                    .mx_2()
+                    .mt_3()
+                    .mb_2()
+                    .h(px(36.0))
+                    .flex_none()
+                    .rounded(px(8.0))
+                    .bg(update_banner_bg(false))
+                    .cursor_pointer()
+                    .hover(|s| s.bg(update_banner_bg(true)))
+                    .on_click(|_, _, cx| {
+                        if let Some(store) = AutoUpdateStore::try_global(cx) {
+                            store.update(cx, |store, cx| store.check(true, cx));
+                        }
+                    })
+                    .child(
+                        Icon::new(IconName::Download)
+                            .size(px(16.0))
+                            .text_color(gpui::white()),
+                    )
+                    .child(
+                        div()
+                            .text_sm()
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .text_color(gpui::white())
+                            .child(format!(
+                                "{} (v{})",
+                                mezon_i18n::t(&locale, "common.newUpdateAvailable"),
+                                version
+                            )),
+                    )
+            });
         let fullscreen = if self.connected_call_is_active(cx) {
             let chat = cx.entity();
             crate::chat::voice::render_screen_fullscreen_overlay(
@@ -1587,6 +1697,8 @@ impl Render for ChatLayout {
                                     .size_full(),
                                 )
                             }))
+                            .children(update_available_pill)
+                            .children(update_pill)
                             .child(
                                 div()
                                     .w_full()
@@ -1791,6 +1903,45 @@ impl ChatLayout {
         })
         .detach();
         self.thread_search_input = Some(input);
+    }
+
+    pub(crate) fn ensure_canvas_search_input(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.canvas_search_input.is_some() {
+            return;
+        }
+        let locale = self.settings.read(cx).language.clone();
+        let placeholder = mezon_i18n::t(&locale, "channelMenu.menu.thread.searchCanvas");
+        let input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder(placeholder)
+                .embedded(true)
+        });
+        self.canvas_search_input = Some(input);
+    }
+
+    fn ensure_canvas_view(
+        &mut self,
+        clan_id: ClanId,
+        channel_id: ChannelId,
+        canvas_id: ChannelId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Entity<CanvasView> {
+        if let Some(existing) = &self.canvas_view {
+            existing.update(cx, |view, cx| {
+                view.sync_route(clan_id, channel_id, canvas_id, window, cx);
+            });
+            return existing.clone();
+        }
+        let settings = self.settings.clone();
+        let view =
+            cx.new(|cx| CanvasView::new(settings, clan_id, channel_id, canvas_id, window, cx));
+        self.canvas_view = Some(view.clone());
+        view
     }
 
     pub(crate) fn settings_language(&self, cx: &App) -> String {
@@ -2260,6 +2411,7 @@ impl ChatLayout {
         let inbox_handle = self.inbox_handle.clone();
         let active_clan_id = self.active_clan_id(cx);
         let pin_handle = self.pin_popover_handle.clone();
+        let canvas_handle = self.canvas_popover_handle.clone();
         let show_results_panel = self.show_results_panel;
         let topic_open = TopicsStore::global(cx).read(cx).is_panel_open();
         let create_thread_open = ThreadsStore::global(cx).read(cx).is_creating();
@@ -2322,6 +2474,7 @@ impl ChatLayout {
                         None,
                         None,
                         Some(pin_handle),
+                        None,
                         show_search_bar,
                         search_expanded,
                         show_search_options,
@@ -2356,6 +2509,7 @@ impl ChatLayout {
                         None,
                         None,
                         Some(pin_handle),
+                        None,
                         false,
                         false,
                         false,
@@ -2372,6 +2526,40 @@ impl ChatLayout {
         }
 
         if let Some(ch) = self.channel_list.read(cx).active_channel() {
+            if let Route::Canvas {
+                clan_id,
+                channel_id,
+                canvas_id,
+            } = Router::global(cx).read(cx).route().clone()
+            {
+                let channel_name = ch.name.clone();
+                let active_channel_id = ch.id;
+                let canvas = self
+                    .ensure_canvas_view(clan_id, channel_id, canvas_id, window, cx)
+                    .into_any_element();
+                return self
+                    .chat_area
+                    .render_canvas(
+                        &locale,
+                        Some(channel_name.as_str()),
+                        Some(active_channel_id),
+                        true,
+                        self.show_member_list && !show_results_panel && !topic_open,
+                        true,
+                        Some(inbox_handle.clone()),
+                        active_clan_id.clone(),
+                        Some(pin_handle.clone()),
+                        Some(canvas_handle.clone()),
+                        show_search_bar,
+                        search_expanded,
+                        show_search_options,
+                        search_input.clone(),
+                        canvas,
+                        cx,
+                    )
+                    .into_any_element();
+            }
+
             if ch.channel_type == ChannelType::Voice {
                 self.sync_voice_session_defaults(cx);
                 let channel = ch.clone();
@@ -2473,6 +2661,7 @@ impl ChatLayout {
                                 None,
                                 active_clan_id,
                                 None,
+                                None,
                                 false,
                                 false,
                                 false,
@@ -2556,6 +2745,7 @@ impl ChatLayout {
                     Some(inbox_handle),
                     active_clan_id,
                     Some(pin_handle),
+                    Some(canvas_handle),
                     show_search_bar,
                     search_expanded,
                     show_search_options,
@@ -2594,6 +2784,7 @@ impl ChatLayout {
                     Some(inbox_handle),
                     active_clan_id,
                     None,
+                    Some(canvas_handle),
                     show_search_bar,
                     search_expanded,
                     show_search_options,

@@ -322,7 +322,14 @@ impl MezonTransport {
                         Some(executor) => {
                             let _ = executor.sender.send((code, message));
                         }
-                        None => dispatch_realtime_push(cid, &message, on_event.as_ref()),
+                        None => {
+                            tracing::debug!(
+                                target: "cid_match",
+                                "no pending request for cid={cid} code={code} len={}; routing as push",
+                                message.len()
+                            );
+                            dispatch_realtime_push(cid, &message, on_event.as_ref())
+                        }
                     }
                 } else {
                     dispatch_realtime_push(cid, &message, on_event.as_ref());
@@ -394,7 +401,7 @@ impl MezonTransport {
             .await
             .map_err(|_| {
                 self.pending_requests.lock().remove(&cid);
-                anyhow::anyhow!("Request timed out")
+                anyhow::anyhow!("Request timed out (cid={cid}, {}ms)", timeout.as_millis())
             })?
             .map_err(|_| anyhow::anyhow!("Response channel closed"))?;
         Ok(result)
@@ -2776,6 +2783,31 @@ pub struct ApiPinMessage {
     pub create_time: i64,
 }
 
+pub const CANVAS_LIST_LIMIT: i32 = 50;
+pub const CANVAS_STATUS_CREATED: i32 = 1;
+pub const CANVAS_STATUS_UPDATE: i32 = 2;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ApiCanvas {
+    pub id: String,
+    pub title: String,
+    pub content: String,
+    pub is_default: bool,
+    pub creator_id: String,
+    pub update_time_seconds: u32,
+    pub create_time_seconds: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ApiCanvasDetail {
+    pub id: String,
+    pub title: String,
+    pub content: String,
+    pub creator_id: String,
+    pub editor_id: String,
+    pub is_default: bool,
+}
+
 impl MezonTransport {
     /// Build a protobuf-encoded API request envelope.
     ///
@@ -4088,7 +4120,8 @@ impl MezonTransport {
         let parsed_clan_id: i64 = clan_id;
         let parsed_channel_id: i64 = channel_id;
         tracing::debug!(
-            "send_channel_message: clan_id={} channel_id={} is_public={} content_len={} attachments={}",
+            "send_channel_message: cid={} clan_id={} channel_id={} is_public={} content_len={} attachments={}",
+            cid,
             parsed_clan_id,
             parsed_channel_id,
             is_public,
@@ -5261,14 +5294,36 @@ impl MezonTransport {
         Ok(api::BannedUserList::decode(response.as_slice())?)
     }
 
-    /// Get channel canvas list.
+    fn canvas_from_proto(item: api::ChannelCanvasItem) -> ApiCanvas {
+        ApiCanvas {
+            id: item.id.to_string(),
+            title: item.title,
+            content: item.content,
+            is_default: item.is_default,
+            creator_id: item.creator_id.to_string(),
+            update_time_seconds: item.update_time_seconds,
+            create_time_seconds: item.create_time_seconds,
+        }
+    }
+
+    fn canvas_detail_from_proto(detail: api::ChannelCanvasDetailResponse) -> ApiCanvasDetail {
+        ApiCanvasDetail {
+            id: detail.id.to_string(),
+            title: detail.title,
+            content: detail.content,
+            creator_id: detail.creator_id.to_string(),
+            editor_id: detail.editor_id.to_string(),
+            is_default: detail.is_default,
+        }
+    }
+
     pub async fn get_channel_canvas_list(
         &self,
         channel_id: i64,
         clan_id: i64,
         limit: i32,
         page: i32,
-    ) -> Result<api::ChannelCanvasListResponse> {
+    ) -> Result<Vec<ApiCanvas>> {
         let cid = self.generate_cid();
         let body = api::ChannelCanvasListRequest {
             channel_id,
@@ -5284,16 +5339,20 @@ impl MezonTransport {
         if code != 0 {
             return Err(anyhow::anyhow!("API error: code={}", code));
         }
-        Ok(api::ChannelCanvasListResponse::decode(response.as_slice())?)
+        let list = api::ChannelCanvasListResponse::decode(response.as_slice())?;
+        Ok(list
+            .channel_canvases
+            .into_iter()
+            .map(Self::canvas_from_proto)
+            .collect())
     }
 
-    /// Get channel canvas detail.
     pub async fn get_channel_canvas_detail(
         &self,
         id: i64,
         clan_id: i64,
         channel_id: i64,
-    ) -> Result<api::ChannelCanvasDetailResponse> {
+    ) -> Result<ApiCanvasDetail> {
         let cid = self.generate_cid();
         let body = api::ChannelCanvasDetailRequest {
             id,
@@ -5307,9 +5366,8 @@ impl MezonTransport {
         if code != 0 {
             return Err(anyhow::anyhow!("API error: code={}", code));
         }
-        Ok(api::ChannelCanvasDetailResponse::decode(
-            response.as_slice(),
-        )?)
+        let detail = api::ChannelCanvasDetailResponse::decode(response.as_slice())?;
+        Ok(Self::canvas_detail_from_proto(detail))
     }
 
     /// List onboarding.
@@ -5468,11 +5526,19 @@ impl MezonTransport {
     }
 
     /// List audit log.
-    pub async fn list_audit_log(&self, clan_id: i64) -> Result<api::ListAuditLog> {
+    pub async fn list_audit_log(
+        &self,
+        clan_id: i64,
+        action_log: &str,
+        user_id: Option<i64>,
+        date_log: &str,
+    ) -> Result<api::ListAuditLog> {
         let cid = self.generate_cid();
         let body = api::ListAuditLogRequest {
             clan_id,
-            ..Default::default()
+            action_log: action_log.to_string(),
+            user_id: user_id.unwrap_or(0),
+            date_log: date_log.to_string(),
         }
         .encode_to_vec();
         let (code, response) = self.send_api_request(cid, "ListAuditLog", body).await?;
@@ -7594,21 +7660,26 @@ impl MezonTransport {
         Ok(())
     }
 
-    /// Edit channel canvases.
+    #[allow(clippy::too_many_arguments)]
     pub async fn edit_channel_canvases(
         &self,
+        id: i64,
         channel_id: i64,
         clan_id: i64,
         title: &str,
         content: &str,
-    ) -> Result<api::EditChannelCanvasResponse> {
+        is_default: bool,
+        status: i32,
+    ) -> Result<String> {
         let cid = self.generate_cid();
         let body = api::EditChannelCanvasRequest {
+            id,
             channel_id,
             clan_id,
             title: title.to_string(),
             content: content.to_string(),
-            ..Default::default()
+            is_default,
+            status,
         }
         .encode_to_vec();
         let (code, response) = self
@@ -7617,7 +7688,8 @@ impl MezonTransport {
         if code != 0 {
             return Err(anyhow::anyhow!("API error: code={}", code));
         }
-        Ok(api::EditChannelCanvasResponse::decode(response.as_slice())?)
+        let resp = api::EditChannelCanvasResponse::decode(response.as_slice())?;
+        Ok(resp.id.to_string())
     }
 
     /// Delete channel canvas.

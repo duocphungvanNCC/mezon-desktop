@@ -1,9 +1,9 @@
 use std::sync::Arc;
 
 use gpui::{
-    Anchor, AnyElement, App, ClickEvent, Context, CursorStyle, Div, Entity, FontWeight,
-    IntoElement, Render, RenderOnce, SharedString, Stateful, Subscription, WeakEntity, Window, div,
-    point, prelude::*, px,
+    Anchor, AnyElement, App, ClickEvent, Context, CursorStyle, Div, Entity, FontWeight, Hsla,
+    IntoElement, Pixels, Render, RenderOnce, SharedString, Stateful, Subscription, WeakEntity,
+    Window, div, point, prelude::*, px,
 };
 use mezon_store::{InVoiceInfo, Settings, StreamStore, ThreadsStore};
 use ui::{Clickable, PopoverMenu, PopoverMenuHandle, Toggleable, Tooltip};
@@ -14,7 +14,9 @@ use crate::chat::inbox::{InboxPopoverPanel, clan_has_inbox_badge};
 use crate::chat::layout::ChatLayout;
 use crate::chat::pinned_popover::{PinnedPopoverPanel, pin_popover_on_open};
 use crate::chat::threads_popover::{ThreadsPopoverPanel, thread_popover_on_open};
+use crate::chat::{CanvasPopoverPanel, canvas_popover_on_open};
 use crate::components::primitives::{Icon, IconName, InputState};
+use crate::components::{Button, ButtonVariant, ButtonVariants, Sizable, Size};
 use crate::theme::{ActiveTheme, Theme};
 
 type ToggleHandler = Arc<dyn Fn(&mut Window, &mut App)>;
@@ -22,6 +24,11 @@ type ClickHandler = Box<dyn Fn(&ClickEvent, &mut Window, &mut App) + 'static>;
 type ThreadTriggerClickHandler = Box<dyn Fn(&ClickEvent, &mut Window, &mut App) + 'static>;
 
 const HEADER_POPOVER_Y_OFFSET: f32 = 4.;
+const CANVAS_HEADER_BTN_H: f32 = 24.;
+
+fn canvas_popover_y_offset() -> Pixels {
+    px((window_controls::APP_HEADER_HEIGHT - CANVAS_HEADER_BTN_H) / 4.)
+}
 
 pub struct ChannelHeader {
     name: String,
@@ -39,6 +46,7 @@ pub struct ChannelHeader {
     layout: Option<Entity<ChatLayout>>,
     thread_handle: Option<PopoverMenuHandle<ThreadsPopoverPanel>>,
     pin_handle: Option<PopoverMenuHandle<PinnedPopoverPanel>>,
+    canvas_handle: Option<PopoverMenuHandle<CanvasPopoverPanel>>,
     settings: Option<Entity<Settings>>,
     gallery_trigger: Option<AnyElement>,
     files_trigger: Option<AnyElement>,
@@ -68,6 +76,7 @@ impl ChannelHeader {
             layout: None,
             thread_handle: None,
             pin_handle: None,
+            canvas_handle: None,
             settings: None,
             gallery_trigger: None,
             files_trigger: None,
@@ -147,6 +156,16 @@ impl ChannelHeader {
         settings: Entity<Settings>,
     ) -> Self {
         self.pin_handle = Some(handle);
+        self.settings = Some(settings);
+        self
+    }
+
+    pub fn canvas_popover(
+        mut self,
+        handle: PopoverMenuHandle<CanvasPopoverPanel>,
+        settings: Entity<Settings>,
+    ) -> Self {
+        self.canvas_handle = Some(handle);
         self.settings = Some(settings);
         self
     }
@@ -231,6 +250,7 @@ impl ChannelHeader {
             layout,
             thread_handle,
             pin_handle,
+            canvas_handle,
             settings,
             gallery_trigger,
             files_trigger,
@@ -266,6 +286,7 @@ impl ChannelHeader {
             thread_handle,
             layout,
             pin_handle,
+            canvas_handle,
             settings,
             gallery_trigger,
             files_trigger,
@@ -396,6 +417,7 @@ impl ChannelHeader {
             layout: None,
             thread_handle: None,
             pin_handle: None,
+            canvas_handle: None,
             settings: None,
             gallery_trigger: None,
             files_trigger: None,
@@ -422,6 +444,7 @@ impl ChannelHeader {
         thread_handle: Option<PopoverMenuHandle<ThreadsPopoverPanel>>,
         layout: Option<Entity<ChatLayout>>,
         pin_handle: Option<PopoverMenuHandle<PinnedPopoverPanel>>,
+        canvas_handle: Option<PopoverMenuHandle<CanvasPopoverPanel>>,
         settings: Option<Entity<Settings>>,
         gallery_trigger: Option<AnyElement>,
         files_trigger: Option<AnyElement>,
@@ -449,6 +472,7 @@ impl ChannelHeader {
             layout,
             thread_handle,
             pin_handle,
+            canvas_handle,
             settings,
             gallery_trigger,
             files_trigger,
@@ -486,6 +510,7 @@ impl ChannelHeader {
         let thread_handle = self.thread_handle;
         let layout = self.layout;
         let pin_handle = self.pin_handle;
+        let canvas_handle = self.canvas_handle;
         let settings = self.settings;
         let mut gallery_trigger = self.gallery_trigger;
         let mut files_trigger = self.files_trigger;
@@ -528,11 +553,48 @@ impl ChannelHeader {
             if id == "hdr-members" && !members_action {
                 continue;
             }
+            if id == "hdr-canvas"
+                && let (Some(handle), Some(settings), Some(layout)) =
+                    (canvas_handle.clone(), settings.clone(), layout.clone())
+            {
+                let is_open = handle.is_deployed();
+                let menu_handle = handle.clone();
+                buttons.push(
+                    PopoverMenu::new("hdr-canvas-popover")
+                        .with_handle(handle)
+                        .anchor(Anchor::TopRight)
+                        .attach(Anchor::BottomRight)
+                        .offset(point(px(0.), canvas_popover_y_offset()))
+                        .on_open(canvas_popover_on_open())
+                        .menu({
+                            let settings = settings.clone();
+                            move |window, cx| {
+                                layout.update(cx, |layout, cx| {
+                                    layout.ensure_canvas_search_input(window, cx);
+                                });
+                                let search_input = layout.read(cx).canvas_search_input.clone()?;
+                                Some(cx.new(|cx| {
+                                    CanvasPopoverPanel::new(
+                                        settings.clone(),
+                                        search_input,
+                                        menu_handle.clone(),
+                                        window,
+                                        cx,
+                                    )
+                                }))
+                            }
+                        })
+                        .trigger(CanvasPopoverTrigger::new(theme, is_open))
+                        .into_any_element(),
+                );
+                continue;
+            }
             if id == "hdr-thread" {
                 if !show_threads {
                     continue;
                 }
                 if let (Some(handle), Some(layout)) = (thread_handle.clone(), layout.clone()) {
+                    let is_open = handle.is_deployed();
                     let menu_handle = handle.clone();
                     buttons.push(
                         PopoverMenu::new("hdr-thread-popover")
@@ -560,7 +622,7 @@ impl ChannelHeader {
                                     }))
                                 }
                             })
-                            .trigger(ThreadPopoverTrigger::new(theme, false))
+                            .trigger(ThreadPopoverTrigger::new(theme, is_open))
                             .into_any_element(),
                     );
                 }
@@ -569,6 +631,7 @@ impl ChannelHeader {
             if id == "hdr-pin"
                 && let (Some(handle), Some(settings)) = (pin_handle.clone(), settings.clone())
             {
+                let is_open = handle.is_deployed();
                 let menu_handle = handle.clone();
                 buttons.push(
                     PopoverMenu::new("hdr-pin-popover")
@@ -590,7 +653,7 @@ impl ChannelHeader {
                                 }))
                             }
                         })
-                        .trigger(PinPopoverTrigger::new(theme, false))
+                        .trigger(PinPopoverTrigger::new(theme, is_open))
                         .into_any_element(),
                 );
                 continue;
@@ -718,6 +781,7 @@ pub struct ChatHeader {
     timeline_active: bool,
     stream_sidebar: bool,
     pin_handle: Option<PopoverMenuHandle<PinnedPopoverPanel>>,
+    canvas_handle: Option<PopoverMenuHandle<CanvasPopoverPanel>>,
     layout: WeakEntity<ChatLayout>,
     settings: Entity<Settings>,
     _settings_observe: Subscription,
@@ -754,6 +818,7 @@ impl ChatHeader {
             timeline_active: false,
             stream_sidebar: false,
             pin_handle: None,
+            canvas_handle: None,
             layout,
             settings: settings.clone(),
             _settings_observe,
@@ -772,6 +837,7 @@ impl ChatHeader {
         inbox_handle: Option<PopoverMenuHandle<InboxPopoverPanel>>,
         clan_id: Option<String>,
         pin_handle: Option<PopoverMenuHandle<PinnedPopoverPanel>>,
+        canvas_handle: Option<PopoverMenuHandle<CanvasPopoverPanel>>,
         timeline_action: bool,
         timeline_active: bool,
         show_search_bar: bool,
@@ -791,6 +857,7 @@ impl ChatHeader {
         };
         self.inbox_handle = inbox_handle;
         self.pin_handle = pin_handle;
+        self.canvas_handle = canvas_handle;
         self.search_input = search_input;
         let show_threads = if resolving && !dm {
             self.show_threads
@@ -997,7 +1064,10 @@ impl Render for ChatHeader {
                 .inbox_context(clan_id, locale.to_string());
         }
         if let Some(handle) = self.pin_handle.clone() {
-            header = header.pin_popover(handle, settings);
+            header = header.pin_popover(handle, settings.clone());
+        }
+        if let Some(handle) = self.canvas_handle.clone() {
+            header = header.canvas_popover(handle, settings);
         }
         header.render(&theme, cx).into_any_element()
     }
@@ -1290,6 +1360,63 @@ impl RenderOnce for PinPopoverTrigger {
         if self.open {
             button = button.bg(self.bg_active);
         }
+        if let Some(handler) = self.on_click {
+            button.on_click(handler)
+        } else {
+            button
+        }
+    }
+}
+
+#[derive(IntoElement)]
+struct CanvasPopoverTrigger {
+    open: bool,
+    icon_color: Hsla,
+    on_click: Option<Box<dyn Fn(&ClickEvent, &mut Window, &mut App) + 'static>>,
+}
+
+impl CanvasPopoverTrigger {
+    fn new(theme: &Theme, open: bool) -> Self {
+        Self {
+            open,
+            icon_color: theme.text_muted.into(),
+            on_click: None,
+        }
+    }
+}
+
+impl Toggleable for CanvasPopoverTrigger {
+    fn toggle_state(mut self, selected: bool) -> Self {
+        self.open = selected;
+        self
+    }
+}
+
+impl Clickable for CanvasPopoverTrigger {
+    fn on_click(mut self, handler: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static) -> Self {
+        self.on_click = Some(Box::new(handler));
+        self
+    }
+
+    fn cursor_style(self, _cursor_style: CursorStyle) -> Self {
+        self
+    }
+}
+
+impl RenderOnce for CanvasPopoverTrigger {
+    fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
+        let mut button = Button::new("hdr-canvas-trigger")
+            .with_size(Size::Small)
+            .icon(
+                Icon::new(IconName::CanvasIcon)
+                    .size(px(20.))
+                    .text_color(self.icon_color),
+            );
+        button = if self.open {
+            button.with_variant(ButtonVariant::Secondary)
+        } else {
+            button.ghost()
+        };
         if let Some(handler) = self.on_click {
             button.on_click(handler)
         } else {
