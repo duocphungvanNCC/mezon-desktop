@@ -1,7 +1,10 @@
 use std::sync::Arc;
 
+use crate::app::shell::Shell;
 use crate::chat::clan_management_page::{management_page, section_toolbar};
+use crate::chat::user_profile_modal::UserProfileModal;
 use crate::components::primitives::{Avatar, Icon, IconName, Input, InputEvent, InputState};
+use crate::image_cache::shared_avatar_cache;
 use crate::theme::ActiveTheme;
 use gpui::{
     AnyElement, Context, Entity, FontWeight, Hsla, ListAlignment, ListOffset, ListState,
@@ -281,9 +284,28 @@ impl ClanMembersPage {
             .map(Hsla::from)
             .unwrap_or_else(|| Hsla::from(theme.text_secondary));
         let subtitle = row.username.clone();
+        let user_id = row.id;
+        let clan_id = self.clan_id;
+        let settings = self.settings.clone();
         table_row(theme, false, fill_available_height)
             .id(format!("member-row-{}", row.id.get()))
+            .cursor_pointer()
             .hover(|style| style.bg(theme.bg_hover))
+            .on_click(move |_, _window, cx| {
+                let avatar_image_cache = shared_avatar_cache(cx);
+                let modal = cx.new(|cx| {
+                    UserProfileModal::new(
+                        user_id,
+                        clan_id,
+                        settings.clone(),
+                        avatar_image_cache,
+                        cx,
+                    )
+                });
+                Shell::global(cx).update(cx, |shell, cx| {
+                    shell.show_fullscreen_modal(modal.into(), cx);
+                });
+            })
             .child(name_column(
                 div()
                     .flex()

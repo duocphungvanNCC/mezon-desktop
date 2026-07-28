@@ -10,4 +10,5 @@ mod profile_page;
 mod screen;
 mod voice_page;
 
+pub use profile_page::{request_clan_profile, request_user_profile};
 pub use screen::{SettingsPage, SettingsScreen};

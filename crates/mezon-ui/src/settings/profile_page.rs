@@ -1,3 +1,4 @@
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::time::Duration;
 
 use crate::components::primitives::{
@@ -17,6 +18,18 @@ use crate::theme::{ActiveTheme, Theme};
 enum ProfileTab {
     User,
     Clan,
+}
+
+const NO_PROFILE_OPEN_REQUEST: i64 = -1;
+const USER_PROFILE_OPEN_REQUEST: i64 = 0;
+static PROFILE_OPEN_REQUEST: AtomicI64 = AtomicI64::new(NO_PROFILE_OPEN_REQUEST);
+
+pub fn request_user_profile() {
+    PROFILE_OPEN_REQUEST.store(USER_PROFILE_OPEN_REQUEST, Ordering::Release);
+}
+
+pub fn request_clan_profile(clan_id: mezon_store::ClanId) {
+    PROFILE_OPEN_REQUEST.store(clan_id.get(), Ordering::Release);
 }
 
 struct ProfileState {
@@ -359,6 +372,32 @@ impl ProfilePage {
 
 impl Render for ProfilePage {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let open_request = PROFILE_OPEN_REQUEST.swap(NO_PROFILE_OPEN_REQUEST, Ordering::AcqRel);
+        if open_request == USER_PROFILE_OPEN_REQUEST {
+            self.active_tab = ProfileTab::User;
+        } else if open_request > USER_PROFILE_OPEN_REQUEST {
+            self.active_tab = ProfileTab::Clan;
+            let display_name = self
+                .profile
+                .as_ref()
+                .map(|profile| profile.display_name.clone())
+                .unwrap_or_default();
+            let username = self
+                .profile
+                .as_ref()
+                .map(|profile| profile.username.clone())
+                .unwrap_or_default();
+            let section = self.clan_section.get_or_insert_with(|| {
+                cx.new(|cx| {
+                    ClanProfileSection::new(self.settings.clone(), self.clan_list.clone(), cx)
+                })
+            });
+            section.update(cx, |section, cx| {
+                section.set_user_profile(display_name, username);
+                section.fetch(&open_request.to_string(), cx);
+            });
+        }
+
         if self.profile.as_ref().is_some_and(|p| !p.loading) && self.display_name_input.is_none() {
             self.init_inputs(window, cx);
         }
