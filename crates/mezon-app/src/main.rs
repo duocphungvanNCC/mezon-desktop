@@ -694,6 +694,7 @@ fn open_main_window(
     mezon_store::PinnedMessagesStore::init(api.clone(), cx);
     mezon_store::CanvasStore::init(api.clone(), cx);
     mezon_store::PresenceStore::init(api.clone(), cx);
+    mezon_store::StreamStore::init(api.clone(), cx);
     mezon_store::VoiceStore::init(api.clone(), cx);
     mezon_store::ClanMembersStore::init(api.clone(), cx);
     mezon_store::EmojiStore::init(api.clone(), cx);

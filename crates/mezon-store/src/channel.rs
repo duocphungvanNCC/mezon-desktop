@@ -121,6 +121,7 @@ pub struct Channel {
     pub voice_members: Vec<VoiceMember>,
     pub is_favorite: bool,
     pub creator_id: UserId,
+    pub avatar_url: String,
 }
 
 impl Channel {
@@ -1587,6 +1588,7 @@ impl ChannelList {
                         voice_members: Vec::new(),
                         is_favorite: false,
                         creator_id: UserId(e.creator_id),
+                        avatar_url: String::new(),
                     };
                     let inserted = if let Some(cats) = self.cache.get_mut(&clan_id) {
                         insert_channel(cats, channel)
@@ -1748,6 +1750,7 @@ impl ChannelList {
                     voice_members: Vec::new(),
                     is_favorite: false,
                     creator_id: UserId(desc.creator_id),
+                    avatar_url: desc.channel_avatar.clone(),
                 };
                 let inserted = insert_channel(cats, channel);
                 if inserted {
@@ -2135,6 +2138,7 @@ fn thread_channel_from_context(
         voice_members: Vec::new(),
         is_favorite: false,
         creator_id: UserId(0),
+        avatar_url: String::new(),
     }
 }
 
@@ -2172,6 +2176,7 @@ fn channel_from_desc(
         voice_members,
         is_favorite,
         creator_id: UserId(c.creator_id),
+        avatar_url: c.channel_avatar,
     }
 }
 
@@ -2826,6 +2831,7 @@ mod tests {
             voice_members: Vec::new(),
             is_favorite: false,
             creator_id: UserId(0),
+            avatar_url: String::new(),
         }
     }
 
@@ -3143,6 +3149,7 @@ mod tests {
             badge_count: badge,
             creator_id: 0,
             clan_name: String::new(),
+            channel_avatar: String::new(),
         };
 
         let badge_descs = vec![
@@ -3267,6 +3274,7 @@ mod tests {
             voice_members: Vec::new(),
             is_favorite: true,
             creator_id: UserId(0),
+            avatar_url: String::new(),
         };
         assert!(ch.is_favorite);
     }
@@ -3294,6 +3302,7 @@ mod tests {
                 voice_members: Vec::new(),
                 is_favorite: false,
                 creator_id: UserId(0),
+                avatar_url: String::new(),
             },
             Channel {
                 id: ChannelId(2),
@@ -3315,6 +3324,7 @@ mod tests {
                 voice_members: Vec::new(),
                 is_favorite: true,
                 creator_id: UserId(0),
+                avatar_url: String::new(),
             },
         ];
 

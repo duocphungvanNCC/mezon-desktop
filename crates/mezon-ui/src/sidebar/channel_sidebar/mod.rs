@@ -9,7 +9,8 @@ use gpui::{
 };
 use mezon_store::{
     ChannelId, ChannelList, ChannelType, ClanId, ClanList, ClanMembersStore, FAVOR_CATE_ID,
-    PERMISSION_ADMINISTRATOR, PERMISSION_MANAGE_CLAN, PermissionStore, Settings, VoiceMember,
+    PERMISSION_ADMINISTRATOR, PERMISSION_MANAGE_CLAN, PermissionStore, Settings, StreamMember,
+    StreamStore, VoiceMember,
 };
 
 use crate::channel_app::{is_channel_app_open, launch_channel_app_from_store};
@@ -39,11 +40,50 @@ fn resolve_voice_member_slot(
     clan_id: Option<ClanId>,
     m: &VoiceMember,
 ) -> VoiceMemberSlot {
-    let (display_name, avatar_url) = crate::util::voice_member::resolve_display(cx, clan_id, m);
+    let resolved = crate::util::voice_member::resolve_display(cx, clan_id, m);
     VoiceMemberSlot {
         user_id: m.user_id.to_string(),
-        display_name,
-        avatar_url,
+        display_name: resolved.name,
+        avatar_url: resolved.avatar_src,
+        avatar_raw: resolved.avatar_raw,
+    }
+}
+
+fn resolve_stream_member_slot(
+    cx: &App,
+    clan_id: Option<ClanId>,
+    m: &StreamMember,
+) -> VoiceMemberSlot {
+    let resolved = crate::util::voice_member::resolve_stream_display(cx, clan_id, m);
+    VoiceMemberSlot {
+        user_id: m.user_id.to_string(),
+        display_name: resolved.name,
+        avatar_url: resolved.avatar_src,
+        avatar_raw: resolved.avatar_raw,
+    }
+}
+
+fn channel_sidebar_members(
+    cx: &App,
+    clan_id: Option<ClanId>,
+    ch: &mezon_store::Channel,
+) -> Vec<VoiceMemberSlot> {
+    if ch.channel_type == ChannelType::Stream {
+        StreamStore::try_global(cx)
+            .map(|store| {
+                store
+                    .read(cx)
+                    .members_for_channel(ch.id)
+                    .iter()
+                    .map(|m| resolve_stream_member_slot(cx, clan_id, m))
+                    .collect()
+            })
+            .unwrap_or_default()
+    } else {
+        ch.voice_members
+            .iter()
+            .map(|m| resolve_voice_member_slot(cx, clan_id, m))
+            .collect()
     }
 }
 
@@ -76,6 +116,7 @@ pub struct ChannelSidebar {
     _settings_observe: Subscription,
     _router_observe: Subscription,
     _members_observe: Subscription,
+    _stream_observe: Subscription,
     _permissions_observe: Subscription,
     _notification_setting_observe: Subscription,
 }
@@ -147,6 +188,11 @@ impl ChannelSidebar {
                 cx.notify();
             }
         });
+        let stream_observe = cx.observe(&StreamStore::global(cx), |this, _, cx| {
+            if this.rebuild_items(cx) {
+                cx.notify();
+            }
+        });
         let permissions_observe = cx.observe(&PermissionStore::global(cx), |_, _, cx| cx.notify());
 
         let initial_locale = settings.read(cx).language.clone();
@@ -189,6 +235,7 @@ impl ChannelSidebar {
             _settings_observe: settings_observe,
             _router_observe: router_observe,
             _members_observe: members_observe,
+            _stream_observe: stream_observe,
             _permissions_observe: permissions_observe,
             _notification_setting_observe: notification_setting_observe,
         };
@@ -323,11 +370,7 @@ impl ChannelSidebar {
                                 is_favorite: is_favorites,
                                 line_above,
                                 line_below,
-                                voice_members: ch
-                                    .voice_members
-                                    .iter()
-                                    .map(|m| resolve_voice_member_slot(cx, new_clan_id, m))
-                                    .collect(),
+                                voice_members: channel_sidebar_members(cx, new_clan_id, ch),
                                 voice_compact: false,
                             });
                         }
@@ -340,12 +383,13 @@ impl ChannelSidebar {
                                 .and_then(|ch| ch.parent_id)
                         });
                         for ch in &category.channels {
+                            let sidebar_members = channel_sidebar_members(cx, new_clan_id, ch);
                             let is_voice_or_streaming = matches!(
                                 ch.channel_type,
                                 ChannelType::Voice | ChannelType::Stream | ChannelType::App
                             );
                             let has_members_in_voice =
-                                is_voice_or_streaming && !ch.voice_members.is_empty();
+                                is_voice_or_streaming && !sidebar_members.is_empty();
                             let should_show = (ch.is_unread() && !is_voice_or_streaming)
                                 || active_channel_id == Some(ch.id)
                                 || active_parent_id == Some(ch.id)
@@ -383,11 +427,7 @@ impl ChannelSidebar {
                                 is_favorite: is_favorites,
                                 line_above: false,
                                 line_below: false,
-                                voice_members: ch
-                                    .voice_members
-                                    .iter()
-                                    .map(|m| resolve_voice_member_slot(cx, new_clan_id, m))
-                                    .collect(),
+                                voice_members: sidebar_members,
                                 voice_compact: true,
                             });
                         }
@@ -1593,13 +1633,16 @@ fn render_sidebar_item(
                         .py(px(2.));
                     for (index, m) in voice_members.iter().take(5).enumerate() {
                         let name_text = m.display_name.clone();
-                        let avatar = if m.avatar_url.is_empty() {
-                            Avatar::new().name(name_text)
-                        } else {
-                            Avatar::new()
-                                .src(SharedString::from(m.avatar_url.clone()))
-                                .name(name_text)
-                        };
+                        let mut avatar = Avatar::new().name(name_text);
+                        if !m.avatar_url.is_empty() {
+                            avatar = avatar.src(SharedString::from(m.avatar_url.clone()));
+                            if !m.avatar_raw.is_empty() && m.avatar_raw != m.avatar_url {
+                                avatar =
+                                    avatar.fallback_src(SharedString::from(m.avatar_raw.clone()));
+                            }
+                        } else if !m.avatar_raw.is_empty() {
+                            avatar = avatar.src(SharedString::from(m.avatar_raw.clone()));
+                        }
                         cluster = cluster.child(
                             div()
                                 .when(index > 0, |el| el.ml(px(-6.)))
@@ -1627,13 +1670,16 @@ fn render_sidebar_item(
                         .pl(voice_pl)
                         .children(voice_members.iter().map(|m| {
                             let name_text = m.display_name.clone();
-                            let avatar = if m.avatar_url.is_empty() {
-                                Avatar::new().name(name_text.clone())
-                            } else {
-                                Avatar::new()
-                                    .src(SharedString::from(m.avatar_url.clone()))
-                                    .name(name_text.clone())
-                            };
+                            let mut avatar = Avatar::new().name(name_text.clone());
+                            if !m.avatar_url.is_empty() {
+                                avatar = avatar.src(SharedString::from(m.avatar_url.clone()));
+                                if !m.avatar_raw.is_empty() && m.avatar_raw != m.avatar_url {
+                                    avatar = avatar
+                                        .fallback_src(SharedString::from(m.avatar_raw.clone()));
+                                }
+                            } else if !m.avatar_raw.is_empty() {
+                                avatar = avatar.src(SharedString::from(m.avatar_raw.clone()));
+                            }
                             div()
                                 .w_full()
                                 .min_w_0()
