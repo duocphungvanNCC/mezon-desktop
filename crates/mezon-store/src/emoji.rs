@@ -4,14 +4,13 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU16, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use gpui::{App, AppContext, Context, Entity, EventEmitter, Global, Subscription, Task};
+use gpui::{App, AppContext, Context, Entity, EventEmitter, Global, Task};
 use image::ImageEncoder as _;
 use mezon_client::{AppApi, ConnectionStatus, RealtimeEvent};
 use mezon_proto::{api, realtime};
 
 use crate::Freshness;
 use crate::badge::BadgeService;
-use crate::clan::{ClanEvent, ClanList};
 use crate::ids::ClanId;
 use crate::realtime::{RealtimeDispatch, RealtimeKind};
 
@@ -52,7 +51,6 @@ pub struct EmojiStore {
     freshness: Freshness,
     loading: bool,
     api: Arc<AppApi>,
-    _clan_sub: Subscription,
     _conn_watch: Task<()>,
 }
 
@@ -88,12 +86,6 @@ impl EmojiStore {
     fn new(api: Arc<AppApi>, cx: &mut Context<Self>) -> Self {
         Self::register_realtime(cx);
 
-        let clan_sub = cx.subscribe(&ClanList::global(cx), |this, _clan, event, cx| {
-            if let ClanEvent::ActiveClanChanged(Some(_)) = event {
-                this.ensure_loaded(cx);
-            }
-        });
-
         let conn_watch = Self::spawn_connection_watch(api.clone(), cx);
 
         let mut store = Self {
@@ -103,7 +95,6 @@ impl EmojiStore {
             freshness: Freshness::new(),
             loading: false,
             api,
-            _clan_sub: clan_sub,
             _conn_watch: conn_watch,
         };
         store.fetch_recent(cx);
@@ -145,18 +136,23 @@ impl EmojiStore {
     }
 
     pub fn ensure_loaded(&mut self, cx: &mut Context<Self>) {
-        if !self.freshness.is_fresh(crate::CACHE_TTL) {
-            self.fetch(cx);
+        self.ensure_loaded_task(cx).detach();
+    }
+
+    pub fn ensure_loaded_task(&mut self, cx: &mut Context<Self>) -> Task<()> {
+        if self.freshness.is_fresh(crate::CACHE_TTL) {
+            return Task::ready(());
         }
+        self.fetch(cx)
     }
 
     pub fn refresh(&mut self, cx: &mut Context<Self>) {
-        self.fetch(cx);
+        self.fetch(cx).detach();
     }
 
-    fn fetch(&mut self, cx: &mut Context<Self>) {
+    fn fetch(&mut self, cx: &mut Context<Self>) -> Task<()> {
         if self.loading {
-            return;
+            return Task::ready(());
         }
         self.loading = true;
         let api = self.api.clone();
@@ -185,7 +181,6 @@ impl EmojiStore {
                 }
             });
         })
-        .detach();
     }
 
     fn fetch_recent(&mut self, cx: &mut Context<Self>) {

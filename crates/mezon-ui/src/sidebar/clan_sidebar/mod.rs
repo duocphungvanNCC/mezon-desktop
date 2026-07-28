@@ -2,7 +2,7 @@ use std::rc::Rc;
 
 use gpui::{
     AnyElement, App, Context, Entity, ListState, Pixels, Point, SharedString, Subscription, Window,
-    div, img, list, prelude::*, px,
+    div, img, list, prelude::*, px, size,
 };
 use mezon_store::{
     AccountStore, ClanId, ClanList, DirectMessageStore, FriendStore, NotificationSettingStore,
@@ -18,7 +18,7 @@ use crate::theme::{ActiveTheme, Theme};
 
 mod clan_row;
 mod direct_unread_list;
-use clan_row::{ClanRow, build_clan_rail_menu, render_clan_row, render_pill};
+use clan_row::{CLAN_ROW_HEIGHT, ClanRow, build_clan_rail_menu, render_clan_row, render_pill};
 
 pub(super) struct ClanPanelMenu {
     position: Point<Pixels>,
@@ -65,14 +65,8 @@ impl ClanSidebar {
         let list_state = ListState::new(0, gpui::ListAlignment::Top, px(48.))
             .smooth_line_scroll()
             .suppress_hover_while_scrolling();
-        let direct_sub = cx.observe(&direct_store, |this, store, cx| {
-            let fingerprint = direct_unread_fingerprint(store.read(cx));
-            if this.direct_unread_fingerprint == Some(fingerprint) {
-                return;
-            }
-            this.direct_unread_fingerprint = Some(fingerprint);
-            let live = build_direct_unread_items(store.read(cx), cx);
-            this.direct_unread.sync(live, cx);
+        let direct_sub = cx.observe(&direct_store, |this, _store, cx| {
+            this.refresh_direct_unread(cx);
         });
 
         let clan_sub = cx.observe(&clan_list, |this, clan_list, cx| {
@@ -90,6 +84,7 @@ impl ClanSidebar {
         });
         let friend_sub = cx.observe(&FriendStore::global(cx), |_, _, cx| cx.notify());
         let notification_sub = cx.observe(&NotificationSettingStore::global(cx), |this, _, cx| {
+            this.refresh_direct_unread(cx);
             if this.clan_menu.is_some() {
                 cx.notify();
             }
@@ -129,7 +124,7 @@ impl ClanSidebar {
                 direct_store.read(cx),
                 cx,
             )),
-            direct_unread_fingerprint: Some(direct_unread_fingerprint(direct_store.read(cx))),
+            direct_unread_fingerprint: Some(direct_unread_fingerprint(direct_store.read(cx), cx)),
             list_state,
             dm_active: initial_dm_active,
             can_go_back: initial_can_go_back,
@@ -253,8 +248,24 @@ impl ClanSidebar {
         self.rows = Rc::new(rows);
         if needs_reset {
             self.list_state.reset(item_count);
+            self.list_state.splice_with_size_hint(
+                0..item_count,
+                item_count,
+                size(px(0.), px(CLAN_ROW_HEIGHT)),
+            );
         }
         true
+    }
+
+    fn refresh_direct_unread(&mut self, cx: &mut Context<Self>) {
+        let store = DirectMessageStore::global(cx);
+        let fingerprint = direct_unread_fingerprint(store.read(cx), cx);
+        if self.direct_unread_fingerprint == Some(fingerprint) {
+            return;
+        }
+        self.direct_unread_fingerprint = Some(fingerprint);
+        let live = build_direct_unread_items(store.read(cx), cx);
+        self.direct_unread.sync(live, cx);
     }
 }
 

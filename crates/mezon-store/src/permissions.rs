@@ -1,11 +1,11 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use gpui::{App, AppContext, Context, Entity, EventEmitter, Global, Subscription, Task};
+use gpui::{App, AppContext, Context, Entity, EventEmitter, Global, Task};
 use mezon_client::{AppApi, ConnectionStatus};
 
 use crate::AuthState;
-use crate::clan::{ClanEvent, ClanList};
+use crate::clan::ClanList;
 use crate::ids::{ClanId, UserId};
 
 pub const PERMISSION_CLAN_OWNER: &str = "clan-owner";
@@ -54,7 +54,6 @@ pub struct PermissionStore {
     loading_clans: HashSet<ClanId>,
     api: Arc<AppApi>,
     auth_state: Entity<AuthState>,
-    _clan_sub: Subscription,
     _conn_watch: Task<()>,
 }
 
@@ -80,13 +79,6 @@ impl PermissionStore {
     }
 
     fn new(api: Arc<AppApi>, auth_state: Entity<AuthState>, cx: &mut Context<Self>) -> Self {
-        let clan_sub = cx.subscribe(&ClanList::global(cx), |this, _clan, event, cx| {
-            if let ClanEvent::ActiveClanChanged(Some(clan_id)) = event {
-                this.load_permission_catalog(cx);
-                this.load_clan_permissions(*clan_id, cx);
-            }
-        });
-
         let conn_watch = Self::spawn_connection_watch(api.clone(), cx);
 
         Self {
@@ -98,7 +90,6 @@ impl PermissionStore {
             loading_clans: HashSet::new(),
             api,
             auth_state,
-            _clan_sub: clan_sub,
             _conn_watch: conn_watch,
         }
     }
@@ -209,9 +200,17 @@ impl PermissionStore {
     }
 
     pub fn load_clan_permissions(&mut self, clan_id: ClanId, cx: &mut Context<Self>) {
+        self.load_clan_permissions_task(clan_id, cx).detach();
+    }
+
+    pub fn load_clan_permissions_task(
+        &mut self,
+        clan_id: ClanId,
+        cx: &mut Context<Self>,
+    ) -> Task<()> {
         self.load_permission_catalog(cx);
         if self.max_level_by_clan.contains_key(&clan_id) || !self.loading_clans.insert(clan_id) {
-            return;
+            return Task::ready(());
         }
         let api = self.api.clone();
         cx.spawn(async move |this, cx| {
@@ -236,7 +235,6 @@ impl PermissionStore {
                 }
             });
         })
-        .detach();
     }
 
     fn load_permission_catalog(&mut self, cx: &mut Context<Self>) {

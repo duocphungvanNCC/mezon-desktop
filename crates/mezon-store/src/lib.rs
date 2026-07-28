@@ -2,14 +2,18 @@ pub mod account;
 pub mod activity;
 pub mod album_layout;
 pub mod audio;
+pub mod audit_log;
+pub mod auto_update;
 pub mod badge;
 pub mod cache;
+pub mod canvas;
 pub mod channel;
 pub mod channel_media;
 pub mod channel_members;
 pub mod channel_permissions;
 pub mod channel_settings;
 pub mod clan;
+pub mod clan_load;
 pub mod clan_members;
 pub mod config;
 pub mod connection;
@@ -46,6 +50,8 @@ pub mod ui_state;
 pub mod user_profile;
 pub mod users_by_user;
 pub mod voice;
+pub mod wallet;
+mod wallet_persist;
 pub mod webhook;
 
 use anyhow::{Context, Result};
@@ -68,8 +74,15 @@ pub use audio::{
     AudioDeviceInfo, AudioStore, MicCaptureFactory, MicCaptureHandle, MicPcmCaptureFactory,
     MicPcmFormat,
 };
+pub use audit_log::{
+    ALL_ACTION_INDEX, AUDIT_ACTION_OPTIONS, AuditActionOption, AuditLogEntry, AuditLogQuery,
+    AuditLogState, AuditLogStateView, AuditLogStore, audit_action_api_value, audit_action_i18n_key,
+    audit_action_index_for_api_log,
+};
+pub use auto_update::{AutoUpdateStatus, AutoUpdateStore};
 pub use badge::BadgeService;
 pub use cache::{Freshness, KeyedCache};
+pub use canvas::{CanvasDetail, CanvasStore, CanvasSummary, UploadedCanvasImage, canvas_web_link};
 pub use channel::*;
 pub use channel_media::{
     CHANNEL_MEDIA_CACHE_TTL, CHANNEL_MEDIA_PAGE_SIZE, ChannelMediaEvent, ChannelMediaStore,
@@ -83,12 +96,16 @@ pub use channel_permissions::{
 };
 pub use channel_settings::{ChannelSetting, ChannelSettingsEvent, ChannelSettingsStore};
 pub use clan::*;
+pub use clan_load::ClanLoadScheduler;
 pub use clan_members::{
     ClanMember, ClanMembersEvent, ClanMembersStore, User, split_members_by_status,
 };
 pub use config::AppConfig;
 pub use connection::{ConnectionStore, resolve_initial_auth_state};
-pub use direct::{DirectChannel, DirectEvent, DirectKind, DirectMessageBody, DirectMessageStore};
+pub use direct::{
+    DirectChannel, DirectEvent, DirectKind, DirectMessageBody, DirectMessageStore,
+    dm_counts_toward_unread_badge,
+};
 pub use emoji::{
     EMOJI_UPLOAD_MAX_PX, EMOTICON_ALLOWED_EXTENSIONS, EMOTICON_SHORTNAME_MAX,
     EMOTICON_SHORTNAME_MIN, Emoji, EmojiEvent, EmojiStore, MAX_EMOJI_BYTES, MAX_STICKER_BYTES,
@@ -131,6 +148,7 @@ pub use mezon_client::{
     search_content_highlight_terms, search_dropdown_mode, search_filter_chip_ranges,
     search_page_count, search_page_numbers, should_show_search_dropdown,
 };
+pub use mmn_client::{DECIMAL_FACTOR as TOKEN_DECIMAL_FACTOR, DECIMALS as TOKEN_DECIMALS};
 pub use notification_push::NotificationPushStore;
 pub use notification_setting::{NotificationSettingEvent, NotificationSettingStore};
 pub use ogp::{OgpResult, OutgoingOgp, fetch_ogp, first_previewable_url};
@@ -172,6 +190,7 @@ pub use voice::{
     capture_screen_share_preview, list_screen_share_options, peek_screen_share_options,
     screen_tile_id, upload_sound_file, validate_sound_file,
 };
+pub use wallet::{SendTokenRequest, WalletDetail, WalletEvent, WalletStore, WalletTransaction};
 pub use webhook::{
     ChannelWebhook, ClanWebhook, MAX_WEBHOOK_AVATAR_BYTES, WEBHOOK_NAME_MAX_LENGTH, WebhookEvent,
     WebhookStore,
@@ -470,4 +489,19 @@ pub enum AuthState {
     Connecting(Session),
     /// Token received, transport connected, and session is valid.
     Authenticated(Session),
+}
+
+impl AuthState {
+    pub fn session_credentials(&self) -> Option<(String, String)> {
+        match self {
+            Self::Authenticated(session) | Self::Connecting(session) => {
+                if session.id_token.is_empty() || session.user_id.is_empty() {
+                    None
+                } else {
+                    Some((session.id_token.clone(), session.user_id.clone()))
+                }
+            }
+            _ => None,
+        }
+    }
 }

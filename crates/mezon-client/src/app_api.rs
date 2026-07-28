@@ -6,9 +6,9 @@ use anyhow::Result;
 use crate::{
     TransportClient,
     transport::{
-        ApiAccount, ApiAttachment, ApiCategoryDesc, ApiChannelApp, ApiChannelAttachment,
-        ApiChannelDesc, ApiClanDesc, ApiDirectChannel, ApiFriend, ApiMessage, ApiPinMessage,
-        ApiThreadDesc, ApiVoiceChannelUser, RealtimeEvent,
+        ApiAccount, ApiAttachment, ApiCanvas, ApiCanvasDetail, ApiCategoryDesc, ApiChannelApp,
+        ApiChannelAttachment, ApiChannelDesc, ApiClanDesc, ApiDirectChannel, ApiFriend, ApiMessage,
+        ApiPinMessage, ApiThreadDesc, ApiVoiceChannelUser, RealtimeEvent,
     },
 };
 
@@ -158,6 +158,18 @@ impl AppApi {
             .send_channel_message_structured(channel_id, content_json, mode)
             .await
     }
+
+    pub async fn send_channel_message_structured_with_code(
+        &self,
+        channel_id: i64,
+        content_json: &str,
+        mode: i32,
+        message_code: i32,
+    ) -> Result<ApiMessage> {
+        self.transport
+            .send_channel_message_structured_with_code(channel_id, content_json, mode, message_code)
+            .await
+    }
     pub fn new(transport: Arc<TransportClient>, base_img_url: String) -> Self {
         let (realtime_tx, _) = tokio::sync::broadcast::channel(1024);
         let (status_tx, _) = tokio::sync::watch::channel(ConnectionStatus::Disconnected);
@@ -221,6 +233,28 @@ impl AppApi {
     ) -> Result<()> {
         self.transport
             .mark_as_read(channel_id, category_id, clan_id)
+            .await
+    }
+
+    pub async fn update_user_status(
+        &self,
+        status: String,
+        minutes: i32,
+        until_turn_on: bool,
+    ) -> Result<()> {
+        self.transport
+            .update_user_status(status, minutes, until_turn_on)
+            .await
+    }
+
+    pub async fn update_user_custom_status(
+        &self,
+        status: String,
+        minutes: i32,
+        until_turn_on: bool,
+    ) -> Result<()> {
+        self.transport
+            .update_user_custom_status(status, minutes, until_turn_on)
             .await
     }
 
@@ -294,6 +328,18 @@ impl AppApi {
         request: mezon_proto::api::SystemMessageRequest,
     ) -> Result<()> {
         self.transport.update_system_message(request).await
+    }
+
+    pub async fn list_audit_log(
+        &self,
+        clan_id: i64,
+        action_log: &str,
+        user_id: Option<i64>,
+        date_log: &str,
+    ) -> Result<mezon_proto::api::ListAuditLog> {
+        self.transport
+            .list_audit_log(clan_id, action_log, user_id, date_log)
+            .await
     }
 
     pub async fn is_open(&self) -> bool {
@@ -466,6 +512,56 @@ impl AppApi {
             .create_pin_message(message_id, channel_id, clan_id)
             .await?;
         Ok(())
+    }
+
+    pub async fn get_channel_canvas_list(
+        &self,
+        channel_id: i64,
+        clan_id: i64,
+        limit: i32,
+        page: i32,
+    ) -> Result<Vec<ApiCanvas>> {
+        self.transport
+            .get_channel_canvas_list(channel_id, clan_id, limit, page)
+            .await
+    }
+
+    pub async fn get_channel_canvas_detail(
+        &self,
+        id: i64,
+        clan_id: i64,
+        channel_id: i64,
+    ) -> Result<ApiCanvasDetail> {
+        self.transport
+            .get_channel_canvas_detail(id, clan_id, channel_id)
+            .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn edit_channel_canvas(
+        &self,
+        id: i64,
+        channel_id: i64,
+        clan_id: i64,
+        title: &str,
+        content: &str,
+        is_default: bool,
+        status: i32,
+    ) -> Result<String> {
+        self.transport
+            .edit_channel_canvas(id, channel_id, clan_id, title, content, is_default, status)
+            .await
+    }
+
+    pub async fn delete_channel_canvas(
+        &self,
+        canvas_id: i64,
+        clan_id: i64,
+        channel_id: i64,
+    ) -> Result<()> {
+        self.transport
+            .delete_channel_canvas(canvas_id, clan_id, channel_id)
+            .await
     }
 
     #[allow(clippy::too_many_arguments)]

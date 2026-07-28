@@ -1582,6 +1582,7 @@
   "common.canvas.loadingCanvas": "Canvas wird geladen...",
   "common.canvas.titlePlaceholder": "Dein Canvas-Titel",
   "common.canvas.typePlaceholder": "Gib / ein, um einzufügen...",
+  "common.canvas.deleteTitle": "{{name}} löschen",
   "common.canvas.untitled": "Unbenannt",
   "common.cardConversationMessage.aliceJohnson": "Kannst du mir die Dateien von letzter Woche schicken?",
   "common.cardConversationMessage.bobBrown": "Lass uns nächste Woche zusammen Mittagessen gehen.",

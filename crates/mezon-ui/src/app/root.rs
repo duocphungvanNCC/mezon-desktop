@@ -77,6 +77,7 @@ impl RootView {
                 crate::chat::media_channel::close_media_image_modal(cx);
                 crate::channel_app::close_channel_app_window(cx);
                 crate::image_cache::clear_all_image_caches(cx);
+                mezon_canvas::reset_canvas_image_caches(cx);
                 Router::global(cx).update(cx, |router, cx| {
                     router.reset();
                     cx.notify();

@@ -8,7 +8,7 @@ use gpui::{
     prelude::*, px,
 };
 use mezon_store::{
-    ChannelId, ChannelList, ClanId, ClanList, ClanMembersStore, FAVOR_CATE_ID,
+    ChannelId, ChannelList, ChannelType, ClanId, ClanList, ClanMembersStore, FAVOR_CATE_ID,
     PERMISSION_ADMINISTRATOR, PERMISSION_MANAGE_CLAN, PermissionStore, Settings, VoiceMember,
 };
 
@@ -52,6 +52,7 @@ pub struct ChannelSidebar {
     channel_list: Entity<ChannelList>,
     settings: Entity<Settings>,
     items: Rc<Vec<SidebarItem>>,
+    icon_image_cache: Entity<crate::image_cache::LruImageCache>,
     list_state: ListState,
     first_badged_index: Option<usize>,
     active_clan_name: String,
@@ -156,6 +157,15 @@ impl ChannelSidebar {
             channel_list,
             settings,
             items: Rc::new(Vec::new()),
+            icon_image_cache: cx.new(|cx| {
+                crate::image_cache::LruImageCache::icon_thumbnail(
+                    "channel-app-icons",
+                    128,
+                    2 * 1024 * 1024,
+                    256 * 1024,
+                    cx,
+                )
+            }),
             list_state,
             first_badged_index: None,
             active_clan_name: String::new(),
@@ -326,8 +336,25 @@ impl ChannelSidebar {
                             });
                         }
                     } else {
+                        let active_parent_id = active_channel_id.and_then(|id| {
+                            category
+                                .channels
+                                .iter()
+                                .find(|ch| ch.id == id)
+                                .and_then(|ch| ch.parent_id)
+                        });
                         for ch in &category.channels {
-                            if ch.voice_members.is_empty() {
+                            let is_voice_or_streaming = matches!(
+                                ch.channel_type,
+                                ChannelType::Voice | ChannelType::Stream | ChannelType::App
+                            );
+                            let has_members_in_voice =
+                                is_voice_or_streaming && !ch.voice_members.is_empty();
+                            let should_show = (ch.is_unread() && !is_voice_or_streaming)
+                                || active_channel_id == Some(ch.id)
+                                || active_parent_id == Some(ch.id)
+                                || has_members_in_voice;
+                            if !should_show {
                                 continue;
                             }
                             let badge_count = ch.badge_count;
@@ -663,6 +690,7 @@ impl Render for ChannelSidebar {
         let list_element = list(list_state, {
             let sidebar = sidebar.clone();
             let locale = locale.clone();
+            let icon_cache = self.icon_image_cache.clone();
             move |ix, _window, cx| {
                 render_sidebar_item(
                     &items,
@@ -673,6 +701,7 @@ impl Render for ChannelSidebar {
                     sidebar.clone(),
                     suppress_hover,
                     &locale,
+                    icon_cache.clone(),
                 )
             }
         })
@@ -1090,6 +1119,7 @@ fn render_banner_and_events(
     cx: &App,
     suppress_hover: bool,
     locale: &str,
+    icon_cache: Entity<crate::image_cache::LruImageCache>,
 ) -> AnyElement {
     let theme = cx.theme();
     let divider_color = theme.border;
@@ -1178,9 +1208,9 @@ fn render_banner_and_events(
                 SharedString::from(app.app_name.clone())
             };
             let icon_el: AnyElement = if let Some(logo) = &slot.app_logo {
-                gpui::img(logo.clone())
-                    .w(px(24.))
-                    .h(px(24.))
+                div()
+                    .image_cache(icon_cache.clone())
+                    .child(gpui::img(logo.clone()).w(px(24.)).h(px(24.)))
                     .into_any_element()
             } else {
                 gpui::svg()
@@ -1266,6 +1296,7 @@ fn render_sidebar_item(
     sidebar: WeakEntity<ChannelSidebar>,
     suppress_hover: bool,
     locale: &str,
+    icon_cache: Entity<crate::image_cache::LruImageCache>,
 ) -> AnyElement {
     let theme = cx.theme();
     let Some(item) = items.get(ix) else {
@@ -1283,6 +1314,7 @@ fn render_sidebar_item(
             cx,
             suppress_hover,
             locale,
+            icon_cache,
         ),
 
         SidebarItem::Category {
