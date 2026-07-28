@@ -297,7 +297,7 @@ impl ProfilePage {
                         .gap_3()
                         .pt_4()
                         .child(h_flex().gap_2().items_center().child(
-                            div().text_sm().text_color(theme.status_dnd).child(format!(
+                            div().text_sm().text_color(theme.danger_text).child(format!(
                                 "⚠ {}",
                                 mezon_i18n::t(&locale, "setting.profile.unsavedWarning")
                             )),
@@ -495,7 +495,7 @@ impl Render for ProfilePage {
                 el.child(
                     GpuiButton::new("delete-account-btn")
                         .label(mezon_i18n::t(&locale, "setting.profile.deleteAccount"))
-                        .text_color(theme.status_dnd)
+                        .text_color(theme.danger_text)
                         .ghost()
                         .on_click(cx.listener(|this, _, _, cx| {
                             let locale = this.settings.read(cx).language.clone();

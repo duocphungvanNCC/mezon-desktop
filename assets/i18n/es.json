@@ -843,6 +843,7 @@
   "channelSetting.tabs.overview": "Resumen",
   "channelSetting.tabs.permissions": "Permisos",
   "channelSetting.tabs.quickMenu": "Acciones rápidas",
+  "channelSetting.tabs.streamThumbnail": "Miniatura de retransmisión",
   "channelSetting.toast.updated": "Actualizado correctamente",
   "channelSetting.unsavedChanges.reset": "Reiniciar",
   "channelSetting.unsavedChanges.saveChanges": "Guardar Cambios",

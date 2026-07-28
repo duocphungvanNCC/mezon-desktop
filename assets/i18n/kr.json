@@ -829,6 +829,7 @@
   "channelSetting.tabs.overview": "개요",
   "channelSetting.tabs.permissions": "권한",
   "channelSetting.tabs.quickMenu": "빠른 작업",
+  "channelSetting.tabs.streamThumbnail": "스트림 썸네일",
   "channelSetting.toast.updated": "성공적으로 업데이트됨",
   "channelSetting.unsavedChanges.reset": "재설정",
   "channelSetting.unsavedChanges.saveChanges": "변경사항 저장",

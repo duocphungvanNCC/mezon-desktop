@@ -898,6 +898,7 @@
   "channelSetting.tabs.overview": "Overview",
   "channelSetting.tabs.permissions": "Permissions",
   "channelSetting.tabs.quickMenu": "Quick Actions",
+  "channelSetting.tabs.streamThumbnail": "Stream Thumbnail",
   "channelSetting.toast.updated": "Update successfully",
   "channelSetting.unsavedChanges.reset": "Reset",
   "channelSetting.unsavedChanges.saveChanges": "Save Changes",

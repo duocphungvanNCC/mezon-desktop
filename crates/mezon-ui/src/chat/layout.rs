@@ -312,8 +312,8 @@ impl ChatLayout {
         cx.subscribe(
             &mezon_store::ClanMembersStore::global(cx),
             |this, _, event: &mezon_store::ClanMembersEvent, cx| {
-                let mezon_store::ClanMembersEvent::Changed { clan_id } = event;
-                if this.visible_media_clan_id(cx) == Some(*clan_id) {
+                let clan_id = event.clan_id();
+                if this.visible_media_clan_id(cx) == Some(clan_id) {
                     cx.notify();
                 }
             },
@@ -2327,7 +2327,7 @@ impl ChatLayout {
         } else {
             Icon::new(IconName::NoiseSupressionDisabledIcon)
                 .size(px(20.))
-                .text_color(theme.status_dnd)
+                .text_color(theme.danger_text)
         };
         let button = div()
             .id("voice-ns-btn")
@@ -2892,6 +2892,7 @@ impl ChatLayout {
             | Route::SettingsVoice
             | Route::SettingsAdvanced
             | Route::ClanSettings { .. }
+            | Route::ChannelSettings { .. }
             | Route::NotFound { .. } => div().into_any_element(),
         };
 

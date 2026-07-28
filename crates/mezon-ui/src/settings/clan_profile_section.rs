@@ -346,7 +346,7 @@ impl Render for ClanProfileSection {
                         .gap_3()
                         .pt_4()
                         .child(h_flex().gap_2().items_center().child(
-                            div().text_sm().text_color(theme.status_dnd).child(format!(
+                            div().text_sm().text_color(theme.danger_text).child(format!(
                                 "⚠ {}",
                                 mezon_i18n::t(&locale, "setting.profile.unsavedWarning")
                             )),
@@ -580,7 +580,7 @@ impl ClanProfileSection {
                                         .expect("nick_name_input not initialized"),
                                 ))
                                 .when(duplicate_error, |el| {
-                                    el.child(div().text_xs().text_color(theme.status_dnd).child(
+                                    el.child(div().text_xs().text_color(theme.danger_text).child(
                                         mezon_i18n::t(
                                             &locale,
                                             "setting.clanProfile.nicknameExists",

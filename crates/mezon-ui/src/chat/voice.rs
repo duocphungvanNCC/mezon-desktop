@@ -604,7 +604,7 @@ fn render_pre_join(
                 .child(subtitle.to_string()),
         )
         .when_some(error, |this, message| {
-            this.child(div().text_color(theme.status_dnd).text_sm().child(message))
+            this.child(div().text_color(theme.danger_text).text_sm().child(message))
         })
         .child(join);
 
@@ -1356,7 +1356,7 @@ fn mic_permission_modal(theme: &Theme, locale: &str, voice: &Entity<VoiceStore>)
                         .child(
                             Icon::new(IconName::VoiceMicDisabledIcon)
                                 .size(px(26.))
-                                .text_color(theme.status_dnd),
+                                .text_color(theme.danger_text),
                         ),
                 )
                 .child(
@@ -1435,7 +1435,7 @@ fn kick_confirm_modal(
         SharedString::from(mezon_i18n::t(locale, "channelVoice.kickModal.kick").to_string());
 
     let cancel_hover = darken(theme.bg_tertiary, 0.03);
-    let kick_hover = darken(theme.status_dnd, 0.12);
+    let kick_hover = darken(theme.danger_text, 0.12);
     let voice_cancel = voice.clone();
     let voice_confirm = voice.clone();
 
@@ -1472,7 +1472,7 @@ fn kick_confirm_modal(
                         .child(
                             Icon::new(IconName::CloseIcon)
                                 .size(px(26.))
-                                .text_color(theme.status_dnd),
+                                .text_color(theme.danger_text),
                         ),
                 )
                 .child(
@@ -1522,7 +1522,7 @@ fn kick_confirm_modal(
                                 .py_2()
                                 .rounded_md()
                                 .cursor_pointer()
-                                .bg(theme.status_dnd)
+                                .bg(theme.danger_text)
                                 .text_color(gpui::rgb(0xffffff))
                                 .hover(move |s| s.bg(kick_hover))
                                 .on_click(move |_, _, cx| {

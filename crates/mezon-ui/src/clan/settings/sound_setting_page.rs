@@ -4,8 +4,8 @@ use gpui::{
     relative, size, uniform_list,
 };
 use mezon_store::{
-    BadgeService, ClanId, ClanMembersEvent, ClanMembersStore, ClanSound, PermissionStore, Settings,
-    StickerEvent, StickerStore, UserId, VoiceStore,
+    BadgeService, ClanId, ClanMembersStore, ClanSound, PermissionStore, Settings, StickerEvent,
+    StickerStore, UserId, VoiceStore,
 };
 
 use super::sound_picker::{SoundEditTarget, SoundPicker, SoundPickerEvent};
@@ -139,7 +139,7 @@ impl SoundSettingPage {
         });
         let voice_observe = cx.observe(&VoiceStore::global(cx), |_, _, cx| cx.notify());
         let members_observe = cx.subscribe(&ClanMembersStore::global(cx), |this, _, event, cx| {
-            if matches!(event, ClanMembersEvent::Changed { clan_id } if *clan_id == this.clan_id) {
+            if event.clan_id() == this.clan_id {
                 this.rebuild_sounds(cx);
                 cx.notify();
             }
@@ -594,7 +594,7 @@ fn render_sound_card(
                             .child(
                                 Icon::new(IconName::Close)
                                     .size(px(12.0))
-                                    .text_color(theme.status_dnd),
+                                    .text_color(theme.danger_text),
                             )
                             .on_click(move |_, window, cx| {
                                 delete_entity.update(cx, |this, cx| {
