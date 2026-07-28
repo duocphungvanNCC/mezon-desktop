@@ -7,7 +7,7 @@ use gpui::{
     AnyElement, App, ClickEvent, Context, Entity, FocusHandle, Focusable, FontWeight, SharedString,
     Subscription, UniformListScrollHandle, Window, div, prelude::*, px, svg, uniform_list,
 };
-use mezon_store::{DirectMessageStore, Friend, FriendEvent, FriendState, FriendStore, UserId};
+use mezon_store::{DirectMessageStore, FriendEvent, FriendState, FriendStore, UserId};
 
 const GROUP_CHAT_MAXIMUM_MEMBERS: usize = 20;
 
@@ -25,9 +25,9 @@ pub struct CreateMessageGroupModal {
     focus_handle: FocusHandle,
     locale: String,
     search_input: Entity<InputState>,
-    rows: Vec<FriendPickRow>,
+    all_rows: Vec<FriendPickRow>,
+    visible: Vec<usize>,
     selected: Vec<UserId>,
-    addable_count: usize,
     creating: bool,
     scroll: UniformListScrollHandle,
     _input_sub: Subscription,
@@ -59,7 +59,7 @@ impl CreateMessageGroupModal {
             &search_input,
             |this: &mut Self, _input, event: &InputEvent, cx| {
                 if matches!(event, InputEvent::Change) {
-                    this.rebuild_rows(cx);
+                    this.refilter(cx);
                     cx.notify();
                 }
             },
@@ -77,9 +77,9 @@ impl CreateMessageGroupModal {
             focus_handle: cx.focus_handle(),
             locale,
             search_input,
-            rows: Vec::new(),
+            all_rows: Vec::new(),
+            visible: Vec::new(),
             selected: Vec::new(),
-            addable_count: 0,
             creating: false,
             scroll: UniformListScrollHandle::new(),
             _input_sub: input_sub,
@@ -90,17 +90,11 @@ impl CreateMessageGroupModal {
     }
 
     fn rebuild_rows(&mut self, cx: &mut Context<Self>) {
-        let query = self.search_input.read(cx).value().trim().to_lowercase();
         let friends = FriendStore::global(cx);
         let friends = friends.read(cx);
-        let mut addable_count = 0usize;
         let mut rows = Vec::new();
         for friend in friends.friends() {
             if friend.state == FriendState::Blocked {
-                continue;
-            }
-            addable_count += 1;
-            if !friend_matches_query(friend, &query) {
                 continue;
             }
             let avatar_src = if friend.avatar_url.is_empty() {
@@ -117,12 +111,23 @@ impl CreateMessageGroupModal {
                 avatar_raw: SharedString::from(friend.avatar_url.clone()),
             });
         }
-        self.rows = rows;
-        self.addable_count = addable_count;
+        self.all_rows = rows;
+        self.refilter(cx);
+    }
+
+    fn refilter(&mut self, cx: &mut Context<Self>) {
+        let query = self.search_input.read(cx).value().trim().to_lowercase();
+        self.visible = self
+            .all_rows
+            .iter()
+            .enumerate()
+            .filter(|(_, row)| row_matches_query(row, &query))
+            .map(|(ix, _)| ix)
+            .collect();
     }
 
     fn number_can_add(&self) -> usize {
-        (GROUP_CHAT_MAXIMUM_MEMBERS - 1).min(self.addable_count)
+        (GROUP_CHAT_MAXIMUM_MEMBERS - 1).min(self.all_rows.len())
     }
 
     fn remaining_can_add(&self) -> usize {
@@ -253,7 +258,7 @@ impl Render for CreateMessageGroupModal {
         const ROW_HEIGHT: f32 = 40.;
         const LIST_HEIGHT: f32 = 190.;
 
-        let row_count = self.rows.len();
+        let row_count = self.visible.len();
         let list_body = if row_count == 0 {
             div()
                 .h(px(LIST_HEIGHT))
@@ -278,14 +283,16 @@ impl Render for CreateMessageGroupModal {
                     let theme = cx.theme().clone();
                     let modal = list_entity.read(cx);
                     range
-                        .map(|ix| match modal.rows.get(ix) {
-                            Some(row) => render_pick_row(
-                                &theme,
-                                row.clone(),
-                                modal.is_selected(row.user_id),
-                                list_entity.clone(),
-                            ),
-                            None => div().h(px(ROW_HEIGHT)).into_any_element(),
+                        .map(|ix| {
+                            match modal.visible.get(ix).and_then(|i| modal.all_rows.get(*i)) {
+                                Some(row) => render_pick_row(
+                                    &theme,
+                                    row.clone(),
+                                    modal.is_selected(row.user_id),
+                                    list_entity.clone(),
+                                ),
+                                None => div().h(px(ROW_HEIGHT)).into_any_element(),
+                            }
                         })
                         .collect::<Vec<_>>()
                 },
@@ -308,15 +315,15 @@ impl Render for CreateMessageGroupModal {
             .text_size(px(14.))
             .font_weight(FontWeight::MEDIUM)
             .text_color(gpui::white())
+            .bg(theme.tokens.button_theme_primary)
             .when(enabled, |el| {
-                el.bg(theme.tokens.button_theme_primary)
-                    .cursor_pointer()
-                    .hover(|s| s.opacity(0.9))
-                    .on_click(move |_: &ClickEvent, _window, cx| {
+                el.cursor_pointer().hover(|s| s.opacity(0.9)).on_click(
+                    move |_: &ClickEvent, _window, cx| {
                         button_entity.update(cx, |this, cx| this.handle_create(cx));
-                    })
+                    },
+                )
             })
-            .when(!enabled, |el| el.bg(gpui::rgb(0x9c_a3_af)))
+            .when(!enabled, |el| el.opacity(0.6))
             .child(create_label);
 
         div()
@@ -361,11 +368,11 @@ impl Render for CreateMessageGroupModal {
     }
 }
 
-fn friend_matches_query(friend: &Friend, query: &str) -> bool {
+fn row_matches_query(row: &FriendPickRow, query: &str) -> bool {
     if query.is_empty() {
         return true;
     }
-    friend.label().to_lowercase().contains(query) || friend.username.to_lowercase().contains(query)
+    row.name.to_lowercase().contains(query) || row.username.to_lowercase().contains(query)
 }
 
 fn render_pick_row(

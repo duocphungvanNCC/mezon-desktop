@@ -141,7 +141,7 @@ impl CreateChannelModal {
         });
         self._create_task = Some(cx.spawn(async move |this, cx| match task.await {
             Ok((channel_id, created_type)) => {
-                cx.update(|cx| {
+                let _ = this.update(cx, |_, cx| {
                     if !matches!(created_type, ChannelType::Voice | ChannelType::Stream) {
                         channel_list.update(cx, |list, cx| list.select_channel(channel_id, cx));
                         navigate(
@@ -152,12 +152,8 @@ impl CreateChannelModal {
                             },
                         );
                     }
+                    Shell::global(cx).update(cx, |shell, cx| shell.close_modal(cx));
                 });
-                if this.update(cx, |_, _| {}).is_ok() {
-                    cx.update(|cx| {
-                        Shell::global(cx).update(cx, |shell, cx| shell.close_modal(cx));
-                    });
-                }
             }
             Err(CreateChannelError::InvalidName) => {
                 let _ = this.update(cx, |this, cx| {
@@ -305,7 +301,7 @@ impl Render for CreateChannelModal {
                                 div()
                                     .text_sm()
                                     .font_weight(FontWeight::BOLD)
-                                    .text_color(gpui::rgb(0x06b6d4))
+                                    .text_color(theme.text_link)
                                     .child(self.category_name.clone()),
                             ),
                     )
@@ -368,9 +364,9 @@ impl Render for CreateChannelModal {
                             .rounded(px(4.))
                             .border_1()
                             .border_color(if show_invalid || show_duplicate {
-                                gpui::rgb(0xef4444)
+                                theme.status_dnd
                             } else {
-                                gpui::rgb(0x2563eb)
+                                theme.tokens.border_focus
                             })
                             .bg(theme.tokens.bg_active_member_channel)
                             .child(

@@ -269,6 +269,7 @@ impl ChannelSidebar {
                         elem_id: SharedString::from(format!("cat-{}", &category.id)),
                         id: category.id.clone(),
                         name_upper: name.to_uppercase(),
+                        name,
                         collapsed,
                     });
                     if !collapsed {
@@ -1318,6 +1319,7 @@ fn render_sidebar_item(
         SidebarItem::Category {
             elem_id,
             id,
+            name,
             name_upper,
             collapsed,
         } => {
@@ -1369,7 +1371,7 @@ fn render_sidebar_item(
                 .when(can_create_channel, |el| {
                     let channel_list = channel_list_handle.clone();
                     let category_id = category_id.clone();
-                    let modal_category_name = name_upper.clone();
+                    let modal_category_name = name.clone();
                     let locale = locale.to_string();
                     el.child(
                         div()

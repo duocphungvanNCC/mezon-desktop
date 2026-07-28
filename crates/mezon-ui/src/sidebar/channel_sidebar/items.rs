@@ -37,6 +37,7 @@ pub(super) enum SidebarItem {
     },
     Category {
         elem_id: SharedString,
+        name: String,
         name_upper: String,
         id: String,
         collapsed: bool,

@@ -216,7 +216,6 @@ impl RenderOnce for Avatar {
             })
             .image_cache(avatar_cache)
             .child(match self.src {
-                _ if group_default => group_default_circle(image_size),
                 _ if is_anonymous => anonymous_circle(image_size),
                 Some(src) => {
                     let loading_initials = initials.clone();
@@ -270,6 +269,7 @@ impl RenderOnce for Avatar {
                         },
                     )
                 }
+                None if group_default => group_default_circle(image_size),
                 None => initials_circle(image_size, bg, text_color, initials),
             })
             .children(self.indicator.map(|indicator| div().child(indicator)))

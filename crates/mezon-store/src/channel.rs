@@ -1391,15 +1391,8 @@ impl ChannelList {
         category_id: &str,
         name: &str,
     ) -> bool {
-        let normalized = name.trim().to_lowercase();
         self.cache.get(&clan_id).is_some_and(|categories| {
-            categories
-                .iter()
-                .filter(|category| category.id != FAVOR_CATE_ID && category.id == category_id)
-                .flat_map(|category| category.channels.iter())
-                .any(|channel| {
-                    channel.parent_id.is_none() && channel.name.trim().to_lowercase() == normalized
-                })
+            channel_name_exists_in_categories(categories, category_id, name)
         })
     }
 
@@ -1426,6 +1419,13 @@ impl ChannelList {
         };
         let api = self.api.clone();
         cx.spawn(async move |this, cx| {
+            if api
+                .check_duplicate_channel_name(&label, &category_id)
+                .await
+                .map_err(|e| CreateChannelError::Other(e.to_string()))?
+            {
+                return Err(CreateChannelError::DuplicateName);
+            }
             let category_id_num = category_id.parse::<i64>().ok();
             let mut desc = api
                 .create_channel(
@@ -1438,11 +1438,7 @@ impl ChannelList {
                 )
                 .await
                 .map_err(|e| CreateChannelError::Other(e.to_string()))?;
-            if desc.category_id == 0
-                && let Some(category_id_num) = category_id_num
-            {
-                desc.category_id = category_id_num;
-            }
+            desc.category_id = effective_category_id(desc.category_id, category_id_num);
             let channel_id = ChannelId(desc.channel_id);
             let created_type = ChannelType::from_raw(desc.channel_type);
             this.update(cx, |this, cx| {
@@ -2847,6 +2843,29 @@ fn save_previous_channels(channels: HashMap<ClanId, Vec<ChannelId>>) {
     }
 }
 
+fn channel_name_exists_in_categories(
+    categories: &[Category],
+    category_id: &str,
+    name: &str,
+) -> bool {
+    let normalized = name.trim().to_lowercase();
+    categories
+        .iter()
+        .filter(|category| category.id != FAVOR_CATE_ID && category.id == category_id)
+        .flat_map(|category| category.channels.iter())
+        .any(|channel| {
+            channel.parent_id.is_none() && channel.name.trim().to_lowercase() == normalized
+        })
+}
+
+fn effective_category_id(desc_category_id: i64, requested: Option<i64>) -> i64 {
+    if desc_category_id == 0 {
+        requested.unwrap_or(desc_category_id)
+    } else {
+        desc_category_id
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2935,6 +2954,50 @@ mod tests {
                 make_channel(11, "beta", "cat1"),
             ],
         }]
+    }
+
+    #[test]
+    fn channel_name_exists_in_category_matches_case_insensitively() {
+        let cats = categories();
+        assert!(channel_name_exists_in_categories(&cats, "cat1", "alpha"));
+        assert!(channel_name_exists_in_categories(
+            &cats,
+            "cat1",
+            "  ALPHA  "
+        ));
+        assert!(!channel_name_exists_in_categories(&cats, "cat1", "gamma"));
+    }
+
+    #[test]
+    fn channel_name_exists_in_category_is_scoped_to_that_category() {
+        let cats = categories();
+        assert!(!channel_name_exists_in_categories(&cats, "cat2", "alpha"));
+    }
+
+    #[test]
+    fn channel_name_exists_in_category_ignores_favorites_and_threads() {
+        let mut cats = categories();
+        cats.push(Category {
+            id: FAVOR_CATE_ID.into(),
+            clan_id: ClanId(1),
+            name: "favoriteChannel".into(),
+            order: i32::MIN,
+            channels: vec![make_channel(20, "starred", FAVOR_CATE_ID)],
+        });
+        cats[0].channels.push(make_thread(30, 10, "cat1"));
+        assert!(!channel_name_exists_in_categories(
+            &cats,
+            FAVOR_CATE_ID,
+            "starred"
+        ));
+        assert!(!channel_name_exists_in_categories(&cats, "cat1", "30"));
+    }
+
+    #[test]
+    fn effective_category_id_falls_back_to_requested_when_zero() {
+        assert_eq!(effective_category_id(0, Some(42)), 42);
+        assert_eq!(effective_category_id(0, None), 0);
+        assert_eq!(effective_category_id(7, Some(42)), 7);
     }
 
     #[test]
