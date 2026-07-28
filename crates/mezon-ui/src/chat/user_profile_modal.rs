@@ -421,17 +421,19 @@ impl Render for UserProfileModal {
                                             .text_color(status_color),
                                     ),
                             )
-                            .child(
-                                div()
-                                    .absolute()
-                                    .right(px(-20.))
-                                    .top(px(25.))
-                                    .size(px(14.))
-                                    .rounded_full()
-                                    .bg(theme.tokens.bg_secondary)
-                                    .border_1()
-                                    .border_color(theme.bg_floating),
-                            ),
+                            .when(!custom_status.is_empty(), |avatar| {
+                                avatar.child(
+                                    div()
+                                        .absolute()
+                                        .right(px(-20.))
+                                        .top(px(25.))
+                                        .size(px(14.))
+                                        .rounded_full()
+                                        .bg(theme.tokens.bg_secondary)
+                                        .border_1()
+                                        .border_color(theme.bg_floating),
+                                )
+                            }),
                     ))
                     .when(!custom_status.is_empty(), |card| {
                         card.child(deferred(
