@@ -49,6 +49,7 @@ pub fn render_voice_channel(
     output_device_id: Option<String>,
     camera_device_id: Option<String>,
     strip_scroll: &ScrollHandle,
+    strip_width: Pixels,
     grid_page: usize,
     grid_size: gpui::Size<Pixels>,
     show_members: bool,
@@ -76,6 +77,7 @@ pub fn render_voice_channel(
             connecting,
             &chat,
             strip_scroll,
+            strip_width,
             grid_page,
             grid_size,
             show_members,
@@ -985,6 +987,7 @@ fn render_in_call(
     connecting: bool,
     chat: &Entity<ChatLayout>,
     strip_scroll: &ScrollHandle,
+    strip_width: Pixels,
     grid_page: usize,
     grid_size: gpui::Size<Pixels>,
     show_members: bool,
@@ -1035,7 +1038,11 @@ fn render_in_call(
                     target.into_iter().filter(|id| id != fid).collect()
                 };
                 let bounds = strip_scroll.bounds();
-                let viewport_w = f32::from(bounds.size.width);
+                let viewport_w = f32::from(if strip_width > px(0.) {
+                    strip_width
+                } else {
+                    bounds.size.width
+                });
                 let aside_h = carousel_aside_height(f32::from(bounds.size.height));
                 let max_items = if viewport_w > 0. {
                     carousel_max_visible_tiles(viewport_w, aside_h)
@@ -1074,6 +1081,7 @@ fn render_in_call(
             chat,
             show_members,
             strip_scroll,
+            strip_width,
             window,
             cx,
         ),
@@ -1849,6 +1857,7 @@ fn render_focus_layout(
     chat: &Entity<ChatLayout>,
     show_members: bool,
     strip_scroll: &ScrollHandle,
+    strip_width: Pixels,
     window: &mut Window,
     cx: &mut App,
 ) -> AnyElement {
@@ -1935,8 +1944,11 @@ fn render_focus_layout(
         };
 
         let strip_bounds = strip_scroll.bounds();
-        let viewport = strip_bounds.size.width;
-        let mut viewport_w = f32::from(viewport);
+        let mut viewport_w = f32::from(if strip_width > px(0.) {
+            strip_width
+        } else {
+            strip_bounds.size.width
+        });
         if viewport_w <= 0. {
             viewport_w = (f32::from(window.viewport_size().width) * 0.55).max(400.);
         }
@@ -1946,6 +1958,7 @@ fn render_focus_layout(
         let aside_h = carousel_aside_height(strip_h);
         let tile_w = carousel_tile_width(aside_h);
         let tile_step = tile_w + gap;
+        let content_w = carousel_content_width(total, tile_w, gap);
         let overflows = carousel_overflows(viewport_w, total, aside_h, gap);
         let avatar_size = px((aside_h * 0.6).clamp(24., 80.));
         let (start, end) = if overflows {
@@ -2003,6 +2016,7 @@ fn render_focus_layout(
             .flex()
             .flex_row()
             .flex_none()
+            .w(px(content_w))
             .h(px(aside_h))
             .gap(px(gap))
             .when(!overflows, |this| this.justify_center())
@@ -2010,37 +2024,37 @@ fn render_focus_layout(
             .children(strip_tiles)
             .children(trail_spacer);
 
-        let carousel: AnyElement = if overflows {
-            div()
-                .flex_1()
-                .min_h_0()
-                .min_w_0()
-                .w_full()
-                .flex()
-                .flex_col()
-                .child(
-                    div()
-                        .id("voice-carousel-scroll")
-                        .w_full()
-                        .h(px(aside_h))
-                        .overflow_x_scroll()
-                        .track_scroll(strip_scroll)
-                        .child(tiles_row),
+        let measure_chat = chat.clone();
+        let carousel = div()
+            .flex_1()
+            .min_h_0()
+            .min_w_0()
+            .w_full()
+            .relative()
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .id("voice-carousel-scroll")
+                    .w_full()
+                    .h(px(aside_h))
+                    .overflow_x_scroll()
+                    .track_scroll(strip_scroll)
+                    .child(tiles_row),
+            )
+            .children(scrollbar_gap)
+            .child(
+                canvas(
+                    move |bounds, _, cx| {
+                        measure_chat.update(cx, |layout, cx| {
+                            layout.record_voice_strip_width(bounds.size.width, cx)
+                        })
+                    },
+                    |_, _, _, _| {},
                 )
-                .children(scrollbar_gap)
-                .into_any_element()
-        } else {
-            div()
-                .flex_1()
-                .min_h_0()
-                .min_w_0()
-                .w_full()
-                .flex()
-                .flex_row()
-                .justify_center()
-                .child(tiles_row)
-                .into_any_element()
-        };
+                .absolute()
+                .size_full(),
+            );
 
         let strip_max_h = if overflows {
             CAROUSEL_MAX_ROW_HEIGHT + CAROUSEL_SCROLLBAR_GAP_MIN + CAROUSEL_SCROLLBAR_RESERVE
