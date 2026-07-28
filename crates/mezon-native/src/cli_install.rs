@@ -50,7 +50,7 @@ pub fn install() -> anyhow::Result<()> {
         install_unix_symlink(&exe, &link)?;
         #[cfg(target_os = "macos")]
         add_macos_shell_path_entry()?;
-        return Ok(());
+        Ok(())
     }
 
     #[cfg(not(any(unix, target_os = "windows")))]
