@@ -22,6 +22,7 @@ pub struct ArchivedChannelPage {
     settings: Entity<Settings>,
     channels: Vec<ArchivedChannelRow>,
     loading: bool,
+    fetch_failed: bool,
     restoring: Option<i64>,
     _fetch_task: Option<Task<()>>,
     _restore_task: Option<Task<()>>,
@@ -40,6 +41,7 @@ impl ArchivedChannelPage {
             settings,
             channels: Vec::new(),
             loading: true,
+            fetch_failed: false,
             restoring: None,
             _fetch_task: None,
             _restore_task: None,
@@ -55,6 +57,9 @@ impl ArchivedChannelPage {
 
     fn fetch_archived_channels(&mut self, cx: &mut Context<Self>) {
         self.loading = true;
+        self.fetch_failed = false;
+        cx.notify();
+
         let clan_id = self.clan_id;
         self._fetch_task = Some(cx.spawn(async move |this, cx| {
             let task = this
@@ -71,6 +76,7 @@ impl ArchivedChannelPage {
                 this.loading = false;
                 match fetched {
                     Ok(descs) => {
+                        this.fetch_failed = false;
                         this.channels = descs
                             .into_iter()
                             .map(|desc| ArchivedChannelRow {
@@ -83,6 +89,8 @@ impl ArchivedChannelPage {
                     }
                     Err(err) => {
                         tracing::error!("fetch archived channels failed: {err}");
+                        this.channels.clear();
+                        this.fetch_failed = true;
                     }
                 }
                 cx.notify();
@@ -114,26 +122,30 @@ impl ArchivedChannelPage {
             let success = result.is_ok();
             let _ = this.update(cx, |this, cx| {
                 this.restoring = None;
-                match result {
-                    Ok(()) => {
-                        this.channels.retain(|row| row.channel_id != channel_id);
-                        this.channel_list
-                            .update(cx, |store, cx| store.refresh_clan(clan_id, cx));
-                    }
-                    Err(err) => {
-                        tracing::error!("restore archived channel failed: {err}");
-                    }
+                if let Ok(()) = result {
+                    this.channels.retain(|row| row.channel_id != channel_id);
+                    this.channel_list
+                        .update(cx, |store, cx| store.refresh_clan(clan_id, cx));
+                } else if let Err(err) = &result {
+                    tracing::error!("restore archived channel failed: {err}");
                 }
                 cx.notify();
             });
-            if success {
-                let message =
-                    mezon_i18n::t(&locale, "clanSettings.archivedChannels.restoreSuccess")
-                        .to_string();
-                cx.update(|cx| {
-                    Shell::global(cx).update(cx, |shell, cx| shell.success(message, cx));
+            cx.update(|cx| {
+                Shell::global(cx).update(cx, |shell, cx| {
+                    if success {
+                        let message =
+                            mezon_i18n::t(&locale, "clanSettings.archivedChannels.restoreSuccess")
+                                .to_string();
+                        shell.success(message, cx);
+                    } else {
+                        let message =
+                            mezon_i18n::t(&locale, "clanSettings.archivedChannels.restoreFailed")
+                                .to_string();
+                        shell.error(message, cx);
+                    }
                 });
-            }
+            });
         }));
     }
 
@@ -183,6 +195,32 @@ impl ArchivedChannelPage {
             )
     }
 
+    fn render_fetch_error(locale: &str, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
+        v_flex()
+            .items_center()
+            .justify_center()
+            .gap(px(12.0))
+            .py(px(48.0))
+            .child(
+                div()
+                    .text_base()
+                    .text_color(theme.status_dnd)
+                    .text_center()
+                    .child(mezon_i18n::t(
+                        locale,
+                        "clanSettings.archivedChannels.fetchFailed",
+                    )),
+            )
+            .child(
+                Button::new("archived-channels-retry")
+                    .label(mezon_i18n::t(locale, "channelVoice.retry"))
+                    .with_size(Size::Medium)
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.fetch_archived_channels(cx);
+                    })),
+            )
+    }
+
     fn render_channel_row(
         &self,
         index: usize,
@@ -217,8 +255,6 @@ impl ArchivedChannelPage {
                     .flex()
                     .items_center()
                     .justify_center()
-                    // .rounded_md()
-                    // .bg(theme.tokens.bg_icon_theme_active)
                     .child(
                         Icon::new(icon)
                             .size(px(20.0))
@@ -283,18 +319,25 @@ impl Render for ArchivedChannelPage {
                     )),
             )
             .when(self.loading, |el| el.child(div().h(px(48.0))))
-            .when(!self.loading && self.channels.is_empty(), |el| {
-                el.child(Self::render_empty_state(&locale, &theme))
+            .when(!self.loading && self.fetch_failed, |el| {
+                el.child(Self::render_fetch_error(&locale, &theme, cx))
             })
-            .when(!self.loading && !self.channels.is_empty(), |el| {
-                el.child(
-                    v_flex()
-                        .gap(px(12.0))
-                        .children(self.channels.iter().enumerate().map(|(index, row)| {
-                            self.render_channel_row(index, row, &locale, &theme, cx)
-                                .into_any_element()
-                        })),
-                )
-            })
+            .when(
+                !self.loading && !self.fetch_failed && self.channels.is_empty(),
+                |el| el.child(Self::render_empty_state(&locale, &theme)),
+            )
+            .when(
+                !self.loading && !self.fetch_failed && !self.channels.is_empty(),
+                |el| {
+                    el.child(
+                        v_flex()
+                            .gap(px(12.0))
+                            .children(self.channels.iter().enumerate().map(|(index, row)| {
+                                self.render_channel_row(index, row, &locale, &theme, cx)
+                                    .into_any_element()
+                            })),
+                    )
+                },
+            )
     }
 }

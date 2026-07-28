@@ -1420,14 +1420,19 @@ impl ChannelList {
         }
         let api = self.api.clone();
         cx.spawn(async move |this, cx| {
-            api.update_category_order(clan_id.get(), &payload)
-                .await
-                .map_err(|e| e.to_string())?;
-            this.update(cx, |this, cx| {
-                this.refresh_clan(clan_id, cx);
-            })
-            .map_err(|_| "store dropped".to_string())?;
-            Ok(())
+            match api.update_category_order(clan_id.get(), &payload).await {
+                Ok(()) => this
+                    .update(cx, |this, cx| {
+                        this.refresh_clan(clan_id, cx);
+                    })
+                    .map_err(|_| "store dropped".to_string()),
+                Err(error) => {
+                    let _ = this.update(cx, |this, cx| {
+                        this.refresh_clan(clan_id, cx);
+                    });
+                    Err(error.to_string())
+                }
+            }
         })
     }
 

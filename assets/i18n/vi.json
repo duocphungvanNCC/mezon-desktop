@@ -1504,6 +1504,7 @@
   "clanSettings.sidebar.items.archivedChannels": "Kênh đã lưu trữ",
   "clanSettings.sidebar.items.auditLog": "Nhật ký hoạt động",
   "clanSettings.sidebar.items.categoryOrder": "Thứ tự danh mục",
+  "clanSettings.categoryOrder.description": "Kéo thả danh mục để thay đổi thứ tự hiển thị trên thanh kênh. Thay đổi sẽ được lưu tự động khi bạn di chuyển danh mục.",
   "clanSettings.sidebar.items.emoji": "Biểu cảm",
   "clanSettings.sidebar.items.enableCommunity": "Kích hoạt cộng đồng",
   "clanSettings.sidebar.items.imageStickers": "Nhãn dán hình ảnh",

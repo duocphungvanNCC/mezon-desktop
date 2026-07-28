@@ -1,9 +1,10 @@
 use gpui::{
-    Context, CursorStyle, DragMoveEvent, Entity, FontWeight, Pixels, Render, Subscription, Window,
-    div, prelude::*, px,
+    Context, CursorStyle, DragMoveEvent, Entity, FontWeight, Pixels, Render, Subscription, Task,
+    Window, div, prelude::*, px,
 };
-use mezon_store::{ChannelList, ClanId, FAVOR_CATE_ID};
+use mezon_store::{ChannelList, ClanId, FAVOR_CATE_ID, Settings};
 
+use crate::app::shell::Shell;
 use crate::components::primitives::{h_flex, v_flex};
 use crate::theme::{ActiveTheme, Theme};
 
@@ -116,6 +117,7 @@ pub struct CategorySortPage {
     dragging_index: Option<usize>,
     drag_pointer_y: Option<Pixels>,
     _channel_sub: Subscription,
+    _save_task: Option<Task<()>>,
 }
 
 impl CategorySortPage {
@@ -136,10 +138,13 @@ impl CategorySortPage {
             _channel_sub: cx.observe(&channel_list, |this, _, cx| {
                 this.resync_from_store(cx);
             }),
+            _save_task: None,
         }
     }
 
-    pub fn release(&mut self) {}
+    pub fn release(&mut self) {
+        self._save_task.take();
+    }
 
     fn is_valid_sort_category(id: &str) -> bool {
         id != FAVOR_CATE_ID && id.parse::<i64>().is_ok_and(|id| id > 0)
@@ -154,10 +159,13 @@ impl CategorySortPage {
         categories.sort_by_key(|category| category.order);
         categories
             .into_iter()
-            .map(|category| CategorySortItem {
-                id: category.id.clone(),
-                name: category.name.clone(),
-                category_id: category.id.parse().unwrap_or(0),
+            .filter_map(|category| {
+                let category_id = category.id.parse::<i64>().ok()?;
+                Some(CategorySortItem {
+                    id: category.id.clone(),
+                    name: category.name.clone(),
+                    category_id,
+                })
             })
             .collect()
     }
@@ -192,7 +200,7 @@ impl CategorySortPage {
             list.update_categories_order(clan_id, &category_ids, cx)
         });
 
-        cx.spawn(async move |this, cx| match task.await {
+        self._save_task = Some(cx.spawn(async move |this, cx| match task.await {
             Ok(()) => {
                 let _ = this.update(cx, |this, cx| {
                     this.saved_categories = this.categories.clone();
@@ -209,9 +217,15 @@ impl CategorySortPage {
                     this.saving = false;
                     cx.notify();
                 });
+                cx.update(|cx| {
+                    let locale = Settings::try_global(cx)
+                        .map(|settings| settings.read(cx).language.clone())
+                        .unwrap_or_else(|| "en".into());
+                    let message = mezon_i18n::t(&locale, "common.saveFailed").to_string();
+                    Shell::global(cx).update(cx, |shell, cx| shell.error(message, cx));
+                });
             }
-        })
-        .detach();
+        }));
     }
 
     fn handle_drag_move(&mut self, event: &DragMoveEvent<CategoryDrag>, cx: &mut Context<Self>) {
@@ -287,10 +301,18 @@ impl CategorySortPage {
 impl Render for CategorySortPage {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if self.dragging_index.is_some() && !cx.has_active_drag() {
-            self.finish_drag(cx);
+            let handle = cx.weak_entity();
+            cx.defer(move |cx| {
+                let _ = handle.update(cx, |this, cx| {
+                    this.finish_drag(cx);
+                });
+            });
         }
 
         let theme = cx.theme().clone();
+        let locale = Settings::try_global(cx)
+            .map(|settings| settings.read(cx).language.clone())
+            .unwrap_or_else(|| "en".into());
         let categories = self.categories.clone();
         let dragging_index = self.dragging_index;
         let drag_pointer_y = self.drag_pointer_y;
@@ -298,43 +320,58 @@ impl Render for CategorySortPage {
             .zip(drag_pointer_y)
             .and_then(|(index, y)| categories.get(index).map(|item| (item.name.clone(), y)));
 
-        v_flex().relative().w_full().child(
-            div()
-                .id("category-sort-list")
-                .relative()
-                .w_full()
-                .on_drag_move(
-                    cx.listener(|this, event: &DragMoveEvent<CategoryDrag>, _, cx| {
-                        this.handle_drag_move(event, cx);
-                    }),
-                )
-                .on_drop(cx.listener(|this, _: &CategoryDrag, _, cx| {
-                    this.finish_drag(cx);
-                }))
-                .child(
-                    v_flex()
-                        .gap(px(ROW_GAP))
-                        .children(categories.iter().enumerate().map(|(index, item)| {
-                            self.render_category_row(index, item, &theme)
-                                .into_any_element()
-                        })),
-                )
-                .when_some(drag_preview, |list, (name, y)| {
-                    list.child(
-                        div()
-                            .absolute()
-                            .left_0()
-                            .right_0()
-                            .top(y - px(ROW_HEIGHT / 2.0))
-                            .occlude()
-                            .child(render_category_row_surface(
-                                &name,
-                                &theme,
-                                RowSurfaceStyle::DragPreview,
-                                None,
-                            )),
+        v_flex()
+            .relative()
+            .w_full()
+            .pt(px(8.0))
+            .child(
+                div()
+                    .mb(px(24.0))
+                    .max_w(px(672.0))
+                    .text_base()
+                    .text_color(theme.text_secondary)
+                    .child(mezon_i18n::t(
+                        &locale,
+                        "clanSettings.categoryOrder.description",
+                    )),
+            )
+            .child(
+                div()
+                    .id("category-sort-list")
+                    .relative()
+                    .w_full()
+                    .on_drag_move(cx.listener(
+                        |this, event: &DragMoveEvent<CategoryDrag>, _, cx| {
+                            this.handle_drag_move(event, cx);
+                        },
+                    ))
+                    .on_drop(cx.listener(|this, _: &CategoryDrag, _, cx| {
+                        this.finish_drag(cx);
+                    }))
+                    .child(
+                        v_flex()
+                            .gap(px(ROW_GAP))
+                            .children(categories.iter().enumerate().map(|(index, item)| {
+                                self.render_category_row(index, item, &theme)
+                                    .into_any_element()
+                            })),
                     )
-                }),
-        )
+                    .when_some(drag_preview, |list, (name, y)| {
+                        list.child(
+                            div()
+                                .absolute()
+                                .left_0()
+                                .right_0()
+                                .top(y - px(ROW_HEIGHT / 2.0))
+                                .occlude()
+                                .child(render_category_row_surface(
+                                    &name,
+                                    &theme,
+                                    RowSurfaceStyle::DragPreview,
+                                    None,
+                                )),
+                        )
+                    }),
+            )
     }
 }
