@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use gpui::{App, AppContext, Context, Entity, EventEmitter, Global, Task};
 use mezon_client::{AppApi, ConnectionStatus, RealtimeEvent};
@@ -9,12 +9,37 @@ use mezon_proto::api;
 use crate::realtime::{RealtimeDispatch, RealtimeKind};
 use crate::{ChannelId, ChannelList, ClanId, UserId};
 
-const EVENT_CREATED: i32 = 1;
-const EVENT_UPDATED: i32 = 2;
-const EVENT_DELETED: i32 = 3;
-const EVENT_INTERESTED: i32 = 4;
-const EVENT_UNINTERESTED: i32 = 5;
-const EVENT_COMPLETED: i32 = 3;
+const CACHE_TTL: Duration = Duration::from_secs(20 * 60);
+const FETCH_RETRY_BACKOFF: Duration = Duration::from_secs(30);
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum EventAction {
+    Created,
+    Updated,
+    Deleted,
+    Interested,
+    Uninterested,
+    Unknown,
+}
+
+impl From<i32> for EventAction {
+    fn from(value: i32) -> Self {
+        match value {
+            1 => Self::Created,
+            2 => Self::Updated,
+            3 => Self::Deleted,
+            4 => Self::Interested,
+            5 => Self::Uninterested,
+            _ => Self::Unknown,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(i32)]
+enum EventStatus {
+    Completed = 3,
+}
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct ClanEventItem {
@@ -113,6 +138,8 @@ pub struct EventsStore {
     events: HashMap<ClanId, Vec<ClanEventItem>>,
     loaded: HashSet<ClanId>,
     loading: HashSet<ClanId>,
+    fetched_at: HashMap<ClanId, Instant>,
+    failed_at: HashMap<ClanId, Instant>,
     api: Arc<AppApi>,
     _connection_watch: Task<()>,
     _clock_task: Task<()>,
@@ -137,6 +164,8 @@ impl EventsStore {
             events: HashMap::new(),
             loaded: HashSet::new(),
             loading: HashSet::new(),
+            fetched_at: HashMap::new(),
+            failed_at: HashMap::new(),
             api,
             _connection_watch: connection_watch,
             _clock_task: clock_task,
@@ -145,6 +174,20 @@ impl EventsStore {
 
     pub fn global(cx: &App) -> Entity<Self> {
         cx.global::<GlobalEventsStore>().0.clone()
+    }
+
+    pub fn try_global(cx: &App) -> Option<Entity<Self>> {
+        cx.try_global::<GlobalEventsStore>()
+            .map(|store| store.0.clone())
+    }
+
+    pub fn reset(&mut self, cx: &mut Context<Self>) {
+        self.events.clear();
+        self.loaded.clear();
+        self.loading.clear();
+        self.fetched_at.clear();
+        self.failed_at.clear();
+        cx.notify();
     }
 
     fn register_realtime(cx: &mut Context<Self>) {
@@ -180,15 +223,24 @@ impl EventsStore {
 
     fn spawn_clock(cx: &mut Context<Self>) -> Task<()> {
         cx.spawn(async move |this, cx| {
+            let mut previous_tick = chrono::Utc::now().timestamp().max(0) as u32;
             loop {
                 cx.background_executor().timer(Duration::from_secs(1)).await;
                 if this
                     .update(cx, |this, cx| {
+                        let now = chrono::Utc::now().timestamp().max(0) as u32;
+                        let crossed_transition = this.events.values().flatten().any(|event| {
+                            [event.start_time_seconds, event.end_time_seconds]
+                                .into_iter()
+                                .any(|timestamp| timestamp > previous_tick && timestamp <= now)
+                        });
                         let changed = this.remove_expired();
-                        for clan_id in changed {
-                            cx.emit(EventsEvent::Changed { clan_id });
+                        let removed_expired = !changed.is_empty();
+                        Self::emit_changed(changed, cx);
+                        if crossed_transition || removed_expired {
+                            cx.notify();
                         }
-                        cx.notify();
+                        previous_tick = now;
                     })
                     .is_err()
                 {
@@ -198,13 +250,19 @@ impl EventsStore {
         })
     }
 
+    fn emit_changed(changed: Vec<ClanId>, cx: &mut Context<Self>) {
+        for clan_id in changed.into_iter().collect::<HashSet<_>>() {
+            cx.emit(EventsEvent::Changed { clan_id });
+        }
+    }
+
     fn remove_expired(&mut self) -> Vec<ClanId> {
         let now = chrono::Utc::now().timestamp().max(0) as u32;
         let mut changed = Vec::new();
         for (clan_id, events) in &mut self.events {
             let old_len = events.len();
             events.retain(|event| {
-                event.event_status != EVENT_COMPLETED
+                event.event_status != EventStatus::Completed as i32
                     && (event.end_time_seconds == 0 || event.end_time_seconds > now)
             });
             if events.len() != old_len {
@@ -220,17 +278,16 @@ impl EventsStore {
         };
         let clan_id = ClanId(event.clan_id);
         let events = self.events.entry(clan_id).or_default();
-        match event.action {
-            EVENT_CREATED => {
-                let item = ClanEventItem::from_realtime(event);
+        match EventAction::from(event.action) {
+            EventAction::Created => {
                 if let Some(existing) = events.iter_mut().find(|item| item.id == event.event_id) {
-                    *existing = item;
+                    existing.apply_realtime(event);
                 } else {
-                    events.push(item);
+                    events.push(ClanEventItem::from_realtime(event));
                 }
             }
-            EVENT_UPDATED => {
-                if event.event_status == EVENT_COMPLETED {
+            EventAction::Updated => {
+                if event.event_status == EventStatus::Completed as i32 {
                     events.retain(|item| item.id != event.event_id);
                 } else if let Some(existing) =
                     events.iter_mut().find(|item| item.id == event.event_id)
@@ -240,8 +297,8 @@ impl EventsStore {
                     events.push(ClanEventItem::from_realtime(event));
                 }
             }
-            EVENT_DELETED => events.retain(|item| item.id != event.event_id),
-            EVENT_INTERESTED => {
+            EventAction::Deleted => events.retain(|item| item.id != event.event_id),
+            EventAction::Interested => {
                 if let Some(existing) = events.iter_mut().find(|item| item.id == event.event_id) {
                     let user = UserId(event.user_id);
                     if !existing.user_ids.contains(&user) {
@@ -249,15 +306,16 @@ impl EventsStore {
                     }
                 }
             }
-            EVENT_UNINTERESTED => {
+            EventAction::Uninterested => {
                 if let Some(existing) = events.iter_mut().find(|item| item.id == event.event_id) {
                     existing.user_ids.retain(|user| user.0 != event.user_id);
                 }
             }
-            _ => self.fetch(clan_id, cx),
+            EventAction::Unknown => self.fetch(clan_id, cx),
         }
-        self.remove_expired();
-        cx.emit(EventsEvent::Changed { clan_id });
+        let mut changed = self.remove_expired();
+        changed.push(clan_id);
+        Self::emit_changed(changed, cx);
         cx.notify();
     }
 
@@ -266,9 +324,20 @@ impl EventsStore {
     }
 
     pub fn ensure_loaded(&mut self, clan_id: ClanId, cx: &mut Context<Self>) {
-        if !self.loaded.contains(&clan_id) {
-            self.fetch(clan_id, cx);
+        let now = Instant::now();
+        if self.loading.contains(&clan_id)
+            || self
+                .fetched_at
+                .get(&clan_id)
+                .is_some_and(|instant| now.duration_since(*instant) < CACHE_TTL)
+            || self
+                .failed_at
+                .get(&clan_id)
+                .is_some_and(|instant| now.duration_since(*instant) < FETCH_RETRY_BACKOFF)
+        {
+            return;
         }
+        self.fetch(clan_id, cx);
     }
 
     fn refresh_loaded(&mut self, cx: &mut Context<Self>) {
@@ -292,15 +361,21 @@ impl EventsStore {
                         let items = items
                             .into_iter()
                             .map(ClanEventItem::from_api)
-                            .filter(|event| event.event_status != EVENT_COMPLETED)
+                            .filter(|event| event.event_status != EventStatus::Completed as i32)
                             .collect();
                         this.events.insert(clan_id, items);
                         this.loaded.insert(clan_id);
-                        this.remove_expired();
+                        this.fetched_at.insert(clan_id, Instant::now());
+                        this.failed_at.remove(&clan_id);
                     }
-                    Err(error) => tracing::warn!(%error, %clan_id, "failed to load events"),
+                    Err(error) => {
+                        this.failed_at.insert(clan_id, Instant::now());
+                        tracing::warn!(%error, %clan_id, "failed to load events");
+                    }
                 }
-                cx.emit(EventsEvent::Changed { clan_id });
+                let mut changed = this.remove_expired();
+                changed.push(clan_id);
+                Self::emit_changed(changed, cx);
                 cx.notify();
             });
         })
@@ -319,7 +394,7 @@ impl EventsStore {
         self.events(clan_id)
             .iter()
             .filter(|event| {
-                event.event_status != EVENT_COMPLETED
+                event.event_status != EventStatus::Completed as i32
                     && (event.end_time_seconds == 0 || event.end_time_seconds > now)
                     && (!event.is_private || Some(event.creator_id) == current_user)
                     && event
@@ -328,5 +403,29 @@ impl EventsStore {
             })
             .cloned()
             .collect()
+    }
+
+    pub fn visible_event_count(
+        &self,
+        clan_id: ClanId,
+        current_user: Option<UserId>,
+        cx: &App,
+    ) -> usize {
+        let channels = ChannelList::global(cx);
+        let channels = channels.read(cx);
+        let now = chrono::Utc::now().timestamp().max(0) as u32;
+        self.events(clan_id)
+            .iter()
+            .filter(|event| {
+                event.event_status != EventStatus::Completed as i32
+                    && (event.end_time_seconds == 0 || event.end_time_seconds > now)
+                    // Keep parity with React's useEventManagementQuantity: private
+                    // events are only visible to their creator.
+                    && (!event.is_private || Some(event.creator_id) == current_user)
+                    && event
+                        .channel_id
+                        .is_none_or(|channel_id| channels.channel_in_clan(clan_id, channel_id))
+            })
+            .count()
     }
 }

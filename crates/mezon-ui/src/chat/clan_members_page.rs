@@ -97,11 +97,22 @@ impl ClanMembersPage {
             return;
         }
         self.clan_id = clan_id;
-        self.page = 0;
+        self.reset_search(cx);
         self.rows_dirty = true;
         self.page_size_picker_open = false;
         ClanMembersStore::global(cx).update(cx, |store, cx| store.ensure_loaded(clan_id, cx));
         RolesStore::global(cx).update(cx, |store, cx| store.ensure_loaded(clan_id, cx));
+        cx.notify();
+    }
+
+    pub fn reset_search(&mut self, cx: &mut Context<Self>) {
+        self.search = None;
+        self.search_sub = None;
+        self.search_locale.clear();
+        self.page = 0;
+        self.rows_dirty = true;
+        self.page_size_picker_open = false;
+        self.scroll_to_top();
         cx.notify();
     }
 
@@ -663,6 +674,10 @@ impl Render for ClanMembersPage {
         self.ensure_search(window, cx);
         let theme = cx.theme();
         let locale = self.settings.read(cx).language.clone();
+        let has_search_query = self
+            .search
+            .as_ref()
+            .is_some_and(|input| !input.read(cx).value().trim().is_empty());
         let total = self.rows(cx).len();
         let pages = total.div_ceil(self.page_size).max(1);
         self.page = self.page.min(pages - 1);
@@ -685,7 +700,16 @@ impl Render for ClanMembersPage {
         }
         let entity = cx.entity();
         let visible_for_list = visible.clone();
-        let member_list = if self.page_size == 10 {
+        let member_list = if has_search_query && total == 0 {
+            div()
+                .size_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                .text_color(theme.text_secondary)
+                .child(tr(&locale, "memberPage.noSearchResults"))
+                .into_any_element()
+        } else if self.page_size == 10 && visible.len() == self.page_size {
             let mut rows = div()
                 .id("member-ten-row-list")
                 .flex()

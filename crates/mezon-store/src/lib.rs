@@ -2,8 +2,11 @@ pub mod account;
 pub mod activity;
 pub mod album_layout;
 pub mod audio;
+pub mod audit_log;
+pub mod auto_update;
 pub mod badge;
 pub mod cache;
+pub mod canvas;
 pub mod channel;
 pub mod channel_media;
 pub mod channel_members;
@@ -41,6 +44,7 @@ pub mod quick_menu;
 pub mod realtime;
 pub mod roles;
 pub mod sticker;
+pub mod stream;
 pub mod threads;
 pub mod topic_badges;
 pub mod topics;
@@ -72,8 +76,15 @@ pub use audio::{
     AudioDeviceInfo, AudioStore, MicCaptureFactory, MicCaptureHandle, MicPcmCaptureFactory,
     MicPcmFormat,
 };
+pub use audit_log::{
+    ALL_ACTION_INDEX, AUDIT_ACTION_OPTIONS, AuditActionOption, AuditLogEntry, AuditLogQuery,
+    AuditLogState, AuditLogStateView, AuditLogStore, audit_action_api_value, audit_action_i18n_key,
+    audit_action_index_for_api_log,
+};
+pub use auto_update::{AutoUpdateStatus, AutoUpdateStore};
 pub use badge::BadgeService;
 pub use cache::{Freshness, KeyedCache};
+pub use canvas::{CanvasDetail, CanvasStore, CanvasSummary, UploadedCanvasImage, canvas_web_link};
 pub use channel::*;
 pub use channel_media::{
     CHANNEL_MEDIA_CACHE_TTL, CHANNEL_MEDIA_PAGE_SIZE, ChannelMediaEvent, ChannelMediaStore,
@@ -140,6 +151,7 @@ pub use mezon_client::{
     search_content_highlight_terms, search_dropdown_mode, search_filter_chip_ranges,
     search_page_count, search_page_numbers, should_show_search_dropdown,
 };
+pub use mmn_client::{DECIMAL_FACTOR as TOKEN_DECIMAL_FACTOR, DECIMALS as TOKEN_DECIMALS};
 pub use notification_push::NotificationPushStore;
 pub use notification_setting::{NotificationSettingEvent, NotificationSettingStore};
 pub use ogp::{OgpResult, OutgoingOgp, fetch_ogp, first_previewable_url};
@@ -161,6 +173,7 @@ pub use roles::{
     RoleUser, RolesEvent, RolesStore, everyone_slug,
 };
 pub use sticker::{ClanSound, Sticker, StickerEvent, StickerStore};
+pub use stream::{StreamMember, StreamPhase, StreamStore};
 pub use threads::{THREAD_STATUS_JOINED, ThreadSummary, ThreadsEvent, ThreadsStore, group_threads};
 pub use topic_badges::{TopicBadgeEvent, TopicBadgeStore};
 pub use topics::{TopicsEvent, TopicsStore};

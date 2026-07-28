@@ -2,7 +2,7 @@ use std::rc::Rc;
 
 use gpui::{
     AnyElement, App, Context, Entity, ListState, Pixels, Point, SharedString, Subscription, Window,
-    div, img, list, prelude::*, px,
+    div, img, list, prelude::*, px, size,
 };
 use mezon_store::{
     AccountStore, ClanId, ClanList, DirectMessageStore, FriendStore, NotificationSettingStore,
@@ -18,7 +18,7 @@ use crate::theme::{ActiveTheme, Theme};
 
 mod clan_row;
 mod direct_unread_list;
-use clan_row::{ClanRow, build_clan_rail_menu, render_clan_row, render_pill};
+use clan_row::{CLAN_ROW_HEIGHT, ClanRow, build_clan_rail_menu, render_clan_row, render_pill};
 
 pub(super) struct ClanPanelMenu {
     position: Point<Pixels>,
@@ -248,6 +248,11 @@ impl ClanSidebar {
         self.rows = Rc::new(rows);
         if needs_reset {
             self.list_state.reset(item_count);
+            self.list_state.splice_with_size_hint(
+                0..item_count,
+                item_count,
+                size(px(0.), px(CLAN_ROW_HEIGHT)),
+            );
         }
         true
     }

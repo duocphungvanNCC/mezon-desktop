@@ -4,7 +4,7 @@
 
 # Crates we own — vendored Zed crates are excluded (we don't lint/test their code;
 # some of their test targets don't even compile against our pinned deps).
-pkgs := "-p mezon-app -p mezon-ui -p mezon-store -p mezon-client -p mezon-native -p mezon-proto -p mezon-i18n -p mezon-updater -p mezon-audio -p mmn-client"
+pkgs := "-p mezon-app -p mezon-ui -p mezon-store -p mezon-client -p mezon-native -p mezon-proto -p mezon-i18n -p mezon-theme -p mezon-widgets -p mezon-canvas -p mezon-updater -p mezon-audio -p mezon-webview -p mezon-voice -p mezon-stream -p mmn-client"
 
 # Formatting scope lives in scripts/fmt.sh — the one place the justfile, the
 # pre-commit hook and CI all read it from, so they cannot drift apart.
@@ -52,6 +52,7 @@ help:
     @echo "  ---------------------------------------------"
     @echo "  bundle          Build macOS Mezon.app bundle"
     @echo "  build-deb       Build Linux .deb package"
+    @echo "  update-feed     Package auto-update artifact + manifest"
     @echo ""
 
 # ------------------------------------------------------------------------------
@@ -198,6 +199,9 @@ bundle: release
 # Build a Linux .deb package (requires Linux; run install-linux-deps first)
 build-deb:
     @bash scripts/build-deb.sh
+
+update-feed platform artifact="":
+    @bash scripts/make-update-feed.sh {{platform}} {{artifact}}
 
 # Clean build artifacts
 clean:

@@ -10,7 +10,7 @@ use gpui::{
 use mezon_store::{
     BadgeService, ChannelId, ChannelList, ChannelType, ClanId, ClanList, ClanMembersStore,
     EventsStore, FAVOR_CATE_ID, PERMISSION_ADMINISTRATOR, PERMISSION_MANAGE_CLAN, PermissionStore,
-    Settings, VoiceMember,
+    Settings, StreamMember, StreamStore, VoiceMember,
 };
 
 use crate::channel_app::{is_channel_app_open, launch_channel_app_from_store};
@@ -40,11 +40,50 @@ fn resolve_voice_member_slot(
     clan_id: Option<ClanId>,
     m: &VoiceMember,
 ) -> VoiceMemberSlot {
-    let (display_name, avatar_url) = crate::util::voice_member::resolve_display(cx, clan_id, m);
+    let resolved = crate::util::voice_member::resolve_display(cx, clan_id, m);
     VoiceMemberSlot {
         user_id: m.user_id.to_string(),
-        display_name,
-        avatar_url,
+        display_name: resolved.name,
+        avatar_url: resolved.avatar_src,
+        avatar_raw: resolved.avatar_raw,
+    }
+}
+
+fn resolve_stream_member_slot(
+    cx: &App,
+    clan_id: Option<ClanId>,
+    m: &StreamMember,
+) -> VoiceMemberSlot {
+    let resolved = crate::util::voice_member::resolve_stream_display(cx, clan_id, m);
+    VoiceMemberSlot {
+        user_id: m.user_id.to_string(),
+        display_name: resolved.name,
+        avatar_url: resolved.avatar_src,
+        avatar_raw: resolved.avatar_raw,
+    }
+}
+
+fn channel_sidebar_members(
+    cx: &App,
+    clan_id: Option<ClanId>,
+    ch: &mezon_store::Channel,
+) -> Vec<VoiceMemberSlot> {
+    if ch.channel_type == ChannelType::Stream {
+        StreamStore::try_global(cx)
+            .map(|store| {
+                store
+                    .read(cx)
+                    .members_for_channel(ch.id)
+                    .iter()
+                    .map(|m| resolve_stream_member_slot(cx, clan_id, m))
+                    .collect()
+            })
+            .unwrap_or_default()
+    } else {
+        ch.voice_members
+            .iter()
+            .map(|m| resolve_voice_member_slot(cx, clan_id, m))
+            .collect()
     }
 }
 
@@ -53,6 +92,7 @@ pub struct ChannelSidebar {
     channel_list: Entity<ChannelList>,
     settings: Entity<Settings>,
     items: Rc<Vec<SidebarItem>>,
+    icon_image_cache: Entity<crate::image_cache::LruImageCache>,
     list_state: ListState,
     first_badged_index: Option<usize>,
     active_clan_name: String,
@@ -77,6 +117,7 @@ pub struct ChannelSidebar {
     _router_observe: Subscription,
     _members_observe: Subscription,
     _events_observe: Subscription,
+    _stream_observe: Subscription,
     _permissions_observe: Subscription,
     _notification_setting_observe: Subscription,
 }
@@ -149,6 +190,11 @@ impl ChannelSidebar {
             }
         });
         let events_observe = cx.observe(&EventsStore::global(cx), |_, _, cx| cx.notify());
+        let stream_observe = cx.observe(&StreamStore::global(cx), |this, _, cx| {
+            if this.rebuild_items(cx) {
+                cx.notify();
+            }
+        });
         let permissions_observe = cx.observe(&PermissionStore::global(cx), |_, _, cx| cx.notify());
 
         let initial_locale = settings.read(cx).language.clone();
@@ -159,6 +205,15 @@ impl ChannelSidebar {
             channel_list,
             settings,
             items: Rc::new(Vec::new()),
+            icon_image_cache: cx.new(|cx| {
+                crate::image_cache::LruImageCache::icon_thumbnail(
+                    "channel-app-icons",
+                    128,
+                    2 * 1024 * 1024,
+                    256 * 1024,
+                    cx,
+                )
+            }),
             list_state,
             first_badged_index: None,
             active_clan_name: String::new(),
@@ -183,6 +238,7 @@ impl ChannelSidebar {
             _router_observe: router_observe,
             _members_observe: members_observe,
             _events_observe: events_observe,
+            _stream_observe: stream_observe,
             _permissions_observe: permissions_observe,
             _notification_setting_observe: notification_setting_observe,
         };
@@ -320,11 +376,7 @@ impl ChannelSidebar {
                                 is_favorite: is_favorites,
                                 line_above,
                                 line_below,
-                                voice_members: ch
-                                    .voice_members
-                                    .iter()
-                                    .map(|m| resolve_voice_member_slot(cx, new_clan_id, m))
-                                    .collect(),
+                                voice_members: channel_sidebar_members(cx, new_clan_id, ch),
                                 voice_compact: false,
                             });
                         }
@@ -337,12 +389,13 @@ impl ChannelSidebar {
                                 .and_then(|ch| ch.parent_id)
                         });
                         for ch in &category.channels {
+                            let sidebar_members = channel_sidebar_members(cx, new_clan_id, ch);
                             let is_voice_or_streaming = matches!(
                                 ch.channel_type,
                                 ChannelType::Voice | ChannelType::Stream | ChannelType::App
                             );
                             let has_members_in_voice =
-                                is_voice_or_streaming && !ch.voice_members.is_empty();
+                                is_voice_or_streaming && !sidebar_members.is_empty();
                             let should_show = (ch.is_unread() && !is_voice_or_streaming)
                                 || active_channel_id == Some(ch.id)
                                 || active_parent_id == Some(ch.id)
@@ -380,11 +433,7 @@ impl ChannelSidebar {
                                 is_favorite: is_favorites,
                                 line_above: false,
                                 line_below: false,
-                                voice_members: ch
-                                    .voice_members
-                                    .iter()
-                                    .map(|m| resolve_voice_member_slot(cx, new_clan_id, m))
-                                    .collect(),
+                                voice_members: sidebar_members,
                                 voice_compact: true,
                             });
                         }
@@ -683,6 +732,7 @@ impl Render for ChannelSidebar {
         let list_element = list(list_state, {
             let sidebar = sidebar.clone();
             let locale = locale.clone();
+            let icon_cache = self.icon_image_cache.clone();
             move |ix, _window, cx| {
                 render_sidebar_item(
                     &items,
@@ -693,6 +743,7 @@ impl Render for ChannelSidebar {
                     sidebar.clone(),
                     suppress_hover,
                     &locale,
+                    icon_cache.clone(),
                 )
             }
         })
@@ -1110,6 +1161,7 @@ fn render_banner_and_events(
     cx: &App,
     suppress_hover: bool,
     locale: &str,
+    icon_cache: Entity<crate::image_cache::LruImageCache>,
 ) -> AnyElement {
     let theme = cx.theme();
     let divider_color = theme.border;
@@ -1143,16 +1195,18 @@ fn render_banner_and_events(
     let event_count = members_clan_id.map_or(0, |clan_id| {
         EventsStore::global(cx)
             .read(cx)
-            .visible_events(clan_id, current_user, cx)
-            .len()
+            .visible_event_count(clan_id, current_user, cx)
     });
     let settings = sidebar
         .upgrade()
         .map(|entity| entity.read(cx).settings.clone());
     let event_label = if event_count == 1 {
-        "1 Event".to_string()
+        mezon_i18n::t(locale, "eventCreator.actions.event_one").to_string()
+    } else if event_count == 0 {
+        mezon_i18n::t(locale, "eventCreator.actions.noEvent").to_string()
     } else {
-        format!("{event_count} Events")
+        mezon_i18n::t(locale, "eventCreator.actions.event_other")
+            .replace("{{count}}", &event_count.to_string())
     };
     let events_row = nav_row(IconName::IconEvents, event_label, theme, false)
         .id("clan-events-nav")
@@ -1240,9 +1294,9 @@ fn render_banner_and_events(
                 SharedString::from(app.app_name.clone())
             };
             let icon_el: AnyElement = if let Some(logo) = &slot.app_logo {
-                gpui::img(logo.clone())
-                    .w(px(24.))
-                    .h(px(24.))
+                div()
+                    .image_cache(icon_cache.clone())
+                    .child(gpui::img(logo.clone()).w(px(24.)).h(px(24.)))
                     .into_any_element()
             } else {
                 gpui::svg()
@@ -1328,6 +1382,7 @@ fn render_sidebar_item(
     sidebar: WeakEntity<ChannelSidebar>,
     suppress_hover: bool,
     locale: &str,
+    icon_cache: Entity<crate::image_cache::LruImageCache>,
 ) -> AnyElement {
     let theme = cx.theme();
     let Some(item) = items.get(ix) else {
@@ -1345,6 +1400,7 @@ fn render_sidebar_item(
             cx,
             suppress_hover,
             locale,
+            icon_cache,
         ),
 
         SidebarItem::Category {
@@ -1627,13 +1683,16 @@ fn render_sidebar_item(
                         .py(px(2.));
                     for (index, m) in voice_members.iter().take(5).enumerate() {
                         let name_text = m.display_name.clone();
-                        let avatar = if m.avatar_url.is_empty() {
-                            Avatar::new().name(name_text)
-                        } else {
-                            Avatar::new()
-                                .src(SharedString::from(m.avatar_url.clone()))
-                                .name(name_text)
-                        };
+                        let mut avatar = Avatar::new().name(name_text);
+                        if !m.avatar_url.is_empty() {
+                            avatar = avatar.src(SharedString::from(m.avatar_url.clone()));
+                            if !m.avatar_raw.is_empty() && m.avatar_raw != m.avatar_url {
+                                avatar =
+                                    avatar.fallback_src(SharedString::from(m.avatar_raw.clone()));
+                            }
+                        } else if !m.avatar_raw.is_empty() {
+                            avatar = avatar.src(SharedString::from(m.avatar_raw.clone()));
+                        }
                         cluster = cluster.child(
                             div()
                                 .when(index > 0, |el| el.ml(px(-6.)))
@@ -1661,13 +1720,16 @@ fn render_sidebar_item(
                         .pl(voice_pl)
                         .children(voice_members.iter().map(|m| {
                             let name_text = m.display_name.clone();
-                            let avatar = if m.avatar_url.is_empty() {
-                                Avatar::new().name(name_text.clone())
-                            } else {
-                                Avatar::new()
-                                    .src(SharedString::from(m.avatar_url.clone()))
-                                    .name(name_text.clone())
-                            };
+                            let mut avatar = Avatar::new().name(name_text.clone());
+                            if !m.avatar_url.is_empty() {
+                                avatar = avatar.src(SharedString::from(m.avatar_url.clone()));
+                                if !m.avatar_raw.is_empty() && m.avatar_raw != m.avatar_url {
+                                    avatar = avatar
+                                        .fallback_src(SharedString::from(m.avatar_raw.clone()));
+                                }
+                            } else if !m.avatar_raw.is_empty() {
+                                avatar = avatar.src(SharedString::from(m.avatar_raw.clone()));
+                            }
                             div()
                                 .w_full()
                                 .min_w_0()

@@ -9,11 +9,12 @@ mod mmn_client;
 mod zk_client;
 
 pub use crypto::{
-    address_from_user_id, compare_big_decimal, generate_ephemeral_key_pair,
+    address_from_user_id, compare_big_decimal, generate_ephemeral_key_pair, is_integer_amount,
     scale_amount_to_decimals, validate_address, validate_amount,
 };
 pub use dong_client::DongClient;
 pub use error::{MmnError, Result};
+pub use http::is_secure_endpoint;
 pub use indexer_client::{FILTER_ALL, FILTER_RECEIVED, FILTER_SENT, IndexerClient};
 pub use mmn_client::MmnClient;
 pub use types::*;
@@ -201,5 +202,66 @@ mod tests {
         assert_eq!(super::types::TRANSFER_TYPE_TRANSFER_TOKEN, "transfer_token");
         assert_eq!(super::types::TRANSFER_TYPE_UNLOCK_ITEM, "unlock_item");
         assert_eq!(super::types::DECIMALS, 6);
+        assert_eq!(super::types::DECIMAL_FACTOR, 1_000_000);
+    }
+
+    #[test]
+    fn validate_amount_rejects_non_integer_input() {
+        assert!(!crypto::validate_amount("1", "0.5"));
+        assert!(!crypto::validate_amount("1.5", "1"));
+        assert!(!crypto::validate_amount("1000000", "1e6"));
+        assert!(!crypto::validate_amount("1000000", ""));
+        assert!(!crypto::validate_amount("", "1000000"));
+    }
+
+    #[test]
+    fn validate_amount_rejects_negative_amount() {
+        assert!(!crypto::validate_amount("1000000", "-1000000"));
+        assert!(crypto::validate_amount("1000000", "+1000000"));
+    }
+
+    #[test]
+    fn is_secure_endpoint_requires_https_outside_localhost() {
+        assert!(super::is_secure_endpoint("https://mmn.example.com"));
+        assert!(!super::is_secure_endpoint("http://mmn.example.com"));
+        assert!(!super::is_secure_endpoint("http://localhost.evil.com"));
+        assert!(!super::is_secure_endpoint("ftp://mmn.example.com"));
+        assert!(!super::is_secure_endpoint(""));
+        assert_eq!(
+            super::is_secure_endpoint("http://localhost:3000/prove"),
+            cfg!(debug_assertions)
+        );
+    }
+
+    #[test]
+    fn ephemeral_key_pair_debug_redacts_private_key() {
+        let pair = crypto::generate_ephemeral_key_pair().unwrap();
+        let rendered = format!("{pair:?}");
+        assert!(!rendered.contains(pair.private_key.as_str()));
+        assert!(rendered.contains("<redacted>"));
+        assert!(rendered.contains(pair.public_key.as_str()));
+    }
+
+    #[test]
+    fn secret_request_debug_redacts_credentials() {
+        let request = super::types::SendTransactionRequest {
+            private_key: "SECRET_KEY".into(),
+            sender: "SENDER".into(),
+            ..Default::default()
+        };
+        let rendered = format!("{request:?}");
+        assert!(!rendered.contains("SECRET_KEY"));
+        assert!(rendered.contains("SENDER"));
+
+        let zk = super::types::GetZkProofRequest {
+            user_id: "1".into(),
+            ephemeral_public_key: "pk".into(),
+            jwt: "SECRET_JWT".into(),
+            address: "addr".into(),
+            client_type: super::types::ZkClientType::Mezon,
+        };
+        let rendered = format!("{zk:?}");
+        assert!(!rendered.contains("SECRET_JWT"));
+        assert!(rendered.contains("addr"));
     }
 }

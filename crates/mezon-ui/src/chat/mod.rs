@@ -1,4 +1,5 @@
 pub mod area;
+pub use mezon_canvas::{CanvasPopoverPanel, CanvasView, canvas_popover_on_open};
 pub mod channel_app_bar;
 pub mod channel_header;
 pub mod channel_typing;
@@ -28,6 +29,7 @@ pub mod notification_setting_popover;
 pub mod pinned_popover;
 pub mod screen_share_modal;
 pub mod screen_share_pip;
+pub mod stream;
 pub mod threads_popover;
 pub mod user_profile_popover;
 pub mod voice;

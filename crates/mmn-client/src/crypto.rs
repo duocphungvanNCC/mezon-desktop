@@ -157,6 +157,21 @@ fn normalize_decimal(value: &str) -> (bool, String) {
     }
 }
 
+pub fn is_integer_amount(value: &str) -> bool {
+    let trimmed = value.trim();
+    let rest = trimmed
+        .strip_prefix('-')
+        .or_else(|| trimmed.strip_prefix('+'))
+        .unwrap_or(trimmed);
+    !rest.is_empty() && rest.bytes().all(|b| b.is_ascii_digit())
+}
+
 pub fn validate_amount(balance: &str, amount_scaled: &str) -> bool {
+    if !is_integer_amount(balance) || !is_integer_amount(amount_scaled) {
+        return false;
+    }
+    if amount_scaled.trim_start().starts_with('-') {
+        return false;
+    }
     compare_big_decimal(amount_scaled, balance) != Ordering::Greater
 }

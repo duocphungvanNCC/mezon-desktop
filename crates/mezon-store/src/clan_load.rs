@@ -1,4 +1,4 @@
-use gpui::{App, AppContext, AsyncApp, Context, Entity, Global, Subscription, WeakEntity};
+use gpui::{App, AppContext, AsyncApp, Context, Entity, Global, Subscription, Task, WeakEntity};
 
 use crate::channel::ChannelList;
 use crate::clan::{ClanEvent, ClanList};
@@ -12,6 +12,8 @@ use crate::sticker::StickerStore;
 
 pub struct ClanLoadScheduler {
     generation: u64,
+    loading_clan: Option<ClanId>,
+    load_task: Option<Task<()>>,
     _clan_sub: Subscription,
 }
 
@@ -34,8 +36,9 @@ impl ClanLoadScheduler {
             .map(|g| g.0.clone())
     }
 
-    pub fn reset(&mut self) {
+    pub fn reset(&mut self, cx: &mut Context<Self>) {
         self.generation = self.generation.wrapping_add(1);
+        self.cancel_in_flight(cx);
     }
 
     fn new(cx: &mut Context<Self>) -> Self {
@@ -43,22 +46,33 @@ impl ClanLoadScheduler {
             if let ClanEvent::ActiveClanChanged(active) = event {
                 match active {
                     Some(clan_id) => this.start(*clan_id, cx),
-                    None => this.reset(),
+                    None => this.reset(cx),
                 }
             }
         });
 
         Self {
             generation: 0,
+            loading_clan: None,
+            load_task: None,
             _clan_sub: clan_sub,
         }
     }
 
+    fn cancel_in_flight(&mut self, cx: &mut Context<Self>) {
+        self.load_task = None;
+        if let Some(previous) = self.loading_clan.take() {
+            ChannelList::global(cx).update(cx, |channels, _| channels.cancel_badge_seed(previous));
+        }
+    }
+
     fn start(&mut self, clan_id: ClanId, cx: &mut Context<Self>) {
+        self.cancel_in_flight(cx);
         self.generation = self.generation.wrapping_add(1);
         let generation = self.generation;
+        self.loading_clan = Some(clan_id);
 
-        cx.spawn(async move |this, cx| {
+        self.load_task = Some(cx.spawn(async move |this, cx| {
             cx.update(|cx| {
                 ChannelList::global(cx)
                     .update(cx, |channels, cx| channels.load_for_clan(clan_id, cx));
@@ -103,8 +117,14 @@ impl ClanLoadScheduler {
                 NotificationSettingStore::global(cx)
                     .update(cx, |store, cx| store.prefetch_clan(clan_id, cx));
             });
-        })
-        .detach();
+
+            this.update(cx, |this, _| {
+                if this.generation == generation {
+                    this.loading_clan = None;
+                }
+            })
+            .ok();
+        }));
     }
 }
 

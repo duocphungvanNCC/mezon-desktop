@@ -7,6 +7,7 @@ use mezon_store::{
     ChannelList, ClanId, ClanList, ClanSettingsPermissions, PermissionStore, Settings,
 };
 
+use super::audit_log_setting_page::AuditLogSettingPage;
 use super::emoji_setting_page::EmojiSettingPage;
 use super::integration_setting_page::IntegrationSettingPage;
 use super::overview_setting_page::{OverviewSettingPage, render_clan_overview_save_bar};
@@ -161,6 +162,7 @@ pub struct ClanSettingScreen {
     channel_list: Entity<ChannelList>,
     current_page: ClanSettingsPage,
     overview_page: Option<Entity<OverviewSettingPage>>,
+    audit_log_page: Option<Entity<AuditLogSettingPage>>,
     emoji_page: Option<Entity<EmojiSettingPage>>,
     sticker_page: Option<Entity<StickerSettingPage>>,
     sound_page: Option<Entity<SoundSettingPage>>,
@@ -195,6 +197,7 @@ impl ClanSettingScreen {
             channel_list,
             current_page: page,
             overview_page: None,
+            audit_log_page: None,
             emoji_page: None,
             sticker_page: None,
             sound_page: None,
@@ -278,6 +281,7 @@ impl ClanSettingScreen {
             self.release_page(self.current_page, cx);
             if clan_changed {
                 self.release_page(ClanSettingsPage::Overview, cx);
+                self.release_page(ClanSettingsPage::AuditLog, cx);
                 self.release_page(ClanSettingsPage::Emoji, cx);
                 self.release_page(ClanSettingsPage::ImageStickers, cx);
                 self.release_page(ClanSettingsPage::VoiceStickers, cx);
@@ -296,6 +300,11 @@ impl ClanSettingScreen {
         match page {
             ClanSettingsPage::Overview => {
                 if let Some(entity) = self.overview_page.take() {
+                    entity.update(cx, |page, cx| page.release(cx));
+                }
+            }
+            ClanSettingsPage::AuditLog => {
+                if let Some(entity) = self.audit_log_page.take() {
                     entity.update(cx, |page, cx| page.release(cx));
                 }
             }
@@ -344,6 +353,13 @@ impl ClanSettingScreen {
                 }));
                 if let Some(overview) = &self.overview_page {
                     cx.observe(overview, |_, _, cx| cx.notify()).detach();
+                }
+            }
+            ClanSettingsPage::AuditLog if self.audit_log_page.is_none() => {
+                self.audit_log_page =
+                    Some(cx.new(|cx| AuditLogSettingPage::new(clan_id, settings, cx)));
+                if let Some(audit_log) = &self.audit_log_page {
+                    cx.observe(audit_log, |_, _, cx| cx.notify()).detach();
                 }
             }
             ClanSettingsPage::Emoji if self.emoji_page.is_none() => {
@@ -406,6 +422,10 @@ impl ClanSettingScreen {
                 .overview_page
                 .as_ref()
                 .map(|p| p.clone().into_any_element()),
+            ClanSettingsPage::AuditLog => self
+                .audit_log_page
+                .as_ref()
+                .map(|p| p.clone().into_any_element()),
             ClanSettingsPage::Emoji => self
                 .emoji_page
                 .as_ref()
@@ -452,8 +472,7 @@ impl Render for ClanSettingScreen {
         let perms = PermissionStore::global(cx)
             .read(cx)
             .clan_settings_permissions(clan_id, cx);
-        let hide_page_title = matches!(page, ClanSettingsPage::AuditLog);
-
+        let audit_log_layout = page == ClanSettingsPage::AuditLog;
         let content = self.current_page_view().unwrap_or_else(|| {
             div()
                 .flex_1()
@@ -673,25 +692,23 @@ impl Render for ClanSettingScreen {
                                     .h_full()
                                     .min_h_0()
                                     .w(px(SETTINGS_CONTENT_WIDTH))
-                                    .when(!hide_page_title, |panel| {
-                                        panel.child(
-                                            div()
-                                                .flex_shrink_0()
-                                                .w_full()
-                                                .pl(px(40.0))
-                                                .pr(px(28.0))
-                                                .pt(px(60.0))
-                                                .child(
-                                                    div()
-                                                        .max_w(px(740.0))
-                                                        .text_xl()
-                                                        .font_weight(gpui::FontWeight::SEMIBOLD)
-                                                        .mb_5()
-                                                        .text_color(theme.text_primary)
-                                                        .child(self.page_title(page, &locale)),
-                                                ),
-                                        )
-                                    })
+                                    .child(
+                                        div()
+                                            .flex_shrink_0()
+                                            .w_full()
+                                            .pl(px(40.0))
+                                            .pr(px(28.0))
+                                            .pt(px(60.0))
+                                            .child(
+                                                div()
+                                                    .max_w(px(740.0))
+                                                    .text_xl()
+                                                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                                                    .mb_5()
+                                                    .text_color(theme.text_primary)
+                                                    .child(self.page_title(page, &locale)),
+                                            ),
+                                    )
                                     .child(
                                         if matches!(
                                             page,
@@ -714,6 +731,27 @@ impl Render for ClanSettingScreen {
                                                         .child(content),
                                                 )
                                                 .into_any_element()
+                                        } else if audit_log_layout {
+                                            div()
+                                                .id("clan-settings-scroll")
+                                                .flex_1()
+                                                .min_h_0()
+                                                .overflow_hidden()
+                                                .flex()
+                                                .flex_col()
+                                                .pb(px(28.0))
+                                                .pl(px(40.0))
+                                                .pr(px(28.0))
+                                                .child(
+                                                    v_flex()
+                                                        .max_w(px(740.0))
+                                                        .w_full()
+                                                        .h_full()
+                                                        .min_h_0()
+                                                        .flex_1()
+                                                        .child(content),
+                                                )
+                                                .into_any_element()
                                         } else {
                                             let mut scroll = div()
                                                 .id("clan-settings-scroll")
@@ -721,8 +759,7 @@ impl Render for ClanSettingScreen {
                                                 .min_h_0()
                                                 .pb(px(28.0))
                                                 .pl(px(40.0))
-                                                .pr(px(28.0))
-                                                .when(hide_page_title, |el| el.pt(px(60.0)));
+                                                .pr(px(28.0));
                                             if roles_edit_mode {
                                                 scroll = scroll.overflow_hidden();
                                             } else {

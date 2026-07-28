@@ -6,6 +6,7 @@ members = [
     "crates/mezon-client",
     "crates/mezon-store",
     "crates/mezon-voice",
+    "crates/mezon-stream",
     "crates/mezon-video",
     "crates/mezon-audio",
     "crates/mezon-native",
@@ -13,6 +14,9 @@ members = [
     "crates/mezon-updater",
     "crates/mezon-proto",
     "crates/mezon-i18n",
+    "crates/mezon-theme",
+    "crates/mezon-widgets",
+    "crates/mezon-canvas",
     "crates/mmn-client",
     # "crates/mezon-active-windows" excluded: orphan (unused) + does not compile (Rust 2024
     # `unsafe extern` + core_foundation API mismatch). Re-add once fixed & wired for rich-presence.
@@ -53,7 +57,7 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "0.1.0"
+version = "0.1.27"
 edition = "2024"
 authors = ["Mezon Team"]
 license = "GPL-3.0-or-later"
@@ -113,6 +117,7 @@ mezon-ui      = { path = "crates/mezon-ui" }
 mezon-client  = { path = "crates/mezon-client" }
 mezon-store   = { path = "crates/mezon-store" }
 mezon-voice   = { path = "crates/mezon-voice" }
+mezon-stream  = { path = "crates/mezon-stream" }
 mezon-video   = { path = "crates/mezon-video" }
 mezon-audio   = { path = "crates/mezon-audio" }
 mezon-native  = { path = "crates/mezon-native" }
@@ -120,6 +125,9 @@ mezon-webview = { path = "crates/mezon-webview" }
 mezon-proto   = { path = "crates/mezon-proto" }
 mezon-updater = { path = "crates/mezon-updater" }
 mezon-i18n    = { path = "crates/mezon-i18n" }
+mezon-theme   = { path = "crates/mezon-theme" }
+mezon-widgets = { path = "crates/mezon-widgets" }
+mezon-canvas  = { path = "crates/mezon-canvas" }
 mmn-client    = { path = "crates/mmn-client" }
 # mezon-active-windows = { path = "crates/mezon-active-windows" }  # excluded — see [workspace.members]
 
@@ -353,6 +361,7 @@ cbindgen              = "0.28.0"
 
 [patch.crates-io]
 gpui = { path = "crates/vendor/gpui" }
+libspa = { path = "crates/vendor/libspa" }
 
 [patch."https://github.com/zed-industries/scap"]
 zed-scap = { path = "crates/vendor/zed-scap" }

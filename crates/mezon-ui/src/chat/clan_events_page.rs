@@ -1,6 +1,6 @@
 use chrono::{DateTime, Local};
 use gpui::{
-    AnyElement, App, Context, Entity, FocusHandle, Focusable, FontWeight, Render, SharedString,
+    AnyElement, App, Context, Entity, FocusHandle, Focusable, FontWeight, Render, Subscription,
     Window, div, img, prelude::*, px,
 };
 use mezon_store::{
@@ -16,6 +16,9 @@ pub struct ClanEventsModal {
     clan_id: ClanId,
     settings: Entity<Settings>,
     focus_handle: FocusHandle,
+    _events_subscription: Subscription,
+    _members_subscription: Subscription,
+    _channels_subscription: Subscription,
 }
 
 impl Focusable for ClanEventsModal {
@@ -33,12 +36,10 @@ impl ClanEventsModal {
     ) -> Self {
         let focus_handle = cx.focus_handle();
         window.focus(&focus_handle, cx);
-        cx.observe(&EventsStore::global(cx), |_, _, cx| cx.notify())
-            .detach();
-        cx.observe(&ClanMembersStore::global(cx), |_, _, cx| cx.notify())
-            .detach();
-        cx.observe(&ChannelList::global(cx), |_, _, cx| cx.notify())
-            .detach();
+        let events_subscription = cx.observe(&EventsStore::global(cx), |_, _, cx| cx.notify());
+        let members_subscription =
+            cx.observe(&ClanMembersStore::global(cx), |_, _, cx| cx.notify());
+        let channels_subscription = cx.observe(&ChannelList::global(cx), |_, _, cx| cx.notify());
         EventsStore::global(cx).update(cx, |store, cx| store.ensure_loaded(clan_id, cx));
         ClanMembersStore::global(cx).update(cx, |store, cx| store.ensure_loaded(clan_id, cx));
         ChannelList::global(cx).update(cx, |store, cx| store.load_for_clan(clan_id, cx));
@@ -46,6 +47,9 @@ impl ClanEventsModal {
             clan_id,
             settings,
             focus_handle,
+            _events_subscription: events_subscription,
+            _members_subscription: members_subscription,
+            _channels_subscription: channels_subscription,
         }
     }
 
@@ -135,10 +139,6 @@ impl ClanEventsModal {
         } else {
             theme.text_secondary
         };
-        let more_group: SharedString = format!("event-more-{}", event.id).into();
-        let share_group: SharedString = format!("event-share-{}", event.id).into();
-        let interested_group: SharedString = format!("event-interested-{}", event.id).into();
-        let end_group: SharedString = format!("event-end-{}", event.id).into();
 
         let heading = div()
             .flex()
@@ -236,8 +236,9 @@ impl ClanEventsModal {
                 ),
         );
         if !event.logo.is_empty() {
+            let logo = crate::util::imgproxy::proxied(cx, &event.logo, 400, 220, "fit");
             details = details.child(
-                img(event.logo.clone())
+                img(logo)
                     .w(px(200.))
                     .h(px(110.))
                     .rounded(px(3.))
@@ -245,10 +246,8 @@ impl ClanEventsModal {
             );
         }
 
-        let action = |icon, label: &'static str, group: SharedString| {
+        let action = |icon, label: &'static str| {
             div()
-                .id(group.clone())
-                .group(group.clone())
                 .flex()
                 .items_center()
                 .gap_2()
@@ -257,20 +256,8 @@ impl ClanEventsModal {
                 .rounded_lg()
                 .bg(theme.bg_tertiary)
                 .text_color(theme.text_secondary)
-                .cursor_pointer()
-                .hover(|style| style.text_color(theme.text_primary))
-                .child(
-                    Icon::new(icon)
-                        .size_4()
-                        .text_color(theme.text_secondary)
-                        .group_hover(group.clone(), |style| style.text_color(theme.text_primary)),
-                )
-                .child(
-                    div()
-                        .text_color(theme.text_secondary)
-                        .group_hover(group, |style| style.text_color(theme.text_primary))
-                        .child(label),
-                )
+                .child(Icon::new(icon).size_4().text_color(theme.text_secondary))
+                .child(div().text_color(theme.text_secondary).child(label))
         };
         let interest_action = action(
             if user_is_interested {
@@ -283,7 +270,6 @@ impl ClanEventsModal {
             } else {
                 "eventMenu.dashboard.Interested"
             }),
-            interested_group,
         );
 
         div()
@@ -293,7 +279,7 @@ impl ClanEventsModal {
             .border_color(theme.border)
             .bg(theme.bg_floating)
             .overflow_hidden()
-            .child(div().p_4().cursor_pointer().child(heading).child(details))
+            .child(div().p_4().child(heading).child(details))
             .child(
                 div()
                     .border_t_1()
@@ -314,15 +300,16 @@ impl ClanEventsModal {
                                     .gap_2()
                                     .min_w_0()
                                     .text_color(theme.text_secondary)
-                                    .child(
-                                        Icon::new(if is_location && !event.is_private {
-                                            IconName::Location
-                                        } else {
-                                            IconName::Speaker
-                                        })
-                                        .size(px(20.))
-                                        .text_color(theme.text_secondary),
-                                    )
+                                    .child(if is_location && !event.is_private {
+                                        img(IconName::Location.path())
+                                            .size(px(20.))
+                                            .into_any_element()
+                                    } else {
+                                        Icon::new(IconName::Speaker)
+                                            .size(px(20.))
+                                            .text_color(theme.text_secondary)
+                                            .into_any_element()
+                                    })
                                     .child(
                                         div()
                                             .truncate()
@@ -337,46 +324,28 @@ impl ClanEventsModal {
                                     .items_center()
                                     .gap_2()
                                     .child(
-                                        div()
-                                            .id(more_group.clone())
-                                            .group(more_group.clone())
-                                            .px_2()
-                                            .cursor_pointer()
-                                            .text_color(theme.text_secondary)
-                                            .hover(|style| style.text_color(theme.text_primary))
-                                            .child(
-                                                Icon::new(IconName::ThreeDot)
-                                                    .size(px(20.))
-                                                    .text_color(theme.text_secondary)
-                                                    .group_hover(more_group.clone(), |style| {
-                                                        style.text_color(theme.text_primary)
-                                                    }),
-                                            ),
+                                        div().px_2().text_color(theme.text_secondary).child(
+                                            Icon::new(IconName::ThreeDot)
+                                                .size(px(20.))
+                                                .text_color(theme.text_secondary),
+                                        ),
                                     )
                                     .when(!is_location, |actions| {
                                         actions.child(action(
                                             IconName::IconShareEventVoice,
                                             tr("eventCreator.eventDetail.share"),
-                                            share_group,
                                         ))
                                     })
                                     .child(if ongoing {
                                         div()
-                                            .id(end_group.clone())
-                                            .group(end_group.clone())
                                             .px_4()
                                             .py_2()
                                             .rounded_lg()
                                             .bg(theme.bg_tertiary)
                                             .text_color(theme.text_secondary)
-                                            .cursor_pointer()
-                                            .hover(|style| style.text_color(theme.text_primary))
                                             .child(
                                                 div()
                                                     .text_color(theme.text_secondary)
-                                                    .group_hover(end_group, |style| {
-                                                        style.text_color(theme.text_primary)
-                                                    })
                                                     .child(tr("eventMenu.dashboard.endEvent")),
                                             )
                                     } else {
@@ -411,16 +380,12 @@ impl ClanEventsModal {
                                             div()
                                                 .id("event-open-link")
                                                 .whitespace_nowrap()
-                                                .cursor_pointer()
-                                                .hover(|style| style.underline())
                                                 .child(tr("eventCreator.eventDetail.openLink")),
                                         )
                                         .child(
                                             div()
                                                 .id("event-invite")
                                                 .whitespace_nowrap()
-                                                .cursor_pointer()
-                                                .hover(|style| style.underline())
                                                 .child(tr("eventCreator.eventDetail.invite")),
                                         )
                                         .child(
@@ -430,8 +395,6 @@ impl ClanEventsModal {
                                                 .items_center()
                                                 .gap_1()
                                                 .whitespace_nowrap()
-                                                .cursor_pointer()
-                                                .hover(|style| style.underline())
                                                 .child(tr("eventCreator.eventDetail.copyLink"))
                                                 .child(
                                                     Icon::new(IconName::CopyIcon)
@@ -622,13 +585,7 @@ impl Render for ClanEventsModal {
                                     .text_color(theme.text_secondary),
                             )
                             .child(div().font_weight(FontWeight::BOLD).child(event_count_label))
-                            .child(div().h(px(28.)).w(px(2.)).bg(theme.border)), // .child(
-                                                                                 //     Button::new("create-event")
-                                                                                 //         .primary()
-                                                                                 //         .label(tr("eventCreator.actions.create"))
-                                                                                 //         .on_click(|_, _, _| {})
-                                                                                 //         .font_weight(FontWeight::BOLD),
-                                                                                 // ),
+                            .child(div().h(px(28.)).w(px(2.)).bg(theme.border)),
                     )
                     .child(
                         div()
