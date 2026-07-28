@@ -182,6 +182,21 @@ pub fn validate_category_name(name: &str) -> Result<String, CreateCategoryError>
     Ok(trimmed.to_string())
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CreateChannelError {
+    InvalidName,
+    DuplicateName,
+    Other(String),
+}
+
+pub fn validate_channel_name(name: &str) -> Result<String, CreateChannelError> {
+    validate_category_name(name).map_err(|err| match err {
+        CreateCategoryError::InvalidName => CreateChannelError::InvalidName,
+        CreateCategoryError::DuplicateName => CreateChannelError::DuplicateName,
+        CreateCategoryError::Other(msg) => CreateChannelError::Other(msg),
+    })
+}
+
 fn collapse_state_path() -> std::path::PathBuf {
     dirs::config_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."))
@@ -1367,6 +1382,80 @@ impl ChannelList {
             })
             .map_err(|_| CreateCategoryError::Other("store dropped".into()))?;
             Ok(())
+        })
+    }
+
+    pub fn channel_name_exists_in_category(
+        &self,
+        clan_id: ClanId,
+        category_id: &str,
+        name: &str,
+    ) -> bool {
+        let normalized = name.trim().to_lowercase();
+        self.cache.get(&clan_id).is_some_and(|categories| {
+            categories
+                .iter()
+                .filter(|category| category.id != FAVOR_CATE_ID && category.id == category_id)
+                .flat_map(|category| category.channels.iter())
+                .any(|channel| {
+                    channel.parent_id.is_none() && channel.name.trim().to_lowercase() == normalized
+                })
+        })
+    }
+
+    pub fn create_channel(
+        &mut self,
+        clan_id: ClanId,
+        category_id: String,
+        name: String,
+        channel_type: ChannelType,
+        private: bool,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<(ChannelId, ChannelType), CreateChannelError>> {
+        let label = match validate_channel_name(&name) {
+            Ok(label) => label,
+            Err(err) => return Task::ready(Err(err)),
+        };
+        if self.channel_name_exists_in_category(clan_id, &category_id, &label) {
+            return Task::ready(Err(CreateChannelError::DuplicateName));
+        }
+        let channel_private = if private && channel_type == ChannelType::Text {
+            1
+        } else {
+            0
+        };
+        let api = self.api.clone();
+        cx.spawn(async move |this, cx| {
+            let category_id_num = category_id.parse::<i64>().ok();
+            let mut desc = api
+                .create_channel(
+                    clan_id.get(),
+                    &label,
+                    channel_type.as_raw(),
+                    category_id_num,
+                    None,
+                    channel_private,
+                )
+                .await
+                .map_err(|e| CreateChannelError::Other(e.to_string()))?;
+            if desc.category_id == 0
+                && let Some(category_id_num) = category_id_num
+            {
+                desc.category_id = category_id_num;
+            }
+            let channel_id = ChannelId(desc.channel_id);
+            let created_type = ChannelType::from_raw(desc.channel_type);
+            this.update(cx, |this, cx| {
+                if let Some(categories) = this.cache.get_mut(&clan_id) {
+                    let channel = channel_from_desc(desc, 0, Vec::new(), false);
+                    if insert_channel(categories, channel) {
+                        this.invalidate_channel_index(clan_id);
+                        cx.notify();
+                    }
+                }
+            })
+            .map_err(|_| CreateChannelError::Other("store dropped".into()))?;
+            Ok((channel_id, created_type))
         })
     }
 
@@ -3785,6 +3874,33 @@ mod tests {
         assert_eq!(
             validate_category_name("_hidden"),
             Err(CreateCategoryError::InvalidName)
+        );
+    }
+
+    #[test]
+    fn validate_channel_name_accepts_and_trims() {
+        assert_eq!(validate_channel_name("  general  ").unwrap(), "general");
+        assert_eq!(validate_channel_name("Kênh chung").unwrap(), "Kênh chung");
+    }
+
+    #[test]
+    fn validate_channel_name_rejects_invalid() {
+        let too_long = "a".repeat(CATEGORY_NAME_MAX_CHARS + 1);
+        assert_eq!(
+            validate_channel_name(""),
+            Err(CreateChannelError::InvalidName)
+        );
+        assert_eq!(
+            validate_channel_name(&too_long),
+            Err(CreateChannelError::InvalidName)
+        );
+        assert_eq!(
+            validate_channel_name("it's"),
+            Err(CreateChannelError::InvalidName)
+        );
+        assert_eq!(
+            validate_channel_name("-lead"),
+            Err(CreateChannelError::InvalidName)
         );
     }
 

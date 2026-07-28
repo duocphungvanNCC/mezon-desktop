@@ -406,7 +406,7 @@ fn render_pick_row(
                 .gap_2()
                 .rounded_lg()
                 .cursor_pointer()
-                .hover(|s| s.bg(theme.tokens.bg_item_hover))
+                .hover(|s| s.bg(theme.tokens.bg_active_member_channel))
                 .on_click(move |_: &ClickEvent, _window, cx| {
                     entity.update(cx, |this, cx| this.toggle(user_id, cx));
                 })
