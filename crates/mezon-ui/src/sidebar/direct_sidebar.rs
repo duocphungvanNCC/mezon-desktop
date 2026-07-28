@@ -10,8 +10,10 @@ use mezon_store::{
 };
 
 use super::channel_sidebar::menu::{MUTE_DURATIONS, apply_mute, mute_label, submenu_options};
+use super::create_message_group_modal::CreateMessageGroupModal;
 use ui::{ScrollAxes, Scrollbars, WithScrollbar};
 
+use crate::app::shell::Shell;
 use crate::components::compositions::{DM_ROW_HEIGHT, DmRow};
 use crate::components::primitives::{ContextMenu, Icon, IconName, context_menu_at};
 use crate::router::{Route, Router, navigate};
@@ -358,6 +360,16 @@ impl DirectSidebar {
                     .rounded_md()
                     .cursor_pointer()
                     .hover(move |this| this.bg(bg_hover))
+                    .on_click({
+                        let locale = locale.to_string();
+                        move |_, window, cx| {
+                            let locale = locale.clone();
+                            let modal =
+                                cx.new(|cx| CreateMessageGroupModal::new(locale, window, cx));
+                            Shell::global(cx)
+                                .update(cx, |shell, cx| shell.show_modal(modal.into(), cx));
+                        }
+                    })
                     .child(
                         Icon::new(IconName::Plus)
                             .size(px(16.))
