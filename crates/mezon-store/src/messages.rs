@@ -28,7 +28,7 @@ use crate::Settings;
 use crate::account::AccountStore;
 use crate::album_layout::{AlbumLayout, calculate_album_layout};
 use crate::badge::BadgeService;
-use crate::channel::{ChannelEvent, ChannelList, ChannelType};
+use crate::channel::{ChannelEvent, ChannelList, ChannelType, STREAM_MODE_THREAD};
 use crate::clan_members::ClanMembersStore;
 use crate::direct::{DirectKind, DirectMessageStore};
 use crate::message::{
@@ -476,7 +476,6 @@ struct ChannelMessages {
 
 const POLL_RESULT_ANIMATION_WINDOW: Duration = Duration::from_millis(1200);
 const STREAM_MODE_CHANNEL: i32 = 2;
-const STREAM_MODE_THREAD: i32 = 6;
 static BUZZ_SOUND: &[u8] = include_bytes!("../assets/audio/buzz.mp3");
 
 pub struct MessagesStore {
@@ -4817,7 +4816,7 @@ async fn ensure_archived_thread_reactivated(
     let needs = this
         .update(cx, |_this, cx| {
             ChannelList::global(cx).update(cx, |list, cx| {
-                list.needs_reactivate_for_send(channel_id, clan_id, mode, cx)
+                list.begin_reactivate_for_send(channel_id, clan_id, mode, cx)
             })
         })
         .ok()
@@ -4837,6 +4836,11 @@ async fn ensure_archived_thread_reactivated(
             });
         }
         Err(e) => {
+            let _ = this.update(cx, |_this, cx| {
+                ChannelList::global(cx).update(cx, |list, _cx| {
+                    list.finish_reactivating(channel_id);
+                });
+            });
             tracing::error!("active_archived_thread before send failed: {e}");
         }
     }

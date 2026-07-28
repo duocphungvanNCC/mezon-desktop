@@ -343,7 +343,11 @@ impl ChannelSidebar {
                                 .find(|ch| ch.id == id)
                                 .and_then(|ch| ch.parent_id)
                         });
-                        for ch in &category.channels {
+                        for ch in category
+                            .channels
+                            .iter()
+                            .filter(|ch| ch.visible_in_sidebar())
+                        {
                             let is_voice_or_streaming = matches!(
                                 ch.channel_type,
                                 ChannelType::Voice | ChannelType::Stream | ChannelType::App

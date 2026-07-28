@@ -291,6 +291,7 @@ impl ChatLayout {
         let chat_area = ChatArea::new(settings.clone(), cx);
         cx.observe(&channel_list, |this, _, cx| {
             this.apply_pending_channel(cx);
+            this.redirect_archived_thread_route(cx);
             this.ensure_active_channel_for_clan(cx);
             this.sync_inbox_context(cx);
             this.sync_voice_frame_pump(cx);
@@ -317,6 +318,7 @@ impl ChatLayout {
             }
             this.reset_message_search(cx);
             this.sync_active_from_route(cx);
+            this.redirect_archived_thread_route(cx);
             this.ensure_active_channel_for_clan(cx);
             this.sync_voice_frame_pump(cx);
             this.dismiss_inbox_popover(cx);
@@ -1012,6 +1014,31 @@ impl ChatLayout {
                 channel_list.select_channel(channel_id, cx);
             });
         }
+    }
+
+    fn redirect_archived_thread_route(&mut self, cx: &mut Context<Self>) {
+        let Route::Thread {
+            clan_id,
+            channel_id,
+            thread_id,
+        } = Router::global(cx).read(cx).route()
+        else {
+            return;
+        };
+        if self
+            .channel_list
+            .read(cx)
+            .channel_in_clan(clan_id, thread_id)
+        {
+            return;
+        }
+        crate::router::replace(
+            cx,
+            Route::Channel {
+                clan_id,
+                channel_id,
+            },
+        );
     }
 
     fn ensure_active_channel_for_clan(&mut self, cx: &mut Context<Self>) {
