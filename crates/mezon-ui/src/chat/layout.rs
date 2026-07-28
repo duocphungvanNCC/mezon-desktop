@@ -3,14 +3,16 @@ use std::collections::HashMap;
 use crate::chat::channel_app_bar::ChannelAppBarTarget;
 use gpui::{
     AnyView, App, Context, DismissEvent, Entity, Focusable, Pixels, ScrollHandle, Size,
-    StyleRefinement, Subscription, Task, Window, canvas, deferred, div, prelude::*, px,
+    StyleRefinement, Subscription, Task, Window, canvas, deferred, div, linear_color_stop,
+    linear_gradient, prelude::*, px,
 };
 use mezon_store::{
-    AuthState, Channel, ChannelId, ChannelList, ChannelType, ClanId, ClanList, ClanMembersStore,
-    DirectChannel, DirectKind, DirectMessageStore, GroupMembersStore, InboxStore,
-    MessageSearchEvent, MessageSearchStore, MessagesStore, PinnedEvent, PinnedMessagesStore,
-    Settings, ThreadsEvent, ThreadsStore, TopicsEvent, TopicsStore, UiState, VoiceConnection,
-    VoiceMember, VoiceModerationError, VoiceStore, expand_mention_name_tokens,
+    AuthState, AutoUpdateStatus, AutoUpdateStore, Channel, ChannelId, ChannelList, ChannelType,
+    ClanId, ClanList, ClanMembersStore, DirectChannel, DirectKind, DirectMessageStore,
+    GroupMembersStore, InboxStore, MessageSearchEvent, MessageSearchStore, MessagesStore,
+    PinnedEvent, PinnedMessagesStore, Settings, ThreadsEvent, ThreadsStore, TopicsEvent,
+    TopicsStore, UiState, VoiceConnection, VoiceMember, VoiceModerationError, VoiceStore,
+    expand_mention_name_tokens,
 };
 use ui::PopoverMenuHandle;
 
@@ -221,6 +223,10 @@ impl ChatLayout {
             cx.notify();
         })
         .detach();
+
+        if let Some(update_store) = AutoUpdateStore::try_global(cx) {
+            cx.observe(&update_store, |_, _, cx| cx.notify()).detach();
+        }
 
         let voice_store = VoiceStore::global(cx);
         cx.observe(&voice_store, |this, voice, cx| {
@@ -1356,6 +1362,98 @@ impl Render for ChatLayout {
         } else {
             px(0.)
         };
+        fn update_banner_bg(hover: bool) -> gpui::Background {
+            if hover {
+                linear_gradient(
+                    90.,
+                    linear_color_stop(gpui::rgb(0x7c3aed), 0.),
+                    linear_color_stop(gpui::rgb(0xdb2777), 1.),
+                )
+            } else {
+                linear_gradient(
+                    90.,
+                    linear_color_stop(gpui::rgb(0x8b5cf6), 0.),
+                    linear_color_stop(gpui::rgb(0xec4899), 1.),
+                )
+            }
+        }
+        let update_pill = AutoUpdateStore::try_global(cx)
+            .filter(|store| matches!(store.read(cx).status(), AutoUpdateStatus::Updated { .. }))
+            .map(|_| {
+                let locale = self.settings.read(cx).language.clone();
+                div()
+                    .id("update-mezon-pill")
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .gap_2()
+                    .mx_2()
+                    .mt_3()
+                    .mb_2()
+                    .h(px(36.0))
+                    .flex_none()
+                    .rounded(px(8.0))
+                    .bg(update_banner_bg(false))
+                    .cursor_pointer()
+                    .hover(|s| s.bg(update_banner_bg(true)))
+                    .on_click(|_, _, cx| cx.restart())
+                    .child(
+                        Icon::new(IconName::ReloadIcon)
+                            .size(px(16.0))
+                            .text_color(gpui::white()),
+                    )
+                    .child(
+                        div()
+                            .text_sm()
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .text_color(gpui::white())
+                            .child(mezon_i18n::t(&locale, "common.updateMezon").to_string()),
+                    )
+            });
+        let update_available_pill = AutoUpdateStore::try_global(cx)
+            .and_then(|store| match store.read(cx).status() {
+                AutoUpdateStatus::UpdateAvailable { version } => Some(version.clone()),
+                _ => None,
+            })
+            .map(|version| {
+                let locale = self.settings.read(cx).language.clone();
+                div()
+                    .id("update-available-pill")
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .gap_2()
+                    .mx_2()
+                    .mt_3()
+                    .mb_2()
+                    .h(px(36.0))
+                    .flex_none()
+                    .rounded(px(8.0))
+                    .bg(update_banner_bg(false))
+                    .cursor_pointer()
+                    .hover(|s| s.bg(update_banner_bg(true)))
+                    .on_click(|_, _, cx| {
+                        if let Some(store) = AutoUpdateStore::try_global(cx) {
+                            store.update(cx, |store, cx| store.check(true, cx));
+                        }
+                    })
+                    .child(
+                        Icon::new(IconName::Download)
+                            .size(px(16.0))
+                            .text_color(gpui::white()),
+                    )
+                    .child(
+                        div()
+                            .text_sm()
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .text_color(gpui::white())
+                            .child(format!(
+                                "{} (v{})",
+                                mezon_i18n::t(&locale, "common.newUpdateAvailable"),
+                                version
+                            )),
+                    )
+            });
         let fullscreen = if self.connected_call_is_active(cx) {
             let chat = cx.entity();
             crate::chat::voice::render_screen_fullscreen_overlay(
@@ -1442,6 +1540,8 @@ impl Render for ChatLayout {
                                     .size_full(),
                                 )
                             }))
+                            .children(update_available_pill)
+                            .children(update_pill)
                             .child(
                                 div()
                                     .w_full()

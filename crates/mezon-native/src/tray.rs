@@ -1,5 +1,5 @@
 use anyhow::Result;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use tray_icon::{
     TrayIcon, TrayIconBuilder,
     menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem},
@@ -23,23 +23,19 @@ const TRAY_ICON_BYTES: &[u8] = include_bytes!(concat!(
 
 pub struct MezonTray {
     _icon: TrayIcon,
-    update_task: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
     stop_tx: crossbeam_channel::Sender<()>,
 }
 
 impl MezonTray {
     pub fn new(
         on_show: impl Fn() + Send + Sync + 'static,
+        on_check_updates: impl Fn() + Send + Sync + 'static,
         on_quit: impl Fn() + Send + Sync + 'static,
-        rt_handle: Arc<tokio::runtime::Handle>,
     ) -> Result<Self> {
         let on_show = Arc::new(on_show);
+        let on_check_updates = Arc::new(on_check_updates);
         let on_quit = Arc::new(on_quit);
         let receiver = MenuEvent::receiver().clone();
-
-        let update_task: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>> =
-            Arc::new(Mutex::new(None));
-        let update_task_thread = Arc::clone(&update_task);
 
         let (stop_tx, stop_rx) = crossbeam_channel::bounded::<()>(1);
 
@@ -49,44 +45,7 @@ impl MezonTray {
                     recv(receiver) -> msg => match msg {
                         Ok(event) => match event.id().0.as_str() {
                             SHOW_ID => (on_show)(),
-                            UPDATE_ID => {
-                                let handle = rt_handle.clone();
-                                let join = handle.spawn(async {
-                                    match mezon_updater::check_for_updates(env!("CARGO_PKG_VERSION"))
-                                        .await
-                                    {
-                                        Ok(Some(version)) => {
-                                            match mezon_updater::download_url()
-                                                .and_then(|url| {
-                                                    mezon_updater::validate_update_url(url)?;
-                                                    Ok(url)
-                                                })
-                                            {
-                                                Ok(download_url) => {
-                                                    tracing::info!(
-                                                        "Update available: v{version} — download from {download_url}"
-                                                    );
-                                                    let _ = open::that_detached(download_url);
-                                                }
-                                                Err(e) => {
-                                                    tracing::warn!("Blocked open of update URL: {e}");
-                                                }
-                                            }
-                                        }
-                                        Ok(None) => {
-                                            tracing::info!("Mezon is up to date");
-                                        }
-                                        Err(e) => {
-                                            tracing::warn!("Update check failed: {e}");
-                                        }
-                                    }
-                                });
-                                if let Ok(mut guard) = update_task_thread.lock()
-                                    && let Some(prior) = guard.replace(join)
-                                {
-                                    prior.abort();
-                                }
-                            }
+                            UPDATE_ID => (on_check_updates)(),
                             QUIT_ID => (on_quit)(),
                             _ => {}
                         },
@@ -103,7 +62,6 @@ impl MezonTray {
         tracing::debug!("System tray created");
         Ok(Self {
             _icon: icon,
-            update_task,
             stop_tx,
         })
     }
@@ -135,12 +93,6 @@ fn build_menu_and_tray() -> Result<TrayIcon> {
 impl Drop for MezonTray {
     fn drop(&mut self) {
         let _ = self.stop_tx.send(());
-        if let Ok(mut guard) = self.update_task.lock()
-            && let Some(handle) = guard.take()
-        {
-            handle.abort();
-            tracing::debug!("Aborted tray update-check task on drop");
-        }
     }
 }
 

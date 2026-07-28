@@ -465,6 +465,7 @@ enum LoaderKind {
     /// animated full-resolution source costs ~100 KB of RAM. Used for avatars.
     AvatarThumbnail,
     AvatarThumbnailSmall,
+    IconThumbnail,
     GalleryThumbnail,
     /// Aspect-preserving thumbnail for OGP link previews, capped at
     /// [`OGP_THUMB_DECODE_MAX_PX`].
@@ -549,6 +550,23 @@ impl LruImageCache {
         Self::with_loader(
             label,
             LoaderKind::AvatarThumbnailSmall,
+            max_items,
+            max_bytes,
+            max_entry_bytes,
+            cx,
+        )
+    }
+
+    pub fn icon_thumbnail(
+        label: &'static str,
+        max_items: usize,
+        max_bytes: u64,
+        max_entry_bytes: u64,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        Self::with_loader(
+            label,
+            LoaderKind::IconThumbnail,
             max_items,
             max_bytes,
             max_entry_bytes,
@@ -952,6 +970,9 @@ impl LruImageCache {
             LoaderKind::AvatarThumbnailSmall => {
                 AssetLogger::<AvatarImageLoaderSmall>::load(resource.clone(), cx).boxed()
             }
+            LoaderKind::IconThumbnail => {
+                AssetLogger::<IconImageLoader>::load(resource.clone(), cx).boxed()
+            }
             LoaderKind::GalleryThumbnail => {
                 AssetLogger::<GalleryImageLoader>::load(resource.clone(), cx).boxed()
             }
@@ -1013,6 +1034,7 @@ impl ImageCache for LruImageCache {
 /// keeps a single avatar at ~100 KB regardless of the source file.
 const AVATAR_DECODE_MAX_PX: u32 = 160;
 const AVATAR_SMALL_DECODE_MAX_PX: u32 = 80;
+const ICON_DECODE_MAX_PX: u32 = 64;
 const GALLERY_THUMB_DECODE_MAX_PX: u32 = 320;
 /// OGP link-preview thumbnails render at ≤200px tall; decode to 512px longest
 /// side (aspect-preserving, ~2x for retina) so a large external OG image
@@ -1122,6 +1144,20 @@ impl Asset for AvatarImageLoaderSmall {
         cx: &mut App,
     ) -> impl Future<Output = Self::Output> + Send + 'static {
         load_avatar_scaled(source, AVATAR_SMALL_DECODE_MAX_PX, cx)
+    }
+}
+
+pub enum IconImageLoader {}
+
+impl Asset for IconImageLoader {
+    type Source = Resource;
+    type Output = Result<Arc<RenderImage>, ImageCacheError>;
+
+    fn load(
+        source: Self::Source,
+        cx: &mut App,
+    ) -> impl Future<Output = Self::Output> + Send + 'static {
+        load_avatar_scaled(source, ICON_DECODE_MAX_PX, cx)
     }
 }
 

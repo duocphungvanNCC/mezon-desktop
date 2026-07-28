@@ -1741,14 +1741,19 @@ fn render_emoji_span(
             .child(name.clone())
             .into_any_element();
     }
-    img(src)
-        .size(size)
+    div()
         .flex_none()
-        .object_fit(ObjectFit::Contain)
-        .with_fallback(super::reaction_detail::emoji_error_fallback(
-            size,
-            ctx.theme.text_muted,
-        ))
+        .size(size)
+        .image_cache(ctx.icon_cache.clone())
+        .child(
+            img(src)
+                .size(size)
+                .object_fit(ObjectFit::Contain)
+                .with_fallback(super::reaction_detail::emoji_error_fallback(
+                    size,
+                    ctx.theme.text_muted,
+                )),
+        )
         .into_any_element()
 }
 

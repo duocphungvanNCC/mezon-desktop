@@ -320,7 +320,14 @@ impl MezonTransport {
                         Some(executor) => {
                             let _ = executor.sender.send((code, message));
                         }
-                        None => dispatch_realtime_push(cid, &message, on_event.as_ref()),
+                        None => {
+                            tracing::debug!(
+                                target: "cid_match",
+                                "no pending request for cid={cid} code={code} len={}; routing as push",
+                                message.len()
+                            );
+                            dispatch_realtime_push(cid, &message, on_event.as_ref())
+                        }
                     }
                 } else {
                     dispatch_realtime_push(cid, &message, on_event.as_ref());
@@ -392,7 +399,7 @@ impl MezonTransport {
             .await
             .map_err(|_| {
                 self.pending_requests.lock().remove(&cid);
-                anyhow::anyhow!("Request timed out")
+                anyhow::anyhow!("Request timed out (cid={cid}, {}ms)", timeout.as_millis())
             })?
             .map_err(|_| anyhow::anyhow!("Response channel closed"))?;
         Ok(result)
@@ -4108,7 +4115,8 @@ impl MezonTransport {
         let parsed_clan_id: i64 = clan_id;
         let parsed_channel_id: i64 = channel_id;
         tracing::debug!(
-            "send_channel_message: clan_id={} channel_id={} is_public={} content_len={} attachments={}",
+            "send_channel_message: cid={} clan_id={} channel_id={} is_public={} content_len={} attachments={}",
+            cid,
             parsed_clan_id,
             parsed_channel_id,
             is_public,
@@ -5507,11 +5515,19 @@ impl MezonTransport {
     }
 
     /// List audit log.
-    pub async fn list_audit_log(&self, clan_id: i64) -> Result<api::ListAuditLog> {
+    pub async fn list_audit_log(
+        &self,
+        clan_id: i64,
+        action_log: &str,
+        user_id: Option<i64>,
+        date_log: &str,
+    ) -> Result<api::ListAuditLog> {
         let cid = self.generate_cid();
         let body = api::ListAuditLogRequest {
             clan_id,
-            ..Default::default()
+            action_log: action_log.to_string(),
+            user_id: user_id.unwrap_or(0),
+            date_log: date_log.to_string(),
         }
         .encode_to_vec();
         let (code, response) = self.send_api_request(cid, "ListAuditLog", body).await?;

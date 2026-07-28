@@ -104,7 +104,7 @@ pub fn ensure_canvas_image_dimensions_loaded(cx: &mut App, src: &str, notify: En
     let src_owned = src.to_string();
     cx.spawn(async move |cx| {
         let dims = fetch_remote_image_dimensions(client, url).await;
-        let _ = cx.update(|cx| {
+        cx.update(|cx| {
             let state = match dims {
                 Some((width, height)) if width > 0 && height > 0 => {
                     ImageDimState::Ready(width, height)
