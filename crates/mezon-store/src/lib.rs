@@ -43,6 +43,7 @@ pub mod quick_menu;
 pub mod realtime;
 pub mod roles;
 pub mod sticker;
+pub mod stream;
 pub mod threads;
 pub mod topic_badges;
 pub mod topics;
@@ -170,6 +171,7 @@ pub use roles::{
     RoleUser, RolesEvent, RolesStore, everyone_slug,
 };
 pub use sticker::{ClanSound, Sticker, StickerEvent, StickerStore};
+pub use stream::{StreamMember, StreamPhase, StreamStore};
 pub use threads::{
     THREAD_STATUS_ARCHIVED, THREAD_STATUS_JOINED, ThreadSummary, ThreadsEvent, ThreadsStore,
     group_threads,

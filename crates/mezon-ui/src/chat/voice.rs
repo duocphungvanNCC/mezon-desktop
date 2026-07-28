@@ -829,7 +829,8 @@ fn resolve_voice_identity(
 }
 
 fn resolve_voice_member(cx: &App, clan_id: ClanId, m: &VoiceMember) -> (String, String) {
-    crate::util::voice_member::resolve_display(cx, Some(clan_id), m)
+    let resolved = crate::util::voice_member::resolve_display(cx, Some(clan_id), m);
+    (resolved.name, resolved.avatar_src)
 }
 
 fn raised_hands_overlay(cx: &App, clan_id: ClanId, store: &VoiceStore) -> Option<AnyElement> {

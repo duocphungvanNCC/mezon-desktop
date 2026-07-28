@@ -127,6 +127,7 @@ pub struct Channel {
     pub is_favorite: bool,
     pub creator_id: UserId,
     pub active: i32,
+    pub avatar_url: String,
 }
 
 impl Channel {
@@ -1605,6 +1606,7 @@ impl ChannelList {
                         is_favorite: false,
                         creator_id: UserId(e.creator_id),
                         active: CHANNEL_ACTIVE_JOINED,
+                        avatar_url: String::new(),
                     };
                     let inserted = if let Some(cats) = self.cache.get_mut(&clan_id) {
                         insert_channel(cats, channel)
@@ -1767,6 +1769,7 @@ impl ChannelList {
                     is_favorite: false,
                     creator_id: UserId(desc.creator_id),
                     active: CHANNEL_ACTIVE_JOINED,
+                    avatar_url: desc.channel_avatar.clone(),
                 };
                 let inserted = insert_channel(cats, channel);
                 if inserted {
@@ -2249,6 +2252,7 @@ impl ChannelList {
                 is_favorite: false,
                 creator_id: UserId(e.creator_id),
                 active: CHANNEL_ACTIVE_JOINED,
+                avatar_url: String::new(),
             };
             if let Some(cats) = self.cache.get_mut(&clan_id)
                 && insert_channel(cats, channel)
@@ -2482,6 +2486,7 @@ fn thread_channel_from_context(
         is_favorite: false,
         creator_id: UserId(0),
         active,
+        avatar_url: String::new(),
     }
 }
 
@@ -2520,6 +2525,7 @@ fn channel_from_desc(
         is_favorite,
         creator_id: UserId(c.creator_id),
         active: c.active,
+        avatar_url: c.channel_avatar,
     }
 }
 
@@ -3175,6 +3181,7 @@ mod tests {
             is_favorite: false,
             creator_id: UserId(0),
             active: CHANNEL_ACTIVE_JOINED,
+            avatar_url: String::new(),
         }
     }
 
@@ -3496,6 +3503,7 @@ mod tests {
             active: CHANNEL_ACTIVE_JOINED,
             creator_id: 0,
             clan_name: String::new(),
+            channel_avatar: String::new(),
         };
 
         let badge_descs = vec![
@@ -3621,6 +3629,7 @@ mod tests {
             is_favorite: true,
             creator_id: UserId(0),
             active: CHANNEL_ACTIVE_JOINED,
+            avatar_url: String::new(),
         };
         assert!(ch.is_favorite);
     }
@@ -3649,6 +3658,7 @@ mod tests {
                 is_favorite: false,
                 creator_id: UserId(0),
                 active: CHANNEL_ACTIVE_JOINED,
+                avatar_url: String::new(),
             },
             Channel {
                 id: ChannelId(2),
@@ -3671,6 +3681,7 @@ mod tests {
                 is_favorite: true,
                 creator_id: UserId(0),
                 active: CHANNEL_ACTIVE_JOINED,
+                avatar_url: String::new(),
             },
         ];
 
@@ -3729,6 +3740,7 @@ mod tests {
             active: CHANNEL_ACTIVE_JOINED,
             creator_id: 0,
             clan_name: String::new(),
+            channel_avatar: String::new(),
         };
         let channel = channel_from_desc(desc, 0, vec![UserId(42)], false);
         let vm = &channel.voice_members[0];
@@ -3938,6 +3950,7 @@ mod tests {
             active: CHANNEL_ACTIVE_JOINED,
             creator_id: 0,
             clan_name: String::new(),
+            channel_avatar: String::new(),
         };
         let seed = unread_seed_from_descs(vec![desc(10, 1), desc(11, 8), desc(12, 10)]);
 
@@ -4363,6 +4376,7 @@ mod tests {
             active: CHANNEL_ACTIVE_ARCHIVED,
             creator_id: 0,
             clan_name: String::new(),
+            channel_avatar: String::new(),
         };
         let channel = channel_from_desc(desc, 0, Vec::new(), false);
         assert_eq!(channel.active, CHANNEL_ACTIVE_ARCHIVED);

@@ -23,6 +23,10 @@ pub fn profile_url(cx: &App, source_url: &str) -> String {
         .unwrap_or_else(|| source_url.to_string())
 }
 
+pub fn stream_cover_url(cx: &App, source_url: &str) -> String {
+    proxied(cx, source_url, 1280, 720, "fill")
+}
+
 pub fn cdn_asset_url(cx: &App, path: &str) -> String {
     let base = AppConfig::try_global(cx)
         .map(|cfg| cfg.base_img_url.clone())
