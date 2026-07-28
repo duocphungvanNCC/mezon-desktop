@@ -51,6 +51,7 @@ pub struct ChatLayout {
     settings: Entity<Settings>,
     voice_store: Entity<VoiceStore>,
     voice_strip_scroll: ScrollHandle,
+    voice_strip_width: Pixels,
     voice_grid_page: usize,
     voice_grid_wheel_accum: f32,
     voice_grid_size: Size<Pixels>,
@@ -389,6 +390,7 @@ impl ChatLayout {
             settings,
             voice_store,
             voice_strip_scroll: ScrollHandle::new(),
+            voice_strip_width: px(0.),
             voice_grid_page: 0,
             voice_grid_wheel_accum: 0.,
             voice_grid_size: Size::default(),
@@ -1964,6 +1966,7 @@ impl ChatLayout {
             self.voice_grid_page = 0;
             self.voice_grid_wheel_accum = 0.;
             self.voice_visual = Default::default();
+            self.voice_strip_width = px(0.);
             self.voice_strip_scroll
                 .set_offset(gpui::point(px(0.), px(0.)));
         }
@@ -1972,6 +1975,13 @@ impl ChatLayout {
     pub(crate) fn toggle_voice_member_strip(&mut self, cx: &mut Context<Self>) {
         self.voice_show_members = !self.voice_show_members;
         cx.notify();
+    }
+
+    pub(crate) fn record_voice_strip_width(&mut self, width: Pixels, cx: &mut Context<Self>) {
+        if (self.voice_strip_width - width).abs() > px(0.5) {
+            self.voice_strip_width = width;
+            cx.notify();
+        }
     }
 
     pub(crate) fn record_voice_grid_size(&mut self, size: Size<Pixels>, cx: &mut Context<Self>) {
@@ -2420,6 +2430,7 @@ impl ChatLayout {
                     output_device_id,
                     camera_device_id,
                     &self.voice_strip_scroll,
+                    self.voice_strip_width,
                     self.voice_grid_page,
                     self.voice_grid_size,
                     self.voice_show_members,
