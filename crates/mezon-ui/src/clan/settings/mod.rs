@@ -2,6 +2,7 @@ mod audit_log_setting_page;
 mod channel_webhook_tab;
 mod clan_setting_screen;
 mod clan_webhook_tab;
+mod community_setting_page;
 mod emoji_setting_page;
 mod emoji_sticker_picker;
 mod integration_setting_page;
@@ -19,6 +20,7 @@ mod sticker_setting_page;
 
 pub use audit_log_setting_page::AuditLogSettingPage;
 pub use clan_setting_screen::{ClanSettingScreen, ClanSettingsPage};
+pub use community_setting_page::{CommunitySettingPage, render_community_save_bar};
 pub use emoji_setting_page::EmojiSettingPage;
 pub use integration_setting_page::IntegrationSettingPage;
 pub use overview_setting_page::OverviewSettingPage;

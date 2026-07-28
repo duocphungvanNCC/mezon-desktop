@@ -8,6 +8,7 @@ use mezon_store::{
 };
 
 use super::audit_log_setting_page::AuditLogSettingPage;
+use super::community_setting_page::{CommunitySettingPage, render_community_save_bar};
 use super::emoji_setting_page::EmojiSettingPage;
 use super::integration_setting_page::IntegrationSettingPage;
 use super::overview_setting_page::{OverviewSettingPage, render_clan_overview_save_bar};
@@ -78,7 +79,7 @@ impl ClanSettingsPage {
             Self::Integrations => "clanSettings.sidebar.items.integrations",
             Self::AuditLog => "clanSettings.sidebar.items.auditLog",
             Self::Onboarding => "clanSettings.sidebar.items.onboarding",
-            Self::EnableCommunity => "clanSettings.sidebar.items.enableCommunity",
+            Self::EnableCommunity => "clanSettings.sidebar.items.clanCommunity",
         }
     }
 
@@ -168,6 +169,7 @@ pub struct ClanSettingScreen {
     sound_page: Option<Entity<SoundSettingPage>>,
     roles_page: Option<Entity<RoleSettingPage>>,
     integrations_page: Option<Entity<IntegrationSettingPage>>,
+    community_page: Option<Entity<CommunitySettingPage>>,
     scroll: ScrollHandle,
     nav_scroll: ScrollHandle,
     focus_handle: FocusHandle,
@@ -203,6 +205,7 @@ impl ClanSettingScreen {
             sound_page: None,
             roles_page: None,
             integrations_page: None,
+            community_page: None,
             scroll: ScrollHandle::new(),
             nav_scroll: ScrollHandle::new(),
             focus_handle: cx.focus_handle(),
@@ -287,6 +290,7 @@ impl ClanSettingScreen {
                 self.release_page(ClanSettingsPage::VoiceStickers, cx);
                 self.release_page(ClanSettingsPage::Roles, cx);
                 self.release_page(ClanSettingsPage::Integrations, cx);
+                self.release_page(ClanSettingsPage::EnableCommunity, cx);
             }
             self.reset_content_scroll();
         }
@@ -320,6 +324,11 @@ impl ClanSettingScreen {
             }
             ClanSettingsPage::VoiceStickers => {
                 if let Some(entity) = self.sound_page.take() {
+                    entity.update(cx, |page, cx| page.release(cx));
+                }
+            }
+            ClanSettingsPage::EnableCommunity => {
+                if let Some(entity) = self.community_page.take() {
                     entity.update(cx, |page, cx| page.release(cx));
                 }
             }
@@ -375,6 +384,14 @@ impl ClanSettingScreen {
             ClanSettingsPage::VoiceStickers if self.sound_page.is_none() => {
                 self.sound_page = Some(cx.new(|cx| SoundSettingPage::new(clan_id, settings, cx)));
                 if let Some(page) = &self.sound_page {
+                    cx.observe(page, |_, _, cx| cx.notify()).detach();
+                }
+            }
+            ClanSettingsPage::EnableCommunity if self.community_page.is_none() => {
+                let clan_list = self.clan_list.clone();
+                self.community_page =
+                    Some(cx.new(|cx| CommunitySettingPage::new(clan_id, clan_list, settings, cx)));
+                if let Some(page) = &self.community_page {
                     cx.observe(page, |_, _, cx| cx.notify()).detach();
                 }
             }
@@ -446,6 +463,10 @@ impl ClanSettingScreen {
                 .integrations_page
                 .as_ref()
                 .map(|p| p.clone().into_any_element()),
+            ClanSettingsPage::EnableCommunity => self
+                .community_page
+                .as_ref()
+                .map(|p| p.clone().into_any_element()),
             _ => None,
         }
     }
@@ -509,6 +530,12 @@ impl Render for ClanSettingScreen {
                 .as_ref()
                 .is_some_and(|roles| roles.read(cx).is_role_icon_picker_open());
         let role_icon_picker = self.roles_page.clone().filter(|_| show_role_icon_picker);
+        let show_community_save = page == ClanSettingsPage::EnableCommunity
+            && self
+                .community_page
+                .as_ref()
+                .is_some_and(|community| community.read(cx).should_show_save_bar(cx));
+        let community_save_bar = self.community_page.clone().filter(|_| show_community_save);
 
         fn nav_item(
             id: &str,
@@ -833,6 +860,11 @@ impl Render for ClanSettingScreen {
                 panel.child(render_role_icon_picker_modal(
                     roles, &locale, &theme, window, cx,
                 ))
+            })
+            .when_some(community_save_bar, |panel, community| {
+                panel.child(deferred(render_community_save_bar(
+                    community, &locale, &theme, cx,
+                )))
             })
     }
 }

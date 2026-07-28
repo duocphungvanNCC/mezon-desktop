@@ -14,6 +14,11 @@ use crate::realtime::{RealtimeDispatch, RealtimeKind};
 
 pub const MAX_CLAN_LOGO_BYTES: u64 = 1_000_000;
 pub const MAX_CLAN_BANNER_BYTES: u64 = 10_000_000;
+pub const MAX_COMMUNITY_BANNER_BYTES: u64 = 10_000_000;
+pub const MAX_COMMUNITY_ABOUT_CHARS: usize = 100;
+pub const MAX_COMMUNITY_DESCRIPTION_CHARS: usize = 300;
+pub const MAX_COMMUNITY_SHORT_URL_CHARS: usize = 50;
+pub const MAX_COMMUNITY_BANNER_URL_BYTES: usize = 2048;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ClanImageMimeType {
@@ -86,6 +91,10 @@ pub struct Clan {
     pub is_onboarding: bool,
     pub is_community: bool,
     pub prevent_anonymous: bool,
+    pub community_banner: String,
+    pub about: String,
+    pub description: String,
+    pub short_url: String,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -129,6 +138,111 @@ impl ClanSystemMessage {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct CommunityInfo {
+    pub is_community: bool,
+    pub community_banner: String,
+    pub about: String,
+    pub description: String,
+    pub short_url: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct CommunityDraft {
+    pub community_banner: String,
+    pub about: String,
+    pub description: String,
+    pub short_url: String,
+}
+
+impl CommunityDraft {
+    pub fn from_info(info: &CommunityInfo) -> Self {
+        Self {
+            community_banner: info.community_banner.clone(),
+            about: info.about.clone(),
+            description: info.description.clone(),
+            short_url: info.short_url.clone(),
+        }
+    }
+
+    pub fn has_changes(&self, saved: &Self) -> bool {
+        self != saved
+    }
+
+    /// Normalize and bound user-controlled community fields before send/persist.
+    pub fn sanitized(mut self) -> Self {
+        self.about = truncate_chars(self.about.trim(), MAX_COMMUNITY_ABOUT_CHARS);
+        self.description = truncate_chars(self.description.trim(), MAX_COMMUNITY_DESCRIPTION_CHARS);
+        self.short_url = sanitize_community_short_url(&self.short_url);
+        self.community_banner = sanitize_community_banner_url(&self.community_banner);
+        self
+    }
+
+    pub fn is_valid(&self) -> bool {
+        let draft = self.clone().sanitized();
+        !draft.community_banner.is_empty()
+            && !draft.about.is_empty()
+            && !draft.description.is_empty()
+            && !draft.short_url.is_empty()
+    }
+}
+
+impl From<&Clan> for CommunityInfo {
+    fn from(clan: &Clan) -> Self {
+        Self {
+            is_community: clan.is_community,
+            community_banner: clan.community_banner.clone(),
+            about: clan.about.clone(),
+            description: clan.description.clone(),
+            short_url: clan.short_url.clone(),
+        }
+    }
+}
+
+impl From<ApiClanDesc> for CommunityInfo {
+    fn from(desc: ApiClanDesc) -> Self {
+        Self {
+            is_community: desc.is_community,
+            community_banner: desc.community_banner,
+            about: desc.about,
+            description: desc.description,
+            short_url: desc.short_url,
+        }
+    }
+}
+
+fn truncate_chars(value: &str, max: usize) -> String {
+    value.chars().take(max).collect()
+}
+
+fn sanitize_community_short_url(raw: &str) -> String {
+    truncate_chars(
+        &raw.to_ascii_lowercase()
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric() || *c == '-')
+            .collect::<String>(),
+        MAX_COMMUNITY_SHORT_URL_CHARS,
+    )
+}
+
+fn sanitize_community_banner_url(raw: &str) -> String {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    if trimmed.len() > MAX_COMMUNITY_BANNER_URL_BYTES {
+        return String::new();
+    }
+    // Only accept http(s) URLs produced by our upload/CDN path — reject schemes like javascript:.
+    let Ok(url) = url::Url::parse(trimmed) else {
+        return String::new();
+    };
+    if !matches!(url.scheme(), "https" | "http") {
+        return String::new();
+    }
+    trimmed.to_string()
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClanOverviewDraft {
     pub clan_name: String,
@@ -163,6 +277,8 @@ impl ClanOverviewDraft {
             is_onboarding: clan.is_onboarding,
             is_community: clan.is_community,
             prevent_anonymous: self.prevent_anonymous,
+            // Overview save must not wipe community profile fields.
+            community: None,
         }
     }
 }
@@ -213,6 +329,10 @@ impl From<ApiClanDesc> for Clan {
             is_onboarding: c.is_onboarding,
             is_community: c.is_community,
             prevent_anonymous: c.prevent_anonymous,
+            community_banner: c.community_banner,
+            about: c.about,
+            description: c.description,
+            short_url: c.short_url,
         }
     }
 }
@@ -443,6 +563,7 @@ impl ClanList {
                     is_onboarding: e.is_onboarding,
                     is_community: e.is_community,
                     prevent_anonymous: e.prevent_anonymous,
+                    community: None,
                 };
                 if update_clan(&mut self.clans, ClanId(e.clan_id), update) {
                     cx.notify();
@@ -747,6 +868,106 @@ impl ClanList {
         })
     }
 
+    pub fn fetch_community_info(
+        &self,
+        clan_id: ClanId,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<CommunityInfo, String>> {
+        // Prefer in-memory clan data from the initial list fetch — avoid re-listing all clans.
+        if let Some(clan) = self.clans.iter().find(|c| c.id == clan_id) {
+            let info = CommunityInfo::from(clan);
+            return cx.spawn(async move |_, _| Ok(info));
+        }
+        let api = self.api.clone();
+        let id = clan_id.get();
+        cx.spawn(async move |_, _| {
+            let descs = api.list_clan_descs().await.map_err(|e| e.to_string())?;
+            descs
+                .into_iter()
+                .find(|desc| desc.clan_id == id)
+                .map(CommunityInfo::from)
+                .ok_or_else(|| "clan not found".into())
+        })
+    }
+
+    pub fn update_community_status(
+        &mut self,
+        clan_id: ClanId,
+        enabled: bool,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<(), String>> {
+        let api = self.api.clone();
+        let clan = self.clans.iter().find(|c| c.id == clan_id).cloned();
+        cx.spawn(async move |this, cx| {
+            let request = community_update_request(clan_id, clan.as_ref(), |req| {
+                req.is_community = Some(enabled);
+            });
+            api.update_clan_desc(request)
+                .await
+                .map_err(|e| e.to_string())?;
+            this.update(cx, |this, cx| {
+                if let Some(clan) = this.clans.iter_mut().find(|c| c.id == clan_id) {
+                    clan.is_community = enabled;
+                }
+                cx.notify();
+            })
+            .map_err(|_| "store dropped".to_string())?;
+            Ok(())
+        })
+    }
+
+    pub fn save_community_fields(
+        &mut self,
+        clan_id: ClanId,
+        draft: CommunityDraft,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<(), String>> {
+        let draft = draft.sanitized();
+        if !draft.is_valid() {
+            return cx
+                .spawn(async move |_, _| Err("community fields are incomplete or invalid".into()));
+        }
+        let api = self.api.clone();
+        let clan = self.clans.iter().find(|c| c.id == clan_id).cloned();
+        let banner = draft.community_banner.clone();
+        let about = draft.about.clone();
+        let description = draft.description.clone();
+        let short_url = draft.short_url.clone();
+        cx.spawn(async move |this, cx| {
+            // Single update enables community and persists profile fields together.
+            let mut request = community_update_request(clan_id, clan.as_ref(), |req| {
+                req.is_community = Some(true);
+            });
+            request.community_banner = Some(banner.clone());
+            request.about = Some(about.clone());
+            request.description = Some(description.clone());
+            request.short_url = Some(short_url.clone());
+            api.update_clan_desc(request)
+                .await
+                .map_err(|e| e.to_string())?;
+            this.update(cx, |this, cx| {
+                if let Some(clan) = this.clans.iter_mut().find(|c| c.id == clan_id) {
+                    clan.is_community = true;
+                    clan.community_banner = banner;
+                    clan.about = about;
+                    clan.description = description;
+                    clan.short_url = short_url;
+                }
+                cx.notify();
+            })
+            .map_err(|_| "store dropped".to_string())?;
+            Ok(())
+        })
+    }
+
+    pub fn disable_community(
+        &mut self,
+        clan_id: ClanId,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<(), String>> {
+        self.update_community_status(clan_id, false, cx)
+    }
+
     pub fn check_clan_name_available(
         &self,
         name: &str,
@@ -867,6 +1088,25 @@ pub(crate) async fn upload_image_to_cdn(
     Ok(format!("{base}/{}", upload.filename))
 }
 
+fn community_update_request(
+    clan_id: ClanId,
+    clan: Option<&Clan>,
+    patch: impl FnOnce(&mut UpdateClanDescRequest),
+) -> UpdateClanDescRequest {
+    let mut request = UpdateClanDescRequest {
+        clan_id: clan_id.get(),
+        clan_name: clan.map(|c| c.name.clone()).unwrap_or_default(),
+        welcome_channel_id: clan
+            .and_then(|c| c.welcome_channel_id)
+            .map(ChannelId::get)
+            .unwrap_or_default(),
+        prevent_anonymous: clan.is_some_and(|c| c.prevent_anonymous),
+        ..Default::default()
+    };
+    patch(&mut request);
+    request
+}
+
 fn apply_clan_order(clans: &mut Vec<Clan>, order: &[ClanId]) {
     if order.is_empty() {
         return;
@@ -890,6 +1130,7 @@ struct ClanUpdate {
     is_onboarding: bool,
     is_community: bool,
     prevent_anonymous: bool,
+    community: Option<CommunityDraft>,
 }
 
 fn update_clan(clans: &mut [Clan], clan_id: ClanId, update: ClanUpdate) -> bool {
@@ -908,6 +1149,12 @@ fn update_clan(clans: &mut [Clan], clan_id: ClanId, update: ClanUpdate) -> bool 
     clan.is_onboarding = update.is_onboarding;
     clan.is_community = update.is_community;
     clan.prevent_anonymous = update.prevent_anonymous;
+    if let Some(community) = update.community {
+        clan.community_banner = community.community_banner;
+        clan.about = community.about;
+        clan.description = community.description;
+        clan.short_url = community.short_url;
+    }
     true
 }
 
@@ -952,6 +1199,10 @@ mod tests {
             is_onboarding: false,
             is_community: false,
             prevent_anonymous: false,
+            community_banner: String::new(),
+            about: String::new(),
+            description: String::new(),
+            short_url: String::new(),
         }
     }
 
@@ -965,6 +1216,7 @@ mod tests {
             is_onboarding: false,
             is_community: false,
             prevent_anonymous: false,
+            community: None,
         }
     }
 
@@ -1017,6 +1269,12 @@ mod tests {
             is_onboarding: true,
             is_community: true,
             prevent_anonymous: true,
+            community: Some(CommunityDraft {
+                community_banner: "https://cdn.example/community.png".into(),
+                about: "about".into(),
+                description: "desc".into(),
+                short_url: "vanity".into(),
+            }),
         };
         assert!(update_clan(&mut c, ClanId(1), update));
         assert_eq!(c[0].name, "NewName");
@@ -1027,6 +1285,34 @@ mod tests {
         assert!(c[0].is_onboarding);
         assert!(c[0].is_community);
         assert!(c[0].prevent_anonymous);
+        assert_eq!(c[0].community_banner, "https://cdn.example/community.png");
+        assert_eq!(c[0].about, "about");
+        assert_eq!(c[0].description, "desc");
+        assert_eq!(c[0].short_url, "vanity");
+    }
+
+    #[test]
+    fn community_draft_sanitizes_and_rejects_unsafe_banner() {
+        let draft = CommunityDraft {
+            community_banner: "javascript:alert(1)".into(),
+            about: format!("  {}  ", "a".repeat(120)),
+            description: "ok".into(),
+            short_url: "Bad_URL!!".into(),
+        }
+        .sanitized();
+        assert!(draft.community_banner.is_empty());
+        assert_eq!(draft.about.len(), MAX_COMMUNITY_ABOUT_CHARS);
+        assert_eq!(draft.short_url, "badurl");
+        assert!(!draft.is_valid());
+
+        let ok = CommunityDraft {
+            community_banner: "https://cdn.example/b.png".into(),
+            about: "about".into(),
+            description: "desc".into(),
+            short_url: "vanity".into(),
+        }
+        .sanitized();
+        assert!(ok.is_valid());
     }
 
     #[test]
@@ -1043,6 +1329,7 @@ mod tests {
             is_onboarding: false,
             is_community: false,
             prevent_anonymous: false,
+            ..Default::default()
         };
         let clan = Clan::from(desc);
         assert_eq!(clan.badge_count, 0);
@@ -1104,6 +1391,7 @@ mod tests {
             is_onboarding: false,
             is_community: false,
             prevent_anonymous: false,
+            ..Default::default()
         };
         assert_eq!(Clan::from(desc).creator_id, UserId(7));
     }
@@ -1252,6 +1540,7 @@ mod tests {
             is_onboarding: false,
             is_community: false,
             prevent_anonymous: false,
+            ..Default::default()
         };
         apply_created_clan(&mut clans, desc);
         assert_eq!(clans.len(), 3);
@@ -1277,6 +1566,7 @@ mod tests {
             is_onboarding: false,
             is_community: false,
             prevent_anonymous: false,
+            ..Default::default()
         };
         apply_created_clan(&mut clans, desc);
         assert_eq!(clans.len(), 2);
