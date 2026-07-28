@@ -65,6 +65,7 @@ pub fn validate_http_url(url: &str) -> Result<()> {
     bail!("Only HTTPS URLs are allowed")
 }
 
+#[cfg(debug_assertions)]
 fn is_debug_local_http(url: &str) -> bool {
     Url::parse(url).is_ok_and(|parsed| {
         parsed.scheme() == "http"

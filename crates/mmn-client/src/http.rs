@@ -10,6 +10,23 @@ use crate::error::{MmnError, Result};
 
 pub(crate) type Headers = BTreeMap<String, String>;
 
+const MAX_RESPONSE_BYTES: u64 = 8 * 1024 * 1024;
+
+pub fn is_secure_endpoint(url: &str) -> bool {
+    if url.starts_with("https://") {
+        return true;
+    }
+    #[cfg(debug_assertions)]
+    if let Some(rest) = url.strip_prefix("http://") {
+        return ["localhost", "127.0.0.1", "[::1]"].iter().any(|host| {
+            rest.strip_prefix(host).is_some_and(|tail| {
+                tail.is_empty() || tail.starts_with(':') || tail.starts_with('/')
+            })
+        });
+    }
+    false
+}
+
 pub(crate) async fn execute(
     http: Arc<dyn HttpClient>,
     method: http::Method,
@@ -41,9 +58,15 @@ pub(crate) async fn execute(
             let mut buffer = Vec::new();
             response
                 .into_body()
+                .take(MAX_RESPONSE_BYTES + 1)
                 .read_to_end(&mut buffer)
                 .await
                 .map_err(|e| MmnError::Http(e.to_string()))?;
+            if buffer.len() as u64 > MAX_RESPONSE_BYTES {
+                return Err(MmnError::Http(format!(
+                    "response exceeds {MAX_RESPONSE_BYTES} bytes"
+                )));
+            }
 
             if !status.is_success() {
                 let message = String::from_utf8_lossy(&buffer).trim().to_string();

@@ -15,7 +15,7 @@ use crate::components::primitives::{
 };
 use crate::theme::ActiveTheme;
 
-const DECIMAL_FACTOR: i128 = 1_000_000;
+use mezon_store::TOKEN_DECIMAL_FACTOR as DECIMAL_FACTOR;
 const MAX_CANDIDATES_SHOWN: usize = 50;
 
 #[derive(Clone)]
@@ -68,11 +68,9 @@ impl SendTokenModal {
                 ))
             });
             let amount = cx.new(|cx| {
-                InputState::new(window, cx)
-                    .placeholder(tr(
-                        "userProfile.statusProfile.sendTokenModal.placeholders.amountPlaceholder",
-                    ))
-                    .validate(|value, _cx| value.chars().all(|c| c.is_ascii_digit()))
+                InputState::new(window, cx).placeholder(tr(
+                    "userProfile.statusProfile.sendTokenModal.placeholders.amountPlaceholder",
+                ))
             });
             let note = cx.new(|cx| {
                 InputState::new(window, cx).placeholder(tr(
@@ -95,13 +93,25 @@ impl SendTokenModal {
                     }
                 },
             );
-            let amount_sub = cx.subscribe(
+            let amount_sub = cx.subscribe_in(
                 &amount,
-                |this: &mut Self, _input, event: &InputEvent, cx| {
-                    if matches!(event, InputEvent::Change) {
-                        this.error = None;
-                        cx.notify();
+                window,
+                |this: &mut Self, input, event: &InputEvent, window, cx| {
+                    if !matches!(event, InputEvent::Change) {
+                        return;
                     }
+                    this.error = None;
+                    let raw = input.read(cx).value().to_string();
+                    let formatted = format_amount_input(&raw, &this.locale);
+                    if formatted != raw {
+                        let input = input.clone();
+                        window.defer(cx, move |window, cx| {
+                            input.update(cx, |input, cx| {
+                                input.set_value(formatted, window, cx);
+                            });
+                        });
+                    }
+                    cx.notify();
                 },
             );
 
@@ -232,36 +242,29 @@ impl SendTokenModal {
     }
 
     fn amount_value(&self, cx: &App) -> i64 {
-        self.amount
-            .read(cx)
-            .value()
-            .chars()
-            .filter(|c| c.is_ascii_digit())
-            .collect::<String>()
-            .parse()
-            .unwrap_or(0)
+        parse_whole_token_amount(self.amount.read(cx).value())
     }
 
-    fn exceeds_balance(&self, cx: &App) -> bool {
-        let amount = self.amount_value(cx);
+    fn exceeds_balance_for(&self, amount: i64, cx: &App) -> bool {
         if amount <= 0 {
             return false;
         }
-        let balance =
-            WalletStore::try_global(cx).and_then(|w| w.read(cx).balance().map(|b| b.to_string()));
-        let Some(balance) = balance else {
+        let Some(wallet) = WalletStore::try_global(cx) else {
             return false;
         };
-        let scaled = (amount as i128).saturating_mul(DECIMAL_FACTOR);
-        let available: i128 = balance.trim().parse().unwrap_or(0);
-        scaled > available
+        let Some(balance) = wallet.read(cx).balance() else {
+            return false;
+        };
+        amount_exceeds_balance(amount, balance)
+    }
+
+    fn can_send_with(&self, amount: i64, exceeds: bool) -> bool {
+        !self.sending && self.selected.is_some() && amount > 0 && !exceeds
     }
 
     fn can_send(&self, cx: &App) -> bool {
-        !self.sending
-            && self.selected.is_some()
-            && self.amount_value(cx) > 0
-            && !self.exceeds_balance(cx)
+        let amount = self.amount_value(cx);
+        self.can_send_with(amount, self.exceeds_balance_for(amount, cx))
     }
 
     fn send(&mut self, cx: &mut Context<Self>) {
@@ -360,8 +363,9 @@ impl Render for SendTokenModal {
         let entity = cx.entity();
         let locale = self.locale.clone();
         let tk = |key: &'static str| mezon_i18n::t(&locale, key).to_string();
-        let can_send = self.can_send(cx);
-        let exceeds = self.exceeds_balance(cx);
+        let amount = self.amount_value(cx);
+        let exceeds = self.exceeds_balance_for(amount, cx);
+        let can_send = self.can_send_with(amount, exceeds);
 
         let header = div()
             .flex()
@@ -615,16 +619,46 @@ impl Render for SendTokenModal {
     }
 }
 
-fn format_thousands(n: i64) -> String {
-    let digits = n.unsigned_abs().to_string();
+fn parse_whole_token_amount(raw: &str) -> i64 {
+    let digits: String = raw.chars().filter(|c| c.is_ascii_digit()).collect();
+    digits.parse().unwrap_or(0)
+}
+
+fn amount_exceeds_balance(amount: i64, balance: &str) -> bool {
+    if amount <= 0 {
+        return false;
+    }
+    let scaled = (amount as i128).saturating_mul(DECIMAL_FACTOR);
+    let available: i128 = balance.trim().parse().unwrap_or(0);
+    scaled > available
+}
+
+fn group_separator(locale: &str) -> char {
+    if locale.starts_with("vi") { '.' } else { ',' }
+}
+
+fn format_amount_input(raw: &str, locale: &str) -> String {
+    if raw.is_empty() {
+        return String::new();
+    }
+    group_digits(parse_whole_token_amount(raw), group_separator(locale))
+}
+
+fn group_digits(value: i64, separator: char) -> String {
+    let digits = value.unsigned_abs().to_string();
     let bytes = digits.as_bytes();
-    let mut out = String::new();
+    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
     for (index, byte) in bytes.iter().enumerate() {
         if index > 0 && (bytes.len() - index).is_multiple_of(3) {
-            out.push(',');
+            out.push(separator);
         }
         out.push(*byte as char);
     }
+    out
+}
+
+fn format_thousands(n: i64) -> String {
+    let out = group_digits(n, ',');
     if n < 0 { format!("-{out}") } else { out }
 }
 
@@ -636,4 +670,90 @@ fn section(theme: &crate::theme::Theme, label: impl Into<SharedString>) -> gpui:
             .text_color(theme.tokens.text_theme_primary)
             .child(label.into()),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        DECIMAL_FACTOR, amount_exceeds_balance, format_amount_input, format_thousands,
+        parse_whole_token_amount,
+    };
+
+    #[test]
+    fn keeps_digits_like_the_react_handler() {
+        assert_eq!(parse_whole_token_amount("1000"), 1000);
+        assert_eq!(parse_whole_token_amount("12abc34"), 1234);
+        assert_eq!(parse_whole_token_amount("-5"), 5);
+        assert_eq!(parse_whole_token_amount(""), 0);
+        assert_eq!(parse_whole_token_amount("   "), 0);
+    }
+
+    #[test]
+    fn strips_group_separators_of_both_locales() {
+        assert_eq!(parse_whole_token_amount("1,000"), 1000);
+        assert_eq!(parse_whole_token_amount("1.000"), 1000);
+        assert_eq!(parse_whole_token_amount("12,345,678"), 12_345_678);
+        assert_eq!(parse_whole_token_amount("12.345.678"), 12_345_678);
+    }
+
+    #[test]
+    fn overlong_digit_runs_fall_back_to_zero_not_panic() {
+        assert_eq!(parse_whole_token_amount(&"9".repeat(40)), 0);
+    }
+
+    #[test]
+    fn amount_input_groups_by_locale_like_intl_number_format() {
+        assert_eq!(format_amount_input("1000", "en"), "1,000");
+        assert_eq!(format_amount_input("1000", "vi"), "1.000");
+        assert_eq!(format_amount_input("12345678", "vi"), "12.345.678");
+        assert_eq!(format_amount_input("999", "en"), "999");
+    }
+
+    #[test]
+    fn amount_input_reformats_its_own_output_idempotently() {
+        for locale in ["en", "vi"] {
+            let once = format_amount_input("12345678", locale);
+            assert_eq!(format_amount_input(&once, locale), once);
+            assert_eq!(parse_whole_token_amount(&once), 12_345_678);
+        }
+    }
+
+    #[test]
+    fn balance_check_scales_the_amount_before_comparing() {
+        assert!(!amount_exceeds_balance(1, "1000000"));
+        assert!(!amount_exceeds_balance(1, "2000000"));
+        assert!(amount_exceeds_balance(2, "1000000"));
+        assert!(amount_exceeds_balance(1, "999999"));
+    }
+
+    #[test]
+    fn balance_check_is_inert_for_non_positive_amounts() {
+        assert!(!amount_exceeds_balance(0, "0"));
+        assert!(!amount_exceeds_balance(-1, "0"));
+    }
+
+    #[test]
+    fn unparseable_balance_blocks_the_send() {
+        assert!(amount_exceeds_balance(1, "abc"));
+        assert!(amount_exceeds_balance(1, ""));
+        assert!(!amount_exceeds_balance(1, " 1000000 "));
+    }
+
+    #[test]
+    fn oversized_amount_saturates_instead_of_overflowing() {
+        assert!(amount_exceeds_balance(i64::MAX, "1000000"));
+    }
+
+    #[test]
+    fn clearing_the_amount_field_stays_empty() {
+        assert_eq!(format_amount_input("", "vi"), "");
+        assert_eq!(format_amount_input("abc", "vi"), "0");
+    }
+
+    #[test]
+    fn grouped_output_round_trips_through_the_parser() {
+        for value in [1i64, 999, 1000, 1_234_567, i64::MAX / DECIMAL_FACTOR as i64] {
+            assert_eq!(parse_whole_token_amount(&format_thousands(value)), value);
+        }
+    }
 }

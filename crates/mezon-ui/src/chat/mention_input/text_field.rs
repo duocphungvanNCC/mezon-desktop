@@ -22,7 +22,7 @@ use unicode_segmentation::UnicodeSegmentation;
 use crate::theme::ActiveTheme;
 use crate::util::text_edit::{
     EditKind, HistoryEntry, MAX_UNDO_HISTORY, home_target, line_end, line_start,
-    next_word_boundary, previous_word_boundary,
+    next_word_boundary, previous_word_boundary, should_coalesce,
 };
 
 const MASK: char = '\u{2022}';
@@ -657,8 +657,7 @@ impl MentionInputState {
     }
 
     fn record_history(&mut self, kind: EditKind) {
-        let coalesce = matches!(kind, EditKind::Insert | EditKind::Delete)
-            && self.last_edit_kind == Some(kind);
+        let coalesce = should_coalesce(self.last_edit_kind, kind);
         self.redo_stack.clear();
         if !coalesce {
             self.undo_stack.push(self.history_snapshot());

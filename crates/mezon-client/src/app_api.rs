@@ -330,6 +330,18 @@ impl AppApi {
         self.transport.update_system_message(request).await
     }
 
+    pub async fn list_audit_log(
+        &self,
+        clan_id: i64,
+        action_log: &str,
+        user_id: Option<i64>,
+        date_log: &str,
+    ) -> Result<mezon_proto::api::ListAuditLog> {
+        self.transport
+            .list_audit_log(clan_id, action_log, user_id, date_log)
+            .await
+    }
+
     pub async fn is_open(&self) -> bool {
         self.transport.is_open().await
     }
@@ -2342,6 +2354,19 @@ impl AppApi {
 
     pub async fn list_voice_channel_users(&self, clan_id: i64) -> Result<Vec<ApiVoiceChannelUser>> {
         self.transport.list_voice_channel_users(clan_id).await
+    }
+
+    pub async fn list_streaming_channel_users(
+        &self,
+        clan_id: i64,
+        channel_id: i64,
+        channel_type: i32,
+        state: i32,
+        limit: i32,
+    ) -> Result<mezon_proto::api::StreamingChannelUserList> {
+        self.transport
+            .list_streaming_channel_users(clan_id, channel_id, channel_type, state, limit)
+            .await
     }
 
     pub async fn generate_meet_token(&self, channel_id: &str, room_name: &str) -> Result<String> {

@@ -23,6 +23,10 @@ pub fn profile_url(cx: &App, source_url: &str) -> String {
         .unwrap_or_else(|| source_url.to_string())
 }
 
+pub fn stream_cover_url(cx: &App, source_url: &str) -> String {
+    proxied(cx, source_url, 1280, 720, "fill")
+}
+
 pub fn cdn_asset_url(cx: &App, path: &str) -> String {
     let base = AppConfig::try_global(cx)
         .map(|cfg| cfg.base_img_url.clone())
@@ -37,5 +41,11 @@ pub fn cdn_asset_url(cx: &App, path: &str) -> String {
 pub fn emoji_url(cx: &App, emoji_id: &str) -> String {
     AppConfig::try_global(cx)
         .map(|cfg| cfg.emoji_src(emoji_id))
+        .unwrap_or_default()
+}
+
+pub fn emoji_url_sized(cx: &App, emoji_id: &str, size: u32) -> String {
+    AppConfig::try_global(cx)
+        .map(|cfg| cfg.emoji_src_sized(emoji_id, size))
         .unwrap_or_default()
 }

@@ -106,6 +106,10 @@ pub enum EditKind {
     Other,
 }
 
+pub fn should_coalesce(last: Option<EditKind>, kind: EditKind) -> bool {
+    matches!(kind, EditKind::Insert | EditKind::Delete) && last == Some(kind)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

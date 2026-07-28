@@ -244,10 +244,6 @@ fn install_panic_hook() {
 }
 
 fn run_app(lock: SingleInstance, initial_url: Option<String>) {
-    // Reuse the shared transport runtime for auxiliary background work (the tray's update
-    // check) instead of standing up a second process-wide runtime.
-    let rt_handle = Arc::new(mezon_client::transport_runtime::handle());
-
     let settings = Settings::load_sync();
 
     tracing::debug!(
@@ -285,12 +281,14 @@ fn run_app(lock: SingleInstance, initial_url: Option<String>) {
     let initial_auth_state = mezon_store::resolve_initial_auth_state();
 
     // Subscribe to screen lock/unlock events.
-    mezon_native::power::subscribe(Box::new(|event| match event {
+    let (wake_tx, mut wake_rx) = futures::channel::mpsc::unbounded::<()>();
+    mezon_native::power::subscribe(Box::new(move |event| match event {
         mezon_native::power::PowerEvent::ScreenLocked => {
             tracing::info!("Screen locked");
         }
         mezon_native::power::PowerEvent::ScreenUnlocked => {
             tracing::info!("Screen unlocked");
+            let _ = wake_tx.unbounded_send(());
         }
     }));
 
@@ -411,6 +409,17 @@ fn run_app(lock: SingleInstance, initial_url: Option<String>) {
         init_ui(cx);
 
         AppConfig::init_global(app_config_handle, cx);
+
+        let wake_task = cx.spawn(async move |cx: &mut AsyncApp| {
+            while wake_rx.next().await.is_some() {
+                cx.update(|cx| {
+                    if let Some(store) = mezon_store::AutoUpdateStore::try_global(cx) {
+                        store.update(cx, |store, cx| store.check(false, cx));
+                    }
+                });
+            }
+        });
+        cx.set_global(WakeCheckTaskGlobal(wake_task));
 
         mezon_ui::theme::set_theme(mezon_ui::theme::resolve_theme(&settings.theme), cx);
 
@@ -580,7 +589,7 @@ fn run_app(lock: SingleInstance, initial_url: Option<String>) {
             })
         };
 
-        if let Some((tray, tray_tasks)) = setup_tray(cx, rt_handle.clone()) {
+        if let Some((tray, tray_tasks)) = setup_tray(cx) {
             cx.set_global(TrayGlobal(tray));
             cx.set_global(TrayTasksGlobal {
                 _deep_link: deep_link_task,
@@ -662,6 +671,7 @@ fn open_main_window(
     };
 
     let auth_state = cx.new(|_| initial_auth);
+    mezon_store::AutoUpdateStore::init(mezon_store::AppConfig::global(cx).update_url.clone(), cx);
     let title_bar = cx.new(|cx| TitleBar::new(settings_entity.clone(), cx));
 
     mezon_store::LoginStore::init(client, api.clone(), auth_state.clone(), cx);
@@ -677,12 +687,14 @@ fn open_main_window(
     mezon_store::MessagesStore::init(api.clone(), cx);
     mezon_store::ThreadsStore::init(api.clone(), cx);
     mezon_store::MessageSearchStore::init(api.clone(), cx);
+    mezon_store::AuditLogStore::init(api.clone(), cx);
     mezon_store::InboxStore::init(api.clone(), cx);
     mezon_store::TopicsStore::init(api.clone(), cx);
     mezon_store::TopicBadgeStore::init(api.clone(), auth_state.clone(), cx);
     mezon_store::PinnedMessagesStore::init(api.clone(), cx);
     mezon_store::CanvasStore::init(api.clone(), cx);
     mezon_store::PresenceStore::init(api.clone(), cx);
+    mezon_store::StreamStore::init(api.clone(), cx);
     mezon_store::VoiceStore::init(api.clone(), cx);
     mezon_store::ClanMembersStore::init(api.clone(), cx);
     mezon_store::EmojiStore::init(api.clone(), cx);
@@ -957,6 +969,9 @@ fn notification_route(
 struct TrayGlobal(#[allow(dead_code)] mezon_native::tray::MezonTray);
 impl gpui::Global for TrayGlobal {}
 
+struct WakeCheckTaskGlobal(#[allow(dead_code)] gpui::Task<()>);
+impl gpui::Global for WakeCheckTaskGlobal {}
+
 struct TrayTasksGlobal {
     _deep_link: gpui::Task<()>,
     _tray_tasks: TrayTasks,
@@ -965,19 +980,29 @@ impl gpui::Global for TrayTasksGlobal {}
 
 struct TrayTasks {
     _show: gpui::Task<()>,
+    _update: gpui::Task<()>,
     _quit: gpui::Task<()>,
 }
 
-fn setup_tray(
-    cx: &mut App,
-    rt_handle: Arc<tokio::runtime::Handle>,
-) -> Option<(mezon_native::tray::MezonTray, TrayTasks)> {
+fn setup_tray(cx: &mut App) -> Option<(mezon_native::tray::MezonTray, TrayTasks)> {
     let (show_tx, mut show_rx) = futures::channel::mpsc::unbounded::<()>();
+    let (update_tx, mut update_rx) = futures::channel::mpsc::unbounded::<()>();
     let (quit_tx, mut quit_rx) = futures::channel::mpsc::unbounded::<()>();
 
     let show_task = cx.spawn(async move |cx: &mut AsyncApp| {
         while show_rx.next().await.is_some() {
             cx.update(show_main_window);
+        }
+    });
+
+    let update_task = cx.spawn(async move |cx: &mut AsyncApp| {
+        while update_rx.next().await.is_some() {
+            cx.update(|cx| {
+                show_main_window(cx);
+                if let Some(store) = mezon_store::AutoUpdateStore::try_global(cx) {
+                    store.update(cx, |store, cx| store.check(true, cx));
+                }
+            });
         }
     });
 
@@ -993,10 +1018,13 @@ fn setup_tray(
             let _ = show_tx.unbounded_send(());
         },
         move || {
+            tracing::info!("Tray: Check for updates requested");
+            let _ = update_tx.unbounded_send(());
+        },
+        move || {
             tracing::info!("Tray: Quit requested");
             let _ = quit_tx.unbounded_send(());
         },
-        rt_handle,
     ) {
         Ok(tray) => {
             tracing::debug!("System tray initialised");
@@ -1004,6 +1032,7 @@ fn setup_tray(
                 tray,
                 TrayTasks {
                     _show: show_task,
+                    _update: update_task,
                     _quit: quit_task,
                 },
             ))

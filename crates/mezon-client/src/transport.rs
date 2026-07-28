@@ -57,6 +57,8 @@ pub enum RealtimeEvent {
     Unmute(realtime::UnmuteEvent),
     StreamingJoined(realtime::StreamingJoinedEvent),
     StreamingLeaved(realtime::StreamingLeavedEvent),
+    StreamingStarted(realtime::StreamingStartedEvent),
+    StreamingEnded(realtime::StreamingEndedEvent),
     VoiceStarted(realtime::VoiceStartedEvent),
     VoiceEnded(realtime::VoiceEndedEvent),
     VoiceJoined(realtime::VoiceJoinedEvent),
@@ -109,6 +111,8 @@ impl TryFrom<realtime::envelope::Message> for RealtimeEvent {
             realtime::envelope::Message::UnmuteEvent(m) => Ok(Self::Unmute(m)),
             realtime::envelope::Message::StreamingJoinedEvent(m) => Ok(Self::StreamingJoined(m)),
             realtime::envelope::Message::StreamingLeavedEvent(m) => Ok(Self::StreamingLeaved(m)),
+            realtime::envelope::Message::StreamingStartedEvent(m) => Ok(Self::StreamingStarted(m)),
+            realtime::envelope::Message::StreamingEndedEvent(m) => Ok(Self::StreamingEnded(m)),
             realtime::envelope::Message::VoiceStartedEvent(m) => Ok(Self::VoiceStarted(m)),
             realtime::envelope::Message::VoiceEndedEvent(m) => Ok(Self::VoiceEnded(m)),
             realtime::envelope::Message::VoiceJoinedEvent(m) => Ok(Self::VoiceJoined(m)),
@@ -318,7 +322,14 @@ impl MezonTransport {
                         Some(executor) => {
                             let _ = executor.sender.send((code, message));
                         }
-                        None => dispatch_realtime_push(cid, &message, on_event.as_ref()),
+                        None => {
+                            tracing::debug!(
+                                target: "cid_match",
+                                "no pending request for cid={cid} code={code} len={}; routing as push",
+                                message.len()
+                            );
+                            dispatch_realtime_push(cid, &message, on_event.as_ref())
+                        }
                     }
                 } else {
                     dispatch_realtime_push(cid, &message, on_event.as_ref());
@@ -390,7 +401,7 @@ impl MezonTransport {
             .await
             .map_err(|_| {
                 self.pending_requests.lock().remove(&cid);
-                anyhow::anyhow!("Request timed out")
+                anyhow::anyhow!("Request timed out (cid={cid}, {}ms)", timeout.as_millis())
             })?
             .map_err(|_| anyhow::anyhow!("Response channel closed"))?;
         Ok(result)
@@ -509,6 +520,8 @@ pub struct ApiChannelDesc {
     pub creator_id: i64,
     #[serde(default)]
     pub clan_name: String,
+    #[serde(default)]
+    pub channel_avatar: String,
 }
 
 /// A direct-message / group conversation descriptor (clan_id = 0 namespace). Unlike
@@ -2972,6 +2985,7 @@ impl MezonTransport {
             badge_count: channel.count_mess_unread,
             creator_id: channel.creator_id,
             clan_name: channel.clan_name,
+            channel_avatar: channel.channel_avatar,
         }
     }
 
@@ -4163,7 +4177,8 @@ impl MezonTransport {
         let parsed_clan_id: i64 = clan_id;
         let parsed_channel_id: i64 = channel_id;
         tracing::debug!(
-            "send_channel_message: clan_id={} channel_id={} is_public={} content_len={} attachments={}",
+            "send_channel_message: cid={} clan_id={} channel_id={} is_public={} content_len={} attachments={}",
+            cid,
             parsed_clan_id,
             parsed_channel_id,
             is_public,
@@ -4773,16 +4788,22 @@ impl MezonTransport {
         Ok(api::ListUserOnlineResponse::decode(response.as_slice())?)
     }
 
-    /// List streaming channel users.
+    /// List streaming channel users (clan-wide presence).
     pub async fn list_streaming_channel_users(
         &self,
         clan_id: i64,
         channel_id: i64,
+        channel_type: i32,
+        state: i32,
+        limit: i32,
     ) -> Result<api::StreamingChannelUserList> {
         let cid = self.generate_cid();
         let body = api::ListChannelUsersRequest {
             clan_id,
             channel_id,
+            channel_type,
+            limit,
+            state,
             ..Default::default()
         }
         .encode_to_vec();
@@ -5562,11 +5583,19 @@ impl MezonTransport {
     }
 
     /// List audit log.
-    pub async fn list_audit_log(&self, clan_id: i64) -> Result<api::ListAuditLog> {
+    pub async fn list_audit_log(
+        &self,
+        clan_id: i64,
+        action_log: &str,
+        user_id: Option<i64>,
+        date_log: &str,
+    ) -> Result<api::ListAuditLog> {
         let cid = self.generate_cid();
         let body = api::ListAuditLogRequest {
             clan_id,
-            ..Default::default()
+            action_log: action_log.to_string(),
+            user_id: user_id.unwrap_or(0),
+            date_log: date_log.to_string(),
         }
         .encode_to_vec();
         let (code, response) = self.send_api_request(cid, "ListAuditLog", body).await?;

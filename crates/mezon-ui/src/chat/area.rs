@@ -164,7 +164,9 @@ impl ChatArea {
                         if replying_to.is_some()
                             && let Some(input) = this.chat_area.mention_input.clone()
                         {
-                            input.update(cx, |input, cx| input.focus_input(window, cx));
+                            window.defer(cx, move |window, cx| {
+                                input.update(cx, |input, cx| input.focus_input(window, cx));
+                            });
                         }
                         this.chat_area.replying_to = replying_to;
                         cx.notify();
@@ -213,6 +215,7 @@ impl ChatArea {
                 search_expanded,
                 show_search_options,
                 search_input,
+                false,
                 Some(locale),
                 cx,
             );
@@ -298,6 +301,7 @@ impl ChatArea {
         show_results_panel: bool,
         message_search_panel: Option<Entity<MessageSearchPanel>>,
         app_channel_bar: Option<ChannelAppBarTarget>,
+        stream_sidebar: bool,
         cx: &mut Context<crate::ChatLayout>,
     ) -> gpui::AnyElement {
         let (input_bar, mention_input) = if media_channel_view {
@@ -334,6 +338,7 @@ impl ChatArea {
                 search_expanded,
                 show_search_options,
                 search_input,
+                stream_sidebar,
                 Some(locale),
                 cx,
             );
