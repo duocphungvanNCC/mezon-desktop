@@ -15,6 +15,12 @@ pub struct CaretBlink {
     enabled: bool,
 }
 
+impl Default for CaretBlink {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl CaretBlink {
     pub fn new() -> Self {
         Self {

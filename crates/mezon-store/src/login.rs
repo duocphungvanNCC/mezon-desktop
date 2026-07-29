@@ -106,7 +106,7 @@ impl LoginStore {
 
     pub fn reset_all_user_stores(cx: &mut App) {
         if let Some(e) = crate::clan_load::ClanLoadScheduler::try_global(cx) {
-            e.update(cx, |s, _| s.reset());
+            e.update(cx, |s, cx| s.reset(cx));
         }
         if let Some(e) = crate::account::AccountStore::try_global(cx) {
             e.update(cx, |s, cx| s.reset(cx));
@@ -124,6 +124,20 @@ impl LoginStore {
             e.update(cx, |s, cx| s.reset(cx));
         }
         if let Some(e) = crate::roles::RolesStore::try_global(cx) {
+            e.update(cx, |s, cx| s.reset(cx));
+        }
+        if let Some(e) = crate::permissions::PermissionStore::try_global(cx) {
+            e.update(cx, |s, cx| s.reset(cx));
+        }
+        if let Some(e) = crate::channel_permissions::ChannelPermissionsStore::try_global(cx) {
+            e.update(cx, |s, cx| s.reset(cx));
+        }
+        if let Some(e) = crate::channel_users::ChannelUsersStore::try_global(cx) {
+            e.update(cx, |s, cx| s.reset(cx));
+        }
+        if let Some(e) =
+            crate::channel_role_permissions::ChannelRolePermissionsStore::try_global(cx)
+        {
             e.update(cx, |s, cx| s.reset(cx));
         }
         if let Some(e) = crate::sticker::StickerStore::try_global(cx) {
@@ -182,6 +196,9 @@ impl LoginStore {
         }
         if let Some(e) = crate::voice::VoiceStore::try_global(cx) {
             e.update(cx, |s, cx| s.logout_teardown(cx));
+        }
+        if let Some(e) = crate::stream::StreamStore::try_global(cx) {
+            e.update(cx, |s, cx| s.on_logout(cx));
         }
         if let Some(e) = crate::wallet::WalletStore::try_global(cx) {
             e.update(cx, |s, cx| s.reset(cx));

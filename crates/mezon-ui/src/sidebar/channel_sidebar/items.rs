@@ -6,6 +6,7 @@ pub(super) struct VoiceMemberSlot {
     pub(super) user_id: String,
     pub(super) display_name: String,
     pub(super) avatar_url: String,
+    pub(super) avatar_raw: String,
 }
 
 #[derive(Clone, PartialEq)]

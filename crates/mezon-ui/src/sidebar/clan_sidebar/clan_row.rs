@@ -15,6 +15,8 @@ use crate::components::primitives::{ContextMenu, SubmenuOption, mention_count_ba
 use crate::router::{Route, Router};
 use crate::theme::ActiveTheme;
 
+pub(super) const CLAN_ROW_HEIGHT: f32 = 56.;
+
 const CLAN_NOTI_LEVELS: [(i32, &str); 3] = [
     (
         NOTIFICATION_ALL_MESSAGE,
@@ -261,7 +263,7 @@ pub(super) fn render_clan_row(
         .group(clan.group_name.clone())
         .relative()
         .w_full()
-        .h(px(56.))
+        .h(px(CLAN_ROW_HEIGHT))
         .flex()
         .items_center()
         .justify_center()

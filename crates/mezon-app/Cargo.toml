@@ -51,14 +51,19 @@ maintainer = "Mezon Team"
 copyright = "2026, Mezon Team"
 section = "net"
 priority = "optional"
-depends = "$auto, libva2, libva-drm2"
+depends = "$auto, libva2, libva-drm2, libwayland-client0, libwayland-egl1, libegl1, libvulkan1, libfontconfig1, libfreetype6, gstreamer1.0-plugins-base, gstreamer1.0-plugins-good"
 extended-description = "Mezon desktop client (Rust/GPUI) for voice, video and text chat."
 maintainer-scripts = "../../packaging/linux/debian"
 assets = [
     ["target/release/mezon", "usr/bin/", "755"],
     ["../../packaging/linux/mezon.desktop", "usr/share/applications/", "644"],
-    ["../../packaging/linux/mezon.png", "usr/share/pixmaps/mezon.png", "644"],
-    ["../../packaging/linux/mezon.png", "usr/share/icons/hicolor/48x48/apps/mezon.png", "644"],
-    ["../../packaging/linux/mezon.png", "usr/share/icons/hicolor/128x128/apps/mezon.png", "644"],
-    ["../../packaging/linux/mezon.png", "usr/share/icons/hicolor/256x256/apps/mezon.png", "644"],
+    ["../../packaging/linux/mezon.metainfo.xml", "usr/share/metainfo/", "644"],
+    ["../../packaging/linux/icons/48x48/mezon.png", "usr/share/pixmaps/mezon.png", "644"],
+    ["../../packaging/linux/icons/16x16/mezon.png", "usr/share/icons/hicolor/16x16/apps/mezon.png", "644"],
+    ["../../packaging/linux/icons/24x24/mezon.png", "usr/share/icons/hicolor/24x24/apps/mezon.png", "644"],
+    ["../../packaging/linux/icons/32x32/mezon.png", "usr/share/icons/hicolor/32x32/apps/mezon.png", "644"],
+    ["../../packaging/linux/icons/48x48/mezon.png", "usr/share/icons/hicolor/48x48/apps/mezon.png", "644"],
+    ["../../packaging/linux/icons/64x64/mezon.png", "usr/share/icons/hicolor/64x64/apps/mezon.png", "644"],
+    ["../../packaging/linux/icons/128x128/mezon.png", "usr/share/icons/hicolor/128x128/apps/mezon.png", "644"],
+    ["../../packaging/linux/icons/256x256/mezon.png", "usr/share/icons/hicolor/256x256/apps/mezon.png", "644"],
 ]

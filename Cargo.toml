@@ -6,6 +6,7 @@ members = [
     "crates/mezon-client",
     "crates/mezon-store",
     "crates/mezon-voice",
+    "crates/mezon-stream",
     "crates/mezon-video",
     "crates/mezon-audio",
     "crates/mezon-native",
@@ -56,7 +57,7 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "0.1.0"
+version = "0.1.27"
 edition = "2024"
 authors = ["Mezon Team"]
 license = "GPL-3.0-or-later"
@@ -116,6 +117,7 @@ mezon-ui      = { path = "crates/mezon-ui" }
 mezon-client  = { path = "crates/mezon-client" }
 mezon-store   = { path = "crates/mezon-store" }
 mezon-voice   = { path = "crates/mezon-voice" }
+mezon-stream  = { path = "crates/mezon-stream" }
 mezon-video   = { path = "crates/mezon-video" }
 mezon-audio   = { path = "crates/mezon-audio" }
 mezon-native  = { path = "crates/mezon-native" }
@@ -359,6 +361,7 @@ cbindgen              = "0.28.0"
 
 [patch.crates-io]
 gpui = { path = "crates/vendor/gpui" }
+libspa = { path = "crates/vendor/libspa" }
 
 [patch."https://github.com/zed-industries/scap"]
 zed-scap = { path = "crates/vendor/zed-scap" }

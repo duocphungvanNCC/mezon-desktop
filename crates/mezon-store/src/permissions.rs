@@ -3,16 +3,19 @@ use std::sync::Arc;
 
 use gpui::{App, AppContext, Context, Entity, EventEmitter, Global, Task};
 use mezon_client::{AppApi, ConnectionStatus};
+use mezon_proto::api;
 
 use crate::AuthState;
+use crate::channel_permissions::{ChannelPermissionsStore, is_overridden_slug};
 use crate::clan::ClanList;
-use crate::ids::{ClanId, UserId};
+use crate::ids::{ChannelId, ClanId, UserId};
 
 pub const PERMISSION_CLAN_OWNER: &str = "clan-owner";
 pub const PERMISSION_ADMINISTRATOR: &str = "administrator";
 pub const PERMISSION_MANAGE_CHANNEL: &str = "manage-channel";
 pub const PERMISSION_MANAGE_CLAN: &str = "manage-clan";
-pub const PERMISSION_SEND_MESSAGE: &str = "send-message";
+
+pub const PERMISSION_SCOPE_CHANNEL: i32 = 2;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PermissionDefinition {
@@ -21,6 +24,7 @@ pub struct PermissionDefinition {
     pub title: String,
     pub description: String,
     pub level: i32,
+    pub scope: i32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -28,6 +32,7 @@ pub struct ClanSettingsPermissions {
     pub is_clan_owner: bool,
     pub has_manage_clan: bool,
     pub has_manage_channel: bool,
+    pub has_administrator: bool,
 }
 
 impl ClanSettingsPermissions {
@@ -36,6 +41,7 @@ impl ClanSettingsPermissions {
             is_clan_owner: false,
             has_manage_clan: false,
             has_manage_channel: false,
+            has_administrator: false,
         }
     }
 }
@@ -52,6 +58,7 @@ pub struct PermissionStore {
     catalog_loading: bool,
     max_level_by_clan: HashMap<ClanId, i32>,
     loading_clans: HashSet<ClanId>,
+    reset_generation: u64,
     api: Arc<AppApi>,
     auth_state: Entity<AuthState>,
     _conn_watch: Task<()>,
@@ -88,6 +95,7 @@ impl PermissionStore {
             catalog_loading: false,
             max_level_by_clan: HashMap::new(),
             loading_clans: HashSet::new(),
+            reset_generation: 0,
             api,
             auth_state,
             _conn_watch: conn_watch,
@@ -152,7 +160,20 @@ impl PermissionStore {
         *required_level <= max_level
     }
 
-    pub fn check_permission(&self, clan_id: ClanId, slug: &str, cx: &App) -> bool {
+    pub fn check(
+        &self,
+        clan_id: ClanId,
+        channel_id: Option<ChannelId>,
+        slug: &str,
+        cx: &App,
+    ) -> bool {
+        if is_overridden_slug(slug) {
+            let Some(channel_id) = channel_id else {
+                return false;
+            };
+            return ChannelPermissionsStore::try_global(cx)
+                .is_some_and(|store| store.read(cx).has_permission(slug, clan_id, channel_id));
+        }
         if slug == PERMISSION_CLAN_OWNER {
             return self.is_clan_owner(clan_id, cx);
         }
@@ -161,6 +182,17 @@ impl PermissionStore {
         }
         let max_level = self.max_level_by_clan.get(&clan_id).copied();
         self.has_permission_level(max_level, slug)
+    }
+
+    pub fn check_permission(&self, clan_id: ClanId, slug: &str, cx: &App) -> bool {
+        self.check(clan_id, None, slug, cx)
+    }
+
+    pub fn reset(&mut self, cx: &mut Context<Self>) {
+        self.reset_generation = self.reset_generation.wrapping_add(1);
+        self.max_level_by_clan.clear();
+        self.loading_clans.clear();
+        cx.notify();
     }
 
     pub fn current_permission_level(&self, clan_id: ClanId, cx: &App) -> Option<i32> {
@@ -178,6 +210,12 @@ impl PermissionStore {
         &self.definitions
     }
 
+    pub fn channel_scoped_definitions(&self) -> impl Iterator<Item = &PermissionDefinition> {
+        self.definitions
+            .iter()
+            .filter(|definition| definition.scope == PERMISSION_SCOPE_CHANNEL)
+    }
+
     pub fn ensure_catalog_loaded(&mut self, cx: &mut Context<Self>) {
         self.load_permission_catalog(cx);
     }
@@ -189,6 +227,7 @@ impl PermissionStore {
                 is_clan_owner: true,
                 has_manage_clan: true,
                 has_manage_channel: true,
+                has_administrator: true,
             };
         }
         let max_level = self.max_level_by_clan.get(&clan_id).copied();
@@ -196,6 +235,7 @@ impl PermissionStore {
             is_clan_owner: false,
             has_manage_clan: self.has_permission_level(max_level, PERMISSION_MANAGE_CLAN),
             has_manage_channel: self.has_permission_level(max_level, PERMISSION_MANAGE_CHANNEL),
+            has_administrator: self.has_permission_level(max_level, PERMISSION_ADMINISTRATOR),
         }
     }
 
@@ -209,18 +249,38 @@ impl PermissionStore {
         cx: &mut Context<Self>,
     ) -> Task<()> {
         self.load_permission_catalog(cx);
-        if self.max_level_by_clan.contains_key(&clan_id) || !self.loading_clans.insert(clan_id) {
+        if self.max_level_by_clan.contains_key(&clan_id) {
+            return Task::ready(());
+        }
+        self.fetch_clan_permissions(clan_id, cx)
+    }
+
+    pub fn reload_clan_permissions(&mut self, clan_id: ClanId, cx: &mut Context<Self>) {
+        self.load_permission_catalog(cx);
+        self.fetch_clan_permissions(clan_id, cx).detach();
+    }
+
+    fn fetch_clan_permissions(&mut self, clan_id: ClanId, cx: &mut Context<Self>) -> Task<()> {
+        if !self.loading_clans.insert(clan_id) {
             return Task::ready(());
         }
         let api = self.api.clone();
+        let generation = self.reset_generation;
         cx.spawn(async move |this, cx| {
             let result = api.get_clan_user_role(clan_id.get()).await;
             let _ = this.update(cx, |this, cx| {
+                if this.reset_generation != generation {
+                    return;
+                }
                 this.loading_clans.remove(&clan_id);
                 match result {
                     Ok(role_list) => {
-                        this.max_level_by_clan
+                        let previous = this
+                            .max_level_by_clan
                             .insert(clan_id, role_list.max_level_permission);
+                        if previous == Some(role_list.max_level_permission) {
+                            return;
+                        }
                         cx.emit(PermissionEvent::Changed {
                             clan_id: Some(clan_id),
                         });
@@ -249,22 +309,17 @@ impl PermissionStore {
                 this.catalog_loading = false;
                 match result {
                     Ok(list) => {
-                        let mut catalog = HashMap::new();
-                        let mut definitions = Vec::new();
-                        for p in list.permissions {
-                            if p.slug.is_empty() {
-                                continue;
-                            }
-                            catalog.insert(p.slug.clone(), p.level);
-                            definitions.push(PermissionDefinition {
-                                id: p.id,
-                                slug: p.slug,
-                                title: p.title,
-                                description: p.description,
-                                level: p.level,
-                            });
+                        let definitions = definitions_from_permission_list(list);
+                        if definitions.is_empty() {
+                            tracing::warn!(
+                                "get_list_permission returned an empty catalog; keeping it unloaded so the next access retries"
+                            );
+                            return;
                         }
-                        this.catalog = catalog;
+                        this.catalog = definitions
+                            .iter()
+                            .map(|definition| (definition.slug.clone(), definition.level))
+                            .collect();
                         this.definitions = definitions;
                         this.catalog_loaded = true;
                         cx.emit(PermissionEvent::Changed { clan_id: None });
@@ -275,5 +330,210 @@ impl PermissionStore {
             });
         })
         .detach();
+    }
+}
+
+fn definitions_from_permission_list(list: api::PermissionList) -> Vec<PermissionDefinition> {
+    list.permissions
+        .into_iter()
+        .filter(|permission| !permission.slug.is_empty())
+        .map(|permission| PermissionDefinition {
+            id: permission.id,
+            slug: permission.slug,
+            title: permission.title,
+            description: permission.description,
+            level: permission.level,
+            scope: permission.scope,
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use gpui::TestAppContext;
+    use mezon_client::{Session, TransportClient};
+
+    use super::*;
+    use crate::channel_permissions::{
+        ChannelPermissionsStore, PERMISSION_DELETE_MESSAGE, PERMISSION_MANAGE_THREAD,
+        PERMISSION_SEND_MESSAGE,
+    };
+    use crate::clan::Clan;
+    use crate::realtime::RealtimeDispatch;
+
+    const TEST_CLAN: ClanId = ClanId(1);
+    const TEST_OWNER: UserId = UserId(42);
+
+    fn test_api() -> Arc<AppApi> {
+        Arc::new(AppApi::new(
+            Arc::new(TransportClient::new(String::new())),
+            String::new(),
+        ))
+    }
+
+    fn owned_clan() -> Clan {
+        Clan {
+            id: TEST_CLAN,
+            creator_id: TEST_OWNER,
+            name: "Test".into(),
+            avatar_url: None,
+            banner_url: None,
+            badge_count: 0,
+            has_unread: false,
+            muted: false,
+            welcome_channel_id: None,
+            status: 0,
+            is_onboarding: false,
+            is_community: false,
+            prevent_anonymous: false,
+        }
+    }
+
+    fn init_stores(auth: AuthState, cx: &mut App) -> Entity<PermissionStore> {
+        let api = test_api();
+        RealtimeDispatch::init(api.clone(), cx);
+        ClanList::init(api.clone(), cx);
+        ChannelPermissionsStore::init(api.clone(), cx);
+        let auth_state = cx.new(|_| auth);
+        PermissionStore::init(api, auth_state, cx)
+    }
+
+    fn permission(id: i64, slug: &str, level: i32, scope: i32) -> api::Permission {
+        api::Permission {
+            id,
+            title: slug.to_uppercase(),
+            slug: slug.into(),
+            description: String::new(),
+            active: 0,
+            scope,
+            level,
+        }
+    }
+
+    #[gpui::test]
+    fn check_permission_is_denied_after_reset(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            let store = init_stores(AuthState::NotAuthenticated, cx);
+            store.update(cx, |store, cx| {
+                store.catalog.insert(PERMISSION_MANAGE_CLAN.into(), 5);
+                store.max_level_by_clan.insert(TEST_CLAN, 9);
+                store.loading_clans.insert(TEST_CLAN);
+
+                assert!(store.check_permission(TEST_CLAN, PERMISSION_MANAGE_CLAN, cx));
+                assert!(store.check(TEST_CLAN, None, PERMISSION_MANAGE_CLAN, cx));
+
+                store.reset(cx);
+
+                assert!(!store.check_permission(TEST_CLAN, PERMISSION_MANAGE_CLAN, cx));
+                assert!(!store.check(TEST_CLAN, None, PERMISSION_MANAGE_CLAN, cx));
+                assert!(store.loading_clans.is_empty());
+                assert!(store.catalog.contains_key(PERMISSION_MANAGE_CLAN));
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn overridden_slug_without_channel_is_denied_for_clan_owner(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            let session = Session {
+                user_id: TEST_OWNER.get().to_string(),
+                ..Default::default()
+            };
+            let store = init_stores(AuthState::Authenticated(session), cx);
+            ClanList::global(cx).update(cx, |clans, cx| clans.update_clans(vec![owned_clan()], cx));
+
+            store.update(cx, |store, cx| {
+                assert!(store.check(TEST_CLAN, None, PERMISSION_CLAN_OWNER, cx));
+                assert!(store.check(TEST_CLAN, None, PERMISSION_MANAGE_CLAN, cx));
+
+                assert!(!store.check(TEST_CLAN, None, PERMISSION_SEND_MESSAGE, cx));
+                assert!(!store.check(TEST_CLAN, None, PERMISSION_DELETE_MESSAGE, cx));
+                assert!(!store.check(TEST_CLAN, None, PERMISSION_MANAGE_THREAD, cx));
+                assert!(!store.check_permission(TEST_CLAN, PERMISSION_SEND_MESSAGE, cx));
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn clan_owner_has_administrator_in_settings_permissions(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            let session = Session {
+                user_id: TEST_OWNER.get().to_string(),
+                ..Default::default()
+            };
+            let store = init_stores(AuthState::Authenticated(session), cx);
+            ClanList::global(cx).update(cx, |clans, cx| clans.update_clans(vec![owned_clan()], cx));
+
+            store.update(cx, |store, cx| {
+                assert!(
+                    store
+                        .clan_settings_permissions(TEST_CLAN, cx)
+                        .has_administrator
+                );
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn administrator_level_grants_settings_administrator(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            let store = init_stores(AuthState::NotAuthenticated, cx);
+            store.update(cx, |store, cx| {
+                store.catalog.insert(PERMISSION_ADMINISTRATOR.into(), 8);
+                store.catalog.insert(PERMISSION_MANAGE_CLAN.into(), 9);
+                store.max_level_by_clan.insert(TEST_CLAN, 8);
+
+                let perms = store.clan_settings_permissions(TEST_CLAN, cx);
+                assert!(perms.has_administrator);
+                assert!(!perms.has_manage_clan);
+                assert!(!perms.is_clan_owner);
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn channel_scoped_definitions_keeps_only_channel_scope(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            let store = init_stores(AuthState::NotAuthenticated, cx);
+            store.update(cx, |store, _cx| {
+                store.definitions = definitions_from_permission_list(api::PermissionList {
+                    max_level_permission: 0,
+                    permissions: vec![
+                        permission(1, PERMISSION_MANAGE_CLAN, 9, 1),
+                        permission(2, PERMISSION_SEND_MESSAGE, 1, PERMISSION_SCOPE_CHANNEL),
+                        permission(3, PERMISSION_DELETE_MESSAGE, 2, PERMISSION_SCOPE_CHANNEL),
+                        permission(4, PERMISSION_ADMINISTRATOR, 10, 0),
+                        permission(5, "", 3, PERMISSION_SCOPE_CHANNEL),
+                    ],
+                });
+
+                let slugs: Vec<&str> = store
+                    .channel_scoped_definitions()
+                    .map(|definition| definition.slug.as_str())
+                    .collect();
+                assert_eq!(
+                    slugs,
+                    vec![PERMISSION_SEND_MESSAGE, PERMISSION_DELETE_MESSAGE]
+                );
+                assert_eq!(store.permission_definitions().len(), 4);
+            });
+        });
+    }
+
+    #[test]
+    fn definitions_carry_scope_from_dto() {
+        let definitions = definitions_from_permission_list(api::PermissionList {
+            max_level_permission: 0,
+            permissions: vec![permission(
+                7,
+                PERMISSION_SEND_MESSAGE,
+                1,
+                PERMISSION_SCOPE_CHANNEL,
+            )],
+        });
+        assert_eq!(definitions.len(), 1);
+        assert_eq!(definitions[0].scope, PERMISSION_SCOPE_CHANNEL);
+        assert_eq!(definitions[0].level, 1);
+        assert_eq!(definitions[0].id, 7);
     }
 }

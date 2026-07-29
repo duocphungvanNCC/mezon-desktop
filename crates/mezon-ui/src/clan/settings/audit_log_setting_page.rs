@@ -795,7 +795,7 @@ impl AuditLogSettingPage {
                 .child(
                     div()
                         .text_sm()
-                        .text_color(theme.status_dnd)
+                        .text_color(theme.danger_text)
                         .text_center()
                         .child(mezon_i18n::t(locale, "auditLog.fetchFailed")),
                 )

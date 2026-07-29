@@ -31,6 +31,8 @@ const LEAVE_RED_HOVER: u32 = 0xa12829;
 const SPEAKING_BLUE: u32 = 0x1f8cf9;
 const SPEAKING_BORDER_WIDTH: f32 = 2.5;
 
+const PARTICIPANT_TILE_BG: u32 = 0x5c5e66;
+
 fn speaking_border_color(cell: &VideoCell) -> Hsla {
     if cell.speaking && !cell.muted && !cell.is_screen {
         gpui::rgb(SPEAKING_BLUE).into()
@@ -49,6 +51,7 @@ pub fn render_voice_channel(
     output_device_id: Option<String>,
     camera_device_id: Option<String>,
     strip_scroll: &ScrollHandle,
+    strip_width: Pixels,
     grid_page: usize,
     grid_size: gpui::Size<Pixels>,
     show_members: bool,
@@ -76,6 +79,7 @@ pub fn render_voice_channel(
             connecting,
             &chat,
             strip_scroll,
+            strip_width,
             grid_page,
             grid_size,
             show_members,
@@ -602,7 +606,7 @@ fn render_pre_join(
                 .child(subtitle.to_string()),
         )
         .when_some(error, |this, message| {
-            this.child(div().text_color(theme.status_dnd).text_sm().child(message))
+            this.child(div().text_color(theme.danger_text).text_sm().child(message))
         })
         .child(join);
 
@@ -790,13 +794,12 @@ fn update_pages(current: &[String], next: &[String], max_items: usize) -> Vec<St
     updated
 }
 
-const AGENT_AVATAR_PATH: &str = "0/0/1779484387973271600/1737423959329_undefined173740153013517374015248704886401586613166392.png";
+const AGENT_AVATAR_URL: &str = "https://cdn.mezon.vn/0/0/1779484387973271600/1737423959329_undefined173740153013517374015248704886401586613166392.png";
 
 fn resolve_cell_identity(cx: &App, clan_id: ClanId, p: &VoiceParticipant) -> (String, String) {
     let (name, avatar_url) = resolve_voice_identity(cx, clan_id, &p.identity, &p.name);
     if p.is_agent {
-        let source = crate::util::imgproxy::cdn_asset_url(cx, AGENT_AVATAR_PATH);
-        (name, crate::util::imgproxy::avatar_url(cx, &source))
+        (name, crate::util::imgproxy::avatar_url(cx, AGENT_AVATAR_URL))
     } else {
         (name, avatar_url)
     }
@@ -829,7 +832,8 @@ fn resolve_voice_identity(
 }
 
 fn resolve_voice_member(cx: &App, clan_id: ClanId, m: &VoiceMember) -> (String, String) {
-    crate::util::voice_member::resolve_display(cx, Some(clan_id), m)
+    let resolved = crate::util::voice_member::resolve_display(cx, Some(clan_id), m);
+    (resolved.name, resolved.avatar_src)
 }
 
 fn raised_hands_overlay(cx: &App, clan_id: ClanId, store: &VoiceStore) -> Option<AnyElement> {
@@ -984,6 +988,7 @@ fn render_in_call(
     connecting: bool,
     chat: &Entity<ChatLayout>,
     strip_scroll: &ScrollHandle,
+    strip_width: Pixels,
     grid_page: usize,
     grid_size: gpui::Size<Pixels>,
     show_members: bool,
@@ -1034,7 +1039,11 @@ fn render_in_call(
                     target.into_iter().filter(|id| id != fid).collect()
                 };
                 let bounds = strip_scroll.bounds();
-                let viewport_w = f32::from(bounds.size.width);
+                let viewport_w = f32::from(if strip_width > px(0.) {
+                    strip_width
+                } else {
+                    bounds.size.width
+                });
                 let aside_h = carousel_aside_height(f32::from(bounds.size.height));
                 let max_items = if viewport_w > 0. {
                     carousel_max_visible_tiles(viewport_w, aside_h)
@@ -1073,6 +1082,7 @@ fn render_in_call(
             chat,
             show_members,
             strip_scroll,
+            strip_width,
             window,
             cx,
         ),
@@ -1347,7 +1357,7 @@ fn mic_permission_modal(theme: &Theme, locale: &str, voice: &Entity<VoiceStore>)
                         .child(
                             Icon::new(IconName::VoiceMicDisabledIcon)
                                 .size(px(26.))
-                                .text_color(theme.status_dnd),
+                                .text_color(theme.danger_text),
                         ),
                 )
                 .child(
@@ -1426,7 +1436,7 @@ fn kick_confirm_modal(
         SharedString::from(mezon_i18n::t(locale, "channelVoice.kickModal.kick").to_string());
 
     let cancel_hover = darken(theme.bg_tertiary, 0.03);
-    let kick_hover = darken(theme.status_dnd, 0.12);
+    let kick_hover = darken(theme.danger_text, 0.12);
     let voice_cancel = voice.clone();
     let voice_confirm = voice.clone();
 
@@ -1463,7 +1473,7 @@ fn kick_confirm_modal(
                         .child(
                             Icon::new(IconName::CloseIcon)
                                 .size(px(26.))
-                                .text_color(theme.status_dnd),
+                                .text_color(theme.danger_text),
                         ),
                 )
                 .child(
@@ -1513,7 +1523,7 @@ fn kick_confirm_modal(
                                 .py_2()
                                 .rounded_md()
                                 .cursor_pointer()
-                                .bg(theme.status_dnd)
+                                .bg(theme.danger_text)
                                 .text_color(gpui::rgb(0xffffff))
                                 .hover(move |s| s.bg(kick_hover))
                                 .on_click(move |_, _, cx| {
@@ -1623,6 +1633,22 @@ fn render_grid(
     let page_offset = page * max_tiles;
     let paginated = measured && total_pages > 1;
 
+    let tile_h = if measured && rows > 0 {
+        let gap = 8.0_f32; // gap_2 between rows
+        let usable = f32::from(grid_size.height)
+            - gap * 2.0 // p_2 top + bottom
+            - gap * rows.saturating_sub(1) as f32
+            - if paginated { 16.0 } else { 0.0 };
+        (usable / rows as f32).max(0.0)
+    } else {
+        0.0
+    };
+    let avatar_size = if tile_h > 0.0 {
+        px((tile_h * 0.33).clamp(44.0, 80.0))
+    } else {
+        px(80.0)
+    };
+
     let mut grid = div()
         .relative()
         .flex()
@@ -1639,7 +1665,8 @@ fn render_grid(
             let index = page_offset + r * cols + c;
             let mut cell_el = div().flex_1().min_w_0().min_h_0().w_full();
             if index < count {
-                cell_el = cell_el.child(video_tile(theme, locale, store, voice, &cells[index]));
+                cell_el =
+                    cell_el.child(video_tile(theme, locale, store, voice, &cells[index], avatar_size));
             }
             row = row.child(cell_el);
         }
@@ -1848,6 +1875,7 @@ fn render_focus_layout(
     chat: &Entity<ChatLayout>,
     show_members: bool,
     strip_scroll: &ScrollHandle,
+    strip_width: Pixels,
     window: &mut Window,
     cx: &mut App,
 ) -> AnyElement {
@@ -1934,8 +1962,11 @@ fn render_focus_layout(
         };
 
         let strip_bounds = strip_scroll.bounds();
-        let viewport = strip_bounds.size.width;
-        let mut viewport_w = f32::from(viewport);
+        let mut viewport_w = f32::from(if strip_width > px(0.) {
+            strip_width
+        } else {
+            strip_bounds.size.width
+        });
         if viewport_w <= 0. {
             viewport_w = (f32::from(window.viewport_size().width) * 0.55).max(400.);
         }
@@ -1945,6 +1976,7 @@ fn render_focus_layout(
         let aside_h = carousel_aside_height(strip_h);
         let tile_w = carousel_tile_width(aside_h);
         let tile_step = tile_w + gap;
+        let content_w = carousel_content_width(total, tile_w, gap);
         let overflows = carousel_overflows(viewport_w, total, aside_h, gap);
         let avatar_size = px((aside_h * 0.6).clamp(24., 80.));
         let (start, end) = if overflows {
@@ -2002,6 +2034,7 @@ fn render_focus_layout(
             .flex()
             .flex_row()
             .flex_none()
+            .w(px(content_w))
             .h(px(aside_h))
             .gap(px(gap))
             .when(!overflows, |this| this.justify_center())
@@ -2009,37 +2042,37 @@ fn render_focus_layout(
             .children(strip_tiles)
             .children(trail_spacer);
 
-        let carousel: AnyElement = if overflows {
-            div()
-                .flex_1()
-                .min_h_0()
-                .min_w_0()
-                .w_full()
-                .flex()
-                .flex_col()
-                .child(
-                    div()
-                        .id("voice-carousel-scroll")
-                        .w_full()
-                        .h(px(aside_h))
-                        .overflow_x_scroll()
-                        .track_scroll(strip_scroll)
-                        .child(tiles_row),
+        let measure_chat = chat.clone();
+        let carousel = div()
+            .flex_1()
+            .min_h_0()
+            .min_w_0()
+            .w_full()
+            .relative()
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .id("voice-carousel-scroll")
+                    .w_full()
+                    .h(px(aside_h))
+                    .overflow_x_scroll()
+                    .track_scroll(strip_scroll)
+                    .child(tiles_row),
+            )
+            .children(scrollbar_gap)
+            .child(
+                canvas(
+                    move |bounds, _, cx| {
+                        measure_chat.update(cx, |layout, cx| {
+                            layout.record_voice_strip_width(bounds.size.width, cx)
+                        })
+                    },
+                    |_, _, _, _| {},
                 )
-                .children(scrollbar_gap)
-                .into_any_element()
-        } else {
-            div()
-                .flex_1()
-                .min_h_0()
-                .min_w_0()
-                .w_full()
-                .flex()
-                .flex_row()
-                .justify_center()
-                .child(tiles_row)
-                .into_any_element()
-        };
+                .absolute()
+                .size_full(),
+            );
 
         let strip_max_h = if overflows {
             CAROUSEL_MAX_ROW_HEIGHT + CAROUSEL_SCROLLBAR_GAP_MIN + CAROUSEL_SCROLLBAR_RESERVE
@@ -2163,7 +2196,7 @@ fn focus_main_tile(
     cell: &VideoCell,
 ) -> AnyElement {
     let voice = voice.clone();
-    let inner = tile_inner(theme, store, cell, px(120.));
+    let inner = tile_inner(theme, store, cell, px(80.));
 
     div()
         .id(SharedString::from(format!("focus-main-{}", cell.id)))
@@ -2176,7 +2209,7 @@ fn focus_main_tile(
         .justify_center()
         .rounded_lg()
         .overflow_hidden()
-        .bg(theme.bg_secondary)
+        .bg(gpui::rgb(PARTICIPANT_TILE_BG))
         .cursor_pointer()
         .child(inner)
         .child(tile_metadata(locale, cell))
@@ -2216,7 +2249,7 @@ fn strip_tile(
         .w(px(tile_width))
         .rounded_lg()
         .overflow_hidden()
-        .bg(theme.bg_secondary)
+        .bg(gpui::rgb(PARTICIPANT_TILE_BG))
         .cursor_pointer()
         .border(px(SPEAKING_BORDER_WIDTH))
         .border_color(border_color)
@@ -2239,10 +2272,11 @@ fn video_tile(
     store: &VoiceStore,
     voice: &Entity<VoiceStore>,
     cell: &VideoCell,
+    avatar_size: Pixels,
 ) -> AnyElement {
     let voice = voice.clone();
     let id = cell.id.clone();
-    let inner = tile_inner(theme, store, cell, px(80.));
+    let inner = tile_inner(theme, store, cell, avatar_size);
     let border_color = speaking_border_color(cell);
 
     div()
@@ -2254,7 +2288,7 @@ fn video_tile(
         .size_full()
         .rounded_lg()
         .overflow_hidden()
-        .bg(theme.bg_secondary)
+        .bg(gpui::rgb(PARTICIPANT_TILE_BG))
         .cursor_pointer()
         .border(px(SPEAKING_BORDER_WIDTH))
         .border_color(border_color)
@@ -2335,7 +2369,6 @@ fn tile_metadata(locale: &str, cell: &VideoCell) -> AnyElement {
         .flex()
         .flex_row()
         .items_center()
-        .justify_between()
         .gap_1()
         .child(
             div()
@@ -2369,8 +2402,8 @@ fn tile_metadata(locale: &str, cell: &VideoCell) -> AnyElement {
                         .relative()
                         .min_w_0()
                         .py(px(2.))
-                        .text_xs()
-                        .line_height(px(12.))
+                        .text_base()
+                        .line_height(px(16.))
                         .text_color(gpui::rgb(0xffffff))
                         .child(div().invisible().whitespace_nowrap().child(label.clone()))
                         .child(
@@ -2383,6 +2416,7 @@ fn tile_metadata(locale: &str, cell: &VideoCell) -> AnyElement {
                         ),
                 ),
         )
+        .child(div().flex_1())
         .child(
             div()
                 .flex_none()

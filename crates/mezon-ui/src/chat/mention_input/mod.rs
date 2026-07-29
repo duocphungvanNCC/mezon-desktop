@@ -1474,7 +1474,7 @@ impl MentionInput {
             cx.subscribe(
                 &ClanMembersStore::global(cx),
                 |this, _, event: &ClanMembersEvent, cx| {
-                    let ClanMembersEvent::Changed { clan_id } = event;
+                    let clan_id = &event.clan_id();
                     if mention_role_clan(cx) == Some(*clan_id) {
                         this.invalidate_pool(Sigil::At, cx);
                     }

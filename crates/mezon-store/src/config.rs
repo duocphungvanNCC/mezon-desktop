@@ -160,7 +160,7 @@ impl AppConfig {
             sentry_dsn: String::new(),
             anonymous_user_id: "1767478432163172999".into(),
             max_length_name_allowed: 64,
-            update_url: "https://cdn.komu.vn/release/".into(),
+            update_url: "https://cdn.komu.vn/desktop/release/latest/".into(),
         }
     }
 

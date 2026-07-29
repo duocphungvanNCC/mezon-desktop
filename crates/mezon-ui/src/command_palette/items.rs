@@ -515,7 +515,7 @@ pub fn render_palette_row(
                     .items_center()
                     .justify_center()
                     .rounded_full()
-                    .bg(theme.status_dnd)
+                    .bg(theme.mention_badge)
                     .text_size(px(10.))
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(theme.tokens.text_theme_message)

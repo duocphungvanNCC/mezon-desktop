@@ -57,6 +57,8 @@ pub enum RealtimeEvent {
     Unmute(realtime::UnmuteEvent),
     StreamingJoined(realtime::StreamingJoinedEvent),
     StreamingLeaved(realtime::StreamingLeavedEvent),
+    StreamingStarted(realtime::StreamingStartedEvent),
+    StreamingEnded(realtime::StreamingEndedEvent),
     VoiceStarted(realtime::VoiceStartedEvent),
     VoiceEnded(realtime::VoiceEndedEvent),
     VoiceJoined(realtime::VoiceJoinedEvent),
@@ -109,6 +111,8 @@ impl TryFrom<realtime::envelope::Message> for RealtimeEvent {
             realtime::envelope::Message::UnmuteEvent(m) => Ok(Self::Unmute(m)),
             realtime::envelope::Message::StreamingJoinedEvent(m) => Ok(Self::StreamingJoined(m)),
             realtime::envelope::Message::StreamingLeavedEvent(m) => Ok(Self::StreamingLeaved(m)),
+            realtime::envelope::Message::StreamingStartedEvent(m) => Ok(Self::StreamingStarted(m)),
+            realtime::envelope::Message::StreamingEndedEvent(m) => Ok(Self::StreamingEnded(m)),
             realtime::envelope::Message::VoiceStartedEvent(m) => Ok(Self::VoiceStarted(m)),
             realtime::envelope::Message::VoiceEndedEvent(m) => Ok(Self::VoiceEnded(m)),
             realtime::envelope::Message::VoiceJoinedEvent(m) => Ok(Self::VoiceJoined(m)),
@@ -318,7 +322,14 @@ impl MezonTransport {
                         Some(executor) => {
                             let _ = executor.sender.send((code, message));
                         }
-                        None => dispatch_realtime_push(cid, &message, on_event.as_ref()),
+                        None => {
+                            tracing::debug!(
+                                target: "cid_match",
+                                "no pending request for cid={cid} code={code} len={}; routing as push",
+                                message.len()
+                            );
+                            dispatch_realtime_push(cid, &message, on_event.as_ref())
+                        }
                     }
                 } else {
                     dispatch_realtime_push(cid, &message, on_event.as_ref());
@@ -390,7 +401,7 @@ impl MezonTransport {
             .await
             .map_err(|_| {
                 self.pending_requests.lock().remove(&cid);
-                anyhow::anyhow!("Request timed out")
+                anyhow::anyhow!("Request timed out (cid={cid}, {}ms)", timeout.as_millis())
             })?
             .map_err(|_| anyhow::anyhow!("Response channel closed"))?;
         Ok(result)
@@ -509,6 +520,8 @@ pub struct ApiChannelDesc {
     pub creator_id: i64,
     #[serde(default)]
     pub clan_name: String,
+    #[serde(default)]
+    pub channel_avatar: String,
 }
 
 /// A direct-message / group conversation descriptor (clan_id = 0 namespace). Unlike
@@ -2970,6 +2983,7 @@ impl MezonTransport {
             badge_count: channel.count_mess_unread,
             creator_id: channel.creator_id,
             clan_name: channel.clan_name,
+            channel_avatar: channel.channel_avatar,
         }
     }
 
@@ -4106,7 +4120,8 @@ impl MezonTransport {
         let parsed_clan_id: i64 = clan_id;
         let parsed_channel_id: i64 = channel_id;
         tracing::debug!(
-            "send_channel_message: clan_id={} channel_id={} is_public={} content_len={} attachments={}",
+            "send_channel_message: cid={} clan_id={} channel_id={} is_public={} content_len={} attachments={}",
+            cid,
             parsed_clan_id,
             parsed_channel_id,
             is_public,
@@ -4716,16 +4731,22 @@ impl MezonTransport {
         Ok(api::ListUserOnlineResponse::decode(response.as_slice())?)
     }
 
-    /// List streaming channel users.
+    /// List streaming channel users (clan-wide presence).
     pub async fn list_streaming_channel_users(
         &self,
         clan_id: i64,
         channel_id: i64,
+        channel_type: i32,
+        state: i32,
+        limit: i32,
     ) -> Result<api::StreamingChannelUserList> {
         let cid = self.generate_cid();
         let body = api::ListChannelUsersRequest {
             clan_id,
             channel_id,
+            channel_type,
+            limit,
+            state,
             ..Default::default()
         }
         .encode_to_vec();
@@ -4882,12 +4903,13 @@ impl MezonTransport {
         &self,
         role_id: i64,
         channel_id: i64,
+        user_id: i64,
     ) -> Result<api::PermissionRoleChannelListEventResponse> {
         let cid = self.generate_cid();
         let body = api::PermissionRoleChannelListEventRequest {
             role_id,
             channel_id,
-            ..Default::default()
+            user_id,
         }
         .encode_to_vec();
         let (code, response) = self
@@ -5813,13 +5835,16 @@ impl MezonTransport {
         clan_id: i64,
         channel_id: i64,
         channel_private: i32,
+        user_ids: Vec<i64>,
+        role_ids: Vec<i64>,
     ) -> Result<()> {
         let cid = self.generate_cid();
         let body = api::ChangeChannelPrivateRequest {
             clan_id,
             channel_id,
             channel_private,
-            ..Default::default()
+            user_ids,
+            role_ids,
         }
         .encode_to_vec();
         let (code, _) = self
@@ -6500,11 +6525,21 @@ impl MezonTransport {
     }
 
     /// Set role channel permission.
-    pub async fn set_role_channel_permission(&self, role_id: i64, channel_id: i64) -> Result<()> {
+    pub async fn set_role_channel_permission(
+        &self,
+        role_id: i64,
+        channel_id: i64,
+        user_id: i64,
+        max_permission_id: i64,
+        permission_update: Vec<api::PermissionUpdate>,
+    ) -> Result<()> {
         let cid = self.generate_cid();
         let body = api::UpdateRoleChannelRequest {
             role_id,
+            permission_update,
+            max_permission_id,
             channel_id,
+            user_id,
             ..Default::default()
         }
         .encode_to_vec();
@@ -7273,10 +7308,17 @@ impl MezonTransport {
     }
 
     /// Delete role channel desc.
-    pub async fn delete_role_channel_desc(&self, role_id: i64) -> Result<()> {
+    pub async fn delete_role_channel_desc(
+        &self,
+        role_id: i64,
+        channel_id: i64,
+        clan_id: i64,
+    ) -> Result<()> {
         let cid = self.generate_cid();
         let body = api::DeleteRoleRequest {
             role_id,
+            channel_id,
+            clan_id,
             ..Default::default()
         }
         .encode_to_vec();

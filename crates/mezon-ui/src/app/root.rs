@@ -1,6 +1,7 @@
 use crate::app::title_bar::TitleBar;
 use crate::app::window_controls;
 use crate::auth::login_view::LoginView;
+use crate::chat::channel_settings::ChannelSettingScreen;
 use crate::chat::layout::ChatLayout;
 use crate::clan::settings::{ClanSettingScreen, ClanSettingsPage};
 use crate::components::primitives::Sizable;
@@ -24,6 +25,7 @@ pub struct RootView {
     chat_layout: Entity<ChatLayout>,
     settings_screen: Entity<SettingsScreen>,
     clan_setting_screen: Entity<ClanSettingScreen>,
+    channel_setting_screen: Entity<ChannelSettingScreen>,
     applied_theme: String,
     cached_locale: String,
     image_cache: Entity<LruImageCache>,
@@ -67,6 +69,7 @@ impl RootView {
         cx.observe(&Router::global(cx), |this, _router, cx| {
             this.sync_settings_page(cx);
             this.sync_clan_settings_page(cx);
+            this.sync_channel_settings_tab(cx);
             cx.notify();
         })
         .detach();
@@ -139,6 +142,11 @@ impl RootView {
             }
         });
 
+        let channel_setting_screen = cx.new({
+            let settings = settings.clone();
+            move |cx| ChannelSettingScreen::new(settings.clone(), cx)
+        });
+
         let applied_theme = settings.read(cx).theme.clone();
         let cached_locale = settings.read(cx).language.clone();
         crate::image_cache::start_idle_trim(cx);
@@ -158,6 +166,7 @@ impl RootView {
             chat_layout,
             settings_screen,
             clan_setting_screen,
+            channel_setting_screen,
             applied_theme,
             cached_locale,
             image_cache,
@@ -195,6 +204,25 @@ impl RootView {
             }
         }
     }
+
+    fn sync_channel_settings_tab(&mut self, cx: &mut Context<Self>) {
+        match Router::global(cx).read(cx).route() {
+            Route::ChannelSettings {
+                clan_id,
+                channel_id,
+                tab,
+            } => {
+                self.channel_setting_screen.update(cx, |screen, cx| {
+                    screen.set_target(clan_id, channel_id, tab, cx);
+                });
+            }
+            _ => {
+                self.channel_setting_screen.update(cx, |screen, cx| {
+                    screen.release_active_tab(cx);
+                });
+            }
+        }
+    }
 }
 
 impl Render for RootView {
@@ -228,6 +256,9 @@ impl Render for RootView {
                     | Route::SettingsVoice
                     | Route::SettingsAdvanced => uncached_fill(self.settings_screen.clone()),
                     Route::ClanSettings { .. } => cached_fill(self.clan_setting_screen.clone()),
+                    Route::ChannelSettings { .. } => {
+                        uncached_fill(self.channel_setting_screen.clone())
+                    }
                     Route::NotFound { .. } => render_not_found(theme, locale),
                     Route::AddFriend { .. } => render_placeholder(theme, "Add Friend"),
                     Route::Invite { .. } => render_placeholder(theme, "Accept Invite"),

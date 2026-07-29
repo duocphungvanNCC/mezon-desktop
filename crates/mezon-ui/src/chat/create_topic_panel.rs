@@ -67,8 +67,10 @@ impl TopicPanel {
                 }
                 let reply_id = store.read(cx).reply_target().map(|d| d.message_ref_id);
                 if reply_id.is_some() && reply_id != this.reply_target_id {
-                    this.mention_input
-                        .update(cx, |input, cx| input.focus_input(window, cx));
+                    let input = this.mention_input.clone();
+                    window.defer(cx, move |window, cx| {
+                        input.update(cx, |input, cx| input.focus_input(window, cx));
+                    });
                 }
                 this.reply_target_id = reply_id;
             },
@@ -230,7 +232,7 @@ impl Render for TopicPanel {
                     div()
                         .text_sm()
                         .font_weight(FontWeight::MEDIUM)
-                        .text_color(theme.status_dnd)
+                        .text_color(theme.danger_text)
                         .child(err),
                 )
             })

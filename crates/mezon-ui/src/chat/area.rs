@@ -1,10 +1,14 @@
 use std::path::PathBuf;
+use std::time::Duration;
 
 use gpui::{
     AnyView, App, Context, Entity, ExternalPaths, FontWeight, SharedString, StyleRefinement,
-    Subscription, Window, div, prelude::*, px, rgb, rgba,
+    Subscription, Task, Window, div, prelude::*, px, rgb, rgba,
 };
-use mezon_store::{ChannelId, ClanId, InVoiceInfo, MessagesEvent, MessagesStore, Settings};
+use mezon_store::{
+    ChannelId, ChannelPermissionsStore, ClanId, InVoiceInfo, MessagesEvent, MessagesStore,
+    PERMISSION_SEND_MESSAGE, Settings,
+};
 use ui::PopoverMenuHandle;
 
 use crate::chat::CanvasPopoverPanel;
@@ -37,11 +41,20 @@ pub struct ChatArea {
     media_channel_panel: Option<Entity<MediaChannelPanel>>,
     media_channel_context: Option<(ClanId, ChannelId)>,
     replying_to: Option<ReplyTarget>,
+    send_permission_key: Option<(ClanId, ChannelId)>,
+    send_permission_live: Option<bool>,
+    can_send_message: Option<bool>,
+    no_permission_label: Option<(SharedString, SharedString)>,
     _submit_sub: Option<Subscription>,
     _reply_sub: Option<Subscription>,
+    _send_permission_sub: Subscription,
+    _send_permission_channel_sub: Subscription,
+    _send_permission_debounce: Option<Task<()>>,
     drop_title_cache: Option<(SharedString, SharedString, SharedString)>,
     drop_body_cache: Option<(SharedString, SharedString)>,
 }
+
+const SEND_PERMISSION_DEBOUNCE: Duration = Duration::from_millis(500);
 
 impl ChatArea {
     pub fn new(settings: Entity<Settings>, cx: &mut Context<crate::ChatLayout>) -> Self {
@@ -53,6 +66,20 @@ impl ChatArea {
         let header = cx.new(|cx| ChatHeader::new(layout, &settings, cx));
         let typing = cx.new(|cx| ChannelTyping::new(&settings, cx));
         let member_avatar_cache = crate::image_cache::shared_avatar_cache(cx);
+        let send_permission_sub = cx.subscribe(
+            &ChannelPermissionsStore::global(cx),
+            |this: &mut crate::ChatLayout, _, _event: &mezon_store::ChannelPermissionsEvent, cx| {
+                this.chat_area.sync_send_permission(cx);
+            },
+        );
+        let send_permission_channel_sub = cx.subscribe(
+            &MessagesStore::global(cx),
+            |this: &mut crate::ChatLayout, _, event: &mezon_store::MessagesEvent, cx| {
+                if matches!(event, mezon_store::MessagesEvent::Reset { .. }) {
+                    this.chat_area.sync_send_permission(cx);
+                }
+            },
+        );
         Self {
             timeline,
             mention_input: None,
@@ -66,11 +93,65 @@ impl ChatArea {
             media_channel_panel: None,
             media_channel_context: None,
             replying_to: None,
+            send_permission_key: None,
+            send_permission_live: None,
+            can_send_message: None,
+            no_permission_label: None,
             _submit_sub: None,
             _reply_sub: None,
+            _send_permission_sub: send_permission_sub,
+            _send_permission_channel_sub: send_permission_channel_sub,
+            _send_permission_debounce: None,
             drop_title_cache: None,
             drop_body_cache: None,
         }
+    }
+
+    pub fn sync_send_permission(&mut self, cx: &mut Context<crate::ChatLayout>) {
+        let key = {
+            let messages = MessagesStore::global(cx).read(cx);
+            if messages.is_dm() {
+                None
+            } else {
+                messages
+                    .active_clan_id()
+                    .filter(|clan_id| !clan_id.is_zero())
+                    .zip(messages.active_channel_id())
+            }
+        };
+        let live = key.and_then(|(clan_id, channel_id)| {
+            ChannelPermissionsStore::try_global(cx).and_then(|store| {
+                store
+                    .read(cx)
+                    .permission_value(PERMISSION_SEND_MESSAGE, clan_id, channel_id)
+            })
+        });
+        if key == self.send_permission_key && live == self.send_permission_live {
+            return;
+        }
+        let switched = key != self.send_permission_key;
+        self.send_permission_key = key;
+        self.send_permission_live = live;
+        if switched {
+            self._send_permission_debounce = None;
+            if self.can_send_message != live {
+                self.can_send_message = live;
+                cx.notify();
+            }
+            return;
+        }
+        self._send_permission_debounce = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(SEND_PERMISSION_DEBOUNCE)
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                let live = this.chat_area.send_permission_live;
+                if this.chat_area.can_send_message != live {
+                    this.chat_area.can_send_message = live;
+                    cx.notify();
+                }
+            });
+        }));
     }
 
     pub fn bind_channel_members(&mut self, cx: &mut Context<crate::ChatLayout>) {
@@ -164,7 +245,9 @@ impl ChatArea {
                         if replying_to.is_some()
                             && let Some(input) = this.chat_area.mention_input.clone()
                         {
-                            input.update(cx, |input, cx| input.focus_input(window, cx));
+                            window.defer(cx, move |window, cx| {
+                                input.update(cx, |input, cx| input.focus_input(window, cx));
+                            });
                         }
                         this.chat_area.replying_to = replying_to;
                         cx.notify();
@@ -213,6 +296,7 @@ impl ChatArea {
                 search_expanded,
                 show_search_options,
                 search_input,
+                false,
                 Some(locale),
                 cx,
             );
@@ -298,6 +382,7 @@ impl ChatArea {
         show_results_panel: bool,
         message_search_panel: Option<Entity<MessageSearchPanel>>,
         app_channel_bar: Option<ChannelAppBarTarget>,
+        stream_sidebar: bool,
         cx: &mut Context<crate::ChatLayout>,
     ) -> gpui::AnyElement {
         let (input_bar, mention_input) = if media_channel_view {
@@ -334,6 +419,7 @@ impl ChatArea {
                 search_expanded,
                 show_search_options,
                 search_input,
+                stream_sidebar,
                 Some(locale),
                 cx,
             );
@@ -459,6 +545,38 @@ impl ChatArea {
             )
         };
 
+        let send_denied = !media_channel_view && self.can_send_message == Some(false);
+        let no_permission_notice = if send_denied {
+            let label = match &self.no_permission_label {
+                Some((cached_locale, label)) if cached_locale.as_ref() == locale => label.clone(),
+                _ => {
+                    let label: SharedString =
+                        mezon_i18n::t(locale, "common.noPermissionToSendMessage").into();
+                    self.no_permission_label =
+                        Some((SharedString::from(locale.to_string()), label.clone()));
+                    label
+                }
+            };
+            let theme = cx.theme();
+            div()
+                .flex_shrink_0()
+                .h(px(44.))
+                .ml(px(16.))
+                .mr(px(14.))
+                .mb(px(16.))
+                .py(px(8.))
+                .pl(px(8.))
+                .rounded(px(4.))
+                .opacity(0.8)
+                .bg(theme.tokens.bg_tertiary)
+                .text_color(theme.tokens.text_theme_primary)
+                .overflow_hidden()
+                .child(label)
+                .into_any_element()
+        } else {
+            div().into_any_element()
+        };
+
         let message_column = div()
             .relative()
             .group("chat-drop-zone")
@@ -495,25 +613,28 @@ impl ChatArea {
                             .cached(StyleRefinement::default().size_full()),
                     ),
                 )
-                .when_some(app_channel_bar.as_ref(), |col, target| {
-                    col.child(render_channel_app_bar(
-                        locale,
-                        target.clone(),
-                        cx.theme(),
-                        cx,
-                    ))
+                .when(send_denied, |col| col.child(no_permission_notice))
+                .when(!send_denied, |col| {
+                    col.when_some(app_channel_bar.as_ref(), |col, target| {
+                        col.child(render_channel_app_bar(
+                            locale,
+                            target.clone(),
+                            cx.theme(),
+                            cx,
+                        ))
+                    })
+                    .when(app_channel_bar.is_none(), |col| {
+                        col.when_some(input_bar.clone(), |col, input_bar| col.child(input_bar))
+                    })
+                    .child(
+                        AnyView::from(self.typing.clone()).cached(
+                            StyleRefinement::default()
+                                .w_full()
+                                .h(px(16.))
+                                .flex_shrink_0(),
+                        ),
+                    )
                 })
-                .when(app_channel_bar.is_none(), |col| {
-                    col.when_some(input_bar.clone(), |col, input_bar| col.child(input_bar))
-                })
-                .child(
-                    AnyView::from(self.typing.clone()).cached(
-                        StyleRefinement::default()
-                            .w_full()
-                            .h(px(16.))
-                            .flex_shrink_0(),
-                    ),
-                )
                 .when_some(drop_overlay, |col, overlay| col.child(overlay))
             });
 

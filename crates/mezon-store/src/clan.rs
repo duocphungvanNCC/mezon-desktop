@@ -167,6 +167,22 @@ impl ClanOverviewDraft {
     }
 }
 
+fn carry_live_badges(previous: &[Clan], next: &mut [Clan]) {
+    if previous.is_empty() {
+        return;
+    }
+    let live: std::collections::HashMap<ClanId, (u32, bool)> = previous
+        .iter()
+        .map(|clan| (clan.id, (clan.badge_count, clan.has_unread)))
+        .collect();
+    for clan in next {
+        if let Some(&(badge_count, has_unread)) = live.get(&clan.id) {
+            clan.badge_count = badge_count;
+            clan.has_unread = has_unread;
+        }
+    }
+}
+
 fn proto_channel_id(id: Option<ChannelId>) -> i64 {
     id.map(|id| id.get())
         .filter(|id| *id != 0)
@@ -222,6 +238,7 @@ pub struct ClanList {
     pub active_clan_id: Option<ClanId>,
     api: Arc<AppApi>,
     loading: bool,
+    badges_loaded: bool,
     reset_generation: u64,
     _connection_watch: Task<()>,
 }
@@ -253,6 +270,7 @@ impl ClanList {
         self.reset_generation = self.reset_generation.wrapping_add(1);
         self.clans.clear();
         self.loading = false;
+        self.badges_loaded = false;
         if self.active_clan_id.take().is_some() {
             cx.emit(ClanEvent::ActiveClanChanged(None));
         }
@@ -267,6 +285,7 @@ impl ClanList {
             active_clan_id: None,
             api,
             loading: false,
+            badges_loaded: false,
             reset_generation: 0,
             _connection_watch: connection_watch,
         }
@@ -322,12 +341,18 @@ impl ClanList {
         self.loading = true;
         let api = self.api.clone();
         let generation = self.reset_generation;
+        let fetch_badges = !self.badges_loaded;
         cx.spawn(async move |this, cx| {
             const MAX_RETRIES: u32 = 3;
             let mut attempt = 0u32;
             let (clans, badges_result) = loop {
-                let (clans_result, badges_result) =
-                    tokio::join!(api.list_clan_descs(), api.list_clan_badge_count());
+                let (clans_result, badges_result) = if fetch_badges {
+                    let (clans, badges) =
+                        tokio::join!(api.list_clan_descs(), api.list_clan_badge_count());
+                    (clans, Some(badges))
+                } else {
+                    (api.list_clan_descs().await, None)
+                };
                 match clans_result {
                     Ok(c) => break (c, badges_result),
                     Err(e) if attempt < MAX_RETRIES => {
@@ -348,14 +373,20 @@ impl ClanList {
                     }
                 }
             };
-            let badge_map: std::collections::HashMap<String, (i32, bool)> = badges_result
-                .unwrap_or_else(|e| {
+            let mut badges_fetched = false;
+            let badge_map: std::collections::HashMap<String, (i32, bool)> = match badges_result {
+                Some(Ok(list)) => {
+                    badges_fetched = true;
+                    list.into_iter()
+                        .map(|(id, badge, has_unread)| (id, (badge, has_unread)))
+                        .collect()
+                }
+                Some(Err(e)) => {
                     tracing::warn!("clan badge count fetch failed: {e}");
-                    Vec::new()
-                })
-                .into_iter()
-                .map(|(id, badge, has_unread)| (id, (badge, has_unread)))
-                .collect();
+                    std::collections::HashMap::new()
+                }
+                None => std::collections::HashMap::new(),
+            };
             let mapped: Vec<Clan> = clans
                 .into_iter()
                 .map(|c| {
@@ -372,6 +403,7 @@ impl ClanList {
                     return;
                 }
                 this.loading = false;
+                this.badges_loaded = this.badges_loaded || badges_fetched;
                 this.update_clans(mapped, cx);
                 if let Some(clan_id) = this.active_clan_id {
                     this.fire_join_clan_chat(clan_id, cx);
@@ -424,6 +456,11 @@ impl ClanList {
             }
             RealtimeEvent::UserClanRemoved(e) => {
                 let id = ClanId(e.clan_id);
+                let me = crate::badge::BadgeService::try_global(cx)
+                    .and_then(|badges| badges.read(cx).current_user_id(cx));
+                if !crate::event_targets_user(&e.user_ids, me) {
+                    return;
+                }
                 let before = self.clans.len();
                 self.clans.retain(|c| c.id != id);
                 if self.clans.len() != before {
@@ -561,8 +598,9 @@ impl ClanList {
         cx.notify();
     }
 
-    pub fn update_clans(&mut self, clans: Vec<Clan>, cx: &mut Context<Self>) {
+    pub fn update_clans(&mut self, mut clans: Vec<Clan>, cx: &mut Context<Self>) {
         let prev_active = self.active_clan_id;
+        carry_live_badges(&self.clans, &mut clans);
         self.clans = clans;
         let active_missing = self
             .active_clan_id
@@ -1076,6 +1114,38 @@ mod tests {
     }
 
     #[test]
+    fn refetched_clans_keep_live_badges() {
+        let mut previous = clans();
+        previous[0].badge_count = 4;
+        previous[0].has_unread = true;
+        let mut refetched = clans();
+        carry_live_badges(&previous, &mut refetched);
+        assert_eq!(refetched[0].badge_count, 4);
+        assert!(refetched[0].has_unread);
+        assert_eq!(refetched[1].badge_count, 0);
+    }
+
+    #[test]
+    fn first_load_takes_server_badges() {
+        let mut fresh = clans();
+        fresh[0].badge_count = 7;
+        fresh[0].has_unread = true;
+        carry_live_badges(&[], &mut fresh);
+        assert_eq!(fresh[0].badge_count, 7);
+        assert!(fresh[0].has_unread);
+    }
+
+    #[test]
+    fn newly_joined_clan_takes_server_badge() {
+        let previous = vec![make_clan(1, "One", None)];
+        let mut refetched = clans();
+        refetched[1].badge_count = 9;
+        carry_live_badges(&previous, &mut refetched);
+        assert_eq!(refetched[0].badge_count, 0);
+        assert_eq!(refetched[1].badge_count, 9);
+    }
+
+    #[test]
     fn badge_map_applies_to_clans_on_reload() {
         let mut c = clans();
         let badge_map: std::collections::HashMap<String, (i32, bool)> = [
@@ -1225,10 +1295,67 @@ mod tests {
         assert!(msg.contains("already exists"));
     }
 
+    const TEST_SELF: i64 = 42;
+    const TEST_OTHER: i64 = 77;
+
+    fn init_clan_list(cx: &mut App) -> Entity<ClanList> {
+        let api = Arc::new(mezon_client::AppApi::new(
+            Arc::new(mezon_client::TransportClient::new(String::new())),
+            String::new(),
+        ));
+        RealtimeDispatch::init(api.clone(), cx);
+        let auth_state = cx.new(|_| {
+            crate::AuthState::Authenticated(mezon_client::Session {
+                user_id: TEST_SELF.to_string(),
+                ..Default::default()
+            })
+        });
+        crate::badge::BadgeService::init(auth_state, cx);
+        ClanList::init(api, cx)
+    }
+
+    fn removed_event(clan_id: i64, user_ids: &[i64]) -> RealtimeEvent {
+        RealtimeEvent::UserClanRemoved(mezon_proto::realtime::UserClanRemoved {
+            clan_id,
+            user_ids: user_ids.to_vec(),
+        })
+    }
+
     #[test]
     fn create_clan_error_display_other() {
         let err = CreateClanError::Other("network timeout".into());
         let msg = format!("{err}");
         assert_eq!(msg, "network timeout");
+    }
+    #[gpui::test]
+    fn user_clan_removed_keeps_the_clan_when_someone_else_is_kicked(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let clan_list = init_clan_list(cx);
+            clan_list.update(cx, |list, cx| {
+                list.update_clans(clans(), cx);
+
+                list.handle_event(&removed_event(1, &[TEST_OTHER]), cx);
+                assert!(
+                    list.clan_by_id(ClanId(1)).is_some(),
+                    "kicking another member must not drop the clan locally"
+                );
+
+                list.handle_event(&removed_event(1, &[TEST_OTHER, TEST_SELF]), cx);
+                assert!(list.clan_by_id(ClanId(1)).is_none());
+                assert!(list.clan_by_id(ClanId(2)).is_some());
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn user_clan_removed_with_no_ids_is_a_no_op(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let clan_list = init_clan_list(cx);
+            clan_list.update(cx, |list, cx| {
+                list.update_clans(clans(), cx);
+                list.handle_event(&removed_event(1, &[]), cx);
+                assert!(list.clan_by_id(ClanId(1)).is_some());
+            });
+        });
     }
 }

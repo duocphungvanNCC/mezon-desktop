@@ -8,6 +8,7 @@ mod screen_audio;
 mod screen_picker;
 mod screen_previews;
 mod screen_targets;
+mod stream_playback;
 mod video;
 
 use std::collections::HashMap;
@@ -32,6 +33,7 @@ use parking_lot::{Condvar, Mutex};
 
 pub use audio::AudioFormat;
 pub use camera::{CameraDeviceInfo, enumerate_cameras};
+pub use stream_playback::StreamAudioOutput;
 
 pub fn microphone_denied() -> bool {
     audio::microphone_denied()
@@ -44,11 +46,11 @@ pub use screen_targets::{
 };
 #[cfg(target_os = "macos")]
 pub use video::VideoSurface;
-pub use video::{VideoFrameData, VideoFrameStore};
+pub use video::{VideoFrameData, VideoFrameStore, i420_to_bgra_into};
 
 use crate::camera::CameraController;
 use crate::screen::ScreenStopper;
-use crate::video::{i420_to_bgra_into, local_camera_key, local_screen_key, track_frame_key};
+use crate::video::{local_camera_key, local_screen_key, track_frame_key};
 
 const MAX_REMOTE_VIDEO_WIDTH: u32 = 1920;
 const MAX_REMOTE_VIDEO_HEIGHT: u32 = 1080;

@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use gpui::{
     App, ClickEvent, Context, DismissEvent, Entity, EventEmitter, FocusHandle, Focusable,
-    FontWeight, Hsla, ListAlignment, ListState, MouseDownEvent, SharedString, Window, div, list,
+    FontWeight, ListAlignment, ListState, MouseDownEvent, SharedString, Window, div, list,
     prelude::*, px,
 };
 use mezon_store::{
@@ -12,7 +12,6 @@ use mezon_store::{
 };
 use ui::{PopoverMenuHandle, ScrollAxes, Scrollbars, WithScrollbar};
 
-use crate::chat::message::DEFAULT_DISPLAY_NAME_COLOR;
 use crate::components::primitives::{
     Avatar, Button, ButtonVariants, Icon, IconName, Sizable, Size, Spinner, h_flex, v_flex,
 };
@@ -25,7 +24,7 @@ const MIN_BODY_HEIGHT: f32 = 144.;
 const LIST_BODY_HEIGHT: f32 = 520.;
 const LIST_OVERDRAW: f32 = 200.;
 const MAX_VH: f32 = 0.8;
-const LIST_PAD_X: f32 = 16.;
+const LIST_PAD_X: f32 = 8.;
 
 #[derive(Clone)]
 struct PinCardVm {
@@ -319,16 +318,27 @@ fn resolve_pin_sender(
     channel_id: Option<ChannelId>,
     cx: &App,
 ) -> (String, String) {
-    let user_id = msg.sender_id.parse::<UserId>().ok();
+    let user_id = msg
+        .sender_id
+        .parse::<UserId>()
+        .ok()
+        .filter(|id| !id.is_zero());
 
+    let mut name = String::new();
+    let mut avatar = String::new();
     if let (Some(user_id), Some(clan_id)) = (user_id, clan_id)
         && let Some(profile) = resolve_user_profile(user_id, ProfileContext::Clan(clan_id), cx)
     {
-        return (profile.display_name, profile.avatar_url);
+        name = profile.display_name;
+        avatar = profile.avatar_url;
     }
 
-    let mut name = msg.sender_name.clone();
-    let mut avatar = msg.avatar_url.clone();
+    if name.is_empty() {
+        name = msg.sender_name.clone();
+    }
+    if avatar.is_empty() {
+        avatar = msg.avatar_url.clone();
+    }
     if (avatar.is_empty() || name.is_empty())
         && let (Some(user_id), Some(channel_id)) = (user_id, channel_id)
         && let Some(profile) = resolve_user_profile(user_id, ProfileContext::Direct(channel_id), cx)
@@ -341,7 +351,7 @@ fn resolve_pin_sender(
         }
     }
 
-    if avatar.is_empty()
+    if (avatar.is_empty() || name.is_empty())
         && let (Ok(message_id), Some(channel_id)) =
             (msg.message_id.parse::<MessageId>(), channel_id)
         && let Some(message) = MessagesStore::global(cx)
@@ -353,6 +363,22 @@ fn resolve_pin_sender(
         }
         if name.is_empty() && !message.sender_name.is_empty() {
             name = message.sender_name.to_string();
+        }
+    }
+
+    if (avatar.is_empty() || name.is_empty())
+        && let Some(user_id) = user_id
+        && let Some(user) = UsersByUserStore::global(cx).read(cx).user(user_id)
+    {
+        if avatar.is_empty() {
+            avatar = user.avatar_url.clone();
+        }
+        if name.is_empty() {
+            name = if user.display_name.is_empty() {
+                user.username.clone()
+            } else {
+                user.display_name.clone()
+            };
         }
     }
 
@@ -387,7 +413,7 @@ fn pin_card(
 ) -> gpui::AnyElement {
     let tokens = &theme.tokens;
     let group_name = SharedString::from(format!("pin-card-{index}"));
-    let sender_color = Hsla::from(gpui::rgb(DEFAULT_DISPLAY_NAME_COLOR));
+    let sender_color = tokens.text_theme_primary;
 
     let mut avatar = Avatar::new()
         .name(&vm.sender_label)
@@ -402,28 +428,25 @@ fn pin_card(
 
     let name_row = h_flex()
         .items_center()
-        .gap_2()
+        .gap_4()
         .min_w_0()
         .child(
             div()
-                .text_sm()
-                .font_weight(FontWeight::SEMIBOLD)
+                .flex_shrink_0()
+                .font_weight(FontWeight::MEDIUM)
                 .text_color(sender_color)
-                .overflow_hidden()
-                .text_ellipsis()
                 .child(vm.sender_label.clone()),
         )
         .child(
             div()
                 .flex_shrink_0()
-                .text_xs()
-                .font_weight(FontWeight::MEDIUM)
-                .text_color(tokens.text_secondary)
+                .text_size(px(10.))
+                .text_color(tokens.text_theme_primary)
                 .child(format_pin_time(vm.create_time, locale)),
         );
 
     let content = div()
-        .text_sm()
+        .line_height(px(24.))
         .text_color(tokens.text_theme_message)
         .child(vm.content.clone());
 

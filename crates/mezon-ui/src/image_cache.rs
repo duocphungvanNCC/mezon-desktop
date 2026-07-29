@@ -128,48 +128,86 @@ pub fn start_idle_trim(cx: &mut App) {
 const SHARED_AVATAR_CACHE_CAPACITY: usize = 512;
 const SHARED_AVATAR_CACHE_BYTES: u64 = 24 * 1024 * 1024;
 const SHARED_SMALL_AVATAR_CACHE_BYTES: u64 = 12 * 1024 * 1024;
+const SHARED_ROLE_ICON_CACHE_CAPACITY: usize = 512;
+const SHARED_ROLE_ICON_CACHE_BYTES: u64 = 4 * 1024 * 1024;
+const ROLE_ICON_ENTRY_MAX_BYTES: u64 = 256 * 1024;
 
 struct SharedAvatarCache(Entity<LruImageCache>);
 impl Global for SharedAvatarCache {}
 
-struct SharedOgpCache(Entity<LruImageCache>);
-impl Global for SharedOgpCache {}
+struct SharedRoleIconCache(Entity<LruImageCache>);
+impl Global for SharedRoleIconCache {}
 
-const OGP_SHARED_CACHE_CAPACITY: usize = 16;
-const OGP_SHARED_CACHE_BYTES: u64 = 8 * 1024 * 1024;
-const OGP_SHARED_ENTRY_MAX_BYTES: u64 = 2 * 1024 * 1024;
+struct SharedRoleIconPreviewCache(Entity<LruImageCache>);
+impl Global for SharedRoleIconPreviewCache {}
 
-/// App-global, bounded, aspect-preserving cache for OGP link-preview images
-/// (decode-capped at [`OGP_THUMB_DECODE_MAX_PX`]), so previews never share/evict
-/// the message image cache and large external OG images decode downscaled. Must
-/// be initialized once with a `&mut App`; read from render via [`ogp_image_cache`].
-pub fn shared_ogp_cache(cx: &mut App) -> Entity<LruImageCache> {
-    if let Some(existing) = cx.try_global::<SharedOgpCache>() {
+const OGP_TIMELINE_CACHE_CAPACITY: usize = 12;
+const OGP_TIMELINE_CACHE_BYTES: u64 = 6 * 1024 * 1024;
+const OGP_AUX_CACHE_CAPACITY: usize = 4;
+const OGP_AUX_CACHE_BYTES: u64 = 2 * 1024 * 1024;
+const OGP_ENTRY_MAX_BYTES: u64 = 1024 * 1024;
+
+pub fn ogp_timeline_cache(label: &'static str, cx: &mut App) -> Entity<LruImageCache> {
+    ogp_preview_cache(
+        label,
+        OGP_TIMELINE_CACHE_CAPACITY,
+        OGP_TIMELINE_CACHE_BYTES,
+        cx,
+    )
+}
+
+pub fn ogp_aux_cache(label: &'static str, cx: &mut App) -> Entity<LruImageCache> {
+    ogp_preview_cache(label, OGP_AUX_CACHE_CAPACITY, OGP_AUX_CACHE_BYTES, cx)
+}
+
+fn ogp_preview_cache(
+    label: &'static str,
+    capacity: usize,
+    bytes: u64,
+    cx: &mut App,
+) -> Entity<LruImageCache> {
+    cx.new(|cx| LruImageCache::ogp_thumbnail(label, capacity, bytes, OGP_ENTRY_MAX_BYTES, cx))
+}
+
+/// Shared decode cache for role icons. They render at 12-20px everywhere, so
+/// they go through the `IconThumbnail` loader (decodes at `ICON_DECODE_MAX_PX`)
+/// instead of the app-wide `"shared"` cache, whose `LoaderKind::Full` would keep
+/// the source resolution resident.
+/// Read-only view of the shared role-icon cache for render paths that only hold
+/// `&App`. Returns `None` before the first `shared_role_icon_cache` call.
+/// One 64pt preview lives in the role-icon picker modal. It needs a 128px decode,
+/// so it uses the avatar loader (`AVATAR_DECODE_MAX_PX` = 160) rather than the
+/// 64px icon loader, with a budget sized for the single image it holds.
+pub fn shared_role_icon_preview_cache(cx: &mut App) -> Entity<LruImageCache> {
+    if let Some(existing) = cx.try_global::<SharedRoleIconPreviewCache>() {
         return existing.0.clone();
     }
     let cache = cx.new(|cx| {
-        LruImageCache::ogp_thumbnail(
-            "ogp-shared",
-            OGP_SHARED_CACHE_CAPACITY,
-            OGP_SHARED_CACHE_BYTES,
-            OGP_SHARED_ENTRY_MAX_BYTES,
-            cx,
-        )
+        LruImageCache::avatar_thumbnail("role-icon-preview", 16, 1024 * 1024, 256 * 1024, cx)
     });
-    cx.set_global(SharedOgpCache(cache.clone()));
+    cx.set_global(SharedRoleIconPreviewCache(cache.clone()));
     cache
 }
 
-/// The app-global OGP image cache if [`shared_ogp_cache`] has been initialized.
-pub fn ogp_image_cache(app: &App) -> Option<Entity<LruImageCache>> {
-    app.try_global::<SharedOgpCache>()
-        .map(|cache| cache.0.clone())
+pub fn role_icon_cache(cx: &App) -> Option<Entity<LruImageCache>> {
+    cx.try_global::<SharedRoleIconCache>().map(|c| c.0.clone())
 }
 
-pub fn sweep_ogp_cache(window: &mut Window, cx: &mut App) {
-    if let Some(cache) = ogp_image_cache(cx) {
-        cache.update(cx, |cache, cx| cache.sweep_once_per_frame(window, cx));
+pub fn shared_role_icon_cache(cx: &mut App) -> Entity<LruImageCache> {
+    if let Some(existing) = cx.try_global::<SharedRoleIconCache>() {
+        return existing.0.clone();
     }
+    let cache = cx.new(|cx| {
+        LruImageCache::icon_thumbnail(
+            "role-icons-shared",
+            SHARED_ROLE_ICON_CACHE_CAPACITY,
+            SHARED_ROLE_ICON_CACHE_BYTES,
+            ROLE_ICON_ENTRY_MAX_BYTES,
+            cx,
+        )
+    });
+    cx.set_global(SharedRoleIconCache(cache.clone()));
+    cache
 }
 
 pub fn shared_avatar_cache(cx: &mut App) -> Entity<LruImageCache> {
@@ -465,6 +503,7 @@ enum LoaderKind {
     /// animated full-resolution source costs ~100 KB of RAM. Used for avatars.
     AvatarThumbnail,
     AvatarThumbnailSmall,
+    IconThumbnail,
     GalleryThumbnail,
     /// Aspect-preserving thumbnail for OGP link previews, capped at
     /// [`OGP_THUMB_DECODE_MAX_PX`].
@@ -549,6 +588,23 @@ impl LruImageCache {
         Self::with_loader(
             label,
             LoaderKind::AvatarThumbnailSmall,
+            max_items,
+            max_bytes,
+            max_entry_bytes,
+            cx,
+        )
+    }
+
+    pub fn icon_thumbnail(
+        label: &'static str,
+        max_items: usize,
+        max_bytes: u64,
+        max_entry_bytes: u64,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        Self::with_loader(
+            label,
+            LoaderKind::IconThumbnail,
             max_items,
             max_bytes,
             max_entry_bytes,
@@ -952,6 +1008,9 @@ impl LruImageCache {
             LoaderKind::AvatarThumbnailSmall => {
                 AssetLogger::<AvatarImageLoaderSmall>::load(resource.clone(), cx).boxed()
             }
+            LoaderKind::IconThumbnail => {
+                AssetLogger::<IconImageLoader>::load(resource.clone(), cx).boxed()
+            }
             LoaderKind::GalleryThumbnail => {
                 AssetLogger::<GalleryImageLoader>::load(resource.clone(), cx).boxed()
             }
@@ -1013,6 +1072,7 @@ impl ImageCache for LruImageCache {
 /// keeps a single avatar at ~100 KB regardless of the source file.
 const AVATAR_DECODE_MAX_PX: u32 = 160;
 const AVATAR_SMALL_DECODE_MAX_PX: u32 = 80;
+const ICON_DECODE_MAX_PX: u32 = 64;
 const GALLERY_THUMB_DECODE_MAX_PX: u32 = 320;
 /// OGP link-preview thumbnails render at ≤200px tall; decode to 512px longest
 /// side (aspect-preserving, ~2x for retina) so a large external OG image
@@ -1122,6 +1182,20 @@ impl Asset for AvatarImageLoaderSmall {
         cx: &mut App,
     ) -> impl Future<Output = Self::Output> + Send + 'static {
         load_avatar_scaled(source, AVATAR_SMALL_DECODE_MAX_PX, cx)
+    }
+}
+
+pub enum IconImageLoader {}
+
+impl Asset for IconImageLoader {
+    type Source = Resource;
+    type Output = Result<Arc<RenderImage>, ImageCacheError>;
+
+    fn load(
+        source: Self::Source,
+        cx: &mut App,
+    ) -> impl Future<Output = Self::Output> + Send + 'static {
+        load_avatar_scaled(source, ICON_DECODE_MAX_PX, cx)
     }
 }
 
@@ -1749,7 +1823,13 @@ mod tests {
         assert_eq!(PREVIEW_IMAGE_CACHE_CAPACITY, 64);
         assert_eq!(PREVIEW_IMAGE_CACHE_BYTES, 32 * 1024 * 1024);
         assert_eq!(SHARED_IMAGE_CACHE_BYTES, 24 * 1024 * 1024);
-        assert_eq!(OGP_SHARED_CACHE_BYTES, 8 * 1024 * 1024);
+        assert_eq!(OGP_TIMELINE_CACHE_BYTES, 6 * 1024 * 1024);
+        assert_eq!(OGP_AUX_CACHE_BYTES, 2 * 1024 * 1024);
+        assert_eq!(
+            OGP_TIMELINE_CACHE_BYTES + 3 * OGP_AUX_CACHE_BYTES,
+            12 * 1024 * 1024,
+            "one timeline plus the search and two composer caches must stay near the old single-cache budget"
+        );
         assert_eq!(IDLE_TRIM_INTERVAL, Duration::from_secs(30));
         assert_eq!(IDLE_TRIM_TTL, Duration::from_secs(60));
     }
@@ -1777,6 +1857,25 @@ mod tests {
             GRACE_PERIOD + Duration::from_millis(1),
             GRACE_PERIOD
         ));
+    }
+
+    #[gpui::test]
+    fn each_view_gets_its_own_ogp_cache(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let timeline = ogp_timeline_cache("timeline-ogp", cx);
+            let composer = ogp_aux_cache("composer-ogp", cx);
+
+            assert_ne!(
+                timeline.read(cx).instance,
+                composer.read(cx).instance,
+                "sharing one OGP cache lets a sweep from the view that rendered this frame \
+                 evict previews that are still on screen in a view that did not"
+            );
+            assert!(
+                timeline.read(cx).max_bytes > composer.read(cx).max_bytes,
+                "the timeline holds many previews at once; the composer holds at most the pending one"
+            );
+        });
     }
 
     #[test]

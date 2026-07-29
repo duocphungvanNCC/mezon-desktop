@@ -1695,6 +1695,9 @@ fn render_social_link_card(
         .flex()
         .flex_col()
         .gap_1()
+        .when(kind != LinkKind::Plain, |card| {
+            card.flex_basis(relative(1.))
+        })
         .w_full()
         .min_w_0()
         .max_w(px(400.))
@@ -1741,14 +1744,19 @@ fn render_emoji_span(
             .child(name.clone())
             .into_any_element();
     }
-    img(src)
-        .size(size)
+    div()
         .flex_none()
-        .object_fit(ObjectFit::Contain)
-        .with_fallback(super::reaction_detail::emoji_error_fallback(
-            size,
-            ctx.theme.text_muted,
-        ))
+        .size(size)
+        .image_cache(ctx.icon_cache.clone())
+        .child(
+            img(src)
+                .size(size)
+                .object_fit(ObjectFit::Contain)
+                .with_fallback(super::reaction_detail::emoji_error_fallback(
+                    size,
+                    ctx.theme.text_muted,
+                )),
+        )
         .into_any_element()
 }
 
