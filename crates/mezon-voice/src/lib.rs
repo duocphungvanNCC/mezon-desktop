@@ -1,6 +1,8 @@
 mod audio;
 mod camera;
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+mod linux_session;
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
 mod pipewire_init;
 mod runtime;
 mod screen;
@@ -33,12 +35,14 @@ use parking_lot::{Condvar, Mutex};
 
 pub use audio::AudioFormat;
 pub use camera::{CameraDeviceInfo, enumerate_cameras};
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+pub use linux_session::record_wayland_session;
 pub use stream_playback::StreamAudioOutput;
 
 pub fn microphone_denied() -> bool {
     audio::microphone_denied()
 }
-pub use screen_picker::PickedScreen;
+pub use screen_picker::{PickedScreen, system_screen_share_pick};
 pub use screen_previews::{ScreenSharePreview, capture_screen_share_preview};
 pub use screen_targets::{
     ScreenShareKind, ScreenShareListError, ScreenShareOption, list_screen_share_options,

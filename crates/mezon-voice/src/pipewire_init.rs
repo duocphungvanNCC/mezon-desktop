@@ -16,7 +16,3 @@ pub(crate) fn ensure_pipewire_stubs_armed() -> bool {
         armed
     })
 }
-
-pub(crate) fn is_wayland_session() -> bool {
-    std::env::var_os("WAYLAND_DISPLAY").is_some()
-}

@@ -59,50 +59,67 @@ fn alsa_pcm_is_digital_output(pcm_id: &str) -> bool {
 }
 
 #[cfg(target_os = "linux")]
+fn alsa_pcm_rank(pcm_id: &str) -> u8 {
+    if pcm_id.starts_with("sysdefault:") {
+        0
+    } else if pcm_id.starts_with("plughw:") {
+        1
+    } else if pcm_id.starts_with("front:") {
+        2
+    } else if pcm_id.starts_with("hw:") {
+        3
+    } else {
+        4
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn best_pcm_per_device(mut ranked: Vec<(u8, AudioDeviceInfo)>) -> Vec<AudioDeviceInfo> {
+    ranked.sort_by(|(a_rank, a), (b_rank, b)| a.name.cmp(&b.name).then(a_rank.cmp(b_rank)));
+    let mut seen = std::collections::HashSet::new();
+    ranked
+        .into_iter()
+        .filter(|(_, device)| seen.insert(device.name.clone()))
+        .map(|(_, device)| device)
+        .collect()
+}
+
+#[cfg(target_os = "linux")]
 fn collect_devices(devices: impl Iterator<Item = cpal::Device>) -> Vec<AudioDeviceInfo> {
     let mut analog = Vec::new();
-    let mut analog_names = std::collections::HashSet::new();
     let mut hardware = Vec::new();
-    let mut hardware_names = std::collections::HashSet::new();
     let mut all = Vec::new();
-    let mut all_names = std::collections::HashSet::new();
 
     for device in devices {
         let (Ok(id), Ok(description)) = (device.id(), device.description()) else {
             continue;
         };
-        let id = id.to_string();
-        let name = description.to_string();
-        let pcm_id = description.driver();
+        let pcm_id = description.driver().unwrap_or_default();
+        let rank = alsa_pcm_rank(pcm_id);
+        let info = AudioDeviceInfo {
+            id: id.to_string(),
+            name: description.to_string(),
+        };
 
-        if all_names.insert(name.clone()) {
-            all.push(AudioDeviceInfo {
-                id: id.clone(),
-                name: name.clone(),
-            });
-        }
+        all.push((rank, info.clone()));
 
-        if pcm_id.is_some_and(alsa_pcm_is_hardware) {
-            if hardware_names.insert(name.clone()) {
-                hardware.push(AudioDeviceInfo {
-                    id: id.clone(),
-                    name: name.clone(),
-                });
-            }
-            if !pcm_id.is_some_and(alsa_pcm_is_digital_output) && analog_names.insert(name.clone())
-            {
-                analog.push(AudioDeviceInfo { id, name });
+        if alsa_pcm_is_hardware(pcm_id) {
+            hardware.push((rank, info.clone()));
+            if !alsa_pcm_is_digital_output(pcm_id) {
+                analog.push((rank, info));
             }
         }
     }
 
+    let analog = best_pcm_per_device(analog);
     if !analog.is_empty() {
-        analog
-    } else if !hardware.is_empty() {
-        hardware
-    } else {
-        all
+        return analog;
     }
+    let hardware = best_pcm_per_device(hardware);
+    if !hardware.is_empty() {
+        return hardware;
+    }
+    best_pcm_per_device(all)
 }
 
 /// A live microphone capture handle.
