@@ -18,7 +18,8 @@ use mezon_store::{
 use ui::{ScrollAxes, Scrollbars, WithScrollbar};
 
 use crate::app::main_window::{
-    activate_main_window, handle as main_window_handle, window_placement_for,
+    activate_main_window, handle as main_window_handle, overlay_placement,
+    overlay_window_kind_and_parent, sync_overlay_to_main,
 };
 use crate::app::shell::Shell;
 use crate::app::title_bar::TitleBar;
@@ -150,56 +151,6 @@ fn open_image_viewer_now(request: OpenViewerRequest, cx: &mut App) {
     spawn_image_viewer_window(request, None, cx);
 }
 
-fn viewer_window_placement(
-    main_app: AnyWindowHandle,
-    cx: &mut App,
-) -> (WindowBounds, Option<DisplayId>) {
-    window_placement_for(main_app, cx).unwrap_or_else(|| {
-        (
-            WindowBounds::Windowed(Bounds::centered(None, size(px(1100.0), px(740.0)), cx)),
-            None,
-        )
-    })
-}
-
-#[cfg(target_os = "linux")]
-fn viewer_uses_wayland_parent() -> bool {
-    std::env::var("WAYLAND_DISPLAY").is_ok()
-        && std::env::var("XDG_SESSION_TYPE")
-            .map(|session| session.eq_ignore_ascii_case("wayland"))
-            .unwrap_or(true)
-}
-
-#[cfg(not(target_os = "linux"))]
-fn viewer_uses_wayland_parent() -> bool {
-    false
-}
-
-fn apply_viewer_bounds(window: &mut Window, bounds: WindowBounds) {
-    match bounds {
-        WindowBounds::Windowed(bounds) => window.set_bounds(bounds),
-        WindowBounds::Maximized(_) => {
-            if !window.is_maximized() {
-                window.zoom_window();
-            }
-        }
-        WindowBounds::Fullscreen(_) => {
-            if !window.is_fullscreen() {
-                window.toggle_fullscreen();
-            }
-        }
-    }
-}
-
-fn sync_viewer_to_main(viewer: WindowHandle<ImageViewer>, main_app: AnyWindowHandle, cx: &mut App) {
-    let Some((main_bounds, _)) = window_placement_for(main_app, cx) else {
-        return;
-    };
-    let _ = viewer.update(cx, |_, window, _| {
-        apply_viewer_bounds(window, main_bounds);
-    });
-}
-
 fn spawn_image_viewer_window(
     request: OpenViewerRequest,
     prior_placement: Option<(WindowBounds, Option<DisplayId>)>,
@@ -208,15 +159,9 @@ fn spawn_image_viewer_window(
     let main_app = main_window_handle(cx)
         .expect("main app window must be registered before opening image viewer");
     let (window_bounds, display_id) =
-        prior_placement.unwrap_or_else(|| viewer_window_placement(main_app, cx));
+        prior_placement.unwrap_or_else(|| overlay_placement(main_app, cx));
 
-    let use_wayland_parent = viewer_uses_wayland_parent();
-    let kind = if use_wayland_parent {
-        WindowKind::Floating
-    } else {
-        WindowKind::Normal
-    };
-    let parent_window = use_wayland_parent.then_some(main_app);
+    let (kind, parent_window) = overlay_window_kind_and_parent(main_app);
     let options = WindowOptions {
         window_bounds: Some(window_bounds),
         window_min_size: Some(size(px(640.0), px(480.0))),
@@ -249,7 +194,7 @@ fn spawn_image_viewer_window(
             });
             let viewer = handle.clone();
             cx.defer(move |cx| {
-                sync_viewer_to_main(viewer, main_app, cx);
+                sync_overlay_to_main(viewer, main_app, cx);
             });
         }
         Err(e) => tracing::error!("failed to open image viewer window: {e}"),
