@@ -1,6 +1,6 @@
 use gpui::{
-    App, ClickEvent, Context, Entity, FontWeight, Hsla, Pixels, ScrollHandle, SharedString, Window,
-    div, prelude::*, px,
+    App, ClickEvent, Context, DefiniteLength, Entity, FontWeight, Hsla, Pixels, ScrollHandle,
+    SharedString, Window, div, prelude::*, px, relative,
 };
 use mezon_store::{BadgeService, CanvasDetail, CanvasStore, ChannelId, ClanId, Settings, UserId};
 use serde::Deserialize;
@@ -17,7 +17,9 @@ use mezon_widgets::{
     v_flex,
 };
 
-const CANVAS_CONTENT_HORIZONTAL_PADDING: Pixels = px(128.);
+pub(crate) const CANVAS_CONTENT_HORIZONTAL_PADDING: Pixels = px(16.);
+pub(crate) const CANVAS_CONTENT_MAX_WIDTH_RATIO: f32 = 0.8;
+const CANVAS_CONTENT_MAX_WIDTH: DefiniteLength = relative(CANVAS_CONTENT_MAX_WIDTH_RATIO);
 pub(crate) const CANVAS_BODY_FONT_SIZE: Pixels = px(15.);
 pub(crate) const CANVAS_BODY_LINE_HEIGHT: Pixels = px(22.5);
 
@@ -500,11 +502,14 @@ impl gpui::Render for CanvasView {
                 .w_full()
                 .pb(if show_save_bar { px(88.) } else { px(24.) })
                 .child(
-                    div()
-                        .w_full()
-                        .min_w_0()
-                        .px(CANVAS_CONTENT_HORIZONTAL_PADDING)
-                        .child(v_flex().w_full().min_w_0().child(title_el).child(body)),
+                    div().w_full().min_w_0().flex().justify_center().child(
+                        div()
+                            .w_full()
+                            .max_w(CANVAS_CONTENT_MAX_WIDTH)
+                            .min_w_0()
+                            .px(CANVAS_CONTENT_HORIZONTAL_PADDING)
+                            .child(v_flex().w_full().min_w_0().child(title_el).child(body)),
+                    ),
                 )
                 .into_any_element(),
             window,

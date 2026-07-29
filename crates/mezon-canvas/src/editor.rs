@@ -26,7 +26,10 @@ use crate::image::{
     canvas_image_known_size, canvas_img, ensure_canvas_image_dimensions_loaded, is_data_image_url,
     remember_canvas_image_size,
 };
-use crate::view::{TipTapMark, TipTapNode, is_tiptap_content_empty, parse_tiptap_doc};
+use crate::view::{
+    CANVAS_CONTENT_HORIZONTAL_PADDING, CANVAS_CONTENT_MAX_WIDTH_RATIO, TipTapMark, TipTapNode,
+    is_tiptap_content_empty, parse_tiptap_doc,
+};
 use mezon_theme::ActiveTheme;
 use mezon_widgets::{
     Button, ButtonVariants, Icon, IconName, Input, InputState, Sizable, Size, h_flex, v_flex,
@@ -34,9 +37,13 @@ use mezon_widgets::{
 
 const KEY_CONTEXT: &str = "MezonCanvasEditor";
 const CANVAS_IMAGE_MARGIN: Pixels = px(16.);
-const CANVAS_HORIZONTAL_PADDING: Pixels = px(128.);
 const CANVAS_MIN_LAYOUT_WIDTH: Pixels = px(64.);
 const CANVAS_LAYOUT_WIDTH_FALLBACK: Pixels = px(480.);
+
+fn canvas_content_layout_width(parent_w: Pixels) -> Pixels {
+    let content_w = parent_w * CANVAS_CONTENT_MAX_WIDTH_RATIO;
+    (content_w - CANVAS_CONTENT_HORIZONTAL_PADDING * 2.).max(CANVAS_MIN_LAYOUT_WIDTH)
+}
 
 pub(crate) fn italic_font_family() -> SharedString {
     #[cfg(target_os = "macos")]
@@ -160,6 +167,7 @@ struct EditorLine {
     text: String,
     marks: Vec<EditorMark>,
     image_src: Option<String>,
+    ordered_start: Option<usize>,
 }
 
 impl Default for EditorLine {
@@ -169,6 +177,7 @@ impl Default for EditorLine {
             text: String::new(),
             marks: Vec::new(),
             image_src: None,
+            ordered_start: None,
         }
     }
 }
@@ -348,8 +357,7 @@ impl CanvasEditorState {
             .map(|handle| handle.bounds().size.width)
             .unwrap_or(Pixels::ZERO);
         if parent_w > CANVAS_MIN_LAYOUT_WIDTH {
-            self.layout_width =
-                (parent_w - CANVAS_HORIZONTAL_PADDING * 2.).max(CANVAS_MIN_LAYOUT_WIDTH);
+            self.layout_width = canvas_content_layout_width(parent_w);
         }
     }
 
@@ -389,18 +397,13 @@ impl CanvasEditorState {
 
     fn layout_available_width(&self, bounds: Bounds<Pixels>) -> Pixels {
         let bounds_w = bounds.size.width;
-        let cached = self.layout_width.max(
-            self.last_bounds
-                .map(|b| b.size.width)
-                .unwrap_or(Pixels::ZERO),
-        );
         if bounds_w > CANVAS_MIN_LAYOUT_WIDTH {
-            bounds_w
-        } else if cached > CANVAS_MIN_LAYOUT_WIDTH {
-            cached
-        } else {
-            bounds_w.max(cached).max(CANVAS_LAYOUT_WIDTH_FALLBACK)
+            return bounds_w;
         }
+        if self.layout_width > CANVAS_MIN_LAYOUT_WIDTH {
+            return self.layout_width;
+        }
+        bounds_w.max(CANVAS_LAYOUT_WIDTH_FALLBACK)
     }
 
     fn content_layout_height(&self) -> Pixels {
@@ -466,6 +469,7 @@ impl CanvasEditorState {
             text: String::new(),
             marks: Vec::new(),
             image_src: Some(src),
+            ordered_start: None,
         };
 
         let image_ix = if self.lines[line_ix].block == BlockKind::Image {
@@ -498,6 +502,7 @@ impl CanvasEditorState {
                             text: tail,
                             marks: Vec::new(),
                             image_src: None,
+                            ordered_start: None,
                         },
                     );
                 }
@@ -727,6 +732,13 @@ impl CanvasEditorState {
             return;
         }
         let current = self.lines[line_ix].clone();
+        if is_list_block(current.block) && current.text.is_empty() {
+            self.lines[line_ix].block = BlockKind::Paragraph;
+            self.lines[line_ix].ordered_start = None;
+            self.rebuild_buffer();
+            self.move_to(self.line_col_to_offset(line_ix, 0), cx);
+            return;
+        }
         let col = snap_column(&current.text, col);
         let tail_text = current.text[col..].to_string();
         let tail_marks = current
@@ -772,6 +784,7 @@ impl CanvasEditorState {
                 text: tail_text,
                 marks: tail_marks,
                 image_src: None,
+                ordered_start: None,
             },
         );
         self.rebuild_buffer();
@@ -787,6 +800,71 @@ impl CanvasEditorState {
         self.rebuild_buffer();
         let new_cursor = self.line_starts[line_ix] + col + 1;
         self.move_to(new_cursor, cx);
+    }
+
+    fn join_line_with_previous(&mut self, line_ix: usize, cx: &mut Context<Self>) {
+        if line_ix == 0 || line_ix >= self.lines.len() {
+            return;
+        }
+        let tail = self.lines.remove(line_ix);
+        let join_at = self.lines[line_ix - 1].text.len();
+        let prev = &mut self.lines[line_ix - 1];
+        prev.text.push_str(&tail.text);
+        for mut mark in tail.marks {
+            mark.range.start += join_at;
+            mark.range.end += join_at;
+            prev.marks.push(mark);
+        }
+        self.rebuild_buffer();
+        self.move_to(self.line_col_to_offset(line_ix - 1, join_at), cx);
+    }
+
+    fn lift_list_line_to_paragraph(&mut self, line_ix: usize, cx: &mut Context<Self>) {
+        if line_ix >= self.lines.len() {
+            return;
+        }
+        self.lines[line_ix].block = BlockKind::Paragraph;
+        self.lines[line_ix].ordered_start = None;
+        self.rebuild_buffer();
+        self.move_to(self.line_col_to_offset(line_ix, 0), cx);
+    }
+
+    fn remove_empty_list_line(&mut self, line_ix: usize, cx: &mut Context<Self>) {
+        if line_ix >= self.lines.len() {
+            return;
+        }
+        if line_ix == 0 {
+            self.lift_list_line_to_paragraph(line_ix, cx);
+            return;
+        }
+        let prev_len = self.lines[line_ix - 1].text.len();
+        self.lines.remove(line_ix);
+        self.rebuild_buffer();
+        self.move_to(self.line_col_to_offset(line_ix - 1, prev_len), cx);
+    }
+
+    fn handle_list_backspace_at_line_start(
+        &mut self,
+        line_ix: usize,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if line_ix >= self.lines.len() {
+            return false;
+        }
+        let block = self.lines[line_ix].block;
+        if !is_list_block(block) {
+            return false;
+        }
+        if self.lines[line_ix].text.is_empty() {
+            self.remove_empty_list_line(line_ix, cx);
+            return true;
+        }
+        if line_ix == 0 || !list_blocks_same(self.lines[line_ix - 1].block, block) {
+            self.lift_list_line_to_paragraph(line_ix, cx);
+            return true;
+        }
+        self.join_line_with_previous(line_ix, cx);
+        true
     }
 
     fn selection_line_range(&self) -> (usize, usize, usize, usize) {
@@ -830,7 +908,30 @@ impl CanvasEditorState {
         } else {
             el
         };
-        for line in &mut self.lines[start..=end] {
+        if is_list_block(kind) {
+            let all_match = self.lines[start..=end]
+                .iter()
+                .all(|line| line.block != BlockKind::Image && list_blocks_same(line.block, kind));
+            if all_match {
+                for line in &mut self.lines[start..=end] {
+                    if line.block != BlockKind::Image {
+                        line.block = BlockKind::Paragraph;
+                        line.ordered_start = None;
+                    }
+                }
+                self.selected_range = selection;
+                self.block_menu_open = false;
+                self.rebuild_buffer();
+                self.focus(window, cx);
+                cx.notify();
+                return;
+            }
+        }
+        let starts_new_ordered_run: Vec<bool> = (start..=end)
+            .map(|line_ix| line_ix == 0 || self.lines[line_ix - 1].block != BlockKind::OrderedItem)
+            .collect();
+        for (offset, line_ix) in (start..=end).enumerate() {
+            let line = &mut self.lines[line_ix];
             if line.block == BlockKind::Image {
                 continue;
             }
@@ -838,6 +939,13 @@ impl CanvasEditorState {
                 BlockKind::TaskItem { checked: _ } => BlockKind::TaskItem { checked: false },
                 other => other,
             };
+            if matches!(kind, BlockKind::OrderedItem) {
+                if starts_new_ordered_run[offset] {
+                    line.ordered_start = None;
+                }
+            } else {
+                line.ordered_start = None;
+            }
         }
         self.selected_range = selection;
         self.block_menu_open = false;
@@ -1167,6 +1275,13 @@ impl CanvasEditorState {
         }
         if col == 0 && line > 0 && self.lines[line - 1].block == BlockKind::Image {
             self.remove_line(line - 1, cx);
+            return;
+        }
+        if col == 0
+            && self.selected_range.is_empty()
+            && self.handle_list_backspace_at_line_start(line, cx)
+        {
+            self.caret_blink.pause_blinking(cx);
             return;
         }
         if self.selected_range.is_empty() {
@@ -2685,16 +2800,34 @@ fn build_line_runs(
         .collect()
 }
 
-fn ordered_line_number(lines: &[EditorLine], line_ix: usize) -> usize {
-    let mut n = 1usize;
-    for i in (0..line_ix).rev() {
-        if lines[i].block == BlockKind::OrderedItem {
-            n += 1;
-        } else {
-            break;
-        }
+fn is_list_block(block: BlockKind) -> bool {
+    matches!(
+        block,
+        BlockKind::BulletItem | BlockKind::OrderedItem | BlockKind::TaskItem { .. }
+    )
+}
+
+fn list_blocks_same(a: BlockKind, b: BlockKind) -> bool {
+    matches!(
+        (a, b),
+        (BlockKind::BulletItem, BlockKind::BulletItem)
+            | (BlockKind::OrderedItem, BlockKind::OrderedItem)
+            | (BlockKind::TaskItem { .. }, BlockKind::TaskItem { .. })
+    )
+}
+
+fn ordered_run_start_ix(lines: &[EditorLine], line_ix: usize) -> usize {
+    let mut start = line_ix;
+    while start > 0 && lines[start - 1].block == BlockKind::OrderedItem {
+        start -= 1;
     }
-    n
+    start
+}
+
+fn ordered_line_number(lines: &[EditorLine], line_ix: usize) -> usize {
+    let run_start = ordered_run_start_ix(lines, line_ix);
+    let base = lines[run_start].ordered_start.unwrap_or(1);
+    base + (line_ix - run_start)
 }
 
 fn block_paint_meta(
@@ -3238,6 +3371,7 @@ fn flatten_block(node: &TipTapNode, lines: &mut Vec<EditorLine>) {
             text: inline_to_text(node.content.as_ref()),
             marks: inline_to_marks(node.content.as_ref()),
             image_src: None,
+            ordered_start: None,
         }),
         "heading" => {
             let level = node
@@ -3251,6 +3385,7 @@ fn flatten_block(node: &TipTapNode, lines: &mut Vec<EditorLine>) {
                 text: inline_to_text(node.content.as_ref()),
                 marks: inline_to_marks(node.content.as_ref()),
                 image_src: None,
+                ordered_start: None,
             });
         }
         "blockquote" => {
@@ -3262,6 +3397,7 @@ fn flatten_block(node: &TipTapNode, lines: &mut Vec<EditorLine>) {
                             text: inline_to_text(child.content.as_ref()),
                             marks: inline_to_marks(child.content.as_ref()),
                             image_src: None,
+                            ordered_start: None,
                         });
                     } else {
                         flatten_block(child, lines);
@@ -3274,6 +3410,7 @@ fn flatten_block(node: &TipTapNode, lines: &mut Vec<EditorLine>) {
             text: inline_to_text(node.content.as_ref()),
             marks: Vec::new(),
             image_src: None,
+            ordered_start: None,
         }),
         "bulletList" => flatten_list(node, lines, BlockKind::BulletItem),
         "orderedList" => flatten_list(node, lines, BlockKind::OrderedItem),
@@ -3292,6 +3429,7 @@ fn flatten_block(node: &TipTapNode, lines: &mut Vec<EditorLine>) {
                     text: String::new(),
                     marks: Vec::new(),
                     image_src: Some(src),
+                    ordered_start: None,
                 });
             }
         }
@@ -3306,7 +3444,17 @@ fn flatten_block(node: &TipTapNode, lines: &mut Vec<EditorLine>) {
 }
 
 fn flatten_list(node: &TipTapNode, lines: &mut Vec<EditorLine>, kind: BlockKind) {
+    let ordered_start = (kind == BlockKind::OrderedItem)
+        .then(|| {
+            node.attrs
+                .as_ref()
+                .and_then(|attrs| attrs.get("start"))
+                .and_then(|value| value.as_u64())
+                .map(|value| value as usize)
+        })
+        .flatten();
     if let Some(children) = &node.content {
+        let mut first_item = true;
         for child in children {
             if child.kind == "listItem"
                 && let Some(inner) = &child.content
@@ -3318,7 +3466,9 @@ fn flatten_list(node: &TipTapNode, lines: &mut Vec<EditorLine>, kind: BlockKind)
                             text: inline_to_text(block.content.as_ref()),
                             marks: inline_to_marks(block.content.as_ref()),
                             image_src: None,
+                            ordered_start: if first_item { ordered_start } else { None },
                         });
+                        first_item = false;
                     } else {
                         flatten_block(block, lines);
                     }
@@ -3346,6 +3496,7 @@ fn flatten_task_list(node: &TipTapNode, lines: &mut Vec<EditorLine>) {
                                 text: inline_to_text(block.content.as_ref()),
                                 marks: inline_to_marks(block.content.as_ref()),
                                 image_src: None,
+                                ordered_start: None,
                             });
                         }
                     }
@@ -3433,9 +3584,10 @@ fn lines_to_tiptap_json(lines: &[EditorLine]) -> String {
             }
             BlockKind::OrderedItem => {
                 let (items, next) = collect_list_lines(lines, i, BlockKind::OrderedItem);
+                let start = lines[i].ordered_start.unwrap_or(1);
                 content.push(json!({
                     "type": "orderedList",
-                    "attrs": { "start": 1, "type": null },
+                    "attrs": { "start": start, "type": null },
                     "content": items.iter().map(list_item_json).collect::<Vec<_>>()
                 }));
                 i = next;
@@ -3824,6 +3976,7 @@ mod tests {
                 text: "G10".into(),
                 marks: Vec::new(),
                 image_src: None,
+                ordered_start: None,
             },
             EditorLine {
                 block: BlockKind::Paragraph,
@@ -3841,6 +3994,7 @@ mod tests {
                     },
                 ],
                 image_src: None,
+                ordered_start: None,
             },
             EditorLine::default(),
         ];
@@ -3875,18 +4029,21 @@ mod tests {
             text: String::new(),
             marks: Vec::new(),
             image_src: Some("https://cdn.mezon.ai/x.png".into()),
+            ordered_start: None,
         };
         let code = EditorLine {
             block: BlockKind::CodeBlock,
             text: "fn main() {}".into(),
             marks: Vec::new(),
             image_src: None,
+            ordered_start: None,
         };
         let ordered = EditorLine {
             block: BlockKind::OrderedItem,
             text: "1".into(),
             marks: Vec::new(),
             image_src: None,
+            ordered_start: None,
         };
         let link = EditorLine {
             block: BlockKind::Paragraph,
@@ -3897,6 +4054,7 @@ mod tests {
                 href: Some("https://mezon.ai".into()),
             }],
             image_src: None,
+            ordered_start: None,
         };
 
         let image_json = lines_to_tiptap_json(&[image]);
@@ -3931,6 +4089,7 @@ mod tests {
             text: "fn main() {}".into(),
             marks: Vec::new(),
             image_src: None,
+            ordered_start: None,
         };
         let json = lines_to_tiptap_json(&[line]);
         assert!(json.contains("codeBlock"));
@@ -4003,6 +4162,7 @@ mod tests {
             text: "item".into(),
             marks: Vec::new(),
             image_src: None,
+            ordered_start: None,
         }];
         let meta = block_paint_meta(&lines[0], 0, &lines, px(16.));
         assert_eq!(meta.prefix.as_ref(), "☐ ");
@@ -4015,6 +4175,7 @@ mod tests {
             text: "fn main() {}".into(),
             marks: Vec::new(),
             image_src: None,
+            ordered_start: None,
         }];
         let meta = block_paint_meta(&lines[0], 0, &lines, px(16.));
         assert!(meta.monospace);
@@ -4028,6 +4189,7 @@ mod tests {
             text: "todo".into(),
             marks: Vec::new(),
             image_src: None,
+            ordered_start: None,
         };
         let json = lines_to_tiptap_json(&[line]);
         assert!(json.contains("taskList"));
@@ -4101,28 +4263,171 @@ mod tests {
                 text: "one".into(),
                 marks: Vec::new(),
                 image_src: None,
+                ordered_start: None,
             },
             EditorLine {
                 block: BlockKind::OrderedItem,
                 text: "two".into(),
                 marks: Vec::new(),
                 image_src: None,
+                ordered_start: None,
             },
             EditorLine {
                 block: BlockKind::Paragraph,
-                text: "break".into(),
+                text: String::new(),
                 marks: Vec::new(),
                 image_src: None,
+                ordered_start: None,
             },
             EditorLine {
                 block: BlockKind::OrderedItem,
-                text: "one again".into(),
+                text: "three".into(),
                 marks: Vec::new(),
                 image_src: None,
+                ordered_start: None,
             },
         ];
         assert_eq!(ordered_line_number(&lines, 0), 1);
         assert_eq!(ordered_line_number(&lines, 1), 2);
         assert_eq!(ordered_line_number(&lines, 3), 1);
+    }
+
+    #[test]
+    fn ordered_line_number_uses_start_attr_from_web() {
+        let lines = vec![
+            EditorLine {
+                block: BlockKind::OrderedItem,
+                text: "one".into(),
+                marks: Vec::new(),
+                image_src: None,
+                ordered_start: Some(1),
+            },
+            EditorLine {
+                block: BlockKind::Paragraph,
+                text: String::new(),
+                marks: Vec::new(),
+                image_src: None,
+                ordered_start: None,
+            },
+            EditorLine {
+                block: BlockKind::OrderedItem,
+                text: "three".into(),
+                marks: Vec::new(),
+                image_src: None,
+                ordered_start: Some(3),
+            },
+        ];
+        assert_eq!(ordered_line_number(&lines, 0), 1);
+        assert_eq!(ordered_line_number(&lines, 2), 3);
+    }
+
+    #[test]
+    fn roundtrip_preserves_ordered_list_start_attr() {
+        let raw = r#"{"type":"doc","content":[{"type":"orderedList","attrs":{"start":1,"type":null},"content":[{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Ch"}]}]}]},{"type":"paragraph"},{"type":"orderedList","attrs":{"start":3,"type":null},"content":[{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Gia"}]}]}]}]}"#;
+        let lines = lines_from_tiptap(raw);
+        assert_eq!(lines[0].ordered_start, Some(1));
+        assert_eq!(lines[2].ordered_start, Some(3));
+        let back = lines_to_tiptap_json(&lines);
+        assert!(back.contains(r#""start":3"#));
+    }
+
+    #[test]
+    fn ordered_line_number_links_consecutive_formatted_lines() {
+        let lines = vec![
+            EditorLine {
+                block: BlockKind::Paragraph,
+                text: "intro".into(),
+                marks: Vec::new(),
+                image_src: None,
+                ordered_start: None,
+            },
+            EditorLine {
+                block: BlockKind::OrderedItem,
+                text: "first".into(),
+                marks: Vec::new(),
+                image_src: None,
+                ordered_start: None,
+            },
+            EditorLine {
+                block: BlockKind::OrderedItem,
+                text: "second".into(),
+                marks: Vec::new(),
+                image_src: None,
+                ordered_start: None,
+            },
+        ];
+        assert_eq!(ordered_line_number(&lines, 1), 1);
+        assert_eq!(ordered_line_number(&lines, 2), 2);
+    }
+
+    #[gpui::test]
+    fn enter_on_empty_ordered_item_exits_list(cx: &mut TestAppContext) {
+        let cx = cx.add_empty_window();
+        let entity = cx.update(|window, cx| {
+            cx.new(|cx| CanvasEditorState::new(window, cx, "placeholder", "en"))
+        });
+        cx.update(|_, cx| {
+            entity.update(cx, |state, cx| {
+                state.lines = vec![
+                    EditorLine {
+                        block: BlockKind::OrderedItem,
+                        text: "one".into(),
+                        marks: Vec::new(),
+                        image_src: None,
+                        ordered_start: None,
+                    },
+                    EditorLine {
+                        block: BlockKind::OrderedItem,
+                        text: String::new(),
+                        marks: Vec::new(),
+                        image_src: None,
+                        ordered_start: None,
+                    },
+                ];
+                state.rebuild_buffer();
+                state.move_to(state.line_col_to_offset(1, 0), cx);
+                state.split_paragraph(cx);
+            });
+        });
+        cx.update(|_, cx| {
+            let state = entity.read(cx);
+            assert_eq!(state.lines.len(), 2);
+            assert_eq!(state.lines[1].block, BlockKind::Paragraph);
+        });
+    }
+
+    #[gpui::test]
+    fn backspace_on_empty_ordered_item_joins_previous_line(cx: &mut TestAppContext) {
+        let cx = cx.add_empty_window();
+        let entity = cx.update(|window, cx| {
+            cx.new(|cx| CanvasEditorState::new(window, cx, "placeholder", "en"))
+        });
+        cx.update(|_, cx| {
+            entity.update(cx, |state, cx| {
+                state.lines = vec![
+                    EditorLine {
+                        block: BlockKind::OrderedItem,
+                        text: "one".into(),
+                        marks: Vec::new(),
+                        image_src: None,
+                        ordered_start: None,
+                    },
+                    EditorLine {
+                        block: BlockKind::OrderedItem,
+                        text: String::new(),
+                        marks: Vec::new(),
+                        image_src: None,
+                        ordered_start: None,
+                    },
+                ];
+                state.rebuild_buffer();
+                state.remove_empty_list_line(1, cx);
+            });
+        });
+        cx.update(|_, cx| {
+            let state = entity.read(cx);
+            assert_eq!(state.lines.len(), 1);
+            assert_eq!(state.lines[0].text, "one");
+        });
     }
 }
