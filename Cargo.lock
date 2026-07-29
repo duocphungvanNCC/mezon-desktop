@@ -5778,7 +5778,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-app"
-version = "0.1.27"
+version = "0.1.29"
 dependencies = [
  "anyhow",
  "dirs 5.0.1",
@@ -5807,7 +5807,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-audio"
-version = "0.1.27"
+version = "0.1.29"
 dependencies = [
  "anyhow",
  "flume",
@@ -5822,7 +5822,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-canvas"
-version = "0.1.27"
+version = "0.1.29"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -5844,7 +5844,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-client"
-version = "0.1.27"
+version = "0.1.29"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5879,14 +5879,14 @@ dependencies = [
 
 [[package]]
 name = "mezon-i18n"
-version = "0.1.27"
+version = "0.1.29"
 dependencies = [
  "serde_json",
 ]
 
 [[package]]
 name = "mezon-native"
-version = "0.1.27"
+version = "0.1.29"
 dependencies = [
  "anyhow",
  "auto-launch",
@@ -5910,7 +5910,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-proto"
-version = "0.1.27"
+version = "0.1.29"
 dependencies = [
  "prost 0.13.5",
  "prost-build 0.13.5",
@@ -5921,7 +5921,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-store"
-version = "0.1.27"
+version = "0.1.29"
 dependencies = [
  "anyhow",
  "chrono",
@@ -5951,7 +5951,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-stream"
-version = "0.1.27"
+version = "0.1.29"
 dependencies = [
  "anyhow",
  "flume",
@@ -5969,7 +5969,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-theme"
-version = "0.1.27"
+version = "0.1.29"
 dependencies = [
  "gpui",
  "theme",
@@ -5977,7 +5977,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-ui"
-version = "0.1.27"
+version = "0.1.29"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -6018,7 +6018,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-updater"
-version = "0.1.27"
+version = "0.1.29"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -6036,7 +6036,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-video"
-version = "0.1.27"
+version = "0.1.29"
 dependencies = [
  "anyhow",
  "core-foundation 0.10.0",
@@ -6058,7 +6058,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-voice"
-version = "0.1.27"
+version = "0.1.29"
 dependencies = [
  "anyhow",
  "block",
@@ -6087,7 +6087,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-webview"
-version = "0.1.27"
+version = "0.1.29"
 dependencies = [
  "anyhow",
  "gtk",
@@ -6100,7 +6100,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-widgets"
-version = "0.1.27"
+version = "0.1.29"
 dependencies = [
  "gpui",
  "mezon-store",
@@ -6164,7 +6164,7 @@ dependencies = [
 
 [[package]]
 name = "mmn-client"
-version = "0.1.27"
+version = "0.1.29"
 dependencies = [
  "base64 0.22.1",
  "bs58",
