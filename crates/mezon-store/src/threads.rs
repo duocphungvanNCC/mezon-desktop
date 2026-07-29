@@ -252,12 +252,7 @@ impl ThreadsStore {
         cx: &mut Context<Self>,
     ) {
         let channel_id = ev.channel_id.to_string();
-        let active = if ev.active == THREAD_STATUS_ARCHIVED {
-            THREAD_STATUS_ARCHIVED
-        } else {
-            THREAD_STATUS_JOINED
-        };
-        self.set_thread_active(&channel_id, active, cx);
+        self.set_thread_active(&channel_id, ev.status, cx);
     }
 
     fn apply_thread_message(&mut self, msg: &api::ChannelMessage, cx: &mut Context<Self>) {

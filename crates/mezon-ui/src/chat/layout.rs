@@ -7,12 +7,13 @@ use gpui::{
     linear_gradient, prelude::*, px,
 };
 use mezon_store::{
-    AuthState, AutoUpdateStatus, AutoUpdateStore, Channel, ChannelId, ChannelList, ChannelType,
-    ClanId, ClanList, ClanMembersStore, DirectChannel, DirectKind, DirectMessageStore,
-    GroupMembersStore, InboxStore, MessageSearchEvent, MessageSearchStore, MessagesStore,
-    PinnedEvent, PinnedMessagesStore, Settings, StreamStore, ThreadsEvent, ThreadsStore,
-    TopicsEvent, TopicsStore, UiState, VoiceConnection, VoiceMember, VoiceModerationError,
-    VoiceStore, expand_mention_name_tokens,
+    AuthState, AutoUpdateStatus, AutoUpdateStore, CHANNEL_ACTIVE_ARCHIVED, CHANNEL_ACTIVE_JOINED,
+    Channel, ChannelId, ChannelList, ChannelType, ClanId, ClanList, ClanMembersStore,
+    DirectChannel, DirectKind, DirectMessageStore, GroupMembersStore, InboxStore,
+    MessageSearchEvent, MessageSearchStore, MessagesStore, PinnedEvent, PinnedMessagesStore,
+    Settings, StreamStore, THREAD_STATUS_ARCHIVED, ThreadsEvent, ThreadsStore, TopicsEvent,
+    TopicsStore, UiState, VoiceConnection, VoiceMember, VoiceModerationError, VoiceStore,
+    expand_mention_name_tokens,
 };
 use ui::PopoverMenuHandle;
 
@@ -1103,11 +1104,11 @@ impl ChatLayout {
         else {
             return;
         };
-        if self
-            .channel_list
-            .read(cx)
-            .channel_in_clan(clan_id, thread_id)
-        {
+        let channel_list = self.channel_list.read(cx);
+        if !channel_list.is_clan_cache_loaded(clan_id) {
+            return;
+        }
+        if channel_list.channel_in_clan(clan_id, thread_id) {
             return;
         }
         crate::router::replace(
@@ -1876,8 +1877,15 @@ impl ChatLayout {
             .read(cx)
             .thread_active(&channel_id.to_string())
         {
-            Some(active) => (active, true),
-            None => (mezon_store::CHANNEL_ACTIVE_JOINED, false),
+            Some(status) => (
+                if status == THREAD_STATUS_ARCHIVED {
+                    CHANNEL_ACTIVE_ARCHIVED
+                } else {
+                    CHANNEL_ACTIVE_JOINED
+                },
+                true,
+            ),
+            None => (CHANNEL_ACTIVE_JOINED, false),
         };
         self.channel_list.update(cx, |list, cx| {
             if let Some(parent) = parent {

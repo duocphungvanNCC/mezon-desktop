@@ -407,6 +407,7 @@ impl ChannelList {
         self.previous_channels.clear();
         self.persist_previous_channels(cx);
         self.invalidate_channel_index_all();
+        self.reactivating.clear();
         self.active_clan_id = None;
         if self.active_channel_id.take().is_some() {
             cx.emit(ChannelEvent::ActiveChannelChanged(None));
@@ -993,6 +994,7 @@ impl ChannelList {
             categories
                 .iter()
                 .flat_map(|category| &category.channels)
+                .filter(|ch| ch.visible_in_sidebar())
                 .any(|ch| ch.is_unread())
         })
     }
@@ -1014,6 +1016,7 @@ impl ChannelList {
             categories
                 .iter()
                 .flat_map(|category| &category.channels)
+                .filter(|ch| ch.visible_in_sidebar())
                 .filter(|ch| seen.insert(ch.id))
                 .map(|ch| ch.badge_count)
                 .sum()
@@ -2063,41 +2066,6 @@ impl ChannelList {
         }
     }
 
-    pub fn channel_active(&self, clan_id: ClanId, channel_id: ChannelId) -> Option<i32> {
-        self.channel(clan_id, channel_id).map(|ch| ch.active)
-    }
-
-    pub fn maybe_reactivate_after_send(
-        &mut self,
-        channel_id: ChannelId,
-        clan_id: ClanId,
-        mode: i32,
-        cx: &mut Context<Self>,
-    ) {
-        if !self.begin_reactivate_for_send(channel_id, clan_id, mode, cx) {
-            return;
-        }
-
-        let api = self.api.clone();
-        cx.spawn(async move |this, cx| {
-            let result = api
-                .active_archived_thread(clan_id.get(), channel_id.get())
-                .await;
-            let _ = this.update(cx, |this, cx| {
-                this.reactivating.remove(&channel_id);
-                match result {
-                    Ok(()) => {
-                        this.apply_thread_reactivated(clan_id, channel_id, None, cx);
-                    }
-                    Err(e) => {
-                        tracing::error!("active_archived_thread failed: {e}");
-                    }
-                }
-            });
-        })
-        .detach();
-    }
-
     pub fn begin_reactivate_for_send(
         &mut self,
         channel_id: ChannelId,
@@ -2140,9 +2108,7 @@ impl ChannelList {
             if !name.is_empty() {
                 ch.name = name;
             }
-        } else if let Some(parent_id) =
-            parent_id.or_else(|| self.active_channel_id.filter(|id| *id != channel_id))
-        {
+        } else if let Some(parent_id) = parent_id {
             let channel = thread_channel_from_context(
                 channel_id,
                 name,
@@ -2183,15 +2149,21 @@ impl ChannelList {
 
         if is_archive {
             let mut removed = false;
+            let mut swept_all = false;
             if let Some(cats) = self.cache.get_mut(&clan_id) {
                 removed = remove_channel(cats, channel_id);
             } else {
+                swept_all = true;
                 for cats in self.cache.values_mut() {
                     removed |= remove_channel(cats, channel_id);
                 }
             }
             if removed {
-                self.invalidate_channel_index(clan_id);
+                if swept_all {
+                    self.invalidate_channel_index_all();
+                } else {
+                    self.invalidate_channel_index(clan_id);
+                }
             }
             if self.active_channel_id == Some(channel_id) {
                 let redirect = (!parent_id.is_zero()).then_some(parent_id);
@@ -2391,10 +2363,6 @@ impl ChannelList {
         })
         .detach();
     }
-}
-
-pub fn should_reactivate_after_send(mode: i32, channel: &Channel) -> bool {
-    should_reactivate_thread_after_send(mode, channel, thread_needs_reactivate(channel))
 }
 
 fn should_reactivate_thread_after_send(mode: i32, channel: &Channel, archived: bool) -> bool {
@@ -4330,13 +4298,29 @@ mod tests {
         let mut thread = make_thread(50, 10, "cat1");
         thread.channel_type = ChannelType::Thread;
         thread.active = CHANNEL_ACTIVE_ARCHIVED;
-        assert!(should_reactivate_after_send(6, &thread));
-        assert!(!should_reactivate_after_send(2, &thread));
+        assert!(should_reactivate_thread_after_send(
+            6,
+            &thread,
+            thread_needs_reactivate(&thread)
+        ));
+        assert!(!should_reactivate_thread_after_send(
+            2,
+            &thread,
+            thread_needs_reactivate(&thread)
+        ));
         thread.active = CHANNEL_ACTIVE_JOINED;
-        assert!(!should_reactivate_after_send(6, &thread));
+        assert!(!should_reactivate_thread_after_send(
+            6,
+            &thread,
+            thread_needs_reactivate(&thread)
+        ));
         assert!(should_reactivate_thread_after_send(6, &thread, true));
         let parent = make_channel(10, "parent", "cat1");
-        assert!(!should_reactivate_after_send(6, &parent));
+        assert!(!should_reactivate_thread_after_send(
+            6,
+            &parent,
+            thread_needs_reactivate(&parent)
+        ));
     }
 
     #[test]
@@ -4351,7 +4335,11 @@ mod tests {
             - THREAD_ARCHIVE_DURATION_SECONDS
             - 1;
         assert!(thread_needs_reactivate(&thread));
-        assert!(should_reactivate_after_send(6, &thread));
+        assert!(should_reactivate_thread_after_send(
+            6,
+            &thread,
+            thread_needs_reactivate(&thread)
+        ));
     }
 
     #[test]
@@ -4418,7 +4406,11 @@ mod tests {
         thread.channel_type = ChannelType::Thread;
         thread.active = CHANNEL_ACTIVE_JOINED;
         assert!(!thread.is_archived());
-        assert!(!should_reactivate_after_send(6, &thread));
+        assert!(!should_reactivate_thread_after_send(
+            6,
+            &thread,
+            thread_needs_reactivate(&thread)
+        ));
 
         assert!(sync_thread_active_status(
             &mut thread,
@@ -4427,7 +4419,11 @@ mod tests {
         ));
         assert!(thread.is_archived());
         assert!(!thread.visible_in_sidebar());
-        assert!(should_reactivate_after_send(6, &thread));
+        assert!(should_reactivate_thread_after_send(
+            6,
+            &thread,
+            thread_needs_reactivate(&thread)
+        ));
         assert!(should_reactivate_thread_after_send(6, &thread, true));
     }
 

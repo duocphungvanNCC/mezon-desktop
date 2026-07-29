@@ -376,6 +376,7 @@ impl AppApi {
             .await
     }
 
+    /// List threads for a parent channel.
     pub async fn list_thread_descs(
         &self,
         channel_id: &str,
