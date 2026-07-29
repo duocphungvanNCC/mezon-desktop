@@ -898,9 +898,15 @@ fn render_album(
             tile_element = tile_element.when(
                 !att.uploading && !att.upload_failed && !raw_url.is_empty(),
                 |d| {
-                    d.cursor_pointer().on_click(move |_, _window, cx| {
+                    d.cursor_pointer().on_click(move |_, window, cx| {
                         if !selection.borrow().has_selection() {
-                            open_viewer_from_message(&settings, raw_url.clone(), anchor, cx);
+                            open_viewer_from_message(
+                                &settings,
+                                raw_url.clone(),
+                                anchor,
+                                window,
+                                cx,
+                            );
                         }
                     })
                 },
@@ -927,9 +933,9 @@ fn render_album(
                             .object_fit(ObjectFit::Cover),
                     )
                 })
-                .on_click(move |_, _window, cx| {
+                .on_click(move |_, window, cx| {
                     if !selection.borrow().has_selection() {
-                        open_viewer_from_message(&settings, raw_url.clone(), anchor, cx);
+                        open_viewer_from_message(&settings, raw_url.clone(), anchor, window, cx);
                     }
                 });
         }
@@ -1047,9 +1053,9 @@ fn render_photo(
             .overflow_hidden()
             .bg(theme.bg_tertiary);
         el = el.when(!sending && !att.upload_failed && !raw_url.is_empty(), |d| {
-            d.cursor_pointer().on_click(move |_, _window, cx| {
+            d.cursor_pointer().on_click(move |_, window, cx| {
                 if !selection.borrow().has_selection() {
-                    open_viewer_from_message(&settings, raw_url.clone(), anchor, cx);
+                    open_viewer_from_message(&settings, raw_url.clone(), anchor, window, cx);
                 }
             })
         });
@@ -1125,9 +1131,9 @@ fn render_photo(
         .overflow_hidden()
         .bg(theme.bg_tertiary);
     el = el.when(!is_sticker && !att.upload_failed, |d| {
-        d.cursor_pointer().on_click(move |_, _window, cx| {
+        d.cursor_pointer().on_click(move |_, window, cx| {
             if !selection.borrow().has_selection() {
-                open_viewer_from_message(&settings, raw_url.clone(), anchor, cx);
+                open_viewer_from_message(&settings, raw_url.clone(), anchor, window, cx);
             }
         })
     });
@@ -1883,6 +1889,7 @@ fn open_viewer_from_message(
     settings: &Entity<mezon_store::Settings>,
     url: SharedString,
     anchor_before: u32,
+    window: &gpui::Window,
     cx: &mut gpui::App,
 ) {
     use crate::image_viewer::{OpenViewerRequest, open_image_viewer, resolve_channel_label};
@@ -1919,6 +1926,7 @@ fn open_viewer_from_message(
             selected_url: Some(url),
             anchor_before: Some(anchor_before),
         },
+        window,
         cx,
     );
 }

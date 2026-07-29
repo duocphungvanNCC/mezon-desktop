@@ -54,6 +54,7 @@ pub enum RealtimeKind {
     UserChannelRemoved,
     ChannelArchive,
     NotifUserChannel,
+    Unmute,
     Notifications,
     AddFriend,
     RemoveFriend,
@@ -103,6 +104,7 @@ impl RealtimeKind {
             RealtimeEvent::UserChannelRemoved(_) => Self::UserChannelRemoved,
             RealtimeEvent::ChannelArchive(_) => Self::ChannelArchive,
             RealtimeEvent::NotifUserChannel(_) => Self::NotifUserChannel,
+            RealtimeEvent::Unmute(_) => Self::Unmute,
             RealtimeEvent::Notifications(_) => Self::Notifications,
             RealtimeEvent::AddFriend(_) => Self::AddFriend,
             RealtimeEvent::RemoveFriend(_) => Self::RemoveFriend,
@@ -322,10 +324,10 @@ mod tests {
     }
 
     #[test]
-    fn kind_of_returns_none_for_unhandled() {
+    fn kind_of_routes_unmute() {
         assert_eq!(
             RealtimeKind::of(&RealtimeEvent::Unmute(realtime::UnmuteEvent::default())),
-            None
+            Some(RealtimeKind::Unmute)
         );
     }
 

@@ -18,6 +18,7 @@ pub struct Session {
     pub session_id: String,
     /// Unix timestamp (seconds) when the token expires
     pub expires_at: u64,
+    pub is_remember: bool,
     /// The WebSocket endpoint URL returned by the server after auth
     pub ws_url: Option<String>,
     /// Parsed WebSocket host returned by the server after auth
@@ -146,5 +147,53 @@ mod tests {
             ..Default::default()
         };
         assert!(session.is_expired());
+    }
+
+    fn fake_jwt(user_id: &str, username: &str, exp: u64) -> String {
+        let claims = format!(r#"{{"uid":"{user_id}","usn":"{username}","exp":{exp}}}"#);
+        format!("header.{}.signature", URL_SAFE_NO_PAD.encode(claims))
+    }
+
+    #[test]
+    fn apply_refresh_adopts_the_new_token_and_its_expiry() {
+        let mut session = Session {
+            token: fake_jwt("7", "ngoc", 1000),
+            refresh_token: "old-refresh".into(),
+            session_id: "old-sid".into(),
+            expires_at: 1000,
+            user_id: "7".into(),
+            username: "ngoc".into(),
+            ..Default::default()
+        };
+
+        let renewed = fake_jwt("7", "ngoc", 9000);
+        session.apply_refresh(&renewed, "new-refresh", "new-sid");
+
+        assert_eq!(session.token, renewed);
+        assert_eq!(session.refresh_token, "new-refresh");
+        assert_eq!(session.session_id, "new-sid");
+        assert_eq!(session.expires_at, 9000);
+    }
+
+    #[test]
+    fn apply_refresh_keeps_fields_the_server_left_empty() {
+        let original = fake_jwt("7", "ngoc", 1000);
+        let mut session = Session {
+            token: original.clone(),
+            refresh_token: "old-refresh".into(),
+            session_id: "old-sid".into(),
+            expires_at: 1000,
+            ..Default::default()
+        };
+
+        session.apply_refresh("", "", "new-sid");
+
+        assert_eq!(
+            session.token, original,
+            "an sid-only push must not clear the token"
+        );
+        assert_eq!(session.refresh_token, "old-refresh");
+        assert_eq!(session.session_id, "new-sid");
+        assert_eq!(session.expires_at, 1000);
     }
 }

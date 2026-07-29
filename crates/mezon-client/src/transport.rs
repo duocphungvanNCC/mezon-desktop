@@ -4,8 +4,10 @@
 /// for interacting with the Mezon backend.
 pub use crate::transport_adapter::TransportAdapter;
 use anyhow::{Context, Result};
+use futures::AsyncReadExt as _;
+use http_client::{AsyncBody, HttpClient, http};
 use mezon_proto::{api, realtime};
-use parking_lot::Mutex;
+use parking_lot::{Mutex, RwLock};
 use prost::Message;
 use serde::{Deserialize, Serialize};
 use serde_json;
@@ -21,6 +23,8 @@ const DEFAULT_SEND_TIMEOUT_MS: u64 = 10000;
 const DEFAULT_CONNECT_GATE_MS: u64 = 5000;
 const DEFAULT_PING_TIMEOUT_MS: u64 = 5000;
 const MULTIPART_OP_TIMEOUT_MS: u64 = 120000;
+const HTTP_FALLBACK_TIMEOUT: Duration = Duration::from_secs(20);
+const MAX_HTTP_FALLBACK_RESPONSE_BYTES: u64 = 1024 * 1024;
 
 fn parse_id<T>(value: &str) -> Result<T>
 where
@@ -230,6 +234,12 @@ fn encode_envelope_cid_last(mut envelope: realtime::Envelope) -> Vec<u8> {
     bytes
 }
 
+#[derive(Clone)]
+pub struct HttpFallbackSession {
+    pub base_url: String,
+    pub token: String,
+}
+
 /// Main transport client.
 pub struct MezonTransport {
     adapter: Arc<dyn TransportAdapter>,
@@ -243,6 +253,7 @@ pub struct MezonTransport {
     /// Surfaced in the `api_ok` log so a duplicated / repeated call is obvious
     /// (`call#2` for a one-shot List means something is fetching twice).
     api_call_counts: Arc<Mutex<HashMap<String, u64>>>,
+    http_fallback: Arc<RwLock<Option<Arc<HttpFallbackSession>>>>,
     #[allow(dead_code)]
     base_path: String,
 }
@@ -260,6 +271,7 @@ impl MezonTransport {
             connected_tx,
             connected_rx,
             api_call_counts: Arc::new(Mutex::new(HashMap::new())),
+            http_fallback: Arc::new(RwLock::new(None)),
             base_path,
         }
     }
@@ -267,6 +279,10 @@ impl MezonTransport {
     /// Set request timeout.
     pub fn set_timeout(&mut self, timeout_ms: u64) {
         self.send_timeout_ms = Duration::from_millis(timeout_ms);
+    }
+
+    pub fn set_http_fallback(&self, fallback: Option<HttpFallbackSession>) {
+        *self.http_fallback.write() = fallback.map(Arc::new);
     }
 
     /// Generate a unique correlation ID.
@@ -2924,6 +2940,94 @@ impl MezonTransport {
         Ok((code, response))
     }
 
+    async fn send_api_request_over_http(&self, api_name: &str, body: Vec<u8>) -> Result<Vec<u8>> {
+        let fallback = self
+            .http_fallback
+            .read()
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("no session for the HTTP fallback"))?;
+
+        let url = format!(
+            "{}/mezon.api.Mezon/{api_name}",
+            fallback.base_url.trim_end_matches('/')
+        );
+        let request = http::Request::builder()
+            .method(http::Method::POST)
+            .uri(&url)
+            .header("Authorization", format!("Bearer {}", fallback.token))
+            .header("Content-Type", "application/proto")
+            .header("Accept", "application/proto")
+            .body(AsyncBody::from(body))
+            .context("failed to build the HTTP fallback request")?;
+
+        let started = Instant::now();
+        let mut response = match tokio::time::timeout(
+            HTTP_FALLBACK_TIMEOUT,
+            crate::transport_runtime::http_client().send(request),
+        )
+        .await
+        {
+            Ok(result) => result.context("network error on the HTTP fallback")?,
+            Err(_) => anyhow::bail!(
+                "HTTP fallback timed out after {}s",
+                HTTP_FALLBACK_TIMEOUT.as_secs()
+            ),
+        };
+
+        let status = response.status();
+        let mut bytes: Vec<u8> = Vec::new();
+        response
+            .body_mut()
+            .take(MAX_HTTP_FALLBACK_RESPONSE_BYTES + 1)
+            .read_to_end(&mut bytes)
+            .await
+            .context("failed to read the HTTP fallback response body")?;
+        if !status.is_success() {
+            anyhow::bail!("HTTP fallback failed with status {}", status.as_u16());
+        }
+        if bytes.len() as u64 > MAX_HTTP_FALLBACK_RESPONSE_BYTES {
+            anyhow::bail!(
+                "HTTP fallback response exceeds {MAX_HTTP_FALLBACK_RESPONSE_BYTES} bytes"
+            );
+        }
+
+        tracing::info!(
+            target: "socket",
+            "api_http_ok: action={api_name} bytes={} took={}ms",
+            bytes.len(),
+            started.elapsed().as_millis()
+        );
+        Ok(bytes)
+    }
+
+    /// Send over the socket, falling back to HTTP only while the socket is closed.
+    ///
+    /// The fallback deliberately never retries a request the socket already accepted: a send that
+    /// fails *after* the frame left the client (a timeout, a dropped reply) proves nothing about
+    /// whether the server applied it, and replaying a non-idempotent call like SendChannelMessage
+    /// there posts the message twice. Deciding up front also keeps the success path free of the
+    /// defensive `body` clone that a retry-after-failure shape would need on every single call.
+    async fn send_api_request_with_http_fallback(
+        &self,
+        cid: u16,
+        api_name: &str,
+        body: Vec<u8>,
+    ) -> Result<(u32, Vec<u8>)> {
+        let has_fallback = self.http_fallback.read().is_some();
+        if has_fallback && !self.is_open().await {
+            tracing::warn!(
+                target: "socket",
+                "api_socket_closed: action={api_name} cid={cid} — sending over HTTP"
+            );
+            let response = self
+                .send_api_request_over_http(api_name, body)
+                .await
+                .context("socket closed; HTTP fallback")?;
+            return Ok((0, response));
+        }
+        self.send_api_request(cid, api_name, body).await
+    }
+
     fn account_from_user(
         user: api::User,
         email: Option<String>,
@@ -4258,7 +4362,9 @@ impl MezonTransport {
         }
         .encode_to_vec();
 
-        let (code, response) = self.send_api_request(cid, api_name, body).await?;
+        let (code, response) = self
+            .send_api_request_with_http_fallback(cid, api_name, body)
+            .await?;
 
         if code != 0 {
             return Err(anyhow::anyhow!("API error: code={}", code));
@@ -4271,6 +4377,9 @@ impl MezonTransport {
             ack.channel_id,
             ack.code
         );
+        if ack.message_id == 0 {
+            return Err(anyhow::anyhow!("send returned no message id"));
+        }
         let mut content_tokens = if content_is_json {
             serde_json::from_str(&content_json).unwrap_or_default()
         } else {
@@ -5192,7 +5301,7 @@ impl MezonTransport {
         }
         .encode_to_vec();
         let (code, _response) = self
-            .send_api_request(cid, "SendChannelMessage", body)
+            .send_api_request_with_http_fallback(cid, "SendChannelMessage", body)
             .await?;
         if code != 0 {
             return Err(anyhow::anyhow!("API error: code={}", code));

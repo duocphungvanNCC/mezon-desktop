@@ -27,21 +27,32 @@ pub fn main_window_bounds(cx: &mut App) -> Option<Bounds<Pixels>> {
         })
 }
 
+/// Read a placement straight off a live `Window`. Callers that already hold the main window —
+/// every click handler does — must use this rather than [`window_placement_for`]: reaching for
+/// the main window through `cx.update_window` while that same window is mid-update fails, and the
+/// resulting `None` silently downgrades an overlay to [`overlay_fallback_placement`].
+pub fn overlay_placement_from_window(
+    window: &Window,
+    cx: &App,
+) -> (WindowBounds, Option<DisplayId>) {
+    let display_id = window.display(cx).map(|d| d.id());
+    let bounds = window.bounds();
+    let window_bounds = if window.is_fullscreen() {
+        WindowBounds::Fullscreen(bounds)
+    } else if window.is_maximized() {
+        WindowBounds::Maximized(bounds)
+    } else {
+        WindowBounds::Windowed(bounds)
+    };
+    (window_bounds, display_id)
+}
+
 pub fn window_placement_for(
     handle: AnyWindowHandle,
     cx: &mut App,
 ) -> Option<(WindowBounds, Option<DisplayId>)> {
     cx.update_window(handle, |_, window, cx| {
-        let display_id = window.display(cx).map(|d| d.id());
-        let bounds = window.bounds();
-        let window_bounds = if window.is_fullscreen() {
-            WindowBounds::Fullscreen(bounds)
-        } else if window.is_maximized() {
-            WindowBounds::Maximized(bounds)
-        } else {
-            WindowBounds::Windowed(bounds)
-        };
-        (window_bounds, display_id)
+        overlay_placement_from_window(window, cx)
     })
     .ok()
 }

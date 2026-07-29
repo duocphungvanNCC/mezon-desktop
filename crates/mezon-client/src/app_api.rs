@@ -8,7 +8,7 @@ use crate::{
     transport::{
         ApiAccount, ApiAttachment, ApiCanvas, ApiCanvasDetail, ApiCategoryDesc, ApiChannelApp,
         ApiChannelAttachment, ApiChannelDesc, ApiClanDesc, ApiDirectChannel, ApiFriend, ApiMessage,
-        ApiPinMessage, ApiThreadDesc, ApiVoiceChannelUser, RealtimeEvent,
+        ApiPinMessage, ApiThreadDesc, ApiVoiceChannelUser, HttpFallbackSession, RealtimeEvent,
     },
 };
 
@@ -180,6 +180,10 @@ impl AppApi {
             status_tx: Arc::new(status_tx),
             base_img_url,
         }
+    }
+
+    pub fn set_http_fallback(&self, fallback: Option<HttpFallbackSession>) {
+        self.transport.set_http_fallback(fallback);
     }
 
     pub fn subscribe(&self) -> tokio::sync::broadcast::Receiver<RealtimeEvent> {

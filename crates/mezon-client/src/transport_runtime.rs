@@ -423,6 +423,10 @@ impl TransportClient {
         }
     }
 
+    pub fn set_http_fallback(&self, fallback: Option<crate::transport::HttpFallbackSession>) {
+        self.inner.set_http_fallback(fallback);
+    }
+
     pub async fn connect(
         &self,
         host: &str,
