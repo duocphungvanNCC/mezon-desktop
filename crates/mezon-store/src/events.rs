@@ -214,10 +214,11 @@ impl EventsStore {
                     break;
                 }
                 let connected = *status.borrow() == ConnectionStatus::Connected;
-                if connected && !connected_before {
-                    if this.update(cx, |this, cx| this.refresh_loaded(cx)).is_err() {
-                        break;
-                    }
+                if connected
+                    && !connected_before
+                    && this.update(cx, |this, cx| this.refresh_loaded(cx)).is_err()
+                {
+                    break;
                 }
                 connected_before = connected;
             }
@@ -391,25 +392,38 @@ impl EventsStore {
         .detach();
     }
 
+    /// Rows the viewer may see in `clan_id`. `visible_events` and
+    /// `visible_event_count` must agree exactly — the sidebar count is rendered
+    /// next to the list the modal shows — so both go through this one predicate.
+    ///
+    /// Keeps parity with React's `useEventManagementQuantity`: private events are
+    /// only visible to their creator, and an event pinned to a channel is hidden
+    /// unless that channel is in the clan the viewer can see.
+    fn visible_in_clan<'a>(
+        &'a self,
+        clan_id: ClanId,
+        current_user: Option<UserId>,
+        cx: &'a App,
+    ) -> impl Iterator<Item = &'a ClanEventItem> + 'a {
+        let channels = ChannelList::global(cx).read(cx);
+        let now = chrono::Utc::now().timestamp().max(0) as u32;
+        self.events(clan_id).iter().filter(move |event| {
+            event.event_status != EventStatus::Completed as i32
+                && (event.end_time_seconds == 0 || event.end_time_seconds > now)
+                && (!event.is_private || Some(event.creator_id) == current_user)
+                && event
+                    .channel_id
+                    .is_none_or(|channel_id| channels.channel_in_clan(clan_id, channel_id))
+        })
+    }
+
     pub fn visible_events(
         &self,
         clan_id: ClanId,
         current_user: Option<UserId>,
         cx: &App,
     ) -> Vec<ClanEventItem> {
-        let channels = ChannelList::global(cx);
-        let channels = channels.read(cx);
-        let now = chrono::Utc::now().timestamp().max(0) as u32;
-        self.events(clan_id)
-            .iter()
-            .filter(|event| {
-                event.event_status != EventStatus::Completed as i32
-                    && (event.end_time_seconds == 0 || event.end_time_seconds > now)
-                    && (!event.is_private || Some(event.creator_id) == current_user)
-                    && event
-                        .channel_id
-                        .is_none_or(|channel_id| channels.channel_in_clan(clan_id, channel_id))
-            })
+        self.visible_in_clan(clan_id, current_user, cx)
             .cloned()
             .collect()
     }
@@ -420,21 +434,6 @@ impl EventsStore {
         current_user: Option<UserId>,
         cx: &App,
     ) -> usize {
-        let channels = ChannelList::global(cx);
-        let channels = channels.read(cx);
-        let now = chrono::Utc::now().timestamp().max(0) as u32;
-        self.events(clan_id)
-            .iter()
-            .filter(|event| {
-                event.event_status != EventStatus::Completed as i32
-                    && (event.end_time_seconds == 0 || event.end_time_seconds > now)
-                    // Keep parity with React's useEventManagementQuantity: private
-                    // events are only visible to their creator.
-                    && (!event.is_private || Some(event.creator_id) == current_user)
-                    && event
-                        .channel_id
-                        .is_none_or(|channel_id| channels.channel_in_clan(clan_id, channel_id))
-            })
-            .count()
+        self.visible_in_clan(clan_id, current_user, cx).count()
     }
 }
