@@ -31,6 +31,8 @@ const LEAVE_RED_HOVER: u32 = 0xa12829;
 const SPEAKING_BLUE: u32 = 0x1f8cf9;
 const SPEAKING_BORDER_WIDTH: f32 = 2.5;
 
+const PARTICIPANT_TILE_BG: u32 = 0x5c5e66;
+
 fn speaking_border_color(cell: &VideoCell) -> Hsla {
     if cell.speaking && !cell.muted && !cell.is_screen {
         gpui::rgb(SPEAKING_BLUE).into()
@@ -792,13 +794,16 @@ fn update_pages(current: &[String], next: &[String], max_items: usize) -> Vec<St
     updated
 }
 
-const AGENT_AVATAR_PATH: &str = "0/0/1779484387973271600/1737423959329_undefined173740153013517374015248704886401586613166392.png";
+/// The KOMU agent avatar is a global Mezon asset that only exists on the
+/// canonical `cdn.mezon.vn` — per-deployment CDNs like `cdn.komu.vn` return 404
+/// for this path. Reference it directly (matching the web client) instead of
+/// `base_img_url`, then run it through the local imgproxy like any other avatar.
+const AGENT_AVATAR_URL: &str = "https://cdn.mezon.vn/0/0/1779484387973271600/1737423959329_undefined173740153013517374015248704886401586613166392.png";
 
 fn resolve_cell_identity(cx: &App, clan_id: ClanId, p: &VoiceParticipant) -> (String, String) {
     let (name, avatar_url) = resolve_voice_identity(cx, clan_id, &p.identity, &p.name);
     if p.is_agent {
-        let source = crate::util::imgproxy::cdn_asset_url(cx, AGENT_AVATAR_PATH);
-        (name, crate::util::imgproxy::avatar_url(cx, &source))
+        (name, crate::util::imgproxy::avatar_url(cx, AGENT_AVATAR_URL))
     } else {
         (name, avatar_url)
     }
@@ -1632,6 +1637,25 @@ fn render_grid(
     let page_offset = page * max_tiles;
     let paginated = measured && total_pages > 1;
 
+    // Scale the avatar with tile height (capped at the web client's 80px) so it
+    // doesn't dominate short tiles in small windows. Falls back to 80px until the
+    // grid is measured. The 0.33 factor / 44px floor are tunable to taste.
+    let tile_h = if measured && rows > 0 {
+        let gap = 8.0_f32; // gap_2 between rows
+        let usable = f32::from(grid_size.height)
+            - gap * 2.0 // p_2 top + bottom
+            - gap * rows.saturating_sub(1) as f32
+            - if paginated { 16.0 } else { 0.0 };
+        (usable / rows as f32).max(0.0)
+    } else {
+        0.0
+    };
+    let avatar_size = if tile_h > 0.0 {
+        px((tile_h * 0.33).clamp(44.0, 80.0))
+    } else {
+        px(80.0)
+    };
+
     let mut grid = div()
         .relative()
         .flex()
@@ -1648,7 +1672,8 @@ fn render_grid(
             let index = page_offset + r * cols + c;
             let mut cell_el = div().flex_1().min_w_0().min_h_0().w_full();
             if index < count {
-                cell_el = cell_el.child(video_tile(theme, locale, store, voice, &cells[index]));
+                cell_el =
+                    cell_el.child(video_tile(theme, locale, store, voice, &cells[index], avatar_size));
             }
             row = row.child(cell_el);
         }
@@ -2178,7 +2203,9 @@ fn focus_main_tile(
     cell: &VideoCell,
 ) -> AnyElement {
     let voice = voice.clone();
-    let inner = tile_inner(theme, store, cell, px(120.));
+    // Match the web client: `ParticipantTile` renders an 80px avatar in every
+    // layout, including the spotlighted main tile (no growth when focused).
+    let inner = tile_inner(theme, store, cell, px(80.));
 
     div()
         .id(SharedString::from(format!("focus-main-{}", cell.id)))
@@ -2191,7 +2218,7 @@ fn focus_main_tile(
         .justify_center()
         .rounded_lg()
         .overflow_hidden()
-        .bg(theme.bg_secondary)
+        .bg(gpui::rgb(PARTICIPANT_TILE_BG))
         .cursor_pointer()
         .child(inner)
         .child(tile_metadata(locale, cell))
@@ -2231,7 +2258,7 @@ fn strip_tile(
         .w(px(tile_width))
         .rounded_lg()
         .overflow_hidden()
-        .bg(theme.bg_secondary)
+        .bg(gpui::rgb(PARTICIPANT_TILE_BG))
         .cursor_pointer()
         .border(px(SPEAKING_BORDER_WIDTH))
         .border_color(border_color)
@@ -2254,10 +2281,11 @@ fn video_tile(
     store: &VoiceStore,
     voice: &Entity<VoiceStore>,
     cell: &VideoCell,
+    avatar_size: Pixels,
 ) -> AnyElement {
     let voice = voice.clone();
     let id = cell.id.clone();
-    let inner = tile_inner(theme, store, cell, px(80.));
+    let inner = tile_inner(theme, store, cell, avatar_size);
     let border_color = speaking_border_color(cell);
 
     div()
@@ -2269,7 +2297,7 @@ fn video_tile(
         .size_full()
         .rounded_lg()
         .overflow_hidden()
-        .bg(theme.bg_secondary)
+        .bg(gpui::rgb(PARTICIPANT_TILE_BG))
         .cursor_pointer()
         .border(px(SPEAKING_BORDER_WIDTH))
         .border_color(border_color)
@@ -2350,7 +2378,6 @@ fn tile_metadata(locale: &str, cell: &VideoCell) -> AnyElement {
         .flex()
         .flex_row()
         .items_center()
-        .justify_between()
         .gap_1()
         .child(
             div()
@@ -2384,8 +2411,8 @@ fn tile_metadata(locale: &str, cell: &VideoCell) -> AnyElement {
                         .relative()
                         .min_w_0()
                         .py(px(2.))
-                        .text_xs()
-                        .line_height(px(12.))
+                        .text_base()
+                        .line_height(px(16.))
                         .text_color(gpui::rgb(0xffffff))
                         .child(div().invisible().whitespace_nowrap().child(label.clone()))
                         .child(
@@ -2398,6 +2425,10 @@ fn tile_metadata(locale: &str, cell: &VideoCell) -> AnyElement {
                         ),
                 ),
         )
+        // Spacer pushes the quality pill to the right edge without letting flex
+        // shrink the label pill while free space remains (so the name stays full
+        // whenever the tile has room; it still truncates in narrow strip tiles).
+        .child(div().flex_1())
         .child(
             div()
                 .flex_none()
