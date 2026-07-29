@@ -403,6 +403,7 @@ impl ClanMembersPage {
                             if event.button != gpui::MouseButton::Left {
                                 return;
                             }
+                            cx.stop_propagation();
                             this.role_picker_open = if this.role_picker_open == Some(user_id) {
                                 None
                             } else {
@@ -507,6 +508,9 @@ impl ClanMembersPage {
             .border_color(theme.tokens.border_primary)
             .bg(theme.tokens.bg_theme_contexify)
             .shadow_lg()
+            .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                cx.stop_propagation();
+            })
             .on_mouse_down_out(cx.listener(|this, _, _, cx| {
                 if this.role_picker_open.is_some() {
                     this.role_picker_open = None;
