@@ -1,5 +1,6 @@
 pub mod channel_sidebar;
 pub mod clan_sidebar;
+pub mod create_message_group_modal;
 pub mod direct_sidebar;
 
 use gpui::{App, Div, FontWeight, Pixels, SharedString, div, prelude::*, px, rgb, white};

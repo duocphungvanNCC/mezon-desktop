@@ -5729,9 +5729,10 @@ impl MezonTransport {
     pub async fn create_direct_channel(&self, user_ids: &[i64]) -> Result<ApiChannelDesc> {
         let cid = self.generate_cid();
 
+        let channel_type = if user_ids.len() > 1 { 2 } else { 3 };
         let body = api::CreateChannelDescRequest {
             clan_id: 0,
-            r#type: 3,
+            r#type: channel_type,
             channel_private: 1,
             user_ids: user_ids.to_vec(),
             ..Default::default()

@@ -12,6 +12,7 @@ use crate::{
     },
 };
 
+const CHECK_NAME_TYPE_CHANNEL: i32 = 2;
 const CHECK_NAME_TYPE_NICKNAME: i32 = 4;
 
 fn sanitize_filename(name: &str) -> String {
@@ -2143,6 +2144,21 @@ impl AppApi {
             .parse()
             .map_err(|e| anyhow::anyhow!("invalid condition_id {condition_id:?}: {e}"))?;
         let resp = self.transport.check_duplicate_name(name, 0, cond).await?;
+        Ok(resp.is_duplicate)
+    }
+
+    pub async fn check_duplicate_channel_name(
+        &self,
+        name: &str,
+        category_id: &str,
+    ) -> Result<bool> {
+        let cond: i64 = category_id
+            .parse()
+            .map_err(|e| anyhow::anyhow!("invalid category_id {category_id:?}: {e}"))?;
+        let resp = self
+            .transport
+            .check_duplicate_name(name, CHECK_NAME_TYPE_CHANNEL, cond)
+            .await?;
         Ok(resp.is_duplicate)
     }
 
