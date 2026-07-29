@@ -69,6 +69,7 @@ pub enum RealtimeEvent {
     UserChannelRemoved(realtime::UserChannelRemoved),
     NotifUserChannel(api::NotificationUserChannel),
     AddClanUser(realtime::AddClanUserEvent),
+    ClanEventCreated(api::CreateEventRequest),
     UserClanRemoved(realtime::UserClanRemoved),
     ClanUpdated(realtime::ClanUpdatedEvent),
     ClanProfileUpdated(realtime::ClanProfileUpdatedEvent),
@@ -126,6 +127,7 @@ impl TryFrom<realtime::envelope::Message> for RealtimeEvent {
             }
             realtime::envelope::Message::NotiUserChannel(m) => Ok(Self::NotifUserChannel(m)),
             realtime::envelope::Message::AddClanUserEvent(m) => Ok(Self::AddClanUser(m)),
+            realtime::envelope::Message::ClanEventCreated(m) => Ok(Self::ClanEventCreated(m)),
             realtime::envelope::Message::UserClanRemovedEvent(m) => Ok(Self::UserClanRemoved(m)),
             realtime::envelope::Message::ClanUpdatedEvent(m) => Ok(Self::ClanUpdated(m)),
             realtime::envelope::Message::ClanProfileUpdatedEvent(m) => {

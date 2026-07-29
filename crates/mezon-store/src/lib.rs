@@ -21,6 +21,7 @@ pub mod config;
 pub mod connection;
 pub mod direct;
 pub mod emoji;
+pub mod events;
 pub mod files;
 pub mod friend;
 pub mod gallery;
@@ -121,6 +122,7 @@ pub use emoji::{
     normalize_emoji_shortname, strip_emoji_colons, validate_emoji_create_shortname,
     validate_emoticon_file,
 };
+pub use events::{ClanEventItem, EventsEvent, EventsStore};
 pub use files::{
     ChannelDocument, FILES_BROAD_QUERY, FILES_CACHE_TTL, FILES_PAGE_SIZE, FILES_TYPED_QUERY,
     FilesEvent, FilesStore, filename_matches_query, is_document, short_file_type_label,
