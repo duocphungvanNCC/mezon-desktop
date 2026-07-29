@@ -1,6 +1,8 @@
 pub mod audio;
 pub mod autostart;
 pub mod badge;
+pub mod cli_install;
+pub mod control;
 pub mod deep_link;
 pub mod instance;
 pub mod location;

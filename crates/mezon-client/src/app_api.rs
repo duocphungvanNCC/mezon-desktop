@@ -1622,12 +1622,16 @@ impl AppApi {
     ) -> Result<ApiMessage> {
         let attachments: Vec<_> = {
             use futures::StreamExt as _;
-            futures::stream::iter(media_urls.iter().map(|url| self.upload_media_from_url(url)))
-                .buffer_unordered(4)
-                .collect::<Vec<_>>()
-                .await
-                .into_iter()
-                .collect::<Result<Vec<_>>>()?
+            let api = self.clone();
+            futures::stream::iter(media_urls.iter().cloned().map(move |url| {
+                let api = api.clone();
+                async move { api.upload_media_from_url(&url).await }
+            }))
+            .buffer_unordered(4)
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<Result<Vec<_>>>()?
         };
         self.transport
             .send_channel_message_with_attachments(
