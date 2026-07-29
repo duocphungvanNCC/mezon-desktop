@@ -1175,7 +1175,7 @@ fn strip_marker(s: &str, marker: &str) -> String {
     trimmed.to_string()
 }
 
-fn strip_code_fence(s: &str) -> (Option<String>, String) {
+pub fn strip_code_fence(s: &str) -> (Option<String>, String) {
     let mut body = s.trim();
     if let Some(rest) = body.strip_prefix("```") {
         body = rest;
@@ -1184,19 +1184,19 @@ fn strip_code_fence(s: &str) -> (Option<String>, String) {
         }
     }
     body = body.trim_matches('`');
-    body = body.strip_prefix('\n').unwrap_or(body);
-    body = body.strip_suffix('\n').unwrap_or(body);
-    let mut lines = body.splitn(2, '\n');
-    let first = lines.next().unwrap_or("");
-    let rest = lines.next();
-    if let Some(rest) = rest
-        && !first.is_empty()
-        && first.len() <= 32
-        && first
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'+' || b == b'-' || b == b'_' || b == b'#')
-    {
-        return (Some(first.to_string()), rest.to_string());
+    let body = body.trim();
+
+    if let Some((first, rest)) = body.split_once('\n') {
+        let rest = rest.trim_end();
+        if !rest.is_empty()
+            && !first.is_empty()
+            && first.len() <= 32
+            && first.bytes().all(|b| {
+                b.is_ascii_alphanumeric() || b == b'+' || b == b'-' || b == b'_' || b == b'#'
+            })
+        {
+            return (Some(first.to_string()), rest.to_string());
+        }
     }
     (None, body.to_string())
 }

@@ -320,7 +320,8 @@ impl BadgeService {
                             cls.set_has_unread_message(clan_id, cx);
                         });
                     }
-                    if !from_me && is_new_message && !seen && badge_mention {
+                    if !from_me && is_new_message && !seen && badge_mention && !skip_unread_activity
+                    {
                         ClanList::global(cx).update(cx, |cls, cx| {
                             cls.increment_clan_badge(clan_id, cx);
                         });

@@ -1,5 +1,5 @@
 use gpui::{
-    App, ClickEvent, Context, Entity, FocusHandle, Focusable, FontWeight, Hsla, SharedString,
+    App, ClickEvent, Context, Entity, FocusHandle, Focusable, FontWeight, SharedString,
     Subscription, Window, div, prelude::*, px,
 };
 use mezon_store::{
@@ -7,12 +7,12 @@ use mezon_store::{
     MessageId, MessagesStore, PinnedMessage, PinnedMessagesStore, UsersByUserStore,
 };
 
-use super::context::DEFAULT_DISPLAY_NAME_COLOR;
 use super::parts::{
     effective_clan_id, resolve_pin_avatar_url, resolve_pin_sender_label_with_message,
 };
 use super::time::format_message_time;
 use crate::app::shell::Shell;
+use crate::chat::pinned_popover::{render_pin_message_preview, render_pinned_message_preview};
 use crate::components::primitives::{
     Avatar, Button, ButtonVariants, Sizable, Size, h_flex, v_flex,
 };
@@ -24,7 +24,7 @@ struct MessagePreview {
     sender_label: SharedString,
     avatar_src: Option<SharedString>,
     avatar_fallback: Option<SharedString>,
-    content: SharedString,
+    body: gpui::AnyElement,
     timestamp: Option<SharedString>,
 }
 
@@ -77,7 +77,6 @@ fn member_subscriptions(cx: &mut Context<ConfirmPinMessageModal>) -> Vec<Subscri
         cx.observe(&UsersByUserStore::global(cx), |_, _, cx| cx.notify()),
         cx.observe(&AccountStore::global(cx), |_, _, cx| cx.notify()),
         cx.observe(&DirectMessageStore::global(cx), |_, _, cx| cx.notify()),
-        cx.observe(&MessagesStore::global(cx), |_, _, cx| cx.notify()),
     ]
 }
 
@@ -88,7 +87,6 @@ fn member_subscriptions_unpin(cx: &mut Context<ConfirmUnpinMessageModal>) -> Vec
         cx.observe(&AccountStore::global(cx), |_, _, cx| cx.notify()),
         cx.observe(&DirectMessageStore::global(cx), |_, _, cx| cx.notify()),
         cx.observe(&PinnedMessagesStore::global(cx), |_, _, cx| cx.notify()),
-        cx.observe(&MessagesStore::global(cx), |_, _, cx| cx.notify()),
     ]
 }
 
@@ -109,12 +107,15 @@ impl ConfirmPinMessageModal {
                 messages.active_channel_id(),
             )
         };
-        let Some(message) = find_channel_message(message_id, channel_id, cx) else {
-            tracing::warn!(
-                message_id = message_id.get(),
-                "confirm pin modal: message not found in active or channel cache"
-            );
-            return;
+        let message = match find_channel_message(message_id, channel_id, cx) {
+            Some(message) => message,
+            None => {
+                tracing::warn!(
+                    message_id = message_id.get(),
+                    "confirm pin modal: message not found in active or channel cache"
+                );
+                Message::new(message_id, String::new(), "", "", 0)
+            }
         };
         if clan_id.is_none() {
             clan_id = ClanList::global(cx).read(cx).active_clan_id;
@@ -181,6 +182,7 @@ impl ConfirmPinMessageModal {
             self.clan_id,
             self.channel_id,
             &self.locale,
+            self.avatar_image_cache.clone(),
             cx,
         )
     }
@@ -259,6 +261,7 @@ impl ConfirmUnpinMessageModal {
             self.channel_id,
             &self.fallback_sender_label,
             &self.locale,
+            self.avatar_image_cache.clone(),
             cx,
         ))
     }
@@ -281,8 +284,10 @@ fn preview_from_message(
     clan_id: Option<ClanId>,
     channel_id: Option<ChannelId>,
     locale: &str,
+    image_cache: Entity<LruImageCache>,
     cx: &App,
 ) -> MessagePreview {
+    let theme = cx.theme();
     let clan_id = effective_clan_id(clan_id, cx);
     let sender_label = resolve_pin_sender_label_with_message(
         &msg.sender_id,
@@ -317,7 +322,7 @@ fn preview_from_message(
         sender_label,
         avatar_src,
         avatar_fallback,
-        content: msg.content.clone().into(),
+        body: render_pin_message_preview(msg, theme, image_cache, cx),
         timestamp,
     }
 }
@@ -328,8 +333,10 @@ fn preview_from_pin(
     channel_id: Option<ChannelId>,
     fallback_sender_label: &SharedString,
     _locale: &str,
+    image_cache: Entity<LruImageCache>,
     cx: &App,
 ) -> MessagePreview {
+    let theme = cx.theme();
     let clan_id = effective_clan_id(clan_id, cx);
     let mut sender_label = resolve_pin_sender_label_with_message(
         &pin.sender_id,
@@ -364,7 +371,7 @@ fn preview_from_pin(
         sender_label,
         avatar_src,
         avatar_fallback,
-        content: pin.content.clone().into(),
+        body: render_pinned_message_preview(pin, theme, image_cache, cx),
         timestamp: None,
     }
 }
@@ -385,12 +392,12 @@ fn resolve_avatar_urls(
 }
 
 fn render_preview(
-    preview: &MessagePreview,
+    preview: MessagePreview,
     avatar_cache: Entity<LruImageCache>,
     theme: &crate::theme::Theme,
 ) -> impl IntoElement {
     let tokens = &theme.tokens;
-    let sender_color = Hsla::from(gpui::rgb(DEFAULT_DISPLAY_NAME_COLOR));
+    let sender_color = tokens.text_theme_primary;
 
     let mut avatar = Avatar::new()
         .name(&preview.sender_label)
@@ -445,9 +452,7 @@ fn render_preview(
                     .min_w_0()
                     .max_h(px(320.))
                     .overflow_y_scroll()
-                    .text_sm()
-                    .text_color(tokens.text_theme_message)
-                    .child(preview.content.clone()),
+                    .child(preview.body),
             ),
         )
 }
@@ -512,7 +517,7 @@ impl Render for ConfirmPinMessageModal {
                     ),
             )
             .child(div().px(px(16.)).py(px(16.)).child(render_preview(
-                &preview,
+                preview,
                 self.avatar_image_cache.clone(),
                 &theme,
             )));
@@ -581,7 +586,7 @@ impl Render for ConfirmUnpinMessageModal {
                             .child(self.description.clone()),
                     ),
             )
-            .children(preview.as_ref().map(|preview| {
+            .children(preview.map(|preview| {
                 div()
                     .px(px(16.))
                     .pb(px(8.))

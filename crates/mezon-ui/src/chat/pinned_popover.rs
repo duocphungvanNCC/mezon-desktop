@@ -3,13 +3,13 @@ use std::sync::Arc;
 
 use gpui::{
     App, ClickEvent, Context, DismissEvent, Entity, EventEmitter, FocusHandle, Focusable,
-    FontWeight, HighlightStyle, Hsla, ListAlignment, ListState, MouseDownEvent, ObjectFit,
-    SharedString, StyledText, Window, div, img, list, prelude::*, px, relative, rems,
+    FontWeight, ListAlignment, ListState, MouseDownEvent, ObjectFit, SharedString, Window, div,
+    img, list, prelude::*, px, rems,
 };
 use mezon_store::{
-    AccountStore, ChannelId, ClanMembersStore, DirectMessageStore, Embed, MessageAttachment,
-    MessageId, MessageSpan, MessagesStore, PinnedMessage, PinnedMessagesStore, RichLayout,
-    RichRunKind, Settings, UsersByUserStore,
+    AccountStore, ChannelId, ClanMembersStore, DirectMessageStore, Embed, Message,
+    MessageAttachment, MessageId, MessageSpan, MessagesStore, PinnedMessage, PinnedMessagesStore,
+    RichLayout, Settings, UsersByUserStore, strip_code_fence,
 };
 use ui::{PopoverMenuHandle, ScrollAxes, Scrollbars, WithScrollbar};
 
@@ -17,7 +17,11 @@ use crate::chat::file_type_icon::file_type_icon_for;
 use crate::chat::message::parts::{
     effective_clan_id, resolve_pin_avatar_url, resolve_pin_sender_label_with_message,
 };
-use crate::chat::message::{ConfirmUnpinMessageModal, render_ogp_preview};
+use crate::chat::message::{
+    ConfirmUnpinMessageModal, heading_line_height, heading_size, pin_link_element,
+    render_ogp_preview, render_pin_rich_layout_element, resolve_message_link_url,
+    text_wrap_children,
+};
 use crate::components::primitives::{
     Avatar, Button, ButtonVariants, Icon, IconName, Sizable, Size, Spinner, h_flex, v_flex,
 };
@@ -44,6 +48,8 @@ struct PinCardVm {
     sender_label: SharedString,
     avatar_src: Option<SharedString>,
     avatar_fallback: Option<SharedString>,
+    pin: Arc<PinnedMessage>,
+    text_spans: Arc<[MessageSpan]>,
 }
 
 impl PinCardVm {
@@ -69,8 +75,53 @@ impl PinCardVm {
             sender_label,
             avatar_src,
             avatar_fallback,
+            pin: Arc::new(msg.clone()),
+            text_spans: prepare_pin_text_spans(msg),
         }
     }
+}
+
+pub(crate) fn render_pinned_message_preview(
+    pin: &PinnedMessage,
+    theme: &Theme,
+    image_cache: Entity<LruImageCache>,
+    cx: &App,
+) -> gpui::AnyElement {
+    let text_spans = prepare_pin_text_spans(pin);
+    render_pin_body(pin, &text_spans, theme, image_cache, cx)
+}
+
+fn pinned_message_from_chat_message(msg: &Message) -> PinnedMessage {
+    PinnedMessage {
+        id: msg.id.to_string(),
+        message_id: msg.id.to_string(),
+        sender_id: msg.sender_id.clone(),
+        sender_name: msg.sender_name.to_string(),
+        avatar_url: msg.avatar_url.to_string(),
+        avatar_proxied: msg.avatar_proxied.clone(),
+        content: msg.content.clone(),
+        raw_content: msg.raw_content.as_deref().unwrap_or("").to_string(),
+        spans: msg.spans.clone().into(),
+        rich_layout: msg.rich_layout.clone(),
+        ogp: msg.ogp.clone(),
+        embeds: msg.embeds.clone(),
+        attachments: msg.attachments.clone(),
+        create_time: msg.create_time,
+    }
+}
+
+pub(crate) fn render_pin_message_preview(
+    msg: &Message,
+    theme: &Theme,
+    image_cache: Entity<LruImageCache>,
+    cx: &App,
+) -> gpui::AnyElement {
+    render_pinned_message_preview(
+        &pinned_message_from_chat_message(msg),
+        theme,
+        image_cache,
+        cx,
+    )
 }
 
 pub struct PinnedPopoverPanel {
@@ -96,7 +147,7 @@ impl PinnedPopoverPanel {
 
         let subs = vec![
             cx.observe(&PinnedMessagesStore::global(cx), |this, _, cx| {
-                this.pin_cards = Self::compute_pin_cards(cx);
+                this.pin_cards = this.compute_pin_cards(cx);
                 cx.notify();
             }),
             cx.observe(&ClanMembersStore::global(cx), |this, _, cx| {
@@ -115,30 +166,51 @@ impl PinnedPopoverPanel {
         ];
 
         let avatar_image_cache = crate::image_cache::shared_avatar_cache(cx);
-
-        let pin_cards = Self::compute_pin_cards(cx);
         let list_state = ListState::new(0, ListAlignment::Top, px(LIST_OVERDRAW)).measure_all();
 
-        Self {
+        let mut panel = Self {
             settings,
             popover_handle,
             list_state,
             focus_handle,
             avatar_image_cache,
-            pin_cards,
+            pin_cards: Vec::new(),
             _subs: subs,
-        }
+        };
+        panel.pin_cards = panel.compute_pin_cards(cx);
+        panel
     }
 
     fn refresh_name_rows(&mut self, cx: &mut Context<Self>) {
-        self.pin_cards = Self::compute_pin_cards(cx);
-        if self.list_state.item_count() > 0 {
-            self.list_state.remeasure();
+        let store = PinnedMessagesStore::global(cx).read(cx);
+        if self.pin_cards.len() != store.pinned().len() {
+            self.pin_cards = self.compute_pin_cards(cx);
+            cx.notify();
+            return;
+        }
+        let clan_id = effective_clan_id(store.clan_id(), cx);
+        let channel_id = store.channel_id();
+        for (vm, pin) in self.pin_cards.iter_mut().zip(store.pinned()) {
+            if vm.message_id.as_ref() != pin.message_id.as_str() {
+                self.pin_cards = self.compute_pin_cards(cx);
+                cx.notify();
+                return;
+            }
+            vm.sender_label = resolve_pin_sender_label_with_message(
+                &pin.sender_id,
+                &pin.sender_name,
+                Some(pin.message_id.as_str()),
+                clan_id,
+                channel_id,
+                cx,
+            );
+            (vm.avatar_src, vm.avatar_fallback) =
+                resolve_pin_avatar_urls(pin, clan_id, channel_id, cx);
         }
         cx.notify();
     }
 
-    fn compute_pin_cards(cx: &App) -> Vec<PinCardVm> {
+    fn compute_pin_cards(&self, cx: &App) -> Vec<PinCardVm> {
         let store = PinnedMessagesStore::global(cx).read(cx);
         let clan_id = effective_clan_id(store.clan_id(), cx);
         let channel_id = store.channel_id();
@@ -306,10 +378,6 @@ fn render_body(
             .py(px(LIST_PAD_Y))
             .child(
                 list(list_state.clone(), move |ix, _window, cx| {
-                    let store = PinnedMessagesStore::global(cx).read(cx);
-                    let Some(pin) = store.pinned().get(ix) else {
-                        return div().into_any_element();
-                    };
                     let Some(vm) = cards_for_list.get(ix) else {
                         return div().into_any_element();
                     };
@@ -318,7 +386,6 @@ fn render_body(
                         .pb(px(8.))
                         .child(pin_card(
                             ix,
-                            pin,
                             vm,
                             &theme_for_list,
                             &locale_for_list,
@@ -387,7 +454,6 @@ fn resolve_pin_avatar_urls(
 
 fn pin_card(
     index: usize,
-    pin: &PinnedMessage,
     vm: &PinCardVm,
     theme: &Theme,
     locale: &str,
@@ -436,7 +502,7 @@ fn pin_card(
                 .child(format_pin_time(vm.create_time, locale)),
         );
 
-    let content = render_pin_body(pin, theme, avatar_cache, cx);
+    let content = render_pin_body(&vm.pin, &vm.text_spans, theme, avatar_cache, cx);
 
     let jump_message_id = vm.message_id.clone();
     let jump_handle = popover_handle.clone();
@@ -499,7 +565,7 @@ fn pin_card(
         .child(avatar)
         .child(
             v_flex()
-                .w(relative(0.85))
+                .flex_1()
                 .min_w_0()
                 .gap_1()
                 .child(name_row)
@@ -511,12 +577,13 @@ fn pin_card(
 
 fn render_pin_body(
     pin: &PinnedMessage,
+    text_spans: &[MessageSpan],
     theme: &Theme,
     image_cache: Entity<LruImageCache>,
     cx: &App,
 ) -> gpui::AnyElement {
     let message_id = pin.message_id.parse::<MessageId>().unwrap_or(MessageId(0));
-    let text_body = render_pin_text_body(pin, theme);
+    let text_body = render_pin_text_body(pin, text_spans, theme);
     let image_preview = pin
         .attachments
         .iter()
@@ -537,7 +604,6 @@ fn render_pin_body(
         .w_full()
         .min_w_0()
         .max_w_full()
-        .overflow_hidden()
         .gap_1()
         .child(text_body)
         .children(ogp)
@@ -547,15 +613,13 @@ fn render_pin_body(
         .into_any_element()
 }
 
-fn render_pin_text_body(pin: &PinnedMessage, theme: &Theme) -> gpui::AnyElement {
-    let expanded = expand_pin_spans(&pin.spans);
-    let spans = if expanded.is_empty() {
-        pin.spans.as_ref()
-    } else {
-        expanded.as_slice()
-    };
-    if !spans.is_empty() {
-        return render_pin_spans(spans, theme);
+fn render_pin_text_body(
+    pin: &PinnedMessage,
+    text_spans: &[MessageSpan],
+    theme: &Theme,
+) -> gpui::AnyElement {
+    if !text_spans.is_empty() {
+        return render_pin_spans(text_spans, theme);
     }
     if let Some(layout) = pin.rich_layout.as_ref()
         && !layout.text.is_empty()
@@ -566,22 +630,35 @@ fn render_pin_text_body(pin: &PinnedMessage, theme: &Theme) -> gpui::AnyElement 
     if pin.content.is_empty() {
         return div().into_any_element();
     }
-    if pin.content.contains('`') || text_has_block_markup(&pin.content) {
-        let fallback = expand_pin_spans(&[MessageSpan::Text(pin.content.clone().into())]);
-        if !fallback.is_empty() {
-            return render_pin_spans(&fallback, theme);
-        }
-    }
     div()
         .w_full()
         .min_w_0()
         .max_w_full()
-        .overflow_hidden()
         .child(pin_plain_line(
             &pin.content,
             theme.tokens.text_theme_message,
         ))
         .into_any_element()
+}
+
+fn prepare_pin_text_spans(pin: &PinnedMessage) -> Arc<[MessageSpan]> {
+    let expanded = expand_pin_spans(&pin.spans);
+    if !expanded.is_empty() {
+        return expanded.into();
+    }
+    if !pin.spans.is_empty() {
+        return Arc::clone(&pin.spans);
+    }
+    if pin.content.is_empty() {
+        return Arc::new([]);
+    }
+    if pin.content.contains('`') || text_has_block_markup(&pin.content) {
+        let fallback = expand_pin_spans(&[MessageSpan::Text(pin.content.clone().into())]);
+        if !fallback.is_empty() {
+            return fallback.into();
+        }
+    }
+    Arc::new([])
 }
 
 fn text_has_block_markup(text: &str) -> bool {
@@ -605,16 +682,6 @@ fn expand_pin_spans(spans: &[MessageSpan]) -> Vec<MessageSpan> {
                     changed = true;
                 }
             }
-            MessageSpan::CodeBlock { language, text } => {
-                let cleaned = normalize_pin_code_block(text);
-                if cleaned.as_ref() != text.as_ref() || language.is_some() {
-                    changed = true;
-                }
-                out.push(MessageSpan::CodeBlock {
-                    language: language.clone(),
-                    text: cleaned,
-                });
-            }
             other => out.push(other.clone()),
         }
     }
@@ -630,10 +697,11 @@ fn split_pin_plain_text(text: &str, out: &mut Vec<MessageSpan>) {
         let after_open = &rest[start + 3..];
         if let Some(end) = after_open.find("```") {
             let fence_body = &after_open[..end];
-            let cleaned = normalize_pin_code_block(fence_body);
+            let wrapped = format!("```{fence_body}```");
+            let (language, text) = strip_code_fence(&wrapped);
             out.push(MessageSpan::CodeBlock {
-                language: None,
-                text: cleaned,
+                language,
+                text: text.into(),
             });
             rest = &after_open[end + 3..];
         } else {
@@ -675,32 +743,6 @@ fn flush_pin_text_buf(buf: &mut String, out: &mut Vec<MessageSpan>) {
     out.push(MessageSpan::Text(std::mem::take(buf).into()));
 }
 
-fn normalize_pin_code_block(raw: &str) -> SharedString {
-    let mut body = raw.trim();
-    if let Some(rest) = body.strip_prefix("```") {
-        body = rest;
-        if let Some(rest) = body.strip_suffix("```") {
-            body = rest;
-        }
-    }
-    body = body.trim_matches('`');
-    body = body.strip_prefix('\n').unwrap_or(body);
-    body = body.strip_suffix('\n').unwrap_or(body);
-    let mut lines = body.splitn(2, '\n');
-    let first = lines.next().unwrap_or("");
-    let rest = lines.next();
-    if let Some(rest) = rest
-        && !first.is_empty()
-        && first.len() <= 32
-        && first
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'+' || b == b'-' || b == b'_' || b == b'#')
-    {
-        return rest.to_string().into();
-    }
-    body.to_string().into()
-}
-
 fn parse_pin_heading_line(line: &str) -> Option<(u8, &str)> {
     let hashes = line.bytes().take_while(|&b| b == b'#').count();
     if hashes == 0 || hashes > 6 {
@@ -714,61 +756,8 @@ fn parse_pin_heading_line(line: &str) -> Option<(u8, &str)> {
     Some((hashes as u8, body))
 }
 
-fn soft_break_hints(text: &str) -> String {
-    let mut out = String::with_capacity(text.len() + text.len() / 8);
-    for ch in text.chars() {
-        out.push(ch);
-        if matches!(ch, '/' | '?' | '&' | '=' | '_' | '-') {
-            out.push('\u{200B}');
-        }
-    }
-    out
-}
-
 fn render_pin_rich_layout(layout: &RichLayout, theme: &Theme) -> gpui::AnyElement {
-    let mention_color: Hsla = theme.tokens.mention_color.into();
-    let mention_bg: Hsla = theme.tokens.mention_primary.into();
-    let code_bg: Hsla = theme.tokens.bg_markdown_code.into();
-    let link_color: Hsla = theme.tokens.mention_color.into();
-    let text = layout.text.clone();
-    let mut highlights: Vec<(std::ops::Range<usize>, HighlightStyle)> = Vec::new();
-    for run in layout.runs.iter() {
-        let style = match run.kind {
-            RichRunKind::Bold => HighlightStyle {
-                font_weight: Some(FontWeight::BOLD),
-                ..Default::default()
-            },
-            RichRunKind::Code => HighlightStyle {
-                background_color: Some(code_bg),
-                ..Default::default()
-            },
-            RichRunKind::Link => HighlightStyle {
-                color: Some(link_color),
-                underline: Some(gpui::UnderlineStyle {
-                    thickness: px(1.),
-                    color: Some(link_color),
-                    wavy: false,
-                }),
-                ..Default::default()
-            },
-            RichRunKind::Mention | RichRunKind::Hashtag => HighlightStyle {
-                color: Some(mention_color),
-                background_color: Some(mention_bg),
-                ..Default::default()
-            },
-        };
-        highlights.push((run.range.clone(), style));
-    }
-    div()
-        .w_full()
-        .min_w_0()
-        .max_w_full()
-        .overflow_hidden()
-        .text_sm()
-        .line_height(rems(1.25))
-        .text_color(theme.tokens.text_theme_message)
-        .child(StyledText::new(text).with_highlights(highlights))
-        .into_any_element()
+    render_pin_rich_layout_element(layout, theme)
 }
 
 fn pin_inline_row() -> gpui::Div {
@@ -776,46 +765,40 @@ fn pin_inline_row() -> gpui::Div {
         .w_full()
         .min_w_0()
         .max_w_full()
-        .overflow_hidden()
         .flex()
         .flex_row()
         .flex_wrap()
         .items_baseline()
+        .gap_x(px(4.))
 }
 
-fn pin_plain_line(text: &str, color: impl Into<Hsla>) -> gpui::AnyElement {
+fn pin_is_http_url(text: &str) -> bool {
+    let text = text.trim();
+    text.starts_with("http://") || text.starts_with("https://")
+}
+
+fn pin_link_row(text: &str, url: &str, color: gpui::Rgba) -> gpui::AnyElement {
+    pin_link_element(text, url, color, true)
+}
+
+fn pin_plain_line(text: &str, color: gpui::Rgba) -> gpui::AnyElement {
+    if pin_is_http_url(text) {
+        return pin_link_row(text, text, color);
+    }
     div()
         .w_full()
         .min_w_0()
         .max_w_full()
-        .overflow_hidden()
+        .flex()
+        .flex_row()
+        .flex_wrap()
+        .items_baseline()
         .text_sm()
         .line_height(rems(1.25))
         .text_color(color)
-        .child(soft_break_hints(text))
+        .gap_x(px(4.))
+        .children(text_wrap_children(text, color))
         .into_any_element()
-}
-
-fn pin_heading_size(level: u8) -> gpui::Pixels {
-    match level {
-        1 => px(36.),
-        2 => px(30.),
-        3 => px(24.),
-        4 => px(20.),
-        5 => px(18.),
-        _ => px(16.),
-    }
-}
-
-fn pin_heading_line_height(level: u8) -> impl Into<gpui::DefiniteLength> {
-    match level {
-        1 => rems(2.5),
-        2 => rems(2.25),
-        3 => rems(2.),
-        4 => rems(1.75),
-        5 => rems(1.75),
-        _ => rems(1.5),
-    }
 }
 
 fn render_pin_spans(spans: &[MessageSpan], theme: &Theme) -> gpui::AnyElement {
@@ -824,7 +807,7 @@ fn render_pin_spans(spans: &[MessageSpan], theme: &Theme) -> gpui::AnyElement {
     let mention_color = theme.tokens.mention_color;
     let code_bg = theme.tokens.bg_markdown_code;
     let body_color = theme.tokens.text_theme_message;
-    let mut col = v_flex().w_full().min_w_0().max_w_full().overflow_hidden();
+    let mut col = v_flex().w_full().min_w_0().max_w_full();
     let mut row = pin_inline_row();
     let mut has_inline = false;
 
@@ -846,13 +829,11 @@ fn render_pin_spans(spans: &[MessageSpan], theme: &Theme) -> gpui::AnyElement {
                         continue;
                     }
                     if has_inline {
-                        row = row.child(
-                            div()
-                                .text_sm()
-                                .line_height(rems(1.25))
-                                .text_color(body_color)
-                                .child(soft_break_hints(line)),
-                        );
+                        for child in text_wrap_children(line, body_color) {
+                            row = row.child(child);
+                        }
+                    } else if pin_is_http_url(line) {
+                        col = col.child(pin_link_row(line, line, link_color));
                     } else {
                         col = col.child(pin_plain_line(line, body_color));
                     }
@@ -866,7 +847,7 @@ fn render_pin_spans(spans: &[MessageSpan], theme: &Theme) -> gpui::AnyElement {
                         .line_height(rems(1.25))
                         .font_weight(FontWeight::BOLD)
                         .text_color(body_color)
-                        .child(soft_break_hints(text)),
+                        .child(text.clone()),
                 );
             }
             MessageSpan::Code(text) => {
@@ -879,19 +860,13 @@ fn render_pin_spans(spans: &[MessageSpan], theme: &Theme) -> gpui::AnyElement {
                         .rounded_sm()
                         .bg(code_bg)
                         .text_color(body_color)
-                        .child(soft_break_hints(text)),
+                        .child(text.clone()),
                 );
             }
-            MessageSpan::Link { text, .. } => {
+            MessageSpan::Link { text, url, .. } => {
                 has_inline = true;
-                row = row.child(
-                    div()
-                        .text_sm()
-                        .line_height(rems(1.25))
-                        .text_color(link_color)
-                        .underline()
-                        .child(soft_break_hints(text)),
-                );
+                let resolved = resolve_message_link_url(url, text);
+                row = row.child(pin_link_element(text, &resolved, link_color, false));
             }
             MessageSpan::Mention { display, .. } | MessageSpan::Hashtag { display, .. } => {
                 has_inline = true;
@@ -940,11 +915,11 @@ fn render_pin_spans(spans: &[MessageSpan], theme: &Theme) -> gpui::AnyElement {
                         .max_w_full()
                         .overflow_hidden()
                         .my(px(2.))
-                        .text_size(pin_heading_size(*level))
-                        .line_height(pin_heading_line_height(*level))
+                        .text_size(heading_size(*level))
+                        .line_height(heading_line_height(*level))
                         .font_weight(FontWeight::BOLD)
                         .text_color(body_color)
-                        .child(soft_break_hints(text)),
+                        .child(text.clone()),
                 );
             }
             MessageSpan::CodeBlock { text, .. } => {
@@ -953,9 +928,8 @@ fn render_pin_spans(spans: &[MessageSpan], theme: &Theme) -> gpui::AnyElement {
                     row = pin_inline_row();
                     has_inline = false;
                 }
-                let code_text = normalize_pin_code_block(text);
                 let mut code_col = v_flex().w_full().min_w_0().overflow_hidden();
-                for (i, line) in code_text.split('\n').enumerate() {
+                for (i, line) in text.split('\n').enumerate() {
                     if i > 0 && line.is_empty() {
                         code_col = code_col.child(div().w_full().h(px(8.)));
                         continue;
@@ -968,7 +942,7 @@ fn render_pin_spans(spans: &[MessageSpan], theme: &Theme) -> gpui::AnyElement {
                             .text_size(px(14.))
                             .line_height(rems(1.25))
                             .text_color(body_color)
-                            .child(soft_break_hints(line)),
+                            .child(line.to_string()),
                     );
                 }
                 col = col.child(
