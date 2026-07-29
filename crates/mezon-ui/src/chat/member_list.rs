@@ -7,14 +7,16 @@ use gpui::{
 };
 use mezon_store::{
     AccountStore, BadgeService, ChannelEvent, ChannelId, ChannelList, ChannelMembersEvent,
-    ChannelMembersStore, ClanId, ClanList, ClanMember, ClanMembersEvent, ClanMembersStore,
-    DirectEvent, DirectKind, DirectMessageStore, GroupMember, GroupMembersEvent, GroupMembersStore,
-    PresenceEvent, PresenceStore, ProfileContext, Settings, UserId, split_members_by_status,
+    ChannelMembersStore, ChannelType, ClanId, ClanList, ClanMember, ClanMembersStore, DirectEvent,
+    DirectKind, DirectMessageStore, GroupMember, GroupMembersEvent, GroupMembersStore,
+    PERMISSION_ADMINISTRATOR, PERMISSION_CLAN_OWNER, PermissionStore, PresenceEvent, PresenceStore,
+    ProfileContext, RolesEvent, RolesStore, Settings, UserId, split_members_by_status,
 };
 
 use crate::app::shell::Shell;
 use crate::chat::member_row_element::MemberRowElement;
 use crate::chat::message::{ShareContactModal, share_contact_subject};
+use crate::chat::role_style::{role_color_in, role_fallback_color};
 use crate::chat::user_profile_popover::UserProfilePopover;
 use crate::components::primitives::{Avatar, ContextMenu, IconName, context_menu_at};
 use crate::image_cache::LruImageCache;
@@ -22,8 +24,6 @@ use crate::router::{Route, Router};
 use crate::theme::{ActiveTheme, Theme};
 use crate::util::reactive::Derived;
 use crate::util::text_utils::normalize_search_string;
-
-const DEFAULT_ROLE_COLOR: u32 = 0x99aab5;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum MemberSource {
@@ -58,6 +58,7 @@ struct MemberRow {
     user_status: SharedString,
     in_voice: bool,
     is_owner: bool,
+    role_color: Option<Hsla>,
     rcm_id: SharedString,
 }
 
@@ -68,6 +69,7 @@ struct RawMember {
     online: bool,
     user_status: String,
     in_voice: bool,
+    role_color: Option<Hsla>,
 }
 
 struct ProfilePopoverState {
@@ -142,7 +144,7 @@ impl MemberListPanel {
             MemberSource::Channel => {
                 subs.push(
                     cx.subscribe(&ClanMembersStore::global(cx), |this, _, event, cx| {
-                        let ClanMembersEvent::Changed { clan_id } = event;
+                        let clan_id = &event.clan_id();
                         if shows_clan(*clan_id, cx) {
                             this.rebuild(cx);
                         }
@@ -166,6 +168,14 @@ impl MemberListPanel {
                         }
                     }),
                 );
+                subs.push(cx.subscribe(&RolesStore::global(cx), |this, _, event, cx| {
+                    let RolesEvent::Changed { clan_id } = event else {
+                        return;
+                    };
+                    if shows_clan(*clan_id, cx) {
+                        this.rebuild(cx);
+                    }
+                }));
             }
             MemberSource::Group => {
                 subs.push(
@@ -485,6 +495,8 @@ fn channel_raw_members(cx: &App, ctx: ChannelContext) -> (Vec<RawMember>, Vec<Ra
     let store = store.read(cx);
     let channel_list = ChannelList::global(cx);
     let channels = channel_list.read(cx);
+    let roles = RolesStore::try_global(cx);
+    let roles = roles.as_ref().map(|roles| roles.read(cx));
     let pool: Vec<&ClanMember> = match &ctx.filter_ids {
         Some(ids) => ids
             .iter()
@@ -503,6 +515,7 @@ fn channel_raw_members(cx: &App, ctx: ChannelContext) -> (Vec<RawMember>, Vec<Ra
                 online: is_online,
                 user_status: presence.user_status(member.id()).unwrap_or("").to_string(),
                 in_voice: is_online && channels.in_voice_status(member.id()).is_some(),
+                role_color: Some(role_color_in(roles, ctx.clan_id, member.id())),
             })
             .collect()
     };
@@ -526,6 +539,7 @@ fn group_raw_members(cx: &App, direct_id: ChannelId) -> Vec<RawMember> {
             online: member.online || presence_online.contains(&member.id()),
             user_status: presence.user_status(member.id()).unwrap_or("").to_string(),
             in_voice: false,
+            role_color: None,
         })
         .collect()
 }
@@ -741,6 +755,7 @@ fn make_member_row(cx: &App, raw: RawMember, owner_id: Option<UserId>) -> Row {
         user_status: single_line(raw.user_status).into(),
         in_voice: raw.in_voice,
         is_owner: owner_id == Some(raw.user_id),
+        role_color: raw.role_color,
     })
 }
 
@@ -829,7 +844,7 @@ fn render_member(
         theme.text_muted.into()
     });
     let dot_border = dim(theme.bg_secondary.into());
-    let name_color = dim(rgb(DEFAULT_ROLE_COLOR).into());
+    let name_color = dim(member.role_color.unwrap_or_else(role_fallback_color));
     let owner_icon = member.is_owner.then(|| dim(rgb(0xF0B132).into()));
     let status_color = {
         let mut color: Hsla = theme.text_primary.into();
@@ -949,6 +964,7 @@ impl Render for MemberListPanel {
                 settings.clone(),
                 locale.clone(),
                 panel_weak.clone(),
+                MemberMenuPermissions::resolve(*user_id, context, cx),
             )
         });
         let profile_overlay = self
@@ -1001,10 +1017,18 @@ impl Render for MemberListPanel {
             .child(list)
             .when_some(
                 menu_overlay,
-                |el, (user_id, display_name, pos, ctx, settings, locale, panel)| {
+                |el, (user_id, display_name, pos, ctx, settings, locale, panel, permissions)| {
                     el.child(context_menu_at(
                         pos,
-                        build_member_menu(user_id, display_name, ctx, settings, panel, &locale),
+                        build_member_menu(
+                            user_id,
+                            display_name,
+                            ctx,
+                            settings,
+                            panel,
+                            &locale,
+                            permissions,
+                        ),
                     ))
                 },
             )
@@ -1028,6 +1052,56 @@ fn toast_coming_soon(settings: Entity<Settings>) -> impl Fn(&mut Window, &mut Ap
     }
 }
 
+#[derive(Clone, Copy, Default)]
+struct MemberMenuPermissions {
+    is_self: bool,
+    show_ban: bool,
+    show_kick: bool,
+    show_remove_from_thread: bool,
+}
+
+impl MemberMenuPermissions {
+    fn resolve(user_id: UserId, context: Option<ProfileContext>, cx: &App) -> Self {
+        let me = BadgeService::global(cx).read(cx).current_user_id(cx);
+        let is_self = me == Some(user_id);
+        let Some(ProfileContext::Clan(clan_id)) = context else {
+            return Self {
+                is_self,
+                ..Default::default()
+            };
+        };
+        let (has_clan_owner, has_administrator) = match PermissionStore::try_global(cx) {
+            Some(store) => {
+                let store = store.read(cx);
+                (
+                    store.check(clan_id, None, PERMISSION_CLAN_OWNER, cx),
+                    store.check(clan_id, None, PERMISSION_ADMINISTRATOR, cx),
+                )
+            }
+            None => (false, false),
+        };
+        let member_is_clan_owner = ClanList::global(cx)
+            .read(cx)
+            .clan_by_id(clan_id)
+            .is_some_and(|clan| clan.creator_id == user_id);
+        let active_channel = ChannelList::global(cx)
+            .read(cx)
+            .active_channel()
+            .map(|channel| (channel.channel_type, channel.creator_id));
+        let is_thread = active_channel
+            .is_some_and(|(channel_type, _)| matches!(channel_type, ChannelType::Thread));
+        let is_channel_creator =
+            me.is_some() && active_channel.map(|(_, creator_id)| creator_id) == me;
+        let elevated = has_clan_owner || (has_administrator && !member_is_clan_owner);
+        Self {
+            is_self,
+            show_ban: has_administrator && !is_self,
+            show_kick: !is_self && elevated,
+            show_remove_from_thread: !is_self && is_thread && (is_channel_creator || elevated),
+        }
+    }
+}
+
 fn build_member_menu(
     user_id: UserId,
     display_name: SharedString,
@@ -1035,9 +1109,11 @@ fn build_member_menu(
     settings: Entity<Settings>,
     panel: WeakEntity<MemberListPanel>,
     locale: &str,
+    permissions: MemberMenuPermissions,
 ) -> ContextMenu {
     let t = |key: &'static str| mezon_i18n::t(locale, key).to_string();
     let is_clan = matches!(context, Some(ProfileContext::Clan(_)));
+    let is_self = permissions.is_self;
 
     let dismiss = {
         let panel = panel.clone();
@@ -1054,54 +1130,64 @@ fn build_member_menu(
     let remove_from_thread_label = mezon_i18n::t(locale, "contextMenu.member.removeFromThread")
         .replace("{{username}}", display_name.as_ref());
 
-    let mut menu = ContextMenu::new()
-        .on_dismiss(dismiss)
-        .item(
-            t("contextMenu.member.profile"),
-            toast_coming_soon(settings.clone()),
-        )
-        .item(
-            t("contextMenu.member.message"),
-            toast_coming_soon(settings.clone()),
-        )
-        .item(t("contextMenu.member.shareContact"), {
-            let settings = settings.clone();
-            let display_name = display_name.clone();
-            let panel = panel.clone();
-            move |window, cx| {
-                let contact = share_contact_subject(user_id, display_name.as_ref(), context, cx);
-                let locale = settings.read(cx).language.clone().into();
-                ShareContactModal::open(contact, locale, window, cx);
-                if let Some(p) = panel.upgrade() {
-                    p.update(cx, |this, cx| {
-                        this.open_menu = None;
-                        cx.notify();
-                    });
-                }
-            }
-        })
-        .item(
-            t("contextMenu.member.addFriend"),
-            toast_coming_soon(settings.clone()),
-        )
-        .separator()
-        .danger_item(
-            t("contextMenu.member.removeFriend"),
-            toast_coming_soon(settings.clone()),
-        );
+    let mut menu = ContextMenu::new().on_dismiss(dismiss).item(
+        t("contextMenu.member.profile"),
+        toast_coming_soon(settings.clone()),
+    );
 
-    if is_clan {
+    if !is_self {
         menu = menu
+            .item(
+                t("contextMenu.member.message"),
+                toast_coming_soon(settings.clone()),
+            )
+            .item(t("contextMenu.member.shareContact"), {
+                let settings = settings.clone();
+                let display_name = display_name.clone();
+                let panel = panel.clone();
+                move |window, cx| {
+                    let contact =
+                        share_contact_subject(user_id, display_name.as_ref(), context, cx);
+                    let locale = settings.read(cx).language.clone().into();
+                    ShareContactModal::open(contact, locale, window, cx);
+                    if let Some(p) = panel.upgrade() {
+                        p.update(cx, |this, cx| {
+                            this.open_menu = None;
+                            cx.notify();
+                        });
+                    }
+                }
+            })
+            .item(
+                t("contextMenu.member.addFriend"),
+                toast_coming_soon(settings.clone()),
+            )
             .separator()
             .danger_item(
+                t("contextMenu.member.removeFriend"),
+                toast_coming_soon(settings.clone()),
+            );
+    }
+
+    if is_clan
+        && (permissions.show_ban || permissions.show_kick || permissions.show_remove_from_thread)
+    {
+        menu = menu.separator();
+        if permissions.show_ban {
+            menu = menu.danger_item(
                 t("contextMenu.member.banChat"),
                 toast_coming_soon(settings.clone()),
-            )
-            .danger_item(
+            );
+        }
+        if permissions.show_kick {
+            menu = menu.danger_item(
                 t("contextMenu.member.kick"),
                 toast_coming_soon(settings.clone()),
-            )
-            .danger_item(remove_from_thread_label, toast_coming_soon(settings));
+            );
+        }
+        if permissions.show_remove_from_thread {
+            menu = menu.danger_item(remove_from_thread_label, toast_coming_soon(settings));
+        }
     }
 
     menu

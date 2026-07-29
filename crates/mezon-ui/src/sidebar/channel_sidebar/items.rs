@@ -6,6 +6,7 @@ pub(super) struct VoiceMemberSlot {
     pub(super) user_id: String,
     pub(super) display_name: String,
     pub(super) avatar_url: String,
+    pub(super) avatar_raw: String,
 }
 
 #[derive(Clone, PartialEq)]
@@ -37,6 +38,7 @@ pub(super) enum SidebarItem {
     },
     Category {
         elem_id: SharedString,
+        name: String,
         name_upper: String,
         id: String,
         collapsed: bool,

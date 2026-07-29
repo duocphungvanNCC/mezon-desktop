@@ -175,7 +175,6 @@ pub fn render_role_icon_picker_modal(
                     }),
             ),
     )
-    .with_priority(1)
 }
 
 impl RoleSettingPage {
@@ -189,11 +188,12 @@ impl RoleSettingPage {
         let icon = self.draft_icon.clone();
         let has_icon = !icon.is_empty();
         let uploading = self.icon_uploading;
+        let preview_cache = crate::image_cache::shared_role_icon_preview_cache(cx);
 
         h_flex()
             .gap_3()
             .items_start()
-            .child(self.render_role_icon_preview(&icon, has_icon, theme))
+            .child(self.render_role_icon_preview(&icon, has_icon, theme, &preview_cache, cx))
             .child(
                 h_flex()
                     .gap_2()
@@ -232,6 +232,8 @@ impl RoleSettingPage {
         icon: &str,
         has_icon: bool,
         theme: &Theme,
+        preview_cache: &Entity<crate::image_cache::LruImageCache>,
+        cx: &gpui::App,
     ) -> impl IntoElement {
         div()
             .flex_shrink_0()
@@ -244,9 +246,10 @@ impl RoleSettingPage {
             .justify_center()
             .when(has_icon, |el| {
                 el.child(
-                    img(icon.to_string())
+                    img(crate::util::imgproxy::role_icon_preview_url(cx, icon))
                         .size_full()
-                        .object_fit(gpui::ObjectFit::Cover),
+                        .object_fit(gpui::ObjectFit::Cover)
+                        .image_cache(preview_cache),
                 )
             })
             .when(!has_icon, |el| {

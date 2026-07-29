@@ -417,6 +417,16 @@ impl AppConfig {
         }
     }
 
+    pub fn community_clan_url(&self, short_url: &str) -> String {
+        let base = self.domain_url.trim_end_matches('/');
+        format!("{base}/clans/clan/{short_url}")
+    }
+
+    pub fn community_clan_url_prefix(&self) -> String {
+        let base = self.domain_url.trim_end_matches('/');
+        format!("{base}/clans/clan/")
+    }
+
     pub fn avatar_proxy(&self, source: &str) -> String {
         self.imgproxy_url(source, 100, 100, "fit")
     }

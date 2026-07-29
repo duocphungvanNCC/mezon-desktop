@@ -232,7 +232,7 @@ impl Render for TopicPanel {
                     div()
                         .text_sm()
                         .font_weight(FontWeight::MEDIUM)
-                        .text_color(theme.status_dnd)
+                        .text_color(theme.danger_text)
                         .child(err),
                 )
             })

@@ -25,6 +25,7 @@ PKGS=(
     -p mezon-audio
     -p mezon-webview
     -p mezon-voice
+    -p mezon-stream
     -p mmn-client
 )
 

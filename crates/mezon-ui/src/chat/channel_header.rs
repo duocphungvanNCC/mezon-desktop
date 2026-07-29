@@ -1,11 +1,11 @@
 use std::sync::Arc;
 
 use gpui::{
-    Anchor, AnyElement, App, ClickEvent, Context, CursorStyle, Div, Entity, Hsla, IntoElement,
-    Pixels, Render, RenderOnce, SharedString, Stateful, Subscription, WeakEntity, Window, div,
-    point, prelude::*, px,
+    Anchor, AnyElement, App, ClickEvent, Context, CursorStyle, Div, Entity, FontWeight, Hsla,
+    IntoElement, Pixels, Render, RenderOnce, SharedString, Stateful, Subscription, WeakEntity,
+    Window, div, point, prelude::*, px,
 };
-use mezon_store::{InVoiceInfo, Settings, ThreadsStore};
+use mezon_store::{InVoiceInfo, PinnedMessagesStore, Settings, StreamStore, ThreadsStore};
 use ui::{Clickable, PopoverMenu, PopoverMenuHandle, Toggleable, Tooltip};
 
 use crate::app::window_controls;
@@ -501,7 +501,7 @@ impl ChannelHeader {
         icon_active: gpui::Rgba,
         bg_hover: gpui::Rgba,
         bg_active: gpui::Rgba,
-        _cx: &App,
+        cx: &App,
     ) -> Vec<AnyElement> {
         let members_action = self.members_action;
         let members_active = self.members_active;
@@ -633,6 +633,10 @@ impl ChannelHeader {
             {
                 let is_open = handle.is_deployed();
                 let menu_handle = handle.clone();
+                let show_badge = PinnedMessagesStore::global(cx)
+                    .read(cx)
+                    .active_has_pin_badge();
+                let badge_color = theme.mention_badge;
                 buttons.push(
                     PopoverMenu::new("hdr-pin-popover")
                         .with_handle(handle)
@@ -653,7 +657,12 @@ impl ChannelHeader {
                                 }))
                             }
                         })
-                        .trigger(PinPopoverTrigger::new(theme, is_open))
+                        .trigger(PinPopoverTrigger::new(
+                            theme,
+                            is_open,
+                            show_badge,
+                            badge_color,
+                        ))
                         .into_any_element(),
                 );
                 continue;
@@ -779,12 +788,14 @@ pub struct ChatHeader {
     show_threads: bool,
     timeline_action: bool,
     timeline_active: bool,
+    stream_sidebar: bool,
     pin_handle: Option<PopoverMenuHandle<PinnedPopoverPanel>>,
     canvas_handle: Option<PopoverMenuHandle<CanvasPopoverPanel>>,
     layout: WeakEntity<ChatLayout>,
     settings: Entity<Settings>,
     _settings_observe: Subscription,
     _notification_observe: Subscription,
+    _pinned_observe: Subscription,
 }
 
 impl ChatHeader {
@@ -798,6 +809,7 @@ impl ChatHeader {
             &mezon_store::NotificationSettingStore::global(cx),
             |_, _, cx| cx.notify(),
         );
+        let _pinned_observe = cx.observe(&PinnedMessagesStore::global(cx), |_, _, cx| cx.notify());
         Self {
             name: SharedString::default(),
             dm: false,
@@ -815,12 +827,14 @@ impl ChatHeader {
             show_threads: false,
             timeline_action: false,
             timeline_active: false,
+            stream_sidebar: false,
             pin_handle: None,
             canvas_handle: None,
             layout,
             settings: settings.clone(),
             _settings_observe,
             _notification_observe,
+            _pinned_observe,
         }
     }
 
@@ -842,6 +856,7 @@ impl ChatHeader {
         search_expanded: bool,
         show_search_options: bool,
         search_input: Option<Entity<InputState>>,
+        stream_sidebar: bool,
         locale: Option<&str>,
         cx: &mut Context<Self>,
     ) {
@@ -875,6 +890,7 @@ impl ChatHeader {
             && self.show_threads == show_threads
             && self.timeline_action == timeline_action
             && self.timeline_active == timeline_active
+            && self.stream_sidebar == stream_sidebar
         {
             return;
         }
@@ -892,6 +908,7 @@ impl ChatHeader {
         self.show_threads = show_threads;
         self.timeline_action = timeline_action;
         self.timeline_active = timeline_active;
+        self.stream_sidebar = stream_sidebar;
         cx.notify();
     }
 }
@@ -899,6 +916,9 @@ impl ChatHeader {
 impl Render for ChatHeader {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
+        if self.stream_sidebar {
+            return render_stream_chat_sidebar_header(&theme, &self.name, cx).into_any_element();
+        }
         let layout_weak = self.layout.clone();
         let settings = self.settings.clone();
         let show_threads = self.show_threads;
@@ -1063,6 +1083,67 @@ impl Render for ChatHeader {
         }
         header.render(&theme, cx).into_any_element()
     }
+}
+
+fn render_stream_chat_sidebar_header(
+    theme: &Theme,
+    name: &SharedString,
+    _cx: &App,
+) -> impl IntoElement {
+    let label = crate::chat::stream::truncate_label(name, 30);
+    let hover = theme.bg_hover;
+
+    div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .justify_between()
+        .w_full()
+        .px_4()
+        .h(px(50.))
+        .min_h(px(50.))
+        .border_b_1()
+        .border_color(theme.border)
+        .bg(theme.bg_primary)
+        .child(
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap_2()
+                .child(
+                    Icon::new(IconName::MessageIcon)
+                        .size(px(20.))
+                        .text_color(theme.text_primary),
+                )
+                .child(
+                    div()
+                        .text_base()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(theme.text_primary)
+                        .child(label),
+                ),
+        )
+        .child(
+            div()
+                .id("stream-chat-close")
+                .flex()
+                .items_center()
+                .justify_center()
+                .cursor_pointer()
+                .text_color(theme.text_primary)
+                .hover(move |s| s.bg(hover))
+                .rounded_md()
+                .p_1()
+                .child(Icon::new(IconName::Close).size(px(20.)))
+                .on_click(|_, _, cx| {
+                    StreamStore::global(cx).update(cx, |store, cx| {
+                        if store.show_chat() {
+                            store.toggle_chat(cx);
+                        }
+                    });
+                }),
+        )
 }
 
 #[derive(IntoElement)]
@@ -1230,6 +1311,8 @@ impl RenderOnce for InboxPopoverTrigger {
 #[derive(IntoElement)]
 struct PinPopoverTrigger {
     open: bool,
+    show_badge: bool,
+    badge_color: gpui::Rgba,
     icon_color: gpui::Rgba,
     icon_active: gpui::Rgba,
     bg_hover: gpui::Rgba,
@@ -1238,9 +1321,11 @@ struct PinPopoverTrigger {
 }
 
 impl PinPopoverTrigger {
-    fn new(theme: &Theme, open: bool) -> Self {
+    fn new(theme: &Theme, open: bool, show_badge: bool, badge_color: gpui::Rgba) -> Self {
         Self {
             open,
+            show_badge,
+            badge_color,
             icon_color: theme.text_muted,
             icon_active: theme.text_primary,
             bg_hover: theme.bg_hover,
@@ -1287,7 +1372,23 @@ impl RenderOnce for PinPopoverTrigger {
             .cursor_pointer()
             .hover(move |s| s.bg(bg_hover))
             .occlude()
-            .child(Icon::new(IconName::PinRight).size(px(20.)).text_color(tint));
+            .child(
+                div()
+                    .relative()
+                    .child(Icon::new(IconName::PinRight).size(px(20.)).text_color(tint))
+                    .when(self.show_badge, |d| {
+                        d.child(
+                            div()
+                                .absolute()
+                                .bottom(px(0.))
+                                .right(px(0.))
+                                .w(px(8.))
+                                .h(px(8.))
+                                .rounded_full()
+                                .bg(self.badge_color),
+                        )
+                    }),
+            );
         if self.open {
             button = button.bg(self.bg_active);
         }

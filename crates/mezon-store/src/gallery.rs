@@ -304,20 +304,11 @@ fn is_video_type(filetype: &str, url: &str) -> bool {
 }
 
 fn is_image_type(filetype: &str, url: &str) -> bool {
-    if filetype.starts_with("image/") || filetype == "sticker" {
-        return true;
-    }
-    matches!(
-        extension(url).as_deref(),
-        Some("png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "svg" | "avif")
-    )
+    crate::message::is_image_type(filetype, url)
 }
 
 fn extension(url: &str) -> Option<String> {
-    url.split(['?', '#'])
-        .next()
-        .and_then(|u| u.rsplit('.').next())
-        .map(|ext| ext.to_ascii_lowercase())
+    crate::message::url_extension(url)
 }
 
 fn format_day(ts: i64) -> String {

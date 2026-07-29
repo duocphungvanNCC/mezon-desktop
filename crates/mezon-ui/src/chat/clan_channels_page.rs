@@ -113,7 +113,7 @@ impl ClanChannelsPage {
             return;
         }
         self.clan_id = clan_id;
-        self.page = 0;
+        self.reset_search(cx);
         self.expanded.clear();
         self.visible_row_keys.clear();
         self.rows_dirty = true;
@@ -124,6 +124,17 @@ impl ClanChannelsPage {
         ClanMembersStore::global(cx).update(cx, |store, cx| store.ensure_loaded(clan_id, cx));
         PermissionStore::global(cx)
             .update(cx, |store, cx| store.load_clan_permissions(clan_id, cx));
+        cx.notify();
+    }
+
+    pub fn reset_search(&mut self, cx: &mut Context<Self>) {
+        self.search = None;
+        self.search_sub = None;
+        self.search_locale.clear();
+        self.page = 0;
+        self.rows_dirty = true;
+        self.page_size_picker_open = false;
+        self.scroll_to_top();
         cx.notify();
     }
 
@@ -716,6 +727,10 @@ impl Render for ClanChannelsPage {
                 cx.theme(),
             );
         }
+        let has_search_query = self
+            .search
+            .as_ref()
+            .is_some_and(|input| !input.read(cx).value().trim().is_empty());
         let total = self.rows(cx).len();
         let pages = total.div_ceil(self.page_size).max(1);
         self.page = self.page.min(pages - 1);
@@ -742,15 +757,27 @@ impl Render for ClanChannelsPage {
         let entity = cx.entity();
         let locale_for_list = Arc::<str>::from(locale.clone());
         let rows_for_list = visible.clone();
-        let channel_list = list(self.list_state.clone(), move |index, _window, cx| {
-            entity.update(cx, |this, cx| {
-                rows_for_list
-                    .get(index)
-                    .map(|row| this.render_visible_row(row, &locale_for_list, cx))
-                    .unwrap_or_else(|| div().into_any_element())
+        let channel_list = if has_search_query && total == 0 {
+            div()
+                .size_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                .text_color(cx.theme().text_secondary)
+                .child(tr(&locale, "setting.channelSetting.noSearchResults"))
+                .into_any_element()
+        } else {
+            list(self.list_state.clone(), move |index, _window, cx| {
+                entity.update(cx, |this, cx| {
+                    rows_for_list
+                        .get(index)
+                        .map(|row| this.render_visible_row(row, &locale_for_list, cx))
+                        .unwrap_or_else(|| div().into_any_element())
+                })
             })
-        })
-        .size_full();
+            .size_full()
+            .into_any_element()
+        };
         let search = div()
             .relative()
             .w(px(500.))

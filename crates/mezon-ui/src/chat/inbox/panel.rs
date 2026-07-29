@@ -7,8 +7,8 @@ use gpui::{
     SharedString, Subscription, Window, div, list, prelude::*, px, rgb, svg,
 };
 use mezon_store::{
-    ChannelId, ChannelList, ClanId, ClanList, ClanMembersEvent, ClanMembersStore, InboxCategory,
-    InboxEvent, InboxNotification, InboxStore, MessageId, MessagesEvent, MessagesStore, RolesStore,
+    ChannelId, ChannelList, ClanId, ClanList, ClanMembersStore, InboxCategory, InboxEvent,
+    InboxNotification, InboxStore, MessageId, MessagesEvent, MessagesStore, RolesStore,
     TopicBadgeEvent, TopicBadgeStore, TopicDiscussion, TopicsEvent, TopicsStore, UsersByUserEvent,
     UsersByUserStore,
 };
@@ -123,9 +123,7 @@ impl InboxPopoverPanel {
             }
         });
         let _members_sub = cx.subscribe(&members_store, |this, _, event, cx| {
-            if let ClanMembersEvent::Changed { clan_id } = event
-                && this.clan_id == clan_id.to_string()
-            {
+            if this.clan_id == event.clan_id().to_string() {
                 cx.notify();
             }
         });
@@ -1107,5 +1105,5 @@ pub fn clan_has_inbox_badge(clan_id: &str, cx: &App) -> bool {
         .clans
         .iter()
         .find(|c| c.id == clan_id)
-        .is_some_and(|c| c.badge_count > 0 || c.has_unread)
+        .is_some_and(|c| c.badge_count > 0)
 }

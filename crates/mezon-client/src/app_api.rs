@@ -12,6 +12,7 @@ use crate::{
     },
 };
 
+const CHECK_NAME_TYPE_CHANNEL: i32 = 2;
 const CHECK_NAME_TYPE_NICKNAME: i32 = 4;
 
 fn sanitize_filename(name: &str) -> String {
@@ -376,6 +377,7 @@ impl AppApi {
             .await
     }
 
+    /// List threads for a parent channel.
     pub async fn list_thread_descs(
         &self,
         channel_id: &str,
@@ -743,6 +745,42 @@ impl AppApi {
                 mode,
                 timestamp_seconds,
                 badge_count,
+            )
+            .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn write_last_pin_message(
+        &self,
+        clan_id: i64,
+        channel_id: i64,
+        message_id: i64,
+        mode: i32,
+        is_public: bool,
+        timestamp_seconds: u32,
+        operation: i32,
+        avatar: &str,
+        sender_id: &str,
+        sender_username: &str,
+        content: &str,
+        attachment: &str,
+        created_time: &str,
+    ) -> Result<()> {
+        self.transport
+            .write_last_pin_message(
+                clan_id,
+                channel_id,
+                message_id,
+                mode,
+                is_public,
+                timestamp_seconds,
+                operation,
+                avatar,
+                sender_id,
+                sender_username,
+                content,
+                attachment,
+                created_time,
             )
             .await
     }
@@ -1332,6 +1370,76 @@ impl AppApi {
 
     pub async fn get_list_permission(&self) -> Result<mezon_proto::api::PermissionList> {
         self.transport.get_list_permission().await
+    }
+
+    pub async fn get_permission_by_role_id_channel_id(
+        &self,
+        role_id: i64,
+        channel_id: i64,
+        user_id: i64,
+    ) -> Result<mezon_proto::api::PermissionRoleChannelListEventResponse> {
+        self.transport
+            .get_permission_by_role_id_channel_id(role_id, channel_id, user_id)
+            .await
+    }
+
+    pub async fn set_role_channel_permission(
+        &self,
+        role_id: i64,
+        channel_id: i64,
+        user_id: i64,
+        max_permission_id: i64,
+        permission_update: Vec<mezon_proto::api::PermissionUpdate>,
+    ) -> Result<()> {
+        self.transport
+            .set_role_channel_permission(
+                role_id,
+                channel_id,
+                user_id,
+                max_permission_id,
+                permission_update,
+            )
+            .await
+    }
+
+    pub async fn add_roles_channel_desc(
+        &self,
+        role_ids: Vec<String>,
+        channel_id: i64,
+    ) -> Result<()> {
+        self.transport
+            .add_roles_channel_desc(role_ids, channel_id)
+            .await
+    }
+
+    pub async fn delete_role_channel_desc(
+        &self,
+        role_id: i64,
+        channel_id: i64,
+        clan_id: i64,
+    ) -> Result<()> {
+        self.transport
+            .delete_role_channel_desc(role_id, channel_id, clan_id)
+            .await
+    }
+
+    pub async fn update_channel_private(
+        &self,
+        clan_id: i64,
+        channel_id: i64,
+        channel_private: i32,
+        user_ids: Vec<i64>,
+        role_ids: Vec<i64>,
+    ) -> Result<()> {
+        self.transport
+            .update_channel_private(clan_id, channel_id, channel_private, user_ids, role_ids)
+            .await
+    }
+
+    pub async fn remove_channel_users(&self, channel_id: i64, user_ids: Vec<String>) -> Result<()> {
+        self.transport
+            .remove_channel_users(channel_id, user_ids)
+            .await
     }
 
     pub async fn get_clan_user_role(&self, clan_id: i64) -> Result<mezon_proto::api::RoleList> {
@@ -2080,6 +2188,21 @@ impl AppApi {
         Ok(resp.is_duplicate)
     }
 
+    pub async fn check_duplicate_channel_name(
+        &self,
+        name: &str,
+        category_id: &str,
+    ) -> Result<bool> {
+        let cond: i64 = category_id
+            .parse()
+            .map_err(|e| anyhow::anyhow!("invalid category_id {category_id:?}: {e}"))?;
+        let resp = self
+            .transport
+            .check_duplicate_name(name, CHECK_NAME_TYPE_CHANNEL, cond)
+            .await?;
+        Ok(resp.is_duplicate)
+    }
+
     pub async fn check_duplicate_clan_nickname(
         &self,
         clan_id: i64,
@@ -2130,6 +2253,33 @@ impl AppApi {
 
     pub async fn list_categories_typed(&self, clan_id: i64) -> Result<Vec<ApiCategoryDesc>> {
         self.transport.list_categories_typed(clan_id).await
+    }
+
+    pub async fn update_category_order(
+        &self,
+        clan_id: i64,
+        categories: &[(i32, i64)],
+    ) -> Result<()> {
+        self.transport
+            .update_category_order(clan_id, categories)
+            .await
+    }
+
+    pub async fn list_archived_channel_descs(
+        &self,
+        clan_id: i64,
+    ) -> Result<Vec<mezon_proto::api::ChannelDescription>> {
+        Ok(self
+            .transport
+            .list_archived_channel_descs(clan_id)
+            .await?
+            .channeldesc)
+    }
+
+    pub async fn restore_archived_channel(&self, clan_id: i64, channel_id: i64) -> Result<()> {
+        self.transport
+            .active_archived_thread(clan_id, channel_id)
+            .await
     }
 
     pub async fn list_clan_badge_count(&self) -> Result<Vec<(String, i32, bool)>> {
@@ -2324,6 +2474,19 @@ impl AppApi {
         self.transport.list_voice_channel_users(clan_id).await
     }
 
+    pub async fn list_streaming_channel_users(
+        &self,
+        clan_id: i64,
+        channel_id: i64,
+        channel_type: i32,
+        state: i32,
+        limit: i32,
+    ) -> Result<mezon_proto::api::StreamingChannelUserList> {
+        self.transport
+            .list_streaming_channel_users(clan_id, channel_id, channel_type, state, limit)
+            .await
+    }
+
     pub async fn generate_meet_token(&self, channel_id: &str, room_name: &str) -> Result<String> {
         self.transport
             .generate_meet_token(channel_id, room_name)
@@ -2399,6 +2562,12 @@ impl AppApi {
     pub async fn remove_channel_favorite(&self, channel_id: i64, clan_id: i64) -> Result<()> {
         self.transport
             .remove_channel_favorite(channel_id, clan_id)
+            .await
+    }
+
+    pub async fn active_archived_thread(&self, clan_id: i64, channel_id: i64) -> Result<()> {
+        self.transport
+            .active_archived_thread(clan_id, channel_id)
             .await
     }
 

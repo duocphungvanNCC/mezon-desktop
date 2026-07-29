@@ -14,6 +14,7 @@ use crate::channel_permissions::{ChannelPermissionsStore, PERMISSION_MANAGE_THRE
 use crate::clan::ClanList;
 use crate::clan_members::ClanMembersStore;
 use crate::ids::{ChannelId, ClanId};
+use crate::messages::MessagesStore;
 use crate::realtime::{RealtimeDispatch, RealtimeKind};
 
 pub const THREAD_STATUS_ARCHIVED: i32 = 0;
@@ -138,6 +139,7 @@ impl ThreadsStore {
                 RealtimeKind::ChannelUpdated,
                 RealtimeKind::ChannelMessage,
                 RealtimeKind::ChannelDeleted,
+                RealtimeKind::ChannelArchive,
             ] {
                 dispatch.on(kind, &entity, |this, event, cx| {
                     this.on_realtime_event(event, cx);
@@ -177,6 +179,9 @@ impl ThreadsStore {
 
     fn on_realtime_event(&mut self, event: &RealtimeEvent, cx: &mut Context<Self>) {
         let Some(list_id) = self.list_channel_id.clone() else {
+            if let RealtimeEvent::ChannelArchive(ev) = event {
+                self.apply_channel_archive(ev, cx);
+            }
             return;
         };
         match event {
@@ -192,8 +197,63 @@ impl ThreadsStore {
             RealtimeEvent::ChannelDeleted(ev) => {
                 self.apply_thread_deleted(&ev.channel_id.to_string(), cx);
             }
+            RealtimeEvent::ChannelArchive(ev) => {
+                self.apply_channel_archive(ev, cx);
+            }
             _ => {}
         }
+    }
+
+    pub fn mark_thread_active(&mut self, channel_id: &str, cx: &mut Context<Self>) {
+        self.set_thread_active(channel_id, THREAD_STATUS_JOINED, cx);
+    }
+
+    pub fn mark_thread_archived(&mut self, channel_id: &str, cx: &mut Context<Self>) {
+        self.set_thread_active(channel_id, THREAD_STATUS_ARCHIVED, cx);
+    }
+
+    pub fn thread_active(&self, channel_id: &str) -> Option<i32> {
+        self.threads
+            .iter()
+            .find(|t| t.channel_id == channel_id)
+            .map(|t| t.active)
+            .or_else(|| {
+                self.search_results.as_ref().and_then(|results| {
+                    results
+                        .iter()
+                        .find(|t| t.channel_id == channel_id)
+                        .map(|t| t.active)
+                })
+            })
+    }
+
+    fn set_thread_active(&mut self, channel_id: &str, active: i32, cx: &mut Context<Self>) {
+        let mut changed = false;
+        if let Some(thread) = self.threads.iter_mut().find(|t| t.channel_id == channel_id)
+            && thread.active != active
+        {
+            thread.active = active;
+            changed = true;
+        }
+        if let Some(results) = self.search_results.as_mut()
+            && let Some(thread) = results.iter_mut().find(|t| t.channel_id == channel_id)
+            && thread.active != active
+        {
+            thread.active = active;
+            changed = true;
+        }
+        if changed {
+            cx.notify();
+        }
+    }
+
+    fn apply_channel_archive(
+        &mut self,
+        ev: &realtime::ChannelArchiveEvent,
+        cx: &mut Context<Self>,
+    ) {
+        let channel_id = ev.channel_id.to_string();
+        self.set_thread_active(&channel_id, ev.status, cx);
     }
 
     fn apply_thread_message(&mut self, msg: &api::ChannelMessage, cx: &mut Context<Self>) {
@@ -423,19 +483,15 @@ impl ThreadsStore {
     }
 
     pub fn can_create_thread(&self, cx: &App) -> bool {
-        let Some(list_id) = self.list_channel_id.as_deref() else {
+        let is_dm = MessagesStore::try_global(cx).is_some_and(|store| store.read(cx).is_dm());
+        let Some((channel_id, clan_id)) = thread_creation_scope(
+            is_dm,
+            self.list_channel_id.as_deref(),
+            self.clan_id.as_deref(),
+        ) else {
             return false;
         };
-        let Ok(channel_id) = list_id.parse::<ChannelId>() else {
-            return false;
-        };
-        let Some(clan_id) = self
-            .clan_id
-            .as_deref()
-            .and_then(|s| s.parse::<ClanId>().ok())
-            .filter(|id| !id.is_zero())
-            .or_else(|| ClanList::global(cx).read(cx).active_clan_id)
-        else {
+        let Some(clan_id) = clan_id.or_else(|| ClanList::global(cx).read(cx).active_clan_id) else {
             return false;
         };
         ChannelPermissionsStore::global(cx).read(cx).has_permission(
@@ -446,19 +502,15 @@ impl ThreadsStore {
     }
 
     pub fn ensure_create_permissions(&mut self, cx: &mut Context<Self>) {
-        let Some(list_id) = self.list_channel_id.as_deref() else {
+        let is_dm = MessagesStore::try_global(cx).is_some_and(|store| store.read(cx).is_dm());
+        let Some((channel_id, clan_id)) = thread_creation_scope(
+            is_dm,
+            self.list_channel_id.as_deref(),
+            self.clan_id.as_deref(),
+        ) else {
             return;
         };
-        let Ok(channel_id) = list_id.parse::<ChannelId>() else {
-            return;
-        };
-        let Some(clan_id) = self
-            .clan_id
-            .as_deref()
-            .and_then(|s| s.parse::<ClanId>().ok())
-            .filter(|id| !id.is_zero())
-            .or_else(|| ClanList::global(cx).read(cx).active_clan_id)
-        else {
+        let Some(clan_id) = clan_id.or_else(|| ClanList::global(cx).read(cx).active_clan_id) else {
             return;
         };
         ChannelPermissionsStore::global(cx).update(cx, |store, cx| {
@@ -820,6 +872,21 @@ fn list_channel_id_for(channel: &Channel) -> String {
     }
 }
 
+fn thread_creation_scope(
+    is_dm: bool,
+    list_channel_id: Option<&str>,
+    clan_id: Option<&str>,
+) -> Option<(ChannelId, Option<ClanId>)> {
+    if is_dm {
+        return None;
+    }
+    let channel_id = list_channel_id?.parse::<ChannelId>().ok()?;
+    let clan_id = clan_id
+        .and_then(|raw| raw.parse::<ClanId>().ok())
+        .filter(|id| !id.is_zero());
+    Some((channel_id, clan_id))
+}
+
 fn page_has_more(batch_len: usize) -> bool {
     batch_len >= THREAD_LIST_LIMIT as usize
 }
@@ -941,6 +1008,34 @@ pub fn group_threads(threads: &[ThreadSummary]) -> (Vec<usize>, Vec<usize>, Vec<
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn thread_creation_scope_is_none_in_a_dm() {
+        assert_eq!(thread_creation_scope(true, Some("77"), Some("5")), None);
+        assert_eq!(thread_creation_scope(true, Some("77"), Some("0")), None);
+    }
+
+    #[test]
+    fn thread_creation_scope_drops_a_zero_clan_so_the_caller_can_fall_back() {
+        assert_eq!(
+            thread_creation_scope(false, Some("77"), Some("0")),
+            Some((ChannelId(77), None))
+        );
+        assert_eq!(
+            thread_creation_scope(false, Some("77"), None),
+            Some((ChannelId(77), None))
+        );
+    }
+
+    #[test]
+    fn thread_creation_scope_keeps_a_real_clan_channel() {
+        assert_eq!(
+            thread_creation_scope(false, Some("77"), Some("5")),
+            Some((ChannelId(77), Some(ClanId(5))))
+        );
+        assert_eq!(thread_creation_scope(false, None, Some("5")), None);
+        assert_eq!(thread_creation_scope(false, Some("nope"), Some("5")), None);
+    }
 
     #[test]
     fn page_has_more_when_batch_full() {
@@ -1066,5 +1161,60 @@ mod tests {
         assert_eq!(thread.last_sent_timestamp, 50);
         assert_eq!(thread.last_message_content, "keep");
         assert_eq!(thread.last_message_sender_id, "9");
+    }
+
+    #[test]
+    fn group_threads_moves_archived_to_older_bucket() {
+        let threads = vec![
+            ThreadSummary {
+                channel_id: "1".into(),
+                channel_label: "joined".into(),
+                clan_id: "c".into(),
+                parent_id: "p".into(),
+                channel_private: 0,
+                active: THREAD_STATUS_JOINED,
+                creator_id: String::new(),
+                last_message_content: String::new(),
+                last_message_sender_id: String::new(),
+                last_message_sender_name: String::new(),
+                last_message_sender_avatar: String::new(),
+                last_sent_timestamp: 3,
+                member_count: 0,
+            },
+            ThreadSummary {
+                channel_id: "2".into(),
+                channel_label: "archived".into(),
+                clan_id: "c".into(),
+                parent_id: "p".into(),
+                channel_private: 0,
+                active: THREAD_STATUS_ARCHIVED,
+                creator_id: String::new(),
+                last_message_content: String::new(),
+                last_message_sender_id: String::new(),
+                last_message_sender_name: String::new(),
+                last_message_sender_avatar: String::new(),
+                last_sent_timestamp: 2,
+                member_count: 0,
+            },
+            ThreadSummary {
+                channel_id: "3".into(),
+                channel_label: "public".into(),
+                clan_id: "c".into(),
+                parent_id: "p".into(),
+                channel_private: 0,
+                active: THREAD_STATUS_ACTIVE_PUBLIC,
+                creator_id: String::new(),
+                last_message_content: String::new(),
+                last_message_sender_id: String::new(),
+                last_message_sender_name: String::new(),
+                last_message_sender_avatar: String::new(),
+                last_sent_timestamp: 1,
+                member_count: 0,
+            },
+        ];
+        let (joined, active, older) = group_threads(&threads);
+        assert_eq!(joined, vec![0]);
+        assert_eq!(active, vec![2]);
+        assert_eq!(older, vec![1]);
     }
 }

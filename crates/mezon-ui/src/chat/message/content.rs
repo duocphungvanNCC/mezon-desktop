@@ -1,6 +1,7 @@
 use std::cell::{Cell, RefCell};
 use std::ops::Range;
 use std::rc::Rc;
+use std::sync::Arc;
 
 use gpui::{
     AnyElement, App, Bounds, FontWeight, HighlightStyle, Hsla, InteractiveText, ObjectFit, Pixels,
@@ -9,8 +10,8 @@ use gpui::{
 };
 use mezon_store::{
     ChannelId, ChannelList, ChannelType, ClanId, Embed, LinkKind, Message, MessageCode, MessageId,
-    MessageSpan, PlatformStore, ProfileContext, RichClick, RichRunKind, RichToken, UserId,
-    is_here_user_id,
+    MessageSpan, PlatformStore, ProfileContext, RichClick, RichLayout, RichRunKind, RichToken,
+    UserId, is_here_user_id,
 };
 
 use ui::Clickable;
@@ -1585,7 +1586,7 @@ fn append_span(
     }
 }
 
-fn heading_size(level: u8) -> Pixels {
+pub(crate) fn heading_size(level: u8) -> Pixels {
     match level {
         1 => px(36.),
         2 => px(30.),
@@ -1596,7 +1597,7 @@ fn heading_size(level: u8) -> Pixels {
     }
 }
 
-fn heading_line_height(level: u8) -> impl Into<gpui::DefiniteLength> {
+pub(crate) fn heading_line_height(level: u8) -> impl Into<gpui::DefiniteLength> {
     match level {
         1 => rems(2.5),
         2 => rems(2.25),
@@ -1695,6 +1696,9 @@ fn render_social_link_card(
         .flex()
         .flex_col()
         .gap_1()
+        .when(kind != LinkKind::Plain, |card| {
+            card.flex_basis(relative(1.))
+        })
         .w_full()
         .min_w_0()
         .max_w(px(400.))
@@ -2349,6 +2353,209 @@ pub(crate) fn open_message_link(url: String, cx: &mut App) {
     if let Some(store) = PlatformStore::try_global(cx) {
         let _ = store.read(cx).open_url_external(&url);
     }
+}
+
+pub(crate) fn resolve_message_link_url(url: &str, text: &str) -> String {
+    resolve_link_url(url, text)
+}
+
+pub(crate) fn text_wrap_children(text: &str, color: gpui::Rgba) -> Vec<AnyElement> {
+    let mut out: Vec<AnyElement> = Vec::new();
+    let mut first_line = true;
+    for line in text.split('\n') {
+        if !first_line {
+            out.push(div().w_full().h_0().into_any_element());
+        }
+        first_line = false;
+        for word in line.split_whitespace() {
+            for segment in split_unbreakable(word) {
+                out.push(
+                    div()
+                        .text_sm()
+                        .line_height(rems(1.25))
+                        .text_color(color)
+                        .child(segment)
+                        .into_any_element(),
+                );
+            }
+        }
+    }
+    out
+}
+
+pub(crate) fn render_pin_rich_layout_element(layout: &RichLayout, theme: &Theme) -> AnyElement {
+    let mention_color: Hsla = theme.tokens.mention_color.into();
+    let mention_bg: Hsla = theme.tokens.mention_primary.into();
+    let code_bg: Hsla = theme.tokens.bg_markdown_code.into();
+    let link_color: Hsla = theme.tokens.mention_color.into();
+    let body_color = theme.tokens.text_theme_message;
+
+    if layout.runs.is_empty() {
+        return div()
+            .w_full()
+            .min_w_0()
+            .max_w_full()
+            .text_sm()
+            .line_height(rems(1.25))
+            .text_color(body_color)
+            .gap_x(px(4.))
+            .children(text_wrap_children(layout.text.as_ref(), body_color))
+            .into_any_element();
+    }
+
+    let mut highlights: Vec<(Range<usize>, HighlightStyle)> = Vec::with_capacity(layout.runs.len());
+    let mut click_ranges: Vec<Range<usize>> = Vec::new();
+    let mut actions: Vec<RichClick> = Vec::new();
+    for run in layout.runs.iter() {
+        match run.kind {
+            RichRunKind::Bold => highlights.push((
+                run.range.clone(),
+                HighlightStyle {
+                    font_weight: Some(FontWeight::BOLD),
+                    ..Default::default()
+                },
+            )),
+            RichRunKind::Code => highlights.push((
+                run.range.clone(),
+                HighlightStyle {
+                    background_color: Some(code_bg),
+                    ..Default::default()
+                },
+            )),
+            RichRunKind::Link => highlights.push((
+                run.range.clone(),
+                HighlightStyle {
+                    color: Some(link_color),
+                    underline: Some(UnderlineStyle {
+                        thickness: px(1.),
+                        color: Some(link_color),
+                        wavy: false,
+                    }),
+                    ..Default::default()
+                },
+            )),
+            RichRunKind::Mention | RichRunKind::Hashtag => highlights.push((
+                run.range.clone(),
+                HighlightStyle {
+                    color: Some(mention_color),
+                    background_color: Some(mention_bg),
+                    ..Default::default()
+                },
+            )),
+        }
+        if let Some(click) = run.click.clone() {
+            click_ranges.push(run.range.clone());
+            actions.push(click);
+        }
+    }
+
+    let styled = StyledText::new(layout.text.clone()).with_highlights(highlights);
+    let content = if actions.is_empty() {
+        styled.into_any_element()
+    } else {
+        let actions: Arc<[RichClick]> = actions.into();
+        InteractiveText::new(("pin-rich", layout.text.len()), styled)
+            .on_click_shared(click_ranges.into(), move |range_ix, _, cx| {
+                let Some(RichClick::Link(url)) = actions.get(range_ix) else {
+                    return;
+                };
+                open_message_link(url.to_string(), cx);
+            })
+            .into_any_element()
+    };
+
+    div()
+        .w_full()
+        .min_w_0()
+        .max_w_full()
+        .text_sm()
+        .line_height(rems(1.25))
+        .text_color(body_color)
+        .child(div().max_w_full().min_w_0().child(content))
+        .into_any_element()
+}
+
+pub(crate) fn pin_link_element(
+    text: &str,
+    url: &str,
+    color: gpui::Rgba,
+    full_width: bool,
+) -> AnyElement {
+    let resolved = SharedString::from(resolve_link_url(url, text));
+    let group_name = SharedString::from(format!("pin-link-{resolved}"));
+    let url_for_click = resolved.clone();
+    let mut container = div()
+        .id(resolved.clone())
+        .group(group_name.clone())
+        .cursor_pointer()
+        .text_color(color)
+        .text_sm()
+        .line_height(rems(1.25))
+        .on_click(move |_, _, cx| open_message_link(url_for_click.to_string(), cx))
+        .flex()
+        .flex_row()
+        .flex_wrap()
+        .items_baseline()
+        .min_w_0()
+        .children(pin_link_text_segments(text, group_name, color));
+    if full_width {
+        container = container.w_full();
+    }
+    container.into_any_element()
+}
+
+fn pin_link_text_segments(
+    text: &str,
+    group_name: SharedString,
+    color: gpui::Rgba,
+) -> Vec<AnyElement> {
+    let mut out = Vec::new();
+    let mut index = 0usize;
+    let mut first_line = true;
+    for line in text.split('\n') {
+        if !first_line {
+            out.push(div().w_full().h_0().into_any_element());
+        }
+        first_line = false;
+        if line.chars().any(char::is_whitespace) {
+            for word in line.split_whitespace() {
+                for segment in split_unbreakable(word) {
+                    out.push(pin_link_text_segment(
+                        group_name.clone(),
+                        segment,
+                        color,
+                        index,
+                    ));
+                    index += 1;
+                }
+            }
+        } else {
+            for segment in split_unbreakable(line) {
+                out.push(pin_link_text_segment(
+                    group_name.clone(),
+                    segment,
+                    color,
+                    index,
+                ));
+                index += 1;
+            }
+        }
+    }
+    out
+}
+
+fn pin_link_text_segment(
+    group_name: SharedString,
+    display: String,
+    color: gpui::Rgba,
+    index: usize,
+) -> AnyElement {
+    div()
+        .id((group_name.clone(), index))
+        .text_color(color)
+        .group_hover(group_name, |s| s.underline())
+        .child(display)
+        .into_any_element()
 }
 
 fn link_block(

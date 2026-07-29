@@ -6,6 +6,7 @@ members = [
     "crates/mezon-client",
     "crates/mezon-store",
     "crates/mezon-voice",
+    "crates/mezon-stream",
     "crates/mezon-video",
     "crates/mezon-audio",
     "crates/mezon-native",
@@ -118,6 +119,7 @@ mezon-ui      = { path = "crates/mezon-ui" }
 mezon-client  = { path = "crates/mezon-client" }
 mezon-store   = { path = "crates/mezon-store" }
 mezon-voice   = { path = "crates/mezon-voice" }
+mezon-stream  = { path = "crates/mezon-stream" }
 mezon-video   = { path = "crates/mezon-video" }
 mezon-audio   = { path = "crates/mezon-audio" }
 mezon-native  = { path = "crates/mezon-native" }

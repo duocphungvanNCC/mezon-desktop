@@ -31,6 +31,11 @@ pub(crate) fn selectable_invite_text(invite: &InvitePreview, locale: &str) -> St
     )
 }
 
+const INVITE_AVATAR_BOX: f32 = 72.0;
+const INVITE_AVATAR_BORDER: f32 = 4.0;
+const INVITE_AVATAR_RADIUS: f32 = 22.0;
+const INVITE_AVATAR_INNER_RADIUS: f32 = INVITE_AVATAR_RADIUS - INVITE_AVATAR_BORDER;
+
 pub fn render_invite_card(
     invite: &InvitePreview,
     base: Option<usize>,
@@ -74,6 +79,7 @@ pub fn render_invite_card(
         avatar_inner = avatar_inner.child(
             img(invite.image_proxied.clone())
                 .size_full()
+                .rounded(px(INVITE_AVATAR_INNER_RADIUS))
                 .object_fit(ObjectFit::Cover),
         );
     }
@@ -233,10 +239,10 @@ pub fn render_invite_card(
                 .absolute()
                 .top(px(40.))
                 .left(px(16.))
-                .w(px(72.))
-                .h(px(72.))
+                .w(px(INVITE_AVATAR_BOX))
+                .h(px(INVITE_AVATAR_BOX))
                 .overflow_hidden()
-                .rounded(px(22.))
+                .rounded(px(INVITE_AVATAR_RADIUS))
                 .border_4()
                 .border_color(theme.tokens.border_primary)
                 .bg(theme.tokens.theme_setting_primary)

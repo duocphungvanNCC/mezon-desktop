@@ -113,7 +113,7 @@ impl InvitePeopleModal {
         let member_sub = cx.subscribe(
             &ClanMembersStore::global(cx),
             move |this: &mut Self, _store, event: &ClanMembersEvent, cx| {
-                if matches!(event, ClanMembersEvent::Changed { clan_id: changed } if *changed == clan_id) {
+                if event.clan_id() == clan_id {
                     this.rebuild_rows(cx);
                     cx.notify();
                 }

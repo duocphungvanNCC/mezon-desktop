@@ -54,9 +54,11 @@ impl Render for UserReactionPanel {
             .unwrap_or((0, Vec::new()));
         let emoji_src = crate::util::imgproxy::emoji_url(cx, &self.emoji_id);
         let current_uid = BadgeService::global(cx).read(cx).current_user_id(cx);
-        let clan_id = ClanList::global(cx).read(cx).active_clan_id;
-        let dm_context = clan_id
-            .is_none()
+        let is_dm = MessagesStore::global(cx).read(cx).is_dm();
+        let clan_id = (!is_dm)
+            .then(|| ClanList::global(cx).read(cx).active_clan_id)
+            .flatten();
+        let dm_context = is_dm
             .then(|| {
                 let direct = DirectMessageStore::global(cx);
                 let direct = direct.read(cx);
@@ -72,8 +74,7 @@ impl Render for UserReactionPanel {
                     })
             })
             .flatten();
-        let self_profile = clan_id
-            .is_none()
+        let self_profile = is_dm
             .then(|| {
                 AccountStore::try_global(cx).and_then(|store| {
                     store.read(cx).account.as_ref().map(|account| {

@@ -61,6 +61,15 @@ impl ClanMember {
 #[derive(Debug, Clone)]
 pub enum ClanMembersEvent {
     Changed { clan_id: ClanId },
+    ProfileUpdated { clan_id: ClanId },
+}
+
+impl ClanMembersEvent {
+    pub fn clan_id(&self) -> ClanId {
+        match self {
+            Self::Changed { clan_id } | Self::ProfileUpdated { clan_id } => *clan_id,
+        }
+    }
 }
 
 #[derive(Default)]
@@ -222,6 +231,52 @@ impl ClanMembersStore {
         self.fetch(clan_id, cx).detach();
     }
 
+    #[cfg(test)]
+    pub(crate) fn seed_members_for_test(&mut self, clan_id: ClanId, members: Vec<ClanMember>) {
+        let mut bucket = ClanBucket::default();
+        for member in members {
+            bucket.upsert(member);
+        }
+        self.cache.insert(clan_id, bucket, None);
+    }
+
+    pub fn apply_role_membership(
+        &mut self,
+        clan_id: ClanId,
+        role_id: RoleId,
+        add_user_ids: &[i64],
+        remove_user_ids: &[i64],
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if !apply_role_ids_patch(
+            &mut self.cache,
+            clan_id,
+            role_id,
+            add_user_ids,
+            remove_user_ids,
+        ) {
+            return false;
+        }
+        let self_roles = BadgeService::try_global(cx)
+            .and_then(|badge| badge.read(cx).current_user_id(cx))
+            .and_then(|self_id| {
+                let member = self.cache.get(&clan_id)?.by_id.get(&self_id)?;
+                Some(
+                    member
+                        .role_ids
+                        .iter()
+                        .map(|role| role.get())
+                        .collect::<Vec<i64>>(),
+                )
+            });
+        if let Some(roles) = self_roles {
+            self.self_role_ids.insert(clan_id, roles);
+        }
+        cx.emit(ClanMembersEvent::Changed { clan_id });
+        cx.notify();
+        true
+    }
+
     fn fetch(&mut self, clan_id: ClanId, cx: &mut Context<Self>) -> Task<()> {
         if !self.loading.insert(clan_id) {
             return Task::ready(());
@@ -241,8 +296,17 @@ impl ClanMembersStore {
                             .read(cx)
                             .current_user_id(cx)
                             .map(|uid| uid.0);
-                        let online_users = online_result.unwrap_or_default();
-                        let online_ids = online_ids_from_users(&online_users, self_id);
+                        let mut degraded = false;
+                        let online_ids = match online_result {
+                            Ok(online_users) => online_ids_from_users(&online_users, self_id),
+                            Err(e) => {
+                                degraded = true;
+                                tracing::warn!(
+                                    "list_user_online failed for {clan_id}, keeping the known online set: {e}"
+                                );
+                                previous_online_ids(&this.cache, clan_id)
+                            }
+                        };
                         let mut bucket = ClanBucket::default();
                         for cu in users {
                             if let Some(mut member) = clan_member_from_proto(cu) {
@@ -268,9 +332,19 @@ impl ClanMembersStore {
                         prune_self_roles(&this.cache, &mut this.self_role_ids);
                         let online_uids: Vec<UserId> =
                             online_ids.iter().map(|id| UserId(*id)).collect();
-                        let statuses = status_result
-                            .map(user_statuses_from_list)
-                            .unwrap_or_default();
+                        let statuses = match status_result {
+                            Ok(list) => user_statuses_from_list(list),
+                            Err(e) => {
+                                degraded = true;
+                                tracing::warn!(
+                                    "list_clan_users_status failed for {clan_id}: {e}"
+                                );
+                                Vec::new()
+                            }
+                        };
+                        if degraded {
+                            this.cache.mark_stale(&clan_id);
+                        }
                         PresenceStore::global(cx).update(cx, |presence, cx| {
                             presence.seed_presence(&online_uids, &statuses, cx);
                         });
@@ -284,6 +358,20 @@ impl ClanMembersStore {
     }
 
     fn handle_event(&mut self, event: &RealtimeEvent, cx: &mut Context<Self>) {
+        if let RealtimeEvent::ClanProfileUpdated(e) = event {
+            let clan_id = ClanId(e.clan_id);
+            if apply_profile_update(
+                &mut self.cache,
+                clan_id,
+                UserId(e.user_id),
+                &e.clan_nick,
+                &e.clan_avatar,
+            ) {
+                cx.emit(ClanMembersEvent::ProfileUpdated { clan_id });
+                cx.notify();
+            }
+            return;
+        }
         let changed_clan = match event {
             RealtimeEvent::AddClanUser(e) => {
                 let clan_id = ClanId(e.clan_id);
@@ -302,17 +390,6 @@ impl ClanMembersStore {
                 }
                 apply_remove_members(&mut self.cache, clan_id, &ids).then_some(clan_id)
             }
-            RealtimeEvent::ClanProfileUpdated(e) => {
-                let clan_id = ClanId(e.clan_id);
-                apply_profile_update(
-                    &mut self.cache,
-                    clan_id,
-                    UserId(e.user_id),
-                    &e.clan_nick,
-                    &e.clan_avatar,
-                )
-                .then_some(clan_id)
-            }
             _ => None,
         };
         if let Some(clan_id) = changed_clan {
@@ -320,6 +397,35 @@ impl ClanMembersStore {
             cx.notify();
         }
     }
+}
+
+fn apply_role_ids_patch(
+    by_clan: &mut KeyedCache<ClanId, ClanBucket>,
+    clan_id: ClanId,
+    role_id: RoleId,
+    add_user_ids: &[i64],
+    remove_user_ids: &[i64],
+) -> bool {
+    let Some(bucket) = by_clan.get_mut(&clan_id) else {
+        return false;
+    };
+    let mut changed = false;
+    for user_id in add_user_ids {
+        if let Some(member) = bucket.by_id.get_mut(&UserId(*user_id))
+            && !member.role_ids.contains(&role_id)
+        {
+            member.role_ids.push(role_id);
+            changed = true;
+        }
+    }
+    for user_id in remove_user_ids {
+        if let Some(member) = bucket.by_id.get_mut(&UserId(*user_id)) {
+            let before = member.role_ids.len();
+            member.role_ids.retain(|id| *id != role_id);
+            changed |= member.role_ids.len() != before;
+        }
+    }
+    changed
 }
 
 /// Add a member to an **already-loaded** clan bucket. Ignored for a clan we have not fetched yet,
@@ -431,6 +537,20 @@ fn user_statuses_from_list(list: api::ClanUserStatusList) -> Vec<(UserId, String
         .filter(|e| e.user_id != 0)
         .map(|e| (UserId(e.user_id), e.user_status))
         .collect()
+}
+
+fn previous_online_ids(cache: &KeyedCache<ClanId, ClanBucket>, clan_id: ClanId) -> HashSet<i64> {
+    cache
+        .get(&clan_id)
+        .map(|bucket| {
+            bucket
+                .by_id
+                .values()
+                .filter(|member| member.online)
+                .map(|member| member.user.id.0)
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 fn online_ids_from_users(users: &[api::User], self_id: Option<i64>) -> HashSet<i64> {
@@ -695,6 +815,34 @@ mod tests {
             "x",
             "y"
         ));
+    }
+
+    #[test]
+    fn previous_online_ids_carries_the_last_known_online_set() {
+        let mut online_member = member(1, "online");
+        online_member.online = true;
+        let cache = bucket_with(vec![online_member, member(2, "offline")]);
+
+        let carried = previous_online_ids(&cache, ClanId(1));
+        assert_eq!(carried, [1].into_iter().collect::<HashSet<i64>>());
+        assert!(previous_online_ids(&cache, ClanId(99)).is_empty());
+    }
+
+    #[test]
+    fn a_degraded_member_fetch_is_not_pinned_fresh_for_the_ttl() {
+        let mut cache = bucket_with(vec![member(1, "a")]);
+        assert!(cache.is_fresh(&ClanId(1), crate::CACHE_TTL));
+
+        cache.mark_stale(&ClanId(1));
+
+        assert!(
+            !cache.is_fresh(&ClanId(1), crate::CACHE_TTL),
+            "a partial fetch must be refetched on the next clan entry"
+        );
+        assert!(
+            cache.get(&ClanId(1)).is_some(),
+            "the members already loaded must still be served"
+        );
     }
 
     #[test]

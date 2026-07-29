@@ -19,13 +19,12 @@ pub fn render_ogp_embed(
 ) -> Option<AnyElement> {
     let can_remove =
         !ctx.current_user_id.is_empty() && msg.sender_id.as_str() == ctx.current_user_id;
-    let og_cache = crate::image_cache::ogp_image_cache(ctx.app);
     render_ogp_preview_impl(
         msg.ogp.as_deref()?,
         msg.row_anchor_id,
         ctx.theme,
         can_remove,
-        og_cache,
+        ctx.ogp_cache.clone(),
         Some((base, selection_context, ctx.selection.clone())),
     )
 }
@@ -34,16 +33,9 @@ pub fn render_ogp_preview(
     ogp: &OgpPreview,
     message_id: MessageId,
     theme: &Theme,
-    app: &gpui::App,
+    ogp_cache: Entity<LruImageCache>,
 ) -> Option<AnyElement> {
-    render_ogp_preview_impl(
-        ogp,
-        message_id,
-        theme,
-        false,
-        crate::image_cache::ogp_image_cache(app),
-        None,
-    )
+    render_ogp_preview_impl(ogp, message_id, theme, false, ogp_cache, None)
 }
 
 fn render_ogp_preview_impl(
@@ -51,7 +43,7 @@ fn render_ogp_preview_impl(
     message_id: MessageId,
     theme: &Theme,
     can_remove: bool,
-    og_cache: Option<Entity<LruImageCache>>,
+    og_cache: Entity<LruImageCache>,
     selectable: Option<(
         usize,
         &SelectableTextContext,
@@ -125,7 +117,7 @@ fn render_ogp_preview_impl(
         .flex()
         .items_center()
         .justify_center()
-        .when_some(og_cache, |image_box, cache| image_box.image_cache(cache))
+        .image_cache(og_cache)
         .child(ogp_image(ogp.image_proxied.clone(), theme.text_muted));
 
     Some(

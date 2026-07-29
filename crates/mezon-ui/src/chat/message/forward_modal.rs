@@ -849,7 +849,7 @@ impl Render for ForwardMessageModal {
             .when(self.note_len >= COUNTER_VISIBLE_AT, |el| {
                 let remaining = MAX_FORWARD_MESSAGE_LENGTH as isize - self.note_len as isize;
                 let color = if remaining < 0 {
-                    theme.status_dnd
+                    theme.danger_text
                 } else if self.note_len >= COUNTER_WARN_AT {
                     theme.status_idle
                 } else {
@@ -864,7 +864,7 @@ impl Render for ForwardMessageModal {
             });
 
         let note_border = if self.note_too_long() {
-            theme.status_dnd
+            theme.danger_text
         } else {
             theme.tokens.theme_border_input
         };
@@ -1085,7 +1085,12 @@ fn render_option_row(
         let mut avatar = Avatar::new()
             .name(option.label.clone())
             .size_px(px(16.))
-            .image_cache(image_cache.clone());
+            .image_cache(image_cache.clone())
+            .group_default(
+                matches!(option.kind, OptionKind::Group)
+                    && option.avatar.is_empty()
+                    && option.avatar_raw.is_empty(),
+            );
         if !option.avatar.is_empty() {
             avatar = avatar.src(option.avatar.clone());
             if !option.avatar_raw.is_empty() && option.avatar_raw != option.avatar {
@@ -1735,7 +1740,12 @@ fn render_share_option_row(
         let mut avatar = Avatar::new()
             .name(option.label.clone())
             .size_px(px(16.))
-            .image_cache(image_cache.clone());
+            .image_cache(image_cache.clone())
+            .group_default(
+                matches!(option.kind, OptionKind::Group)
+                    && option.avatar.is_empty()
+                    && option.avatar_raw.is_empty(),
+            );
         if !option.avatar.is_empty() {
             avatar = avatar.src(option.avatar.clone());
             if !option.avatar_raw.is_empty() && option.avatar_raw != option.avatar {

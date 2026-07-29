@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use gpui::{App, Entity, HighlightStyle, Hsla, SharedString, WeakEntity};
 use mezon_store::{
-    ChannelType, ClanId, Emoji, MessageId, ProfileContext, RichClick, RichLayout, Settings, UserId,
+    ChannelType, ClanId, MessageId, ProfileContext, RichClick, RichLayout, Settings, UserId,
 };
 
 use super::audio_player::AudioPlayerView;
@@ -68,6 +68,7 @@ pub struct RowCtx<'a> {
     pub avatar_cache: Entity<LruImageCache>,
     pub large_avatar_cache: Entity<LruImageCache>,
     pub icon_cache: Entity<LruImageCache>,
+    pub ogp_cache: Entity<LruImageCache>,
     pub unread_boundary_id: Option<MessageId>,
     pub highlight_id: Option<MessageId>,
     pub reply_highlight_id: Option<MessageId>,
@@ -84,13 +85,15 @@ pub struct RowCtx<'a> {
     pub channel_type: Option<ChannelType>,
     /// The open channel is not itself a thread (`parent_id.is_none()`).
     pub channel_top_level: bool,
-    /// Reduced substitute for React's role-permission checks: clan creator only.
-    pub is_clan_owner: bool,
+    /// `manage-thread` on the open channel, resolved once per render pass.
+    pub can_manage_thread: bool,
+    /// `send-message` on the open channel, resolved once per render pass.
+    pub can_send_message: bool,
     /// Message currently being edited inline, if any (shared across all rows).
     pub editing_id: Option<MessageId>,
     pub edit_input: Option<Entity<MentionInput>>,
     /// Up to 3 most-recently-used emoji for the hover toolbar's quick-react pills.
-    pub emoji_recent: &'a [Emoji],
+    pub emoji_recent: &'a [RecentEmojiCell],
     /// `common.comingSoon`, resolved once per render pass (not per row).
     pub coming_soon: SharedString,
     /// Cross-frame memo for per-row derived values that are expensive to
@@ -101,6 +104,16 @@ pub struct RowCtx<'a> {
     pub selection: super::selection::SharedSelection,
 }
 
+/// Per-frame view model for the quick-reaction strip. The proxied url and the
+/// element-id prefix are identical for every row, so they are resolved once per
+/// frame instead of rebuilt inside each row's hover actions.
+pub struct RecentEmojiCell {
+    pub id: SharedString,
+    pub shortname: SharedString,
+    pub src: SharedString,
+    pub element_key: SharedString,
+}
+
 #[derive(Default)]
 pub struct RowMemo {
     /// sender -> live-resolved (raw, proxied) avatar urls; `None` caches a
@@ -109,6 +122,8 @@ pub struct RowMemo {
     pub avatars: HashMap<UserId, Option<(SharedString, SharedString)>>,
     /// (clan, sender) -> resolved display name for head/avatar rows.
     pub display_names: HashMap<(Option<ClanId>, UserId), SharedString>,
+    /// (clan, sender) -> resolved username colour + role icon for head rows.
+    pub role_styles: HashMap<(Option<ClanId>, UserId), (Hsla, Option<SharedString>)>,
     /// message -> formatted head time label ("14:03" / "Yesterday at 14:03").
     pub time_labels: HashMap<MessageId, SharedString>,
     pub rich_text: HashMap<MessageId, RichTextRenderPlan>,
@@ -116,6 +131,28 @@ pub struct RowMemo {
     pub selection_text_pieces:
         HashMap<SharedString, Rc<[super::content::CachedSelectableTextPiece]>>,
     pub poll_scrolls: HashMap<MessageId, gpui::ScrollHandle>,
+}
+
+pub const ROW_MEMO_CAPACITY: usize = 4096;
+
+impl RowMemo {
+    pub fn remember_role_style(
+        &mut self,
+        key: (Option<ClanId>, UserId),
+        value: (Hsla, Option<SharedString>),
+    ) {
+        if self.role_styles.len() >= ROW_MEMO_CAPACITY {
+            self.role_styles.clear();
+        }
+        self.role_styles.insert(key, value);
+    }
+
+    pub fn forget_clan_role_styles(&mut self, clan_id: ClanId) -> bool {
+        let before = self.role_styles.len();
+        self.role_styles
+            .retain(|(clan, _), _| *clan != Some(clan_id));
+        before != self.role_styles.len()
+    }
 }
 
 #[derive(Clone)]
@@ -139,3 +176,47 @@ pub const AVATAR_SIZE: f32 = 40.0;
 pub const AVATAR_LEFT: f32 = 16.0;
 pub const CONTENT_RIGHT_PAD: f32 = 48.0;
 pub const REPLY_INSET: f32 = 36.0;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui::rgb;
+
+    fn style() -> (Hsla, Option<SharedString>) {
+        (Hsla::from(rgb(0x99_aa_b5)), None)
+    }
+
+    #[test]
+    fn role_style_memo_is_keyed_by_clan_and_user() {
+        let mut memo = RowMemo::default();
+        let clan = ClanId(1);
+        let user = UserId(2);
+        memo.remember_role_style((Some(clan), user), style());
+        memo.remember_role_style((None, user), (Hsla::from(rgb(0x17_ac_86)), None));
+
+        assert_eq!(memo.role_styles.len(), 2);
+        assert_eq!(memo.role_styles[&(Some(clan), user)].0.h, style().0.h);
+    }
+
+    #[test]
+    fn role_style_memo_clears_at_capacity() {
+        let mut memo = RowMemo::default();
+        for index in 0..=ROW_MEMO_CAPACITY {
+            memo.remember_role_style((Some(ClanId(1)), UserId(index as i64 + 1)), style());
+        }
+        assert_eq!(memo.role_styles.len(), 1);
+    }
+
+    #[test]
+    fn forgetting_a_clan_keeps_other_scopes() {
+        let mut memo = RowMemo::default();
+        let user = UserId(2);
+        memo.remember_role_style((Some(ClanId(1)), user), style());
+        memo.remember_role_style((Some(ClanId(9)), user), style());
+        memo.remember_role_style((None, user), style());
+
+        assert!(memo.forget_clan_role_styles(ClanId(1)));
+        assert_eq!(memo.role_styles.len(), 2);
+        assert!(!memo.forget_clan_role_styles(ClanId(1)));
+    }
+}

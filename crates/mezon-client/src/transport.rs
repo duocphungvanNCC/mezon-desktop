@@ -57,6 +57,8 @@ pub enum RealtimeEvent {
     Unmute(realtime::UnmuteEvent),
     StreamingJoined(realtime::StreamingJoinedEvent),
     StreamingLeaved(realtime::StreamingLeavedEvent),
+    StreamingStarted(realtime::StreamingStartedEvent),
+    StreamingEnded(realtime::StreamingEndedEvent),
     VoiceStarted(realtime::VoiceStartedEvent),
     VoiceEnded(realtime::VoiceEndedEvent),
     VoiceJoined(realtime::VoiceJoinedEvent),
@@ -109,6 +111,8 @@ impl TryFrom<realtime::envelope::Message> for RealtimeEvent {
             realtime::envelope::Message::UnmuteEvent(m) => Ok(Self::Unmute(m)),
             realtime::envelope::Message::StreamingJoinedEvent(m) => Ok(Self::StreamingJoined(m)),
             realtime::envelope::Message::StreamingLeavedEvent(m) => Ok(Self::StreamingLeaved(m)),
+            realtime::envelope::Message::StreamingStartedEvent(m) => Ok(Self::StreamingStarted(m)),
+            realtime::envelope::Message::StreamingEndedEvent(m) => Ok(Self::StreamingEnded(m)),
             realtime::envelope::Message::VoiceStartedEvent(m) => Ok(Self::VoiceStarted(m)),
             realtime::envelope::Message::VoiceEndedEvent(m) => Ok(Self::VoiceEnded(m)),
             realtime::envelope::Message::VoiceJoinedEvent(m) => Ok(Self::VoiceJoined(m)),
@@ -512,10 +516,18 @@ pub struct ApiChannelDesc {
     pub last_sent_message_id: i64,
     pub last_sent_timestamp: i64,
     pub badge_count: i32,
+    #[serde(default = "default_channel_active")]
+    pub active: i32,
     #[serde(default)]
     pub creator_id: i64,
     #[serde(default)]
     pub clan_name: String,
+    #[serde(default)]
+    pub channel_avatar: String,
+}
+
+fn default_channel_active() -> i32 {
+    1
 }
 
 /// A direct-message / group conversation descriptor (clan_id = 0 namespace). Unlike
@@ -563,7 +575,7 @@ pub struct ApiChannelApp {
     pub channel_id: i64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ApiClanDesc {
     pub clan_id: i64,
     pub clan_name: String,
@@ -575,6 +587,14 @@ pub struct ApiClanDesc {
     pub is_onboarding: bool,
     pub is_community: bool,
     pub prevent_anonymous: bool,
+    #[serde(default)]
+    pub community_banner: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub about: String,
+    #[serde(default)]
+    pub short_url: String,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -2771,10 +2791,12 @@ pub struct ApiPinMessage {
     pub id: String,
     pub message_id: String,
     pub content: String,
+    pub content_text: String,
     pub sender_id: String,
     pub sender_name: String,
     pub avatar: String,
     pub create_time: i64,
+    pub attachments: Vec<ApiAttachment>,
 }
 
 pub const CANVAS_LIST_LIMIT: i32 = 50;
@@ -2975,8 +2997,10 @@ impl MezonTransport {
             last_sent_message_id,
             last_sent_timestamp,
             badge_count: channel.count_mess_unread,
+            active: channel.active,
             creator_id: channel.creator_id,
             clan_name: channel.clan_name,
+            channel_avatar: channel.channel_avatar,
         }
     }
 
@@ -3030,6 +3054,10 @@ impl MezonTransport {
             is_onboarding: clan.is_onboarding,
             is_community: clan.is_community,
             prevent_anonymous: clan.prevent_anonymous,
+            community_banner: clan.community_banner,
+            description: clan.description,
+            about: clan.about,
+            short_url: clan.short_url,
         }
     }
 
@@ -3101,19 +3129,23 @@ impl MezonTransport {
     }
 
     fn pin_message_from_proto(pin: api::PinMessage) -> ApiPinMessage {
-        let content = serde_json::from_str::<serde_json::Value>(&pin.content)
+        let content = pin.content;
+        let content_text = serde_json::from_str::<serde_json::Value>(&content)
             .ok()
             .and_then(|v| v.get("t").and_then(|t| t.as_str().map(|s| s.to_string())))
-            .unwrap_or_else(|| pin.content.clone());
+            .unwrap_or_else(|| content.clone());
+        let attachments = parse_message_attachments(&pin.attachment);
 
         ApiPinMessage {
             id: pin.id.to_string(),
             message_id: pin.message_id.to_string(),
             content,
+            content_text,
             sender_id: pin.sender_id.to_string(),
             sender_name: pin.username,
             avatar: pin.avatar,
             create_time: i64::from(pin.create_time_seconds),
+            attachments,
         }
     }
 
@@ -3729,6 +3761,57 @@ impl MezonTransport {
         let (code, _response) = self.send(cid, encode_envelope_cid_last(envelope)).await?;
         if code != 0 {
             anyhow::bail!("write_last_seen_message error: code={code}");
+        }
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn write_last_pin_message(
+        &self,
+        clan_id: i64,
+        channel_id: i64,
+        message_id: i64,
+        mode: i32,
+        is_public: bool,
+        timestamp_seconds: u32,
+        operation: i32,
+        avatar: &str,
+        sender_id: &str,
+        sender_username: &str,
+        content: &str,
+        attachment: &str,
+        created_time: &str,
+    ) -> Result<()> {
+        let cid = self.generate_cid();
+        tracing::debug!(
+            target: "socket",
+            "realtime_send: action=LastPinMessageEvent cid={} clan_id={clan_id} channel_id={channel_id} message_id={message_id}",
+            i32::from(cid)
+        );
+        let envelope = realtime::Envelope {
+            cid: i32::from(cid),
+            message: Some(realtime::envelope::Message::LastPinMessageEvent(
+                realtime::LastPinMessageEvent {
+                    clan_id,
+                    channel_id,
+                    message_id,
+                    mode,
+                    user_id: 0,
+                    timestamp_seconds,
+                    operation,
+                    is_public,
+                    message_sender_avatar: avatar.to_string(),
+                    message_sender_id: sender_id.to_string(),
+                    message_sender_username: sender_username.to_string(),
+                    message_content: content.to_string(),
+                    message_attachment: attachment.to_string(),
+                    message_created_time: created_time.to_string(),
+                },
+            )),
+        };
+        let (code, _response) = self.send(cid, encode_envelope_cid_last(envelope)).await?;
+        if code != 0 {
+            anyhow::bail!("write_last_pin_message error: code={code}");
         }
         Ok(())
     }
@@ -4724,16 +4807,22 @@ impl MezonTransport {
         Ok(api::ListUserOnlineResponse::decode(response.as_slice())?)
     }
 
-    /// List streaming channel users.
+    /// List streaming channel users (clan-wide presence).
     pub async fn list_streaming_channel_users(
         &self,
         clan_id: i64,
         channel_id: i64,
+        channel_type: i32,
+        state: i32,
+        limit: i32,
     ) -> Result<api::StreamingChannelUserList> {
         let cid = self.generate_cid();
         let body = api::ListChannelUsersRequest {
             clan_id,
             channel_id,
+            channel_type,
+            limit,
+            state,
             ..Default::default()
         }
         .encode_to_vec();
@@ -4890,12 +4979,13 @@ impl MezonTransport {
         &self,
         role_id: i64,
         channel_id: i64,
+        user_id: i64,
     ) -> Result<api::PermissionRoleChannelListEventResponse> {
         let cid = self.generate_cid();
         let body = api::PermissionRoleChannelListEventRequest {
             role_id,
             channel_id,
-            ..Default::default()
+            user_id,
         }
         .encode_to_vec();
         let (code, response) = self
@@ -5715,9 +5805,10 @@ impl MezonTransport {
     pub async fn create_direct_channel(&self, user_ids: &[i64]) -> Result<ApiChannelDesc> {
         let cid = self.generate_cid();
 
+        let channel_type = if user_ids.len() > 1 { 2 } else { 3 };
         let body = api::CreateChannelDescRequest {
             clan_id: 0,
-            r#type: 3,
+            r#type: channel_type,
             channel_private: 1,
             user_ids: user_ids.to_vec(),
             ..Default::default()
@@ -5821,13 +5912,16 @@ impl MezonTransport {
         clan_id: i64,
         channel_id: i64,
         channel_private: i32,
+        user_ids: Vec<i64>,
+        role_ids: Vec<i64>,
     ) -> Result<()> {
         let cid = self.generate_cid();
         let body = api::ChangeChannelPrivateRequest {
             clan_id,
             channel_id,
             channel_private,
-            ..Default::default()
+            user_ids,
+            role_ids,
         }
         .encode_to_vec();
         let (code, _) = self
@@ -5894,36 +5988,6 @@ impl MezonTransport {
         let (code, _) = self
             .send_api_request(cid, "RemoveChannelUsers", body)
             .await?;
-        if code != 0 {
-            return Err(anyhow::anyhow!("API error: code={}", code));
-        }
-        Ok(())
-    }
-
-    /// Leave thread.
-    pub async fn leave_thread(&self, clan_id: i64, channel_id: i64) -> Result<()> {
-        let cid = self.generate_cid();
-        let body = api::LeaveThreadRequest {
-            clan_id,
-            channel_id,
-        }
-        .encode_to_vec();
-        let (code, _) = self.send_api_request(cid, "LeaveThread", body).await?;
-        if code != 0 {
-            return Err(anyhow::anyhow!("API error: code={}", code));
-        }
-        Ok(())
-    }
-
-    /// Archive channel.
-    pub async fn archive_channel(&self, clan_id: i64, channel_id: i64) -> Result<()> {
-        let cid = self.generate_cid();
-        let body = api::ArchiveChannelRequest {
-            clan_id,
-            channel_id,
-        }
-        .encode_to_vec();
-        let (code, _) = self.send_api_request(cid, "ArchiveChannel", body).await?;
         if code != 0 {
             return Err(anyhow::anyhow!("API error: code={}", code));
         }
@@ -6508,11 +6572,21 @@ impl MezonTransport {
     }
 
     /// Set role channel permission.
-    pub async fn set_role_channel_permission(&self, role_id: i64, channel_id: i64) -> Result<()> {
+    pub async fn set_role_channel_permission(
+        &self,
+        role_id: i64,
+        channel_id: i64,
+        user_id: i64,
+        max_permission_id: i64,
+        permission_update: Vec<api::PermissionUpdate>,
+    ) -> Result<()> {
         let cid = self.generate_cid();
         let body = api::UpdateRoleChannelRequest {
             role_id,
+            permission_update,
+            max_permission_id,
             channel_id,
+            user_id,
             ..Default::default()
         }
         .encode_to_vec();
@@ -7281,10 +7355,17 @@ impl MezonTransport {
     }
 
     /// Delete role channel desc.
-    pub async fn delete_role_channel_desc(&self, role_id: i64) -> Result<()> {
+    pub async fn delete_role_channel_desc(
+        &self,
+        role_id: i64,
+        channel_id: i64,
+        clan_id: i64,
+    ) -> Result<()> {
         let cid = self.generate_cid();
         let body = api::DeleteRoleRequest {
             role_id,
+            channel_id,
+            clan_id,
             ..Default::default()
         }
         .encode_to_vec();
