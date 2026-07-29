@@ -17,6 +17,55 @@ use crate::theme::ActiveTheme;
 
 pub(super) const CLAN_ROW_HEIGHT: f32 = 56.;
 
+const CLAN_DRAG_INDICATOR_COLOR: u32 = 0x3b82f6;
+const CLAN_AVATAR_PX: f32 = 40.;
+
+#[derive(Clone)]
+pub(super) struct ClanReorderDrag {
+    pub(super) index: usize,
+    pub(super) name: SharedString,
+    pub(super) avatar: Option<SharedString>,
+}
+
+pub(super) struct ClanDragPreview {
+    name: SharedString,
+    avatar: Option<SharedString>,
+}
+
+impl Render for ClanDragPreview {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme();
+        let mut preview = div()
+            .size(px(CLAN_AVATAR_PX))
+            .rounded(px(8.))
+            .overflow_hidden();
+        if let Some(avatar) = self.avatar.clone() {
+            preview = preview.child(
+                img(avatar)
+                    .size(px(CLAN_AVATAR_PX))
+                    .rounded(px(8.))
+                    .object_fit(gpui::ObjectFit::Cover),
+            );
+        } else {
+            let initial = self
+                .name
+                .chars()
+                .next()
+                .map(|c| c.to_uppercase().to_string())
+                .unwrap_or_default();
+            preview = preview
+                .bg(theme.tokens.theme_base_color)
+                .flex()
+                .items_center()
+                .justify_center()
+                .text_color(theme.tokens.text_theme_primary)
+                .text_size(px(20.))
+                .child(SharedString::from(initial));
+        }
+        preview.opacity(0.8)
+    }
+}
+
 const CLAN_NOTI_LEVELS: [(i32, &str); 3] = [
     (
         NOTIFICATION_ALL_MESSAGE,
@@ -132,21 +181,24 @@ pub(super) struct ClanRow {
     pub active: bool,
 }
 
+fn activate_clan(clan_list: &Entity<ClanList>, clan_id: ClanId, cx: &mut App) {
+    clan_list.update(cx, |m, cx| {
+        m.select_clan(clan_id, cx);
+    });
+    if !matches!(
+        Router::global(cx).read(cx).route(),
+        Route::Chat | Route::Channel { .. }
+    ) {
+        crate::router::navigate(cx, Route::Chat);
+    }
+}
+
 fn on_clan_click(
     clan_list: Entity<ClanList>,
     clan_id: SharedString,
 ) -> impl Fn(&ClickEvent, &mut Window, &mut App) {
     move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
-        let id = clan_id.to_string();
-        clan_list.update(cx, |m, cx| {
-            m.select_clan(id.parse().unwrap_or_default(), cx);
-        });
-        if !matches!(
-            Router::global(cx).read(cx).route(),
-            Route::Chat | Route::Channel { .. }
-        ) {
-            crate::router::navigate(cx, Route::Chat);
-        }
+        activate_clan(&clan_list, clan_id.parse().unwrap_or_default(), cx);
     }
 }
 
@@ -286,6 +338,44 @@ pub(super) fn render_clan_row(
                             .bg(theme.tokens.bg_unread_message),
                     ),
             )
+        })
+        .on_drag(
+            ClanReorderDrag {
+                index: ix,
+                name: clan.name.clone(),
+                avatar: clan.proxied_avatar_url.clone(),
+            },
+            |drag, _, _, cx| {
+                cx.stop_propagation();
+                let name = drag.name.clone();
+                let avatar = drag.avatar.clone();
+                cx.new(|_| ClanDragPreview { name, avatar })
+            },
+        )
+        .drag_over::<ClanReorderDrag>(move |style, drag, _, _| {
+            if drag.index == ix {
+                style
+            } else if drag.index > ix {
+                style
+                    .border_t_2()
+                    .border_color(gpui::rgb(CLAN_DRAG_INDICATOR_COLOR))
+            } else {
+                style
+                    .border_b_2()
+                    .border_color(gpui::rgb(CLAN_DRAG_INDICATOR_COLOR))
+            }
+        })
+        .on_drop({
+            let clan_list = clan_list_handle.clone();
+            let clan_num = prefetch_clan_id;
+            move |drag: &ClanReorderDrag, _, cx| {
+                let from = drag.index;
+                if from == ix {
+                    activate_clan(&clan_list, clan_num, cx);
+                    return;
+                }
+                clan_list.update(cx, |list, cx| list.move_clan(from, ix, cx));
+            }
         })
         .on_click(on_clan_click(clan_list_handle, clan_id))
         .on_mouse_down(MouseButton::Right, {
