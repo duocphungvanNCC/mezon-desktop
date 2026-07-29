@@ -794,10 +794,6 @@ fn update_pages(current: &[String], next: &[String], max_items: usize) -> Vec<St
     updated
 }
 
-/// The KOMU agent avatar is a global Mezon asset that only exists on the
-/// canonical `cdn.mezon.vn` — per-deployment CDNs like `cdn.komu.vn` return 404
-/// for this path. Reference it directly (matching the web client) instead of
-/// `base_img_url`, then run it through the local imgproxy like any other avatar.
 const AGENT_AVATAR_URL: &str = "https://cdn.mezon.vn/0/0/1779484387973271600/1737423959329_undefined173740153013517374015248704886401586613166392.png";
 
 fn resolve_cell_identity(cx: &App, clan_id: ClanId, p: &VoiceParticipant) -> (String, String) {
@@ -1637,9 +1633,6 @@ fn render_grid(
     let page_offset = page * max_tiles;
     let paginated = measured && total_pages > 1;
 
-    // Scale the avatar with tile height (capped at the web client's 80px) so it
-    // doesn't dominate short tiles in small windows. Falls back to 80px until the
-    // grid is measured. The 0.33 factor / 44px floor are tunable to taste.
     let tile_h = if measured && rows > 0 {
         let gap = 8.0_f32; // gap_2 between rows
         let usable = f32::from(grid_size.height)
@@ -2203,8 +2196,6 @@ fn focus_main_tile(
     cell: &VideoCell,
 ) -> AnyElement {
     let voice = voice.clone();
-    // Match the web client: `ParticipantTile` renders an 80px avatar in every
-    // layout, including the spotlighted main tile (no growth when focused).
     let inner = tile_inner(theme, store, cell, px(80.));
 
     div()
@@ -2425,9 +2416,6 @@ fn tile_metadata(locale: &str, cell: &VideoCell) -> AnyElement {
                         ),
                 ),
         )
-        // Spacer pushes the quality pill to the right edge without letting flex
-        // shrink the label pill while free space remains (so the name stays full
-        // whenever the tile has room; it still truncates in narrow strip tiles).
         .child(div().flex_1())
         .child(
             div()
