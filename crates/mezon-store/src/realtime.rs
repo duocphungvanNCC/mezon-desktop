@@ -320,9 +320,7 @@ mod tests {
     #[test]
     fn kind_of_returns_none_for_unhandled() {
         assert_eq!(
-            RealtimeKind::of(&RealtimeEvent::CustomStatus(
-                realtime::CustomStatusEvent::default()
-            )),
+            RealtimeKind::of(&RealtimeEvent::Unmute(realtime::UnmuteEvent::default())),
             None
         );
     }

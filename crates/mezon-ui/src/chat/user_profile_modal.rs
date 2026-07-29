@@ -26,6 +26,7 @@ pub struct UserProfileModal {
     settings: Entity<Settings>,
     avatar_image_cache: Entity<LruImageCache>,
     banner_color: Option<Rgba>,
+    banner_source: String,
     is_self: bool,
     edit_options_open: bool,
     live_status: String,
@@ -46,20 +47,7 @@ impl UserProfileModal {
         cx: &mut Context<Self>,
     ) -> Self {
         let account = AccountStore::global(cx).read(cx).account.clone();
-        let member_username = ClanMembersStore::global(cx)
-            .read(cx)
-            .member(clan_id, user_id)
-            .map(|member| member.user.username.clone())
-            .unwrap_or_default();
-        let is_self = BadgeService::global(cx)
-            .read(cx)
-            .current_user_id(cx)
-            .is_some_and(|id| id == user_id)
-            || account.as_ref().is_some_and(|account| {
-                !member_username.is_empty()
-                    && !account.username.is_empty()
-                    && account.username == member_username
-            });
+        let is_self = Self::resolve_is_self(user_id, clan_id, cx);
         let presence = PresenceStore::global(cx);
         let presence = presence.read(cx);
         let presence_status_snapshot = presence
@@ -83,7 +71,13 @@ impl UserProfileModal {
                 presence.user_status(user_id).unwrap_or("").to_string(),
             )
         };
-        let members_sub = cx.observe(&ClanMembersStore::global(cx), |_, _, cx| cx.notify());
+        // The member row often arrives after the modal opens, so identity, status and
+        // the banner source all have to be re-derived when the stores fill in.
+        let members_sub = cx.observe(&ClanMembersStore::global(cx), |this, _, cx| {
+            this.sync_identity(cx);
+            this.refresh_banner_source(cx);
+            cx.notify();
+        });
         let presence_sub = cx.observe(&PresenceStore::global(cx), |this, _, cx| {
             if this.sync_presence_status(cx) {
                 cx.notify();
@@ -91,16 +85,13 @@ impl UserProfileModal {
         });
         let friend_sub = cx.observe(&FriendStore::global(cx), |_, _, cx| cx.notify());
         let account_sub = cx.observe(&AccountStore::global(cx), |this, _, cx| {
-            if this.sync_account_status(cx) {
+            let identity_changed = this.sync_identity(cx);
+            let status_changed = this.sync_account_status(cx);
+            if identity_changed || status_changed {
                 cx.notify();
             }
         });
-        let source_avatar = ClanMembersStore::global(cx)
-            .read(cx)
-            .member(clan_id, user_id)
-            .map(|member| member.user.avatar_url.clone())
-            .unwrap_or_default();
-        let source_avatar = crate::util::imgproxy::avatar_url(cx, &source_avatar);
+        let source_avatar = Self::banner_source_for(user_id, clan_id, cx);
 
         let mut modal = Self {
             focus_handle: cx.focus_handle(),
@@ -109,6 +100,7 @@ impl UserProfileModal {
             settings,
             avatar_image_cache,
             banner_color: None,
+            banner_source: source_avatar.clone(),
             is_self,
             edit_options_open: false,
             live_status,
@@ -121,6 +113,63 @@ impl UserProfileModal {
         };
         modal.load_banner_color(source_avatar, cx);
         modal
+    }
+
+    fn resolve_is_self(user_id: UserId, clan_id: ClanId, cx: &App) -> bool {
+        let member_username = ClanMembersStore::global(cx)
+            .read(cx)
+            .member(clan_id, user_id)
+            .map(|member| member.user.username.clone())
+            .unwrap_or_default();
+        BadgeService::global(cx)
+            .read(cx)
+            .current_user_id(cx)
+            .is_some_and(|id| id == user_id)
+            || AccountStore::global(cx)
+                .read(cx)
+                .account
+                .as_ref()
+                .is_some_and(|account| {
+                    !member_username.is_empty()
+                        && !account.username.is_empty()
+                        && account.username == member_username
+                })
+    }
+
+    /// Both username sides can still be empty on open, so `is_self` has to be
+    /// re-derived rather than latched — otherwise a late account/member row leaves
+    /// the viewer looking at Add-Friend and Transfer buttons on their own profile.
+    fn sync_identity(&mut self, cx: &App) -> bool {
+        let is_self = Self::resolve_is_self(self.user_id, self.clan_id, cx);
+        if self.is_self == is_self {
+            return false;
+        }
+        self.is_self = is_self;
+        // The status source swaps with is_self, so pull the value that now applies.
+        self.sync_account_status(cx);
+        self.sync_presence_status(cx);
+        true
+    }
+
+    fn banner_source_for(user_id: UserId, clan_id: ClanId, cx: &App) -> String {
+        // Must match what the rendered Avatar resolves to, otherwise the banner
+        // polls a resource the cache was never asked to load.
+        let raw = ClanMembersStore::global(cx)
+            .read(cx)
+            .member(clan_id, user_id)
+            .map(|member| member.avatar().to_string())
+            .unwrap_or_default();
+        crate::util::imgproxy::avatar_url(cx, &raw)
+    }
+
+    fn refresh_banner_source(&mut self, cx: &mut Context<Self>) {
+        let source = Self::banner_source_for(self.user_id, self.clan_id, cx);
+        if source == self.banner_source {
+            return;
+        }
+        self.banner_source = source.clone();
+        self.banner_color = None;
+        self.load_banner_color(source, cx);
     }
 
     fn sync_account_status(&mut self, cx: &App) -> bool {
@@ -169,7 +218,9 @@ impl UserProfileModal {
         let avatar_image_cache = self.avatar_image_cache.clone();
         let resource = gpui::Resource::Uri(avatar_url.into());
         self._banner_task = Some(cx.spawn(async move |this, cx| {
-            for _ in 0..40 {
+            // A cold avatar can take well over the 2s a flat 40x50ms poll allowed, and
+            // giving up left the banner on the default colour with nothing to retry it.
+            for attempt in 0..60 {
                 let image = avatar_image_cache
                     .read_with(cx, |cache, _| cache.cached_render_image(&resource));
                 if let Some(image) = image
@@ -182,8 +233,9 @@ impl UserProfileModal {
                     });
                     break;
                 }
+                let delay_ms = if attempt < 20 { 50 } else { 200 };
                 cx.background_executor()
-                    .timer(Duration::from_millis(50))
+                    .timer(Duration::from_millis(delay_ms))
                     .await;
             }
         }));
