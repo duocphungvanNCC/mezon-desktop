@@ -37,7 +37,7 @@ pub fn server_instructions(read_only: bool) -> String {
          3. send_message — needs clan_id, channel_id, content (use clan_id=0 for DMs)\n\
          4. capture_chat / capture_window — need Screen Recording permission; save data_base64 to a file, then send_image with path\n\
          5. get_message before click_message_button or select_message_option\n\n\
-         Snowflake ids accept integer or numeric string. Write tools are omitted in read-only mode."
+         Snowflake ids accept integer or numeric string. Write tools return an explicit read-only error when disabled."
     )
 }
 
@@ -48,7 +48,7 @@ pub fn tool_count(read_only: bool) -> usize {
         .count()
 }
 
-pub fn build_tool_router<S, F, Fut>(read_only: bool, invoke: F) -> ToolRouter<S>
+pub fn build_tool_router<S, F, Fut>(_read_only: bool, invoke: F) -> ToolRouter<S>
 where
     S: Send + Sync + 'static,
     F: Fn(String, Value) -> Fut + Clone + Send + Sync + 'static,
@@ -56,9 +56,6 @@ where
 {
     let mut router = ToolRouter::<S>::new();
     for spec in TOOL_SPECS {
-        if read_only && spec.write {
-            continue;
-        }
         let tool_name = spec.name.to_string();
         let invoke = invoke.clone();
         router.add_route(ToolRoute::new_dyn(

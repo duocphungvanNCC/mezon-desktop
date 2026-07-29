@@ -2,7 +2,8 @@ use futures::StreamExt as _;
 use gpui::{App, AsyncApp};
 use mezon_client::AppApi;
 use mezon_mcp::{
-    CaptureTarget, McpCommand, McpController, McpStartParams, ToolCallParams, list_tools_json,
+    CaptureTarget, McpCommand, McpController, McpStartParams, ToolCallParams, is_write_tool,
+    list_tools_json,
 };
 use mezon_native::control::{ControlHandler, ControlRequest, ControlResponse, ControlServer};
 use mezon_store::{AuthState, LoginStore, Settings};
@@ -11,7 +12,7 @@ use std::sync::Arc;
 
 pub struct McpRuntime {
     controller: Arc<McpController>,
-    _control_server: ControlServer,
+    _control_server: Option<ControlServer>,
 }
 
 impl McpRuntime {
@@ -37,8 +38,13 @@ impl McpRuntime {
             }
         });
 
-        let control_server = ControlServer::bind(handler)?;
-        control_server.run_in_background();
+        let control_server = if mezon_native::control::control_server_enabled() {
+            let server = ControlServer::bind(handler)?;
+            server.run_in_background();
+            Some(server)
+        } else {
+            None
+        };
 
         let controller_for_backend = controller.clone();
         let api_for_backend = api.clone();
@@ -154,6 +160,13 @@ async fn handle_control_request(
         }
         "tool.call" => {
             let params: ToolCallParams = serde_json::from_value(request.params)?;
+            let read_only = controller.status().await.read_only;
+            if read_only && is_write_tool(&params.name) {
+                return Ok(ControlResponse::err(
+                    request.id,
+                    format!("Tool {} is disabled in read-only mode", params.name),
+                ));
+            }
             let result = controller.call_tool(&params.name, params.arguments).await?;
             Ok(ControlResponse::ok(request.id, result))
         }

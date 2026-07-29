@@ -14,14 +14,20 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Commands {
+    /// Sign out of the current Mezon session
     Logout,
+    /// Refresh clans, DMs, and message lists
     Refresh,
+    /// Quit the running Mezon desktop app
     Quit,
+    /// Show Mezon app status
     Status,
+    /// Manage the local Mezon MCP server
     Mcp(McpCommand),
 }
 
 #[derive(Parser)]
+#[command(about = "Manage the local Mezon MCP server")]
 pub struct McpCommand {
     #[command(subcommand)]
     pub command: McpSubcommand,
@@ -29,25 +35,32 @@ pub struct McpCommand {
 
 #[derive(Subcommand)]
 pub enum McpSubcommand {
+    /// Start the MCP HTTP server in the running Mezon app
     Start {
-        #[arg(long)]
+        #[arg(long, help = "Expose only read tools")]
         read_only: bool,
-        #[arg(long)]
+        #[arg(long, help = "Preferred listen port (default: ephemeral)")]
         port: Option<u16>,
     },
+    /// Show MCP server status
     Status,
+    /// Stop the MCP HTTP server
     Stop,
+    /// List available MCP tools
     Tools {
-        #[arg(long)]
+        #[arg(long, help = "List only read tools")]
         read_only: bool,
     },
+    /// Call an MCP tool through the running Mezon app
     Call {
+        /// Tool name
         name: String,
-        #[arg(long, default_value = "{}")]
+        #[arg(long, default_value = "{}", help = "JSON object of tool arguments")]
         args: String,
     },
+    /// Run an MCP stdio proxy for Standard MCP clients
     Stdio {
-        #[arg(long)]
+        #[arg(long, help = "Expose only read tools")]
         read_only: bool,
     },
 }
@@ -64,15 +77,7 @@ pub fn is_cli_invocation(args: &[String]) -> bool {
     if args.len() <= 1 {
         return false;
     }
-    if args
-        .iter()
-        .skip(1)
-        .any(|arg| matches!(arg.as_str(), "--help" | "-h" | "--version" | "-V"))
-    {
-        return true;
-    }
-    matches!(
-        args.get(1).map(String::as_str),
-        Some("mcp" | "logout" | "refresh" | "quit" | "status")
-    )
+    !args
+        .get(1)
+        .is_some_and(|arg| arg.starts_with("mezonapp://"))
 }

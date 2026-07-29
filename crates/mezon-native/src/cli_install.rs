@@ -239,26 +239,33 @@ fn add_windows_path_entry(bin_dir: &Path) -> anyhow::Result<()> {
 
     unsafe {
         let mut key = Default::default();
-        RegOpenKeyExW(
+        let open_result = RegOpenKeyExW(
             HKEY_CURRENT_USER,
             windows::core::w!("Environment"),
             0,
             KEY_SET_VALUE,
             &mut key,
-        )
-        .context("open HKCU\\Environment")?;
+        );
+        if open_result != windows::Win32::Foundation::NO_ERROR {
+            anyhow::bail!("open HKCU\\Environment failed: {}", open_result.0);
+        }
 
         let wide_value: Vec<u16> = current.encode_utf16().chain(std::iter::once(0)).collect();
-        RegSetValueExW(
+        let value_bytes: Vec<u8> = wide_value
+            .iter()
+            .flat_map(|word| word.to_le_bytes())
+            .collect();
+        let set_result = RegSetValueExW(
             key,
             windows::core::w!("Path"),
-            0,
+            Some(0),
             REG_SZ,
-            Some(wide_value.as_ptr().cast()),
-            (wide_value.len() * 2) as u32,
-        )
-        .context("set user PATH")?;
-        RegCloseKey(key)?;
+            Some(&value_bytes),
+        );
+        let _ = RegCloseKey(key);
+        if set_result != windows::Win32::Foundation::NO_ERROR {
+            anyhow::bail!("set user PATH failed: {}", set_result.0);
+        }
     }
     Ok(())
 }
@@ -289,25 +296,32 @@ fn remove_windows_path_entry() -> anyhow::Result<()> {
 
     unsafe {
         let mut key = Default::default();
-        RegOpenKeyExW(
+        let open_result = RegOpenKeyExW(
             HKEY_CURRENT_USER,
             windows::core::w!("Environment"),
             0,
             KEY_SET_VALUE,
             &mut key,
-        )
-        .context("open HKCU\\Environment")?;
+        );
+        if open_result != windows::Win32::Foundation::NO_ERROR {
+            anyhow::bail!("open HKCU\\Environment failed: {}", open_result.0);
+        }
         let wide_value: Vec<u16> = current.encode_utf16().chain(std::iter::once(0)).collect();
-        RegSetValueExW(
+        let value_bytes: Vec<u8> = wide_value
+            .iter()
+            .flat_map(|word| word.to_le_bytes())
+            .collect();
+        let set_result = RegSetValueExW(
             key,
             windows::core::w!("Path"),
-            0,
+            Some(0),
             REG_SZ,
-            Some(wide_value.as_ptr().cast()),
-            (wide_value.len() * 2) as u32,
-        )
-        .context("update user PATH")?;
-        RegCloseKey(key)?;
+            Some(&value_bytes),
+        );
+        let _ = RegCloseKey(key);
+        if set_result != windows::Win32::Foundation::NO_ERROR {
+            anyhow::bail!("update user PATH failed: {}", set_result.0);
+        }
     }
     Ok(())
 }
@@ -319,7 +333,7 @@ fn read_user_path() -> anyhow::Result<String> {
     unsafe {
         let mut buffer = vec![0u16; 32_768];
         let mut size = (buffer.len() * 2) as u32;
-        RegGetValueW(
+        let result = RegGetValueW(
             HKEY_CURRENT_USER,
             windows::core::w!("Environment"),
             windows::core::w!("Path"),
@@ -327,8 +341,10 @@ fn read_user_path() -> anyhow::Result<String> {
             None,
             Some(buffer.as_mut_ptr().cast()),
             Some(&mut size),
-        )
-        .context("read user PATH")?;
+        );
+        if result != windows::Win32::Foundation::NO_ERROR {
+            anyhow::bail!("read user PATH failed: {}", result.0);
+        }
         let len = (size as usize / 2).saturating_sub(1);
         Ok(String::from_utf16_lossy(&buffer[..len]))
     }

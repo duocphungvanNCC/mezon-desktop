@@ -3,6 +3,10 @@ use crate::protocol::{McpStartResult, McpStatus, mcp_url};
 use crate::state;
 use crate::tools::McpBackend;
 use anyhow::Context as _;
+use axum::http::header::ORIGIN;
+use axum::http::{HeaderMap, Request, StatusCode};
+use axum::middleware::Next;
+use axum::response::Response;
 use futures::channel::mpsc::UnboundedSender;
 use mezon_client::AppApi;
 use rmcp::transport::{
@@ -10,6 +14,7 @@ use rmcp::transport::{
     streamable_http_server::{session::local::LocalSessionManager, tower::StreamableHttpService},
 };
 use serde_json::Value;
+use std::net::IpAddr;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
@@ -87,7 +92,9 @@ impl McpController {
                 .with_sse_keep_alive(None)
                 .with_cancellation_token(cancel.child_token()),
         );
-        let router = axum::Router::new().nest_service("/mcp", service);
+        let router = axum::Router::new()
+            .nest_service("/mcp", service)
+            .layer(axum::middleware::from_fn(enforce_local_origin));
         let server_task = tokio::spawn(async move {
             if let Err(e) = axum::serve(listener, router)
                 .with_graceful_shutdown(async move {
@@ -146,6 +153,36 @@ impl McpController {
         let backend = McpBackend::new(api, inner.ui_tx.clone(), inner.status.read_only);
         backend.call_tool(name, arguments).await
     }
+}
+
+async fn enforce_local_origin(
+    headers: HeaderMap,
+    request: Request<axum::body::Body>,
+    next: Next,
+) -> Result<Response, StatusCode> {
+    if !origin_allowed(&headers) {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    Ok(next.run(request).await)
+}
+
+fn origin_allowed(headers: &HeaderMap) -> bool {
+    let Some(origin) = headers.get(ORIGIN) else {
+        return true;
+    };
+    let Ok(origin) = origin.to_str() else {
+        return false;
+    };
+    let Ok(parsed) = url::Url::parse(origin) else {
+        return false;
+    };
+    let Some(host) = parsed.host_str() else {
+        return false;
+    };
+    if host.eq_ignore_ascii_case("localhost") {
+        return true;
+    }
+    host.parse::<IpAddr>().is_ok_and(|addr| addr.is_loopback())
 }
 
 impl Default for McpController {

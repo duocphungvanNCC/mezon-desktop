@@ -6156,6 +6156,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
+ "url",
 ]
 
 [[package]]
@@ -6171,6 +6172,7 @@ dependencies = [
  "flume",
  "gtk",
  "image",
+ "libc",
  "notify-rust",
  "objc",
  "open",

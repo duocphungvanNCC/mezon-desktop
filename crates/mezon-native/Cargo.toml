@@ -33,3 +33,6 @@ windows.workspace = true
 notify-rust = "4"
 zbus = "4"
 gtk = "0.18"
+
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true

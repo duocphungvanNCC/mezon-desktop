@@ -6,6 +6,16 @@ use std::sync::Arc;
 pub const APP_NOT_RUNNING_MSG: &str =
     "Mezon app is not running. Open the Mezon desktop app, then retry this command.";
 
+pub fn control_server_enabled() -> bool {
+    std::env::var("MEZON_CONTROL_SERVER")
+        .ok()
+        .map(|value| {
+            let value = value.trim().to_ascii_lowercase();
+            !matches!(value.as_str(), "0" | "false" | "off" | "no")
+        })
+        .unwrap_or(true)
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ControlRequest {
     pub id: u64,
@@ -149,17 +159,26 @@ impl ControlServer {
 
     #[cfg(unix)]
     fn bind_unix(handler: ControlHandler) -> anyhow::Result<Self> {
+        use std::os::unix::fs::PermissionsExt as _;
         use std::os::unix::net::UnixStream;
 
         let mut last_error = None;
         for path in control_socket_paths() {
-            if let Some(parent) = path.parent()
-                && let Err(e) = std::fs::create_dir_all(parent)
-            {
-                last_error = Some(e);
-                continue;
+            if let Some(parent) = path.parent() {
+                if let Err(e) = create_secure_socket_dir(parent) {
+                    last_error = Some(e);
+                    continue;
+                }
+                if let Err(e) = check_current_user_owned(parent) {
+                    last_error = Some(e);
+                    continue;
+                }
             }
             if path.exists() {
+                if let Err(e) = check_current_user_owned(&path) {
+                    last_error = Some(e);
+                    continue;
+                }
                 match UnixStream::connect(&path) {
                     Ok(_) => {
                         tracing::debug!("Control socket already in use at {}", path.display());
@@ -177,6 +196,13 @@ impl ControlServer {
             }
             match std::os::unix::net::UnixListener::bind(&path) {
                 Ok(listener) => {
+                    if let Err(e) =
+                        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+                    {
+                        last_error = Some(e);
+                        let _ = std::fs::remove_file(&path);
+                        continue;
+                    }
                     tracing::debug!("Control server listening at {}", path.display());
                     return Ok(Self {
                         handler,
@@ -240,9 +266,12 @@ impl ControlServer {
                 for stream in listener.incoming() {
                     match stream {
                         Ok(stream) => {
-                            if let Err(e) = Self::serve_connection(stream, handler.clone()) {
-                                tracing::debug!("Control connection error: {e}");
-                            }
+                            let handler = handler.clone();
+                            std::thread::spawn(move || {
+                                if let Err(e) = Self::serve_connection(stream, handler) {
+                                    tracing::debug!("Control connection error: {e}");
+                                }
+                            });
                         }
                         Err(e) => {
                             tracing::warn!("Control accept error: {e}");
@@ -380,8 +409,10 @@ pub fn control_socket_paths() -> Vec<std::path::PathBuf> {
     if let Ok(override_path) = std::env::var("MEZON_CONTROL_SOCKET")
         && !override_path.is_empty()
     {
-        paths.push(std::path::PathBuf::from(override_path));
-        return paths;
+        let override_path = std::path::PathBuf::from(override_path);
+        if override_path.is_absolute() {
+            paths.push(override_path);
+        }
     }
     if let Some(runtime_dir) = dirs::runtime_dir() {
         paths.push(runtime_dir.join("mezon-ctl.sock"));
@@ -396,4 +427,25 @@ pub fn control_socket_paths() -> Vec<std::path::PathBuf> {
             .join("mezon-ctl.sock"),
     );
     paths
+}
+
+#[cfg(unix)]
+fn create_secure_socket_dir(path: &std::path::Path) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt as _;
+    std::fs::create_dir_all(path)?;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
+}
+
+#[cfg(unix)]
+fn check_current_user_owned(path: &std::path::Path) -> std::io::Result<()> {
+    use std::os::unix::fs::MetadataExt as _;
+    let metadata = std::fs::metadata(path)?;
+    let current_uid = unsafe { libc::geteuid() };
+    if metadata.uid() != current_uid {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            format!("path is not owned by current user: {}", path.display()),
+        ));
+    }
+    Ok(())
 }
