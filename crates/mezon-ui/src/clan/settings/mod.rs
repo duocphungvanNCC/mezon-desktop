@@ -1,4 +1,6 @@
+mod archived_channel_page;
 mod audit_log_setting_page;
+mod category_sort_page;
 mod channel_webhook_tab;
 mod clan_setting_screen;
 mod clan_webhook_tab;
@@ -18,7 +20,9 @@ mod sound_picker;
 mod sound_setting_page;
 mod sticker_setting_page;
 
+pub use archived_channel_page::ArchivedChannelPage;
 pub use audit_log_setting_page::AuditLogSettingPage;
+pub use category_sort_page::CategorySortPage;
 pub use clan_setting_screen::{ClanSettingScreen, ClanSettingsPage};
 pub use community_setting_page::{CommunitySettingPage, render_community_save_bar};
 pub use emoji_setting_page::EmojiSettingPage;

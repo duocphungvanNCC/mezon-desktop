@@ -10,11 +10,10 @@ use gpui::{
     list, prelude::*, px, radians,
 };
 use mezon_store::{
-    ChannelId, ChannelList, ChannelType, ClanId, ClanMembersStore, MessageSearchStore, MessageSpan,
-    MessagesStore, RichLayout, RichRunKind, RolesStore, SearchDropdownMode, SearchHit,
-    SearchPageToken, autocomplete_needle, has_filter_options, resolve_search_hit_ogp,
-    search_content_highlight_terms, search_dropdown_mode, search_page_count, search_page_numbers,
-    should_show_search_dropdown,
+    ChannelId, ChannelList, ChannelType, ClanId, MessageSearchStore, MessageSpan, MessagesStore,
+    RichLayout, RichRunKind, SearchDropdownMode, SearchHit, SearchPageToken, autocomplete_needle,
+    has_filter_options, resolve_search_hit_ogp, search_content_highlight_terms,
+    search_dropdown_mode, search_page_count, search_page_numbers, should_show_search_dropdown,
 };
 use ui::ScrollAxes;
 use ui::Scrollbars;
@@ -22,9 +21,8 @@ use ui::WithScrollbar;
 
 use crate::chat::layout::ChatLayout;
 use crate::chat::member_list::{MentionMemberRaw, mention_member_pool};
-use crate::chat::message::{
-    DEFAULT_DISPLAY_NAME_COLOR, format_message_time, open_message_link, render_ogp_preview,
-};
+use crate::chat::message::{format_message_time, open_message_link, render_ogp_preview};
+use crate::chat::role_style::message_sender_color;
 use crate::components::primitives::{Icon, IconName, Input, InputState, Sizable, Size, Spinner};
 use crate::image_cache::{
     LruImageCache, MESSAGE_ENTRY_MAX_BYTES, MESSAGE_IMAGE_CACHE_BYTES, MESSAGE_IMAGE_CACHE_CAPACITY,
@@ -36,7 +34,6 @@ pub const MESSAGE_SEARCH_PANEL_WIDTH: f32 = 420.;
 pub const SEARCH_BAR_WIDTH_COLLAPSED: f32 = 160.;
 pub const SEARCH_BAR_WIDTH_EXPANDED: f32 = 320.;
 pub const SEARCH_OPTIONS_WIDTH: f32 = 400.;
-const DEFAULT_ROLE_COLOR: u32 = 0x99_aab5;
 
 const SEARCH_PREFIX_OPTIONS: &[&str] = &[">", "~", "&"];
 
@@ -168,6 +165,7 @@ pub struct MessageSearchPanel {
     last_results_page: i32,
     avatar_image_cache: Entity<LruImageCache>,
     attachment_image_cache: Entity<LruImageCache>,
+    ogp_image_cache: Entity<LruImageCache>,
     cached_rows: Rc<Vec<SearchListRow>>,
     cached_highlights: Rc<Vec<String>>,
     rows_cache_fp: Option<(u64, u64)>,
@@ -236,6 +234,7 @@ impl MessageSearchPanel {
                     cx,
                 )
             }),
+            ogp_image_cache: crate::image_cache::ogp_aux_cache("message-search-ogp", cx),
             _subs: subs,
         }
     }
@@ -274,7 +273,8 @@ impl MessageSearchPanel {
 
 impl Render for MessageSearchPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        crate::image_cache::sweep_ogp_cache(window, cx);
+        self.ogp_image_cache
+            .update(cx, |cache, cx| cache.sweep_once_per_frame(window, cx));
         self.avatar_image_cache
             .update(cx, |cache, cx| cache.sweep_once_per_frame(window, cx));
         self.attachment_image_cache
@@ -382,6 +382,7 @@ impl Render for MessageSearchPanel {
             let highlight_terms = self.cached_highlights.clone();
             let avatar_cache = self.avatar_image_cache.clone();
             let attachment_cache = self.attachment_image_cache.clone();
+            let ogp_cache = self.ogp_image_cache.clone();
             let pagination = (page_count > 1)
                 .then(|| render_search_pagination(&theme, current_page, page_count, panel));
             if self.list_state.item_count() != self.cached_rows.len() {
@@ -428,6 +429,7 @@ impl Render for MessageSearchPanel {
                                         is_direct,
                                         avatar_cache.clone(),
                                         attachment_cache.clone(),
+                                        ogp_cache.clone(),
                                         cx,
                                     ))
                                     .into_any_element()
@@ -693,6 +695,7 @@ fn render_search_row(
     is_direct: bool,
     avatar_image_cache: Entity<LruImageCache>,
     attachment_image_cache: Entity<LruImageCache>,
+    ogp_image_cache: Entity<LruImageCache>,
     cx: &App,
 ) -> gpui::AnyElement {
     let hit_for_jump = hit.clone();
@@ -870,8 +873,12 @@ fn render_search_row(
                                     )
                                 })
                                 .children(ogp.as_ref().and_then(|ogp| {
-                                    let preview =
-                                        render_ogp_preview(ogp, hit.message_id, theme, cx)?;
+                                    let preview = render_ogp_preview(
+                                        ogp,
+                                        hit.message_id,
+                                        theme,
+                                        ogp_image_cache.clone(),
+                                    )?;
                                     Some(
                                         div()
                                             .w_full()
@@ -908,47 +915,8 @@ fn resolve_search_channel_label(
 }
 
 fn resolve_search_sender_color(hit: &SearchHit, is_direct: bool, cx: &App) -> gpui::Hsla {
-    if is_direct {
-        return gpui::Hsla::from(gpui::rgb(DEFAULT_DISPLAY_NAME_COLOR));
-    }
-    let Some(user_id) = hit.sender_id else {
-        return gpui::Hsla::from(gpui::rgb(DEFAULT_ROLE_COLOR));
-    };
-    let role_ids = ClanMembersStore::global(cx)
-        .read(cx)
-        .member(hit.clan_id, user_id)
-        .map(|member| member.role_ids.clone())
-        .unwrap_or_default();
-    if role_ids.is_empty() {
-        return gpui::Hsla::from(gpui::rgb(DEFAULT_ROLE_COLOR));
-    }
-    let Some(roles_store) = RolesStore::try_global(cx) else {
-        return gpui::Hsla::from(gpui::rgb(DEFAULT_ROLE_COLOR));
-    };
-    for role in roles_store.read(cx).roles_for(hit.clan_id, &role_ids) {
-        if let Some(color) = parse_hex_role_color(&role.color) {
-            return gpui::Hsla::from(color);
-        }
-    }
-    gpui::Hsla::from(gpui::rgb(DEFAULT_ROLE_COLOR))
-}
-
-fn parse_hex_role_color(raw: &str) -> Option<gpui::Rgba> {
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-    let hex = trimmed.strip_prefix('#').unwrap_or(trimmed);
-    if hex.len() != 6 {
-        return None;
-    }
-    let value = u32::from_str_radix(hex, 16).ok()?;
-    Some(gpui::Rgba {
-        r: ((value >> 16) & 0xff) as f32 / 255.,
-        g: ((value >> 8) & 0xff) as f32 / 255.,
-        b: (value & 0xff) as f32 / 255.,
-        a: 1.,
-    })
+    let clan_id = (!is_direct).then_some(hit.clan_id);
+    message_sender_color(clan_id, hit.sender_id, cx)
 }
 
 fn render_search_message_content(

@@ -6,6 +6,7 @@ use rust_embed::RustEmbed;
 
 pub const AVATAR_GROUP: &str = "images/avatar-group.png";
 pub const MEZON_LOGO: &str = "images/logoflashsceenmezon.png";
+pub const STREAM_THUMBNAIL: &str = "images/flahstream.png";
 pub const MEZON_LOGO_ICON: &str = "images/mezon-logo-white.svg";
 pub const MEZON_LOGO_QR: &str = "images/icon-logo-mezon.svg";
 pub const MEZON_COMMUNITY: &str = "images/mezon-community.png";

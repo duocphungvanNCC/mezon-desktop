@@ -577,6 +577,11 @@ impl ClanList {
             }
             RealtimeEvent::UserClanRemoved(e) => {
                 let id = ClanId(e.clan_id);
+                let me = crate::badge::BadgeService::try_global(cx)
+                    .and_then(|badges| badges.read(cx).current_user_id(cx));
+                if !crate::event_targets_user(&e.user_ids, me) {
+                    return;
+                }
                 let before = self.clans.len();
                 self.clans.retain(|c| c.id != id);
                 if self.clans.len() != before {
@@ -1580,10 +1585,67 @@ mod tests {
         assert!(msg.contains("already exists"));
     }
 
+    const TEST_SELF: i64 = 42;
+    const TEST_OTHER: i64 = 77;
+
+    fn init_clan_list(cx: &mut App) -> Entity<ClanList> {
+        let api = Arc::new(mezon_client::AppApi::new(
+            Arc::new(mezon_client::TransportClient::new(String::new())),
+            String::new(),
+        ));
+        RealtimeDispatch::init(api.clone(), cx);
+        let auth_state = cx.new(|_| {
+            crate::AuthState::Authenticated(mezon_client::Session {
+                user_id: TEST_SELF.to_string(),
+                ..Default::default()
+            })
+        });
+        crate::badge::BadgeService::init(auth_state, cx);
+        ClanList::init(api, cx)
+    }
+
+    fn removed_event(clan_id: i64, user_ids: &[i64]) -> RealtimeEvent {
+        RealtimeEvent::UserClanRemoved(mezon_proto::realtime::UserClanRemoved {
+            clan_id,
+            user_ids: user_ids.to_vec(),
+        })
+    }
+
     #[test]
     fn create_clan_error_display_other() {
         let err = CreateClanError::Other("network timeout".into());
         let msg = format!("{err}");
         assert_eq!(msg, "network timeout");
+    }
+    #[gpui::test]
+    fn user_clan_removed_keeps_the_clan_when_someone_else_is_kicked(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let clan_list = init_clan_list(cx);
+            clan_list.update(cx, |list, cx| {
+                list.update_clans(clans(), cx);
+
+                list.handle_event(&removed_event(1, &[TEST_OTHER]), cx);
+                assert!(
+                    list.clan_by_id(ClanId(1)).is_some(),
+                    "kicking another member must not drop the clan locally"
+                );
+
+                list.handle_event(&removed_event(1, &[TEST_OTHER, TEST_SELF]), cx);
+                assert!(list.clan_by_id(ClanId(1)).is_none());
+                assert!(list.clan_by_id(ClanId(2)).is_some());
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn user_clan_removed_with_no_ids_is_a_no_op(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let clan_list = init_clan_list(cx);
+            clan_list.update(cx, |list, cx| {
+                list.update_clans(clans(), cx);
+                list.handle_event(&removed_event(1, &[]), cx);
+                assert!(list.clan_by_id(ClanId(1)).is_some());
+            });
+        });
     }
 }

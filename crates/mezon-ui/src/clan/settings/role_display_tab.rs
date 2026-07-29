@@ -39,7 +39,7 @@ fn render_required_section_label(
             div()
                 .text_xs()
                 .font_weight(FontWeight::BOLD)
-                .text_color(theme.status_dnd)
+                .text_color(theme.danger_text)
                 .child("*"),
         )
         .when(show_inline_error, |row| {
@@ -49,7 +49,7 @@ fn render_required_section_label(
                         .pl_2()
                         .text_xs()
                         .font_weight(FontWeight::NORMAL)
-                        .text_color(theme.status_dnd)
+                        .text_color(theme.danger_text)
                         .child(mezon_i18n::t(locale, key).to_string()),
                 )
             } else {
