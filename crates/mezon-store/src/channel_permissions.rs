@@ -3,17 +3,33 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use gpui::{App, AppContext, Context, Entity, EventEmitter, Global, Task};
-use mezon_client::{AppApi, ConnectionStatus};
-use mezon_proto::api;
+use mezon_client::{AppApi, ConnectionStatus, RealtimeEvent};
+use mezon_proto::{api, realtime};
 
 use crate::KeyedCache;
+use crate::badge::BadgeService;
+use crate::clan_members::ClanMembersStore;
 use crate::ids::{ChannelId, ClanId};
+use crate::realtime::{RealtimeDispatch, RealtimeKind};
 
 const MAX_CACHED_CHANNEL_PERMISSIONS: usize = 64;
 const FAILED_FETCH_BACKOFF: Duration = Duration::from_secs(30);
+const REFETCH_CONCURRENCY: usize = 4;
+const REFETCH_STEP_DELAY: Duration = Duration::from_millis(120);
 
 pub const PERMISSION_MANAGE_THREAD: &str = "manage-thread";
+pub const PERMISSION_SEND_MESSAGE: &str = "send-message";
 pub const PERMISSION_DELETE_MESSAGE: &str = "delete-message";
+
+pub const OVERRIDDEN_SLUGS: [&str; 3] = [
+    PERMISSION_MANAGE_THREAD,
+    PERMISSION_SEND_MESSAGE,
+    PERMISSION_DELETE_MESSAGE,
+];
+
+pub fn is_overridden_slug(slug: &str) -> bool {
+    OVERRIDDEN_SLUGS.contains(&slug)
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct ChannelPermissionKey {
@@ -33,8 +49,10 @@ pub struct ChannelPermissionsStore {
     cache: KeyedCache<ChannelPermissionKey, HashMap<String, bool>>,
     loading: HashSet<ChannelPermissionKey>,
     failed_at: HashMap<ChannelPermissionKey, Instant>,
+    reset_generation: u64,
     api: Arc<AppApi>,
     _conn_watch: Task<()>,
+    _refetch: Task<()>,
 }
 
 struct GlobalChannelPermissionsStore(Entity<ChannelPermissionsStore>);
@@ -53,14 +71,27 @@ impl ChannelPermissionsStore {
         cx.global::<GlobalChannelPermissionsStore>().0.clone()
     }
 
+    pub fn try_global(cx: &App) -> Option<Entity<Self>> {
+        cx.try_global::<GlobalChannelPermissionsStore>()
+            .map(|g| g.0.clone())
+    }
+
     fn new(api: Arc<AppApi>, cx: &mut Context<Self>) -> Self {
         let conn_watch = Self::spawn_connection_watch(api.clone(), cx);
+        let entity = cx.entity();
+        RealtimeDispatch::global(cx).update(cx, |dispatch, _| {
+            dispatch.on(RealtimeKind::RoleEvent, &entity, |this, event, cx| {
+                this.handle_role_event(event, cx);
+            });
+        });
         Self {
             cache: KeyedCache::new(Some(MAX_CACHED_CHANNEL_PERMISSIONS)),
             loading: HashSet::new(),
             failed_at: HashMap::new(),
+            reset_generation: 0,
             api,
             _conn_watch: conn_watch,
+            _refetch: Task::ready(()),
         }
     }
 
@@ -75,7 +106,13 @@ impl ChannelPermissionsStore {
                 let connected = *status_rx.borrow() == ConnectionStatus::Connected;
                 if connected && !was_connected {
                     was_connected = true;
-                    if this.update(cx, |this, _| this.invalidate()).is_err() {
+                    if this
+                        .update(cx, |this, cx| {
+                            this.invalidate();
+                            this.refetch_cached(cx);
+                        })
+                        .is_err()
+                    {
                         break;
                     }
                 } else if !connected {
@@ -85,9 +122,80 @@ impl ChannelPermissionsStore {
         })
     }
 
+    fn handle_role_event(&mut self, event: &RealtimeEvent, cx: &mut Context<Self>) {
+        let RealtimeEvent::Unhandled(realtime::envelope::Message::RoleEvent(role_event)) = event
+        else {
+            return;
+        };
+        if !self.role_event_affects_me(role_event, cx) {
+            return;
+        }
+        self.invalidate();
+        self.refetch_cached(cx);
+        cx.notify();
+    }
+
+    fn role_event_affects_me(&self, role_event: &realtime::RoleEvent, cx: &App) -> bool {
+        let Some(me) = BadgeService::try_global(cx).and_then(|b| b.read(cx).current_user_id(cx))
+        else {
+            return false;
+        };
+        if role_event.user_add_ids.contains(&me.get())
+            || role_event.user_remove_ids.contains(&me.get())
+        {
+            return true;
+        }
+        if role_event.active_permission_ids.is_empty()
+            && role_event.remove_permission_ids.is_empty()
+        {
+            return false;
+        }
+        let Some(role) = role_event.role.as_ref() else {
+            return false;
+        };
+        ClanMembersStore::try_global(cx)
+            .and_then(|members| {
+                members
+                    .read(cx)
+                    .self_role_ids(ClanId(role.clan_id))
+                    .map(|ids| ids.contains(&role.id))
+            })
+            .unwrap_or(false)
+    }
+
     fn invalidate(&mut self) {
         self.cache.mark_all_stale();
         self.failed_at.clear();
+    }
+
+    fn refetch_cached(&mut self, cx: &mut Context<Self>) {
+        let keys = self.cache.iter().map(|(key, _)| *key).collect::<Vec<_>>();
+        let generation = self.reset_generation;
+        self._refetch = cx.spawn(async move |this, cx| {
+            for chunk in keys.chunks(REFETCH_CONCURRENCY) {
+                let started = this.update(cx, |this, cx| {
+                    if this.reset_generation != generation {
+                        return false;
+                    }
+                    for key in chunk {
+                        this.fetch(key.clan_id, key.channel_id, cx);
+                    }
+                    true
+                });
+                if !matches!(started, Ok(true)) {
+                    return;
+                }
+                cx.background_executor().timer(REFETCH_STEP_DELAY).await;
+            }
+        });
+    }
+
+    pub fn reset(&mut self, cx: &mut Context<Self>) {
+        self.reset_generation = self.reset_generation.wrapping_add(1);
+        self.cache.clear();
+        self.loading.clear();
+        self.failed_at.clear();
+        cx.notify();
     }
 
     pub fn has_permission(&self, slug: &str, clan_id: ClanId, channel_id: ChannelId) -> bool {
@@ -105,6 +213,9 @@ impl ChannelPermissionsStore {
             clan_id,
             channel_id,
         };
+        if self.cache.is_invalidated(&key) {
+            return None;
+        }
         self.cache
             .get(&key)
             .and_then(|perms| perms.get(slug).copied())
@@ -144,11 +255,15 @@ impl ChannelPermissionsStore {
         }
         self.loading.insert(key);
         let api = self.api.clone();
+        let generation = self.reset_generation;
         cx.spawn(async move |this, cx| {
             let result = api
                 .list_user_permission_in_channel(clan_id.get(), channel_id.get())
                 .await;
             let _ = this.update(cx, |this, cx| {
+                if this.reset_generation != generation {
+                    return;
+                }
                 this.loading.remove(&key);
                 match result {
                     Ok(resp) => {
@@ -191,6 +306,72 @@ fn permissions_from_response(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const TEST_CLAN: ClanId = ClanId(1);
+    const TEST_CHANNEL: ChannelId = ChannelId(7);
+
+    fn test_store() -> ChannelPermissionsStore {
+        ChannelPermissionsStore {
+            cache: KeyedCache::new(Some(MAX_CACHED_CHANNEL_PERMISSIONS)),
+            loading: HashSet::new(),
+            failed_at: HashMap::new(),
+            reset_generation: 0,
+            api: Arc::new(AppApi::new(
+                Arc::new(mezon_client::TransportClient::new(String::new())),
+                String::new(),
+            )),
+            _conn_watch: Task::ready(()),
+            _refetch: Task::ready(()),
+        }
+    }
+
+    fn seed_granted(store: &mut ChannelPermissionsStore) {
+        store.cache.insert(
+            ChannelPermissionKey {
+                clan_id: TEST_CLAN,
+                channel_id: TEST_CHANNEL,
+            },
+            HashMap::from([(PERMISSION_DELETE_MESSAGE.to_string(), true)]),
+            None,
+        );
+    }
+
+    #[test]
+    fn stale_entry_reads_as_absent() {
+        let mut store = test_store();
+        seed_granted(&mut store);
+        assert_eq!(
+            store.permission_value(PERMISSION_DELETE_MESSAGE, TEST_CLAN, TEST_CHANNEL),
+            Some(true)
+        );
+        assert!(store.has_permission(PERMISSION_DELETE_MESSAGE, TEST_CLAN, TEST_CHANNEL));
+
+        store.invalidate();
+
+        assert!(
+            store
+                .cache
+                .get(&ChannelPermissionKey {
+                    clan_id: TEST_CLAN,
+                    channel_id: TEST_CHANNEL,
+                })
+                .is_some()
+        );
+        assert_eq!(
+            store.permission_value(PERMISSION_DELETE_MESSAGE, TEST_CLAN, TEST_CHANNEL),
+            None
+        );
+        assert!(!store.has_permission(PERMISSION_DELETE_MESSAGE, TEST_CLAN, TEST_CHANNEL));
+    }
+
+    #[test]
+    fn overridden_slugs_cover_the_three_channel_scoped_permissions() {
+        assert!(is_overridden_slug(PERMISSION_MANAGE_THREAD));
+        assert!(is_overridden_slug(PERMISSION_SEND_MESSAGE));
+        assert!(is_overridden_slug(PERMISSION_DELETE_MESSAGE));
+        assert!(!is_overridden_slug("manage-clan"));
+        assert!(!is_overridden_slug("clan-owner"));
+    }
 
     #[test]
     fn permissions_from_response_maps_active_flag() {

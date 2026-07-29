@@ -46,6 +46,19 @@ impl<K: Eq + Hash + Clone, V> KeyedCache<K, V> {
             .is_some_and(|t| t.elapsed() < ttl)
     }
 
+    /// `true` if the key is cached but was explicitly invalidated (`mark_stale` / `mark_all_stale`),
+    /// as opposed to merely aging past its TTL. Lets a security-sensitive read fail closed on a
+    /// resync while still serving stale-but-revalidating data for ordinary TTL expiry.
+    pub fn is_invalidated<Q>(&self, key: &Q) -> bool
+    where
+        K: Borrow<Q>,
+        Q: Hash + Eq + ?Sized,
+    {
+        self.entries
+            .get(key)
+            .is_some_and(|e| e.fetched_at.is_none())
+    }
+
     pub fn get<Q>(&self, key: &Q) -> Option<&V>
     where
         K: Borrow<Q>,
@@ -198,6 +211,23 @@ impl Default for Freshness {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn is_invalidated_separates_explicit_invalidation_from_ttl_ageing() {
+        let mut cache: KeyedCache<u8, u8> = KeyedCache::new(None);
+        cache.insert(1, 42, None);
+
+        assert!(!cache.is_fresh(&1, Duration::from_millis(0)));
+        assert!(!cache.is_invalidated(&1));
+        assert_eq!(cache.get(&1), Some(&42));
+
+        cache.mark_all_stale();
+
+        assert!(cache.is_invalidated(&1));
+        assert_eq!(cache.get(&1), Some(&42));
+
+        assert!(!cache.is_invalidated(&9));
+    }
 
     #[test]
     fn freshness_starts_stale_then_tracks_fetch_and_stale() {

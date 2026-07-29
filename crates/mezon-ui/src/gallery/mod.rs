@@ -844,7 +844,7 @@ fn render_date_filter_panel(
             el.child(
                 div()
                     .text_size(px(12.))
-                    .text_color(theme.status_dnd)
+                    .text_color(theme.danger_text)
                     .child(error),
             )
         })

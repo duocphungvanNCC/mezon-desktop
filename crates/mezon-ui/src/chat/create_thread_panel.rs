@@ -181,7 +181,7 @@ pub fn render_create_thread_panel(params: CreateThreadPanelParams<'_>) -> AnyEle
                                         .mt_1()
                                         .text_sm()
                                         .font_weight(FontWeight::MEDIUM)
-                                        .text_color(theme.status_dnd)
+                                        .text_color(theme.danger_text)
                                         .child(err.to_string()),
                                 )
                             }),

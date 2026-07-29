@@ -12,6 +12,7 @@ use std::sync::Arc;
 
 use gpui::{App, AppContext, Context, Entity, Global, Task};
 use mezon_client::{AppApi, RealtimeEvent};
+use mezon_proto::realtime;
 
 /// Discriminant of the realtime events that a store can subscribe to. Mirrors the handled
 /// [`RealtimeEvent`] variants so handlers register by kind (cf. routing rpc messages by type).
@@ -38,6 +39,10 @@ pub enum RealtimeKind {
     VoiceJoined,
     VoiceLeaved,
     VoiceReaction,
+    StreamingJoined,
+    StreamingLeaved,
+    StreamingStarted,
+    StreamingEnded,
     MarkAsRead,
     LastPinMessage,
     UnpinMessage,
@@ -53,6 +58,7 @@ pub enum RealtimeKind {
     BlockFriend,
     UnblockFriend,
     TokenSent,
+    RoleEvent,
 }
 
 impl RealtimeKind {
@@ -80,6 +86,10 @@ impl RealtimeKind {
             RealtimeEvent::VoiceJoined(_) => Self::VoiceJoined,
             RealtimeEvent::VoiceLeaved(_) => Self::VoiceLeaved,
             RealtimeEvent::VoiceReaction(_) => Self::VoiceReaction,
+            RealtimeEvent::StreamingJoined(_) => Self::StreamingJoined,
+            RealtimeEvent::StreamingLeaved(_) => Self::StreamingLeaved,
+            RealtimeEvent::StreamingStarted(_) => Self::StreamingStarted,
+            RealtimeEvent::StreamingEnded(_) => Self::StreamingEnded,
             RealtimeEvent::MarkAsRead(_) => Self::MarkAsRead,
             RealtimeEvent::LastPinMessage(_) => Self::LastPinMessage,
             RealtimeEvent::UnpinMessage(_) => Self::UnpinMessage,
@@ -95,6 +105,7 @@ impl RealtimeKind {
             RealtimeEvent::BlockFriend(_) => Self::BlockFriend,
             RealtimeEvent::UnblockFriend(_) => Self::UnblockFriend,
             RealtimeEvent::TokenSent(_) => Self::TokenSent,
+            RealtimeEvent::Unhandled(realtime::envelope::Message::RoleEvent(_)) => Self::RoleEvent,
             _ => return None,
         })
     }
@@ -285,6 +296,16 @@ mod tests {
         assert_eq!(
             RealtimeKind::of(&RealtimeEvent::TokenSent(api::TokenSentEvent::default())),
             Some(RealtimeKind::TokenSent)
+        );
+    }
+
+    #[test]
+    fn kind_of_maps_role_event_from_unhandled_envelope() {
+        assert_eq!(
+            RealtimeKind::of(&RealtimeEvent::Unhandled(
+                realtime::envelope::Message::RoleEvent(realtime::RoleEvent::default())
+            )),
+            Some(RealtimeKind::RoleEvent)
         );
     }
 

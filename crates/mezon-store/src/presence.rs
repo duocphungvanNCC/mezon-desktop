@@ -209,8 +209,7 @@ impl PresenceStore {
                 tracing::debug!(user_id = e.user_id, " custom-status text updated");
                 self.apply_seed_user_status(&[(UserId(e.user_id), e.status.clone())]);
                 Self::sync_self_account(e.user_id, None, Some(&e.status), cx);
-                cx.emit(PresenceEvent::StatusChanged);
-                cx.notify();
+                self.schedule_status_notify(cx);
             }
             RealtimeEvent::UserStatus(e) => {
                 let user_id = UserId(e.user_id);
@@ -225,8 +224,7 @@ impl PresenceStore {
                 }
                 self.presence_status.insert(user_id, status.to_string());
                 Self::sync_self_account(e.user_id, Some(status), None, cx);
-                cx.emit(PresenceEvent::StatusChanged);
-                cx.notify();
+                self.schedule_status_notify(cx);
             }
             _ => {}
         }

@@ -1,22 +1,23 @@
 use gpui::{
     AnyElement, App, ClickEvent, Context, Entity, FocusHandle, Focusable, FontWeight, MouseButton,
-    MouseDownEvent, Render, Rgba, Subscription, Task, Window, deferred, div, prelude::*, px, svg,
+    MouseDownEvent, Render, Rgba, Subscription, Task, Window, deferred, div, prelude::*, px,
 };
 use mezon_store::{
     AccountStore, BadgeService, ClanId, ClanMembersStore, FriendState, FriendStore, PresenceStore,
-    Settings, UserId,
+    ProfileContext, Settings, UserId,
 };
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use crate::app::shell::{FriendRemovalKind, Shell};
-use crate::chat::message::SendTokenModal;
+use crate::chat::message::{SendTokenModal, ShareContactModal, share_contact_subject};
+use crate::chat::user_profile_popover::{
+    banner_icon_button, banner_icon_shell, format_member_since, share_contact_icon,
+};
 use crate::components::primitives::{Avatar, Icon, IconName};
-use crate::image_cache::{LruImageCache, read_body_limited};
+use crate::image_cache::LruImageCache;
 use crate::router::{Route, navigate};
 use crate::theme::ActiveTheme;
 use ui::Tooltip;
-
-const AVATAR_FETCH_LIMIT: usize = 8 * 1024 * 1024;
 
 pub struct UserProfileModal {
     focus_handle: FocusHandle,
@@ -29,11 +30,6 @@ pub struct UserProfileModal {
     edit_options_open: bool,
     live_status: String,
     live_custom_status: String,
-    account_status_snapshot: String,
-    account_custom_snapshot: String,
-    account_override_until: Option<Instant>,
-    presence_status_snapshot: String,
-    presence_custom_snapshot: String,
     _banner_task: Option<Task<()>>,
     _members_sub: Subscription,
     _presence_sub: Subscription,
@@ -59,9 +55,11 @@ impl UserProfileModal {
             .read(cx)
             .current_user_id(cx)
             .is_some_and(|id| id == user_id)
-            || account
-                .as_ref()
-                .is_some_and(|account| account.username == member_username);
+            || account.as_ref().is_some_and(|account| {
+                !member_username.is_empty()
+                    && !account.username.is_empty()
+                    && account.username == member_username
+            });
         let presence = PresenceStore::global(cx);
         let presence = presence.read(cx);
         let presence_status_snapshot = presence
@@ -74,7 +72,6 @@ impl UserProfileModal {
                     "Invisible".to_string()
                 }
             });
-        let presence_custom_snapshot = presence.user_status(user_id).unwrap_or("").to_string();
         let (live_status, live_custom_status) = if is_self {
             account
                 .as_ref()
@@ -86,29 +83,24 @@ impl UserProfileModal {
                 presence.user_status(user_id).unwrap_or("").to_string(),
             )
         };
-        let account_status_snapshot = account
-            .as_ref()
-            .map(|account| account.status.clone())
-            .unwrap_or_default();
-        let account_custom_snapshot = account
-            .as_ref()
-            .map(|account| account.user_status.clone())
-            .unwrap_or_default();
         let members_sub = cx.observe(&ClanMembersStore::global(cx), |_, _, cx| cx.notify());
         let presence_sub = cx.observe(&PresenceStore::global(cx), |this, _, cx| {
-            this.sync_presence_status(cx);
-            cx.notify();
+            if this.sync_presence_status(cx) {
+                cx.notify();
+            }
         });
         let friend_sub = cx.observe(&FriendStore::global(cx), |_, _, cx| cx.notify());
         let account_sub = cx.observe(&AccountStore::global(cx), |this, _, cx| {
-            this.sync_account_status(cx);
-            cx.notify();
+            if this.sync_account_status(cx) {
+                cx.notify();
+            }
         });
         let source_avatar = ClanMembersStore::global(cx)
             .read(cx)
             .member(clan_id, user_id)
             .map(|member| member.user.avatar_url.clone())
             .unwrap_or_default();
+        let source_avatar = crate::util::imgproxy::avatar_url(cx, &source_avatar);
 
         let mut modal = Self {
             focus_handle: cx.focus_handle(),
@@ -121,11 +113,6 @@ impl UserProfileModal {
             edit_options_open: false,
             live_status,
             live_custom_status,
-            account_status_snapshot,
-            account_custom_snapshot,
-            account_override_until: None,
-            presence_status_snapshot,
-            presence_custom_snapshot,
             _banner_task: None,
             _members_sub: members_sub,
             _presence_sub: presence_sub,
@@ -143,29 +130,19 @@ impl UserProfileModal {
         let Some(account) = AccountStore::global(cx).read(cx).account.as_ref() else {
             return false;
         };
-        let account_changed = self.account_status_snapshot != account.status
-            || self.account_custom_snapshot != account.user_status;
-        if !account_changed {
-            return false;
-        }
         let changed =
             self.live_status != account.status || self.live_custom_status != account.user_status;
-        self.account_status_snapshot = account.status.clone();
-        self.account_custom_snapshot = account.user_status.clone();
-        self.live_status = account.status.clone();
-        self.live_custom_status = account.user_status.clone();
-        self.account_override_until = Some(Instant::now() + Duration::from_secs(2));
+        if changed {
+            self.live_status = account.status.clone();
+            self.live_custom_status = account.user_status.clone();
+        }
         changed
     }
 
     fn sync_presence_status(&mut self, cx: &App) -> bool {
-        if self
-            .account_override_until
-            .is_some_and(|until| Instant::now() < until)
-        {
+        if self.is_self {
             return false;
         }
-        self.account_override_until = None;
         let presence = PresenceStore::global(cx);
         let presence = presence.read(cx);
         let status = presence.presence_status(self.user_id).unwrap_or_else(|| {
@@ -176,17 +153,12 @@ impl UserProfileModal {
             }
         });
         let custom_status = presence.user_status(self.user_id).unwrap_or("");
-        let presence_changed = self.presence_status_snapshot.as_str() != status
-            || self.presence_custom_snapshot.as_str() != custom_status;
-        if !presence_changed {
-            return false;
-        }
         let changed =
             self.live_status != status || self.live_custom_status.as_str() != custom_status;
-        self.presence_status_snapshot = status.to_string();
-        self.presence_custom_snapshot = custom_status.to_string();
-        self.live_status = status.to_string();
-        self.live_custom_status = custom_status.to_string();
+        if changed {
+            self.live_status = status.to_string();
+            self.live_custom_status = custom_status.to_string();
+        }
         changed
     }
 
@@ -194,30 +166,25 @@ impl UserProfileModal {
         if avatar_url.is_empty() {
             return;
         }
-        let client = cx.http_client();
+        let avatar_image_cache = self.avatar_image_cache.clone();
+        let resource = gpui::Resource::Uri(avatar_url.into());
         self._banner_task = Some(cx.spawn(async move |this, cx| {
-            let result = async {
-                let mut response = client.get(&avatar_url, ().into(), true).await?;
-                if !response.status().is_success() {
-                    anyhow::bail!("avatar fetch returned {}", response.status());
+            for _ in 0..40 {
+                let image = avatar_image_cache
+                    .read_with(cx, |cache, _| cache.cached_render_image(&resource));
+                if let Some(image) = image
+                    && let Some(bytes) = image.as_bytes(0)
+                    && let Some(color) = average_bgra_color(bytes)
+                {
+                    let _ = this.update(cx, |this, cx| {
+                        this.banner_color = Some(color);
+                        cx.notify();
+                    });
+                    break;
                 }
-                let bytes = read_body_limited(&mut response, AVATAR_FETCH_LIMIT).await?;
-                let color = cx
-                    .background_executor()
-                    .spawn(async move {
-                        let image = image::load_from_memory(&bytes)?.to_rgba8();
-                        anyhow::Ok(average_color(&image))
-                    })
-                    .await?;
-                anyhow::Ok(color)
-            }
-            .await;
-
-            if let Ok(color) = result {
-                let _ = this.update(cx, |this, cx| {
-                    this.banner_color = color;
-                    cx.notify();
-                });
+                cx.background_executor()
+                    .timer(Duration::from_millis(50))
+                    .await;
             }
         }));
     }
@@ -241,7 +208,7 @@ impl Render for UserProfileModal {
             .read(cx)
             .member(self.clan_id, self.user_id)
             .cloned();
-        let (display_name, username, avatar, about_me, created_at) = member
+        let (display_name, username, raw_avatar, about_me, created_at) = member
             .as_ref()
             .map(|member| {
                 (
@@ -253,6 +220,7 @@ impl Render for UserProfileModal {
                 )
             })
             .unwrap_or_default();
+        let avatar = crate::util::imgproxy::avatar_url(cx, &raw_avatar);
         let is_self = self.is_self;
         let custom_status = self.live_custom_status.clone();
         let (status_icon, status_color) = profile_status(&self.live_status, theme);
@@ -270,7 +238,10 @@ impl Render for UserProfileModal {
             avatar_view = avatar_view.src(avatar.clone());
         }
 
-        let banner_color = self.banner_color.unwrap_or(gpui::rgb(0xF7E4F0));
+        let banner_color = self
+            .banner_color
+            .map(gpui::Hsla::from)
+            .unwrap_or(theme.tokens.bg_secondary.into());
 
         div()
             .id("full-user-profile-backdrop")
@@ -313,11 +284,11 @@ impl Render for UserProfileModal {
                                 is_self,
                                 friend_state,
                                 self.user_id,
+                                self.clan_id,
                                 &username,
                                 &display_name,
-                                &avatar,
+                                &raw_avatar,
                                 &locale,
-                                theme,
                             )),
                     )
                     .child(
@@ -530,9 +501,11 @@ impl Render for UserProfileModal {
                                                 "common.userProfile.editClanProfile",
                                             ))
                                             .on_click(move |_, _, cx| {
-                                                crate::settings::request_clan_profile(clan_id);
                                                 Self::close(cx);
-                                                navigate(cx, Route::SettingsProfile);
+                                                navigate(
+                                                    cx,
+                                                    Route::SettingsClanProfile { clan_id },
+                                                );
                                             }),
                                     )
                                     .child(
@@ -550,7 +523,6 @@ impl Render for UserProfileModal {
                                                 "common.userProfile.editMainProfile",
                                             ))
                                             .on_click(|_, _, cx| {
-                                                crate::settings::request_user_profile();
                                                 Self::close(cx);
                                                 navigate(cx, Route::SettingsProfile);
                                             }),
@@ -566,11 +538,11 @@ fn render_profile_actions(
     is_self: bool,
     friend_state: Option<FriendState>,
     user_id: UserId,
+    clan_id: ClanId,
     username: &str,
     display_name: &str,
     avatar: &str,
     locale: &str,
-    theme: &crate::theme::Theme,
 ) -> AnyElement {
     if is_self {
         return div().into_any_element();
@@ -589,7 +561,6 @@ fn render_profile_actions(
             "full-profile-transfer",
             IconName::Transaction,
             mezon_i18n::t(locale, "common.transfer"),
-            theme,
             move |_, window, cx| {
                 UserProfileModal::close(cx);
                 SendTokenModal::open(
@@ -605,7 +576,10 @@ fn render_profile_actions(
         actions = actions.child(profile_share_contact_button(
             "full-profile-share-contact",
             mezon_i18n::t(locale, "common.shareContact"),
-            theme,
+            user_id,
+            clan_id,
+            display_name,
+            locale,
         ));
     }
 
@@ -617,7 +591,6 @@ fn render_profile_actions(
                 "full-profile-accept-friend",
                 IconName::IConAcceptFriend,
                 mezon_i18n::t(locale, "common.accept"),
-                theme,
                 move |_, _, cx| {
                     FriendStore::global(cx)
                         .update(cx, |store, cx| store.accept_friend(user_id, cx));
@@ -627,7 +600,6 @@ fn render_profile_actions(
                 "full-profile-ignore-friend",
                 IconName::IConIgnoreFriend,
                 mezon_i18n::t(locale, "common.ignore"),
-                theme,
                 move |_, window, cx| {
                     UserProfileModal::close(cx);
                     Shell::global(cx).update(cx, |shell, cx| {
@@ -650,7 +622,7 @@ fn render_profile_actions(
         Some(FriendState::InviteSent) => IconName::PendingFriend,
         Some(FriendState::Blocked) => return actions.into_any_element(),
         None => IconName::AddPerson,
-        Some(FriendState::InviteReceived) => unreachable!(),
+        Some(FriendState::InviteReceived) => IconName::IConAcceptFriend,
     };
     let action_username = username.to_string();
     let action_display_name = display_name.to_string();
@@ -666,7 +638,6 @@ fn render_profile_actions(
                 Some(FriendState::InviteReceived) => mezon_i18n::t(locale, "common.accept"),
                 _ => mezon_i18n::t(locale, "common.addFriend"),
             },
-            theme,
             move |_, window, cx| match friend_state {
                 Some(FriendState::Friend) => {
                     UserProfileModal::close(cx);
@@ -715,60 +686,43 @@ fn profile_action_button(
     id: &'static str,
     icon: IconName,
     tooltip: impl Into<gpui::SharedString> + 'static,
-    _theme: &crate::theme::Theme,
     on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
 ) -> AnyElement {
     div()
-        .id(id)
-        .size(px(34.))
-        .flex()
-        .items_center()
-        .justify_center()
-        .rounded_full()
-        .bg(gpui::rgb(0x272120))
-        .cursor_pointer()
+        .id(format!("{id}-tooltip"))
         .tooltip(Tooltip::text(tooltip))
-        .on_click(on_click)
-        .child(Icon::new(icon).size(px(16.)).text_color(gpui::white()))
+        .child(banner_icon_button(id, icon, false, true, on_click))
         .into_any_element()
 }
 
 fn profile_share_contact_button(
     id: &'static str,
     tooltip: impl Into<gpui::SharedString> + 'static,
-    _theme: &crate::theme::Theme,
+    user_id: UserId,
+    clan_id: ClanId,
+    display_name: &str,
+    locale: &str,
 ) -> AnyElement {
+    let display_name = display_name.to_string();
+    let locale = locale.to_string();
     div()
-        .id(id)
-        .size(px(34.))
-        .flex()
-        .items_center()
-        .justify_center()
-        .rounded_full()
-        .bg(gpui::rgb(0x272120))
-        .cursor_pointer()
+        .id(format!("{id}-tooltip"))
         .tooltip(Tooltip::text(tooltip))
-        .on_click(|_, _, _| {})
-        .child(
-            div()
-                .relative()
-                .size(px(16.))
-                .child(
-                    svg()
-                        .path("icons/icon-share-contact-base.svg")
-                        .size(px(16.))
-                        .text_color(gpui::rgb(0x656369)),
-                )
-                .child(
-                    svg()
-                        .path("icons/icon-share-contact-accent.svg")
-                        .absolute()
-                        .top_0()
-                        .left_0()
-                        .size(px(16.))
-                        .text_color(gpui::white()),
-                ),
-        )
+        .child(banner_icon_shell(
+            id,
+            false,
+            move |_, window, cx| {
+                let contact = share_contact_subject(
+                    user_id,
+                    &display_name,
+                    Some(ProfileContext::Clan(clan_id)),
+                    cx,
+                );
+                UserProfileModal::close(cx);
+                ShareContactModal::open(contact, locale.clone().into(), window, cx);
+            },
+            share_contact_icon(),
+        ))
         .into_any_element()
 }
 
@@ -781,28 +735,19 @@ fn profile_status(status: &str, theme: &crate::theme::Theme) -> (IconName, Rgba)
     }
 }
 
-fn format_member_since(seconds: u32) -> String {
-    if seconds == 0 {
-        return String::new();
-    }
-    chrono::DateTime::from_timestamp(i64::from(seconds), 0)
-        .map(|date| date.format("%B %-d, %Y").to_string())
-        .unwrap_or_default()
-}
-
-fn average_color(image: &image::RgbaImage) -> Option<Rgba> {
+fn average_bgra_color(bytes: &[u8]) -> Option<Rgba> {
     let mut red = 0f64;
     let mut green = 0f64;
     let mut blue = 0f64;
     let mut weight = 0f64;
-    for pixel in image.pixels() {
+    for pixel in bytes.chunks_exact(4) {
         let alpha = f64::from(pixel[3]) / 255.;
         if alpha == 0. {
             continue;
         }
-        red += f64::from(pixel[0]).powi(2) * alpha;
+        red += f64::from(pixel[2]).powi(2) * alpha;
         green += f64::from(pixel[1]).powi(2) * alpha;
-        blue += f64::from(pixel[2]).powi(2) * alpha;
+        blue += f64::from(pixel[0]).powi(2) * alpha;
         weight += alpha;
     }
     (weight > 0.).then(|| Rgba {
@@ -815,12 +760,12 @@ fn average_color(image: &image::RgbaImage) -> Option<Rgba> {
 
 #[cfg(test)]
 mod tests {
-    use super::average_color;
+    use super::average_bgra_color;
 
     #[test]
     fn average_color_uses_avatar_pixels() {
-        let image = image::RgbaImage::from_pixel(2, 2, image::Rgba([120, 60, 30, 255]));
-        let color = average_color(&image).expect("color image has an average");
+        let pixels = [30, 60, 120, 255].repeat(4);
+        let color = average_bgra_color(&pixels).expect("color image has an average");
         assert!((color.r - 120. / 255.).abs() < 0.001);
         assert!((color.g - 60. / 255.).abs() < 0.001);
         assert!((color.b - 30. / 255.).abs() < 0.001);

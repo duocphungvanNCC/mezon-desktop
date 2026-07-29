@@ -419,7 +419,7 @@ fn render_labeled_input(
     input: Input,
 ) -> impl IntoElement {
     let counter_color = if len >= max {
-        theme.status_dnd
+        theme.danger_text
     } else {
         theme.text_muted
     };

@@ -35,6 +35,7 @@ pub struct LoginView {
     qr_login_id: Option<String>,
     qr_expired: bool,
     qr_image: Option<Arc<RenderImage>>,
+    qr_image_blurred: Option<Arc<RenderImage>>,
     is_remember: bool,
     pending_reset: bool,
     pending_otp_clear: bool,
@@ -95,6 +96,7 @@ impl LoginView {
             qr_login_id: None,
             qr_expired: false,
             qr_image: None,
+            qr_image_blurred: None,
             is_remember: false,
             pending_reset: false,
             pending_otp_clear: false,
@@ -122,6 +124,7 @@ impl LoginView {
         self.is_remember = false;
         self.qr_login_id = None;
         self.qr_image = None;
+        self.qr_image_blurred = None;
         self.qr_expired = false;
         self.loading = false;
         self.show_loading = false;
@@ -276,11 +279,16 @@ impl LoginView {
             };
             let exec = cx.background_executor().clone();
             let login_id_for_qr = login_id.clone();
-            let qr_image = exec
-                .spawn(async move { build_qr_image(&login_id_for_qr) })
+            let qr_images = exec
+                .spawn(async move { build_qr_images(&login_id_for_qr) })
                 .await;
             let _ = this.update(cx, |this, cx| {
-                this.qr_image = qr_image;
+                let (sharp, blurred) = match qr_images {
+                    Some(images) => (Some(images.0), Some(images.1)),
+                    None => (None, None),
+                };
+                this.qr_image = sharp;
+                this.qr_image_blurred = blurred;
                 this.qr_login_id = Some(login_id.clone());
                 cx.notify();
             });
@@ -525,6 +533,7 @@ impl LoginView {
         entity.update(cx, |this, cx| {
             this.qr_login_id = None;
             this.qr_image = None;
+            this.qr_image_blurred = None;
             this.qr_expired = false;
             let auth_state = this.auth_state.clone();
             this._qr_poll_task = Some(Self::start_qr_flow(auth_state, cx));
@@ -739,10 +748,15 @@ impl LoginView {
             .justify_center()
             .overflow_hidden();
 
-        if let Some(image) = &self.qr_image {
-            let mut qr_img = img(image.clone()).size(px(168.));
+        let shown = if expired {
+            self.qr_image_blurred.as_ref().or(self.qr_image.as_ref())
+        } else {
+            self.qr_image.as_ref()
+        };
+        if let Some(image) = shown {
+            let mut qr_img = img(image.clone()).size(px(QR_DISPLAY_PX));
             if expired {
-                qr_img = qr_img.opacity(0.5);
+                qr_img = qr_img.opacity(QR_EXPIRED_OPACITY);
             }
             qr_box = qr_box.child(qr_img);
         } else if !expired {
@@ -981,7 +995,7 @@ impl Render for LoginView {
     }
 }
 
-fn build_qr_image(data: &str) -> Option<Arc<RenderImage>> {
+fn build_qr_images(data: &str) -> Option<(Arc<RenderImage>, Arc<RenderImage>)> {
     let code = qrcode::QrCode::new(data.as_bytes()).ok()?;
     let width = code.width();
     if width == 0 {
@@ -1007,9 +1021,33 @@ fn build_qr_image(data: &str) -> Option<Arc<RenderImage>> {
             }
         }
     }
-    Some(Arc::new(RenderImage::new(vec![image::Frame::new(buf)])))
+    let blur_dim = qr_blur_bitmap_dim(dim);
+    let downscaled = image::imageops::resize(
+        &buf,
+        blur_dim,
+        blur_dim,
+        image::imageops::FilterType::Triangle,
+    );
+    let blurred = image::imageops::blur(&downscaled, qr_expired_blur_sigma(blur_dim));
+    Some((
+        Arc::new(RenderImage::new(vec![image::Frame::new(buf)])),
+        Arc::new(RenderImage::new(vec![image::Frame::new(blurred)])),
+    ))
 }
 
+fn qr_blur_bitmap_dim(bitmap_dim: u32) -> u32 {
+    (bitmap_dim / QR_EXPIRED_BLUR_DOWNSCALE).max(QR_EXPIRED_BLUR_MIN_DIM)
+}
+
+fn qr_expired_blur_sigma(bitmap_dim: u32) -> f32 {
+    QR_EXPIRED_BLUR_PX * bitmap_dim as f32 / QR_DISPLAY_PX
+}
+
+const QR_DISPLAY_PX: f32 = 168.;
+const QR_EXPIRED_BLUR_PX: f32 = 12.;
+const QR_EXPIRED_BLUR_DOWNSCALE: u32 = 4;
+const QR_EXPIRED_BLUR_MIN_DIM: u32 = 48;
+const QR_EXPIRED_OPACITY: f32 = 0.5;
 const MAX_ERROR_LEN: usize = 120;
 const ERROR_SLOT_HEIGHT: f32 = 32.;
 const FORM_MIN_HEIGHT: f32 = 256.;
@@ -1216,6 +1254,39 @@ fn required_label(label: &str) -> gpui::AnyElement {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn expired_qr_blur_is_scaled_from_display_px_to_bitmap_px() {
+        assert_eq!(qr_expired_blur_sigma(QR_DISPLAY_PX as u32), 12.);
+        assert_eq!(qr_expired_blur_sigma(336), 24.);
+    }
+
+    #[test]
+    fn build_qr_images_blurs_a_downscaled_copy_not_the_full_bitmap() {
+        let (sharp, blurred) = build_qr_images("mezon-login-id").expect("qr images");
+        let sharp_len = sharp.as_ref().as_bytes(0).expect("sharp frame").len();
+        let blurred_len = blurred.as_ref().as_bytes(0).expect("blurred frame").len();
+
+        assert!(blurred_len > 0);
+        assert!(
+            blurred_len < sharp_len,
+            "the expired QR is upscaled from a small blur, so it must not carry the full bitmap"
+        );
+    }
+
+    #[test]
+    fn qr_blur_downscale_keeps_a_usable_bitmap_and_a_small_kernel() {
+        assert_eq!(qr_blur_bitmap_dim(320), 80);
+        assert_eq!(
+            qr_blur_bitmap_dim(96),
+            QR_EXPIRED_BLUR_MIN_DIM,
+            "a tiny QR must not be downscaled past the floor"
+        );
+        assert!(
+            qr_expired_blur_sigma(qr_blur_bitmap_dim(320)) < 6.0,
+            "blur cost is driven by the kernel, which grows with sigma"
+        );
+    }
 
     #[test]
     fn extracts_message_from_http_error() {
