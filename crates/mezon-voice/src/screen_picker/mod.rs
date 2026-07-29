@@ -1,20 +1,33 @@
 use scap::Target;
 
-#[cfg(target_os = "linux")]
-use crate::screen_targets::ScreenShareKind;
-
 #[derive(Debug, Clone)]
 pub enum PickedScreen {
     Target(Target),
     #[cfg(target_os = "linux")]
-    LinuxPortal(ScreenShareKind),
+    LinuxPortal,
+}
+
+pub fn system_screen_share_pick() -> Option<PickedScreen> {
+    #[cfg(target_os = "linux")]
+    if crate::linux_session::is_wayland_session() {
+        return Some(PickedScreen::LinuxPortal);
+    }
+    None
+}
+
+pub(crate) fn pick_uses_portal(pick: &PickedScreen) -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        matches!(pick, PickedScreen::LinuxPortal)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = pick;
+        false
+    }
 }
 
 pub(crate) fn pick_is_window(pick: &PickedScreen) -> bool {
-    #[cfg(target_os = "linux")]
-    if let PickedScreen::LinuxPortal(kind) = pick {
-        return matches!(kind, ScreenShareKind::Window);
-    }
     matches!(pick, PickedScreen::Target(Target::Window(_)))
 }
 
@@ -23,9 +36,7 @@ pub(crate) fn portal_source_types_for_pick(pick: &PickedScreen) -> Option<u32> {
         PickedScreen::Target(Target::Window(_)) => Some(2),
         PickedScreen::Target(Target::Display(_)) => Some(1),
         #[cfg(target_os = "linux")]
-        PickedScreen::LinuxPortal(ScreenShareKind::Window) => Some(2),
-        #[cfg(target_os = "linux")]
-        PickedScreen::LinuxPortal(ScreenShareKind::Display) => Some(1),
+        PickedScreen::LinuxPortal => Some(3),
     }
 }
 
@@ -33,7 +44,7 @@ pub(crate) fn scap_target_for_pick(pick: PickedScreen) -> Result<Option<Target>,
     match pick {
         PickedScreen::Target(target) => Ok(Some(resolve_target(&target)?)),
         #[cfg(target_os = "linux")]
-        PickedScreen::LinuxPortal(_) => Ok(None),
+        PickedScreen::LinuxPortal => Ok(None),
     }
 }
 

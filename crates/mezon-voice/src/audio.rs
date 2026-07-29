@@ -307,25 +307,26 @@ impl AudioIo {
                                 continue;
                             }
                             current_input_id = device_id;
-                            if in_stream.is_some() {
-                                in_stream = None;
-                                request_macos_microphone_permission();
-                                match build_input(
-                                    &host,
-                                    current_input_id.as_deref(),
-                                    capture_tx.clone(),
-                                    out_latency_ms.clone(),
-                                ) {
-                                    Ok((stream, in_fmt)) => {
-                                        let _ = in_fmt_tx.send(in_fmt);
-                                        if input_active && let Err(e) = stream.play() {
-                                            tracing::warn!("voice mic stream play failed: {e}");
-                                        }
-                                        in_stream = Some(stream);
+                            if in_stream.is_none() && !input_active {
+                                continue;
+                            }
+                            in_stream = None;
+                            request_macos_microphone_permission();
+                            match build_input(
+                                &host,
+                                current_input_id.as_deref(),
+                                capture_tx.clone(),
+                                out_latency_ms.clone(),
+                            ) {
+                                Ok((stream, in_fmt)) => {
+                                    let _ = in_fmt_tx.send(in_fmt);
+                                    if input_active && let Err(e) = stream.play() {
+                                        tracing::warn!("voice mic stream play failed: {e}");
                                     }
-                                    Err(e) => {
-                                        tracing::warn!("voice mic stream rebuild failed: {e}")
-                                    }
+                                    in_stream = Some(stream);
+                                }
+                                Err(e) => {
+                                    tracing::warn!("voice mic stream rebuild failed: {e}")
                                 }
                             }
                         }
@@ -467,15 +468,38 @@ fn prepare_output(
     out_latency_ms: Arc<AtomicU32>,
 ) -> Result<(cpal::Stream, AudioFormat)> {
     let host = cpal::default_host();
-    let output = select_output(&host, output_device_id)?;
-    let out_supported = output.default_output_config()?;
+    if let Some(id) = output_device_id {
+        let opened = select_output(&host, Some(id)).and_then(|device| {
+            open_output(
+                &device,
+                mixer.clone(),
+                reverse_tx.clone(),
+                out_latency_ms.clone(),
+            )
+        });
+        match opened {
+            Ok(ready) => return Ok(ready),
+            Err(e) => tracing::warn!("voice output device unusable, falling back to default: {e}"),
+        }
+    }
+    let device = select_output(&host, None)?;
+    open_output(&device, mixer, reverse_tx, out_latency_ms)
+}
+
+fn open_output(
+    device: &cpal::Device,
+    mixer: Arc<PlaybackMixer>,
+    reverse_tx: flume::Sender<ReverseChunk>,
+    out_latency_ms: Arc<AtomicU32>,
+) -> Result<(cpal::Stream, AudioFormat)> {
+    let supported = device.default_output_config()?;
     let out_fmt = AudioFormat {
-        sample_rate: out_supported.sample_rate(),
-        channels: out_supported.channels() as u32,
+        sample_rate: supported.sample_rate(),
+        channels: supported.channels() as u32,
     };
-    let out_stream = build_output(&output, &out_supported, mixer, reverse_tx, out_latency_ms)?;
-    out_stream.play()?;
-    Ok((out_stream, out_fmt))
+    let stream = build_output(device, &supported, mixer, reverse_tx, out_latency_ms)?;
+    stream.play()?;
+    Ok((stream, out_fmt))
 }
 
 fn select_input(host: &cpal::Host, id: Option<&str>) -> Result<cpal::Device> {
@@ -515,7 +539,23 @@ fn build_input(
     capture_tx: flume::Sender<CaptureChunk>,
     out_latency_ms: Arc<AtomicU32>,
 ) -> Result<(cpal::Stream, AudioFormat)> {
-    let device = select_input(host, id)?;
+    if let Some(id) = id {
+        let opened = select_input(host, Some(id))
+            .and_then(|device| open_input(&device, capture_tx.clone(), out_latency_ms.clone()));
+        match opened {
+            Ok(ready) => return Ok(ready),
+            Err(e) => tracing::warn!("voice input device unusable, falling back to default: {e}"),
+        }
+    }
+    let device = select_input(host, None)?;
+    open_input(&device, capture_tx, out_latency_ms)
+}
+
+fn open_input(
+    device: &cpal::Device,
+    capture_tx: flume::Sender<CaptureChunk>,
+    out_latency_ms: Arc<AtomicU32>,
+) -> Result<(cpal::Stream, AudioFormat)> {
     let supported = device.default_input_config()?;
     let in_fmt = AudioFormat {
         sample_rate: supported.sample_rate(),

@@ -55,6 +55,9 @@ fn configure_linux_session() {
     if std::env::var_os("DISPLAY").is_none() {
         return;
     }
+    if std::env::var_os("WAYLAND_DISPLAY").is_some_and(|display| !display.is_empty()) {
+        mezon_store::record_wayland_session();
+    }
     unsafe {
         std::env::set_var("GDK_BACKEND", "x11");
         std::env::remove_var("WAYLAND_DISPLAY");

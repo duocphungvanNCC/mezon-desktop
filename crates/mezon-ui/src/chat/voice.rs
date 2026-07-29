@@ -331,7 +331,7 @@ pub fn render_mini_bar(
             if screen_enabled {
                 voice.update(cx, |store, cx| store.stop_screen_share(cx));
             } else {
-                crate::chat::screen_share_modal::open_screen_share_modal(
+                crate::chat::screen_share_modal::start_screen_share_flow(
                     voice.clone(),
                     settings.clone(),
                     window,
@@ -2597,7 +2597,7 @@ fn control_bar(
             if screen_enabled {
                 voice.update(cx, |store, cx| store.stop_screen_share(cx));
             } else {
-                crate::chat::screen_share_modal::open_screen_share_modal(
+                crate::chat::screen_share_modal::start_screen_share_flow(
                     voice.clone(),
                     settings.clone(),
                     window,

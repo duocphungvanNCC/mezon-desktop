@@ -18,7 +18,8 @@ type CapturedScreenFrame = scap::capturer::engine::mac::PixelBuffer;
 type CapturedScreenFrame = BGRAFrame;
 
 use crate::screen_picker::{
-    PickedScreen, pick_is_window, portal_source_types_for_pick, scap_target_for_pick,
+    PickedScreen, pick_is_window, pick_uses_portal, portal_source_types_for_pick,
+    scap_target_for_pick,
 };
 #[cfg(not(target_os = "macos"))]
 use crate::video::bgra_to_i420;
@@ -131,7 +132,7 @@ pub fn start_screen(
             }
 
             #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-            if crate::pipewire_init::is_wayland_session()
+            if crate::linux_session::is_wayland_session()
                 && !crate::pipewire_init::ensure_pipewire_stubs_armed()
             {
                 let _ = track_tx.send(Err("PipeWire unavailable for screen capture".into()));
@@ -139,6 +140,7 @@ pub fn start_screen(
             }
 
             let is_window_share = pick_is_window(&pick);
+            let use_portal = pick_uses_portal(&pick);
             let portal_source_types = portal_source_types_for_pick(&pick);
             let capture_target = match scap_target_for_pick(pick) {
                 Ok(target) => target,
@@ -160,6 +162,7 @@ pub fn start_screen(
                 output_type: FrameType::BGRAFrame,
                 output_resolution: Resolution::_1080p,
                 portal_source_types,
+                use_portal,
                 ..Default::default()
             };
 

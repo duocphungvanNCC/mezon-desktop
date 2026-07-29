@@ -193,13 +193,15 @@ pub use user_profile::{
     resolve_user_profile,
 };
 pub use users_by_user::{UsersByUserEvent, UsersByUserStore};
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+pub use voice::record_wayland_session;
 pub use voice::{
     DeviceKind, DeviceMenuKind, DisplayedReaction, MAX_SOUND_BYTES, NetworkQuality, PickedScreen,
     SOUND_ALLOWED_EXTENSIONS, ScreenShareKind, ScreenShareListError, ScreenShareOption,
     ScreenSharePreview, VideoFrameData, VideoFrameStore, VoiceCallStatus, VoiceConnection,
     VoiceModerationError, VoiceParticipant, VoiceRenderFrame, VoiceStore, camera_tile_id,
     capture_screen_share_preview, list_screen_share_options, peek_screen_share_options,
-    screen_tile_id, upload_sound_file, validate_sound_file,
+    screen_tile_id, system_screen_share_pick, upload_sound_file, validate_sound_file,
 };
 pub use wallet::{
     SendTokenRequest, TransactionCursor, WalletDetail, WalletEvent, WalletStore, WalletTransaction,

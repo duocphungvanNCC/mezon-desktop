@@ -12,10 +12,13 @@ use mezon_client::{AppApi, RealtimeEvent};
 use mezon_voice::{IceServerConfig, VoiceEvent, VoiceSession};
 use parking_lot::Mutex;
 
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+pub use mezon_voice::record_wayland_session;
 pub use mezon_voice::{
     CameraDeviceInfo, NetworkQuality, PickedScreen, ScreenShareKind, ScreenShareListError,
     ScreenShareOption, ScreenSharePreview, VideoFrameData, VideoFrameStore, VoiceParticipant,
     capture_screen_share_preview, list_screen_share_options, peek_screen_share_options,
+    system_screen_share_pick,
 };
 
 use crate::AppConfig;

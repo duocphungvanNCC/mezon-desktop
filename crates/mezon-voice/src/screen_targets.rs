@@ -19,19 +19,6 @@ pub struct ScreenShareOption {
     pub pick: PickedScreen,
 }
 
-impl ScreenShareOption {
-    pub fn is_portal(&self) -> bool {
-        #[cfg(target_os = "linux")]
-        {
-            matches!(self.pick, PickedScreen::LinuxPortal(_))
-        }
-        #[cfg(not(target_os = "linux"))]
-        {
-            false
-        }
-    }
-}
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ScreenShareListError {
     PermissionDenied,
@@ -84,24 +71,6 @@ fn fetch_screen_share_options() -> Result<Vec<ScreenShareOption>, ScreenShareLis
 
 #[cfg(not(target_os = "macos"))]
 fn list_scap_options() -> Result<Vec<ScreenShareOption>, String> {
-    #[cfg(target_os = "linux")]
-    if std::env::var("WAYLAND_DISPLAY").is_ok() {
-        return Ok(vec![
-            ScreenShareOption {
-                id: 0,
-                title: String::new(),
-                kind: ScreenShareKind::Window,
-                pick: PickedScreen::LinuxPortal(ScreenShareKind::Window),
-            },
-            ScreenShareOption {
-                id: 1,
-                title: String::new(),
-                kind: ScreenShareKind::Display,
-                pick: PickedScreen::LinuxPortal(ScreenShareKind::Display),
-            },
-        ]);
-    }
-
     let mut options = Vec::new();
     for target in scap::get_all_targets().map_err(|e| e.to_string())? {
         match target {
