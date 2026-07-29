@@ -569,7 +569,7 @@ pub struct ApiChannelApp {
     pub channel_id: i64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ApiClanDesc {
     pub clan_id: i64,
     pub clan_name: String,
@@ -581,6 +581,14 @@ pub struct ApiClanDesc {
     pub is_onboarding: bool,
     pub is_community: bool,
     pub prevent_anonymous: bool,
+    #[serde(default)]
+    pub community_banner: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub about: String,
+    #[serde(default)]
+    pub short_url: String,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -3037,6 +3045,10 @@ impl MezonTransport {
             is_onboarding: clan.is_onboarding,
             is_community: clan.is_community,
             prevent_anonymous: clan.prevent_anonymous,
+            community_banner: clan.community_banner,
+            description: clan.description,
+            about: clan.about,
+            short_url: clan.short_url,
         }
     }
 

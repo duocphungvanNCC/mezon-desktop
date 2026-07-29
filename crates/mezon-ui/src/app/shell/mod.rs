@@ -22,6 +22,7 @@ mod confirm_delete_sound_modal;
 mod confirm_delete_sticker_modal;
 mod confirm_delete_webhook_modal;
 mod confirm_remove_friend_modal;
+mod disable_clan_community_modal;
 mod upload_limit_modal;
 use coming_soon_modal::ComingSoonModal;
 use confirm_delete_canvas_modal::ConfirmDeleteCanvasModal;
@@ -33,6 +34,7 @@ use confirm_delete_sticker_modal::ConfirmDeleteStickerModal;
 use confirm_delete_webhook_modal::{ConfirmDeleteWebhookModal, WebhookDeleteTarget};
 pub use confirm_remove_friend_modal::FriendRemovalKind;
 use confirm_remove_friend_modal::{ConfirmRemoveFriendModal, interpolate_username};
+use disable_clan_community_modal::DisableClanCommunityModal;
 use upload_limit_modal::UploadLimitModal;
 
 const TOAST_TTL: Duration = Duration::from_secs(4);
@@ -523,6 +525,39 @@ impl Shell {
             focus_handle: cx.focus_handle(),
             title: title.into(),
             content: content.into(),
+        });
+        let focus_handle = view.read(cx).focus_handle.clone();
+        window.focus(&focus_handle, cx);
+        self.show_modal(view.into(), cx);
+    }
+
+    pub fn confirm_disable_clan_community(
+        &mut self,
+        on_confirm: impl Fn(&mut App) + 'static,
+        locale: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let title: SharedString = mezon_i18n::t(
+            locale,
+            "onBoardingClan.communitySettings.disableModal.title",
+        )
+        .into();
+        let description: SharedString = mezon_i18n::t(
+            locale,
+            "onBoardingClan.communitySettings.disableModal.description",
+        )
+        .into();
+        let cancel_label: SharedString = mezon_i18n::t(locale, "common.cancel").into();
+        let confirm_label: SharedString =
+            mezon_i18n::t(locale, "onBoardingClan.communitySettings.buttons.disable").into();
+        let view = cx.new(|cx| DisableClanCommunityModal {
+            focus_handle: cx.focus_handle(),
+            title,
+            description,
+            cancel_label,
+            confirm_label,
+            on_confirm: std::rc::Rc::new(on_confirm),
         });
         let focus_handle = view.read(cx).focus_handle.clone();
         window.focus(&focus_handle, cx);
