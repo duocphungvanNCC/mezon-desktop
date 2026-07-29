@@ -85,10 +85,10 @@ pub(crate) fn render_pinned_message_preview(
     pin: &PinnedMessage,
     theme: &Theme,
     image_cache: Entity<LruImageCache>,
-    cx: &App,
+    ogp_cache: Entity<LruImageCache>,
 ) -> gpui::AnyElement {
     let text_spans = prepare_pin_text_spans(pin);
-    render_pin_body(pin, &text_spans, theme, image_cache, cx)
+    render_pin_body(pin, &text_spans, theme, image_cache, ogp_cache)
 }
 
 fn pinned_message_from_chat_message(msg: &Message) -> PinnedMessage {
@@ -114,13 +114,13 @@ pub(crate) fn render_pin_message_preview(
     msg: &Message,
     theme: &Theme,
     image_cache: Entity<LruImageCache>,
-    cx: &App,
+    ogp_cache: Entity<LruImageCache>,
 ) -> gpui::AnyElement {
     render_pinned_message_preview(
         &pinned_message_from_chat_message(msg),
         theme,
         image_cache,
-        cx,
+        ogp_cache,
     )
 }
 
@@ -130,6 +130,7 @@ pub struct PinnedPopoverPanel {
     list_state: ListState,
     focus_handle: FocusHandle,
     avatar_image_cache: Entity<LruImageCache>,
+    ogp_image_cache: Entity<LruImageCache>,
     pin_cards: Vec<PinCardVm>,
     _subs: Vec<gpui::Subscription>,
 }
@@ -166,6 +167,7 @@ impl PinnedPopoverPanel {
         ];
 
         let avatar_image_cache = crate::image_cache::shared_avatar_cache(cx);
+        let ogp_image_cache = crate::image_cache::ogp_aux_cache("pinned-ogp", cx);
         let list_state = ListState::new(0, ListAlignment::Top, px(LIST_OVERDRAW)).measure_all();
 
         let mut panel = Self {
@@ -174,6 +176,7 @@ impl PinnedPopoverPanel {
             list_state,
             focus_handle,
             avatar_image_cache,
+            ogp_image_cache,
             pin_cards: Vec::new(),
             _subs: subs,
         };
@@ -240,6 +243,7 @@ impl Render for PinnedPopoverPanel {
         let clan_id = store.read(cx).clan_id();
         let handle = self.popover_handle.clone();
         let avatar_cache = self.avatar_image_cache.clone();
+        let ogp_cache = self.ogp_image_cache.clone();
         let tokens = &theme.tokens;
 
         if let Some(clan_id) = clan_id {
@@ -285,6 +289,7 @@ impl Render for PinnedPopoverPanel {
                 handle,
                 list_state,
                 avatar_cache,
+                ogp_cache,
                 panel_max_h,
                 window,
                 cx,
@@ -330,6 +335,7 @@ fn render_body(
     popover_handle: PopoverMenuHandle<PinnedPopoverPanel>,
     list_state: ListState,
     avatar_cache: Entity<LruImageCache>,
+    ogp_cache: Entity<LruImageCache>,
     panel_max_h: f32,
     window: &mut Window,
     cx: &mut Context<PinnedPopoverPanel>,
@@ -368,6 +374,7 @@ fn render_body(
         let locale_for_list = locale.clone();
         let handle_for_list = popover_handle.clone();
         let avatar_for_list = avatar_cache.clone();
+        let ogp_for_list = ogp_cache.clone();
         div()
             .size_full()
             .overflow_hidden()
@@ -377,7 +384,7 @@ fn render_body(
             .pr(px(LIST_PAD_X))
             .py(px(LIST_PAD_Y))
             .child(
-                list(list_state.clone(), move |ix, _window, cx| {
+                list(list_state.clone(), move |ix, _window, _cx| {
                     let Some(vm) = cards_for_list.get(ix) else {
                         return div().into_any_element();
                     };
@@ -391,7 +398,7 @@ fn render_body(
                             &locale_for_list,
                             handle_for_list.clone(),
                             avatar_for_list.clone(),
-                            cx,
+                            ogp_for_list.clone(),
                         ))
                         .into_any_element()
                 })
@@ -459,7 +466,7 @@ fn pin_card(
     locale: &str,
     popover_handle: PopoverMenuHandle<PinnedPopoverPanel>,
     avatar_cache: Entity<LruImageCache>,
-    cx: &App,
+    ogp_cache: Entity<LruImageCache>,
 ) -> gpui::AnyElement {
     let tokens = &theme.tokens;
     let group_name = SharedString::from(format!("pin-card-{index}"));
@@ -502,7 +509,7 @@ fn pin_card(
                 .child(format_pin_time(vm.create_time, locale)),
         );
 
-    let content = render_pin_body(&vm.pin, &vm.text_spans, theme, avatar_cache, cx);
+    let content = render_pin_body(&vm.pin, &vm.text_spans, theme, avatar_cache, ogp_cache);
 
     let jump_message_id = vm.message_id.clone();
     let jump_handle = popover_handle.clone();
@@ -580,7 +587,7 @@ fn render_pin_body(
     text_spans: &[MessageSpan],
     theme: &Theme,
     image_cache: Entity<LruImageCache>,
-    cx: &App,
+    ogp_cache: Entity<LruImageCache>,
 ) -> gpui::AnyElement {
     let message_id = pin.message_id.parse::<MessageId>().unwrap_or(MessageId(0));
     let text_body = render_pin_text_body(pin, text_spans, theme);
@@ -597,7 +604,7 @@ fn render_pin_body(
     let ogp = pin
         .ogp
         .as_ref()
-        .and_then(|ogp| render_ogp_preview(ogp, message_id, theme, cx));
+        .and_then(|ogp| render_ogp_preview(ogp, message_id, theme, ogp_cache));
     let embeds = render_pin_embeds(&pin.embeds, theme, image_cache);
 
     v_flex()

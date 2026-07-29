@@ -40,6 +40,7 @@ pub struct ConfirmPinMessageModal {
     cancel_label: SharedString,
     confirm_label: SharedString,
     avatar_image_cache: Entity<LruImageCache>,
+    ogp_image_cache: Entity<LruImageCache>,
     _subs: Vec<Subscription>,
 }
 
@@ -56,6 +57,7 @@ pub struct ConfirmUnpinMessageModal {
     cancel_label: SharedString,
     confirm_label: SharedString,
     avatar_image_cache: Entity<LruImageCache>,
+    ogp_image_cache: Entity<LruImageCache>,
     _subs: Vec<Subscription>,
 }
 
@@ -159,6 +161,7 @@ impl ConfirmPinMessageModal {
                 .to_string()
                 .into(),
             avatar_image_cache: crate::image_cache::shared_avatar_cache(cx),
+            ogp_image_cache: crate::image_cache::ogp_aux_cache("pin-confirm-ogp", cx),
             _subs: member_subscriptions(cx),
         });
         let focus_handle = view.read(cx).focus_handle.clone();
@@ -183,6 +186,7 @@ impl ConfirmPinMessageModal {
             self.channel_id,
             &self.locale,
             self.avatar_image_cache.clone(),
+            self.ogp_image_cache.clone(),
             cx,
         )
     }
@@ -228,6 +232,7 @@ impl ConfirmUnpinMessageModal {
                 .to_string()
                 .into(),
             avatar_image_cache: crate::image_cache::shared_avatar_cache(cx),
+            ogp_image_cache: crate::image_cache::ogp_aux_cache("unpin-confirm-ogp", cx),
             _subs: member_subscriptions_unpin(cx),
         });
         let focus_handle = view.read(cx).focus_handle.clone();
@@ -262,6 +267,7 @@ impl ConfirmUnpinMessageModal {
             &self.fallback_sender_label,
             &self.locale,
             self.avatar_image_cache.clone(),
+            self.ogp_image_cache.clone(),
             cx,
         ))
     }
@@ -285,6 +291,7 @@ fn preview_from_message(
     channel_id: Option<ChannelId>,
     locale: &str,
     image_cache: Entity<LruImageCache>,
+    ogp_cache: Entity<LruImageCache>,
     cx: &App,
 ) -> MessagePreview {
     let theme = cx.theme();
@@ -322,7 +329,7 @@ fn preview_from_message(
         sender_label,
         avatar_src,
         avatar_fallback,
-        body: render_pin_message_preview(msg, theme, image_cache, cx),
+        body: render_pin_message_preview(msg, theme, image_cache, ogp_cache),
         timestamp,
     }
 }
@@ -334,6 +341,7 @@ fn preview_from_pin(
     fallback_sender_label: &SharedString,
     _locale: &str,
     image_cache: Entity<LruImageCache>,
+    ogp_cache: Entity<LruImageCache>,
     cx: &App,
 ) -> MessagePreview {
     let theme = cx.theme();
@@ -371,7 +379,7 @@ fn preview_from_pin(
         sender_label,
         avatar_src,
         avatar_fallback,
-        body: render_pinned_message_preview(pin, theme, image_cache, cx),
+        body: render_pinned_message_preview(pin, theme, image_cache, ogp_cache),
         timestamp: None,
     }
 }
