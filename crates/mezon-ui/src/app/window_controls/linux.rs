@@ -1,9 +1,9 @@
-use gpui::{Div, MouseButton, Pixels, Rgba, StyleRefinement, Window, prelude::*, px, rgb};
+use gpui::{App, Div, MouseButton, Pixels, Rgba, StyleRefinement, Window, prelude::*, px, rgb};
 
 use crate::components::primitives::{Icon, IconName};
 use crate::theme::Theme;
 
-use super::{CONTROL_CLOSE_HOVER, control_button, controls_row};
+use super::{CONTROL_CLOSE_HOVER, control_button, controls_row, hide_main_window};
 
 pub fn render_controls(theme: &Theme, window: &Window) -> impl IntoElement {
     let hover = theme.bg_hover;
@@ -21,21 +21,25 @@ pub fn render_controls(theme: &Theme, window: &Window) -> impl IntoElement {
             icon_size,
             IconName::WindowMinimize,
             move |style| style.bg(hover),
-            |window| window.minimize_window(),
+            |window, _| window.minimize_window(),
         ))
         .child(window_control_button(
             color,
             icon_size,
             zoom_icon,
             move |style| style.bg(hover),
-            |window| window.zoom_window(),
+            |window, _| window.zoom_window(),
         ))
         .child(window_control_button(
             color,
             icon_size,
             IconName::WindowClose,
             |style| style.bg(rgb(CONTROL_CLOSE_HOVER)).text_color(gpui::white()),
-            |window| window.remove_window(),
+            |window, cx| {
+                if !hide_main_window(window, cx) {
+                    window.remove_window();
+                }
+            },
         ))
 }
 
@@ -44,13 +48,13 @@ fn window_control_button(
     icon_size: Pixels,
     icon: IconName,
     hover: impl FnOnce(StyleRefinement) -> StyleRefinement + 'static,
-    on_click: impl Fn(&mut Window) + 'static,
+    on_click: impl Fn(&mut Window, &mut App) + 'static,
 ) -> Div {
     control_button(color)
         .hover(hover)
         .on_mouse_down(MouseButton::Left, move |_, window, cx| {
             cx.stop_propagation();
-            on_click(window);
+            on_click(window, cx);
         })
         .child(Icon::new(icon).size(icon_size).text_color(color))
 }

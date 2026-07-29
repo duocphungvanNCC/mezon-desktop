@@ -165,6 +165,7 @@ pub struct MessageSearchPanel {
     last_results_page: i32,
     avatar_image_cache: Entity<LruImageCache>,
     attachment_image_cache: Entity<LruImageCache>,
+    ogp_image_cache: Entity<LruImageCache>,
     cached_rows: Rc<Vec<SearchListRow>>,
     cached_highlights: Rc<Vec<String>>,
     rows_cache_fp: Option<(u64, u64)>,
@@ -233,6 +234,7 @@ impl MessageSearchPanel {
                     cx,
                 )
             }),
+            ogp_image_cache: crate::image_cache::ogp_aux_cache("message-search-ogp", cx),
             _subs: subs,
         }
     }
@@ -271,7 +273,8 @@ impl MessageSearchPanel {
 
 impl Render for MessageSearchPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        crate::image_cache::sweep_ogp_cache(window, cx);
+        self.ogp_image_cache
+            .update(cx, |cache, cx| cache.sweep_once_per_frame(window, cx));
         self.avatar_image_cache
             .update(cx, |cache, cx| cache.sweep_once_per_frame(window, cx));
         self.attachment_image_cache
@@ -379,6 +382,7 @@ impl Render for MessageSearchPanel {
             let highlight_terms = self.cached_highlights.clone();
             let avatar_cache = self.avatar_image_cache.clone();
             let attachment_cache = self.attachment_image_cache.clone();
+            let ogp_cache = self.ogp_image_cache.clone();
             let pagination = (page_count > 1)
                 .then(|| render_search_pagination(&theme, current_page, page_count, panel));
             if self.list_state.item_count() != self.cached_rows.len() {
@@ -425,6 +429,7 @@ impl Render for MessageSearchPanel {
                                         is_direct,
                                         avatar_cache.clone(),
                                         attachment_cache.clone(),
+                                        ogp_cache.clone(),
                                         cx,
                                     ))
                                     .into_any_element()
@@ -690,6 +695,7 @@ fn render_search_row(
     is_direct: bool,
     avatar_image_cache: Entity<LruImageCache>,
     attachment_image_cache: Entity<LruImageCache>,
+    ogp_image_cache: Entity<LruImageCache>,
     cx: &App,
 ) -> gpui::AnyElement {
     let hit_for_jump = hit.clone();
@@ -867,8 +873,12 @@ fn render_search_row(
                                     )
                                 })
                                 .children(ogp.as_ref().and_then(|ogp| {
-                                    let preview =
-                                        render_ogp_preview(ogp, hit.message_id, theme, cx)?;
+                                    let preview = render_ogp_preview(
+                                        ogp,
+                                        hit.message_id,
+                                        theme,
+                                        ogp_image_cache.clone(),
+                                    )?;
                                     Some(
                                         div()
                                             .w_full()

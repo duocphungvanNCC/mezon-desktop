@@ -74,6 +74,8 @@ pub struct ContextMenu {
 
 const SUBMENU_WIDTH: f32 = 240.;
 const MENU_WIDTH_ESTIMATE: f32 = 240.;
+const QUICK_REACTION_EMOJI_PX: f32 = 24.;
+const QUICK_REACTION_EMOJI_SOURCE_PX: u32 = 48;
 
 impl ContextMenu {
     pub fn new() -> Self {
@@ -347,7 +349,11 @@ impl RenderOnce for ContextMenu {
             for (index, reaction) in self.quick_reactions.into_iter().enumerate() {
                 let emoji_id = reaction.emoji_id.clone();
                 let shortname = reaction.shortname.clone();
-                let src = crate::util::imgproxy::emoji_url(cx, &reaction.emoji_id);
+                let src = crate::util::imgproxy::emoji_url_sized(
+                    cx,
+                    &reaction.emoji_id,
+                    QUICK_REACTION_EMOJI_SOURCE_PX,
+                );
                 let dismiss_click = dismiss.clone();
                 let on_react = on_quick_reaction.clone();
                 let mut cell = div()
@@ -369,22 +375,24 @@ impl RenderOnce for ContextMenu {
                     });
                 if !src.is_empty() {
                     let fallback_color = muted;
-                    cell = cell.child(img(SharedString::from(src)).size(px(24.)).with_fallback(
-                        move || {
-                            div()
-                                .size(px(24.))
-                                .rounded(px(4.))
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .child(
-                                    Icon::new(IconName::ImageThumbnail)
-                                        .size(px(16.))
-                                        .text_color(fallback_color),
-                                )
-                                .into_any_element()
-                        },
-                    ));
+                    cell = cell.child(
+                        img(SharedString::from(src))
+                            .size(px(QUICK_REACTION_EMOJI_PX))
+                            .with_fallback(move || {
+                                div()
+                                    .size(px(QUICK_REACTION_EMOJI_PX))
+                                    .rounded(px(4.))
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .child(
+                                        Icon::new(IconName::ImageThumbnail)
+                                            .size(px(16.))
+                                            .text_color(fallback_color),
+                                    )
+                                    .into_any_element()
+                            }),
+                    );
                 }
                 reaction_row = reaction_row.child(cell);
             }
@@ -630,7 +638,11 @@ impl RenderOnce for ContextMenu {
                         for (ri, reaction) in reactions.iter().enumerate() {
                             let emoji_id = reaction.emoji_id.clone();
                             let shortname = reaction.shortname.clone();
-                            let src = crate::util::imgproxy::emoji_url(cx, &reaction.emoji_id);
+                            let src = crate::util::imgproxy::emoji_url_sized(
+                                cx,
+                                &reaction.emoji_id,
+                                QUICK_REACTION_EMOJI_SOURCE_PX,
+                            );
                             let shortname_label = SharedString::from(reaction.shortname.clone());
                             let on_react = on_react.clone();
                             let dismiss_r = dismiss.clone();
@@ -655,11 +667,11 @@ impl RenderOnce for ContextMenu {
                             if !src.is_empty() {
                                 row = row.child(
                                     img(SharedString::from(src))
-                                        .size(px(24.))
+                                        .size(px(QUICK_REACTION_EMOJI_PX))
                                         .flex_none()
                                         .with_fallback(move || {
                                             div()
-                                                .size(px(24.))
+                                                .size(px(QUICK_REACTION_EMOJI_PX))
                                                 .flex()
                                                 .items_center()
                                                 .justify_center()

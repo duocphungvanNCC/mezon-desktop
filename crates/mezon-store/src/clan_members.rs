@@ -296,8 +296,17 @@ impl ClanMembersStore {
                             .read(cx)
                             .current_user_id(cx)
                             .map(|uid| uid.0);
-                        let online_users = online_result.unwrap_or_default();
-                        let online_ids = online_ids_from_users(&online_users, self_id);
+                        let mut degraded = false;
+                        let online_ids = match online_result {
+                            Ok(online_users) => online_ids_from_users(&online_users, self_id),
+                            Err(e) => {
+                                degraded = true;
+                                tracing::warn!(
+                                    "list_user_online failed for {clan_id}, keeping the known online set: {e}"
+                                );
+                                previous_online_ids(&this.cache, clan_id)
+                            }
+                        };
                         let mut bucket = ClanBucket::default();
                         for cu in users {
                             if let Some(mut member) = clan_member_from_proto(cu) {
@@ -323,9 +332,19 @@ impl ClanMembersStore {
                         prune_self_roles(&this.cache, &mut this.self_role_ids);
                         let online_uids: Vec<UserId> =
                             online_ids.iter().map(|id| UserId(*id)).collect();
-                        let statuses = status_result
-                            .map(user_statuses_from_list)
-                            .unwrap_or_default();
+                        let statuses = match status_result {
+                            Ok(list) => user_statuses_from_list(list),
+                            Err(e) => {
+                                degraded = true;
+                                tracing::warn!(
+                                    "list_clan_users_status failed for {clan_id}: {e}"
+                                );
+                                Vec::new()
+                            }
+                        };
+                        if degraded {
+                            this.cache.mark_stale(&clan_id);
+                        }
                         PresenceStore::global(cx).update(cx, |presence, cx| {
                             presence.seed_presence(&online_uids, &statuses, cx);
                         });
@@ -518,6 +537,20 @@ fn user_statuses_from_list(list: api::ClanUserStatusList) -> Vec<(UserId, String
         .filter(|e| e.user_id != 0)
         .map(|e| (UserId(e.user_id), e.user_status))
         .collect()
+}
+
+fn previous_online_ids(cache: &KeyedCache<ClanId, ClanBucket>, clan_id: ClanId) -> HashSet<i64> {
+    cache
+        .get(&clan_id)
+        .map(|bucket| {
+            bucket
+                .by_id
+                .values()
+                .filter(|member| member.online)
+                .map(|member| member.user.id.0)
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 fn online_ids_from_users(users: &[api::User], self_id: Option<i64>) -> HashSet<i64> {
@@ -782,6 +815,34 @@ mod tests {
             "x",
             "y"
         ));
+    }
+
+    #[test]
+    fn previous_online_ids_carries_the_last_known_online_set() {
+        let mut online_member = member(1, "online");
+        online_member.online = true;
+        let cache = bucket_with(vec![online_member, member(2, "offline")]);
+
+        let carried = previous_online_ids(&cache, ClanId(1));
+        assert_eq!(carried, [1].into_iter().collect::<HashSet<i64>>());
+        assert!(previous_online_ids(&cache, ClanId(99)).is_empty());
+    }
+
+    #[test]
+    fn a_degraded_member_fetch_is_not_pinned_fresh_for_the_ttl() {
+        let mut cache = bucket_with(vec![member(1, "a")]);
+        assert!(cache.is_fresh(&ClanId(1), crate::CACHE_TTL));
+
+        cache.mark_stale(&ClanId(1));
+
+        assert!(
+            !cache.is_fresh(&ClanId(1), crate::CACHE_TTL),
+            "a partial fetch must be refetched on the next clan entry"
+        );
+        assert!(
+            cache.get(&ClanId(1)).is_some(),
+            "the members already loaded must still be served"
+        );
     }
 
     #[test]

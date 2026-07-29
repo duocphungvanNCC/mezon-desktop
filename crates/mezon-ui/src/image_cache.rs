@@ -141,44 +141,32 @@ impl Global for SharedRoleIconCache {}
 struct SharedRoleIconPreviewCache(Entity<LruImageCache>);
 impl Global for SharedRoleIconPreviewCache {}
 
-struct SharedOgpCache(Entity<LruImageCache>);
-impl Global for SharedOgpCache {}
+const OGP_TIMELINE_CACHE_CAPACITY: usize = 12;
+const OGP_TIMELINE_CACHE_BYTES: u64 = 6 * 1024 * 1024;
+const OGP_AUX_CACHE_CAPACITY: usize = 4;
+const OGP_AUX_CACHE_BYTES: u64 = 2 * 1024 * 1024;
+const OGP_ENTRY_MAX_BYTES: u64 = 1024 * 1024;
 
-const OGP_SHARED_CACHE_CAPACITY: usize = 16;
-const OGP_SHARED_CACHE_BYTES: u64 = 8 * 1024 * 1024;
-const OGP_SHARED_ENTRY_MAX_BYTES: u64 = 2 * 1024 * 1024;
-
-/// App-global, bounded, aspect-preserving cache for OGP link-preview images
-/// (decode-capped at [`OGP_THUMB_DECODE_MAX_PX`]), so previews never share/evict
-/// the message image cache and large external OG images decode downscaled. Must
-/// be initialized once with a `&mut App`; read from render via [`ogp_image_cache`].
-pub fn shared_ogp_cache(cx: &mut App) -> Entity<LruImageCache> {
-    if let Some(existing) = cx.try_global::<SharedOgpCache>() {
-        return existing.0.clone();
-    }
-    let cache = cx.new(|cx| {
-        LruImageCache::ogp_thumbnail(
-            "ogp-shared",
-            OGP_SHARED_CACHE_CAPACITY,
-            OGP_SHARED_CACHE_BYTES,
-            OGP_SHARED_ENTRY_MAX_BYTES,
-            cx,
-        )
-    });
-    cx.set_global(SharedOgpCache(cache.clone()));
-    cache
+pub fn ogp_timeline_cache(label: &'static str, cx: &mut App) -> Entity<LruImageCache> {
+    ogp_preview_cache(
+        label,
+        OGP_TIMELINE_CACHE_CAPACITY,
+        OGP_TIMELINE_CACHE_BYTES,
+        cx,
+    )
 }
 
-/// The app-global OGP image cache if [`shared_ogp_cache`] has been initialized.
-pub fn ogp_image_cache(app: &App) -> Option<Entity<LruImageCache>> {
-    app.try_global::<SharedOgpCache>()
-        .map(|cache| cache.0.clone())
+pub fn ogp_aux_cache(label: &'static str, cx: &mut App) -> Entity<LruImageCache> {
+    ogp_preview_cache(label, OGP_AUX_CACHE_CAPACITY, OGP_AUX_CACHE_BYTES, cx)
 }
 
-pub fn sweep_ogp_cache(window: &mut Window, cx: &mut App) {
-    if let Some(cache) = ogp_image_cache(cx) {
-        cache.update(cx, |cache, cx| cache.sweep_once_per_frame(window, cx));
-    }
+fn ogp_preview_cache(
+    label: &'static str,
+    capacity: usize,
+    bytes: u64,
+    cx: &mut App,
+) -> Entity<LruImageCache> {
+    cx.new(|cx| LruImageCache::ogp_thumbnail(label, capacity, bytes, OGP_ENTRY_MAX_BYTES, cx))
 }
 
 /// Shared decode cache for role icons. They render at 12-20px everywhere, so
@@ -1835,7 +1823,13 @@ mod tests {
         assert_eq!(PREVIEW_IMAGE_CACHE_CAPACITY, 64);
         assert_eq!(PREVIEW_IMAGE_CACHE_BYTES, 32 * 1024 * 1024);
         assert_eq!(SHARED_IMAGE_CACHE_BYTES, 24 * 1024 * 1024);
-        assert_eq!(OGP_SHARED_CACHE_BYTES, 8 * 1024 * 1024);
+        assert_eq!(OGP_TIMELINE_CACHE_BYTES, 6 * 1024 * 1024);
+        assert_eq!(OGP_AUX_CACHE_BYTES, 2 * 1024 * 1024);
+        assert_eq!(
+            OGP_TIMELINE_CACHE_BYTES + 3 * OGP_AUX_CACHE_BYTES,
+            12 * 1024 * 1024,
+            "one timeline plus the search and two composer caches must stay near the old single-cache budget"
+        );
         assert_eq!(IDLE_TRIM_INTERVAL, Duration::from_secs(30));
         assert_eq!(IDLE_TRIM_TTL, Duration::from_secs(60));
     }
@@ -1863,6 +1857,25 @@ mod tests {
             GRACE_PERIOD + Duration::from_millis(1),
             GRACE_PERIOD
         ));
+    }
+
+    #[gpui::test]
+    fn each_view_gets_its_own_ogp_cache(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let timeline = ogp_timeline_cache("timeline-ogp", cx);
+            let composer = ogp_aux_cache("composer-ogp", cx);
+
+            assert_ne!(
+                timeline.read(cx).instance,
+                composer.read(cx).instance,
+                "sharing one OGP cache lets a sweep from the view that rendered this frame \
+                 evict previews that are still on screen in a view that did not"
+            );
+            assert!(
+                timeline.read(cx).max_bytes > composer.read(cx).max_bytes,
+                "the timeline holds many previews at once; the composer holds at most the pending one"
+            );
+        });
     }
 
     #[test]
