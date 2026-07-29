@@ -92,6 +92,12 @@ struct InProgressConfigure {
 pub struct WaylandWindowState {
     surface_state: WaylandSurfaceState,
     acknowledged_first_configure: bool,
+    /// mezon vendor edit: set while the surface is unmapped by
+    /// `PlatformWindow::hide` (hide-to-tray). xdg-shell has no hide request, so
+    /// hiding means attaching a null buffer; rendering must stay gated until
+    /// `activate` restarts the configure cycle, otherwise the next present
+    /// re-attaches a buffer and silently maps the window again.
+    unmapped: bool,
     parent: Option<WaylandWindowStatePtr>,
     children: FxHashSet<ObjectId>,
     pub surface: wl_surface::WlSurface,
@@ -368,6 +374,7 @@ impl WaylandWindowState {
         Ok(Self {
             surface_state,
             acknowledged_first_configure: false,
+            unmapped: false,
             parent,
             children: FxHashSet::default(),
             surface,
@@ -1270,6 +1277,22 @@ impl PlatformWindow for WaylandWindow {
     }
 
     fn activate(&self) {
+        // mezon vendor edit: undo a `hide()` (hide-to-tray). Committing without a
+        // buffer restarts the xdg_surface configure cycle; `handle_xdg_surface_event`
+        // acks it and drives the first frame, which attaches a buffer and maps the
+        // window again.
+        {
+            let mut state = self.borrow_mut();
+            if state.unmapped {
+                state.unmapped = false;
+                // The remap frame must actually present, otherwise no buffer is
+                // attached and the surface stays invisible. Nothing else marks
+                // the window dirty here, so force the frame.
+                state.force_render_after_recovery = true;
+                state.surface.commit();
+            }
+        }
+
         // Try to request an activation token. Even though the activation is likely going to be rejected,
         // KWin and Mutter can use the app_id to visually indicate we're requesting attention.
         let state = self.borrow();
@@ -1334,6 +1357,22 @@ impl PlatformWindow for WaylandWindow {
         if let Some(toplevel) = self.borrow().surface_state.toplevel() {
             toplevel.set_minimized();
         }
+    }
+
+    /// mezon vendor edit: implement hide-to-tray. xdg-shell has no hide request,
+    /// so unmap the surface by attaching a null buffer. Per xdg-shell the surface
+    /// then returns to its initial unconfigured state, which is why
+    /// `acknowledged_first_configure` is reset — `activate` recommits to restart
+    /// the configure handshake and remap.
+    fn hide(&self) {
+        let mut state = self.borrow_mut();
+        if state.unmapped {
+            return;
+        }
+        state.unmapped = true;
+        state.acknowledged_first_configure = false;
+        state.surface.attach(None, 0, 0);
+        state.surface.commit();
     }
 
     fn zoom(&self) {
@@ -1411,6 +1450,12 @@ impl PlatformWindow for WaylandWindow {
     fn draw(&self, scene: &Scene) {
         let mut state = self.borrow_mut();
 
+        // mezon vendor edit: presenting attaches a buffer, which would remap a
+        // surface hidden to tray. Stay dark until `activate` unmaps the flag.
+        if state.unmapped {
+            return;
+        }
+
         if state.renderer.device_lost() {
             let raw_window = RawWindow {
                 window: state.surface.id().as_ptr().cast::<std::ffi::c_void>(),
@@ -1445,7 +1490,9 @@ impl PlatformWindow for WaylandWindow {
 
         // Work around a bug in old versions of wlroots where committing without a buffer attached
         // can cause invalid synchronization that leads to graphical corruption.
-        if !state.renderer_presented {
+        // mezon vendor edit: skip while unmapped — this commit would restart the
+        // configure cycle behind `activate`'s back and remap the hidden window.
+        if !state.renderer_presented && !state.unmapped {
             state.surface.commit();
         }
 
