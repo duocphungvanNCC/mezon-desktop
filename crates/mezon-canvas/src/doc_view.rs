@@ -36,14 +36,22 @@ pub fn render_tiptap_node(doc: TipTapNode, theme: &Theme, cx: &App) -> gpui::Any
         if children.is_empty() {
             return div().into_any_element();
         }
+        let mut elements = Vec::with_capacity(children.len());
+        let mut ordered_next = 1usize;
+        for (i, node) in children.into_iter().enumerate() {
+            if node.kind == "orderedList" {
+                let start = ordered_list_start(&node).max(ordered_next);
+                let count = ordered_list_item_count(&node);
+                elements.push(render_node(node, theme, cx, 0, i as u64, Some(start)));
+                ordered_next = start + count;
+            } else {
+                elements.push(render_node(node, theme, cx, 0, i as u64, None));
+            }
+        }
         return v_flex()
             .w_full()
-            .children(
-                children
-                    .into_iter()
-                    .enumerate()
-                    .map(|(i, n)| render_node(n, theme, cx, 0, i as u64)),
-            )
+            .min_w_0()
+            .children(elements)
             .into_any_element();
     }
     div()
@@ -51,6 +59,18 @@ pub fn render_tiptap_node(doc: TipTapNode, theme: &Theme, cx: &App) -> gpui::Any
         .text_color(theme.tokens.text_theme_message)
         .child(doc.kind)
         .into_any_element()
+}
+
+fn ordered_list_start(node: &TipTapNode) -> usize {
+    node.attrs
+        .as_ref()
+        .and_then(|attrs| attrs.get("start"))
+        .and_then(|value| value.as_u64())
+        .unwrap_or(1) as usize
+}
+
+fn ordered_list_item_count(node: &TipTapNode) -> usize {
+    node.content.as_ref().map(|items| items.len()).unwrap_or(0)
 }
 
 fn inline_scope(parent: u64, index: usize) -> u64 {
@@ -63,6 +83,7 @@ fn render_node(
     cx: &App,
     depth: usize,
     scope_id: u64,
+    ordered_start: Option<usize>,
 ) -> gpui::AnyElement {
     let tokens = &theme.tokens;
     match node.kind.as_str() {
@@ -102,6 +123,7 @@ fn render_node(
         }
         "bulletList" | "taskList" => v_flex()
             .w_full()
+            .min_w_0()
             .pl(px(8. + depth as f32 * 8.))
             .children(
                 node.content
@@ -114,12 +136,21 @@ fn render_node(
             )
             .into_any_element(),
         "orderedList" => {
+            let start = ordered_start.unwrap_or_else(|| ordered_list_start(&node));
             let items = node.content.unwrap_or_default();
             v_flex()
                 .w_full()
+                .min_w_0()
                 .pl(px(8. + depth as f32 * 8.))
                 .children(items.into_iter().enumerate().map(|(i, n)| {
-                    render_list_item_numbered(n, theme, cx, depth, i + 1, inline_scope(scope_id, i))
+                    render_list_item_numbered(
+                        n,
+                        theme,
+                        cx,
+                        depth,
+                        start + i,
+                        inline_scope(scope_id, i),
+                    )
                 }))
                 .into_any_element()
         }
@@ -172,11 +203,9 @@ fn render_node(
             if let Some(children) = node.content {
                 v_flex()
                     .w_full()
-                    .children(
-                        children.into_iter().enumerate().map(|(i, n)| {
-                            render_node(n, theme, cx, depth, inline_scope(scope_id, i))
-                        }),
-                    )
+                    .children(children.into_iter().enumerate().map(|(i, n)| {
+                        render_node(n, theme, cx, depth, inline_scope(scope_id, i), None)
+                    }))
                     .into_any_element()
             } else {
                 div().into_any_element()
@@ -200,11 +229,12 @@ fn render_block_children(
     }
     v_flex()
         .w_full()
+        .min_w_0()
         .children(
             children
                 .into_iter()
                 .enumerate()
-                .map(|(i, n)| render_node(n, theme, cx, depth, inline_scope(scope_id, i))),
+                .map(|(i, n)| render_node(n, theme, cx, depth, inline_scope(scope_id, i), None)),
         )
         .into_any_element()
 }
@@ -230,10 +260,12 @@ fn render_list_item(
     };
     h_flex()
         .w_full()
+        .min_w_0()
         .items_start()
         .gap_1()
         .child(
             div()
+                .flex_shrink_0()
                 .text_size(CANVAS_BODY_FONT_SIZE)
                 .line_height(CANVAS_BODY_LINE_HEIGHT)
                 .text_color(theme.tokens.text_theme_message)
@@ -245,7 +277,9 @@ fn render_list_item(
                     .unwrap_or_default()
                     .into_iter()
                     .enumerate()
-                    .map(|(i, n)| render_node(n, theme, cx, depth + 1, inline_scope(scope_id, i))),
+                    .map(|(i, n)| {
+                        render_node(n, theme, cx, depth + 1, inline_scope(scope_id, i), None)
+                    }),
             ),
         )
         .into_any_element()
@@ -261,10 +295,12 @@ fn render_list_item_numbered(
 ) -> gpui::AnyElement {
     h_flex()
         .w_full()
+        .min_w_0()
         .items_start()
         .gap_1()
         .child(
             div()
+                .flex_shrink_0()
                 .text_size(CANVAS_BODY_FONT_SIZE)
                 .line_height(CANVAS_BODY_LINE_HEIGHT)
                 .text_color(theme.tokens.text_theme_message)
@@ -276,7 +312,9 @@ fn render_list_item_numbered(
                     .unwrap_or_default()
                     .into_iter()
                     .enumerate()
-                    .map(|(i, n)| render_node(n, theme, cx, depth + 1, inline_scope(scope_id, i))),
+                    .map(|(i, n)| {
+                        render_node(n, theme, cx, depth + 1, inline_scope(scope_id, i), None)
+                    }),
             ),
         )
         .into_any_element()
