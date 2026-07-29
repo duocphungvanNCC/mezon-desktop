@@ -18,7 +18,8 @@ use mezon_widgets::{
 };
 
 pub(crate) const CANVAS_CONTENT_HORIZONTAL_PADDING: Pixels = px(16.);
-const CANVAS_CONTENT_MAX_WIDTH: DefiniteLength = relative(0.8);
+pub(crate) const CANVAS_CONTENT_MAX_WIDTH_RATIO: f32 = 0.8;
+const CANVAS_CONTENT_MAX_WIDTH: DefiniteLength = relative(CANVAS_CONTENT_MAX_WIDTH_RATIO);
 pub(crate) const CANVAS_BODY_FONT_SIZE: Pixels = px(15.);
 pub(crate) const CANVAS_BODY_LINE_HEIGHT: Pixels = px(22.5);
 

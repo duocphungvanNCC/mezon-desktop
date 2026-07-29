@@ -37,16 +37,9 @@ pub fn render_tiptap_node(doc: TipTapNode, theme: &Theme, cx: &App) -> gpui::Any
             return div().into_any_element();
         }
         let mut elements = Vec::with_capacity(children.len());
-        let mut ordered_next = 1usize;
         for (i, node) in children.into_iter().enumerate() {
-            if node.kind == "orderedList" {
-                let start = ordered_list_start(&node).max(ordered_next);
-                let count = ordered_list_item_count(&node);
-                elements.push(render_node(node, theme, cx, 0, i as u64, Some(start)));
-                ordered_next = start + count;
-            } else {
-                elements.push(render_node(node, theme, cx, 0, i as u64, None));
-            }
+            let ordered_start = (node.kind == "orderedList").then(|| ordered_list_start(&node));
+            elements.push(render_node(node, theme, cx, 0, i as u64, ordered_start));
         }
         return v_flex()
             .w_full()
@@ -67,10 +60,6 @@ fn ordered_list_start(node: &TipTapNode) -> usize {
         .and_then(|attrs| attrs.get("start"))
         .and_then(|value| value.as_u64())
         .unwrap_or(1) as usize
-}
-
-fn ordered_list_item_count(node: &TipTapNode) -> usize {
-    node.content.as_ref().map(|items| items.len()).unwrap_or(0)
 }
 
 fn inline_scope(parent: u64, index: usize) -> u64 {

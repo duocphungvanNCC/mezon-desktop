@@ -27,8 +27,8 @@ use crate::image::{
     remember_canvas_image_size,
 };
 use crate::view::{
-    CANVAS_CONTENT_HORIZONTAL_PADDING, TipTapMark, TipTapNode, is_tiptap_content_empty,
-    parse_tiptap_doc,
+    CANVAS_CONTENT_HORIZONTAL_PADDING, CANVAS_CONTENT_MAX_WIDTH_RATIO, TipTapMark, TipTapNode,
+    is_tiptap_content_empty, parse_tiptap_doc,
 };
 use mezon_theme::ActiveTheme;
 use mezon_widgets::{
@@ -37,7 +37,6 @@ use mezon_widgets::{
 
 const KEY_CONTEXT: &str = "MezonCanvasEditor";
 const CANVAS_IMAGE_MARGIN: Pixels = px(16.);
-const CANVAS_CONTENT_MAX_WIDTH_RATIO: f32 = 0.8;
 const CANVAS_MIN_LAYOUT_WIDTH: Pixels = px(64.);
 const CANVAS_LAYOUT_WIDTH_FALLBACK: Pixels = px(480.);
 
@@ -168,6 +167,7 @@ struct EditorLine {
     text: String,
     marks: Vec<EditorMark>,
     image_src: Option<String>,
+    ordered_start: Option<usize>,
 }
 
 impl Default for EditorLine {
@@ -177,6 +177,7 @@ impl Default for EditorLine {
             text: String::new(),
             marks: Vec::new(),
             image_src: None,
+            ordered_start: None,
         }
     }
 }
@@ -468,6 +469,7 @@ impl CanvasEditorState {
             text: String::new(),
             marks: Vec::new(),
             image_src: Some(src),
+            ordered_start: None,
         };
 
         let image_ix = if self.lines[line_ix].block == BlockKind::Image {
@@ -500,6 +502,7 @@ impl CanvasEditorState {
                             text: tail,
                             marks: Vec::new(),
                             image_src: None,
+                            ordered_start: None,
                         },
                     );
                 }
@@ -731,6 +734,7 @@ impl CanvasEditorState {
         let current = self.lines[line_ix].clone();
         if is_list_block(current.block) && current.text.is_empty() {
             self.lines[line_ix].block = BlockKind::Paragraph;
+            self.lines[line_ix].ordered_start = None;
             self.rebuild_buffer();
             self.move_to(self.line_col_to_offset(line_ix, 0), cx);
             return;
@@ -780,6 +784,7 @@ impl CanvasEditorState {
                 text: tail_text,
                 marks: tail_marks,
                 image_src: None,
+                ordered_start: None,
             },
         );
         self.rebuild_buffer();
@@ -819,6 +824,7 @@ impl CanvasEditorState {
             return;
         }
         self.lines[line_ix].block = BlockKind::Paragraph;
+        self.lines[line_ix].ordered_start = None;
         self.rebuild_buffer();
         self.move_to(self.line_col_to_offset(line_ix, 0), cx);
     }
@@ -840,7 +846,6 @@ impl CanvasEditorState {
     fn handle_list_backspace_at_line_start(
         &mut self,
         line_ix: usize,
-        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
         if line_ix >= self.lines.len() {
@@ -906,11 +911,12 @@ impl CanvasEditorState {
         if is_list_block(kind) {
             let all_match = self.lines[start..=end]
                 .iter()
-                .all(|line| line.block != BlockKind::Image && line.block == kind);
+                .all(|line| line.block != BlockKind::Image && list_blocks_same(line.block, kind));
             if all_match {
                 for line in &mut self.lines[start..=end] {
                     if line.block != BlockKind::Image {
                         line.block = BlockKind::Paragraph;
+                        line.ordered_start = None;
                     }
                 }
                 self.selected_range = selection;
@@ -921,7 +927,11 @@ impl CanvasEditorState {
                 return;
             }
         }
-        for line in &mut self.lines[start..=end] {
+        let starts_new_ordered_run: Vec<bool> = (start..=end)
+            .map(|line_ix| line_ix == 0 || self.lines[line_ix - 1].block != BlockKind::OrderedItem)
+            .collect();
+        for (offset, line_ix) in (start..=end).enumerate() {
+            let line = &mut self.lines[line_ix];
             if line.block == BlockKind::Image {
                 continue;
             }
@@ -929,6 +939,13 @@ impl CanvasEditorState {
                 BlockKind::TaskItem { checked: _ } => BlockKind::TaskItem { checked: false },
                 other => other,
             };
+            if matches!(kind, BlockKind::OrderedItem) {
+                if starts_new_ordered_run[offset] {
+                    line.ordered_start = None;
+                }
+            } else {
+                line.ordered_start = None;
+            }
         }
         self.selected_range = selection;
         self.block_menu_open = false;
@@ -1262,7 +1279,7 @@ impl CanvasEditorState {
         }
         if col == 0
             && self.selected_range.is_empty()
-            && self.handle_list_backspace_at_line_start(line, window, cx)
+            && self.handle_list_backspace_at_line_start(line, cx)
         {
             self.caret_blink.pause_blinking(cx);
             return;
@@ -2791,24 +2808,26 @@ fn is_list_block(block: BlockKind) -> bool {
 }
 
 fn list_blocks_same(a: BlockKind, b: BlockKind) -> bool {
-    match (a, b) {
-        (BlockKind::BulletItem, BlockKind::BulletItem) => true,
-        (BlockKind::OrderedItem, BlockKind::OrderedItem) => true,
-        (BlockKind::TaskItem { .. }, BlockKind::TaskItem { .. }) => true,
-        _ => false,
+    matches!(
+        (a, b),
+        (BlockKind::BulletItem, BlockKind::BulletItem)
+            | (BlockKind::OrderedItem, BlockKind::OrderedItem)
+            | (BlockKind::TaskItem { .. }, BlockKind::TaskItem { .. })
+    )
+}
+
+fn ordered_run_start_ix(lines: &[EditorLine], line_ix: usize) -> usize {
+    let mut start = line_ix;
+    while start > 0 && lines[start - 1].block == BlockKind::OrderedItem {
+        start -= 1;
     }
+    start
 }
 
 fn ordered_line_number(lines: &[EditorLine], line_ix: usize) -> usize {
-    lines[..line_ix]
-        .iter()
-        .filter(|line| line.block == BlockKind::OrderedItem)
-        .count()
-        + 1
-}
-
-fn ordered_list_start_for_line(lines: &[EditorLine], line_ix: usize) -> usize {
-    ordered_line_number(lines, line_ix)
+    let run_start = ordered_run_start_ix(lines, line_ix);
+    let base = lines[run_start].ordered_start.unwrap_or(1);
+    base + (line_ix - run_start)
 }
 
 fn block_paint_meta(
@@ -3352,6 +3371,7 @@ fn flatten_block(node: &TipTapNode, lines: &mut Vec<EditorLine>) {
             text: inline_to_text(node.content.as_ref()),
             marks: inline_to_marks(node.content.as_ref()),
             image_src: None,
+            ordered_start: None,
         }),
         "heading" => {
             let level = node
@@ -3365,6 +3385,7 @@ fn flatten_block(node: &TipTapNode, lines: &mut Vec<EditorLine>) {
                 text: inline_to_text(node.content.as_ref()),
                 marks: inline_to_marks(node.content.as_ref()),
                 image_src: None,
+                ordered_start: None,
             });
         }
         "blockquote" => {
@@ -3376,6 +3397,7 @@ fn flatten_block(node: &TipTapNode, lines: &mut Vec<EditorLine>) {
                             text: inline_to_text(child.content.as_ref()),
                             marks: inline_to_marks(child.content.as_ref()),
                             image_src: None,
+                            ordered_start: None,
                         });
                     } else {
                         flatten_block(child, lines);
@@ -3388,6 +3410,7 @@ fn flatten_block(node: &TipTapNode, lines: &mut Vec<EditorLine>) {
             text: inline_to_text(node.content.as_ref()),
             marks: Vec::new(),
             image_src: None,
+            ordered_start: None,
         }),
         "bulletList" => flatten_list(node, lines, BlockKind::BulletItem),
         "orderedList" => flatten_list(node, lines, BlockKind::OrderedItem),
@@ -3406,6 +3429,7 @@ fn flatten_block(node: &TipTapNode, lines: &mut Vec<EditorLine>) {
                     text: String::new(),
                     marks: Vec::new(),
                     image_src: Some(src),
+                    ordered_start: None,
                 });
             }
         }
@@ -3420,7 +3444,17 @@ fn flatten_block(node: &TipTapNode, lines: &mut Vec<EditorLine>) {
 }
 
 fn flatten_list(node: &TipTapNode, lines: &mut Vec<EditorLine>, kind: BlockKind) {
+    let ordered_start = (kind == BlockKind::OrderedItem)
+        .then(|| {
+            node.attrs
+                .as_ref()
+                .and_then(|attrs| attrs.get("start"))
+                .and_then(|value| value.as_u64())
+                .map(|value| value as usize)
+        })
+        .flatten();
     if let Some(children) = &node.content {
+        let mut first_item = true;
         for child in children {
             if child.kind == "listItem"
                 && let Some(inner) = &child.content
@@ -3432,7 +3466,9 @@ fn flatten_list(node: &TipTapNode, lines: &mut Vec<EditorLine>, kind: BlockKind)
                             text: inline_to_text(block.content.as_ref()),
                             marks: inline_to_marks(block.content.as_ref()),
                             image_src: None,
+                            ordered_start: if first_item { ordered_start } else { None },
                         });
+                        first_item = false;
                     } else {
                         flatten_block(block, lines);
                     }
@@ -3460,6 +3496,7 @@ fn flatten_task_list(node: &TipTapNode, lines: &mut Vec<EditorLine>) {
                                 text: inline_to_text(block.content.as_ref()),
                                 marks: inline_to_marks(block.content.as_ref()),
                                 image_src: None,
+                                ordered_start: None,
                             });
                         }
                     }
@@ -3547,7 +3584,7 @@ fn lines_to_tiptap_json(lines: &[EditorLine]) -> String {
             }
             BlockKind::OrderedItem => {
                 let (items, next) = collect_list_lines(lines, i, BlockKind::OrderedItem);
-                let start = ordered_list_start_for_line(lines, i);
+                let start = lines[i].ordered_start.unwrap_or(1);
                 content.push(json!({
                     "type": "orderedList",
                     "attrs": { "start": start, "type": null },
@@ -3939,6 +3976,7 @@ mod tests {
                 text: "G10".into(),
                 marks: Vec::new(),
                 image_src: None,
+                ordered_start: None,
             },
             EditorLine {
                 block: BlockKind::Paragraph,
@@ -3956,6 +3994,7 @@ mod tests {
                     },
                 ],
                 image_src: None,
+                ordered_start: None,
             },
             EditorLine::default(),
         ];
@@ -3990,18 +4029,21 @@ mod tests {
             text: String::new(),
             marks: Vec::new(),
             image_src: Some("https://cdn.mezon.ai/x.png".into()),
+            ordered_start: None,
         };
         let code = EditorLine {
             block: BlockKind::CodeBlock,
             text: "fn main() {}".into(),
             marks: Vec::new(),
             image_src: None,
+            ordered_start: None,
         };
         let ordered = EditorLine {
             block: BlockKind::OrderedItem,
             text: "1".into(),
             marks: Vec::new(),
             image_src: None,
+            ordered_start: None,
         };
         let link = EditorLine {
             block: BlockKind::Paragraph,
@@ -4012,6 +4054,7 @@ mod tests {
                 href: Some("https://mezon.ai".into()),
             }],
             image_src: None,
+            ordered_start: None,
         };
 
         let image_json = lines_to_tiptap_json(&[image]);
@@ -4046,6 +4089,7 @@ mod tests {
             text: "fn main() {}".into(),
             marks: Vec::new(),
             image_src: None,
+            ordered_start: None,
         };
         let json = lines_to_tiptap_json(&[line]);
         assert!(json.contains("codeBlock"));
@@ -4118,6 +4162,7 @@ mod tests {
             text: "item".into(),
             marks: Vec::new(),
             image_src: None,
+            ordered_start: None,
         }];
         let meta = block_paint_meta(&lines[0], 0, &lines, px(16.));
         assert_eq!(meta.prefix.as_ref(), "☐ ");
@@ -4130,6 +4175,7 @@ mod tests {
             text: "fn main() {}".into(),
             marks: Vec::new(),
             image_src: None,
+            ordered_start: None,
         }];
         let meta = block_paint_meta(&lines[0], 0, &lines, px(16.));
         assert!(meta.monospace);
@@ -4143,6 +4189,7 @@ mod tests {
             text: "todo".into(),
             marks: Vec::new(),
             image_src: None,
+            ordered_start: None,
         };
         let json = lines_to_tiptap_json(&[line]);
         assert!(json.contains("taskList"));
@@ -4209,95 +4256,79 @@ mod tests {
     }
 
     #[test]
-    fn ordered_line_number_continues_across_paragraph() {
+    fn ordered_line_number_restarts_after_paragraph() {
         let lines = vec![
             EditorLine {
                 block: BlockKind::OrderedItem,
                 text: "one".into(),
                 marks: Vec::new(),
                 image_src: None,
+                ordered_start: None,
             },
             EditorLine {
                 block: BlockKind::OrderedItem,
                 text: "two".into(),
                 marks: Vec::new(),
                 image_src: None,
+                ordered_start: None,
             },
             EditorLine {
                 block: BlockKind::Paragraph,
                 text: String::new(),
                 marks: Vec::new(),
                 image_src: None,
+                ordered_start: None,
             },
             EditorLine {
                 block: BlockKind::OrderedItem,
                 text: "three".into(),
                 marks: Vec::new(),
                 image_src: None,
+                ordered_start: None,
             },
         ];
         assert_eq!(ordered_line_number(&lines, 0), 1);
         assert_eq!(ordered_line_number(&lines, 1), 2);
-        assert_eq!(ordered_line_number(&lines, 3), 3);
+        assert_eq!(ordered_line_number(&lines, 3), 1);
     }
 
     #[test]
-    fn ordered_line_number_follows_document_order_not_format_order() {
+    fn ordered_line_number_uses_start_attr_from_web() {
         let lines = vec![
             EditorLine {
                 block: BlockKind::OrderedItem,
-                text: "first".into(),
+                text: "one".into(),
                 marks: Vec::new(),
                 image_src: None,
-            },
-            EditorLine {
-                block: BlockKind::Paragraph,
-                text: "gap".into(),
-                marks: Vec::new(),
-                image_src: None,
-            },
-            EditorLine {
-                block: BlockKind::OrderedItem,
-                text: "second".into(),
-                marks: Vec::new(),
-                image_src: None,
-            },
-        ];
-        assert_eq!(ordered_line_number(&lines, 0), 1);
-        assert_eq!(ordered_line_number(&lines, 2), 2);
-    }
-
-    #[test]
-    fn serializes_split_ordered_lists_with_start_attr() {
-        let lines = vec![
-            EditorLine {
-                block: BlockKind::OrderedItem,
-                text: "Ch".into(),
-                marks: Vec::new(),
-                image_src: None,
-            },
-            EditorLine {
-                block: BlockKind::OrderedItem,
-                text: "Van".into(),
-                marks: Vec::new(),
-                image_src: None,
+                ordered_start: Some(1),
             },
             EditorLine {
                 block: BlockKind::Paragraph,
                 text: String::new(),
                 marks: Vec::new(),
                 image_src: None,
+                ordered_start: None,
             },
             EditorLine {
                 block: BlockKind::OrderedItem,
-                text: "Gia".into(),
+                text: "three".into(),
                 marks: Vec::new(),
                 image_src: None,
+                ordered_start: Some(3),
             },
         ];
-        let json = lines_to_tiptap_json(&lines);
-        assert!(json.contains(r#""start":1"#));
-        assert!(json.contains(r#""start":3"#));
+        assert_eq!(ordered_line_number(&lines, 0), 1);
+        assert_eq!(ordered_line_number(&lines, 2), 3);
+    }
+
+    #[test]
+    fn roundtrip_preserves_ordered_list_start_attr() {
+        let raw = r#"{"type":"doc","content":[{"type":"orderedList","attrs":{"start":1,"type":null},"content":[{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Ch"}]}]}]},{"type":"paragraph"},{"type":"orderedList","attrs":{"start":3,"type":null},"content":[{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Gia"}]}]}]}]}"#;
+        let lines = lines_from_tiptap(raw);
+        assert_eq!(lines[0].ordered_start, Some(1));
+        assert_eq!(lines[2].ordered_start, Some(3));
+        let back = lines_to_tiptap_json(&lines);
+        assert!(back.contains(r#""start":3"#));
     }
 
     #[test]
@@ -4308,18 +4339,21 @@ mod tests {
                 text: "intro".into(),
                 marks: Vec::new(),
                 image_src: None,
+                ordered_start: None,
             },
             EditorLine {
                 block: BlockKind::OrderedItem,
                 text: "first".into(),
                 marks: Vec::new(),
                 image_src: None,
+                ordered_start: None,
             },
             EditorLine {
                 block: BlockKind::OrderedItem,
                 text: "second".into(),
                 marks: Vec::new(),
                 image_src: None,
+                ordered_start: None,
             },
         ];
         assert_eq!(ordered_line_number(&lines, 1), 1);
@@ -4340,12 +4374,14 @@ mod tests {
                         text: "one".into(),
                         marks: Vec::new(),
                         image_src: None,
+                        ordered_start: None,
                     },
                     EditorLine {
                         block: BlockKind::OrderedItem,
                         text: String::new(),
                         marks: Vec::new(),
                         image_src: None,
+                        ordered_start: None,
                     },
                 ];
                 state.rebuild_buffer();
@@ -4374,12 +4410,14 @@ mod tests {
                         text: "one".into(),
                         marks: Vec::new(),
                         image_src: None,
+                        ordered_start: None,
                     },
                     EditorLine {
                         block: BlockKind::OrderedItem,
                         text: String::new(),
                         marks: Vec::new(),
                         image_src: None,
+                        ordered_start: None,
                     },
                 ];
                 state.rebuild_buffer();
