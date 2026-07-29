@@ -5924,36 +5924,6 @@ impl MezonTransport {
         Ok(())
     }
 
-    /// Leave thread.
-    pub async fn leave_thread(&self, clan_id: i64, channel_id: i64) -> Result<()> {
-        let cid = self.generate_cid();
-        let body = api::LeaveThreadRequest {
-            clan_id,
-            channel_id,
-        }
-        .encode_to_vec();
-        let (code, _) = self.send_api_request(cid, "LeaveThread", body).await?;
-        if code != 0 {
-            return Err(anyhow::anyhow!("API error: code={}", code));
-        }
-        Ok(())
-    }
-
-    /// Archive channel.
-    pub async fn archive_channel(&self, clan_id: i64, channel_id: i64) -> Result<()> {
-        let cid = self.generate_cid();
-        let body = api::ArchiveChannelRequest {
-            clan_id,
-            channel_id,
-        }
-        .encode_to_vec();
-        let (code, _) = self.send_api_request(cid, "ArchiveChannel", body).await?;
-        if code != 0 {
-            return Err(anyhow::anyhow!("API error: code={}", code));
-        }
-        Ok(())
-    }
-
     /// Reactivate archived thread.
     pub async fn active_archived_thread(&self, clan_id: i64, channel_id: i64) -> Result<()> {
         let cid = self.generate_cid();
