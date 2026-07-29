@@ -856,18 +856,19 @@ impl LinuxClient for WaylandClient {
     ) -> anyhow::Result<Box<dyn PlatformWindow>> {
         let mut state = self.0.borrow_mut();
 
-        let parent = params
-            .parent_window
-            .and_then(|parent_handle| {
-                state
-                    .windows
-                    .values()
-                    .find(|window| window.handle() == parent_handle)
-                    .cloned()
-            })
+        let explicit_parent = params.parent_window.and_then(|parent_handle| {
+            state
+                .windows
+                .values()
+                .find(|window| window.handle() == parent_handle)
+                .cloned()
+        });
+
+        let parent = explicit_parent
+            .clone()
             .or_else(|| state.keyboard_focused_window.clone());
 
-        if let Some(ref parent_window) = parent {
+        if let Some(ref parent_window) = explicit_parent {
             if params.kind == WindowKind::Floating || params.kind == WindowKind::Dialog {
                 params.bounds.size = parent_window.bounds().size;
             }

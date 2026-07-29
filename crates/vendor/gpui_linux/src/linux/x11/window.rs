@@ -18,7 +18,7 @@ use x11rb::{
     connection::Connection,
     cookie::{Cookie, VoidCookie},
     errors::ConnectionError,
-    properties::{WmSizeHints, WmSizeHintsSpecification},
+    properties::WmSizeHints,
     protocol::{
         sync,
         xinput::{self, ConnectionExt as _},
@@ -738,11 +738,6 @@ impl X11WindowState {
             // This prevents the window from being resized larger than what the GPU can render.
             let max_texture_size = renderer.max_texture_size();
             let mut size_hints = WmSizeHints::new();
-            size_hints.position = Some((
-                WmSizeHintsSpecification::UserSpecified,
-                bounds.origin.x.0,
-                bounds.origin.y.0,
-            ));
             if let Some(size) = params.window_min_size {
                 size_hints.min_size =
                     Some((f32::from(size.width) as i32, f32::from(size.height) as i32));

@@ -1176,11 +1176,12 @@ impl PlatformWindow for MacWindow {
                         return;
                     }
                     let screen_frame = NSScreen::frame(screen);
+                    let local_top = bounds.origin.y.as_f32() as f64 - screen_frame.origin.y;
                     let window_rect = NSRect::new(
                         NSPoint::new(
                             screen_frame.origin.x + bounds.origin.x.as_f32() as f64,
                             screen_frame.origin.y + screen_frame.size.height
-                                - bounds.origin.y.as_f32() as f64
+                                - local_top
                                 - bounds.size.height.as_f32() as f64,
                         ),
                         NSSize::new(

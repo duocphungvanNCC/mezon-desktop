@@ -2,9 +2,9 @@ use std::sync::Arc;
 
 use gpui::http_client::HttpClient;
 use gpui::{
-    AnyView, App, AppContext, Bounds, Context, Corners, DisplayId, Entity, FocusHandle, Focusable,
-    ImageCache, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, ObjectFit, Pixels,
-    Point, Render, RenderImage, Resource, ScrollDelta, ScrollWheelEvent, SharedString, SharedUri,
+    AnyView, App, AppContext, Bounds, Context, Corners, Entity, FocusHandle, Focusable, ImageCache,
+    KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, ObjectFit, Pixels, Point, Render,
+    RenderImage, Resource, ScrollDelta, ScrollWheelEvent, SharedString, SharedUri,
     Size as GpuiSize, StyleRefinement, Subscription, UniformListScrollHandle, Window, WindowBounds,
     WindowHandle, WindowOptions, canvas, div, img, point, prelude::*, px, size, uniform_list,
 };
@@ -12,7 +12,7 @@ use mezon_store::{AppConfig, ChannelTimelineAttachment, Settings};
 use ui::{ScrollAxes, Scrollbars, WithScrollbar};
 
 use crate::app::main_window::{
-    activate_main_window, handle as main_window_handle, overlay_placement,
+    activate_main_window, handle as main_window_handle, overlay_placement_for_main,
     overlay_window_kind_and_parent, sync_overlay_to_main,
 };
 use crate::app::title_bar::TitleBar;
@@ -74,16 +74,6 @@ fn clear_media_image_modal_global(cx: &mut App) {
     }
 }
 
-fn prior_media_modal_placement(cx: &mut App) -> Option<(WindowBounds, Option<DisplayId>)> {
-    let handle = cx.try_global::<GlobalMediaImageModal>().map(|g| g.0)?;
-    handle
-        .update(cx, |_, window, cx| {
-            let display_id = window.display(cx).map(|d| d.id());
-            (window.window_bounds(), display_id)
-        })
-        .ok()
-}
-
 pub fn close_media_image_modal(cx: &mut App) {
     let Some(handle) = cx.try_global::<GlobalMediaImageModal>().map(|g| g.0) else {
         return;
@@ -118,7 +108,6 @@ pub fn open_media_image_modal(
 
     let mut pending = Some((uploaded, index));
     if let Some(handle) = cx.try_global::<GlobalMediaImageModal>().map(|g| g.0) {
-        let prior = prior_media_modal_placement(cx);
         let _ = handle.update(cx, |modal, window, cx| {
             if let Some((uploaded, index)) = pending.take() {
                 window.activate_window();
@@ -133,7 +122,7 @@ pub fn open_media_image_modal(
         let Some((uploaded, index)) = pending else {
             return;
         };
-        spawn_media_image_modal_window(uploaded, index, settings, prior, cx);
+        spawn_media_image_modal_window(uploaded, index, settings, cx);
         return;
     }
 
@@ -141,20 +130,17 @@ pub fn open_media_image_modal(
         return;
     };
 
-    spawn_media_image_modal_window(uploaded, index, settings, None, cx);
+    spawn_media_image_modal_window(uploaded, index, settings, cx);
 }
 
 fn spawn_media_image_modal_window(
     uploaded: Vec<ChannelTimelineAttachment>,
     index: usize,
     settings: Entity<Settings>,
-    prior_placement: Option<(WindowBounds, Option<DisplayId>)>,
     cx: &mut App,
 ) {
-    let main_app = main_window_handle(cx)
-        .expect("main app window must be registered before opening media image modal");
-    let (window_bounds, display_id) =
-        prior_placement.unwrap_or_else(|| overlay_placement(main_app, cx));
+    let main_app = main_window_handle(cx);
+    let (window_bounds, display_id) = overlay_placement_for_main(cx);
     let (kind, parent_window) = overlay_window_kind_and_parent(main_app);
     let options = WindowOptions {
         window_bounds: Some(window_bounds),
@@ -187,9 +173,11 @@ fn spawn_media_image_modal_window(
                 window.focus(&modal.focus_handle, cx);
             });
             let modal = handle.clone();
-            cx.defer(move |cx| {
-                sync_overlay_to_main(modal, main_app, cx);
-            });
+            if let Some(main_app) = main_app {
+                cx.defer(move |cx| {
+                    sync_overlay_to_main(modal, main_app, cx);
+                });
+            }
         }
         Err(error) => tracing::error!("failed to open media image modal window: {error}"),
     }

@@ -18,7 +18,13 @@ pub fn handle(cx: &App) -> Option<AnyWindowHandle> {
 }
 
 pub fn main_window_bounds(cx: &mut App) -> Option<Bounds<Pixels>> {
-    main_window_placement(cx).map(|(bounds, _)| bounds.get_bounds())
+    let handle = handle(cx)?;
+    cx.update_window(handle, |_, window, _| window.window_bounds())
+        .ok()
+        .and_then(|bounds| match bounds {
+            WindowBounds::Windowed(bounds) => Some(bounds),
+            _ => None,
+        })
 }
 
 pub fn window_placement_for(
@@ -53,15 +59,12 @@ pub fn activate_main_window(cx: &mut App) {
     let _ = cx.update_window(handle, |_, window, _| window.activate_window());
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
 pub fn uses_wayland_overlay_parent() -> bool {
-    std::env::var("WAYLAND_DISPLAY").is_ok()
-        && std::env::var("XDG_SESSION_TYPE")
-            .map(|session| session.eq_ignore_ascii_case("wayland"))
-            .unwrap_or(true)
+    gpui::guess_compositor() == "Wayland"
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
 pub fn uses_wayland_overlay_parent() -> bool {
     false
 }
@@ -73,18 +76,20 @@ pub fn overlay_fallback_placement(cx: &mut App) -> (WindowBounds, Option<Display
     )
 }
 
-pub fn overlay_placement(
-    main_app: AnyWindowHandle,
-    cx: &mut App,
-) -> (WindowBounds, Option<DisplayId>) {
-    window_placement_for(main_app, cx).unwrap_or_else(|| overlay_fallback_placement(cx))
+pub fn overlay_placement_for_main(cx: &mut App) -> (WindowBounds, Option<DisplayId>) {
+    if let Some(main) = handle(cx) {
+        if let Some(placement) = window_placement_for(main, cx) {
+            return placement;
+        }
+    }
+    overlay_fallback_placement(cx)
 }
 
 pub fn overlay_window_kind_and_parent(
-    main_app: AnyWindowHandle,
+    main_app: Option<AnyWindowHandle>,
 ) -> (WindowKind, Option<AnyWindowHandle>) {
     if uses_wayland_overlay_parent() {
-        (WindowKind::Floating, Some(main_app))
+        (WindowKind::Floating, main_app)
     } else {
         (WindowKind::Normal, None)
     }

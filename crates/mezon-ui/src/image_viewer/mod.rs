@@ -4,12 +4,11 @@ use std::time::{Duration, Instant};
 use gpui::Size as GpuiSize;
 use gpui::http_client::HttpClient;
 use gpui::{
-    AnyWindowHandle, App, AppContext, BackgroundExecutor, Bounds, Context, Corners, DisplayId,
-    Entity, FocusHandle, Focusable, ImageCache, KeyDownEvent, MouseButton, MouseDownEvent,
-    MouseMoveEvent, ObjectFit, Pixels, Point, Render, RenderImage, Resource, ScrollDelta,
-    ScrollWheelEvent, SharedString, SharedUri, Subscription, UniformListScrollHandle, Window,
-    WindowBounds, WindowHandle, WindowKind, WindowOptions, canvas, div, img, point, prelude::*, px,
-    relative, size, uniform_list,
+    App, AppContext, BackgroundExecutor, Bounds, Context, Corners, Entity, FocusHandle, Focusable,
+    ImageCache, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, ObjectFit, Pixels,
+    Point, Render, RenderImage, Resource, ScrollDelta, ScrollWheelEvent, SharedString, SharedUri,
+    Subscription, UniformListScrollHandle, Window, WindowBounds, WindowHandle, WindowKind,
+    WindowOptions, canvas, div, img, point, prelude::*, px, relative, size, uniform_list,
 };
 use mezon_store::{
     AppConfig, ChannelAttachment, ChannelId, ChannelList, ClanId, DirectMessageStore, GalleryStore,
@@ -18,7 +17,7 @@ use mezon_store::{
 use ui::{ScrollAxes, Scrollbars, WithScrollbar};
 
 use crate::app::main_window::{
-    activate_main_window, handle as main_window_handle, overlay_placement,
+    activate_main_window, handle as main_window_handle, overlay_placement_for_main,
     overlay_window_kind_and_parent, sync_overlay_to_main,
 };
 use crate::app::shell::Shell;
@@ -109,16 +108,6 @@ pub fn close_image_viewer(cx: &mut App) {
     clear_image_viewer_global(cx);
 }
 
-fn prior_viewer_placement(cx: &mut App) -> Option<(WindowBounds, Option<DisplayId>)> {
-    let handle = cx.try_global::<GlobalImageViewer>().map(|g| g.0)?;
-    handle
-        .update(cx, |_, window, cx| {
-            let display_id = window.display(cx).map(|d| d.id());
-            (window.window_bounds(), display_id)
-        })
-        .ok()
-}
-
 /// Open the image viewer, replacing any existing viewer window.
 pub fn open_image_viewer(request: OpenViewerRequest, cx: &mut App) {
     open_image_viewer_now(request, cx);
@@ -127,7 +116,6 @@ pub fn open_image_viewer(request: OpenViewerRequest, cx: &mut App) {
 fn open_image_viewer_now(request: OpenViewerRequest, cx: &mut App) {
     let mut pending = Some(request);
     if let Some(handle) = cx.try_global::<GlobalImageViewer>().map(|g| g.0) {
-        let prior = prior_viewer_placement(cx);
         let _ = handle.update(cx, |viewer, window, cx| {
             if let Some(request) = pending.take() {
                 window.activate_window();
@@ -142,25 +130,18 @@ fn open_image_viewer_now(request: OpenViewerRequest, cx: &mut App) {
         let Some(request) = pending.take() else {
             return;
         };
-        spawn_image_viewer_window(request, prior, cx);
+        spawn_image_viewer_window(request, cx);
         return;
     }
     let Some(request) = pending else {
         return;
     };
-    spawn_image_viewer_window(request, None, cx);
+    spawn_image_viewer_window(request, cx);
 }
 
-fn spawn_image_viewer_window(
-    request: OpenViewerRequest,
-    prior_placement: Option<(WindowBounds, Option<DisplayId>)>,
-    cx: &mut App,
-) {
-    let main_app = main_window_handle(cx)
-        .expect("main app window must be registered before opening image viewer");
-    let (window_bounds, display_id) =
-        prior_placement.unwrap_or_else(|| overlay_placement(main_app, cx));
-
+fn spawn_image_viewer_window(request: OpenViewerRequest, cx: &mut App) {
+    let main_app = main_window_handle(cx);
+    let (window_bounds, display_id) = overlay_placement_for_main(cx);
     let (kind, parent_window) = overlay_window_kind_and_parent(main_app);
     let options = WindowOptions {
         window_bounds: Some(window_bounds),
@@ -193,9 +174,11 @@ fn spawn_image_viewer_window(
                 window.focus(&viewer.focus_handle, cx);
             });
             let viewer = handle.clone();
-            cx.defer(move |cx| {
-                sync_overlay_to_main(viewer, main_app, cx);
-            });
+            if let Some(main_app) = main_app {
+                cx.defer(move |cx| {
+                    sync_overlay_to_main(viewer, main_app, cx);
+                });
+            }
         }
         Err(e) => tracing::error!("failed to open image viewer window: {e}"),
     }
