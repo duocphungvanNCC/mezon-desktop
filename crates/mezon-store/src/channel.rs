@@ -805,7 +805,7 @@ impl ChannelList {
             self.ensure_extras(clan_id, cx);
         }
     }
-  
+
     fn fetch_clan(&mut self, clan_id: ClanId, cx: &mut Context<Self>) {
         if self.loading.contains(&clan_id) {
             return;

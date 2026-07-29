@@ -2785,10 +2785,12 @@ pub struct ApiPinMessage {
     pub id: String,
     pub message_id: String,
     pub content: String,
+    pub content_text: String,
     pub sender_id: String,
     pub sender_name: String,
     pub avatar: String,
     pub create_time: i64,
+    pub attachments: Vec<ApiAttachment>,
 }
 
 pub const CANVAS_LIST_LIMIT: i32 = 50;
@@ -3120,19 +3122,23 @@ impl MezonTransport {
     }
 
     fn pin_message_from_proto(pin: api::PinMessage) -> ApiPinMessage {
-        let content = serde_json::from_str::<serde_json::Value>(&pin.content)
+        let content = pin.content;
+        let content_text = serde_json::from_str::<serde_json::Value>(&content)
             .ok()
             .and_then(|v| v.get("t").and_then(|t| t.as_str().map(|s| s.to_string())))
-            .unwrap_or_else(|| pin.content.clone());
+            .unwrap_or_else(|| content.clone());
+        let attachments = parse_message_attachments(&pin.attachment);
 
         ApiPinMessage {
             id: pin.id.to_string(),
             message_id: pin.message_id.to_string(),
             content,
+            content_text,
             sender_id: pin.sender_id.to_string(),
             sender_name: pin.username,
             avatar: pin.avatar,
             create_time: i64::from(pin.create_time_seconds),
+            attachments,
         }
     }
 
@@ -3748,6 +3754,57 @@ impl MezonTransport {
         let (code, _response) = self.send(cid, encode_envelope_cid_last(envelope)).await?;
         if code != 0 {
             anyhow::bail!("write_last_seen_message error: code={code}");
+        }
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn write_last_pin_message(
+        &self,
+        clan_id: i64,
+        channel_id: i64,
+        message_id: i64,
+        mode: i32,
+        is_public: bool,
+        timestamp_seconds: u32,
+        operation: i32,
+        avatar: &str,
+        sender_id: &str,
+        sender_username: &str,
+        content: &str,
+        attachment: &str,
+        created_time: &str,
+    ) -> Result<()> {
+        let cid = self.generate_cid();
+        tracing::debug!(
+            target: "socket",
+            "realtime_send: action=LastPinMessageEvent cid={} clan_id={clan_id} channel_id={channel_id} message_id={message_id}",
+            i32::from(cid)
+        );
+        let envelope = realtime::Envelope {
+            cid: i32::from(cid),
+            message: Some(realtime::envelope::Message::LastPinMessageEvent(
+                realtime::LastPinMessageEvent {
+                    clan_id,
+                    channel_id,
+                    message_id,
+                    mode,
+                    user_id: 0,
+                    timestamp_seconds,
+                    operation,
+                    is_public,
+                    message_sender_avatar: avatar.to_string(),
+                    message_sender_id: sender_id.to_string(),
+                    message_sender_username: sender_username.to_string(),
+                    message_content: content.to_string(),
+                    message_attachment: attachment.to_string(),
+                    message_created_time: created_time.to_string(),
+                },
+            )),
+        };
+        let (code, _response) = self.send(cid, encode_envelope_cid_last(envelope)).await?;
+        if code != 0 {
+            anyhow::bail!("write_last_pin_message error: code={code}");
         }
         Ok(())
     }

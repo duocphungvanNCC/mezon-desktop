@@ -9,6 +9,7 @@ use mezon_store::{
 use super::channel_messages::ChannelMessages;
 use super::content::{first_link, open_message_link};
 use super::forward_modal::ForwardMessageModal;
+use super::pin_confirm_modals::ConfirmPinMessageModal;
 use super::report_modal::ReportMessageModal;
 use crate::app::shell::Shell;
 use crate::components::primitives::{ContextMenu, IconName};
@@ -683,12 +684,12 @@ fn build_channel_menu(
 
     if !is_pinned {
         let message_id = msg.id;
+        let locale_owned = locale.to_string();
         menu = menu.item_trailing_icon(
             t("contextMenu.pinMessage"),
             IconName::PinMessageRightClick,
-            move |_window, cx| {
-                PinnedMessagesStore::global(cx)
-                    .update(cx, |store, cx| store.pin(&message_id.to_string(), cx));
+            move |window, cx| {
+                ConfirmPinMessageModal::open(message_id, locale_owned.clone().into(), window, cx);
             },
         );
     }

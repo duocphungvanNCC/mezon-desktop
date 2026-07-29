@@ -958,10 +958,13 @@ pub fn parse_spans(content: &ApiMessageContent) -> Vec<MessageSpan> {
                 match ty {
                     "b" => spans.push(MessageSpan::Bold(strip_marker(&inner, "**").into())),
                     "c" | "s" => spans.push(MessageSpan::Code(strip_marker(&inner, "`").into())),
-                    "t" | "pre" => spans.push(MessageSpan::CodeBlock {
-                        language: None,
-                        text: strip_marker(&inner, "```").into(),
-                    }),
+                    "t" | "pre" => {
+                        let (language, text) = strip_code_fence(&inner);
+                        spans.push(MessageSpan::CodeBlock {
+                            language,
+                            text: text.into(),
+                        });
+                    }
                     "lk" | "vk" | "lk_yt" | "lk_fb" | "lk_tt" => {
                         let url = tok.url.clone().unwrap_or_else(|| inner.clone());
                         spans.push(resolve_link_span(
@@ -1192,6 +1195,32 @@ fn strip_marker(s: &str, marker: &str) -> String {
         .and_then(|r| r.strip_suffix(marker))
         .unwrap_or(s);
     trimmed.to_string()
+}
+
+pub fn strip_code_fence(s: &str) -> (Option<String>, String) {
+    let mut body = s.trim();
+    if let Some(rest) = body.strip_prefix("```") {
+        body = rest;
+        if let Some(rest) = body.strip_suffix("```") {
+            body = rest;
+        }
+    }
+    body = body.trim_matches('`');
+    let body = body.trim();
+
+    if let Some((first, rest)) = body.split_once('\n') {
+        let rest = rest.trim_end();
+        if !rest.is_empty()
+            && !first.is_empty()
+            && first.len() <= 32
+            && first.bytes().all(|b| {
+                b.is_ascii_alphanumeric() || b == b'+' || b == b'-' || b == b'_' || b == b'#'
+            })
+        {
+            return (Some(first.to_string()), rest.to_string());
+        }
+    }
+    (None, body.to_string())
 }
 
 pub(crate) fn split_token_transaction(content: &str) -> TokenTransaction {
