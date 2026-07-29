@@ -276,6 +276,10 @@ pub struct X11WindowState {
     maximized_vertical: bool,
     maximized_horizontal: bool,
     hidden: bool,
+    /// mezon vendor edit: set while the window is unmapped by `PlatformWindow::hide`
+    /// (hide-to-tray). Distinct from `hidden`, which mirrors `_NET_WM_STATE_HIDDEN`
+    /// (iconified by the window manager) and is recomputed from WM properties.
+    unmapped: bool,
     active: bool,
     hovered: bool,
     pub(crate) force_render_after_recovery: bool,
@@ -434,11 +438,21 @@ impl X11WindowState {
 
         let visual_set = find_visuals(xcb, x_screen_index);
 
-        let visual = match visual_set.transparent {
-            Some(visual) => visual,
-            None => {
-                log::warn!("Unable to find a transparent visual",);
-                visual_set.inherit
+        // mezon vendor edit: opt-out from the 32-bit ARGB visual. Mesa's software
+        // rasterizer (llvmpipe/lavapipe) presents nothing to an ARGB32 X window —
+        // the window stays pure black while the render loop runs normally — so
+        // running the app under software rendering (containers, VMs, CI) needs the
+        // plain opaque visual. Real GPU drivers are unaffected; this is off unless
+        // GPUI_X11_OPAQUE_VISUAL is set.
+        let visual = if std::env::var_os("GPUI_X11_OPAQUE_VISUAL").is_some() {
+            visual_set.inherit
+        } else {
+            match visual_set.transparent {
+                Some(visual) => visual,
+                None => {
+                    log::warn!("Unable to find a transparent visual",);
+                    visual_set.inherit
+                }
             }
         };
         log::info!("Using {:?}", visual);
@@ -799,6 +813,7 @@ impl X11WindowState {
                 maximized_vertical: false,
                 maximized_horizontal: false,
                 hidden: false,
+                unmapped: false,
                 appearance,
                 handle,
                 background_appearance: WindowBackgroundAppearance::Opaque,
@@ -1460,6 +1475,18 @@ impl PlatformWindow for X11Window {
     }
 
     fn activate(&self) {
+        // mezon vendor edit: undo a `hide()` (hide-to-tray) before requesting
+        // focus — an unmapped window cannot be focused or activated, so without
+        // remapping first the activation request is dropped by the WM.
+        if self.0.state.borrow().unmapped {
+            self.0.state.borrow_mut().unmapped = false;
+            check_reply(
+                || "X11 MapWindow failed.",
+                self.0.xcb.map_window(self.0.x_window),
+            )
+            .log_err();
+        }
+
         let data = [1, xproto::Time::CURRENT_TIME.into(), 0, 0, 0];
         let message = xproto::ClientMessageEvent::new(
             32,
@@ -1576,6 +1603,25 @@ impl PlatformWindow for X11Window {
                     .is_some_and(|ctx| ctx.supports_dual_source_blending())
             })
             .unwrap_or_default()
+    }
+
+    /// mezon vendor edit: implement hide-to-tray by unmapping the window.
+    /// Upstream leaves the `PlatformWindow::hide` default no-op on X11, so the
+    /// only way off screen was destroying the window.
+    fn hide(&self) {
+        {
+            let mut state = self.0.state.borrow_mut();
+            if state.unmapped {
+                return;
+            }
+            state.unmapped = true;
+        }
+        check_reply(
+            || "X11 UnmapWindow failed.",
+            self.0.xcb.unmap_window(self.0.x_window),
+        )
+        .log_err();
+        xcb_flush(&self.0.xcb);
     }
 
     fn minimize(&self) {
