@@ -2257,6 +2257,11 @@ impl Window {
         self.platform_window.resize(size);
     }
 
+    /// Set the window bounds (position and size). On Wayland only the size is applied.
+    pub fn set_bounds(&mut self, bounds: Bounds<Pixels>) {
+        self.platform_window.set_bounds(bounds);
+    }
+
     /// Returns whether or not the window is currently fullscreen
     pub fn is_fullscreen(&self) -> bool {
         self.platform_window.is_fullscreen()

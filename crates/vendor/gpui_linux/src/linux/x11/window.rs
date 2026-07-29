@@ -1411,6 +1411,32 @@ impl PlatformWindow for X11Window {
         xcb_flush(&self.0.xcb);
     }
 
+    fn set_bounds(&mut self, bounds: Bounds<Pixels>) {
+        let scale = self.0.state.borrow().scale_factor;
+        let device_bounds = bounds.to_device_pixels(scale);
+        check_reply(
+            || {
+                format!(
+                    "X11 ConfigureWindow failed. x: {}, y: {}, width: {}, height: {}",
+                    device_bounds.origin.x.0,
+                    device_bounds.origin.y.0,
+                    device_bounds.size.width.0,
+                    device_bounds.size.height.0
+                )
+            },
+            self.0.xcb.configure_window(
+                self.0.x_window,
+                &xproto::ConfigureWindowAux::new()
+                    .x(device_bounds.origin.x.0)
+                    .y(device_bounds.origin.y.0)
+                    .width(device_bounds.size.width.0 as u32)
+                    .height(device_bounds.size.height.0 as u32),
+            ),
+        )
+        .log_err();
+        xcb_flush(&self.0.xcb);
+    }
+
     fn scale_factor(&self) -> f32 {
         self.0.state.borrow().scale_factor
     }

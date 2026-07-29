@@ -637,6 +637,32 @@ impl PlatformWindow for WindowsWindow {
             .detach();
     }
 
+    fn set_bounds(&mut self, bounds: Bounds<Pixels>) {
+        let hwnd = self.0.hwnd;
+        let device_bounds = bounds.to_device_pixels(self.scale_factor());
+        let border_offset = self.state.border_offset.clone();
+        let rect = calculate_window_rect(device_bounds, &border_offset);
+
+        self.0
+            .executor
+            .spawn(async move {
+                unsafe {
+                    SetWindowPos(
+                        hwnd,
+                        None,
+                        device_bounds.origin.x.0,
+                        device_bounds.origin.y.0,
+                        rect.right - rect.left,
+                        rect.bottom - rect.top,
+                        SWP_NOZORDER | SWP_NOACTIVATE,
+                    )
+                    .context("unable to set window bounds")
+                    .log_err();
+                }
+            })
+            .detach();
+    }
+
     fn scale_factor(&self) -> f32 {
         self.state.scale_factor.get()
     }

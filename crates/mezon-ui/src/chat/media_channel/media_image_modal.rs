@@ -5,14 +5,16 @@ use gpui::{
     AnyView, App, AppContext, Bounds, Context, Corners, Entity, FocusHandle, Focusable, ImageCache,
     KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, ObjectFit, Pixels, Point, Render,
     RenderImage, Resource, ScrollDelta, ScrollWheelEvent, SharedString, SharedUri,
-    Size as GpuiSize, StyleRefinement, Subscription, UniformListScrollHandle, Window, WindowBounds,
-    WindowHandle, WindowKind, WindowOptions, canvas, div, img, point, prelude::*, px, size,
-    uniform_list,
+    Size as GpuiSize, StyleRefinement, Subscription, UniformListScrollHandle, Window, WindowHandle,
+    WindowOptions, canvas, div, img, point, prelude::*, px, size, uniform_list,
 };
 use mezon_store::{AppConfig, ChannelTimelineAttachment, Settings};
 use ui::{ScrollAxes, Scrollbars, WithScrollbar};
 
-use crate::app::main_window::{activate_main_window, main_window_bounds};
+use crate::app::main_window::{
+    activate_main_window, handle as main_window_handle, overlay_placement_for_main,
+    overlay_window_kind, sync_overlay_to_main,
+};
 use crate::app::title_bar::TitleBar;
 use crate::app::window_controls;
 use crate::components::primitives::{Icon, IconName, Spinner};
@@ -72,25 +74,6 @@ fn clear_media_image_modal_global(cx: &mut App) {
     }
 }
 
-fn prior_media_modal_bounds(cx: &mut App) -> Option<Bounds<Pixels>> {
-    let handle = cx.try_global::<GlobalMediaImageModal>().map(|g| g.0)?;
-    match handle.update(cx, |_, window, _| window.window_bounds()) {
-        Ok(WindowBounds::Windowed(bounds)) => Some(bounds),
-        _ => None,
-    }
-}
-
-fn default_media_modal_bounds(cx: &mut App) -> Bounds<Pixels> {
-    const MIN_W: f32 = 640.0;
-    const MIN_H: f32 = 480.0;
-    if let Some(main) = main_window_bounds(cx) {
-        let w = (f32::from(main.size.width) * 0.8).max(MIN_W);
-        let h = (f32::from(main.size.height) * 0.8).max(MIN_H);
-        return Bounds::centered(None, size(px(w), px(h)), cx);
-    }
-    Bounds::centered(None, size(px(1100.0), px(740.0)), cx)
-}
-
 pub fn close_media_image_modal(cx: &mut App) {
     let Some(handle) = cx.try_global::<GlobalMediaImageModal>().map(|g| g.0) else {
         return;
@@ -136,29 +119,37 @@ pub fn open_media_image_modal(
             return;
         }
         clear_media_image_modal_global(cx);
+        let Some((uploaded, index)) = pending else {
+            return;
+        };
+        spawn_media_image_modal_window(uploaded, index, settings, cx);
+        return;
     }
 
     let Some((uploaded, index)) = pending else {
         return;
     };
 
-    let bounds = prior_media_modal_bounds(cx).unwrap_or_else(|| default_media_modal_bounds(cx));
-    spawn_media_image_modal_window(uploaded, index, settings, bounds, cx);
+    spawn_media_image_modal_window(uploaded, index, settings, cx);
 }
 
 fn spawn_media_image_modal_window(
     uploaded: Vec<ChannelTimelineAttachment>,
     index: usize,
     settings: Entity<Settings>,
-    bounds: Bounds<Pixels>,
     cx: &mut App,
 ) {
+    let main_app = main_window_handle(cx);
+    let (window_bounds, display_id) = overlay_placement_for_main(cx);
+    let kind = overlay_window_kind();
     let options = WindowOptions {
-        window_bounds: Some(WindowBounds::Windowed(bounds)),
+        window_bounds: Some(window_bounds),
         window_min_size: Some(size(px(640.0), px(480.0))),
-        kind: WindowKind::Normal,
+        kind,
         focus: true,
         show: true,
+        is_movable: true,
+        display_id,
         titlebar: Some(window_controls::window_title_options()),
         window_decorations: window_controls::main_window_decorations(),
         app_id: window_controls::linux_app_id(),
@@ -169,11 +160,23 @@ fn spawn_media_image_modal_window(
         cx.new(|cx| MediaImageModal::new(uploaded, index, settings, window, cx))
     }) {
         Ok(handle) => {
+            #[cfg(target_os = "macos")]
+            if let Err(error) = handle.update(cx, |_, window, _| {
+                window_controls::macos::disable_window_fullscreen(window);
+            }) {
+                tracing::warn!("Failed to configure media image modal window: {error}");
+            }
             cx.set_global(GlobalMediaImageModal(handle));
             let _ = handle.update(cx, |modal, window, cx| {
                 window.activate_window();
                 window.focus(&modal.focus_handle, cx);
             });
+            let modal = handle;
+            if let Some(main_app) = main_app {
+                cx.defer(move |cx| {
+                    sync_overlay_to_main(modal, main_app, cx);
+                });
+            }
         }
         Err(error) => tracing::error!("failed to open media image modal window: {error}"),
     }
