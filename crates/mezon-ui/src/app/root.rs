@@ -175,7 +175,17 @@ impl RootView {
 
     fn sync_settings_page(&mut self, cx: &mut Context<Self>) {
         let page = match Router::global(cx).read(cx).route() {
-            Route::SettingsProfile => crate::settings::SettingsPage::Profile,
+            Route::SettingsProfile => {
+                self.settings_screen
+                    .update(cx, |screen, cx| screen.set_profile_target(None, cx));
+                return;
+            }
+            Route::SettingsClanProfile { clan_id } => {
+                self.settings_screen.update(cx, |screen, cx| {
+                    screen.set_profile_target(Some(clan_id), cx)
+                });
+                return;
+            }
             Route::SettingsDevices => crate::settings::SettingsPage::Device,
             Route::SettingsAppearance => crate::settings::SettingsPage::Appearance,
             Route::SettingsActivity => crate::settings::SettingsPage::Activity,
@@ -248,6 +258,7 @@ impl Render for RootView {
                 match route {
                     Route::SettingsAccount
                     | Route::SettingsProfile
+                    | Route::SettingsClanProfile { .. }
                     | Route::SettingsDevices
                     | Route::SettingsAppearance
                     | Route::SettingsActivity

@@ -144,6 +144,33 @@ impl ProfilePage {
         }
     }
 
+    pub fn show_user_profile(&mut self, cx: &mut Context<Self>) {
+        self.active_tab = ProfileTab::User;
+        cx.notify();
+    }
+
+    pub fn show_clan_profile(&mut self, clan_id: mezon_store::ClanId, cx: &mut Context<Self>) {
+        self.active_tab = ProfileTab::Clan;
+        let display_name = self
+            .profile
+            .as_ref()
+            .map(|profile| profile.display_name.clone())
+            .unwrap_or_default();
+        let username = self
+            .profile
+            .as_ref()
+            .map(|profile| profile.username.clone())
+            .unwrap_or_default();
+        let section = self.clan_section.get_or_insert_with(|| {
+            cx.new(|cx| ClanProfileSection::new(self.settings.clone(), self.clan_list.clone(), cx))
+        });
+        section.update(cx, |section, cx| {
+            section.set_user_profile(display_name, username);
+            section.fetch(&clan_id.get().to_string(), cx);
+        });
+        cx.notify();
+    }
+
     fn show_toast(&mut self, message: impl Into<SharedString>, cx: &mut Context<Self>) {
         self.toast_message = Some(message.into());
         cx.notify();

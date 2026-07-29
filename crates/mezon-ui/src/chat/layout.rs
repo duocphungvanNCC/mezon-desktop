@@ -2939,6 +2939,7 @@ impl ChatLayout {
             ),
             Route::SettingsAccount
             | Route::SettingsProfile
+            | Route::SettingsClanProfile { .. }
             | Route::SettingsDevices
             | Route::SettingsAppearance
             | Route::SettingsActivity

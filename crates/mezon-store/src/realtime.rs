@@ -23,6 +23,8 @@ pub enum RealtimeKind {
     MessageTyping,
     ChannelPresence,
     StatusPresence,
+    CustomStatus,
+    UserStatus,
     ChannelCreated,
     ChannelUpdated,
     ChannelDeleted,
@@ -69,6 +71,8 @@ impl RealtimeKind {
             RealtimeEvent::MessageTyping(_) => Self::MessageTyping,
             RealtimeEvent::ChannelPresence(_) => Self::ChannelPresence,
             RealtimeEvent::StatusPresence(_) => Self::StatusPresence,
+            RealtimeEvent::CustomStatus(_) => Self::CustomStatus,
+            RealtimeEvent::UserStatus(_) => Self::UserStatus,
             RealtimeEvent::ChannelCreated(_) => Self::ChannelCreated,
             RealtimeEvent::ChannelUpdated(_) => Self::ChannelUpdated,
             RealtimeEvent::ChannelDeleted(_) => Self::ChannelDeleted,
@@ -318,9 +322,7 @@ mod tests {
     #[test]
     fn kind_of_returns_none_for_unhandled() {
         assert_eq!(
-            RealtimeKind::of(&RealtimeEvent::CustomStatus(
-                realtime::CustomStatusEvent::default()
-            )),
+            RealtimeKind::of(&RealtimeEvent::Unmute(realtime::UnmuteEvent::default())),
             None
         );
     }

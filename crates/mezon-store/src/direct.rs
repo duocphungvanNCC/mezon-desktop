@@ -1183,6 +1183,7 @@ mod tests {
             badge_count: 0,
             creator_id,
             clan_name: String::new(),
+            channel_avatar: String::new(),
         }
     }
 

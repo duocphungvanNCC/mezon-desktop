@@ -42,6 +42,9 @@ pub enum Route {
     },
     SettingsAccount,
     SettingsProfile,
+    SettingsClanProfile {
+        clan_id: ClanId,
+    },
     SettingsDevices,
     SettingsAppearance,
     SettingsActivity,
@@ -93,6 +96,9 @@ impl Route {
             Route::Invite { invite_id } => format!("/invite/{invite_id}"),
             Route::SettingsAccount => "/settings/account".to_string(),
             Route::SettingsProfile => "/settings/profile".to_string(),
+            Route::SettingsClanProfile { clan_id } => {
+                format!("/settings/profile/clans/{clan_id}")
+            }
             Route::SettingsDevices => "/settings/devices".to_string(),
             Route::SettingsAppearance => "/settings/appearance".to_string(),
             Route::SettingsActivity => "/settings/activity".to_string(),
@@ -184,6 +190,9 @@ impl Route {
             },
             ["settings"] | ["settings", "account"] => Route::SettingsAccount,
             ["settings", "profile"] => Route::SettingsProfile,
+            ["settings", "profile", "clans", clan_id] => Route::SettingsClanProfile {
+                clan_id: ClanId(clan_id.parse().ok()?),
+            },
             ["settings", "devices"] => Route::SettingsDevices,
             ["settings", "appearance"] => Route::SettingsAppearance,
             ["settings", "activity"] => Route::SettingsActivity,
