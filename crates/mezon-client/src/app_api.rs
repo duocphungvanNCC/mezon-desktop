@@ -12,6 +12,7 @@ use crate::{
     },
 };
 
+const CHECK_NAME_TYPE_CHANNEL: i32 = 2;
 const CHECK_NAME_TYPE_NICKNAME: i32 = 4;
 
 fn sanitize_filename(name: &str) -> String {
@@ -376,6 +377,7 @@ impl AppApi {
             .await
     }
 
+    /// List threads for a parent channel.
     pub async fn list_thread_descs(
         &self,
         channel_id: &str,
@@ -743,6 +745,42 @@ impl AppApi {
                 mode,
                 timestamp_seconds,
                 badge_count,
+            )
+            .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn write_last_pin_message(
+        &self,
+        clan_id: i64,
+        channel_id: i64,
+        message_id: i64,
+        mode: i32,
+        is_public: bool,
+        timestamp_seconds: u32,
+        operation: i32,
+        avatar: &str,
+        sender_id: &str,
+        sender_username: &str,
+        content: &str,
+        attachment: &str,
+        created_time: &str,
+    ) -> Result<()> {
+        self.transport
+            .write_last_pin_message(
+                clan_id,
+                channel_id,
+                message_id,
+                mode,
+                is_public,
+                timestamp_seconds,
+                operation,
+                avatar,
+                sender_id,
+                sender_username,
+                content,
+                attachment,
+                created_time,
             )
             .await
     }
@@ -1181,6 +1219,13 @@ impl AppApi {
     pub async fn list_emojis_by_user_id(&self) -> Result<Vec<mezon_proto::api::ClanEmoji>> {
         let resp = self.transport.list_emojis_by_user_id().await?;
         Ok(resp.emoji_list)
+    }
+
+    pub async fn list_events(
+        &self,
+        clan_id: i64,
+    ) -> Result<Vec<mezon_proto::api::EventManagement>> {
+        Ok(self.transport.list_events(clan_id).await?.events)
     }
 
     pub async fn emoji_recent_list(&self) -> Result<Vec<mezon_proto::api::EmojiRecent>> {
@@ -2146,6 +2191,21 @@ impl AppApi {
         Ok(resp.is_duplicate)
     }
 
+    pub async fn check_duplicate_channel_name(
+        &self,
+        name: &str,
+        category_id: &str,
+    ) -> Result<bool> {
+        let cond: i64 = category_id
+            .parse()
+            .map_err(|e| anyhow::anyhow!("invalid category_id {category_id:?}: {e}"))?;
+        let resp = self
+            .transport
+            .check_duplicate_name(name, CHECK_NAME_TYPE_CHANNEL, cond)
+            .await?;
+        Ok(resp.is_duplicate)
+    }
+
     pub async fn check_duplicate_clan_nickname(
         &self,
         clan_id: i64,
@@ -2505,6 +2565,12 @@ impl AppApi {
     pub async fn remove_channel_favorite(&self, channel_id: i64, clan_id: i64) -> Result<()> {
         self.transport
             .remove_channel_favorite(channel_id, clan_id)
+            .await
+    }
+
+    pub async fn active_archived_thread(&self, clan_id: i64, channel_id: i64) -> Result<()> {
+        self.transport
+            .active_archived_thread(clan_id, channel_id)
             .await
     }
 

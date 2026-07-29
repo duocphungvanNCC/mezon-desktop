@@ -16,7 +16,9 @@ mod message_actions_panel;
 mod message_buzz_modal;
 mod message_context_menu;
 mod ogp_embed;
-mod parts;
+pub(crate) mod parts;
+mod pin_confirm_modals;
+pub(crate) use pin_confirm_modals::ConfirmUnpinMessageModal;
 mod poll_card;
 mod poll_detail_modal;
 mod reaction_detail;
@@ -37,6 +39,10 @@ mod video_player;
 
 pub use channel_messages::ChannelMessages;
 pub(crate) use content::open_message_link;
+pub(crate) use content::{heading_line_height, heading_size};
+pub(crate) use content::{
+    pin_link_element, render_pin_rich_layout_element, resolve_message_link_url, text_wrap_children,
+};
 pub use context::DEFAULT_DISPLAY_NAME_COLOR;
 pub(crate) use create_poll_modal::CreatePollModal;
 pub(crate) use custom_status_modal::CustomStatusModal;

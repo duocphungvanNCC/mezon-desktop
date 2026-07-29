@@ -814,7 +814,7 @@ pub fn render_welcome(_msg: &Message, ctx: &RowCtx) -> AnyElement {
             avatar,
         } => {
             col = col
-                .child(welcome_avatar(&display_name, &avatar, ctx))
+                .child(welcome_avatar(&display_name, &avatar, false, ctx))
                 .child(
                     div()
                         .text_size(px(28.))
@@ -839,7 +839,7 @@ pub fn render_welcome(_msg: &Message, ctx: &RowCtx) -> AnyElement {
         }
         WelcomeContext::Group { name, avatar } => {
             col = col
-                .child(welcome_avatar(&name, &avatar, ctx))
+                .child(welcome_avatar(&name, &avatar, true, ctx))
                 .child(
                     div()
                         .text_size(px(28.))
@@ -900,11 +900,12 @@ fn welcome_icon_circle(icon: impl IntoElement, bg: Option<gpui::Rgba>) -> AnyEle
         .into_any_element()
 }
 
-fn welcome_avatar(name: &str, avatar: &str, ctx: &RowCtx) -> AnyElement {
+fn welcome_avatar(name: &str, avatar: &str, is_group: bool, ctx: &RowCtx) -> AnyElement {
     let mut av = Avatar::new()
         .name(name)
         .size_px(px(75.))
-        .image_cache(ctx.avatar_cache.clone());
+        .image_cache(ctx.avatar_cache.clone())
+        .group_default(is_group && avatar.is_empty());
     if !avatar.is_empty() {
         av = av.src(avatar.to_string());
     }

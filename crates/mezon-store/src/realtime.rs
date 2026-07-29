@@ -23,6 +23,8 @@ pub enum RealtimeKind {
     MessageTyping,
     ChannelPresence,
     StatusPresence,
+    CustomStatus,
+    UserStatus,
     ChannelCreated,
     ChannelUpdated,
     ChannelDeleted,
@@ -31,6 +33,7 @@ pub enum RealtimeKind {
     ClanDeleted,
     ClanEmoji,
     AddClanUser,
+    ClanEventCreated,
     UserClanRemoved,
     ClanProfileUpdated,
     SessionRefreshed,
@@ -49,6 +52,7 @@ pub enum RealtimeKind {
     LastSeenUpdated,
     UserChannelAdded,
     UserChannelRemoved,
+    ChannelArchive,
     NotifUserChannel,
     Notifications,
     AddFriend,
@@ -68,6 +72,8 @@ impl RealtimeKind {
             RealtimeEvent::MessageTyping(_) => Self::MessageTyping,
             RealtimeEvent::ChannelPresence(_) => Self::ChannelPresence,
             RealtimeEvent::StatusPresence(_) => Self::StatusPresence,
+            RealtimeEvent::CustomStatus(_) => Self::CustomStatus,
+            RealtimeEvent::UserStatus(_) => Self::UserStatus,
             RealtimeEvent::ChannelCreated(_) => Self::ChannelCreated,
             RealtimeEvent::ChannelUpdated(_) => Self::ChannelUpdated,
             RealtimeEvent::ChannelDeleted(_) => Self::ChannelDeleted,
@@ -76,6 +82,7 @@ impl RealtimeKind {
             RealtimeEvent::ClanDeleted(_) => Self::ClanDeleted,
             RealtimeEvent::ClanEmoji(_) => Self::ClanEmoji,
             RealtimeEvent::AddClanUser(_) => Self::AddClanUser,
+            RealtimeEvent::ClanEventCreated(_) => Self::ClanEventCreated,
             RealtimeEvent::UserClanRemoved(_) => Self::UserClanRemoved,
             RealtimeEvent::ClanProfileUpdated(_) => Self::ClanProfileUpdated,
             RealtimeEvent::SessionRefreshed(_) => Self::SessionRefreshed,
@@ -94,6 +101,7 @@ impl RealtimeKind {
             RealtimeEvent::LastSeenUpdated(_) => Self::LastSeenUpdated,
             RealtimeEvent::UserChannelAdded(_) => Self::UserChannelAdded,
             RealtimeEvent::UserChannelRemoved(_) => Self::UserChannelRemoved,
+            RealtimeEvent::ChannelArchive(_) => Self::ChannelArchive,
             RealtimeEvent::NotifUserChannel(_) => Self::NotifUserChannel,
             RealtimeEvent::Notifications(_) => Self::Notifications,
             RealtimeEvent::AddFriend(_) => Self::AddFriend,
@@ -316,9 +324,7 @@ mod tests {
     #[test]
     fn kind_of_returns_none_for_unhandled() {
         assert_eq!(
-            RealtimeKind::of(&RealtimeEvent::CustomStatus(
-                realtime::CustomStatusEvent::default()
-            )),
+            RealtimeKind::of(&RealtimeEvent::Unmute(realtime::UnmuteEvent::default())),
             None
         );
     }

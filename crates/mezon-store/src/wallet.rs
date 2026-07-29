@@ -7,7 +7,7 @@ use mezon_client::transport_runtime::http_client_arc;
 use mmn_client::{
     AddTxResponse, ClaimRedEnvelopeQrRequest, ClaimRedEnvelopeQrResponse, DECIMALS, DongClient,
     EphemeralKeyPair, ExtraInfo, GetZkProofRequest, IndexerClient, MmnClient,
-    SendTransactionRequest, ZkClient, ZkClientType, ZkProof, address_from_user_id,
+    SendTransactionRequest, Transaction, ZkClient, ZkClientType, ZkProof, address_from_user_id,
     generate_ephemeral_key_pair, is_secure_endpoint, scale_amount_to_decimals,
 };
 
@@ -35,6 +35,52 @@ pub struct WalletTransaction {
     pub counterparty: String,
     pub note: String,
     pub hash: String,
+    pub timestamp: i64,
+    pub sender_user_id: Option<String>,
+    pub receiver_user_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct WalletTransactionPage {
+    pub transactions: Vec<WalletTransaction>,
+    pub has_more: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct TransactionCursor {
+    pub timestamp: String,
+    pub hash: String,
+}
+
+impl TransactionCursor {
+    pub fn after(transaction: &WalletTransaction) -> Option<Self> {
+        let timestamp = chrono::DateTime::from_timestamp(transaction.timestamp, 0)?
+            .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        Some(Self {
+            timestamp,
+            hash: transaction.hash.clone(),
+        })
+    }
+}
+
+fn map_transaction(transaction: Transaction, address: &str) -> WalletTransaction {
+    let sent = transaction.from_address == address;
+    let counterparty = if sent {
+        transaction.to_address
+    } else {
+        transaction.from_address
+    };
+    let extra_info = serde_json::from_str::<ExtraInfo>(&transaction.extra_info).ok();
+    WalletTransaction {
+        sent,
+        value: transaction.value,
+        counterparty,
+        note: transaction.text_data,
+        hash: transaction.hash,
+        timestamp: transaction.transaction_timestamp,
+        sender_user_id: extra_info.as_ref().and_then(|e| e.user_sender_id.clone()),
+        receiver_user_id: extra_info.and_then(|e| e.user_receiver_id),
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -58,7 +104,7 @@ pub struct SendTokenRequest {
 
 struct WalletClients {
     mmn: MmnClient,
-    indexer: IndexerClient,
+    indexer: Option<IndexerClient>,
     zk: ZkClient,
     dong: DongClient,
 }
@@ -171,14 +217,19 @@ impl WalletStore {
                 return None;
             }
         }
+        if config.indexer_api_url.is_empty() {
+            tracing::error!("wallet: indexer_api_url is unset, transaction history is disabled");
+        }
         let http = http_client_arc();
         Some(Arc::new(WalletClients {
             mmn: MmnClient::new(http.clone(), config.mmn_api_url.clone()),
-            indexer: IndexerClient::new(
-                http.clone(),
-                config.indexer_api_url.clone(),
-                INDEXER_CHAIN_ID,
-            ),
+            indexer: (!config.indexer_api_url.is_empty()).then(|| {
+                IndexerClient::new(
+                    http.clone(),
+                    config.indexer_api_url.clone(),
+                    INDEXER_CHAIN_ID,
+                )
+            }),
             zk: ZkClient::new(http.clone(), config.zk_api_url.clone()),
             dong: DongClient::new(http, config.dong_service_api_url.clone()),
         }))
@@ -487,40 +538,66 @@ impl WalletStore {
         )
     }
 
-    pub fn list_wallet_transactions(
+    pub fn load_wallet_transactions(
         &self,
         address: String,
-        page: i64,
-        limit: i64,
         filter: i32,
+        cursor: Option<TransactionCursor>,
         cx: &mut Context<Self>,
-    ) -> Task<Result<Vec<WalletTransaction>, String>> {
+    ) -> Task<Result<WalletTransactionPage, String>> {
         let Some(clients) = self.clients.clone() else {
             return Task::ready(Err("Wallet is not configured".to_string()));
         };
         cx.spawn(async move |_this, _cx| {
-            let response = clients
-                .indexer
-                .get_transaction_by_wallet(&address, page, limit, filter, None, None)
+            let Some(indexer) = clients.indexer.as_ref() else {
+                return Err("Transaction history is not configured".to_string());
+            };
+            let (timestamp_lt, last_hash) = match &cursor {
+                Some(cursor) => (Some(cursor.timestamp.as_str()), Some(cursor.hash.as_str())),
+                None => (None, None),
+            };
+            let response = indexer
+                .get_transactions_by_wallet_before_timestamp(
+                    &address,
+                    filter,
+                    None,
+                    timestamp_lt,
+                    last_hash,
+                )
                 .await
                 .map_err(|error| error.to_string())?;
-            let rows = response
+            let has_more = response.meta.has_more.unwrap_or(false);
+            let transactions = response
                 .data
                 .unwrap_or_default()
                 .into_iter()
-                .map(|tx| {
-                    let sent = tx.from_address == address;
-                    let counterparty = if sent { tx.to_address } else { tx.from_address };
-                    WalletTransaction {
-                        sent,
-                        value: tx.value,
-                        counterparty,
-                        note: tx.text_data,
-                        hash: tx.hash,
-                    }
-                })
+                .map(|tx| map_transaction(tx, &address))
                 .collect();
-            Ok(rows)
+            Ok(WalletTransactionPage {
+                transactions,
+                has_more,
+            })
+        })
+    }
+
+    pub fn wallet_transaction_detail(
+        &self,
+        hash: String,
+        address: String,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<WalletTransaction, String>> {
+        let Some(clients) = self.clients.clone() else {
+            return Task::ready(Err("Wallet is not configured".to_string()));
+        };
+        cx.spawn(async move |_this, _cx| {
+            let Some(indexer) = clients.indexer.as_ref() else {
+                return Err("Transaction history is not configured".to_string());
+            };
+            let transaction = indexer
+                .get_transaction_by_hash(&hash)
+                .await
+                .map_err(|error| error.to_string())?;
+            Ok(map_transaction(transaction, &address))
         })
     }
 

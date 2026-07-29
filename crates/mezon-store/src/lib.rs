@@ -21,6 +21,7 @@ pub mod config;
 pub mod connection;
 pub mod direct;
 pub mod emoji;
+pub mod events;
 pub mod files;
 pub mod friend;
 pub mod gallery;
@@ -121,6 +122,7 @@ pub use emoji::{
     normalize_emoji_shortname, strip_emoji_colons, validate_emoji_create_shortname,
     validate_emoticon_file,
 };
+pub use events::{ClanEventItem, EventsEvent, EventsStore};
 pub use files::{
     ChannelDocument, FILES_BROAD_QUERY, FILES_CACHE_TTL, FILES_PAGE_SIZE, FILES_TYPED_QUERY,
     FilesEvent, FilesStore, filename_matches_query, is_document, short_file_type_label,
@@ -179,7 +181,10 @@ pub use roles::{
 };
 pub use sticker::{ClanSound, Sticker, StickerEvent, StickerStore};
 pub use stream::{StreamMember, StreamPhase, StreamStore};
-pub use threads::{THREAD_STATUS_JOINED, ThreadSummary, ThreadsEvent, ThreadsStore, group_threads};
+pub use threads::{
+    THREAD_STATUS_ARCHIVED, THREAD_STATUS_JOINED, ThreadSummary, ThreadsEvent, ThreadsStore,
+    group_threads,
+};
 pub use topic_badges::{TopicBadgeEvent, TopicBadgeStore};
 pub use topics::{TopicsEvent, TopicsStore};
 pub use ui_state::UiState;
@@ -198,7 +203,10 @@ pub use voice::{
     capture_screen_share_preview, list_screen_share_options, peek_screen_share_options,
     screen_tile_id, system_screen_share_pick, upload_sound_file, validate_sound_file,
 };
-pub use wallet::{SendTokenRequest, WalletDetail, WalletEvent, WalletStore, WalletTransaction};
+pub use wallet::{
+    SendTokenRequest, TransactionCursor, WalletDetail, WalletEvent, WalletStore, WalletTransaction,
+    WalletTransactionPage,
+};
 pub use webhook::{
     ChannelWebhook, ClanWebhook, MAX_WEBHOOK_AVATAR_BYTES, WEBHOOK_NAME_MAX_LENGTH, WebhookEvent,
     WebhookStore,

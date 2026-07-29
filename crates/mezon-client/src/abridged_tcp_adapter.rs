@@ -240,6 +240,7 @@ fn envelope_kind(envelope: &mezon_proto::realtime::Envelope) -> &'static str {
         Some(M::ChannelPresenceEvent(_)) => "ChannelPresence",
         Some(M::StatusPresenceEvent(_)) => "StatusPresence",
         Some(M::CustomStatusEvent(_)) => "CustomStatus",
+        Some(M::UserStatusEvent(_)) => "UserStatus",
         Some(M::MessageReactionEvent(_)) => "MessageReaction",
         Some(M::MarkAsRead(_)) => "MarkAsRead",
         Some(M::ChannelCreatedEvent(_)) => "ChannelCreated",

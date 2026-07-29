@@ -15,6 +15,7 @@ pub struct Avatar {
     fallback_src: Option<SharedString>,
     image_cache: Option<gpui::Entity<crate::image_cache::LruImageCache>>,
     is_anonymous: bool,
+    group_default: bool,
 }
 
 const ANONYMOUS_AVATAR_ICON: &str = "icons/anonymous-avatar.svg";
@@ -32,6 +33,7 @@ impl Avatar {
             fallback_src: None,
             image_cache: None,
             is_anonymous: false,
+            group_default: false,
         }
     }
 
@@ -53,6 +55,11 @@ impl Avatar {
 
     pub fn anonymous(mut self, is_anonymous: bool) -> Self {
         self.is_anonymous = is_anonymous;
+        self
+    }
+
+    pub fn group_default(mut self, group_default: bool) -> Self {
+        self.group_default = group_default;
         self
     }
 
@@ -132,6 +139,21 @@ fn anonymous_circle(d: Pixels) -> AnyElement {
         .into_any_element()
 }
 
+fn group_default_circle(d: Pixels) -> AnyElement {
+    div()
+        .size(d)
+        .flex_shrink_0()
+        .rounded_full()
+        .overflow_hidden()
+        .child(
+            img(crate::util::assets::AVATAR_GROUP)
+                .size(d)
+                .rounded_full()
+                .object_fit(gpui::ObjectFit::Cover),
+        )
+        .into_any_element()
+}
+
 fn clipped_image(
     size: Pixels,
     src: SharedString,
@@ -183,6 +205,7 @@ impl RenderOnce for Avatar {
         let element_bg = Hsla::from(cx.theme().bg_tertiary);
         let initials = name_initials(name.as_ref());
         let is_anonymous = self.is_anonymous;
+        let group_default = self.group_default;
 
         div()
             .size(container_size)
@@ -246,6 +269,7 @@ impl RenderOnce for Avatar {
                         },
                     )
                 }
+                None if group_default => group_default_circle(image_size),
                 None => initials_circle(image_size, bg, text_color, initials),
             })
             .children(self.indicator.map(|indicator| div().child(indicator)))
