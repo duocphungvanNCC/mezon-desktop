@@ -1,11 +1,11 @@
 use std::sync::Arc;
 
 use gpui::{
-    Anchor, AnyElement, App, ClickEvent, Context, CursorStyle, Div, Entity, Hsla, IntoElement,
-    Pixels, Render, RenderOnce, SharedString, Stateful, Subscription, WeakEntity, Window, div,
-    point, prelude::*, px,
+    Anchor, AnyElement, App, ClickEvent, Context, CursorStyle, Div, Entity, FontWeight, Hsla,
+    IntoElement, Pixels, Render, RenderOnce, SharedString, Stateful, Subscription, WeakEntity,
+    Window, div, point, prelude::*, px,
 };
-use mezon_store::{InVoiceInfo, Settings, ThreadsStore};
+use mezon_store::{InVoiceInfo, Settings, StreamStore, ThreadsStore};
 use ui::{Clickable, PopoverMenu, PopoverMenuHandle, Toggleable, Tooltip};
 
 use crate::app::window_controls;
@@ -779,6 +779,7 @@ pub struct ChatHeader {
     show_threads: bool,
     timeline_action: bool,
     timeline_active: bool,
+    stream_sidebar: bool,
     pin_handle: Option<PopoverMenuHandle<PinnedPopoverPanel>>,
     canvas_handle: Option<PopoverMenuHandle<CanvasPopoverPanel>>,
     layout: WeakEntity<ChatLayout>,
@@ -815,6 +816,7 @@ impl ChatHeader {
             show_threads: false,
             timeline_action: false,
             timeline_active: false,
+            stream_sidebar: false,
             pin_handle: None,
             canvas_handle: None,
             layout,
@@ -842,6 +844,7 @@ impl ChatHeader {
         search_expanded: bool,
         show_search_options: bool,
         search_input: Option<Entity<InputState>>,
+        stream_sidebar: bool,
         locale: Option<&str>,
         cx: &mut Context<Self>,
     ) {
@@ -875,6 +878,7 @@ impl ChatHeader {
             && self.show_threads == show_threads
             && self.timeline_action == timeline_action
             && self.timeline_active == timeline_active
+            && self.stream_sidebar == stream_sidebar
         {
             return;
         }
@@ -892,6 +896,7 @@ impl ChatHeader {
         self.show_threads = show_threads;
         self.timeline_action = timeline_action;
         self.timeline_active = timeline_active;
+        self.stream_sidebar = stream_sidebar;
         cx.notify();
     }
 }
@@ -899,6 +904,9 @@ impl ChatHeader {
 impl Render for ChatHeader {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
+        if self.stream_sidebar {
+            return render_stream_chat_sidebar_header(&theme, &self.name, cx).into_any_element();
+        }
         let layout_weak = self.layout.clone();
         let settings = self.settings.clone();
         let show_threads = self.show_threads;
@@ -1063,6 +1071,67 @@ impl Render for ChatHeader {
         }
         header.render(&theme, cx).into_any_element()
     }
+}
+
+fn render_stream_chat_sidebar_header(
+    theme: &Theme,
+    name: &SharedString,
+    _cx: &App,
+) -> impl IntoElement {
+    let label = crate::chat::stream::truncate_label(name, 30);
+    let hover = theme.bg_hover;
+
+    div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .justify_between()
+        .w_full()
+        .px_4()
+        .h(px(50.))
+        .min_h(px(50.))
+        .border_b_1()
+        .border_color(theme.border)
+        .bg(theme.bg_primary)
+        .child(
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap_2()
+                .child(
+                    Icon::new(IconName::MessageIcon)
+                        .size(px(20.))
+                        .text_color(theme.text_primary),
+                )
+                .child(
+                    div()
+                        .text_base()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(theme.text_primary)
+                        .child(label),
+                ),
+        )
+        .child(
+            div()
+                .id("stream-chat-close")
+                .flex()
+                .items_center()
+                .justify_center()
+                .cursor_pointer()
+                .text_color(theme.text_primary)
+                .hover(move |s| s.bg(hover))
+                .rounded_md()
+                .p_1()
+                .child(Icon::new(IconName::Close).size(px(20.)))
+                .on_click(|_, _, cx| {
+                    StreamStore::global(cx).update(cx, |store, cx| {
+                        if store.show_chat() {
+                            store.toggle_chat(cx);
+                        }
+                    });
+                }),
+        )
 }
 
 #[derive(IntoElement)]

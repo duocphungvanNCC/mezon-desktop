@@ -20,6 +20,8 @@ pub struct SingleInstance {
     url_rx: std::sync::Mutex<Option<std::sync::mpsc::Receiver<String>>>,
 }
 
+pub const ACTIVATE_MESSAGE: &str = "mezon-activate";
+
 impl SingleInstance {
     /// Try to acquire the single-instance lock.
     ///
@@ -27,10 +29,10 @@ impl SingleInstance {
     /// Returns `Ok(None)` — another instance is already running.
     pub fn try_acquire() -> anyhow::Result<Option<Self>> {
         #[cfg(unix)]
-        return Self::try_acquire_unix(None);
+        return Self::try_acquire_unix(Some(ACTIVATE_MESSAGE));
 
         #[cfg(windows)]
-        return Self::try_acquire_windows(None);
+        return Self::try_acquire_windows(Some(ACTIVATE_MESSAGE));
 
         #[cfg(not(any(unix, windows)))]
         Ok(Some(Self {}))

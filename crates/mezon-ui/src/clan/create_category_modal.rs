@@ -240,7 +240,7 @@ impl Render for CreateCategoryModal {
                             .text_xs()
                             .italic()
                             .font_weight(FontWeight::MEDIUM)
-                            .text_color(theme.status_dnd)
+                            .text_color(theme.danger_text)
                             .when(show_invalid, |el| el.child(invalid_msg))
                             .when(show_duplicate, |el| el.child(duplicate_msg)),
                     ),

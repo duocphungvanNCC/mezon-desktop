@@ -1,6 +1,7 @@
 use gpui::{App, AppContext, Entity, Global};
 use mezon_store::{ChannelId, ClanId};
 
+use crate::chat::channel_settings::ChannelSettingsTab;
 use crate::clan::settings::ClanSettingsPage;
 use std::collections::VecDeque;
 
@@ -41,6 +42,9 @@ pub enum Route {
     },
     SettingsAccount,
     SettingsProfile,
+    SettingsClanProfile {
+        clan_id: ClanId,
+    },
     SettingsDevices,
     SettingsAppearance,
     SettingsActivity,
@@ -51,6 +55,11 @@ pub enum Route {
     ClanSettings {
         clan_id: ClanId,
         page: ClanSettingsPage,
+    },
+    ChannelSettings {
+        clan_id: ClanId,
+        channel_id: ChannelId,
+        tab: ChannelSettingsTab,
     },
     NotFound {
         path: String,
@@ -87,6 +96,9 @@ impl Route {
             Route::Invite { invite_id } => format!("/invite/{invite_id}"),
             Route::SettingsAccount => "/settings/account".to_string(),
             Route::SettingsProfile => "/settings/profile".to_string(),
+            Route::SettingsClanProfile { clan_id } => {
+                format!("/settings/profile/clans/{clan_id}")
+            }
             Route::SettingsDevices => "/settings/devices".to_string(),
             Route::SettingsAppearance => "/settings/appearance".to_string(),
             Route::SettingsActivity => "/settings/activity".to_string(),
@@ -97,6 +109,16 @@ impl Route {
             Route::ClanSettings { clan_id, page } => {
                 format!("/chat/clans/{}/settings/{}", clan_id.get(), page.slug())
             }
+            Route::ChannelSettings {
+                clan_id,
+                channel_id,
+                tab,
+            } => format!(
+                "/chat/clans/{}/channels/{}/settings/{}",
+                clan_id.get(),
+                channel_id.get(),
+                tab.slug()
+            ),
             Route::NotFound { path } => path.clone(),
         }
     }
@@ -168,6 +190,9 @@ impl Route {
             },
             ["settings"] | ["settings", "account"] => Route::SettingsAccount,
             ["settings", "profile"] => Route::SettingsProfile,
+            ["settings", "profile", "clans", clan_id] => Route::SettingsClanProfile {
+                clan_id: ClanId(clan_id.parse().ok()?),
+            },
             ["settings", "devices"] => Route::SettingsDevices,
             ["settings", "appearance"] => Route::SettingsAppearance,
             ["settings", "activity"] => Route::SettingsActivity,
@@ -182,6 +207,26 @@ impl Route {
             ["chat", "clans", clan_id, "settings", page] => Route::ClanSettings {
                 clan_id: clan_id.parse().ok()?,
                 page: ClanSettingsPage::from_slug(page)?,
+            },
+            ["chat", "clans", clan_id, "channels", channel_id, "settings"] => {
+                Route::ChannelSettings {
+                    clan_id: clan_id.parse().ok()?,
+                    channel_id: channel_id.parse().ok()?,
+                    tab: ChannelSettingsTab::Overview,
+                }
+            }
+            [
+                "chat",
+                "clans",
+                clan_id,
+                "channels",
+                channel_id,
+                "settings",
+                tab,
+            ] => Route::ChannelSettings {
+                clan_id: clan_id.parse().ok()?,
+                channel_id: channel_id.parse().ok()?,
+                tab: ChannelSettingsTab::from_slug(tab)?,
             },
             _ => return None,
         })
@@ -513,6 +558,54 @@ mod tests {
         };
         assert_eq!(route.to_path(), "/chat/clans/7/settings/roles");
         assert_eq!(Route::from_path(&route.to_path()), route);
+    }
+
+    #[test]
+    fn from_path_channel_settings_permissions() {
+        assert_eq!(
+            Route::from_path("/chat/clans/4/channels/9/settings/permissions"),
+            Route::ChannelSettings {
+                clan_id: ClanId(4),
+                channel_id: ChannelId(9),
+                tab: ChannelSettingsTab::Permissions,
+            }
+        );
+    }
+
+    #[test]
+    fn from_path_channel_settings_defaults_to_overview() {
+        assert_eq!(
+            Route::from_path("/chat/clans/4/channels/9/settings"),
+            Route::ChannelSettings {
+                clan_id: ClanId(4),
+                channel_id: ChannelId(9),
+                tab: ChannelSettingsTab::Overview,
+            }
+        );
+    }
+
+    #[test]
+    fn to_path_roundtrip_channel_settings() {
+        let route = Route::ChannelSettings {
+            clan_id: ClanId(4),
+            channel_id: ChannelId(9),
+            tab: ChannelSettingsTab::StreamThumbnail,
+        };
+        assert_eq!(
+            route.to_path(),
+            "/chat/clans/4/channels/9/settings/stream-thumbnail"
+        );
+        assert_eq!(Route::from_path(&route.to_path()), route);
+    }
+
+    #[test]
+    fn from_path_channel_settings_unknown_tab_is_not_found() {
+        assert_eq!(
+            Route::from_path("/chat/clans/4/channels/9/settings/nope"),
+            Route::NotFound {
+                path: "/chat/clans/4/channels/9/settings/nope".into(),
+            }
+        );
     }
 
     #[test]

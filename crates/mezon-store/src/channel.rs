@@ -13,7 +13,9 @@ use mezon_client::{
 };
 
 use crate::KeyedCache;
+use crate::badge::BadgeService;
 use crate::clan::{ClanEvent, ClanList};
+use crate::event_targets_user;
 use crate::messages::MessagesStore;
 use crate::realtime::{RealtimeDispatch, RealtimeKind};
 
@@ -100,6 +102,14 @@ impl From<ApiChannelApp> for AppChannel {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArchivedChannelDesc {
+    pub channel_id: i64,
+    pub channel_label: String,
+    pub channel_private: bool,
+    pub last_active_timestamp: Option<i64>,
+}
+
 #[derive(Debug, Clone)]
 pub struct Channel {
     pub id: ChannelId,
@@ -121,6 +131,7 @@ pub struct Channel {
     pub voice_members: Vec<VoiceMember>,
     pub is_favorite: bool,
     pub creator_id: UserId,
+    pub avatar_url: String,
 }
 
 impl Channel {
@@ -182,6 +193,21 @@ pub fn validate_category_name(name: &str) -> Result<String, CreateCategoryError>
     Ok(trimmed.to_string())
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CreateChannelError {
+    InvalidName,
+    DuplicateName,
+    Other(String),
+}
+
+pub fn validate_channel_name(name: &str) -> Result<String, CreateChannelError> {
+    validate_category_name(name).map_err(|err| match err {
+        CreateCategoryError::InvalidName => CreateChannelError::InvalidName,
+        CreateCategoryError::DuplicateName => CreateChannelError::DuplicateName,
+        CreateCategoryError::Other(msg) => CreateChannelError::Other(msg),
+    })
+}
+
 fn collapse_state_path() -> std::path::PathBuf {
     dirs::config_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."))
@@ -204,9 +230,15 @@ struct TopicParentBadge {
 }
 
 struct ClanExtras {
-    voice_map: HashMap<ChannelId, Vec<UserId>>,
-    favorite_ids: HashSet<ChannelId>,
-    app_channels: Vec<AppChannel>,
+    voice_map: Option<HashMap<ChannelId, Vec<UserId>>>,
+    favorite_ids: Option<HashSet<ChannelId>>,
+    app_channels: Option<Vec<AppChannel>>,
+}
+
+impl ClanExtras {
+    fn is_complete(&self) -> bool {
+        self.voice_map.is_some() && self.favorite_ids.is_some() && self.app_channels.is_some()
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -221,6 +253,7 @@ struct ChannelUnreadSeed {
 pub struct ChannelList {
     cache: KeyedCache<ClanId, Vec<Category>>,
     app_channels_cache: HashMap<ClanId, Vec<AppChannel>>,
+    favorites: HashMap<ClanId, HashSet<ChannelId>>,
     topic_parent_badges: HashMap<ChannelId, TopicParentBadge>,
     pending_channel_badges: HashMap<ChannelId, u32>,
     pending_badge_seed: HashMap<ClanId, HashMap<ChannelId, ChannelUnreadSeed>>,
@@ -372,6 +405,7 @@ impl ChannelList {
         self.reset_generation = self.reset_generation.wrapping_add(1);
         self.cache.clear();
         self.app_channels_cache.clear();
+        self.favorites.clear();
         self.topic_parent_badges.clear();
         self.pending_channel_badges.clear();
         self.pending_badge_seed.clear();
@@ -447,6 +481,7 @@ impl ChannelList {
         Self {
             cache: KeyedCache::new(None),
             app_channels_cache: HashMap::new(),
+            favorites: HashMap::new(),
             topic_parent_badges: HashMap::new(),
             pending_channel_badges: HashMap::new(),
             pending_badge_seed: HashMap::new(),
@@ -686,17 +721,89 @@ impl ChannelList {
                 if this.reset_generation != generation {
                     return;
                 }
-                this.extras_loaded.insert(clan_id);
-                this.apply_clan_extras(clan_id, extras, cx);
+                this.finish_extras(clan_id, extras, cx);
             });
         })
         .detach();
+    }
+
+    fn finish_extras(&mut self, clan_id: ClanId, extras: ClanExtras, cx: &mut Context<Self>) {
+        let complete = extras.is_complete();
+        let applied = self.apply_clan_extras(clan_id, extras, cx);
+        if applied && complete {
+            self.extras_loaded.insert(clan_id);
+        }
     }
 
     pub fn refresh_clan(&mut self, clan_id: ClanId, cx: &mut Context<Self>) {
         self.want_extras.insert(clan_id);
         self.extras_loaded.remove(&clan_id);
         self.fetch_clan(clan_id, cx);
+    }
+
+    pub fn fetch_archived_channels(
+        &self,
+        clan_id: ClanId,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<Vec<ArchivedChannelDesc>, String>> {
+        let api = self.api.clone();
+        let id = clan_id.get();
+        cx.spawn(async move |_, _| {
+            let descs = api
+                .list_archived_channel_descs(id)
+                .await
+                .map_err(|e| e.to_string())?;
+            Ok(descs
+                .into_iter()
+                .map(|d| ArchivedChannelDesc {
+                    channel_id: d.channel_id,
+                    channel_label: d.channel_label,
+                    channel_private: d.channel_private != 0,
+                    last_active_timestamp: d
+                        .last_sent_message
+                        .filter(|m| m.timestamp_seconds > 0)
+                        .map(|m| i64::from(m.timestamp_seconds)),
+                })
+                .collect())
+        })
+    }
+
+    pub fn restore_archived_channel(
+        &self,
+        clan_id: ClanId,
+        channel_id: i64,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<(), String>> {
+        let api = self.api.clone();
+        let clan_id_raw = clan_id.get();
+        cx.spawn(async move |_, _| {
+            api.restore_archived_channel(clan_id_raw, channel_id)
+                .await
+                .map_err(|e| e.to_string())
+        })
+    }
+
+    fn apply_clan_structure(
+        &mut self,
+        clan_id: ClanId,
+        mut categories: Vec<Category>,
+        cx: &mut Context<Self>,
+    ) {
+        self.consume_badge_seed(clan_id, &mut categories);
+        self.merge_pending_badges(&mut categories);
+        let previous_voice = collect_voice_members(&self.cache, clan_id);
+        merge_previous_voice_members(&mut categories, &previous_voice);
+        let categories = rebuild_favorites(categories, clan_id, self.favorites.get(&clan_id));
+        if seed_in_voice_from_categories(&mut self.in_voice, clan_id, &categories) {
+            cx.emit(ChannelEvent::InVoiceChanged);
+        }
+        self.cache.insert(clan_id, categories, None);
+        self.invalidate_channel_index(clan_id);
+        cx.emit(ChannelEvent::ClanChannelsLoaded(clan_id));
+        cx.notify();
+        if self.want_extras.contains(&clan_id) {
+            self.ensure_extras(clan_id, cx);
+        }
     }
 
     fn fetch_clan(&mut self, clan_id: ClanId, cx: &mut Context<Self>) {
@@ -709,26 +816,13 @@ impl ChannelList {
         cx.spawn(async move |this, cx| {
             let result = Self::fetch_clan_structure(&api, clan_id).await;
             match result {
-                Ok(mut categories) => {
+                Ok(categories) => {
                     let _ = this.update(cx, |this, cx| {
                         this.loading.remove(&clan_id);
                         if this.reset_generation != generation {
                             return;
                         }
-                        this.consume_badge_seed(clan_id, &mut categories);
-                        this.merge_pending_badges(&mut categories);
-                        let previous_voice = collect_voice_members(&this.cache, clan_id);
-                        merge_previous_voice_members(&mut categories, &previous_voice);
-                        if seed_in_voice_from_categories(&mut this.in_voice, clan_id, &categories) {
-                            cx.emit(ChannelEvent::InVoiceChanged);
-                        }
-                        this.cache.insert(clan_id, categories, None);
-                        this.invalidate_channel_index(clan_id);
-                        cx.emit(ChannelEvent::ClanChannelsLoaded(clan_id));
-                        cx.notify();
-                        if this.want_extras.contains(&clan_id) {
-                            this.ensure_extras(clan_id, cx);
-                        }
+                        this.apply_clan_structure(clan_id, categories, cx);
                     });
                 }
                 Err(e) => {
@@ -818,8 +912,7 @@ impl ChannelList {
             })
             .collect();
 
-        let categories = build_categories(api_categories, &mut channels);
-        Ok(assemble_with_favorites(categories, clan_id))
+        Ok(build_categories(api_categories, &mut channels))
     }
 
     async fn fetch_clan_extras(api: &AppApi, clan_id: ClanId) -> ClanExtras {
@@ -829,36 +922,33 @@ impl ChannelList {
             api.list_channel_apps(clan_id.get()),
         );
 
-        let voice_users = voice_res.unwrap_or_else(|e| {
-            tracing::warn!("list_voice_channel_users failed: {e}");
-            Vec::new()
-        });
-        let favorite_ids: HashSet<ChannelId> = favorites_res
-            .unwrap_or_else(|e| {
-                tracing::warn!("list_favorite_channels failed: {e}");
-                Vec::new()
-            })
-            .into_iter()
-            .filter_map(|s| s.parse::<ChannelId>().ok())
-            .collect();
-        let app_channels: Vec<AppChannel> = apps_res
-            .unwrap_or_else(|e| {
-                tracing::warn!("list_channel_apps failed: {e}");
-                Vec::new()
-            })
-            .into_iter()
-            .map(AppChannel::from)
-            .collect();
+        let voice_users = voice_res
+            .inspect_err(|e| tracing::warn!("list_voice_channel_users failed: {e}"))
+            .ok();
+        let favorite_ids: Option<HashSet<ChannelId>> = favorites_res
+            .inspect_err(|e| tracing::warn!("list_favorite_channels failed: {e}"))
+            .ok()
+            .map(|ids| {
+                ids.into_iter()
+                    .filter_map(|s| s.parse::<ChannelId>().ok())
+                    .collect()
+            });
+        let app_channels: Option<Vec<AppChannel>> = apps_res
+            .inspect_err(|e| tracing::warn!("list_channel_apps failed: {e}"))
+            .ok()
+            .map(|apps| apps.into_iter().map(AppChannel::from).collect());
 
-        let voice_map: HashMap<ChannelId, Vec<UserId>> = voice_users
-            .into_iter()
-            .map(|v| {
-                (
-                    ChannelId(v.channel_id),
-                    v.user_ids.into_iter().map(UserId).collect(),
-                )
-            })
-            .collect();
+        let voice_map: Option<HashMap<ChannelId, Vec<UserId>>> = voice_users.map(|users| {
+            users
+                .into_iter()
+                .map(|v| {
+                    (
+                        ChannelId(v.channel_id),
+                        v.user_ids.into_iter().map(UserId).collect(),
+                    )
+                })
+                .collect()
+        });
 
         ClanExtras {
             voice_map,
@@ -867,49 +957,59 @@ impl ChannelList {
         }
     }
 
-    fn apply_clan_extras(&mut self, clan_id: ClanId, extras: ClanExtras, cx: &mut Context<Self>) {
-        let app_channels_changed =
-            self.app_channels_cache.get(&clan_id) != Some(&extras.app_channels);
-        self.app_channels_cache.insert(clan_id, extras.app_channels);
+    fn apply_clan_extras(
+        &mut self,
+        clan_id: ClanId,
+        extras: ClanExtras,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let mut app_channels_changed = false;
+        if let Some(app_channels) = extras.app_channels {
+            app_channels_changed = self.app_channels_cache.get(&clan_id) != Some(&app_channels);
+            self.app_channels_cache.insert(clan_id, app_channels);
+        }
+
+        let mut favorites_changed = false;
+        let favorites_len = extras.favorite_ids.as_ref().map(HashSet::len);
+        if let Some(favorite_ids) = extras.favorite_ids {
+            favorites_changed = self.favorites.get(&clan_id) != Some(&favorite_ids);
+            self.favorites.insert(clan_id, favorite_ids);
+        }
 
         let Some(slot) = self.cache.get_mut(&clan_id) else {
             cx.notify();
-            return;
+            return false;
         };
 
         let mut owned = std::mem::take(slot);
         owned.retain(|category| category.id != FAVOR_CATE_ID);
 
-        let mut changed = app_channels_changed;
-        for ch in owned
-            .iter_mut()
-            .flat_map(|category| category.channels.iter_mut())
-        {
-            let is_favorite = extras.favorite_ids.contains(&ch.id);
-            if ch.is_favorite != is_favorite {
-                ch.is_favorite = is_favorite;
-                changed = true;
-            }
-            let members: Vec<VoiceMember> = extras
-                .voice_map
-                .get(&ch.id)
-                .map(|ids| {
-                    ids.iter()
-                        .map(|uid| VoiceMember {
-                            display_name: uid.to_string(),
-                            avatar_url: String::new(),
-                            user_id: *uid,
-                        })
-                        .collect()
-                })
-                .unwrap_or_default();
-            if ch.voice_members != members {
-                ch.voice_members = members;
-                changed = true;
+        let mut changed = app_channels_changed || favorites_changed;
+        if let Some(voice_map) = extras.voice_map.as_ref() {
+            for ch in owned
+                .iter_mut()
+                .flat_map(|category| category.channels.iter_mut())
+            {
+                let members: Vec<VoiceMember> = voice_map
+                    .get(&ch.id)
+                    .map(|ids| {
+                        ids.iter()
+                            .map(|uid| VoiceMember {
+                                display_name: uid.to_string(),
+                                avatar_url: String::new(),
+                                user_id: *uid,
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                if ch.voice_members != members {
+                    ch.voice_members = members;
+                    changed = true;
+                }
             }
         }
 
-        let rebuilt = assemble_with_favorites(owned, clan_id);
+        let rebuilt = rebuild_favorites(owned, clan_id, self.favorites.get(&clan_id));
         let in_voice_changed = seed_in_voice_from_categories(&mut self.in_voice, clan_id, &rebuilt);
         if let Some(slot) = self.cache.get_mut(&clan_id) {
             *slot = rebuilt;
@@ -922,14 +1022,15 @@ impl ChannelList {
         tracing::debug!(
             target: "clan_load",
             clan_id = clan_id.get(),
-            favorites = extras.favorite_ids.len(),
-            voice_channels = extras.voice_map.len(),
+            favorites = favorites_len,
+            voice_channels = extras.voice_map.as_ref().map(HashMap::len),
             changed,
             "extras patched into cached clan structure"
         );
         if changed || in_voice_changed {
             cx.notify();
         }
+        true
     }
 
     fn notify_channel_list(&self, clan_id: ClanId, cx: &mut Context<Self>) {
@@ -1342,6 +1443,55 @@ impl ChannelList {
         })
     }
 
+    pub fn update_categories_order(
+        &mut self,
+        clan_id: ClanId,
+        category_ids: &[i64],
+        cx: &mut Context<Self>,
+    ) -> Task<Result<(), String>> {
+        if category_ids.is_empty() {
+            return Task::ready(Err("no categories to reorder".into()));
+        }
+        let payload: Vec<(i32, i64)> = category_ids
+            .iter()
+            .enumerate()
+            .map(|(index, category_id)| ((index + 1) as i32, *category_id))
+            .collect();
+        if let Some(categories) = self.cache.get_mut(&clan_id) {
+            for (index, category_id) in category_ids.iter().enumerate() {
+                let order = (index + 1) as i32;
+                let id = category_id.to_string();
+                if let Some(category) = categories.iter_mut().find(|c| c.id == id) {
+                    category.order = order;
+                }
+            }
+            categories.sort_by_key(|c| {
+                if c.id == FAVOR_CATE_ID {
+                    i32::MIN
+                } else {
+                    c.order
+                }
+            });
+            cx.notify();
+        }
+        let api = self.api.clone();
+        cx.spawn(async move |this, cx| {
+            match api.update_category_order(clan_id.get(), &payload).await {
+                Ok(()) => this
+                    .update(cx, |this, cx| {
+                        this.refresh_clan(clan_id, cx);
+                    })
+                    .map_err(|_| "store dropped".to_string()),
+                Err(error) => {
+                    let _ = this.update(cx, |this, cx| {
+                        this.refresh_clan(clan_id, cx);
+                    });
+                    Err(error.to_string())
+                }
+            }
+        })
+    }
+
     pub fn create_category(
         &mut self,
         clan_id: ClanId,
@@ -1367,6 +1517,76 @@ impl ChannelList {
             })
             .map_err(|_| CreateCategoryError::Other("store dropped".into()))?;
             Ok(())
+        })
+    }
+
+    pub fn channel_name_exists_in_category(
+        &self,
+        clan_id: ClanId,
+        category_id: &str,
+        name: &str,
+    ) -> bool {
+        self.cache.get(&clan_id).is_some_and(|categories| {
+            channel_name_exists_in_categories(categories, category_id, name)
+        })
+    }
+
+    pub fn create_channel(
+        &mut self,
+        clan_id: ClanId,
+        category_id: String,
+        name: String,
+        channel_type: ChannelType,
+        private: bool,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<(ChannelId, ChannelType), CreateChannelError>> {
+        let label = match validate_channel_name(&name) {
+            Ok(label) => label,
+            Err(err) => return Task::ready(Err(err)),
+        };
+        if self.channel_name_exists_in_category(clan_id, &category_id, &label) {
+            return Task::ready(Err(CreateChannelError::DuplicateName));
+        }
+        let channel_private = if private && channel_type == ChannelType::Text {
+            1
+        } else {
+            0
+        };
+        let api = self.api.clone();
+        cx.spawn(async move |this, cx| {
+            if api
+                .check_duplicate_channel_name(&label, &category_id)
+                .await
+                .map_err(|e| CreateChannelError::Other(e.to_string()))?
+            {
+                return Err(CreateChannelError::DuplicateName);
+            }
+            let category_id_num = category_id.parse::<i64>().ok();
+            let mut desc = api
+                .create_channel(
+                    clan_id.get(),
+                    &label,
+                    channel_type.as_raw(),
+                    category_id_num,
+                    None,
+                    channel_private,
+                )
+                .await
+                .map_err(|e| CreateChannelError::Other(e.to_string()))?;
+            desc.category_id = effective_category_id(desc.category_id, category_id_num);
+            let channel_id = ChannelId(desc.channel_id);
+            let created_type = ChannelType::from_raw(desc.channel_type);
+            this.update(cx, |this, cx| {
+                if let Some(categories) = this.cache.get_mut(&clan_id) {
+                    let channel = channel_from_desc(desc, 0, Vec::new(), false);
+                    if insert_channel(categories, channel) {
+                        this.invalidate_channel_index(clan_id);
+                        cx.notify();
+                    }
+                }
+            })
+            .map_err(|_| CreateChannelError::Other("store dropped".into()))?;
+            Ok((channel_id, created_type))
         })
     }
 
@@ -1587,6 +1807,7 @@ impl ChannelList {
                         voice_members: Vec::new(),
                         is_favorite: false,
                         creator_id: UserId(e.creator_id),
+                        avatar_url: String::new(),
                     };
                     let inserted = if let Some(cats) = self.cache.get_mut(&clan_id) {
                         insert_channel(cats, channel)
@@ -1619,6 +1840,8 @@ impl ChannelList {
                 for cats in self.cache.values_mut() {
                     removed |= remove_channel(cats, id);
                 }
+                removed |=
+                    remove_user_channel(&mut self.user_channels, &mut self.user_channels_order, id);
                 let in_voice_changed = remove_in_voice_in_channel(&mut self.in_voice, id);
                 if removed {
                     self.invalidate_channel_index_all();
@@ -1715,6 +1938,12 @@ impl ChannelList {
                 if channel_type == 2 || channel_type == 3 {
                     return;
                 }
+                let me = BadgeService::try_global(cx)
+                    .and_then(|badges| badges.read(cx).current_user_id(cx));
+                let added_ids = e.users.iter().map(|u| u.user_id).collect::<Vec<_>>();
+                if !event_targets_user(&added_ids, me) {
+                    return;
+                }
                 let clan_id = ClanId(e.clan_id);
                 let channel_id = ChannelId(desc.channel_id);
                 let Some(cats) = self.cache.get_mut(&clan_id) else {
@@ -1748,6 +1977,7 @@ impl ChannelList {
                     voice_members: Vec::new(),
                     is_favorite: false,
                     creator_id: UserId(desc.creator_id),
+                    avatar_url: desc.channel_avatar.clone(),
                 };
                 let inserted = insert_channel(cats, channel);
                 if inserted {
@@ -1761,10 +1991,20 @@ impl ChannelList {
                 if channel_type == 2 || channel_type == 3 {
                     return;
                 }
+                let me = BadgeService::try_global(cx)
+                    .and_then(|badges| badges.read(cx).current_user_id(cx));
+                if !event_targets_user(&e.user_ids, me) {
+                    return;
+                }
                 let mut removed = false;
                 for cats in self.cache.values_mut() {
                     removed |= remove_channel(cats, channel_id);
                 }
+                removed |= remove_user_channel(
+                    &mut self.user_channels,
+                    &mut self.user_channels_order,
+                    channel_id,
+                );
                 let in_voice_changed = remove_in_voice_in_channel(&mut self.in_voice, channel_id);
                 if removed {
                     self.invalidate_channel_index_all();
@@ -2023,6 +2263,76 @@ impl ChannelList {
         clan_id: ClanId,
         cx: &mut Context<Self>,
     ) {
+        self.apply_favorite_locally(channel_id, clan_id, true, cx);
+
+        let api = self.api.clone();
+        let generation = self.reset_generation;
+        cx.spawn(async move |this, cx| {
+            if let Err(e) = api
+                .add_channel_favorite(channel_id.get(), clan_id.get())
+                .await
+            {
+                tracing::error!("add_channel_favorite failed: {e}");
+                let _ = this.update(cx, |this, cx| {
+                    if this.reset_generation == generation {
+                        this.apply_favorite_locally(channel_id, clan_id, false, cx);
+                    }
+                });
+            }
+        })
+        .detach();
+    }
+
+    pub fn remove_channel_favorite(
+        &mut self,
+        channel_id: ChannelId,
+        clan_id: ClanId,
+        cx: &mut Context<Self>,
+    ) {
+        self.apply_favorite_locally(channel_id, clan_id, false, cx);
+
+        let api = self.api.clone();
+        let generation = self.reset_generation;
+        cx.spawn(async move |this, cx| {
+            if let Err(e) = api
+                .remove_channel_favorite(channel_id.get(), clan_id.get())
+                .await
+            {
+                tracing::error!("remove_channel_favorite failed: {e}");
+                let _ = this.update(cx, |this, cx| {
+                    if this.reset_generation == generation {
+                        this.apply_favorite_locally(channel_id, clan_id, true, cx);
+                    }
+                });
+            }
+        })
+        .detach();
+    }
+
+    fn apply_favorite_locally(
+        &mut self,
+        channel_id: ChannelId,
+        clan_id: ClanId,
+        favorite: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if favorite {
+            self.add_favorite_locally(channel_id, clan_id, cx);
+        } else {
+            self.remove_favorite_locally(channel_id, clan_id, cx);
+        }
+    }
+
+    fn add_favorite_locally(
+        &mut self,
+        channel_id: ChannelId,
+        clan_id: ClanId,
+        cx: &mut Context<Self>,
+    ) {
+        self.favorites
+            .entry(clan_id)
+            .or_default()
+            .insert(channel_id);
         let mut changed = false;
         if let Some(cats) = self.cache.get_mut(&clan_id) {
             let channel = cats
@@ -2060,24 +2370,17 @@ impl ChannelList {
             self.invalidate_channel_index(clan_id);
             cx.notify();
         }
-
-        let api = self.api.clone();
-        let cid = channel_id;
-        let clid = clan_id;
-        cx.spawn(async move |_, _| {
-            if let Err(e) = api.add_channel_favorite(cid.get(), clid.get()).await {
-                tracing::error!("add_channel_favorite failed: {e}");
-            }
-        })
-        .detach();
     }
 
-    pub fn remove_channel_favorite(
+    fn remove_favorite_locally(
         &mut self,
         channel_id: ChannelId,
         clan_id: ClanId,
         cx: &mut Context<Self>,
     ) {
+        if let Some(ids) = self.favorites.get_mut(&clan_id) {
+            ids.remove(&channel_id);
+        }
         let mut changed = false;
         if let Some(cats) = self.cache.get_mut(&clan_id) {
             for cat in cats.iter_mut() {
@@ -2096,16 +2399,6 @@ impl ChannelList {
             self.invalidate_channel_index(clan_id);
             cx.notify();
         }
-
-        let api = self.api.clone();
-        let cid = channel_id;
-        let clid = clan_id;
-        cx.spawn(async move |_, _| {
-            if let Err(e) = api.remove_channel_favorite(cid.get(), clid.get()).await {
-                tracing::error!("remove_channel_favorite failed: {e}");
-            }
-        })
-        .detach();
     }
 }
 
@@ -2135,6 +2428,7 @@ fn thread_channel_from_context(
         voice_members: Vec::new(),
         is_favorite: false,
         creator_id: UserId(0),
+        avatar_url: String::new(),
     }
 }
 
@@ -2172,6 +2466,7 @@ fn channel_from_desc(
         voice_members,
         is_favorite,
         creator_id: UserId(c.creator_id),
+        avatar_url: c.channel_avatar,
     }
 }
 
@@ -2443,6 +2738,18 @@ fn apply_in_voice_leaved(
     false
 }
 
+fn remove_user_channel(
+    user_channels: &mut HashMap<ChannelId, Channel>,
+    order: &mut Vec<ChannelId>,
+    channel_id: ChannelId,
+) -> bool {
+    if user_channels.remove(&channel_id).is_none() {
+        return false;
+    }
+    order.retain(|id| *id != channel_id);
+    true
+}
+
 fn remove_in_voice_in_channel(
     in_voice: &mut HashMap<UserId, InVoiceInfo>,
     channel_id: ChannelId,
@@ -2483,6 +2790,21 @@ fn merge_previous_voice_members(
             }
         }
     }
+}
+
+fn rebuild_favorites(
+    mut categories: Vec<Category>,
+    clan_id: ClanId,
+    favorite_ids: Option<&HashSet<ChannelId>>,
+) -> Vec<Category> {
+    categories.retain(|category| category.id != FAVOR_CATE_ID);
+    for ch in categories
+        .iter_mut()
+        .flat_map(|category| category.channels.iter_mut())
+    {
+        ch.is_favorite = favorite_ids.is_some_and(|ids| ids.contains(&ch.id));
+    }
+    assemble_with_favorites(categories, clan_id)
 }
 
 fn seed_in_voice_from_categories(
@@ -2758,6 +3080,29 @@ fn save_previous_channels(channels: HashMap<ClanId, Vec<ChannelId>>) {
     }
 }
 
+fn channel_name_exists_in_categories(
+    categories: &[Category],
+    category_id: &str,
+    name: &str,
+) -> bool {
+    let normalized = name.trim().to_lowercase();
+    categories
+        .iter()
+        .filter(|category| category.id != FAVOR_CATE_ID && category.id == category_id)
+        .flat_map(|category| category.channels.iter())
+        .any(|channel| {
+            channel.parent_id.is_none() && channel.name.trim().to_lowercase() == normalized
+        })
+}
+
+fn effective_category_id(desc_category_id: i64, requested: Option<i64>) -> i64 {
+    if desc_category_id == 0 {
+        requested.unwrap_or(desc_category_id)
+    } else {
+        desc_category_id
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2826,6 +3171,7 @@ mod tests {
             voice_members: Vec::new(),
             is_favorite: false,
             creator_id: UserId(0),
+            avatar_url: String::new(),
         }
     }
 
@@ -2846,6 +3192,50 @@ mod tests {
                 make_channel(11, "beta", "cat1"),
             ],
         }]
+    }
+
+    #[test]
+    fn channel_name_exists_in_category_matches_case_insensitively() {
+        let cats = categories();
+        assert!(channel_name_exists_in_categories(&cats, "cat1", "alpha"));
+        assert!(channel_name_exists_in_categories(
+            &cats,
+            "cat1",
+            "  ALPHA  "
+        ));
+        assert!(!channel_name_exists_in_categories(&cats, "cat1", "gamma"));
+    }
+
+    #[test]
+    fn channel_name_exists_in_category_is_scoped_to_that_category() {
+        let cats = categories();
+        assert!(!channel_name_exists_in_categories(&cats, "cat2", "alpha"));
+    }
+
+    #[test]
+    fn channel_name_exists_in_category_ignores_favorites_and_threads() {
+        let mut cats = categories();
+        cats.push(Category {
+            id: FAVOR_CATE_ID.into(),
+            clan_id: ClanId(1),
+            name: "favoriteChannel".into(),
+            order: i32::MIN,
+            channels: vec![make_channel(20, "starred", FAVOR_CATE_ID)],
+        });
+        cats[0].channels.push(make_thread(30, 10, "cat1"));
+        assert!(!channel_name_exists_in_categories(
+            &cats,
+            FAVOR_CATE_ID,
+            "starred"
+        ));
+        assert!(!channel_name_exists_in_categories(&cats, "cat1", "30"));
+    }
+
+    #[test]
+    fn effective_category_id_falls_back_to_requested_when_zero() {
+        assert_eq!(effective_category_id(0, Some(42)), 42);
+        assert_eq!(effective_category_id(0, None), 0);
+        assert_eq!(effective_category_id(7, Some(42)), 7);
     }
 
     #[test]
@@ -3143,6 +3533,7 @@ mod tests {
             badge_count: badge,
             creator_id: 0,
             clan_name: String::new(),
+            channel_avatar: String::new(),
         };
 
         let badge_descs = vec![
@@ -3267,6 +3658,7 @@ mod tests {
             voice_members: Vec::new(),
             is_favorite: true,
             creator_id: UserId(0),
+            avatar_url: String::new(),
         };
         assert!(ch.is_favorite);
     }
@@ -3294,6 +3686,7 @@ mod tests {
                 voice_members: Vec::new(),
                 is_favorite: false,
                 creator_id: UserId(0),
+                avatar_url: String::new(),
             },
             Channel {
                 id: ChannelId(2),
@@ -3315,6 +3708,7 @@ mod tests {
                 voice_members: Vec::new(),
                 is_favorite: true,
                 creator_id: UserId(0),
+                avatar_url: String::new(),
             },
         ];
 
@@ -3372,6 +3766,7 @@ mod tests {
             badge_count: 0,
             creator_id: 0,
             clan_name: String::new(),
+            channel_avatar: String::new(),
         };
         let channel = channel_from_desc(desc, 0, vec![UserId(42)], false);
         let vm = &channel.voice_members[0];
@@ -3426,6 +3821,413 @@ mod tests {
         assert_eq!(result[0].id, FAVOR_CATE_ID);
         assert!(result[0].channels.is_empty());
         assert_eq!(result[1].id, "1");
+    }
+
+    fn structure_with_two_channels() -> Vec<Category> {
+        let api_cats = vec![ApiCategoryDesc {
+            category_id: 1,
+            category_name: "General".into(),
+            clan_id: 1,
+            category_order: 0,
+        }];
+        let mut channels = vec![
+            {
+                let mut ch = make_channel(1, "normal", "1");
+                ch.clan_id = ClanId(1);
+                ch
+            },
+            {
+                let mut ch = make_channel(2, "fav-ch", "1");
+                ch.clan_id = ClanId(1);
+                ch
+            },
+        ];
+        build_categories(api_cats, &mut channels)
+    }
+
+    fn favorite_extras(ids: &[ChannelId]) -> ClanExtras {
+        ClanExtras {
+            voice_map: Some(HashMap::new()),
+            favorite_ids: Some(ids.iter().copied().collect()),
+            app_channels: Some(Vec::new()),
+        }
+    }
+
+    const VOICE_CHANNEL: ChannelId = ChannelId(2);
+    const VOICE_USER: UserId = UserId(7);
+
+    fn voice_extras(voice_map: HashMap<ChannelId, Vec<UserId>>) -> ClanExtras {
+        ClanExtras {
+            voice_map: Some(voice_map),
+            favorite_ids: Some([VOICE_CHANNEL].into_iter().collect()),
+            app_channels: Some(Vec::new()),
+        }
+    }
+
+    fn one_user_in_voice() -> HashMap<ChannelId, Vec<UserId>> {
+        [(VOICE_CHANNEL, vec![VOICE_USER])].into_iter().collect()
+    }
+
+    fn voice_members_of(channels: &ChannelList, category_ix: usize) -> Vec<UserId> {
+        channels.categories_for_clan(ClanId(1))[category_ix]
+            .channels
+            .iter()
+            .find(|ch| ch.id == VOICE_CHANNEL)
+            .map(|ch| ch.voice_members.iter().map(|m| m.user_id).collect())
+            .unwrap_or_default()
+    }
+
+    fn assert_voice_member_on_both_copies(channels: &ChannelList, context: &str) {
+        assert_eq!(
+            voice_members_of(channels, 0),
+            vec![VOICE_USER],
+            "{context}: favorite copy lost its voice member"
+        );
+        assert_eq!(
+            voice_members_of(channels, 1),
+            vec![VOICE_USER],
+            "{context}: source channel lost its voice member"
+        );
+        assert_eq!(
+            channels.in_voice_status(VOICE_USER).map(|i| i.channel_id),
+            Some(VOICE_CHANNEL),
+            "{context}: in_voice index lost the user"
+        );
+    }
+
+    #[gpui::test]
+    fn extras_patch_voice_members_onto_the_favorite_copy_too(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let channels = init_channel_list(cx);
+            channels.update(cx, |channels, cx| {
+                channels.apply_clan_structure(ClanId(1), structure_with_two_channels(), cx);
+                channels.apply_clan_extras(ClanId(1), voice_extras(one_user_in_voice()), cx);
+
+                assert_voice_member_on_both_copies(channels, "extras apply");
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn failed_voice_fetch_keeps_the_members_it_already_knows(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let channels = init_channel_list(cx);
+            channels.update(cx, |channels, cx| {
+                channels.apply_clan_structure(ClanId(1), structure_with_two_channels(), cx);
+                channels.apply_clan_extras(ClanId(1), voice_extras(one_user_in_voice()), cx);
+
+                channels.apply_clan_extras(
+                    ClanId(1),
+                    ClanExtras {
+                        voice_map: None,
+                        favorite_ids: None,
+                        app_channels: None,
+                    },
+                    cx,
+                );
+
+                assert_voice_member_on_both_copies(channels, "failed voice fetch");
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn an_empty_voice_response_clears_the_members(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let channels = init_channel_list(cx);
+            channels.update(cx, |channels, cx| {
+                channels.apply_clan_structure(ClanId(1), structure_with_two_channels(), cx);
+                channels.apply_clan_extras(ClanId(1), voice_extras(one_user_in_voice()), cx);
+
+                channels.apply_clan_extras(ClanId(1), voice_extras(HashMap::new()), cx);
+
+                assert!(voice_members_of(channels, 0).is_empty());
+                assert!(voice_members_of(channels, 1).is_empty());
+                assert!(channels.in_voice_status(VOICE_USER).is_none());
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn realtime_voice_join_survives_a_structure_refetch(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let channels = init_channel_list(cx);
+            channels.update(cx, |channels, cx| {
+                channels.apply_clan_structure(ClanId(1), structure_with_two_channels(), cx);
+                channels.apply_clan_extras(ClanId(1), voice_extras(HashMap::new()), cx);
+
+                channels.handle_event(
+                    &RealtimeEvent::VoiceJoined(mezon_proto::realtime::VoiceJoinedEvent {
+                        clan_id: 1,
+                        user_id: VOICE_USER.get(),
+                        voice_channel_id: VOICE_CHANNEL.get(),
+                        participant: "someone".into(),
+                        ..Default::default()
+                    }),
+                    cx,
+                );
+                assert_voice_member_on_both_copies(channels, "realtime join");
+
+                channels.apply_clan_structure(ClanId(1), structure_with_two_channels(), cx);
+                assert_voice_member_on_both_copies(channels, "structure refetch");
+            });
+        });
+    }
+
+    #[test]
+    fn rebuild_favorites_derives_the_favor_cate_from_the_id_set() {
+        let ids: HashSet<ChannelId> = [ChannelId(2)].into_iter().collect();
+        let result = rebuild_favorites(structure_with_two_channels(), ClanId(1), Some(&ids));
+
+        assert_eq!(result[0].id, FAVOR_CATE_ID);
+        assert_eq!(result[0].channels.len(), 1);
+        assert_eq!(result[0].channels[0].id, ChannelId(2));
+        let source = result[1].channels.iter().find(|ch| ch.id == ChannelId(2));
+        assert!(source.is_some_and(|ch| ch.is_favorite));
+    }
+
+    #[test]
+    fn rebuild_favorites_keeps_a_single_favor_cate_when_run_twice() {
+        let once = rebuild_favorites(structure_with_two_channels(), ClanId(1), None);
+        let twice = rebuild_favorites(once, ClanId(1), None);
+
+        assert_eq!(
+            twice.iter().filter(|c| c.id == FAVOR_CATE_ID).count(),
+            1,
+            "assembling twice must not stack favor categories"
+        );
+        assert!(twice[0].channels.is_empty());
+    }
+
+    fn init_channel_list(cx: &mut App) -> Entity<ChannelList> {
+        let api = Arc::new(mezon_client::AppApi::new(
+            Arc::new(mezon_client::TransportClient::new(String::new())),
+            String::new(),
+        ));
+        RealtimeDispatch::init(api.clone(), cx);
+        let auth_state = cx.new(|_| crate::AuthState::NotAuthenticated);
+        crate::badge::BadgeService::init(auth_state, cx);
+        crate::clan::ClanList::init(api.clone(), cx);
+        cx.new(|cx| ChannelList::new(api, cx))
+    }
+
+    #[gpui::test]
+    fn refetching_a_clan_structure_keeps_favorites_without_refetching_them(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| {
+            let channels = init_channel_list(cx);
+            channels.update(cx, |channels, cx| {
+                channels.apply_clan_structure(ClanId(1), structure_with_two_channels(), cx);
+                channels.apply_clan_extras(ClanId(1), favorite_extras(&[ChannelId(2)]), cx);
+                channels.extras_loaded.insert(ClanId(1));
+                assert_eq!(channels.categories_for_clan(ClanId(1))[0].channels.len(), 1);
+
+                channels.apply_clan_structure(ClanId(1), structure_with_two_channels(), cx);
+
+                let favor = &channels.categories_for_clan(ClanId(1))[0];
+                assert_eq!(favor.id, FAVOR_CATE_ID);
+                assert_eq!(
+                    favor.channels.len(),
+                    1,
+                    "a TTL-expiry refetch must not empty the favorites category"
+                );
+                assert!(
+                    channels.extras_loaded.contains(&ClanId(1)),
+                    "the cached favorite ids survive a refetch, so no extra API call is needed"
+                );
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn toggling_a_favorite_survives_a_structure_refetch(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let channels = init_channel_list(cx);
+            channels.update(cx, |channels, cx| {
+                channels.apply_clan_structure(ClanId(1), structure_with_two_channels(), cx);
+                channels.apply_clan_extras(ClanId(1), favorite_extras(&[]), cx);
+
+                channels.add_channel_favorite(ChannelId(1), ClanId(1), cx);
+                channels.apply_clan_structure(ClanId(1), structure_with_two_channels(), cx);
+                assert_eq!(
+                    channels.categories_for_clan(ClanId(1))[0].channels.len(),
+                    1,
+                    "an optimistic favorite must survive a refetch"
+                );
+
+                channels.remove_channel_favorite(ChannelId(1), ClanId(1), cx);
+                channels.apply_clan_structure(ClanId(1), structure_with_two_channels(), cx);
+                assert!(
+                    channels.categories_for_clan(ClanId(1))[0]
+                        .channels
+                        .is_empty(),
+                    "an unfavorited channel must not come back on a refetch"
+                );
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn a_rolled_back_favorite_does_not_survive_a_structure_refetch(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let channels = init_channel_list(cx);
+            channels.update(cx, |channels, cx| {
+                channels.apply_clan_structure(ClanId(1), structure_with_two_channels(), cx);
+                channels.apply_clan_extras(ClanId(1), favorite_extras(&[]), cx);
+                channels.extras_loaded.insert(ClanId(1));
+
+                channels.apply_favorite_locally(ChannelId(1), ClanId(1), true, cx);
+                assert_eq!(channels.categories_for_clan(ClanId(1))[0].channels.len(), 1);
+
+                channels.apply_favorite_locally(ChannelId(1), ClanId(1), false, cx);
+                channels.apply_clan_structure(ClanId(1), structure_with_two_channels(), cx);
+
+                assert!(
+                    channels.categories_for_clan(ClanId(1))[0]
+                        .channels
+                        .is_empty(),
+                    "a favorite whose api call failed must not be re-applied from the local set"
+                );
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn a_rolled_back_unfavorite_is_restored_on_a_structure_refetch(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let channels = init_channel_list(cx);
+            channels.update(cx, |channels, cx| {
+                channels.apply_clan_structure(ClanId(1), structure_with_two_channels(), cx);
+                channels.apply_clan_extras(ClanId(1), favorite_extras(&[ChannelId(2)]), cx);
+                channels.extras_loaded.insert(ClanId(1));
+
+                channels.apply_favorite_locally(ChannelId(2), ClanId(1), false, cx);
+                assert!(
+                    channels.categories_for_clan(ClanId(1))[0]
+                        .channels
+                        .is_empty()
+                );
+
+                channels.apply_favorite_locally(ChannelId(2), ClanId(1), true, cx);
+                channels.apply_clan_structure(ClanId(1), structure_with_two_channels(), cx);
+
+                assert_eq!(
+                    channels.categories_for_clan(ClanId(1))[0].channels.len(),
+                    1,
+                    "an unfavorite whose api call failed must leave the favorite in place"
+                );
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn failed_favorites_fetch_keeps_favorites_and_stays_unloaded(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let channels = init_channel_list(cx);
+            channels.update(cx, |channels, cx| {
+                channels.apply_clan_structure(ClanId(1), structure_with_two_channels(), cx);
+                channels.finish_extras(ClanId(1), favorite_extras(&[ChannelId(2)]), cx);
+                assert!(channels.extras_loaded.contains(&ClanId(1)));
+
+                channels.extras_loaded.remove(&ClanId(1));
+                channels.finish_extras(
+                    ClanId(1),
+                    ClanExtras {
+                        voice_map: Some(HashMap::new()),
+                        favorite_ids: None,
+                        app_channels: None,
+                    },
+                    cx,
+                );
+
+                let favor = &channels.categories_for_clan(ClanId(1))[0];
+                assert_eq!(
+                    favor.channels.len(),
+                    1,
+                    "a failed list_favorite_channels must not wipe known favorites"
+                );
+                assert!(
+                    !channels.extras_loaded.contains(&ClanId(1)),
+                    "a failed fetch must leave the gate open so the next clan entry retries"
+                );
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn re_entering_a_clan_after_a_failed_extras_fetch_starts_a_new_one(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| {
+            let channels = init_channel_list(cx);
+            channels.update(cx, |channels, cx| {
+                channels.load_for_clan(ClanId(1), cx);
+                channels.apply_clan_structure(ClanId(1), structure_with_two_channels(), cx);
+                channels.finish_extras(
+                    ClanId(1),
+                    ClanExtras {
+                        voice_map: None,
+                        favorite_ids: None,
+                        app_channels: None,
+                    },
+                    cx,
+                );
+                channels.extras_loading.clear();
+
+                assert!(channels.cache.is_fresh(&ClanId(1), crate::CACHE_TTL));
+                channels.load_for_clan(ClanId(1), cx);
+                assert!(
+                    channels.extras_loading.contains(&ClanId(1)),
+                    "re-entering the clan must issue the extras calls again"
+                );
+
+                channels.extras_loading.clear();
+                channels.finish_extras(ClanId(1), favorite_extras(&[ChannelId(2)]), cx);
+                channels.load_for_clan(ClanId(1), cx);
+                assert!(
+                    channels.extras_loading.is_empty(),
+                    "once loaded, re-entering must not re-issue them"
+                );
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn a_successful_extras_fetch_closes_the_gate(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let channels = init_channel_list(cx);
+            channels.update(cx, |channels, cx| {
+                channels.apply_clan_structure(ClanId(1), structure_with_two_channels(), cx);
+                channels.finish_extras(ClanId(1), favorite_extras(&[ChannelId(2)]), cx);
+
+                assert!(
+                    channels.extras_loaded.contains(&ClanId(1)),
+                    "a complete fetch must not be repeated on the next clan entry"
+                );
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn extras_arriving_before_the_structure_stay_unloaded(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let channels = init_channel_list(cx);
+            channels.update(cx, |channels, cx| {
+                channels.finish_extras(ClanId(1), favorite_extras(&[ChannelId(2)]), cx);
+                assert!(
+                    !channels.extras_loaded.contains(&ClanId(1)),
+                    "extras that could not be applied must be re-requested"
+                );
+
+                channels.apply_clan_structure(ClanId(1), structure_with_two_channels(), cx);
+                assert_eq!(
+                    channels.categories_for_clan(ClanId(1))[0].channels.len(),
+                    1,
+                    "the favorite ids are kept even when the structure arrives later"
+                );
+            });
+        });
     }
 
     const PARENT_CHANNEL: ChannelId = ChannelId(10);
@@ -3580,6 +4382,7 @@ mod tests {
             badge_count: 2,
             creator_id: 0,
             clan_name: String::new(),
+            channel_avatar: String::new(),
         };
         let seed = unread_seed_from_descs(vec![desc(10, 1), desc(11, 8), desc(12, 10)]);
 
@@ -3789,6 +4592,33 @@ mod tests {
     }
 
     #[test]
+    fn validate_channel_name_accepts_and_trims() {
+        assert_eq!(validate_channel_name("  general  ").unwrap(), "general");
+        assert_eq!(validate_channel_name("Kênh chung").unwrap(), "Kênh chung");
+    }
+
+    #[test]
+    fn validate_channel_name_rejects_invalid() {
+        let too_long = "a".repeat(CATEGORY_NAME_MAX_CHARS + 1);
+        assert_eq!(
+            validate_channel_name(""),
+            Err(CreateChannelError::InvalidName)
+        );
+        assert_eq!(
+            validate_channel_name(&too_long),
+            Err(CreateChannelError::InvalidName)
+        );
+        assert_eq!(
+            validate_channel_name("it's"),
+            Err(CreateChannelError::InvalidName)
+        );
+        assert_eq!(
+            validate_channel_name("-lead"),
+            Err(CreateChannelError::InvalidName)
+        );
+    }
+
+    #[test]
     fn upsert_category_appends_new_category_without_sorting_by_order() {
         let mut cats = vec![
             Category {
@@ -3918,6 +4748,47 @@ mod tests {
         assert_eq!(map.get(&UserId(9)), Some(&in_voice(1, 11)));
 
         assert!(!remove_in_voice_in_channel(&mut map, ChannelId(10)));
+    }
+
+    #[test]
+    fn user_channel_removed_only_drops_the_channel_for_the_removed_user() {
+        let me = Some(UserId(7));
+        assert!(event_targets_user(&[7], me));
+        assert!(event_targets_user(&[8, 7, 9], me));
+        assert!(!event_targets_user(&[8], me));
+        assert!(!event_targets_user(&[8, 9], me));
+        assert!(!event_targets_user(&[], me));
+    }
+
+    #[test]
+    fn user_channel_removed_is_ignored_when_the_session_has_no_user() {
+        assert!(!event_targets_user(&[7], None));
+        assert!(!event_targets_user(&[], None));
+    }
+
+    #[test]
+    fn remove_user_channel_drops_it_from_the_palette_source_too() {
+        let mut channels = HashMap::new();
+        let mut order = Vec::new();
+        for id in [10, 11, 12] {
+            channels.insert(ChannelId(id), make_channel(id, "general", "cat"));
+            order.push(ChannelId(id));
+        }
+
+        assert!(remove_user_channel(
+            &mut channels,
+            &mut order,
+            ChannelId(11)
+        ));
+        assert!(!channels.contains_key(&ChannelId(11)));
+        assert_eq!(order, vec![ChannelId(10), ChannelId(12)]);
+
+        assert!(!remove_user_channel(
+            &mut channels,
+            &mut order,
+            ChannelId(11)
+        ));
+        assert_eq!(order, vec![ChannelId(10), ChannelId(12)]);
     }
 
     #[test]

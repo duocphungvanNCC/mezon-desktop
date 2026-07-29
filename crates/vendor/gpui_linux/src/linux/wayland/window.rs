@@ -1281,8 +1281,7 @@ impl PlatformWindow for WaylandWindow {
                 state.client.activation_token_for_raise(state.surface.id());
             token.set_app_id(app_id);
             token.set_serial(serial, &state.globals.seat);
-            let interaction_surface =
-                interaction_surface.unwrap_or_else(|| state.surface.clone());
+            let interaction_surface = interaction_surface.unwrap_or_else(|| state.surface.clone());
             token.set_surface(&interaction_surface);
             token.commit();
         }

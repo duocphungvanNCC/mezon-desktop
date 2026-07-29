@@ -392,6 +392,30 @@ impl DirectMessageStore {
         })
     }
 
+    pub fn create_group_with_users(
+        &self,
+        user_ids: Vec<UserId>,
+        group_label: String,
+        cx: &mut Context<Self>,
+    ) -> Task<anyhow::Result<(ChannelId, i32)>> {
+        let api = self.api.clone();
+        cx.spawn(async move |this, cx| {
+            let ids: Vec<i64> = user_ids.iter().map(|id| id.0).collect();
+            let fallback_member_count = (user_ids.len() + 1) as u32;
+            let desc = api.create_direct_channel(&ids).await?;
+            let channel_id = ChannelId(desc.channel_id);
+            let channel_type = desc.channel_type as i32;
+            this.update(cx, |this, cx| {
+                let channel = direct_group_from_created(&desc, &group_label, fallback_member_count);
+                this.channels.upsert_created(channel);
+                this.freshness.mark_fetched();
+                cx.emit(DirectEvent::Changed { channel_id: None });
+                cx.notify();
+            })?;
+            Ok((channel_id, channel_type))
+        })
+    }
+
     pub fn send_direct_text_to_target(
         &self,
         user_id: Option<UserId>,
@@ -878,6 +902,40 @@ fn direct_from_created(
     }
 }
 
+fn direct_group_from_created(
+    desc: &ApiChannelDesc,
+    label: &str,
+    fallback_member_count: u32,
+) -> DirectChannel {
+    let member_count = if desc.member_count > 0 {
+        desc.member_count as u32
+    } else {
+        fallback_member_count
+    };
+    DirectChannel {
+        id: ChannelId(desc.channel_id),
+        label: if label.is_empty() {
+            desc.channel_label.clone()
+        } else {
+            label.to_string()
+        },
+        kind: DirectKind::from_raw(desc.channel_type),
+        avatar: String::new(),
+        peer_user_id: None,
+        peer_username: String::new(),
+        creator_id: if desc.creator_id == 0 {
+            None
+        } else {
+            Some(UserId(desc.creator_id))
+        },
+        online: false,
+        member_count,
+        unread_count: desc.count_mess_unread.max(0) as u32,
+        last_sent_timestamp: desc.last_sent_timestamp,
+        last_seen_timestamp: desc.last_seen_timestamp,
+    }
+}
+
 fn dm_peer_index(c: &ApiDirectChannel) -> usize {
     c.avatars
         .iter()
@@ -1097,6 +1155,57 @@ mod tests {
         assert_eq!(DirectKind::Group.stream_mode(), 3);
         assert_eq!(DirectKind::Dm.channel_type(), 3);
         assert_eq!(DirectKind::Group.channel_type(), 2);
+    }
+
+    fn api_channel_desc(
+        id: i64,
+        label: &str,
+        ty: u32,
+        member_count: i32,
+        creator_id: i64,
+    ) -> ApiChannelDesc {
+        ApiChannelDesc {
+            channel_id: id,
+            channel_label: label.into(),
+            channel_type: ty,
+            clan_id: 0,
+            category_name: String::new(),
+            category_id: 0,
+            channel_private: 1,
+            count_mess_unread: 0,
+            member_count,
+            parent_id: 0,
+            is_mute: false,
+            last_seen_message_id: 0,
+            last_seen_timestamp: 0,
+            last_sent_message_id: 0,
+            last_sent_timestamp: 0,
+            badge_count: 0,
+            creator_id,
+            clan_name: String::new(),
+            channel_avatar: String::new(),
+        }
+    }
+
+    #[test]
+    fn group_from_created_marks_group_without_peer() {
+        let desc = api_channel_desc(9, "server-label", 2, 4, 7);
+        let group = direct_group_from_created(&desc, "phat, nghia", 3);
+        assert_eq!(group.id, ChannelId(9));
+        assert_eq!(group.kind, DirectKind::Group);
+        assert_eq!(group.peer_user_id, None);
+        assert_eq!(group.creator_id, Some(UserId(7)));
+        assert_eq!(group.label, "phat, nghia");
+        assert_eq!(group.member_count, 4);
+    }
+
+    #[test]
+    fn group_from_created_falls_back_when_server_omits_count_and_label() {
+        let desc = api_channel_desc(9, "server-label", 2, 0, 0);
+        let group = direct_group_from_created(&desc, "", 3);
+        assert_eq!(group.member_count, 3);
+        assert_eq!(group.label, "server-label");
+        assert_eq!(group.creator_id, None);
     }
 
     #[test]

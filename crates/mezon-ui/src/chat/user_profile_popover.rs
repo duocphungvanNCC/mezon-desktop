@@ -1,11 +1,13 @@
 use gpui::{
     Anchor, AnyElement, App, ClickEvent, Context, CursorStyle, DismissEvent, Div, ElementId,
-    EventEmitter, FocusHandle, Focusable, FontWeight, MouseDownEvent, ParentElement, Render,
-    SharedString, Stateful, StyleRefinement, Styled, Window, div, prelude::*, px, svg,
+    EventEmitter, FocusHandle, Focusable, FontWeight, MouseButton, MouseDownEvent, ParentElement,
+    Render, SharedString, Stateful, StyleRefinement, Styled, Window, deferred, div, img,
+    prelude::*, px, svg,
 };
 use mezon_store::{
-    BadgeService, ChannelList, DirectMessageBody, DirectMessageStore, FriendState, FriendStore,
-    PresenceStore, ProfileContext, RolesStore, Settings, UserId, resolve_user_profile,
+    BadgeService, ChannelList, ClanId, ClanMembersStore, DirectMessageBody, DirectMessageStore,
+    FriendState, FriendStore, PERMISSION_CLAN_OWNER, PERMISSION_MANAGE_CLAN, PermissionStore,
+    PresenceStore, ProfileContext, RoleId, RolesStore, Settings, UserId, resolve_user_profile,
 };
 use ui::{Clickable, PopoverMenu, Toggleable};
 
@@ -19,6 +21,34 @@ use crate::theme::{ActiveTheme, Theme};
 const BANNER_HEIGHT: f32 = 105.;
 const AVATAR_SIZE: f32 = 90.;
 const AVATAR_BORDER: f32 = 6.;
+const COLLAPSED_ROLE_CHIPS: usize = 6;
+
+pub(crate) fn role_is_assignable(
+    current_level: Option<i32>,
+    role_max_level_permission: i32,
+) -> bool {
+    let role_level = if role_max_level_permission == 0 {
+        -1
+    } else {
+        role_max_level_permission
+    };
+    current_level.is_some_and(|level| level > role_level)
+}
+
+#[derive(Clone)]
+struct RoleChip {
+    id: RoleId,
+    name: SharedString,
+    color: gpui::Rgba,
+    icon: SharedString,
+}
+
+#[derive(Default)]
+struct RoleSection {
+    can_edit: bool,
+    assigned: Vec<RoleChip>,
+    candidates: Vec<RoleChip>,
+}
 
 pub struct UserProfilePopover {
     focus_handle: FocusHandle,
@@ -27,13 +57,21 @@ pub struct UserProfilePopover {
     settings: gpui::Entity<Settings>,
     avatar_image_cache: gpui::Entity<LruImageCache>,
     message_input: gpui::Entity<InputState>,
+    role_search: gpui::Entity<InputState>,
+    roles: RoleSection,
+    roles_dirty: bool,
+    add_role_open: bool,
+    show_all_roles: bool,
     friend_menu_open: bool,
     sending_message: bool,
     _roles_sub: Option<gpui::Subscription>,
+    _clan_members_sub: gpui::Subscription,
+    _permissions_sub: Option<gpui::Subscription>,
     _friend_sub: gpui::Subscription,
     _presence_sub: gpui::Subscription,
     _channel_sub: Option<gpui::Subscription>,
     _input_sub: gpui::Subscription,
+    _role_search_sub: gpui::Subscription,
 }
 
 impl UserProfilePopover {
@@ -64,8 +102,39 @@ impl UserProfilePopover {
             },
         );
 
-        let roles_sub = RolesStore::try_global(cx)
-            .map(|roles_store| cx.observe(&roles_store, |_, _, cx| cx.notify()));
+        let role_search = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder(mezon_i18n::t(&locale, "userProfile.labels.role"))
+                .text_size(px(14.))
+                .borderless()
+        });
+        let role_search_sub = cx.subscribe(
+            &role_search,
+            |this: &mut Self, _, event: &InputEvent, cx| {
+                if matches!(event, InputEvent::Change) {
+                    this.roles_dirty = true;
+                    cx.notify();
+                }
+            },
+        );
+
+        let roles_sub = RolesStore::try_global(cx).map(|roles_store| {
+            cx.observe(&roles_store, |this: &mut Self, _, cx| {
+                this.roles_dirty = true;
+                cx.notify();
+            })
+        });
+        let clan_members_sub =
+            cx.observe(&ClanMembersStore::global(cx), |this: &mut Self, _, cx| {
+                this.roles_dirty = true;
+                cx.notify();
+            });
+        let permissions_sub = PermissionStore::try_global(cx).map(|permission_store| {
+            cx.observe(&permission_store, |this: &mut Self, _, cx| {
+                this.roles_dirty = true;
+                cx.notify();
+            })
+        });
         let friend_sub = cx.observe(&FriendStore::global(cx), |_, _, cx| cx.notify());
         let presence_sub = cx.observe(&PresenceStore::global(cx), |_, _, cx| cx.notify());
         let channel_sub = matches!(context, ProfileContext::Clan(_))
@@ -78,14 +147,401 @@ impl UserProfilePopover {
             settings,
             avatar_image_cache,
             message_input,
+            role_search,
+            roles: RoleSection::default(),
+            roles_dirty: true,
+            add_role_open: false,
+            show_all_roles: false,
             friend_menu_open: false,
             sending_message: false,
             _roles_sub: roles_sub,
+            _clan_members_sub: clan_members_sub,
+            _permissions_sub: permissions_sub,
             _friend_sub: friend_sub,
             _presence_sub: presence_sub,
             _channel_sub: channel_sub,
             _input_sub: input_sub,
+            _role_search_sub: role_search_sub,
         }
+    }
+
+    fn clan_id(&self) -> Option<ClanId> {
+        match self.context {
+            ProfileContext::Clan(clan_id) => Some(clan_id),
+            ProfileContext::Direct(_) => None,
+        }
+    }
+
+    fn compute_roles(&self, cx: &App) -> RoleSection {
+        let Some(clan_id) = self.clan_id() else {
+            return RoleSection::default();
+        };
+        let (Some(roles_store), Some(permission_store)) =
+            (RolesStore::try_global(cx), PermissionStore::try_global(cx))
+        else {
+            return RoleSection::default();
+        };
+        let assigned_ids = resolve_user_profile(self.user_id, self.context, cx)
+            .map(|profile| profile.role_ids)
+            .unwrap_or_default();
+        let permissions = permission_store.read(cx);
+        let can_edit = permissions.check(clan_id, None, PERMISSION_MANAGE_CLAN, cx);
+        let is_clan_owner = permissions.check(clan_id, None, PERMISSION_CLAN_OWNER, cx);
+        let level = permissions.current_permission_level(clan_id, cx);
+        let query = self.role_search.read(cx).value().trim().to_lowercase();
+
+        let roles = roles_store.read(cx);
+        let mut section = RoleSection {
+            can_edit,
+            ..RoleSection::default()
+        };
+        for (role_id, role) in roles.active_roles_in_clan(clan_id) {
+            if assigned_ids.contains(&role_id) {
+                section.assigned.push(RoleChip {
+                    id: role_id,
+                    name: role.name.clone().into(),
+                    color: chip_color(&role.color),
+                    icon: crate::util::imgproxy::role_icon_url(cx, &role.icon).into(),
+                });
+                continue;
+            }
+            if roles.is_everyone_role(clan_id, role) {
+                continue;
+            }
+            if !query.is_empty() && !role.name.to_lowercase().contains(&query) {
+                continue;
+            }
+            if !is_clan_owner && !role_is_assignable(level, role.max_level_permission) {
+                continue;
+            }
+            section.candidates.push(RoleChip {
+                id: role_id,
+                name: role.name.clone().into(),
+                color: chip_color(&role.color),
+                icon: crate::util::imgproxy::role_icon_url(cx, &role.icon).into(),
+            });
+        }
+        section
+    }
+
+    fn mutate_role(&mut self, role_id: RoleId, add: bool, cx: &mut Context<Self>) {
+        let Some(clan_id) = self.clan_id() else {
+            return;
+        };
+        let Some(roles_store) = RolesStore::try_global(cx) else {
+            return;
+        };
+        let user_id = self.user_id.get();
+        let (add_ids, remove_ids) = if add {
+            (vec![user_id], Vec::new())
+        } else {
+            (Vec::new(), vec![user_id])
+        };
+        let started = roles_store.update(cx, |store, cx| {
+            store.mutate_role_members(clan_id, role_id, add_ids, remove_ids, cx)
+        });
+        if !started {
+            return;
+        }
+        self.roles_dirty = true;
+        cx.notify();
+    }
+
+    fn render_roles(&self, locale: &str, cx: &Context<Self>) -> AnyElement {
+        let theme = cx.theme().clone();
+        let total = self.roles.assigned.len();
+        let overflow = total.saturating_sub(COLLAPSED_ROLE_CHIPS);
+        let visible = if self.show_all_roles {
+            total
+        } else {
+            total.min(COLLAPSED_ROLE_CHIPS)
+        };
+
+        let chips = div()
+            .id("profile-role-chips")
+            .mt_2()
+            .flex()
+            .flex_wrap()
+            .gap_2()
+            .when(self.show_all_roles, |el| {
+                el.max_h(px(100.)).min_h_0().overflow_y_scroll()
+            })
+            .children(
+                self.roles.assigned[..visible]
+                    .iter()
+                    .map(|chip| self.render_role_chip(chip, locale, &theme, cx)),
+            )
+            .when(overflow > 0 && !self.show_all_roles, |el| {
+                el.child(
+                    role_expander_pill(
+                        "profile-roles-more",
+                        format!("+ {overflow}"),
+                        &theme,
+                        cx.listener(|this, _, _, cx| {
+                            this.show_all_roles = true;
+                            cx.notify();
+                        }),
+                    )
+                    .ml_1(),
+                )
+            });
+
+        div()
+            .flex()
+            .flex_col()
+            .child(chips)
+            .when(overflow > 0 && self.show_all_roles, |el| {
+                el.child(
+                    div()
+                        .mt_1()
+                        .flex()
+                        .justify_start()
+                        .child(role_expander_pill(
+                            "profile-roles-less",
+                            mezon_i18n::t(locale, "userProfile.labels.showLess"),
+                            &theme,
+                            cx.listener(|this, _, _, cx| {
+                                this.show_all_roles = false;
+                                cx.notify();
+                            }),
+                        )),
+                )
+            })
+            .when(self.roles.can_edit, |el| {
+                el.child(self.render_add_role(locale, &theme, cx))
+            })
+            .into_any_element()
+    }
+
+    fn render_role_chip(
+        &self,
+        chip: &RoleChip,
+        locale: &str,
+        theme: &Theme,
+        cx: &Context<Self>,
+    ) -> AnyElement {
+        let icon_cache = crate::image_cache::role_icon_cache(cx);
+        let role_id = chip.id;
+        let color = chip.color;
+        let group: SharedString = format!("role-chip-{}", role_id.get()).into();
+        div()
+            .flex()
+            .items_center()
+            .gap_x_1()
+            .rounded(px(4.))
+            .p_1()
+            .bg(theme.tokens.bg_active_member_channel)
+            .text_color(theme.tokens.text_theme_primary)
+            .when(self.roles.can_edit, |el| {
+                el.child(
+                    div()
+                        .id(("profile-role-remove", role_id.get() as u64))
+                        .group(group.clone())
+                        .p(px(2.))
+                        .rounded_full()
+                        .bg(color)
+                        .cursor_pointer()
+                        .child(
+                            Icon::new(IconName::IconRemove)
+                                .size(px(8.))
+                                .text_color(color)
+                                .group_hover(group.clone(), |style| {
+                                    style.text_color(gpui::black())
+                                }),
+                        )
+                        .tooltip(ui::Tooltip::text(mezon_i18n::t(
+                            locale,
+                            "userProfile.labels.removeRole",
+                        )))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.mutate_role(role_id, false, cx);
+                        })),
+                )
+            })
+            .when(!self.roles.can_edit, |el| {
+                el.child(div().size(px(8.)).flex_shrink_0().rounded_full().bg(color))
+            })
+            .when(!chip.icon.is_empty(), |el| {
+                el.child(
+                    img(chip.icon.clone())
+                        .size(px(12.))
+                        .flex_shrink_0()
+                        .when_some(icon_cache.clone(), |el, cache| el.image_cache(&cache)),
+                )
+            })
+            .child(
+                div()
+                    .text_xs()
+                    .font_weight(FontWeight::MEDIUM)
+                    .max_w(px(120.))
+                    .overflow_hidden()
+                    .truncate()
+                    .child(chip.name.clone()),
+            )
+            .into_any_element()
+    }
+
+    fn render_add_role(&self, locale: &str, theme: &Theme, cx: &Context<Self>) -> AnyElement {
+        div()
+            .relative()
+            .flex()
+            .items_center()
+            .justify_center()
+            .mt_1()
+            .border_1()
+            .border_color(theme.tokens.border_primary)
+            .when(self.add_role_open, |el| {
+                el.child(deferred(self.render_add_role_panel(locale, theme, cx)))
+            })
+            .child(
+                div()
+                    .id("profile-add-role")
+                    .flex()
+                    .items_center()
+                    .gap_x_1()
+                    .rounded(px(4.))
+                    .p_1()
+                    .cursor_pointer()
+                    .text_color(theme.tokens.text_theme_primary)
+                    .child(
+                        Icon::new(IconName::Plus)
+                            .size(px(20.))
+                            .text_color(theme.tokens.text_theme_primary),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .font_weight(FontWeight::MEDIUM)
+                            .child(mezon_i18n::t(locale, "userProfile.labels.addRole")),
+                    )
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.add_role_open = !this.add_role_open;
+                        cx.notify();
+                    })),
+            )
+            .into_any_element()
+    }
+
+    fn render_add_role_panel(&self, locale: &str, theme: &Theme, cx: &Context<Self>) -> AnyElement {
+        let list = div()
+            .id("profile-role-candidates")
+            .w_full()
+            .flex_1()
+            .min_h_0()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .overflow_y_scroll()
+            .when(self.roles.candidates.is_empty(), |el| {
+                el.child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .py_4()
+                        .gap_y_4()
+                        .items_center()
+                        .text_color(theme.tokens.text_secondary)
+                        .child(
+                            div()
+                                .font_weight(FontWeight::MEDIUM)
+                                .child(mezon_i18n::t(locale, "userProfile.labels.nope")),
+                        )
+                        .child(div().child(mezon_i18n::t(locale, "userProfile.labels.typoError"))),
+                )
+            })
+            .children(
+                self.roles
+                    .candidates
+                    .iter()
+                    .map(|chip| self.render_role_candidate(chip, theme, cx)),
+            );
+
+        div()
+            .occlude()
+            .absolute()
+            .bottom(px(32.))
+            .left_0()
+            .w_full()
+            .max_h(px(240.))
+            .flex()
+            .flex_col()
+            .gap_3()
+            .rounded_lg()
+            .shadow_lg()
+            .bg(theme.tokens.theme_setting_primary)
+            .text_color(theme.tokens.text_theme_primary)
+            .child(
+                div()
+                    .relative()
+                    .w_full()
+                    .h(px(36.))
+                    .child(
+                        div()
+                            .w_full()
+                            .rounded_tl_lg()
+                            .rounded_tr_lg()
+                            .bg(theme.tokens.theme_setting_nav)
+                            .child(
+                                Input::new(&self.role_search)
+                                    .w_full()
+                                    .text_color(theme.tokens.text_theme_primary),
+                            ),
+                    )
+                    .child(
+                        div().absolute().right(px(8.)).top(px(8.)).child(
+                            Icon::new(IconName::Search)
+                                .size(px(20.))
+                                .text_color(theme.tokens.text_theme_primary),
+                        ),
+                    ),
+            )
+            .child(list)
+            .into_any_element()
+    }
+
+    fn render_role_candidate(
+        &self,
+        chip: &RoleChip,
+        theme: &Theme,
+        cx: &Context<Self>,
+    ) -> AnyElement {
+        let icon_cache = crate::image_cache::role_icon_cache(cx);
+        let role_id = chip.id;
+        div()
+            .id(("profile-role-candidate", role_id.get() as u64))
+            .w_full()
+            .p_2()
+            .flex()
+            .items_center()
+            .gap_2()
+            .text_base()
+            .cursor_pointer()
+            .text_color(theme.tokens.text_theme_primary)
+            .hover(|style| style.bg(theme.tokens.bg_item_hover))
+            .child(
+                div()
+                    .size(px(12.))
+                    .flex_shrink_0()
+                    .rounded_full()
+                    .bg(chip.color),
+            )
+            .when(!chip.icon.is_empty(), |el| {
+                el.child(
+                    img(chip.icon.clone())
+                        .size(px(12.))
+                        .flex_shrink_0()
+                        .when_some(icon_cache.clone(), |el, cache| el.image_cache(&cache)),
+                )
+            })
+            .child(div().overflow_hidden().truncate().child(chip.name.clone()))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _, _, cx| {
+                    this.add_role_open = false;
+                    this.mutate_role(role_id, true, cx);
+                }),
+            )
+            .into_any_element()
     }
 
     fn send_message(&mut self, cx: &mut Context<Self>) {
@@ -222,29 +678,13 @@ impl Render for UserProfilePopover {
 
         let is_clan = matches!(self.context, ProfileContext::Clan(_));
         let is_dm = matches!(self.context, ProfileContext::Direct(_));
-        let clan_id_opt = match self.context {
-            ProfileContext::Clan(id) => Some(id),
-            _ => None,
-        };
-        let role_ids = profile
-            .as_ref()
-            .map(|p| p.role_ids.as_slice())
-            .unwrap_or_default();
-        let roles: Vec<(SharedString, SharedString)> = clan_id_opt
-            .zip(RolesStore::try_global(cx))
-            .map(|(clan_id, rs)| {
-                rs.read(cx)
-                    .roles_for(clan_id, role_ids)
-                    .into_iter()
-                    .map(|r| {
-                        (
-                            SharedString::from(r.name.as_str()),
-                            SharedString::from(r.color.as_str()),
-                        )
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
+        if self.roles_dirty {
+            self.roles = self.compute_roles(cx);
+            self.roles_dirty = false;
+        }
+        let assigned_role_count = self.roles.assigned.len();
+        let can_edit_roles = self.roles.can_edit;
+        let show_roles_section = is_clan && (assigned_role_count > 0 || can_edit_roles);
 
         let me = BadgeService::global(cx).read(cx).current_user_id(cx);
         let is_self = me == Some(self.user_id);
@@ -374,17 +814,13 @@ impl Render for UserProfilePopover {
                                         .child(member_since),
                                 )
                         })
-                        .when(is_clan && !roles.is_empty(), |d| {
+                        .when(show_roles_section, |d| {
                             d.child(section_divider(theme.tokens.theme_border_input))
                                 .child(section_label(
                                     mezon_i18n::t(&locale, "userProfile.aboutMe.roles.headerTitle"),
                                     theme.tokens.text_theme_primary,
                                 ))
-                                .child(div().mt_1().flex().flex_wrap().gap_2().children(
-                                    roles.iter().map(|(name, color)| {
-                                        role_pill(name.clone(), color.as_ref(), theme.as_ref())
-                                    }),
-                                ))
+                                .child(self.render_roles(&locale, cx))
                         })
                         .when(show_message_input, |d| {
                             d.child(
@@ -459,7 +895,7 @@ const BANNER_ICON_PENDING_BG: u32 = 0x4e5058;
 const SHARE_CONTACT_BODY: u32 = 0x656369;
 const SHARE_CONTACT_CHECK: u32 = 0x549d5b;
 
-fn share_contact_icon() -> gpui::AnyElement {
+pub(crate) fn share_contact_icon() -> gpui::AnyElement {
     div()
         .relative()
         .size(px(16.))
@@ -483,7 +919,7 @@ fn share_contact_icon() -> gpui::AnyElement {
         .into_any_element()
 }
 
-fn banner_icon_shell(
+pub(crate) fn banner_icon_shell(
     id: impl Into<ElementId>,
     pending_style: bool,
     on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
@@ -514,7 +950,7 @@ fn banner_icon_shell(
         .into_any_element()
 }
 
-fn banner_icon_button(
+pub(crate) fn banner_icon_button(
     id: impl Into<ElementId>,
     icon: IconName,
     pending_style: bool,
@@ -926,7 +1362,7 @@ fn section_label(text: impl Into<SharedString>, color: gpui::Rgba) -> gpui::AnyE
         .into_any_element()
 }
 
-fn format_member_since(create_time_seconds: u32) -> String {
+pub(crate) fn format_member_since(create_time_seconds: u32) -> String {
     if create_time_seconds == 0 {
         return String::new();
     }
@@ -958,50 +1394,44 @@ fn days_to_date(days_since_epoch: u32) -> (u32, u32, u32) {
     (y, m, d)
 }
 
-fn role_pill(name: SharedString, color: &str, theme: &Theme) -> AnyElement {
-    let dot_color = parse_role_color(color).unwrap_or(theme.text_muted);
+fn chip_color(color: &str) -> gpui::Rgba {
+    parse_role_color(color)
+        .unwrap_or_else(|| gpui::rgb(crate::chat::role_style::ROLE_FALLBACK_COLOR))
+}
+
+fn role_expander_pill(
+    id: &'static str,
+    label: impl Into<SharedString>,
+    theme: &Theme,
+    on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+) -> Stateful<Div> {
     div()
+        .id(id)
         .flex()
-        .flex_row()
         .items_center()
-        .gap_1()
-        .px(px(6.))
-        .py(px(2.))
+        .gap_x_1()
         .rounded(px(4.))
-        .bg(theme.tokens.bg_active_member_channel)
-        .child(div().size(px(8.)).rounded_full().bg(dot_color))
+        .p_1()
+        .cursor_pointer()
+        .bg(theme.tokens.bg_theme_input_primary)
+        .text_color(theme.tokens.text_theme_primary)
         .child(
             div()
                 .text_xs()
-                .text_color(theme.tokens.text_theme_primary)
-                .child(name),
+                .font_weight(FontWeight::MEDIUM)
+                .px_1()
+                .line_height(px(15.))
+                .child(label.into()),
         )
-        .into_any_element()
+        .on_click(on_click)
 }
 
 fn parse_role_color(s: &str) -> Option<gpui::Rgba> {
-    let s = s.trim().strip_prefix('#')?;
-    let (r, g, b) = match s.len() {
-        6 => {
-            let r = u8::from_str_radix(&s[0..2], 16).ok()?;
-            let g = u8::from_str_radix(&s[2..4], 16).ok()?;
-            let b = u8::from_str_radix(&s[4..6], 16).ok()?;
-            (r, g, b)
-        }
-        3 => {
-            let r = u8::from_str_radix(&s[0..1], 16).ok()?;
-            let g = u8::from_str_radix(&s[1..2], 16).ok()?;
-            let b = u8::from_str_radix(&s[2..3], 16).ok()?;
-            (r * 17, g * 17, b * 17)
-        }
-        _ => return None,
-    };
-    Some(gpui::Rgba {
-        r: r as f32 / 255.0,
-        g: g as f32 / 255.0,
-        b: b as f32 / 255.0,
-        a: 1.0,
-    })
+    let trimmed = s.trim();
+    if !trimmed.starts_with('#') {
+        return None;
+    }
+    mezon_store::parse_role_color(trimmed)
 }
 
 pub(crate) struct ClickableContainer(Stateful<Div>);

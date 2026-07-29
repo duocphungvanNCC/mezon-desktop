@@ -18,16 +18,18 @@ use mezon_store::{
     BadgeService, ChannelId, ChannelList, ChannelPermissionsEvent, ChannelPermissionsStore, ClanId,
     ClanList, ClanMembersStore, DirectMessageStore, EmbedInput, EmbedTextInput, Emoji, EmojiStore,
     GroupMembersStore, MessageCode, MessageId, MessagesEvent, MessagesStore,
-    PERMISSION_DELETE_MESSAGE, ProfileContext, Settings, TopicsEvent, TopicsStore, UserId,
+    PERMISSION_DELETE_MESSAGE, PERMISSION_MANAGE_THREAD, PERMISSION_SEND_MESSAGE, PermissionStore,
+    ProfileContext, RolesEvent, RolesStore, Settings, TopicsEvent, TopicsStore, UserId,
     UsersByUserStore,
     message::{Message, markdown_edit_source},
 };
 
 use super::audio_player::{AudioActivation, AudioPlayerView};
-use super::context::{OnboardingContext, RowCtx, RowMemo, WelcomeContext};
+use super::context::{OnboardingContext, RecentEmojiCell, RowCtx, RowMemo, WelcomeContext};
 use super::dispatch::render_message_item;
 use super::gif_video::GifVideoView;
 use super::message_context_menu;
+use super::parts::recent_emoji_cells;
 use super::reaction_picker::{ReactionPicker, ReactionPickerEvent};
 use super::selection::{MessageSelectionState, SelPoint, SharedSelection, TextSegment, word_range};
 use super::skeleton::message_skeleton;
@@ -455,6 +457,7 @@ const IDLE_CACHE_SWEEP_INTERVAL: Duration = Duration::from_millis(100);
 const HOVER_SHOW_DELAY_MS: u64 = 200;
 const HOVER_HIDE_DELAY_MS: u64 = 100;
 const SCROLL_RELIEF_DELAY: Duration = Duration::from_millis(1500);
+const RECENT_EMOJI_COUNT: usize = 3;
 const MAX_GIF_VIDEOS: usize = 6;
 const MAX_AUDIO_PLAYERS: usize = 8;
 
@@ -1107,6 +1110,7 @@ pub struct ChannelMessages {
     avatar_image_cache: Entity<LruImageCache>,
     small_avatar_image_cache: Entity<LruImageCache>,
     icon_image_cache: Entity<LruImageCache>,
+    ogp_image_cache: Entity<LruImageCache>,
     active_videos: Rc<HashMap<(MessageId, usize), Entity<VideoPlayerView>>>,
     active_audios: Rc<indexmap::IndexMap<(MessageId, usize), Entity<AudioPlayerView>>>,
     gif_videos: Rc<HashMap<(MessageId, usize), Entity<GifVideoView>>>,
@@ -1173,10 +1177,11 @@ pub struct ChannelMessages {
     context_menu_target: Option<(MessageId, Point<Pixels>)>,
     context_menu_forward_all: bool,
     reaction_submenu_open: bool,
-    emoji_recent: Rc<Vec<Emoji>>,
+    emoji_recent: Rc<Vec<RecentEmojiCell>>,
     _emoji_observe: Subscription,
-    channel_permissions_fp: Option<(bool, bool)>,
+    channel_permissions_fp: Option<(bool, bool, bool)>,
     _channel_permissions_observe: Subscription,
+    _roles_observe: Subscription,
     gif_reconcile_fingerprint: Option<(Option<ChannelId>, usize, usize)>,
     last_gif_reconcile: Option<Instant>,
     last_image_cache_sweep: Option<Instant>,
@@ -1227,6 +1232,7 @@ impl ChannelMessages {
                 let mut memo = this.row_memo.borrow_mut();
                 memo.avatars.clear();
                 memo.display_names.clear();
+                memo.role_styles.clear();
             }
             this.store_identity(Self::compute_identity(cx));
             if this.refresh_derived_state(cx) {
@@ -1243,6 +1249,7 @@ impl ChannelMessages {
                 let mut memo = this.row_memo.borrow_mut();
                 memo.avatars.clear();
                 memo.display_names.clear();
+                memo.role_styles.clear();
             }
             if this.refresh_derived_state(cx) {
                 cx.notify();
@@ -1257,6 +1264,7 @@ impl ChannelMessages {
                 let mut memo = this.row_memo.borrow_mut();
                 memo.avatars.clear();
                 memo.display_names.clear();
+                memo.role_styles.clear();
                 cx.notify();
             }
         });
@@ -1269,6 +1277,17 @@ impl ChannelMessages {
                 let mut memo = this.row_memo.borrow_mut();
                 memo.avatars.clear();
                 memo.display_names.clear();
+                memo.role_styles.clear();
+                cx.notify();
+            }
+        });
+
+        let roles_observe = cx.subscribe(&RolesStore::global(cx), |this, _, event, cx| {
+            let RolesEvent::Changed { clan_id } = event else {
+                return;
+            };
+            let evicted = this.row_memo.borrow_mut().forget_clan_role_styles(*clan_id);
+            if evicted || MessagesStore::global(cx).read(cx).active_clan_id() == Some(*clan_id) {
                 cx.notify();
             }
         });
@@ -1664,6 +1683,7 @@ impl ChannelMessages {
                 cx,
             )
         });
+        let ogp_image_cache = crate::image_cache::ogp_timeline_cache("message-ogp", cx);
         let last_cold_inputs = Self::cold_inputs(cx);
         let (welcome, onboarding) = Self::compute_indicator_contexts(cx);
         let cached_unread_boundary = unread_boundary(&MessagesStore::global(cx), None, cx);
@@ -1672,24 +1692,28 @@ impl ChannelMessages {
         let (identity_inputs, cached_current_user_id, cached_role_ids, cached_is_clan_owner) =
             Self::compute_identity(cx);
         let emoji_store = EmojiStore::global(cx);
-        let emoji_recent: Rc<Vec<Emoji>> = Rc::new(
-            emoji_store
+        let recent: Vec<Emoji> = emoji_store
+            .read(cx)
+            .recent(RECENT_EMOJI_COUNT)
+            .into_iter()
+            .cloned()
+            .collect();
+        let emoji_recent: Rc<Vec<RecentEmojiCell>> = Rc::new(recent_emoji_cells(&recent, cx));
+        let emoji_observe = cx.observe(&emoji_store, |this, store, cx| {
+            let next: Vec<Emoji> = store
                 .read(cx)
-                .recent(3)
+                .recent(RECENT_EMOJI_COUNT)
                 .into_iter()
                 .cloned()
-                .collect(),
-        );
-        let emoji_observe = cx.observe(&emoji_store, |this, store, cx| {
-            let next: Vec<Emoji> = store.read(cx).recent(3).into_iter().cloned().collect();
+                .collect();
             let changed = this.emoji_recent.len() != next.len()
                 || this
                     .emoji_recent
                     .iter()
                     .zip(&next)
-                    .any(|(a, b)| a.id != b.id);
+                    .any(|(a, b)| a.id.as_ref() != b.id.as_str());
             if changed {
-                this.emoji_recent = Rc::new(next);
+                this.emoji_recent = Rc::new(recent_emoji_cells(&next, cx));
                 cx.notify();
             }
         });
@@ -1708,8 +1732,9 @@ impl ChannelMessages {
                 }
                 let store = store.read(cx);
                 let fp = (
-                    store.has_permission("send-message", *clan_id, *channel_id),
+                    store.has_permission(PERMISSION_SEND_MESSAGE, *clan_id, *channel_id),
                     store.has_permission(PERMISSION_DELETE_MESSAGE, *clan_id, *channel_id),
+                    store.has_permission(PERMISSION_MANAGE_THREAD, *clan_id, *channel_id),
                 );
                 if this.channel_permissions_fp == Some(fp) {
                     return;
@@ -1731,6 +1756,7 @@ impl ChannelMessages {
             avatar_image_cache,
             small_avatar_image_cache,
             icon_image_cache,
+            ogp_image_cache,
             active_videos: Rc::new(HashMap::new()),
             active_audios: Rc::new(indexmap::IndexMap::new()),
             gif_videos: Rc::new(HashMap::new()),
@@ -1798,6 +1824,7 @@ impl ChannelMessages {
             _emoji_observe: emoji_observe,
             channel_permissions_fp: None,
             _channel_permissions_observe: channel_permissions_observe,
+            _roles_observe: roles_observe,
             gif_reconcile_fingerprint: None,
             last_gif_reconcile: None,
             last_image_cache_sweep: None,
@@ -2035,6 +2062,22 @@ impl ChannelMessages {
             }
         }
         cx.notify();
+    }
+
+    fn message_permissions(cx: &App) -> (bool, bool) {
+        let key = {
+            let messages = MessagesStore::global(cx).read(cx);
+            messages.active_clan_id().zip(messages.active_channel_id())
+        };
+        let Some((clan_id, channel_id)) = key else {
+            return (false, false);
+        };
+        let permissions = PermissionStore::global(cx);
+        let permissions = permissions.read(cx);
+        (
+            permissions.check(clan_id, Some(channel_id), PERMISSION_MANAGE_THREAD, cx),
+            permissions.check(clan_id, Some(channel_id), PERMISSION_SEND_MESSAGE, cx),
+        )
     }
 
     fn ensure_topic_create_permissions(&mut self, cx: &mut Context<Self>) {
@@ -2892,6 +2935,7 @@ impl ChannelMessages {
             memo.selection_text_pieces.clear();
         }
         self.channel_permissions_fp = None;
+        self.ensure_topic_create_permissions(cx);
         self.image_cache
             .update(cx, |cache, cx| cache.clear(window, cx));
         crate::image_cache::release_freed_memory_to_os(cx);
@@ -3163,7 +3207,7 @@ impl ChannelMessages {
                         .h(px(18.))
                         .px_1()
                         .rounded_full()
-                        .bg(theme.status_dnd)
+                        .bg(theme.mention_badge)
                         .flex()
                         .items_center()
                         .justify_center()
@@ -3855,7 +3899,7 @@ impl ChannelMessages {
             .active_channel()
             .map(|c| (Some(c.channel_type), c.parent_id.is_none()))
             .unwrap_or((None, true));
-        let is_clan_owner = self.cached_is_clan_owner;
+        let (can_manage_thread, can_send_message) = Self::message_permissions(cx);
         let emoji_recent = self.emoji_recent.clone();
         let (editing_id, edit_input) = match &self.edit_input {
             Some((id, input)) => (Some(*id), Some(input.clone())),
@@ -3904,6 +3948,7 @@ impl ChannelMessages {
         let context_menu_message = self.context_menu_target.map(|(id, _)| id);
         let avatar_image_cache = self.avatar_image_cache.clone();
         let small_avatar_image_cache = self.small_avatar_image_cache.clone();
+        let ogp_image_cache = self.ogp_image_cache.clone();
         let icon_image_cache = self.icon_image_cache.clone();
         let reply_highlight_id = TopicsStore::global(cx)
             .read(cx)
@@ -3965,6 +4010,7 @@ impl ChannelMessages {
                         avatar_cache: small_avatar_image_cache.clone(),
                         large_avatar_cache: avatar_image_cache.clone(),
                         icon_cache: icon_image_cache.clone(),
+                        ogp_cache: ogp_image_cache.clone(),
                         unread_boundary_id: None,
                         highlight_id: None,
                         reply_highlight_id,
@@ -3979,7 +4025,8 @@ impl ChannelMessages {
                         clan_id: active_clan,
                         channel_type,
                         channel_top_level,
-                        is_clan_owner,
+                        can_manage_thread,
+                        can_send_message,
                         editing_id,
                         edit_input: edit_input.clone(),
                         emoji_recent: &emoji_recent,
@@ -4043,7 +4090,7 @@ impl ChannelMessages {
                 let menu = message_context_menu::build(
                     &target_msg,
                     &self.cached_current_user_id,
-                    self.cached_is_clan_owner,
+                    can_send_message,
                     &self.cached_locale,
                     self.context_menu_forward_all,
                     true,
@@ -4067,7 +4114,8 @@ impl ChannelMessages {
 
 impl Render for ChannelMessages {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        crate::image_cache::sweep_ogp_cache(window, cx);
+        self.ogp_image_cache
+            .update(cx, |cache, cx| cache.sweep_once_per_frame(window, cx));
         {
             let mut selection = self.selection.borrow_mut();
             selection.begin_render();
@@ -4114,7 +4162,7 @@ impl Render for ChannelMessages {
             .active_channel()
             .map(|c| (Some(c.channel_type), c.parent_id.is_none()))
             .unwrap_or((None, true));
-        let is_clan_owner = self.cached_is_clan_owner;
+        let (can_manage_thread, can_send_message) = Self::message_permissions(cx);
         let emoji_recent = self.emoji_recent.clone();
         let (editing_id, edit_input) = match &self.edit_input {
             Some((id, input)) => (Some(*id), Some(input.clone())),
@@ -4149,6 +4197,7 @@ impl Render for ChannelMessages {
         let context_menu_message = self.context_menu_target.map(|(id, _)| id);
         let avatar_image_cache = self.avatar_image_cache.clone();
         let small_avatar_image_cache = self.small_avatar_image_cache.clone();
+        let ogp_image_cache = self.ogp_image_cache.clone();
         let icon_image_cache = self.icon_image_cache.clone();
         let unread_boundary_id = self.cached_unread_boundary;
         let highlight_id = self.highlight_id;
@@ -4217,6 +4266,7 @@ impl Render for ChannelMessages {
                         avatar_cache: small_avatar_image_cache.clone(),
                         large_avatar_cache: avatar_image_cache.clone(),
                         icon_cache: icon_image_cache.clone(),
+                        ogp_cache: ogp_image_cache.clone(),
                         unread_boundary_id,
                         highlight_id,
                         reply_highlight_id,
@@ -4231,7 +4281,8 @@ impl Render for ChannelMessages {
                         clan_id: active_clan,
                         channel_type,
                         channel_top_level,
-                        is_clan_owner,
+                        can_manage_thread,
+                        can_send_message,
                         editing_id,
                         edit_input: edit_input.clone(),
                         emoji_recent: &emoji_recent,
@@ -4299,7 +4350,7 @@ impl Render for ChannelMessages {
                 let menu = message_context_menu::build(
                     target_msg,
                     &self.cached_current_user_id,
-                    self.cached_is_clan_owner,
+                    can_send_message,
                     &self.cached_locale,
                     self.context_menu_forward_all,
                     false,

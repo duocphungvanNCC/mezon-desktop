@@ -899,17 +899,21 @@ fn resolve_thread_preview(thread: &ThreadSummary, cx: &App) -> ThreadCardPreview
     }
 }
 
+fn thread_clan_id(thread: &ThreadSummary, cx: &App) -> Option<ClanId> {
+    thread.clan_id.parse::<ClanId>().ok().or_else(|| {
+        ThreadsStore::global(cx)
+            .read(cx)
+            .list_clan_id()
+            .and_then(|id| id.parse::<ClanId>().ok())
+    })
+}
+
 fn resolve_thread_sender(
     thread: &ThreadSummary,
     preview: &ThreadCardPreview,
     cx: &App,
 ) -> (String, String) {
-    let clan_id = thread.clan_id.parse::<ClanId>().ok().or_else(|| {
-        ThreadsStore::global(cx)
-            .read(cx)
-            .list_clan_id()
-            .and_then(|id| id.parse::<ClanId>().ok())
-    });
+    let clan_id = thread_clan_id(thread, cx);
 
     if let (Some(user_id), Some(clan_id)) = (preview.sender_id_raw.parse::<UserId>().ok(), clan_id)
         && let Some(profile) = resolve_user_profile(user_id, ProfileContext::Clan(clan_id), cx)
