@@ -2,18 +2,18 @@ use std::sync::Arc;
 
 use gpui::http_client::HttpClient;
 use gpui::{
-    AnyView, App, AppContext, Bounds, Context, Corners, Entity, FocusHandle, Focusable, ImageCache,
-    KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, ObjectFit, Pixels, Point, Render,
-    RenderImage, Resource, ScrollDelta, ScrollWheelEvent, SharedString, SharedUri,
-    Size as GpuiSize, StyleRefinement, Subscription, UniformListScrollHandle, Window, WindowHandle,
-    WindowOptions, canvas, div, img, point, prelude::*, px, size, uniform_list,
+    AnyView, App, AppContext, Bounds, Context, Corners, DisplayId, Entity, FocusHandle, Focusable,
+    ImageCache, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, ObjectFit, Pixels,
+    Point, Render, RenderImage, Resource, ScrollDelta, ScrollWheelEvent, SharedString, SharedUri,
+    Size as GpuiSize, StyleRefinement, Subscription, UniformListScrollHandle, Window, WindowBounds,
+    WindowHandle, WindowOptions, canvas, div, img, point, prelude::*, px, size, uniform_list,
 };
 use mezon_store::{AppConfig, ChannelTimelineAttachment, Settings};
 use ui::{ScrollAxes, Scrollbars, WithScrollbar};
 
 use crate::app::main_window::{
-    activate_main_window, handle as main_window_handle, overlay_placement_for_main,
-    overlay_window_kind, sync_overlay_to_main,
+    activate_main_window, apply_overlay_bounds, handle as main_window_handle,
+    overlay_placement_from_window, overlay_window_kind, sync_overlay_to_main,
 };
 use crate::app::title_bar::TitleBar;
 use crate::app::window_controls;
@@ -88,7 +88,7 @@ pub fn close_media_image_modal(cx: &mut App) {
 pub fn open_media_image_modal(
     attachments: Vec<ChannelTimelineAttachment>,
     attachment_index: usize,
-    _window: &mut Window,
+    window: &mut Window,
     cx: &mut App,
 ) {
     let uploaded: Vec<_> = attachments
@@ -106,10 +106,12 @@ pub fn open_media_image_modal(
         return;
     };
 
+    let placement = overlay_placement_from_window(window, cx);
     let mut pending = Some((uploaded, index));
     if let Some(handle) = cx.try_global::<GlobalMediaImageModal>().map(|g| g.0) {
         let _ = handle.update(cx, |modal, window, cx| {
             if let Some((uploaded, index)) = pending.take() {
+                apply_overlay_bounds(window, placement.0);
                 window.activate_window();
                 window.focus(&modal.focus_handle, cx);
                 modal.set_attachments(uploaded, index, window, cx);
@@ -122,7 +124,7 @@ pub fn open_media_image_modal(
         let Some((uploaded, index)) = pending else {
             return;
         };
-        spawn_media_image_modal_window(uploaded, index, settings, cx);
+        spawn_media_image_modal_window(uploaded, index, settings, placement, cx);
         return;
     }
 
@@ -130,17 +132,18 @@ pub fn open_media_image_modal(
         return;
     };
 
-    spawn_media_image_modal_window(uploaded, index, settings, cx);
+    spawn_media_image_modal_window(uploaded, index, settings, placement, cx);
 }
 
 fn spawn_media_image_modal_window(
     uploaded: Vec<ChannelTimelineAttachment>,
     index: usize,
     settings: Entity<Settings>,
+    placement: (WindowBounds, Option<DisplayId>),
     cx: &mut App,
 ) {
     let main_app = main_window_handle(cx);
-    let (window_bounds, display_id) = overlay_placement_for_main(cx);
+    let (window_bounds, display_id) = placement;
     let kind = overlay_window_kind();
     let options = WindowOptions {
         window_bounds: Some(window_bounds),

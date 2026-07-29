@@ -4,11 +4,11 @@ use std::time::{Duration, Instant};
 use gpui::Size as GpuiSize;
 use gpui::http_client::HttpClient;
 use gpui::{
-    App, AppContext, BackgroundExecutor, Bounds, Context, Corners, Entity, FocusHandle, Focusable,
-    ImageCache, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, ObjectFit, Pixels,
-    Point, Render, RenderImage, Resource, ScrollDelta, ScrollWheelEvent, SharedString, SharedUri,
-    Subscription, UniformListScrollHandle, Window, WindowHandle, WindowOptions, canvas, div, img,
-    point, prelude::*, px, relative, size, uniform_list,
+    App, AppContext, BackgroundExecutor, Bounds, Context, Corners, DisplayId, Entity, FocusHandle,
+    Focusable, ImageCache, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, ObjectFit,
+    Pixels, Point, Render, RenderImage, Resource, ScrollDelta, ScrollWheelEvent, SharedString,
+    SharedUri, Subscription, UniformListScrollHandle, Window, WindowBounds, WindowHandle,
+    WindowOptions, canvas, div, img, point, prelude::*, px, relative, size, uniform_list,
 };
 use mezon_store::{
     AppConfig, ChannelAttachment, ChannelId, ChannelList, ClanId, DirectMessageStore, GalleryStore,
@@ -17,8 +17,8 @@ use mezon_store::{
 use ui::{ScrollAxes, Scrollbars, WithScrollbar};
 
 use crate::app::main_window::{
-    activate_main_window, handle as main_window_handle, overlay_placement_for_main,
-    overlay_window_kind, sync_overlay_to_main,
+    activate_main_window, apply_overlay_bounds, handle as main_window_handle,
+    overlay_placement_from_window, overlay_window_kind, sync_overlay_to_main,
 };
 use crate::app::shell::Shell;
 use crate::app::title_bar::TitleBar;
@@ -108,16 +108,24 @@ pub fn close_image_viewer(cx: &mut App) {
     clear_image_viewer_global(cx);
 }
 
-/// Open the image viewer, replacing any existing viewer window.
-pub fn open_image_viewer(request: OpenViewerRequest, cx: &mut App) {
-    open_image_viewer_now(request, cx);
+/// Open the image viewer, replacing any existing viewer window. `window` is the window the user
+/// clicked in — its placement is what the viewer is opened at, so it must be read here rather than
+/// looked up from the global handle, which is unreachable while that window is mid-update.
+pub fn open_image_viewer(request: OpenViewerRequest, window: &Window, cx: &mut App) {
+    let placement = overlay_placement_from_window(window, cx);
+    open_image_viewer_now(request, placement, cx);
 }
 
-fn open_image_viewer_now(request: OpenViewerRequest, cx: &mut App) {
+fn open_image_viewer_now(
+    request: OpenViewerRequest,
+    placement: (WindowBounds, Option<DisplayId>),
+    cx: &mut App,
+) {
     let mut pending = Some(request);
     if let Some(handle) = cx.try_global::<GlobalImageViewer>().map(|g| g.0) {
         let _ = handle.update(cx, |viewer, window, cx| {
             if let Some(request) = pending.take() {
+                apply_overlay_bounds(window, placement.0);
                 window.activate_window();
                 window.focus(&viewer.focus_handle, cx);
                 viewer.set_request(request, window, cx);
@@ -130,18 +138,22 @@ fn open_image_viewer_now(request: OpenViewerRequest, cx: &mut App) {
         let Some(request) = pending.take() else {
             return;
         };
-        spawn_image_viewer_window(request, cx);
+        spawn_image_viewer_window(request, placement, cx);
         return;
     }
     let Some(request) = pending else {
         return;
     };
-    spawn_image_viewer_window(request, cx);
+    spawn_image_viewer_window(request, placement, cx);
 }
 
-fn spawn_image_viewer_window(request: OpenViewerRequest, cx: &mut App) {
+fn spawn_image_viewer_window(
+    request: OpenViewerRequest,
+    placement: (WindowBounds, Option<DisplayId>),
+    cx: &mut App,
+) {
     let main_app = main_window_handle(cx);
-    let (window_bounds, display_id) = overlay_placement_for_main(cx);
+    let (window_bounds, display_id) = placement;
     let kind = overlay_window_kind();
     let options = WindowOptions {
         window_bounds: Some(window_bounds),

@@ -36,7 +36,12 @@ pub fn render_controls(theme: &Theme, window: &Window) -> impl IntoElement {
             IconName::WindowClose,
             |style| style.bg(rgb(CONTROL_CLOSE_HOVER)).text_color(gpui::white()),
             |window, cx| {
-                if !hide_main_window(window, cx) {
+                // Hide-to-tray belongs to the main window alone. These controls are shared by
+                // every window that uses the app title bar, and hiding a secondary window instead
+                // of closing it leaves it alive but unmapped: reopening then re-maps it and the
+                // window manager, not the app, picks where it lands.
+                let is_main = crate::app::main_window::handle(cx) == Some(window.window_handle());
+                if !is_main || !hide_main_window(window, cx) {
                     window.remove_window();
                 }
             },

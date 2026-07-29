@@ -1261,17 +1261,17 @@ fn render_banner_and_events(
         .when(event_count > 0, |row| {
             row.child(
                 div()
-                    .min_w(px(22.))
-                    .h(px(22.))
+                    .min_w(px(20.))
+                    .h(px(20.))
                     .px_1()
                     .flex()
                     .items_center()
                     .justify_center()
                     .rounded_full()
-                    .bg(theme.status_dnd)
+                    .bg(gpui::rgb(0xdc2626))
                     .text_color(gpui::white())
                     .text_size(px(12.))
-                    .font_weight(gpui::FontWeight::BOLD)
+                    .font_weight(gpui::FontWeight::MEDIUM)
                     .child(event_count.to_string()),
             )
         })

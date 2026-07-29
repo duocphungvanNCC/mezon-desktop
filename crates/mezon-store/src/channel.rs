@@ -145,7 +145,7 @@ impl Channel {
     }
 
     pub fn is_archived(&self) -> bool {
-        self.active == CHANNEL_ACTIVE_ARCHIVED
+        self.parent_id.is_some() && self.active == CHANNEL_ACTIVE_ARCHIVED
     }
 
     pub fn visible_in_sidebar(&self) -> bool {
@@ -928,6 +928,19 @@ impl ChannelList {
                 channel_from_desc(c, badge, Vec::new(), false)
             })
             .collect();
+
+        let omitted_active = channels
+            .iter()
+            .filter(|ch| ch.parent_id.is_none() && ch.active == CHANNEL_ACTIVE_ARCHIVED)
+            .count();
+        if omitted_active > 0 {
+            tracing::info!(
+                target: "socket",
+                "list_channel_descs: clan={} channels={} with_active_unset={omitted_active}",
+                clan_id,
+                channels.len()
+            );
+        }
 
         Ok(build_categories(api_categories, &mut channels))
     }
@@ -5198,6 +5211,35 @@ mod tests {
             &thread,
             thread_needs_reactivate(&thread)
         ));
+    }
+
+    #[test]
+    fn plain_channel_stays_visible_when_server_omits_active() {
+        let desc = ApiChannelDesc {
+            channel_id: 11,
+            channel_label: "general".into(),
+            channel_type: ChannelType::Text.as_raw(),
+            clan_id: 1,
+            category_name: String::new(),
+            category_id: 7,
+            channel_private: 0,
+            count_mess_unread: 0,
+            member_count: 0,
+            parent_id: 0,
+            is_mute: false,
+            last_seen_message_id: 0,
+            last_seen_timestamp: 0,
+            last_sent_message_id: 0,
+            last_sent_timestamp: 0,
+            badge_count: 0,
+            active: 0,
+            creator_id: 0,
+            clan_name: String::new(),
+            channel_avatar: String::new(),
+        };
+        let channel = channel_from_desc(desc, 0, Vec::new(), false);
+        assert!(!channel.is_archived());
+        assert!(channel.visible_in_sidebar());
     }
 
     #[test]

@@ -97,6 +97,11 @@ impl NotificationSettingStore {
                     &entity,
                     |store, event, cx| store.handle_realtime(event, cx),
                 );
+                dispatch.on(
+                    crate::realtime::RealtimeKind::Unmute,
+                    &entity,
+                    |store, event, cx| store.handle_unmute(event, cx),
+                );
             });
             this
         });
@@ -118,14 +123,48 @@ impl NotificationSettingStore {
         if channel_id.is_zero() {
             return;
         }
-        let setting = ChannelNotificationSetting::from_api(dto);
-        self.settings.insert(channel_id, setting);
+        let entry = self.settings.entry(channel_id).or_default();
+        entry.apply_realtime(dto, channel_id.get());
+        let setting = *entry;
         cx.emit(NotificationSettingEvent::Changed(channel_id));
         cx.notify();
         let muted = setting.is_time_muted(now_ms());
         crate::channel::ChannelList::global(cx).update(cx, |channels, cx| {
             channels.set_channel_muted_any_clan(channel_id, muted, cx);
         });
+    }
+
+    fn handle_unmute(&mut self, event: &mezon_client::RealtimeEvent, cx: &mut Context<Self>) {
+        let mezon_client::RealtimeEvent::Unmute(ev) = event else {
+            return;
+        };
+        let mut changed = false;
+
+        let channel_id = ChannelId(ev.channel_id);
+        if !channel_id.is_zero()
+            && let Some(entry) = self.settings.get_mut(&channel_id)
+            && entry.mute_until_ms != 0
+        {
+            entry.mute_until_ms = 0;
+            changed = true;
+            cx.emit(NotificationSettingEvent::Changed(channel_id));
+            crate::channel::ChannelList::global(cx).update(cx, |channels, cx| {
+                channels.set_channel_muted_any_clan(channel_id, false, cx);
+            });
+        }
+
+        if ev.category_id != 0
+            && self
+                .category_mute
+                .remove(&ev.category_id.to_string())
+                .is_some()
+        {
+            changed = true;
+        }
+
+        if changed {
+            cx.notify();
+        }
     }
 
     pub fn global(cx: &App) -> Entity<Self> {
