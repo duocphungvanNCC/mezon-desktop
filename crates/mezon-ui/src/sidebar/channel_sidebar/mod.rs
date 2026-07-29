@@ -16,7 +16,9 @@ use mezon_store::{
 use crate::channel_app::{is_channel_app_open, launch_channel_app_from_store};
 use ui::{ScrollAxes, Scrollbars, Tooltip, WithScrollbar};
 
+use crate::app::shell::Shell;
 use crate::clan::clan_menu::{build_clan_menu, clan_menu_overlay};
+use crate::clan::create_channel_modal::CreateChannelModal;
 use crate::components::compositions::channel_row::{channel_type_icon, shows_left_unread_nub};
 use crate::components::compositions::channel_row_element::{
     ChannelRowBadge, ChannelRowElement, ThreadConnector,
@@ -329,6 +331,7 @@ impl ChannelSidebar {
                         elem_id: SharedString::from(format!("cat-{}", &category.id)),
                         id: category.id.clone(),
                         name_upper: name.to_uppercase(),
+                        name,
                         collapsed,
                     });
                     if !collapsed {
@@ -944,7 +947,7 @@ impl Render for ChannelSidebar {
                     .children(skeleton_overlay)
                     .children(mention_button)
                     .custom_scrollbars(
-                        Scrollbars::always_visible(ScrollAxes::Vertical)
+                        Scrollbars::new(ScrollAxes::Vertical)
                             .tracked_scroll_handle(&self.list_state),
                         window,
                         cx,
@@ -1392,6 +1395,7 @@ fn render_sidebar_item(
         SidebarItem::Category {
             elem_id,
             id,
+            name,
             name_upper,
             collapsed,
         } => {
@@ -1400,11 +1404,23 @@ fn render_sidebar_item(
             let clan_id_for_toggle = active_clan_id_for_nav.unwrap_or_default();
             let menu_collapsed = *collapsed;
 
+            let can_create_channel = category_id != FAVOR_CATE_ID
+                && PermissionStore::try_global(cx).is_some_and(|store| {
+                    let store = store.read(cx);
+                    let perms = store.clan_settings_permissions(clan_id_for_toggle, cx);
+                    perms.is_clan_owner
+                        || perms.has_manage_clan
+                        || perms.has_manage_channel
+                        || store.check_permission(clan_id_for_toggle, PERMISSION_ADMINISTRATOR, cx)
+                });
+            let add_hover_bg = theme.bg_hover;
+
             let mut header = div()
                 .id(elem_id.clone())
                 .flex()
                 .flex_row()
                 .items_center()
+                .justify_between()
                 .w_full()
                 .px_2()
                 .cursor_pointer()
@@ -1418,8 +1434,61 @@ fn render_sidebar_item(
                 IconName::CaretDown
             };
             header = header
-                .child(Icon::new(icon).size(px(18.0)).text_color(theme.text_muted))
-                .child(div().ml_1().child(category_name))
+                .child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .min_w_0()
+                        .flex_1()
+                        .child(Icon::new(icon).size(px(18.0)).text_color(theme.text_muted))
+                        .child(div().ml_1().min_w_0().truncate().child(category_name)),
+                )
+                .when(can_create_channel, |el| {
+                    let channel_list = channel_list_handle.clone();
+                    let category_id = category_id.clone();
+                    let modal_category_name = name.clone();
+                    let locale = locale.to_string();
+                    el.child(
+                        div()
+                            .id(SharedString::from(format!("cat-add-{elem_id}")))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .size(px(22.))
+                            .flex_none()
+                            .mr(px(4.))
+                            .rounded_md()
+                            .cursor_pointer()
+                            .hover(move |s| s.bg(add_hover_bg))
+                            .on_click(move |_, window, cx| {
+                                cx.stop_propagation();
+                                if menu_collapsed {
+                                    channel_list.update(cx, |list, cx| {
+                                        list.toggle_category(clan_id_for_toggle, &category_id, cx);
+                                    });
+                                }
+                                let modal = cx.new(|cx| {
+                                    CreateChannelModal::new(
+                                        clan_id_for_toggle,
+                                        category_id.clone(),
+                                        modal_category_name.clone(),
+                                        channel_list.clone(),
+                                        locale.clone(),
+                                        window,
+                                        cx,
+                                    )
+                                });
+                                Shell::global(cx)
+                                    .update(cx, |shell, cx| shell.show_modal(modal.into(), cx));
+                            })
+                            .child(
+                                Icon::new(IconName::Plus)
+                                    .size(px(18.))
+                                    .text_color(theme.text_muted),
+                            ),
+                    )
+                })
                 .on_click(on_category_click(
                     channel_list_handle.clone(),
                     clan_id_for_toggle,
@@ -1456,6 +1525,7 @@ fn render_sidebar_item(
             div()
                 .pt(px(10.))
                 .pb(px(6.))
+                .w_full()
                 .flex()
                 .flex_col()
                 .child(header)

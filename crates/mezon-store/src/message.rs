@@ -33,6 +33,34 @@ pub struct MessageAttachment {
     pub upload_failed: bool,
 }
 
+pub const STICKER_FILETYPE: &str = "sticker";
+
+pub fn url_extension(url: &str) -> Option<String> {
+    let path = url.split(['?', '#']).next()?;
+    let name = path.rsplit('/').next()?;
+    let tail = name.rsplit('@').next().unwrap_or(name);
+    let ext = if tail.contains('.') {
+        tail.rsplit('.').next()?
+    } else {
+        tail
+    };
+    (!ext.is_empty()).then(|| ext.to_ascii_lowercase())
+}
+
+pub fn is_image_type(filetype: &str, url: &str) -> bool {
+    let mime_image =
+        (filetype.starts_with("image") || filetype == STICKER_FILETYPE) && !is_svg_type(filetype);
+    mime_image
+        || matches!(
+            url_extension(url).as_deref(),
+            Some("png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "avif")
+        )
+}
+
+fn is_svg_type(filetype: &str) -> bool {
+    filetype.contains("svg+xml")
+}
+
 pub fn format_file_size(bytes: u64) -> String {
     if bytes >= 1_000_000 {
         format!("{:.1} MB", bytes as f64 / 1_000_000.0)
@@ -49,16 +77,7 @@ impl MessageAttachment {
     }
 
     pub fn is_image(&self) -> bool {
-        self.filetype.starts_with("image/")
-            || matches!(
-                self.url
-                    .split(['?', '#'])
-                    .next()
-                    .and_then(|u| u.rsplit('.').next())
-                    .map(|ext| ext.to_ascii_lowercase())
-                    .as_deref(),
-                Some("png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "svg" | "avif")
-            )
+        is_image_type(&self.filetype, &self.url)
     }
 
     pub fn media_is_video(filetype: &str, url: &str) -> bool {
@@ -185,6 +204,9 @@ pub struct MessageReference {
     pub message_ref_id: MessageId,
     pub sender_id: UserId,
     pub sender_name: String,
+    pub sender_clan_nick: String,
+    pub sender_display_name: String,
+    pub sender_username: String,
     pub sender_avatar: String,
     pub content: String,
     pub content_preview: SharedString,
@@ -1477,6 +1499,16 @@ impl Message {
             && !self.send_failed
     }
 
+    /// `day_label`, `time_hhmm` and `local_date` are all derived from `create_time`, so they
+    /// must only ever move as a unit — assigning `create_time` alone leaves the rendered
+    /// timestamp describing the *previous* value (or blank, when the other value was 0).
+    pub fn set_create_time(&mut self, create_time: i64) {
+        self.create_time = create_time;
+        self.day_label = local_day_key(create_time);
+        self.time_hhmm = format_local_time_hhmm(create_time).into();
+        self.local_date = local_datetime(create_time).map(|dt| dt.date_naive());
+    }
+
     pub fn token_transaction_parts(&self) -> (SharedString, SharedString) {
         let tx = split_token_transaction(&self.content);
         (tx.title, tx.detail)
@@ -1985,6 +2017,54 @@ mod tests {
             url: url.into(),
             ..Default::default()
         }
+    }
+
+    const STICKER_IMGPROXY_URL: &str = "https://imgproxy.mezon.ai/K0YUZRIosDOcz5lY6qrgC6UIXmQgWzLjZv7VJ1RAA8c/rs:fit:100:100:1/mb:2097152/plain/https://cdn.mezon.ai/stickers/2039232970027438080.webp@webp";
+
+    #[test]
+    fn sticker_filetype_is_an_image_not_a_document() {
+        assert!(attachment(STICKER_FILETYPE, STICKER_IMGPROXY_URL).is_image());
+        assert!(attachment(STICKER_FILETYPE, "https://cdn.mezon.ai/stickers/1.webp").is_image());
+        assert!(attachment(STICKER_FILETYPE, "").is_image());
+    }
+
+    #[test]
+    fn imgproxy_output_format_is_read_as_the_extension() {
+        assert_eq!(url_extension(STICKER_IMGPROXY_URL).as_deref(), Some("webp"));
+        assert!(attachment("", STICKER_IMGPROXY_URL).is_image());
+    }
+
+    #[test]
+    fn svg_is_a_file_row_not_an_image() {
+        assert!(!attachment("image/svg+xml", "https://cdn.example/logo.svg").is_image());
+        assert!(!attachment("", "https://cdn.example/logo.svg").is_image());
+    }
+
+    #[test]
+    fn heic_and_bare_image_prefix_are_images() {
+        assert!(attachment("image/heic", "https://cdn.example/a.heic").is_image());
+        assert!(attachment("image", "https://cdn.example/a").is_image());
+    }
+
+    #[test]
+    fn url_extension_handles_plain_query_and_extensionless_urls() {
+        assert_eq!(
+            url_extension("https://cdn.example/a/b/photo.PNG").as_deref(),
+            Some("png")
+        );
+        assert_eq!(
+            url_extension("https://cdn.example/photo.jpg?w=1#frag").as_deref(),
+            Some("jpg")
+        );
+        assert_eq!(
+            url_extension("https://cdn.example/asset@2x.png").as_deref(),
+            Some("png")
+        );
+        assert_eq!(
+            url_extension("https://cdn.example/no-extension").as_deref(),
+            Some("no-extension")
+        );
+        assert!(!attachment("", "https://cdn.example/no-extension").is_image());
     }
 
     #[test]

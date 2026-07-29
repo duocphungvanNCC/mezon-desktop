@@ -1696,6 +1696,9 @@ fn render_social_link_card(
         .flex()
         .flex_col()
         .gap_1()
+        .when(kind != LinkKind::Plain, |card| {
+            card.flex_basis(relative(1.))
+        })
         .w_full()
         .min_w_0()
         .max_w(px(400.))

@@ -12,6 +12,7 @@ use crate::{
     },
 };
 
+const CHECK_NAME_TYPE_CHANNEL: i32 = 2;
 const CHECK_NAME_TYPE_NICKNAME: i32 = 4;
 
 fn sanitize_filename(name: &str) -> String {
@@ -2182,6 +2183,21 @@ impl AppApi {
         Ok(resp.is_duplicate)
     }
 
+    pub async fn check_duplicate_channel_name(
+        &self,
+        name: &str,
+        category_id: &str,
+    ) -> Result<bool> {
+        let cond: i64 = category_id
+            .parse()
+            .map_err(|e| anyhow::anyhow!("invalid category_id {category_id:?}: {e}"))?;
+        let resp = self
+            .transport
+            .check_duplicate_name(name, CHECK_NAME_TYPE_CHANNEL, cond)
+            .await?;
+        Ok(resp.is_duplicate)
+    }
+
     pub async fn check_duplicate_clan_nickname(
         &self,
         clan_id: i64,
@@ -2232,6 +2248,33 @@ impl AppApi {
 
     pub async fn list_categories_typed(&self, clan_id: i64) -> Result<Vec<ApiCategoryDesc>> {
         self.transport.list_categories_typed(clan_id).await
+    }
+
+    pub async fn update_category_order(
+        &self,
+        clan_id: i64,
+        categories: &[(i32, i64)],
+    ) -> Result<()> {
+        self.transport
+            .update_category_order(clan_id, categories)
+            .await
+    }
+
+    pub async fn list_archived_channel_descs(
+        &self,
+        clan_id: i64,
+    ) -> Result<Vec<mezon_proto::api::ChannelDescription>> {
+        Ok(self
+            .transport
+            .list_archived_channel_descs(clan_id)
+            .await?
+            .channeldesc)
+    }
+
+    pub async fn restore_archived_channel(&self, clan_id: i64, channel_id: i64) -> Result<()> {
+        self.transport
+            .active_archived_thread(clan_id, channel_id)
+            .await
     }
 
     pub async fn list_clan_badge_count(&self) -> Result<Vec<(String, i32, bool)>> {

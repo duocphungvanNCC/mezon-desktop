@@ -1,5 +1,6 @@
 use crate::chat::{MentionInput, ReplyTarget};
 use crate::components::primitives::{Icon, IconName};
+use crate::image_cache::LruImageCache;
 use crate::theme::{ActiveTheme, Theme};
 use gpui::{
     Context, Entity, FontWeight, ObjectFit, Render, SharedString, Subscription, Window, div, img,
@@ -22,6 +23,7 @@ pub struct InputBar {
     _settings_observe: Subscription,
     _mention_observe: Subscription,
     _messages_sub: Subscription,
+    ogp_image_cache: Entity<LruImageCache>,
 }
 
 impl InputBar {
@@ -49,6 +51,7 @@ impl InputBar {
             _settings_observe: settings_observe,
             _mention_observe: mention_observe,
             _messages_sub: messages_sub,
+            ogp_image_cache: crate::image_cache::ogp_aux_cache("composer-ogp", cx),
         }
     }
 
@@ -136,7 +139,7 @@ impl InputBar {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let ogp_image_cache = crate::image_cache::shared_ogp_cache(cx);
+        let ogp_image_cache = self.ogp_image_cache.clone();
         let mut text_col = div()
             .flex()
             .flex_col()
@@ -271,7 +274,8 @@ impl InputBar {
 
 impl Render for InputBar {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        crate::image_cache::sweep_ogp_cache(window, cx);
+        self.ogp_image_cache
+            .update(cx, |cache, cx| cache.sweep_once_per_frame(window, cx));
         self.render_bar(cx.theme().clone(), cx)
     }
 }

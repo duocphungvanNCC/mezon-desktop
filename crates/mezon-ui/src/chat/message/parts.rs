@@ -8,7 +8,7 @@ use gpui::{
 };
 use mezon_store::{
     AccountStore, AlbumLayout, AppConfig, BadgeService, ChannelType, ClanId, ClanList,
-    ClanMembersStore, Message, MessageAttachment, MessageCode, MessageId, MessageReference,
+    ClanMembersStore, Emoji, Message, MessageAttachment, MessageCode, MessageId, MessageReference,
     MessagesStore, PlatformStore, ProfileContext, Reaction, ThreadsStore, TopicsStore, UserId,
     UsersByUserStore, ViewerMedia, resolve_avatar_url, resolve_user_profile,
 };
@@ -18,7 +18,7 @@ use super::audio_player::{
     AudioActivation, audio_failed_pill, audio_pill, audio_sending_pill, audio_time_label,
 };
 use super::content::{SELECTION_BG, SelectableTextContext, profile_popover_trigger};
-use super::context::{REPLY_USERNAME_COLOR, ROW_MEMO_CAPACITY, RowCtx};
+use super::context::{REPLY_USERNAME_COLOR, ROW_MEMO_CAPACITY, RecentEmojiCell, RowCtx};
 use super::gif_video::GifVideoView;
 use super::reaction_detail::{UserReactionPanel, emoji_error_fallback};
 use super::selection::{SelectableRegion, TextSegment};
@@ -269,12 +269,78 @@ pub fn resolve_message_display_name(msg: &Message, ctx: &RowCtx, cx: &App) -> Sh
     msg.sender_name.clone()
 }
 
+fn is_anonymous_sender(sender_id: &str, cx: &App) -> bool {
+    AppConfig::try_global(cx)
+        .map(|config| !config.anonymous_user_id.is_empty() && sender_id == config.anonymous_user_id)
+        .unwrap_or(false)
+}
+
+fn is_anonymous_user_id(user_id: UserId, cx: &App) -> bool {
+    AppConfig::try_global(cx)
+        .and_then(|config| config.anonymous_user_id.parse::<i64>().ok())
+        .is_some_and(|anonymous| anonymous == user_id.get())
+}
+
+fn reference_avatar(
+    clan_id: ClanId,
+    user_id: UserId,
+    ctx: &RowCtx,
+    cx: &App,
+) -> Option<SharedString> {
+    if let Some(cached) = ctx.row_memo.borrow().avatars.get(&user_id) {
+        return cached.as_ref().map(|(_, proxied)| proxied.clone());
+    }
+    let resolved = resolve_avatar_url(user_id, ProfileContext::Clan(clan_id), cx)
+        .filter(|url| !url.is_empty())
+        .map(|url| {
+            let proxied = SharedString::from(crate::util::imgproxy::avatar_url(cx, &url));
+            (SharedString::from(url), proxied)
+        });
+    ctx.row_memo
+        .borrow_mut()
+        .avatars
+        .insert(user_id, resolved.clone());
+    resolved.map(|(_, proxied)| proxied)
+}
+
+fn resolve_reference_identity(
+    reference: &MessageReference,
+    ctx: &RowCtx,
+    cx: &App,
+) -> (SharedString, SharedString) {
+    let baked_name = || SharedString::from(reference.sender_name.clone());
+    let baked_avatar = || SharedString::from(reference.sender_avatar.clone());
+    let clan_id = role_scope(ctx.profile_context)
+        .filter(|_| !reference.sender_id.is_zero())
+        .filter(|_| !is_anonymous_user_id(reference.sender_id, cx));
+    let Some(clan_id) = clan_id else {
+        return (baked_name(), baked_avatar());
+    };
+    let members = ClanMembersStore::global(cx);
+    let member = members.read(cx).member(clan_id, reference.sender_id);
+    let name = match member {
+        Some(member) => SharedString::from(mezon_store::name_for_prioritize(
+            first_non_empty(&member.clan_nick, &reference.sender_clan_nick),
+            first_non_empty(&member.user.display_name, &reference.sender_display_name),
+            first_non_empty(&member.user.username, &reference.sender_username),
+        )),
+        None => baked_name(),
+    };
+    let avatar =
+        reference_avatar(clan_id, reference.sender_id, ctx, cx).unwrap_or_else(baked_avatar);
+    (name, avatar)
+}
+
+fn first_non_empty<'a>(preferred: &'a str, fallback: &'a str) -> &'a str {
+    if preferred.is_empty() {
+        fallback
+    } else {
+        preferred
+    }
+}
+
 pub fn avatar_element(msg: &Message, ctx: &RowCtx, cx: &App) -> AnyElement {
-    let is_anonymous = AppConfig::try_global(cx)
-        .map(|config| {
-            !config.anonymous_user_id.is_empty() && msg.sender_id == config.anonymous_user_id
-        })
-        .unwrap_or(false);
+    let is_anonymous = is_anonymous_sender(&msg.sender_id, cx);
     let (raw_url, proxied) = resolve_message_avatar_urls(msg, ctx, cx);
     let display_name = resolve_message_display_name(msg, ctx, cx);
     let mut avatar = Avatar::new()
@@ -453,15 +519,16 @@ pub fn render_reply(reference: &MessageReference, ctx: &RowCtx) -> AnyElement {
 
     let has_attachment_ref = reference.has_attachment || reference.has_embed;
     let is_deleted = reference.content == DELETED_REPLY_PREVIEW;
-    let avatar = if reference.sender_avatar.is_empty() {
+    let (sender_name, sender_avatar) = resolve_reference_identity(reference, ctx, ctx.app);
+    let avatar = if sender_avatar.is_empty() {
         Avatar::new()
-            .name(reference.sender_name.clone())
+            .name(sender_name.clone())
             .size_px(px(20.))
             .image_cache(ctx.avatar_cache.clone())
     } else {
         Avatar::new()
-            .name(reference.sender_name.clone())
-            .src(reference.sender_avatar.clone())
+            .name(sender_name.clone())
+            .src(sender_avatar)
             .size_px(px(20.))
             .image_cache(ctx.avatar_cache.clone())
     };
@@ -502,7 +569,7 @@ pub fn render_reply(reference: &MessageReference, ctx: &RowCtx) -> AnyElement {
                 .font_weight(FontWeight::BOLD)
                 .text_color(gpui::rgb(REPLY_USERNAME_COLOR))
                 .hover(|s| s.underline())
-                .child(reference.sender_name.clone()),
+                .child(sender_name),
         )
         .child(if has_attachment_ref {
             div()
@@ -1488,6 +1555,21 @@ fn add_reaction_button(message_id: MessageId, ctx: &RowCtx) -> AnyElement {
 
 const REACTION_EMOJI_PX: f32 = 16.;
 const REACTION_EMOJI_SOURCE_PX: u32 = 32;
+const RECENT_EMOJI_PX: f32 = 20.;
+const RECENT_EMOJI_SOURCE_PX: u32 = 40;
+
+pub fn recent_emoji_cells(emojis: &[Emoji], cx: &App) -> Vec<RecentEmojiCell> {
+    emojis
+        .iter()
+        .map(|emoji| RecentEmojiCell {
+            id: emoji.id.clone().into(),
+            shortname: emoji.shortname.clone().into(),
+            src: crate::util::imgproxy::emoji_url_sized(cx, &emoji.id, RECENT_EMOJI_SOURCE_PX)
+                .into(),
+            element_key: format!("recent-emoji-{}", emoji.id).into(),
+        })
+        .collect()
+}
 
 fn reaction_emoji_src(reaction: &Reaction, app: &gpui::App) -> SharedString {
     if reaction.emoji_id.is_empty() || reaction.emoji_id.as_ref() == "0" {
@@ -1671,11 +1753,8 @@ pub fn render_hover_actions(
         for emoji in ctx.emoji_recent {
             let emoji_id = emoji.id.clone();
             let shortname = emoji.shortname.clone();
-            let src = crate::util::imgproxy::emoji_url(ctx.app, &emoji.id);
-            let cell_id =
-                SharedString::from(format!("recent-emoji-{}-{}", msg.row_anchor_id.0, emoji.id));
             let mut cell = div()
-                .id(cell_id)
+                .id((emoji.element_key.clone(), msg.row_anchor_id.0 as usize))
                 .flex()
                 .items_center()
                 .justify_center()
@@ -1685,15 +1764,19 @@ pub fn render_hover_actions(
                 .hover(move |s| s.bg(bg_hover))
                 .on_click(move |_, _, cx| {
                     MessagesStore::global(cx).update(cx, |store, cx| {
-                        store.add_reaction(msg_id, emoji_id.clone(), shortname.clone(), cx);
+                        store.add_reaction(msg_id, emoji_id.to_string(), shortname.to_string(), cx);
                     });
                 });
-            if !src.is_empty() {
+            if !emoji.src.is_empty() {
                 cell = cell.child(
-                    img(src)
-                        .size(px(20.))
+                    img(emoji.src.clone())
+                        .size(px(RECENT_EMOJI_PX))
                         .object_fit(ObjectFit::ScaleDown)
-                        .with_fallback(emoji_error_fallback(px(20.), theme.text_secondary)),
+                        .image_cache(&ctx.icon_cache)
+                        .with_fallback(emoji_error_fallback(
+                            px(RECENT_EMOJI_PX),
+                            theme.text_secondary,
+                        )),
                 );
             }
             row = row.child(cell);

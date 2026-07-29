@@ -493,6 +493,18 @@ impl TransportClient {
             .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
     }
 
+    pub async fn list_archived_channel_descs(
+        &self,
+        clan_id: i64,
+    ) -> Result<mezon_proto::api::ListArchivedChannelDescsResponse> {
+        let transport = self.inner.clone();
+
+        runtime()
+            .spawn(async move { transport.list_archived_channel_descs(clan_id).await })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
     pub async fn list_channel_by_user_id(&self) -> Result<Vec<crate::transport::ApiChannelDesc>> {
         tracing::debug!("TransportClient::list_channel_by_user_id() called");
 
@@ -2582,6 +2594,29 @@ impl TransportClient {
                     .create_category_desc(&category_name, clan_id)
                     .await
             })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
+    pub async fn update_category_order(
+        &self,
+        clan_id: i64,
+        categories: &[(i32, i64)],
+    ) -> Result<()> {
+        let transport = self.inner.clone();
+        let categories = categories.to_vec();
+
+        runtime()
+            .spawn(async move { transport.update_category_order(clan_id, &categories).await })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
+    pub async fn active_archived_thread(&self, clan_id: i64, channel_id: i64) -> Result<()> {
+        let transport = self.inner.clone();
+
+        runtime()
+            .spawn(async move { transport.active_archived_thread(clan_id, channel_id).await })
             .await
             .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
     }

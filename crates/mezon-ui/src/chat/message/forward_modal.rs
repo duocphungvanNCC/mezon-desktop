@@ -1085,7 +1085,12 @@ fn render_option_row(
         let mut avatar = Avatar::new()
             .name(option.label.clone())
             .size_px(px(16.))
-            .image_cache(image_cache.clone());
+            .image_cache(image_cache.clone())
+            .group_default(
+                matches!(option.kind, OptionKind::Group)
+                    && option.avatar.is_empty()
+                    && option.avatar_raw.is_empty(),
+            );
         if !option.avatar.is_empty() {
             avatar = avatar.src(option.avatar.clone());
             if !option.avatar_raw.is_empty() && option.avatar_raw != option.avatar {
@@ -1735,7 +1740,12 @@ fn render_share_option_row(
         let mut avatar = Avatar::new()
             .name(option.label.clone())
             .size_px(px(16.))
-            .image_cache(image_cache.clone());
+            .image_cache(image_cache.clone())
+            .group_default(
+                matches!(option.kind, OptionKind::Group)
+                    && option.avatar.is_empty()
+                    && option.avatar_raw.is_empty(),
+            );
         if !option.avatar.is_empty() {
             avatar = avatar.src(option.avatar.clone());
             if !option.avatar_raw.is_empty() && option.avatar_raw != option.avatar {

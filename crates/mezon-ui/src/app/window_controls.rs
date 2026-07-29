@@ -1,6 +1,6 @@
 use gpui::{
-    CursorStyle, Decorations, Div, MouseButton, ResizeEdge, Tiling, TitlebarOptions, Window,
-    WindowDecorations, div, prelude::*, px,
+    App, CursorStyle, Decorations, Div, Global, MouseButton, QuitMode, ResizeEdge, Tiling,
+    TitlebarOptions, Window, WindowDecorations, WindowHandle, div, prelude::*, px,
 };
 
 #[cfg(any(target_os = "linux", target_os = "windows"))]
@@ -47,6 +47,43 @@ pub const CLAN_SIDEBAR_HEADER_TOP: f32 = CLAN_SIDEBAR_STICKY_TOP;
 /// Returns an empty element on macOS, where the native traffic lights are used.
 pub fn render_controls(theme: &Theme, window: &Window) -> impl IntoElement {
     platform::render_controls(theme, window)
+}
+
+struct RunsInBackground(bool);
+impl Global for RunsInBackground {}
+
+pub fn set_runs_in_background(cx: &mut App, tray_available: bool) {
+    let enabled = tray_available || cfg!(target_os = "macos");
+    cx.set_global(RunsInBackground(enabled));
+    cx.set_quit_mode(if enabled {
+        QuitMode::Explicit
+    } else {
+        QuitMode::Default
+    });
+}
+
+fn runs_in_background(cx: &App) -> bool {
+    cx.try_global::<RunsInBackground>()
+        .map_or(cfg!(target_os = "macos"), |global| global.0)
+}
+
+pub fn hide_main_window(window: &mut Window, cx: &App) -> bool {
+    if !runs_in_background(cx) {
+        return false;
+    }
+    window.hide_window();
+    true
+}
+
+pub fn configure_window<V: 'static>(cx: &mut App, handle: WindowHandle<V>) {
+    if let Err(error) = cx.update_window(handle.into(), |_, window, cx| {
+        window.on_window_should_close(cx, |window, cx| !hide_main_window(window, cx));
+
+        #[cfg(target_os = "macos")]
+        platform::disable_window_fullscreen(window);
+    }) {
+        tracing::warn!("Failed to configure main window: {error}");
+    }
 }
 
 pub fn window_title_options() -> TitlebarOptions {

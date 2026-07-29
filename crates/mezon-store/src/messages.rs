@@ -41,9 +41,7 @@ use crate::message::{
     recompute_message_grouping, rollback_reaction, sort_messages, spans_only_emoji,
     viewer_highlight_direct,
 };
-use crate::message_time::{
-    format_local_time_hhmm, local_datetime, local_day_key, unix_now_seconds,
-};
+use crate::message_time::unix_now_seconds;
 use crate::presign;
 use crate::realtime::{RealtimeDispatch, RealtimeKind};
 use crate::topics::TopicsStore;
@@ -58,7 +56,7 @@ const DIRECTION_AFTER: i32 = 1;
 const DIRECTION_AROUND: i32 = 2;
 const CHANNEL_TYPE_CHANNEL: i32 = 1;
 const CHANNEL_TYPE_THREAD: i32 = 7;
-const STICKER_FILETYPE: &str = "sticker";
+use crate::message::STICKER_FILETYPE;
 const AUDIO_FILETYPE: &str = "audio/mpeg";
 const MAX_MESSAGES_PER_CHANNEL: usize = 200;
 const MAX_CACHED_CHANNELS: usize = 30;
@@ -1949,7 +1947,7 @@ impl MessagesStore {
         }) {
             return;
         }
-        let display_name = AccountStore::global(cx)
+        let account_name = AccountStore::global(cx)
             .read(cx)
             .account
             .as_ref()
@@ -1961,9 +1959,19 @@ impl MessagesStore {
                 }
             })
             .unwrap_or_default();
-        if display_name.is_empty() {
+        if account_name.is_empty() {
             return;
         }
+        let clan_nick = matches!(self.mode, STREAM_MODE_CHANNEL | STREAM_MODE_THREAD)
+            .then(|| ClanMembersStore::try_global(cx).zip(viewer_user_id(cx)))
+            .flatten()
+            .and_then(|(members, me)| {
+                members
+                    .read(cx)
+                    .member(clan_id, me)
+                    .map(|member| member.clan_nick.clone())
+            });
+        let display_name = typing_display_name(self.mode, clan_nick.as_deref(), &account_name);
         self.last_typing_sent = Some((channel_id, now));
         let mode = self.mode;
         let is_public = self.is_public;
@@ -2592,14 +2600,29 @@ impl MessagesStore {
         let references: Vec<mezon_proto::api::MessageRef> = msg
             .references
             .iter()
-            .map(|reference| mezon_proto::api::MessageRef {
-                message_ref_id: reference.message_ref_id.get(),
-                content: reference.content.clone(),
-                has_attachment: reference.has_attachment,
-                message_sender_id: reference.sender_id.get(),
-                message_sender_username: reference.sender_name.to_string(),
-                message_sender_avatar: reference.sender_avatar.to_string(),
-                ..Default::default()
+            .map(|reference| {
+                let (clan_nick, display_name, username, avatar) = reference_sender_fields(
+                    reference.sender_id,
+                    (
+                        &reference.sender_clan_nick,
+                        &reference.sender_display_name,
+                        &reference.sender_username,
+                        &reference.sender_avatar,
+                    ),
+                    Some(clan_id),
+                    cx,
+                );
+                mezon_proto::api::MessageRef {
+                    message_ref_id: reference.message_ref_id.get(),
+                    content: reference.content.clone(),
+                    has_attachment: reference.has_attachment,
+                    message_sender_id: reference.sender_id.get(),
+                    message_sender_username: username,
+                    message_sender_avatar: avatar,
+                    message_sender_clan_nick: clan_nick,
+                    message_sender_display_name: display_name,
+                    ..Default::default()
+                }
             })
             .collect();
         let sender_id = msg.sender_id.parse().unwrap_or(0);
@@ -3392,6 +3415,10 @@ impl MessagesStore {
         );
         let (display_name, avatar_url, avatar_proxied) =
             outgoing_sender_profile(&sender_id, &sender_name, clan_id, cx);
+        let reply_clan_id = (!self.is_dm)
+            .then_some(self.active_clan_id)
+            .flatten()
+            .filter(|clan_id| !clan_id.is_zero());
         let mut optimistic = Message::new(
             temp_id,
             sent.text.clone(),
@@ -3426,11 +3453,25 @@ impl MessagesStore {
             }
         }
         if let Some(draft) = &reply {
+            let (clan_nick, display_name, username, avatar) = reference_sender_fields(
+                draft.sender_id,
+                (
+                    "",
+                    &draft.sender_name,
+                    &draft.sender_name,
+                    &draft.sender_avatar,
+                ),
+                reply_clan_id,
+                cx,
+            );
             optimistic = optimistic.with_references(vec![MessageReference {
                 message_ref_id: draft.message_ref_id,
                 sender_id: draft.sender_id,
-                sender_name: draft.sender_name.clone(),
-                sender_avatar: draft.sender_avatar.clone(),
+                sender_name: name_for_prioritize(&clan_nick, &display_name, &username),
+                sender_clan_nick: clan_nick,
+                sender_display_name: display_name,
+                sender_username: username,
+                sender_avatar: avatar,
                 content_preview: crate::message::reply_preview_line(&draft.content_preview).into(),
                 content: draft.content_preview.clone(),
                 has_attachment: draft.has_attachment,
@@ -3468,15 +3509,31 @@ impl MessagesStore {
         self.emit_appended(old_len, cx);
 
         let api = self.api.clone();
-        let reply_ref = reply.map(|draft| OutgoingReply {
-            message_ref_id: draft.message_ref_id.get(),
-            content: draft.content_preview,
-            has_attachment: draft.has_attachment,
-            message_sender_id: draft.sender_id.get(),
-            message_sender_username: draft.sender_name.clone(),
-            message_sender_avatar: draft.sender_avatar,
-            message_sender_clan_nick: String::new(),
-            message_sender_display_name: draft.sender_name,
+        let reply_sender = reply.as_ref().map(|draft| {
+            reference_sender_fields(
+                draft.sender_id,
+                (
+                    "",
+                    &draft.sender_name,
+                    &draft.sender_name,
+                    &draft.sender_avatar,
+                ),
+                reply_clan_id,
+                cx,
+            )
+        });
+        let reply_ref = reply.zip(reply_sender).map(|(draft, sender)| {
+            let (clan_nick, display_name, username, avatar) = sender;
+            OutgoingReply {
+                message_ref_id: draft.message_ref_id.get(),
+                content: draft.content_preview,
+                has_attachment: draft.has_attachment,
+                message_sender_id: draft.sender_id.get(),
+                message_sender_username: username,
+                message_sender_avatar: avatar,
+                message_sender_clan_nick: clan_nick,
+                message_sender_display_name: display_name,
+            }
         });
         cx.spawn(async move |this, cx| {
             if has_attachments {
@@ -5342,10 +5399,7 @@ fn fill_sparse_topic_ack(
         msg.avatar_proxied = avatar_proxied;
     }
     if gaps.time {
-        msg.create_time = now;
-        msg.day_label = local_day_key(now);
-        msg.time_hhmm = format_local_time_hhmm(now).into();
-        msg.local_date = local_datetime(now).map(|dt| dt.date_naive());
+        msg.set_create_time(now);
     }
 }
 
@@ -5476,8 +5530,7 @@ fn merge_sparse_sender(prior: &Message, mut incoming: Message) -> Message {
         incoming.avatar_proxied = prior.avatar_proxied.clone();
     }
     if prior.id.is_optimistic() {
-        incoming.create_time = prior.create_time;
-        incoming.day_label = prior.day_label.clone();
+        incoming.set_create_time(prior.create_time);
         incoming.row_anchor_id = prior.row_anchor_id;
     }
     if incoming.references.is_empty() && !prior.references.is_empty() {
@@ -5560,6 +5613,53 @@ fn optimistic_create_time_at(messages: &MessageList, sender_id: &str, now: i64) 
 
 pub(crate) fn viewer_user_id(cx: &App) -> Option<UserId> {
     BadgeService::try_global(cx)?.read(cx).current_user_id(cx)
+}
+
+/// `(clan_nick, display_name, username, avatar)` for a reply reference, mirroring React's
+/// per-field `live || baked` fallback in `MessageReply.tsx` rather than an all-or-nothing swap.
+fn reference_sender_fields(
+    sender_id: UserId,
+    baked: (&str, &str, &str, &str),
+    clan_id: Option<ClanId>,
+    cx: &App,
+) -> (String, String, String, String) {
+    let live = clan_id
+        .filter(|clan_id| !clan_id.is_zero())
+        .zip(ClanMembersStore::try_global(cx))
+        .and_then(|(clan_id, members)| {
+            members.read(cx).member(clan_id, sender_id).map(|member| {
+                (
+                    member.clan_nick.clone(),
+                    member.user.display_name.clone(),
+                    member.user.username.clone(),
+                    member.avatar().to_string(),
+                )
+            })
+        });
+    let (clan_nick, display_name, username, avatar) = live.unwrap_or_default();
+    (
+        first_non_empty(&clan_nick, baked.0),
+        first_non_empty(&display_name, baked.1),
+        first_non_empty(&username, baked.2),
+        first_non_empty(&avatar, baked.3),
+    )
+}
+
+fn first_non_empty(preferred: &str, fallback: &str) -> String {
+    if preferred.is_empty() {
+        fallback.to_owned()
+    } else {
+        preferred.to_owned()
+    }
+}
+
+fn typing_display_name(mode: i32, clan_nick: Option<&str>, account_name: &str) -> String {
+    if matches!(mode, STREAM_MODE_CHANNEL | STREAM_MODE_THREAD)
+        && let Some(nick) = clan_nick.map(str::trim).filter(|nick| !nick.is_empty())
+    {
+        return nick.to_owned();
+    }
+    account_name.to_owned()
 }
 
 fn format_thousands(n: i64) -> String {
@@ -6356,13 +6456,11 @@ fn message_reference_from_api(
     r: &mezon_client::transport::ApiMessageRef,
     cfg: Option<&AppConfig>,
 ) -> MessageReference {
-    let sender_name = if !r.message_sender_clan_nick.is_empty() {
-        r.message_sender_clan_nick.clone()
-    } else if !r.message_sender_display_name.is_empty() {
-        r.message_sender_display_name.clone()
-    } else {
-        r.message_sender_username.clone()
-    };
+    let sender_name = name_for_prioritize(
+        &r.message_sender_clan_nick,
+        &r.message_sender_display_name,
+        &r.message_sender_username,
+    );
     let parsed =
         serde_json::from_str::<mezon_client::transport::ApiMessageContent>(&r.content).ok();
     let content = parsed
@@ -6383,12 +6481,25 @@ fn message_reference_from_api(
         message_ref_id: MessageId(r.message_ref_id),
         sender_id: UserId(r.message_sender_id),
         sender_name,
+        sender_clan_nick: r.message_sender_clan_nick.clone(),
+        sender_display_name: r.message_sender_display_name.clone(),
+        sender_username: r.message_sender_username.clone(),
         sender_avatar,
         content,
         content_preview,
         has_attachment: r.has_attachment,
         has_embed,
         is_poll,
+    }
+}
+
+pub fn name_for_prioritize(clan_nick: &str, display_name: &str, username: &str) -> String {
+    if !clan_nick.is_empty() {
+        clan_nick.to_owned()
+    } else if !display_name.is_empty() {
+        display_name.to_owned()
+    } else {
+        username.to_owned()
     }
 }
 
@@ -6494,6 +6605,136 @@ mod tests {
     use super::*;
     use crate::ids::UserId;
     use crate::message::MessageSpan;
+
+    #[test]
+    fn name_for_prioritize_matches_reacts_order() {
+        assert_eq!(name_for_prioritize("nick", "display", "user"), "nick");
+        assert_eq!(name_for_prioritize("", "display", "user"), "display");
+        assert_eq!(name_for_prioritize("", "", "user"), "user");
+        assert_eq!(name_for_prioritize("", "", ""), "");
+    }
+
+    #[test]
+    fn first_non_empty_prefers_the_live_value() {
+        assert_eq!(first_non_empty("live", "baked"), "live");
+        assert_eq!(first_non_empty("", "baked"), "baked");
+        assert_eq!(first_non_empty("", ""), "");
+    }
+
+    #[gpui::test]
+    fn reference_sender_fields_split_the_three_names_from_the_clan_member(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| {
+            let api = Arc::new(mezon_client::AppApi::new(
+                Arc::new(mezon_client::TransportClient::new(String::new())),
+                String::new(),
+            ));
+            crate::realtime::RealtimeDispatch::init(api.clone(), cx);
+            ClanMembersStore::init(api, cx);
+            ClanMembersStore::global(cx).update(cx, |members, _| {
+                members.seed_members_for_test(
+                    ClanId(1),
+                    vec![crate::clan_members::ClanMember {
+                        user: crate::clan_members::User {
+                            id: UserId(7),
+                            username: "wumpus".into(),
+                            display_name: "Wumpus".into(),
+                            ..Default::default()
+                        },
+                        clan_nick: "Nick In Clan".into(),
+                        ..Default::default()
+                    }],
+                );
+            });
+
+            assert_eq!(
+                reference_sender_fields(
+                    UserId(7),
+                    ("stale nick", "stale display", "stale user", "stale.png"),
+                    Some(ClanId(1)),
+                    cx
+                ),
+                (
+                    "Nick In Clan".to_string(),
+                    "Wumpus".to_string(),
+                    "wumpus".to_string(),
+                    "stale.png".to_string()
+                ),
+                "an empty live field falls back per-field, not all-or-nothing"
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn reference_sender_fields_fall_back_to_the_baked_values(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let api = Arc::new(mezon_client::AppApi::new(
+                Arc::new(mezon_client::TransportClient::new(String::new())),
+                String::new(),
+            ));
+            crate::realtime::RealtimeDispatch::init(api.clone(), cx);
+            ClanMembersStore::init(api, cx);
+
+            let input = ("", "Baked Name", "Baked Name", "baked.png");
+            let baked = (
+                String::new(),
+                "Baked Name".to_string(),
+                "Baked Name".to_string(),
+                "baked.png".to_string(),
+            );
+            assert_eq!(
+                reference_sender_fields(UserId(7), input, None, cx),
+                baked,
+                "a DM reply carries no clan nick"
+            );
+            assert_eq!(
+                reference_sender_fields(UserId(7), input, Some(ClanId(0)), cx),
+                baked
+            );
+            assert_eq!(
+                reference_sender_fields(UserId(404), input, Some(ClanId(1)), cx),
+                baked,
+                "an uncached member must not blank the reference"
+            );
+        });
+    }
+
+    #[test]
+    fn typing_name_prefers_the_clan_nick_in_a_channel_or_thread() {
+        for mode in [STREAM_MODE_CHANNEL, STREAM_MODE_THREAD] {
+            assert_eq!(
+                typing_display_name(mode, Some("Nick In Clan"), "Global Name"),
+                "Nick In Clan"
+            );
+        }
+    }
+
+    #[test]
+    fn typing_name_falls_back_to_the_account_name_without_a_usable_nick() {
+        assert_eq!(
+            typing_display_name(STREAM_MODE_CHANNEL, None, "Global Name"),
+            "Global Name"
+        );
+        assert_eq!(
+            typing_display_name(STREAM_MODE_CHANNEL, Some(""), "Global Name"),
+            "Global Name"
+        );
+        assert_eq!(
+            typing_display_name(STREAM_MODE_CHANNEL, Some("   "), "Global Name"),
+            "Global Name"
+        );
+    }
+
+    #[test]
+    fn typing_name_ignores_the_clan_nick_outside_a_clan_channel() {
+        for mode in [3, 4] {
+            assert_eq!(
+                typing_display_name(mode, Some("Nick In Clan"), "Global Name"),
+                "Global Name"
+            );
+        }
+    }
 
     #[test]
     fn parse_embed_accent_accepts_normalized_hex_colors() {
@@ -7197,6 +7438,53 @@ mod tests {
     }
 
     #[test]
+    fn merge_sparse_sender_keeps_the_timestamp_and_its_rendered_fields_in_sync() {
+        let optimistic = Message::new(
+            MessageId::next_optimistic(),
+            "hi",
+            "42",
+            "Me",
+            1_700_000_000,
+        );
+        assert!(!optimistic.time_hhmm.is_empty());
+
+        let sparse_ack = Message::new(MessageId(99), "hi", "0", String::new(), 0);
+        assert!(sparse_ack.time_hhmm.is_empty(), "the ack carries no time");
+
+        let merged = merge_sparse_sender(&optimistic, sparse_ack);
+
+        assert_eq!(merged.create_time, optimistic.create_time);
+        assert_eq!(
+            merged.time_hhmm, optimistic.time_hhmm,
+            "the head timestamp must not blank out when the ack replaces the optimistic row"
+        );
+        assert_eq!(merged.local_date, optimistic.local_date);
+        assert_eq!(merged.day_label, optimistic.day_label);
+    }
+
+    #[test]
+    fn merge_sparse_sender_rewrites_the_rendered_time_from_the_kept_timestamp() {
+        let optimistic = Message::new(
+            MessageId::next_optimistic(),
+            "hi",
+            "42",
+            "Me",
+            1_700_000_000,
+        );
+        let later_ack = Message::new(MessageId(99), "hi", "42", "Me", 1_700_003_600);
+        assert_ne!(optimistic.time_hhmm, later_ack.time_hhmm);
+
+        let merged = merge_sparse_sender(&optimistic, later_ack);
+
+        assert_eq!(merged.create_time, optimistic.create_time);
+        assert_eq!(
+            merged.time_hhmm, optimistic.time_hhmm,
+            "keeping the optimistic create_time must also keep its rendered time"
+        );
+        assert_eq!(merged.local_date, optimistic.local_date);
+    }
+
+    #[test]
     fn merge_sparse_sender_keeps_optimistic_avatar_and_name() {
         let optimistic = Message::new(MessageId::next_optimistic(), "2", "42", "huy.lexuan", 100)
             .with_avatar("avatar.png");
@@ -7752,12 +8040,9 @@ mod tests {
                     message_ref_id: MessageId(42),
                     sender_id: UserId(1),
                     sender_name: "x".into(),
-                    sender_avatar: String::new(),
                     content: "orig".into(),
                     content_preview: "orig".into(),
-                    has_attachment: false,
-                    has_embed: false,
-                    is_poll: false,
+                    ..Default::default()
                 },
             ]),
         ]);
