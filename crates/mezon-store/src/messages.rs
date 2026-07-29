@@ -1088,11 +1088,11 @@ impl MessagesStore {
     /// Called by the timeline when the user scrolls to the top: fetch the next
     /// older page from the server. The buffer is the whole window, so there is
     /// no local "reveal" step — reaching the top always pages over the network.
-    pub fn scroll_reached_top(&mut self, cx: &mut Context<Self>) {
+    pub fn scroll_reached_top(&mut self, cx: &mut Context<Self>) -> bool {
         if self.active_channel_id.is_none() {
-            return;
+            return false;
         }
-        self.load_more(cx);
+        self.load_more(cx)
     }
 
     /// Batch-update channel tail ids from channel list fetch (React
@@ -1367,12 +1367,12 @@ impl MessagesStore {
     /// next newer page from the server (only relevant after a jump-to-message,
     /// when the newest message is not loaded). This is a network load — there is
     /// no local "reveal newer", since in normal flow the newest is always shown.
-    pub fn scroll_reached_bottom(&mut self, cx: &mut Context<Self>) {
+    pub fn scroll_reached_bottom(&mut self, cx: &mut Context<Self>) -> bool {
         tracing::debug!(
             has_more_bottom = self.has_more_bottom(),
             "scroll_reached_bottom"
         );
-        self.load_more_bottom(cx);
+        self.load_more_bottom(cx)
     }
 
     pub fn is_loading(&self) -> bool {
@@ -1421,7 +1421,7 @@ impl MessagesStore {
         self.channel_has_more()
     }
 
-    pub fn load_more(&mut self, cx: &mut Context<Self>) {
+    pub fn load_more(&mut self, cx: &mut Context<Self>) -> bool {
         if self.loading_more || self.loading {
             // Guard against duplicate fetches while one is already in flight
             // (cf. React `debounce`/loadingStatus). Logged to verify no dup call.
@@ -1430,19 +1430,19 @@ impl MessagesStore {
                 loading = self.loading,
                 "load_more skipped: fetch already in flight"
             );
-            return;
+            return false;
         }
         let Some(channel_id) = self.active_channel_id else {
-            return;
+            return false;
         };
         let Some(clan_id) = self.active_clan_id else {
-            return;
+            return false;
         };
         let Some(channel) = self.cache.get(&channel_id) else {
-            return;
+            return false;
         };
         if !channel.has_more {
-            return;
+            return false;
         }
         let Some(oldest_id) = channel
             .messages
@@ -1450,7 +1450,7 @@ impl MessagesStore {
             .map(|m| m.id)
             .filter(|id| !id.is_optimistic())
         else {
-            return;
+            return false;
         };
 
         // Progressive backoff (cf. React `handleOnChange`): if loads keep firing
@@ -1562,28 +1562,29 @@ impl MessagesStore {
             });
         })
         .detach();
+        true
     }
 
     /// Fetch the next newer page from the server and append it (the bottom
     /// counterpart of [`Self::load_more`]). Active when the channel tail is not
     /// yet in the loaded buffer (React `loadMoreMessage` AFTER_TIMESTAMP).
-    pub fn load_more_bottom(&mut self, cx: &mut Context<Self>) {
+    pub fn load_more_bottom(&mut self, cx: &mut Context<Self>) -> bool {
         if self.loading_more || self.loading {
             tracing::debug!(
                 loading_more = self.loading_more,
                 loading = self.loading,
                 "load_more_bottom skipped: fetch already in flight"
             );
-            return;
+            return false;
         }
         let Some(channel_id) = self.active_channel_id else {
-            return;
+            return false;
         };
         let Some(clan_id) = self.active_clan_id else {
-            return;
+            return false;
         };
         let Some(channel) = self.cache.get(&channel_id) else {
-            return;
+            return false;
         };
         let last_channel_id = self.last_message_by_channel.get(&channel_id).copied();
         let newest_loaded = channel
@@ -1597,12 +1598,13 @@ impl MessagesStore {
         };
         if !can_load || !has_more_bottom_for(last_channel_id, &channel.messages) {
             tracing::debug!("load_more_bottom skipped: at channel tail");
-            return;
+            return false;
         }
         let Some(newest_id) = newest_loaded else {
             tracing::debug!("load_more_bottom skipped: no non-optimistic newest id");
-            return;
+            return false;
         };
+        let expected_tail = last_channel_id;
 
         self.loading_more = true;
         cx.notify();
@@ -1666,6 +1668,25 @@ impl MessagesStore {
                         .filter(|m| !channel.messages.contains_id(m.id))
                         .collect();
                     if newer.is_empty() {
+                        match reconciled_tail_after_empty_page(
+                            this.last_message_by_channel.get(&channel_id).copied(),
+                            expected_tail,
+                            newest_id,
+                        ) {
+                            Some(tail) => {
+                                this.last_message_by_channel.insert(channel_id, tail);
+                            }
+                            None => {
+                                // The tail advanced while this fetch was in
+                                // flight; chase it immediately, otherwise the
+                                // buffer stays frozen with `has_more_bottom`
+                                // true and live appends stay gated. Bounded:
+                                // each chase consumes one tail move.
+                                if this.active_channel_id == Some(channel_id) {
+                                    this.load_more_bottom(cx);
+                                }
+                            }
+                        }
                         cx.emit(MessagesEvent::Updated { message_id: None });
                         cx.notify();
                         return;
@@ -1705,6 +1726,7 @@ impl MessagesStore {
             });
         })
         .detach();
+        true
     }
 
     /// Jump to a message (cf. React `jumpToMessage`, used by reply previews).
@@ -5331,6 +5353,20 @@ fn patch_reply_previews_after_delete(messages: &mut MessageList, deleted_id: Mes
     }
 }
 
+/// The channel tail to record after an AFTER page came back with nothing new.
+/// The server has no message past our newest row, so the id we were chasing is
+/// unreachable from this buffer (deleted, or a thread/topic row that never
+/// lands here) and pinning it would keep `has_more_bottom` true forever — which
+/// also blocks live tail appends. Returns `None` when the tail moved while the
+/// fetch was in flight, since that newer id has not been chased yet.
+fn reconciled_tail_after_empty_page(
+    current_tail: Option<MessageId>,
+    expected_tail: Option<MessageId>,
+    newest_loaded: MessageId,
+) -> Option<MessageId> {
+    (current_tail == expected_tail).then_some(newest_loaded)
+}
+
 /// Whether newer messages exist on the server that are not in the loaded buffer.
 fn has_more_bottom_for(last_message_id: Option<MessageId>, messages: &MessageList) -> bool {
     let Some(last_id) = last_message_id.filter(|id| !id.is_zero() && !id.is_optimistic()) else {
@@ -8020,6 +8056,35 @@ mod tests {
             Some(MessageId(1)),
             &MessageList::default()
         ));
+    }
+
+    #[test]
+    fn an_empty_newer_page_pins_the_tail_to_the_loaded_newest() {
+        let list = MessageList::from_messages(vec![
+            Message::new(MessageId(1), "a", "u1", "U", 100),
+            Message::new(MessageId(50), "m", "u1", "U", 150),
+        ]);
+        assert!(has_more_bottom_for(Some(MessageId(99)), &list));
+
+        let reconciled = reconciled_tail_after_empty_page(
+            Some(MessageId(99)),
+            Some(MessageId(99)),
+            MessageId(50),
+        );
+        assert_eq!(reconciled, Some(MessageId(50)));
+        assert!(!has_more_bottom_for(reconciled, &list));
+    }
+
+    #[test]
+    fn an_empty_newer_page_keeps_a_tail_that_moved_mid_fetch() {
+        assert_eq!(
+            reconciled_tail_after_empty_page(
+                Some(MessageId(120)),
+                Some(MessageId(99)),
+                MessageId(50)
+            ),
+            None
+        );
     }
 
     #[test]
