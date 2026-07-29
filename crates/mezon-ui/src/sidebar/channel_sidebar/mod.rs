@@ -335,7 +335,11 @@ impl ChannelSidebar {
                         collapsed,
                     });
                     if !collapsed {
-                        let ch_slice = &category.channels;
+                        let ch_slice: Vec<_> = category
+                            .channels
+                            .iter()
+                            .filter(|ch| ch.visible_in_sidebar())
+                            .collect();
                         let mut seen_parents: HashSet<ChannelId> = HashSet::new();
                         let mut has_prev_sibling = vec![false; ch_slice.len()];
                         for (idx, ch) in ch_slice.iter().enumerate() {
@@ -400,7 +404,11 @@ impl ChannelSidebar {
                                 .find(|ch| ch.id == id)
                                 .and_then(|ch| ch.parent_id)
                         });
-                        for ch in &category.channels {
+                        for ch in category
+                            .channels
+                            .iter()
+                            .filter(|ch| ch.visible_in_sidebar())
+                        {
                             let sidebar_members = channel_sidebar_members(cx, new_clan_id, ch);
                             let is_voice_or_streaming = matches!(
                                 ch.channel_type,

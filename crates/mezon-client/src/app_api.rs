@@ -377,6 +377,7 @@ impl AppApi {
             .await
     }
 
+    /// List threads for a parent channel.
     pub async fn list_thread_descs(
         &self,
         channel_id: &str,
@@ -2557,6 +2558,12 @@ impl AppApi {
     pub async fn remove_channel_favorite(&self, channel_id: i64, clan_id: i64) -> Result<()> {
         self.transport
             .remove_channel_favorite(channel_id, clan_id)
+            .await
+    }
+
+    pub async fn active_archived_thread(&self, clan_id: i64, channel_id: i64) -> Result<()> {
+        self.transport
+            .active_archived_thread(clan_id, channel_id)
             .await
     }
 

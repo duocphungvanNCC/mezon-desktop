@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 
 use gpui::{
     App, AppContext, AsyncApp, Context, Entity, EventEmitter, Global, Rgba, SharedString,
-    Subscription, Task,
+    Subscription, Task, WeakEntity,
 };
 use mezon_audio::{AudioPlayer, decode_audio};
 use mezon_client::transport::{
@@ -28,7 +28,7 @@ use crate::Settings;
 use crate::account::AccountStore;
 use crate::album_layout::{AlbumLayout, calculate_album_layout};
 use crate::badge::BadgeService;
-use crate::channel::{ChannelEvent, ChannelList, ChannelType};
+use crate::channel::{ChannelEvent, ChannelList, ChannelType, STREAM_MODE_THREAD};
 use crate::clan_members::ClanMembersStore;
 use crate::direct::{DirectKind, DirectMessageStore};
 use crate::message::{
@@ -474,7 +474,6 @@ struct ChannelMessages {
 
 const POLL_RESULT_ANIMATION_WINDOW: Duration = Duration::from_millis(1200);
 const STREAM_MODE_CHANNEL: i32 = 2;
-const STREAM_MODE_THREAD: i32 = 6;
 static BUZZ_SOUND: &[u8] = include_bytes!("../assets/audio/buzz.mp3");
 
 pub struct MessagesStore {
@@ -3536,6 +3535,7 @@ impl MessagesStore {
             }
         });
         cx.spawn(async move |this, cx| {
+            ensure_archived_thread_reactivated(&api, &this, channel_id, clan_id, mode, cx).await;
             if has_attachments {
                 let files: Vec<UploadFile> = attachments
                     .into_iter()
@@ -3805,6 +3805,7 @@ impl MessagesStore {
 
         let api = self.api.clone();
         cx.spawn(async move |this, cx| {
+            ensure_archived_thread_reactivated(&api, &this, channel_id, clan_id, mode, cx).await;
             let result = api
                 .send_message_with_attachment_urls(
                     clan_id.get(),
@@ -4844,7 +4845,50 @@ impl MessagesStore {
         }
         true
     }
+}
 
+async fn ensure_archived_thread_reactivated(
+    api: &AppApi,
+    this: &WeakEntity<MessagesStore>,
+    channel_id: ChannelId,
+    clan_id: ClanId,
+    mode: i32,
+    cx: &mut AsyncApp,
+) {
+    let needs = this
+        .update(cx, |_this, cx| {
+            ChannelList::global(cx).update(cx, |list, cx| {
+                list.begin_reactivate_for_send(channel_id, clan_id, mode, cx)
+            })
+        })
+        .ok()
+        .unwrap_or(false);
+    if !needs {
+        return;
+    }
+    match api
+        .active_archived_thread(clan_id.get(), channel_id.get())
+        .await
+    {
+        Ok(()) => {
+            let _ = this.update(cx, |_this, cx| {
+                ChannelList::global(cx).update(cx, |list, cx| {
+                    list.apply_thread_reactivated(clan_id, channel_id, None, cx);
+                });
+            });
+        }
+        Err(e) => {
+            let _ = this.update(cx, |_this, cx| {
+                ChannelList::global(cx).update(cx, |list, _cx| {
+                    list.finish_reactivating(channel_id);
+                });
+            });
+            tracing::error!("active_archived_thread before send failed: {e}");
+        }
+    }
+}
+
+impl MessagesStore {
     fn reconcile_temp(
         &mut self,
         channel_id: ChannelId,

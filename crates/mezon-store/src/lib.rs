@@ -179,7 +179,10 @@ pub use roles::{
 };
 pub use sticker::{ClanSound, Sticker, StickerEvent, StickerStore};
 pub use stream::{StreamMember, StreamPhase, StreamStore};
-pub use threads::{THREAD_STATUS_JOINED, ThreadSummary, ThreadsEvent, ThreadsStore, group_threads};
+pub use threads::{
+    THREAD_STATUS_ARCHIVED, THREAD_STATUS_JOINED, ThreadSummary, ThreadsEvent, ThreadsStore,
+    group_threads,
+};
 pub use topic_badges::{TopicBadgeEvent, TopicBadgeStore};
 pub use topics::{TopicsEvent, TopicsStore};
 pub use ui_state::UiState;

@@ -516,12 +516,18 @@ pub struct ApiChannelDesc {
     pub last_sent_message_id: i64,
     pub last_sent_timestamp: i64,
     pub badge_count: i32,
+    #[serde(default = "default_channel_active")]
+    pub active: i32,
     #[serde(default)]
     pub creator_id: i64,
     #[serde(default)]
     pub clan_name: String,
     #[serde(default)]
     pub channel_avatar: String,
+}
+
+fn default_channel_active() -> i32 {
+    1
 }
 
 /// A direct-message / group conversation descriptor (clan_id = 0 namespace). Unlike
@@ -2991,6 +2997,7 @@ impl MezonTransport {
             last_sent_message_id,
             last_sent_timestamp,
             badge_count: channel.count_mess_unread,
+            active: channel.active,
             creator_id: channel.creator_id,
             clan_name: channel.clan_name,
             channel_avatar: channel.channel_avatar,
@@ -5981,36 +5988,6 @@ impl MezonTransport {
         let (code, _) = self
             .send_api_request(cid, "RemoveChannelUsers", body)
             .await?;
-        if code != 0 {
-            return Err(anyhow::anyhow!("API error: code={}", code));
-        }
-        Ok(())
-    }
-
-    /// Leave thread.
-    pub async fn leave_thread(&self, clan_id: i64, channel_id: i64) -> Result<()> {
-        let cid = self.generate_cid();
-        let body = api::LeaveThreadRequest {
-            clan_id,
-            channel_id,
-        }
-        .encode_to_vec();
-        let (code, _) = self.send_api_request(cid, "LeaveThread", body).await?;
-        if code != 0 {
-            return Err(anyhow::anyhow!("API error: code={}", code));
-        }
-        Ok(())
-    }
-
-    /// Archive channel.
-    pub async fn archive_channel(&self, clan_id: i64, channel_id: i64) -> Result<()> {
-        let cid = self.generate_cid();
-        let body = api::ArchiveChannelRequest {
-            clan_id,
-            channel_id,
-        }
-        .encode_to_vec();
-        let (code, _) = self.send_api_request(cid, "ArchiveChannel", body).await?;
         if code != 0 {
             return Err(anyhow::anyhow!("API error: code={}", code));
         }
