@@ -436,7 +436,7 @@ impl EmojiStickerPicker {
                         div()
                             .text_xs()
                             .text_color(if name_len > 40 {
-                                theme.status_dnd
+                                theme.danger_text
                             } else {
                                 theme.text_muted
                             })

@@ -53,7 +53,7 @@ impl RenderOnce for Toast {
         let (accent, icon) = match self.kind {
             ToastKind::Info => (theme.text_link, IconName::Inbox),
             ToastKind::Success => (theme.status_online, IconName::Check),
-            ToastKind::Error => (theme.status_dnd, IconName::TriangleAlert),
+            ToastKind::Error => (theme.danger_text, IconName::TriangleAlert),
         };
 
         let track = theme.bg_tertiary;

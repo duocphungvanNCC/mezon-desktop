@@ -4960,12 +4960,13 @@ impl MezonTransport {
         &self,
         role_id: i64,
         channel_id: i64,
+        user_id: i64,
     ) -> Result<api::PermissionRoleChannelListEventResponse> {
         let cid = self.generate_cid();
         let body = api::PermissionRoleChannelListEventRequest {
             role_id,
             channel_id,
-            ..Default::default()
+            user_id,
         }
         .encode_to_vec();
         let (code, response) = self
@@ -5891,13 +5892,16 @@ impl MezonTransport {
         clan_id: i64,
         channel_id: i64,
         channel_private: i32,
+        user_ids: Vec<i64>,
+        role_ids: Vec<i64>,
     ) -> Result<()> {
         let cid = self.generate_cid();
         let body = api::ChangeChannelPrivateRequest {
             clan_id,
             channel_id,
             channel_private,
-            ..Default::default()
+            user_ids,
+            role_ids,
         }
         .encode_to_vec();
         let (code, _) = self
@@ -6578,11 +6582,21 @@ impl MezonTransport {
     }
 
     /// Set role channel permission.
-    pub async fn set_role_channel_permission(&self, role_id: i64, channel_id: i64) -> Result<()> {
+    pub async fn set_role_channel_permission(
+        &self,
+        role_id: i64,
+        channel_id: i64,
+        user_id: i64,
+        max_permission_id: i64,
+        permission_update: Vec<api::PermissionUpdate>,
+    ) -> Result<()> {
         let cid = self.generate_cid();
         let body = api::UpdateRoleChannelRequest {
             role_id,
+            permission_update,
+            max_permission_id,
             channel_id,
+            user_id,
             ..Default::default()
         }
         .encode_to_vec();
@@ -7351,10 +7365,17 @@ impl MezonTransport {
     }
 
     /// Delete role channel desc.
-    pub async fn delete_role_channel_desc(&self, role_id: i64) -> Result<()> {
+    pub async fn delete_role_channel_desc(
+        &self,
+        role_id: i64,
+        channel_id: i64,
+        clan_id: i64,
+    ) -> Result<()> {
         let cid = self.generate_cid();
         let body = api::DeleteRoleRequest {
             role_id,
+            channel_id,
+            clan_id,
             ..Default::default()
         }
         .encode_to_vec();

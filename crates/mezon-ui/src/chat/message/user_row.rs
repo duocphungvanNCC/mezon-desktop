@@ -5,9 +5,7 @@ use super::call_log_card::render_call_log_card;
 use super::content::{
     SelectableTextContext, memoized_selectable_message_layout, render_message_content,
 };
-use super::context::{
-    AVATAR_LEFT, AVATAR_SIZE, CONTENT_INSET, CONTENT_RIGHT_PAD, DEFAULT_DISPLAY_NAME_COLOR, RowCtx,
-};
+use super::context::{AVATAR_LEFT, AVATAR_SIZE, CONTENT_INSET, CONTENT_RIGHT_PAD, RowCtx};
 use super::embed_card::render_embeds;
 use super::message_actions_panel::render_actions_panel;
 use super::ogp_embed::render_ogp_embed;
@@ -79,7 +77,7 @@ pub fn render_user_message(
         .pr(px(CONTENT_RIGHT_PAD));
 
     if show_head {
-        body_column = body_column.child(render_head(msg, ctx, DEFAULT_DISPLAY_NAME_COLOR));
+        body_column = body_column.child(render_head(msg, ctx));
     }
 
     if msg.show_forwarded_label {

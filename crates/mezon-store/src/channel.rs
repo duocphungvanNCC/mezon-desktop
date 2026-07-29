@@ -13,7 +13,9 @@ use mezon_client::{
 };
 
 use crate::KeyedCache;
+use crate::badge::BadgeService;
 use crate::clan::{ClanEvent, ClanList};
+use crate::event_targets_user;
 use crate::messages::MessagesStore;
 use crate::realtime::{RealtimeDispatch, RealtimeKind};
 
@@ -1621,6 +1623,8 @@ impl ChannelList {
                 for cats in self.cache.values_mut() {
                     removed |= remove_channel(cats, id);
                 }
+                removed |=
+                    remove_user_channel(&mut self.user_channels, &mut self.user_channels_order, id);
                 let in_voice_changed = remove_in_voice_in_channel(&mut self.in_voice, id);
                 if removed {
                     self.invalidate_channel_index_all();
@@ -1717,6 +1721,12 @@ impl ChannelList {
                 if channel_type == 2 || channel_type == 3 {
                     return;
                 }
+                let me = BadgeService::try_global(cx)
+                    .and_then(|badges| badges.read(cx).current_user_id(cx));
+                let added_ids = e.users.iter().map(|u| u.user_id).collect::<Vec<_>>();
+                if !event_targets_user(&added_ids, me) {
+                    return;
+                }
                 let clan_id = ClanId(e.clan_id);
                 let channel_id = ChannelId(desc.channel_id);
                 let Some(cats) = self.cache.get_mut(&clan_id) else {
@@ -1764,10 +1774,20 @@ impl ChannelList {
                 if channel_type == 2 || channel_type == 3 {
                     return;
                 }
+                let me = BadgeService::try_global(cx)
+                    .and_then(|badges| badges.read(cx).current_user_id(cx));
+                if !event_targets_user(&e.user_ids, me) {
+                    return;
+                }
                 let mut removed = false;
                 for cats in self.cache.values_mut() {
                     removed |= remove_channel(cats, channel_id);
                 }
+                removed |= remove_user_channel(
+                    &mut self.user_channels,
+                    &mut self.user_channels_order,
+                    channel_id,
+                );
                 let in_voice_changed = remove_in_voice_in_channel(&mut self.in_voice, channel_id);
                 if removed {
                     self.invalidate_channel_index_all();
@@ -2446,6 +2466,18 @@ fn apply_in_voice_leaved(
         return true;
     }
     false
+}
+
+fn remove_user_channel(
+    user_channels: &mut HashMap<ChannelId, Channel>,
+    order: &mut Vec<ChannelId>,
+    channel_id: ChannelId,
+) -> bool {
+    if user_channels.remove(&channel_id).is_none() {
+        return false;
+    }
+    order.retain(|id| *id != channel_id);
+    true
 }
 
 fn remove_in_voice_in_channel(
@@ -3928,6 +3960,47 @@ mod tests {
         assert_eq!(map.get(&UserId(9)), Some(&in_voice(1, 11)));
 
         assert!(!remove_in_voice_in_channel(&mut map, ChannelId(10)));
+    }
+
+    #[test]
+    fn user_channel_removed_only_drops_the_channel_for_the_removed_user() {
+        let me = Some(UserId(7));
+        assert!(event_targets_user(&[7], me));
+        assert!(event_targets_user(&[8, 7, 9], me));
+        assert!(!event_targets_user(&[8], me));
+        assert!(!event_targets_user(&[8, 9], me));
+        assert!(!event_targets_user(&[], me));
+    }
+
+    #[test]
+    fn user_channel_removed_is_ignored_when_the_session_has_no_user() {
+        assert!(!event_targets_user(&[7], None));
+        assert!(!event_targets_user(&[], None));
+    }
+
+    #[test]
+    fn remove_user_channel_drops_it_from_the_palette_source_too() {
+        let mut channels = HashMap::new();
+        let mut order = Vec::new();
+        for id in [10, 11, 12] {
+            channels.insert(ChannelId(id), make_channel(id, "general", "cat"));
+            order.push(ChannelId(id));
+        }
+
+        assert!(remove_user_channel(
+            &mut channels,
+            &mut order,
+            ChannelId(11)
+        ));
+        assert!(!channels.contains_key(&ChannelId(11)));
+        assert_eq!(order, vec![ChannelId(10), ChannelId(12)]);
+
+        assert!(!remove_user_channel(
+            &mut channels,
+            &mut order,
+            ChannelId(11)
+        ));
+        assert_eq!(order, vec![ChannelId(10), ChannelId(12)]);
     }
 
     #[test]

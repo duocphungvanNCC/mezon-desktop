@@ -277,7 +277,7 @@ impl Render for ScreenShareModal {
         let bg: gpui::Hsla = theme.bg_secondary.into();
         let accent = gpui::Hsla::from(gpui::rgb(ACCENT_BLUE));
         let tile_bg: gpui::Hsla = theme.bg_tertiary.into();
-        let status_dnd: gpui::Hsla = theme.status_dnd.into();
+        let danger_text: gpui::Hsla = theme.danger_text.into();
 
         let title: SharedString = mezon_i18n::t(&locale, "screenShare.chooseWhatToShare").into();
         let share_audio_label: SharedString =
@@ -398,7 +398,7 @@ impl Render for ScreenShareModal {
                                     }
                                     ScreenShareListError::Unavailable(message) => div()
                                         .text_sm()
-                                        .text_color(status_dnd)
+                                        .text_color(danger_text)
                                         .child(message)
                                         .into_any_element(),
                                 })

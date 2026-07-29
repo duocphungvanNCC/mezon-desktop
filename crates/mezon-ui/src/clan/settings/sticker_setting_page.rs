@@ -4,8 +4,8 @@ use gpui::{
     uniform_list,
 };
 use mezon_store::{
-    BadgeService, ClanId, ClanMembersEvent, ClanMembersStore, ClanSettingsPermissions,
-    PermissionEvent, PermissionStore, Settings, Sticker, StickerEvent, StickerStore, UserId,
+    BadgeService, ClanId, ClanMembersStore, ClanSettingsPermissions, PermissionEvent,
+    PermissionStore, Settings, Sticker, StickerEvent, StickerStore, UserId,
 };
 
 use super::emoji_sticker_picker::{
@@ -132,9 +132,7 @@ impl StickerSettingPage {
             },
         );
         let members_sub = cx.subscribe(&ClanMembersStore::global(cx), |this, _, event, cx| {
-            if matches!(event, ClanMembersEvent::Changed { clan_id } if *clan_id == this.clan_id)
-                && this.rebuild_grid(cx)
-            {
+            if event.clan_id() == this.clan_id && this.rebuild_grid(cx) {
                 cx.notify();
             }
         });
@@ -516,7 +514,7 @@ fn render_sticker_card(
                         .child(
                             Icon::new(IconName::Close)
                                 .size(px(12.0))
-                                .text_color(theme.status_dnd),
+                                .text_color(theme.danger_text),
                         ),
                 ),
         );

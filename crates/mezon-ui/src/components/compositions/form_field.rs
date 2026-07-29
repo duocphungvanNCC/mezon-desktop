@@ -94,7 +94,7 @@ impl Render for FormField {
             container = container.child(
                 div()
                     .text_xs()
-                    .text_color(theme.status_dnd)
+                    .text_color(theme.danger_text)
                     .child(error.clone()),
             );
         }

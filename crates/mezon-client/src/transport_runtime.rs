@@ -149,6 +149,57 @@ pub async fn fetch_bytes(url: &str) -> Result<(Vec<u8>, Option<String>)> {
         .map_err(|e| anyhow::anyhow!("fetch task failed: {e}"))?
 }
 
+const NOTIFICATION_ICON_MAX_PX: u32 = 64;
+const NOTIFICATION_ICON_KEEP: usize = 8;
+const NOTIFICATION_ICON_DECODE_MAX_PX: u32 = 2048;
+
+fn retire_temp_icon(path: std::path::PathBuf) {
+    use std::collections::VecDeque;
+    use std::sync::Mutex;
+    static RECENT: Mutex<VecDeque<std::path::PathBuf>> = Mutex::new(VecDeque::new());
+    let Ok(mut recent) = RECENT.lock() else {
+        return;
+    };
+    recent.push_back(path);
+    while recent.len() > NOTIFICATION_ICON_KEEP {
+        if let Some(stale) = recent.pop_front() {
+            let _ = std::fs::remove_file(&stale);
+        }
+    }
+}
+
+fn notification_icon_limits() -> image::Limits {
+    let max_px = NOTIFICATION_ICON_DECODE_MAX_PX;
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(max_px);
+    limits.max_image_height = Some(max_px);
+    limits.max_alloc = Some(max_px as u64 * max_px as u64 * 4);
+    limits
+}
+
+fn shrink_icon_to_png(bytes: &[u8]) -> Result<Vec<u8>> {
+    use image::ImageEncoder as _;
+    let mut reader = image::ImageReader::new(std::io::Cursor::new(bytes)).with_guessed_format()?;
+    reader.limits(notification_icon_limits());
+    let decoded = reader.decode()?;
+    let oversized = decoded.width().max(decoded.height()) > NOTIFICATION_ICON_MAX_PX;
+    let image = if oversized {
+        decoded.thumbnail(NOTIFICATION_ICON_MAX_PX, NOTIFICATION_ICON_MAX_PX)
+    } else {
+        decoded
+    }
+    .to_rgba8();
+    let (width, height) = image.dimensions();
+    let mut out = Vec::new();
+    image::codecs::png::PngEncoder::new(&mut out).write_image(
+        image.as_raw(),
+        width,
+        height,
+        image::ExtendedColorType::Rgba8,
+    )?;
+    Ok(out)
+}
+
 /// Write bytes to a uniquely-named temp file for use as a notification icon
 /// attachment. The OS notification system copies the file into its own store, so
 /// the returned path is safe to delete afterwards.
@@ -157,10 +208,12 @@ pub async fn write_temp_icon(bytes: Vec<u8>) -> Result<std::path::PathBuf> {
     static SEQ: AtomicU64 = AtomicU64::new(0);
     let seq = SEQ.fetch_add(1, Ordering::Relaxed);
     let path =
-        std::env::temp_dir().join(format!("mezon-noti-icon-{}-{seq}.img", std::process::id()));
+        std::env::temp_dir().join(format!("mezon-noti-icon-{}-{seq}.png", std::process::id()));
     runtime()
         .spawn_blocking(move || {
-            std::fs::write(&path, &bytes)?;
+            let encoded = shrink_icon_to_png(&bytes)?;
+            std::fs::write(&path, &encoded)?;
+            retire_temp_icon(path.clone());
             Ok(path)
         })
         .await
@@ -2051,6 +2104,116 @@ impl TransportClient {
             .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
     }
 
+    pub async fn get_permission_by_role_id_channel_id(
+        &self,
+        role_id: i64,
+        channel_id: i64,
+        user_id: i64,
+    ) -> Result<mezon_proto::api::PermissionRoleChannelListEventResponse> {
+        let transport = self.inner.clone();
+        runtime()
+            .spawn(async move {
+                transport
+                    .get_permission_by_role_id_channel_id(role_id, channel_id, user_id)
+                    .await
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
+    pub async fn set_role_channel_permission(
+        &self,
+        role_id: i64,
+        channel_id: i64,
+        user_id: i64,
+        max_permission_id: i64,
+        permission_update: Vec<mezon_proto::api::PermissionUpdate>,
+    ) -> Result<()> {
+        let transport = self.inner.clone();
+        runtime()
+            .spawn(async move {
+                transport
+                    .set_role_channel_permission(
+                        role_id,
+                        channel_id,
+                        user_id,
+                        max_permission_id,
+                        permission_update,
+                    )
+                    .await
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
+    pub async fn add_roles_channel_desc(
+        &self,
+        role_ids: Vec<String>,
+        channel_id: i64,
+    ) -> Result<()> {
+        let transport = self.inner.clone();
+        runtime()
+            .spawn(async move {
+                let refs: Vec<&str> = role_ids.iter().map(String::as_str).collect();
+                transport.add_roles_channel_desc(&refs, channel_id).await
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
+    pub async fn delete_role_channel_desc(
+        &self,
+        role_id: i64,
+        channel_id: i64,
+        clan_id: i64,
+    ) -> Result<()> {
+        let transport = self.inner.clone();
+        runtime()
+            .spawn(async move {
+                transport
+                    .delete_role_channel_desc(role_id, channel_id, clan_id)
+                    .await
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
+    pub async fn update_channel_private(
+        &self,
+        clan_id: i64,
+        channel_id: i64,
+        channel_private: i32,
+        user_ids: Vec<i64>,
+        role_ids: Vec<i64>,
+    ) -> Result<()> {
+        let transport = self.inner.clone();
+        runtime()
+            .spawn(async move {
+                transport
+                    .update_channel_private(
+                        clan_id,
+                        channel_id,
+                        channel_private,
+                        user_ids,
+                        role_ids,
+                    )
+                    .await
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
+    pub async fn remove_channel_users(&self, channel_id: i64, user_ids: Vec<String>) -> Result<()> {
+        let transport = self.inner.clone();
+        runtime()
+            .spawn(async move {
+                let refs: Vec<&str> = user_ids.iter().map(String::as_str).collect();
+                transport.remove_channel_users(channel_id, &refs).await
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
     pub async fn get_clan_user_role(
         &self,
         clan_id: i64,
@@ -3021,5 +3184,87 @@ impl TransportClient {
             .spawn(async move { transport.delete_clan_webhook_by_id(id, clan_id).await })
             .await
             .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn png_of(width: u32, height: u32) -> Vec<u8> {
+        use image::ImageEncoder as _;
+        let pixels = vec![0u8; (width * height * 4) as usize];
+        let mut out = Vec::new();
+        image::codecs::png::PngEncoder::new(&mut out)
+            .write_image(&pixels, width, height, image::ExtendedColorType::Rgba8)
+            .expect("encode source png");
+        out
+    }
+
+    fn dimensions_of(bytes: &[u8]) -> (u32, u32) {
+        image::ImageReader::new(std::io::Cursor::new(bytes))
+            .with_guessed_format()
+            .expect("guess format")
+            .into_dimensions()
+            .expect("read dimensions")
+    }
+
+    #[test]
+    fn oversized_icon_is_capped_to_the_max_edge() {
+        let encoded = shrink_icon_to_png(&png_of(512, 512)).expect("shrink");
+        assert_eq!(
+            dimensions_of(&encoded),
+            (NOTIFICATION_ICON_MAX_PX, NOTIFICATION_ICON_MAX_PX)
+        );
+    }
+
+    #[test]
+    fn non_square_icon_keeps_its_aspect_ratio() {
+        let encoded = shrink_icon_to_png(&png_of(512, 256)).expect("shrink");
+        assert_eq!(
+            dimensions_of(&encoded),
+            (NOTIFICATION_ICON_MAX_PX, NOTIFICATION_ICON_MAX_PX / 2)
+        );
+    }
+
+    #[test]
+    fn small_icon_is_not_upscaled() {
+        let encoded = shrink_icon_to_png(&png_of(32, 32)).expect("shrink");
+        assert_eq!(dimensions_of(&encoded), (32, 32));
+    }
+
+    #[test]
+    fn output_is_png_regardless_of_input_format() {
+        use image::ImageEncoder as _;
+        let mut source = Vec::new();
+        image::codecs::jpeg::JpegEncoder::new(&mut source)
+            .write_image(
+                &vec![0u8; 128 * 128 * 3],
+                128,
+                128,
+                image::ExtendedColorType::Rgb8,
+            )
+            .expect("encode source jpeg");
+
+        let encoded = shrink_icon_to_png(&source).expect("shrink");
+        assert_eq!(
+            image::guess_format(&encoded).expect("guess output format"),
+            image::ImageFormat::Png
+        );
+    }
+
+    #[test]
+    fn a_decode_bomb_is_rejected_rather_than_allocated() {
+        let oversized = NOTIFICATION_ICON_DECODE_MAX_PX + 1;
+        let err = shrink_icon_to_png(&png_of(oversized, 1));
+        assert!(
+            err.is_err(),
+            "expected the decode limit to reject the image"
+        );
+    }
+
+    #[test]
+    fn garbage_bytes_do_not_panic() {
+        assert!(shrink_icon_to_png(b"not an image at all").is_err());
     }
 }

@@ -739,7 +739,7 @@ fn file_row(
             .child(
                 div()
                     .text_sm()
-                    .text_color(theme.status_dnd)
+                    .text_color(theme.danger_text)
                     .child(mezon_i18n::t(
                         locale,
                         "channelTopbar.fileItem.attachmentFailed",

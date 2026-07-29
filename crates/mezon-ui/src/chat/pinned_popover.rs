@@ -17,9 +17,7 @@ use crate::chat::file_type_icon::file_type_icon_for;
 use crate::chat::message::parts::{
     effective_clan_id, resolve_pin_avatar_url, resolve_pin_sender_label_with_message,
 };
-use crate::chat::message::{
-    ConfirmUnpinMessageModal, DEFAULT_DISPLAY_NAME_COLOR, render_ogp_preview,
-};
+use crate::chat::message::{ConfirmUnpinMessageModal, render_ogp_preview};
 use crate::components::primitives::{
     Avatar, Button, ButtonVariants, Icon, IconName, Sizable, Size, Spinner, h_flex, v_flex,
 };
@@ -399,7 +397,7 @@ fn pin_card(
 ) -> gpui::AnyElement {
     let tokens = &theme.tokens;
     let group_name = SharedString::from(format!("pin-card-{index}"));
-    let sender_color = Hsla::from(gpui::rgb(DEFAULT_DISPLAY_NAME_COLOR));
+    let sender_color = tokens.text_theme_primary;
     let sender_label = vm.sender_label.clone();
     let avatar_src = vm.avatar_src.clone();
     let avatar_fallback = vm.avatar_fallback.clone();
@@ -433,9 +431,8 @@ fn pin_card(
         .child(
             div()
                 .flex_shrink_0()
-                .text_xs()
-                .font_weight(FontWeight::MEDIUM)
-                .text_color(tokens.text_secondary)
+                .text_size(px(10.))
+                .text_color(tokens.text_theme_primary)
                 .child(format_pin_time(vm.create_time, locale)),
         );
 

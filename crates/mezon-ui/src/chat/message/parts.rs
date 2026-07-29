@@ -3,7 +3,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use gpui::{
-    Anchor, AnyElement, App, ClickEvent, Entity, FontWeight, MouseButton, ObjectFit, Pixels,
+    Anchor, AnyElement, App, ClickEvent, Entity, FontWeight, Hsla, MouseButton, ObjectFit, Pixels,
     SharedString, Transformation, Window, div, img, prelude::*, px, radians, rems, rgba,
 };
 use mezon_store::{
@@ -18,12 +18,13 @@ use super::audio_player::{
     AudioActivation, audio_failed_pill, audio_pill, audio_sending_pill, audio_time_label,
 };
 use super::content::{SELECTION_BG, SelectableTextContext, profile_popover_trigger};
-use super::context::{REPLY_USERNAME_COLOR, RowCtx};
+use super::context::{REPLY_USERNAME_COLOR, ROW_MEMO_CAPACITY, RowCtx};
 use super::gif_video::GifVideoView;
 use super::reaction_detail::{UserReactionPanel, emoji_error_fallback};
 use super::selection::{SelectableRegion, TextSegment};
 use super::time::format_message_time;
 use super::video_player::{VideoActivation, VideoFullscreenMode, VideoLayout};
+use crate::chat::role_style::{name_color, role_scope, role_style_view};
 use crate::chat::user_profile_popover::{ClickableContainer, profile_popover_menu};
 use crate::components::primitives::{Avatar, Icon, IconName, Sizable, Size, Spinner};
 use crate::theme::Theme;
@@ -211,26 +212,55 @@ pub fn resolve_message_sender_label(
     SharedString::default()
 }
 
+fn message_sender_user_id(msg: &Message) -> Option<mezon_store::UserId> {
+    msg.sender_user_id
+        .or_else(|| msg.sender_id.parse().ok().map(mezon_store::UserId))
+}
+
+pub fn resolve_message_role_style(
+    msg: &Message,
+    ctx: &RowCtx,
+    cx: &App,
+) -> (Hsla, Option<SharedString>) {
+    let Some(clan_id) = role_scope(ctx.profile_context) else {
+        return (name_color(false, None), None);
+    };
+    let Some(user_id) = message_sender_user_id(msg) else {
+        return (name_color(true, None), None);
+    };
+    let key = (Some(clan_id), user_id);
+    if let Some(cached) = ctx.row_memo.borrow().role_styles.get(&key) {
+        return cached.clone();
+    }
+    let style = role_style_view(clan_id, user_id, cx);
+    let resolved = (name_color(true, style.color), style.icon);
+    ctx.row_memo
+        .borrow_mut()
+        .remember_role_style(key, resolved.clone());
+    resolved
+}
+
 pub fn resolve_message_display_name(msg: &Message, ctx: &RowCtx, cx: &App) -> SharedString {
-    let user_id = msg
-        .sender_user_id
-        .or_else(|| msg.sender_id.parse().ok().map(mezon_store::UserId));
-    let clan_id = match ctx.profile_context {
-        Some(ProfileContext::Clan(clan_id)) => Some(clan_id),
-        _ => None,
-    };
-    let channel_id = match ctx.profile_context {
-        Some(ProfileContext::Direct(channel_id)) => Some(channel_id),
-        _ => None,
-    };
+    let user_id = message_sender_user_id(msg);
+    let clan_id = role_scope(ctx.profile_context);
     if let Some(user_id) = user_id {
         let key = (clan_id, user_id);
         if let Some(cached) = ctx.row_memo.borrow().display_names.get(&key) {
             return cached.clone();
         }
-        let resolved = resolve_message_sender_label(msg, clan_id, channel_id, cx);
+        let resolved = if let Some(clan_id) = clan_id {
+            ClanMembersStore::global(cx)
+                .read(cx)
+                .member(clan_id, user_id)
+                .map(|member| member.name())
+                .filter(|name| !name.is_empty())
+                .map(SharedString::from)
+                .unwrap_or_else(|| msg.sender_name.clone())
+        } else {
+            msg.sender_name.clone()
+        };
         let mut memo = ctx.row_memo.borrow_mut();
-        if memo.display_names.len() >= 4096 {
+        if memo.display_names.len() >= ROW_MEMO_CAPACITY {
             memo.display_names.clear();
         }
         memo.display_names.insert(key, resolved.clone());
@@ -307,8 +337,9 @@ fn resolve_message_avatar_urls(
     (msg.avatar_url.clone(), None)
 }
 
-pub fn render_head(msg: &Message, ctx: &RowCtx, name_color: u32) -> AnyElement {
+pub fn render_head(msg: &Message, ctx: &RowCtx) -> AnyElement {
     let theme = ctx.theme;
+    let (username_color, role_icon) = resolve_message_role_style(msg, ctx, ctx.app);
     let time_label = {
         let mut memo = ctx.row_memo.borrow_mut();
         match memo.time_labels.get(&msg.id) {
@@ -327,25 +358,35 @@ pub fn render_head(msg: &Message, ctx: &RowCtx, name_color: u32) -> AnyElement {
         }
     };
     let display_name = resolve_message_display_name(msg, ctx, ctx.app);
-    let name = div()
+    let mut name = div()
         .max_w_full()
         .min_w_0()
         .text_size(px(16.))
         .font_weight(FontWeight::MEDIUM)
-        .text_color(gpui::rgb(name_color))
+        .text_color(username_color)
         .child(display_name);
+    if let Some(icon) = role_icon.filter(|icon| !icon.is_empty()) {
+        name = name.flex().flex_row().items_center().child(
+            img(crate::util::imgproxy::role_icon_url(ctx.app, &icon))
+                .size(px(20.))
+                .ml(px(4.))
+                .flex_none()
+                .image_cache(&ctx.icon_cache),
+        );
+    }
     div()
         .flex()
         .flex_row()
         .w_full()
         .min_w_0()
-        .items_baseline()
-        .gap_2()
         .child(profile_name_trigger(msg, ctx, name))
         .child(
             div()
                 .flex_none()
+                .pl_1()
+                .pt(px(5.))
                 .text_size(px(12.))
+                .font_weight(FontWeight::MEDIUM)
                 .text_color(theme.text_muted)
                 .child(time_label),
         )
@@ -684,7 +725,7 @@ fn attachment_failed_overlay(theme: &Theme) -> impl IntoElement {
                 .child(
                     Icon::new(IconName::TriangleAlert)
                         .size(px(24.))
-                        .text_color(theme.status_dnd),
+                        .text_color(theme.danger_text),
                 ),
         )
 }
@@ -1279,7 +1320,7 @@ fn render_file_box(
                     d.child(
                         Icon::new(IconName::TriangleAlert)
                             .size(px(28.))
-                            .text_color(theme.status_dnd),
+                            .text_color(theme.danger_text),
                     )
                 }),
         )
@@ -1602,6 +1643,7 @@ pub fn render_hover_actions(
     let is_own_message = ctx.current_user_id == msg.sender_id.as_str();
 
     let show_topic = !ctx.is_topic_box
+        && ctx.can_send_message
         && ctx.clan_id.is_some_and(|c| !c.is_zero())
         && !is_topic_msg
         && !is_poll_msg
@@ -1614,7 +1656,7 @@ pub fn render_hover_actions(
         && !msg.is_forwarded;
     let show_thread = !ctx.is_topic_box
         && ctx.channel_top_level
-        && ctx.is_clan_owner
+        && ctx.can_manage_thread
         && !is_poll_msg
         && ctx.channel_type != Some(ChannelType::Stream)
         && ctx.channel_type != Some(ChannelType::App);
