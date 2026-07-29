@@ -142,7 +142,8 @@ pub struct EventsStore {
     failed_at: HashMap<ClanId, Instant>,
     api: Arc<AppApi>,
     _connection_watch: Task<()>,
-    _clock_task: Task<()>,
+    transition_task: Option<Task<()>>,
+    transition_generation: u64,
 }
 
 struct GlobalEventsStore(Entity<EventsStore>);
@@ -159,7 +160,6 @@ impl EventsStore {
     fn new(api: Arc<AppApi>, cx: &mut Context<Self>) -> Self {
         Self::register_realtime(cx);
         let connection_watch = Self::spawn_connection_watch(api.clone(), cx);
-        let clock_task = Self::spawn_clock(cx);
         Self {
             events: HashMap::new(),
             loaded: HashSet::new(),
@@ -168,7 +168,8 @@ impl EventsStore {
             failed_at: HashMap::new(),
             api,
             _connection_watch: connection_watch,
-            _clock_task: clock_task,
+            transition_task: None,
+            transition_generation: 0,
         }
     }
 
@@ -187,6 +188,8 @@ impl EventsStore {
         self.loading.clear();
         self.fetched_at.clear();
         self.failed_at.clear();
+        self.transition_generation = self.transition_generation.wrapping_add(1);
+        self.transition_task = None;
         cx.notify();
     }
 
@@ -221,33 +224,37 @@ impl EventsStore {
         })
     }
 
-    fn spawn_clock(cx: &mut Context<Self>) -> Task<()> {
-        cx.spawn(async move |this, cx| {
-            let mut previous_tick = chrono::Utc::now().timestamp().max(0) as u32;
-            loop {
-                cx.background_executor().timer(Duration::from_secs(1)).await;
-                if this
-                    .update(cx, |this, cx| {
-                        let now = chrono::Utc::now().timestamp().max(0) as u32;
-                        let crossed_transition = this.events.values().flatten().any(|event| {
-                            [event.start_time_seconds, event.end_time_seconds]
-                                .into_iter()
-                                .any(|timestamp| timestamp > previous_tick && timestamp <= now)
-                        });
-                        let changed = this.remove_expired();
-                        let removed_expired = !changed.is_empty();
-                        Self::emit_changed(changed, cx);
-                        if crossed_transition || removed_expired {
-                            cx.notify();
-                        }
-                        previous_tick = now;
-                    })
-                    .is_err()
-                {
-                    break;
+    fn schedule_next_transition(&mut self, cx: &mut Context<Self>) {
+        self.transition_generation = self.transition_generation.wrapping_add(1);
+        let generation = self.transition_generation;
+        self.transition_task = None;
+
+        let now = chrono::Utc::now().timestamp().max(0) as u32;
+        let next_transition = self
+            .events
+            .values()
+            .flatten()
+            .flat_map(|event| [event.start_time_seconds, event.end_time_seconds])
+            .filter(|timestamp| *timestamp > now)
+            .min();
+        let Some(next_transition) = next_transition else {
+            return;
+        };
+
+        let delay = Duration::from_secs(next_transition.saturating_sub(now).max(1) as u64);
+        self.transition_task = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(delay).await;
+            let _ = this.update(cx, |this, cx| {
+                if this.transition_generation != generation {
+                    return;
                 }
-            }
-        })
+                this.transition_task = None;
+                let changed = this.remove_expired();
+                Self::emit_changed(changed, cx);
+                cx.notify();
+                this.schedule_next_transition(cx);
+            });
+        }));
     }
 
     fn emit_changed(changed: Vec<ClanId>, cx: &mut Context<Self>) {
@@ -316,6 +323,7 @@ impl EventsStore {
         let mut changed = self.remove_expired();
         changed.push(clan_id);
         Self::emit_changed(changed, cx);
+        self.schedule_next_transition(cx);
         cx.notify();
     }
 
@@ -376,6 +384,7 @@ impl EventsStore {
                 let mut changed = this.remove_expired();
                 changed.push(clan_id);
                 Self::emit_changed(changed, cx);
+                this.schedule_next_transition(cx);
                 cx.notify();
             });
         })
