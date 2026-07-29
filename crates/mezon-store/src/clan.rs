@@ -360,7 +360,9 @@ pub struct ClanList {
     loading: bool,
     badges_loaded: bool,
     reset_generation: u64,
+    saved_order: Vec<ClanId>,
     _connection_watch: Task<()>,
+    _saved_order_load: Task<()>,
 }
 
 struct GlobalClanList(Entity<ClanList>);
@@ -400,6 +402,18 @@ impl ClanList {
     fn new(api: Arc<AppApi>, cx: &mut Context<Self>) -> Self {
         Self::register_realtime(cx);
         let connection_watch = Self::spawn_connection_watch(api.clone(), cx);
+        let saved_order_load = cx.spawn(async move |this, cx| {
+            let order = cx
+                .background_executor()
+                .spawn(async { crate::Settings::load_sync().clan_order })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                this.saved_order = order;
+                if this.apply_saved_order_internal() {
+                    cx.notify();
+                }
+            });
+        });
         Self {
             clans: Vec::new(),
             active_clan_id: None,
@@ -407,7 +421,9 @@ impl ClanList {
             loading: false,
             badges_loaded: false,
             reset_generation: 0,
+            saved_order: Vec::new(),
             _connection_watch: connection_watch,
+            _saved_order_load: saved_order_load,
         }
     }
 
@@ -723,6 +739,7 @@ impl ClanList {
         let prev_active = self.active_clan_id;
         carry_live_badges(&self.clans, &mut clans);
         self.clans = clans;
+        self.apply_saved_order_internal();
         let active_missing = self
             .active_clan_id
             .is_some_and(|active| !self.clans.iter().any(|c| c.id == active));
@@ -785,6 +802,7 @@ impl ClanList {
 
     pub fn reorder_clans(&mut self, order: Vec<ClanId>, cx: &mut Context<Self>) {
         apply_clan_order(&mut self.clans, &order);
+        self.saved_order = order.clone();
         cx.notify();
         cx.background_executor()
             .spawn(async move {
@@ -795,8 +813,26 @@ impl ClanList {
             .detach();
     }
 
+    pub fn move_clan(&mut self, from: usize, to: usize, cx: &mut Context<Self>) {
+        let Some(order) = moved_clan_order(&self.clans, from, to) else {
+            return;
+        };
+        self.reorder_clans(order, cx);
+    }
+
     pub fn apply_saved_order(&mut self, order: &[ClanId]) {
+        self.saved_order = order.to_vec();
         apply_clan_order(&mut self.clans, order);
+    }
+
+    fn apply_saved_order_internal(&mut self) -> bool {
+        if self.saved_order.is_empty() || self.clans.is_empty() {
+            return false;
+        }
+        let order = std::mem::take(&mut self.saved_order);
+        apply_clan_order(&mut self.clans, &order);
+        self.saved_order = order;
+        true
     }
 
     pub fn clan_by_id(&self, clan_id: ClanId) -> Option<&Clan> {
@@ -1106,6 +1142,16 @@ fn community_update_request(
     request
 }
 
+fn moved_clan_order(clans: &[Clan], from: usize, to: usize) -> Option<Vec<ClanId>> {
+    if from == to || from >= clans.len() || to >= clans.len() {
+        return None;
+    }
+    let mut ids: Vec<ClanId> = clans.iter().map(|clan| clan.id).collect();
+    let moved = ids.remove(from);
+    ids.insert(to, moved);
+    Some(ids)
+}
+
 fn apply_clan_order(clans: &mut Vec<Clan>, order: &[ClanId]) {
     if order.is_empty() {
         return;
@@ -1224,6 +1270,69 @@ mod tests {
             make_clan(1, "One", None),
             make_clan(2, "Two", Some("old.png")),
         ]
+    }
+
+    fn four_clans() -> Vec<Clan> {
+        vec![
+            make_clan(1, "A", None),
+            make_clan(2, "B", None),
+            make_clan(3, "C", None),
+            make_clan(4, "D", None),
+        ]
+    }
+
+    fn ids_after_move(from: usize, to: usize) -> Vec<i64> {
+        let clans = four_clans();
+        moved_clan_order(&clans, from, to)
+            .expect("move")
+            .into_iter()
+            .map(|id| id.get())
+            .collect()
+    }
+
+    #[test]
+    fn dragging_a_clan_down_lands_it_after_the_target() {
+        assert_eq!(ids_after_move(0, 2), vec![2, 3, 1, 4]);
+    }
+
+    #[test]
+    fn dragging_a_clan_up_lands_it_before_the_target() {
+        assert_eq!(ids_after_move(3, 1), vec![1, 4, 2, 3]);
+    }
+
+    #[test]
+    fn moving_a_clan_onto_itself_or_out_of_range_is_a_no_op() {
+        let clans = four_clans();
+        assert!(moved_clan_order(&clans, 1, 1).is_none());
+        assert!(moved_clan_order(&clans, 9, 1).is_none());
+        assert!(moved_clan_order(&clans, 1, 9).is_none());
+        assert!(moved_clan_order(&[], 0, 0).is_none());
+    }
+
+    #[test]
+    fn a_saved_order_survives_a_clan_list_refetch() {
+        let saved: Vec<ClanId> = [4, 3, 2, 1].into_iter().map(ClanId).collect();
+        let mut clans = four_clans();
+
+        apply_clan_order(&mut clans, &saved);
+
+        let ids: Vec<i64> = clans.iter().map(|clan| clan.id.get()).collect();
+        assert_eq!(ids, vec![4, 3, 2, 1]);
+    }
+
+    #[test]
+    fn a_clan_missing_from_the_saved_order_keeps_its_place_at_the_end() {
+        let saved: Vec<ClanId> = [3, 1].into_iter().map(ClanId).collect();
+        let mut clans = four_clans();
+
+        apply_clan_order(&mut clans, &saved);
+
+        let ids: Vec<i64> = clans.iter().map(|clan| clan.id.get()).collect();
+        assert_eq!(
+            ids,
+            vec![3, 1, 2, 4],
+            "a clan joined after the order was saved must still be listed"
+        );
     }
 
     #[test]
