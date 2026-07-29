@@ -944,7 +944,7 @@ impl Render for ChannelSidebar {
                     .children(skeleton_overlay)
                     .children(mention_button)
                     .custom_scrollbars(
-                        Scrollbars::always_visible(ScrollAxes::Vertical)
+                        Scrollbars::new(ScrollAxes::Vertical)
                             .tracked_scroll_handle(&self.list_state),
                         window,
                         cx,

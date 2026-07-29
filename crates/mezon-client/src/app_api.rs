@@ -2198,6 +2198,33 @@ impl AppApi {
         self.transport.list_categories_typed(clan_id).await
     }
 
+    pub async fn update_category_order(
+        &self,
+        clan_id: i64,
+        categories: &[(i32, i64)],
+    ) -> Result<()> {
+        self.transport
+            .update_category_order(clan_id, categories)
+            .await
+    }
+
+    pub async fn list_archived_channel_descs(
+        &self,
+        clan_id: i64,
+    ) -> Result<Vec<mezon_proto::api::ChannelDescription>> {
+        Ok(self
+            .transport
+            .list_archived_channel_descs(clan_id)
+            .await?
+            .channeldesc)
+    }
+
+    pub async fn restore_archived_channel(&self, clan_id: i64, channel_id: i64) -> Result<()> {
+        self.transport
+            .active_archived_thread(clan_id, channel_id)
+            .await
+    }
+
     pub async fn list_clan_badge_count(&self) -> Result<Vec<(String, i32, bool)>> {
         self.transport.list_clan_badge_count().await
     }

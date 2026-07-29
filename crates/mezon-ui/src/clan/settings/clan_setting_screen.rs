@@ -7,7 +7,9 @@ use mezon_store::{
     ChannelList, ClanId, ClanList, ClanSettingsPermissions, PermissionStore, Settings,
 };
 
+use super::archived_channel_page::ArchivedChannelPage;
 use super::audit_log_setting_page::AuditLogSettingPage;
+use super::category_sort_page::CategorySortPage;
 use super::emoji_setting_page::EmojiSettingPage;
 use super::integration_setting_page::IntegrationSettingPage;
 use super::overview_setting_page::{OverviewSettingPage, render_clan_overview_save_bar};
@@ -164,6 +166,8 @@ pub struct ClanSettingScreen {
     channel_list: Entity<ChannelList>,
     current_page: ClanSettingsPage,
     overview_page: Option<Entity<OverviewSettingPage>>,
+    category_sort_page: Option<Entity<CategorySortPage>>,
+    archived_channel_page: Option<Entity<ArchivedChannelPage>>,
     audit_log_page: Option<Entity<AuditLogSettingPage>>,
     emoji_page: Option<Entity<EmojiSettingPage>>,
     sticker_page: Option<Entity<StickerSettingPage>>,
@@ -199,6 +203,8 @@ impl ClanSettingScreen {
             channel_list,
             current_page: page,
             overview_page: None,
+            category_sort_page: None,
+            archived_channel_page: None,
             audit_log_page: None,
             emoji_page: None,
             sticker_page: None,
@@ -283,6 +289,8 @@ impl ClanSettingScreen {
             self.release_page(self.current_page, cx);
             if clan_changed {
                 self.release_page(ClanSettingsPage::Overview, cx);
+                self.release_page(ClanSettingsPage::CategoryOrder, cx);
+                self.release_page(ClanSettingsPage::ArchivedChannels, cx);
                 self.release_page(ClanSettingsPage::AuditLog, cx);
                 self.release_page(ClanSettingsPage::Emoji, cx);
                 self.release_page(ClanSettingsPage::ImageStickers, cx);
@@ -303,6 +311,16 @@ impl ClanSettingScreen {
             ClanSettingsPage::Overview => {
                 if let Some(entity) = self.overview_page.take() {
                     entity.update(cx, |page, cx| page.release(cx));
+                }
+            }
+            ClanSettingsPage::CategoryOrder => {
+                if let Some(entity) = self.category_sort_page.take() {
+                    entity.update(cx, |page, _| page.release());
+                }
+            }
+            ClanSettingsPage::ArchivedChannels => {
+                if let Some(entity) = self.archived_channel_page.take() {
+                    entity.update(cx, |page, _| page.release());
                 }
             }
             ClanSettingsPage::AuditLog => {
@@ -355,6 +373,23 @@ impl ClanSettingScreen {
                 }));
                 if let Some(overview) = &self.overview_page {
                     cx.observe(overview, |_, _, cx| cx.notify()).detach();
+                }
+            }
+            ClanSettingsPage::CategoryOrder if self.category_sort_page.is_none() => {
+                let channel_list = self.channel_list.clone();
+                self.category_sort_page =
+                    Some(cx.new(|cx| CategorySortPage::new(clan_id, channel_list, cx)));
+                if let Some(page) = &self.category_sort_page {
+                    cx.observe(page, |_, _, cx| cx.notify()).detach();
+                }
+            }
+            ClanSettingsPage::ArchivedChannels if self.archived_channel_page.is_none() => {
+                let channel_list = self.channel_list.clone();
+                self.archived_channel_page = Some(
+                    cx.new(|cx| ArchivedChannelPage::new(clan_id, channel_list, settings, cx)),
+                );
+                if let Some(page) = &self.archived_channel_page {
+                    cx.observe(page, |_, _, cx| cx.notify()).detach();
                 }
             }
             ClanSettingsPage::AuditLog if self.audit_log_page.is_none() => {
@@ -422,6 +457,14 @@ impl ClanSettingScreen {
         match self.current_page {
             ClanSettingsPage::Overview => self
                 .overview_page
+                .as_ref()
+                .map(|p| p.clone().into_any_element()),
+            ClanSettingsPage::CategoryOrder => self
+                .category_sort_page
+                .as_ref()
+                .map(|p| p.clone().into_any_element()),
+            ClanSettingsPage::ArchivedChannels => self
+                .archived_channel_page
                 .as_ref()
                 .map(|p| p.clone().into_any_element()),
             ClanSettingsPage::AuditLog => self
