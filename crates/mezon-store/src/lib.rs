@@ -199,7 +199,10 @@ pub use voice::{
     capture_screen_share_preview, list_screen_share_options, peek_screen_share_options,
     screen_tile_id, upload_sound_file, validate_sound_file,
 };
-pub use wallet::{SendTokenRequest, WalletDetail, WalletEvent, WalletStore, WalletTransaction};
+pub use wallet::{
+    SendTokenRequest, TransactionCursor, WalletDetail, WalletEvent, WalletStore, WalletTransaction,
+    WalletTransactionPage,
+};
 pub use webhook::{
     ChannelWebhook, ClanWebhook, MAX_WEBHOOK_AVATAR_BYTES, WEBHOOK_NAME_MAX_LENGTH, WebhookEvent,
     WebhookStore,
