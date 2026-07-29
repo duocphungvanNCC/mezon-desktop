@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use gpui::{App, Entity, HighlightStyle, Hsla, SharedString, WeakEntity};
 use mezon_store::{
-    ChannelType, ClanId, Emoji, MessageId, ProfileContext, RichClick, RichLayout, Settings, UserId,
+    ChannelType, ClanId, MessageId, ProfileContext, RichClick, RichLayout, Settings, UserId,
 };
 
 use super::audio_player::AudioPlayerView;
@@ -68,6 +68,7 @@ pub struct RowCtx<'a> {
     pub avatar_cache: Entity<LruImageCache>,
     pub large_avatar_cache: Entity<LruImageCache>,
     pub icon_cache: Entity<LruImageCache>,
+    pub ogp_cache: Entity<LruImageCache>,
     pub unread_boundary_id: Option<MessageId>,
     pub highlight_id: Option<MessageId>,
     pub reply_highlight_id: Option<MessageId>,
@@ -92,7 +93,7 @@ pub struct RowCtx<'a> {
     pub editing_id: Option<MessageId>,
     pub edit_input: Option<Entity<MentionInput>>,
     /// Up to 3 most-recently-used emoji for the hover toolbar's quick-react pills.
-    pub emoji_recent: &'a [Emoji],
+    pub emoji_recent: &'a [RecentEmojiCell],
     /// `common.comingSoon`, resolved once per render pass (not per row).
     pub coming_soon: SharedString,
     /// Cross-frame memo for per-row derived values that are expensive to
@@ -101,6 +102,16 @@ pub struct RowCtx<'a> {
     /// locale change and day rollover.
     pub row_memo: Rc<RefCell<RowMemo>>,
     pub selection: super::selection::SharedSelection,
+}
+
+/// Per-frame view model for the quick-reaction strip. The proxied url and the
+/// element-id prefix are identical for every row, so they are resolved once per
+/// frame instead of rebuilt inside each row's hover actions.
+pub struct RecentEmojiCell {
+    pub id: SharedString,
+    pub shortname: SharedString,
+    pub src: SharedString,
+    pub element_key: SharedString,
 }
 
 #[derive(Default)]

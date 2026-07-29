@@ -25,10 +25,11 @@ use mezon_store::{
 };
 
 use super::audio_player::{AudioActivation, AudioPlayerView};
-use super::context::{OnboardingContext, RowCtx, RowMemo, WelcomeContext};
+use super::context::{OnboardingContext, RecentEmojiCell, RowCtx, RowMemo, WelcomeContext};
 use super::dispatch::render_message_item;
 use super::gif_video::GifVideoView;
 use super::message_context_menu;
+use super::parts::recent_emoji_cells;
 use super::reaction_picker::{ReactionPicker, ReactionPickerEvent};
 use super::selection::{MessageSelectionState, SelPoint, SharedSelection, TextSegment, word_range};
 use super::skeleton::message_skeleton;
@@ -456,6 +457,7 @@ const IDLE_CACHE_SWEEP_INTERVAL: Duration = Duration::from_millis(100);
 const HOVER_SHOW_DELAY_MS: u64 = 200;
 const HOVER_HIDE_DELAY_MS: u64 = 100;
 const SCROLL_RELIEF_DELAY: Duration = Duration::from_millis(1500);
+const RECENT_EMOJI_COUNT: usize = 3;
 const MAX_GIF_VIDEOS: usize = 6;
 const MAX_AUDIO_PLAYERS: usize = 8;
 
@@ -1108,6 +1110,7 @@ pub struct ChannelMessages {
     avatar_image_cache: Entity<LruImageCache>,
     small_avatar_image_cache: Entity<LruImageCache>,
     icon_image_cache: Entity<LruImageCache>,
+    ogp_image_cache: Entity<LruImageCache>,
     active_videos: Rc<HashMap<(MessageId, usize), Entity<VideoPlayerView>>>,
     active_audios: Rc<indexmap::IndexMap<(MessageId, usize), Entity<AudioPlayerView>>>,
     gif_videos: Rc<HashMap<(MessageId, usize), Entity<GifVideoView>>>,
@@ -1174,7 +1177,7 @@ pub struct ChannelMessages {
     context_menu_target: Option<(MessageId, Point<Pixels>)>,
     context_menu_forward_all: bool,
     reaction_submenu_open: bool,
-    emoji_recent: Rc<Vec<Emoji>>,
+    emoji_recent: Rc<Vec<RecentEmojiCell>>,
     _emoji_observe: Subscription,
     channel_permissions_fp: Option<(bool, bool, bool)>,
     _channel_permissions_observe: Subscription,
@@ -1680,6 +1683,7 @@ impl ChannelMessages {
                 cx,
             )
         });
+        let ogp_image_cache = crate::image_cache::ogp_timeline_cache("message-ogp", cx);
         let last_cold_inputs = Self::cold_inputs(cx);
         let (welcome, onboarding) = Self::compute_indicator_contexts(cx);
         let cached_unread_boundary = unread_boundary(&MessagesStore::global(cx), None, cx);
@@ -1688,24 +1692,28 @@ impl ChannelMessages {
         let (identity_inputs, cached_current_user_id, cached_role_ids, cached_is_clan_owner) =
             Self::compute_identity(cx);
         let emoji_store = EmojiStore::global(cx);
-        let emoji_recent: Rc<Vec<Emoji>> = Rc::new(
-            emoji_store
+        let recent: Vec<Emoji> = emoji_store
+            .read(cx)
+            .recent(RECENT_EMOJI_COUNT)
+            .into_iter()
+            .cloned()
+            .collect();
+        let emoji_recent: Rc<Vec<RecentEmojiCell>> = Rc::new(recent_emoji_cells(&recent, cx));
+        let emoji_observe = cx.observe(&emoji_store, |this, store, cx| {
+            let next: Vec<Emoji> = store
                 .read(cx)
-                .recent(3)
+                .recent(RECENT_EMOJI_COUNT)
                 .into_iter()
                 .cloned()
-                .collect(),
-        );
-        let emoji_observe = cx.observe(&emoji_store, |this, store, cx| {
-            let next: Vec<Emoji> = store.read(cx).recent(3).into_iter().cloned().collect();
+                .collect();
             let changed = this.emoji_recent.len() != next.len()
                 || this
                     .emoji_recent
                     .iter()
                     .zip(&next)
-                    .any(|(a, b)| a.id != b.id);
+                    .any(|(a, b)| a.id.as_ref() != b.id.as_str());
             if changed {
-                this.emoji_recent = Rc::new(next);
+                this.emoji_recent = Rc::new(recent_emoji_cells(&next, cx));
                 cx.notify();
             }
         });
@@ -1748,6 +1756,7 @@ impl ChannelMessages {
             avatar_image_cache,
             small_avatar_image_cache,
             icon_image_cache,
+            ogp_image_cache,
             active_videos: Rc::new(HashMap::new()),
             active_audios: Rc::new(indexmap::IndexMap::new()),
             gif_videos: Rc::new(HashMap::new()),
@@ -3939,6 +3948,7 @@ impl ChannelMessages {
         let context_menu_message = self.context_menu_target.map(|(id, _)| id);
         let avatar_image_cache = self.avatar_image_cache.clone();
         let small_avatar_image_cache = self.small_avatar_image_cache.clone();
+        let ogp_image_cache = self.ogp_image_cache.clone();
         let icon_image_cache = self.icon_image_cache.clone();
         let reply_highlight_id = TopicsStore::global(cx)
             .read(cx)
@@ -4000,6 +4010,7 @@ impl ChannelMessages {
                         avatar_cache: small_avatar_image_cache.clone(),
                         large_avatar_cache: avatar_image_cache.clone(),
                         icon_cache: icon_image_cache.clone(),
+                        ogp_cache: ogp_image_cache.clone(),
                         unread_boundary_id: None,
                         highlight_id: None,
                         reply_highlight_id,
@@ -4103,7 +4114,8 @@ impl ChannelMessages {
 
 impl Render for ChannelMessages {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        crate::image_cache::sweep_ogp_cache(window, cx);
+        self.ogp_image_cache
+            .update(cx, |cache, cx| cache.sweep_once_per_frame(window, cx));
         {
             let mut selection = self.selection.borrow_mut();
             selection.begin_render();
@@ -4185,6 +4197,7 @@ impl Render for ChannelMessages {
         let context_menu_message = self.context_menu_target.map(|(id, _)| id);
         let avatar_image_cache = self.avatar_image_cache.clone();
         let small_avatar_image_cache = self.small_avatar_image_cache.clone();
+        let ogp_image_cache = self.ogp_image_cache.clone();
         let icon_image_cache = self.icon_image_cache.clone();
         let unread_boundary_id = self.cached_unread_boundary;
         let highlight_id = self.highlight_id;
@@ -4253,6 +4266,7 @@ impl Render for ChannelMessages {
                         avatar_cache: small_avatar_image_cache.clone(),
                         large_avatar_cache: avatar_image_cache.clone(),
                         icon_cache: icon_image_cache.clone(),
+                        ogp_cache: ogp_image_cache.clone(),
                         unread_boundary_id,
                         highlight_id,
                         reply_highlight_id,

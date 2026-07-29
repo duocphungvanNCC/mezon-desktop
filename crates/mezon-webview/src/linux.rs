@@ -47,7 +47,18 @@ pub fn init_gtk() -> Result<()> {
     Ok(())
 }
 
+const GTK_EVENTS_PER_PUMP: usize = 32;
+
 pub fn pump_gtk_events() {
+    for _ in 0..GTK_EVENTS_PER_PUMP {
+        if !gtk::events_pending() {
+            return;
+        }
+        gtk::main_iteration_do(false);
+    }
+}
+
+fn drain_gtk_events() {
     while gtk::events_pending() {
         gtk::main_iteration_do(false);
     }
@@ -59,19 +70,19 @@ pub fn destroy_webview(webview: ChannelAppWebView) {
     if let Err(error) = webview.set_visible(false) {
         tracing::warn!("channel app webview hide failed: {error:#}");
     }
-    pump_gtk_events();
+    drain_gtk_events();
 
     let gtk_window = wry_gtk_window(&gtk_webview);
     unsafe {
         gtk_webview.destroy();
     }
-    pump_gtk_events();
+    drain_gtk_events();
 
     if let Some(gtk_window) = gtk_window {
         unsafe {
             gtk_window.destroy();
         }
-        pump_gtk_events();
+        drain_gtk_events();
     }
 
     sync_x11_display();
@@ -109,7 +120,7 @@ pub fn create(
     builder: WebViewBuilder<'_>,
 ) -> Result<ChannelAppWebView> {
     init_gtk()?;
-    pump_gtk_events();
+    drain_gtk_events();
 
     let handle = parent.window_handle()?.as_raw();
     let webview = match handle {

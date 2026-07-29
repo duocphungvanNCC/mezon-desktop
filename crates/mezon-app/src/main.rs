@@ -344,9 +344,7 @@ fn run_app(lock: SingleInstance, initial_url: Option<String>) {
                         .await;
                     foreground
                         .spawn(async move {
-                            if mezon_webview::active_webview_count() > 0 {
-                                mezon_webview::pump_gtk_events();
-                            }
+                            mezon_webview::pump_gtk_events();
                         })
                         .detach();
                 }
@@ -449,10 +447,6 @@ fn run_app(lock: SingleInstance, initial_url: Option<String>) {
 
         cx.set_global(SingleInstanceGlobal(lock));
 
-        // Initialize the app-global OGP preview image cache so message-row
-        // rendering (which only has `&App`) can read it.
-        mezon_ui::image_cache::shared_ogp_cache(cx);
-
         // If we were launched with a deep link, inject it immediately.
         if let Some(url) = initial_url {
             let _ = url_tx.unbounded_send(url);
@@ -491,10 +485,16 @@ fn run_app(lock: SingleInstance, initial_url: Option<String>) {
             let auth_state = auth_state_handle.clone();
             cx.spawn(async move |cx: &mut AsyncApp| {
                 while let Some(url) = url_rx.next().await {
+                    if url == mezon_native::instance::ACTIVATE_MESSAGE {
+                        tracing::debug!("Relaunched while running — showing main window");
+                        cx.update(activate_main_window);
+                        continue;
+                    }
                     tracing::info!(
                         "Received deep link: {}",
                         url.split(['?', '#']).next().unwrap_or_default()
                     );
+                    cx.update(activate_main_window);
                     if url.starts_with("mezonapp://callback") {
                         let flow_pending = cx.update(|cx| {
                             matches!(
@@ -589,7 +589,9 @@ fn run_app(lock: SingleInstance, initial_url: Option<String>) {
             })
         };
 
-        if let Some((tray, tray_tasks)) = setup_tray(cx) {
+        let tray = setup_tray(cx);
+        mezon_ui::app::window_controls::set_runs_in_background(cx, tray.is_some());
+        if let Some((tray, tray_tasks)) = tray {
             cx.set_global(TrayGlobal(tray));
             cx.set_global(TrayTasksGlobal {
                 _deep_link: deep_link_task,
@@ -842,8 +844,7 @@ fn open_main_window(
             std::process::exit(1);
         });
 
-    #[cfg(target_os = "macos")]
-    mezon_ui::app::window_controls::macos::configure_window(cx, window_handle);
+    mezon_ui::app::window_controls::configure_window(cx, window_handle);
 
     (auth_state, window_handle.into())
 }

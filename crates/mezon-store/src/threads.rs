@@ -14,6 +14,7 @@ use crate::channel_permissions::{ChannelPermissionsStore, PERMISSION_MANAGE_THRE
 use crate::clan::ClanList;
 use crate::clan_members::ClanMembersStore;
 use crate::ids::{ChannelId, ClanId};
+use crate::messages::MessagesStore;
 use crate::realtime::{RealtimeDispatch, RealtimeKind};
 
 pub const THREAD_STATUS_ARCHIVED: i32 = 0;
@@ -423,19 +424,15 @@ impl ThreadsStore {
     }
 
     pub fn can_create_thread(&self, cx: &App) -> bool {
-        let Some(list_id) = self.list_channel_id.as_deref() else {
+        let is_dm = MessagesStore::try_global(cx).is_some_and(|store| store.read(cx).is_dm());
+        let Some((channel_id, clan_id)) = thread_creation_scope(
+            is_dm,
+            self.list_channel_id.as_deref(),
+            self.clan_id.as_deref(),
+        ) else {
             return false;
         };
-        let Ok(channel_id) = list_id.parse::<ChannelId>() else {
-            return false;
-        };
-        let Some(clan_id) = self
-            .clan_id
-            .as_deref()
-            .and_then(|s| s.parse::<ClanId>().ok())
-            .filter(|id| !id.is_zero())
-            .or_else(|| ClanList::global(cx).read(cx).active_clan_id)
-        else {
+        let Some(clan_id) = clan_id.or_else(|| ClanList::global(cx).read(cx).active_clan_id) else {
             return false;
         };
         ChannelPermissionsStore::global(cx).read(cx).has_permission(
@@ -446,19 +443,15 @@ impl ThreadsStore {
     }
 
     pub fn ensure_create_permissions(&mut self, cx: &mut Context<Self>) {
-        let Some(list_id) = self.list_channel_id.as_deref() else {
+        let is_dm = MessagesStore::try_global(cx).is_some_and(|store| store.read(cx).is_dm());
+        let Some((channel_id, clan_id)) = thread_creation_scope(
+            is_dm,
+            self.list_channel_id.as_deref(),
+            self.clan_id.as_deref(),
+        ) else {
             return;
         };
-        let Ok(channel_id) = list_id.parse::<ChannelId>() else {
-            return;
-        };
-        let Some(clan_id) = self
-            .clan_id
-            .as_deref()
-            .and_then(|s| s.parse::<ClanId>().ok())
-            .filter(|id| !id.is_zero())
-            .or_else(|| ClanList::global(cx).read(cx).active_clan_id)
-        else {
+        let Some(clan_id) = clan_id.or_else(|| ClanList::global(cx).read(cx).active_clan_id) else {
             return;
         };
         ChannelPermissionsStore::global(cx).update(cx, |store, cx| {
@@ -820,6 +813,21 @@ fn list_channel_id_for(channel: &Channel) -> String {
     }
 }
 
+fn thread_creation_scope(
+    is_dm: bool,
+    list_channel_id: Option<&str>,
+    clan_id: Option<&str>,
+) -> Option<(ChannelId, Option<ClanId>)> {
+    if is_dm {
+        return None;
+    }
+    let channel_id = list_channel_id?.parse::<ChannelId>().ok()?;
+    let clan_id = clan_id
+        .and_then(|raw| raw.parse::<ClanId>().ok())
+        .filter(|id| !id.is_zero());
+    Some((channel_id, clan_id))
+}
+
 fn page_has_more(batch_len: usize) -> bool {
     batch_len >= THREAD_LIST_LIMIT as usize
 }
@@ -941,6 +949,34 @@ pub fn group_threads(threads: &[ThreadSummary]) -> (Vec<usize>, Vec<usize>, Vec<
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn thread_creation_scope_is_none_in_a_dm() {
+        assert_eq!(thread_creation_scope(true, Some("77"), Some("5")), None);
+        assert_eq!(thread_creation_scope(true, Some("77"), Some("0")), None);
+    }
+
+    #[test]
+    fn thread_creation_scope_drops_a_zero_clan_so_the_caller_can_fall_back() {
+        assert_eq!(
+            thread_creation_scope(false, Some("77"), Some("0")),
+            Some((ChannelId(77), None))
+        );
+        assert_eq!(
+            thread_creation_scope(false, Some("77"), None),
+            Some((ChannelId(77), None))
+        );
+    }
+
+    #[test]
+    fn thread_creation_scope_keeps_a_real_clan_channel() {
+        assert_eq!(
+            thread_creation_scope(false, Some("77"), Some("5")),
+            Some((ChannelId(77), Some(ClanId(5))))
+        );
+        assert_eq!(thread_creation_scope(false, None, Some("5")), None);
+        assert_eq!(thread_creation_scope(false, Some("nope"), Some("5")), None);
+    }
 
     #[test]
     fn page_has_more_when_batch_full() {

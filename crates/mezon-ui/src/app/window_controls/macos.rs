@@ -1,5 +1,5 @@
 use block::ConcreteBlock;
-use gpui::{App, Window, WindowHandle, div, prelude::*};
+use gpui::{App, Window, div, prelude::*};
 use objc::runtime::Object;
 use objc::{class, msg_send, sel, sel_impl};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
@@ -39,19 +39,6 @@ pub fn minimize_active_window(cx: &mut App) {
 pub fn disable_window_fullscreen(window: &Window) {
     if let Some(view) = appkit_view(window) {
         disable_fullscreen(view);
-    }
-}
-
-pub fn configure_window<V: 'static>(cx: &mut App, handle: WindowHandle<V>) {
-    if let Err(error) = cx.update_window(handle.into(), |_, window, cx| {
-        window.on_window_should_close(cx, |window, _| {
-            hide_window(window);
-            false
-        });
-
-        disable_window_fullscreen(window);
-    }) {
-        tracing::warn!("Failed to configure window: {error}");
     }
 }
 
