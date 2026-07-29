@@ -1298,7 +1298,6 @@ impl Window {
             app_id,
             window_min_size,
             window_decorations,
-            parent_window,
             #[cfg_attr(
                 not(any(target_os = "linux", target_os = "freebsd")),
                 allow(unused_variables)
@@ -1324,7 +1323,6 @@ impl Window {
                 show,
                 display_id,
                 window_min_size,
-                parent_window,
                 icon,
                 #[cfg(target_os = "macos")]
                 tabbing_identifier,

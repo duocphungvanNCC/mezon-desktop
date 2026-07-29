@@ -636,9 +636,7 @@ impl X11Client {
                                     )
                                 };
                                 let len = events.len();
-                                if len >= 2
-                                    && same_run(&events[len - 1])
-                                    && same_run(&events[len - 2])
+                                if len >= 2 && same_run(&events[len - 1]) && same_run(&events[len - 2])
                                 {
                                     events[len - 1] = Event::XinputMotion(motion);
                                 } else {
@@ -1614,21 +1612,10 @@ impl LinuxClient for X11Client {
         params: WindowParams,
     ) -> anyhow::Result<Box<dyn PlatformWindow>> {
         let mut state = self.0.borrow_mut();
-        let parent_window = params
-            .parent_window
-            .and_then(|parent_handle| {
-                state
-                    .windows
-                    .values()
-                    .find(|window| window.handle() == parent_handle)
-                    .map(|window| window.window.clone())
-            })
-            .or_else(|| {
-                state
-                    .keyboard_focused_window
-                    .and_then(|focused_window| state.windows.get(&focused_window))
-                    .map(|w| w.window.clone())
-            });
+        let parent_window = state
+            .keyboard_focused_window
+            .and_then(|focused_window| state.windows.get(&focused_window))
+            .map(|w| w.window.clone());
         let x_window = state
             .xcb_connection
             .generate_id()

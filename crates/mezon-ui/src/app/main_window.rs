@@ -59,6 +59,9 @@ pub fn activate_main_window(cx: &mut App) {
     let _ = cx.update_window(handle, |_, window, _| window.activate_window());
 }
 
+/// Wayland has no client-side positioning, so an overlay can only be tied to the main window by
+/// asking the compositor to treat it as a transient child. GPUI parents `Floating` windows to the
+/// keyboard-focused window, which is the main window whenever the user clicks an image.
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
 pub fn uses_wayland_overlay_parent() -> bool {
     gpui::guess_compositor() == "Wayland"
@@ -77,21 +80,19 @@ pub fn overlay_fallback_placement(cx: &mut App) -> (WindowBounds, Option<Display
 }
 
 pub fn overlay_placement_for_main(cx: &mut App) -> (WindowBounds, Option<DisplayId>) {
-    if let Some(main) = handle(cx) {
-        if let Some(placement) = window_placement_for(main, cx) {
-            return placement;
-        }
+    if let Some(main) = handle(cx)
+        && let Some(placement) = window_placement_for(main, cx)
+    {
+        return placement;
     }
     overlay_fallback_placement(cx)
 }
 
-pub fn overlay_window_kind_and_parent(
-    main_app: Option<AnyWindowHandle>,
-) -> (WindowKind, Option<AnyWindowHandle>) {
+pub fn overlay_window_kind() -> WindowKind {
     if uses_wayland_overlay_parent() {
-        (WindowKind::Floating, main_app)
+        WindowKind::Floating
     } else {
-        (WindowKind::Normal, None)
+        WindowKind::Normal
     }
 }
 

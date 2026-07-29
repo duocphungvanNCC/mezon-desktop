@@ -1164,6 +1164,13 @@ impl PlatformWindow for MacWindow {
             .detach();
     }
 
+    // mezon vendor edit: `open()` places a window from `bounds` with a formula that is not the
+    // inverse of `bounds()` — it omits the `- bounds.size.height` term and passes a *content*
+    // rect while `bounds()` reads the *frame* rect. So a window created from another window's
+    // `bounds()` lands one window-height off, and the only way to align two windows is to move
+    // one after creation. This must stay the exact inverse of `bounds()` above: that flips y with
+    // `screen_frame.size.height` and normalises by `screen_frame.origin`, so undo both here or
+    // the window jumps by the screen origin on any non-primary display.
     fn set_bounds(&mut self, bounds: Bounds<Pixels>) {
         let this = self.0.lock();
         let window = this.native_window;
@@ -1176,12 +1183,11 @@ impl PlatformWindow for MacWindow {
                         return;
                     }
                     let screen_frame = NSScreen::frame(screen);
-                    let local_top = bounds.origin.y.as_f32() as f64 - screen_frame.origin.y;
                     let window_rect = NSRect::new(
                         NSPoint::new(
                             screen_frame.origin.x + bounds.origin.x.as_f32() as f64,
                             screen_frame.origin.y + screen_frame.size.height
-                                - local_top
+                                - bounds.origin.y.as_f32() as f64
                                 - bounds.size.height.as_f32() as f64,
                         ),
                         NSSize::new(

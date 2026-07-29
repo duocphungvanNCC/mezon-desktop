@@ -5,15 +5,15 @@ use gpui::{
     AnyView, App, AppContext, Bounds, Context, Corners, Entity, FocusHandle, Focusable, ImageCache,
     KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, ObjectFit, Pixels, Point, Render,
     RenderImage, Resource, ScrollDelta, ScrollWheelEvent, SharedString, SharedUri,
-    Size as GpuiSize, StyleRefinement, Subscription, UniformListScrollHandle, Window, WindowBounds,
-    WindowHandle, WindowOptions, canvas, div, img, point, prelude::*, px, size, uniform_list,
+    Size as GpuiSize, StyleRefinement, Subscription, UniformListScrollHandle, Window, WindowHandle,
+    WindowOptions, canvas, div, img, point, prelude::*, px, size, uniform_list,
 };
 use mezon_store::{AppConfig, ChannelTimelineAttachment, Settings};
 use ui::{ScrollAxes, Scrollbars, WithScrollbar};
 
 use crate::app::main_window::{
     activate_main_window, handle as main_window_handle, overlay_placement_for_main,
-    overlay_window_kind_and_parent, sync_overlay_to_main,
+    overlay_window_kind, sync_overlay_to_main,
 };
 use crate::app::title_bar::TitleBar;
 use crate::app::window_controls;
@@ -141,7 +141,7 @@ fn spawn_media_image_modal_window(
 ) {
     let main_app = main_window_handle(cx);
     let (window_bounds, display_id) = overlay_placement_for_main(cx);
-    let (kind, parent_window) = overlay_window_kind_and_parent(main_app);
+    let kind = overlay_window_kind();
     let options = WindowOptions {
         window_bounds: Some(window_bounds),
         window_min_size: Some(size(px(640.0), px(480.0))),
@@ -150,7 +150,6 @@ fn spawn_media_image_modal_window(
         show: true,
         is_movable: true,
         display_id,
-        parent_window,
         titlebar: Some(window_controls::window_title_options()),
         window_decorations: window_controls::main_window_decorations(),
         app_id: window_controls::linux_app_id(),
@@ -167,12 +166,12 @@ fn spawn_media_image_modal_window(
             }) {
                 tracing::warn!("Failed to configure media image modal window: {error}");
             }
-            cx.set_global(GlobalMediaImageModal(handle.clone()));
+            cx.set_global(GlobalMediaImageModal(handle));
             let _ = handle.update(cx, |modal, window, cx| {
                 window.activate_window();
                 window.focus(&modal.focus_handle, cx);
             });
-            let modal = handle.clone();
+            let modal = handle;
             if let Some(main_app) = main_app {
                 cx.defer(move |cx| {
                     sync_overlay_to_main(modal, main_app, cx);

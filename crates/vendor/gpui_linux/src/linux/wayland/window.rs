@@ -562,10 +562,6 @@ impl WaylandWindowStatePtr {
         self.state.borrow().handle
     }
 
-    pub fn bounds(&self) -> Bounds<Pixels> {
-        self.state.borrow().bounds
-    }
-
     pub fn surface(&self) -> wl_surface::WlSurface {
         self.state.borrow().surface.clone()
     }

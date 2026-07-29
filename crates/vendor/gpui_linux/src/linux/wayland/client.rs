@@ -94,10 +94,11 @@ use crate::linux::{
 use gpui::{
     AnyWindowHandle, Bounds, Capslock, CursorStyle, DevicePixels, DisplayId, FileDropEvent,
     ForegroundExecutor, ImageFormat, KeyDownEvent, KeyUpEvent, Keystroke, Modifiers,
-    ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseExitEvent, MouseMoveEvent,
-    MouseUpEvent, NavigationDirection, Pixels, PlatformDisplay, PlatformInput,
-    PlatformKeyboardLayout, PlatformWindow, Point, ScrollDelta, ScrollWheelEvent, SharedString,
-    Size, TouchPhase, WindowButtonLayout, WindowKind, WindowParams, point, profiler, px, size,
+    ModifiersChangedEvent,
+    MouseButton, MouseDownEvent, MouseExitEvent, MouseMoveEvent, MouseUpEvent, NavigationDirection,
+    Pixels, PlatformDisplay, PlatformInput, PlatformKeyboardLayout, PlatformWindow, Point,
+    ScrollDelta, ScrollWheelEvent, SharedString, Size, TouchPhase, WindowButtonLayout,
+    WindowParams, point, profiler, px, size,
 };
 use gpui_wgpu::{CompositorGpuHint, GpuContext};
 use wayland_protocols::wp::linux_dmabuf::zv1::client::{
@@ -852,27 +853,11 @@ impl LinuxClient for WaylandClient {
     fn open_window(
         &self,
         handle: AnyWindowHandle,
-        mut params: WindowParams,
+        params: WindowParams,
     ) -> anyhow::Result<Box<dyn PlatformWindow>> {
         let mut state = self.0.borrow_mut();
 
-        let explicit_parent = params.parent_window.and_then(|parent_handle| {
-            state
-                .windows
-                .values()
-                .find(|window| window.handle() == parent_handle)
-                .cloned()
-        });
-
-        let parent = explicit_parent
-            .clone()
-            .or_else(|| state.keyboard_focused_window.clone());
-
-        if let Some(ref parent_window) = explicit_parent {
-            if params.kind == WindowKind::Floating || params.kind == WindowKind::Dialog {
-                params.bounds.size = parent_window.bounds().size;
-            }
-        }
+        let parent = state.keyboard_focused_window.clone();
 
         let target_output = params.display_id.and_then(|display_id| {
             let target_protocol_id: u64 = display_id.into();

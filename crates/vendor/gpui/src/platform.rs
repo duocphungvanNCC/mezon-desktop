@@ -623,6 +623,11 @@ pub trait PlatformWindow: HasWindowHandle + HasDisplayHandle {
     fn window_bounds(&self) -> WindowBounds;
     fn content_size(&self) -> Size<Pixels>;
     fn resize(&mut self, size: Size<Pixels>);
+    /// mezon vendor edit: move a window after creation. Upstream has no equivalent —
+    /// `WindowOptions::window_bounds` only applies at creation, and on macOS that path is not
+    /// the inverse of [`PlatformWindow::bounds`], so aligning one window to another needs an
+    /// explicit move. Wayland gets the default impl because the protocol has no client-side
+    /// positioning; only the size can be honoured there.
     fn set_bounds(&mut self, bounds: Bounds<Pixels>) {
         let current = self.bounds();
         if bounds.size != current.size {
@@ -1548,9 +1553,6 @@ pub struct WindowOptions {
     /// Tab group name, allows opening the window as a native tab on macOS 10.12+. Windows with the same tabbing identifier will be grouped together.
     pub tabbing_identifier: Option<String>,
 
-    /// Optional parent window for transient child windows (Linux Wayland/X11).
-    pub parent_window: Option<AnyWindowHandle>,
-
     /// When true, GPUI renders without a topmost DirectComposition target so native
     #[cfg(target_os = "windows")]
     pub disable_direct_composition: bool,
@@ -1606,7 +1608,6 @@ pub struct WindowParams {
     pub display_id: Option<DisplayId>,
 
     pub window_min_size: Option<Size<Pixels>>,
-    pub parent_window: Option<AnyWindowHandle>,
     #[cfg(target_os = "macos")]
     pub tabbing_identifier: Option<String>,
     #[cfg(target_os = "windows")]
@@ -1670,7 +1671,6 @@ impl Default for WindowOptions {
             window_min_size: None,
             window_decorations: None,
             tabbing_identifier: None,
-            parent_window: None,
             #[cfg(target_os = "windows")]
             disable_direct_composition: false,
         }

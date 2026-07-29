@@ -7,8 +7,8 @@ use gpui::{
     App, AppContext, BackgroundExecutor, Bounds, Context, Corners, Entity, FocusHandle, Focusable,
     ImageCache, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, ObjectFit, Pixels,
     Point, Render, RenderImage, Resource, ScrollDelta, ScrollWheelEvent, SharedString, SharedUri,
-    Subscription, UniformListScrollHandle, Window, WindowBounds, WindowHandle, WindowKind,
-    WindowOptions, canvas, div, img, point, prelude::*, px, relative, size, uniform_list,
+    Subscription, UniformListScrollHandle, Window, WindowHandle, WindowOptions, canvas, div, img,
+    point, prelude::*, px, relative, size, uniform_list,
 };
 use mezon_store::{
     AppConfig, ChannelAttachment, ChannelId, ChannelList, ClanId, DirectMessageStore, GalleryStore,
@@ -18,7 +18,7 @@ use ui::{ScrollAxes, Scrollbars, WithScrollbar};
 
 use crate::app::main_window::{
     activate_main_window, handle as main_window_handle, overlay_placement_for_main,
-    overlay_window_kind_and_parent, sync_overlay_to_main,
+    overlay_window_kind, sync_overlay_to_main,
 };
 use crate::app::shell::Shell;
 use crate::app::title_bar::TitleBar;
@@ -142,7 +142,7 @@ fn open_image_viewer_now(request: OpenViewerRequest, cx: &mut App) {
 fn spawn_image_viewer_window(request: OpenViewerRequest, cx: &mut App) {
     let main_app = main_window_handle(cx);
     let (window_bounds, display_id) = overlay_placement_for_main(cx);
-    let (kind, parent_window) = overlay_window_kind_and_parent(main_app);
+    let kind = overlay_window_kind();
     let options = WindowOptions {
         window_bounds: Some(window_bounds),
         window_min_size: Some(size(px(640.0), px(480.0))),
@@ -151,7 +151,6 @@ fn spawn_image_viewer_window(request: OpenViewerRequest, cx: &mut App) {
         show: true,
         is_movable: true,
         display_id,
-        parent_window,
         titlebar: Some(window_controls::window_title_options()),
         window_decorations: window_controls::main_window_decorations(),
         app_id: window_controls::linux_app_id(),
@@ -168,12 +167,12 @@ fn spawn_image_viewer_window(request: OpenViewerRequest, cx: &mut App) {
             }) {
                 tracing::warn!("Failed to configure image viewer window: {error}");
             }
-            cx.set_global(GlobalImageViewer(handle.clone()));
+            cx.set_global(GlobalImageViewer(handle));
             let _ = handle.update(cx, |viewer, window, cx| {
                 window.activate_window();
                 window.focus(&viewer.focus_handle, cx);
             });
-            let viewer = handle.clone();
+            let viewer = handle;
             if let Some(main_app) = main_app {
                 cx.defer(move |cx| {
                     sync_overlay_to_main(viewer, main_app, cx);
