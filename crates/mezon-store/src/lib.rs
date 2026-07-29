@@ -11,7 +11,9 @@ pub mod channel;
 pub mod channel_media;
 pub mod channel_members;
 pub mod channel_permissions;
+pub mod channel_role_permissions;
 pub mod channel_settings;
+pub mod channel_users;
 pub mod clan;
 pub mod clan_load;
 pub mod clan_members;
@@ -92,10 +94,15 @@ pub use channel_media::{
 };
 pub use channel_members::{ChannelMember, ChannelMembersEvent, ChannelMembersStore};
 pub use channel_permissions::{
-    ChannelPermissionsEvent, ChannelPermissionsStore, PERMISSION_DELETE_MESSAGE,
-    PERMISSION_MANAGE_THREAD,
+    ChannelPermissionsEvent, ChannelPermissionsStore, OVERRIDDEN_SLUGS, PERMISSION_DELETE_MESSAGE,
+    PERMISSION_MANAGE_THREAD, PERMISSION_SEND_MESSAGE, is_overridden_slug,
+};
+pub use channel_role_permissions::{
+    ChannelRolePermissionsEvent, ChannelRolePermissionsStore, OVERRIDE_TYPE_ALLOW,
+    OVERRIDE_TYPE_DENY, OVERRIDE_TYPE_NEUTRAL, PermissionEntity,
 };
 pub use channel_settings::{ChannelSetting, ChannelSettingsEvent, ChannelSettingsStore};
+pub use channel_users::{ChannelUsersEvent, ChannelUsersStore};
 pub use clan::*;
 pub use clan_load::ClanLoadScheduler;
 pub use clan_members::{
@@ -155,7 +162,7 @@ pub use notification_setting::{NotificationSettingEvent, NotificationSettingStor
 pub use ogp::{OgpResult, OutgoingOgp, fetch_ogp, first_previewable_url};
 pub use permissions::{
     ClanSettingsPermissions, PERMISSION_ADMINISTRATOR, PERMISSION_CLAN_OWNER,
-    PERMISSION_MANAGE_CHANNEL, PERMISSION_MANAGE_CLAN, PERMISSION_SEND_MESSAGE,
+    PERMISSION_MANAGE_CHANNEL, PERMISSION_MANAGE_CLAN, PERMISSION_SCOPE_CHANNEL,
     PermissionDefinition, PermissionEvent, PermissionStore,
 };
 pub use pinned::{PinnedEvent, PinnedMessage, PinnedMessagesStore};
@@ -168,7 +175,7 @@ pub use quick_menu::{QuickMenuItem, QuickMenuStore};
 pub use realtime::{RealtimeDispatch, RealtimeKind};
 pub use roles::{
     ClanRoleDetail, DEFAULT_ROLE_COLOR, MAX_ROLE_ICON_BYTES, Role, RoleDraft, RolePermission,
-    RoleUser, RolesEvent, RolesStore, everyone_slug,
+    RoleStyle, RoleUser, RolesEvent, RolesStore, everyone_slug, parse_role_color,
 };
 pub use sticker::{ClanSound, Sticker, StickerEvent, StickerStore};
 pub use stream::{StreamMember, StreamPhase, StreamStore};
@@ -200,6 +207,12 @@ pub use webhook::{
 
 pub const CACHE_TTL: Duration = Duration::from_secs(20 * 60);
 
+/// TTL for clan-scoped catalog data that realtime events keep patched in place
+/// (roles). Reconnect and a detected event-stream gap both `mark_all_stale`, so
+/// this timer only has to catch events silently missed while the socket stayed
+/// up — a case that does not need a 20-minute poll.
+pub const EVENT_BACKED_CACHE_TTL: Duration = Duration::from_secs(6 * 60 * 60);
+
 const SETTINGS_SAVE_DEBOUNCE: Duration = Duration::from_millis(300);
 
 #[derive(Default)]
@@ -209,6 +222,16 @@ struct SettingsSaver {
     entity_id: Option<gpui::EntityId>,
 }
 impl gpui::Global for SettingsSaver {}
+
+/// `UserClanRemoved` / `UserChannelRemoved` / `UserChannelAdded` are broadcast to
+/// everyone in the clan or channel, not just the affected members, so a handler that
+/// adds or tears down local state must first confirm the signed-in user is one of the
+/// ids carried by the event. Without this, kicking one member wipes the clan or
+/// channel for every other member, and adding one member makes a private channel
+/// appear in the sidebar of people who cannot open it.
+pub(crate) fn event_targets_user(user_ids: &[i64], me: Option<ids::UserId>) -> bool {
+    me.is_some_and(|me| user_ids.contains(&me.get()))
+}
 
 /// Persist [`Settings`] through one serialized, coalescing writer: burst
 /// changes (slider drags) collapse into a single debounced write, writes never

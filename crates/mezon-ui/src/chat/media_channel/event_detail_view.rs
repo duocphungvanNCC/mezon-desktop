@@ -758,7 +758,7 @@ fn render_detail_top(
         })
         .when((edit_title || edit_description) && can_edit, |col| {
             let primary = theme.tokens.bg_button_primary;
-            let cancel_hover_bg = Hsla::from(theme.status_dnd).opacity(0.1);
+            let cancel_hover_bg = Hsla::from(theme.danger_text).opacity(0.1);
             col.child(
                 h_flex()
                     .justify_end()
@@ -777,8 +777,9 @@ fn render_detail_top(
                             .font_weight(FontWeight::MEDIUM)
                             .text_color(theme.text_secondary)
                             .when(!saving, |el| {
-                                el.cursor_pointer()
-                                    .hover(|el| el.text_color(theme.status_dnd).bg(cancel_hover_bg))
+                                el.cursor_pointer().hover(|el| {
+                                    el.text_color(theme.danger_text).bg(cancel_hover_bg)
+                                })
                             })
                             .when(saving, |el| el.opacity(0.5))
                             .on_click({

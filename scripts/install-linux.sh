@@ -46,9 +46,12 @@ fi
 
 app_dir="${HOME}/.local/share/mezon"
 bin_dir="${HOME}/.local/bin"
-mkdir -p "$app_dir" "$bin_dir" \
-  "${HOME}/.local/share/applications" \
-  "${HOME}/.local/share/icons/hicolor/256x256/apps"
+icon_root="${HOME}/.local/share/icons/hicolor"
+icon_sizes="16x16 24x24 32x32 48x48 64x64 128x128 256x256"
+mkdir -p "$app_dir" "$bin_dir" "${HOME}/.local/share/applications"
+for size in $icon_sizes; do
+  mkdir -p "${icon_root}/${size}/apps"
+done
 
 tar -xzf "$archive" -C "$tmp"
 [[ -f "${tmp}/mezon" ]] || {
@@ -60,8 +63,14 @@ install -m 755 "${tmp}/mezon" "${app_dir}/mezon.new"
 mv -f "${app_dir}/mezon.new" "${app_dir}/mezon"
 ln -sf "${app_dir}/mezon" "${bin_dir}/mezon"
 
-if [[ -f "${tmp}/mezon.png" ]]; then
-  cp "${tmp}/mezon.png" "${HOME}/.local/share/icons/hicolor/256x256/apps/mezon.png"
+if [[ -d "${tmp}/icons" ]]; then
+  for size in $icon_sizes; do
+    if [[ -f "${tmp}/icons/${size}/mezon.png" ]]; then
+      cp "${tmp}/icons/${size}/mezon.png" "${icon_root}/${size}/apps/mezon.png"
+    fi
+  done
+elif [[ -f "${tmp}/mezon.png" ]]; then
+  cp "${tmp}/mezon.png" "${icon_root}/256x256/apps/mezon.png"
 fi
 if [[ -f "${tmp}/mezon.desktop" ]]; then
   sed -e "s|^Exec=.*|Exec=${app_dir}/mezon %u|" "${tmp}/mezon.desktop" \

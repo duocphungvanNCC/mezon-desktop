@@ -1,16 +1,22 @@
 use std::sync::Arc;
 
 use crate::chat::clan_management_page::{management_page, section_toolbar};
+use crate::chat::role_style::role_fallback_color;
+use crate::chat::user_profile_popover::role_is_assignable;
 use crate::components::primitives::{Avatar, Icon, IconName, Input, InputEvent, InputState};
-use crate::theme::ActiveTheme;
+use crate::theme::{ActiveTheme, Theme};
 use gpui::{
     AnyElement, Context, Entity, FontWeight, Hsla, ListAlignment, ListOffset, ListState,
-    MouseButton, Render, Subscription, Window, deferred, div, img, list, prelude::*, px, size,
+    MouseButton, Render, SharedString, Subscription, Window, deferred, div, img, list, prelude::*,
+    px, size,
 };
-use mezon_store::{ClanId, ClanMembersStore, Role, RoleId, RolesStore, Settings, UserId};
+use mezon_store::{
+    ClanId, ClanMembersStore, PermissionStore, Role, RoleId, RolesStore, Settings, UserId,
+};
 use unicode_normalization::{UnicodeNormalization, char::is_combining_mark};
 
 const PAGE_SIZES: [usize; 3] = [10, 50, 100];
+const ROLE_PICKER_WIDTH: f32 = 288.;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum MemberSortField {
@@ -34,6 +40,18 @@ pub struct ClanMembersPage {
     cached_rows: Vec<MemberRow>,
     rows_dirty: bool,
     list_state: ListState,
+    role_picker_open: Option<UserId>,
+    can_manage_clan: bool,
+    role_options: Vec<RoleOption>,
+    role_options_dirty: bool,
+    _permission_sub: Option<Subscription>,
+}
+
+#[derive(Clone)]
+struct RoleOption {
+    id: RoleId,
+    name: SharedString,
+    color: gpui::Rgba,
 }
 
 #[derive(Clone)]
@@ -56,7 +74,7 @@ impl Render for ExtraRolesTooltip {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let mut roles = div().flex().flex_col().items_start().gap_1();
         for role in &self.roles {
-            roles = roles.child(role_badge(role, true, cx.theme()));
+            roles = roles.child(role_badge(role, true, cx.theme(), cx));
         }
         roles
     }
@@ -71,10 +89,17 @@ impl ClanMembersPage {
         .detach();
         cx.observe(&RolesStore::global(cx), |this, _, cx| {
             this.rows_dirty = true;
+            this.role_options_dirty = true;
             cx.notify();
         })
         .detach();
         cx.observe(&settings, |_, _, cx| cx.notify()).detach();
+        let permission_sub = PermissionStore::try_global(cx).map(|store| {
+            cx.observe(&store, |this: &mut Self, _, cx| {
+                this.role_options_dirty = true;
+                cx.notify();
+            })
+        });
         Self {
             clan_id: ClanId(0),
             settings,
@@ -88,7 +113,14 @@ impl ClanMembersPage {
             sort_descending: true,
             cached_rows: Vec::new(),
             rows_dirty: true,
-            list_state: ListState::new(0, ListAlignment::Top, px(240.)),
+            list_state: ListState::new(0, ListAlignment::Top, px(240.))
+                .smooth_line_scroll()
+                .suppress_hover_while_scrolling(),
+            role_picker_open: None,
+            can_manage_clan: false,
+            role_options: Vec::new(),
+            role_options_dirty: true,
+            _permission_sub: permission_sub,
         }
     }
 
@@ -99,6 +131,8 @@ impl ClanMembersPage {
         self.clan_id = clan_id;
         self.reset_search(cx);
         self.rows_dirty = true;
+        self.role_options_dirty = true;
+        self.role_picker_open = None;
         self.page_size_picker_open = false;
         ClanMembersStore::global(cx).update(cx, |store, cx| store.ensure_loaded(clan_id, cx));
         RolesStore::global(cx).update(cx, |store, cx| store.ensure_loaded(clan_id, cx));
@@ -139,6 +173,7 @@ impl ClanMembersPage {
             if matches!(event, InputEvent::Change) {
                 this.page = 0;
                 this.rows_dirty = true;
+                this.role_picker_open = None;
                 this.scroll_to_top();
                 cx.notify();
             }
@@ -213,7 +248,65 @@ impl ClanMembersPage {
         &self.cached_rows
     }
 
+    fn refresh_role_options(&mut self, cx: &Context<Self>) {
+        if !self.role_options_dirty {
+            return;
+        }
+        self.role_options_dirty = false;
+        self.role_options.clear();
+        self.can_manage_clan = false;
+        let Some(permission_store) = PermissionStore::try_global(cx) else {
+            return;
+        };
+        let clan_id = self.clan_id;
+        let permissions = permission_store.read(cx);
+        let clan_permissions = permissions.clan_settings_permissions(clan_id, cx);
+        self.can_manage_clan = clan_permissions.has_manage_clan;
+        if !self.can_manage_clan {
+            return;
+        }
+        let level = permissions.current_permission_level(clan_id, cx);
+        let roles_store = RolesStore::global(cx);
+        let roles = roles_store.read(cx);
+        let options = roles
+            .active_roles_in_clan(clan_id)
+            .into_iter()
+            .filter(|(_, role)| !roles.is_everyone_role(clan_id, role))
+            .filter(|(_, role)| {
+                clan_permissions.is_clan_owner
+                    || role_is_assignable(level, role.max_level_permission)
+            })
+            .map(|(id, role)| RoleOption {
+                id,
+                name: role.name.clone().into(),
+                color: role_color(&role.color),
+            })
+            .collect();
+        self.role_options = options;
+    }
+
+    fn toggle_role(
+        &mut self,
+        user_id: UserId,
+        role_id: RoleId,
+        assigned: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let clan_id = self.clan_id;
+        let (add_ids, remove_ids) = if assigned {
+            (Vec::new(), vec![user_id.get()])
+        } else {
+            (vec![user_id.get()], Vec::new())
+        };
+        RolesStore::global(cx).update(cx, |store, cx| {
+            store.mutate_role_members(clan_id, role_id, add_ids, remove_ids, cx);
+        });
+        self.rows_dirty = true;
+        cx.notify();
+    }
+
     fn select_sort(&mut self, field: MemberSortField) {
+        self.role_picker_open = None;
         if self.sort_field == field {
             self.sort_descending = !self.sort_descending;
         } else {
@@ -252,7 +345,7 @@ impl ClanMembersPage {
         let mut cell = div().relative().flex().items_center().gap_2().min_w_0();
 
         if let Some(role) = roles.first() {
-            cell = cell.child(role_badge(role, false, cx.theme()));
+            cell = cell.child(role_badge(role, false, cx.theme(), cx));
         } else {
             cell = cell.child(div().text_color(cx.theme().text_secondary).child("-"));
         }
@@ -275,7 +368,150 @@ impl ClanMembersPage {
             cell = cell.child(extra_roles);
         }
 
+        if self.can_manage_clan {
+            cell = cell.child(self.render_role_picker_trigger(row, cx));
+        }
+
         cell.into_any_element()
+    }
+
+    fn render_role_picker_trigger(&self, row: &MemberRow, cx: &Context<Self>) -> AnyElement {
+        let theme = cx.theme().clone();
+        let user_id = row.id;
+        let open = self.role_picker_open == Some(user_id);
+        div()
+            .relative()
+            .child(
+                div()
+                    .id(("member-add-role", user_id.get() as u64))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .size(px(24.))
+                    .ml_1()
+                    .rounded(px(4.))
+                    .cursor_pointer()
+                    .text_size(px(16.))
+                    .bg(theme.tokens.bg_active_member_channel)
+                    .text_color(theme.tokens.text_theme_primary)
+                    .child("+")
+                    .capture_any_mouse_down(cx.listener(
+                        move |this, event: &gpui::MouseDownEvent, _, cx| {
+                            if event.button != gpui::MouseButton::Left {
+                                return;
+                            }
+                            this.role_picker_open = if this.role_picker_open == Some(user_id) {
+                                None
+                            } else {
+                                Some(user_id)
+                            };
+                            cx.notify();
+                        },
+                    )),
+            )
+            .when(open, |element| {
+                element.child(deferred(self.render_role_picker(row, &theme, cx)))
+            })
+            .into_any_element()
+    }
+
+    fn render_role_picker(&self, row: &MemberRow, theme: &Theme, cx: &Context<Self>) -> AnyElement {
+        let user_id = row.id;
+        let locale = self.settings.read(cx).language.clone();
+        let mut options = div().flex().flex_col().gap_1().w_full();
+        if self.role_options.is_empty() {
+            options = options.child(
+                div()
+                    .text_color(theme.text_muted)
+                    .child(tr(&locale, "common.noRolesAvailable")),
+            );
+        }
+        for option in &self.role_options {
+            let role_id = option.id;
+            let assigned = row.role_ids.contains(&role_id);
+            options = options.child(
+                div()
+                    .id(("member-role-option", role_id.get() as u64))
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap_2()
+                    .h(px(24.))
+                    .px_2()
+                    .rounded_lg()
+                    .cursor_pointer()
+                    .hover(|style| style.bg(theme.tokens.bg_item_hover))
+                    .child(
+                        div()
+                            .size(px(12.))
+                            .flex_shrink_0()
+                            .rounded_full()
+                            .bg(option.color),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .px_1()
+                            .text_size(px(12.))
+                            .font_weight(FontWeight::MEDIUM)
+                            .line_height(px(15.))
+                            .overflow_hidden()
+                            .truncate()
+                            .text_color(theme.tokens.text_theme_primary)
+                            .child(option.name.clone()),
+                    )
+                    .child(
+                        div()
+                            .size(px(16.))
+                            .flex_shrink_0()
+                            .rounded(px(6.))
+                            .border_1()
+                            .border_color(theme.tokens.border_primary)
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .when(assigned, |element| {
+                                element.child(
+                                    Icon::new(IconName::Check)
+                                        .size(px(16.))
+                                        .text_color(theme.tokens.text_theme_primary),
+                                )
+                            }),
+                    )
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, _, _, cx| {
+                            this.toggle_role(user_id, role_id, assigned, cx);
+                        }),
+                    ),
+            );
+        }
+
+        div()
+            .id(("member-role-picker", user_id.get() as u64))
+            .occlude()
+            .absolute()
+            .top_0()
+            .right(px(30.))
+            .w(px(ROLE_PICKER_WIDTH))
+            .max_h(px(208.))
+            .min_h_0()
+            .overflow_y_scroll()
+            .p_1()
+            .rounded_lg()
+            .border_1()
+            .border_color(theme.tokens.border_primary)
+            .bg(theme.tokens.bg_theme_contexify)
+            .shadow_lg()
+            .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                if this.role_picker_open.is_some() {
+                    this.role_picker_open = None;
+                    cx.notify();
+                }
+            }))
+            .child(options)
+            .into_any_element()
     }
 
     fn render_member_row(
@@ -290,7 +526,7 @@ impl ClanMembersPage {
             .first()
             .and_then(|role| parse_hex_color(&role.color))
             .map(Hsla::from)
-            .unwrap_or_else(|| Hsla::from(theme.text_secondary));
+            .unwrap_or_else(role_fallback_color);
         let subtitle = row.username.clone();
         table_row(theme, false, fill_available_height)
             .id(format!("member-row-{}", row.id.get()))
@@ -672,6 +908,7 @@ impl ClanMembersPage {
 impl Render for ClanMembersPage {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.ensure_search(window, cx);
+        self.refresh_role_options(cx);
         let theme = cx.theme();
         let locale = self.settings.read(cx).language.clone();
         let has_search_query = self
@@ -808,8 +1045,17 @@ fn date_cell(value: String, theme: &crate::theme::Theme) -> AnyElement {
         .child(value)
         .into_any_element()
 }
-fn role_badge(role: &Role, emphasized: bool, theme: &crate::theme::Theme) -> AnyElement {
-    let color = parse_hex_color(&role.color).unwrap_or_else(|| gpui::rgba(0x778899ff));
+fn role_color(raw: &str) -> gpui::Rgba {
+    parse_hex_color(raw).unwrap_or_else(|| gpui::rgb(crate::chat::role_style::ROLE_FALLBACK_COLOR))
+}
+
+fn role_badge(
+    role: &Role,
+    emphasized: bool,
+    theme: &crate::theme::Theme,
+    cx: &gpui::App,
+) -> AnyElement {
+    let color = role_color(&role.color);
     let mut background = color;
     background.a = 0.31;
     div()
@@ -823,7 +1069,14 @@ fn role_badge(role: &Role, emphasized: bool, theme: &crate::theme::Theme) -> Any
         .bg(background)
         .child(role_dot(role))
         .when(!role.icon.is_empty(), |element| {
-            element.child(img(role.icon.clone()).size(px(12.)).flex_shrink_0())
+            element.child(
+                img(crate::util::imgproxy::role_icon_url(cx, &role.icon))
+                    .size(px(12.))
+                    .flex_shrink_0()
+                    .when_some(crate::image_cache::role_icon_cache(cx), |el, cache| {
+                        el.image_cache(&cache)
+                    }),
+            )
         })
         .child(
             div()
@@ -849,7 +1102,7 @@ fn role_dot(role: &Role) -> AnyElement {
         .size(px(12.))
         .flex_shrink_0()
         .rounded_full()
-        .bg(parse_hex_color(&role.color).unwrap_or_else(|| gpui::rgba(0x778899ff)))
+        .bg(role_color(&role.color))
         .into_any_element()
 }
 

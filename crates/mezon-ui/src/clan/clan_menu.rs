@@ -136,7 +136,7 @@ impl RenderOnce for ClanMenuDropdown {
         let border = tokens.border_primary;
         let text = tokens.text_theme_primary;
         let hover = tokens.bg_item_hover;
-        let danger = theme.status_dnd;
+        let danger = theme.danger_text;
         let muted = theme.text_secondary;
         let dismiss = self.on_dismiss.clone();
 

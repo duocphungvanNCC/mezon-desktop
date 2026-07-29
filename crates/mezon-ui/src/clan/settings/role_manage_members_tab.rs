@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use std::rc::Rc;
 
 use gpui::{
     Context, FontWeight, ListSizingBehavior, MouseDownEvent, SharedString, Window, canvas, div,
@@ -109,17 +110,9 @@ impl RoleSettingPage {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         self.ensure_member_search_input(window, cx);
-        if let Some(role_id) = self.selected_role_id {
-            RolesStore::global(cx).update(cx, |store, cx| {
-                store.ensure_role_users_loaded(role_id, cx);
-            });
-        }
-        ClanMembersStore::global(cx).update(cx, |store, cx| {
-            store.ensure_loaded(self.clan_id, cx);
-        });
 
         let query = self.member_search_query.to_ascii_lowercase();
-        let members = self.filtered_role_members(query, cx);
+        let members = Rc::new(self.filtered_role_members(query, cx));
         let can_add = can_edit && self.selected_role_id.is_some() && !self.is_saving(cx);
         let members_saving = self.is_saving(cx);
         let popover_open = self.add_members_popover_open;
@@ -215,8 +208,6 @@ impl RoleSettingPage {
                     move |range, _window, cx| {
                         let theme = cx.theme().clone();
                         let page = entity.read(cx);
-                        let query = page.member_search_query.to_ascii_lowercase();
-                        let members = page.filtered_role_members(query, cx);
                         range
                             .map(|ix| match members.get(ix) {
                                 Some(member) => page
@@ -249,7 +240,7 @@ impl RoleSettingPage {
     ) -> impl IntoElement {
         self.ensure_add_member_search_input(window, cx);
         let query = self.add_member_search_query.to_ascii_lowercase();
-        let candidates = self.add_member_candidates(query, cx);
+        let candidates = Rc::new(self.add_member_candidates(query, cx));
         let role_name = self.draft_name.clone();
         let selected_count = self.add_member_selection.len();
         let title = mezon_i18n::t(locale, "clanRoles.setupMember.addMember");
@@ -330,8 +321,6 @@ impl RoleSettingPage {
                             move |range, _window, cx| {
                                 let theme = cx.theme().clone();
                                 let page = page.read(cx);
-                                let query = page.add_member_search_query.to_ascii_lowercase();
-                                let candidates = page.add_member_candidates(query, cx);
                                 range
                                     .map(|ix| match candidates.get(ix) {
                                         Some(member) => page

@@ -727,7 +727,7 @@ impl OverviewSettingPage {
                         })
                         .size(px(16.0))
                         .text_color(if has_logo {
-                            theme.status_dnd
+                            theme.danger_text
                         } else {
                             theme.text_secondary
                         }),
@@ -827,7 +827,7 @@ impl OverviewSettingPage {
                         })
                         .size(px(16.0))
                         .text_color(if has_banner {
-                            theme.status_dnd
+                            theme.danger_text
                         } else {
                             theme.text_secondary
                         }),
@@ -1034,7 +1034,7 @@ impl Render for OverviewSettingPage {
                                             .text_xs()
                                             .italic()
                                             .font_weight(FontWeight::NORMAL)
-                                            .text_color(theme.status_dnd)
+                                            .text_color(theme.danger_text)
                                             .child(err),
                                     )
                                 }),

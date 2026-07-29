@@ -234,42 +234,7 @@ fn avatar_from(url: &str) -> Option<SharedString> {
 }
 
 fn parse_hex_role_color(raw: &str) -> Option<gpui::Rgba> {
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-    let hex = trimmed.strip_prefix('#').unwrap_or(trimmed);
-    let (r, g, b) = match hex.len() {
-        6 => {
-            let value = u32::from_str_radix(hex, 16).ok()?;
-            (
-                ((value >> 16) & 0xff) as u8,
-                ((value >> 8) & 0xff) as u8,
-                (value & 0xff) as u8,
-            )
-        }
-        3 => {
-            let r = u8::from_str_radix(&hex[0..1], 16).ok()?;
-            let g = u8::from_str_radix(&hex[1..2], 16).ok()?;
-            let b = u8::from_str_radix(&hex[2..3], 16).ok()?;
-            (r * 17, g * 17, b * 17)
-        }
-        8 => {
-            let value = u32::from_str_radix(&hex[0..6], 16).ok()?;
-            (
-                ((value >> 16) & 0xff) as u8,
-                ((value >> 8) & 0xff) as u8,
-                (value & 0xff) as u8,
-            )
-        }
-        _ => return None,
-    };
-    Some(gpui::Rgba {
-        r: r as f32 / 255.,
-        g: g as f32 / 255.,
-        b: b as f32 / 255.,
-        a: 1.,
-    })
+    mezon_store::parse_role_color(raw)
 }
 
 fn resolve_inbox_sender_color(clan_id: ClanId, sender_id: UserId, cx: &App) -> Hsla {

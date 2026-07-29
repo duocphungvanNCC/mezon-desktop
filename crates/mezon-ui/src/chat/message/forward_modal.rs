@@ -849,7 +849,7 @@ impl Render for ForwardMessageModal {
             .when(self.note_len >= COUNTER_VISIBLE_AT, |el| {
                 let remaining = MAX_FORWARD_MESSAGE_LENGTH as isize - self.note_len as isize;
                 let color = if remaining < 0 {
-                    theme.status_dnd
+                    theme.danger_text
                 } else if self.note_len >= COUNTER_WARN_AT {
                     theme.status_idle
                 } else {
@@ -864,7 +864,7 @@ impl Render for ForwardMessageModal {
             });
 
         let note_border = if self.note_too_long() {
-            theme.status_dnd
+            theme.danger_text
         } else {
             theme.tokens.theme_border_input
         };
