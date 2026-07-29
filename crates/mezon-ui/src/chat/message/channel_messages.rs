@@ -673,6 +673,46 @@ fn pagination_proximity(
     )
 }
 
+/// Where to pin the scroll when a newer page lands while the user sits at the
+/// bottom clamp with more pages still below. Parked at the clamp the list is
+/// bottom-following (`logical_scroll_top == None`), so every appended page
+/// glues the viewport to the new end — the position never leaves the
+/// pagination threshold and the loader chain-fires page after page with no
+/// user input. Pin the previous tail row at the viewport top instead; the
+/// user scrolls into the new page themselves. Returns the list index to pin,
+/// or `None` when following is correct (not at the clamp, or the page reached
+/// the real tail).
+fn clamp_append_pin(
+    was_at_end: bool,
+    added_bottom: usize,
+    has_more_bottom: bool,
+    prev_count: usize,
+    added_top: usize,
+    removed_top: usize,
+) -> Option<usize> {
+    (was_at_end && added_bottom > 0 && has_more_bottom)
+        .then(|| (prev_count + added_top).saturating_sub(removed_top + 1))
+}
+
+/// The viewport range to test for pagination. `last_visible_*` come from the
+/// most recent scroll event; when the list anchor has moved since (a splice, a
+/// programmatic scroll, or a read while parked at the bottom) the cached range
+/// is stale, so re-anchor it at `scroll_top` and keep the measured span rather
+/// than collapsing to an empty range — an empty range reads as "far from the
+/// bottom" and silently skips bottom pagination.
+fn pagination_visible_range(
+    scroll_top: usize,
+    last_visible_start: usize,
+    last_visible_end: usize,
+    item_count: usize,
+) -> (usize, usize) {
+    if last_visible_start == scroll_top {
+        return (last_visible_start, last_visible_end);
+    }
+    let span = last_visible_end.saturating_sub(last_visible_start);
+    (scroll_top, scroll_top.saturating_add(span).min(item_count))
+}
+
 fn pagination_direction(
     near_top: bool,
     near_bottom: bool,
@@ -1054,6 +1094,39 @@ mod pagination_tests {
             None
         );
     }
+
+    #[test]
+    fn stale_anchor_keeps_the_measured_viewport_span() {
+        assert_eq!(pagination_visible_range(70, 70, 88, 100), (70, 88));
+        assert_eq!(pagination_visible_range(75, 70, 88, 100), (75, 93));
+        assert_eq!(pagination_visible_range(95, 70, 88, 100), (95, 100));
+    }
+
+    #[test]
+    fn moved_anchor_near_the_tail_still_reads_as_near_bottom() {
+        let (start, end) = pagination_visible_range(75, 70, 88, 100);
+        assert_eq!(pagination_proximity(start, end, 100, false), (false, true));
+    }
+
+    #[test]
+    fn clamp_append_pins_the_previous_tail_row() {
+        assert_eq!(clamp_append_pin(true, 50, true, 100, 0, 0), Some(99));
+        assert_eq!(clamp_append_pin(true, 50, true, 200, 0, 50), Some(149));
+    }
+
+    #[test]
+    fn clamp_append_follows_when_the_tail_page_arrived_or_not_parked() {
+        assert_eq!(clamp_append_pin(true, 50, false, 100, 0, 0), None);
+        assert_eq!(clamp_append_pin(false, 50, true, 100, 0, 0), None);
+        assert_eq!(clamp_append_pin(true, 0, true, 100, 0, 0), None);
+    }
+
+    #[test]
+    fn pinned_position_leaves_the_pagination_threshold() {
+        let pinned = clamp_append_pin(true, 50, true, 100, 0, 0).unwrap();
+        let (start, end) = pagination_visible_range(pinned, 100, 101, 150);
+        assert_eq!(pagination_proximity(start, end, 150, false), (false, false));
+    }
 }
 
 #[cfg(test)]
@@ -1133,6 +1206,8 @@ pub struct ChannelMessages {
     paginate_armed_top: bool,
     paginate_armed_bottom: bool,
     pagination_check_scheduled: bool,
+    paginate_retry_pending: bool,
+    pagination_fetch_active: bool,
     last_paginate_count: usize,
     last_paginate_edges: (
         Option<mezon_store::MessageId>,
@@ -1361,6 +1436,7 @@ impl ChannelMessages {
                     this.list_state.reset(*count);
                     this.last_visible_start = 0;
                     this.last_visible_end = 0;
+                    this.paginate_retry_pending = false;
                     this.header_shown = false;
 
                     let new_channel = _store.read(cx).active_channel_id();
@@ -1494,6 +1570,19 @@ impl ChannelMessages {
                             this.last_seen_at_bottom = Some(last.id);
                         }
                         this.sync_channel_seen(cx);
+                    } else if let Some(item_ix) = clamp_append_pin(
+                        was_at_end,
+                        *added_bottom,
+                        _store.read(cx).has_more_bottom(),
+                        prev_count,
+                        *added_top,
+                        *removed_top,
+                    ) {
+                        this.list_state.scroll_to(gpui::ListOffset {
+                            item_ix,
+                            offset_in_item: px(0.),
+                        });
+                        this.at_bottom = false;
                     } else if *added_top > 0 || *removed_top > 0 {
                         let anchor = preserved_message_anchor.or_else(|| {
                             shifted_scroll_anchor(
@@ -1576,6 +1665,33 @@ impl ChannelMessages {
                 this.refresh_derived_state(cx);
             }
             cx.notify();
+        }));
+
+        subs.push(cx.observe(&store, |this, store, cx| {
+            if this.is_topic_box {
+                return;
+            }
+            let fetching = {
+                let s = store.read(cx);
+                s.is_loading() || s.is_loading_more()
+            };
+            let finished = this.pagination_fetch_active && !fetching;
+            this.pagination_fetch_active = fetching;
+            if !finished {
+                return;
+            }
+            // A fetch just ended (success, empty, or error). Re-arm both edges:
+            // a failed or empty page leaves the buffer unchanged, so none of
+            // the in-check re-arm conditions fire and the edge would stay dead
+            // until the user scrolls a full threshold away. If a pagination
+            // request was rejected while this fetch held the slot, run the
+            // check now — parked against an edge, no further scroll event is
+            // coming to do it.
+            this.paginate_armed_top = true;
+            this.paginate_armed_bottom = true;
+            if this.paginate_retry_pending {
+                this.maybe_paginate_by_items(cx);
+            }
         }));
 
         let list_state = ListState::new(0, ListAlignment::Bottom, px(LIST_OVERDRAW))
@@ -1778,6 +1894,8 @@ impl ChannelMessages {
             scroll_relief_armed: false,
             paginate_armed_top: true,
             paginate_armed_bottom: true,
+            paginate_retry_pending: false,
+            pagination_fetch_active: false,
             pagination_check_scheduled: false,
             last_paginate_count: 0,
             last_paginate_edges: (None, None),
@@ -3038,11 +3156,12 @@ impl ChannelMessages {
     fn maybe_paginate_by_items(&mut self, cx: &mut Context<Self>) {
         let item_count = self.list_state.item_count();
         let scroll_top = self.list_state.logical_scroll_top().item_ix;
-        let (visible_start, visible_end) = if self.last_visible_start == scroll_top {
-            (self.last_visible_start, self.last_visible_end)
-        } else {
-            (scroll_top, scroll_top)
-        };
+        let (visible_start, visible_end) = pagination_visible_range(
+            scroll_top,
+            self.last_visible_start,
+            self.last_visible_end,
+            item_count,
+        );
         let (near_top, near_bottom) =
             pagination_proximity(visible_start, visible_end, item_count, self.header_shown);
         let store_entity = MessagesStore::global(cx);
@@ -3071,6 +3190,7 @@ impl ChannelMessages {
         if !near_bottom || !has_more_bottom {
             self.paginate_armed_bottom = true;
         }
+        self.paginate_retry_pending = false;
         match pagination_direction(
             near_top,
             near_bottom,
@@ -3080,12 +3200,14 @@ impl ChannelMessages {
             self.paginate_armed_bottom,
         ) {
             Some(PaginationDirection::Top) => {
-                self.paginate_armed_top = false;
-                store_entity.update(cx, |store, cx| store.scroll_reached_top(cx));
+                let started = store_entity.update(cx, |store, cx| store.scroll_reached_top(cx));
+                self.paginate_armed_top = !started;
+                self.paginate_retry_pending = !started;
             }
             Some(PaginationDirection::Bottom) => {
-                self.paginate_armed_bottom = false;
-                store_entity.update(cx, |store, cx| store.scroll_reached_bottom(cx));
+                let started = store_entity.update(cx, |store, cx| store.scroll_reached_bottom(cx));
+                self.paginate_armed_bottom = !started;
+                self.paginate_retry_pending = !started;
             }
             None => {}
         }
