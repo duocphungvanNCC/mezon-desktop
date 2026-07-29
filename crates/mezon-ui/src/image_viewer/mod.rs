@@ -4,11 +4,12 @@ use std::time::{Duration, Instant};
 use gpui::Size as GpuiSize;
 use gpui::http_client::HttpClient;
 use gpui::{
-    App, AppContext, BackgroundExecutor, Bounds, Context, Corners, Entity, FocusHandle, Focusable,
-    ImageCache, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, ObjectFit, Pixels,
-    Point, Render, RenderImage, Resource, ScrollDelta, ScrollWheelEvent, SharedString, SharedUri,
-    Subscription, UniformListScrollHandle, Window, WindowBounds, WindowHandle, WindowKind,
-    WindowOptions, canvas, div, img, point, prelude::*, px, relative, size, uniform_list,
+    AnyWindowHandle, App, AppContext, BackgroundExecutor, Bounds, Context, Corners, DisplayId,
+    Entity, FocusHandle, Focusable, ImageCache, KeyDownEvent, MouseButton, MouseDownEvent,
+    MouseMoveEvent, ObjectFit, Pixels, Point, Render, RenderImage, Resource, ScrollDelta,
+    ScrollWheelEvent, SharedString, SharedUri, Subscription, UniformListScrollHandle, Window,
+    WindowBounds, WindowHandle, WindowKind, WindowOptions, canvas, div, img, point, prelude::*, px,
+    relative, size, uniform_list,
 };
 use mezon_store::{
     AppConfig, ChannelAttachment, ChannelId, ChannelList, ClanId, DirectMessageStore, GalleryStore,
@@ -16,7 +17,9 @@ use mezon_store::{
 };
 use ui::{ScrollAxes, Scrollbars, WithScrollbar};
 
-use crate::app::main_window::{activate_main_window, main_window_bounds};
+use crate::app::main_window::{
+    activate_main_window, handle as main_window_handle, window_placement_for,
+};
 use crate::app::shell::Shell;
 use crate::app::title_bar::TitleBar;
 use crate::app::window_controls;
@@ -105,12 +108,14 @@ pub fn close_image_viewer(cx: &mut App) {
     clear_image_viewer_global(cx);
 }
 
-fn prior_viewer_bounds(cx: &mut App) -> Option<Bounds<Pixels>> {
+fn prior_viewer_placement(cx: &mut App) -> Option<(WindowBounds, Option<DisplayId>)> {
     let handle = cx.try_global::<GlobalImageViewer>().map(|g| g.0)?;
-    match handle.update(cx, |_, window, _| window.window_bounds()) {
-        Ok(WindowBounds::Windowed(bounds)) => Some(bounds),
-        _ => None,
-    }
+    handle
+        .update(cx, |_, window, cx| {
+            let display_id = window.display(cx).map(|d| d.id());
+            (window.window_bounds(), display_id)
+        })
+        .ok()
 }
 
 /// Open the image viewer, replacing any existing viewer window.
@@ -121,6 +126,7 @@ pub fn open_image_viewer(request: OpenViewerRequest, cx: &mut App) {
 fn open_image_viewer_now(request: OpenViewerRequest, cx: &mut App) {
     let mut pending = Some(request);
     if let Some(handle) = cx.try_global::<GlobalImageViewer>().map(|g| g.0) {
+        let prior = prior_viewer_placement(cx);
         let _ = handle.update(cx, |viewer, window, cx| {
             if let Some(request) = pending.take() {
                 window.activate_window();
@@ -132,37 +138,94 @@ fn open_image_viewer_now(request: OpenViewerRequest, cx: &mut App) {
             return;
         }
         clear_image_viewer_global(cx);
+        let Some(request) = pending.take() else {
+            return;
+        };
+        spawn_image_viewer_window(request, prior, cx);
+        return;
     }
     let Some(request) = pending else {
         return;
     };
-    let prior_bounds = prior_viewer_bounds(cx);
-    spawn_image_viewer_window(request, prior_bounds, cx);
+    spawn_image_viewer_window(request, None, cx);
 }
 
-fn default_viewer_bounds(cx: &mut App) -> Bounds<Pixels> {
-    const MIN_W: f32 = 640.0;
-    const MIN_H: f32 = 480.0;
-    if let Some(main) = main_window_bounds(cx) {
-        let w = (f32::from(main.size.width) * 0.8).max(MIN_W);
-        let h = (f32::from(main.size.height) * 0.8).max(MIN_H);
-        return Bounds::centered(None, size(px(w), px(h)), cx);
+fn viewer_window_placement(
+    main_app: AnyWindowHandle,
+    cx: &mut App,
+) -> (WindowBounds, Option<DisplayId>) {
+    window_placement_for(main_app, cx).unwrap_or_else(|| {
+        (
+            WindowBounds::Windowed(Bounds::centered(None, size(px(1100.0), px(740.0)), cx)),
+            None,
+        )
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn viewer_uses_wayland_parent() -> bool {
+    std::env::var("WAYLAND_DISPLAY").is_ok()
+        && std::env::var("XDG_SESSION_TYPE")
+            .map(|session| session.eq_ignore_ascii_case("wayland"))
+            .unwrap_or(true)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn viewer_uses_wayland_parent() -> bool {
+    false
+}
+
+fn apply_viewer_bounds(window: &mut Window, bounds: WindowBounds) {
+    match bounds {
+        WindowBounds::Windowed(bounds) => window.set_bounds(bounds),
+        WindowBounds::Maximized(_) => {
+            if !window.is_maximized() {
+                window.zoom_window();
+            }
+        }
+        WindowBounds::Fullscreen(_) => {
+            if !window.is_fullscreen() {
+                window.toggle_fullscreen();
+            }
+        }
     }
-    Bounds::centered(None, size(px(1100.0), px(740.0)), cx)
+}
+
+fn sync_viewer_to_main(viewer: WindowHandle<ImageViewer>, main_app: AnyWindowHandle, cx: &mut App) {
+    let Some((main_bounds, _)) = window_placement_for(main_app, cx) else {
+        return;
+    };
+    let _ = viewer.update(cx, |_, window, _| {
+        apply_viewer_bounds(window, main_bounds);
+    });
 }
 
 fn spawn_image_viewer_window(
     request: OpenViewerRequest,
-    prior_bounds: Option<Bounds<Pixels>>,
+    prior_placement: Option<(WindowBounds, Option<DisplayId>)>,
     cx: &mut App,
 ) {
-    let bounds = prior_bounds.unwrap_or_else(|| default_viewer_bounds(cx));
+    let main_app = main_window_handle(cx)
+        .expect("main app window must be registered before opening image viewer");
+    let (window_bounds, display_id) =
+        prior_placement.unwrap_or_else(|| viewer_window_placement(main_app, cx));
+
+    let use_wayland_parent = viewer_uses_wayland_parent();
+    let kind = if use_wayland_parent {
+        WindowKind::Floating
+    } else {
+        WindowKind::Normal
+    };
+    let parent_window = use_wayland_parent.then_some(main_app);
     let options = WindowOptions {
-        window_bounds: Some(WindowBounds::Windowed(bounds)),
+        window_bounds: Some(window_bounds),
         window_min_size: Some(size(px(640.0), px(480.0))),
-        kind: WindowKind::Normal,
+        kind,
         focus: true,
         show: true,
+        is_movable: true,
+        display_id,
+        parent_window,
         titlebar: Some(window_controls::window_title_options()),
         window_decorations: window_controls::main_window_decorations(),
         app_id: window_controls::linux_app_id(),
@@ -179,10 +242,14 @@ fn spawn_image_viewer_window(
             }) {
                 tracing::warn!("Failed to configure image viewer window: {error}");
             }
-            cx.set_global(GlobalImageViewer(handle));
+            cx.set_global(GlobalImageViewer(handle.clone()));
             let _ = handle.update(cx, |viewer, window, cx| {
                 window.activate_window();
                 window.focus(&viewer.focus_handle, cx);
+            });
+            let viewer = handle.clone();
+            cx.defer(move |cx| {
+                sync_viewer_to_main(viewer, main_app, cx);
             });
         }
         Err(e) => tracing::error!("failed to open image viewer window: {e}"),

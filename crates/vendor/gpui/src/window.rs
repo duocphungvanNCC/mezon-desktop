@@ -1298,6 +1298,7 @@ impl Window {
             app_id,
             window_min_size,
             window_decorations,
+            parent_window,
             #[cfg_attr(
                 not(any(target_os = "linux", target_os = "freebsd")),
                 allow(unused_variables)
@@ -1323,6 +1324,7 @@ impl Window {
                 show,
                 display_id,
                 window_min_size,
+                parent_window,
                 icon,
                 #[cfg(target_os = "macos")]
                 tabbing_identifier,
@@ -2255,6 +2257,11 @@ impl Window {
     /// Set the content size of the window.
     pub fn resize(&mut self, size: Size<Pixels>) {
         self.platform_window.resize(size);
+    }
+
+    /// Set the window bounds (position and size). On Wayland only the size is applied.
+    pub fn set_bounds(&mut self, bounds: Bounds<Pixels>) {
+        self.platform_window.set_bounds(bounds);
     }
 
     /// Returns whether or not the window is currently fullscreen
