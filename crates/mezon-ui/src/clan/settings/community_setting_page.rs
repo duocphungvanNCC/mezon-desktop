@@ -3,9 +3,9 @@ use gpui::{
     Task, Window, div, img, prelude::*, px,
 };
 use mezon_store::{
-    ClanId, ClanImageMimeType, ClanList, CommunityDraft, CommunityInfo, MAX_COMMUNITY_ABOUT_CHARS,
-    MAX_COMMUNITY_BANNER_BYTES, MAX_COMMUNITY_DESCRIPTION_CHARS, MAX_COMMUNITY_SHORT_URL_CHARS,
-    Settings,
+    AppConfig, ClanId, ClanImageMimeType, ClanList, CommunityDraft, CommunityInfo,
+    MAX_COMMUNITY_ABOUT_CHARS, MAX_COMMUNITY_BANNER_BYTES, MAX_COMMUNITY_DESCRIPTION_CHARS,
+    MAX_COMMUNITY_SHORT_URL_CHARS, Settings, sanitize_community_short_url, truncate_chars,
 };
 use std::time::Duration;
 
@@ -21,7 +21,6 @@ use crate::util::imgproxy;
 const ABOUT_MAX_LEN: usize = MAX_COMMUNITY_ABOUT_CHARS;
 const DESCRIPTION_MAX_LEN: usize = MAX_COMMUNITY_DESCRIPTION_CHARS;
 const VANITY_URL_MAX_LEN: usize = MAX_COMMUNITY_SHORT_URL_CHARS;
-const VANITY_URL_PREFIX: &str = "mezon.ai/clans/clan/";
 const COMMUNITY_BANNER_PREVIEW_W: u32 = 700;
 const COMMUNITY_BANNER_PREVIEW_H: u32 = 200;
 
@@ -154,10 +153,6 @@ impl CommunitySettingPage {
         self._vanity_sub = None;
     }
 
-    fn sync_inputs_from_draft(&mut self, _window: &mut Window, _cx: &mut Context<Self>) {
-        self.reset_inputs();
-    }
-
     fn ensure_inputs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let locale = self.settings.read(cx).language.clone();
         let theme = cx.theme().clone();
@@ -237,11 +232,16 @@ impl CommunitySettingPage {
             vanity_input.update(cx, |state, cx| {
                 state.set_value(&initial, window, cx);
             });
-            let sub = cx.subscribe(&vanity_input, |this, input, evt: &InputEvent, cx| {
+            let sub = cx.subscribe_in(&vanity_input, window, |this, input, evt, window, cx| {
                 if *evt == InputEvent::Change {
                     let raw = input.read(cx).value().to_string();
-                    this.draft.short_url =
-                        truncate_chars(&sanitize_vanity_url(&raw), VANITY_URL_MAX_LEN);
+                    let value = sanitize_community_short_url(&raw);
+                    if value != raw {
+                        input.update(cx, |state, cx| {
+                            state.set_value(&value, window, cx);
+                        });
+                    }
+                    this.draft.short_url = value;
                     this.field_errors.vanity_url = false;
                     this.url_copied = false;
                     this._copy_reset_task.take();
@@ -303,18 +303,18 @@ impl CommunitySettingPage {
         cx.notify();
     }
 
-    fn cancel_setup(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn cancel_setup(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
         self.setup_mode = false;
         self.draft = self.saved_draft.clone();
         self.field_errors = FieldErrors::default();
-        self.sync_inputs_from_draft(window, cx);
+        self.reset_inputs();
         cx.notify();
     }
 
-    fn reset(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn reset(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
         self.draft = self.saved_draft.clone();
         self.field_errors = FieldErrors::default();
-        self.sync_inputs_from_draft(window, cx);
+        self.reset_inputs();
         cx.notify();
     }
 
@@ -462,16 +462,22 @@ impl CommunitySettingPage {
             return;
         }
         let locale = self.settings.read(cx).language.clone();
-        let page = cx.entity();
+        let page = cx.weak_entity();
         Shell::global(cx).update(cx, |shell, cx| {
-            shell.confirm_disable_clan_community(page, &locale, window, cx);
+            shell.confirm_disable_clan_community(
+                move |cx| {
+                    let _ = page.update(cx, |page, cx| {
+                        page.disable_community(cx);
+                    });
+                },
+                &locale,
+                window,
+                cx,
+            );
         });
     }
 
     fn pick_banner(&mut self, cx: &mut Context<Self>) {
-        self.banner_uploading = true;
-        cx.notify();
-
         let locale = self.settings.read(cx).language.clone();
         let prompt: SharedString = mezon_i18n::t(
             &locale,
@@ -499,7 +505,7 @@ impl CommunitySettingPage {
                 Ok(Ok(Some(paths))) => paths,
                 _ => {
                     let _ = this.update(cx, |this, cx| {
-                        finish(this);
+                        this._banner_upload_task = None;
                         cx.notify();
                     });
                     return;
@@ -509,12 +515,16 @@ impl CommunitySettingPage {
                 Some(path) => path,
                 None => {
                     let _ = this.update(cx, |this, cx| {
-                        finish(this);
+                        this._banner_upload_task = None;
                         cx.notify();
                     });
                     return;
                 }
             };
+            let _ = this.update(cx, |this, cx| {
+                this.banner_uploading = true;
+                cx.notify();
+            });
             let ext = path
                 .extension()
                 .and_then(|e| e.to_str())
@@ -601,15 +611,19 @@ impl CommunitySettingPage {
         cx.notify();
     }
 
-    fn preview_url(&self) -> String {
-        format!("{VANITY_URL_PREFIX}{}", self.draft.short_url)
+    fn preview_url(&self, cx: &App) -> String {
+        AppConfig::global(cx).community_clan_url(&self.draft.short_url)
+    }
+
+    fn vanity_url_prefix(&self, cx: &App) -> String {
+        AppConfig::global(cx).community_clan_url_prefix()
     }
 
     fn copy_preview_url(&mut self, cx: &mut Context<Self>) {
         if self.draft.short_url.is_empty() {
             return;
         }
-        cx.write_to_clipboard(ClipboardItem::new_string(self.preview_url()));
+        cx.write_to_clipboard(ClipboardItem::new_string(self.preview_url(cx)));
         self.url_copied = true;
         cx.notify();
         let executor = cx.background_executor().clone();
@@ -739,9 +753,7 @@ impl CommunitySettingPage {
     fn render_char_counter(current: usize, max: usize, theme: &Theme) -> impl IntoElement {
         div()
             .text_xs()
-            .text_color(if current > max {
-                theme.status_dnd
-            } else if current > max * 8 / 10 {
+            .text_color(if current > max * 8 / 10 {
                 theme.status_idle
             } else {
                 theme.text_muted
@@ -958,6 +970,8 @@ impl CommunitySettingPage {
         let vanity_len = self.draft.short_url.chars().count();
         let show_preview = !self.draft.short_url.is_empty();
         let saving = self.saving;
+        let vanity_prefix = self.vanity_url_prefix(cx);
+        let preview_url = self.preview_url(cx);
 
         v_flex()
             .w_full()
@@ -1101,7 +1115,7 @@ impl CommunitySettingPage {
                                     .border_color(theme.border)
                                     .text_xs()
                                     .text_color(theme.text_muted)
-                                    .child(VANITY_URL_PREFIX),
+                                    .child(vanity_prefix),
                             )
                             .child(
                                 div()
@@ -1152,7 +1166,7 @@ impl CommunitySettingPage {
                                                         .text_color(theme.text_primary)
                                                         .overflow_hidden()
                                                         .text_ellipsis()
-                                                        .child(self.preview_url()),
+                                                        .child(preview_url),
                                                 ),
                                         )
                                         .child(
@@ -1232,7 +1246,13 @@ impl CommunitySettingPage {
                                 .text_xs()
                                 .font_weight(FontWeight::BOLD)
                                 .text_color(theme.status_dnd)
-                                .child("DANGER ZONE"),
+                                .child(
+                                    mezon_i18n::t(
+                                        locale,
+                                        "onBoardingClan.communitySettings.dangerZone",
+                                    )
+                                    .to_uppercase(),
+                                ),
                         )
                         .child(
                             h_flex()
@@ -1368,15 +1388,4 @@ pub fn render_community_save_bar(
                         ),
                 ),
         )
-}
-
-fn sanitize_vanity_url(raw: &str) -> String {
-    raw.to_ascii_lowercase()
-        .chars()
-        .filter(|c| c.is_ascii_alphanumeric() || *c == '-')
-        .collect()
-}
-
-fn truncate_chars(value: &str, max: usize) -> String {
-    value.chars().take(max).collect()
 }

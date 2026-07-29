@@ -14,7 +14,7 @@ use crate::realtime::{RealtimeDispatch, RealtimeKind};
 
 pub const MAX_CLAN_LOGO_BYTES: u64 = 1_000_000;
 pub const MAX_CLAN_BANNER_BYTES: u64 = 10_000_000;
-pub const MAX_COMMUNITY_BANNER_BYTES: u64 = 10_000_000;
+pub const MAX_COMMUNITY_BANNER_BYTES: u64 = MAX_CLAN_BANNER_BYTES;
 pub const MAX_COMMUNITY_ABOUT_CHARS: usize = 100;
 pub const MAX_COMMUNITY_DESCRIPTION_CHARS: usize = 300;
 pub const MAX_COMMUNITY_SHORT_URL_CHARS: usize = 50;
@@ -211,11 +211,11 @@ impl From<ApiClanDesc> for CommunityInfo {
     }
 }
 
-fn truncate_chars(value: &str, max: usize) -> String {
+pub fn truncate_chars(value: &str, max: usize) -> String {
     value.chars().take(max).collect()
 }
 
-fn sanitize_community_short_url(raw: &str) -> String {
+pub fn sanitize_community_short_url(raw: &str) -> String {
     truncate_chars(
         &raw.to_ascii_lowercase()
             .chars()
@@ -895,32 +895,6 @@ impl ClanList {
         })
     }
 
-    pub fn update_community_status(
-        &mut self,
-        clan_id: ClanId,
-        enabled: bool,
-        cx: &mut Context<Self>,
-    ) -> Task<Result<(), String>> {
-        let api = self.api.clone();
-        let clan = self.clans.iter().find(|c| c.id == clan_id).cloned();
-        cx.spawn(async move |this, cx| {
-            let request = community_update_request(clan_id, clan.as_ref(), |req| {
-                req.is_community = Some(enabled);
-            });
-            api.update_clan_desc(request)
-                .await
-                .map_err(|e| e.to_string())?;
-            this.update(cx, |this, cx| {
-                if let Some(clan) = this.clans.iter_mut().find(|c| c.id == clan_id) {
-                    clan.is_community = enabled;
-                }
-                cx.notify();
-            })
-            .map_err(|_| "store dropped".to_string())?;
-            Ok(())
-        })
-    }
-
     pub fn save_community_fields(
         &mut self,
         clan_id: ClanId,
@@ -932,15 +906,16 @@ impl ClanList {
             return cx
                 .spawn(async move |_, _| Err("community fields are incomplete or invalid".into()));
         }
+        let Some(clan) = self.clans.iter().find(|c| c.id == clan_id).cloned() else {
+            return cx.spawn(async move |_, _| Err("clan not found".into()));
+        };
         let api = self.api.clone();
-        let clan = self.clans.iter().find(|c| c.id == clan_id).cloned();
         let banner = draft.community_banner.clone();
         let about = draft.about.clone();
         let description = draft.description.clone();
         let short_url = draft.short_url.clone();
         cx.spawn(async move |this, cx| {
-            // Single update enables community and persists profile fields together.
-            let mut request = community_update_request(clan_id, clan.as_ref(), |req| {
+            let mut request = community_update_request(clan_id, &clan, |req| {
                 req.is_community = Some(true);
             });
             request.community_banner = Some(banner.clone());
@@ -970,7 +945,26 @@ impl ClanList {
         clan_id: ClanId,
         cx: &mut Context<Self>,
     ) -> Task<Result<(), String>> {
-        self.update_community_status(clan_id, false, cx)
+        let Some(clan) = self.clans.iter().find(|c| c.id == clan_id).cloned() else {
+            return cx.spawn(async move |_, _| Err("clan not found".into()));
+        };
+        let api = self.api.clone();
+        cx.spawn(async move |this, cx| {
+            let request = community_update_request(clan_id, &clan, |req| {
+                req.is_community = Some(false);
+            });
+            api.update_clan_desc(request)
+                .await
+                .map_err(|e| e.to_string())?;
+            this.update(cx, |this, cx| {
+                if let Some(clan) = this.clans.iter_mut().find(|c| c.id == clan_id) {
+                    clan.is_community = false;
+                }
+                cx.notify();
+            })
+            .map_err(|_| "store dropped".to_string())?;
+            Ok(())
+        })
     }
 
     pub fn check_clan_name_available(
@@ -1095,17 +1089,17 @@ pub(crate) async fn upload_image_to_cdn(
 
 fn community_update_request(
     clan_id: ClanId,
-    clan: Option<&Clan>,
+    clan: &Clan,
     patch: impl FnOnce(&mut UpdateClanDescRequest),
 ) -> UpdateClanDescRequest {
     let mut request = UpdateClanDescRequest {
         clan_id: clan_id.get(),
-        clan_name: clan.map(|c| c.name.clone()).unwrap_or_default(),
+        clan_name: clan.name.clone(),
         welcome_channel_id: clan
-            .and_then(|c| c.welcome_channel_id)
+            .welcome_channel_id
             .map(ChannelId::get)
             .unwrap_or_default(),
-        prevent_anonymous: clan.is_some_and(|c| c.prevent_anonymous),
+        prevent_anonymous: clan.prevent_anonymous,
         ..Default::default()
     };
     patch(&mut request);

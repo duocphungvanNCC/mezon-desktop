@@ -32,7 +32,7 @@ pub enum ClanSettingsPage {
     Integrations,
     AuditLog,
     Onboarding,
-    EnableCommunity,
+    ClanCommunity,
 }
 
 impl ClanSettingsPage {
@@ -48,7 +48,7 @@ impl ClanSettingsPage {
             "integrations" => Self::Integrations,
             "audit-log" => Self::AuditLog,
             "onboarding" => Self::Onboarding,
-            "enable-community" => Self::EnableCommunity,
+            "clan-community" => Self::ClanCommunity,
             _ => return None,
         })
     }
@@ -65,7 +65,7 @@ impl ClanSettingsPage {
             Self::Integrations => "integrations",
             Self::AuditLog => "audit-log",
             Self::Onboarding => "onboarding",
-            Self::EnableCommunity => "enable-community",
+            Self::ClanCommunity => "clan-community",
         }
     }
 
@@ -81,7 +81,7 @@ impl ClanSettingsPage {
             Self::Integrations => "clanSettings.sidebar.items.integrations",
             Self::AuditLog => "clanSettings.sidebar.items.auditLog",
             Self::Onboarding => "clanSettings.sidebar.items.onboarding",
-            Self::EnableCommunity => "clanSettings.sidebar.items.clanCommunity",
+            Self::ClanCommunity => "clanSettings.sidebar.items.clanCommunity",
         }
     }
 
@@ -103,7 +103,7 @@ impl ClanSettingsPage {
             | Self::Roles
             | Self::AuditLog
             | Self::Onboarding
-            | Self::EnableCommunity => perms.has_manage_clan,
+            | Self::ClanCommunity => perms.has_manage_clan,
             Self::CategoryOrder | Self::Emoji | Self::ImageStickers | Self::VoiceStickers => true,
         }
     }
@@ -155,7 +155,7 @@ const SIDEBAR_SECTIONS: &[SidebarSection] = &[
         title_key: None,
         pages: &[
             ClanSettingsPage::Onboarding,
-            ClanSettingsPage::EnableCommunity,
+            ClanSettingsPage::ClanCommunity,
         ],
     },
 ];
@@ -300,7 +300,7 @@ impl ClanSettingScreen {
                 self.release_page(ClanSettingsPage::VoiceStickers, cx);
                 self.release_page(ClanSettingsPage::Roles, cx);
                 self.release_page(ClanSettingsPage::Integrations, cx);
-                self.release_page(ClanSettingsPage::EnableCommunity, cx);
+                self.release_page(ClanSettingsPage::ClanCommunity, cx);
             }
             self.reset_content_scroll();
         }
@@ -347,7 +347,7 @@ impl ClanSettingScreen {
                     entity.update(cx, |page, cx| page.release(cx));
                 }
             }
-            ClanSettingsPage::EnableCommunity => {
+            ClanSettingsPage::ClanCommunity => {
                 if let Some(entity) = self.community_page.take() {
                     entity.update(cx, |page, cx| page.release(cx));
                 }
@@ -424,7 +424,7 @@ impl ClanSettingScreen {
                     cx.observe(page, |_, _, cx| cx.notify()).detach();
                 }
             }
-            ClanSettingsPage::EnableCommunity if self.community_page.is_none() => {
+            ClanSettingsPage::ClanCommunity if self.community_page.is_none() => {
                 let clan_list = self.clan_list.clone();
                 self.community_page =
                     Some(cx.new(|cx| CommunitySettingPage::new(clan_id, clan_list, settings, cx)));
@@ -508,7 +508,7 @@ impl ClanSettingScreen {
                 .integrations_page
                 .as_ref()
                 .map(|p| p.clone().into_any_element()),
-            ClanSettingsPage::EnableCommunity => self
+            ClanSettingsPage::ClanCommunity => self
                 .community_page
                 .as_ref()
                 .map(|p| p.clone().into_any_element()),
@@ -575,7 +575,7 @@ impl Render for ClanSettingScreen {
                 .as_ref()
                 .is_some_and(|roles| roles.read(cx).is_role_icon_picker_open());
         let role_icon_picker = self.roles_page.clone().filter(|_| show_role_icon_picker);
-        let show_community_save = page == ClanSettingsPage::EnableCommunity
+        let show_community_save = page == ClanSettingsPage::ClanCommunity
             && self
                 .community_page
                 .as_ref()

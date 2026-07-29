@@ -3469,6 +3469,7 @@
   "onBoardingClan.communitySettings.banner.uploadDescription": "Drag & drop or click to select an image",
   "onBoardingClan.communitySettings.banner.uploadTitle": "Upload Banner",
   "onBoardingClan.communitySettings.buttons.disable": "Disable Community",
+  "onBoardingClan.communitySettings.dangerZone": "Danger Zone",
   "onBoardingClan.communitySettings.disableModal.title": "Disable Community?",
   "onBoardingClan.communitySettings.disableModal.description": "Are you sure you want to disable Community for this clan? Your community page will no longer be publicly listed.",
   "onBoardingClan.communitySettings.buttons.enableAndSave": "Enable & Save",

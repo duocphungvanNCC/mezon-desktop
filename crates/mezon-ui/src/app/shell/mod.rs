@@ -533,7 +533,7 @@ impl Shell {
 
     pub fn confirm_disable_clan_community(
         &mut self,
-        page: Entity<crate::clan::settings::CommunitySettingPage>,
+        on_confirm: impl Fn(&mut App) + 'static,
         locale: &str,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -553,11 +553,11 @@ impl Shell {
             mezon_i18n::t(locale, "onBoardingClan.communitySettings.buttons.disable").into();
         let view = cx.new(|cx| DisableClanCommunityModal {
             focus_handle: cx.focus_handle(),
-            page: page.downgrade(),
             title,
             description,
             cancel_label,
             confirm_label,
+            on_confirm: std::rc::Rc::new(on_confirm),
         });
         let focus_handle = view.read(cx).focus_handle.clone();
         window.focus(&focus_handle, cx);

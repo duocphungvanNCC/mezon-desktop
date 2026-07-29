@@ -1,23 +1,24 @@
-use gpui::{Context, FocusHandle, SharedString, WeakEntity, Window, div, prelude::*, px};
+use std::rc::Rc;
+
+use gpui::{App, Context, FocusHandle, SharedString, Window, div, prelude::*, px};
 
 use super::Shell;
-use crate::clan::settings::CommunitySettingPage;
 use crate::components::primitives::{Button, ButtonVariants, h_flex, v_flex};
 use crate::theme::ActiveTheme;
 
 pub(super) struct DisableClanCommunityModal {
     pub(super) focus_handle: FocusHandle,
-    pub(super) page: WeakEntity<CommunitySettingPage>,
     pub(super) title: SharedString,
     pub(super) description: SharedString,
     pub(super) cancel_label: SharedString,
     pub(super) confirm_label: SharedString,
+    pub(super) on_confirm: Rc<dyn Fn(&mut App)>,
 }
 
 impl Render for DisableClanCommunityModal {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
-        let page = self.page.clone();
+        let on_confirm = self.on_confirm.clone();
 
         v_flex()
             .track_focus(&self.focus_handle)
@@ -63,15 +64,8 @@ impl Render for DisableClanCommunityModal {
                             .label(self.confirm_label.clone())
                             .danger()
                             .on_click(move |_, _window, cx| {
-                                let already_saving =
-                                    page.upgrade().is_some_and(|page| page.read(cx).is_saving());
-                                if already_saving {
-                                    return;
-                                }
                                 Shell::global(cx).update(cx, |shell, cx| shell.close_modal(cx));
-                                let _ = page.update(cx, |page, cx| {
-                                    page.disable_community(cx);
-                                });
+                                on_confirm(cx);
                             }),
                     ),
             )
