@@ -15,7 +15,8 @@ use mezon_client::transport::{
     MESSAGE_BUZZ_CODE, OutgoingEmoji as TransportEmoji, OutgoingHashtag as TransportHashtag,
     OutgoingMention as TransportMention, OutgoingMessageFlags, OutgoingOgp, OutgoingReply,
     SHARE_CONTACT_CODE, build_send_content, build_share_contact_content_json, detect_markdown,
-    emoji_content_tokens, hashtag_content_tokens, markdown_content_tokens, mention_content_tokens,
+    emoji_content_tokens, hashtag_content_tokens, is_here_user_id, markdown_content_tokens,
+    mention_content_tokens,
 };
 use mezon_client::{
     AppApi, AttachmentUploadOutcome, ConnectionStatus, MezonTransport, RealtimeEvent, UploadFile,
@@ -29,6 +30,7 @@ use crate::account::AccountStore;
 use crate::album_layout::{AlbumLayout, calculate_album_layout};
 use crate::badge::BadgeService;
 use crate::channel::{ChannelEvent, ChannelList, ChannelType, STREAM_MODE_THREAD};
+use crate::channel_members::ChannelMembersStore;
 use crate::clan_members::ClanMembersStore;
 use crate::direct::{DirectKind, DirectMessageStore};
 use crate::message::{
@@ -44,6 +46,8 @@ use crate::message::{
 use crate::message_time::unix_now_seconds;
 use crate::presign;
 use crate::realtime::{RealtimeDispatch, RealtimeKind};
+use crate::roles::RolesStore;
+use crate::threads::ThreadsStore;
 use crate::topics::TopicsStore;
 use crate::wallet::{SendTokenRequest, WalletEvent, WalletStore};
 
@@ -3558,6 +3562,15 @@ impl MessagesStore {
         });
         cx.spawn(async move |this, cx| {
             ensure_archived_thread_reactivated(&api, &this, channel_id, clan_id, mode, cx).await;
+            ensure_thread_membership_for_send(
+                &api,
+                &this,
+                channel_id,
+                clan_id,
+                &transport_mentions,
+                cx,
+            )
+            .await;
             if has_attachments {
                 let files: Vec<UploadFile> = attachments
                     .into_iter()
@@ -3594,6 +3607,8 @@ impl MessagesStore {
                     .map(|a| presign::normalize_presign_key(&a.url))
                     .collect();
                 let update_mentions = transport_mentions.clone();
+                let update_hashtags = transport_hashtags.clone();
+                let update_emojis = transport_emojis.clone();
                 let sent = match api
                     .send_presigned_message(
                         clan_id.get(),
@@ -3648,6 +3663,8 @@ impl MessagesStore {
                     real_message_id,
                     &content,
                     update_mentions,
+                    update_hashtags,
+                    update_emojis,
                     create_time_seconds,
                     presigned,
                     keys,
@@ -4511,6 +4528,21 @@ impl MessagesStore {
         };
         let message = message_id.get();
         let storage_for_rollback = storage_id;
+        if let Some(reaction_clan_id) = self.active_clan_id {
+            let users = plan_thread_membership_for_reaction(
+                parent_channel_id,
+                reaction_clan_id,
+                current_uid,
+                cx,
+            );
+            if !users.is_empty() {
+                let join_api = api.clone();
+                cx.spawn(async move |this, cx| {
+                    add_thread_members(&join_api, &this, parent_channel_id, users, cx).await;
+                })
+                .detach();
+            }
+        }
         cx.spawn(async move |this, cx| {
             if let Err(e) = api
                 .react_channel_message(
@@ -4908,6 +4940,191 @@ async fn ensure_archived_thread_reactivated(
             tracing::error!("active_archived_thread before send failed: {e}");
         }
     }
+}
+
+fn plan_thread_membership(
+    self_id: Option<UserId>,
+    thread_members: &[UserId],
+    parent_members: &[UserId],
+    mentioned: &[UserId],
+) -> Vec<UserId> {
+    let mut plan = Vec::new();
+    if let Some(self_id) = self_id
+        && !thread_members.contains(&self_id)
+    {
+        plan.push(self_id);
+    }
+    for user_id in mentioned {
+        if Some(*user_id) == self_id
+            || thread_members.contains(user_id)
+            || !parent_members.contains(user_id)
+            || plan.contains(user_id)
+        {
+            continue;
+        }
+        plan.push(*user_id);
+    }
+    plan
+}
+
+fn needs_parent_lookup(thread_members: &[UserId], candidates: &[UserId]) -> bool {
+    candidates
+        .iter()
+        .any(|user_id| !thread_members.contains(user_id))
+}
+
+fn mentioned_thread_candidates(
+    mentions: &[TransportMention],
+    clan_id: ClanId,
+    cx: &App,
+) -> Vec<UserId> {
+    let roles = RolesStore::try_global(cx);
+    let mut candidates = Vec::new();
+    for mention in mentions {
+        if !mention.user_id.is_empty() {
+            if is_here_user_id(&mention.user_id) {
+                continue;
+            }
+            if let Ok(user_id) = mention.user_id.parse::<UserId>() {
+                candidates.push(user_id);
+            }
+            continue;
+        }
+        let Ok(role_id) = mention.role_id.parse::<crate::ids::RoleId>() else {
+            continue;
+        };
+        let Some(roles) = roles.as_ref() else {
+            continue;
+        };
+        candidates.extend(roles.read(cx).role_member_ids(clan_id, role_id));
+    }
+    candidates
+}
+
+struct ThreadSendContext {
+    parent_id: ChannelId,
+    parent_channel_type: Option<i32>,
+    self_id: Option<UserId>,
+    thread_members: Vec<UserId>,
+    parent_members: Option<Vec<UserId>>,
+    mentioned: Vec<UserId>,
+}
+
+fn thread_send_context(
+    channel_id: ChannelId,
+    clan_id: ClanId,
+    mentions: &[TransportMention],
+    cx: &App,
+) -> Option<ThreadSendContext> {
+    let channels = ChannelList::global(cx);
+    let channels = channels.read(cx);
+    let parent_id = channels
+        .channel(clan_id, channel_id)
+        .and_then(|channel| channel.parent_id)
+        .filter(|parent_id| !parent_id.is_zero())?;
+    let parent_channel_type = channels
+        .channel(clan_id, parent_id)
+        .map(|channel| channel.channel_type.as_raw() as i32);
+    let members = ChannelMembersStore::try_global(cx)?;
+    let members = members.read(cx);
+    Some(ThreadSendContext {
+        parent_id,
+        parent_channel_type,
+        self_id: viewer_user_id(cx),
+        thread_members: members.member_ids(channel_id),
+        parent_members: members
+            .has_channel(parent_id)
+            .then(|| members.member_ids(parent_id)),
+        mentioned: mentioned_thread_candidates(mentions, clan_id, cx),
+    })
+}
+
+fn plan_thread_membership_for_reaction(
+    channel_id: ChannelId,
+    clan_id: ClanId,
+    user_id: UserId,
+    cx: &App,
+) -> Vec<UserId> {
+    let Some(ctx) = thread_send_context(channel_id, clan_id, &[], cx) else {
+        return Vec::new();
+    };
+    let parent_members = ctx.parent_members.unwrap_or_default();
+    plan_thread_membership(None, &ctx.thread_members, &parent_members, &[user_id])
+}
+
+async fn add_thread_members(
+    api: &AppApi,
+    this: &WeakEntity<MessagesStore>,
+    channel_id: ChannelId,
+    users: Vec<UserId>,
+    cx: &mut AsyncApp,
+) {
+    let _ = this.update(cx, |_this, cx| {
+        let joining_self = viewer_user_id(cx).is_some_and(|self_id| users.contains(&self_id));
+        if let Some(threads) = ThreadsStore::try_global(cx).filter(|_| joining_self) {
+            threads.update(cx, |threads, cx| {
+                threads.mark_thread_active(&channel_id.to_string(), cx);
+            });
+        }
+    });
+    let user_ids: Vec<String> = users.iter().map(|user_id| user_id.to_string()).collect();
+    if let Err(e) = api.add_channel_users(channel_id.get(), user_ids).await {
+        tracing::error!("add_channel_users for thread {channel_id} failed: {e}");
+        return;
+    }
+    let _ = this.update(cx, |_this, cx| {
+        if let Some(members) = ChannelMembersStore::try_global(cx) {
+            members.update(cx, |members, cx| {
+                members.apply_members_added(channel_id, &users, cx);
+            });
+        }
+    });
+}
+
+async fn ensure_thread_membership_for_send(
+    api: &AppApi,
+    this: &WeakEntity<MessagesStore>,
+    channel_id: ChannelId,
+    clan_id: ClanId,
+    mentions: &[TransportMention],
+    cx: &mut AsyncApp,
+) {
+    let Ok(Some(ctx)) = this.update(cx, |_this, cx| {
+        thread_send_context(channel_id, clan_id, mentions, cx)
+    }) else {
+        return;
+    };
+    let parent_members = match (ctx.parent_members, ctx.parent_channel_type) {
+        (Some(members), _) => members,
+        (None, Some(parent_channel_type))
+            if needs_parent_lookup(&ctx.thread_members, &ctx.mentioned) =>
+        {
+            match api
+                .list_channel_users(clan_id.get(), ctx.parent_id.get(), parent_channel_type)
+                .await
+            {
+                Ok(users) => users.iter().map(|user| UserId(user.user_id)).collect(),
+                Err(e) => {
+                    tracing::error!(
+                        "list_channel_users for thread parent {} failed: {e}",
+                        ctx.parent_id
+                    );
+                    Vec::new()
+                }
+            }
+        }
+        (None, _) => Vec::new(),
+    };
+    let users = plan_thread_membership(
+        ctx.self_id,
+        &ctx.thread_members,
+        &parent_members,
+        &ctx.mentioned,
+    );
+    if users.is_empty() {
+        return;
+    }
+    add_thread_members(api, this, channel_id, users, cx).await;
 }
 
 impl MessagesStore {
@@ -6685,6 +6902,106 @@ mod tests {
     use super::*;
     use crate::ids::UserId;
     use crate::message::MessageSpan;
+
+    #[test]
+    fn thread_send_joins_sender_when_not_a_member() {
+        let plan =
+            plan_thread_membership(Some(UserId(1)), &[UserId(2)], &[UserId(1), UserId(2)], &[]);
+
+        assert_eq!(plan, vec![UserId(1)]);
+    }
+
+    #[test]
+    fn thread_send_does_not_rejoin_an_existing_member() {
+        let plan = plan_thread_membership(
+            Some(UserId(1)),
+            &[UserId(1), UserId(2)],
+            &[UserId(1), UserId(2)],
+            &[],
+        );
+
+        assert!(plan.is_empty());
+    }
+
+    #[test]
+    fn thread_send_adds_mentioned_parent_members_missing_from_the_thread() {
+        let plan = plan_thread_membership(
+            Some(UserId(1)),
+            &[UserId(1)],
+            &[UserId(1), UserId(2), UserId(3)],
+            &[UserId(2), UserId(3)],
+        );
+
+        assert_eq!(plan, vec![UserId(2), UserId(3)]);
+    }
+
+    #[test]
+    fn thread_send_skips_mentions_outside_the_parent_channel() {
+        let plan = plan_thread_membership(
+            Some(UserId(1)),
+            &[UserId(1)],
+            &[UserId(1), UserId(2)],
+            &[UserId(2), UserId(9)],
+        );
+
+        assert_eq!(plan, vec![UserId(2)]);
+    }
+
+    #[test]
+    fn thread_send_skips_mentions_already_in_the_thread() {
+        let plan = plan_thread_membership(
+            Some(UserId(1)),
+            &[UserId(1), UserId(2)],
+            &[UserId(1), UserId(2)],
+            &[UserId(2)],
+        );
+
+        assert!(plan.is_empty());
+    }
+
+    #[test]
+    fn thread_send_lists_the_sender_once_when_also_mentioned() {
+        let plan = plan_thread_membership(
+            Some(UserId(1)),
+            &[],
+            &[UserId(1), UserId(2)],
+            &[UserId(1), UserId(2), UserId(2)],
+        );
+
+        assert_eq!(plan, vec![UserId(1), UserId(2)]);
+    }
+
+    #[test]
+    fn thread_send_without_a_known_viewer_only_adds_mentions() {
+        let plan = plan_thread_membership(None, &[], &[UserId(2)], &[UserId(2)]);
+
+        assert_eq!(plan, vec![UserId(2)]);
+    }
+
+    #[test]
+    fn parent_lookup_is_skipped_when_every_candidate_is_already_in_the_thread() {
+        assert!(!needs_parent_lookup(
+            &[UserId(1), UserId(2)],
+            &[UserId(1), UserId(2)]
+        ));
+        assert!(!needs_parent_lookup(&[UserId(1)], &[]));
+        assert!(needs_parent_lookup(&[UserId(1)], &[UserId(2)]));
+    }
+
+    #[test]
+    fn thread_reaction_joins_a_parent_member() {
+        let plan =
+            plan_thread_membership(None, &[UserId(2)], &[UserId(1), UserId(2)], &[UserId(1)]);
+
+        assert_eq!(plan, vec![UserId(1)]);
+    }
+
+    #[test]
+    fn thread_reaction_does_not_join_a_non_parent_member() {
+        let plan = plan_thread_membership(None, &[UserId(2)], &[UserId(2)], &[UserId(1)]);
+
+        assert!(plan.is_empty());
+    }
 
     #[test]
     fn name_for_prioritize_matches_reacts_order() {

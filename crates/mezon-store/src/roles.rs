@@ -61,6 +61,7 @@ pub struct ClanRoleDetail {
     pub max_level_permission: i32,
     pub permissions: Vec<RolePermission>,
     pub member_count: usize,
+    pub member_ids: Vec<UserId>,
     pub channel_ids: Vec<ChannelId>,
     pub role_channel_active: bool,
     pub creator_id: UserId,
@@ -365,6 +366,17 @@ impl RolesStore {
             .get(&role_id)
             .map(|users| users.as_slice())
             .unwrap_or(&[])
+    }
+
+    pub fn role_member_ids(&self, clan_id: ClanId, role_id: RoleId) -> Vec<UserId> {
+        if let Some(users) = self.role_users.get(&role_id) {
+            return users.iter().map(|user| user.id).collect();
+        }
+        self.cache
+            .get(&clan_id)
+            .and_then(|roles| roles.by_id.get(&role_id))
+            .map(|role| role.member_ids.clone())
+            .unwrap_or_default()
     }
 
     pub fn ensure_role_users_loaded(&mut self, role_id: RoleId, cx: &mut Context<Self>) {
@@ -839,15 +851,16 @@ impl RolesStore {
             return false;
         }
         let id = RoleId(r.id);
-        let previous_member_count = self
+        let previous_members = self
             .cache
             .get(&clan_id)
             .and_then(|roles| roles.by_id.get(&id))
-            .map(|role| role.member_count);
+            .map(|role| (role.member_count, role.member_ids.clone()));
         let has_role_users = r.role_user_list.is_some();
         let mut detail = role_detail_from_proto(r);
-        if !has_role_users && let Some(count) = previous_member_count {
+        if !has_role_users && let Some((count, member_ids)) = previous_members {
             detail.member_count = count;
+            detail.member_ids = member_ids;
         }
         let roles = self.cache.get_mut(&clan_id);
         if let Some(roles) = roles {
@@ -1129,10 +1142,11 @@ fn role_detail_from_proto(r: api::Role) -> ClanRoleDetail {
                 .collect()
         })
         .unwrap_or_default();
-    let member_count = r
+    let member_ids: Vec<UserId> = r
         .role_user_list
-        .map(|list| list.role_users.len())
-        .unwrap_or(0);
+        .map(|list| list.role_users.iter().map(|user| UserId(user.id)).collect())
+        .unwrap_or_default();
+    let member_count = member_ids.len();
     ClanRoleDetail {
         name: r.title,
         color: r.color,
@@ -1143,6 +1157,7 @@ fn role_detail_from_proto(r: api::Role) -> ClanRoleDetail {
         max_level_permission: r.max_level_permission,
         permissions,
         member_count,
+        member_ids,
         channel_ids: r.channel_ids.into_iter().map(ChannelId).collect(),
         role_channel_active: r.role_channel_active == 1,
         creator_id: UserId(r.creator_id),
@@ -1759,6 +1774,80 @@ mod tests {
                         .clan_role(TEST_CLAN, RoleId(10))
                         .map(|r| r.member_count),
                     Some(1)
+                );
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn role_member_ids_come_from_the_clan_roles_snapshot(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            let store = init_roles_store(cx);
+            store.update(cx, |store, _cx| {
+                let mut role = make_role(10, "Admin", "#f00");
+                role.role_user_list = Some(api::RoleUserList {
+                    role_users: vec![
+                        api::role_user_list::RoleUser {
+                            id: 101,
+                            ..Default::default()
+                        },
+                        api::role_user_list::RoleUser {
+                            id: 102,
+                            ..Default::default()
+                        },
+                    ],
+                    ..Default::default()
+                });
+                store
+                    .cache
+                    .insert(TEST_CLAN, roles_map_from_proto(vec![role]), None);
+
+                assert_eq!(
+                    store.role_member_ids(TEST_CLAN, RoleId(10)),
+                    vec![UserId(101), UserId(102)]
+                );
+                assert!(store.role_member_ids(TEST_CLAN, RoleId(99)).is_empty());
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn role_member_ids_prefer_the_fetched_role_user_list(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            let store = init_roles_store(cx);
+            store.update(cx, |store, _cx| {
+                let mut role = make_role(10, "Admin", "#f00");
+                role.role_user_list = Some(api::RoleUserList {
+                    role_users: vec![api::role_user_list::RoleUser {
+                        id: 101,
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                });
+                store
+                    .cache
+                    .insert(TEST_CLAN, roles_map_from_proto(vec![role]), None);
+                store.role_users.insert(
+                    RoleId(10),
+                    vec![
+                        RoleUser {
+                            id: UserId(101),
+                            username: String::new(),
+                            display_name: String::new(),
+                            avatar_url: String::new(),
+                        },
+                        RoleUser {
+                            id: UserId(103),
+                            username: String::new(),
+                            display_name: String::new(),
+                            avatar_url: String::new(),
+                        },
+                    ],
+                );
+
+                assert_eq!(
+                    store.role_member_ids(TEST_CLAN, RoleId(10)),
+                    vec![UserId(101), UserId(103)]
                 );
             });
         });
