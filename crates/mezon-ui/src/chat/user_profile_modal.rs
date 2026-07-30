@@ -787,7 +787,7 @@ fn profile_status(status: &str, theme: &crate::theme::Theme) -> (IconName, Rgba)
     }
 }
 
-fn average_bgra_color(bytes: &[u8]) -> Option<Rgba> {
+pub(crate) fn average_bgra_color(bytes: &[u8]) -> Option<Rgba> {
     let mut red = 0f64;
     let mut green = 0f64;
     let mut blue = 0f64;

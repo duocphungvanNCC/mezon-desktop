@@ -1,28 +1,44 @@
 use std::time::Duration;
 
 use crate::components::primitives::{
-    Avatar, Button as GpuiButton, ButtonVariants, Divider, Label, Sizable, Size, h_flex, v_flex,
+    Avatar, Button as GpuiButton, ButtonVariants, Label, Sizable, Size, h_flex, v_flex,
 };
-use gpui::{Context, Entity, FontWeight, SharedString, Window, div, prelude::*, px};
+use gpui::{
+    Context, Entity, FontWeight, Rgba, SharedString, Task, Window, deferred, div, prelude::*, px,
+};
 use mezon_store::{AccountStore, Settings};
 
+use crate::image_cache::LruImageCache;
 use crate::theme::ActiveTheme;
 
 pub struct AccountPage {
     settings: Entity<Settings>,
+    avatar_image_cache: Entity<LruImageCache>,
+    banner_color: Option<Rgba>,
+    banner_source: String,
+    banner_task: Option<Task<()>>,
     toast_message: Option<SharedString>,
 }
 
 impl AccountPage {
     pub fn new(settings: Entity<Settings>, cx: &mut Context<Self>) -> Self {
         cx.observe(&settings, |_, _, cx| cx.notify()).detach();
-        cx.observe(&AccountStore::global(cx), |_, _, cx| cx.notify())
-            .detach();
+        cx.observe(&AccountStore::global(cx), |this, _, cx| {
+            this.refresh_banner_source(cx);
+            cx.notify();
+        })
+        .detach();
         AccountStore::global(cx).update(cx, |store, cx| store.ensure_account(cx));
-        Self {
+        let mut page = Self {
             settings,
+            avatar_image_cache: crate::image_cache::shared_avatar_cache(cx),
+            banner_color: None,
+            banner_source: String::new(),
+            banner_task: None,
             toast_message: None,
-        }
+        };
+        page.refresh_banner_source(cx);
+        page
     }
 
     fn show_toast(&mut self, message: impl Into<SharedString>, cx: &mut Context<Self>) {
@@ -38,6 +54,51 @@ impl AccountPage {
             .ok();
         })
         .detach();
+    }
+
+    fn refresh_banner_source(&mut self, cx: &mut Context<Self>) {
+        let source = AccountStore::global(cx)
+            .read(cx)
+            .account
+            .as_ref()
+            .and_then(|account| account.avatar_url.as_deref())
+            .map(|url| crate::util::imgproxy::avatar_url(cx, url))
+            .unwrap_or_default();
+        if source == self.banner_source {
+            return;
+        }
+        self.banner_source = source.clone();
+        self.banner_color = None;
+        self.load_banner_color(source, cx);
+    }
+
+    fn load_banner_color(&mut self, avatar_url: String, cx: &mut Context<Self>) {
+        if avatar_url.is_empty() {
+            self.banner_task = None;
+            return;
+        }
+        let avatar_image_cache = self.avatar_image_cache.clone();
+        let resource = gpui::Resource::Uri(avatar_url.into());
+        self.banner_task = Some(cx.spawn(async move |this, cx| {
+            for attempt in 0..60 {
+                let image = avatar_image_cache
+                    .read_with(cx, |cache, _| cache.cached_render_image(&resource));
+                if let Some(image) = image
+                    && let Some(bytes) = image.as_bytes(0)
+                    && let Some(color) = crate::chat::user_profile_modal::average_bgra_color(bytes)
+                {
+                    let _ = this.update(cx, |this, cx| {
+                        this.banner_color = Some(color);
+                        cx.notify();
+                    });
+                    break;
+                }
+                let delay_ms = if attempt < 20 { 50 } else { 200 };
+                cx.background_executor()
+                    .timer(Duration::from_millis(delay_ms))
+                    .await;
+            }
+        }));
     }
 }
 
@@ -83,6 +144,12 @@ impl Render for AccountPage {
             SharedString::from(mezon_i18n::t(&locale, "setting.account.setPassword"))
         };
 
+        let password_display = if account.password_setted {
+            SharedString::from("*********")
+        } else {
+            SharedString::from(mezon_i18n::t(&locale, "setting.account.password"))
+        };
+
         let phone_display = account
             .phone_number
             .as_ref()
@@ -98,43 +165,69 @@ impl Render for AccountPage {
         let avatar_url = account
             .avatar_url
             .as_ref()
-            .map(|url| SharedString::from(crate::util::imgproxy::profile_url(cx, url)));
+            .map(|url| SharedString::from(crate::util::imgproxy::avatar_url(cx, url)))
+            .unwrap_or_default();
+        let banner_color = self
+            .banner_color
+            .map(gpui::Hsla::from)
+            .unwrap_or(theme.tokens.bg_secondary.into());
+
+        let account_field = |label: SharedString, value: SharedString| {
+            v_flex()
+                .gap_1()
+                .child(
+                    div()
+                        .text_xs()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(theme.text_muted)
+                        .child(label),
+                )
+                .child(Label::new(value).text_color(theme.text_secondary))
+        };
+
+        let outlined_button = |id: &'static str, label: SharedString| {
+            div()
+                .id(id)
+                .h(px(40.0))
+                .px_3()
+                .flex()
+                .flex_none()
+                .items_center()
+                .justify_center()
+                .rounded_md()
+                .bg(theme.tokens.bg_button_secondary)
+                .border_1()
+                .border_color(theme.border)
+                .text_color(theme.text_secondary)
+                .cursor_pointer()
+                .hover(move |style| style.text_color(theme.text_primary))
+                .child(label)
+        };
 
         v_flex()
-            .gap_6()
             .text_sm()
             .child(
                 v_flex()
+                    .relative()
                     .rounded_lg()
                     .overflow_hidden()
                     .bg(theme.bg_primary)
                     .shadow_md()
-                    .child(div().h(px(100.0)).w_full().bg(theme.brand))
+                    .child(div().h(px(100.0)).w_full().bg(banner_color))
                     .child(
                         h_flex()
-                            .px_6()
-                            .py_4()
+                            .h(px(104.))
+                            .px_5()
                             .gap_4()
+                            .items_center()
                             .child(
-                                Avatar::new()
-                                    .when_some(avatar_url.clone(), |av, url| av.src(url))
-                                    .name(display_name.clone())
-                                    .with_size(Size::Large),
-                            )
-                            .child(
-                                v_flex()
-                                    .gap_1()
-                                    .child(
-                                        Label::new(display_name.clone())
-                                            .text_lg()
-                                            .font_weight(FontWeight::SEMIBOLD)
-                                            .text_color(theme.text_primary),
-                                    )
-                                    .child(
-                                        Label::new(format!("@{}", username))
-                                            .text_sm()
-                                            .text_color(theme.text_muted),
-                                    ),
+                                Label::new(display_name.clone())
+                                    .relative()
+                                    .top(px(-26.0))
+                                    .ml(px(128.0))
+                                    .text_lg()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(theme.text_secondary),
                             )
                             .child(div().flex_1())
                             .child(
@@ -143,8 +236,10 @@ impl Render for AccountPage {
                                         &locale,
                                         "setting.account.editUserProfile",
                                     ))
-                                    .text_color(theme.text_primary)
-                                    .ghost()
+                                    .relative()
+                                    .top(px(-8.0))
+                                    .with_size(Size::Large)
+                                    .primary()
                                     .on_click(move |_, _, cx| {
                                         crate::router::replace(
                                             cx,
@@ -152,160 +247,136 @@ impl Render for AccountPage {
                                         );
                                     }),
                             ),
-                    ),
-            )
-            .child(
-                v_flex()
-                    .rounded_lg()
-                    .overflow_hidden()
-                    .bg(theme.bg_primary)
-                    .shadow_md()
-                    .child(
-                        h_flex()
-                            .justify_between()
-                            .items_center()
-                            .px_6()
-                            .py_4()
-                            .child(
-                                h_flex()
-                                    .gap_2()
-                                    .child(
-                                        div()
-                                            .text_xs()
-                                            .font_weight(FontWeight::SEMIBOLD)
-                                            .text_color(theme.text_primary)
-                                            .child(mezon_i18n::t(
-                                                &locale,
-                                                "setting.account.displayName",
-                                            )),
-                                    )
-                                    .child(
-                                        Label::new(display_name.clone())
-                                            .text_color(theme.text_muted),
-                                    ),
-                            ),
                     )
-                    .child(Divider::horizontal())
                     .child(
-                        h_flex()
-                            .justify_between()
-                            .items_center()
-                            .px_6()
-                            .py_4()
+                        v_flex()
+                            .gap_4()
+                            .px_4()
+                            .pb_4()
                             .child(
-                                h_flex()
-                                    .gap_2()
+                                v_flex()
+                                    .gap_4()
+                                    .p_4()
+                                    .rounded_md()
+                                    .bg(theme.bg_secondary)
+                                    .shadow_sm()
                                     .child(
-                                        div()
-                                            .text_xs()
-                                            .font_weight(FontWeight::SEMIBOLD)
-                                            .text_color(theme.text_primary)
-                                            .child(mezon_i18n::t(
-                                                &locale,
-                                                "setting.account.username",
-                                            )),
+                                        h_flex()
+                                            .justify_between()
+                                            .items_center()
+                                            .child(account_field(
+                                                mezon_i18n::t(
+                                                    &locale,
+                                                    "setting.account.displayName",
+                                                )
+                                                .into(),
+                                                display_name.clone(),
+                                            ))
+                                            .child(
+                                                outlined_button(
+                                                    "edit-display-name-btn",
+                                                    mezon_i18n::t(&locale, "accountSetting.edit")
+                                                        .into(),
+                                                )
+                                                .on_click(move |_, _, cx| {
+                                                    crate::router::replace(
+                                                        cx,
+                                                        crate::router::Route::SettingsProfile,
+                                                    );
+                                                }),
+                                            ),
                                     )
-                                    .child(
-                                        Label::new(format!("@{}", username))
-                                            .text_color(theme.text_muted),
-                                    ),
-                            ),
-                    )
-                    .child(Divider::horizontal())
-                    .child(
-                        h_flex()
-                            .justify_between()
-                            .items_center()
-                            .px_6()
-                            .py_4()
-                            .child(
-                                h_flex()
-                                    .gap_2()
-                                    .child(
-                                        div()
-                                            .text_xs()
-                                            .font_weight(FontWeight::SEMIBOLD)
-                                            .text_color(theme.text_primary)
-                                            .child(mezon_i18n::t(&locale, "setting.account.email")),
-                                    )
-                                    .child(Label::new(email_display).text_color(theme.text_muted)),
-                            ),
-                    )
-                    .child(Divider::horizontal())
-                    .child(
-                        h_flex()
-                            .justify_between()
-                            .items_center()
-                            .px_6()
-                            .py_4()
-                            .child(
-                                h_flex()
-                                    .gap_2()
-                                    .child(
-                                        div()
-                                            .text_xs()
-                                            .font_weight(FontWeight::SEMIBOLD)
-                                            .text_color(theme.text_primary)
-                                            .child(mezon_i18n::t(
-                                                &locale,
-                                                "setting.account.password",
-                                            )),
-                                    )
-                                    .child(Label::new("••••••••••").text_color(theme.text_muted)),
+                                    .child(account_field(
+                                        mezon_i18n::t(&locale, "setting.account.username").into(),
+                                        username,
+                                    )),
                             )
                             .child(
-                                GpuiButton::new("password-btn")
-                                    .label(password_label)
-                                    .text_color(theme.text_primary)
-                                    .ghost()
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        let locale = this.settings.read(cx).language.clone();
-                                        this.show_toast(
-                                            mezon_i18n::t(
-                                                &locale,
-                                                "setting.account.passwordComingSoon",
-                                            ),
-                                            cx,
-                                        );
-                                    })),
-                            ),
-                    )
-                    .child(Divider::horizontal())
-                    .child(
-                        h_flex()
-                            .justify_between()
-                            .items_center()
-                            .px_6()
-                            .py_4()
-                            .child(
                                 h_flex()
-                                    .gap_2()
-                                    .child(
-                                        div()
-                                            .text_xs()
-                                            .font_weight(FontWeight::SEMIBOLD)
-                                            .text_color(theme.text_primary)
-                                            .child(mezon_i18n::t(&locale, "setting.account.phone")),
-                                    )
-                                    .child(Label::new(phone_display).text_color(theme.text_muted)),
+                                    .justify_between()
+                                    .items_center()
+                                    .p_4()
+                                    .rounded_md()
+                                    .bg(theme.bg_secondary)
+                                    .shadow_sm()
+                                    .child(account_field(
+                                        mezon_i18n::t(&locale, "setting.account.email").into(),
+                                        email_display,
+                                    )),
                             )
                             .child(
-                                GpuiButton::new("phone-btn")
-                                    .label(phone_label)
-                                    .text_color(theme.text_primary)
-                                    .ghost()
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        let locale = this.settings.read(cx).language.clone();
-                                        this.show_toast(
-                                            mezon_i18n::t(
-                                                &locale,
-                                                "setting.account.phoneComingSoon",
-                                            ),
-                                            cx,
-                                        );
-                                    })),
+                                h_flex()
+                                    .justify_between()
+                                    .items_center()
+                                    .p_4()
+                                    .rounded_md()
+                                    .bg(theme.bg_secondary)
+                                    .shadow_sm()
+                                    .child(account_field(
+                                        mezon_i18n::t(&locale, "setting.account.password").into(),
+                                        password_display,
+                                    ))
+                                    .child(
+                                        outlined_button("password-btn", password_label).on_click(
+                                            cx.listener(|this, _, _, cx| {
+                                                let locale =
+                                                    this.settings.read(cx).language.clone();
+                                                this.show_toast(
+                                                    mezon_i18n::t(
+                                                        &locale,
+                                                        "setting.account.passwordComingSoon",
+                                                    ),
+                                                    cx,
+                                                );
+                                            }),
+                                        ),
+                                    ),
+                            )
+                            .child(
+                                h_flex()
+                                    .justify_between()
+                                    .items_center()
+                                    .p_4()
+                                    .rounded_md()
+                                    .bg(theme.bg_secondary)
+                                    .shadow_sm()
+                                    .child(account_field(
+                                        mezon_i18n::t(&locale, "setting.account.phone").into(),
+                                        phone_display,
+                                    ))
+                                    .child(outlined_button("phone-btn", phone_label).on_click(
+                                        cx.listener(|this, _, _, cx| {
+                                            let locale = this.settings.read(cx).language.clone();
+                                            this.show_toast(
+                                                mezon_i18n::t(
+                                                    &locale,
+                                                    "setting.account.phoneComingSoon",
+                                                ),
+                                                cx,
+                                            );
+                                        }),
+                                    )),
                             ),
-                    ),
+                    )
+                    .child(deferred(
+                        div()
+                            .absolute()
+                            .left(px(20.0))
+                            .top(px(72.0))
+                            .size(px(108.0))
+                            .rounded_full()
+                            .bg(theme.bg_primary)
+                            .p(px(6.0))
+                            .child(
+                                Avatar::new()
+                                    .when(!avatar_url.is_empty(), |avatar| {
+                                        avatar.src(avatar_url.clone())
+                                    })
+                                    .name(display_name)
+                                    .size_px(px(96.0))
+                                    .image_cache(self.avatar_image_cache.clone()),
+                            ),
+                    )),
             )
             .when_some(self.toast_message.clone(), |this, msg| {
                 this.child(div().text_sm().text_color(theme.text_muted).child(msg))
