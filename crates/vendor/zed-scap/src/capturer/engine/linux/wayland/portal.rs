@@ -389,7 +389,7 @@ impl<'a> ScreenCastPortal<'a> {
         Self::handle_req_response(
             self.proxy.connection,
             request_handle,
-            100, // Wait 10 s
+            1200,
             Duration::from_millis(100),
             response_clone,
         )?;

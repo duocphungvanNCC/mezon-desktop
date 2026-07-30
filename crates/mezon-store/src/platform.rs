@@ -103,9 +103,35 @@ pub type OpenUrlFn = Arc<dyn Fn(&str) -> anyhow::Result<()> + Send + Sync>;
 /// Download `url` and save it locally under the given suggested filename.
 pub type SaveAttachmentFn = Arc<dyn Fn(&str, &str) -> anyhow::Result<()> + Send + Sync>;
 pub type NotifyFn = Arc<dyn Fn(DesktopNotification) + Send + Sync>;
+pub type CliInstallVisibleFn = Arc<dyn Fn() -> bool + Send + Sync>;
+pub type CliInstallStateFn = Arc<dyn Fn() -> bool + Send + Sync>;
+pub type CliInstallToggleFn = Arc<dyn Fn() -> anyhow::Result<bool> + Send + Sync>;
+pub type McpStatusFn = Arc<dyn Fn() -> McpServerStatus + Send + Sync>;
+pub type McpStartFn = Arc<dyn Fn(bool) -> anyhow::Result<McpServerStatus> + Send + Sync>;
+pub type McpStopFn = Arc<dyn Fn() -> anyhow::Result<McpServerStatus> + Send + Sync>;
 /// Returns whether the OS permits desktop notifications (false only when explicitly denied).
 pub type NotificationPermitFn = Arc<dyn Fn() -> bool + Send + Sync>;
 pub type CurrentLocationFn = Arc<dyn Fn() -> anyhow::Result<(f64, f64)> + Send + Sync>;
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct McpServerStatus {
+    pub running: bool,
+    pub port: Option<u16>,
+    pub read_only: bool,
+    pub url: Option<String>,
+}
+
+pub struct McpServerHooks {
+    pub status: McpStatusFn,
+    pub start: McpStartFn,
+    pub stop: McpStopFn,
+}
+
+pub struct CliInstallHooks {
+    pub visible: CliInstallVisibleFn,
+    pub installed: CliInstallStateFn,
+    pub toggle: CliInstallToggleFn,
+}
 
 pub struct DesktopNotification {
     pub title: String,
@@ -121,6 +147,8 @@ pub struct PlatformStore {
     open_url: Option<OpenUrlFn>,
     save_attachment: Option<SaveAttachmentFn>,
     notifier: Option<NotifyFn>,
+    cli_install: Option<CliInstallHooks>,
+    mcp_server: Option<McpServerHooks>,
     notification_permit: Option<NotificationPermitFn>,
     current_location: Option<CurrentLocationFn>,
 }
@@ -131,6 +159,8 @@ impl PlatformStore {
             open_url: None,
             save_attachment: None,
             notifier: None,
+            cli_install: None,
+            mcp_server: None,
             notification_permit: None,
             current_location: None,
         });
@@ -185,6 +215,68 @@ impl PlatformStore {
         if let Some(f) = &self.notifier {
             f(notification);
         }
+    }
+
+    pub fn set_cli_install(entity: &Entity<Self>, hooks: CliInstallHooks, cx: &mut App) {
+        entity.update(cx, |store, cx| {
+            store.cli_install = Some(hooks);
+            cx.notify();
+        });
+    }
+
+    pub fn cli_install_visible(&self) -> bool {
+        self.cli_install
+            .as_ref()
+            .is_some_and(|hooks| (hooks.visible)())
+    }
+
+    pub fn cli_install_installed(&self) -> bool {
+        self.cli_install
+            .as_ref()
+            .is_some_and(|hooks| (hooks.installed)())
+    }
+
+    pub fn cli_install_toggle(&self) -> anyhow::Result<bool> {
+        match &self.cli_install {
+            Some(hooks) => (hooks.toggle)(),
+            None => Err(anyhow::anyhow!("cli install not available")),
+        }
+    }
+
+    pub fn cli_install_toggle_fn(&self) -> Option<CliInstallToggleFn> {
+        self.cli_install
+            .as_ref()
+            .map(|hooks| Arc::clone(&hooks.toggle))
+    }
+
+    pub fn set_mcp_server(entity: &Entity<Self>, hooks: McpServerHooks, cx: &mut App) {
+        entity.update(cx, |store, cx| {
+            store.mcp_server = Some(hooks);
+            cx.notify();
+        });
+    }
+
+    pub fn mcp_server_available(&self) -> bool {
+        self.mcp_server.is_some()
+    }
+
+    pub fn mcp_server_status(&self) -> McpServerStatus {
+        self.mcp_server
+            .as_ref()
+            .map(|hooks| (hooks.status)())
+            .unwrap_or_default()
+    }
+
+    pub fn mcp_server_start_fn(&self) -> Option<McpStartFn> {
+        self.mcp_server
+            .as_ref()
+            .map(|hooks| Arc::clone(&hooks.start))
+    }
+
+    pub fn mcp_server_stop_fn(&self) -> Option<McpStopFn> {
+        self.mcp_server
+            .as_ref()
+            .map(|hooks| Arc::clone(&hooks.stop))
     }
 
     pub fn set_notification_permit(entity: &Entity<Self>, f: NotificationPermitFn, cx: &mut App) {

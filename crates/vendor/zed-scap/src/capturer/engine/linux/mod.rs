@@ -38,7 +38,7 @@ type Type = mpsc::Sender<Result<Frame>>;
 impl LinuxCapturer {
     pub fn new(options: &Options, tx: Type) -> Result<Self> {
         #[cfg(feature = "wayland")]
-        if env::var("WAYLAND_DISPLAY").is_ok() {
+        if options.use_portal || env::var("WAYLAND_DISPLAY").is_ok() {
             log::debug!("Creating new Wayland screen capturer.");
             return Ok(Self {
                 imp: Box::new(WaylandCapturer::new(options, tx)?),

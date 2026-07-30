@@ -10,9 +10,9 @@ use gpui::{
     App, AppContext, AsyncApp, BackgroundExecutor, Context, Entity, Global, Subscription, Task,
 };
 use mezon_client::{
-    AppApi, ConnectionStatus, DEFAULT_WS_HOST, NetworkMonitor, RECONNECT_NETWORK_PROBE_TIMEOUT,
-    RealtimeEvent, Session, TransportClient, favicon_probe_url, keychain,
-    probe_network_reachability,
+    AppApi, ConnectionStatus, DEFAULT_WS_HOST, HttpFallbackSession, NetworkMonitor,
+    RECONNECT_NETWORK_PROBE_TIMEOUT, RealtimeEvent, Session, TransportClient, favicon_probe_url,
+    keychain, probe_network_reachability,
 };
 
 use crate::login::{session_credentials, spawn_session_logout};
@@ -122,6 +122,8 @@ impl ConnectionStore {
             .map(|cfg| favicon_probe_url(&cfg.redirect_uri))
             .unwrap_or_else(|| favicon_probe_url(""));
         let tcp_default_port = AppConfig::try_global(cx).and_then(|cfg| cfg.tcp_port);
+        let configured_api_base = AppConfig::try_global(cx).map(configured_api_base_url);
+        let auth_client = crate::login::LoginStore::global(cx).read(cx).client();
         let online_signal = network.online();
 
         let manager = cx.spawn(async move |this, cx| {
@@ -131,6 +133,8 @@ impl ConnectionStore {
             let mut consecutive_failures = 0u32;
             let mut handshake_rejections = 0u32;
             let mut connect_ack_rx = connect_ack_rx;
+            let mut renewal_retry_at: Option<std::time::Instant> = None;
+            let mut renewal_backoff = TOKEN_RENEWAL_RETRY_MIN;
 
             loop {
                 let (session, is_connecting) = cx.update(|cx| match auth_state.read(cx).clone() {
@@ -148,6 +152,7 @@ impl ConnectionStore {
                 });
 
                 let Some(session) = session else {
+                    api.set_http_fallback(None);
                     if connected_user_id.take().is_some() {
                         if let Err(e) = transport.close().await {
                             tracing::warn!("Failed to close TCP transport after logout: {e}");
@@ -157,9 +162,35 @@ impl ConnectionStore {
                     retry_backoff_secs = 1;
                     consecutive_failures = 0;
                     handshake_rejections = 0;
+                    renewal_retry_at = None;
+                    renewal_backoff = TOKEN_RENEWAL_RETRY_MIN;
                     wake.notified().await;
                     continue;
                 };
+
+                // `wake` fires on every heartbeat miss, network flap and status change, so an
+                // ungated renewal here turns one failing endpoint into a REST call per wake-up.
+                let session = if renewal_retry_at.is_some_and(|at| std::time::Instant::now() < at) {
+                    session
+                } else {
+                    let (session, outcome) =
+                        renew_expiring_token(&auth_client, &auth_state, session, cx).await;
+                    match outcome {
+                        RenewalOutcome::Failed => {
+                            renewal_retry_at =
+                                Some(std::time::Instant::now() + renewal_backoff);
+                            renewal_backoff =
+                                (renewal_backoff * 2).min(TOKEN_RENEWAL_RETRY_MAX);
+                        }
+                        RenewalOutcome::Renewed => {
+                            renewal_retry_at = None;
+                            renewal_backoff = TOKEN_RENEWAL_RETRY_MIN;
+                        }
+                        RenewalOutcome::NotNeeded => {}
+                    }
+                    session
+                };
+                api.set_http_fallback(http_fallback_session(&session, configured_api_base.as_deref()));
 
                 if connected_user_id.as_deref() == Some(session.user_id.as_str())
                     && transport.is_open().await
@@ -167,7 +198,10 @@ impl ConnectionStore {
                     retry_backoff_secs = 1;
                     consecutive_failures = 0;
                     handshake_rejections = 0;
-                    wake.notified().await;
+                    tokio::select! {
+                        _ = wake.notified() => {}
+                        _ = exec.timer(token_renewal_delay(&session)) => {}
+                    }
                     continue;
                 }
 
@@ -375,13 +409,18 @@ impl ConnectionStore {
                         return;
                     };
                     connect_ack_tx.send_modify(|n| *n = n.wrapping_add(1));
-                    if ev.session_id.is_empty() {
+                    if ev.session_id.is_empty() && ev.token.is_empty() {
                         return;
                     }
-                    tracing::info!("Session refreshed over socket for user_id={}", ev.user_id);
+                    tracing::info!(
+                        "Session refreshed over socket for user_id={} token_renewed={} sid_renewed={}",
+                        ev.user_id,
+                        !ev.token.is_empty(),
+                        !ev.session_id.is_empty()
+                    );
                     match state {
                         AuthState::Authenticated(session) | AuthState::Connecting(session) => {
-                            session.session_id = ev.session_id.clone();
+                            session.apply_refresh(&ev.token, &ev.refresh_token, &ev.session_id);
                             let session_clone = session.clone();
                             cx.background_executor()
                                 .spawn(async move {
@@ -398,6 +437,121 @@ impl ConnectionStore {
             );
         });
     }
+}
+
+const TOKEN_RENEWAL_SKEW: std::time::Duration = std::time::Duration::from_secs(5 * 60);
+const TOKEN_RENEWAL_MIN_DELAY: std::time::Duration = std::time::Duration::from_secs(5 * 60);
+const TOKEN_RENEWAL_MAX_DELAY: std::time::Duration = std::time::Duration::from_secs(60 * 60);
+const TOKEN_RENEWAL_RETRY_MIN: std::time::Duration = std::time::Duration::from_secs(30);
+const TOKEN_RENEWAL_RETRY_MAX: std::time::Duration = std::time::Duration::from_secs(15 * 60);
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RenewalOutcome {
+    NotNeeded,
+    Renewed,
+    Failed,
+}
+
+fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+fn token_renewal_delay(session: &Session) -> std::time::Duration {
+    if session.expires_at == 0 || session.refresh_token.is_empty() {
+        return TOKEN_RENEWAL_MAX_DELAY;
+    }
+    let deadline = session
+        .expires_at
+        .saturating_sub(TOKEN_RENEWAL_SKEW.as_secs());
+    std::time::Duration::from_secs(deadline.saturating_sub(now_secs()))
+        .clamp(TOKEN_RENEWAL_MIN_DELAY, TOKEN_RENEWAL_MAX_DELAY)
+}
+
+fn token_needs_renewal(session: &Session) -> bool {
+    !session.refresh_token.is_empty()
+        && session.expires_at != 0
+        && now_secs() + TOKEN_RENEWAL_SKEW.as_secs() >= session.expires_at
+}
+
+async fn renew_expiring_token(
+    client: &Arc<mezon_client::MezonClient>,
+    auth_state: &Entity<AuthState>,
+    session: Session,
+    cx: &mut AsyncApp,
+) -> (Session, RenewalOutcome) {
+    if !token_needs_renewal(&session) {
+        return (session, RenewalOutcome::NotNeeded);
+    }
+    tracing::info!("JWT expiring — renewing the session over REST");
+    let renewed = match client
+        .refresh_session(&session.refresh_token, session.is_remember)
+        .await
+    {
+        Ok(renewed) => renewed,
+        Err(e) => {
+            tracing::warn!("Session renewal failed ({e}) — keeping the current session");
+            return (session, RenewalOutcome::Failed);
+        }
+    };
+    if renewed.token.is_empty() || renewed.user_id != session.user_id {
+        tracing::warn!("Session renewal returned an unusable session — keeping the current one");
+        return (session, RenewalOutcome::Failed);
+    }
+
+    let applied = cx.update(|cx| {
+        auth_state.update(cx, |state, cx| {
+            let current = match state {
+                AuthState::Authenticated(s) | AuthState::Connecting(s) => s,
+                _ => return false,
+            };
+            if current.user_id != renewed.user_id {
+                return false;
+            }
+            *current = renewed.clone();
+            cx.notify();
+            true
+        })
+    });
+    if !applied {
+        return (session, RenewalOutcome::Failed);
+    }
+
+    let persisted = renewed.clone();
+    cx.background_executor()
+        .spawn(async move {
+            if let Err(e) = keychain::save_session(&persisted) {
+                tracing::warn!("Failed to persist the renewed session: {e}");
+            }
+        })
+        .detach();
+    (renewed, RenewalOutcome::Renewed)
+}
+
+fn configured_api_base_url(config: &AppConfig) -> String {
+    let scheme = if config.api_secure { "https" } else { "http" };
+    format!("{scheme}://{}:{}", config.api_host, config.api_port)
+}
+
+fn http_fallback_session(
+    session: &Session,
+    configured_api_base: Option<&str>,
+) -> Option<HttpFallbackSession> {
+    if session.token.is_empty() {
+        return None;
+    }
+    let base_url = session
+        .api_url
+        .as_deref()
+        .filter(|url| !url.is_empty())
+        .or(configured_api_base)?
+        .to_string();
+    Some(HttpFallbackSession {
+        base_url,
+        token: session.token.clone(),
+    })
 }
 
 fn requires_network_probe(consecutive_failures: u32) -> bool {
@@ -473,6 +627,95 @@ pub fn resolve_initial_auth_state() -> AuthState {
 mod tests {
     use super::*;
     use mezon_client::Session;
+
+    fn session_expiring_in(secs: u64) -> Session {
+        Session {
+            token: "jwt".into(),
+            refresh_token: "refresh".into(),
+            expires_at: now_secs() + secs,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn token_renewal_triggers_inside_the_skew_window() {
+        assert!(!token_needs_renewal(&session_expiring_in(3600)));
+        assert!(token_needs_renewal(&session_expiring_in(60)));
+
+        let expired = Session {
+            expires_at: now_secs().saturating_sub(60),
+            ..session_expiring_in(0)
+        };
+        assert!(token_needs_renewal(&expired));
+    }
+
+    #[test]
+    fn token_renewal_needs_a_refresh_token_and_a_known_expiry() {
+        let no_refresh = Session {
+            refresh_token: String::new(),
+            ..session_expiring_in(60)
+        };
+        assert!(!token_needs_renewal(&no_refresh));
+
+        let no_expiry = Session {
+            expires_at: 0,
+            ..session_expiring_in(60)
+        };
+        assert!(!token_needs_renewal(&no_expiry));
+    }
+
+    #[test]
+    fn token_renewal_delay_stays_within_its_bounds() {
+        assert_eq!(
+            token_renewal_delay(&session_expiring_in(0)),
+            TOKEN_RENEWAL_MIN_DELAY
+        );
+        assert_eq!(
+            token_renewal_delay(&session_expiring_in(48 * 3600)),
+            TOKEN_RENEWAL_MAX_DELAY
+        );
+
+        let mid = token_renewal_delay(&session_expiring_in(TOKEN_RENEWAL_SKEW.as_secs() + 15 * 60));
+        assert!(mid > TOKEN_RENEWAL_MIN_DELAY && mid < TOKEN_RENEWAL_MAX_DELAY);
+    }
+
+    #[test]
+    fn http_fallback_prefers_server_issued_api_url() {
+        let s = Session {
+            token: "jwt".into(),
+            api_url: Some("https://api.mezon.ai".into()),
+            ..Default::default()
+        };
+        let fallback = http_fallback_session(&s, Some("https://baked:8088")).expect("fallback");
+        assert_eq!(fallback.base_url, "https://api.mezon.ai");
+        assert_eq!(fallback.token, "jwt");
+    }
+
+    #[test]
+    fn http_fallback_falls_back_to_configured_base() {
+        let s = Session {
+            token: "jwt".into(),
+            api_url: Some(String::new()),
+            ..Default::default()
+        };
+        let fallback = http_fallback_session(&s, Some("https://baked:8088")).expect("fallback");
+        assert_eq!(fallback.base_url, "https://baked:8088");
+    }
+
+    #[test]
+    fn http_fallback_needs_a_token_and_a_base() {
+        let no_token = Session {
+            api_url: Some("https://api.mezon.ai".into()),
+            ..Default::default()
+        };
+        assert!(http_fallback_session(&no_token, Some("https://baked:8088")).is_none());
+
+        let no_base = Session {
+            token: "jwt".into(),
+            ..Default::default()
+        };
+        assert!(http_fallback_session(&no_base, None).is_none());
+    }
 
     #[test]
     fn resolve_tcp_port_uses_tcp_port_field_first() {

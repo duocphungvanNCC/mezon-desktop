@@ -71,6 +71,7 @@ pub struct Options {
     pub output_resolution: Resolution,
     pub excluded_targets: Option<Vec<Target>>,
     pub portal_source_types: Option<u32>,
+    pub use_portal: bool,
 }
 
 pub struct Capturer {

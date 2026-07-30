@@ -82,6 +82,12 @@ pub struct WindowsWindowState {
     pub invalidate_devices: Arc<AtomicBool>,
     fullscreen: Cell<Option<StyleAndBounds>>,
     initial_placement: Cell<Option<WindowOpenStatus>>,
+    /// mezon vendor edit: set by `PlatformWindow::hide` (hide-to-tray) so
+    /// `activate` knows it must `SW_SHOW` the window before trying to focus it.
+    /// Tracked explicitly rather than read back via `IsWindowVisible` so the
+    /// initial-placement path (which shows the window asynchronously) is not
+    /// mistaken for a hidden window.
+    pub(crate) hidden: Cell<bool>,
     hwnd: HWND,
     pub(crate) a11y: RefCell<Option<A11yState>>,
 }
@@ -174,6 +180,7 @@ impl WindowsWindowState {
             display: Cell::new(display),
             fullscreen: Cell::new(fullscreen),
             initial_placement: Cell::new(initial_placement),
+            hidden: Cell::new(false),
             hwnd,
             invalidate_devices,
             direct_manipulation,
@@ -630,6 +637,32 @@ impl PlatformWindow for WindowsWindow {
             .detach();
     }
 
+    fn set_bounds(&mut self, bounds: Bounds<Pixels>) {
+        let hwnd = self.0.hwnd;
+        let device_bounds = bounds.to_device_pixels(self.scale_factor());
+        let border_offset = self.state.border_offset.clone();
+        let rect = calculate_window_rect(device_bounds, &border_offset);
+
+        self.0
+            .executor
+            .spawn(async move {
+                unsafe {
+                    SetWindowPos(
+                        hwnd,
+                        None,
+                        device_bounds.origin.x.0,
+                        device_bounds.origin.y.0,
+                        rect.right - rect.left,
+                        rect.bottom - rect.top,
+                        SWP_NOZORDER | SWP_NOACTIVATE,
+                    )
+                    .context("unable to set window bounds")
+                    .log_err();
+                }
+            })
+            .detach();
+    }
+
     fn scale_factor(&self) -> f32 {
         self.state.scale_factor.get()
     }
@@ -764,6 +797,13 @@ impl PlatformWindow for WindowsWindow {
                 this.set_window_placement().log_err();
 
                 unsafe {
+                    // mezon vendor edit: undo a `hide()` (hide-to-tray) before
+                    // focusing — a `SW_HIDE`-den window cannot become active or
+                    // foreground, so activating it would silently do nothing.
+                    if this.state.hidden.replace(false) {
+                        ShowWindowAsync(hwnd, SW_SHOW).ok().log_err();
+                    }
+
                     // If the window is minimized, restore it.
                     if IsIconic(hwnd).as_bool() {
                         ShowWindowAsync(hwnd, SW_RESTORE).ok().log_err();
@@ -860,6 +900,16 @@ impl PlatformWindow for WindowsWindow {
 
     fn minimize(&self) {
         unsafe { ShowWindowAsync(self.0.hwnd, SW_MINIMIZE).ok().log_err() };
+    }
+
+    /// mezon vendor edit: implement hide-to-tray. Upstream leaves the
+    /// `PlatformWindow::hide` default no-op on Windows; without this the window
+    /// stays on screen and the only way off it is destroying the window.
+    fn hide(&self) {
+        if self.state.hidden.replace(true) {
+            return;
+        }
+        unsafe { ShowWindowAsync(self.0.hwnd, SW_HIDE).ok().log_err() };
     }
 
     fn zoom(&self) {

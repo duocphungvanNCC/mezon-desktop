@@ -45,7 +45,6 @@ struct ApiSession {
     #[allow(dead_code)]
     #[serde(default)]
     created: bool,
-    #[allow(dead_code)]
     #[serde(default)]
     is_remember: bool,
     /// Socket credential returned after auth (used for WebSocket `token=` query param).
@@ -277,6 +276,7 @@ impl MezonClient {
             id_token: api.id_token,
             session_id: api.session_id.unwrap_or_default(),
             expires_at: expires_at.unwrap_or(0),
+            is_remember: api.is_remember,
             api_url: api.api_url,
             api_host,
             api_port,

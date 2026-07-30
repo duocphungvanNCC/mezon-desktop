@@ -4,8 +4,7 @@ use crate::auth::login_view::LoginView;
 use crate::chat::channel_settings::ChannelSettingScreen;
 use crate::chat::layout::ChatLayout;
 use crate::clan::settings::{ClanSettingScreen, ClanSettingsPage};
-use crate::components::primitives::Sizable;
-use crate::components::primitives::{Button, Icon, IconName, Size, Spinner};
+use crate::components::primitives::{Button, Icon, IconName};
 use crate::image_cache::{
     LruImageCache, SHARED_ENTRY_MAX_BYTES, SHARED_IMAGE_CACHE_BYTES, SHARED_IMAGE_CACHE_CAPACITY,
 };
@@ -13,10 +12,11 @@ use crate::router::{Route, Router};
 use crate::settings::SettingsScreen;
 use crate::theme::{ActiveTheme, Theme, resolve_theme};
 use gpui::{
-    AnyView, App, ClickEvent, Context, Entity, FontWeight, MouseButton, NavigationDirection,
-    StyleRefinement, Window, div, img, prelude::*, px,
+    Animation, AnimationExt as _, AnyView, App, ClickEvent, Context, Entity, FontWeight,
+    MouseButton, NavigationDirection, StyleRefinement, Task, Window, div, img, prelude::*, px,
 };
 use mezon_store::{AuthState, ChannelList, ClanId, ClanList, ConnectionStore, Settings};
+use std::time::{Duration, Instant};
 
 pub struct RootView {
     title_bar: Entity<TitleBar>,
@@ -29,6 +29,17 @@ pub struct RootView {
     applied_theme: String,
     cached_locale: String,
     image_cache: Entity<LruImageCache>,
+    connecting_since: Option<Instant>,
+    _splash_delay: Option<Task<()>>,
+}
+
+fn spawn_splash_delay(cx: &mut Context<RootView>) -> Task<()> {
+    cx.spawn(async move |this, cx| {
+        cx.background_executor()
+            .timer(Duration::from_millis(SPLASH_QUIET_MS))
+            .await;
+        let _ = this.update(cx, |_, cx| cx.notify());
+    })
 }
 
 impl RootView {
@@ -74,7 +85,16 @@ impl RootView {
         })
         .detach();
 
-        cx.observe(&auth_state, |_, auth_state, cx| {
+        cx.observe(&auth_state, |this, auth_state, cx| {
+            if matches!(*auth_state.read(cx), AuthState::Connecting(_)) {
+                if this.connecting_since.is_none() {
+                    this.connecting_since = Some(Instant::now());
+                    this._splash_delay = Some(spawn_splash_delay(cx));
+                }
+            } else {
+                this.connecting_since = None;
+                this._splash_delay = None;
+            }
             if matches!(*auth_state.read(cx), AuthState::NotAuthenticated) {
                 crate::image_viewer::close_image_viewer(cx);
                 crate::chat::media_channel::close_media_image_modal(cx);
@@ -159,6 +179,12 @@ impl RootView {
                 cx,
             )
         });
+        let connecting_at_start = matches!(*auth_state.read(cx), AuthState::Connecting(_));
+        let (connecting_since, splash_delay) = if connecting_at_start {
+            (Some(Instant::now()), Some(spawn_splash_delay(cx)))
+        } else {
+            (None, None)
+        };
         Self {
             title_bar,
             auth_state,
@@ -170,12 +196,24 @@ impl RootView {
             applied_theme,
             cached_locale,
             image_cache,
+            connecting_since,
+            _splash_delay: splash_delay,
         }
     }
 
     fn sync_settings_page(&mut self, cx: &mut Context<Self>) {
         let page = match Router::global(cx).read(cx).route() {
-            Route::SettingsProfile => crate::settings::SettingsPage::Profile,
+            Route::SettingsProfile => {
+                self.settings_screen
+                    .update(cx, |screen, cx| screen.set_profile_target(None, cx));
+                return;
+            }
+            Route::SettingsClanProfile { clan_id } => {
+                self.settings_screen.update(cx, |screen, cx| {
+                    screen.set_profile_target(Some(clan_id), cx)
+                });
+                return;
+            }
             Route::SettingsDevices => crate::settings::SettingsPage::Device,
             Route::SettingsAppearance => crate::settings::SettingsPage::Appearance,
             Route::SettingsActivity => crate::settings::SettingsPage::Activity,
@@ -240,14 +278,26 @@ impl Render for RootView {
             }
             AuthState::AwaitingCallback => render_awaiting_callback(theme, locale),
             AuthState::Connecting(_) => {
-                let attempt = ConnectionStore::global(cx).read(cx).connecting_attempt();
-                render_connecting(theme, locale, attempt)
+                let (attempt, online) = {
+                    let store = ConnectionStore::global(cx).read(cx);
+                    (store.connecting_attempt(), store.is_online())
+                };
+                let waited = self
+                    .connecting_since
+                    .map(|since| since.elapsed())
+                    .unwrap_or_default();
+                if should_show_splash(attempt, online, waited) {
+                    render_connecting(locale, attempt, window.is_window_active())
+                } else {
+                    render_quiet_startup()
+                }
             }
             AuthState::Authenticated(_) => {
                 let route = Router::global(cx).read(cx).route();
                 match route {
                     Route::SettingsAccount
                     | Route::SettingsProfile
+                    | Route::SettingsClanProfile { .. }
                     | Route::SettingsDevices
                     | Route::SettingsAppearance
                     | Route::SettingsActivity
@@ -356,30 +406,158 @@ fn render_awaiting_callback(theme: &Theme, locale: &str) -> gpui::AnyElement {
         .into_any_element()
 }
 
-fn render_connecting(theme: &Theme, locale: &str, attempt: u32) -> gpui::AnyElement {
+const SPLASH_BG: u32 = 0x1e1f22;
+const SPLASH_ACCENT: u32 = 0x5865f2;
+const SPLASH_ACCENT_END: u32 = 0x7289da;
+const SPLASH_STATUS_TEXT: u32 = 0xd1d5db;
+const SPLASH_LOGO_WIDTH: f32 = 280.;
+const SPLASH_LOGO_HEIGHT: f32 = 50.;
+const SPLASH_LOGO_VIEWPORT_FRACTION: f32 = 0.72;
+const SPLASH_DOT_BASE_SIZE: f32 = 6.;
+const SPLASH_DOT_CYCLE_MS: u64 = 1400;
+const SPLASH_DOT_STAGGER_MS: u64 = 200;
+const SPLASH_PROGRESS_MS: u64 = 30_000;
+const SPLASH_PROGRESS_HEIGHT: f32 = 3.;
+const SPLASH_QUIET_MS: u64 = 600;
+const SPLASH_FADE_MS: u64 = 250;
+
+fn splash_progress_fraction(delta: f32) -> f32 {
+    if delta <= 0.8 {
+        delta / 0.8 * 0.85
+    } else {
+        0.85 + (delta - 0.8) / 0.2 * 0.1
+    }
+}
+
+fn splash_dot_intensity(delta: f32, offset: f32) -> f32 {
+    let phase = (delta + offset).rem_euclid(1.0);
+    if phase <= 0.4 {
+        phase / 0.4
+    } else if phase <= 0.8 {
+        1.0 - (phase - 0.4) / 0.4
+    } else {
+        0.0
+    }
+}
+
+/// `animate: false` renders the dots as plain static circles. The animation repeats forever, and a
+/// connect that never succeeds leaves this screen up indefinitely — driving a frame request per
+/// tick on the root view for as long as the machine stays offline. Nobody is watching a background
+/// window, so the pulse is dropped there.
+fn render_splash_dots(animate: bool) -> gpui::AnyElement {
+    let mut row = div().flex().flex_row().gap(px(6.)).mt(px(4.));
+    for index in 0..3u64 {
+        let offset = (index * SPLASH_DOT_STAGGER_MS) as f32 / SPLASH_DOT_CYCLE_MS as f32;
+        let dot = div()
+            .rounded_full()
+            .bg(gpui::rgb(SPLASH_ACCENT))
+            .size(px(SPLASH_DOT_BASE_SIZE));
+        row = row.child(if animate {
+            dot.with_animation(
+                gpui::ElementId::Integer(index),
+                Animation::new(Duration::from_millis(SPLASH_DOT_CYCLE_MS)).repeat(),
+                move |el, delta| {
+                    let intensity = splash_dot_intensity(delta, offset);
+                    el.opacity(0.2 + 0.8 * intensity)
+                        .size(px(SPLASH_DOT_BASE_SIZE * (0.8 + 0.4 * intensity)))
+                },
+            )
+            .into_any_element()
+        } else {
+            dot.opacity(0.6).into_any_element()
+        });
+    }
+    row.into_any_element()
+}
+
+fn render_splash_progress_bar() -> gpui::AnyElement {
+    div()
+        .absolute()
+        .top_0()
+        .left_0()
+        .h(px(SPLASH_PROGRESS_HEIGHT))
+        .rounded_r(px(2.))
+        .bg(gpui::linear_gradient(
+            90.,
+            gpui::linear_color_stop(gpui::rgb(SPLASH_ACCENT), 0.),
+            gpui::linear_color_stop(gpui::rgb(SPLASH_ACCENT_END), 1.),
+        ))
+        .with_animation(
+            "splash-progress",
+            Animation::new(Duration::from_millis(SPLASH_PROGRESS_MS)),
+            |el, delta| el.w(gpui::relative(splash_progress_fraction(delta))),
+        )
+        .into_any_element()
+}
+
+fn should_show_splash(attempt: u32, online: bool, waited: Duration) -> bool {
+    attempt > 0 || !online || waited >= Duration::from_millis(SPLASH_QUIET_MS)
+}
+
+fn render_quiet_startup() -> gpui::AnyElement {
+    div()
+        .flex_1()
+        .size_full()
+        .bg(gpui::rgb(SPLASH_BG))
+        .into_any_element()
+}
+
+fn render_connecting(locale: &str, attempt: u32, animate: bool) -> gpui::AnyElement {
     let label = if attempt > 0 {
         mezon_i18n::t(locale, "root.reconnectingAttempt").replace("{{count}}", &attempt.to_string())
     } else {
         mezon_i18n::t(locale, "root.loading").to_string()
     };
+    let fade = |id: &'static str| {
+        (
+            id,
+            Animation::new(Duration::from_millis(SPLASH_FADE_MS)).with_easing(gpui::ease_in_out),
+        )
+    };
+    let (bar_id, bar_anim) = fade("splash-bar-fade");
+    let (body_id, body_anim) = fade("splash-body-fade");
     div()
+        .relative()
         .flex()
         .flex_1()
+        .size_full()
         .items_center()
         .justify_center()
         .flex_col()
-        .gap_4()
+        .bg(gpui::rgb(SPLASH_BG))
         .child(
-            Spinner::new()
-                .with_size(Size::Large)
-                .color(theme.brand.into()),
+            div()
+                .absolute()
+                .top_0()
+                .left_0()
+                .w_full()
+                .child(render_splash_progress_bar())
+                .with_animation(bar_id, bar_anim, |el, delta| el.opacity(delta)),
         )
         .child(
             div()
-                .text_xl()
-                .font_weight(FontWeight::BOLD)
-                .text_color(theme.text_primary)
-                .child(label),
+                .flex()
+                .flex_col()
+                .items_center()
+                .child(
+                    img(crate::util::assets::MEZON_LOGO)
+                        .w(px(SPLASH_LOGO_WIDTH))
+                        .h(px(SPLASH_LOGO_HEIGHT))
+                        .max_w(gpui::relative(SPLASH_LOGO_VIEWPORT_FRACTION))
+                        .object_fit(gpui::ObjectFit::Contain)
+                        .mb(px(24.)),
+                )
+                .child(render_splash_dots(animate))
+                .child(
+                    div()
+                        .text_size(px(12.))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(gpui::rgb(SPLASH_STATUS_TEXT))
+                        .mt(px(10.))
+                        .mb(px(12.))
+                        .child(label),
+                )
+                .with_animation(body_id, body_anim, |el, delta| el.opacity(delta)),
         )
         .into_any_element()
 }
@@ -442,4 +620,51 @@ fn render_not_found(theme: &Theme, locale: &str) -> gpui::AnyElement {
         )
         .child(back_btn)
         .into_any_element()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn quiet_startup_stays_silent_while_the_first_connect_is_quick() {
+        assert!(!should_show_splash(0, true, Duration::ZERO));
+        assert!(!should_show_splash(
+            0,
+            true,
+            Duration::from_millis(SPLASH_QUIET_MS - 1)
+        ));
+    }
+
+    #[test]
+    fn splash_appears_once_the_quiet_window_elapses() {
+        assert!(should_show_splash(
+            0,
+            true,
+            Duration::from_millis(SPLASH_QUIET_MS)
+        ));
+    }
+
+    #[test]
+    fn splash_shows_immediately_while_reconnecting_or_offline() {
+        assert!(should_show_splash(1, true, Duration::ZERO));
+        assert!(should_show_splash(0, false, Duration::ZERO));
+        assert!(should_show_splash(3, false, Duration::ZERO));
+    }
+
+    #[test]
+    fn progress_bar_never_reaches_full_width() {
+        assert_eq!(splash_progress_fraction(0.0), 0.0);
+        assert!((splash_progress_fraction(0.8) - 0.85).abs() < f32::EPSILON);
+        assert!((splash_progress_fraction(1.0) - 0.95).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn dots_are_staggered_so_they_do_not_pulse_together() {
+        let offset = 200. / 1400.;
+        let at_peak = splash_dot_intensity(0.4, 0.0);
+        assert!((at_peak - 1.0).abs() < f32::EPSILON);
+        assert!(splash_dot_intensity(0.4, offset) < at_peak);
+        assert_eq!(splash_dot_intensity(0.9, 0.0), 0.0);
+    }
 }

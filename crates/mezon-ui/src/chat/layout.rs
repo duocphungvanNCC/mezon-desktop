@@ -7,12 +7,13 @@ use gpui::{
     linear_gradient, prelude::*, px,
 };
 use mezon_store::{
-    AuthState, AutoUpdateStatus, AutoUpdateStore, Channel, ChannelId, ChannelList, ChannelType,
-    ClanId, ClanList, ClanMembersStore, DirectChannel, DirectKind, DirectMessageStore,
-    GroupMembersStore, InboxStore, MessageSearchEvent, MessageSearchStore, MessagesStore,
-    PinnedEvent, PinnedMessagesStore, Settings, StreamStore, ThreadsEvent, ThreadsStore,
-    TopicsEvent, TopicsStore, UiState, VoiceConnection, VoiceMember, VoiceModerationError,
-    VoiceStore, expand_mention_name_tokens,
+    AuthState, AutoUpdateStatus, AutoUpdateStore, CHANNEL_ACTIVE_ARCHIVED, CHANNEL_ACTIVE_JOINED,
+    Channel, ChannelId, ChannelList, ChannelType, ClanId, ClanList, ClanMembersStore,
+    DirectChannel, DirectKind, DirectMessageStore, GroupMembersStore, InboxStore,
+    MessageSearchEvent, MessageSearchStore, MessagesStore, PinnedEvent, PinnedMessagesStore,
+    Settings, StreamStore, THREAD_STATUS_ARCHIVED, ThreadsEvent, ThreadsStore, TopicsEvent,
+    TopicsStore, UiState, VoiceConnection, VoiceMember, VoiceModerationError, VoiceStore,
+    expand_mention_name_tokens,
 };
 use ui::PopoverMenuHandle;
 
@@ -323,6 +324,7 @@ impl ChatLayout {
         let chat_area = ChatArea::new(settings.clone(), cx);
         cx.observe(&channel_list, |this, _, cx| {
             this.apply_pending_channel(cx);
+            this.redirect_archived_thread_route(cx);
             this.ensure_active_channel_for_clan(cx);
             this.sync_inbox_context(cx);
             this.sync_stream_session(cx);
@@ -364,6 +366,7 @@ impl ChatLayout {
             }
             this.reset_message_search(cx);
             this.sync_active_from_route(cx);
+            this.redirect_archived_thread_route(cx);
             this.ensure_active_channel_for_clan(cx);
             this.sync_stream_session(cx);
             this.sync_voice_frame_pump(cx);
@@ -1092,6 +1095,31 @@ impl ChatLayout {
                 channel_list.select_channel(channel_id, cx);
             });
         }
+    }
+
+    fn redirect_archived_thread_route(&mut self, cx: &mut Context<Self>) {
+        let Route::Thread {
+            clan_id,
+            channel_id,
+            thread_id,
+        } = Router::global(cx).read(cx).route()
+        else {
+            return;
+        };
+        let channel_list = self.channel_list.read(cx);
+        if !channel_list.is_clan_cache_loaded(clan_id) {
+            return;
+        }
+        if channel_list.channel_in_clan(clan_id, thread_id) {
+            return;
+        }
+        crate::router::replace(
+            cx,
+            Route::Channel {
+                clan_id,
+                channel_id,
+            },
+        );
     }
 
     fn ensure_active_channel_for_clan(&mut self, cx: &mut Context<Self>) {
@@ -1844,15 +1872,42 @@ impl ChatLayout {
         let Ok(clan_id) = clan_id.parse::<ClanId>() else {
             return;
         };
-        self.thread_popover_handle.hide(cx);
-        self.clear_thread_search(cx);
+        self.dismiss_threads_popover(cx);
         let label = label.to_string();
         let parent = parent_id.parse::<ChannelId>().ok();
+        let (active, active_confirmed) = match ThreadsStore::global(cx)
+            .read(cx)
+            .thread_active(&channel_id.to_string())
+        {
+            Some(status) => (
+                if status == THREAD_STATUS_ARCHIVED {
+                    CHANNEL_ACTIVE_ARCHIVED
+                } else {
+                    CHANNEL_ACTIVE_JOINED
+                },
+                true,
+            ),
+            None => (CHANNEL_ACTIVE_JOINED, false),
+        };
         self.channel_list.update(cx, |list, cx| {
             if let Some(parent) = parent {
-                list.ensure_thread_with_parent(channel_id, parent, clan_id, label.clone(), cx);
+                list.ensure_thread_with_parent_active(
+                    channel_id,
+                    parent,
+                    clan_id,
+                    label.clone(),
+                    active,
+                    active_confirmed,
+                    cx,
+                );
             } else {
-                list.ensure_thread_channel(channel_id, label.clone(), cx);
+                list.ensure_thread_channel_with_active(
+                    channel_id,
+                    label.clone(),
+                    active,
+                    active_confirmed,
+                    cx,
+                );
             }
         });
         crate::router::navigate(
@@ -2884,6 +2939,7 @@ impl ChatLayout {
             ),
             Route::SettingsAccount
             | Route::SettingsProfile
+            | Route::SettingsClanProfile { .. }
             | Route::SettingsDevices
             | Route::SettingsAppearance
             | Route::SettingsActivity

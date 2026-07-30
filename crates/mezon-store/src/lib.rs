@@ -21,6 +21,7 @@ pub mod config;
 pub mod connection;
 pub mod direct;
 pub mod emoji;
+pub mod events;
 pub mod files;
 pub mod friend;
 pub mod gallery;
@@ -121,6 +122,7 @@ pub use emoji::{
     normalize_emoji_shortname, strip_emoji_colons, validate_emoji_create_shortname,
     validate_emoticon_file,
 };
+pub use events::{ClanEventItem, EventsEvent, EventsStore};
 pub use files::{
     ChannelDocument, FILES_BROAD_QUERY, FILES_CACHE_TTL, FILES_PAGE_SIZE, FILES_TYPED_QUERY,
     FilesEvent, FilesStore, filename_matches_query, is_document, short_file_type_label,
@@ -167,8 +169,10 @@ pub use permissions::{
 };
 pub use pinned::{PinnedEvent, PinnedMessage, PinnedMessagesStore};
 pub use platform::{
-    DesktopNotification, DownloadEvent, NotifyFn, OpenUrlFn, PlatformStore,
-    copy_image_url_to_clipboard, download_url_with_dialog,
+    CliInstallHooks, CliInstallStateFn, CliInstallToggleFn, CliInstallVisibleFn,
+    DesktopNotification, DownloadEvent, McpServerHooks, McpServerStatus, McpStartFn, McpStatusFn,
+    McpStopFn, NotifyFn, OpenUrlFn, PlatformStore, copy_image_url_to_clipboard,
+    download_url_with_dialog,
 };
 pub use presence::*;
 pub use quick_menu::{QuickMenuItem, QuickMenuStore};
@@ -179,7 +183,10 @@ pub use roles::{
 };
 pub use sticker::{ClanSound, Sticker, StickerEvent, StickerStore};
 pub use stream::{StreamMember, StreamPhase, StreamStore};
-pub use threads::{THREAD_STATUS_JOINED, ThreadSummary, ThreadsEvent, ThreadsStore, group_threads};
+pub use threads::{
+    THREAD_STATUS_ARCHIVED, THREAD_STATUS_JOINED, ThreadSummary, ThreadsEvent, ThreadsStore,
+    group_threads,
+};
 pub use topic_badges::{TopicBadgeEvent, TopicBadgeStore};
 pub use topics::{TopicsEvent, TopicsStore};
 pub use ui_state::UiState;
@@ -188,15 +195,20 @@ pub use user_profile::{
     resolve_user_profile,
 };
 pub use users_by_user::{UsersByUserEvent, UsersByUserStore};
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+pub use voice::record_wayland_session;
 pub use voice::{
     DeviceKind, DeviceMenuKind, DisplayedReaction, MAX_SOUND_BYTES, NetworkQuality, PickedScreen,
     SOUND_ALLOWED_EXTENSIONS, ScreenShareKind, ScreenShareListError, ScreenShareOption,
     ScreenSharePreview, VideoFrameData, VideoFrameStore, VoiceCallStatus, VoiceConnection,
     VoiceModerationError, VoiceParticipant, VoiceRenderFrame, VoiceStore, camera_tile_id,
     capture_screen_share_preview, list_screen_share_options, peek_screen_share_options,
-    screen_tile_id, upload_sound_file, validate_sound_file,
+    screen_tile_id, system_screen_share_pick, upload_sound_file, validate_sound_file,
 };
-pub use wallet::{SendTokenRequest, WalletDetail, WalletEvent, WalletStore, WalletTransaction};
+pub use wallet::{
+    SendTokenRequest, TransactionCursor, WalletDetail, WalletEvent, WalletStore, WalletTransaction,
+    WalletTransactionPage,
+};
 pub use webhook::{
     ChannelWebhook, ClanWebhook, MAX_WEBHOOK_AVATAR_BYTES, WEBHOOK_NAME_MAX_LENGTH, WebhookEvent,
     WebhookStore,
@@ -320,6 +332,9 @@ pub struct Settings {
     /// Last active channel_id within the last clan (restored on startup)
     #[serde(default)]
     pub last_channel_id: Option<ChannelId>,
+    /// Start the HTTP MCP server in read-only mode (no write tools)
+    #[serde(default)]
+    pub mcp_read_only: bool,
 }
 
 impl Default for Settings {
@@ -342,6 +357,7 @@ impl Default for Settings {
             clan_order: Vec::new(),
             last_clan_id: None,
             last_channel_id: None,
+            mcp_read_only: false,
         }
     }
 }

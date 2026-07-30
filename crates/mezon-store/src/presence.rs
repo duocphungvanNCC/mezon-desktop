@@ -8,6 +8,7 @@ use gpui::{
 };
 use mezon_client::RealtimeEvent;
 
+use crate::account::{AccountEvent, AccountStore};
 use crate::badge::BadgeService;
 use crate::channel::ChannelList;
 use crate::realtime::{RealtimeDispatch, RealtimeKind};
@@ -34,6 +35,7 @@ pub struct PresenceStore {
     typing_by_channel: HashMap<ChannelId, HashMap<UserId, TypingEntry>>,
     pub channel_online: HashMap<ChannelId, HashSet<UserId>>,
     pub user_online: HashSet<UserId>,
+    pub presence_status: HashMap<UserId, String>,
     pub user_status: HashMap<UserId, String>,
     status_notify_task: Option<Task<()>>,
     typing_sweep_task: Option<Task<()>>,
@@ -65,6 +67,7 @@ impl PresenceStore {
         self.typing_sweep_task = None;
         self.channel_online.clear();
         self.user_online.clear();
+        self.presence_status.clear();
         self.user_status.clear();
         cx.emit(PresenceEvent::StatusChanged);
         cx.notify();
@@ -98,6 +101,13 @@ impl PresenceStore {
             .filter(|s| !s.is_empty())
     }
 
+    pub fn presence_status(&self, user_id: UserId) -> Option<&str> {
+        self.presence_status
+            .get(&user_id)
+            .map(String::as_str)
+            .filter(|s| !s.is_empty())
+    }
+
     fn new(_api: Arc<mezon_client::AppApi>, cx: &mut Context<Self>) -> Self {
         Self::register_realtime(cx);
 
@@ -113,6 +123,7 @@ impl PresenceStore {
             typing_by_channel: HashMap::new(),
             channel_online: HashMap::new(),
             user_online: HashSet::new(),
+            presence_status: HashMap::new(),
             user_status: HashMap::new(),
             status_notify_task: None,
             typing_sweep_task: None,
@@ -128,6 +139,8 @@ impl PresenceStore {
                 RealtimeKind::MessageTyping,
                 RealtimeKind::ChannelPresence,
                 RealtimeKind::StatusPresence,
+                RealtimeKind::CustomStatus,
+                RealtimeKind::UserStatus,
             ] {
                 dispatch.on(kind, &entity, |this, event, cx| {
                     this.handle_event(event, cx)
@@ -138,6 +151,7 @@ impl PresenceStore {
                 this.typing_by_channel.clear();
                 this.channel_online.clear();
                 this.user_online.clear();
+                this.presence_status.clear();
                 this.user_status.clear();
                 cx.emit(PresenceEvent::StatusChanged);
                 cx.notify();
@@ -176,13 +190,40 @@ impl PresenceStore {
             RealtimeEvent::StatusPresence(e) => {
                 let joins: Vec<UserId> = e.joins.iter().map(|u| UserId(u.user_id)).collect();
                 let leaves: Vec<UserId> = e.leaves.iter().map(|u| UserId(u.user_id)).collect();
-                let statuses: Vec<(UserId, String)> = e
+                let presence_statuses: Vec<(UserId, String)> = e
                     .joins
                     .iter()
                     .map(|u| (UserId(u.user_id), u.status.clone().unwrap_or_default()))
                     .collect();
+                let custom_statuses: Vec<(UserId, String)> = e
+                    .joins
+                    .iter()
+                    .map(|u| (UserId(u.user_id), u.user_status.clone()))
+                    .collect();
                 self.apply_status_presence(&joins, &leaves);
-                self.apply_seed_user_status(&statuses);
+                self.apply_presence_statuses(&presence_statuses, &leaves);
+                self.apply_seed_user_status(&custom_statuses);
+                self.schedule_status_notify(cx);
+            }
+            RealtimeEvent::CustomStatus(e) => {
+                tracing::debug!(user_id = e.user_id, " custom-status text updated");
+                self.apply_seed_user_status(&[(UserId(e.user_id), e.status.clone())]);
+                Self::sync_self_account(e.user_id, None, Some(&e.status), cx);
+                self.schedule_status_notify(cx);
+            }
+            RealtimeEvent::UserStatus(e) => {
+                let user_id = UserId(e.user_id);
+                let status = e.custom_status.trim();
+                tracing::debug!(user_id = e.user_id, status, " user-status updated");
+                if status.eq_ignore_ascii_case("invisible")
+                    || status.eq_ignore_ascii_case("offline")
+                {
+                    self.user_online.remove(&user_id);
+                } else {
+                    self.user_online.insert(user_id);
+                }
+                self.presence_status.insert(user_id, status.to_string());
+                Self::sync_self_account(e.user_id, Some(status), None, cx);
                 self.schedule_status_notify(cx);
             }
             _ => {}
@@ -306,6 +347,53 @@ impl PresenceStore {
         }
     }
 
+    fn apply_presence_statuses(&mut self, statuses: &[(UserId, String)], leaves: &[UserId]) {
+        for uid in leaves {
+            self.presence_status.insert(*uid, "offline".to_string());
+        }
+        for (uid, status) in statuses {
+            let value = if status.is_empty() { "online" } else { status };
+            self.presence_status.insert(*uid, value.to_string());
+        }
+    }
+
+    fn sync_self_account(
+        user_id: i64,
+        status: Option<&str>,
+        custom_status: Option<&str>,
+        cx: &mut Context<Self>,
+    ) {
+        let is_self = BadgeService::try_global(cx)
+            .and_then(|service| service.read(cx).current_user_id(cx))
+            .is_some_and(|current_user_id| current_user_id.0 == user_id);
+        if !is_self {
+            return;
+        }
+
+        AccountStore::global(cx).update(cx, |store, cx| {
+            let Some(account) = store.account.as_mut() else {
+                return;
+            };
+            let mut changed = false;
+            if let Some(status) = status
+                && account.status != status
+            {
+                account.status = status.to_string();
+                changed = true;
+            }
+            if let Some(custom_status) = custom_status
+                && account.user_status != custom_status
+            {
+                account.user_status = custom_status.to_string();
+                changed = true;
+            }
+            if changed {
+                cx.emit(AccountEvent::StatusUpdated);
+                cx.notify();
+            }
+        });
+    }
+
     pub fn seed_presence(
         &mut self,
         online: &[UserId],
@@ -350,6 +438,7 @@ mod tests {
             typing_by_channel: HashMap::new(),
             channel_online: HashMap::new(),
             user_online: HashSet::new(),
+            presence_status: HashMap::new(),
             user_status: HashMap::new(),
             status_notify_task: None,
             typing_sweep_task: None,

@@ -7,8 +7,7 @@ use rust_embed::RustEmbed;
 pub const AVATAR_GROUP: &str = "images/avatar-group.png";
 pub const MEZON_LOGO: &str = "images/logoflashsceenmezon.png";
 pub const STREAM_THUMBNAIL: &str = "images/flahstream.png";
-pub const MEZON_LOGO_ICON: &str = "images/mezon-logo-white.svg";
-pub const MEZON_LOGO_QR: &str = "images/icon-logo-mezon.svg";
+pub const MEZON_COMMUNITY: &str = "images/mezon-community.png";
 
 #[derive(RustEmbed)]
 #[folder = "assets"]
@@ -32,5 +31,23 @@ impl AssetSource for Assets {
         Ok(Self::iter()
             .filter_map(|p| p.starts_with(path).then(|| p.into()))
             .collect())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_declared_asset_is_embedded() {
+        for path in [AVATAR_GROUP, MEZON_LOGO, STREAM_THUMBNAIL, MEZON_COMMUNITY] {
+            let loaded = Assets
+                .load(path)
+                .unwrap_or_else(|e| panic!("{path} is declared but not embedded: {e}"));
+            assert!(
+                loaded.is_some_and(|bytes| !bytes.is_empty()),
+                "{path} embedded but empty"
+            );
+        }
     }
 }

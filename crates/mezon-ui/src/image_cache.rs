@@ -538,6 +538,15 @@ pub struct LruImageCache {
 }
 
 impl LruImageCache {
+    pub fn cached_render_image(&self, resource: &Resource) -> Option<Arc<RenderImage>> {
+        self.cache
+            .get(&hash(resource))
+            .and_then(|entry| match &entry.item {
+                ImageCacheItem::Loaded(Ok(image)) => Some(image.clone()),
+                _ => None,
+            })
+    }
+
     pub fn new(max_items: usize, max_bytes: u64, cx: &mut Context<Self>) -> Self {
         Self::labeled("image", max_items, max_bytes, u64::MAX, cx)
     }

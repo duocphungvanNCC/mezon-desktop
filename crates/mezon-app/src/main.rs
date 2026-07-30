@@ -1,4 +1,5 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+mod mcp;
 
 use anyhow::Result;
 use futures::StreamExt;
@@ -55,6 +56,9 @@ fn configure_linux_session() {
     if std::env::var_os("DISPLAY").is_none() {
         return;
     }
+    if std::env::var_os("WAYLAND_DISPLAY").is_some_and(|display| !display.is_empty()) {
+        mezon_store::record_wayland_session();
+    }
     unsafe {
         std::env::set_var("GDK_BACKEND", "x11");
         std::env::remove_var("WAYLAND_DISPLAY");
@@ -82,8 +86,12 @@ fn main() -> Result<()> {
     #[cfg(target_os = "linux")]
     configure_linux_session();
 
-    init_logging();
     install_panic_hook();
+    if let Some(exit_code) = mezon_cli::try_run(std::env::args())? {
+        std::process::exit(exit_code);
+    }
+
+    init_logging();
 
     #[cfg(target_os = "linux")]
     log_linux_session_notes();
@@ -293,6 +301,15 @@ fn run_app(lock: SingleInstance, initial_url: Option<String>) {
     }));
 
     let (url_tx, mut url_rx) = futures::channel::mpsc::unbounded::<String>();
+    let (mcp_cmd_tx, mcp_cmd_rx) = futures::channel::mpsc::unbounded::<mezon_mcp::McpCommand>();
+
+    let mcp_runtime = match mcp::McpRuntime::start(api.clone(), mcp_cmd_tx) {
+        Ok(runtime) => Some((runtime, mcp_cmd_rx)),
+        Err(error) => {
+            tracing::warn!("MCP control server disabled: {error}");
+            None
+        }
+    };
 
     let app_config_handle = app_config.clone();
     let app = application()
@@ -455,6 +472,7 @@ fn run_app(lock: SingleInstance, initial_url: Option<String>) {
         let settings_entity = cx.new(|_| settings.clone());
         mezon_store::Settings::init_global(&settings_entity, cx);
 
+        let settings_for_mcp = settings_entity.clone();
         let (auth_state_handle, window_handle) = open_main_window(
             cx,
             &settings,
@@ -464,6 +482,19 @@ fn run_app(lock: SingleInstance, initial_url: Option<String>) {
             transport.clone(),
             initial_auth_state,
         );
+
+        let _mcp_runtime = if let Some((runtime, mcp_cmd_rx)) = mcp_runtime {
+            mcp::McpRuntime::spawn_ui_bridge(
+                cx,
+                auth_state_handle.clone(),
+                settings_for_mcp,
+                mcp_cmd_rx,
+            );
+            register_mcp_server_hooks(cx, runtime.controller());
+            Some(runtime)
+        } else {
+            None
+        };
 
         register_main_window(window_handle, cx);
 
@@ -710,6 +741,7 @@ fn open_main_window(
     mezon_store::UsersByUserStore::init(api.clone(), cx);
     mezon_store::RolesStore::init(api.clone(), cx);
     mezon_store::WebhookStore::init(api.clone(), cx);
+    mezon_store::EventsStore::init(api.clone(), cx);
     mezon_store::GalleryStore::init(api.clone(), cx);
     mezon_store::ChannelMediaStore::init(api.clone(), cx);
     mezon_store::FilesStore::init(api.clone(), cx);
@@ -746,6 +778,15 @@ fn open_main_window(
                 icon_path: n.icon_path,
             });
         }),
+        cx,
+    );
+    mezon_store::PlatformStore::set_cli_install(
+        &platform_store,
+        mezon_store::CliInstallHooks {
+            visible: std::sync::Arc::new(mezon_native::cli_install::menu_visible),
+            installed: std::sync::Arc::new(mezon_native::cli_install::is_installed),
+            toggle: std::sync::Arc::new(mezon_native::cli_install::toggle),
+        },
         cx,
     );
     mezon_store::PlatformStore::set_notification_permit(
@@ -847,6 +888,51 @@ fn open_main_window(
     mezon_ui::app::window_controls::configure_window(cx, window_handle);
 
     (auth_state, window_handle.into())
+}
+
+fn register_mcp_server_hooks(cx: &mut App, controller: Arc<mezon_mcp::McpController>) {
+    let runtime = mezon_client::transport_runtime::handle();
+    let platform = mezon_store::PlatformStore::global(cx);
+    mezon_store::PlatformStore::set_mcp_server(
+        &platform,
+        mezon_store::McpServerHooks {
+            status: Arc::new({
+                let controller = controller.clone();
+                let runtime = runtime.clone();
+                move || mcp_status_snapshot(&runtime, &controller)
+            }),
+            start: Arc::new({
+                let controller = controller.clone();
+                let runtime = runtime.clone();
+                move |read_only| {
+                    runtime.block_on(controller.start(read_only, None))?;
+                    Ok(mcp_status_snapshot(&runtime, &controller))
+                }
+            }),
+            stop: Arc::new({
+                let controller = controller.clone();
+                let runtime = runtime.clone();
+                move || {
+                    runtime.block_on(controller.stop())?;
+                    Ok(mcp_status_snapshot(&runtime, &controller))
+                }
+            }),
+        },
+        cx,
+    );
+}
+
+fn mcp_status_snapshot(
+    runtime: &tokio::runtime::Handle,
+    controller: &mezon_mcp::McpController,
+) -> mezon_store::McpServerStatus {
+    let status = runtime.block_on(controller.status());
+    mezon_store::McpServerStatus {
+        running: status.running,
+        port: status.port,
+        read_only: status.read_only,
+        url: status.url,
+    }
 }
 
 struct SingleInstanceGlobal(#[allow(dead_code)] SingleInstance);

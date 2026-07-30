@@ -1105,5 +1105,5 @@ pub fn clan_has_inbox_badge(clan_id: &str, cx: &App) -> bool {
         .clans
         .iter()
         .find(|c| c.id == clan_id)
-        .is_some_and(|c| c.badge_count > 0 || c.has_unread)
+        .is_some_and(|c| c.badge_count > 0)
 }

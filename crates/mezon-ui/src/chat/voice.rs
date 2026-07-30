@@ -331,7 +331,7 @@ pub fn render_mini_bar(
             if screen_enabled {
                 voice.update(cx, |store, cx| store.stop_screen_share(cx));
             } else {
-                crate::chat::screen_share_modal::open_screen_share_modal(
+                crate::chat::screen_share_modal::start_screen_share_flow(
                     voice.clone(),
                     settings.clone(),
                     window,
@@ -799,7 +799,10 @@ const AGENT_AVATAR_URL: &str = "https://cdn.mezon.vn/0/0/1779484387973271600/173
 fn resolve_cell_identity(cx: &App, clan_id: ClanId, p: &VoiceParticipant) -> (String, String) {
     let (name, avatar_url) = resolve_voice_identity(cx, clan_id, &p.identity, &p.name);
     if p.is_agent {
-        (name, crate::util::imgproxy::avatar_url(cx, AGENT_AVATAR_URL))
+        (
+            name,
+            crate::util::imgproxy::avatar_url(cx, AGENT_AVATAR_URL),
+        )
     } else {
         (name, avatar_url)
     }
@@ -1665,8 +1668,14 @@ fn render_grid(
             let index = page_offset + r * cols + c;
             let mut cell_el = div().flex_1().min_w_0().min_h_0().w_full();
             if index < count {
-                cell_el =
-                    cell_el.child(video_tile(theme, locale, store, voice, &cells[index], avatar_size));
+                cell_el = cell_el.child(video_tile(
+                    theme,
+                    locale,
+                    store,
+                    voice,
+                    &cells[index],
+                    avatar_size,
+                ));
             }
             row = row.child(cell_el);
         }
@@ -2588,7 +2597,7 @@ fn control_bar(
             if screen_enabled {
                 voice.update(cx, |store, cx| store.stop_screen_share(cx));
             } else {
-                crate::chat::screen_share_modal::open_screen_share_modal(
+                crate::chat::screen_share_modal::start_screen_share_flow(
                     voice.clone(),
                     settings.clone(),
                     window,

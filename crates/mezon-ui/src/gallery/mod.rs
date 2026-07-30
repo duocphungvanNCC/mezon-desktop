@@ -389,6 +389,7 @@ impl GalleryModal {
                 selected_url: None,
                 anchor_before: None,
             },
+            window,
             cx,
         );
     }

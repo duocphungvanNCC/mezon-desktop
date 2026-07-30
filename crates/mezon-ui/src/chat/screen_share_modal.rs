@@ -8,7 +8,7 @@ use gpui::{
 use mezon_store::{
     PickedScreen, ScreenShareKind, ScreenShareListError, ScreenShareOption, ScreenSharePreview,
     Settings, VoiceStore, capture_screen_share_preview, list_screen_share_options,
-    peek_screen_share_options,
+    peek_screen_share_options, system_screen_share_pick,
 };
 
 use crate::app::shell::Shell;
@@ -288,8 +288,6 @@ impl Render for ScreenShareModal {
         let share_label: SharedString = mezon_i18n::t(&locale, "screenShare.share").into();
         let loading_label: SharedString = mezon_i18n::t(&locale, "screenShare.loading").into();
         let empty_label: SharedString = mezon_i18n::t(&locale, "screenShare.selectScreen").into();
-        let portal_label: SharedString =
-            mezon_i18n::t(&locale, "screenShare.linuxPortalOption").into();
 
         let filtered = self.filtered_options();
         let can_share = self.selected.is_some();
@@ -424,7 +422,6 @@ impl Render for ScreenShareModal {
                                     text_primary,
                                     text_muted,
                                     tile_bg,
-                                    portal_label.clone(),
                                     cx,
                                 ))
                             })
@@ -528,7 +525,6 @@ fn target_grid(
     text_primary: gpui::Hsla,
     text_muted: gpui::Hsla,
     tile_bg: gpui::Hsla,
-    portal_label: SharedString,
     cx: &mut Context<ScreenShareModal>,
 ) -> impl IntoElement {
     div()
@@ -547,11 +543,7 @@ fn target_grid(
                     kind,
                     id: option.id,
                 });
-            let title = if option.is_portal() {
-                portal_label.clone()
-            } else {
-                SharedString::from(option.title.clone())
-            };
+            let title = SharedString::from(option.title.clone());
             let id = option.id;
             let tile_id = SharedString::from(format!("screen-share-tile-{index}"));
             let preview = previews.get(&preview_key).cloned();
@@ -673,12 +665,16 @@ fn permission_denied_state(locale: &str, cx: &mut Context<ScreenShareModal>) -> 
         .into_any_element()
 }
 
-pub fn open_screen_share_modal(
+pub fn start_screen_share_flow(
     voice: Entity<VoiceStore>,
     settings: Entity<Settings>,
     window: &mut Window,
     cx: &mut App,
 ) {
+    if let Some(pick) = system_screen_share_pick() {
+        voice.update(cx, |store, cx| store.start_screen_share(pick, false, cx));
+        return;
+    }
     let modal = cx.new(|cx| ScreenShareModal::new(voice, settings, window, cx));
     Shell::global(cx).update(cx, |shell, cx| shell.show_modal(modal.into(), cx));
 }

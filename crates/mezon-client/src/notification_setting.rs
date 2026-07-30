@@ -72,11 +72,24 @@ impl ChannelNotificationSetting {
         self.mute_until_ms == i64::from(MUTE_INFINITY) || self.mute_until_ms > now_ms
     }
 
+    pub fn apply_realtime(&mut self, dto: &api::NotificationUserChannel, channel_id: i64) {
+        self.id = channel_id;
+        self.mute_until_ms = Self::expiry_from_epoch_seconds(dto.time_mute_seconds);
+    }
+
     pub fn expiry_from_duration(now_ms: i64, mute_seconds: i32) -> i64 {
         match mute_seconds {
             MUTE_UNMUTE => 0,
             MUTE_INFINITY => i64::from(MUTE_INFINITY),
             seconds => now_ms + i64::from(seconds) * 1000,
+        }
+    }
+
+    pub fn expiry_from_epoch_seconds(epoch_seconds: i32) -> i64 {
+        match epoch_seconds {
+            MUTE_UNMUTE => 0,
+            MUTE_INFINITY => i64::from(MUTE_INFINITY),
+            seconds => i64::from(seconds) * 1000,
         }
     }
 
@@ -215,6 +228,64 @@ mod tests {
             ChannelNotificationSetting::from_api_at(&dto, now),
             setting(7, NOTIFICATION_MENTION_MESSAGE, now + 3_600_000)
         );
+    }
+
+    #[test]
+    fn apply_realtime_reads_an_absolute_epoch_not_a_duration() {
+        let now = 1_700_000_000_000;
+        let expires_at_s = 1_700_003_600;
+        let dto = api::NotificationUserChannel {
+            id: 7,
+            notification_setting_type: NOTIFICATION_MENTION_MESSAGE,
+            time_mute_seconds: expires_at_s,
+            ..Default::default()
+        };
+        let mut applied = setting(0, NOTIFICATION_DEFAULT, 0);
+        applied.apply_realtime(&dto, 42);
+        assert_eq!(applied.mute_until_ms, i64::from(expires_at_s) * 1000);
+        assert_eq!(applied.muted_until_ms(now), Some(now + 3_600_000));
+        assert_ne!(
+            applied.mute_until_ms,
+            ChannelNotificationSetting::from_api_at(&dto, now).mute_until_ms
+        );
+    }
+
+    #[test]
+    fn apply_realtime_keeps_the_level_and_marks_an_override() {
+        let dto = api::NotificationUserChannel {
+            id: 0,
+            notification_setting_type: NOTIFICATION_DEFAULT,
+            time_mute_seconds: 1_700_003_600,
+            ..Default::default()
+        };
+        let mut applied = setting(9, NOTIFICATION_MENTION_MESSAGE, 0);
+        applied.apply_realtime(&dto, 42);
+        assert_eq!(applied.level, NOTIFICATION_MENTION_MESSAGE);
+        assert_eq!(applied.id, 42);
+        assert!(applied.is_muted(None, None));
+    }
+
+    #[test]
+    fn apply_realtime_preserves_infinity_and_unmute_sentinels() {
+        let mut inf = setting(9, NOTIFICATION_DEFAULT, 0);
+        inf.apply_realtime(
+            &api::NotificationUserChannel {
+                time_mute_seconds: MUTE_INFINITY,
+                ..Default::default()
+            },
+            42,
+        );
+        assert_eq!(inf.mute_until_ms, i64::from(MUTE_INFINITY));
+
+        let mut unmuted = setting(9, NOTIFICATION_DEFAULT, 5_000);
+        unmuted.apply_realtime(
+            &api::NotificationUserChannel {
+                time_mute_seconds: MUTE_UNMUTE,
+                ..Default::default()
+            },
+            42,
+        );
+        assert_eq!(unmuted.mute_until_ms, 0);
     }
 
     #[test]

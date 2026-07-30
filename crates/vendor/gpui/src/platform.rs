@@ -623,6 +623,17 @@ pub trait PlatformWindow: HasWindowHandle + HasDisplayHandle {
     fn window_bounds(&self) -> WindowBounds;
     fn content_size(&self) -> Size<Pixels>;
     fn resize(&mut self, size: Size<Pixels>);
+    /// mezon vendor edit: move a window after creation. Upstream has no equivalent —
+    /// `WindowOptions::window_bounds` only applies at creation, and on macOS that path is not
+    /// the inverse of [`PlatformWindow::bounds`], so aligning one window to another needs an
+    /// explicit move. Wayland gets the default impl because the protocol has no client-side
+    /// positioning; only the size can be honoured there.
+    fn set_bounds(&mut self, bounds: Bounds<Pixels>) {
+        let current = self.bounds();
+        if bounds.size != current.size {
+            self.resize(bounds.size);
+        }
+    }
     fn scale_factor(&self) -> f32;
     fn appearance(&self) -> WindowAppearance;
     fn display(&self) -> Option<Rc<dyn PlatformDisplay>>;

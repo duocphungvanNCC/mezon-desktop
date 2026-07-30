@@ -8,10 +8,11 @@ use crate::{
     transport::{
         ApiAccount, ApiAttachment, ApiCanvas, ApiCanvasDetail, ApiCategoryDesc, ApiChannelApp,
         ApiChannelAttachment, ApiChannelDesc, ApiClanDesc, ApiDirectChannel, ApiFriend, ApiMessage,
-        ApiPinMessage, ApiThreadDesc, ApiVoiceChannelUser, RealtimeEvent,
+        ApiPinMessage, ApiThreadDesc, ApiVoiceChannelUser, HttpFallbackSession, RealtimeEvent,
     },
 };
 
+const CHECK_NAME_TYPE_CHANNEL: i32 = 2;
 const CHECK_NAME_TYPE_NICKNAME: i32 = 4;
 
 fn sanitize_filename(name: &str) -> String {
@@ -179,6 +180,10 @@ impl AppApi {
             status_tx: Arc::new(status_tx),
             base_img_url,
         }
+    }
+
+    pub fn set_http_fallback(&self, fallback: Option<HttpFallbackSession>) {
+        self.transport.set_http_fallback(fallback);
     }
 
     pub fn subscribe(&self) -> tokio::sync::broadcast::Receiver<RealtimeEvent> {
@@ -376,6 +381,7 @@ impl AppApi {
             .await
     }
 
+    /// List threads for a parent channel.
     pub async fn list_thread_descs(
         &self,
         channel_id: &str,
@@ -743,6 +749,42 @@ impl AppApi {
                 mode,
                 timestamp_seconds,
                 badge_count,
+            )
+            .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn write_last_pin_message(
+        &self,
+        clan_id: i64,
+        channel_id: i64,
+        message_id: i64,
+        mode: i32,
+        is_public: bool,
+        timestamp_seconds: u32,
+        operation: i32,
+        avatar: &str,
+        sender_id: &str,
+        sender_username: &str,
+        content: &str,
+        attachment: &str,
+        created_time: &str,
+    ) -> Result<()> {
+        self.transport
+            .write_last_pin_message(
+                clan_id,
+                channel_id,
+                message_id,
+                mode,
+                is_public,
+                timestamp_seconds,
+                operation,
+                avatar,
+                sender_id,
+                sender_username,
+                content,
+                attachment,
+                created_time,
             )
             .await
     }
@@ -1183,6 +1225,13 @@ impl AppApi {
         Ok(resp.emoji_list)
     }
 
+    pub async fn list_events(
+        &self,
+        clan_id: i64,
+    ) -> Result<Vec<mezon_proto::api::EventManagement>> {
+        Ok(self.transport.list_events(clan_id).await?.events)
+    }
+
     pub async fn emoji_recent_list(&self) -> Result<Vec<mezon_proto::api::EmojiRecent>> {
         let resp = self.transport.emoji_recent_list().await?;
         Ok(resp.emoji_recents)
@@ -1573,12 +1622,16 @@ impl AppApi {
     ) -> Result<ApiMessage> {
         let attachments: Vec<_> = {
             use futures::StreamExt as _;
-            futures::stream::iter(media_urls.iter().map(|url| self.upload_media_from_url(url)))
-                .buffer_unordered(4)
-                .collect::<Vec<_>>()
-                .await
-                .into_iter()
-                .collect::<Result<Vec<_>>>()?
+            let api = self.clone();
+            futures::stream::iter(media_urls.iter().cloned().map(move |url| {
+                let api = api.clone();
+                async move { api.upload_media_from_url(&url).await }
+            }))
+            .buffer_unordered(4)
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<Result<Vec<_>>>()?
         };
         self.transport
             .send_channel_message_with_attachments(
@@ -2146,6 +2199,21 @@ impl AppApi {
         Ok(resp.is_duplicate)
     }
 
+    pub async fn check_duplicate_channel_name(
+        &self,
+        name: &str,
+        category_id: &str,
+    ) -> Result<bool> {
+        let cond: i64 = category_id
+            .parse()
+            .map_err(|e| anyhow::anyhow!("invalid category_id {category_id:?}: {e}"))?;
+        let resp = self
+            .transport
+            .check_duplicate_name(name, CHECK_NAME_TYPE_CHANNEL, cond)
+            .await?;
+        Ok(resp.is_duplicate)
+    }
+
     pub async fn check_duplicate_clan_nickname(
         &self,
         clan_id: i64,
@@ -2196,6 +2264,33 @@ impl AppApi {
 
     pub async fn list_categories_typed(&self, clan_id: i64) -> Result<Vec<ApiCategoryDesc>> {
         self.transport.list_categories_typed(clan_id).await
+    }
+
+    pub async fn update_category_order(
+        &self,
+        clan_id: i64,
+        categories: &[(i32, i64)],
+    ) -> Result<()> {
+        self.transport
+            .update_category_order(clan_id, categories)
+            .await
+    }
+
+    pub async fn list_archived_channel_descs(
+        &self,
+        clan_id: i64,
+    ) -> Result<Vec<mezon_proto::api::ChannelDescription>> {
+        Ok(self
+            .transport
+            .list_archived_channel_descs(clan_id)
+            .await?
+            .channeldesc)
+    }
+
+    pub async fn restore_archived_channel(&self, clan_id: i64, channel_id: i64) -> Result<()> {
+        self.transport
+            .active_archived_thread(clan_id, channel_id)
+            .await
     }
 
     pub async fn list_clan_badge_count(&self) -> Result<Vec<(String, i32, bool)>> {
@@ -2478,6 +2573,12 @@ impl AppApi {
     pub async fn remove_channel_favorite(&self, channel_id: i64, clan_id: i64) -> Result<()> {
         self.transport
             .remove_channel_favorite(channel_id, clan_id)
+            .await
+    }
+
+    pub async fn active_archived_thread(&self, clan_id: i64, channel_id: i64) -> Result<()> {
+        self.transport
+            .active_archived_thread(clan_id, channel_id)
             .await
     }
 

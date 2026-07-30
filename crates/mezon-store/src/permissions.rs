@@ -386,6 +386,10 @@ mod tests {
             is_onboarding: false,
             is_community: false,
             prevent_anonymous: false,
+            community_banner: String::new(),
+            about: String::new(),
+            description: String::new(),
+            short_url: String::new(),
         }
     }
 

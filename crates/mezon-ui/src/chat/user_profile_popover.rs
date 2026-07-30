@@ -895,7 +895,7 @@ const BANNER_ICON_PENDING_BG: u32 = 0x4e5058;
 const SHARE_CONTACT_BODY: u32 = 0x656369;
 const SHARE_CONTACT_CHECK: u32 = 0x549d5b;
 
-fn share_contact_icon() -> gpui::AnyElement {
+pub(crate) fn share_contact_icon() -> gpui::AnyElement {
     div()
         .relative()
         .size(px(16.))
@@ -919,7 +919,7 @@ fn share_contact_icon() -> gpui::AnyElement {
         .into_any_element()
 }
 
-fn banner_icon_shell(
+pub(crate) fn banner_icon_shell(
     id: impl Into<ElementId>,
     pending_style: bool,
     on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
@@ -950,7 +950,7 @@ fn banner_icon_shell(
         .into_any_element()
 }
 
-fn banner_icon_button(
+pub(crate) fn banner_icon_button(
     id: impl Into<ElementId>,
     icon: IconName,
     pending_style: bool,
@@ -1362,7 +1362,7 @@ fn section_label(text: impl Into<SharedString>, color: gpui::Rgba) -> gpui::AnyE
         .into_any_element()
 }
 
-fn format_member_since(create_time_seconds: u32) -> String {
+pub(crate) fn format_member_since(create_time_seconds: u32) -> String {
     if create_time_seconds == 0 {
         return String::new();
     }

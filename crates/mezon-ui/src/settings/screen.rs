@@ -108,6 +108,20 @@ impl SettingsScreen {
         cx.notify();
     }
 
+    pub fn set_profile_target(
+        &mut self,
+        clan_id: Option<mezon_store::ClanId>,
+        cx: &mut Context<Self>,
+    ) {
+        self.set_page(SettingsPage::Profile, cx);
+        if let Some(profile_page) = &self.profile_page {
+            profile_page.update(cx, |page, cx| match clan_id {
+                Some(clan_id) => page.show_clan_profile(clan_id, cx),
+                None => page.show_user_profile(cx),
+            });
+        }
+    }
+
     fn page_title(&self, page: SettingsPage, locale: &str) -> SharedString {
         mezon_i18n::t(locale, page.i18n_key()).into()
     }

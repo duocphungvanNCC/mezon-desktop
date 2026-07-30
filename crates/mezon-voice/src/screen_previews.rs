@@ -32,7 +32,7 @@ pub fn capture_screen_share_preview(pick: &PickedScreen) -> Option<ScreenSharePr
             }
         }
         #[cfg(target_os = "linux")]
-        PickedScreen::LinuxPortal(_) => None,
+        PickedScreen::LinuxPortal => None,
     }
 }
 
