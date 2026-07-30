@@ -713,19 +713,15 @@ fn render_selectable_segmented_spans(
                 display,
                 channel_id,
             } => {
-                let resolved = channel_id
-                    .as_deref()
-                    .and_then(parse_channel_id)
-                    .and_then(|channel_id| hashtag_channel(channel_id, ctx.app).0);
-                let label = hashtag_label(display, resolved, ctx.locale);
-                let end = base + INLINE_ICON_PLACEHOLDER.len_utf8() + label.len();
+                let chip = hashtag_chip(display, channel_id.as_deref(), ctx.locale, ctx.app);
+                let end = base + INLINE_ICON_PLACEHOLDER.len_utf8() + chip.label.len();
                 let is_selected = selected
                     .as_ref()
                     .is_some_and(|range| range.start < end && range.end > base);
                 let bounds = Rc::new(Cell::new(None));
                 segments.push(TextSegment::bounded(base..end, bounds.clone()));
                 row = row.child(SelectableRegion::new(
-                    render_hashtag_chip(display.clone(), channel_id.as_deref(), ctx),
+                    render_hashtag_chip(chip, ctx),
                     bounds,
                     is_selected.then(|| rgba(SELECTION_BG)),
                 ));
@@ -937,12 +933,8 @@ pub(crate) fn selectable_spans_text(spans: &[MessageSpan], locale: &str, cx: &Ap
                 display,
                 channel_id,
             } => {
-                let resolved = channel_id
-                    .as_deref()
-                    .and_then(parse_channel_id)
-                    .and_then(|channel_id| hashtag_channel(channel_id, cx).0);
                 text.push(INLINE_ICON_PLACEHOLDER);
-                text.push_str(&hashtag_label(display, resolved, locale));
+                text.push_str(&hashtag_chip(display, channel_id.as_deref(), locale, cx).label);
             }
             MessageSpan::Canvas { title, .. } => text.push_str(title),
         }
@@ -1570,8 +1562,7 @@ fn append_span(
             display,
             channel_id,
         } => row.child(render_hashtag_chip(
-            display.clone(),
-            channel_id.as_deref(),
+            hashtag_chip(display, channel_id.as_deref(), ctx.locale, ctx.app),
             ctx,
         )),
         MessageSpan::Emoji {
@@ -1870,37 +1861,12 @@ pub(crate) fn profile_popover_trigger(
         })
 }
 
-fn render_hashtag_chip(
-    display: impl Into<SharedString>,
-    channel_id: Option<&str>,
-    ctx: &RowCtx,
-) -> AnyElement {
-    let display: SharedString = display.into();
+fn render_hashtag_chip(chip: HashtagChip, ctx: &RowCtx) -> AnyElement {
     let theme = ctx.theme;
     let bg = theme.tokens.mention_primary;
     let color = theme.tokens.mention_color;
     let hover_bg = theme.tokens.bg_mention_hover;
     let hover_color = theme.tokens.color_mention_hover;
-    let parsed_channel = channel_id.and_then(parse_channel_id);
-    let (resolved_name, icon) = match parsed_channel {
-        Some(cid) => hashtag_channel(cid, ctx.app),
-        None => (None, IconName::Hashtag),
-    };
-    let from_channel_link = display.starts_with("http://") || display.starts_with("https://");
-    let (label, unresolved_link) = match resolved_name {
-        Some(name) => (name, false),
-        None if from_channel_link => (
-            SharedString::from(mezon_i18n::t(ctx.locale, "message.unknown")),
-            true,
-        ),
-        None => (
-            display
-                .strip_prefix('#')
-                .map(|name| SharedString::from(name.to_owned()))
-                .unwrap_or(display),
-            false,
-        ),
-    };
 
     let inner = div()
         .flex()
@@ -1909,49 +1875,102 @@ fn render_hashtag_chip(
         .min_w_0()
         .items_center()
         .gap_0p5()
-        .child(Icon::new(icon).size_4().text_color(color))
+        .child(Icon::new(chip.icon).size_4().text_color(color))
         .child(
             div()
                 .min_w_0()
-                .when(unresolved_link, |d| d.italic())
-                .child(label),
+                .when(chip.italic, |d| d.italic())
+                .child(chip.label),
         );
 
-    match parsed_channel {
+    let base = div()
+        .max_w_full()
+        .min_w_0()
+        .px(px(1.))
+        .rounded_sm()
+        .font_weight(FontWeight::MEDIUM)
+        .bg(bg)
+        .text_color(color)
+        .hover(move |s| s.bg(hover_bg).text_color(hover_color))
+        .child(inner);
+
+    match chip.channel_id {
         Some(channel_id) => {
             let locale = ctx.locale.to_string();
             let selection = ctx.selection.clone();
-            div()
-                .id(("msg-hashtag", channel_id.get() as usize))
-                .max_w_full()
-                .min_w_0()
-                .px(px(1.))
-                .rounded_sm()
-                .font_weight(FontWeight::MEDIUM)
+            base.id(("msg-hashtag", channel_id.get() as usize))
                 .cursor_pointer()
-                .bg(bg)
-                .text_color(color)
                 .on_click(move |_, _, cx| {
                     if !selection.borrow().has_selection() {
                         navigate_to_channel(channel_id, &locale, cx);
                     }
                 })
-                .hover(move |s| s.bg(hover_bg).text_color(hover_color))
-                .child(inner)
                 .into_any_element()
         }
-        None => div()
-            .max_w_full()
-            .min_w_0()
-            .px(px(1.))
-            .rounded_sm()
-            .font_weight(FontWeight::MEDIUM)
-            .bg(bg)
-            .text_color(color)
-            .hover(move |s| s.bg(hover_bg).text_color(hover_color))
-            .child(inner)
-            .into_any_element(),
+        None => base.into_any_element(),
     }
+}
+
+struct HashtagChip {
+    label: SharedString,
+    icon: IconName,
+    italic: bool,
+    channel_id: Option<ChannelId>,
+}
+
+struct ResolvedHashtag {
+    name: Option<SharedString>,
+    icon: IconName,
+}
+
+fn hashtag_chip(display: &str, channel_id: Option<&str>, locale: &str, cx: &App) -> HashtagChip {
+    let parsed_channel = channel_id.and_then(parse_channel_id);
+    let resolved = parsed_channel.and_then(|cid| hashtag_channel(cid, cx));
+    hashtag_chip_for(display, parsed_channel, resolved, locale)
+}
+
+fn hashtag_chip_for(
+    display: &str,
+    parsed_channel: Option<ChannelId>,
+    resolved: Option<ResolvedHashtag>,
+    locale: &str,
+) -> HashtagChip {
+    if let Some(resolved) = resolved {
+        return HashtagChip {
+            label: resolved
+                .name
+                .unwrap_or_else(|| hashtag_display_label(display)),
+            icon: resolved.icon,
+            italic: false,
+            channel_id: parsed_channel,
+        };
+    }
+    if display.starts_with("http://") || display.starts_with("https://") {
+        return HashtagChip {
+            label: SharedString::new_static(mezon_i18n::t(locale, "message.unknown")),
+            icon: IconName::Hashtag,
+            italic: true,
+            channel_id: None,
+        };
+    }
+    if parsed_channel.is_some() {
+        return HashtagChip {
+            label: SharedString::new_static(mezon_i18n::t(locale, "message.noAccess")),
+            icon: IconName::LockedPrivate,
+            italic: false,
+            channel_id: None,
+        };
+    }
+    HashtagChip {
+        label: hashtag_display_label(display),
+        icon: IconName::Hashtag,
+        italic: false,
+        channel_id: None,
+    }
+}
+
+fn hashtag_display_label(display: &str) -> SharedString {
+    SharedString::from(display.strip_prefix('#').unwrap_or(display))
 }
 
 fn build_inline_content(msg: &Message, ctx: &RowCtx, body_color: gpui::Rgba) -> Option<AnyElement> {
@@ -2035,16 +2054,11 @@ fn build_inline_content(msg: &Message, ctx: &RowCtx, body_color: gpui::Rgba) -> 
                 display,
                 channel_id,
             } => {
-                let parsed_channel = channel_id.as_deref().and_then(parse_channel_id);
-                let (resolved_name, icon) = match parsed_channel {
-                    Some(cid) => hashtag_channel(cid, ctx.app),
-                    None => (None, IconName::Hashtag),
-                };
-                let label = hashtag_label(display, resolved_name, ctx.locale);
+                let chip = hashtag_chip(display, channel_id.as_deref(), ctx.locale, ctx.app);
                 let icon_index = text.len();
                 text.push(INLINE_ICON_PLACEHOLDER);
                 let label_index = text.len();
-                text.push_str(&label);
+                text.push_str(&chip.label);
                 let end = text.len();
                 runs.push(StyledRun {
                     range: icon_index..label_index,
@@ -2064,10 +2078,10 @@ fn build_inline_content(msg: &Message, ctx: &RowCtx, body_color: gpui::Rgba) -> 
                 icons.push(IconOverlay {
                     byte_index: icon_index,
                     end_index: label_index,
-                    icon,
+                    icon: chip.icon,
                     color: mention_color,
                 });
-                if let Some(cid) = parsed_channel {
+                if let Some(cid) = chip.channel_id {
                     let locale = ctx.locale.to_string();
                     clicks.push(ClickRegion {
                         range: icon_index..end,
@@ -2105,34 +2119,21 @@ fn build_inline_content(msg: &Message, ctx: &RowCtx, body_color: gpui::Rgba) -> 
     Some(inline.into_any_element())
 }
 
-fn hashtag_label(display: &str, resolved_name: Option<SharedString>, locale: &str) -> SharedString {
-    if let Some(name) = resolved_name {
-        return name;
-    }
-    if display.starts_with("http://") || display.starts_with("https://") {
-        return SharedString::from(mezon_i18n::t(locale, "message.unknown"));
-    }
-    SharedString::from(display.strip_prefix('#').unwrap_or(display).to_owned())
-}
-
-fn hashtag_channel(channel_id: ChannelId, cx: &App) -> (Option<SharedString>, IconName) {
+fn hashtag_channel(channel_id: ChannelId, cx: &App) -> Option<ResolvedHashtag> {
     let channels = ChannelList::global(cx);
     let store = channels.read(cx);
-    let resolved = store
+    store
         .find_channel_in_active_clan(channel_id)
         .or_else(|| {
             store
                 .clan_id_for_channel(channel_id)
                 .and_then(|clan_id| store.channel(clan_id, channel_id))
         })
-        .or_else(|| store.user_channel(channel_id));
-    match resolved {
-        Some(channel) => (
-            (!channel.name.is_empty()).then(|| SharedString::from(channel.name.clone())),
-            channel_type_icon(channel.channel_type, channel.private),
-        ),
-        None => (None, IconName::Hashtag),
-    }
+        .or_else(|| store.user_channel(channel_id))
+        .map(|channel| ResolvedHashtag {
+            name: (!channel.name.is_empty()).then(|| SharedString::from(channel.name.as_str())),
+            icon: channel_type_icon(channel.channel_type, channel.private),
+        })
 }
 
 fn channel_type_icon(kind: ChannelType, private: bool) -> IconName {
@@ -2764,27 +2765,73 @@ mod tests {
 
 #[cfg(test)]
 mod hashtag_label_tests {
-    use super::hashtag_label;
+    use super::{ChannelId, HashtagChip, IconName, ResolvedHashtag, hashtag_chip_for};
     use gpui::SharedString;
 
-    #[test]
-    fn resolved_channel_wins_over_the_raw_url() {
-        let label = hashtag_label(
-            "https://mezon.ai/chat/clans/1/channels/2",
-            Some(SharedString::from("general")),
-            "en",
-        );
-        assert_eq!(label, "general");
+    const LINK: &str = "https://mezon.ai/chat/clans/1/channels/2";
+
+    fn resolved(name: Option<&str>) -> Option<ResolvedHashtag> {
+        Some(ResolvedHashtag {
+            name: name.map(SharedString::from),
+            icon: IconName::Hashtag,
+        })
+    }
+
+    fn chip(
+        display: &str,
+        channel_id: Option<i64>,
+        resolved: Option<ResolvedHashtag>,
+    ) -> HashtagChip {
+        hashtag_chip_for(display, channel_id.map(ChannelId), resolved, "en")
     }
 
     #[test]
-    fn unresolved_channel_link_never_shows_the_raw_url() {
-        let label = hashtag_label("https://mezon.ai/chat/clans/1/channels/2", None, "en");
-        assert_eq!(label, "unknown");
+    fn resolved_channel_wins_over_the_raw_url() {
+        assert_eq!(
+            chip(LINK, Some(2), resolved(Some("general"))).label,
+            "general"
+        );
+    }
+
+    #[test]
+    fn unresolved_channel_link_shows_unknown_like_react() {
+        let chip = chip(LINK, Some(2), None);
+
+        assert_eq!(chip.label, "unknown");
+        assert!(chip.italic);
+        assert_eq!(chip.icon.path(), IconName::Hashtag.path());
+    }
+
+    #[test]
+    fn unresolved_channel_link_without_id_shows_unknown() {
+        assert_eq!(chip(LINK, None, None).label, "unknown");
     }
 
     #[test]
     fn typed_hashtag_falls_back_to_the_name_without_the_hash() {
-        assert_eq!(hashtag_label("#general", None, "en"), "general");
+        assert_eq!(chip("#general", None, None).label, "general");
+    }
+
+    #[test]
+    fn inaccessible_channel_shows_no_access() {
+        let chip = chip("#secret", Some(999), None);
+
+        assert_eq!(chip.label, "No Access");
+        assert!(!chip.italic);
+        assert_eq!(chip.icon.path(), IconName::LockedPrivate.path());
+    }
+
+    #[test]
+    fn a_resolved_channel_without_a_name_keeps_the_typed_label() {
+        assert_eq!(chip("#general", Some(2), resolved(None)).label, "general");
+    }
+
+    #[test]
+    fn an_unreachable_channel_is_not_clickable() {
+        assert!(chip("#secret", Some(999), None).channel_id.is_none());
+        assert_eq!(
+            chip("#g", Some(2), resolved(Some("g"))).channel_id,
+            Some(ChannelId(2))
+        );
     }
 }
