@@ -769,7 +769,45 @@ impl X11Client {
         Ok(())
     }
 
+    // mezon vendor edit: the XIM connection dies for the whole session when the IM
+    // daemon restarts, and never exists when the app started before the daemon
+    // (autostart at login). Focus-in is a natural, low-frequency point to try a
+    // fresh connect so IME heals without an app restart.
+    fn revive_xim_if_dead(&self) {
+        const XIM_HANDSHAKE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+        {
+            let mut state = self.0.borrow_mut();
+            let stalled = matches!(
+                state.xim_handler.as_ref(),
+                Some(handler) if !handler.opened && handler.created_at.elapsed() > XIM_HANDSHAKE_TIMEOUT
+            );
+            if stalled {
+                eprintln!("[xim] handshake stalled; dropping the connection to retry");
+                state.take_xim();
+                state.ximc = None;
+                state.xim_handler = None;
+            }
+        }
+        let (xcb_connection, x_root_index) = {
+            let state = self.0.borrow();
+            if state.ximc.is_some() || state.xim_handler.is_some() {
+                return;
+            }
+            (Rc::clone(&state.xcb_connection), state.x_root_index)
+        };
+        match X11rbClient::init(xcb_connection, x_root_index, None) {
+            Ok(ximc) => {
+                eprintln!("[xim] reconnected to the XIM server");
+                let mut state = self.0.borrow_mut();
+                state.ximc = Some(ximc);
+                state.xim_handler = Some(XimHandler::new());
+            }
+            Err(_) => {}
+        }
+    }
+
     pub fn enable_ime(&self) {
+        self.revive_xim_if_dead();
         let mut state = self.0.borrow_mut();
         if !state.has_xim() {
             return;

@@ -73,6 +73,71 @@ fn configure_linux_session() {
             std::env::set_var("LC_CTYPE", fallback);
         }
     }
+    ensure_fcitx_xim_on_the_spot();
+}
+
+#[cfg(target_os = "linux")]
+fn ensure_fcitx_xim_on_the_spot() {
+    let uses_fcitx = std::env::var("XMODIFIERS")
+        .map(|v| v.contains("fcitx"))
+        .unwrap_or(false);
+    if !uses_fcitx {
+        return;
+    }
+    let Some(home) = std::env::var_os("HOME") else {
+        return;
+    };
+    let conf_dir = std::path::PathBuf::from(home).join(".config/fcitx5/conf");
+    let conf_path = conf_dir.join("xim.conf");
+    let existing = std::fs::read_to_string(&conf_path).unwrap_or_default();
+    let already_on = existing
+        .lines()
+        .any(|line| line.trim().eq_ignore_ascii_case("UseOnTheSpot=True"));
+    if already_on {
+        return;
+    }
+    if let Err(error) = std::fs::create_dir_all(&conf_dir) {
+        tracing::warn!("fcitx5 XIM OnTheSpot: create conf dir failed: {error}");
+        return;
+    }
+    let next = if existing.trim().is_empty() {
+        "UseOnTheSpot=True\n".to_string()
+    } else if existing
+        .lines()
+        .any(|line| line.trim().starts_with("UseOnTheSpot="))
+    {
+        existing
+            .lines()
+            .map(|line| {
+                if line.trim().starts_with("UseOnTheSpot=") {
+                    "UseOnTheSpot=True"
+                } else {
+                    line
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n"
+    } else {
+        format!("{}\nUseOnTheSpot=True\n", existing.trim_end())
+    };
+    if let Err(error) = std::fs::write(&conf_path, next) {
+        tracing::warn!("fcitx5 XIM OnTheSpot: write conf failed: {error}");
+        return;
+    }
+    tracing::info!(
+        "Enabled fcitx5 XIM UseOnTheSpot for inline preedit; restarting fcitx5 once \
+         (the xim addon only reads this setting at startup)"
+    );
+    match std::process::Command::new("fcitx5").args(["-rd"]).spawn() {
+        Ok(mut child) => {
+            std::thread::spawn(move || {
+                let _ = child.wait();
+            });
+            std::thread::sleep(std::time::Duration::from_millis(1200));
+        }
+        Err(error) => tracing::debug!("fcitx5 not available for restart: {error}"),
+    }
 }
 
 #[cfg(target_os = "linux")]
