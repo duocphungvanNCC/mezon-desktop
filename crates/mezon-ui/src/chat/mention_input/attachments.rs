@@ -1,24 +1,12 @@
 use std::path::{Path, PathBuf};
 
+pub use mezon_store::PendingAttachment;
+
 pub const MAX_FILE_ATTACHMENTS: usize = 50;
 pub const IMAGE_MAX_FILE_SIZE: u64 = 50 * 1024 * 1024;
 pub const MAX_FILE_SIZE: u64 = 1024 * 1024 * 1024;
 
 pub const POSTER_MAX_EDGE: u32 = 480;
-
-#[derive(Debug, Clone)]
-pub struct PendingAttachment {
-    pub path: PathBuf,
-    pub filename: String,
-    pub filetype: String,
-    pub size: u64,
-    pub is_image: bool,
-    pub is_video: bool,
-    pub width: u32,
-    pub height: u32,
-    pub duration: i32,
-    pub poster_jpeg: Option<Vec<u8>>,
-}
 
 pub enum AttachmentLimit {
     Count,
