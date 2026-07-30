@@ -81,6 +81,7 @@ fn capture_frame(target: &Target) -> anyhow::Result<BGRAFrame> {
         output_resolution: Resolution::Captured,
         excluded_targets: None,
         portal_source_types: None,
+        use_portal: false,
     };
 
     let mut capturer = Capturer::build(options).context("Building screen capturer")?;
@@ -231,7 +232,7 @@ fn native_window_id(window: &Window) -> anyhow::Result<u32> {
         #[cfg(any(target_os = "linux", target_os = "freebsd"))]
         RawWindowHandle::Xcb(xcb) => Ok(xcb.window.get()),
         #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-        RawWindowHandle::Xlib(xlib) => Ok(xlib.window.get()),
+        RawWindowHandle::Xlib(xlib) => Ok(xlib.window as u32),
         #[cfg(any(target_os = "linux", target_os = "freebsd"))]
         RawWindowHandle::Wayland(_) => {
             anyhow::bail!("Window capture is not supported on Wayland sessions")
