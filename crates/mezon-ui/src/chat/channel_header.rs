@@ -35,7 +35,7 @@ fn canvas_popover_y_offset() -> Pixels {
     px((window_controls::APP_HEADER_HEIGHT - CANVAS_HEADER_BTN_H) / 4.)
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 pub struct DmHeaderInfo {
     pub channel_id: ChannelId,
     pub is_group: bool,
@@ -856,6 +856,9 @@ impl ChannelHeader {
 pub struct ChatHeader {
     name: SharedString,
     dm: bool,
+    /// Cached so the header does not re-derive it (and re-allocate the proxied
+    /// avatar url and member-count string) on every repaint.
+    dm_header: Option<DmHeaderInfo>,
     in_voice: Option<InVoiceInfo>,
     members_action: bool,
     members_active: bool,
@@ -878,6 +881,7 @@ pub struct ChatHeader {
     _settings_observe: Subscription,
     _notification_observe: Subscription,
     _pinned_observe: Subscription,
+    _direct_observe: Subscription,
     _group_members_observe: Subscription,
 }
 
@@ -893,13 +897,20 @@ impl ChatHeader {
             |_, _, cx| cx.notify(),
         );
         let _pinned_observe = cx.observe(&PinnedMessagesStore::global(cx), |_, _, cx| cx.notify());
-        let _group_members_observe = cx
-            .observe(&mezon_store::GroupMembersStore::global(cx), |_, _, cx| {
-                cx.notify()
-            });
+        // The DM store carries the group's label and avatar; the layout's own
+        // change gate only tracks the label, so an avatar-only edit reaches the
+        // header through here. Both refresh paths repaint only on a real change.
+        let _direct_observe = cx.observe(&DirectMessageStore::global(cx), |this, _, cx| {
+            this.refresh_dm_header(cx)
+        });
+        let _group_members_observe = cx.observe(
+            &mezon_store::GroupMembersStore::global(cx),
+            |this, _, cx| this.refresh_dm_header(cx),
+        );
         Self {
             name: SharedString::default(),
             dm: false,
+            dm_header: None,
             in_voice: None,
             members_action: true,
             members_active: false,
@@ -922,7 +933,79 @@ impl ChatHeader {
             _settings_observe,
             _notification_observe,
             _pinned_observe,
+            _direct_observe,
             _group_members_observe,
+        }
+    }
+
+    /// Derives the DM avatar / name / member-count block from the DM and
+    /// group-member stores. Kept out of `render` because it allocates.
+    fn compute_dm_header(dm: bool, locale: &str, cx: &App) -> Option<DmHeaderInfo> {
+        if !dm {
+            return None;
+        }
+        let crate::router::Route::DirectMessage { direct_id, .. } =
+            crate::router::Router::global(cx).read(cx).route()
+        else {
+            return None;
+        };
+        let store = DirectMessageStore::try_global(cx)?;
+        let dm = store.read(cx).find(direct_id)?;
+        let is_group = dm.kind == DirectKind::Group;
+        let avatar_src = if dm.avatar.is_empty() {
+            String::new()
+        } else {
+            crate::util::imgproxy::avatar_url(cx, &dm.avatar)
+        };
+        let members_text = is_group.then(|| {
+            let count = mezon_store::GroupMembersStore::try_global(cx)
+                .map(|gm| gm.read(cx).members(dm.id).len())
+                .unwrap_or(0);
+            let key = if count == 1 {
+                "common.member"
+            } else {
+                "common.members"
+            };
+            SharedString::from(format!(
+                "{} {}",
+                count,
+                mezon_i18n::t(locale, key).to_lowercase()
+            ))
+        });
+        Some(DmHeaderInfo {
+            channel_id: dm.id,
+            is_group,
+            label: SharedString::from(dm.label.clone()),
+            avatar_src: SharedString::from(avatar_src),
+            avatar_raw: SharedString::from(dm.avatar.clone()),
+            members_text,
+            edit_tooltip: SharedString::from(
+                mezon_i18n::t(locale, "channelTopbar.tooltips.clickToEdit").to_string(),
+            ),
+            locale: SharedString::from(locale.to_string()),
+        })
+    }
+
+    /// Allocation-free check that the cached block still describes the conversation
+    /// the router is on, so `sync` can reuse it instead of rebuilding.
+    fn dm_header_matches(&self, locale: Option<&str>, cx: &App) -> bool {
+        let route_id = match crate::router::Router::global(cx).read(cx).route() {
+            crate::router::Route::DirectMessage { direct_id, .. } => Some(direct_id),
+            _ => None,
+        };
+        self.dm_header.as_ref().map(|info| info.channel_id) == route_id
+            && self.locale.as_deref() == locale
+    }
+
+    fn refresh_dm_header(&mut self, cx: &mut Context<Self>) {
+        let locale = self
+            .locale
+            .clone()
+            .unwrap_or_else(|| SharedString::from("en"));
+        let next = Self::compute_dm_header(self.dm, &locale, cx);
+        if self.dm_header != next {
+            self.dm_header = next;
+            cx.notify();
         }
     }
 
@@ -964,7 +1047,16 @@ impl ChatHeader {
         } else {
             ThreadsStore::global(cx).read(cx).show_threads_popover(cx)
         };
+        // `sync` runs from the layout's render path, so only rebuild the DM block
+        // when the conversation or locale actually moved -- content edits arrive
+        // through `_direct_observe` / `_group_members_observe` instead.
+        let dm_header = if dm && self.dm_header_matches(locale, cx) {
+            self.dm_header.clone()
+        } else {
+            Self::compute_dm_header(dm, locale.unwrap_or("en"), cx)
+        };
         if self.name == name
+            && self.dm_header == dm_header
             && self.dm == dm
             && self.in_voice == in_voice
             && self.members_action == members_action
@@ -983,6 +1075,7 @@ impl ChatHeader {
             return;
         }
         self.name = name;
+        self.dm_header = dm_header;
         self.dm = dm;
         self.in_voice = in_voice;
         self.members_action = members_action;
@@ -1109,54 +1202,7 @@ impl Render for ChatHeader {
         } else {
             mezon_i18n::t(&locale, "channelTopbar.tooltips.timelineView").into()
         };
-        let dm_header = if self.dm {
-            match crate::router::Router::global(cx).read(cx).route() {
-                crate::router::Route::DirectMessage { direct_id, .. } => {
-                    DirectMessageStore::try_global(cx).and_then(|store| {
-                        let store = store.read(cx);
-                        store.find(direct_id).map(|dm| {
-                            let is_group = dm.kind == DirectKind::Group;
-                            let avatar_src = if dm.avatar.is_empty() {
-                                String::new()
-                            } else {
-                                crate::util::imgproxy::avatar_url(cx, &dm.avatar)
-                            };
-                            let members_text = is_group.then(|| {
-                                let count = mezon_store::GroupMembersStore::try_global(cx)
-                                    .map(|gm| gm.read(cx).members(dm.id).len())
-                                    .unwrap_or(0);
-                                let key = if count == 1 {
-                                    "common.member"
-                                } else {
-                                    "common.members"
-                                };
-                                SharedString::from(format!(
-                                    "{} {}",
-                                    count,
-                                    mezon_i18n::t(&locale, key).to_lowercase()
-                                ))
-                            });
-                            DmHeaderInfo {
-                                channel_id: dm.id,
-                                is_group,
-                                label: SharedString::from(dm.label.clone()),
-                                avatar_src: SharedString::from(avatar_src),
-                                avatar_raw: SharedString::from(dm.avatar.clone()),
-                                members_text,
-                                edit_tooltip: SharedString::from(
-                                    mezon_i18n::t(&locale, "channelTopbar.tooltips.clickToEdit")
-                                        .to_string(),
-                                ),
-                                locale: locale.clone(),
-                            }
-                        })
-                    })
-                }
-                _ => None,
-            }
-        } else {
-            None
-        };
+        let dm_header = self.dm_header.clone();
         let mut header = ChannelHeader::new(self.name.to_string())
             .dm(self.dm)
             .dm_header(dm_header)

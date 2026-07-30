@@ -80,6 +80,14 @@ impl EditGroupModal {
         }
     }
 
+    /// Releases the picker/upload guard. Always notifies: the guard is claimed
+    /// before the native dialog opens, so cancelling it has to clear the spinner.
+    fn finish_upload(&mut self, cx: &mut Context<Self>) {
+        self._upload_task = None;
+        self.uploading = false;
+        cx.notify();
+    }
+
     fn pick_avatar(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
         if self.uploading || self.saving {
             return;
@@ -93,24 +101,23 @@ impl EditGroupModal {
             multiple: false,
             prompt: Some(prompt),
         });
+        // Claim the guard before awaiting the picker, otherwise a second click
+        // opens a second native dialog while the first is still up.
+        self.uploading = true;
+        cx.notify();
         self._upload_task.take();
         self._upload_task = Some(cx.spawn(async move |this, cx| {
-            let finish = |this: &mut EditGroupModal| {
-                this._upload_task = None;
-                this.uploading = false;
-            };
-
             let paths = match rx.await {
                 Ok(Ok(Some(paths))) => paths,
                 _ => {
-                    let _ = this.update(cx, |this, _| finish(this));
+                    let _ = this.update(cx, |this, cx| this.finish_upload(cx));
                     return;
                 }
             };
             let path = match paths.into_iter().next() {
                 Some(path) => path,
                 None => {
-                    let _ = this.update(cx, |this, _| finish(this));
+                    let _ = this.update(cx, |this, cx| this.finish_upload(cx));
                     return;
                 }
             };
@@ -122,7 +129,7 @@ impl EditGroupModal {
                 .to_ascii_lowercase();
             if !ClanImageMimeType::is_allowed_extension(&ext) {
                 tracing::warn!("group avatar pick rejected: unsupported file type .{ext}");
-                let _ = this.update(cx, |this, _| finish(this));
+                let _ = this.update(cx, |this, cx| this.finish_upload(cx));
                 return;
             }
 
@@ -134,7 +141,7 @@ impl EditGroupModal {
                 Some(size) => size,
                 None => {
                     tracing::warn!("group avatar pick: cannot read file metadata");
-                    let _ = this.update(cx, |this, _| finish(this));
+                    let _ = this.update(cx, |this, cx| this.finish_upload(cx));
                     return;
                 }
             };
@@ -144,20 +151,18 @@ impl EditGroupModal {
                     file_size,
                     MAX_GROUP_AVATAR_BYTES
                 );
-                let _ = this.update(cx, |this, _| finish(this));
+                let _ = this.update(cx, |this, cx| this.finish_upload(cx));
                 return;
             }
 
-            let task = match this.update(cx, |modal, cx| {
-                modal.uploading = true;
-                cx.notify();
+            let task = match this.update(cx, |_, cx| {
                 ClanList::global(cx).update(cx, |store, cx| {
                     store.upload_clan_image(&path, MAX_GROUP_AVATAR_BYTES, cx)
                 })
             }) {
                 Ok(task) => task,
                 Err(_) => {
-                    let _ = this.update(cx, |this, _| finish(this));
+                    let _ = this.update(cx, |this, cx| this.finish_upload(cx));
                     return;
                 }
             };
@@ -166,16 +171,12 @@ impl EditGroupModal {
                     let _ = this.update(cx, |modal, cx| {
                         modal.avatar_current = url;
                         modal.avatar_dirty = true;
-                        finish(modal);
-                        cx.notify();
+                        modal.finish_upload(cx);
                     });
                 }
                 Err(err) => {
                     tracing::error!("group avatar upload failed: {err}");
-                    let _ = this.update(cx, |this, cx| {
-                        finish(this);
-                        cx.notify();
-                    });
+                    let _ = this.update(cx, |this, cx| this.finish_upload(cx));
                 }
             }
         }));
@@ -209,15 +210,17 @@ impl EditGroupModal {
         cx.notify();
 
         let channel_id = self.channel_id;
+        let locale = self.locale.clone();
         let task = DirectMessageStore::global(cx).update(cx, |store, cx| {
             store.update_group(channel_id, label_opt, avatar_opt, cx)
         });
         self._save_task = Some(cx.spawn(async move |this, cx| match task.await {
             Ok(()) => {
                 let alive = this.update(cx, |_, _| {}).is_ok();
+                let saved = mezon_i18n::t(&locale, "directMessage.editGroup.saved").to_string();
                 cx.update(|cx| {
                     Shell::global(cx).update(cx, |shell, cx| {
-                        shell.success("Group updated successfully!".to_string(), cx);
+                        shell.success(saved, cx);
                         if alive {
                             shell.close_modal(cx);
                         }
@@ -225,13 +228,17 @@ impl EditGroupModal {
                 });
             }
             Err(err) => {
+                // The transport error is for the log; the toast gets the localized
+                // message so users never see raw wire text.
                 tracing::error!("update group failed: {err}");
                 let _ = this.update(cx, |this, cx| {
                     this.saving = false;
                     cx.notify();
                 });
+                let failed =
+                    mezon_i18n::t(&locale, "directMessage.editGroup.saveFailed").to_string();
                 cx.update(|cx| {
-                    Shell::global(cx).update(cx, |shell, cx| shell.error(err.to_string(), cx));
+                    Shell::global(cx).update(cx, |shell, cx| shell.error(failed, cx));
                 });
             }
         }));
