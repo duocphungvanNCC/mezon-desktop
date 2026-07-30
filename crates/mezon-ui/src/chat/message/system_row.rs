@@ -10,6 +10,7 @@ use super::content::{
 };
 use super::context::{CONTENT_INSET, OnboardingContext, RowCtx, WelcomeContext};
 use super::time::format_message_time;
+use crate::components::compositions::channel_row::{channel_icon, render_channel_icon};
 use crate::components::primitives::{Avatar, Icon, IconName};
 use crate::router::{Route, navigate};
 
@@ -782,15 +783,12 @@ pub fn render_welcome(_msg: &Message, ctx: &RowCtx) -> AnyElement {
         } => {
             col = col
                 .child(welcome_icon_circle(
-                    if private {
-                        Icon::new(IconName::ThreadIconLocker)
-                            .size_10()
-                            .text_color(icon_fill)
-                    } else {
-                        Icon::new(IconName::ThreadIcon)
-                            .size_10()
-                            .text_color(icon_fill)
-                    },
+                    render_channel_icon(
+                        channel_icon(ChannelType::Thread, private),
+                        px(40.),
+                        icon_fill.into(),
+                        theme.tokens.bg_icon_theme_active.into(),
+                    ),
                     Some(theme.tokens.bg_active_member_channel),
                 ))
                 .child(

@@ -364,7 +364,7 @@ impl AddMemRoleModal {
             if failed_users.is_empty() && failed_roles.is_empty() {
                 return;
             }
-            let _ = cx.update(|cx| {
+            cx.update(|cx| {
                 if !failed_users.is_empty() {
                     ChannelUsersStore::global(cx).update(cx, |store, cx| {
                         store.remove_users(channel_id, &failed_users, cx);

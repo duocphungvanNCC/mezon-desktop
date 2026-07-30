@@ -422,7 +422,7 @@ impl PermissionsTab {
                 .await
             {
                 tracing::error!("delete_role_channel_desc failed for {role_id}: {error}");
-                let _ = cx.update(|cx| {
+                cx.update(|cx| {
                     RolesStore::global(cx).update(cx, |store, cx| {
                         store.add_roles_to_channel(clan_id, channel_id, &[role_id], cx);
                     });
@@ -459,7 +459,7 @@ impl PermissionsTab {
                 .await
             {
                 tracing::error!("remove_channel_users failed for {channel_id}: {error}");
-                let _ = cx.update(|cx| {
+                cx.update(|cx| {
                     super::permission_overrides::report_acl_failure(&locale, cx);
                 });
                 return;

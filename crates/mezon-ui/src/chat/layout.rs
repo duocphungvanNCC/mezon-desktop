@@ -28,6 +28,7 @@ use crate::chat::pinned_popover::PinnedPopoverPanel;
 use crate::chat::threads_popover::ThreadsPopoverPanel;
 use crate::chat::voice_sound_picker::{VoiceSoundPicker, VoiceSoundPickerEvent};
 use crate::chat::{CanvasPopoverPanel, CanvasView};
+use crate::components::compositions::channel_row::channel_icon;
 use crate::components::compositions::user_info_bar::UserInfoBar;
 use crate::components::primitives::{
     Icon, IconName, InputEvent, InputState, Slider, SliderEvent, SliderState,
@@ -1932,7 +1933,7 @@ impl ChatLayout {
                 self.navigate_to_thread(channel_id, clan_id, "", "", cx);
                 ThreadsStore::global(cx).update(cx, |store, cx| store.refresh(cx));
             }
-            ThreadsEvent::CreateFailed { message } => {
+            ThreadsEvent::CreateFailed { message } | ThreadsEvent::LeaveFailed { message } => {
                 Shell::global(cx).update(cx, |shell, cx| {
                     shell.error(message.clone(), cx);
                 });
@@ -2541,6 +2542,7 @@ impl ChatLayout {
                     .render(
                         &locale,
                         Some(dm.label.as_str()),
+                        None,
                         true,
                         in_voice,
                         Some(dm.id),
@@ -2578,6 +2580,7 @@ impl ChatLayout {
                     .chat_area
                     .render(
                         &locale,
+                        None,
                         None,
                         true,
                         None,
@@ -2617,6 +2620,7 @@ impl ChatLayout {
             {
                 let channel_name = ch.name.clone();
                 let active_channel_id = ch.id;
+                let header_icon = channel_icon(ch.channel_type, ch.private);
                 let canvas = self
                     .ensure_canvas_view(clan_id, channel_id, canvas_id, window, cx)
                     .into_any_element();
@@ -2625,6 +2629,7 @@ impl ChatLayout {
                     .render_canvas(
                         &locale,
                         Some(channel_name.as_str()),
+                        Some(header_icon),
                         Some(active_channel_id),
                         true,
                         self.show_member_list && !show_results_panel && !topic_open,
@@ -2732,6 +2737,7 @@ impl ChatLayout {
                             .render(
                                 &locale,
                                 Some(channel.name.as_str()),
+                                Some(channel_icon(channel.channel_type, channel.private)),
                                 false,
                                 None,
                                 Some(channel.id),
@@ -2809,6 +2815,7 @@ impl ChatLayout {
                 .render(
                     &locale,
                     Some(channel_name.as_str()),
+                    Some(channel_icon(ch.channel_type, ch.private)),
                     false,
                     None,
                     Some(channel_id),
@@ -2855,6 +2862,7 @@ impl ChatLayout {
                 .render(
                     &locale,
                     None,
+                    None,
                     false,
                     None,
                     None,
@@ -2887,13 +2895,13 @@ impl ChatLayout {
 
         let placeholder = match route {
             Route::Chat => self.render_placeholder(
-                &theme,
+                theme,
                 crate::components::primitives::IconName::Inbox,
                 mezon_i18n::t(&locale, "nav.chat"),
                 &current_path,
             ),
             Route::Direct => self.render_placeholder(
-                &theme,
+                theme,
                 crate::components::primitives::IconName::People,
                 mezon_i18n::t(&locale, "dm.title"),
                 &current_path,
@@ -2902,7 +2910,7 @@ impl ChatLayout {
                 direct_id,
                 message_type: _,
             } => self.render_placeholder(
-                &theme,
+                theme,
                 crate::components::primitives::IconName::People,
                 &format!("Direct {direct_id}"),
                 &current_path,
@@ -2911,31 +2919,31 @@ impl ChatLayout {
                 div().into_any_element()
             }
             Route::Friends => self.render_placeholder(
-                &theme,
+                theme,
                 crate::components::primitives::IconName::IconFriends,
                 mezon_i18n::t(&locale, "directMessage.friends"),
                 &current_path,
             ),
             Route::Thread { channel_id, .. } => self.render_placeholder(
-                &theme,
+                theme,
                 crate::components::primitives::IconName::Hashtag,
                 &format!("Thread #{channel_id}"),
                 &current_path,
             ),
             Route::Canvas { channel_id, .. } => self.render_placeholder(
-                &theme,
+                theme,
                 crate::components::primitives::IconName::Hashtag,
                 &format!("Canvas #{channel_id}"),
                 &current_path,
             ),
             Route::AddFriend { username } => self.render_placeholder(
-                &theme,
+                theme,
                 crate::components::primitives::IconName::People,
                 &format!("Add Friend: {username}"),
                 &current_path,
             ),
             Route::Invite { invite_id } => self.render_placeholder(
-                &theme,
+                theme,
                 crate::components::primitives::IconName::People,
                 &format!("Invite: {invite_id}"),
                 &current_path,

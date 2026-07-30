@@ -515,7 +515,7 @@ impl Render for DirectSidebar {
                     .relative()
                     .child(list)
                     .custom_scrollbars(
-                        Scrollbars::new(ScrollAxes::Vertical)
+                        Scrollbars::always_visible(ScrollAxes::Vertical)
                             .tracked_scroll_handle(&self.list_scroll),
                         window,
                         cx,
