@@ -201,6 +201,39 @@ impl RootView {
         }
     }
 
+    pub fn reload(window: &mut Window, cx: &mut App) {
+        let Some(settings) = Settings::try_global(cx) else {
+            tracing::warn!("Reload skipped — settings global is missing");
+            return;
+        };
+        let auth_state = mezon_store::LoginStore::global(cx).read(cx).auth_state();
+
+        crate::image_viewer::close_image_viewer(cx);
+        crate::chat::media_channel::close_media_image_modal(cx);
+        crate::channel_app::close_channel_app_window(cx);
+        crate::image_cache::clear_all_image_caches(cx);
+        mezon_canvas::reset_canvas_image_caches(cx);
+        mezon_store::LoginStore::reset_all_user_stores(cx);
+
+        let reconnecting = auth_state.update(cx, |state, cx| {
+            if let AuthState::Authenticated(session) = state {
+                *state = AuthState::Connecting(session.clone());
+                cx.notify();
+                true
+            } else {
+                false
+            }
+        });
+        if reconnecting {
+            ConnectionStore::global(cx).update(cx, |store, cx| store.reconnect(cx));
+        }
+
+        let title_bar = cx.new(|cx| TitleBar::new(settings.clone(), cx));
+        window.replace_root(cx, |_, cx| {
+            RootView::new(title_bar, auth_state, settings, cx)
+        });
+    }
+
     fn sync_settings_page(&mut self, cx: &mut Context<Self>) {
         let page = match Router::global(cx).read(cx).route() {
             Route::SettingsProfile => {

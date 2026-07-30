@@ -116,6 +116,10 @@ unsafe fn handle_shortcut(event: *mut Object, async_app: &gpui::AsyncApp) -> boo
             async_app.update(|cx| cx.quit());
             true
         }
+        b'r' => {
+            async_app.update(crate::reload_app);
+            true
+        }
         _ => false,
     }
 }
