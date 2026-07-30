@@ -51,6 +51,7 @@ pub struct ThreadSummary {
 pub enum ThreadsEvent {
     ThreadCreated { channel_id: String, clan_id: String },
     CreateFailed { message: String },
+    LeaveFailed { message: String },
     OpenPopoverRequested,
 }
 
@@ -92,6 +93,11 @@ impl ThreadsStore {
 
     pub fn global(cx: &App) -> Entity<Self> {
         cx.global::<GlobalThreadsStore>().0.clone()
+    }
+
+    pub fn try_global(cx: &App) -> Option<Entity<Self>> {
+        cx.try_global::<GlobalThreadsStore>()
+            .map(|global| global.0.clone())
     }
 
     fn new(api: Arc<AppApi>, cx: &mut Context<Self>) -> Self {
@@ -140,6 +146,8 @@ impl ThreadsStore {
                 RealtimeKind::ChannelMessage,
                 RealtimeKind::ChannelDeleted,
                 RealtimeKind::ChannelArchive,
+                RealtimeKind::UserChannelAdded,
+                RealtimeKind::UserChannelRemoved,
             ] {
                 dispatch.on(kind, &entity, |this, event, cx| {
                     this.on_realtime_event(event, cx);
@@ -178,6 +186,14 @@ impl ThreadsStore {
     }
 
     fn on_realtime_event(&mut self, event: &RealtimeEvent, cx: &mut Context<Self>) {
+        if let RealtimeEvent::UserChannelAdded(ev) = event {
+            self.apply_user_channel_added(ev, cx);
+            return;
+        }
+        if let RealtimeEvent::UserChannelRemoved(ev) = event {
+            self.apply_user_channel_removed(ev, cx);
+            return;
+        }
         let Some(list_id) = self.list_channel_id.clone() else {
             if let RealtimeEvent::ChannelArchive(ev) = event {
                 self.apply_channel_archive(ev, cx);
@@ -202,6 +218,112 @@ impl ThreadsStore {
             }
             _ => {}
         }
+    }
+
+    fn apply_user_channel_added(
+        &mut self,
+        ev: &realtime::UserChannelAdded,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(desc) = ev.channel_desc.as_ref() else {
+            return;
+        };
+        if desc.r#type != CHANNEL_TYPE_THREAD as i32 || desc.parent_id == 0 {
+            return;
+        }
+        let Some(me) = crate::badge::BadgeService::try_global(cx)
+            .and_then(|badges| badges.read(cx).current_user_id(cx))
+        else {
+            return;
+        };
+        if !ev.users.iter().any(|user| user.user_id == me.get()) {
+            return;
+        }
+        let channel_id = desc.channel_id.to_string();
+        self.set_thread_active(&channel_id, THREAD_STATUS_JOINED, cx);
+        let parent_id = desc.parent_id.to_string();
+        if desc.channel_private == 0 || self.list_channel_id.as_deref() != Some(parent_id.as_str())
+        {
+            return;
+        }
+        let summary = ThreadSummary {
+            channel_id,
+            channel_label: desc.channel_label.clone(),
+            clan_id: desc.clan_id.to_string(),
+            parent_id,
+            channel_private: desc.channel_private,
+            active: THREAD_STATUS_JOINED,
+            creator_id: desc.creator_id.to_string(),
+            last_message_content: String::new(),
+            last_message_sender_id: String::new(),
+            last_message_sender_name: String::new(),
+            last_message_sender_avatar: String::new(),
+            last_sent_timestamp: match i64::from(ev.create_time_seconds) {
+                0 => crate::message_time::unix_now_seconds(),
+                seconds => seconds,
+            },
+            member_count: desc.member_count.max(0),
+        };
+        let before = self.threads.len();
+        merge_threads(&mut self.threads, vec![summary]);
+        if self.threads.len() != before {
+            cx.notify();
+        }
+    }
+
+    fn apply_user_channel_removed(
+        &mut self,
+        ev: &realtime::UserChannelRemoved,
+        cx: &mut Context<Self>,
+    ) {
+        if ev.channel_type != CHANNEL_TYPE_THREAD as i32 {
+            return;
+        }
+        let Some(me) = crate::badge::BadgeService::try_global(cx)
+            .and_then(|badges| badges.read(cx).current_user_id(cx))
+        else {
+            return;
+        };
+        if !ev.user_ids.contains(&me.get()) {
+            return;
+        }
+        let channel_id = ev.channel_id.to_string();
+        if !self.is_private_thread(&channel_id) {
+            return;
+        }
+        self.apply_thread_deleted(&channel_id, cx);
+    }
+
+    fn is_private_thread(&self, channel_id: &str) -> bool {
+        self.threads
+            .iter()
+            .chain(self.search_results.iter().flatten())
+            .any(|thread| thread.channel_id == channel_id && thread.channel_private != 0)
+    }
+
+    pub fn leave_thread(&mut self, clan_id: ClanId, channel_id: ChannelId, cx: &mut Context<Self>) {
+        let api = self.api.clone();
+        cx.spawn(async move |this, cx| {
+            if let Err(e) = api.leave_thread(clan_id.get(), channel_id.get()).await {
+                tracing::error!("leave_thread failed for {channel_id}: {e}");
+                let _ = this.update(cx, |_this, cx| {
+                    cx.emit(ThreadsEvent::LeaveFailed {
+                        message: e.to_string(),
+                    });
+                });
+                return;
+            }
+            let _ = this.update(cx, |this, cx| {
+                ChannelList::global(cx).update(cx, |list, cx| {
+                    list.apply_self_removed_from_channel(channel_id, cx);
+                });
+                let id = channel_id.to_string();
+                if this.is_private_thread(&id) {
+                    this.apply_thread_deleted(&id, cx);
+                }
+            });
+        })
+        .detach();
     }
 
     pub fn mark_thread_active(&mut self, channel_id: &str, cx: &mut Context<Self>) {

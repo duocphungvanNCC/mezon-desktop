@@ -2453,6 +2453,8 @@ impl TransportClient {
         message_id: i64,
         content: &str,
         mentions: Vec<crate::transport::OutgoingMention>,
+        hashtags: Vec<crate::transport::OutgoingHashtag>,
+        emojis: Vec<crate::transport::OutgoingEmoji>,
         presign_finish: Vec<String>,
         create_time_seconds: u32,
         mode: i32,
@@ -2472,6 +2474,8 @@ impl TransportClient {
                         message_id,
                         &content,
                         mentions,
+                        hashtags,
+                        emojis,
                         presign_finish,
                         create_time_seconds,
                         mode,
@@ -2629,6 +2633,15 @@ impl TransportClient {
 
         runtime()
             .spawn(async move { transport.active_archived_thread(clan_id, channel_id).await })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
+    pub async fn leave_thread(&self, clan_id: i64, channel_id: i64) -> Result<()> {
+        let transport = self.inner.clone();
+
+        runtime()
+            .spawn(async move { transport.leave_thread(clan_id, channel_id).await })
             .await
             .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
     }
