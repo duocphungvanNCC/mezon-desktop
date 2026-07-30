@@ -39,6 +39,14 @@ pub fn render_embeds(
     column.into_any_element()
 }
 
+fn embed_card_width(ctx: &RowCtx) -> f32 {
+    if ctx.content_width > 0. {
+        ctx.content_width.min(CARD_MAX_WIDTH)
+    } else {
+        CARD_MAX_WIDTH
+    }
+}
+
 fn is_share_contact_embed(embed: &Embed, code: MessageCode) -> bool {
     code == MessageCode::ShareContact
         || embed
@@ -130,8 +138,7 @@ pub fn render_embed_card(
 
     div()
         .relative()
-        .w_full()
-        .max_w(px(CARD_MAX_WIDTH))
+        .w(px(embed_card_width(ctx)))
         .mt_2()
         .rounded(px(CARD_RADIUS))
         .overflow_hidden()

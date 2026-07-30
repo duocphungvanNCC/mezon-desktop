@@ -577,6 +577,12 @@ impl ChatArea {
             div().into_any_element()
         };
 
+        let timeline_popover_open = self.timeline.read(cx).profile_popover_open();
+        let member_popover_open = self
+            .member_panel
+            .as_ref()
+            .is_some_and(|panel| panel.read(cx).profile_popover_open());
+
         let message_column = div()
             .relative()
             .group("chat-drop-zone")
@@ -607,12 +613,18 @@ impl ChatArea {
                 }
             })
             .when(!media_channel_view, |col| {
-                col.child(
-                    div().flex_1().min_h_0().overflow_hidden().child(
+                col.child(div().flex_1().min_h_0().overflow_hidden().child(
+                    if timeline_popover_open {
+                        div()
+                            .size_full()
+                            .child(AnyView::from(self.timeline.clone()))
+                            .into_any_element()
+                    } else {
                         AnyView::from(self.timeline.clone())
-                            .cached(StyleRefinement::default().size_full()),
-                    ),
-                )
+                            .cached(StyleRefinement::default().size_full())
+                            .into_any_element()
+                    },
+                ))
                 .when(send_denied, |col| col.child(no_permission_notice))
                 .when(!send_denied, |col| {
                     col.when_some(app_channel_bar.as_ref(), |col, target| {
@@ -667,10 +679,17 @@ impl ChatArea {
                         .overflow_hidden()
                         .when(member_visible, |slot| slot.w(px(245.)))
                         .when(!member_visible, |slot| slot.w(px(0.)).invisible())
-                        .child(
+                        .child(if member_popover_open {
+                            div()
+                                .w(px(245.))
+                                .h_full()
+                                .child(AnyView::from(panel))
+                                .into_any_element()
+                        } else {
                             AnyView::from(panel)
-                                .cached(StyleRefinement::default().w(px(245.)).h_full()),
-                        ),
+                                .cached(StyleRefinement::default().w(px(245.)).h_full())
+                                .into_any_element()
+                        }),
                 )
             });
 

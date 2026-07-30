@@ -14,7 +14,7 @@ use crate::util::assets::AVATAR_GROUP;
 
 use super::ClanSidebar;
 
-const REMOVAL_DEFER_MS: u64 = 200;
+const ANIM_MS: u64 = 200;
 const ROW_HEIGHT: f32 = 60.;
 
 #[derive(Clone, PartialEq, Eq)]
@@ -26,7 +26,8 @@ pub(super) struct DirectUnreadItem {
     pub avatar_src: SharedString,
     pub avatar_raw: SharedString,
     pub row_id: SharedString,
-    pub anim_key: SharedString,
+    pub enter_key: SharedString,
+    pub leave_key: SharedString,
 }
 
 pub(super) struct DirectUnreadListState {
@@ -80,7 +81,7 @@ impl DirectUnreadListState {
 
         self.defer_task = Some(cx.spawn(async move |this, cx| {
             cx.background_executor()
-                .timer(Duration::from_millis(REMOVAL_DEFER_MS))
+                .timer(Duration::from_millis(ANIM_MS))
                 .await;
             let _ = this.update(cx, |this, cx| {
                 this.direct_unread.apply_deferred_render();
@@ -160,7 +161,8 @@ pub(super) fn build_direct_unread_items(
             avatar_src: SharedString::from(crate::util::imgproxy::avatar_url(cx, &ch.avatar)),
             avatar_raw: SharedString::from(ch.avatar.clone()),
             row_id: SharedString::from(format!("direct-unread-{}", ch.id)),
-            anim_key: SharedString::from(format!("direct-unread-anim-{}", ch.id)),
+            enter_key: SharedString::from(format!("direct-unread-in-{}", ch.id)),
+            leave_key: SharedString::from(format!("direct-unread-out-{}", ch.id)),
         })
         .collect()
 }
@@ -194,7 +196,6 @@ fn render_direct_unread_item(item: &DirectUnreadItem, animate_out: bool) -> AnyE
     let unread_count = item.unread_count;
     let badge = badge_text(unread_count);
     let wide = unread_count >= 10;
-    let ease = |t: f32| 1.0 - (1.0 - t).powi(2);
 
     let avatar_size = px(40.);
     let avatar = if item.kind == DirectKind::Group && item.avatar_src.is_empty() {
@@ -238,45 +239,37 @@ fn render_direct_unread_item(item: &DirectUnreadItem, animate_out: bool) -> AnyE
         .text_color(gpui::white())
         .child(badge);
 
-    let inner: AnyElement = if animate_out {
-        div()
-            .relative()
-            .child(avatar)
-            .child(badge_el)
-            .with_animation(
-                SharedString::from(format!("{}-fade-out", item.anim_key)),
-                Animation::new(Duration::from_millis(REMOVAL_DEFER_MS)).with_easing(ease),
-                |el, delta| el.opacity(1.0 - delta),
-            )
-            .into_any_element()
-    } else {
-        div()
-            .relative()
-            .child(avatar)
-            .child(badge_el)
-            .into_any_element()
-    };
-
     let row = div()
         .id(item.row_id.clone())
         .flex()
         .items_end()
         .justify_center()
         .w_full()
-        .h(px(ROW_HEIGHT))
         .overflow_hidden()
         .cursor_pointer()
         .on_click(on_direct_unread_click(channel_id, channel_type))
-        .child(inner);
+        .child(div().relative().child(avatar).child(badge_el));
+
+    let animation = Animation::new(Duration::from_millis(ANIM_MS)).with_easing(ease_in_out);
 
     if animate_out {
-        row.with_animation(
-            SharedString::from(format!("{}-height-out", item.anim_key)),
-            Animation::new(Duration::from_millis(REMOVAL_DEFER_MS)).with_easing(ease),
-            |el, delta| el.h(px(ROW_HEIGHT * (1.0 - delta).max(0.0))),
-        )
+        row.with_animation(item.leave_key.clone(), animation, |el, delta| {
+            let remaining = (1.0 - delta).max(0.0);
+            el.h(px(ROW_HEIGHT * remaining)).opacity(remaining)
+        })
         .into_any_element()
     } else {
-        row.into_any_element()
+        row.with_animation(item.enter_key.clone(), animation, |el, delta| {
+            el.h(px(ROW_HEIGHT * delta)).opacity(0.5 + 0.5 * delta)
+        })
+        .into_any_element()
+    }
+}
+
+fn ease_in_out(t: f32) -> f32 {
+    if t < 0.5 {
+        2.0 * t * t
+    } else {
+        1.0 - (-2.0 * t + 2.0).powi(2) / 2.0
     }
 }

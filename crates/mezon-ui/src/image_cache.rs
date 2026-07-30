@@ -475,6 +475,10 @@ fn image_bytes(image: &RenderImage) -> u64 {
         .sum()
 }
 
+fn entry_in_working_set(touched_epoch: u64, epoch: u64, swept: bool) -> bool {
+    swept && epoch.wrapping_sub(touched_epoch) <= 1
+}
+
 fn entry_is_stale(touched_epoch: u64, epoch: u64, age: Duration, grace: Duration) -> bool {
     touched_epoch != epoch && age > grace
 }
@@ -883,10 +887,20 @@ impl LruImageCache {
     /// `last_used` timestamp (map order no longer tracks recency); the final
     /// remaining entry is never evicted, so the image requested this frame
     /// stays resident.
+    ///
+    /// On viewport-swept caches the in-viewport working set (entries touched
+    /// this epoch or the previous one — rows below the current paint cursor
+    /// were last touched one epoch ago) is never a victim: when the visible
+    /// images alone exceed the byte budget, evicting one of them just makes
+    /// the next frame re-decode it and evict its neighbour, blinking a
+    /// different visible image every frame. The sweep remains the bound that
+    /// frees them once they scroll out.
     fn lru_index(&self) -> Option<usize> {
+        let swept = self.sweeps > 0;
         self.cache
             .values()
             .enumerate()
+            .filter(|(_, entry)| !entry_in_working_set(entry.touched_epoch, self.epoch, swept))
             .min_by_key(|(_, entry)| entry.last_used)
             .map(|(index, _)| index)
     }
@@ -1851,6 +1865,16 @@ mod tests {
             GRACE_PERIOD + Duration::from_secs(5),
             GRACE_PERIOD
         ));
+    }
+
+    #[test]
+    fn budget_eviction_spares_the_visible_working_set_on_swept_caches() {
+        assert!(entry_in_working_set(7, 7, true));
+        assert!(entry_in_working_set(6, 7, true));
+        assert!(!entry_in_working_set(5, 7, true));
+        assert!(entry_in_working_set(u64::MAX, 0, true));
+        assert!(!entry_in_working_set(7, 7, false));
+        assert!(!entry_in_working_set(6, 7, false));
     }
 
     #[test]

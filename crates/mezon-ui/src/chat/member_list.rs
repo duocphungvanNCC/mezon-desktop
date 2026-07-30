@@ -108,6 +108,10 @@ enum RouteKey {
 }
 
 impl MemberListPanel {
+    pub(crate) fn profile_popover_open(&self) -> bool {
+        self.open_profile.is_some()
+    }
+
     pub fn new(
         source: MemberSource,
         settings: Entity<Settings>,
