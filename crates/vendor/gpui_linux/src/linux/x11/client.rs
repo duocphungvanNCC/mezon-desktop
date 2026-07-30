@@ -36,7 +36,7 @@ use x11rb::{
     wrapper::ConnectionExt as _,
     xcb_ffi::XCBConnection,
 };
-use xim::{AttributeName, Client, InputStyle, x11rb::X11rbClient};
+use xim::{AttributeName, Client, x11rb::X11rbClient};
 use xkbc::x11::ffi::{XKB_X11_MIN_MAJOR_XKB_VERSION, XKB_X11_MIN_MINOR_XKB_VERSION};
 use xkbcommon::xkb::{self as xkbc, STATE_LAYOUT_EFFECTIVE};
 
@@ -77,6 +77,23 @@ pub(crate) const XINPUT_ALL_DEVICES: xinput::DeviceId = 0;
 pub(crate) const XINPUT_ALL_DEVICE_GROUPS: xinput::DeviceId = 1;
 
 const GPUI_X11_SCALE_FACTOR_ENV: &str = "GPUI_X11_SCALE_FACTOR";
+
+
+fn xim_preedit_geometry(bounds: Bounds<gpui::ScaledPixels>) -> (xim::Point, xim::Rectangle) {
+    let width = bounds.size.width.0.max(1.);
+    let height = bounds.size.height.0.max(1.);
+    let x = u32::from(bounds.origin.x) as i16;
+    let y = u32::from(bounds.origin.y) as i16;
+    (
+        xim::Point { x, y },
+        xim::Rectangle {
+            x,
+            y,
+            width: width as u16,
+            height: height as u16,
+        },
+    )
+}
 
 pub(crate) struct WindowRef {
     window: X11WindowStatePtr,
@@ -262,7 +279,7 @@ impl X11ClientStatePtr {
             return;
         };
         let mut state = client.0.borrow_mut();
-        if state.composing || state.ximc.is_none() {
+        if state.ximc.is_none() {
             return;
         }
 
@@ -275,23 +292,18 @@ impl X11ClientStatePtr {
             state.ximc = Some(ximc);
             return;
         };
+        if !xim_handler.connected || xim_handler.ic_id == 0 || xim_handler.window == 0 {
+            state.ximc = Some(ximc);
+            state.xim_handler = Some(xim_handler);
+            return;
+        }
         let scaled_bounds = bounds.scale(state.scale_factor);
         let ic_attributes = ximc
             .build_ic_attributes()
-            .push(
-                xim::AttributeName::InputStyle,
-                xim::InputStyle::PREEDIT_CALLBACKS,
-            )
-            .push(xim::AttributeName::ClientWindow, xim_handler.window)
-            .push(xim::AttributeName::FocusWindow, xim_handler.window)
             .nested_list(xim::AttributeName::PreeditAttributes, |b| {
-                b.push(
-                    xim::AttributeName::SpotLocation,
-                    xim::Point {
-                        x: u32::from(scaled_bounds.origin.x + scaled_bounds.size.width) as i16,
-                        y: u32::from(scaled_bounds.origin.y + scaled_bounds.size.height) as i16,
-                    },
-                );
+                let (spot, area) = xim_preedit_geometry(scaled_bounds);
+                b.push(xim::AttributeName::SpotLocation, spot)
+                    .push(xim::AttributeName::Area, area);
             })
             .build();
         let _ = ximc
@@ -742,40 +754,68 @@ impl X11Client {
             return;
         }
 
-        let Some((mut ximc, xim_handler)) = state.take_xim() else {
+        let Some((mut ximc, mut xim_handler)) = state.take_xim() else {
             return;
         };
+        let Some(window_id) = state.keyboard_focused_window.filter(|w| *w != 0) else {
+            state.restore_xim(ximc, xim_handler);
+            return;
+        };
+        xim_handler.window = window_id;
+
+        if !xim_handler.styles_ready {
+            state.restore_xim(ximc, xim_handler);
+            return;
+        }
+
+        if xim_handler.connected && xim_handler.ic_id != 0 {
+            let _ = ximc.set_focus(xim_handler.im_id, xim_handler.ic_id);
+            state.restore_xim(ximc, xim_handler);
+            drop(state);
+            if let Some(window) = self.get_window(window_id)
+                && let Some(scaled_area) = window.get_ime_area()
+            {
+                let mut state = self.0.borrow_mut();
+                if let Some((mut ximc, xim_handler)) = state.take_xim() {
+                    let ic_attributes = ximc
+                        .build_ic_attributes()
+                        .nested_list(xim::AttributeName::PreeditAttributes, |b| {
+                            let (spot, area) = xim_preedit_geometry(scaled_area);
+                            b.push(xim::AttributeName::SpotLocation, spot)
+                                .push(xim::AttributeName::Area, area);
+                        })
+                        .build();
+                    let _ = ximc.set_ic_values(xim_handler.im_id, xim_handler.ic_id, ic_attributes);
+                    state.restore_xim(ximc, xim_handler);
+                }
+            }
+            return;
+        }
+
+        if xim_handler.ic_id != 0 {
+            let _ = ximc.destroy_ic(xim_handler.im_id, xim_handler.ic_id);
+            xim_handler.connected = false;
+            xim_handler.ic_id = 0;
+        }
+
+        let input_style = xim_handler.input_style;
         let mut ic_attributes = ximc
             .build_ic_attributes()
-            .push(AttributeName::InputStyle, InputStyle::PREEDIT_CALLBACKS)
-            .push(AttributeName::ClientWindow, xim_handler.window)
-            .push(AttributeName::FocusWindow, xim_handler.window);
+            .push(AttributeName::InputStyle, input_style)
+            .push(AttributeName::ClientWindow, window_id)
+            .push(AttributeName::FocusWindow, window_id);
 
-        let window_id = state.keyboard_focused_window;
         drop(state);
-        if let Some(window_id) = window_id {
-            let Some(window) = self.get_window(window_id) else {
-                log::error!("Failed to get window for IME positioning");
-                let mut state = self.0.borrow_mut();
-                state.ximc = Some(ximc);
-                state.xim_handler = Some(xim_handler);
-                return;
-            };
-            if let Some(scaled_area) = window.get_ime_area() {
-                ic_attributes =
-                    ic_attributes.nested_list(xim::AttributeName::PreeditAttributes, |b| {
-                        b.push(
-                            xim::AttributeName::SpotLocation,
-                            xim::Point {
-                                x: u32::from(scaled_area.origin.x + scaled_area.size.width) as i16,
-                                y: u32::from(scaled_area.origin.y + scaled_area.size.height) as i16,
-                            },
-                        );
-                    });
-            }
+        if let Some(window) = self.get_window(window_id)
+            && let Some(scaled_area) = window.get_ime_area()
+        {
+            ic_attributes = ic_attributes.nested_list(xim::AttributeName::PreeditAttributes, |b| {
+                let (spot, area) = xim_preedit_geometry(scaled_area);
+                b.push(xim::AttributeName::SpotLocation, spot)
+                    .push(xim::AttributeName::Area, area);
+            });
         }
-        ximc.create_ic(xim_handler.im_id, ic_attributes.build())
-            .ok();
+        let _ = ximc.create_ic(xim_handler.im_id, ic_attributes.build());
         let mut state = self.0.borrow_mut();
         state.restore_xim(ximc, xim_handler);
     }
@@ -999,6 +1039,10 @@ impl X11Client {
                 }
                 state.pre_edit_text.take();
                 state.restore_cursor_after_hide();
+                if let Some((mut ximc, xim_handler)) = state.take_xim() {
+                    let _ = ximc.unset_focus(xim_handler.im_id, xim_handler.ic_id);
+                    state.restore_xim(ximc, xim_handler);
+                }
                 drop(state);
                 self.reset_ime();
                 window.handle_ime_delete();
@@ -1498,23 +1542,14 @@ impl X11Client {
         if let Some(scaled_area) = window.get_ime_area() {
             let ic_attributes = ximc
                 .build_ic_attributes()
-                .push(
-                    xim::AttributeName::InputStyle,
-                    xim::InputStyle::PREEDIT_CALLBACKS,
-                )
-                .push(xim::AttributeName::ClientWindow, xim_handler.window)
-                .push(xim::AttributeName::FocusWindow, xim_handler.window)
                 .nested_list(xim::AttributeName::PreeditAttributes, |b| {
-                    b.push(
-                        xim::AttributeName::SpotLocation,
-                        xim::Point {
-                            x: u32::from(scaled_area.origin.x + scaled_area.size.width) as i16,
-                            y: u32::from(scaled_area.origin.y + scaled_area.size.height) as i16,
-                        },
-                    );
+                    let (spot, area) = xim_preedit_geometry(scaled_area);
+                    b.push(xim::AttributeName::SpotLocation, spot)
+                        .push(xim::AttributeName::Area, area);
                 })
                 .build();
-            ximc.set_ic_values(xim_handler.im_id, xim_handler.ic_id, ic_attributes)
+            let _ = ximc
+                .set_ic_values(xim_handler.im_id, xim_handler.ic_id, ic_attributes)
                 .ok();
         }
         let mut state = self.0.borrow_mut();

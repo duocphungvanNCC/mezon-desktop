@@ -62,7 +62,71 @@ fn configure_linux_session() {
     unsafe {
         std::env::set_var("GDK_BACKEND", "x11");
         std::env::remove_var("WAYLAND_DISPLAY");
+        let ctype = std::env::var("LC_CTYPE").unwrap_or_default();
+        if ctype.is_empty() || ctype == "C" || ctype == "POSIX" {
+            let lang = std::env::var("LANG").unwrap_or_default();
+            let fallback = if !lang.is_empty() && lang != "C" && lang != "POSIX" {
+                lang
+            } else {
+                "en_US.UTF-8".into()
+            };
+            std::env::set_var("LC_CTYPE", fallback);
+        }
     }
+    ensure_fcitx_xim_on_the_spot();
+}
+
+#[cfg(target_os = "linux")]
+fn ensure_fcitx_xim_on_the_spot() {
+    let Some(home) = std::env::var_os("HOME") else {
+        return;
+    };
+    let conf_dir = std::path::PathBuf::from(home).join(".config/fcitx5/conf");
+    let conf_path = conf_dir.join("xim.conf");
+    let existing = std::fs::read_to_string(&conf_path).unwrap_or_default();
+    let already_on = existing.lines().any(|line| {
+        let trimmed = line.trim();
+        trimmed.eq_ignore_ascii_case("UseOnTheSpot=True")
+            || trimmed.eq_ignore_ascii_case("UseOnTheSpot=true")
+    });
+    if already_on {
+        return;
+    }
+    if let Err(error) = std::fs::create_dir_all(&conf_dir) {
+        tracing::warn!("fcitx5 XIM OnTheSpot: create conf dir failed: {error}");
+        return;
+    }
+    let next = if existing.trim().is_empty() {
+        "UseOnTheSpot=True\n".to_string()
+    } else if existing
+        .lines()
+        .any(|line| line.trim().starts_with("UseOnTheSpot="))
+    {
+        existing
+            .lines()
+            .map(|line| {
+                if line.trim().starts_with("UseOnTheSpot=") {
+                    "UseOnTheSpot=True"
+                } else {
+                    line
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n"
+    } else {
+        format!("{}\nUseOnTheSpot=True\n", existing.trim_end())
+    };
+    if let Err(error) = std::fs::write(&conf_path, next) {
+        tracing::warn!("fcitx5 XIM OnTheSpot: write conf failed: {error}");
+        return;
+    }
+    tracing::info!(
+        "Enabled fcitx5 XIM UseOnTheSpot for inline IME preedit; restarting fcitx5 once"
+    );
+    let _ = std::process::Command::new("fcitx5-remote")
+        .arg("-r")
+        .spawn();
 }
 
 #[cfg(target_os = "linux")]
