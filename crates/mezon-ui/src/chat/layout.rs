@@ -1241,18 +1241,21 @@ impl ChatLayout {
         changed
     }
 
-    fn focus_composer_on_channel_switch(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn sync_composer_on_channel_switch(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let active_channel_id = Router::global(cx).read(cx).conversation_channel_id();
         if active_channel_id == self.focused_channel_id {
             return;
         }
         self.focused_channel_id = active_channel_id;
-        if active_channel_id.is_none() {
-            return;
-        }
         let Some(input) = self.chat_area.mention_input.clone() else {
             return;
         };
+        input.update(cx, |input, cx| {
+            input.bind_channel(active_channel_id, window, cx)
+        });
+        if active_channel_id.is_none() {
+            return;
+        }
         window.defer(cx, move |window, cx| {
             input.update(cx, |input, cx| input.focus_input(window, cx));
         });
@@ -1480,7 +1483,7 @@ impl Render for ChatLayout {
         crate::trace_render!("ChatLayout");
         self.chat_area.ensure_input(window, cx);
         self.chat_area.bind_window(window, cx);
-        self.focus_composer_on_channel_switch(window, cx);
+        self.sync_composer_on_channel_switch(window, cx);
         self.maybe_prefetch_voice_token(cx);
         self.voice_store
             .update(cx, |store, cx| store.flush_texture_drops(Some(window), cx));
