@@ -751,6 +751,7 @@ impl Render for VideoPlayerView {
             root.w(px(self.width))
                 .h(px(self.height))
                 .max_w_full()
+                .max_h_full()
                 .rounded_lg()
         };
 

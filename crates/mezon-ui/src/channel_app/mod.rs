@@ -584,10 +584,13 @@ impl ChannelAppWindow {
             return;
         }
 
-        self.drop_webview();
-        window.remove_window();
-        if activate_main {
-            cx.defer(activate_main_window);
+        #[cfg(not(target_os = "linux"))]
+        {
+            self.drop_webview();
+            window.remove_window();
+            if activate_main {
+                cx.defer(activate_main_window);
+            }
         }
     }
 

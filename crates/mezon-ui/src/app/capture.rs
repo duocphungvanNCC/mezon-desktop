@@ -232,7 +232,7 @@ fn native_window_id(window: &Window) -> anyhow::Result<u32> {
         #[cfg(any(target_os = "linux", target_os = "freebsd"))]
         RawWindowHandle::Xcb(xcb) => Ok(xcb.window.get()),
         #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-        RawWindowHandle::Xlib(xlib) => Ok(xlib.window.get()),
+        RawWindowHandle::Xlib(xlib) => Ok(xlib.window as u32),
         #[cfg(any(target_os = "linux", target_os = "freebsd"))]
         RawWindowHandle::Wayland(_) => {
             anyhow::bail!("Window capture is not supported on Wayland sessions")

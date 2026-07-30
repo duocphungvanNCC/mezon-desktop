@@ -404,8 +404,8 @@ impl ImageViewer {
             width,
             height,
             fullscreen_mode: VideoFullscreenMode::InPlaceTheater,
-            layout: VideoLayout::FillContainer,
-            decode_max_size: Some(video_decode_max_size(window)),
+            layout: VideoLayout::Fixed,
+            decode_max_size: None,
         };
         if let Some(view) = self.active_video.clone() {
             view.update(cx, |player, cx| player.reopen(activation, window, cx));
@@ -1215,6 +1215,9 @@ impl ImageViewer {
         div()
             .size_full()
             .min_w_0()
+            .flex()
+            .items_center()
+            .justify_center()
             .child(view.clone())
             .into_any_element()
     }
@@ -1634,13 +1637,6 @@ fn fit_contain(container: GpuiSize<Pixels>, content: GpuiSize<Pixels>) -> GpuiSi
     }
     let scale = (cw / iw).min(ch / ih);
     size(px(iw * scale), px(ih * scale))
-}
-
-fn video_decode_max_size(window: &Window) -> (u32, u32) {
-    let viewport = window.viewport_size();
-    let w = f32::from(viewport.width).clamp(1.0, VIEWER_VIDEO_MAX_W) as u32;
-    let h = f32::from(viewport.height).clamp(1.0, VIEWER_VIDEO_MAX_H) as u32;
-    (w, h)
 }
 
 fn video_display_size(att: &ChannelAttachment) -> (f32, f32) {
