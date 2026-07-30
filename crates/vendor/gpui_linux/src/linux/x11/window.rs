@@ -1194,6 +1194,8 @@ impl X11WindowStatePtr {
             input_handler.replace_text_in_range(None, &text);
             let mut state = self.state.borrow_mut();
             state.input_handler = Some(input_handler);
+            drop(state);
+            self.refresh(RequestFrameOptions::default());
         }
     }
 
@@ -1207,6 +1209,8 @@ impl X11WindowStatePtr {
             input_handler.replace_and_mark_text_in_range(None, &text, None);
             let mut state = self.state.borrow_mut();
             state.input_handler = Some(input_handler);
+            drop(state);
+            self.refresh(RequestFrameOptions::default());
         }
     }
 
@@ -1241,16 +1245,14 @@ impl X11WindowStatePtr {
     pub fn get_ime_area(&self) -> Option<Bounds<ScaledPixels>> {
         let mut state = self.state.borrow_mut();
         let scale_factor = state.scale_factor;
-        let mut bounds: Option<Bounds<Pixels>> = None;
         if let Some(mut input_handler) = state.input_handler.take() {
             drop(state);
-            if let Some(selection) = input_handler.selected_text_range(true) {
-                bounds = input_handler.bounds_for_range(selection.range);
-            }
+            let bounds = input_handler.ime_candidate_bounds();
             let mut state = self.state.borrow_mut();
             state.input_handler = Some(input_handler);
-        };
-        bounds.map(|b| b.scale(scale_factor))
+            return bounds.map(|b| b.scale(scale_factor));
+        }
+        None
     }
 
     pub fn set_bounds(&self, bounds: Bounds<i32>) -> anyhow::Result<()> {

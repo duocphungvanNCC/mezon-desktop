@@ -62,6 +62,16 @@ fn configure_linux_session() {
     unsafe {
         std::env::set_var("GDK_BACKEND", "x11");
         std::env::remove_var("WAYLAND_DISPLAY");
+        let ctype = std::env::var("LC_CTYPE").unwrap_or_default();
+        if ctype.is_empty() || ctype == "C" || ctype == "POSIX" {
+            let lang = std::env::var("LANG").unwrap_or_default();
+            let fallback = if !lang.is_empty() && lang != "C" && lang != "POSIX" {
+                lang
+            } else {
+                "en_US.UTF-8".into()
+            };
+            std::env::set_var("LC_CTYPE", fallback);
+        }
     }
 }
 
