@@ -85,7 +85,10 @@ fn xim_preedit_geometry(bounds: Bounds<gpui::ScaledPixels>) -> (xim::Point, xim:
     let x = u32::from(bounds.origin.x) as i16;
     let y = u32::from(bounds.origin.y) as i16;
     (
-        xim::Point { x, y },
+        xim::Point {
+            x,
+            y: y.saturating_add(height as i16),
+        },
         xim::Rectangle {
             x,
             y,
@@ -279,7 +282,7 @@ impl X11ClientStatePtr {
             return;
         };
         let mut state = client.0.borrow_mut();
-        if state.ximc.is_none() {
+        if state.composing || state.ximc.is_none() {
             return;
         }
 
@@ -457,7 +460,16 @@ impl X11Client {
 
         let xcb_connection = Rc::new(xcb_connection);
 
-        let ximc = X11rbClient::init(Rc::clone(&xcb_connection), x_root_index, None).ok();
+        let ximc = match X11rbClient::init(Rc::clone(&xcb_connection), x_root_index, None) {
+            Ok(ximc) => Some(ximc),
+            Err(error) => {
+                eprintln!(
+                    "[xim] no XIM server available; IME input is disabled (XMODIFIERS={:?}): {error}",
+                    std::env::var("XMODIFIERS").unwrap_or_default()
+                );
+                None
+            }
+        };
         let xim_handler = if ximc.is_some() {
             Some(XimHandler::new())
         } else {
@@ -736,9 +748,18 @@ impl X11Client {
                         // we do lose 1-2 keys when crash happens since there is no reliable way to get that info
                         // luckily, x11 sends us window not found error when xim server crashes upon further key press
                         // hence we fall back to handle_event
-                        log::error!("XIMClientError: {}", err);
+                        // mezon vendor edit: retry XIM_OPEN with a fallback locale before
+                        // giving up, and surface the failure via eprintln (vendored log::
+                        // output is dropped by the app's tracing setup).
+                        eprintln!("[xim] client error: {err}");
                         let mut state = self.0.borrow_mut();
-                        state.take_xim();
+                        if let Some((mut ximc, mut xim_handler)) = state.take_xim() {
+                            if xim_handler.try_reopen_next_locale(&mut ximc) {
+                                state.restore_xim(ximc, xim_handler);
+                            } else {
+                                eprintln!("[xim] disabling IME for this session");
+                            }
+                        }
                         drop(state);
                         self.handle_event(event);
                     }
@@ -761,6 +782,7 @@ impl X11Client {
             state.restore_xim(ximc, xim_handler);
             return;
         };
+        let previous_window = xim_handler.window;
         xim_handler.window = window_id;
 
         if !xim_handler.styles_ready {
@@ -768,7 +790,7 @@ impl X11Client {
             return;
         }
 
-        if xim_handler.connected && xim_handler.ic_id != 0 {
+        if xim_handler.connected && xim_handler.ic_id != 0 && previous_window == window_id {
             let _ = ximc.set_focus(xim_handler.im_id, xim_handler.ic_id);
             state.restore_xim(ximc, xim_handler);
             drop(state);
@@ -796,7 +818,13 @@ impl X11Client {
             let _ = ximc.destroy_ic(xim_handler.im_id, xim_handler.ic_id);
             xim_handler.connected = false;
             xim_handler.ic_id = 0;
+            xim_handler.ic_pending = false;
         }
+        if xim_handler.ic_pending {
+            state.restore_xim(ximc, xim_handler);
+            return;
+        }
+        xim_handler.ic_pending = true;
 
         let input_style = xim_handler.input_style;
         let mut ic_attributes = ximc
@@ -815,7 +843,9 @@ impl X11Client {
                     .push(xim::AttributeName::Area, area);
             });
         }
-        let _ = ximc.create_ic(xim_handler.im_id, ic_attributes.build());
+        if ximc.create_ic(xim_handler.im_id, ic_attributes.build()).is_err() {
+            xim_handler.ic_pending = false;
+        }
         let mut state = self.0.borrow_mut();
         state.restore_xim(ximc, xim_handler);
     }
@@ -1040,7 +1070,9 @@ impl X11Client {
                 state.pre_edit_text.take();
                 state.restore_cursor_after_hide();
                 if let Some((mut ximc, xim_handler)) = state.take_xim() {
-                    let _ = ximc.unset_focus(xim_handler.im_id, xim_handler.ic_id);
+                    if xim_handler.connected && xim_handler.ic_id != 0 {
+                        let _ = ximc.unset_focus(xim_handler.im_id, xim_handler.ic_id);
+                    }
                     state.restore_xim(ximc, xim_handler);
                 }
                 drop(state);

@@ -22,10 +22,12 @@ fn pick_input_style(attributes: &AHashMap<AttributeName, Vec<u8>>) -> InputStyle
         .map(|list| list.styles)
         .unwrap_or_default();
 
+    // mezon vendor edit: STATUS_CALLBACKS is never implemented by this handler, so
+    // prefer every no-status variant over it.
     let preferred = [
         InputStyle::PREEDIT_CALLBACKS | InputStyle::STATUS_NOTHING,
-        InputStyle::PREEDIT_CALLBACKS | InputStyle::STATUS_CALLBACKS,
         InputStyle::PREEDIT_CALLBACKS | InputStyle::STATUS_NONE,
+        InputStyle::PREEDIT_CALLBACKS | InputStyle::STATUS_CALLBACKS,
         InputStyle::PREEDIT_POSITION | InputStyle::STATUS_NOTHING,
         InputStyle::PREEDIT_POSITION | InputStyle::STATUS_NONE,
         InputStyle::PREEDIT_POSITION | InputStyle::STATUS_AREA,
@@ -49,16 +51,27 @@ fn pick_input_style(attributes: &AHashMap<AttributeName, Vec<u8>>) -> InputStyle
     InputStyle::PREEDIT_CALLBACKS | InputStyle::STATUS_NOTHING
 }
 
-fn xim_open_locale() -> String {
-    for key in ["LC_CTYPE", "LC_ALL", "LANG"] {
+fn usable_locale(value: &str) -> bool {
+    let value = value.trim();
+    !value.is_empty() && value != "C" && value != "POSIX" && !value.starts_with("C.")
+}
+
+fn xim_locale_candidates() -> Vec<String> {
+    let mut candidates = Vec::new();
+    for key in ["LC_ALL", "LC_CTYPE", "LANG"] {
         if let Ok(value) = std::env::var(key) {
             let trimmed = value.trim();
-            if !trimmed.is_empty() && trimmed != "C" && trimmed != "POSIX" {
-                return trimmed.to_string();
+            if usable_locale(trimmed) && !candidates.iter().any(|c| c == trimmed) {
+                candidates.push(trimmed.to_string());
             }
         }
     }
-    "en_US.UTF-8".into()
+    for fallback in ["en_US.UTF-8", "C"] {
+        if !candidates.iter().any(|c| c == fallback) {
+            candidates.push(fallback.to_string());
+        }
+    }
+    candidates
 }
 
 pub struct XimHandler {
@@ -66,6 +79,10 @@ pub struct XimHandler {
     pub ic_id: u16,
     pub connected: bool,
     pub styles_ready: bool,
+    pub opened: bool,
+    pub ic_pending: bool,
+    locale_candidates: Vec<String>,
+    locale_attempt: usize,
     pub window: xproto::Window,
     pub input_style: InputStyle,
     pub last_callback_event: Option<XimCallbackEvent>,
@@ -78,20 +95,45 @@ impl XimHandler {
             ic_id: Default::default(),
             connected: false,
             styles_ready: false,
+            opened: false,
+            ic_pending: false,
+            locale_candidates: xim_locale_candidates(),
+            locale_attempt: 0,
             window: Default::default(),
             input_style: InputStyle::PREEDIT_CALLBACKS | InputStyle::STATUS_NOTHING,
             last_callback_event: None,
         }
     }
+
+    // mezon vendor edit: an XIM server that rejects the negotiated locale kills the
+    // whole client with a protocol error. Instead of losing IME for the session,
+    // retry XIM_OPEN with the next fallback locale (en_US.UTF-8, then C).
+    pub fn try_reopen_next_locale<C: Client>(&mut self, client: &mut C) -> bool {
+        if self.opened {
+            return false;
+        }
+        self.locale_attempt += 1;
+        let Some(locale) = self.locale_candidates.get(self.locale_attempt) else {
+            return false;
+        };
+        eprintln!("[xim] open failed; retrying with locale {locale}");
+        client.open(locale).is_ok()
+    }
 }
 
 impl<C: Client<XEvent = xproto::KeyPressEvent>> ClientHandler<C> for XimHandler {
     fn handle_connect(&mut self, client: &mut C) -> Result<(), ClientError> {
-        client.open(&xim_open_locale())
+        let locale = self
+            .locale_candidates
+            .get(self.locale_attempt)
+            .cloned()
+            .unwrap_or_else(|| "en_US.UTF-8".into());
+        client.open(&locale)
     }
 
     fn handle_open(&mut self, client: &mut C, input_method_id: u16) -> Result<(), ClientError> {
         self.im_id = input_method_id;
+        self.opened = true;
 
         client.get_im_values(input_method_id, &[AttributeName::QueryInputStyle])
     }
@@ -104,7 +146,8 @@ impl<C: Client<XEvent = xproto::KeyPressEvent>> ClientHandler<C> for XimHandler 
     ) -> Result<(), ClientError> {
         self.input_style = pick_input_style(&attributes);
         self.styles_ready = true;
-        if self.window != 0 && self.ic_id == 0 {
+        if self.window != 0 && self.ic_id == 0 && !self.ic_pending {
+            self.ic_pending = true;
             let ic_attributes = client
                 .build_ic_attributes()
                 .push(AttributeName::InputStyle, self.input_style)
@@ -123,6 +166,7 @@ impl<C: Client<XEvent = xproto::KeyPressEvent>> ClientHandler<C> for XimHandler 
         input_context_id: u16,
     ) -> Result<(), ClientError> {
         self.connected = true;
+        self.ic_pending = false;
         self.ic_id = input_context_id;
         client.set_focus(input_method_id, input_context_id)?;
         Ok(())
