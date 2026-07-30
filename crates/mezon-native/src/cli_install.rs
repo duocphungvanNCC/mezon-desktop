@@ -214,6 +214,7 @@ fn install_windows(exe: &Path, link: &Path) -> anyhow::Result<()> {
     }
     std::os::windows::fs::symlink_file(exe, link).or_else(|_| {
         std::fs::copy(exe, link)
+            .map(|_| ())
             .with_context(|| format!("copy {} to {}", exe.display(), link.display()))
     })?;
     add_windows_path_entry(link.parent().unwrap())
@@ -242,7 +243,7 @@ fn add_windows_path_entry(bin_dir: &Path) -> anyhow::Result<()> {
         let open_result = RegOpenKeyExW(
             HKEY_CURRENT_USER,
             windows::core::w!("Environment"),
-            0,
+            Some(0),
             KEY_SET_VALUE,
             &mut key,
         );
@@ -299,7 +300,7 @@ fn remove_windows_path_entry() -> anyhow::Result<()> {
         let open_result = RegOpenKeyExW(
             HKEY_CURRENT_USER,
             windows::core::w!("Environment"),
-            0,
+            Some(0),
             KEY_SET_VALUE,
             &mut key,
         );
