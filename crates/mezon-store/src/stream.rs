@@ -443,11 +443,7 @@ impl StreamStore {
 
     pub fn set_volume(&mut self, volume: f32, cx: &mut Context<Self>) {
         self.volume = volume.clamp(0.0, 1.0);
-        if self.volume > 0.0 {
-            self.muted = false;
-        } else {
-            self.muted = true;
-        }
+        self.muted = self.volume <= 0.0;
         self.sync_audio_playback();
         cx.notify();
     }

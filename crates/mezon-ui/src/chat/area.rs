@@ -24,6 +24,7 @@ use crate::chat::mention_input::{MentionInput, MentionInputEvent};
 use crate::chat::message::ChannelMessages;
 use crate::chat::message_search::{MESSAGE_SEARCH_PANEL_WIDTH, MessageSearchPanel};
 use crate::chat::pinned_popover::PinnedPopoverPanel;
+use crate::components::compositions::channel_row::ChannelIcon;
 use crate::components::primitives::{Icon, IconName, InputState};
 use crate::image_cache::LruImageCache;
 use crate::theme::ActiveTheme;
@@ -263,6 +264,7 @@ impl ChatArea {
         &mut self,
         locale: &str,
         channel_name: Option<&str>,
+        channel_icon: Option<ChannelIcon>,
         channel_id: Option<ChannelId>,
         show_members_button: bool,
         show_member_panel: bool,
@@ -281,6 +283,7 @@ impl ChatArea {
         self.header.update(cx, |header, cx| {
             header.sync(
                 channel_name,
+                channel_icon,
                 false,
                 None,
                 show_members_button,
@@ -361,6 +364,7 @@ impl ChatArea {
         &mut self,
         locale: &str,
         channel_name: Option<&str>,
+        channel_icon: Option<ChannelIcon>,
         is_dm: bool,
         in_voice: Option<InVoiceInfo>,
         channel_id: Option<ChannelId>,
@@ -404,6 +408,7 @@ impl ChatArea {
         self.header.update(cx, |header, cx| {
             header.sync(
                 channel_name,
+                channel_icon,
                 is_dm,
                 in_voice,
                 show_members_button,

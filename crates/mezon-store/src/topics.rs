@@ -861,6 +861,8 @@ impl TopicsStore {
                     .map(|a| presign::normalize_presign_key(&a.url))
                     .collect();
                 let update_mentions = transport_mentions.clone();
+                let update_hashtags = transport_hashtags.clone();
+                let update_emojis = transport_emojis.clone();
                 let sent = match api
                     .send_topic_presigned_message(
                         clan_id,
@@ -898,6 +900,8 @@ impl TopicsStore {
                     presigned,
                     keys,
                     update_mentions,
+                    update_hashtags,
+                    update_emojis,
                     sent.message_id,
                     sent.create_time.max(0) as u32,
                 ));
@@ -949,8 +953,15 @@ impl TopicsStore {
                 );
             });
 
-            let Some((presigned, keys, update_mentions, real_message_id, create_time_seconds)) =
-                upload_ctx
+            let Some((
+                presigned,
+                keys,
+                update_mentions,
+                update_hashtags,
+                update_emojis,
+                real_message_id,
+                create_time_seconds,
+            )) = upload_ctx
             else {
                 return;
             };
@@ -981,6 +992,8 @@ impl TopicsStore {
                 real_message_id,
                 &content,
                 update_mentions,
+                update_hashtags,
+                update_emojis,
                 create_time_seconds,
                 presigned,
                 keys,
