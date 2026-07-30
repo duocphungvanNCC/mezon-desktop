@@ -14,6 +14,7 @@ use super::create_message_group_modal::CreateMessageGroupModal;
 use ui::{ScrollAxes, Scrollbars, WithScrollbar};
 
 use crate::app::shell::Shell;
+use crate::command_palette::CommandPaletteModal;
 use crate::components::compositions::{DM_ROW_HEIGHT, DmRow};
 use crate::components::primitives::{ContextMenu, Icon, IconName, context_menu_at};
 use crate::router::{Route, Router, navigate};
@@ -255,6 +256,7 @@ impl DirectSidebar {
     }
 
     fn render_search(&self, theme: &Theme, locale: &str) -> impl IntoElement {
+        let bg_hover = theme.bg_hover;
         div()
             .w_full()
             .h(px(50.))
@@ -265,6 +267,7 @@ impl DirectSidebar {
             .border_color(theme.border)
             .child(
                 div()
+                    .id("dm-search")
                     .w_full()
                     .h(px(36.))
                     .px(px(16.))
@@ -272,6 +275,9 @@ impl DirectSidebar {
                     .items_center()
                     .rounded_lg()
                     .bg(theme.tokens.bg_tertiary)
+                    .cursor_pointer()
+                    .hover(move |this| this.bg(bg_hover))
+                    .on_click(|_, _, cx| CommandPaletteModal::try_toggle_authenticated(cx))
                     .child(
                         div()
                             .text_sm()
