@@ -986,6 +986,8 @@ impl McpBackend {
                 sent.message_id,
                 content,
                 Vec::new(),
+                Vec::new(),
+                Vec::new(),
                 vec![key],
                 sent.create_time.max(0) as u32,
                 mode,

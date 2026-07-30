@@ -1203,6 +1203,7 @@ pub struct ChannelMessages {
     _skeleton_timer: Option<Task<()>>,
     hovered_row: Option<MessageId>,
     raw_hover: Option<MessageId>,
+    overlay_hover: Option<MessageId>,
     _hover_show_task: Option<Task<()>>,
     _hover_hide_task: Option<Task<()>>,
     scroll_relief_armed: bool,
@@ -1425,6 +1426,7 @@ impl ChannelMessages {
                     this.context_menu_target = None;
                     this.hovered_row = None;
                     this.raw_hover = None;
+                    this.overlay_hover = None;
                     this._hover_show_task = None;
                     this._hover_hide_task = None;
                     this.edit_input = None;
@@ -1763,11 +1765,13 @@ impl ChannelMessages {
                 }
                 if this.hovered_row.is_some()
                     || this.raw_hover.is_some()
+                    || this.overlay_hover.is_some()
                     || this._hover_show_task.is_some()
                     || this._hover_hide_task.is_some()
                 {
                     this.hovered_row = None;
                     this.raw_hover = None;
+                    this.overlay_hover = None;
                     this._hover_show_task = None;
                     this._hover_hide_task = None;
                 }
@@ -1892,6 +1896,7 @@ impl ChannelMessages {
             _skeleton_timer: None,
             hovered_row: None,
             raw_hover: None,
+            overlay_hover: None,
             _hover_show_task: None,
             _hover_hide_task: None,
             scroll_relief_armed: false,
@@ -2431,6 +2436,7 @@ impl ChannelMessages {
         self._hover_hide_task = None;
         self.hovered_row = None;
         self.raw_hover = None;
+        self.overlay_hover = None;
         self.reaction_submenu_open = false;
         self.context_menu_target = Some((message_id, position));
         cx.notify();
@@ -2439,7 +2445,7 @@ impl ChannelMessages {
     pub(crate) fn close_context_menu(&mut self, cx: &mut Context<Self>) {
         if self.context_menu_target.take().is_some() {
             self.reaction_submenu_open = false;
-            if self.raw_hover.is_none() {
+            if self.hover_target().is_none() {
                 self.hovered_row = None;
             }
             cx.notify();
@@ -2453,6 +2459,10 @@ impl ChannelMessages {
         }
     }
 
+    fn hover_target(&self) -> Option<MessageId> {
+        self.raw_hover.or(self.overlay_hover)
+    }
+
     pub(crate) fn set_row_hover(
         &mut self,
         message_id: MessageId,
@@ -2462,10 +2472,31 @@ impl ChannelMessages {
         if entered {
             self.ensure_topic_create_permissions(cx);
             self.raw_hover = Some(message_id);
+            if self.overlay_hover != Some(message_id) {
+                self.overlay_hover = None;
+            }
         } else if self.raw_hover == Some(message_id) {
             self.raw_hover = None;
         }
-        let raw = self.raw_hover;
+        self.sync_hover_tasks(cx);
+    }
+
+    pub(crate) fn set_overlay_hover(
+        &mut self,
+        message_id: MessageId,
+        entered: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if entered {
+            self.overlay_hover = Some(message_id);
+        } else if self.overlay_hover == Some(message_id) {
+            self.overlay_hover = None;
+        }
+        self.sync_hover_tasks(cx);
+    }
+
+    fn sync_hover_tasks(&mut self, cx: &mut Context<Self>) {
+        let raw = self.hover_target();
 
         match raw {
             Some(target) if self.hovered_row != Some(target) => {
@@ -2474,7 +2505,7 @@ impl ChannelMessages {
                         .timer(Duration::from_millis(HOVER_SHOW_DELAY_MS))
                         .await;
                     let _ = this.update(cx, |this, cx| {
-                        if this.raw_hover == Some(target) && this.hovered_row != Some(target) {
+                        if this.hover_target() == Some(target) && this.hovered_row != Some(target) {
                             this.hovered_row = Some(target);
                             cx.notify();
                         }
@@ -2494,7 +2525,7 @@ impl ChannelMessages {
                         .timer(Duration::from_millis(HOVER_HIDE_DELAY_MS))
                         .await;
                     let _ = this.update(cx, |this, cx| {
-                        if this.raw_hover != Some(shown) && this.hovered_row == Some(shown) {
+                        if this.hover_target() != Some(shown) && this.hovered_row == Some(shown) {
                             this.hovered_row = None;
                             cx.notify();
                         }

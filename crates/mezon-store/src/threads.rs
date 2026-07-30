@@ -228,7 +228,7 @@ impl ThreadsStore {
         let Some(desc) = ev.channel_desc.as_ref() else {
             return;
         };
-        if desc.r#type != CHANNEL_TYPE_THREAD as i32 || desc.parent_id == 0 {
+        if !is_thread_membership_event(desc.r#type, desc.parent_id) {
             return;
         }
         let Some(me) = crate::badge::BadgeService::try_global(cx)
@@ -242,8 +242,11 @@ impl ThreadsStore {
         let channel_id = desc.channel_id.to_string();
         self.set_thread_active(&channel_id, THREAD_STATUS_JOINED, cx);
         let parent_id = desc.parent_id.to_string();
-        if desc.channel_private == 0 || self.list_channel_id.as_deref() != Some(parent_id.as_str())
-        {
+        if !joins_private_thread_list(
+            desc.channel_private,
+            &parent_id,
+            self.list_channel_id.as_deref(),
+        ) {
             return;
         }
         let summary = ThreadSummary {
@@ -265,8 +268,14 @@ impl ThreadsStore {
             member_count: desc.member_count.max(0),
         };
         let before = self.threads.len();
-        merge_threads(&mut self.threads, vec![summary]);
-        if self.threads.len() != before {
+        merge_threads(&mut self.threads, vec![summary.clone()]);
+        let mut changed = self.threads.len() != before;
+        if let Some(results) = self.search_results.as_mut() {
+            let results_before = results.len();
+            merge_threads(results, vec![summary]);
+            changed |= results.len() != results_before;
+        }
+        if changed {
             cx.notify();
         }
     }
@@ -295,14 +304,21 @@ impl ThreadsStore {
     }
 
     fn is_private_thread(&self, channel_id: &str) -> bool {
-        self.threads
-            .iter()
-            .chain(self.search_results.iter().flatten())
-            .any(|thread| thread.channel_id == channel_id && thread.channel_private != 0)
+        contains_private_thread(
+            self.threads
+                .iter()
+                .chain(self.search_results.iter().flatten()),
+            channel_id,
+        )
     }
 
     pub fn leave_thread(&mut self, clan_id: ClanId, channel_id: ChannelId, cx: &mut Context<Self>) {
         let api = self.api.clone();
+        let is_private = ChannelList::global(cx)
+            .read(cx)
+            .channel(clan_id, channel_id)
+            .map(|channel| channel.private)
+            .unwrap_or_else(|| self.is_private_thread(&channel_id.to_string()));
         cx.spawn(async move |this, cx| {
             if let Err(e) = api.leave_thread(clan_id.get(), channel_id.get()).await {
                 tracing::error!("leave_thread failed for {channel_id}: {e}");
@@ -317,9 +333,8 @@ impl ThreadsStore {
                 ChannelList::global(cx).update(cx, |list, cx| {
                     list.apply_self_removed_from_channel(channel_id, cx);
                 });
-                let id = channel_id.to_string();
-                if this.is_private_thread(&id) {
-                    this.apply_thread_deleted(&id, cx);
+                if is_private {
+                    this.apply_thread_deleted(&channel_id.to_string(), cx);
                 }
             });
         })
@@ -1013,6 +1028,30 @@ fn page_has_more(batch_len: usize) -> bool {
     batch_len >= THREAD_LIST_LIMIT as usize
 }
 
+/// A `UserChannelAdded`/`UserChannelRemoved` payload only concerns the thread
+/// list when it describes a thread hanging off a real parent channel.
+fn is_thread_membership_event(channel_type: i32, parent_id: i64) -> bool {
+    channel_type == CHANNEL_TYPE_THREAD as i32 && parent_id != 0
+}
+
+/// Being added is the only signal that can surface a *private* thread, so it is
+/// the only case that inserts a row. Public threads already arrive through
+/// `ChannelCreated`, and only the list currently showing the parent can grow.
+fn joins_private_thread_list(
+    channel_private: i32,
+    parent_id: &str,
+    list_channel_id: Option<&str>,
+) -> bool {
+    channel_private != 0 && list_channel_id == Some(parent_id)
+}
+
+fn contains_private_thread<'a>(
+    mut threads: impl Iterator<Item = &'a ThreadSummary>,
+    channel_id: &str,
+) -> bool {
+    threads.any(|thread| thread.channel_id == channel_id && thread.channel_private != 0)
+}
+
 fn merge_threads(into: &mut Vec<ThreadSummary>, batch: Vec<ThreadSummary>) {
     for thread in batch {
         if !into
@@ -1167,6 +1206,64 @@ mod tests {
     #[test]
     fn page_has_more_false_when_batch_partial() {
         assert!(!page_has_more(10));
+    }
+
+    fn summary(channel_id: &str, channel_private: i32) -> ThreadSummary {
+        ThreadSummary {
+            channel_id: channel_id.into(),
+            channel_label: "t".into(),
+            clan_id: "c".into(),
+            parent_id: "p".into(),
+            channel_private,
+            active: THREAD_STATUS_JOINED,
+            creator_id: String::new(),
+            last_message_content: String::new(),
+            last_message_sender_id: String::new(),
+            last_message_sender_name: String::new(),
+            last_message_sender_avatar: String::new(),
+            last_sent_timestamp: 0,
+            member_count: 0,
+        }
+    }
+
+    #[test]
+    fn membership_events_only_match_threads_with_a_parent() {
+        assert!(is_thread_membership_event(CHANNEL_TYPE_THREAD as i32, 77));
+        assert!(!is_thread_membership_event(CHANNEL_TYPE_THREAD as i32, 0));
+        assert!(!is_thread_membership_event(
+            CHANNEL_TYPE_THREAD as i32 + 1,
+            77
+        ));
+    }
+
+    #[test]
+    fn only_a_private_thread_under_the_open_parent_joins_the_list() {
+        assert!(joins_private_thread_list(1, "77", Some("77")));
+        // Public threads arrive via ChannelCreated instead.
+        assert!(!joins_private_thread_list(0, "77", Some("77")));
+        // A different parent's list must not grow.
+        assert!(!joins_private_thread_list(1, "77", Some("88")));
+        assert!(!joins_private_thread_list(1, "77", None));
+    }
+
+    #[test]
+    fn private_thread_lookup_spans_the_list_and_search_results() {
+        let threads = [summary("1", 0)];
+        let results = [summary("2", 1)];
+
+        assert!(contains_private_thread(
+            threads.iter().chain(results.iter()),
+            "2"
+        ));
+        // Public threads are left alone: removal must not delete their row.
+        assert!(!contains_private_thread(
+            threads.iter().chain(results.iter()),
+            "1"
+        ));
+        assert!(!contains_private_thread(
+            threads.iter().chain(results.iter()),
+            "9"
+        ));
     }
 
     #[test]

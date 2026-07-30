@@ -1984,13 +1984,6 @@ impl ChannelList {
                 let Some(cats) = self.cache.get_mut(&clan_id) else {
                     return;
                 };
-                let already_exists = cats
-                    .iter()
-                    .flat_map(|c| &c.channels)
-                    .any(|ch| ch.id == channel_id);
-                if already_exists {
-                    return;
-                }
                 let last_sent = desc.last_sent_message.as_ref();
                 let (last_sent_message_id, last_sent_timestamp) = match last_sent {
                     Some(header) => (
@@ -4580,6 +4573,25 @@ mod tests {
                      which is only fetched once per session"
                 );
                 assert!(channels.user_channels().any(|ch| ch.id == ChannelId(42)));
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn being_added_to_an_already_visible_channel_still_lists_it(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let channels = init_authenticated_channel_list(cx);
+            channels.update(cx, |channels, cx| {
+                channels.apply_clan_structure(ClanId(1), structure_with_a_thread(), cx);
+                assert!(channels.user_channel(ChannelId(9)).is_none());
+
+                channels.handle_event(&added_to_channel(9, 1, &[REMOVED_SELF]), cx);
+
+                assert!(
+                    channels.user_channel(ChannelId(9)).is_some(),
+                    "react dispatches listChannelsByUserActions.add unconditionally, so a public \
+                     thread already in the clan structure must still reach user_channels"
+                );
             });
         });
     }

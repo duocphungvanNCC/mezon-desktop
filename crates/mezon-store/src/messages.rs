@@ -4528,20 +4528,22 @@ impl MessagesStore {
         };
         let message = message_id.get();
         let storage_for_rollback = storage_id;
-        if let Some(reaction_clan_id) = self.active_clan_id {
-            let users = plan_thread_membership_for_reaction(
-                parent_channel_id,
-                reaction_clan_id,
-                current_uid,
-                cx,
-            );
-            if !users.is_empty() {
-                let join_api = api.clone();
-                cx.spawn(async move |this, cx| {
-                    add_thread_members(&join_api, &this, parent_channel_id, users, cx).await;
-                })
-                .detach();
-            }
+        if let Some(reaction_clan_id) = self.active_clan_id
+            && is_thread_channel(parent_channel_id, reaction_clan_id, cx)
+        {
+            let join_api = api.clone();
+            cx.spawn(async move |this, cx| {
+                ensure_thread_membership_for_reaction(
+                    &join_api,
+                    &this,
+                    parent_channel_id,
+                    reaction_clan_id,
+                    current_uid,
+                    cx,
+                )
+                .await;
+            })
+            .detach();
         }
         cx.spawn(async move |this, cx| {
             if let Err(e) = api
@@ -5003,9 +5005,13 @@ fn mentioned_thread_candidates(
 
 struct ThreadSendContext {
     parent_id: ChannelId,
+    channel_type: Option<i32>,
     parent_channel_type: Option<i32>,
     self_id: Option<UserId>,
-    thread_members: Vec<UserId>,
+    /// `None` when the store holds no roster for the channel. Distinguishing that
+    /// from an empty roster matters: an unloaded thread would otherwise read as
+    /// "nobody is a member" and re-add people who are already in it.
+    thread_members: Option<Vec<UserId>>,
     parent_members: Option<Vec<UserId>>,
     mentioned: Vec<UserId>,
 }
@@ -5018,10 +5024,9 @@ fn thread_send_context(
 ) -> Option<ThreadSendContext> {
     let channels = ChannelList::global(cx);
     let channels = channels.read(cx);
-    let parent_id = channels
-        .channel(clan_id, channel_id)
-        .and_then(|channel| channel.parent_id)
-        .filter(|parent_id| !parent_id.is_zero())?;
+    let channel = channels.channel(clan_id, channel_id)?;
+    let channel_type = Some(channel.channel_type.as_raw() as i32);
+    let parent_id = channel.parent_id.filter(|parent_id| !parent_id.is_zero())?;
     let parent_channel_type = channels
         .channel(clan_id, parent_id)
         .map(|channel| channel.channel_type.as_raw() as i32);
@@ -5029,9 +5034,12 @@ fn thread_send_context(
     let members = members.read(cx);
     Some(ThreadSendContext {
         parent_id,
+        channel_type,
         parent_channel_type,
         self_id: viewer_user_id(cx),
-        thread_members: members.member_ids(channel_id),
+        thread_members: members
+            .has_channel(channel_id)
+            .then(|| members.member_ids(channel_id)),
         parent_members: members
             .has_channel(parent_id)
             .then(|| members.member_ids(parent_id)),
@@ -5039,17 +5047,105 @@ fn thread_send_context(
     })
 }
 
-fn plan_thread_membership_for_reaction(
+fn is_thread_channel(channel_id: ChannelId, clan_id: ClanId, cx: &App) -> bool {
+    ChannelList::global(cx)
+        .read(cx)
+        .channel(clan_id, channel_id)
+        .and_then(|channel| channel.parent_id)
+        .is_some_and(|parent_id| !parent_id.is_zero())
+}
+
+/// Member ids for `channel_id`, falling back to a `ListChannelUsers` round-trip
+/// when the store has no roster yet. The response is written back into
+/// `ChannelMembersStore` so the next send reads it from cache. `None` means the
+/// roster is genuinely unknown — callers must not treat that as "no members".
+async fn resolve_channel_members(
+    api: &AppApi,
+    this: &WeakEntity<MessagesStore>,
+    clan_id: ClanId,
+    channel_id: ChannelId,
+    channel_type: Option<i32>,
+    cached: Option<Vec<UserId>>,
+    cx: &mut AsyncApp,
+) -> Option<Vec<UserId>> {
+    if let Some(members) = cached {
+        return Some(members);
+    }
+    let users = match api
+        .list_channel_users(clan_id.get(), channel_id.get(), channel_type?)
+        .await
+    {
+        Ok(users) => users,
+        Err(e) => {
+            tracing::error!("list_channel_users for {channel_id} failed: {e}");
+            return None;
+        }
+    };
+    let member_ids = users.iter().map(|user| UserId(user.user_id)).collect();
+    let _ = this.update(cx, |_this, cx| {
+        if let Some(members) = ChannelMembersStore::try_global(cx) {
+            members.update(cx, |members, cx| {
+                members.apply_members_loaded(channel_id, &users, cx);
+            });
+        }
+    });
+    Some(member_ids)
+}
+
+/// Users that must join `channel_id` before the caller's action lands, or an
+/// empty plan when nothing is needed (or the thread roster could not be read).
+async fn resolve_thread_membership_plan(
+    api: &AppApi,
+    this: &WeakEntity<MessagesStore>,
     channel_id: ChannelId,
     clan_id: ClanId,
-    user_id: UserId,
-    cx: &App,
+    mentions: &[TransportMention],
+    join_self: bool,
+    extra_candidates: &[UserId],
+    cx: &mut AsyncApp,
 ) -> Vec<UserId> {
-    let Some(ctx) = thread_send_context(channel_id, clan_id, &[], cx) else {
+    let Ok(Some(ctx)) = this.update(cx, |_this, cx| {
+        thread_send_context(channel_id, clan_id, mentions, cx)
+    }) else {
         return Vec::new();
     };
-    let parent_members = ctx.parent_members.unwrap_or_default();
-    plan_thread_membership(None, &ctx.thread_members, &parent_members, &[user_id])
+    let Some(thread_members) = resolve_channel_members(
+        api,
+        this,
+        clan_id,
+        channel_id,
+        ctx.channel_type,
+        ctx.thread_members,
+        cx,
+    )
+    .await
+    else {
+        return Vec::new();
+    };
+    let mut candidates = ctx.mentioned;
+    candidates.extend_from_slice(extra_candidates);
+    // Parent membership only gates the candidates; a self-join never consults it.
+    let parent_members = if needs_parent_lookup(&thread_members, &candidates) {
+        resolve_channel_members(
+            api,
+            this,
+            clan_id,
+            ctx.parent_id,
+            ctx.parent_channel_type,
+            ctx.parent_members,
+            cx,
+        )
+        .await
+        .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+    plan_thread_membership(
+        if join_self { ctx.self_id } else { None },
+        &thread_members,
+        &parent_members,
+        &candidates,
+    )
 }
 
 async fn add_thread_members(
@@ -5089,38 +5185,26 @@ async fn ensure_thread_membership_for_send(
     mentions: &[TransportMention],
     cx: &mut AsyncApp,
 ) {
-    let Ok(Some(ctx)) = this.update(cx, |_this, cx| {
-        thread_send_context(channel_id, clan_id, mentions, cx)
-    }) else {
+    let users =
+        resolve_thread_membership_plan(api, this, channel_id, clan_id, mentions, true, &[], cx)
+            .await;
+    if users.is_empty() {
         return;
-    };
-    let parent_members = match (ctx.parent_members, ctx.parent_channel_type) {
-        (Some(members), _) => members,
-        (None, Some(parent_channel_type))
-            if needs_parent_lookup(&ctx.thread_members, &ctx.mentioned) =>
-        {
-            match api
-                .list_channel_users(clan_id.get(), ctx.parent_id.get(), parent_channel_type)
-                .await
-            {
-                Ok(users) => users.iter().map(|user| UserId(user.user_id)).collect(),
-                Err(e) => {
-                    tracing::error!(
-                        "list_channel_users for thread parent {} failed: {e}",
-                        ctx.parent_id
-                    );
-                    Vec::new()
-                }
-            }
-        }
-        (None, _) => Vec::new(),
-    };
-    let users = plan_thread_membership(
-        ctx.self_id,
-        &ctx.thread_members,
-        &parent_members,
-        &ctx.mentioned,
-    );
+    }
+    add_thread_members(api, this, channel_id, users, cx).await;
+}
+
+async fn ensure_thread_membership_for_reaction(
+    api: &AppApi,
+    this: &WeakEntity<MessagesStore>,
+    channel_id: ChannelId,
+    clan_id: ClanId,
+    user_id: UserId,
+    cx: &mut AsyncApp,
+) {
+    let users =
+        resolve_thread_membership_plan(api, this, channel_id, clan_id, &[], false, &[user_id], cx)
+            .await;
     if users.is_empty() {
         return;
     }
@@ -7215,6 +7299,48 @@ mod tests {
         assert_eq!(select.id.as_deref(), Some("typeOfWork"));
         assert_eq!(select.options.len(), 2);
         assert_eq!(select.options[0].value.as_ref(), "code");
+    }
+
+    #[test]
+    fn parse_embed_input_keeps_select_options_with_non_string_values() {
+        let value = serde_json::json!({
+            "type": 2,
+            "id": "typeOfWork",
+            "component": {
+                "type": 1,
+                "options": [
+                    { "label": "Normal Time", "value": 1, "description": 0 },
+                    { "label": "Overtime", "value": 2 },
+                    "Weekend"
+                ],
+                "valueSelected": { "label": "Normal Time", "value": 1 }
+            }
+        });
+        let EmbedInput::Select(select) =
+            parse_embed_input(Some(&value)).expect("select component should parse")
+        else {
+            panic!("expected a select");
+        };
+        assert_eq!(select.options.len(), 3);
+        assert_eq!(select.options[0].value.as_ref(), "1");
+        assert_eq!(select.options[2].label.as_ref(), "Weekend");
+        assert_eq!(select.value_selected.as_deref(), Some("1"));
+    }
+
+    #[test]
+    fn parse_embed_input_keeps_select_with_null_options() {
+        let value = serde_json::json!({
+            "type": 2,
+            "id": "typeOfWork",
+            "component": { "options": null, "placeholder": "Pick one" }
+        });
+        let EmbedInput::Select(select) =
+            parse_embed_input(Some(&value)).expect("select component should parse")
+        else {
+            panic!("expected a select");
+        };
+        assert!(select.options.is_empty());
+        assert_eq!(select.placeholder.as_deref(), Some("Pick one"));
     }
 
     #[test]

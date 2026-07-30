@@ -635,13 +635,15 @@ impl MentionInput {
         }
         let Some(store) = ComposeStore::try_global(cx) else {
             self.draft_channel = channel_id;
+            self.apply_draft(ComposeDraft::default(), window, cx);
             return;
         };
-        let leaving = self.draft_channel;
-        let outgoing = self.take_draft(cx);
+        let outgoing = self
+            .draft_channel
+            .map(|leaving| (leaving, self.take_draft(cx)));
         let incoming = store.update(cx, |store, _| {
-            if let Some(leaving) = leaving {
-                match outgoing {
+            if let Some((leaving, draft)) = outgoing {
+                match draft {
                     Some(draft) => store.set_draft(leaving, draft),
                     None => store.clear_draft(leaving),
                 }
@@ -687,6 +689,7 @@ impl MentionInput {
         self.suppress_typing = true;
         self.last_content = SharedString::from(text.clone());
         self.input.update(cx, |input, cx| {
+            input.prepare_channel_switch();
             input.set_mention_spans(Vec::new(), cx);
             input.set_value(text, window, cx);
         });

@@ -108,6 +108,9 @@ impl LoginStore {
         if let Some(e) = crate::clan_load::ClanLoadScheduler::try_global(cx) {
             e.update(cx, |s, cx| s.reset(cx));
         }
+        if let Some(e) = crate::compose::ComposeStore::try_global(cx) {
+            e.update(cx, |s, _cx| s.clear_all());
+        }
         if let Some(e) = crate::account::AccountStore::try_global(cx) {
             e.update(cx, |s, cx| s.reset(cx));
         }
