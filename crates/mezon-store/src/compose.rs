@@ -6,6 +6,7 @@ use gpui::{App, AppContext, Entity, Global};
 use crate::ids::ChannelId;
 
 pub const MAX_DRAFT_CHANNELS: usize = 50;
+pub const MAX_DRAFT_BYTES: usize = 8 * 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ComposeTokenKind {
@@ -123,12 +124,27 @@ impl ComposeStore {
         self.recent.push(channel_id);
     }
 
+    fn total_bytes(&self) -> usize {
+        self.by_channel.values().map(draft_bytes).sum()
+    }
+
     fn evict_oldest(&mut self) {
-        while self.recent.len() > MAX_DRAFT_CHANNELS {
+        while self.recent.len() > MAX_DRAFT_CHANNELS
+            || (self.recent.len() > 1 && self.total_bytes() > MAX_DRAFT_BYTES)
+        {
             let oldest = self.recent.remove(0);
             self.by_channel.remove(&oldest);
         }
     }
+}
+
+fn draft_bytes(draft: &ComposeDraft) -> usize {
+    draft.text.len()
+        + draft
+            .attachments
+            .iter()
+            .map(|attachment| attachment.poster_jpeg.as_ref().map_or(0, Vec::len))
+            .sum::<usize>()
 }
 
 #[cfg(test)]
@@ -260,6 +276,43 @@ mod tests {
             store.draft(ChannelId(999)).map(|d| d.text.as_str()),
             Some("newest")
         );
+    }
+
+    #[test]
+    fn evicts_until_the_byte_budget_holds() {
+        let mut store = ComposeStore::new();
+        let heavy = || ComposeDraft {
+            text: String::new(),
+            tokens: Vec::new(),
+            attachments: vec![PendingAttachment {
+                poster_jpeg: Some(vec![0; MAX_DRAFT_BYTES / 2 + 1]),
+                ..attachment()
+            }],
+        };
+        store.set_draft(ChannelId(1), heavy());
+        store.set_draft(ChannelId(2), heavy());
+
+        assert_eq!(store.len(), 1);
+        assert!(store.draft(ChannelId(1)).is_none());
+        assert!(store.draft(ChannelId(2)).is_some());
+    }
+
+    #[test]
+    fn a_lone_oversized_draft_is_not_dropped() {
+        let mut store = ComposeStore::new();
+        store.set_draft(
+            ChannelId(1),
+            ComposeDraft {
+                text: String::new(),
+                tokens: Vec::new(),
+                attachments: vec![PendingAttachment {
+                    poster_jpeg: Some(vec![0; MAX_DRAFT_BYTES + 1]),
+                    ..attachment()
+                }],
+            },
+        );
+
+        assert!(store.draft(ChannelId(1)).is_some());
     }
 
     #[test]

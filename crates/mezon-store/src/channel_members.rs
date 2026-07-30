@@ -168,6 +168,24 @@ impl ChannelMembersStore {
         self.cache.contains(&channel_id)
     }
 
+    /// Seed a channel's roster from a `ListChannelUsers` response fetched outside
+    /// this store, so a caller that had to look the members up itself does not
+    /// leave the cache cold for the next reader.
+    pub fn apply_members_loaded(
+        &mut self,
+        channel_id: ChannelId,
+        users: &[api::channel_user_list::ChannelUser],
+        cx: &mut Context<Self>,
+    ) {
+        let mut bucket = ChannelBucket::default();
+        for cu in users {
+            bucket.upsert(channel_member_from_proto(cu));
+        }
+        self.cache.insert(channel_id, bucket, None);
+        cx.emit(ChannelMembersEvent::Changed { channel_id });
+        cx.notify();
+    }
+
     pub fn apply_members_added(
         &mut self,
         channel_id: ChannelId,
@@ -239,15 +257,7 @@ impl ChannelMembersStore {
             let _ = this.update(cx, |this, cx| {
                 this.loading.remove(&channel_id);
                 match result {
-                    Ok(users) => {
-                        let mut bucket = ChannelBucket::default();
-                        for cu in users {
-                            bucket.upsert(channel_member_from_proto(&cu));
-                        }
-                        this.cache.insert(channel_id, bucket, None);
-                        cx.emit(ChannelMembersEvent::Changed { channel_id });
-                        cx.notify();
-                    }
+                    Ok(users) => this.apply_members_loaded(channel_id, &users, cx),
                     Err(e) => {
                         tracing::error!("list_channel_users failed for {channel_id}: {e}");
                         cx.emit(ChannelMembersEvent::Changed { channel_id });

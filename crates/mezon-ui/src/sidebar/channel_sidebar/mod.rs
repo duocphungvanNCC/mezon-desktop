@@ -409,7 +409,8 @@ impl ChannelSidebar {
                             .filter(|ch| ch.visible_in_sidebar())
                             .collect();
                         let active_parent_id = active_channel_id.and_then(|id| {
-                            ch_slice
+                            category
+                                .channels
                                 .iter()
                                 .find(|ch| ch.id == id)
                                 .and_then(|ch| ch.parent_id)

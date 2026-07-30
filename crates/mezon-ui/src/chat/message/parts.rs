@@ -1,6 +1,7 @@
 use std::cell::Cell;
 use std::rc::Rc;
 use std::sync::Arc;
+use std::time::Duration;
 
 use gpui::{
     Anchor, AnyElement, App, ClickEvent, Entity, FontWeight, Hsla, MouseButton, ObjectFit, Pixels,
@@ -1567,6 +1568,7 @@ fn add_reaction_button(message_id: MessageId, ctx: &RowCtx) -> AnyElement {
         .into_any_element()
 }
 
+const REACTION_TOOLTIP_DELAY: Duration = Duration::from_millis(200);
 const REACTION_EMOJI_PX: f32 = 16.;
 const REACTION_EMOJI_SOURCE_PX: u32 = 32;
 const RECENT_EMOJI_PX: f32 = 20.;
@@ -1645,7 +1647,8 @@ fn reaction_pill(reaction: &Reaction, message_id: MessageId, ctx: &RowCtx) -> An
                     )
                 })
                 .into()
-            });
+            })
+            .tooltip_show_delay(REACTION_TOOLTIP_DELAY);
     }
     if reacted {
         pill = pill
@@ -1805,11 +1808,21 @@ pub fn render_hover_actions(
         )
     });
 
+    let overlay_host = ctx.video_host.clone();
+    let overlay_id = msg.id;
+
     div()
         .id(SharedString::from(format!(
             "hover-actions-{}",
             msg.row_anchor_id.0
         )))
+        .occlude()
+        .on_hover(move |hovered: &bool, _window, cx| {
+            let entered = *hovered;
+            let _ = overlay_host.update(cx, |this, cx| {
+                this.set_overlay_hover(overlay_id, entered, cx)
+            });
+        })
         .absolute()
         .right(px(24.))
         .top(px(top))

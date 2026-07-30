@@ -14,13 +14,15 @@ thiserror.workspace = true
 tracing.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-libc.workspace = true
 flume.workspace = true
 cpal.workspace = true
 open = "5"
 dirs = { workspace = true }
 image = { workspace = true }
 auto-launch = "0.5"
+
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
 
 [target.'cfg(any(target_os = "macos", target_os = "windows"))'.dependencies]
 tray-icon = { version = "0.19", features = ["common-controls-v6"] }
@@ -35,4 +37,4 @@ windows.workspace = true
 [target.'cfg(not(any(target_os = "macos", target_os = "windows")))'.dependencies]
 notify-rust = "4"
 zbus = "4"
-ksni = { version = "0.3", features = ["blocking"] }
+ksni = { version = "0.3", default-features = false, features = ["blocking", "async-io"] }

@@ -1708,11 +1708,11 @@ pub struct ApiEmbed {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ApiSelectOption {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "string_flex::deserialize")]
     pub label: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "string_flex::deserialize")]
     pub value: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "opt_string_flex::deserialize")]
     pub description: Option<String>,
     #[serde(default, deserialize_with = "bool_flex::deserialize")]
     pub default: bool,
@@ -1740,9 +1740,9 @@ pub struct ApiSelectComponent {
         deserialize_with = "opt_i32_flex::deserialize"
     )]
     pub select_type: Option<i32>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "select_options::deserialize")]
     pub options: Vec<ApiSelectOption>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "opt_string_flex::deserialize")]
     pub placeholder: Option<String>,
     #[serde(default, deserialize_with = "opt_i32_flex::deserialize")]
     pub min_options: Option<i32>,
@@ -1750,8 +1750,96 @@ pub struct ApiSelectComponent {
     pub max_options: Option<i32>,
     #[serde(default, deserialize_with = "bool_flex::deserialize")]
     pub disabled: bool,
-    #[serde(default, rename = "valueSelected")]
+    #[serde(
+        default,
+        rename = "valueSelected",
+        deserialize_with = "opt_select_option::deserialize"
+    )]
     pub value_selected: Option<ApiSelectOption>,
+}
+
+fn flex_string(value: &serde_json::Value) -> Option<String> {
+    match value {
+        serde_json::Value::String(s) => Some(s.clone()),
+        serde_json::Value::Number(n) => Some(n.to_string()),
+        serde_json::Value::Bool(b) => Some(b.to_string()),
+        _ => None,
+    }
+}
+
+fn parse_select_option(value: &serde_json::Value) -> Option<ApiSelectOption> {
+    if value.is_object() {
+        return serde_json::from_value(value.clone()).ok();
+    }
+    let text = flex_string(value)?;
+    Some(ApiSelectOption {
+        label: text.clone(),
+        value: text,
+        description: None,
+        default: false,
+    })
+}
+
+mod string_flex {
+    use serde::{Deserialize, Deserializer};
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<String, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        Ok(Option::<serde_json::Value>::deserialize(deserializer)?
+            .as_ref()
+            .and_then(super::flex_string)
+            .unwrap_or_default())
+    }
+}
+
+mod opt_string_flex {
+    use serde::{Deserialize, Deserializer};
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        Ok(Option::<serde_json::Value>::deserialize(deserializer)?
+            .as_ref()
+            .and_then(super::flex_string)
+            .filter(|text| !text.is_empty()))
+    }
+}
+
+mod select_options {
+    use super::ApiSelectOption;
+    use serde::{Deserialize, Deserializer};
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Vec<ApiSelectOption>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let Some(serde_json::Value::Array(items)) =
+            Option::<serde_json::Value>::deserialize(deserializer)?
+        else {
+            return Ok(Vec::new());
+        };
+        Ok(items
+            .iter()
+            .filter_map(super::parse_select_option)
+            .collect())
+    }
+}
+
+mod opt_select_option {
+    use super::ApiSelectOption;
+    use serde::{Deserialize, Deserializer};
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Option<ApiSelectOption>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        Ok(Option::<serde_json::Value>::deserialize(deserializer)?
+            .as_ref()
+            .and_then(super::parse_select_option))
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
