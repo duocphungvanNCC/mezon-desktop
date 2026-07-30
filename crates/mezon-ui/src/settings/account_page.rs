@@ -3,13 +3,32 @@ use std::time::Duration;
 use crate::components::primitives::{
     Avatar, Button as GpuiButton, ButtonVariants, Label, Sizable, Size, h_flex, v_flex,
 };
-use gpui::{
-    Context, Entity, FontWeight, Rgba, SharedString, Task, Window, deferred, div, prelude::*, px,
-};
+use gpui::{Context, Entity, FontWeight, Rgba, SharedString, Task, Window, div, prelude::*, px};
 use mezon_store::{AccountStore, Settings};
 
 use crate::image_cache::LruImageCache;
 use crate::theme::ActiveTheme;
+use crate::util::avatar_color::spawn_banner_color_task;
+
+/// The avatar overlaps the banner, so its box is positioned against the card
+/// rather than laid out in flow. Every offset below is derived from these four
+/// numbers — changing one must not require hand-recomputing the others.
+const BANNER_HEIGHT: f32 = 100.0;
+const HEADER_ROW_HEIGHT: f32 = 104.0;
+const HEADER_PAD_X: f32 = 20.0;
+const AVATAR_SIZE: f32 = 96.0;
+const AVATAR_RING: f32 = 6.0;
+const AVATAR_BOX: f32 = AVATAR_SIZE + AVATAR_RING * 2.0;
+const AVATAR_LEFT: f32 = 20.0;
+const AVATAR_TOP: f32 = 72.0;
+const AVATAR_NAME_GAP: f32 = 20.0;
+/// The header's children already start at `HEADER_PAD_X`; push the name past
+/// the avatar box from there.
+const NAME_INDENT: f32 = AVATAR_LEFT + AVATAR_BOX + AVATAR_NAME_GAP - HEADER_PAD_X;
+/// The header row centers its children; lift the name onto the avatar's midline.
+const NAME_LIFT: f32 = (AVATAR_TOP + AVATAR_BOX / 2.0) - (BANNER_HEIGHT + HEADER_ROW_HEIGHT / 2.0);
+/// Optical nudge so the button's cap height sits level with the name.
+const EDIT_BUTTON_LIFT: f32 = -8.0;
 
 pub struct AccountPage {
     settings: Entity<Settings>,
@@ -56,49 +75,35 @@ impl AccountPage {
         .detach();
     }
 
+    /// Must stay the single source of the avatar url: the banner reads its color
+    /// back out of the image cache, so it can only find what `render` asked for.
+    fn avatar_source(account_avatar_url: Option<&str>, cx: &Context<Self>) -> String {
+        account_avatar_url
+            .map(|url| crate::util::imgproxy::profile_url(cx, url))
+            .unwrap_or_default()
+    }
+
     fn refresh_banner_source(&mut self, cx: &mut Context<Self>) {
-        let source = AccountStore::global(cx)
+        let raw = AccountStore::global(cx)
             .read(cx)
             .account
             .as_ref()
-            .and_then(|account| account.avatar_url.as_deref())
-            .map(|url| crate::util::imgproxy::avatar_url(cx, url))
-            .unwrap_or_default();
+            .and_then(|account| account.avatar_url.clone());
+        let source = Self::avatar_source(raw.as_deref(), cx);
         if source == self.banner_source {
             return;
         }
         self.banner_source = source.clone();
         self.banner_color = None;
-        self.load_banner_color(source, cx);
-    }
-
-    fn load_banner_color(&mut self, avatar_url: String, cx: &mut Context<Self>) {
-        if avatar_url.is_empty() {
-            self.banner_task = None;
-            return;
-        }
-        let avatar_image_cache = self.avatar_image_cache.clone();
-        let resource = gpui::Resource::Uri(avatar_url.into());
-        self.banner_task = Some(cx.spawn(async move |this, cx| {
-            for attempt in 0..60 {
-                let image = avatar_image_cache
-                    .read_with(cx, |cache, _| cache.cached_render_image(&resource));
-                if let Some(image) = image
-                    && let Some(bytes) = image.as_bytes(0)
-                    && let Some(color) = crate::chat::user_profile_modal::average_bgra_color(bytes)
-                {
-                    let _ = this.update(cx, |this, cx| {
-                        this.banner_color = Some(color);
-                        cx.notify();
-                    });
-                    break;
-                }
-                let delay_ms = if attempt < 20 { 50 } else { 200 };
-                cx.background_executor()
-                    .timer(Duration::from_millis(delay_ms))
-                    .await;
-            }
-        }));
+        self.banner_task = spawn_banner_color_task(
+            self.avatar_image_cache.clone(),
+            source,
+            cx,
+            |this, color, cx| {
+                this.banner_color = Some(color);
+                cx.notify();
+            },
+        );
     }
 }
 
@@ -162,25 +167,22 @@ impl Render for AccountPage {
             SharedString::from(mezon_i18n::t(&locale, "setting.account.setPhone"))
         };
 
-        let avatar_url = account
-            .avatar_url
-            .as_ref()
-            .map(|url| SharedString::from(crate::util::imgproxy::avatar_url(cx, url)))
-            .unwrap_or_default();
+        let avatar_url = SharedString::from(Self::avatar_source(account.avatar_url.as_deref(), cx));
         let banner_color = self
             .banner_color
             .map(gpui::Hsla::from)
             .unwrap_or(theme.tokens.bg_secondary.into());
 
+        // React renders these labels through `uppercase font-bold text-xs`.
         let account_field = |label: SharedString, value: SharedString| {
             v_flex()
                 .gap_1()
                 .child(
                     div()
                         .text_xs()
-                        .font_weight(FontWeight::SEMIBOLD)
+                        .font_weight(FontWeight::BOLD)
                         .text_color(theme.text_muted)
-                        .child(label),
+                        .child(SharedString::from(label.to_uppercase())),
                 )
                 .child(Label::new(value).text_color(theme.text_secondary))
         };
@@ -200,11 +202,16 @@ impl Render for AccountPage {
                 .border_color(theme.border)
                 .text_color(theme.text_secondary)
                 .cursor_pointer()
-                .hover(move |style| style.text_color(theme.text_primary))
+                .hover(move |style| {
+                    style
+                        .bg(theme.tokens.bg_item_hover)
+                        .text_color(theme.text_primary)
+                })
                 .child(label)
         };
 
         v_flex()
+            .gap_6()
             .text_sm()
             .child(
                 v_flex()
@@ -213,18 +220,18 @@ impl Render for AccountPage {
                     .overflow_hidden()
                     .bg(theme.bg_primary)
                     .shadow_md()
-                    .child(div().h(px(100.0)).w_full().bg(banner_color))
+                    .child(div().h(px(BANNER_HEIGHT)).w_full().bg(banner_color))
                     .child(
                         h_flex()
-                            .h(px(104.))
-                            .px_5()
+                            .h(px(HEADER_ROW_HEIGHT))
+                            .px(px(HEADER_PAD_X))
                             .gap_4()
                             .items_center()
                             .child(
                                 Label::new(display_name.clone())
                                     .relative()
-                                    .top(px(-26.0))
-                                    .ml(px(128.0))
+                                    .top(px(NAME_LIFT))
+                                    .ml(px(NAME_INDENT))
                                     .text_lg()
                                     .font_weight(FontWeight::SEMIBOLD)
                                     .text_color(theme.text_secondary),
@@ -237,7 +244,7 @@ impl Render for AccountPage {
                                         "setting.account.editUserProfile",
                                     ))
                                     .relative()
-                                    .top(px(-8.0))
+                                    .top(px(EDIT_BUTTON_LIFT))
                                     .with_size(Size::Large)
                                     .primary()
                                     .on_click(move |_, _, cx| {
@@ -358,25 +365,27 @@ impl Render for AccountPage {
                                     )),
                             ),
                     )
-                    .child(deferred(
+                    // Declared last, so it already paints over the banner without
+                    // being promoted into the deferred layer.
+                    .child(
                         div()
                             .absolute()
-                            .left(px(20.0))
-                            .top(px(72.0))
-                            .size(px(108.0))
+                            .left(px(AVATAR_LEFT))
+                            .top(px(AVATAR_TOP))
+                            .size(px(AVATAR_BOX))
                             .rounded_full()
                             .bg(theme.bg_primary)
-                            .p(px(6.0))
+                            .p(px(AVATAR_RING))
                             .child(
                                 Avatar::new()
                                     .when(!avatar_url.is_empty(), |avatar| {
                                         avatar.src(avatar_url.clone())
                                     })
                                     .name(display_name)
-                                    .size_px(px(96.0))
+                                    .size_px(px(AVATAR_SIZE))
                                     .image_cache(self.avatar_image_cache.clone()),
                             ),
-                    )),
+                    ),
             )
             .when_some(self.toast_message.clone(), |this, msg| {
                 this.child(div().text_sm().text_color(theme.text_muted).child(msg))
@@ -391,5 +400,34 @@ fn mask_email(email: &str) -> String {
         format!("{}***{}", &email[..1], &email[at..])
     } else {
         email.to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The header offsets used to be hand-tuned literals. Pin the derived values
+    /// so a change to the banner or avatar can't silently shift the name.
+    #[test]
+    fn name_offsets_track_the_avatar_box() {
+        assert_eq!(AVATAR_BOX, 108.0);
+        assert_eq!(NAME_INDENT, 128.0);
+        assert_eq!(NAME_LIFT, -26.0);
+    }
+
+    #[test]
+    fn name_sits_on_the_avatar_midline() {
+        let avatar_center = AVATAR_TOP + AVATAR_BOX / 2.0;
+        let header_center = BANNER_HEIGHT + HEADER_ROW_HEIGHT / 2.0;
+        assert_eq!(header_center + NAME_LIFT, avatar_center);
+    }
+
+    #[test]
+    fn name_clears_the_avatar_box() {
+        assert_eq!(
+            HEADER_PAD_X + NAME_INDENT,
+            AVATAR_LEFT + AVATAR_BOX + AVATAR_NAME_GAP
+        );
     }
 }
