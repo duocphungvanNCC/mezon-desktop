@@ -1189,18 +1189,11 @@ fn local_mic_muted(local: &LocalParticipant) -> bool {
 }
 
 fn remote_mic_muted(participant: &RemoteParticipant) -> bool {
-    let publications = participant.track_publications();
-    let Some(publication) = publications
+    participant
+        .track_publications()
         .values()
         .find(|publication| publication.source() == TrackSource::Microphone)
-    else {
-        return true;
-    };
-    let enabled = match publication.track() {
-        Some(track) => !track.is_muted() && !publication.is_muted(),
-        None => !publication.is_muted() && publication.is_subscribed(),
-    };
-    !enabled
+        .is_none_or(|publication| publication.is_muted())
 }
 
 fn display_name(name: &str, identity: &str) -> String {
