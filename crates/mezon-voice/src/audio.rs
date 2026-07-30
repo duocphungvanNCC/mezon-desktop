@@ -268,38 +268,35 @@ impl AudioIo {
                 let _ = out_fmt_tx.send(Ok(out_fmt));
                 let host = cpal::default_host();
                 let mut in_stream: Option<cpal::Stream> = None;
-                let mut input_active = false;
+                let mut capture_started = false;
                 while let Ok(cmd) = ctrl_rx.recv() {
                     match cmd {
                         AudioCmd::SetInputActive(active) => {
-                            input_active = active;
-                            if active {
-                                if in_stream.is_none() {
-                                    request_macos_microphone_permission();
-                                    match build_input(
-                                        &host,
-                                        current_input_id.as_deref(),
-                                        capture_tx.clone(),
-                                        out_latency_ms.clone(),
-                                    ) {
-                                        Ok((stream, in_fmt)) => {
-                                            let _ = in_fmt_tx.send(in_fmt);
-                                            in_stream = Some(stream);
-                                        }
-                                        Err(e) => {
-                                            tracing::warn!("voice mic stream build failed: {e}")
-                                        }
+                            if !active {
+                                continue;
+                            }
+                            capture_started = true;
+                            if in_stream.is_none() {
+                                request_macos_microphone_permission();
+                                match build_input(
+                                    &host,
+                                    current_input_id.as_deref(),
+                                    capture_tx.clone(),
+                                    out_latency_ms.clone(),
+                                ) {
+                                    Ok((stream, in_fmt)) => {
+                                        let _ = in_fmt_tx.send(in_fmt);
+                                        in_stream = Some(stream);
+                                    }
+                                    Err(e) => {
+                                        tracing::warn!("voice mic stream build failed: {e}")
                                     }
                                 }
-                                if let Some(stream) = &in_stream
-                                    && let Err(e) = stream.play()
-                                {
-                                    tracing::warn!("voice mic stream play failed: {e}");
-                                }
-                            } else if let Some(stream) = &in_stream
-                                && let Err(e) = stream.pause()
+                            }
+                            if let Some(stream) = &in_stream
+                                && let Err(e) = stream.play()
                             {
-                                tracing::warn!("voice mic stream pause failed: {e}");
+                                tracing::warn!("voice mic stream play failed: {e}");
                             }
                         }
                         AudioCmd::SetInputDevice(device_id) => {
@@ -307,7 +304,7 @@ impl AudioIo {
                                 continue;
                             }
                             current_input_id = device_id;
-                            if in_stream.is_none() && !input_active {
+                            if !capture_started {
                                 continue;
                             }
                             in_stream = None;
@@ -320,7 +317,7 @@ impl AudioIo {
                             ) {
                                 Ok((stream, in_fmt)) => {
                                     let _ = in_fmt_tx.send(in_fmt);
-                                    if input_active && let Err(e) = stream.play() {
+                                    if let Err(e) = stream.play() {
                                         tracing::warn!("voice mic stream play failed: {e}");
                                     }
                                     in_stream = Some(stream);
