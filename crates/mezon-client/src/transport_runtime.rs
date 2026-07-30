@@ -3040,6 +3040,24 @@ impl TransportClient {
             .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
     }
 
+    pub async fn update_channel_desc(
+        &self,
+        clan_id: i64,
+        channel_id: i64,
+        channel_label: Option<String>,
+        channel_avatar: Option<String>,
+    ) -> Result<()> {
+        let transport = self.inner.clone();
+        runtime()
+            .spawn(async move {
+                transport
+                    .update_channel_desc(clan_id, channel_id, channel_label, channel_avatar)
+                    .await
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
     pub async fn detail_channel_timeline(
         &self,
         clan_id: i64,

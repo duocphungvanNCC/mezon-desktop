@@ -416,6 +416,41 @@ impl DirectMessageStore {
         })
     }
 
+    /// `label`/`avatar` are `Some` only for the fields the user actually edited;
+    /// `Some("")` on `avatar` means "remove it".
+    pub fn update_group(
+        &mut self,
+        channel_id: ChannelId,
+        label: Option<String>,
+        avatar: Option<String>,
+        cx: &mut Context<Self>,
+    ) -> Task<anyhow::Result<()>> {
+        let api = self.api.clone();
+        let current = self.channels.find(channel_id);
+        let (sent_label, sent_avatar) = group_desc_payload(
+            current.map(|ch| (ch.label.as_str(), ch.avatar.as_str())),
+            label.as_deref(),
+            avatar.as_deref(),
+        );
+        cx.spawn(async move |this, cx| {
+            api.update_channel_desc(0, channel_id.0, sent_label, sent_avatar)
+                .await?;
+            this.update(cx, |this, cx| {
+                if let Some(ch) = this.channels.find_mut(channel_id) {
+                    if let Some(label) = label {
+                        ch.label = label;
+                    }
+                    if let Some(avatar) = avatar {
+                        ch.avatar = avatar;
+                    }
+                    cx.emit(DirectEvent::Changed { channel_id: None });
+                    cx.notify();
+                }
+            })?;
+            Ok(())
+        })
+    }
+
     pub fn send_direct_text_to_target(
         &self,
         user_id: Option<UserId>,
@@ -945,6 +980,32 @@ fn dm_peer_index(c: &ApiDirectChannel) -> usize {
         .unwrap_or(0)
 }
 
+/// Builds the `UpdateChannelDesc` label/avatar pair for a group edit.
+///
+/// `edited_*` carries only what the user actually changed. The field they left
+/// alone is refilled from `current` rather than sent as `None`, mirroring
+/// React's `updateDmGroup` (`direct.slice.ts`): omitting a field there is not
+/// trusted to mean "leave it", so a name-only edit can't clear the avatar.
+/// An empty string stands in for React's default-avatar placeholder and is
+/// never sent as a carry-over — but an empty `edited_avatar` is an explicit
+/// removal and must reach the server.
+fn group_desc_payload(
+    current: Option<(&str, &str)>,
+    edited_label: Option<&str>,
+    edited_avatar: Option<&str>,
+) -> (Option<String>, Option<String>) {
+    let carry = |value: Option<&str>| value.filter(|value| !value.is_empty()).map(str::to_string);
+    let label = match edited_label {
+        Some(label) => Some(label.to_string()),
+        None => carry(current.map(|(label, _)| label)),
+    };
+    let avatar = match edited_avatar {
+        Some(avatar) => Some(avatar.to_string()),
+        None => carry(current.map(|(_, avatar)| avatar)),
+    };
+    (label, avatar)
+}
+
 fn direct_from_api(c: ApiDirectChannel) -> DirectChannel {
     let kind = DirectKind::from_raw(c.channel_type);
     let (avatar, peer_user_id, peer_username, online) = match kind {
@@ -994,6 +1055,45 @@ fn direct_from_api(c: ApiDirectChannel) -> DirectChannel {
 mod tests {
     use super::*;
     use mezon_client::transport::ApiMessageContent;
+
+    #[test]
+    fn group_desc_payload_refills_the_untouched_field() {
+        let current = Some(("Team", "team.png"));
+
+        // Name-only edit still carries the avatar, so the server cannot read the
+        // missing field as "clear it".
+        assert_eq!(
+            group_desc_payload(current, Some("Team v2"), None),
+            (Some("Team v2".into()), Some("team.png".into()))
+        );
+        // ...and the same the other way around.
+        assert_eq!(
+            group_desc_payload(current, None, Some("new.png")),
+            (Some("Team".into()), Some("new.png".into()))
+        );
+    }
+
+    #[test]
+    fn group_desc_payload_sends_empty_avatar_only_when_removed() {
+        // Explicit removal must reach the server as an empty string.
+        assert_eq!(
+            group_desc_payload(Some(("Team", "team.png")), None, Some("")),
+            (Some("Team".into()), Some(String::new()))
+        );
+        // A group that never had an avatar carries nothing.
+        assert_eq!(
+            group_desc_payload(Some(("Team", "")), Some("Team v2"), None),
+            (Some("Team v2".into()), None)
+        );
+    }
+
+    #[test]
+    fn group_desc_payload_without_a_cached_channel_sends_only_edits() {
+        assert_eq!(
+            group_desc_payload(None, Some("Team v2"), None),
+            (Some("Team v2".into()), None)
+        );
+    }
 
     fn api_dm(id: i64, label: &str, ty: u32) -> ApiDirectChannel {
         ApiDirectChannel {

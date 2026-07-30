@@ -11,6 +11,7 @@ pub mod clan_management_page;
 pub mod clan_members_page;
 pub mod create_thread_panel;
 pub mod create_topic_panel;
+pub mod edit_group_modal;
 pub mod file_type_icon;
 pub mod files_popover;
 pub mod friends_page;

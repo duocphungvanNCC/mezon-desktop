@@ -6020,13 +6020,15 @@ impl MezonTransport {
         &self,
         clan_id: i64,
         channel_id: i64,
-        label: &str,
+        channel_label: Option<String>,
+        channel_avatar: Option<String>,
     ) -> Result<()> {
         let cid = self.generate_cid();
         let body = api::UpdateChannelDescRequest {
             clan_id,
             channel_id,
-            channel_label: Some(label.to_string()),
+            channel_label,
+            channel_avatar,
             ..Default::default()
         }
         .encode_to_vec();

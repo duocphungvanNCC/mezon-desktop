@@ -472,6 +472,18 @@ impl AppApi {
         self.transport.update_channel_timeline(req).await
     }
 
+    pub async fn update_channel_desc(
+        &self,
+        clan_id: i64,
+        channel_id: i64,
+        channel_label: Option<String>,
+        channel_avatar: Option<String>,
+    ) -> Result<()> {
+        self.transport
+            .update_channel_desc(clan_id, channel_id, channel_label, channel_avatar)
+            .await
+    }
+
     pub async fn detail_channel_timeline(
         &self,
         clan_id: i64,

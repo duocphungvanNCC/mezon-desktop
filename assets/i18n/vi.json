@@ -2436,6 +2436,8 @@
   "directMessage.editGroup.groupNamePlaceholder": "Nhập tên nhóm",
   "directMessage.editGroup.removeAvatar": "Xóa ảnh đại diện",
   "directMessage.editGroup.save": "Lưu",
+  "directMessage.editGroup.saveFailed": "Không thể cập nhật nhóm. Vui lòng thử lại.",
+  "directMessage.editGroup.saved": "Đã cập nhật nhóm thành công!",
   "directMessage.editGroup.saving": "Đang lưu...",
   "directMessage.editGroup.title": "Chỉnh sửa nhóm",
   "directMessage.editGroup.uploadImageText": "Nhấp để tải lên hình ảnh",
