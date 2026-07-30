@@ -13,7 +13,8 @@ use super::content::{
 use super::context::{CONTENT_INSET, OnboardingContext, RowCtx, WelcomeContext};
 use super::time::format_message_time;
 use crate::app::shell::Shell;
-use crate::clan::invite_people_modal::InvitePeopleModal;
+use crate::clan::create_channel_modal::CreateChannelModal;
+use crate::clan::invite_people_modal::open_invite_people_modal;
 use crate::components::primitives::{Avatar, Icon, IconName};
 use crate::router::{Route, navigate};
 
@@ -560,19 +561,11 @@ pub fn render_onboard_welcome(ctx: &RowCtx) -> AnyElement {
     let title_color = theme.tokens.text_theme_primary;
     let card_bg = theme.bg_tertiary;
     let hover_bg = theme.tokens.bg_item_hover;
-    let invite_context = ctx.clan_id.and_then(|clan_id| {
-        ClanList::global(ctx.app)
-            .read(ctx.app)
-            .clan(clan_id)
-            .map(|clan| {
-                (
-                    clan_id,
-                    clan.name.clone(),
-                    clan.avatar_url.clone().unwrap_or_default(),
-                )
-            })
-    });
+    // Same clan the onboarding checklist was gated on, so a card that renders as
+    // clickable always has a clan to act on.
+    let clan_id = onboarding.clan_id;
     let invite_locale = locale.to_string();
+    let create_channel_locale = locale.to_string();
 
     div()
         .id("msg-onboard")
@@ -592,31 +585,24 @@ pub fn render_onboard_welcome(ctx: &RowCtx) -> AnyElement {
             mezon_i18n::t(locale, "chatWelcome.onboard.inviteFriends"),
             onboarding.members_invited,
             move |_, window, cx| {
-                let Some((clan_id, clan_name, clan_avatar_url)) = invite_context.clone() else {
+                let Some((clan_name, clan_avatar_url)) =
+                    ClanList::global(cx).read(cx).clan(clan_id).map(|clan| {
+                        (
+                            clan.name.clone(),
+                            clan.avatar_url.clone().unwrap_or_default(),
+                        )
+                    })
+                else {
                     return;
                 };
-                let channel_id =
-                    ChannelList::global(cx)
-                        .read(cx)
-                        .active_channel_id
-                        .filter(|channel_id| {
-                            ChannelList::global(cx)
-                                .read(cx)
-                                .channel_in_clan(clan_id, *channel_id)
-                        });
-                let locale = invite_locale.clone();
-                let modal = cx.new(|cx| {
-                    InvitePeopleModal::new(
-                        clan_id,
-                        channel_id,
-                        clan_name,
-                        clan_avatar_url,
-                        locale,
-                        window,
-                        cx,
-                    )
-                });
-                Shell::global(cx).update(cx, |shell, cx| shell.show_modal(modal.into(), cx));
+                open_invite_people_modal(
+                    clan_id,
+                    clan_name,
+                    clan_avatar_url,
+                    invite_locale.clone(),
+                    window,
+                    cx,
+                );
             },
         ))
         .child(onboard_item(
@@ -648,7 +634,32 @@ pub fn render_onboard_welcome(ctx: &RowCtx) -> AnyElement {
                 .text_color(title_color),
             mezon_i18n::t(locale, "chatWelcome.onboard.createChannel"),
             onboarding.created_channel,
-            |_, _, _| {},
+            move |_, window, cx| {
+                let channel_list = ChannelList::global(cx);
+                // React bails when the clan has no channels yet; here that means
+                // the clan's categories have not loaded, so there is nothing to
+                // create into.
+                let Some((category_id, category_name)) = channel_list
+                    .read(cx)
+                    .categories_for_clan(clan_id)
+                    .first()
+                    .map(|category| (category.id.clone(), category.name.clone()))
+                else {
+                    return;
+                };
+                let modal = cx.new(|cx| {
+                    CreateChannelModal::new(
+                        clan_id,
+                        category_id,
+                        category_name,
+                        channel_list,
+                        create_channel_locale.clone(),
+                        window,
+                        cx,
+                    )
+                });
+                Shell::global(cx).update(cx, |shell, cx| shell.show_modal(modal.into(), cx));
+            },
         ))
         .into_any_element()
 }
@@ -751,6 +762,7 @@ pub fn build_onboarding_context(is_dm: bool, cx: &gpui::App) -> Option<Onboardin
         });
 
     Some(OnboardingContext {
+        clan_id,
         members_invited: member_count > 1,
         sent_message,
         downloaded_app: true,

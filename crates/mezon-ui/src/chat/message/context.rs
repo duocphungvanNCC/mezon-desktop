@@ -20,6 +20,7 @@ use crate::theme::Theme;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct OnboardingContext {
+    pub clan_id: ClanId,
     pub members_invited: bool,
     pub sent_message: bool,
     pub downloaded_app: bool,

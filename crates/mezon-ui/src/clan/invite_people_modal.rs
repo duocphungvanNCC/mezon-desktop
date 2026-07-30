@@ -10,9 +10,9 @@ use gpui::{
     Subscription, UniformListScrollHandle, Window, div, img, prelude::*, px, uniform_list,
 };
 use mezon_store::{
-    AppConfig, ChannelId, ClanId, ClanInviteLink, ClanList, ClanMembersEvent, ClanMembersStore,
-    DirectEvent, DirectKind, DirectMessageBody, DirectMessageStore, Friend, FriendEvent,
-    FriendState, FriendStore, UserId,
+    AppConfig, ChannelId, ChannelList, ClanId, ClanInviteLink, ClanList, ClanMembersEvent,
+    ClanMembersStore, DirectEvent, DirectKind, DirectMessageBody, DirectMessageStore, Friend,
+    FriendEvent, FriendState, FriendStore, UserId,
 };
 use std::collections::HashSet;
 use std::io::Cursor;
@@ -1073,6 +1073,40 @@ fn build_qr_invite_image(data: &str) -> Option<QrInviteImage> {
     let clipboard = ClipboardImage::from_bytes(ImageFormat::Png, png.into_inner());
 
     Some(QrInviteImage { render, clipboard })
+}
+
+/// Resolves the channel the invite link should point at and opens the modal.
+///
+/// Prefers the active channel when it belongs to `clan_id`, otherwise falls back
+/// to the clan's default channel. Callers that reach the modal from somewhere
+/// other than the clan they are viewing still get a link for the right clan.
+pub fn open_invite_people_modal(
+    clan_id: ClanId,
+    clan_name: String,
+    clan_avatar_url: String,
+    locale: String,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let channel_id = {
+        let channels = ChannelList::global(cx).read(cx);
+        channels
+            .active_channel_id
+            .filter(|channel_id| channels.channel_in_clan(clan_id, *channel_id))
+            .or_else(|| channels.default_channel_id(clan_id))
+    };
+    let modal = cx.new(|cx| {
+        InvitePeopleModal::new(
+            clan_id,
+            channel_id,
+            clan_name,
+            clan_avatar_url,
+            locale,
+            window,
+            cx,
+        )
+    });
+    Shell::global(cx).update(cx, |shell, cx| shell.show_modal(modal.into(), cx));
 }
 
 #[cfg(test)]
