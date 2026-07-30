@@ -51,7 +51,7 @@ fn diameter(size: Size) -> Pixels {
 }
 
 impl RenderOnce for Spinner {
-    fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let color = self
             .color
             .unwrap_or_else(|| cx.theme().text_secondary.into());
@@ -59,15 +59,21 @@ impl RenderOnce for Spinner {
             .path("icons/loading-spinner.svg")
             .size(diameter(self.size))
             .flex_none()
-            .text_color(color)
-            .with_animation(
+            .text_color(color);
+
+        if !window.is_window_active() {
+            return div().child(icon.into_any_element());
+        }
+
+        div().child(
+            icon.with_animation(
                 "spinner",
                 Animation::new(Duration::from_secs_f64(0.8))
                     .repeat()
                     .with_easing(ease_in_out),
                 |this, delta| this.with_transformation(Transformation::rotate(percentage(delta))),
-            );
-
-        div().child(icon)
+            )
+            .into_any_element(),
+        )
     }
 }

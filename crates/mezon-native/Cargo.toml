@@ -13,14 +13,15 @@ crossbeam-channel = "0.5"
 thiserror.workspace = true
 tracing.workspace = true
 serde.workspace = true
-serde_json.workspace = true
 flume.workspace = true
 cpal.workspace = true
 open = "5"
 dirs = { workspace = true }
-tray-icon = { version = "0.19", features = ["common-controls-v6"] }
 image = { workspace = true }
 auto-launch = "0.5"
+
+[target.'cfg(any(target_os = "macos", target_os = "windows"))'.dependencies]
+tray-icon = { version = "0.19", features = ["common-controls-v6"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc.workspace = true
@@ -32,7 +33,4 @@ windows.workspace = true
 [target.'cfg(not(any(target_os = "macos", target_os = "windows")))'.dependencies]
 notify-rust = "4"
 zbus = "4"
-gtk = "0.18"
-
-[target.'cfg(unix)'.dependencies]
-libc.workspace = true
+ksni = { version = "0.3", features = ["blocking"] }

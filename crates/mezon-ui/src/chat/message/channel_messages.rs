@@ -25,7 +25,10 @@ use mezon_store::{
 };
 
 use super::audio_player::{AudioActivation, AudioPlayerView};
-use super::context::{OnboardingContext, RecentEmojiCell, RowCtx, RowMemo, WelcomeContext};
+use super::context::{
+    CONTENT_INSET, CONTENT_RIGHT_PAD, OnboardingContext, RecentEmojiCell, RowCtx, RowMemo,
+    WelcomeContext,
+};
 use super::dispatch::render_message_item;
 use super::gif_video::GifVideoView;
 use super::message_context_menu;
@@ -2242,6 +2245,10 @@ impl ChannelMessages {
         }
     }
 
+    pub(crate) fn profile_popover_open(&self) -> bool {
+        self.mention_popover.is_some()
+    }
+
     pub(crate) fn set_mention_popover(
         &mut self,
         popover: Entity<UserProfilePopover>,
@@ -4066,6 +4073,10 @@ impl ChannelMessages {
         let row_memo = self.row_memo.clone();
         let selection = self.selection.clone();
         let list_state = self.list_state.clone();
+        let content_width = (f32::from(self.list_state.viewport_bounds().size.width)
+            - CONTENT_INSET
+            - CONTENT_RIGHT_PAD)
+            .max(0.);
         let hovered_row = self.hovered_row;
         let context_menu_message = self.context_menu_target.map(|(id, _)| id);
         let avatar_image_cache = self.avatar_image_cache.clone();
@@ -4154,6 +4165,7 @@ impl ChannelMessages {
                         emoji_recent: &emoji_recent,
                         coming_soon: coming_soon.clone(),
                         row_memo: row_memo.clone(),
+                        content_width,
                         selection: selection.clone(),
                     };
                     render_message_item(&entity.read(cx).topic_messages, msg_ix, &ctx, cx)
@@ -4315,6 +4327,10 @@ impl Render for ChannelMessages {
         let row_memo = self.row_memo.clone();
         let selection = self.selection.clone();
         let list_state = self.list_state.clone();
+        let content_width = (f32::from(self.list_state.viewport_bounds().size.width)
+            - CONTENT_INSET
+            - CONTENT_RIGHT_PAD)
+            .max(0.);
         let hovered_row = self.hovered_row;
         let context_menu_message = self.context_menu_target.map(|(id, _)| id);
         let avatar_image_cache = self.avatar_image_cache.clone();
@@ -4410,6 +4426,7 @@ impl Render for ChannelMessages {
                         emoji_recent: &emoji_recent,
                         coming_soon: coming_soon.clone(),
                         row_memo: row_memo.clone(),
+                        content_width,
                         selection: selection.clone(),
                     };
                     render_message_item(store.read(cx).viewport_messages(), msg_ix, &ctx, cx)
