@@ -5,17 +5,22 @@ use gpui::{
     IntoElement, Pixels, Render, RenderOnce, SharedString, Stateful, Subscription, WeakEntity,
     Window, div, point, prelude::*, px,
 };
-use mezon_store::{InVoiceInfo, PinnedMessagesStore, Settings, StreamStore, ThreadsStore};
+use mezon_store::{
+    ChannelId, DirectKind, DirectMessageStore, InVoiceInfo, PinnedMessagesStore, Settings,
+    StreamStore, ThreadsStore,
+};
 use ui::{Clickable, PopoverMenu, PopoverMenuHandle, Toggleable, Tooltip};
 
+use crate::app::shell::Shell;
 use crate::app::window_controls;
+use crate::chat::edit_group_modal::EditGroupModal;
 use crate::chat::files_popover::{FilesPopoverPanel, files_popover_on_open};
 use crate::chat::inbox::{InboxPopoverPanel, clan_has_inbox_badge};
 use crate::chat::layout::ChatLayout;
 use crate::chat::pinned_popover::{PinnedPopoverPanel, pin_popover_on_open};
 use crate::chat::threads_popover::{ThreadsPopoverPanel, thread_popover_on_open};
 use crate::chat::{CanvasPopoverPanel, canvas_popover_on_open};
-use crate::components::primitives::{Icon, IconName, InputState};
+use crate::components::primitives::{Avatar, Icon, IconName, InputState};
 use crate::components::{Button, ButtonVariant, ButtonVariants, Sizable, Size};
 use crate::theme::{ActiveTheme, Theme};
 
@@ -30,9 +35,22 @@ fn canvas_popover_y_offset() -> Pixels {
     px((window_controls::APP_HEADER_HEIGHT - CANVAS_HEADER_BTN_H) / 4.)
 }
 
+#[derive(Clone)]
+pub struct DmHeaderInfo {
+    pub channel_id: ChannelId,
+    pub is_group: bool,
+    pub label: SharedString,
+    pub avatar_src: SharedString,
+    pub avatar_raw: SharedString,
+    pub members_text: Option<SharedString>,
+    pub edit_tooltip: SharedString,
+    pub locale: SharedString,
+}
+
 pub struct ChannelHeader {
     name: String,
     dm: bool,
+    dm_header: Option<DmHeaderInfo>,
     muted: bool,
     in_voice: Option<(SharedString, InVoiceInfo)>,
     members_action: bool,
@@ -63,6 +81,7 @@ impl ChannelHeader {
         Self {
             name: name.into(),
             dm: false,
+            dm_header: None,
             muted: false,
             in_voice: None,
             members_action: true,
@@ -91,6 +110,11 @@ impl ChannelHeader {
 
     pub fn dm(mut self, dm: bool) -> Self {
         self.dm = dm;
+        self
+    }
+
+    pub fn dm_header(mut self, info: Option<DmHeaderInfo>) -> Self {
+        self.dm_header = info;
         self
     }
 
@@ -237,6 +261,7 @@ impl ChannelHeader {
         let ChannelHeader {
             name,
             dm,
+            dm_header,
             muted: _,
             in_voice,
             members_action,
@@ -323,51 +348,106 @@ impl ChannelHeader {
                                 .text_color(theme.text_muted),
                         )
                     })
+                    .children(dm_header.as_ref().map(|info| {
+                        let mut avatar = Avatar::new()
+                            .name(info.label.clone())
+                            .size_px(px(32.))
+                            .group_default(info.is_group && info.avatar_raw.is_empty());
+                        if !info.avatar_src.is_empty() {
+                            avatar = avatar.src(info.avatar_src.clone());
+                            if !info.avatar_raw.is_empty() && info.avatar_raw != info.avatar_src {
+                                avatar = avatar.fallback_src(info.avatar_raw.clone());
+                            }
+                        } else if !info.avatar_raw.is_empty() {
+                            avatar = avatar.src(info.avatar_raw.clone());
+                        }
+                        avatar
+                    }))
                     .child({
                         let name_el = div()
                             .text_base()
                             .font_weight(gpui::FontWeight::SEMIBOLD)
                             .text_color(theme.text_primary)
                             .child(name);
-                        match in_voice {
-                            Some((label, info)) => div()
+                        let group_edit = dm_header.filter(|info| info.is_group);
+                        if let Some(info) = group_edit {
+                            let tooltip = info.edit_tooltip.clone();
+                            let members_text = info.members_text.clone();
+                            div()
+                                .id("hdr-dm-edit")
                                 .flex()
                                 .flex_col()
                                 .justify_center()
-                                .gap(px(4.))
-                                .child(name_el.line_height(px(18.)))
-                                .child(
-                                    div()
-                                        .id("hdr-in-voice")
-                                        .flex()
-                                        .flex_row()
-                                        .items_center()
-                                        .gap_1()
-                                        .h(px(16.))
-                                        .cursor_pointer()
-                                        .on_click(move |_, _, cx| {
-                                            crate::router::navigate(
-                                                cx,
-                                                crate::router::Route::Channel {
-                                                    clan_id: info.clan_id,
-                                                    channel_id: info.channel_id,
-                                                },
-                                            )
-                                        })
-                                        .child(
-                                            Icon::new(IconName::Speaker)
-                                                .size(px(12.))
-                                                .text_color(gpui::rgb(0x22c55e)),
+                                .gap(px(1.))
+                                .px_2()
+                                .rounded_lg()
+                                .cursor_pointer()
+                                .hover(move |s| s.bg(bg_hover))
+                                .tooltip(Tooltip::text(tooltip))
+                                .on_click(move |_, window, cx| {
+                                    let modal = cx.new(|cx| {
+                                        EditGroupModal::new(
+                                            info.channel_id,
+                                            info.label.to_string(),
+                                            info.avatar_raw.to_string(),
+                                            info.locale.to_string(),
+                                            window,
+                                            cx,
                                         )
-                                        .child(
-                                            div()
-                                                .text_xs()
-                                                .text_color(theme.text_primary)
-                                                .child(label),
-                                        ),
-                                )
-                                .into_any_element(),
-                            None => name_el.into_any_element(),
+                                    });
+                                    Shell::global(cx)
+                                        .update(cx, |shell, cx| shell.show_modal(modal.into(), cx));
+                                })
+                                .child(name_el.line_height(px(16.)))
+                                .children(members_text.map(|text| {
+                                    div()
+                                        .text_xs()
+                                        .line_height(px(13.))
+                                        .text_color(theme.text_muted)
+                                        .child(text)
+                                }))
+                                .into_any_element()
+                        } else {
+                            match in_voice {
+                                Some((label, info)) => div()
+                                    .flex()
+                                    .flex_col()
+                                    .justify_center()
+                                    .gap(px(4.))
+                                    .child(name_el.line_height(px(18.)))
+                                    .child(
+                                        div()
+                                            .id("hdr-in-voice")
+                                            .flex()
+                                            .flex_row()
+                                            .items_center()
+                                            .gap_1()
+                                            .h(px(16.))
+                                            .cursor_pointer()
+                                            .on_click(move |_, _, cx| {
+                                                crate::router::navigate(
+                                                    cx,
+                                                    crate::router::Route::Channel {
+                                                        clan_id: info.clan_id,
+                                                        channel_id: info.channel_id,
+                                                    },
+                                                )
+                                            })
+                                            .child(
+                                                Icon::new(IconName::Speaker)
+                                                    .size(px(12.))
+                                                    .text_color(gpui::rgb(0x22c55e)),
+                                            )
+                                            .child(
+                                                div()
+                                                    .text_xs()
+                                                    .text_color(theme.text_primary)
+                                                    .child(label),
+                                            ),
+                                    )
+                                    .into_any_element(),
+                                None => name_el.into_any_element(),
+                            }
                         }
                     }),
             )
@@ -405,6 +485,7 @@ impl ChannelHeader {
             notification_trigger: None,
             name: String::new(),
             dm: false,
+            dm_header: None,
             in_voice: None,
             members_action: false,
             members_active: false,
@@ -460,6 +541,7 @@ impl ChannelHeader {
             notification_trigger,
             name: String::new(),
             dm: false,
+            dm_header: None,
             in_voice: None,
             members_action,
             members_active,
@@ -796,6 +878,7 @@ pub struct ChatHeader {
     _settings_observe: Subscription,
     _notification_observe: Subscription,
     _pinned_observe: Subscription,
+    _group_members_observe: Subscription,
 }
 
 impl ChatHeader {
@@ -810,6 +893,10 @@ impl ChatHeader {
             |_, _, cx| cx.notify(),
         );
         let _pinned_observe = cx.observe(&PinnedMessagesStore::global(cx), |_, _, cx| cx.notify());
+        let _group_members_observe = cx
+            .observe(&mezon_store::GroupMembersStore::global(cx), |_, _, cx| {
+                cx.notify()
+            });
         Self {
             name: SharedString::default(),
             dm: false,
@@ -835,6 +922,7 @@ impl ChatHeader {
             _settings_observe,
             _notification_observe,
             _pinned_observe,
+            _group_members_observe,
         }
     }
 
@@ -1021,8 +1109,57 @@ impl Render for ChatHeader {
         } else {
             mezon_i18n::t(&locale, "channelTopbar.tooltips.timelineView").into()
         };
+        let dm_header = if self.dm {
+            match crate::router::Router::global(cx).read(cx).route() {
+                crate::router::Route::DirectMessage { direct_id, .. } => {
+                    DirectMessageStore::try_global(cx).and_then(|store| {
+                        let store = store.read(cx);
+                        store.find(direct_id).map(|dm| {
+                            let is_group = dm.kind == DirectKind::Group;
+                            let avatar_src = if dm.avatar.is_empty() {
+                                String::new()
+                            } else {
+                                crate::util::imgproxy::avatar_url(cx, &dm.avatar)
+                            };
+                            let members_text = is_group.then(|| {
+                                let count = mezon_store::GroupMembersStore::try_global(cx)
+                                    .map(|gm| gm.read(cx).members(dm.id).len())
+                                    .unwrap_or(0);
+                                let key = if count == 1 {
+                                    "common.member"
+                                } else {
+                                    "common.members"
+                                };
+                                SharedString::from(format!(
+                                    "{} {}",
+                                    count,
+                                    mezon_i18n::t(&locale, key).to_lowercase()
+                                ))
+                            });
+                            DmHeaderInfo {
+                                channel_id: dm.id,
+                                is_group,
+                                label: SharedString::from(dm.label.clone()),
+                                avatar_src: SharedString::from(avatar_src),
+                                avatar_raw: SharedString::from(dm.avatar.clone()),
+                                members_text,
+                                edit_tooltip: SharedString::from(
+                                    mezon_i18n::t(&locale, "channelTopbar.tooltips.clickToEdit")
+                                        .to_string(),
+                                ),
+                                locale: locale.clone(),
+                            }
+                        })
+                    })
+                }
+                _ => None,
+            }
+        } else {
+            None
+        };
         let mut header = ChannelHeader::new(self.name.to_string())
             .dm(self.dm)
+            .dm_header(dm_header)
             .members_action(self.members_action)
             .members_active(self.members_active)
             .gallery_trigger(gallery_trigger)

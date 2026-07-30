@@ -416,6 +416,35 @@ impl DirectMessageStore {
         })
     }
 
+    pub fn update_group(
+        &mut self,
+        channel_id: ChannelId,
+        label: Option<String>,
+        avatar: Option<String>,
+        cx: &mut Context<Self>,
+    ) -> Task<anyhow::Result<()>> {
+        let api = self.api.clone();
+        cx.spawn(async move |this, cx| {
+            api.update_channel_desc(0, channel_id.0, label.clone(), avatar.clone())
+                .await?;
+            this.update(cx, |this, cx| {
+                if let Some(ch) = this.channels.find_mut(channel_id) {
+                    if let Some(label) = label
+                        && !label.is_empty()
+                    {
+                        ch.label = label;
+                    }
+                    if let Some(avatar) = avatar {
+                        ch.avatar = avatar;
+                    }
+                    cx.emit(DirectEvent::Changed { channel_id: None });
+                    cx.notify();
+                }
+            })?;
+            Ok(())
+        })
+    }
+
     pub fn send_direct_text_to_target(
         &self,
         user_id: Option<UserId>,
