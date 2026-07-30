@@ -2501,6 +2501,20 @@ pub fn build_send_content(
     }
 }
 
+fn build_presign_finish_content(
+    content: &str,
+    mentions: &[OutgoingMention],
+    hashtags: &[OutgoingHashtag],
+    emojis: &[OutgoingEmoji],
+    presign_finish: &[String],
+    create_time_seconds: u32,
+) -> (String, Vec<OutgoingMention>) {
+    let sent = build_send_content(content, mentions, hashtags, emojis);
+    let content_json = with_presign_finish(sent.json, presign_finish);
+    let content_json = with_create_time_seconds(content_json, create_time_seconds);
+    (content_json, sent.mentions)
+}
+
 fn with_presign_finish(content_json: String, keys: &[String]) -> String {
     let mut value: serde_json::Value =
         serde_json::from_str(&content_json).unwrap_or_else(|_| serde_json::json!({}));
@@ -5361,6 +5375,8 @@ impl MezonTransport {
         message_id: i64,
         content: &str,
         mentions: Vec<OutgoingMention>,
+        hashtags: Vec<OutgoingHashtag>,
+        emojis: Vec<OutgoingEmoji>,
         presign_finish: Vec<String>,
         create_time_seconds: u32,
         mode: i32,
@@ -5369,10 +5385,14 @@ impl MezonTransport {
         is_update_msg_topic: bool,
     ) -> Result<()> {
         let cid = self.generate_cid();
-        let sent = build_send_content(content, &mentions, &[], &[]);
-        let mentions = sent.mentions;
-        let content_json = with_presign_finish(sent.json, &presign_finish);
-        let content_json = with_create_time_seconds(content_json, create_time_seconds);
+        let (content_json, mentions) = build_presign_finish_content(
+            content,
+            &mentions,
+            &hashtags,
+            &emojis,
+            &presign_finish,
+            create_time_seconds,
+        );
         let proto_mentions: Vec<api::MessageMention> = mentions
             .iter()
             .filter_map(OutgoingMention::to_proto)
@@ -6120,6 +6140,20 @@ impl MezonTransport {
         let (code, _) = self
             .send_api_request(cid, "ActiveArchivedThread", body)
             .await?;
+        if code != 0 {
+            return Err(anyhow::anyhow!("API error: code={}", code));
+        }
+        Ok(())
+    }
+
+    pub async fn leave_thread(&self, clan_id: i64, channel_id: i64) -> Result<()> {
+        let cid = self.generate_cid();
+        let body = api::LeaveThreadRequest {
+            clan_id,
+            channel_id,
+        }
+        .encode_to_vec();
+        let (code, _) = self.send_api_request(cid, "LeaveThread", body).await?;
         if code != 0 {
             return Err(anyhow::anyhow!("API error: code={}", code));
         }
@@ -9853,5 +9887,42 @@ mod tests {
         assert!(link.contains("10.5,106.2"));
         assert_eq!(value["lk"][0]["s"], 0);
         assert_eq!(value["mk"][0]["type"], "lk");
+    }
+
+    #[test]
+    fn presign_finish_patch_keeps_emoji_and_hashtag_entities() {
+        let emojis = vec![OutgoingEmoji {
+            emoji_id: "1750123".to_string(),
+            s: 3,
+            e: 8,
+        }];
+        let hashtags = vec![OutgoingHashtag {
+            channel_id: "42".to_string(),
+            s: 9,
+            e: 13,
+        }];
+        let mentions = vec![OutgoingMention {
+            user_id: "7".to_string(),
+            role_id: String::new(),
+            username: "bob".to_string(),
+            s: 14,
+            e: 18,
+        }];
+
+        let (json, _) = build_presign_finish_content(
+            "hi :joy: #gen @bob",
+            &mentions,
+            &hashtags,
+            &emojis,
+            &["key-1".to_string()],
+            1700,
+        );
+        let value: serde_json::Value = serde_json::from_str(&json).expect("json");
+
+        assert_eq!(value["ej"][0]["emojiid"], "1750123");
+        assert_eq!(value["hg"][0]["channelId"], "42");
+        assert_eq!(value["mentions"][0]["user_id"], "7");
+        assert_eq!(value["presign_finish"][0], "key-1");
+        assert_eq!(value["create_time_seconds"], 1700);
     }
 }

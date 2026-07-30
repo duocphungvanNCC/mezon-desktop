@@ -20,6 +20,7 @@ use crate::theme::Theme;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct OnboardingContext {
+    pub clan_id: ClanId,
     pub members_invited: bool,
     pub sent_message: bool,
     pub downloaded_app: bool,
@@ -80,6 +81,7 @@ pub struct RowCtx<'a> {
     pub embed_inputs: &'a HashMap<(MessageId, SharedString), Entity<TextArea>>,
     pub video_host: WeakEntity<ChannelMessages>,
     pub now: chrono::DateTime<chrono::Local>,
+    pub content_width: f32,
     /// Active clan of the currently open channel (permission-substitute + Topic gating).
     pub clan_id: Option<ClanId>,
     pub channel_type: Option<ChannelType>,

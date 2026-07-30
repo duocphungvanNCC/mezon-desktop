@@ -502,7 +502,7 @@ impl PermissionOverrides {
                 .await
             {
                 tracing::error!("add_roles_channel_desc failed for {channel_id}: {error}");
-                let _ = cx.update(|cx| {
+                cx.update(|cx| {
                     RolesStore::global(cx).update(cx, |store, cx| {
                         store.remove_role_from_channel(clan_id, role_id, channel_id, cx);
                     });
@@ -529,7 +529,7 @@ impl PermissionOverrides {
                 .await
             {
                 tracing::error!("add_channel_users failed for {channel_id}: {error}");
-                let _ = cx.update(|cx| {
+                cx.update(|cx| {
                     ChannelUsersStore::global(cx).update(cx, |store, cx| {
                         store.remove_users(channel_id, &[user_id], cx);
                     });

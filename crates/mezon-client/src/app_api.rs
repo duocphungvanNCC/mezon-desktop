@@ -1908,6 +1908,8 @@ impl AppApi {
         message_id: i64,
         content: &str,
         mentions: Vec<crate::transport::OutgoingMention>,
+        hashtags: Vec<crate::transport::OutgoingHashtag>,
+        emojis: Vec<crate::transport::OutgoingEmoji>,
         presign_finish: Vec<String>,
         create_time_seconds: u32,
         mode: i32,
@@ -1922,6 +1924,8 @@ impl AppApi {
                 message_id,
                 content,
                 mentions,
+                hashtags,
+                emojis,
                 presign_finish,
                 create_time_seconds,
                 mode,
@@ -1950,6 +1954,8 @@ impl AppApi {
         message_id: i64,
         content: &str,
         mentions: Vec<crate::transport::OutgoingMention>,
+        hashtags: Vec<crate::transport::OutgoingHashtag>,
+        emojis: Vec<crate::transport::OutgoingEmoji>,
         create_time_seconds: u32,
         presigned: Vec<PresignedAttachment>,
         keys: Vec<String>,
@@ -1988,6 +1994,8 @@ impl AppApi {
                         message_id,
                         content,
                         mentions.clone(),
+                        hashtags.clone(),
+                        emojis.clone(),
                         finished.clone(),
                         create_time_seconds,
                         mode,
@@ -2011,6 +2019,8 @@ impl AppApi {
                     message_id,
                     content,
                     mentions,
+                    hashtags,
+                    emojis,
                     finished,
                     create_time_seconds,
                     mode,
@@ -2592,6 +2602,10 @@ impl AppApi {
         self.transport
             .active_archived_thread(clan_id, channel_id)
             .await
+    }
+
+    pub async fn leave_thread(&self, clan_id: i64, channel_id: i64) -> Result<()> {
+        self.transport.leave_thread(clan_id, channel_id).await
     }
 
     pub async fn list_loged_device(&self) -> Result<Vec<mezon_proto::api::LogedDevice>> {

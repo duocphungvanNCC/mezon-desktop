@@ -1202,9 +1202,10 @@ fn search_summary_from_document(doc: &SearchMessageDocument) -> SearchSummary {
 
 fn parse_search_content(raw: &str) -> String {
     if let Ok(value) = serde_json::from_str::<Value>(raw)
-        && let Some(text) = value.get("t").and_then(Value::as_str) {
-            return text.to_string();
-        }
+        && let Some(text) = value.get("t").and_then(Value::as_str)
+    {
+        return text.to_string();
+    }
     raw.to_string()
 }
 
@@ -1368,12 +1369,13 @@ fn resolve_button_id(message: &ApiMessage, arguments: &Value) -> anyhow::Result<
     for row in &message.content_tokens.components {
         for component in &row.components {
             if let ApiComponentPayload::Button(button) = &component.component
-                && button.label == label {
-                    return component
-                        .id
-                        .clone()
-                        .ok_or_else(|| anyhow::anyhow!("button '{label}' has no id"));
-                }
+                && button.label == label
+            {
+                return component
+                    .id
+                    .clone()
+                    .ok_or_else(|| anyhow::anyhow!("button '{label}' has no id"));
+            }
         }
     }
     anyhow::bail!("button not found with label: {label}")

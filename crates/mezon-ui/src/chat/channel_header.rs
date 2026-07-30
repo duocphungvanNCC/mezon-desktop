@@ -20,6 +20,7 @@ use crate::chat::layout::ChatLayout;
 use crate::chat::pinned_popover::{PinnedPopoverPanel, pin_popover_on_open};
 use crate::chat::threads_popover::{ThreadsPopoverPanel, thread_popover_on_open};
 use crate::chat::{CanvasPopoverPanel, canvas_popover_on_open};
+use crate::components::compositions::channel_row::{ChannelIcon, render_channel_icon};
 use crate::components::primitives::{Avatar, Icon, IconName, InputState};
 use crate::components::{Button, ButtonVariant, ButtonVariants, Sizable, Size};
 use crate::theme::{ActiveTheme, Theme};
@@ -49,6 +50,7 @@ pub struct DmHeaderInfo {
 
 pub struct ChannelHeader {
     name: String,
+    icon: Option<ChannelIcon>,
     dm: bool,
     dm_header: Option<DmHeaderInfo>,
     muted: bool,
@@ -80,6 +82,7 @@ impl ChannelHeader {
     pub fn new(name: impl Into<String>) -> Self {
         Self {
             name: name.into(),
+            icon: None,
             dm: false,
             dm_header: None,
             muted: false,
@@ -115,6 +118,11 @@ impl ChannelHeader {
 
     pub fn dm_header(mut self, info: Option<DmHeaderInfo>) -> Self {
         self.dm_header = info;
+        self
+    }
+
+    pub fn icon(mut self, icon: Option<ChannelIcon>) -> Self {
+        self.icon = icon;
         self
     }
 
@@ -260,6 +268,7 @@ impl ChannelHeader {
         };
         let ChannelHeader {
             name,
+            icon,
             dm,
             dm_header,
             muted: _,
@@ -341,12 +350,18 @@ impl ChannelHeader {
                     .flex_row()
                     .items_center()
                     .gap_1()
-                    .when(!dm, |this| {
-                        this.child(
-                            Icon::new(IconName::Hashtag)
-                                .size(px(20.0))
-                                .text_color(theme.text_muted),
-                        )
+                    .when_some(icon.filter(|_| !dm), |this, icon| {
+                        let glyph: Hsla = if icon.lock.is_some() {
+                            theme.tokens.bg_icon_theme.into()
+                        } else {
+                            theme.text_muted.into()
+                        };
+                        this.child(render_channel_icon(
+                            icon,
+                            px(20.0),
+                            glyph,
+                            theme.tokens.bg_icon_theme_active.into(),
+                        ))
                     })
                     .children(dm_header.as_ref().map(|info| {
                         let mut avatar = Avatar::new()
@@ -484,6 +499,7 @@ impl ChannelHeader {
             muted: false,
             notification_trigger: None,
             name: String::new(),
+            icon: None,
             dm: false,
             dm_header: None,
             in_voice: None,
@@ -540,6 +556,7 @@ impl ChannelHeader {
             muted: false,
             notification_trigger,
             name: String::new(),
+            icon: None,
             dm: false,
             dm_header: None,
             in_voice: None,
@@ -855,6 +872,7 @@ impl ChannelHeader {
 
 pub struct ChatHeader {
     name: SharedString,
+    icon: Option<ChannelIcon>,
     dm: bool,
     /// Cached so the header does not re-derive it (and re-allocate the proxied
     /// avatar url and member-count string) on every repaint.
@@ -909,6 +927,7 @@ impl ChatHeader {
         );
         Self {
             name: SharedString::default(),
+            icon: None,
             dm: false,
             dm_header: None,
             in_voice: None,
@@ -1012,6 +1031,7 @@ impl ChatHeader {
     pub fn sync(
         &mut self,
         name: Option<&str>,
+        icon: Option<ChannelIcon>,
         dm: bool,
         in_voice: Option<InVoiceInfo>,
         members_action: bool,
@@ -1038,6 +1058,12 @@ impl ChatHeader {
             None if dm => SharedString::default(),
             None => self.name.clone(),
         };
+        let icon = match icon {
+            Some(icon) => Some(icon),
+            None if dm => None,
+            None if resolving => self.icon,
+            None => None,
+        };
         self.inbox_handle = inbox_handle;
         self.pin_handle = pin_handle;
         self.canvas_handle = canvas_handle;
@@ -1057,6 +1083,7 @@ impl ChatHeader {
         };
         if self.name == name
             && self.dm_header == dm_header
+            && self.icon == icon
             && self.dm == dm
             && self.in_voice == in_voice
             && self.members_action == members_action
@@ -1076,6 +1103,7 @@ impl ChatHeader {
         }
         self.name = name;
         self.dm_header = dm_header;
+        self.icon = icon;
         self.dm = dm;
         self.in_voice = in_voice;
         self.members_action = members_action;
@@ -1204,6 +1232,7 @@ impl Render for ChatHeader {
         };
         let dm_header = self.dm_header.clone();
         let mut header = ChannelHeader::new(self.name.to_string())
+            .icon(self.icon)
             .dm(self.dm)
             .dm_header(dm_header)
             .members_action(self.members_action)

@@ -17,6 +17,7 @@ pub mod channel_users;
 pub mod clan;
 pub mod clan_load;
 pub mod clan_members;
+pub mod compose;
 pub mod config;
 pub mod connection;
 pub mod direct;
@@ -109,6 +110,7 @@ pub use clan_load::ClanLoadScheduler;
 pub use clan_members::{
     ClanMember, ClanMembersEvent, ClanMembersStore, User, split_members_by_status,
 };
+pub use compose::{ComposeDraft, ComposeStore, ComposeToken, ComposeTokenKind, PendingAttachment};
 pub use config::AppConfig;
 pub use connection::{ConnectionStore, resolve_initial_auth_state};
 pub use direct::{

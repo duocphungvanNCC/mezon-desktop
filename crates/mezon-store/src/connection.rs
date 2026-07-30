@@ -39,6 +39,8 @@ enum ConnectOutcome {
 pub struct ConnectionStore {
     online: bool,
     connecting_attempt: u32,
+    transport: Arc<TransportClient>,
+    wake: Arc<tokio::sync::Notify>,
     _manager: Task<()>,
     _auth_observe: Subscription,
     _heartbeat: Task<()>,
@@ -73,6 +75,19 @@ impl ConnectionStore {
 
     pub fn global(cx: &App) -> Entity<Self> {
         cx.global::<GlobalConnectionStore>().0.clone()
+    }
+
+    pub fn reconnect(&self, cx: &mut Context<Self>) {
+        let transport = self.transport.clone();
+        let wake = self.wake.clone();
+        cx.background_executor()
+            .spawn(async move {
+                if let Err(e) = transport.close().await {
+                    tracing::warn!("Failed to close the transport before reconnect: {e}");
+                }
+                wake.notify_one();
+            })
+            .detach();
     }
 
     fn new(
@@ -117,6 +132,8 @@ impl ConnectionStore {
         };
 
         let heartbeat = Self::spawn_heartbeat(transport.clone(), api.clone(), wake.clone(), cx);
+        let transport_handle = transport.clone();
+        let wake_handle = wake.clone();
 
         let probe_url = AppConfig::try_global(cx)
             .map(|cfg| favicon_probe_url(&cfg.redirect_uri))
@@ -362,6 +379,8 @@ impl ConnectionStore {
         Self {
             online,
             connecting_attempt: 0,
+            transport: transport_handle,
+            wake: wake_handle,
             _manager: manager,
             _auth_observe: auth_observe,
             _heartbeat: heartbeat,

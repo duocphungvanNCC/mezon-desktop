@@ -35,6 +35,8 @@ allow = [
     "Zlib",
     # Public domain: hexf-parse, tiny-keccak.
     "CC0-1.0",
+    # Public domain: ksni (Linux StatusNotifierItem tray).
+    "Unlicense",
     # libfuzzer-sys: (MIT OR Apache-2.0) AND NCSA.
     "NCSA",
     # libbz2-rs-sys: the permissive BSD-style bzip2 license.

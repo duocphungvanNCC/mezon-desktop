@@ -750,6 +750,7 @@ fn open_main_window(
     mezon_store::NotificationPushStore::init(api.clone(), auth_state.clone(), cx);
     mezon_store::ClanLoadScheduler::init(cx);
     mezon_store::QuickMenuStore::init(api.clone(), cx);
+    mezon_store::ComposeStore::init(cx);
     mezon_store::WalletStore::init(auth_state.clone(), cx);
     mezon_ui::WalletToastBridge::init(cx);
     mezon_ui::chat::channel_settings::channel_acl::init(api.clone(), cx);

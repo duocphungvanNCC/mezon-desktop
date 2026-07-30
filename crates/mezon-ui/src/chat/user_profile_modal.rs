@@ -1,13 +1,3 @@
-use gpui::{
-    AnyElement, App, ClickEvent, Context, Entity, FocusHandle, Focusable, FontWeight, MouseButton,
-    MouseDownEvent, Render, Rgba, Subscription, Task, Window, deferred, div, prelude::*, px,
-};
-use mezon_store::{
-    AccountStore, BadgeService, ClanId, ClanMembersStore, FriendState, FriendStore, PresenceStore,
-    ProfileContext, Settings, UserId,
-};
-use std::time::Duration;
-
 use crate::app::shell::{FriendRemovalKind, Shell};
 use crate::chat::message::{SendTokenModal, ShareContactModal, share_contact_subject};
 use crate::chat::user_profile_popover::{
@@ -17,6 +7,15 @@ use crate::components::primitives::{Avatar, Icon, IconName};
 use crate::image_cache::LruImageCache;
 use crate::router::{Route, navigate};
 use crate::theme::ActiveTheme;
+use crate::util::avatar_color::spawn_banner_color_task;
+use gpui::{
+    AnyElement, App, ClickEvent, Context, Entity, FocusHandle, Focusable, FontWeight, MouseButton,
+    MouseDownEvent, Render, Rgba, Subscription, Task, Window, deferred, div, prelude::*, px,
+};
+use mezon_store::{
+    AccountStore, BadgeService, ClanId, ClanMembersStore, FriendState, FriendStore, PresenceStore,
+    ProfileContext, Settings, UserId,
+};
 use ui::Tooltip;
 
 pub struct UserProfileModal {
@@ -215,30 +214,15 @@ impl UserProfileModal {
         if avatar_url.is_empty() {
             return;
         }
-        let avatar_image_cache = self.avatar_image_cache.clone();
-        let resource = gpui::Resource::Uri(avatar_url.into());
-        self._banner_task = Some(cx.spawn(async move |this, cx| {
-            // A cold avatar can take well over the 2s a flat 40x50ms poll allowed, and
-            // giving up left the banner on the default colour with nothing to retry it.
-            for attempt in 0..60 {
-                let image = avatar_image_cache
-                    .read_with(cx, |cache, _| cache.cached_render_image(&resource));
-                if let Some(image) = image
-                    && let Some(bytes) = image.as_bytes(0)
-                    && let Some(color) = average_bgra_color(bytes)
-                {
-                    let _ = this.update(cx, |this, cx| {
-                        this.banner_color = Some(color);
-                        cx.notify();
-                    });
-                    break;
-                }
-                let delay_ms = if attempt < 20 { 50 } else { 200 };
-                cx.background_executor()
-                    .timer(Duration::from_millis(delay_ms))
-                    .await;
-            }
-        }));
+        self._banner_task = spawn_banner_color_task(
+            self.avatar_image_cache.clone(),
+            avatar_url,
+            cx,
+            |this, color, cx| {
+                this.banner_color = Some(color);
+                cx.notify();
+            },
+        );
     }
 
     fn close(cx: &mut App) {
@@ -784,42 +768,5 @@ fn profile_status(status: &str, theme: &crate::theme::Theme) -> (IconName, Rgba)
         "dnd" | "do not disturb" => (IconName::MinusCircleIcon, theme.status_dnd),
         "invisible" | "offline" => (IconName::OfflineStatus, theme.status_offline),
         _ => (IconName::OnlineStatus, theme.status_online),
-    }
-}
-
-fn average_bgra_color(bytes: &[u8]) -> Option<Rgba> {
-    let mut red = 0f64;
-    let mut green = 0f64;
-    let mut blue = 0f64;
-    let mut weight = 0f64;
-    for pixel in bytes.chunks_exact(4) {
-        let alpha = f64::from(pixel[3]) / 255.;
-        if alpha == 0. {
-            continue;
-        }
-        red += f64::from(pixel[2]).powi(2) * alpha;
-        green += f64::from(pixel[1]).powi(2) * alpha;
-        blue += f64::from(pixel[0]).powi(2) * alpha;
-        weight += alpha;
-    }
-    (weight > 0.).then(|| Rgba {
-        r: (red / weight).sqrt() as f32 / 255.,
-        g: (green / weight).sqrt() as f32 / 255.,
-        b: (blue / weight).sqrt() as f32 / 255.,
-        a: 1.,
-    })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::average_bgra_color;
-
-    #[test]
-    fn average_color_uses_avatar_pixels() {
-        let pixels = [30, 60, 120, 255].repeat(4);
-        let color = average_bgra_color(&pixels).expect("color image has an average");
-        assert!((color.r - 120. / 255.).abs() < 0.001);
-        assert!((color.g - 60. / 255.).abs() < 0.001);
-        assert!((color.b - 30. / 255.).abs() < 0.001);
     }
 }

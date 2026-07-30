@@ -19,11 +19,11 @@ use mezon_client::transport::QUICK_MENU_TYPE_FLASH;
 use mezon_store::{
     AccountEvent, AccountStore, AudioStore, BadgeService, Channel, ChannelEvent, ChannelId,
     ChannelList, ChannelMembersEvent, ChannelMembersStore, ClanList, ClanMembersEvent,
-    ClanMembersStore, DirectEvent, DirectMessageStore, Emoji, EmojiEvent, EmojiStore,
-    GroupMembersEvent, GroupMembersStore, MENTION_HERE_ID, MessageSpan, MessagesStore, OgpResult,
-    OutgoingAttachment, OutgoingContent, OutgoingEmoji, OutgoingHashtag, OutgoingMention,
-    OutgoingOgp, QuickMenuStore, RolesEvent, RolesStore, Settings, fetch_ogp,
-    first_previewable_url,
+    ClanMembersStore, ComposeDraft, ComposeStore, ComposeToken, ComposeTokenKind, DirectEvent,
+    DirectMessageStore, Emoji, EmojiEvent, EmojiStore, GroupMembersEvent, GroupMembersStore,
+    MENTION_HERE_ID, MessageSpan, MessagesStore, OgpResult, OutgoingAttachment, OutgoingContent,
+    OutgoingEmoji, OutgoingHashtag, OutgoingMention, OutgoingOgp, QuickMenuStore, RolesEvent,
+    RolesStore, Settings, fetch_ogp, first_previewable_url,
 };
 use std::time::Duration;
 
@@ -190,6 +190,45 @@ struct CommittedToken {
     display: String,
     start: usize,
     end: usize,
+}
+
+impl CommittedToken {
+    fn to_compose(&self) -> ComposeToken {
+        let kind = match &self.kind {
+            TokenKind::Mention { user_id, role_id } => ComposeTokenKind::Mention {
+                user_id: user_id.clone(),
+                role_id: role_id.clone(),
+            },
+            TokenKind::Hashtag { channel_id } => ComposeTokenKind::Hashtag {
+                channel_id: channel_id.clone(),
+            },
+            TokenKind::Emoji { emoji_id } => ComposeTokenKind::Emoji {
+                emoji_id: emoji_id.clone(),
+            },
+        };
+        ComposeToken {
+            kind,
+            display: self.display.clone(),
+            start: self.start,
+            end: self.end,
+        }
+    }
+
+    fn from_compose(token: ComposeToken) -> Self {
+        let kind = match token.kind {
+            ComposeTokenKind::Mention { user_id, role_id } => {
+                TokenKind::Mention { user_id, role_id }
+            }
+            ComposeTokenKind::Hashtag { channel_id } => TokenKind::Hashtag { channel_id },
+            ComposeTokenKind::Emoji { emoji_id } => TokenKind::Emoji { emoji_id },
+        };
+        Self {
+            kind,
+            display: token.display,
+            start: token.start,
+            end: token.end,
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -364,6 +403,8 @@ pub struct MentionInput {
     overflow_to_file: bool,
     overflow_counter: Option<isize>,
     last_content: SharedString,
+    draft_channel: Option<ChannelId>,
+    suppress_typing: bool,
     ogp_preview: Option<OgpResult>,
     ogp_url: Option<String>,
     ogp_generation: u64,
@@ -552,6 +593,8 @@ impl MentionInput {
             overflow_to_file: false,
             overflow_counter: None,
             last_content: SharedString::default(),
+            draft_channel: None,
+            suppress_typing: false,
             ogp_preview: None,
             ogp_url: None,
             ogp_generation: 0,
@@ -579,6 +622,77 @@ impl MentionInput {
     pub fn focus_input(&self, window: &mut Window, cx: &mut App) {
         let handle = self.input.read(cx).focus_handle(cx);
         window.focus(&handle, cx);
+    }
+
+    pub fn bind_channel(
+        &mut self,
+        channel_id: Option<ChannelId>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.draft_channel == channel_id {
+            return;
+        }
+        let Some(store) = ComposeStore::try_global(cx) else {
+            self.draft_channel = channel_id;
+            return;
+        };
+        let leaving = self.draft_channel;
+        let outgoing = self.take_draft(cx);
+        let incoming = store.update(cx, |store, _| {
+            if let Some(leaving) = leaving {
+                match outgoing {
+                    Some(draft) => store.set_draft(leaving, draft),
+                    None => store.clear_draft(leaving),
+                }
+            }
+            channel_id.and_then(|channel_id| store.take_draft(channel_id))
+        });
+        self.draft_channel = channel_id;
+        self.apply_draft(incoming.unwrap_or_default(), window, cx);
+    }
+
+    fn take_draft(&mut self, cx: &mut Context<Self>) -> Option<ComposeDraft> {
+        let text = self.input.read(cx).value().to_string();
+        let attachments = std::mem::take(&mut self.pending_attachments);
+        if text.trim().is_empty() && attachments.is_empty() {
+            return None;
+        }
+        let tokens = self
+            .committed
+            .iter()
+            .map(CommittedToken::to_compose)
+            .collect();
+        Some(ComposeDraft {
+            text,
+            tokens,
+            attachments,
+        })
+    }
+
+    fn apply_draft(&mut self, draft: ComposeDraft, window: &mut Window, cx: &mut Context<Self>) {
+        let ComposeDraft {
+            text,
+            tokens,
+            attachments,
+        } = draft;
+        self.committed = committed_from_compose_tokens(&text, tokens);
+        self.pending_attachments = attachments;
+        self.reset_popup();
+        self.close_popup();
+        self.clear_suggestions(cx);
+        self.clear_ephemeral(cx);
+        self.clear_ogp_preview(cx);
+        self.overflow_counter = None;
+        self.suppress_typing = true;
+        self.last_content = SharedString::from(text.clone());
+        self.input.update(cx, |input, cx| {
+            input.set_mention_spans(Vec::new(), cx);
+            input.set_value(text, window, cx);
+        });
+        self.sync_ranges(cx);
+        self.sync_history_payload(cx);
+        cx.notify();
     }
 
     pub fn take_payload(
@@ -1218,6 +1332,9 @@ impl MentionInput {
         };
         self.update_ogp_preview(&content, cx);
         self.last_content = content;
+        if std::mem::take(&mut self.suppress_typing) {
+            return;
+        }
         MessagesStore::global(cx).update(cx, |store, cx| store.notify_typing(cx));
     }
 
@@ -2350,6 +2467,14 @@ fn emoji_suggest_pool(cx: &App) -> Vec<EmojiSuggestRaw> {
         .collect()
 }
 
+fn committed_from_compose_tokens(text: &str, tokens: Vec<ComposeToken>) -> Vec<CommittedToken> {
+    tokens
+        .into_iter()
+        .filter(|token| text.get(token.start..token.end) == Some(token.display.as_str()))
+        .map(CommittedToken::from_compose)
+        .collect()
+}
+
 fn committed_from_spans(content: &str, spans: &[MessageSpan]) -> Vec<CommittedToken> {
     let mut committed = Vec::new();
     let mut search_from = 0usize;
@@ -2650,5 +2775,93 @@ mod suggest_tests {
     fn sale_id_is_empty_without_extension() {
         assert_eq!(sale_item_id_from_source("https://cdn.example/emojis"), "");
         assert_eq!(sale_item_id_from_source(""), "");
+    }
+}
+
+#[cfg(test)]
+mod draft_tests {
+    use super::{CommittedToken, TokenKind, committed_from_compose_tokens};
+    use mezon_store::{ComposeToken, ComposeTokenKind};
+
+    fn mention(display: &str, start: usize, end: usize) -> ComposeToken {
+        ComposeToken {
+            kind: ComposeTokenKind::Mention {
+                user_id: "42".to_string(),
+                role_id: String::new(),
+            },
+            display: display.to_string(),
+            start,
+            end,
+        }
+    }
+
+    #[test]
+    fn keeps_tokens_that_still_match_the_text() {
+        let restored = committed_from_compose_tokens("hi @bob", vec![mention("@bob", 3, 7)]);
+
+        assert_eq!(
+            restored,
+            vec![CommittedToken {
+                kind: TokenKind::Mention {
+                    user_id: "42".to_string(),
+                    role_id: String::new(),
+                },
+                display: "@bob".to_string(),
+                start: 3,
+                end: 7,
+            }]
+        );
+    }
+
+    #[test]
+    fn drops_tokens_whose_range_no_longer_holds_the_display() {
+        let restored = committed_from_compose_tokens("hi @amy", vec![mention("@bob", 3, 7)]);
+
+        assert!(restored.is_empty());
+    }
+
+    #[test]
+    fn drops_tokens_pointing_past_the_end_of_the_text() {
+        let restored = committed_from_compose_tokens("hi", vec![mention("@bob", 3, 7)]);
+
+        assert!(restored.is_empty());
+    }
+
+    #[test]
+    fn drops_tokens_straddling_a_char_boundary() {
+        let restored = committed_from_compose_tokens("héllo @bob", vec![mention("@bob", 1, 5)]);
+
+        assert!(restored.is_empty());
+    }
+
+    #[test]
+    fn restores_every_token_kind() {
+        let text = "a @bob #gen :joy:";
+        let tokens = vec![
+            mention("@bob", 2, 6),
+            ComposeToken {
+                kind: ComposeTokenKind::Hashtag {
+                    channel_id: "7".to_string(),
+                },
+                display: "#gen".to_string(),
+                start: 7,
+                end: 11,
+            },
+            ComposeToken {
+                kind: ComposeTokenKind::Emoji {
+                    emoji_id: "9".to_string(),
+                },
+                display: ":joy:".to_string(),
+                start: 12,
+                end: 17,
+            },
+        ];
+
+        let restored = committed_from_compose_tokens(text, tokens);
+
+        assert_eq!(restored.len(), 3);
+        assert!(matches!(restored[0].kind, TokenKind::Mention { .. }));
+        assert!(matches!(restored[1].kind, TokenKind::Hashtag { .. }));
+        assert!(matches!(restored[2].kind, TokenKind::Emoji { .. }));
     }
 }

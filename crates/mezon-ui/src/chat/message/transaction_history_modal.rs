@@ -300,13 +300,13 @@ impl TransactionHistoryModal {
         .detach();
     }
 
-    fn render_header(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+    fn render_header(&self, theme: &Theme, window: &Window, cx: &mut Context<Self>) -> AnyElement {
         let locale = self.locale.clone();
         let tk = |key: &'static str| mezon_i18n::t(&locale, key).to_string();
         let reload = Icon::new(IconName::ReloadIcon)
             .size(px(20.))
             .text_color(theme.tokens.text_theme_primary);
-        let reload = if self.loading {
+        let reload = if self.loading && window.is_window_active() {
             reload
                 .with_animation(
                     "tx-history-refresh-spin",
@@ -580,7 +580,7 @@ impl Render for TransactionHistoryModal {
             .rounded(px(12.))
             .bg(theme.tokens.bg_surface)
             .shadow_lg()
-            .child(self.render_header(&theme, cx))
+            .child(self.render_header(&theme, window, cx))
             .child(self.render_tabs(&theme, cx))
             .child(self.render_body(&theme, window, cx))
             .child(self.render_footer(&theme))

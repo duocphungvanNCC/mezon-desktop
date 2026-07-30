@@ -24,6 +24,7 @@ use crate::chat::mention_input::{MentionInput, MentionInputEvent};
 use crate::chat::message::ChannelMessages;
 use crate::chat::message_search::{MESSAGE_SEARCH_PANEL_WIDTH, MessageSearchPanel};
 use crate::chat::pinned_popover::PinnedPopoverPanel;
+use crate::components::compositions::channel_row::ChannelIcon;
 use crate::components::primitives::{Icon, IconName, InputState};
 use crate::image_cache::LruImageCache;
 use crate::theme::ActiveTheme;
@@ -263,6 +264,7 @@ impl ChatArea {
         &mut self,
         locale: &str,
         channel_name: Option<&str>,
+        channel_icon: Option<ChannelIcon>,
         channel_id: Option<ChannelId>,
         show_members_button: bool,
         show_member_panel: bool,
@@ -281,6 +283,7 @@ impl ChatArea {
         self.header.update(cx, |header, cx| {
             header.sync(
                 channel_name,
+                channel_icon,
                 false,
                 None,
                 show_members_button,
@@ -361,6 +364,7 @@ impl ChatArea {
         &mut self,
         locale: &str,
         channel_name: Option<&str>,
+        channel_icon: Option<ChannelIcon>,
         is_dm: bool,
         in_voice: Option<InVoiceInfo>,
         channel_id: Option<ChannelId>,
@@ -404,6 +408,7 @@ impl ChatArea {
         self.header.update(cx, |header, cx| {
             header.sync(
                 channel_name,
+                channel_icon,
                 is_dm,
                 in_voice,
                 show_members_button,
@@ -577,6 +582,12 @@ impl ChatArea {
             div().into_any_element()
         };
 
+        let timeline_popover_open = self.timeline.read(cx).profile_popover_open();
+        let member_popover_open = self
+            .member_panel
+            .as_ref()
+            .is_some_and(|panel| panel.read(cx).profile_popover_open());
+
         let message_column = div()
             .relative()
             .group("chat-drop-zone")
@@ -607,12 +618,18 @@ impl ChatArea {
                 }
             })
             .when(!media_channel_view, |col| {
-                col.child(
-                    div().flex_1().min_h_0().overflow_hidden().child(
+                col.child(div().flex_1().min_h_0().overflow_hidden().child(
+                    if timeline_popover_open {
+                        div()
+                            .size_full()
+                            .child(AnyView::from(self.timeline.clone()))
+                            .into_any_element()
+                    } else {
                         AnyView::from(self.timeline.clone())
-                            .cached(StyleRefinement::default().size_full()),
-                    ),
-                )
+                            .cached(StyleRefinement::default().size_full())
+                            .into_any_element()
+                    },
+                ))
                 .when(send_denied, |col| col.child(no_permission_notice))
                 .when(!send_denied, |col| {
                     col.when_some(app_channel_bar.as_ref(), |col, target| {
@@ -667,10 +684,17 @@ impl ChatArea {
                         .overflow_hidden()
                         .when(member_visible, |slot| slot.w(px(245.)))
                         .when(!member_visible, |slot| slot.w(px(0.)).invisible())
-                        .child(
+                        .child(if member_popover_open {
+                            div()
+                                .w(px(245.))
+                                .h_full()
+                                .child(AnyView::from(panel))
+                                .into_any_element()
+                        } else {
                             AnyView::from(panel)
-                                .cached(StyleRefinement::default().w(px(245.)).h_full()),
-                        ),
+                                .cached(StyleRefinement::default().w(px(245.)).h_full())
+                                .into_any_element()
+                        }),
                 )
             });
 

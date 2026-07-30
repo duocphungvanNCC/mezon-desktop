@@ -446,7 +446,7 @@ impl Render for ClanEventsModal {
             EventsStore::global(cx)
                 .read(cx)
                 .visible_events(self.clan_id, current_user, cx);
-        let mut list = div().flex().flex_col().gap_4();
+        let mut list = div().w_full().flex().flex_col().gap_4();
         for event in &events {
             list = list.child(self.event_card(event, cx));
         }
@@ -609,6 +609,7 @@ impl Render for ClanEventsModal {
             .child(
                 div()
                     .id("clan-events-scroll")
+                    .w_full()
                     .flex_1()
                     .min_h_0()
                     .overflow_y_scroll()
