@@ -51,6 +51,7 @@ jobs:
       NX_CHAT_APP_MMN_API_URL: https://dong.mezon.ai/mmn-api/
       NX_CHAT_APP_ZK_API_URL: https://dong.mezon.ai/zk-api/
       NX_CHAT_APP_INDEXER_API_URL: https://dong.mezon.ai/indexer-api/
+      NX_CHAT_APP_DONG_SERVICE_API_URL: ${{ secrets.NX_CHAT_APP_DONG_SERVICE_API_URL }}
       NX_WEBRTC_ICESERVERS_URL: turn:relay.mezon.ai:5349
       NX_WEBRTC_ICESERVERS_USERNAME: turnmezon
       NX_WEBRTC_ICESERVERS_CREDENTIAL: ${{ secrets.NX_WEBRTC_ICESERVERS_CREDENTIAL }}
