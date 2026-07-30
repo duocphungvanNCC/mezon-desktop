@@ -1,6 +1,6 @@
 use gpui::{
     App, ClickEvent, ClipboardItem, Context, DismissEvent, EventEmitter, FocusHandle, Focusable,
-    FontWeight, Rgba, SharedString, Window, div, prelude::*, px,
+    FontWeight, Rgba, SharedString, Window, deferred, div, prelude::*, px,
 };
 use mezon_store::{AccountStore, BadgeService, Settings, WalletStore};
 
@@ -200,12 +200,23 @@ impl Render for FooterProfilePopup {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let locale = self.locale.clone();
         let tk = |key: &'static str| mezon_i18n::t(&locale, key).to_string();
-        let (bg_banner, bg_card, bg_box, bubble_bg, text_primary, text_secondary, border, hover_bg) = {
+        let (
+            bg_banner,
+            bg_card,
+            bg_box,
+            bg_status_menu,
+            bubble_bg,
+            text_primary,
+            text_secondary,
+            border,
+            hover_bg,
+        ) = {
             let theme = cx.theme();
             (
                 theme.tokens.bg_button_primary,
                 theme.tokens.bg_outside_footer,
                 theme.tokens.theme_setting_primary,
+                theme.tokens.bg_theme_contexify,
                 theme.tokens.bg_surface,
                 theme.tokens.text_theme_primary,
                 theme.tokens.text_secondary,
@@ -465,7 +476,7 @@ impl Render for FooterProfilePopup {
                 .rounded_md()
                 .border_1()
                 .border_color(border)
-                .bg(bg_box)
+                .bg(bg_status_menu)
                 .shadow_lg()
                 .occlude();
             for (value, label_key) in STATUS_OPTIONS {
@@ -474,6 +485,7 @@ impl Render for FooterProfilePopup {
                 let expanded = self.status_duration_for == Some(value);
                 let mut row = div()
                     .id(SharedString::from(format!("footer-status-{value}")))
+                    .group(SharedString::from(format!("footer-status-{value}")))
                     .flex()
                     .flex_row()
                     .items_center()
@@ -481,8 +493,9 @@ impl Render for FooterProfilePopup {
                     .gap_3()
                     .px_2()
                     .py(px(6.))
+                    .text_color(text_primary)
                     .cursor_pointer()
-                    .hover(move |s| s.bg(hover_bg))
+                    .hover(move |s| s.bg(hover_bg).text_color(text_secondary))
                     .on_click(cx.listener(move |this, _: &ClickEvent, _window, cx| {
                         if has_duration {
                             this.status_duration_for = if this.status_duration_for == Some(value) {
@@ -506,18 +519,17 @@ impl Render for FooterProfilePopup {
                                     .size(px(16.))
                                     .text_color(color),
                             )
-                            .child(
-                                div()
-                                    .text_sm()
-                                    .text_color(text_primary)
-                                    .child(tk(label_key)),
-                            ),
+                            .child(div().text_sm().child(tk(label_key))),
                     );
                 if has_duration {
                     row = row.child(
                         Icon::new(IconName::RightIcon)
                             .size(px(12.))
-                            .text_color(text_secondary),
+                            .text_color(text_primary)
+                            .group_hover(
+                                SharedString::from(format!("footer-status-{value}")),
+                                move |s| s.text_color(text_secondary),
+                            ),
                     );
                 }
                 menu = menu.child(row);
@@ -534,23 +546,19 @@ impl Render for FooterProfilePopup {
                                 .items_center()
                                 .px_2()
                                 .py(px(5.))
+                                .text_color(text_primary)
                                 .cursor_pointer()
-                                .hover(move |s| s.bg(hover_bg))
+                                .hover(move |s| s.bg(hover_bg).text_color(text_secondary))
                                 .on_click(cx.listener(move |this, _: &ClickEvent, _window, cx| {
                                     this.apply_status(value, minutes, until, cx);
                                 }))
-                                .child(
-                                    div()
-                                        .text_sm()
-                                        .text_color(text_secondary)
-                                        .child(tk(dur_key)),
-                                ),
+                                .child(div().text_sm().child(tk(dur_key))),
                         );
                     }
                     menu = menu.child(durations);
                 }
             }
-            status_section = status_section.child(menu);
+            status_section = status_section.child(deferred(menu).with_priority(1));
         }
 
         let actions = div()

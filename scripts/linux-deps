@@ -49,7 +49,6 @@ install_apt() {
     libxcb-cursor-dev
     libx11-dev
     libx11-xcb-dev
-    libayatana-appindicator3-dev
     libunwind-dev
     protobuf-compiler
     xdg-desktop-portal
@@ -108,7 +107,6 @@ install_dnf() {
     libxcb-devel
     libX11-devel
     libx11-xcb-devel
-    libappindicator-gtk3-devel
     protobuf-compiler
     xdg-desktop-portal
     gstreamer1-devel

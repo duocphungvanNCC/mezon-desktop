@@ -64,7 +64,7 @@ pub fn render_stream_channel(
             theme,
             locale,
             channel,
-            &store,
+            store,
             &members,
             show_chat,
             stream_entity.clone(),

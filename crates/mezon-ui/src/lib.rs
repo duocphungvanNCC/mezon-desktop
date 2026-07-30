@@ -53,7 +53,8 @@ gpui::actions!(
         HideWindow,
         MinimizeWindow,
         HideApp,
-        OpenCommandPalette
+        OpenCommandPalette,
+        ReloadApp
     ]
 );
 
@@ -99,6 +100,8 @@ pub fn init(cx: &mut gpui::App) {
     cx.on_action(|_: &OpenCommandPalette, cx: &mut gpui::App| {
         command_palette::CommandPaletteModal::try_toggle_authenticated(cx);
     });
+    cx.bind_keys([gpui::KeyBinding::new("secondary-r", ReloadApp, None)]);
+    cx.on_action(|_: &ReloadApp, cx: &mut gpui::App| reload_app(cx));
     components::primitives::init_input(cx);
     components::primitives::init_textarea(cx);
     chat::mention_input::init(cx);
@@ -108,6 +111,18 @@ pub fn init(cx: &mut gpui::App) {
     command_palette::init(cx);
     router::Router::init(cx);
     init_menus(cx);
+}
+
+pub fn reload_app(cx: &mut gpui::App) {
+    let Some(handle) = app::main_window::handle(cx) else {
+        return;
+    };
+    tracing::info!("Reload requested — rebuilding the app shell");
+    cx.defer(move |cx| {
+        if let Err(e) = handle.update(cx, |_, window, cx| RootView::reload(window, cx)) {
+            tracing::warn!("Reload failed: {e}");
+        }
+    });
 }
 
 /// macOS menu bar and standard shortcuts. Edit items reuse the input component's clipboard actions.

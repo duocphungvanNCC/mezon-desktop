@@ -168,6 +168,22 @@ impl ChannelMembersStore {
         self.cache.contains(&channel_id)
     }
 
+    pub fn apply_members_added(
+        &mut self,
+        channel_id: ChannelId,
+        user_ids: &[UserId],
+        cx: &mut Context<Self>,
+    ) {
+        let Some(bucket) = self.cache.get_mut(&channel_id) else {
+            return;
+        };
+        if !add_members_to_bucket(bucket, user_ids) {
+            return;
+        }
+        cx.emit(ChannelMembersEvent::Changed { channel_id });
+        cx.notify();
+    }
+
     pub fn is_loading(&self, channel_id: ChannelId) -> bool {
         self.loading.get(&channel_id).copied().unwrap_or(false)
     }
@@ -274,6 +290,21 @@ impl ChannelMembersStore {
     }
 }
 
+fn add_members_to_bucket(bucket: &mut ChannelBucket, user_ids: &[UserId]) -> bool {
+    let mut changed = false;
+    for user_id in user_ids {
+        if bucket.members.iter().any(|m| m.user_id == *user_id) {
+            continue;
+        }
+        bucket.upsert(ChannelMember {
+            user_id: *user_id,
+            role_ids: Vec::new(),
+        });
+        changed = true;
+    }
+    changed
+}
+
 fn channel_member_from_proto(cu: &api::channel_user_list::ChannelUser) -> ChannelMember {
     ChannelMember {
         user_id: UserId(cu.user_id),
@@ -305,6 +336,28 @@ mod tests {
         let member = channel_member_from_proto(&proto_channel_user(9));
         assert_eq!(member.user_id, UserId(9));
         assert_eq!(member.role_ids, vec![RoleId(5)]);
+    }
+
+    #[test]
+    fn adding_members_locally_skips_users_already_in_the_bucket() {
+        let mut bucket = ChannelBucket::default();
+        bucket.upsert(channel_member_from_proto(&proto_channel_user(1)));
+
+        assert!(add_members_to_bucket(&mut bucket, &[UserId(1), UserId(2)]));
+        assert_eq!(
+            bucket.members.iter().map(|m| m.user_id).collect::<Vec<_>>(),
+            vec![UserId(1), UserId(2)]
+        );
+        assert_eq!(bucket.members[0].role_ids, vec![RoleId(5)]);
+    }
+
+    #[test]
+    fn adding_only_known_members_reports_no_change() {
+        let mut bucket = ChannelBucket::default();
+        bucket.upsert(channel_member_from_proto(&proto_channel_user(1)));
+
+        assert!(!add_members_to_bucket(&mut bucket, &[UserId(1)]));
+        assert!(!add_members_to_bucket(&mut bucket, &[]));
     }
 
     #[test]

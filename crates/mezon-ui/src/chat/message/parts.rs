@@ -1309,7 +1309,10 @@ fn file_box_action(
         .border_color(theme.tokens.border_primary)
         .cursor_pointer()
         .hover(|s| s.opacity(0.8))
-        .on_click(on_click)
+        .on_click(move |event, window, cx| {
+            cx.stop_propagation();
+            on_click(event, window, cx);
+        })
         .child(
             Icon::new(icon)
                 .size(px(16.))
@@ -1341,6 +1344,7 @@ fn render_file_box(
     let download_url = url.clone();
     let download_name = filename.clone();
     let body_url = url.clone();
+    let body_name = filename.clone();
     let pdf_url = url.clone();
     let body_selection = ctx.selection.clone();
     let download_selection = ctx.selection.clone();
@@ -1408,7 +1412,11 @@ fn render_file_box(
                 .when(!sending && !failed, |d| {
                     d.cursor_pointer().on_click(move |_, _, cx| {
                         if !body_selection.borrow().has_selection() {
-                            open_external(&body_url, cx);
+                            crate::util::download::save_with_progress_toast(
+                                body_url.clone(),
+                                body_name.clone(),
+                                cx,
+                            );
                         }
                     })
                 })

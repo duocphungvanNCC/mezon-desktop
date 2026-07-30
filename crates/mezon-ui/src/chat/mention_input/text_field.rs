@@ -1431,9 +1431,13 @@ impl Element for MentionTextElement {
         };
 
         let marked_range = input.marked_range.clone();
-        let display_cursor = input.to_display_offset(cursor);
-        let display_selection = input.to_display_offset(selected_range.start)
-            ..input.to_display_offset(selected_range.end);
+        let display_cursor = input.to_display_offset(cursor).min(display_text.len());
+        let display_selection = input
+            .to_display_offset(selected_range.start)
+            .min(display_text.len())
+            ..input
+                .to_display_offset(selected_range.end)
+                .min(display_text.len());
 
         let run = TextRun {
             len: display_text.len(),
