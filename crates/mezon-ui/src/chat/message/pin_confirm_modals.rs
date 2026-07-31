@@ -16,7 +16,9 @@ use crate::chat::pinned_popover::{render_pin_message_preview, render_pinned_mess
 use crate::components::primitives::{
     Avatar, Button, ButtonVariants, Sizable, Size, h_flex, v_flex,
 };
-use crate::image_cache::LruImageCache;
+use crate::image_cache::{
+    LruImageCache, MESSAGE_ENTRY_MAX_BYTES, MESSAGE_IMAGE_CACHE_BYTES, MESSAGE_IMAGE_CACHE_CAPACITY,
+};
 use crate::image_viewer::resolve_channel_label;
 use crate::theme::ActiveTheme;
 
@@ -40,6 +42,7 @@ pub struct ConfirmPinMessageModal {
     cancel_label: SharedString,
     confirm_label: SharedString,
     avatar_image_cache: Entity<LruImageCache>,
+    message_image_cache: Entity<LruImageCache>,
     ogp_image_cache: Entity<LruImageCache>,
     _subs: Vec<Subscription>,
 }
@@ -57,6 +60,7 @@ pub struct ConfirmUnpinMessageModal {
     cancel_label: SharedString,
     confirm_label: SharedString,
     avatar_image_cache: Entity<LruImageCache>,
+    message_image_cache: Entity<LruImageCache>,
     ogp_image_cache: Entity<LruImageCache>,
     _subs: Vec<Subscription>,
 }
@@ -161,6 +165,15 @@ impl ConfirmPinMessageModal {
                 .to_string()
                 .into(),
             avatar_image_cache: crate::image_cache::shared_avatar_cache(cx),
+            message_image_cache: cx.new(|cx| {
+                LruImageCache::message(
+                    "pin-confirm-image",
+                    MESSAGE_IMAGE_CACHE_CAPACITY,
+                    MESSAGE_IMAGE_CACHE_BYTES,
+                    MESSAGE_ENTRY_MAX_BYTES,
+                    cx,
+                )
+            }),
             ogp_image_cache: crate::image_cache::ogp_aux_cache("pin-confirm-ogp", cx),
             _subs: member_subscriptions(cx),
         });
@@ -185,7 +198,7 @@ impl ConfirmPinMessageModal {
             self.clan_id,
             self.channel_id,
             &self.locale,
-            self.avatar_image_cache.clone(),
+            self.message_image_cache.clone(),
             self.ogp_image_cache.clone(),
             cx,
         )
@@ -232,6 +245,15 @@ impl ConfirmUnpinMessageModal {
                 .to_string()
                 .into(),
             avatar_image_cache: crate::image_cache::shared_avatar_cache(cx),
+            message_image_cache: cx.new(|cx| {
+                LruImageCache::message(
+                    "unpin-confirm-image",
+                    MESSAGE_IMAGE_CACHE_CAPACITY,
+                    MESSAGE_IMAGE_CACHE_BYTES,
+                    MESSAGE_ENTRY_MAX_BYTES,
+                    cx,
+                )
+            }),
             ogp_image_cache: crate::image_cache::ogp_aux_cache("unpin-confirm-ogp", cx),
             _subs: member_subscriptions_unpin(cx),
         });
@@ -266,7 +288,7 @@ impl ConfirmUnpinMessageModal {
             self.channel_id,
             &self.fallback_sender_label,
             &self.locale,
-            self.avatar_image_cache.clone(),
+            self.message_image_cache.clone(),
             self.ogp_image_cache.clone(),
             cx,
         ))
