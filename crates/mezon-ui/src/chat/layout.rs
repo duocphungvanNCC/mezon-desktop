@@ -216,7 +216,7 @@ impl ChatLayout {
             crate::chat::clan_members_page::ClanMembersPage::new(members_settings, cx)
         });
 
-        let user_info_bar = cx.new(|cx| UserInfoBar::new(auth_state.clone(), settings.clone(), cx));
+        let user_info_bar = cx.new(|cx| UserInfoBar::new(auth_state.clone(), cx));
         let channels_settings = settings.clone();
         let clan_channels_page = cx.new(move |cx| {
             crate::chat::clan_channels_page::ClanChannelsPage::new(channels_settings, cx)
@@ -2718,11 +2718,9 @@ impl ChatLayout {
                 let show_chat = self.stream_store.read(cx).show_chat();
                 let layout_entity = cx.entity();
                 let output_device_id = self.settings.read(cx).output_device_id.clone();
-                let theme_name = self.settings.read(cx).theme.clone();
                 let stream_view = crate::chat::stream::render_stream_channel(
                     window,
                     &theme,
-                    &theme_name,
                     &locale,
                     &channel,
                     &self.stream_store,

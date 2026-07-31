@@ -21,12 +21,8 @@ fn theme_is_light(theme: &Theme) -> bool {
     0.299 * bg.r + 0.587 * bg.g + 0.114 * bg.b > 0.5
 }
 
-fn stream_idle_uses_gray(theme_name: &str) -> bool {
-    matches!(theme_name, "light" | "sunrise")
-}
-
-fn stream_channel_bg(theme: &Theme, theme_name: &str, joined: bool) -> Rgba {
-    if joined || !stream_idle_uses_gray(theme_name) {
+fn stream_channel_bg(theme: &Theme, joined: bool) -> Rgba {
+    if joined || !theme_is_light(theme) {
         theme.tokens.theme_setting_primary
     } else {
         gpui::rgb(0xd1d5db)
@@ -36,7 +32,6 @@ fn stream_channel_bg(theme: &Theme, theme_name: &str, joined: bool) -> Rgba {
 pub fn render_stream_channel(
     window: &mut Window,
     theme: &Theme,
-    theme_name: &str,
     locale: &str,
     channel: &Channel,
     stream: &Entity<StreamStore>,
@@ -59,7 +54,7 @@ pub fn render_stream_channel(
     let error_message = store.error_message().map(str::to_owned);
     let output_device = output_device_id.clone();
     let joined = store.is_joined() || store.is_joining();
-    let shell_bg = stream_channel_bg(theme, theme_name, joined);
+    let shell_bg = stream_channel_bg(theme, joined);
 
     let body = if let Some(message) = error_message {
         render_error(

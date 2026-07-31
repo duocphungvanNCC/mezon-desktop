@@ -6,7 +6,7 @@ use gpui::{
 use crate::components::compositions::footer_profile_popup::FooterProfilePopup;
 use crate::components::primitives::{Avatar, Icon, IconName};
 use crate::theme::ActiveTheme;
-use mezon_store::{AccountStore, AuthState, PresenceStore, Settings};
+use mezon_store::{AccountStore, AuthState, PresenceStore};
 
 fn on_settings_click() -> impl Fn(&ClickEvent, &mut Window, &mut App) {
     move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
@@ -28,13 +28,8 @@ pub struct UserInfoBar {
 }
 
 impl UserInfoBar {
-    pub fn new(
-        auth_state: Entity<AuthState>,
-        settings: Entity<Settings>,
-        cx: &mut Context<Self>,
-    ) -> Self {
+    pub fn new(auth_state: Entity<AuthState>, cx: &mut Context<Self>) -> Self {
         let account_store = AccountStore::global(cx);
-        cx.observe(&settings, |_, _, cx| cx.notify()).detach();
         cx.observe(&PresenceStore::global(cx), |this, _, cx| {
             if this.sync_presence(cx) {
                 cx.notify();
