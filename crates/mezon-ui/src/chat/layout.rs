@@ -1069,9 +1069,14 @@ impl ChatLayout {
                     channel_list.select_channel(channel_id, cx);
                 });
             }
-            MessagesStore::global(cx).update(cx, |store, cx| store.open_channel(channel_id, cx));
+            MessagesStore::global(cx).update(cx, |store, cx| {
+                store.open_channel_in_clan(clan_id, channel_id, cx);
+            });
         } else {
             self.pending_channel_id = Some(channel_id);
+            self.channel_list.update(cx, |channel_list, cx| {
+                channel_list.load_for_clan(clan_id, cx);
+            });
         }
     }
 
@@ -1094,6 +1099,9 @@ impl ChatLayout {
                     channel_list.record_previous_channel(clan_id, channel_id, cx);
                 }
                 channel_list.select_channel(channel_id, cx);
+            });
+            MessagesStore::global(cx).update(cx, |store, cx| {
+                store.open_channel_in_clan(clan_id, channel_id, cx);
             });
         }
     }

@@ -1562,6 +1562,7 @@ impl MessagesStore {
                         removed_bottom: dropped_bottom,
                     });
                 }
+                this.try_consume_pending_jump(cx);
                 cx.notify();
             });
         })
@@ -1726,6 +1727,7 @@ impl MessagesStore {
                         removed_bottom: 0,
                     });
                 }
+                this.try_consume_pending_jump(cx);
                 cx.notify();
             });
         })
@@ -1751,7 +1753,7 @@ impl MessagesStore {
         let Some((channel_id, message_id)) = self.pending_jump else {
             return;
         };
-        if self.active_channel_id != Some(channel_id) || self.loading {
+        if self.active_channel_id != Some(channel_id) || self.loading || self.loading_more {
             return;
         }
         self.pending_jump = None;
@@ -1771,9 +1773,11 @@ impl MessagesStore {
             return;
         }
         if self.loading_more || self.loading {
+            self.pending_jump = Some((channel_id, message_id));
             return;
         }
         let Some(clan_id) = self.active_clan_id else {
+            self.pending_jump = Some((channel_id, message_id));
             return;
         };
         let anchor = message_id.get();
@@ -3954,6 +3958,7 @@ impl MessagesStore {
                 .map(|c| c.messages.is_empty())
                 .unwrap_or(true);
             if !empty || self.cache.is_fresh(&channel_id, crate::CACHE_TTL) {
+                self.try_consume_pending_jump(cx);
                 return;
             }
             self.refetch_current_messages(cx);
@@ -3966,17 +3971,56 @@ impl MessagesStore {
         else {
             return;
         };
+        self.open_channel_record(channel.clan_id, channel_id, &channel, cx);
+    }
+
+    pub fn open_channel_in_clan(
+        &mut self,
+        clan_id: ClanId,
+        channel_id: ChannelId,
+        cx: &mut Context<Self>,
+    ) {
+        if self.active_channel_id == Some(channel_id) && !self.is_dm {
+            if self.loading {
+                return;
+            }
+            let empty = self
+                .cache
+                .get(&channel_id)
+                .map(|c| c.messages.is_empty())
+                .unwrap_or(true);
+            if !empty || self.cache.is_fresh(&channel_id, crate::CACHE_TTL) {
+                self.try_consume_pending_jump(cx);
+                return;
+            }
+            self.refetch_current_messages(cx);
+            return;
+        }
+        let channel_list = ChannelList::global(cx).read(cx);
+        let channel = channel_list
+            .channel(clan_id, channel_id)
+            .or_else(|| {
+                channel_list
+                    .clan_id_for_channel(channel_id)
+                    .and_then(|resolved| channel_list.channel(resolved, channel_id))
+            })
+            .cloned();
+        let Some(channel) = channel else {
+            return;
+        };
+        self.open_channel_record(channel.clan_id, channel_id, &channel, cx);
+    }
+
+    fn open_channel_record(
+        &mut self,
+        clan_id: ClanId,
+        channel_id: ChannelId,
+        channel: &crate::channel::Channel,
+        cx: &mut Context<Self>,
+    ) {
         let (is_public, join_type, mode) =
             channel_join_params(channel.channel_type, channel.parent_id, channel.private);
-        self.activate(
-            channel.clan_id,
-            channel_id,
-            is_public,
-            false,
-            join_type,
-            mode,
-            cx,
-        );
+        self.activate(clan_id, channel_id, is_public, false, join_type, mode, cx);
     }
 
     /// Open a direct message / group conversation (clan_id = 0) as the active conversation.
@@ -3997,6 +4041,7 @@ impl MessagesStore {
                 .map(|c| c.messages.is_empty())
                 .unwrap_or(true);
             if !empty || self.cache.is_fresh(&channel_id, crate::CACHE_TTL) {
+                self.try_consume_pending_jump(cx);
                 return;
             }
             self.refetch_current_messages(cx);
