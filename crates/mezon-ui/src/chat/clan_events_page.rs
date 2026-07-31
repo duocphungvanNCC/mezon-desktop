@@ -203,7 +203,7 @@ impl ClanEventsModal {
                             .px_2()
                             .py_1()
                             .rounded_full()
-                            .bg(theme.bg_secondary)
+                            .bg(theme.tokens.bg_secondary)
                             .child(interested.to_string())
                             .child(
                                 Icon::new(IconName::MemberList)
