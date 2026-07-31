@@ -155,11 +155,13 @@ impl ChannelSidebar {
             }
         });
         let settings_observe = cx.observe(&settings, |this, settings, cx| {
-            if settings.read(cx).language == this.last_locale {
-                return;
-            }
-            this.last_locale = settings.read(cx).language.clone();
-            if this.rebuild_items(cx) {
+            let locale = settings.read(cx).language.clone();
+            if locale != this.last_locale {
+                this.last_locale = locale;
+                if this.rebuild_items(cx) {
+                    cx.notify();
+                }
+            } else {
                 cx.notify();
             }
         });
