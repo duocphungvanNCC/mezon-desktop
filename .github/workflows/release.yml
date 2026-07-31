@@ -66,9 +66,17 @@ env:
 
 jobs:
   linux:
-    name: Linux artifacts
-    runs-on: ubuntu-latest
+    name: Linux artifacts (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
     container: ubuntu:22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            arch: x86_64
+          - runner: ubuntu-24.04-arm
+            arch: aarch64
     steps:
       - name: Install container prerequisites
         run: |
@@ -108,7 +116,7 @@ jobs:
       - name: Upload feed
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: update-feed-linux
+          name: update-feed-linux-${{ matrix.arch }}
           path: target/update-feed/*
           if-no-files-found: error
 
