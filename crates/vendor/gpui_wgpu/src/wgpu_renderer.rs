@@ -104,6 +104,38 @@ struct WgpuBindGroupLayouts {
 /// Shared GPU context reference, used to coordinate device recovery across multiple windows.
 pub type GpuContext = Rc<RefCell<Option<WgpuContext>>>;
 
+// mezon vendor edit: X11 must know BEFORE creating a window whether rendering
+// will land on a software rasterizer (llvmpipe/lavapipe/SwiftShader) — Mesa's
+// software WSI presents nothing into a 32-bit ARGB visual, so remote X11
+// sessions (xrdp/VNC) and GPU-less VMs need the opaque visual instead.
+// Uses the already-selected adapter when the shared context exists; otherwise
+// enumerates adapters headlessly (no surface required) and caches the result.
+#[cfg(not(target_family = "wasm"))]
+pub fn gpu_is_software(gpu_context: &GpuContext) -> bool {
+    if let Some(context) = gpu_context.borrow().as_ref() {
+        return context.adapter.get_info().device_type == wgpu::DeviceType::Cpu;
+    }
+    static PROBE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *PROBE.get_or_init(|| {
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+            backends: wgpu::Backends::VULKAN | wgpu::Backends::GL,
+            flags: wgpu::InstanceFlags::default(),
+            backend_options: wgpu::BackendOptions::default(),
+            memory_budget_thresholds: wgpu::MemoryBudgetThresholds::default(),
+            display: None,
+        });
+        let adapters = gpui::block_on(instance.enumerate_adapters(wgpu::Backends::all()));
+        let software_only = !adapters.is_empty()
+            && adapters
+                .iter()
+                .all(|adapter| adapter.get_info().device_type == wgpu::DeviceType::Cpu);
+        if software_only {
+            log::info!("GPU probe: only software adapters available");
+        }
+        software_only
+    })
+}
+
 /// GPU resources that must be dropped together during device recovery.
 struct WgpuResources {
     device: Arc<wgpu::Device>,

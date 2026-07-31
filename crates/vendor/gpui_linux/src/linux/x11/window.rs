@@ -440,11 +440,25 @@ impl X11WindowState {
 
         // mezon vendor edit: opt-out from the 32-bit ARGB visual. Mesa's software
         // rasterizer (llvmpipe/lavapipe) presents nothing to an ARGB32 X window —
-        // the window stays pure black while the render loop runs normally — so
-        // running the app under software rendering (containers, VMs, CI) needs the
-        // plain opaque visual. Real GPU drivers are unaffected; this is off unless
-        // GPUI_X11_OPAQUE_VISUAL is set.
-        let visual = if std::env::var_os("GPUI_X11_OPAQUE_VISUAL").is_some() {
+        // the window stays pure black while the render loop runs normally — which
+        // is exactly what remote X11 sessions (xrdp/VNC) and GPU-less VMs get, so
+        // auto-detect software-only rendering and fall back to the plain opaque
+        // visual. Real GPU drivers are unaffected. GPUI_X11_OPAQUE_VISUAL forces
+        // the choice either way (0/empty = transparent, anything else = opaque).
+        let use_opaque = match std::env::var("GPUI_X11_OPAQUE_VISUAL").ok().as_deref() {
+            Some("0") | Some("") => false,
+            Some(_) => true,
+            None => {
+                let software = gpui_wgpu::gpu_is_software(&gpu_context);
+                if software {
+                    eprintln!(
+                        "[x11] software-only rendering detected; using the opaque visual"
+                    );
+                }
+                software
+            }
+        };
+        let visual = if use_opaque {
             visual_set.inherit
         } else {
             match visual_set.transparent {
