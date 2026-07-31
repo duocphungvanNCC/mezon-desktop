@@ -41,7 +41,7 @@ const LIST_PAD_X: f32 = 16.;
 const LIST_PAD_Y: f32 = 8.;
 const EMPTY_BODY_HEIGHT: f32 = 144.;
 const FILE_NAME_COLOR: u32 = 0x3b_82_f6;
-const ATTACHMENT_PREVIEW_MAX: f32 = 150.;
+const ATTACHMENT_PREVIEW_SIZE: f32 = 120.;
 
 #[derive(Clone)]
 struct PinCardVm {
@@ -616,7 +616,7 @@ fn render_pin_body(
     let image_preview = pin
         .attachments
         .iter()
-        .find(|att| att.is_image() && !att.proxied_src.is_empty())
+        .find(|att| pin_image_attachment_has_src(att))
         .map(|att| render_pin_image_attachment(att, image_cache.clone()));
     let file_preview = pin
         .attachments
@@ -997,6 +997,10 @@ fn render_pin_spans(spans: &[MessageSpan], theme: &Theme) -> gpui::AnyElement {
     col.into_any_element()
 }
 
+fn pin_image_attachment_has_src(att: &MessageAttachment) -> bool {
+    att.is_image() && (!att.proxied_src.is_empty() || !att.url.is_empty())
+}
+
 fn render_pin_image_attachment(
     att: &MessageAttachment,
     image_cache: Entity<LruImageCache>,
@@ -1008,10 +1012,11 @@ fn render_pin_image_attachment(
     };
     div()
         .mt_1()
-        .max_w(px(ATTACHMENT_PREVIEW_MAX))
-        .max_h(px(ATTACHMENT_PREVIEW_MAX))
+        .w(px(ATTACHMENT_PREVIEW_SIZE))
+        .h(px(ATTACHMENT_PREVIEW_SIZE))
+        .flex_shrink_0()
         .overflow_hidden()
-        .rounded(px(8.))
+        .rounded(px(4.))
         .child(
             img(src)
                 .image_cache(&image_cache)
@@ -1195,10 +1200,11 @@ fn render_pin_embeds(
             if !embed.thumbnail_proxied.is_empty() {
                 card = card.child(
                     div()
-                        .max_w(px(ATTACHMENT_PREVIEW_MAX))
-                        .max_h(px(ATTACHMENT_PREVIEW_MAX))
+                        .w(px(ATTACHMENT_PREVIEW_SIZE))
+                        .h(px(ATTACHMENT_PREVIEW_SIZE))
+                        .flex_shrink_0()
                         .overflow_hidden()
-                        .rounded(px(8.))
+                        .rounded(px(4.))
                         .child(
                             img(embed.thumbnail_proxied.clone())
                                 .image_cache(&image_cache)
