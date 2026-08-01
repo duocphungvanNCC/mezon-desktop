@@ -226,6 +226,10 @@ impl AppApi {
         self.transport.list_channel_by_user_id().await
     }
 
+    pub async fn list_channel_detail(&self, channel_id: i64) -> Result<ApiChannelDesc> {
+        self.transport.list_channel_detail(channel_id).await
+    }
+
     pub async fn list_dm_channels(&self, page: i32) -> Result<Vec<ApiDirectChannel>> {
         self.transport.list_dm_channel_descs(page).await
     }

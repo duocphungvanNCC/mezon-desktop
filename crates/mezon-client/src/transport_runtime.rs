@@ -497,6 +497,18 @@ impl TransportClient {
             .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
     }
 
+    pub async fn list_channel_detail(
+        &self,
+        channel_id: i64,
+    ) -> Result<crate::transport::ApiChannelDesc> {
+        let transport = self.inner.clone();
+
+        runtime()
+            .spawn(async move { transport.list_channel_detail(channel_id).await })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
     pub async fn list_archived_channel_descs(
         &self,
         clan_id: i64,

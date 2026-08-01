@@ -732,6 +732,7 @@ impl Render for ChannelSidebar {
                 menu.noti_sub_open,
                 mezon_store::NotificationSettingStore::try_global(cx)
                     .and_then(|store| store.read(cx).clan_default(menu.clan_id)),
+                menu.in_favorites,
                 ChannelMenuPermissions::resolve(menu.clan_id, menu.channel_id, cx),
             )
         });
@@ -1023,6 +1024,7 @@ impl Render for ChannelSidebar {
                     mute_sub_open,
                     noti_sub_open,
                     clan_default,
+                    in_favorites,
                     channel_permissions,
                 )| {
                     el.child(context_menu_at(
@@ -1040,6 +1042,7 @@ impl Render for ChannelSidebar {
                             mute_sub_open,
                             noti_sub_open,
                             clan_default,
+                            in_favorites,
                             channel_permissions,
                         ),
                     ))
@@ -1769,7 +1772,7 @@ fn render_sidebar_item(
                 let click_clan = clan_id_inner;
                 let menu_sidebar = sidebar.clone();
                 let reveal_sidebar = sidebar.clone();
-                let reveal_favorite = *is_favorite;
+                let in_favorites = *is_favorite;
                 let menu_channel_type = *channel_type;
                 let menu_is_thread = *is_thread;
                 return element
@@ -1786,7 +1789,7 @@ fn render_sidebar_item(
                                 },
                             );
                         }
-                        if reveal_favorite {
+                        if in_favorites {
                             let _ = reveal_sidebar.update(cx, |this, cx| {
                                 this.reveal_original_channel(&click_id, cx);
                             });
@@ -1801,6 +1804,7 @@ fn render_sidebar_item(
                                     position,
                                     channel_id: menu_channel_id,
                                     clan_id: menu_clan_id,
+                                    in_favorites,
                                     mute_sub_open: false,
                                     noti_sub_open: false,
                                 });
@@ -1918,6 +1922,7 @@ fn render_sidebar_item(
             let mut channel_col = channel_col.on_mouse_down(MouseButton::Right, {
                 let channel_type = *channel_type;
                 let is_thread = *is_thread;
+                let in_favorites = *is_favorite;
                 move |event: &MouseDownEvent, _window, cx| {
                     let position = event.position;
                     if let Some(view) = sidebar.upgrade() {
@@ -1928,6 +1933,7 @@ fn render_sidebar_item(
                                 position,
                                 channel_id: menu_channel_id,
                                 clan_id: menu_clan_id,
+                                in_favorites,
                                 mute_sub_open: false,
                                 noti_sub_open: false,
                             });

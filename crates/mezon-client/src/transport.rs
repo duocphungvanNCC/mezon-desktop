@@ -4696,7 +4696,7 @@ impl MezonTransport {
     }
 
     /// List channel description detail.
-    pub async fn list_channel_detail(&self, channel_id: i64) -> Result<api::ChannelDescription> {
+    pub async fn list_channel_detail(&self, channel_id: i64) -> Result<ApiChannelDesc> {
         let cid = self.generate_cid();
         let body = api::ListChannelDetailRequest { channel_id }.encode_to_vec();
         let (code, response) = self
@@ -4705,7 +4705,8 @@ impl MezonTransport {
         if code != 0 {
             return Err(anyhow::anyhow!("API error: code={}", code));
         }
-        Ok(api::ChannelDescription::decode(response.as_slice())?)
+        let channel = api::ChannelDescription::decode(response.as_slice())?;
+        Ok(Self::channel_desc_from_proto(channel))
     }
 
     /// List thread descriptions for a parent channel.

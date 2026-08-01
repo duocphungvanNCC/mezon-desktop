@@ -792,6 +792,21 @@ impl DirectMessageStore {
         true
     }
 
+    pub fn mark_as_read(&mut self, channel_id: ChannelId, cx: &mut Context<Self>) {
+        if channel_id.is_zero() {
+            return;
+        }
+        self.note_read(channel_id, cx);
+        let api = self.api.clone();
+        let id = channel_id.get();
+        cx.spawn(async move |_, _| {
+            if let Err(e) = api.mark_as_read(id, 0, 0).await {
+                tracing::error!("mark dm as read failed for channel {id}: {e}");
+            }
+        })
+        .detach();
+    }
+
     fn schedule_changed_notify(&mut self, channel_id: ChannelId, cx: &mut Context<Self>) {
         if !self.pending_changed.contains(&channel_id) {
             self.pending_changed.push(channel_id);
