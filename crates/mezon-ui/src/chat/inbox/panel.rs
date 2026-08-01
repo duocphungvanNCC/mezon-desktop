@@ -109,8 +109,8 @@ impl InboxPopoverPanel {
         }
 
         let _inbox_sub = cx.subscribe(&inbox_store, |this, _, event, cx| {
-            let InboxEvent::Updated { clan_id } = event;
-            if clan_id.as_deref().is_some_and(|id| id != this.clan_id) {
+            let InboxEvent::Updated { .. } = event;
+            if this.tab == InboxTab::Topics {
                 return;
             }
             this.sync_from_store(cx);

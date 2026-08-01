@@ -5,6 +5,7 @@ use prost::Message as _;
 pub const INBOX_PAGE_LIMIT: i32 = 50;
 pub const DIRECTION_BEFORE_TIMESTAMP: i32 = 3;
 pub const DIRECTION_AROUND_TIMESTAMP: i32 = 2;
+pub const INBOX_MESSAGE_MARK_CODE: i32 = -12;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(i32)]
@@ -487,6 +488,85 @@ impl InboxNotification {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MarkedInboxMessageInput {
+    pub message_id: i64,
+    pub channel_id: i64,
+    pub clan_id: i64,
+    pub sender_id: i64,
+    pub username: String,
+    pub display_name: String,
+    pub avatar: String,
+    pub content_json: String,
+    pub create_time_seconds: u32,
+    pub attachment_link: String,
+    pub attachment_type: String,
+    pub has_more_attachment: bool,
+    pub mention_spans: Vec<InboxMentionSpan>,
+    pub channel_type: i32,
+    pub topic_id: Option<i64>,
+}
+
+pub fn pending_inbox_notification_id(message_id: i64) -> String {
+    format!("pending-{message_id}")
+}
+
+pub fn is_pending_inbox_notification_id(id: &str) -> bool {
+    id.starts_with("pending-")
+}
+
+pub fn inbox_notification_from_marked_message_local(
+    marked: &MarkedInboxMessageInput,
+) -> InboxNotification {
+    let mut notification = inbox_notification_from_marked_message(
+        marked.message_id,
+        marked.create_time_seconds,
+        marked,
+    );
+    notification.id = pending_inbox_notification_id(marked.message_id);
+    notification
+}
+
+pub fn inbox_notification_from_marked_message(
+    notification_id: i64,
+    create_time_seconds: u32,
+    marked: &MarkedInboxMessageInput,
+) -> InboxNotification {
+    let preview = InboxMessagePreview {
+        message_id: id_str(marked.message_id),
+        channel_id: id_str(marked.channel_id),
+        clan_id: id_str(marked.clan_id),
+        sender_id: id_str(marked.sender_id),
+        content: display_text_from_message_content(&marked.content_json),
+        raw_content: marked.content_json.clone(),
+        avatar: marked.avatar.clone(),
+        display_name: marked.display_name.clone(),
+        username: marked.username.clone(),
+        create_time_seconds: marked.create_time_seconds,
+        attachment_link: marked.attachment_link.clone(),
+        attachment_type: marked.attachment_type.clone(),
+        has_more_attachment: marked.has_more_attachment,
+        mention_spans: marked.mention_spans.clone(),
+    };
+    InboxNotification {
+        id: id_str(notification_id),
+        category: InboxCategory::Messages,
+        subject: "Message To Inbox".into(),
+        sender_id: id_str(marked.sender_id),
+        clan_id: id_str(marked.clan_id),
+        channel_id: id_str(marked.channel_id),
+        topic_id: marked
+            .topic_id
+            .filter(|id| *id != 0)
+            .map(|id| id.to_string()),
+        channel_type: marked.channel_type,
+        avatar_url: marked.avatar.clone(),
+        create_time_seconds,
+        code: INBOX_MESSAGE_MARK_CODE,
+        message: Some(preview),
+    }
+}
+
 impl TopicDiscussion {
     pub fn reply_preview(&self) -> TopicReplyPreview {
         topic_reply_preview(&self.content)
@@ -664,6 +744,56 @@ mod tests {
         })
         .expect("notification");
         assert_eq!(notification.effective_message_id().as_deref(), Some("99"));
+    }
+
+    #[test]
+    fn inbox_notification_from_marked_message_local_uses_pending_id() {
+        let marked = MarkedInboxMessageInput {
+            message_id: 42,
+            channel_id: 7,
+            clan_id: 1,
+            sender_id: 9,
+            username: "user".into(),
+            display_name: "User".into(),
+            avatar: "a.png".into(),
+            content_json: r#"{"t":"hello"}"#.into(),
+            create_time_seconds: 1_700_000_000,
+            attachment_link: String::new(),
+            attachment_type: String::new(),
+            has_more_attachment: false,
+            mention_spans: Vec::new(),
+            channel_type: 1,
+            topic_id: None,
+        };
+        let notification = inbox_notification_from_marked_message_local(&marked);
+        assert_eq!(notification.id, "pending-42");
+        assert_eq!(notification.effective_message_id().as_deref(), Some("42"));
+    }
+
+    #[test]
+    fn inbox_notification_from_marked_message_builds_preview() {
+        let marked = MarkedInboxMessageInput {
+            message_id: 42,
+            channel_id: 7,
+            clan_id: 1,
+            sender_id: 9,
+            username: "user".into(),
+            display_name: "User".into(),
+            avatar: "a.png".into(),
+            content_json: r#"{"t":"hello"}"#.into(),
+            create_time_seconds: 1_700_000_000,
+            attachment_link: String::new(),
+            attachment_type: String::new(),
+            has_more_attachment: false,
+            mention_spans: Vec::new(),
+            channel_type: 1,
+            topic_id: None,
+        };
+        let notification = inbox_notification_from_marked_message(99, 1_700_000_001, &marked);
+        assert_eq!(notification.id, "99");
+        assert_eq!(notification.category, InboxCategory::Messages);
+        assert_eq!(notification.code, INBOX_MESSAGE_MARK_CODE);
+        assert_eq!(notification.effective_message_id().as_deref(), Some("42"));
     }
 
     #[test]

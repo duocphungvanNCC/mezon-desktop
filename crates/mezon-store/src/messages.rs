@@ -19,8 +19,9 @@ use mezon_client::transport::{
     mention_content_tokens,
 };
 use mezon_client::{
-    AppApi, AttachmentUploadOutcome, ConnectionStatus, MezonTransport, RealtimeEvent, UploadFile,
-    UploadThumbnail, UrlAttachment,
+    AppApi, AttachmentUploadOutcome, ConnectionStatus, InboxCategory, InboxMentionSpan,
+    MarkedInboxMessageInput, MezonTransport, RealtimeEvent, UploadFile, UploadThumbnail,
+    UrlAttachment, inbox_notification_from_marked_message_local,
 };
 
 use crate::AppConfig;
@@ -33,6 +34,7 @@ use crate::channel::{ChannelEvent, ChannelList, ChannelType, STREAM_MODE_THREAD}
 use crate::channel_members::ChannelMembersStore;
 use crate::clan_members::ClanMembersStore;
 use crate::direct::{DirectKind, DirectMessageStore};
+use crate::inbox::{GLOBAL_INBOX_BUCKET_CLAN_ID, InboxStore};
 use crate::message::{
     CallLog, CallLogType, Embed, EmbedAuthor, EmbedField, EmbedFooter, EmbedImage, EmbedInput,
     EmbedTextInput, InvitePreview, MentionTarget, Message, MessageAttachment, MessageButton,
@@ -2746,29 +2748,130 @@ impl MessagesStore {
         };
         let storage_id = self.reaction_storage_channel(message_id);
         let clan_id = self.active_clan_id.map_or(0, |c| c.get());
+        let channel_type = self.mode;
         let Some(channel) = self.cache.get(&storage_id) else {
             return;
         };
-        let Some(msg) = channel.messages.get_by_id(message_id) else {
+        let Some(msg) = channel.messages.get_by_id(message_id).cloned() else {
             return;
         };
-        let content_json = serde_json::to_string(&ApiMessageContent {
-            t: msg.content.clone(),
+        let content_json = msg
+            .raw_content
+            .as_deref()
+            .filter(|raw| !raw.is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| {
+                serde_json::to_string(&ApiMessageContent {
+                    t: msg.content.clone(),
+                    ..Default::default()
+                })
+                .unwrap_or_else(|_| msg.content.clone())
+            });
+        let mentions: Vec<mezon_proto::api::MessageMention> = msg
+            .mention_targets
+            .iter()
+            .filter_map(|target| {
+                let user_id = target.user_id.as_ref()?.parse().ok()?;
+                Some(mezon_proto::api::MessageMention {
+                    user_id,
+                    role_id: target
+                        .role_id
+                        .as_ref()
+                        .and_then(|id| id.parse().ok())
+                        .unwrap_or(0),
+                    s: target.s,
+                    e: target.e,
+                    username: target.username.to_string(),
+                    ..Default::default()
+                })
+            })
+            .collect();
+        let attachments: Vec<mezon_proto::api::MessageAttachment> = msg
+            .attachments
+            .iter()
+            .map(|att| mezon_proto::api::MessageAttachment {
+                url: att.url.clone(),
+                filename: att.filename.clone(),
+                filetype: att.filetype.clone(),
+                width: i32::try_from(att.width).unwrap_or(0),
+                height: i32::try_from(att.height).unwrap_or(0),
+                thumbnail: att.thumbnail.clone(),
+                duration: att.duration,
+                size: i32::try_from(att.size).unwrap_or(0),
+            })
+            .collect();
+        let attachment_link = attachments
+            .first()
+            .map(|att| att.url.clone())
+            .unwrap_or_default();
+        let attachment_type = attachments
+            .first()
+            .map(|att| att.filetype.clone())
+            .unwrap_or_default();
+        let has_more_attachment = attachments.len() > 1;
+        let avatar = msg.avatar_url.to_string();
+        let sender_id = msg.sender_id.parse().unwrap_or(0);
+        let display_name = msg.sender_name.to_string();
+        let create_time_seconds = u32::try_from(msg.create_time.max(0)).unwrap_or(0);
+        let mention_spans: Vec<InboxMentionSpan> = msg
+            .mention_targets
+            .iter()
+            .map(|target| InboxMentionSpan {
+                start: target.s,
+                end: target.e,
+                user_id: target.user_id.clone().unwrap_or_default(),
+                role_id: target.role_id.clone().unwrap_or_default(),
+                is_role: target.role_id.is_some(),
+            })
+            .collect();
+        let marked = MarkedInboxMessageInput {
+            message_id: message_id.get(),
+            channel_id: channel_id.get(),
+            clan_id,
+            sender_id,
+            username: display_name.clone(),
+            display_name,
+            avatar: avatar.clone(),
+            content_json: content_json.clone(),
+            create_time_seconds,
+            attachment_link,
+            attachment_type,
+            has_more_attachment,
+            mention_spans,
+            channel_type,
+            topic_id: msg.topic_id.map(|topic| topic.get()),
+        };
+        let request = mezon_proto::api::Message2InboxRequest {
+            message_id: message_id.get(),
+            channel_id: channel_id.get(),
+            clan_id,
+            avatar,
+            content: content_json,
+            mentions,
+            attachments,
             ..Default::default()
-        })
-        .unwrap_or_else(|_| msg.content.clone());
-
+        };
         let api = self.api.clone();
-        let channel_num = channel_id.get();
-        let message_num = message_id.get();
-        cx.spawn(async move |_this, _cx| {
-            if let Err(e) = api
-                .create_message_2_inbox(message_num, channel_num, clan_id, &content_json)
-                .await
-            {
-                tracing::error!("add_to_inbox create_message_2_inbox failed: {e}");
-            }
-        })
+        cx.spawn(
+            async move |_this, cx| match api.create_message_2_inbox(request).await {
+                Ok(()) => {
+                    let notification = inbox_notification_from_marked_message_local(&marked);
+                    let _ = cx.update(|cx| {
+                        InboxStore::global(cx).update(cx, |store, cx| {
+                            store.prepend_local(
+                                GLOBAL_INBOX_BUCKET_CLAN_ID,
+                                InboxCategory::Messages,
+                                notification,
+                                cx,
+                            );
+                        });
+                    });
+                }
+                Err(e) => {
+                    tracing::error!("add_to_inbox create_message_2_inbox failed: {e}");
+                }
+            },
+        )
         .detach();
     }
 
