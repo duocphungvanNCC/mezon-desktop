@@ -1505,7 +1505,7 @@ impl MessagesStore {
                 Err(e) => {
                     tracing::error!("Failed to load more messages for {channel_id}: {e}");
                     let _ = this.update(cx, |this, cx| {
-                        this.loading_more = false;
+                        this.finish_loading_more(cx);
                         cx.notify();
                     });
                     return;
@@ -1525,9 +1525,10 @@ impl MessagesStore {
                 })
                 .await;
             let _ = this.update(cx, |this, cx| {
-                this.loading_more = false;
                 let (prepended, dropped_bottom) = {
                     let Some(channel) = this.cache.get_mut(&channel_id) else {
+                        this.finish_loading_more(cx);
+                        cx.notify();
                         return;
                     };
                     let older: Vec<Message> = parsed
@@ -1536,25 +1537,17 @@ impl MessagesStore {
                         .collect();
                     if older.is_empty() {
                         channel.has_more = false;
-                        // No more history above: tell the UI so it can drop the
-                        // persistent top loading skeleton.
                         cx.emit(MessagesEvent::Updated { message_id: None });
+                        this.finish_loading_more(cx);
                         cx.notify();
                         return;
                     }
                     let prepended = older.len();
                     let dropped_bottom = channel.messages.prepend_older(older);
-                    // Reached the channel start once the oldest row is the
-                    // FIRST_MESSAGE sentinel (cf. React `hasMore` check).
                     channel.has_more = has_more_from_oldest(channel.messages.as_slice());
                     (prepended, dropped_bottom)
                 };
                 if this.active_channel_id == Some(channel_id) {
-                    // Older rows were prepended; the cap may have dropped the same
-                    // many newest rows off the back. Emit the exact splice so the
-                    // UI window matches the buffer 1:1 — the prepend re-anchors to
-                    // the prior first row, and the back-trim removes off-screen
-                    // rows below.
                     cx.emit(MessagesEvent::Shifted {
                         added_top: prepended,
                         removed_top: 0,
@@ -1562,7 +1555,7 @@ impl MessagesStore {
                         removed_bottom: dropped_bottom,
                     });
                 }
-                this.try_consume_pending_jump(cx);
+                this.finish_loading_more(cx);
                 cx.notify();
             });
         })
@@ -1638,7 +1631,7 @@ impl MessagesStore {
                 Err(e) => {
                     tracing::error!("Failed to load newer messages for {channel_id}: {e}");
                     let _ = this.update(cx, |this, cx| {
-                        this.loading_more = false;
+                        this.finish_loading_more(cx);
                         cx.notify();
                     });
                     return;
@@ -1663,9 +1656,10 @@ impl MessagesStore {
                 })
                 .await;
             let _ = this.update(cx, |this, cx| {
-                this.loading_more = false;
                 let (added, dropped) = {
                     let Some(channel) = this.cache.get_mut(&channel_id) else {
+                        this.finish_loading_more(cx);
+                        cx.notify();
                         return;
                     };
                     let newer: Vec<Message> = parsed
@@ -1673,32 +1667,26 @@ impl MessagesStore {
                         .filter(|m| !channel.messages.contains_id(m.id))
                         .collect();
                     if newer.is_empty() {
-                        match reconciled_tail_after_empty_page(
+                        let chase_tail = match reconciled_tail_after_empty_page(
                             this.last_message_by_channel.get(&channel_id).copied(),
                             expected_tail,
                             newest_id,
                         ) {
                             Some(tail) => {
                                 this.last_message_by_channel.insert(channel_id, tail);
+                                false
                             }
-                            None => {
-                                // The tail advanced while this fetch was in
-                                // flight; chase it immediately, otherwise the
-                                // buffer stays frozen with `has_more_bottom`
-                                // true and live appends stay gated. Bounded:
-                                // each chase consumes one tail move.
-                                if this.active_channel_id == Some(channel_id) {
-                                    this.load_more_bottom(cx);
-                                }
-                            }
-                        }
+                            None => this.active_channel_id == Some(channel_id),
+                        };
                         cx.emit(MessagesEvent::Updated { message_id: None });
+                        this.finish_loading_more(cx);
+                        if chase_tail && this.pending_jump.is_none() && !this.loading_more {
+                            this.load_more_bottom(cx);
+                        }
                         cx.notify();
                         return;
                     }
                     let added = newer.len();
-                    // Appending newer drops the oldest (front) at the cap; those
-                    // older rows then become re-fetchable from the top again.
                     let dropped = channel.messages.append_newer(newer);
                     if dropped > 0 {
                         channel.has_more = true;
@@ -1716,10 +1704,6 @@ impl MessagesStore {
                             "load_more_bottom: appended newer page"
                         );
                     }
-                    // Newer rows were appended; the cap may have dropped the same
-                    // many oldest rows off the front. Emit the exact splice so the
-                    // UI window matches the buffer 1:1 and the scroll stays
-                    // anchored to the prior content.
                     cx.emit(MessagesEvent::Shifted {
                         added_top: 0,
                         removed_top: dropped,
@@ -1727,7 +1711,7 @@ impl MessagesStore {
                         removed_bottom: 0,
                     });
                 }
-                this.try_consume_pending_jump(cx);
+                this.finish_loading_more(cx);
                 cx.notify();
             });
         })
@@ -1746,6 +1730,11 @@ impl MessagesStore {
         cx: &mut Context<Self>,
     ) {
         self.pending_jump = Some((channel_id, message_id));
+        self.try_consume_pending_jump(cx);
+    }
+
+    fn finish_loading_more(&mut self, cx: &mut Context<Self>) {
+        self.loading_more = false;
         self.try_consume_pending_jump(cx);
     }
 
@@ -1808,7 +1797,7 @@ impl MessagesStore {
                 Err(e) => {
                     tracing::error!("jump_to_message AROUND fetch failed for {channel_id}: {e}");
                     let _ = this.update(cx, |this, cx| {
-                        this.loading_more = false;
+                        this.finish_loading_more(cx);
                         cx.notify();
                     });
                     return;
@@ -1823,11 +1812,8 @@ impl MessagesStore {
                 })
                 .await;
             let _ = this.update(cx, |this, cx| {
-                this.loading_more = false;
                 let mut window: Vec<Message> = parsed;
                 sort_messages(&mut window);
-                // Centered trim if the window somehow exceeds the cap, keeping the
-                // target near the middle so both directions stay scrollable.
                 if window.len() > MAX_MESSAGES_PER_CHANNEL {
                     let target = window.iter().position(|m| m.id == message_id).unwrap_or(0);
                     let half = MAX_MESSAGES_PER_CHANNEL / 2;
@@ -1842,6 +1828,7 @@ impl MessagesStore {
                         message_id = anchor,
                         "jump_to_message: target not in AROUND window"
                     );
+                    this.finish_loading_more(cx);
                     cx.notify();
                     return;
                 }
@@ -1851,11 +1838,13 @@ impl MessagesStore {
                     channel.messages.replace(window);
                     channel.has_more = has_more;
                 }
+                this.loading_more = false;
                 if this.active_channel_id == Some(channel_id) {
                     let count = this.messages().len();
                     cx.emit(MessagesEvent::Reset { count });
                     cx.emit(MessagesEvent::JumpTo { message_id });
                 }
+                this.try_consume_pending_jump(cx);
                 cx.notify();
             });
         })
@@ -3948,30 +3937,14 @@ impl MessagesStore {
 
     /// Open a clan channel as the active conversation (looks up clan/privacy from `ChannelList`).
     pub fn open_channel(&mut self, channel_id: ChannelId, cx: &mut Context<Self>) {
-        if self.active_channel_id == Some(channel_id) && !self.is_dm {
-            if self.loading {
-                return;
-            }
-            let empty = self
-                .cache
-                .get(&channel_id)
-                .map(|c| c.messages.is_empty())
-                .unwrap_or(true);
-            if !empty || self.cache.is_fresh(&channel_id, crate::CACHE_TTL) {
-                self.try_consume_pending_jump(cx);
-                return;
-            }
-            self.refetch_current_messages(cx);
-            return;
-        }
-        let Some(channel) = ChannelList::global(cx)
+        let Some(clan_id) = ChannelList::global(cx)
             .read(cx)
             .find_channel_in_active_clan(channel_id)
-            .cloned()
+            .map(|channel| channel.clan_id)
         else {
             return;
         };
-        self.open_channel_record(channel.clan_id, channel_id, &channel, cx);
+        self.open_channel_in_clan(clan_id, channel_id, cx);
     }
 
     pub fn open_channel_in_clan(
@@ -4182,6 +4155,7 @@ impl MessagesStore {
                     self.loading = false;
                     let count = self.messages().len();
                     cx.emit(MessagesEvent::Reset { count });
+                    self.try_consume_pending_jump(cx);
                     cx.notify();
                 }
             }

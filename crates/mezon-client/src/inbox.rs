@@ -259,40 +259,6 @@ fn enrich_message_preview_from_raw(preview: &mut InboxMessagePreview, raw: &[u8]
     if is_valid_inbox_message_id(&preview.message_id) {
         return;
     }
-    if !matches!(raw.first(), Some(b'{') | Some(b'['))
-        && let Ok(message) = api::ChannelMessage::decode(raw)
-        && message.message_id > 0
-    {
-        preview.message_id = id_str(message.message_id);
-        if preview.channel_id.is_empty() || preview.channel_id == "0" {
-            preview.channel_id = id_str(message.channel_id);
-        }
-        if preview.clan_id.is_empty() || preview.clan_id == "0" {
-            preview.clan_id = id_str(message.clan_id);
-        }
-        if preview.sender_id.is_empty() || preview.sender_id == "0" {
-            preview.sender_id = id_str(message.sender_id);
-        }
-        if preview.avatar.is_empty() {
-            preview.avatar = message.avatar;
-        }
-        if preview.display_name.is_empty() {
-            preview.display_name = message.display_name;
-        }
-        if preview.username.is_empty() {
-            preview.username = message.username;
-        }
-        if preview.create_time_seconds == 0 && message.create_time_seconds > 0 {
-            preview.create_time_seconds = message.create_time_seconds;
-        }
-        if preview.content.is_empty() {
-            preview.content = display_text_from_message_content(&message.content);
-        }
-        if preview.raw_content.is_empty() {
-            preview.raw_content = message.content;
-        }
-        return;
-    }
     let (message_id, _) = crate::transport::parse_notification_content(raw);
     if message_id > 0 {
         preview.message_id = message_id.to_string();
@@ -677,7 +643,7 @@ mod tests {
     }
 
     #[test]
-    fn enrich_message_preview_reads_channel_message_bytes() {
+    fn parse_notification_content_reads_channel_message_bytes() {
         let message = api::ChannelMessage {
             message_id: 99,
             channel_id: 7,
