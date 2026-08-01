@@ -95,6 +95,60 @@ pub enum RealtimeEvent {
     Unhandled(realtime::envelope::Message),
 }
 
+impl RealtimeEvent {
+    pub fn kind_name(&self) -> &'static str {
+        match self {
+            Self::ChannelMessage(_) => "ChannelMessage",
+            Self::MessageTyping(_) => "MessageTyping",
+            Self::ChannelPresence(_) => "ChannelPresence",
+            Self::StatusPresence(_) => "StatusPresence",
+            Self::CustomStatus(_) => "CustomStatus",
+            Self::UserStatus(_) => "UserStatus",
+            Self::MessageReaction(_) => "MessageReaction",
+            Self::MarkAsRead(_) => "MarkAsRead",
+            Self::LastSeenUpdated(_) => "LastSeenUpdated",
+            Self::Notifications(_) => "Notifications",
+            Self::ChannelCreated(_) => "ChannelCreated",
+            Self::ChannelUpdated(_) => "ChannelUpdated",
+            Self::ChannelDeleted(_) => "ChannelDeleted",
+            Self::ChannelArchive(_) => "ChannelArchive",
+            Self::CategoryEvent(_) => "CategoryEvent",
+            Self::Unmute(_) => "Unmute",
+            Self::StreamingJoined(_) => "StreamingJoined",
+            Self::StreamingLeaved(_) => "StreamingLeaved",
+            Self::StreamingStarted(_) => "StreamingStarted",
+            Self::StreamingEnded(_) => "StreamingEnded",
+            Self::VoiceStarted(_) => "VoiceStarted",
+            Self::VoiceEnded(_) => "VoiceEnded",
+            Self::VoiceJoined(_) => "VoiceJoined",
+            Self::VoiceLeaved(_) => "VoiceLeaved",
+            Self::VoiceReaction(_) => "VoiceReaction",
+            Self::UserChannelAdded(_) => "UserChannelAdded",
+            Self::UserChannelRemoved(_) => "UserChannelRemoved",
+            Self::NotifUserChannel(_) => "NotifUserChannel",
+            Self::AddClanUser(_) => "AddClanUser",
+            Self::ClanEventCreated(_) => "ClanEventCreated",
+            Self::UserClanRemoved(_) => "UserClanRemoved",
+            Self::ClanUpdated(_) => "ClanUpdated",
+            Self::ClanProfileUpdated(_) => "ClanProfileUpdated",
+            Self::ClanDeleted(_) => "ClanDeleted",
+            Self::ClanEmoji(_) => "ClanEmoji",
+            Self::AddFriend(_) => "AddFriend",
+            Self::RemoveFriend(_) => "RemoveFriend",
+            Self::BlockFriend(_) => "BlockFriend",
+            Self::UnblockFriend(_) => "UnblockFriend",
+            Self::SessionRefreshed(_) => "SessionRefreshed",
+            Self::LastPinMessage(_) => "LastPinMessage",
+            Self::UnpinMessage(_) => "UnpinMessage",
+            Self::SdTopicEvent(_) => "SdTopicEvent",
+            Self::TopicInMessageEvent(_) => "TopicInMessageEvent",
+            Self::TokenSent(_) => "TokenSent",
+            Self::GiveCoffee(_) => "GiveCoffee",
+            Self::Unhandled(_) => "Unhandled",
+        }
+    }
+}
+
 impl TryFrom<realtime::envelope::Message> for RealtimeEvent {
     type Error = &'static str;
 
@@ -163,8 +217,15 @@ fn dispatch_realtime_push(
     match realtime::Envelope::decode(payload) {
         Ok(envelope) => match envelope.message {
             Some(msg) => {
-                tracing::trace!("server push (cid={cid}) -> publishing realtime event");
                 if let Ok(event) = RealtimeEvent::try_from(msg) {
+                    if !matches!(
+                        event,
+                        RealtimeEvent::MessageTyping(_)
+                            | RealtimeEvent::ChannelPresence(_)
+                            | RealtimeEvent::StatusPresence(_)
+                    ) {
+                        tracing::debug!("server push (cid={cid}): {}", event.kind_name());
+                    }
                     on_event(event);
                 }
             }
