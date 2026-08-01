@@ -130,7 +130,7 @@ impl Render for TitleBar {
         let locale = self.settings.read(cx).language.clone();
         let update_status =
             AutoUpdateStore::try_global(cx).map(|store| store.read(cx).status().clone());
-        let theme = cx.theme();
+        let theme = cx.theme().clone();
 
         div()
             .flex()
@@ -167,7 +167,7 @@ impl Render for TitleBar {
                         ),
                     ),
             )
-            .children(update_indicator(update_status, &locale, theme))
-            .child(window_controls::render_controls(theme, window))
+            .children(update_indicator(update_status, &locale, &theme))
+            .child(window_controls::render_controls(&theme, window, cx))
     }
 }
