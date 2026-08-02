@@ -50,6 +50,7 @@ embed-resource.workspace = true
 
 [package.metadata.deb]
 name = "mezon"
+revision = ""
 maintainer = "Mezon Team"
 copyright = "2026, Mezon Team"
 section = "net"
