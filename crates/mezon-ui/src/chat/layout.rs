@@ -1628,7 +1628,12 @@ impl Render for ChatLayout {
                     .cursor_pointer()
                     .hover(|s| s.bg(update_banner_bg(true)))
                     .on_click(|_, _, cx| {
-                        if let Some(store) = AutoUpdateStore::try_global(cx) {
+                        let Some(store) = AutoUpdateStore::try_global(cx) else {
+                            return;
+                        };
+                        if let Some(url) = store.read(cx).store_page_url() {
+                            cx.open_url(url);
+                        } else {
                             store.update(cx, |store, cx| store.check(true, cx));
                         }
                     })

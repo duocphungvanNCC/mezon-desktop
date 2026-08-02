@@ -87,7 +87,12 @@ fn update_indicator(
                     .cursor_pointer()
                     .hover(move |s| s.bg(bg_hover))
                     .on_click(|_, _, cx| {
-                        if let Some(store) = AutoUpdateStore::try_global(cx) {
+                        let Some(store) = AutoUpdateStore::try_global(cx) else {
+                            return;
+                        };
+                        if let Some(url) = store.read(cx).store_page_url() {
+                            cx.open_url(url);
+                        } else {
                             store.update(cx, |store, cx| store.check(true, cx));
                         }
                     })

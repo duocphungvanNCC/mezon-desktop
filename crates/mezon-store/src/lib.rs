@@ -244,6 +244,18 @@ pub(crate) fn event_targets_user(user_ids: &[i64], me: Option<ids::UserId>) -> b
     me.is_some_and(|me| user_ids.contains(&me.get()))
 }
 
+pub(crate) fn running_in_app_sandbox() -> bool {
+    cfg!(target_os = "macos") && std::env::var("APP_SANDBOX_CONTAINER_ID").is_ok()
+}
+
+pub(crate) fn running_from_windows_store() -> bool {
+    cfg!(target_os = "windows")
+        && std::env::current_exe().is_ok_and(|exe| {
+            exe.components()
+                .any(|c| c.as_os_str().eq_ignore_ascii_case("WindowsApps"))
+        })
+}
+
 /// Persist [`Settings`] through one serialized, coalescing writer: burst
 /// changes (slider drags) collapse into a single debounced write, writes never
 /// overlap (so the shared tmp-file path cannot commit an older snapshot last),
