@@ -1,16 +1,18 @@
 use std::time::Duration;
 
 use crate::components::primitives::{
-    Avatar, Button as GpuiButton, ButtonVariants, Icon, IconName, Input, InputEvent, InputState,
-    Label, Sizable, Size, h_flex, v_flex,
+    Avatar, Button as GpuiButton, ButtonVariants, Dropdown, DropdownTriggerStyle, Icon, Input,
+    InputEvent, InputState, Label, h_flex, v_flex,
 };
 use gpui::{
-    Context, Entity, FontWeight, PathPromptOptions, SharedString, Subscription, Window, div,
-    prelude::*, px,
+    Context, Entity, FontWeight, PathPromptOptions, Rgba, SharedString, Subscription, Task, Window,
+    div, prelude::*, px,
 };
 use mezon_store::{AccountEvent, AccountStore, ClanList, Settings};
 
+use super::profile_page::profile_status;
 use crate::theme::{ActiveTheme, Theme};
+use crate::{image_cache::LruImageCache, util::avatar_color::spawn_banner_color_task};
 
 struct ClanProfileState {
     selected_clan_id: SharedString,
@@ -31,10 +33,18 @@ pub struct ClanProfileSection {
     profile: Option<ClanProfileState>,
     display_name: SharedString,
     username: SharedString,
+    user_avatar_url: Option<SharedString>,
+    status: SharedString,
+    custom_status: SharedString,
     nick_name_input: Option<Entity<InputState>>,
     _subscriptions: Vec<Subscription>,
     toast_message: Option<SharedString>,
     selected_clan_id: String,
+    clan_dropdown_open: bool,
+    avatar_image_cache: Entity<LruImageCache>,
+    banner_color: Option<Rgba>,
+    banner_source: String,
+    banner_task: Option<Task<()>>,
 }
 
 impl ClanProfileSection {
@@ -46,23 +56,45 @@ impl ClanProfileSection {
         cx.observe(&settings, |_, _, cx| cx.notify()).detach();
         cx.observe(&clan_list, |_, _, cx| cx.notify()).detach();
         cx.observe(&AccountStore::global(cx), |this, store, cx| {
-            if let Some(clan_profile) = store.read(cx).clan_profile.as_ref()
+            if let Some(account) = store.read(cx).account.as_ref() {
+                let presence_changed = this.status.as_ref() != account.status
+                    || this.custom_status.as_ref() != account.user_status
+                    || this.user_avatar_url.as_ref().map(|url| url.as_ref())
+                        != account.avatar_url.as_deref();
+                this.user_avatar_url = account.avatar_url.clone().map(Into::into);
+                this.status = account.status.clone().into();
+                this.custom_status = account.user_status.clone().into();
+                if presence_changed {
+                    cx.notify();
+                }
+            }
+            let store = store.read(cx);
+            if let Some(clan_profile) = store.clan_profile.as_ref()
                 && clan_profile.clan_id.to_string() == this.selected_clan_id
             {
                 let nick: SharedString = clan_profile.nick_name.clone().into();
                 let avatar: Option<SharedString> = clan_profile.avatar_url.clone().map(Into::into);
-                this.profile = Some(ClanProfileState {
-                    selected_clan_id: clan_profile.clan_id.to_string().into(),
-                    nick_name: nick.clone(),
-                    avatar_url: avatar.clone(),
-                    original_nick_name: nick,
-                    original_avatar_url: avatar,
-                    loading: store.read(cx).clan_profile_loading,
-                    saving: false,
-                    duplicate_error: store.read(cx).nickname_duplicate,
-                    fetched: true,
+                let should_sync = this.profile.as_ref().is_none_or(|profile| {
+                    profile.loading
+                        || profile.selected_clan_id.as_ref() != clan_profile.clan_id.to_string()
+                        || (!this.is_dirty()
+                            && (profile.original_nick_name != nick
+                                || profile.original_avatar_url != avatar))
                 });
-                cx.notify();
+                if should_sync {
+                    this.profile = Some(ClanProfileState {
+                        selected_clan_id: clan_profile.clan_id.to_string().into(),
+                        nick_name: nick.clone(),
+                        avatar_url: avatar.clone(),
+                        original_nick_name: nick,
+                        original_avatar_url: avatar,
+                        loading: store.clan_profile_loading,
+                        saving: false,
+                        duplicate_error: store.nickname_duplicate,
+                        fetched: true,
+                    });
+                    cx.notify();
+                }
             }
         })
         .detach();
@@ -109,7 +141,7 @@ impl ClanProfileSection {
                     }
                     cx.notify();
                 }
-                AccountEvent::AvatarUploaded(url) => {
+                AccountEvent::ClanAvatarUploaded(url) => {
                     if let Some(state) = &mut this.profile {
                         state.avatar_url = Some(url.clone().into());
                     }
@@ -136,16 +168,34 @@ impl ClanProfileSection {
             profile: None,
             display_name: SharedString::default(),
             username: SharedString::default(),
+            user_avatar_url: None,
+            status: SharedString::default(),
+            custom_status: SharedString::default(),
             nick_name_input: None,
             _subscriptions: Vec::new(),
             toast_message: None,
             selected_clan_id: String::new(),
+            clan_dropdown_open: false,
+            avatar_image_cache: crate::image_cache::shared_avatar_cache(cx),
+            banner_color: None,
+            banner_source: String::new(),
+            banner_task: None,
         }
     }
 
-    pub fn set_user_profile(&mut self, display_name: SharedString, username: SharedString) {
+    pub fn set_user_profile(
+        &mut self,
+        display_name: SharedString,
+        username: SharedString,
+        avatar_url: Option<SharedString>,
+        status: SharedString,
+        custom_status: SharedString,
+    ) {
         self.display_name = display_name;
         self.username = username;
+        self.user_avatar_url = avatar_url;
+        self.status = status;
+        self.custom_status = custom_status;
     }
 
     fn show_toast(&mut self, message: impl Into<SharedString>, cx: &mut Context<Self>) {
@@ -223,6 +273,23 @@ impl ClanProfileSection {
         }
     }
 
+    pub fn has_unsaved_changes(&self) -> bool {
+        self.is_dirty()
+    }
+
+    pub fn is_saving(&self) -> bool {
+        self.profile.as_ref().is_some_and(|profile| profile.saving)
+    }
+
+    pub fn save_changes(&mut self, cx: &mut Context<Self>) {
+        self.save(cx);
+    }
+
+    pub fn discard_changes(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.discard(window, cx);
+        cx.notify();
+    }
+
     fn save(&mut self, cx: &mut Context<Self>) {
         let Some(state) = &mut self.profile else {
             return;
@@ -278,10 +345,35 @@ impl ClanProfileSection {
             store.fetch_clan_profile(clan_id.parse().unwrap_or_default(), cx)
         });
     }
+
+    fn refresh_banner_color(&mut self, cx: &mut Context<Self>) {
+        let source = self
+            .profile
+            .as_ref()
+            .and_then(|profile| profile.avatar_url.clone())
+            .or_else(|| self.user_avatar_url.clone())
+            .map(|url| crate::util::imgproxy::profile_url(cx, &url))
+            .unwrap_or_default();
+        if source == self.banner_source {
+            return;
+        }
+        self.banner_source = source.clone();
+        self.banner_color = None;
+        self.banner_task = spawn_banner_color_task(
+            self.avatar_image_cache.clone(),
+            source,
+            cx,
+            |this, color, cx| {
+                this.banner_color = Some(color);
+                cx.notify();
+            },
+        );
+    }
 }
 
 impl Render for ClanProfileSection {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.refresh_banner_color(cx);
         let theme = cx.theme().clone();
         let locale = self.settings.read(cx).language.clone();
 
@@ -313,6 +405,7 @@ impl Render for ClanProfileSection {
 
         let avatar_url = self.profile.as_ref().and_then(|s| s.avatar_url.clone());
         let avatar_display = avatar_url
+            .or_else(|| self.user_avatar_url.clone())
             .as_ref()
             .map(|url| SharedString::from(crate::util::imgproxy::profile_url(cx, url.as_ref())));
 
@@ -335,24 +428,48 @@ impl Render for ClanProfileSection {
             avatar_display,
             &self.display_name,
             &self.username,
+            &self.status,
+            &self.custom_status,
+            self.banner_color,
+            self.avatar_image_cache.clone(),
         );
 
         v_flex()
             .gap_6()
-            .child(h_flex().gap_8().child(form).child(preview))
-            .when(is_dirty || saving, |el| {
+            .child(
+                h_flex()
+                    .gap_8()
+                    .items_start()
+                    .child(div().min_w_0().flex_1().flex_basis(px(0.)).child(form))
+                    .child(div().min_w_0().flex_1().flex_basis(px(0.)).child(preview)),
+            )
+            .when(false && (is_dirty || saving), |el| {
                 el.child(
-                    v_flex()
+                    h_flex()
+                        .absolute()
+                        .left_0()
+                        .right_0()
+                        .bottom(px(16.))
+                        .min_h(px(64.))
+                        .p_3()
                         .gap_3()
-                        .pt_4()
-                        .child(h_flex().gap_2().items_center().child(
-                            div().text_sm().text_color(theme.danger_text).child(format!(
-                                "⚠ {}",
-                                mezon_i18n::t(&locale, "setting.profile.unsavedWarning")
-                            )),
-                        ))
+                        .items_center()
+                        .justify_between()
+                        .rounded_lg()
+                        .border_1()
+                        .border_color(theme.border)
+                        .bg(theme.bg_floating)
+                        .shadow_lg()
+                        .child(
+                            div()
+                                .flex_1()
+                                .text_base()
+                                .text_color(theme.text_primary)
+                                .child(mezon_i18n::t(&locale, "setting.profile.unsavedWarning")),
+                        )
                         .child(
                             h_flex()
+                                .flex_row_reverse()
                                 .gap_3()
                                 .child(
                                     GpuiButton::new("clan-save-btn")
@@ -362,7 +479,7 @@ impl Render for ClanProfileSection {
                                             mezon_i18n::t(&locale, "setting.profile.saveChanges")
                                         })
                                         .disabled(saving)
-                                        .text_color(theme.text_secondary)
+                                        .primary()
                                         .on_click({
                                             let e = entity.clone();
                                             move |_, _, cx| {
@@ -374,7 +491,7 @@ impl Render for ClanProfileSection {
                                 )
                                 .child(
                                     GpuiButton::new("clan-discard-btn")
-                                        .label(mezon_i18n::t(&locale, "common.discard"))
+                                        .label(mezon_i18n::t(&locale, "profileSetting.reset"))
                                         .disabled(saving)
                                         .text_color(theme.text_primary)
                                         .ghost()
@@ -413,72 +530,69 @@ impl ClanProfileSection {
         theme: &Theme,
         clan_options: &[(SharedString, SharedString)],
         selected_clan_id: &SharedString,
-        nick_name: &SharedString,
-        avatar_url: Option<SharedString>,
+        _nick_name: &SharedString,
+        _avatar_url: Option<SharedString>,
         loading: bool,
         duplicate_error: bool,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let locale = self.settings.read(cx).language.clone();
         v_flex()
-            .gap_4()
-            .child(
-                v_flex().gap_1().child(
-                    div()
-                        .text_sm()
-                        .text_color(theme.text_muted)
-                        .child(mezon_i18n::t(&locale, "setting.clanProfile.customize")),
-                ),
-            )
+            .gap_5()
             .child(
                 v_flex()
                     .gap_1()
                     .child(
                         div()
-                            .text_xs()
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(theme.text_primary)
+                            .text_sm()
+                            .text_color(theme.text_muted)
+                            .child(mezon_i18n::t(
+                                &locale,
+                                "profileSetting.showProfilesDescription",
+                            )),
+                    ),
+            )
+            .child(
+                v_flex()
+                    .gap_2()
+                    .child(
+                        div()
+                            .text_sm()
+                            .font_weight(FontWeight::BOLD)
+                            .text_color(theme.text_muted)
                             .child(mezon_i18n::t(&locale, "setting.clanProfile.chooseClan")),
                     )
                     .child({
-                        let entity = cx.entity().clone();
-                        div()
-                            .flex()
-                            .flex_col()
-                            .gap_1()
-                            .children(clan_options.iter().map(move |(id, name)| {
-                                let is_selected = *id == *selected_clan_id;
-                                let click_id = id.clone();
-                                let e = entity.clone();
-                                div()
-                                    .id(SharedString::from(format!("clan-opt-{}", id)))
-                                    .flex()
-                                    .items_center()
-                                    .px_2()
-                                    .py_1()
-                                    .rounded_md()
-                                    .cursor_pointer()
-                                    .when(is_selected, |el| el.bg(theme.bg_hover))
-                                    .hover(|el| el.bg(theme.bg_hover))
-                                    .child(name.clone())
-                                    .child(div().flex_1())
-                                    .when(is_selected, |el| {
-                                        el.child(
-                                            Icon::new(IconName::Check)
-                                                .size_4()
-                                                .text_color(theme.brand),
-                                        )
+                        let selected = clan_options
+                            .iter()
+                            .position(|(id, _)| id == selected_clan_id);
+                        let ids: Vec<SharedString> =
+                            clan_options.iter().map(|(id, _)| id.clone()).collect();
+                        Dropdown::new("clan-profile-select")
+                            .items(clan_options.iter().map(|(_, name)| name.clone()).collect())
+                            .selected(selected)
+                            .open(self.clan_dropdown_open)
+                            .trigger_style(DropdownTriggerStyle::InputPrimary)
+                            .on_toggle({
+                                let entity = cx.entity().clone();
+                                move |_, cx| {
+                                    entity.update(cx, |this, cx| {
+                                        this.clan_dropdown_open = !this.clan_dropdown_open;
+                                        cx.notify();
                                     })
-                                    .on_click({
-                                        let e = e.clone();
-                                        let click_id = click_id.clone();
-                                        move |_, _, cx| {
-                                            e.update(cx, |this, cx| {
-                                                this.fetch(&click_id, cx);
-                                            });
-                                        }
-                                    })
-                            }))
+                                }
+                            })
+                            .on_select({
+                                let entity = cx.entity().clone();
+                                move |index, _, cx| {
+                                    if let Some(id) = ids.get(index) {
+                                        entity.update(cx, |this, cx| {
+                                            this.clan_dropdown_open = false;
+                                            this.fetch(id, cx);
+                                        });
+                                    }
+                                }
+                            })
                     }),
             )
             .when(loading, |el| {
@@ -493,82 +607,13 @@ impl ClanProfileSection {
                     v_flex()
                         .gap_4()
                         .child(
-                            h_flex()
-                                .gap_3()
-                                .items_center()
-                                .child(
-                                    Avatar::new()
-                                        .when_some(avatar_url.clone(), |av, url| av.src(url))
-                                        .name(nick_name.clone())
-                                        .with_size(Size::Large),
-                                )
-                                .child(
-                                    GpuiButton::new("clan-change-avatar-btn")
-                                        .label(mezon_i18n::t(&locale, "common.changeAvatar"))
-                                        .text_color(theme.text_primary)
-                                        .ghost()
-                                        .on_click({
-                                            let entity = cx.entity().clone();
-                                            let choose_avatar = mezon_i18n::t(
-                                                &locale,
-                                                "setting.profile.chooseAvatar",
-                                            );
-                                            move |_, _, cx| {
-                                                let entity = entity.clone();
-                                                let rx = cx.prompt_for_paths(PathPromptOptions {
-                                                    files: true,
-                                                    directories: false,
-                                                    multiple: false,
-                                                    prompt: Some(choose_avatar.into()),
-                                                });
-                                                cx.spawn(async move |cx| {
-                                                    let paths = match rx.await {
-                                                        Ok(Ok(Some(p))) => p,
-                                                        _ => return,
-                                                    };
-                                                    let path = match paths.into_iter().next() {
-                                                        Some(p) => p,
-                                                        None => return,
-                                                    };
-                                                    entity.update(cx, |_, cx| {
-                                                        AccountStore::global(cx).update(
-                                                            cx,
-                                                            |store, cx| {
-                                                                store.upload_avatar(&path, cx);
-                                                            },
-                                                        );
-                                                    });
-                                                })
-                                                .detach();
-                                            }
-                                        }),
-                                )
-                                .child(
-                                    GpuiButton::new("clan-remove-avatar-btn")
-                                        .label(mezon_i18n::t(&locale, "common.removeAvatar"))
-                                        .text_color(theme.text_muted)
-                                        .ghost()
-                                        .on_click({
-                                            let entity = cx.entity().clone();
-                                            move |_, _, cx| {
-                                                entity.clone().update(cx, |this, cx| {
-                                                    if let Some(state) = &mut this.profile {
-                                                        state.avatar_url = None;
-                                                    }
-                                                    cx.notify();
-                                                });
-                                            }
-                                        }),
-                                ),
-                        )
-                        .child(
                             v_flex()
-                                .gap_1()
+                                .gap_2()
                                 .child(
                                     div()
-                                        .text_xs()
-                                        .font_weight(FontWeight::SEMIBOLD)
-                                        .text_color(theme.text_primary)
+                                        .text_sm()
+                                        .font_weight(FontWeight::BOLD)
+                                        .text_color(theme.text_muted)
                                         .child(mezon_i18n::t(
                                             &locale,
                                             "setting.clanProfile.clanNickname",
@@ -587,6 +632,90 @@ impl ClanProfileSection {
                                         ),
                                     ))
                                 }),
+                        )
+                        .child(
+                            v_flex()
+                                .gap_2()
+                                .child(
+                                    div()
+                                        .text_sm()
+                                        .font_weight(FontWeight::BOLD)
+                                        .text_color(theme.text_muted)
+                                        .child(mezon_i18n::t(&locale, "profileSetting.avatar")),
+                                )
+                                .child(
+                                    h_flex()
+                                        .gap_5()
+                                        .items_center()
+                                        .child(
+                                            GpuiButton::new("clan-change-avatar-btn")
+                                                .label(mezon_i18n::t(
+                                                    &locale,
+                                                    "common.changeAvatar",
+                                                ))
+                                                .text_color(theme.text_primary)
+                                                .primary()
+                                                .on_click({
+                                                    let entity = cx.entity().clone();
+                                                    let choose_avatar = mezon_i18n::t(
+                                                        &locale,
+                                                        "setting.profile.chooseAvatar",
+                                                    );
+                                                    move |_, _, cx| {
+                                                        let entity = entity.clone();
+                                                        let rx = cx.prompt_for_paths(
+                                                            PathPromptOptions {
+                                                                files: true,
+                                                                directories: false,
+                                                                multiple: false,
+                                                                prompt: Some(choose_avatar.into()),
+                                                            },
+                                                        );
+                                                        cx.spawn(async move |cx| {
+                                                            let paths = match rx.await {
+                                                                Ok(Ok(Some(p))) => p,
+                                                                _ => return,
+                                                            };
+                                                            let path =
+                                                                match paths.into_iter().next() {
+                                                                    Some(p) => p,
+                                                                    None => return,
+                                                                };
+                                                            entity.update(cx, |_, cx| {
+                                                                AccountStore::global(cx).update(
+                                                                    cx,
+                                                                    |store, cx| {
+                                                                        store.upload_clan_avatar(
+                                                                            &path, cx,
+                                                                        );
+                                                                    },
+                                                                );
+                                                            });
+                                                        })
+                                                        .detach();
+                                                    }
+                                                }),
+                                        )
+                                        .child(
+                                            GpuiButton::new("clan-remove-avatar-btn")
+                                                .label(mezon_i18n::t(
+                                                    &locale,
+                                                    "common.removeAvatar",
+                                                ))
+                                                .text_color(theme.text_muted)
+                                                .on_click({
+                                                    let entity = cx.entity().clone();
+                                                    move |_, _, cx| {
+                                                        entity.clone().update(cx, |this, cx| {
+                                                            if let Some(state) = &mut this.profile {
+                                                                state.avatar_url = None;
+                                                            }
+                                                            cx.notify();
+                                                        });
+                                                    }
+                                                }),
+                                        ),
+                                ),
                         ),
                 )
             })
@@ -599,54 +728,136 @@ impl ClanProfileSection {
         avatar_url: Option<SharedString>,
         display_name: &SharedString,
         username: &SharedString,
+        status: &SharedString,
+        custom_status: &SharedString,
+        banner_color: Option<Rgba>,
+        avatar_image_cache: Entity<LruImageCache>,
     ) -> impl IntoElement {
         let display_label = if nick_name.is_empty() {
             display_name.clone()
         } else {
             nick_name.clone()
         };
+        let (status_icon, status_color) = profile_status(status, theme);
+        let banner_color = banner_color
+            .map(gpui::Hsla::from)
+            .unwrap_or(theme.tokens.bg_secondary.into());
 
         v_flex()
-            .gap_4()
+            .relative()
+            .gap_2()
             .child(
                 Label::new(mezon_i18n::t(locale, "common.preview"))
-                    .text_xl()
-                    .text_color(theme.text_primary)
-                    .font_weight(FontWeight::SEMIBOLD),
+                    .text_sm()
+                    .text_color(theme.text_muted)
+                    .font_weight(FontWeight::BOLD),
             )
             .child(
-                v_flex()
+                div()
+                    .relative()
+                    .h(px(330.))
+                    .w_full()
                     .rounded_lg()
                     .overflow_hidden()
-                    .bg(theme.bg_primary)
-                    .child(div().h(px(105.0)).w_full().bg(theme.brand))
+                    .border_1()
+                    .border_color(theme.border)
+                    .bg(theme.bg_secondary)
                     .child(
-                        v_flex().gap_4().px_6().py_6().child(
-                            h_flex()
-                                .gap_4()
-                                .child(
-                                    Avatar::new()
-                                        .when_some(avatar_url, |av, url| av.src(url))
-                                        .name(nick_name.clone())
-                                        .with_size(Size::Large),
+                        div()
+                            .h(px(132.0))
+                            .w_full()
+                            .rounded_tl_lg()
+                            .rounded_tr_lg()
+                            .bg(banner_color),
+                    )
+                    .child(
+                        v_flex()
+                            .absolute()
+                            .left(px(20.))
+                            .right(px(20.))
+                            .bottom(px(48.))
+                            .p_4()
+                            .rounded_lg()
+                            .border_1()
+                            .border_color(theme.border)
+                            .bg(theme.bg_primary)
+                            .child(
+                                Label::new(display_label.clone())
+                                    .text_xl()
+                                    .font_weight(FontWeight::BOLD)
+                                    .text_color(theme.text_secondary),
+                            )
+                            .child(
+                                Label::new(username.clone())
+                                    .text_sm()
+                                    .text_color(theme.text_muted),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .absolute()
+                            .left(px(20.))
+                            .top(px(86.))
+                            .size(px(92.))
+                            .rounded_full()
+                            .bg(theme.bg_secondary)
+                            .p(px(6.))
+                            .child(
+                                Avatar::new()
+                                    .when_some(avatar_url, |av, url| av.src(url))
+                                    .name(display_label)
+                                    .size_px(px(80.))
+                                    .image_cache(avatar_image_cache),
+                            )
+                            .child(
+                                div()
+                                    .absolute()
+                                    .right(px(5.))
+                                    .bottom(px(5.))
+                                    .p(px(2.))
+                                    .rounded_full()
+                                    .bg(theme.bg_secondary)
+                                    .child(
+                                        Icon::new(status_icon)
+                                            .size(px(15.))
+                                            .text_color(status_color),
+                                    ),
+                            )
+                            .when(!custom_status.is_empty(), |avatar| {
+                                avatar.child(
+                                    div()
+                                        .absolute()
+                                        .right(px(-20.))
+                                        .top(px(28.))
+                                        .size(px(14.))
+                                        .rounded_full()
+                                        .bg(theme.tokens.bg_secondary)
+                                        .border_1()
+                                        .border_color(theme.bg_secondary),
                                 )
-                                .child(
-                                    v_flex()
-                                        .gap_1()
-                                        .child(
-                                            Label::new(display_label)
-                                                .text_xl()
-                                                .font_weight(FontWeight::BOLD)
-                                                .text_color(theme.text_primary),
-                                        )
-                                        .child(
-                                            Label::new(format!("@{}", username))
-                                                .text_sm()
-                                                .text_color(theme.text_muted),
-                                        ),
-                                ),
-                        ),
+                            }),
                     ),
             )
+            .when(!custom_status.is_empty(), |preview| {
+                preview.child(
+                    div()
+                        .absolute()
+                        .left(px(120.))
+                        .top(px(168.))
+                        .max_w(px(250.))
+                        .max_h(px(64.))
+                        .px_4()
+                        .py_3()
+                        .rounded_xl()
+                        .bg(theme.tokens.bg_secondary)
+                        .border_1()
+                        .border_color(theme.border)
+                        .shadow_md()
+                        .text_sm()
+                        .text_color(theme.text_secondary)
+                        .overflow_hidden()
+                        .child(custom_status.clone()),
+                )
+            })
     }
 }

@@ -51,8 +51,11 @@ pub enum AccountEvent {
     DevicesLoadFailed,
     AccountSaved,
     AccountSaveFailed(String),
-    AvatarUploaded(String),
+    UserAvatarUploaded(String),
+    ClanAvatarUploaded(String),
     AvatarUploadFailed(String),
+    DirectMessageIconUploaded(String),
+    DirectMessageIconUploadFailed(String),
     ClanProfileLoaded,
     ClanProfileLoadFailed(String),
     ClanProfileSaved,
@@ -310,7 +313,12 @@ impl AccountStore {
         let api = self.api.clone();
         cx.spawn(async move |this, cx| {
             match api
-                .update_account(Some(&display_name), avatar_url.as_deref(), Some(&about_me))
+                .update_account(
+                    Some(&display_name),
+                    avatar_url.as_deref(),
+                    Some(&about_me),
+                    None,
+                )
                 .await
             {
                 Ok(()) => {
@@ -396,7 +404,7 @@ impl AccountStore {
         .detach();
     }
 
-    pub fn upload_avatar(&mut self, path: &Path, cx: &mut Context<Self>) {
+    fn upload_avatar_for(&mut self, path: &Path, clan_profile: bool, cx: &mut Context<Self>) {
         let api = self.api.clone();
         let path = path.to_path_buf();
         cx.spawn(async move |this, cx| {
@@ -407,19 +415,69 @@ impl AccountStore {
             match result {
                 Ok(url) => {
                     let _ = this.update(cx, |this, cx| {
-                        if let Some(account) = &mut this.account {
-                            account.avatar_url = Some(url.clone());
+                        if clan_profile {
+                            cx.emit(AccountEvent::ClanAvatarUploaded(url));
+                        } else {
+                            if let Some(account) = &mut this.account {
+                                account.avatar_url = Some(url.clone());
+                            }
+                            if let Some(account) = &this.account {
+                                Self::spawn_persist_cache(account, cx);
+                            }
+                            cx.emit(AccountEvent::UserAvatarUploaded(url));
                         }
-                        if let Some(account) = &this.account {
-                            Self::spawn_persist_cache(account, cx);
-                        }
-                        cx.emit(AccountEvent::AvatarUploaded(url));
                         cx.notify();
                     });
                 }
                 Err(e) => {
                     let _ = this.update(cx, |_, cx| {
                         cx.emit(AccountEvent::AvatarUploadFailed(e.to_string()));
+                        cx.notify();
+                    });
+                }
+            }
+        })
+        .detach();
+    }
+
+    pub fn upload_user_avatar(&mut self, path: &Path, cx: &mut Context<Self>) {
+        self.upload_avatar_for(path, false, cx);
+    }
+
+    pub fn upload_clan_avatar(&mut self, path: &Path, cx: &mut Context<Self>) {
+        self.upload_avatar_for(path, true, cx);
+    }
+
+    pub fn upload_direct_message_icon(&mut self, path: &Path, cx: &mut Context<Self>) {
+        let api = self.api.clone();
+        let path = path.to_path_buf();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    let url = api.upload_avatar(&path).await?;
+                    api.update_account(None, None, None, Some(&url)).await?;
+                    anyhow::Ok(url)
+                })
+                .await;
+            match result {
+                Ok(url) => {
+                    let _ = this.update(cx, |this, cx| {
+                        if let Some(account) = &mut this.account {
+                            account.logo = Some(url.clone());
+                        }
+                        if let Some(account) = &this.account {
+                            Self::spawn_persist_cache(account, cx);
+                        }
+                        cx.emit(AccountEvent::DirectMessageIconUploaded(url));
+                        cx.notify();
+                    });
+                }
+                Err(error) => {
+                    let _ = this.update(cx, |_, cx| {
+                        cx.emit(AccountEvent::DirectMessageIconUploadFailed(
+                            error.to_string(),
+                        ));
                         cx.notify();
                     });
                 }
