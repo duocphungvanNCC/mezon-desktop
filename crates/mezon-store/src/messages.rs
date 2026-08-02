@@ -5600,7 +5600,10 @@ fn merge_message_update(existing: &mut Message, incoming: &Message) {
         }
         existing.attachments = new_attachments;
     }
-    existing.references = incoming.references.clone();
+    let kept_prior_references = incoming.references.is_empty();
+    if !kept_prior_references {
+        existing.references = incoming.references.clone();
+    }
     existing.update_time = incoming.update_time;
     existing.is_edited = incoming.is_edited;
     existing.ogp = incoming.ogp.clone();
@@ -5613,7 +5616,8 @@ fn merge_message_update(existing: &mut Message, incoming: &Message) {
     existing.is_deleted_placeholder = incoming.is_deleted_placeholder;
     existing.topic_id = incoming.topic_id;
     existing.topic_creator_id = incoming.topic_creator_id;
-    existing.highlights_viewer_direct = incoming.highlights_viewer_direct;
+    existing.highlights_viewer_direct = incoming.highlights_viewer_direct
+        || (kept_prior_references && existing.highlights_viewer_direct);
     existing.raw_content = incoming.raw_content.clone();
     existing.mention_targets = incoming.mention_targets.clone();
     if incoming.poll.is_some() {
@@ -7906,6 +7910,92 @@ mod tests {
             !existing.attachments[0].presign_pending,
             "recompute against the arrived presign_finish flips the gate"
         );
+    }
+
+    #[test]
+    fn presign_finish_update_keeps_the_reply_reference() {
+        let mut existing = Message::new(MessageId(1), "hi", "u1", "U1", 100)
+            .with_references(vec![MessageReference {
+                message_ref_id: MessageId(7),
+                sender_name: "Alice".into(),
+                content: "original".into(),
+                ..Default::default()
+            }])
+            .with_attachments(vec![MessageAttachment {
+                url: "https://cdn.example/uploads/photo.png".into(),
+                ..Default::default()
+            }]);
+
+        let incoming = Message::new(MessageId(1), "hi", "u1", "U1", 100);
+        assert!(incoming.references.is_empty());
+        assert!(incoming.attachments.is_empty());
+        merge_message_update(&mut existing, &incoming);
+
+        assert_eq!(
+            existing.references.len(),
+            1,
+            "a content-only presign_finish echo must not drop the reply reference"
+        );
+        assert_eq!(existing.references[0].message_ref_id, MessageId(7));
+        assert_eq!(existing.attachments.len(), 1);
+    }
+
+    #[test]
+    fn presign_finish_update_keeps_the_reply_row_highlight() {
+        let mut existing = Message::new(MessageId(1), "hi", "u1", "U1", 100)
+            .with_references(vec![MessageReference {
+                message_ref_id: MessageId(7),
+                sender_id: UserId(42),
+                ..Default::default()
+            }])
+            .with_viewer_highlight(true);
+
+        let incoming = Message::new(MessageId(1), "hi", "u1", "U1", 100);
+        assert!(!incoming.highlights_viewer_direct);
+        merge_message_update(&mut existing, &incoming);
+
+        assert!(
+            existing.highlights_viewer_direct,
+            "the highlight is derived from references, so keeping them must keep it"
+        );
+    }
+
+    #[test]
+    fn update_that_carries_references_recomputes_the_highlight() {
+        let mut existing = Message::new(MessageId(1), "hi", "u1", "U1", 100)
+            .with_references(vec![MessageReference {
+                message_ref_id: MessageId(7),
+                sender_id: UserId(42),
+                ..Default::default()
+            }])
+            .with_viewer_highlight(true);
+        let incoming = Message::new(MessageId(1), "hi", "u1", "U1", 100).with_references(vec![
+            MessageReference {
+                message_ref_id: MessageId(9),
+                sender_id: UserId(7),
+                ..Default::default()
+            },
+        ]);
+        merge_message_update(&mut existing, &incoming);
+        assert!(!existing.highlights_viewer_direct);
+    }
+
+    #[test]
+    fn update_that_carries_references_replaces_them() {
+        let mut existing = Message::new(MessageId(1), "hi", "u1", "U1", 100).with_references(vec![
+            MessageReference {
+                message_ref_id: MessageId(7),
+                ..Default::default()
+            },
+        ]);
+        let incoming = Message::new(MessageId(1), "hi", "u1", "U1", 100).with_references(vec![
+            MessageReference {
+                message_ref_id: MessageId(9),
+                ..Default::default()
+            },
+        ]);
+        merge_message_update(&mut existing, &incoming);
+        assert_eq!(existing.references[0].message_ref_id, MessageId(9));
     }
 
     fn plain_api_message(

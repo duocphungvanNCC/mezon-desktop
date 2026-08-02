@@ -1029,6 +1029,7 @@ impl ChatLayout {
                 self.direct_store
                     .update(cx, |store, cx| store.ensure_loaded(cx));
                 self.chat_area.clear_member_panel();
+                MessagesStore::global(cx).update(cx, |store, cx| store.close(cx));
             }
             Route::Chat => {
                 self.pending_channel_id = None;
