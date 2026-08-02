@@ -1108,11 +1108,19 @@ impl ChatLayout {
         else {
             return;
         };
-        let channel_list = self.channel_list.read(cx);
-        if !channel_list.is_clan_cache_loaded(clan_id) {
-            return;
+        {
+            let channel_list = self.channel_list.read(cx);
+            if !channel_list.is_clan_cache_loaded(clan_id) {
+                return;
+            }
+            if channel_list.channel_in_clan(clan_id, thread_id) {
+                return;
+            }
         }
-        if channel_list.channel_in_clan(clan_id, thread_id) {
+        let resolving = self.channel_list.update(cx, |store, cx| {
+            store.ensure_channel_in_clan(clan_id, thread_id, cx)
+        });
+        if resolving {
             return;
         }
         crate::router::replace(
@@ -1140,12 +1148,20 @@ impl ChatLayout {
             channel_id,
         } = Router::global(cx).read(cx).route()
             && route_clan == clan_id
-            && self
+        {
+            if self
                 .channel_list
                 .read(cx)
                 .channel_in_clan(clan_id, channel_id)
-        {
-            return;
+            {
+                return;
+            }
+            let resolving = self.channel_list.update(cx, |store, cx| {
+                store.ensure_channel_in_clan(clan_id, channel_id, cx)
+            });
+            if resolving {
+                return;
+            }
         }
 
         let welcome = self.clan_list.read(cx).welcome_channel_id(clan_id);

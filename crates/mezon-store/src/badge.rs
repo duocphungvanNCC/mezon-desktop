@@ -426,21 +426,21 @@ impl BadgeService {
                     DirectMessageStore::global(cx).update(cx, |dm, cx| {
                         dm.note_read(channel_id, cx);
                     });
-                } else if e.category_id == 0 {
-                    ChannelList::global(cx).update(cx, |cl, cx| {
-                        cl.apply_mark_as_read_clan(clan_id, cx);
-                    });
-                    ClanList::global(cx).update(cx, |cls, cx| cls.apply_badge_read(clan_id, cx));
-                } else if e.channel_id == 0 {
-                    ChannelList::global(cx).update(cx, |cl, cx| {
-                        cl.apply_mark_as_read_category(clan_id, e.category_id, cx);
-                    });
-                } else {
+                } else if e.channel_id != 0 {
                     let channel_id = ChannelId(e.channel_id);
                     ChannelList::global(cx).update(cx, |cl, cx| {
                         cl.apply_read(clan_id, channel_id, cx);
                         cl.apply_topic_read(channel_id, cx);
                     });
+                } else if e.category_id != 0 {
+                    ChannelList::global(cx).update(cx, |cl, cx| {
+                        cl.apply_mark_as_read_category(clan_id, e.category_id, cx);
+                    });
+                } else {
+                    ChannelList::global(cx).update(cx, |cl, cx| {
+                        cl.apply_mark_as_read_clan(clan_id, cx);
+                    });
+                    ClanList::global(cx).update(cx, |cls, cx| cls.apply_badge_read(clan_id, cx));
                 }
             }
             RealtimeEvent::LastSeenUpdated(e) => {
