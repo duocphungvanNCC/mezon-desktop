@@ -958,15 +958,9 @@ impl AppApi {
 
     pub async fn create_message_2_inbox(
         &self,
-        message_id: i64,
-        channel_id: i64,
-        clan_id: i64,
-        content: &str,
+        request: mezon_proto::api::Message2InboxRequest,
     ) -> Result<()> {
-        self.transport
-            .create_message_2_inbox(message_id, channel_id, clan_id, content)
-            .await
-            .map(|_| ())
+        self.transport.create_message_2_inbox(request).await
     }
 
     pub async fn create_sd_topic(

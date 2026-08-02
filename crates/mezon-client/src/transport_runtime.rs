@@ -1685,19 +1685,11 @@ impl TransportClient {
 
     pub async fn create_message_2_inbox(
         &self,
-        message_id: i64,
-        channel_id: i64,
-        clan_id: i64,
-        content: &str,
-    ) -> Result<mezon_proto::api::ChannelMessageHeader> {
+        request: mezon_proto::api::Message2InboxRequest,
+    ) -> Result<()> {
         let transport = self.inner.clone();
-        let content = content.to_string();
         runtime()
-            .spawn(async move {
-                transport
-                    .create_message_2_inbox(message_id, channel_id, clan_id, &content)
-                    .await
-            })
+            .spawn(async move { transport.create_message_2_inbox(request).await })
             .await
             .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
     }

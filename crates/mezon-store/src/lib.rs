@@ -138,7 +138,7 @@ pub use gallery::{
 pub use gif::{Gif, GifCategory, GifEvent, GifStore};
 pub use group_members::{GroupMember, GroupMembersEvent, GroupMembersStore};
 pub use ids::{ChannelId, ClanId, MessageId, ParseIdError, RoleId, UserId};
-pub use inbox::{InboxEvent, InboxStore};
+pub use inbox::{GLOBAL_INBOX_BUCKET_CLAN_ID, InboxEvent, InboxStore};
 pub use login::{LoginStore, token_from_oauth_callback_url};
 pub use message::*;
 pub use message::{

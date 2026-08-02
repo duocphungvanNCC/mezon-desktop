@@ -7379,29 +7379,16 @@ impl MezonTransport {
     }
 
     /// Create message to inbox.
-    pub async fn create_message_2_inbox(
-        &self,
-        message_id: i64,
-        channel_id: i64,
-        clan_id: i64,
-        content: &str,
-    ) -> Result<api::ChannelMessageHeader> {
+    pub async fn create_message_2_inbox(&self, request: api::Message2InboxRequest) -> Result<()> {
         let cid = self.generate_cid();
-        let body = api::Message2InboxRequest {
-            message_id,
-            channel_id,
-            clan_id,
-            content: content.to_string(),
-            ..Default::default()
-        }
-        .encode_to_vec();
-        let (code, response) = self
+        let body = request.encode_to_vec();
+        let (code, _response) = self
             .send_api_request(cid, "CreateMessage2Inbox", body)
             .await?;
         if code != 0 {
             return Err(anyhow::anyhow!("API error: code={}", code));
         }
-        Ok(api::ChannelMessageHeader::decode(response.as_slice())?)
+        Ok(())
     }
 
     /// Create pin message.
