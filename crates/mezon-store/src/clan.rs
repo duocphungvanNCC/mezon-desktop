@@ -1041,16 +1041,7 @@ impl ClanList {
 }
 
 fn timestamped_upload_filename(original: &str) -> String {
-    let sanitized = original
-        .chars()
-        .map(|c| {
-            if c.is_alphanumeric() || c == '.' || c == '-' || c == '_' {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect::<String>();
+    let sanitized = mezon_client::sanitize_upload_filename(original);
     let ms = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis())
