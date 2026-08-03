@@ -1194,7 +1194,11 @@ fn render_video_poster(
     let theme = ctx.theme;
     let url = SharedString::from(att.url.clone());
     let filename = SharedString::from(att.filename.clone());
-    let thumbnail = att.thumbnail_proxied.clone();
+    let thumbnail = if att.presign_pending {
+        SharedString::default()
+    } else {
+        att.thumbnail_proxied.clone()
+    };
     let width = att.display_width;
     let height = att.display_height;
     let host = ctx.video_host.clone();
@@ -1227,6 +1231,9 @@ fn render_video_poster(
         return container
             .child(attachment_sending_overlay(theme))
             .into_any_element();
+    }
+    if att.presign_pending {
+        return presign_child(container, att, theme).into_any_element();
     }
     let overlay = div()
         .absolute()
