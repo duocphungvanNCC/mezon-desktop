@@ -24,6 +24,7 @@ pub mod transport_runtime;
 pub use abridged_tcp_adapter::AbridgedTcpAdapter;
 pub use app_api::{
     AppApi, AttachmentUploadOutcome, ConnectionStatus, UploadFile, UploadThumbnail, UrlAttachment,
+    sanitize_upload_filename,
 };
 pub use attachment_download::{
     clean_download_url, download_url_to_downloads, resolve_download_filename, sanitize_filename,

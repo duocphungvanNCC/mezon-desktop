@@ -15,10 +15,10 @@ use crate::{
 const CHECK_NAME_TYPE_CHANNEL: i32 = 2;
 const CHECK_NAME_TYPE_NICKNAME: i32 = 4;
 
-fn sanitize_filename(name: &str) -> String {
+pub fn sanitize_upload_filename(name: &str) -> String {
     name.chars()
         .map(|c| {
-            if c.is_alphanumeric() || c == '.' || c == '-' || c == '_' {
+            if c.is_ascii_alphanumeric() || c == '.' {
                 c
             } else {
                 '_'
@@ -1670,7 +1670,7 @@ impl AppApi {
             duration,
             thumbnail,
         } = file;
-        let filename = sanitize_filename(&filename);
+        let upload_name = sanitize_upload_filename(&filename);
         let raw_size = crate::transport_runtime::file_len(path.clone()).await?;
         let size = i32::try_from(raw_size)
             .map_err(|_| anyhow::anyhow!("attachment too large to upload: {raw_size} bytes"))?;
@@ -1683,7 +1683,7 @@ impl AppApi {
             let started = self
                 .transport
                 .multipart_upload_attachment_file_start(mezon_proto::api::UploadAttachmentRequest {
-                    filename: filename.clone(),
+                    filename: upload_name.clone(),
                     filetype: filetype.clone(),
                     size,
                     width,
@@ -1713,7 +1713,7 @@ impl AppApi {
         } else {
             let upload = self
                 .transport
-                .upload_attachment_file(&filename, &filetype, size, width, height)
+                .upload_attachment_file(&upload_name, &filetype, size, width, height)
                 .await?;
             let url = attachment_cdn_url(&self.base_img_url, &upload.filename)?;
             (
@@ -2087,7 +2087,7 @@ impl AppApi {
     }
 
     async fn upload_thumbnail(&self, thumbnail: UploadThumbnail) -> String {
-        let filename = sanitize_filename(&thumbnail.filename);
+        let filename = sanitize_upload_filename(&thumbnail.filename);
         let size = clamp_i32(thumbnail.data.len());
         match self
             .upload_bytes(&filename, "image/jpeg", size, 0, 0, thumbnail.data)
@@ -2137,10 +2137,11 @@ impl AppApi {
             .filter(|s| !s.is_empty())
             .unwrap_or("media");
         let filename = if stem.contains('.') {
-            sanitize_filename(stem)
+            stem.to_string()
         } else {
-            sanitize_filename(&format!("{stem}.{ext}"))
+            format!("{stem}.{ext}")
         };
+        let upload_name = sanitize_upload_filename(&filename);
         let size = clamp_i32(data.len());
 
         let (width, height) = if filetype.starts_with("image/") {
@@ -2150,7 +2151,7 @@ impl AppApi {
         };
 
         let url = self
-            .upload_bytes(&filename, &filetype, size, width, height, data)
+            .upload_bytes(&upload_name, &filetype, size, width, height, data)
             .await?;
 
         Ok(mezon_proto::api::MessageAttachment {
@@ -2254,7 +2255,7 @@ impl AppApi {
             .and_then(|n| n.to_str())
             .unwrap_or("avatar")
             .to_string();
-        let filename = sanitize_filename(&raw_filename);
+        let filename = sanitize_upload_filename(&raw_filename);
         let ext = path
             .extension()
             .and_then(|e| e.to_str())
@@ -2649,7 +2650,29 @@ impl AppApi {
 
 #[cfg(test)]
 mod tests {
-    use super::{MULTIPART_PART_SIZE, attachment_cdn_url, multipart_part_ranges};
+    use super::{
+        MULTIPART_PART_SIZE, attachment_cdn_url, multipart_part_ranges, sanitize_upload_filename,
+    };
+
+    #[test]
+    fn upload_filename_folds_every_non_ascii_char() {
+        assert_eq!(
+            sanitize_upload_filename("Báo cáo tháng 8.pdf"),
+            "B_o_c_o_th_ng_8.pdf"
+        );
+        assert_eq!(sanitize_upload_filename("日本語.png"), "___.png");
+        assert!(
+            sanitize_upload_filename("Đơn xin nghỉ phép.pdf")
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_')
+        );
+    }
+
+    #[test]
+    fn upload_filename_keeps_ascii_stem_and_extension() {
+        assert_eq!(sanitize_upload_filename("report-v2.pdf"), "report_v2.pdf");
+        assert_eq!(sanitize_upload_filename("a b.PNG"), "a_b.PNG");
+    }
 
     #[test]
     fn multipart_ranges_cover_whole_file_and_are_contiguous() {
