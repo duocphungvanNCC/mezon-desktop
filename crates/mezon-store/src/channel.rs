@@ -3047,7 +3047,7 @@ fn flatten_parents_with_threads(
         let threads = thread_groups.remove(&parent.id);
         ordered.push(parent);
         if let Some(mut ts) = threads {
-            ts.sort_by_key(|a| a.id);
+            ts.sort_by_key(|a| (a.name.to_lowercase(), a.id));
             ordered.extend(ts);
         }
     }
