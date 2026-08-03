@@ -1071,6 +1071,7 @@
   "channelVoice.raiseHand": "Raise Hand",
   "channelVoice.reactions": "Reactions",
   "channelVoice.shareYourScreen": "Share Your Screen",
+  "channelVoice.switchLayout": "Switch Layout",
   "channelVoice.stopScreenShare": "Stop screen share",
   "channelVoice.toast.cameraPermissionRequired": "Camera permission is required",
   "channelVoice.toast.connectionConnected": "Connection connected",

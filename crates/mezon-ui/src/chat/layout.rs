@@ -59,6 +59,7 @@ pub struct ChatLayout {
     voice_grid_wheel_accum: f32,
     voice_grid_size: Size<Pixels>,
     voice_show_members: bool,
+    voice_show_chat: bool,
     voice_session_key: Option<String>,
     voice_visual: crate::chat::voice::VoiceVisualState,
     voice_mini_bar_height: Pixels,
@@ -464,6 +465,7 @@ impl ChatLayout {
             voice_grid_wheel_accum: 0.,
             voice_grid_size: Size::default(),
             voice_show_members: true,
+            voice_show_chat: false,
             voice_session_key: None,
             voice_visual: Default::default(),
             voice_mini_bar_height: px(0.),
@@ -2224,6 +2226,7 @@ impl ChatLayout {
         if self.voice_session_key != key {
             self.voice_session_key = key;
             self.voice_show_members = true;
+            self.voice_show_chat = false;
             self.voice_grid_page = 0;
             self.voice_grid_wheel_accum = 0.;
             self.voice_visual = Default::default();
@@ -2235,6 +2238,11 @@ impl ChatLayout {
 
     pub(crate) fn toggle_voice_member_strip(&mut self, cx: &mut Context<Self>) {
         self.voice_show_members = !self.voice_show_members;
+        cx.notify();
+    }
+
+    pub(crate) fn toggle_voice_chat(&mut self, cx: &mut Context<Self>) {
+        self.voice_show_chat = !self.voice_show_chat;
         cx.notify();
     }
 
@@ -2689,6 +2697,7 @@ impl ChatLayout {
                         settings.camera_device_id.clone(),
                     )
                 };
+                let show_chat = self.voice_show_chat;
                 let voice_view = crate::chat::voice::render_voice_channel(
                     &locale,
                     &channel,
@@ -2702,43 +2711,109 @@ impl ChatLayout {
                     self.voice_grid_page,
                     self.voice_grid_size,
                     self.voice_show_members,
+                    show_chat,
+                    self.inbox_handle.clone(),
                     &mut self.voice_visual,
                     window_width,
                     window,
                     cx,
                 );
+                let chat_panel = if show_chat {
+                    Some(
+                        self.chat_area
+                            .render(
+                                &locale,
+                                Some(channel.name.as_str()),
+                                Some(channel_icon(channel.channel_type, channel.private)),
+                                false,
+                                None,
+                                Some(channel.id),
+                                false,
+                                false,
+                                false,
+                                false,
+                                false,
+                                false,
+                                None,
+                                None,
+                                active_clan_id,
+                                None,
+                                None,
+                                false,
+                                false,
+                                false,
+                                None,
+                                false,
+                                None,
+                                None,
+                                true,
+                                cx,
+                            )
+                            .into_any_element(),
+                    )
+                } else {
+                    None
+                };
                 return div()
                     .relative()
                     .flex()
-                    .flex_col()
+                    .flex_row()
                     .flex_1()
                     .min_h_0()
-                    .child(voice_view)
-                    .when_some(self.voice_emoji_picker.clone(), |el, picker| {
-                        el.child(deferred(
+                    .min_w_0()
+                    .child(
+                        div()
+                            .relative()
+                            .flex()
+                            .flex_col()
+                            .flex_1()
+                            .min_w_0()
+                            .min_h_0()
+                            .overflow_hidden()
+                            .child(voice_view)
+                            .when_some(self.voice_emoji_picker.clone(), |el, picker| {
+                                el.child(deferred(
+                                    div()
+                                        .absolute()
+                                        .bottom(px(76.))
+                                        .left(px(16.))
+                                        .occlude()
+                                        .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                                            this.close_voice_emoji_picker(cx)
+                                        }))
+                                        .child(picker),
+                                ))
+                            })
+                            .when_some(self.voice_sound_picker.clone(), |el, picker| {
+                                el.child(deferred(
+                                    div()
+                                        .absolute()
+                                        .bottom(px(76.))
+                                        .left(px(72.))
+                                        .occlude()
+                                        .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                                            this.close_voice_sound_picker(cx)
+                                        }))
+                                        .child(picker),
+                                ))
+                            }),
+                    )
+                    .when_some(chat_panel, |row, panel| {
+                        row.child(
                             div()
-                                .absolute()
-                                .bottom(px(76.))
-                                .left(px(16.))
-                                .occlude()
-                                .on_mouse_down_out(
-                                    cx.listener(|this, _, _, cx| this.close_voice_emoji_picker(cx)),
-                                )
-                                .child(picker),
-                        ))
-                    })
-                    .when_some(self.voice_sound_picker.clone(), |el, picker| {
-                        el.child(deferred(
-                            div()
-                                .absolute()
-                                .bottom(px(76.))
-                                .left(px(72.))
-                                .occlude()
-                                .on_mouse_down_out(
-                                    cx.listener(|this, _, _, cx| this.close_voice_sound_picker(cx)),
-                                )
-                                .child(picker),
-                        ))
+                                .flex()
+                                .flex_col()
+                                .w(px(500.))
+                                .min_w(px(360.))
+                                .max_w(px(500.))
+                                .h_full()
+                                .flex_shrink_0()
+                                .overflow_hidden()
+                                .border_l_1()
+                                .border_color(theme.border)
+                                .bg(theme.bg_primary)
+                                .child(panel),
+                        )
                     })
                     .into_any_element();
             }
