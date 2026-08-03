@@ -3146,15 +3146,14 @@ impl MessagesStore {
 
     fn schedule_presign_expiry(&mut self, cx: &mut Context<Self>) {
         let now = now_unix_seconds();
-        let pending = self.cache.values_mut().flat_map(|channel| {
-            channel.messages.items.iter().map(|message| {
-                (
-                    message.create_time,
-                    message.attachments.iter().any(|a| a.presign_pending),
-                )
-            })
+        let deadlines = self.cache.values_mut().flat_map(|channel| {
+            channel
+                .messages
+                .items
+                .iter()
+                .filter_map(presign_expiry_deadline)
         });
-        let Some(delay) = next_presign_expiry_in(pending, now) else {
+        let Some(delay) = next_presign_expiry_in(deadlines, now) else {
             self.presign_expiry_task = None;
             return;
         };
@@ -4476,6 +4475,7 @@ impl MessagesStore {
         };
         let last_id = channel.messages.last().map(|m| m.id).unwrap_or(tail_id);
         self.set_last_message(storage_id, last_id);
+        self.schedule_presign_expiry(cx);
         if is_buzz && appended {
             self.play_buzz_sound(cx);
         }
@@ -6115,19 +6115,27 @@ fn apply_presign_gate(
     apply_presign_gate_at(attachments, keys, base_img, create_time, now_unix_seconds());
 }
 
-/// When the earliest still-pending attachment reaches its expiry, relative to
-/// `now`. `None` when nothing is waiting.
+/// When this message's pending attachments become droppable, or `None` when the
+/// sweep would not touch it. It must agree with `sweep_expired_presign`: a
+/// message the sweep skips but this counts would be rescheduled at zero delay
+/// forever.
+fn presign_expiry_deadline(message: &Message) -> Option<i64> {
+    if message.create_time <= 0 || !message.attachments.iter().any(|a| a.presign_pending) {
+        return None;
+    }
+    presign::parse_presign_finish_keys(&message.content)?;
+    Some(message.create_time + presign::PRESIGN_PENDING_MAX_AGE_SEC)
+}
+
+/// How long until the earliest deadline, relative to `now`. `None` when nothing
+/// is waiting.
 fn next_presign_expiry_in(
-    messages: impl Iterator<Item = (i64, bool)>,
+    deadlines: impl Iterator<Item = i64>,
     now: i64,
 ) -> Option<std::time::Duration> {
-    messages
-        .filter(|(create_time, pending)| *pending && *create_time > 0)
-        .map(|(create_time, _)| {
-            let deadline = create_time + presign::PRESIGN_PENDING_MAX_AGE_SEC;
-            std::time::Duration::from_secs((deadline - now).max(0) as u64)
-        })
+    deadlines
         .min()
+        .map(|deadline| std::time::Duration::from_secs((deadline - now).max(0) as u64))
 }
 
 fn apply_presign_gate_at(
@@ -9161,11 +9169,8 @@ mod tests {
     fn expiry_is_scheduled_for_the_earliest_pending_message() {
         let now = 1000;
         let max = presign::PRESIGN_PENDING_MAX_AGE_SEC;
-        let delay = next_presign_expiry_in(
-            [(now - 60, true), (now - 300, true), (now, false)].into_iter(),
-            now,
-        )
-        .expect("a pending attachment arms the timer");
+        let delay = next_presign_expiry_in([now - 60 + max, now - 300 + max].into_iter(), now)
+            .expect("a pending attachment arms the timer");
         assert_eq!(
             delay.as_secs() as i64,
             max - 300,
@@ -9173,16 +9178,36 @@ mod tests {
         );
 
         assert!(
-            next_presign_expiry_in([(now, false)].into_iter(), now).is_none(),
+            next_presign_expiry_in(std::iter::empty(), now).is_none(),
             "nothing pending leaves the timer disarmed"
         );
         assert_eq!(
-            next_presign_expiry_in([(now - max - 60, true)].into_iter(), now)
+            next_presign_expiry_in([now - 60].into_iter(), now)
                 .expect("an overdue message still fires")
                 .as_secs(),
             0,
             "an already expired attachment sweeps immediately instead of waiting"
         );
+    }
+
+    #[test]
+    fn a_message_the_sweep_cannot_clear_is_never_scheduled() {
+        let mut pending = Message::new(MessageId(1), "hi".to_string(), "5".to_string(), "me", 1000);
+        pending.create_time = 1000;
+        pending.attachments = vec![cdn_attachment("https://cdn.example/uploads/photo.png")];
+        pending.attachments[0].presign_pending = true;
+
+        pending.content = r#"{"t":"hi","presign_finish":[]}"#.to_string();
+        assert_eq!(
+            presign_expiry_deadline(&pending),
+            Some(1000 + presign::PRESIGN_PENDING_MAX_AGE_SEC),
+            "a pending message the sweep can act on arms the timer"
+        );
+
+        // The sweep skips a message whose content no longer carries the field, so
+        // counting it here would re-arm the timer at zero delay forever.
+        pending.content = r#"{"t":"hi"}"#.to_string();
+        assert_eq!(presign_expiry_deadline(&pending), None);
     }
 
     #[test]
