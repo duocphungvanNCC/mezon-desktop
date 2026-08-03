@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU16, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use gpui::{App, AppContext, Context, Entity, EventEmitter, Global, Task};
 use image::ImageEncoder as _;
@@ -15,6 +15,8 @@ use crate::ids::ClanId;
 use crate::realtime::{RealtimeDispatch, RealtimeKind};
 
 const RECENT_EMOJI_CAP: usize = 20;
+const RECENT_FETCH_ATTEMPTS: u32 = 3;
+const RECENT_FETCH_RETRY_DELAY: Duration = Duration::from_secs(1);
 const EMOJI_ACTION_CREATED: i32 = 1;
 const EMOJI_ACTION_UPDATE: i32 = 2;
 const EMOJI_ACTION_DELETE: i32 = 3;
@@ -52,6 +54,7 @@ pub struct EmojiStore {
     recent_freshness: Freshness,
     loading: bool,
     loading_recent: bool,
+    reset_generation: u32,
     api: Arc<AppApi>,
     _conn_watch: Task<()>,
 }
@@ -84,6 +87,7 @@ impl EmojiStore {
         self.recent_freshness.mark_stale();
         self.loading = false;
         self.loading_recent = false;
+        self.reset_generation = self.reset_generation.wrapping_add(1);
         cx.notify();
     }
 
@@ -100,6 +104,7 @@ impl EmojiStore {
             recent_freshness: Freshness::new(),
             loading: false,
             loading_recent: false,
+            reset_generation: 0,
             api,
             _conn_watch: conn_watch,
         }
@@ -154,7 +159,7 @@ impl EmojiStore {
         self.fetch(cx)
     }
 
-    pub fn ensure_recent_loaded(&mut self, cx: &mut Context<Self>) {
+    fn ensure_recent_loaded(&mut self, cx: &mut Context<Self>) {
         if self.recent_freshness.is_fresh(crate::CACHE_TTL) {
             return;
         }
@@ -162,6 +167,7 @@ impl EmojiStore {
     }
 
     pub fn refresh(&mut self, cx: &mut Context<Self>) {
+        self.freshness.mark_stale();
         self.fetch(cx).detach();
         self.recent_freshness.mark_stale();
         self.fetch_recent(cx);
@@ -173,9 +179,13 @@ impl EmojiStore {
         }
         self.loading = true;
         let api = self.api.clone();
+        let generation = self.reset_generation;
         cx.spawn(async move |this, cx| {
             let result = api.list_emojis_by_user_id().await;
             let _ = this.update(cx, |this, cx| {
+                if this.reset_generation != generation {
+                    return;
+                }
                 this.loading = false;
                 match result.map(|emojis| {
                     emojis
@@ -200,30 +210,62 @@ impl EmojiStore {
         })
     }
 
+    fn apply_recents_if_current(
+        &mut self,
+        generation: u32,
+        recents: Vec<api::EmojiRecent>,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if self.reset_generation != generation {
+            return false;
+        }
+        let mut seen = HashSet::new();
+        self.recent_ids = recents
+            .into_iter()
+            .map(|r| r.emoji_id.to_string())
+            .filter(|id| seen.insert(id.clone()))
+            .take(RECENT_EMOJI_CAP)
+            .collect();
+        self.recent_freshness.mark_fetched();
+        cx.emit(EmojiEvent::Changed);
+        cx.notify();
+        true
+    }
+
     fn fetch_recent(&mut self, cx: &mut Context<Self>) {
         if self.loading_recent {
             return;
         }
         self.loading_recent = true;
         let api = self.api.clone();
+        let generation = self.reset_generation;
         cx.spawn(async move |this, cx| {
-            let result = api.emoji_recent_list().await;
-            let _ = this.update(cx, |this, cx| {
-                this.loading_recent = false;
-                match result {
+            let mut delay = RECENT_FETCH_RETRY_DELAY;
+            for attempt in 1..=RECENT_FETCH_ATTEMPTS {
+                match api.emoji_recent_list().await {
                     Ok(recents) => {
-                        let mut seen = HashSet::new();
-                        this.recent_ids = recents
-                            .into_iter()
-                            .map(|r| r.emoji_id.to_string())
-                            .filter(|id| seen.insert(id.clone()))
-                            .take(RECENT_EMOJI_CAP)
-                            .collect();
-                        this.recent_freshness.mark_fetched();
-                        cx.emit(EmojiEvent::Changed);
-                        cx.notify();
+                        let _ = this.update(cx, |this, cx| {
+                            if this.apply_recents_if_current(generation, recents, cx) {
+                                this.loading_recent = false;
+                            }
+                        });
+                        return;
                     }
-                    Err(e) => tracing::error!("emoji_recent_list failed: {e}"),
+                    Err(e) => {
+                        tracing::error!(
+                            "emoji_recent_list failed (attempt {attempt}/{RECENT_FETCH_ATTEMPTS}): {e}"
+                        );
+                        if attempt == RECENT_FETCH_ATTEMPTS {
+                            break;
+                        }
+                        cx.background_executor().timer(delay).await;
+                        delay *= 2;
+                    }
+                }
+            }
+            let _ = this.update(cx, |this, _| {
+                if this.reset_generation == generation {
+                    this.loading_recent = false;
                 }
             });
         })
@@ -818,6 +860,44 @@ pub async fn upload_emoticon_file(
 mod tests {
     use super::*;
 
+    fn init_emoji_store(cx: &mut gpui::TestAppContext) -> (Arc<AppApi>, Entity<EmojiStore>) {
+        cx.update(|cx| {
+            let api = Arc::new(mezon_client::AppApi::new(
+                Arc::new(mezon_client::TransportClient::new(String::new())),
+                String::new(),
+            ));
+            RealtimeDispatch::init(api.clone(), cx);
+            let store = cx.new(|cx| EmojiStore::new(api.clone(), cx));
+            (api, store)
+        })
+    }
+
+    fn connect(api: &Arc<AppApi>, cx: &mut gpui::TestAppContext) {
+        api.set_status(ConnectionStatus::Disconnected);
+        cx.run_until_parked();
+        api.set_status(ConnectionStatus::Connected);
+        cx.run_until_parked();
+    }
+
+    fn recent_fetch_in_flight(store: &Entity<EmojiStore>, cx: &gpui::TestAppContext) -> bool {
+        store.read_with(cx, |store, _| store.loading_recent)
+    }
+
+    fn settle_recent_fetch_with_success(store: &Entity<EmojiStore>, cx: &mut gpui::TestAppContext) {
+        store.update(cx, |store, cx| {
+            let generation = store.reset_generation;
+            store.loading_recent = false;
+            store.apply_recents_if_current(generation, Vec::new(), cx);
+        });
+    }
+
+    fn recent(emoji_id: i64) -> api::EmojiRecent {
+        api::EmojiRecent {
+            emoji_id,
+            ..Default::default()
+        }
+    }
+
     fn proto(
         id: i64,
         shortname: &str,
@@ -943,45 +1023,64 @@ mod tests {
         assert!(!recent.contains(&(RECENT_EMOJI_CAP - 1).to_string()));
     }
 
-    fn init_emoji_store(cx: &mut App) -> Entity<EmojiStore> {
-        let api = Arc::new(mezon_client::AppApi::new(
-            Arc::new(mezon_client::TransportClient::new(String::new())),
-            String::new(),
-        ));
-        RealtimeDispatch::init(api.clone(), cx);
-        cx.new(|cx| EmojiStore::new(api, cx))
-    }
-
     #[gpui::test]
     fn construction_does_not_fetch_recents(cx: &mut gpui::TestAppContext) {
-        cx.update(|cx| {
-            let store = init_emoji_store(cx);
-            store.update(cx, |store, _| {
-                assert!(
-                    !store.loading_recent,
-                    "recents must wait for the socket, not fire while disconnected"
-                );
-            });
-        });
+        let (_api, store) = init_emoji_store(cx);
+        cx.run_until_parked();
+        assert!(
+            !recent_fetch_in_flight(&store, cx),
+            "recents must wait for the socket, not fire while disconnected"
+        );
     }
 
     #[gpui::test]
-    fn ensure_recent_loaded_fetches_once_then_gates_on_freshness(cx: &mut gpui::TestAppContext) {
-        cx.update(|cx| {
-            let store = init_emoji_store(cx);
-            store.update(cx, |store, cx| {
-                store.ensure_recent_loaded(cx);
-                assert!(store.loading_recent, "first connect must fetch recents");
+    fn connecting_fetches_recents_and_a_fresh_reconnect_does_not(cx: &mut gpui::TestAppContext) {
+        let (api, store) = init_emoji_store(cx);
 
-                store.loading_recent = false;
-                store.recent_freshness.mark_fetched();
-                store.ensure_recent_loaded(cx);
-                assert!(!store.loading_recent, "a fresh list must not refetch");
+        connect(&api, cx);
+        assert!(
+            recent_fetch_in_flight(&store, cx),
+            "the first connect must fetch recents"
+        );
 
-                store.reset(cx);
-                store.ensure_recent_loaded(cx);
-                assert!(store.loading_recent, "logout must force a refetch");
-            });
+        settle_recent_fetch_with_success(&store, cx);
+        connect(&api, cx);
+        assert!(
+            !recent_fetch_in_flight(&store, cx),
+            "a reconnect within the TTL must not refetch"
+        );
+    }
+
+    #[gpui::test]
+    fn logout_forces_a_refetch_on_the_next_connect(cx: &mut gpui::TestAppContext) {
+        let (api, store) = init_emoji_store(cx);
+        connect(&api, cx);
+        settle_recent_fetch_with_success(&store, cx);
+
+        store.update(cx, |store, cx| store.reset(cx));
+        connect(&api, cx);
+
+        assert!(
+            recent_fetch_in_flight(&store, cx),
+            "logout must invalidate recents so the next connect refetches"
+        );
+    }
+
+    #[gpui::test]
+    fn a_response_that_outlives_a_logout_is_dropped(cx: &mut gpui::TestAppContext) {
+        let (api, store) = init_emoji_store(cx);
+        connect(&api, cx);
+
+        store.update(cx, |store, cx| {
+            let in_flight = store.reset_generation;
+            store.reset(cx);
+
+            assert!(
+                !store.apply_recents_if_current(in_flight, vec![recent(1), recent(2)], cx),
+                "a response issued for the previous account must be dropped"
+            );
+            assert!(store.recent_ids.is_empty());
+            assert!(!store.recent_freshness.is_fresh(crate::CACHE_TTL));
         });
     }
 
