@@ -3046,8 +3046,7 @@ fn flatten_parents_with_threads(
     for parent in parents {
         let threads = thread_groups.remove(&parent.id);
         ordered.push(parent);
-        if let Some(mut ts) = threads {
-            ts.sort_by_key(|a| (a.name.to_lowercase(), a.id));
+        if let Some(ts) = threads {
             ordered.extend(ts);
         }
     }
@@ -4306,7 +4305,27 @@ mod tests {
         let cats = build_categories(api_cats, &mut channels);
         assert_eq!(cats.len(), 1);
         let ids: Vec<i64> = cats[0].channels.iter().map(|c| c.id.get()).collect();
-        assert_eq!(ids, vec![10, 12, 15, 20, 25]);
+        assert_eq!(ids, vec![10, 15, 12, 20, 25]);
+    }
+
+    #[test]
+    fn build_categories_keeps_server_order_within_a_thread_group() {
+        let api_cats = vec![ApiCategoryDesc {
+            category_id: 1,
+            category_name: "General".into(),
+            clan_id: 1,
+            category_order: 0,
+        }];
+        let mut zulu = make_thread(11, 10, "1");
+        zulu.name = "zulu".into();
+        let mut alpha = make_thread(12, 10, "1");
+        alpha.name = "alpha".into();
+        let mut mike = make_thread(13, 10, "1");
+        mike.name = "mike".into();
+        let mut channels = vec![make_channel(10, "parent", "1"), zulu, alpha, mike];
+        let cats = build_categories(api_cats, &mut channels);
+        let names: Vec<&str> = cats[0].channels.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, vec!["parent", "zulu", "alpha", "mike"]);
     }
 
     #[test]
