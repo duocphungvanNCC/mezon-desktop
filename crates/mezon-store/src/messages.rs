@@ -4457,6 +4457,9 @@ impl MessagesStore {
             return;
         }
         let tail_id = msg.id;
+        // Arming the expiry timer walks every cached message, so only pay for it
+        // when this message can actually be waiting on an upload.
+        let arms_expiry = msg.attachments.iter().any(|a| a.presign_pending);
         let old_len = channel.messages.len();
         let appended = match channel
             .messages
@@ -4475,7 +4478,9 @@ impl MessagesStore {
         };
         let last_id = channel.messages.last().map(|m| m.id).unwrap_or(tail_id);
         self.set_last_message(storage_id, last_id);
-        self.schedule_presign_expiry(cx);
+        if arms_expiry {
+            self.schedule_presign_expiry(cx);
+        }
         if is_buzz && appended {
             self.play_buzz_sound(cx);
         }
@@ -4524,8 +4529,11 @@ impl MessagesStore {
                 existing.create_time,
             );
         }
+        let arms_expiry = existing.attachments.iter().any(|a| a.presign_pending);
         patch_reply_previews_after_update(&mut channel.messages, message_id, &preview);
-        self.schedule_presign_expiry(cx);
+        if arms_expiry {
+            self.schedule_presign_expiry(cx);
+        }
         if self.active_topic_id == Some(storage_id) {
             cx.emit(MessagesEvent::TopicUpdated {
                 topic_id: storage_id.get(),
@@ -9187,6 +9195,23 @@ mod tests {
                 .as_secs(),
             0,
             "an already expired attachment sweeps immediately instead of waiting"
+        );
+    }
+
+    #[test]
+    fn an_ordinary_message_does_not_arm_the_expiry_timer() {
+        // Arming walks every cached message, and this runs on every socket
+        // arrival, so a message with nothing pending must not trigger it.
+        let mut plain = Message::new(MessageId(9), "hi".to_string(), "5".to_string(), "me", 1000);
+        plain.create_time = 1000;
+        assert_eq!(presign_expiry_deadline(&plain), None);
+
+        plain.attachments = vec![cdn_attachment("https://cdn.example/uploads/photo.png")];
+        plain.content = r#"{"t":"hi","presign_finish":["photo"]}"#.to_string();
+        assert_eq!(
+            presign_expiry_deadline(&plain),
+            None,
+            "a finished attachment has nothing left to expire"
         );
     }
 
