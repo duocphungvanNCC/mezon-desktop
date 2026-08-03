@@ -59,6 +59,11 @@ impl SendTokenModal {
         if Shell::global(cx).read(cx).has_modal() {
             return;
         }
+        if let Some(wallet) = WalletStore::try_global(cx)
+            && !wallet.read(cx).is_available()
+        {
+            wallet.update(cx, |wallet, cx| wallet.enable_wallet_for_current_user(cx));
+        }
         let candidates = Self::build_candidates(cx);
         let view = cx.new(|cx| {
             let tr = |key: &'static str| mezon_i18n::t(&locale, key).to_string();
