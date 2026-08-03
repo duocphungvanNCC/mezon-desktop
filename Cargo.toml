@@ -10,7 +10,6 @@ members = [
     "crates/mezon-video",
     "crates/mezon-audio",
     "crates/mezon-native",
-    "crates/mezon-webview",
     "crates/mezon-updater",
     "crates/mezon-proto",
     "crates/mezon-i18n",
@@ -123,7 +122,6 @@ mezon-stream  = { path = "crates/mezon-stream" }
 mezon-video   = { path = "crates/mezon-video" }
 mezon-audio   = { path = "crates/mezon-audio" }
 mezon-native  = { path = "crates/mezon-native" }
-mezon-webview = { path = "crates/mezon-webview" }
 mezon-proto   = { path = "crates/mezon-proto" }
 mezon-updater = { path = "crates/mezon-updater" }
 mezon-i18n    = { path = "crates/mezon-i18n" }
