@@ -2511,7 +2511,6 @@ impl ChatLayout {
         Some(ChannelAppBarTarget {
             app_id,
             app_url: app.app_url.clone(),
-            app_name: app.app_name.clone(),
             clan_id: channel.clan_id,
             clan_name: channel.clan_name.clone(),
             channel_list: self.channel_list.clone(),
