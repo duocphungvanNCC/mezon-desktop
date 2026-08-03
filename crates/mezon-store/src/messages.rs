@@ -3114,7 +3114,9 @@ impl MessagesStore {
     /// this the placeholder would sit there until some unrelated update for that
     /// channel happened to arrive.
     fn sweep_expired_presign(&mut self, cx: &mut Context<Self>) {
-        let base_img = AppConfig::try_global(cx)
+        let config = AppConfig::try_global(cx).cloned();
+        let base_img = config
+            .as_ref()
             .map(|c| c.base_img_url.clone())
             .unwrap_or_default();
         let now = now_unix_seconds();
@@ -3135,7 +3137,16 @@ impl MessagesStore {
                     message.create_time,
                     now,
                 );
-                changed |= message.attachments.len() != before;
+                if message.attachments.len() != before {
+                    // The album layout and the viewer list are built from the
+                    // attachments, so dropping one leaves them describing tiles
+                    // that are no longer there.
+                    let (album_layout, viewer_media) =
+                        build_media_presentation(&message.attachments, config.as_ref());
+                    message.album_layout = album_layout;
+                    message.viewer_media = viewer_media;
+                    changed = true;
+                }
             }
         }
         if changed {
