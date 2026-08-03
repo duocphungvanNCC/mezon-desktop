@@ -703,6 +703,8 @@ impl ClanProfileSection {
                                                     "common.removeAvatar",
                                                 ))
                                                 .text_color(theme.text_muted)
+                                                .border_1()
+                                                .border_color(theme.border)
                                                 .on_click({
                                                     let entity = cx.entity().clone();
                                                     move |_, _, cx| {

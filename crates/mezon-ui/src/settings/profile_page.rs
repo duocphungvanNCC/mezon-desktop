@@ -655,29 +655,45 @@ impl Render for ProfilePage {
         v_flex()
             .relative()
             .h_full()
-            .gap_4()
-            .child(tabs)
-            .child(body)
-            // Delete Account button (only for user profile tab)
-            .when(!is_clan, |el| {
-                el.child(
-                    GpuiButton::new("delete-account-btn")
-                        .label(mezon_i18n::t(&locale, "setting.profile.deleteAccount"))
-                        .danger()
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            let locale = this.settings.read(cx).language.clone();
-                            this.show_toast(
-                                mezon_i18n::t(&locale, "setting.profile.deleteComingSoon"),
-                                cx,
-                            );
-                        })),
-                )
-            })
+            .min_h_0()
+            .child(
+                v_flex()
+                    .id("profile-content-scroll")
+                    .flex_1()
+                    .min_h_0()
+                    .gap_4()
+                    .overflow_y_scroll()
+                    .pb(if has_unsaved_changes || is_saving {
+                        px(92.)
+                    } else {
+                        px(8.)
+                    })
+                    .child(tabs)
+                    .child(body)
+                    // Delete Account button (only for user profile tab)
+                    .when(!is_clan, |el| {
+                        el.child(
+                            GpuiButton::new("delete-account-btn")
+                                .label(mezon_i18n::t(&locale, "setting.profile.deleteAccount"))
+                                .danger()
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    let locale = this.settings.read(cx).language.clone();
+                                    this.show_toast(
+                                        mezon_i18n::t(&locale, "setting.profile.deleteComingSoon"),
+                                        cx,
+                                    );
+                                })),
+                        )
+                    }),
+            )
             .when(has_unsaved_changes || is_saving, |el| {
                 el.child(
                     h_flex()
+                        .absolute()
+                        .left_0()
+                        .right_0()
+                        .bottom(px(12.))
                         .min_h(px(64.))
-                        .mt_4()
                         .p_3()
                         .gap_3()
                         .items_center()
@@ -842,6 +858,8 @@ impl ProfilePage {
                                 GpuiButton::new("remove-avatar-btn")
                                     .label(mezon_i18n::t(&locale, "common.removeAvatar"))
                                     .text_color(theme.text_muted)
+                                    .border_1()
+                                    .border_color(theme.border)
                                     .on_click(cx.listener(|this, _, _, cx| {
                                         if let Some(state) = &mut this.profile {
                                             state.avatar_url = None;
@@ -867,7 +885,10 @@ impl ProfilePage {
                                 .as_ref()
                                 .expect("about_me_input not initialized"),
                         )
-                        .h(px(112.0)),
+                        .h(px(112.0))
+                        .rounded_lg()
+                        .border_1()
+                        .border_color(theme.border),
                     )
                     .child(
                         div()
