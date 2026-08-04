@@ -140,15 +140,34 @@ pub async fn fetch_channel_attachments(
     before: u32,
     after: u32,
     limit: i32,
-) -> anyhow::Result<Vec<ChannelAttachment>> {
+) -> anyhow::Result<FetchedChannelAttachments> {
     let list = api
         .list_channel_attachments(clan_id.0, channel_id.0, "", 0, limit, before, after)
         .await?;
-    Ok(list
+    let raw_count = list.len();
+    let attachments = list
         .into_iter()
         .map(|a| ChannelAttachment::from_api(a, channel_id, clan_id, &cfg))
         .filter(ChannelAttachment::is_media)
-        .collect())
+        .collect();
+    Ok(FetchedChannelAttachments {
+        attachments,
+        raw_count,
+    })
+}
+
+#[derive(Debug, Clone)]
+pub struct FetchedChannelAttachments {
+    pub attachments: Vec<ChannelAttachment>,
+    pub raw_count: usize,
+}
+
+pub fn initial_page_has_more(raw_count: usize, limit: i32) -> bool {
+    raw_count as i32 >= limit
+}
+
+pub fn next_page_has_more(raw_count: usize, limit: i32, new_items: usize) -> bool {
+    initial_page_has_more(raw_count, limit) && new_items > 0
 }
 
 /// Resolved uploader display info.
@@ -606,8 +625,9 @@ impl GalleryStore {
                 .await;
             let mapped_result = match result {
                 Ok(list) => {
+                    let raw_count = list.len();
                     let cfg = mapping_cfg.clone();
-                    Ok(cx
+                    let mapped = cx
                         .background_executor()
                         .spawn(async move {
                             match cfg {
@@ -621,7 +641,8 @@ impl GalleryStore {
                                 None => Vec::new(),
                             }
                         })
-                        .await)
+                        .await;
+                    Ok((mapped, raw_count))
                 }
                 Err(e) => Err(e),
             };
@@ -629,8 +650,7 @@ impl GalleryStore {
                 let entry = this.by_channel.entry(channel_id).or_default();
                 entry.is_loading = false;
                 match mapped_result {
-                    Ok(mapped) => {
-                        let fetched = mapped.len();
+                    Ok((mapped, raw_count)) => {
                         let added = merge_attachments(
                             &mut entry.attachments,
                             &mut entry.ids,
@@ -638,18 +658,18 @@ impl GalleryStore {
                             reset,
                             direction,
                         );
-                        let full_page = fetched as i32 >= GALLERY_PAGE_SIZE;
-                        let progressed = added > 0;
                         if reset {
-                            entry.has_more_before = full_page;
+                            entry.has_more_before =
+                                initial_page_has_more(raw_count, GALLERY_PAGE_SIZE);
                             entry.has_more_after = false;
                         } else {
+                            let has_more = next_page_has_more(raw_count, GALLERY_PAGE_SIZE, added);
                             match direction {
                                 LoadDirection::Before => {
-                                    entry.has_more_before = full_page && progressed;
+                                    entry.has_more_before = has_more;
                                 }
                                 LoadDirection::After => {
-                                    entry.has_more_after = full_page && progressed;
+                                    entry.has_more_after = has_more;
                                 }
                             }
                         }
@@ -929,5 +949,21 @@ mod tests {
         let mut atts = vec![att(1, 1, "image/png")];
         enrich_uploader(&mut atts, |_| None);
         assert_eq!(atts[0].uploader_name, SharedString::from("Anonymous"));
+    }
+
+    #[test]
+    fn has_more_uses_raw_page_size_not_filtered_media_count() {
+        assert!(initial_page_has_more(50, GALLERY_PAGE_SIZE));
+        assert!(!initial_page_has_more(49, GALLERY_PAGE_SIZE));
+        assert!(
+            next_page_has_more(50, GALLERY_PAGE_SIZE, 12),
+            "full raw page with some new media must keep paging"
+        );
+        assert!(
+            !next_page_has_more(12, GALLERY_PAGE_SIZE, 12),
+            "short raw page is end-of-list even if all items are new media"
+        );
+        assert!(!next_page_has_more(50, GALLERY_PAGE_SIZE, 0));
+        assert!(!next_page_has_more(0, GALLERY_PAGE_SIZE, 0));
     }
 }

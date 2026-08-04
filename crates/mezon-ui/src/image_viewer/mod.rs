@@ -12,7 +12,8 @@ use gpui::{
 };
 use mezon_store::{
     AppConfig, ChannelAttachment, ChannelId, ChannelList, ClanId, DirectMessageStore, GalleryStore,
-    PlatformStore, Settings, UploaderInfo, fetch_channel_attachments, resolve_attachment_uploader,
+    PlatformStore, Settings, UploaderInfo, fetch_channel_attachments, initial_page_has_more,
+    next_page_has_more, resolve_attachment_uploader,
 };
 use ui::{ScrollAxes, Scrollbars, WithScrollbar};
 
@@ -531,10 +532,12 @@ impl ImageViewer {
                 }
                 this.loading = false;
                 match result {
-                    Ok(mut mapped) => {
+                    Ok(page) => {
+                        let mut mapped = page.attachments;
                         resolve_uploaders(&mut mapped, clan, channel, cx);
+                        this.has_more_before =
+                            initial_page_has_more(page.raw_count, VIEWER_FETCH_LIMIT);
                         this.attachments = mapped;
-                        this.has_more_before = this.attachments.len() as i32 >= VIEWER_FETCH_LIMIT;
                         if let Some(url) = &select_url {
                             this.index = this
                                 .attachments
@@ -581,7 +584,8 @@ impl ImageViewer {
                 }
                 this.loading = false;
                 match result {
-                    Ok(mut mapped) => {
+                    Ok(page) => {
+                        let mut mapped = page.attachments;
                         resolve_uploaders(&mut mapped, clan, channel, cx);
                         let existing: std::collections::HashSet<i64> =
                             this.attachments.iter().map(|a| a.id).collect();
@@ -601,7 +605,8 @@ impl ImageViewer {
                             this.attachments = merged;
                             this.video_sync_token = None;
                         }
-                        this.has_more_after = added as i32 >= VIEWER_FETCH_LIMIT;
+                        this.has_more_after =
+                            next_page_has_more(page.raw_count, VIEWER_FETCH_LIMIT, added);
                         cx.notify();
                     }
                     Err(e) => tracing::error!("image viewer newer fetch failed: {e}"),
@@ -638,7 +643,8 @@ impl ImageViewer {
                 }
                 this.loading = false;
                 match result {
-                    Ok(mut mapped) => {
+                    Ok(page) => {
+                        let mut mapped = page.attachments;
                         resolve_uploaders(&mut mapped, clan, channel, cx);
                         let existing: std::collections::HashSet<i64> =
                             this.attachments.iter().map(|a| a.id).collect();
@@ -649,7 +655,8 @@ impl ImageViewer {
                             }
                         }
                         let added = this.attachments.len() - before_len;
-                        this.has_more_before = added > 0;
+                        this.has_more_before =
+                            next_page_has_more(page.raw_count, VIEWER_FETCH_LIMIT, added);
                         cx.notify();
                     }
                     Err(e) => tracing::error!("image viewer page fetch failed: {e}"),

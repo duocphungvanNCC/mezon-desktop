@@ -19,9 +19,25 @@ const TILE: f32 = 144.0;
 const COLUMNS: usize = 3;
 const LIST_PAD_X: f32 = 16.;
 const LOAD_MORE_THRESHOLD: usize = 4;
+const MAX_VIEWPORT_AUTOFILL_PAGES: u8 = 2;
 const DATE_FMT: &str = "%d/%m/%Y";
 const DATE_FILTER_TOP: f32 = 92.0;
 const GALLERY_MIN_DATE: NaiveDate = NaiveDate::from_ymd_opt(2020, 1, 1).unwrap();
+
+fn gallery_thumb_placeholder(bg: gpui::Rgba, muted: gpui::Rgba) -> gpui::AnyElement {
+    div()
+        .size_full()
+        .flex()
+        .items_center()
+        .justify_center()
+        .bg(bg)
+        .child(
+            Icon::new(IconName::ImageThumbnail)
+                .size(px(20.))
+                .text_color(muted),
+        )
+        .into_any()
+}
 
 enum GalleryRow {
     Header(SharedString),
@@ -70,6 +86,7 @@ pub struct GalleryModal {
     list_state: ListState,
     image_cache: Entity<LruImageCache>,
     rows_snapshot: Option<RowsSnapshot>,
+    viewport_autofill_remaining: u8,
     _subscription: Subscription,
     _release: Subscription,
     _from_picker_sub: Subscription,
@@ -131,6 +148,7 @@ impl GalleryModal {
             list_state: ListState::new(0, ListAlignment::Top, px(400.)),
             image_cache,
             rows_snapshot: None,
+            viewport_autofill_remaining: MAX_VIEWPORT_AUTOFILL_PAGES,
             _subscription: subscription,
             _release: release,
             _from_picker_sub: Subscription::new(|| ()),
@@ -178,13 +196,24 @@ impl GalleryModal {
             .set_scroll_handler(move |event, _window, cx| {
                 let near_bottom =
                     event.visible_range.end + LOAD_MORE_THRESHOLD >= event.count && event.count > 0;
-                if near_bottom && let Some(this) = weak.upgrade() {
-                    this.update(cx, |_, cx| {
-                        GalleryStore::global(cx).update(cx, |store, cx| {
-                            store.fetch_page(clan, channel, LoadDirection::Before, cx);
-                        });
-                    });
+                if !near_bottom {
+                    return;
                 }
+                let user_scrolled = event.visible_range.start > 0;
+                let Some(this) = weak.upgrade() else {
+                    return;
+                };
+                this.update(cx, |this, cx| {
+                    if !user_scrolled {
+                        if this.viewport_autofill_remaining == 0 {
+                            return;
+                        }
+                        this.viewport_autofill_remaining -= 1;
+                    }
+                    GalleryStore::global(cx).update(cx, |store, cx| {
+                        store.fetch_page(clan, channel, LoadDirection::Before, cx);
+                    });
+                });
             });
     }
 
@@ -225,9 +254,19 @@ impl GalleryModal {
             }
         }
         flush_bucket(&mut rows, &mut bucket);
+
+        let old_count = self.rows.len();
+        let prefix = gallery_rows_common_prefix(&self.rows, &rows);
+        let new_count = rows.len();
         self.rows = rows;
         self.rows_snapshot = Some(self.rows_snapshot(cx));
-        self.list_state.reset(self.rows.len());
+
+        if old_count == 0 || prefix == 0 {
+            self.list_state.reset(new_count);
+        } else if prefix < old_count || new_count != old_count {
+            self.list_state
+                .splice(prefix..old_count, new_count.saturating_sub(prefix));
+        }
         cx.notify();
     }
 
@@ -276,6 +315,7 @@ impl GalleryModal {
         let (after, before) = calculate_timestamps(from, to);
         self.applied_from_date = from;
         self.applied_to_date = to;
+        self.viewport_autofill_remaining = MAX_VIEWPORT_AUTOFILL_PAGES;
         GalleryStore::global(cx).update(cx, |store, cx| {
             store.apply_date_filter(self.clan_id, self.channel_id, after, before, cx);
         });
@@ -299,6 +339,7 @@ impl GalleryModal {
             picker.set_max(None, cx);
             picker.close(cx);
         });
+        self.viewport_autofill_remaining = MAX_VIEWPORT_AUTOFILL_PAGES;
         GalleryStore::global(cx).update(cx, |store, cx| {
             store.clear_date_filter(self.clan_id, self.channel_id, cx);
         });
@@ -424,15 +465,21 @@ impl GalleryModal {
             _ => return div().into_any_element(),
         };
         let entity = cx.entity();
+        let placeholder_bg = theme.bg_tertiary;
+        let placeholder_muted = theme.text_muted;
         let mut row = div().flex().flex_row().gap_3().pb_3();
         for (id, is_video, thumb_src) in tiles {
             let entity_click = entity.clone();
             let media = if is_video {
                 div().size_full().into_any_element()
             } else {
+                let ph_bg = placeholder_bg;
+                let ph_muted = placeholder_muted;
                 img(thumb_src)
                     .size_full()
                     .object_fit(gpui::ObjectFit::Cover)
+                    .with_loading(move || gallery_thumb_placeholder(ph_bg, ph_muted))
+                    .with_fallback(move || gallery_thumb_placeholder(ph_bg, ph_muted))
                     .into_any_element()
             };
             row = row.child(
@@ -484,6 +531,27 @@ fn flush_bucket(rows: &mut Vec<GalleryRow>, bucket: &mut Vec<GalleryTile>) {
     if !bucket.is_empty() {
         rows.push(GalleryRow::Images(std::mem::take(bucket)));
     }
+}
+
+fn gallery_row_same(a: &GalleryRow, b: &GalleryRow) -> bool {
+    match (a, b) {
+        (GalleryRow::Header(left), GalleryRow::Header(right)) => left == right,
+        (GalleryRow::Images(left), GalleryRow::Images(right)) => {
+            left.len() == right.len()
+                && left
+                    .iter()
+                    .zip(right.iter())
+                    .all(|(a, b)| a.id == b.id && a.is_video == b.is_video)
+        }
+        _ => false,
+    }
+}
+
+fn gallery_rows_common_prefix(old: &[GalleryRow], new: &[GalleryRow]) -> usize {
+    old.iter()
+        .zip(new.iter())
+        .take_while(|(a, b)| gallery_row_same(a, b))
+        .count()
 }
 
 fn enrich_playlist(
@@ -980,5 +1048,47 @@ fn calculate_timestamps(
             (Some(start_of_day_ts(start)), Some(end_of_day_ts(start)))
         }
         (from, to) => (from.map(start_of_day_ts), to.map(end_of_day_ts)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tile(id: i64) -> GalleryTile {
+        GalleryTile {
+            id,
+            is_video: false,
+            thumb_src: SharedString::default(),
+        }
+    }
+
+    #[test]
+    fn common_prefix_keeps_loaded_rows_when_appending() {
+        let old = vec![
+            GalleryRow::Header("August 04, 2026".into()),
+            GalleryRow::Images(vec![tile(1), tile(2), tile(3)]),
+            GalleryRow::Images(vec![tile(4), tile(5)]),
+        ];
+        let new = vec![
+            GalleryRow::Header("August 04, 2026".into()),
+            GalleryRow::Images(vec![tile(1), tile(2), tile(3)]),
+            GalleryRow::Images(vec![tile(4), tile(5), tile(6)]),
+            GalleryRow::Images(vec![tile(7), tile(8), tile(9)]),
+        ];
+        assert_eq!(gallery_rows_common_prefix(&old, &new), 2);
+    }
+
+    #[test]
+    fn common_prefix_is_zero_when_filter_changes_head() {
+        let old = vec![
+            GalleryRow::Header("August 04, 2026".into()),
+            GalleryRow::Images(vec![tile(1), tile(2), tile(3)]),
+        ];
+        let new = vec![
+            GalleryRow::Header("August 03, 2026".into()),
+            GalleryRow::Images(vec![tile(10), tile(11), tile(12)]),
+        ];
+        assert_eq!(gallery_rows_common_prefix(&old, &new), 0);
     }
 }
