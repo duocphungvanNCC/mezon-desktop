@@ -6,6 +6,7 @@ use gpui::{
 };
 use mezon_store::{
     Message, MessageButton, MessageComponent, MessageId, MessageSelect, MessagesStore,
+    select_allows_multiple,
 };
 use ui::PopoverMenu;
 
@@ -254,6 +255,7 @@ pub(super) fn render_message_select(
     let max = select.max_options;
     let disabled = select.disabled;
     let options_len = select.options.len();
+    let user_id = ctx.current_user_id.parse::<i64>().unwrap_or(0);
     let popover_id = SharedString::from(format!("msg-select-popover-{}-{index}", message_id.get()));
 
     PopoverMenu::new(popover_id)
@@ -269,7 +271,7 @@ pub(super) fn render_message_select(
                     max,
                     disabled,
                     options_len,
-                    inside,
+                    user_id,
                     window,
                     cx,
                 )
@@ -335,7 +337,7 @@ struct SelectDropdown {
     min: Option<i32>,
     max: Option<i32>,
     disabled: bool,
-    inside: bool,
+    user_id: i64,
     _blur_sub: Subscription,
 }
 
@@ -357,7 +359,7 @@ impl SelectDropdown {
         max: Option<i32>,
         disabled: bool,
         options_len: usize,
-        inside: bool,
+        user_id: i64,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -386,7 +388,7 @@ impl SelectDropdown {
             min,
             max,
             disabled,
-            inside,
+            user_id,
             _blur_sub: blur_sub,
         }
     }
@@ -401,8 +403,7 @@ impl SelectDropdown {
             .read(cx)
             .message_select_selection(self.message_id, &self.select_id)
             .to_vec();
-        let multiple =
-            self.min.is_some_and(|value| value > 1) || self.max.is_some_and(|value| value >= 2);
+        let multiple = select_allows_multiple(self.min, self.max);
         let new_values = if multiple {
             if current.contains(&value) {
                 cx.emit(DismissEvent);
@@ -418,28 +419,21 @@ impl SelectDropdown {
                 return;
             }
             let mut values = current;
-            values.push(value);
+            values.push(value.clone());
             values
         } else {
-            vec![value]
+            vec![value.clone()]
         };
-        let inside = self.inside;
+        let user_id = self.user_id;
         store.update(cx, |store, cx| {
-            if inside {
-                store.set_message_select_selection(
-                    self.message_id,
-                    self.select_id.clone(),
-                    new_values,
-                    cx,
-                );
-            } else {
-                store.select_message_option(
-                    self.message_id,
-                    self.select_id.clone(),
-                    new_values,
-                    cx,
-                );
-            }
+            store.select_message_option(
+                self.message_id,
+                self.select_id.clone(),
+                new_values,
+                value,
+                user_id,
+                cx,
+            );
         });
         cx.emit(DismissEvent);
     }

@@ -478,6 +478,16 @@ pub struct MessageSelect {
     pub value_selected: Option<SharedString>,
 }
 
+pub fn select_allows_multiple(min_options: Option<i32>, max_options: Option<i32>) -> bool {
+    min_options.is_some_and(|value| value > 1) || max_options.is_some_and(|value| value >= 2)
+}
+
+impl MessageSelect {
+    pub fn allows_multiple(&self) -> bool {
+        select_allows_multiple(self.min_options, self.max_options)
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum MessageComponent {
     Button(MessageButton),

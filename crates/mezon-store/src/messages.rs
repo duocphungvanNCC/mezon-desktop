@@ -3340,32 +3340,70 @@ impl MessagesStore {
         cx.notify();
     }
 
-    #[allow(dead_code)]
     pub fn select_message_option(
         &mut self,
         message_id: MessageId,
         select_id: SharedString,
         values: Vec<SharedString>,
+        chosen: SharedString,
+        user_id: i64,
         cx: &mut Context<Self>,
     ) {
-        let Some(channel_id) = self.active_channel_id else {
-            return;
-        };
         self.set_message_select_selection(message_id, select_id.clone(), values, cx);
+        let sender_id = self
+            .cached_message(message_id)
+            .and_then(|message| message.sender_id.parse::<i64>().ok())
+            .unwrap_or_default();
+        self.send_message_button_click(
+            message_id,
+            select_id,
+            sender_id,
+            user_id,
+            chosen.to_string(),
+            cx,
+        );
+    }
 
-        let api = self.api.clone();
-        let channel_num = channel_id.get();
-        let message_num = message_id.get();
-        let select_id = select_id.to_string();
-        cx.spawn(async move |_this, _cx| {
-            if let Err(e) = api
-                .dropdown_box_selected(message_num, channel_num, &select_id)
-                .await
-            {
-                tracing::error!("select_message_option dropdown_box_selected failed: {e}");
-            }
-        })
-        .detach();
+    fn cached_message(&self, message_id: MessageId) -> Option<&Message> {
+        self.message_in_channel(self.reaction_storage_channel(message_id), message_id)
+    }
+
+    fn multi_choice_select_ids(&self, message_id: MessageId) -> HashSet<SharedString> {
+        let Some(message) = self.cached_message(message_id) else {
+            return HashSet::new();
+        };
+        let embed_selects = message
+            .embeds
+            .iter()
+            .flat_map(|embed| embed.fields.iter())
+            .filter_map(|field| match field.input.as_ref() {
+                Some(EmbedInput::Select(select)) => Some(select),
+                _ => None,
+            });
+        let row_selects = message
+            .components
+            .iter()
+            .flat_map(|row| row.components.iter())
+            .filter_map(|component| match component {
+                MessageComponent::Select(select) => Some(select),
+                _ => None,
+            });
+        embed_selects
+            .chain(row_selects)
+            .filter(|select| select.allows_multiple())
+            .filter_map(|select| select.id.clone())
+            .collect()
+    }
+
+    fn embed_form_payload(
+        &self,
+        message_id: MessageId,
+    ) -> serde_json::Map<String, serde_json::Value> {
+        build_embed_form_payload(
+            &self.multi_choice_select_ids(message_id),
+            self.select_ui.get(&message_id),
+            self.embed_form.get(&message_id),
+        )
     }
 
     pub fn click_message_button(
@@ -3376,27 +3414,26 @@ impl MessagesStore {
         user_id: i64,
         cx: &mut Context<Self>,
     ) {
+        let form = self.embed_form_payload(message_id);
+        tracing::info!("embed form for '{button_id}': {}", describe_form(&form));
+        let extra_data =
+            serde_json::to_string(&serde_json::Value::Object(form)).unwrap_or_else(|_| "{}".into());
+        self.send_message_button_click(message_id, button_id, sender_id, user_id, extra_data, cx);
+    }
+
+    fn send_message_button_click(
+        &mut self,
+        message_id: MessageId,
+        button_id: SharedString,
+        sender_id: i64,
+        user_id: i64,
+        extra_data: String,
+        cx: &mut Context<Self>,
+    ) {
         let Some(channel_id) = self.active_channel_id else {
             tracing::warn!("message button '{button_id}' ignored: no active channel");
             return;
         };
-        let mut form = serde_json::Map::new();
-        if let Some(by_select) = self.select_ui.get(&message_id) {
-            for (id, values) in by_select {
-                let values: Vec<serde_json::Value> = values
-                    .iter()
-                    .map(|v| serde_json::Value::String(v.to_string()))
-                    .collect();
-                form.insert(id.to_string(), serde_json::Value::Array(values));
-            }
-        }
-        if let Some(by_input) = self.embed_form.get(&message_id) {
-            for (id, value) in by_input {
-                form.insert(id.to_string(), serde_json::Value::String(value.to_string()));
-            }
-        }
-        let extra_data =
-            serde_json::to_string(&serde_json::Value::Object(form)).unwrap_or_else(|_| "{}".into());
         let api = self.api.clone();
         let channel_num = channel_id.get();
         let message_num = message_id.get();
@@ -6764,6 +6801,50 @@ fn format_embed_footer_date(raw: &SharedString) -> SharedString {
     }
 }
 
+fn build_embed_form_payload(
+    multi_choice: &HashSet<SharedString>,
+    selects: Option<&HashMap<SharedString, Vec<SharedString>>>,
+    inputs: Option<&HashMap<SharedString, SharedString>>,
+) -> serde_json::Map<String, serde_json::Value> {
+    let mut form = serde_json::Map::new();
+    for (id, values) in selects.into_iter().flatten() {
+        let value = if multi_choice.contains(id) {
+            serde_json::Value::Array(
+                values
+                    .iter()
+                    .map(|value| serde_json::Value::String(value.to_string()))
+                    .collect(),
+            )
+        } else {
+            serde_json::Value::String(
+                values
+                    .first()
+                    .map(SharedString::to_string)
+                    .unwrap_or_default(),
+            )
+        };
+        form.insert(id.to_string(), value);
+    }
+    for (id, value) in inputs.into_iter().flatten() {
+        form.insert(id.to_string(), serde_json::Value::String(value.to_string()));
+    }
+    form
+}
+
+fn describe_form(form: &serde_json::Map<String, serde_json::Value>) -> String {
+    if form.is_empty() {
+        return "{}".into();
+    }
+    form.iter()
+        .map(|(id, value)| match value {
+            serde_json::Value::String(text) => format!("{id}=str({})", text.len()),
+            serde_json::Value::Array(items) => format!("{id}=arr({})", items.len()),
+            _ => format!("{id}=other"),
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 const EMBED_COMPONENT_TYPE_SELECT: i32 = 2;
 const EMBED_COMPONENT_TYPE_INPUT: i32 = 3;
 
@@ -7501,6 +7582,47 @@ mod tests {
         assert!(input.required);
         assert!(!input.multiline);
         assert!(!input.disabled);
+    }
+
+    #[test]
+    fn embed_form_sends_a_single_choice_select_as_a_string() {
+        let mut selects = HashMap::new();
+        selects.insert(
+            SharedString::from("task"),
+            vec![SharedString::from("Coding")],
+        );
+        selects.insert(
+            SharedString::from("tags"),
+            vec![SharedString::from("a"), SharedString::from("b")],
+        );
+        let mut inputs = HashMap::new();
+        inputs.insert(SharedString::from("today"), SharedString::from("shipped"));
+        let multi_choice = HashSet::from([SharedString::from("tags")]);
+
+        let form = build_embed_form_payload(&multi_choice, Some(&selects), Some(&inputs));
+
+        assert_eq!(form["task"], serde_json::json!("Coding"));
+        assert_eq!(form["tags"], serde_json::json!(["a", "b"]));
+        assert_eq!(form["today"], serde_json::json!("shipped"));
+    }
+
+    #[test]
+    fn embed_form_of_an_untouched_message_is_an_empty_object() {
+        let form = build_embed_form_payload(&HashSet::new(), None, None);
+        assert_eq!(
+            serde_json::to_string(&serde_json::Value::Object(form)).expect("json"),
+            "{}"
+        );
+    }
+
+    #[test]
+    fn select_is_multi_choice_only_when_the_bot_asks_for_a_range() {
+        use crate::select_allows_multiple;
+
+        assert!(!select_allows_multiple(None, None));
+        assert!(!select_allows_multiple(Some(1), Some(1)));
+        assert!(select_allows_multiple(Some(2), None));
+        assert!(select_allows_multiple(None, Some(2)));
     }
 
     #[test]
