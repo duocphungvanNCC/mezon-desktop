@@ -1,10 +1,11 @@
+use std::borrow::Cow;
 use std::rc::Rc;
 
 use gpui::{
-    AnyElement, App, AvailableSpace, Bounds, ContentMask, Corners, CursorStyle, DispatchPhase,
-    Element, ElementId, FontWeight, GlobalElementId, Hitbox, HitboxBehavior, Hsla,
-    InspectorElementId, IntoElement, LayoutId, MouseButton, MouseDownEvent, Pixels, Point,
-    SharedString, Style, TextAlign, TransformationMatrix, Window, fill, point, px, size,
+    AnyElement, App, AvailableSpace, Bounds, Corners, CursorStyle, DispatchPhase, Element,
+    ElementId, FontWeight, GlobalElementId, Hitbox, HitboxBehavior, Hsla, InspectorElementId,
+    IntoElement, LayoutId, MouseButton, MouseDownEvent, Pixels, Point, SharedString, Style,
+    TextAlign, TextRun, TransformationMatrix, TruncateFrom, Window, fill, point, px, size,
 };
 
 use crate::components::primitives::IconName;
@@ -20,7 +21,8 @@ const OWNER_GAP: Pixels = px(4.);
 const DOT_SIZE: Pixels = px(12.);
 const DOT_BORDER: Pixels = px(2.);
 const DOT_INNER: Pixels = px(8.);
-const STATUS_MAX_WIDTH: Pixels = px(100.);
+const STATUS_MAX_WIDTH: Pixels = px(150.);
+const ELLIPSIS: &str = "…";
 const STATUS_ICON_SIZE: Pixels = px(12.);
 const STATUS_ICON_GAP: Pixels = px(4.);
 const FALLBACK_WIDTH: Pixels = px(245.);
@@ -104,6 +106,28 @@ fn line_height(window: &Window, font_size: Pixels) -> Pixels {
     text_style
         .line_height
         .to_pixels(font_size.into(), window.rem_size())
+}
+
+fn truncate_to_width(
+    cx: &App,
+    window: &Window,
+    text: SharedString,
+    font_size: Pixels,
+    runs: &[TextRun],
+    max_width: Pixels,
+) -> (SharedString, Vec<TextRun>) {
+    if max_width <= px(0.) {
+        return (SharedString::default(), Vec::new());
+    }
+    let text_style = window.text_style();
+    let mut line_wrapper = cx.text_system().line_wrapper(text_style.font(), font_size);
+    let (truncated, runs_cow) =
+        line_wrapper.truncate_line(text, max_width, ELLIPSIS, runs, TruncateFrom::End);
+    let runs = match runs_cow {
+        Cow::Borrowed(r) => r.to_vec(),
+        Cow::Owned(r) => r,
+    };
+    (truncated, runs)
 }
 
 impl Element for MemberRowElement {
@@ -245,27 +269,30 @@ impl Element for MemberRowElement {
 
         let text_system = window.text_system().clone();
 
+        let mut name_max_width = (width - text_x - H_PADDING).max(px(0.));
+        if self.owner_icon.is_some() {
+            name_max_width = (name_max_width - OWNER_GAP - OWNER_ICON_SIZE).max(px(0.));
+        }
         let mut name_run = window.text_style().to_run(self.name.len());
         name_run.color = self.name_color;
         name_run.font.weight = FontWeight::MEDIUM;
-        let name_line =
-            text_system.shape_line(self.name.clone(), NAME_FONT_SIZE, &[name_run], None);
-        let name_clip = ContentMask {
-            bounds: Bounds {
-                origin: point(left + text_x, top),
-                size: size((width - text_x - H_PADDING).max(px(0.)), ROW_HEIGHT),
-            },
-        };
-        window.with_content_mask(Some(name_clip), |window| {
-            let _ = name_line.paint(
-                point(left + text_x, name_y),
-                name_line_height,
-                TextAlign::Left,
-                None,
-                window,
-                cx,
-            );
-        });
+        let (name_text, name_runs) = truncate_to_width(
+            cx,
+            window,
+            self.name.clone(),
+            NAME_FONT_SIZE,
+            std::slice::from_ref(&name_run),
+            name_max_width,
+        );
+        let name_line = text_system.shape_line(name_text, NAME_FONT_SIZE, &name_runs, None);
+        let _ = name_line.paint(
+            point(left + text_x, name_y),
+            name_line_height,
+            TextAlign::Left,
+            None,
+            window,
+            cx,
+        );
 
         if let Some(color) = self.owner_icon {
             let owner_bounds = Bounds {
@@ -305,25 +332,32 @@ impl Element for MemberRowElement {
                 );
                 status_text_x += STATUS_ICON_SIZE + STATUS_ICON_GAP;
             }
+            let status_area_width = STATUS_MAX_WIDTH.min((width - text_x - H_PADDING).max(px(0.)));
+            let status_text_max_width = if self.status_icon.is_some() {
+                (status_area_width - STATUS_ICON_SIZE - STATUS_ICON_GAP).max(px(0.))
+            } else {
+                status_area_width
+            };
             let mut status_run = window.text_style().to_run(text.len());
             status_run.color = color;
-            let status_line = text_system.shape_line(text, STATUS_FONT_SIZE, &[status_run], None);
-            let status_clip = ContentMask {
-                bounds: Bounds {
-                    origin: point(left + text_x, top),
-                    size: size(STATUS_MAX_WIDTH, ROW_HEIGHT),
-                },
-            };
-            window.with_content_mask(Some(status_clip), |window| {
-                let _ = status_line.paint(
-                    point(status_text_x, status_y),
-                    status_line_height,
-                    TextAlign::Left,
-                    None,
-                    window,
-                    cx,
-                );
-            });
+            let (status_text, status_runs) = truncate_to_width(
+                cx,
+                window,
+                text,
+                STATUS_FONT_SIZE,
+                std::slice::from_ref(&status_run),
+                status_text_max_width,
+            );
+            let status_line =
+                text_system.shape_line(status_text, STATUS_FONT_SIZE, &status_runs, None);
+            let _ = status_line.paint(
+                point(status_text_x, status_y),
+                status_line_height,
+                TextAlign::Left,
+                None,
+                window,
+                cx,
+            );
         }
     }
 }
