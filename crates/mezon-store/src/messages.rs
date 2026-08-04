@@ -182,10 +182,11 @@ pub struct OutgoingMention {
 
 impl OutgoingMention {
     pub(crate) fn into_transport(self) -> TransportMention {
+        let is_role = self.user_id.is_empty() && !self.role_id.is_empty();
         TransportMention {
+            username: if is_role { String::new() } else { self.display },
             user_id: self.user_id,
             role_id: self.role_id,
-            username: self.display,
             s: self.s,
             e: self.e,
         }
@@ -534,6 +535,7 @@ pub struct MessagesStore {
     embed_form: HashMap<MessageId, HashMap<SharedString, SharedString>>,
     forward_task: Option<Task<()>>,
     forward_in_flight: bool,
+    presign_expiry_task: Option<Task<()>>,
     pending_send_payloads: HashMap<MessageId, PendingSendPayload>,
     anonymous_clans: HashSet<ClanId>,
     topic_anonymous_mode: bool,
@@ -948,6 +950,7 @@ impl MessagesStore {
             select_ui: HashMap::new(),
             embed_form: HashMap::new(),
             forward_task: None,
+            presign_expiry_task: None,
             forward_in_flight: false,
             pending_send_payloads: HashMap::new(),
             anonymous_clans: HashSet::new(),
@@ -2856,7 +2859,7 @@ impl MessagesStore {
             async move |_this, cx| match api.create_message_2_inbox(request).await {
                 Ok(()) => {
                     let notification = inbox_notification_from_marked_message_local(&marked);
-                    let _ = cx.update(|cx| {
+                    cx.update(|cx| {
                         InboxStore::global(cx).update(cx, |store, cx| {
                             store.prepend_local(
                                 GLOBAL_INBOX_BUCKET_CLAN_ID,
@@ -3107,6 +3110,71 @@ impl MessagesStore {
         true
     }
 
+    /// Re-run the presign gate so attachments whose upload never completed are
+    /// dropped once they pass their expiry, then arm the next deadline. Without
+    /// this the placeholder would sit there until some unrelated update for that
+    /// channel happened to arrive.
+    fn sweep_expired_presign(&mut self, cx: &mut Context<Self>) {
+        let config = AppConfig::try_global(cx).cloned();
+        let base_img = config
+            .as_ref()
+            .map(|c| c.base_img_url.clone())
+            .unwrap_or_default();
+        let now = now_unix_seconds();
+        let mut changed = false;
+        for channel in self.cache.values_mut() {
+            for message in channel.messages.items.iter_mut() {
+                if !message.attachments.iter().any(|a| a.presign_pending) {
+                    continue;
+                }
+                let Some(keys) = presign::parse_presign_finish_keys(&message.content) else {
+                    continue;
+                };
+                let before = message.attachments.len();
+                apply_presign_gate_at(
+                    &mut message.attachments,
+                    &keys,
+                    &base_img,
+                    message.create_time,
+                    now,
+                );
+                if message.attachments.len() != before {
+                    // The album layout and the viewer list are built from the
+                    // attachments, so dropping one leaves them describing tiles
+                    // that are no longer there.
+                    let (album_layout, viewer_media) =
+                        build_media_presentation(&message.attachments, config.as_ref());
+                    message.album_layout = album_layout;
+                    message.viewer_media = viewer_media;
+                    changed = true;
+                }
+            }
+        }
+        if changed {
+            cx.notify();
+        }
+        self.schedule_presign_expiry(cx);
+    }
+
+    fn schedule_presign_expiry(&mut self, cx: &mut Context<Self>) {
+        let now = now_unix_seconds();
+        let deadlines = self.cache.values_mut().flat_map(|channel| {
+            channel
+                .messages
+                .items
+                .iter()
+                .filter_map(presign_expiry_deadline)
+        });
+        let Some(delay) = next_presign_expiry_in(deadlines, now) else {
+            self.presign_expiry_task = None;
+            return;
+        };
+        self.presign_expiry_task = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(delay).await;
+            let _ = this.update(cx, |this, cx| this.sweep_expired_presign(cx));
+        }));
+    }
+
     pub fn share_contact(
         &mut self,
         contact: ShareContactSubject,
@@ -3273,32 +3341,70 @@ impl MessagesStore {
         cx.notify();
     }
 
-    #[allow(dead_code)]
     pub fn select_message_option(
         &mut self,
         message_id: MessageId,
         select_id: SharedString,
         values: Vec<SharedString>,
+        chosen: SharedString,
+        user_id: i64,
         cx: &mut Context<Self>,
     ) {
-        let Some(channel_id) = self.active_channel_id else {
-            return;
-        };
         self.set_message_select_selection(message_id, select_id.clone(), values, cx);
+        let sender_id = self
+            .cached_message(message_id)
+            .and_then(|message| message.sender_id.parse::<i64>().ok())
+            .unwrap_or_default();
+        self.send_message_button_click(
+            message_id,
+            select_id,
+            sender_id,
+            user_id,
+            chosen.to_string(),
+            cx,
+        );
+    }
 
-        let api = self.api.clone();
-        let channel_num = channel_id.get();
-        let message_num = message_id.get();
-        let select_id = select_id.to_string();
-        cx.spawn(async move |_this, _cx| {
-            if let Err(e) = api
-                .dropdown_box_selected(message_num, channel_num, &select_id)
-                .await
-            {
-                tracing::error!("select_message_option dropdown_box_selected failed: {e}");
-            }
-        })
-        .detach();
+    fn cached_message(&self, message_id: MessageId) -> Option<&Message> {
+        self.message_in_channel(self.reaction_storage_channel(message_id), message_id)
+    }
+
+    fn multi_choice_select_ids(&self, message_id: MessageId) -> HashSet<SharedString> {
+        let Some(message) = self.cached_message(message_id) else {
+            return HashSet::new();
+        };
+        let embed_selects = message
+            .embeds
+            .iter()
+            .flat_map(|embed| embed.fields.iter())
+            .filter_map(|field| match field.input.as_ref() {
+                Some(EmbedInput::Select(select)) => Some(select),
+                _ => None,
+            });
+        let row_selects = message
+            .components
+            .iter()
+            .flat_map(|row| row.components.iter())
+            .filter_map(|component| match component {
+                MessageComponent::Select(select) => Some(select),
+                _ => None,
+            });
+        embed_selects
+            .chain(row_selects)
+            .filter(|select| select.allows_multiple())
+            .filter_map(|select| select.id.clone())
+            .collect()
+    }
+
+    fn embed_form_payload(
+        &self,
+        message_id: MessageId,
+    ) -> serde_json::Map<String, serde_json::Value> {
+        build_embed_form_payload(
+            &self.multi_choice_select_ids(message_id),
+            self.select_ui.get(&message_id),
+            self.embed_form.get(&message_id),
+        )
     }
 
     pub fn click_message_button(
@@ -3309,27 +3415,26 @@ impl MessagesStore {
         user_id: i64,
         cx: &mut Context<Self>,
     ) {
+        let form = self.embed_form_payload(message_id);
+        tracing::info!("embed form for '{button_id}': {}", describe_form(&form));
+        let extra_data =
+            serde_json::to_string(&serde_json::Value::Object(form)).unwrap_or_else(|_| "{}".into());
+        self.send_message_button_click(message_id, button_id, sender_id, user_id, extra_data, cx);
+    }
+
+    fn send_message_button_click(
+        &mut self,
+        message_id: MessageId,
+        button_id: SharedString,
+        sender_id: i64,
+        user_id: i64,
+        extra_data: String,
+        cx: &mut Context<Self>,
+    ) {
         let Some(channel_id) = self.active_channel_id else {
             tracing::warn!("message button '{button_id}' ignored: no active channel");
             return;
         };
-        let mut form = serde_json::Map::new();
-        if let Some(by_select) = self.select_ui.get(&message_id) {
-            for (id, values) in by_select {
-                let values: Vec<serde_json::Value> = values
-                    .iter()
-                    .map(|v| serde_json::Value::String(v.to_string()))
-                    .collect();
-                form.insert(id.to_string(), serde_json::Value::Array(values));
-            }
-        }
-        if let Some(by_input) = self.embed_form.get(&message_id) {
-            for (id, value) in by_input {
-                form.insert(id.to_string(), serde_json::Value::String(value.to_string()));
-            }
-        }
-        let extra_data =
-            serde_json::to_string(&serde_json::Value::Object(form)).unwrap_or_else(|_| "{}".into());
         let api = self.api.clone();
         let channel_num = channel_id.get();
         let message_num = message_id.get();
@@ -4244,6 +4349,7 @@ impl MessagesStore {
                 let messages =
                     prepare_messages(page.messages, AppConfig::try_global(cx), viewer_user_id(cx));
                 self.set_channel(channel_id, messages);
+                self.schedule_presign_expiry(cx);
                 if is_current {
                     self.loading = false;
                     let count = self.messages().len();
@@ -4400,6 +4506,9 @@ impl MessagesStore {
             return;
         }
         let tail_id = msg.id;
+        // Arming the expiry timer walks every cached message, so only pay for it
+        // when this message can actually be waiting on an upload.
+        let arms_expiry = msg.attachments.iter().any(|a| a.presign_pending);
         let old_len = channel.messages.len();
         let appended = match channel
             .messages
@@ -4418,6 +4527,9 @@ impl MessagesStore {
         };
         let last_id = channel.messages.last().map(|m| m.id).unwrap_or(tail_id);
         self.set_last_message(storage_id, last_id);
+        if arms_expiry {
+            self.schedule_presign_expiry(cx);
+        }
         if is_buzz && appended {
             self.play_buzz_sound(cx);
         }
@@ -4466,7 +4578,11 @@ impl MessagesStore {
                 existing.create_time,
             );
         }
+        let arms_expiry = existing.attachments.iter().any(|a| a.presign_pending);
         patch_reply_previews_after_update(&mut channel.messages, message_id, &preview);
+        if arms_expiry {
+            self.schedule_presign_expiry(cx);
+        }
         if self.active_topic_id == Some(storage_id) {
             cx.emit(MessagesEvent::TopicUpdated {
                 topic_id: storage_id.get(),
@@ -6056,6 +6172,29 @@ fn apply_presign_gate(
     apply_presign_gate_at(attachments, keys, base_img, create_time, now_unix_seconds());
 }
 
+/// When this message's pending attachments become droppable, or `None` when the
+/// sweep would not touch it. It must agree with `sweep_expired_presign`: a
+/// message the sweep skips but this counts would be rescheduled at zero delay
+/// forever.
+fn presign_expiry_deadline(message: &Message) -> Option<i64> {
+    if message.create_time <= 0 || !message.attachments.iter().any(|a| a.presign_pending) {
+        return None;
+    }
+    presign::parse_presign_finish_keys(&message.content)?;
+    Some(message.create_time + presign::PRESIGN_PENDING_MAX_AGE_SEC)
+}
+
+/// How long until the earliest deadline, relative to `now`. `None` when nothing
+/// is waiting.
+fn next_presign_expiry_in(
+    deadlines: impl Iterator<Item = i64>,
+    now: i64,
+) -> Option<std::time::Duration> {
+    deadlines
+        .min()
+        .map(|deadline| std::time::Duration::from_secs((deadline - now).max(0) as u64))
+}
+
 fn apply_presign_gate_at(
     attachments: &mut Vec<MessageAttachment>,
     keys: &[String],
@@ -6661,6 +6800,50 @@ fn format_embed_footer_date(raw: &SharedString) -> SharedString {
         Ok(dt) => SharedString::from(dt.format("%-m/%-d/%Y").to_string()),
         Err(_) => raw.clone(),
     }
+}
+
+fn build_embed_form_payload(
+    multi_choice: &HashSet<SharedString>,
+    selects: Option<&HashMap<SharedString, Vec<SharedString>>>,
+    inputs: Option<&HashMap<SharedString, SharedString>>,
+) -> serde_json::Map<String, serde_json::Value> {
+    let mut form = serde_json::Map::new();
+    for (id, values) in selects.into_iter().flatten() {
+        let value = if multi_choice.contains(id) {
+            serde_json::Value::Array(
+                values
+                    .iter()
+                    .map(|value| serde_json::Value::String(value.to_string()))
+                    .collect(),
+            )
+        } else {
+            serde_json::Value::String(
+                values
+                    .first()
+                    .map(SharedString::to_string)
+                    .unwrap_or_default(),
+            )
+        };
+        form.insert(id.to_string(), value);
+    }
+    for (id, value) in inputs.into_iter().flatten() {
+        form.insert(id.to_string(), serde_json::Value::String(value.to_string()));
+    }
+    form
+}
+
+fn describe_form(form: &serde_json::Map<String, serde_json::Value>) -> String {
+    if form.is_empty() {
+        return "{}".into();
+    }
+    form.iter()
+        .map(|(id, value)| match value {
+            serde_json::Value::String(text) => format!("{id}=str({})", text.len()),
+            serde_json::Value::Array(items) => format!("{id}=arr({})", items.len()),
+            _ => format!("{id}=other"),
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 const EMBED_COMPONENT_TYPE_SELECT: i32 = 2;
@@ -7403,6 +7586,47 @@ mod tests {
     }
 
     #[test]
+    fn embed_form_sends_a_single_choice_select_as_a_string() {
+        let mut selects = HashMap::new();
+        selects.insert(
+            SharedString::from("task"),
+            vec![SharedString::from("Coding")],
+        );
+        selects.insert(
+            SharedString::from("tags"),
+            vec![SharedString::from("a"), SharedString::from("b")],
+        );
+        let mut inputs = HashMap::new();
+        inputs.insert(SharedString::from("today"), SharedString::from("shipped"));
+        let multi_choice = HashSet::from([SharedString::from("tags")]);
+
+        let form = build_embed_form_payload(&multi_choice, Some(&selects), Some(&inputs));
+
+        assert_eq!(form["task"], serde_json::json!("Coding"));
+        assert_eq!(form["tags"], serde_json::json!(["a", "b"]));
+        assert_eq!(form["today"], serde_json::json!("shipped"));
+    }
+
+    #[test]
+    fn embed_form_of_an_untouched_message_is_an_empty_object() {
+        let form = build_embed_form_payload(&HashSet::new(), None, None);
+        assert_eq!(
+            serde_json::to_string(&serde_json::Value::Object(form)).expect("json"),
+            "{}"
+        );
+    }
+
+    #[test]
+    fn select_is_multi_choice_only_when_the_bot_asks_for_a_range() {
+        use crate::select_allows_multiple;
+
+        assert!(!select_allows_multiple(None, None));
+        assert!(!select_allows_multiple(Some(1), Some(1)));
+        assert!(select_allows_multiple(Some(2), None));
+        assert!(select_allows_multiple(None, Some(2)));
+    }
+
+    #[test]
     fn parse_embed_input_extracts_select() {
         let value = serde_json::json!({
             "type": 2,
@@ -7840,6 +8064,67 @@ mod tests {
                     display: "@bob".into(),
                     user_id: Some("42".into()),
                     role_id: None,
+                },
+                MessageSpan::Text(" hi".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn role_mention_survives_the_full_send_wire_json() {
+        let transport: Vec<TransportMention> = vec![OutgoingMention {
+            user_id: String::new(),
+            role_id: "9".into(),
+            display: "@Everyone".into(),
+            s: 0,
+            e: 9,
+        }]
+        .into_iter()
+        .map(OutgoingMention::into_transport)
+        .collect();
+        let sent =
+            mezon_client::transport::build_send_content("@Everyone hi", &transport, &[], &[]);
+        let parsed: ApiMessageContent =
+            serde_json::from_str(&sent.json).expect("wire content json");
+        assert_eq!(parsed.mentions.len(), 1);
+        assert_eq!(parsed.mentions[0].role_id.as_deref(), Some("9"));
+        assert_eq!(parsed.mentions[0].username.as_deref(), None);
+        assert_eq!(
+            parse_spans(&parsed)[0],
+            MessageSpan::Mention {
+                display: "@Everyone".into(),
+                user_id: None,
+                role_id: Some("9".into()),
+            }
+        );
+    }
+
+    #[test]
+    fn role_mention_tokens_round_trip_without_a_username() {
+        let mentions = vec![OutgoingMention {
+            user_id: String::new(),
+            role_id: "9".into(),
+            display: "@Admin".into(),
+            s: 0,
+            e: 6,
+        }];
+        let transport: Vec<TransportMention> = mentions
+            .into_iter()
+            .map(OutgoingMention::into_transport)
+            .collect();
+        assert_eq!(transport[0].username, "");
+        let tokens = ApiMessageContent {
+            t: "@Admin hi".into(),
+            mentions: mention_content_tokens(&transport),
+            ..Default::default()
+        };
+        assert_eq!(
+            parse_spans(&tokens),
+            vec![
+                MessageSpan::Mention {
+                    display: "@Admin".into(),
+                    user_id: None,
+                    role_id: Some("9".into()),
                 },
                 MessageSpan::Text(" hi".into()),
             ]
@@ -9081,6 +9366,68 @@ mod tests {
             attachments.is_empty(),
             "a stale never-uploaded attachment is dropped instead of rendering broken forever"
         );
+    }
+
+    #[test]
+    fn expiry_is_scheduled_for_the_earliest_pending_message() {
+        let now = 1000;
+        let max = presign::PRESIGN_PENDING_MAX_AGE_SEC;
+        let delay = next_presign_expiry_in([now - 60 + max, now - 300 + max].into_iter(), now)
+            .expect("a pending attachment arms the timer");
+        assert_eq!(
+            delay.as_secs() as i64,
+            max - 300,
+            "the timer follows the message closest to its expiry"
+        );
+
+        assert!(
+            next_presign_expiry_in(std::iter::empty(), now).is_none(),
+            "nothing pending leaves the timer disarmed"
+        );
+        assert_eq!(
+            next_presign_expiry_in([now - 60].into_iter(), now)
+                .expect("an overdue message still fires")
+                .as_secs(),
+            0,
+            "an already expired attachment sweeps immediately instead of waiting"
+        );
+    }
+
+    #[test]
+    fn an_ordinary_message_does_not_arm_the_expiry_timer() {
+        // Arming walks every cached message, and this runs on every socket
+        // arrival, so a message with nothing pending must not trigger it.
+        let mut plain = Message::new(MessageId(9), "hi".to_string(), "5".to_string(), "me", 1000);
+        plain.create_time = 1000;
+        assert_eq!(presign_expiry_deadline(&plain), None);
+
+        plain.attachments = vec![cdn_attachment("https://cdn.example/uploads/photo.png")];
+        plain.content = r#"{"t":"hi","presign_finish":["photo"]}"#.to_string();
+        assert_eq!(
+            presign_expiry_deadline(&plain),
+            None,
+            "a finished attachment has nothing left to expire"
+        );
+    }
+
+    #[test]
+    fn a_message_the_sweep_cannot_clear_is_never_scheduled() {
+        let mut pending = Message::new(MessageId(1), "hi".to_string(), "5".to_string(), "me", 1000);
+        pending.create_time = 1000;
+        pending.attachments = vec![cdn_attachment("https://cdn.example/uploads/photo.png")];
+        pending.attachments[0].presign_pending = true;
+
+        pending.content = r#"{"t":"hi","presign_finish":[]}"#.to_string();
+        assert_eq!(
+            presign_expiry_deadline(&pending),
+            Some(1000 + presign::PRESIGN_PENDING_MAX_AGE_SEC),
+            "a pending message the sweep can act on arms the timer"
+        );
+
+        // The sweep skips a message whose content no longer carries the field, so
+        // counting it here would re-arm the timer at zero delay forever.
+        pending.content = r#"{"t":"hi"}"#.to_string();
+        assert_eq!(presign_expiry_deadline(&pending), None);
     }
 
     #[test]

@@ -10,7 +10,7 @@ use block::ConcreteBlock;
 use cocoa::{
     appkit::{
         NSAppKitVersionNumber, NSAppKitVersionNumber12_0, NSApplication, NSBackingStoreBuffered,
-        NSColor, NSEvent, NSEventModifierFlags, NSFilenamesPboardType, NSPasteboard, NSScreen,
+        NSColor, NSEventModifierFlags, NSFilenamesPboardType, NSPasteboard, NSScreen,
         NSView, NSViewHeightSizable, NSViewWidthSizable, NSVisualEffectMaterial,
         NSVisualEffectState, NSVisualEffectView, NSWindow, NSWindowButton,
         NSWindowCollectionBehavior, NSWindowOcclusionState, NSWindowOrderingMode,
@@ -109,17 +109,6 @@ pub enum UserTabbingPreference {
     Never,
     Always,
     InFullScreen,
-}
-
-#[link(name = "CoreGraphics", kind = "framework")]
-unsafe extern "C" {
-    // Widely used private APIs; Apple uses them for their Terminal.app.
-    fn CGSMainConnectionID() -> id;
-    fn CGSSetWindowBackgroundBlurRadius(
-        connection_id: id,
-        window_id: NSInteger,
-        radius: i64,
-    ) -> i32;
 }
 
 #[ctor(unsafe)]
@@ -1497,19 +1486,7 @@ impl PlatformWindow for MacWindow {
             };
             this.native_window.setBackgroundColor_(background_color);
 
-            if NSAppKitVersionNumber < NSAppKitVersionNumber12_0 {
-                // Whether `-[NSVisualEffectView respondsToSelector:@selector(_updateProxyLayer)]`.
-                // On macOS Catalina/Big Sur `NSVisualEffectView` doesn’t own concrete sublayers
-                // but uses a `CAProxyLayer`. Use the legacy WindowServer API.
-                let blur_radius = if background_appearance == WindowBackgroundAppearance::Blurred {
-                    80
-                } else {
-                    0
-                };
-
-                let window_number = this.native_window.windowNumber();
-                CGSSetWindowBackgroundBlurRadius(CGSMainConnectionID(), window_number, blur_radius);
-            } else {
+            if NSAppKitVersionNumber >= NSAppKitVersionNumber12_0 {
                 // On newer macOS `NSVisualEffectView` manages the effect layer directly. Using it
                 // could have a better performance (it downsamples the backdrop) and more control
                 // over the effect layer.

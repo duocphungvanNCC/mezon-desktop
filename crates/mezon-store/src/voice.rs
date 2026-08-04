@@ -250,6 +250,16 @@ enum ScreenAutoFocus {
     Focus(String),
 }
 
+fn default_focus_tile_for(participants: &[VoiceParticipant]) -> Option<String> {
+    if let Some(p) = participants.iter().find(|p| p.screenshare.is_some()) {
+        return Some(screen_tile_id(&p.identity));
+    }
+    if let Some(p) = participants.iter().find(|p| p.camera.is_some()) {
+        return Some(camera_tile_id(&p.identity));
+    }
+    participants.first().map(|p| camera_tile_id(&p.identity))
+}
+
 fn screen_auto_focus_transition(
     participants: &[VoiceParticipant],
     auto_focused: Option<&str>,
@@ -1287,6 +1297,14 @@ impl VoiceStore {
         }
     }
 
+    pub fn toggle_layout_view(&mut self, cx: &mut Context<Self>) {
+        if self.focused_tile.is_some() {
+            self.clear_focus(cx);
+        } else if let Some(id) = default_focus_tile_for(&self.participants) {
+            self.set_focus(id, cx);
+        }
+    }
+
     pub fn fullscreen_screen(&self) -> Option<u64> {
         self.fullscreen_screen
     }
@@ -2139,7 +2157,10 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    use super::{ScreenAutoFocus, screen_auto_focus_transition, screen_tile_id};
+    use super::{
+        ScreenAutoFocus, camera_tile_id, default_focus_tile_for, screen_auto_focus_transition,
+        screen_tile_id,
+    };
     use crate::{NetworkQuality, VoiceParticipant};
 
     fn voice_participant(identity: &str, screenshare: Option<u64>) -> VoiceParticipant {
@@ -2221,6 +2242,38 @@ mod tests {
         assert_eq!(
             screen_auto_focus_transition(&participants, None),
             ScreenAutoFocus::Keep
+        );
+    }
+
+    #[test]
+    fn layout_toggle_prefers_screen_share() {
+        let participants = vec![
+            voice_participant("a", None),
+            voice_participant("b", Some(1)),
+        ];
+        assert_eq!(
+            default_focus_tile_for(&participants),
+            Some(screen_tile_id("b"))
+        );
+    }
+
+    #[test]
+    fn layout_toggle_prefers_camera_with_video() {
+        let mut a = voice_participant("a", None);
+        a.camera = Some(1);
+        let participants = vec![a, voice_participant("b", None)];
+        assert_eq!(
+            default_focus_tile_for(&participants),
+            Some(camera_tile_id("a"))
+        );
+    }
+
+    #[test]
+    fn layout_toggle_falls_back_to_first_participant() {
+        let participants = vec![voice_participant("a", None), voice_participant("b", None)];
+        assert_eq!(
+            default_focus_tile_for(&participants),
+            Some(camera_tile_id("a"))
         );
     }
 

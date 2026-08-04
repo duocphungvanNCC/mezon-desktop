@@ -42,11 +42,21 @@ pub fn mime_from_extension(path: &Path) -> String {
 }
 
 pub fn build_pending(path: PathBuf) -> Option<PendingAttachment> {
-    let meta = std::fs::metadata(&path).ok()?;
+    let meta = match std::fs::metadata(&path) {
+        Ok(meta) => meta,
+        Err(err) => {
+            tracing::warn!("attachment skipped, cannot read {}: {err}", path.display());
+            return None;
+        }
+    };
     if !meta.is_file() {
+        tracing::warn!("attachment skipped, not a file: {}", path.display());
         return None;
     }
-    let filename = path.file_name()?.to_str()?.to_string();
+    let Some(filename) = path.file_name().map(|n| n.to_string_lossy().into_owned()) else {
+        tracing::warn!("attachment skipped, no file name: {}", path.display());
+        return None;
+    };
     let filetype = mime_from_extension(&path);
     let is_image = filetype.starts_with("image/");
     let is_video = filetype.starts_with("video/");
@@ -113,6 +123,26 @@ mod tests {
             mime_from_extension(Path::new("noext")),
             "application/octet-stream"
         );
+    }
+
+    #[test]
+    fn build_pending_keeps_the_raw_vietnamese_name() {
+        let dir = std::env::temp_dir().join("mezon_attachment_name_test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("Báo cáo tháng 8.pdf");
+        std::fs::write(&path, b"%PDF-1.4").unwrap();
+
+        let pending = build_pending(path.clone()).expect("a readable file builds a pending");
+        assert_eq!(pending.filename, "Báo cáo tháng 8.pdf");
+        assert_eq!(pending.filetype, "application/pdf");
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn build_pending_skips_a_directory_and_a_missing_path() {
+        assert!(build_pending(std::env::temp_dir()).is_none());
+        assert!(build_pending(std::env::temp_dir().join("mezon_no_such_file_xyz")).is_none());
     }
 
     #[test]

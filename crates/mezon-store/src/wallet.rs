@@ -14,11 +14,19 @@ use mmn_client::{
 use mezon_client::Session;
 
 use crate::AuthState;
+use crate::cache::Freshness;
 use crate::config::{AppConfig, INDEXER_CHAIN_ID};
 use crate::realtime::{RealtimeDispatch, RealtimeKind};
 use crate::wallet_persist::{self, PersistedWalletState};
 
 const GIVE_COFFEE_AMOUNT: i64 = 10_000;
+
+fn should_refresh_balance(refreshing: bool, force: bool, same_user: bool, fresh: bool) -> bool {
+    if refreshing {
+        return false;
+    }
+    force || !same_user || !fresh
+}
 
 static BANK_SOUND: &[u8] = include_bytes!("../assets/audio/bankSound.mp3");
 
@@ -119,6 +127,9 @@ pub struct WalletStore {
     pending_give_coffee: bool,
     enabled_user: Option<String>,
     enabling_user: Option<String>,
+    balance_user: Option<String>,
+    balance_refreshing: bool,
+    balance_freshness: Freshness,
     reset_generation: u64,
     enable_task: Option<Task<()>>,
     bank_player: Option<AudioPlayer>,
@@ -147,6 +158,9 @@ impl WalletStore {
                 pending_give_coffee: false,
                 enabled_user: None,
                 enabling_user: None,
+                balance_user: None,
+                balance_refreshing: false,
+                balance_freshness: Freshness::new(),
                 reset_generation: 0,
                 enable_task: None,
                 bank_player: None,
@@ -203,6 +217,11 @@ impl WalletStore {
     fn build_clients(cx: &App) -> Option<Arc<WalletClients>> {
         let config = AppConfig::try_global(cx)?;
         if config.mmn_api_url.is_empty() || config.zk_api_url.is_empty() {
+            tracing::error!(
+                "wallet disabled: mmn_api_url/zk_api_url unset (mmn={}, zk={})",
+                !config.mmn_api_url.is_empty(),
+                !config.zk_api_url.is_empty()
+            );
             return None;
         }
         let endpoints = [
@@ -219,6 +238,11 @@ impl WalletStore {
         }
         if config.indexer_api_url.is_empty() {
             tracing::error!("wallet: indexer_api_url is unset, transaction history is disabled");
+        }
+        if config.dong_service_api_url.is_empty() {
+            tracing::error!(
+                "wallet: dong_service_api_url is unset, QR red envelope claim is disabled"
+            );
         }
         let http = http_client_arc();
         Some(Arc::new(WalletClients {
@@ -265,6 +289,7 @@ impl WalletStore {
             _ => return,
         };
         self.try_restore_persisted(&user_id, cx);
+        self.ensure_wallet_balance(user_id, cx);
     }
 
     fn try_restore_persisted(&mut self, user_id: &str, cx: &mut Context<Self>) {
@@ -389,18 +414,38 @@ impl WalletStore {
     }
 
     pub fn refresh_wallet(&mut self, user_id: String, cx: &mut Context<Self>) {
+        self.refresh_balance(user_id, true, cx);
+    }
+
+    pub fn ensure_wallet_balance(&mut self, user_id: String, cx: &mut Context<Self>) {
+        self.refresh_balance(user_id, false, cx);
+    }
+
+    fn refresh_balance(&mut self, user_id: String, force: bool, cx: &mut Context<Self>) {
+        if user_id.is_empty() {
+            return;
+        }
+        let same_user = self.balance_user.as_deref() == Some(user_id.as_str());
+        let fresh = self.balance_freshness.is_fresh(crate::CACHE_TTL);
+        if !should_refresh_balance(self.balance_refreshing, force, same_user, fresh) {
+            return;
+        }
         let Some(clients) = self.clients.clone() else {
             return;
         };
         let generation = self.reset_generation;
+        self.balance_refreshing = true;
         cx.spawn(async move |this, cx| {
             let account = clients.mmn.get_account_by_user_id(&user_id).await;
             this.update(cx, |this, cx| {
+                this.balance_refreshing = false;
                 if this.reset_generation != generation {
                     return;
                 }
                 match account {
                     Ok(account) => {
+                        this.balance_user = Some(user_id);
+                        this.balance_freshness.mark_fetched();
                         this.wallet = Some(WalletDetail {
                             address: account.address,
                             balance: account.balance,
@@ -763,7 +808,33 @@ impl WalletStore {
         self.is_enabled = false;
         self.pending_give_coffee = false;
         self.enabled_user = None;
+        self.balance_user = None;
+        self.balance_refreshing = false;
+        self.balance_freshness.mark_stale();
         Self::clear_persisted_wallet();
         cx.notify();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::should_refresh_balance;
+
+    #[test]
+    fn an_in_flight_refresh_blocks_every_caller() {
+        assert!(!should_refresh_balance(true, false, false, false));
+        assert!(!should_refresh_balance(true, true, false, false));
+    }
+
+    #[test]
+    fn a_forced_refresh_ignores_freshness() {
+        assert!(should_refresh_balance(false, true, true, true));
+    }
+
+    #[test]
+    fn an_unforced_refresh_is_skipped_only_when_fresh_for_the_same_user() {
+        assert!(!should_refresh_balance(false, false, true, true));
+        assert!(should_refresh_balance(false, false, true, false));
+        assert!(should_refresh_balance(false, false, false, true));
     }
 }

@@ -10,20 +10,21 @@ use std::rc::Rc;
 use crate::router::{Route, Router};
 use gpui::{
     AnyElement, App, Bounds, Context, DismissEvent, Div, Entity, EventEmitter, Focusable,
-    FontWeight, Image, ImageFormat, IntoElement, KeyBinding, MouseButton, PathPromptOptions,
-    Pixels, Rgba, ScrollStrategy, SharedString, Stateful, Subscription, Task,
-    UniformListScrollHandle, Window, actions, canvas, deferred, div, img, prelude::*, px,
-    uniform_list,
+    FontWeight, HighlightStyle, Hsla, Image, ImageFormat, IntoElement, KeyBinding, MouseButton,
+    PathPromptOptions, Pixels, Rgba, ScrollStrategy, SharedString, Stateful, StyledText,
+    Subscription, Task, UniformListScrollHandle, Window, actions, canvas, deferred, div, img,
+    prelude::*, px, uniform_list,
 };
 use mezon_client::transport::QUICK_MENU_TYPE_FLASH;
 use mezon_store::{
-    AccountEvent, AccountStore, AudioStore, BadgeService, Channel, ChannelEvent, ChannelId,
-    ChannelList, ChannelMembersEvent, ChannelMembersStore, ClanList, ClanMembersEvent,
+    AccountEvent, AccountStore, AppConfig, AudioStore, BadgeService, Channel, ChannelEvent,
+    ChannelId, ChannelList, ChannelMembersEvent, ChannelMembersStore, ClanList, ClanMembersEvent,
     ClanMembersStore, ComposeDraft, ComposeStore, ComposeToken, ComposeTokenKind, DirectEvent,
     DirectMessageStore, Emoji, EmojiEvent, EmojiStore, GroupMembersEvent, GroupMembersStore,
-    MENTION_HERE_ID, MessageSpan, MessagesStore, OgpResult, OutgoingAttachment, OutgoingContent,
-    OutgoingEmoji, OutgoingHashtag, OutgoingMention, OutgoingOgp, QuickMenuStore, RolesEvent,
-    RolesStore, Settings, fetch_ogp, first_previewable_url,
+    MENTION_HERE_USER_ID, MessageSpan, MessagesStore, OgpResult, OutgoingAttachment,
+    OutgoingContent, OutgoingEmoji, OutgoingHashtag, OutgoingMention, OutgoingOgp, QuickMenuStore,
+    RolesEvent, RolesStore, Settings, fetch_invite_preview, fetch_ogp, first_previewable_url,
+    invite_id_from_url,
 };
 use std::time::Duration;
 
@@ -42,12 +43,13 @@ use crate::chat::member_list::{
 use crate::chat::message::CreatePollModal;
 use crate::chat::message::MessageBuzzModal;
 use crate::chat::message::ShareLocationModal;
+use crate::chat::role_style::role_fallback_color;
 use crate::components::primitives::{Avatar, Icon, IconName, ToastKind};
 use crate::image_cache::{
     AVATAR_ENTRY_MAX_BYTES, AVATAR_IMAGE_CACHE_BYTES, AVATAR_IMAGE_CACHE_CAPACITY, LruImageCache,
 };
 use crate::theme::{ActiveTheme, Theme};
-use crate::util::text_utils::normalize_search_string;
+use crate::util::text_utils::{normalize_search_string, push_search_normalized};
 use text_field::{
     MentionFieldEvent, MentionInputField, MentionInputState, MentionSpan, MentionSpanKind,
     byte_offset_to_utf16,
@@ -67,8 +69,8 @@ const MENTION_HERE_NORM: &str = "@HERE";
 const CONVERT_TO_FILE_THRESHOLD: usize = 3700;
 const CONVERT_PREFIX_LEN: usize = 8;
 const STREAM_MODE_DM: i32 = 4;
-const MENTION_ROW_PX: f32 = 36.;
-const MENTION_POPUP_MAX_PX: f32 = MENTION_ROW_PX * 6.;
+const MENTION_ROW_PX: f32 = 40.;
+const MENTION_POPUP_MAX_PX: f32 = MENTION_ROW_PX * MAX_SUGGESTIONS as f32;
 
 actions!(
     mezon_mention,
@@ -154,6 +156,16 @@ impl Sigil {
             Sigil::Colon => 2,
             Sigil::Slash => 3,
         }
+    }
+
+    fn category_title(self, locale: &str) -> SharedString {
+        let key = match self {
+            Sigil::At => "messageBox.mentionCategories.members",
+            Sigil::Hash => "messageBox.mentionCategories.textChannels",
+            Sigil::Colon => "messageBox.mentionCategories.emojiMatching",
+            Sigil::Slash => "messageBox.mentionCategories.commands",
+        };
+        SharedString::from(mezon_i18n::t(locale, key).to_uppercase())
     }
 
     fn from_byte(b: u8) -> Option<Self> {
@@ -248,6 +260,7 @@ struct RoleSuggestRaw {
     title_lc: String,
     title_norm: String,
     icon_src: SharedString,
+    color: Hsla,
 }
 
 #[derive(Clone)]
@@ -279,12 +292,12 @@ enum Suggestion {
 impl Suggestion {
     fn group_order(&self) -> u8 {
         match self {
+            Suggestion::Role(_) => 0,
             Suggestion::Member(..)
             | Suggestion::Channel(_)
             | Suggestion::Emoji(..)
-            | Suggestion::SlashCommand(_) => 0,
-            Suggestion::Role(_) => 1,
-            Suggestion::Here => 2,
+            | Suggestion::SlashCommand(_)
+            | Suggestion::Here => 1,
         }
     }
 
@@ -343,6 +356,45 @@ fn resolve_suggestion_media(items: &mut [Suggestion], cx: &App) {
     }
 }
 
+fn normalized_with_offsets(text: &str) -> (String, Vec<(usize, usize)>) {
+    let mut normalized = String::with_capacity(text.len());
+    let mut spans: Vec<(usize, usize)> = Vec::with_capacity(text.len());
+    for (byte_ix, ch) in text.char_indices() {
+        push_search_normalized(ch, &mut normalized);
+        spans.resize(normalized.len(), (byte_ix, byte_ix + ch.len_utf8()));
+    }
+    (normalized, spans)
+}
+
+fn highlight_match_range(text: &str, query: &str) -> Option<std::ops::Range<usize>> {
+    if text.is_empty() {
+        return None;
+    }
+    let needle = normalize_search_string(query);
+    if needle.is_empty() {
+        return None;
+    }
+    let (haystack, spans) = normalized_with_offsets(text);
+    let start = haystack.find(&needle)?;
+    let end = start + needle.len();
+    let from = spans.get(start)?.0;
+    let to = spans.get(end - 1)?.1;
+    Some(from..to)
+}
+
+fn highlighted_label(text: SharedString, query: &str) -> StyledText {
+    match highlight_match_range(&text, query) {
+        Some(range) => StyledText::new(text).with_highlights(vec![(
+            range,
+            HighlightStyle {
+                font_weight: Some(FontWeight::BOLD),
+                ..Default::default()
+            },
+        )]),
+        None => StyledText::new(text),
+    }
+}
+
 fn prioritize_and_limit(mut items: Vec<Suggestion>, query: &str) -> Vec<Suggestion> {
     let query_lc = query.to_lowercase();
     items.sort_by_cached_key(|item| (item.group_order(), item.match_rank(&query_lc)));
@@ -377,6 +429,7 @@ pub struct MentionInput {
     active_sigil: Sigil,
     pooled: [Option<MentionScope>; 4],
     query_len: usize,
+    active_query: SharedString,
     suggestions: Vec<Suggestion>,
     selected: usize,
     suggestion_scroll: UniformListScrollHandle,
@@ -567,6 +620,7 @@ impl MentionInput {
             active_sigil: Sigil::At,
             pooled: [None; 4],
             query_len: 0,
+            active_query: SharedString::default(),
             suggestions: Vec::new(),
             selected: 0,
             suggestion_scroll: UniformListScrollHandle::new(),
@@ -1258,6 +1312,7 @@ impl MentionInput {
     fn close_suggestions(&mut self) {
         self.active_at = None;
         self.query_len = 0;
+        self.active_query = SharedString::default();
         self.suggestions.clear();
         self.selected = 0;
     }
@@ -1385,6 +1440,20 @@ impl MentionInput {
         self.ogp_generation += 1;
         let generation = self.ogp_generation;
         cx.notify();
+        let invite_id = invite_id_from_url(&url);
+        let invite_gateway = invite_id
+            .is_some()
+            .then(|| {
+                AppConfig::try_global(cx).map(|cfg| {
+                    (
+                        cfg.api_gw_host.clone(),
+                        cfg.api_gw_port,
+                        cfg.api_secure,
+                        cfg.api_key.clone(),
+                    )
+                })
+            })
+            .flatten();
         self._ogp_task = Some(cx.spawn(async move |this, cx| {
             cx.background_executor()
                 .timer(Duration::from_millis(300))
@@ -1395,7 +1464,12 @@ impl MentionInput {
             if !current {
                 return;
             }
-            let result = fetch_ogp(&url).await;
+            let result = match (&invite_id, &invite_gateway) {
+                (Some(invite_id), Some((host, port, secure, key))) => {
+                    fetch_invite_preview(host, *port, *secure, key, &url, invite_id).await
+                }
+                _ => fetch_ogp(&url).await,
+            };
             let _ = this.update(cx, |this, cx| {
                 if this.ogp_generation != generation {
                     return;
@@ -1560,6 +1634,7 @@ impl MentionInput {
         self.active_at = Some(at);
         self.active_sigil = sigil;
         self.query_len = query.len() + 1;
+        self.active_query = SharedString::from(query.to_string());
         self.build_suggestions(query, cx);
         if self.suggestions.is_empty() {
             self.clear_suggestions(cx);
@@ -1859,7 +1934,7 @@ impl MentionInput {
             Suggestion::Here => (
                 "@here".to_string(),
                 TokenKind::Mention {
-                    user_id: MENTION_HERE_ID.to_string(),
+                    user_id: MENTION_HERE_USER_ID.to_string(),
                     role_id: String::new(),
                 },
             ),
@@ -2094,11 +2169,13 @@ impl MentionInput {
         suggestion: &Suggestion,
         entity: &Entity<MentionInput>,
     ) -> AnyElement {
-        let text_primary = theme.text_primary;
+        let text_primary = theme.tokens.text_theme_primary;
         let text_muted = theme.text_muted;
         let selected_bg = theme.tokens.bg_active_member_channel;
         let is_selected = index == self.selected;
+        let query = self.active_query.clone();
 
+        let mut display_color = Hsla::from(text_primary);
         let (leading, display, secondary): (Option<AnyElement>, SharedString, SharedString) =
             match suggestion {
                 Suggestion::Here => (
@@ -2109,7 +2186,7 @@ impl MentionInput {
                 Suggestion::Member(member, avatar_src) => {
                     let mut avatar = Avatar::new()
                         .name(member.display.clone())
-                        .size_px(px(24.))
+                        .size_px(px(20.))
                         .image_cache(self.avatar_cache.clone());
                     if !avatar_src.is_empty() {
                         avatar = avatar
@@ -2119,19 +2196,26 @@ impl MentionInput {
                     (
                         Some(avatar.into_any_element()),
                         member.display.clone().into(),
-                        format!("@{}", member.username).into(),
+                        format!("@{}", member.username.to_lowercase()).into(),
                     )
                 }
                 Suggestion::Role(role) => {
-                    let mut avatar = Avatar::new()
-                        .name(role.title.clone())
-                        .size_px(px(24.))
-                        .image_cache(self.avatar_cache.clone());
-                    if !role.icon_src.is_empty() {
-                        avatar = avatar.src(role.icon_src.clone());
-                    }
+                    display_color = role.color;
+                    let leading = if role.icon_src.is_empty() {
+                        Icon::new(IconName::RoleIcon)
+                            .size(px(20.))
+                            .flex_shrink_0()
+                            .text_color(role.color)
+                            .into_any_element()
+                    } else {
+                        img(role.icon_src.clone())
+                            .size(px(20.))
+                            .flex_shrink_0()
+                            .rounded(px(4.))
+                            .into_any_element()
+                    };
                     (
-                        Some(avatar.into_any_element()),
+                        Some(leading),
                         role.title.clone().into(),
                         SharedString::default(),
                     )
@@ -2142,7 +2226,7 @@ impl MentionInput {
                             .flex()
                             .items_center()
                             .justify_center()
-                            .size(px(24.))
+                            .size(px(20.))
                             .text_size(px(16.))
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_color(text_muted)
@@ -2170,7 +2254,7 @@ impl MentionInput {
                             .flex()
                             .items_center()
                             .justify_center()
-                            .size(px(24.))
+                            .size(px(20.))
                             .text_size(px(16.))
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_color(text_muted)
@@ -2192,8 +2276,8 @@ impl MentionInput {
             .gap_2()
             .w_full()
             .px_3()
-            .py(px(6.))
-            .rounded(px(6.))
+            .py_2()
+            .rounded(px(8.))
             .cursor_pointer()
             .when(is_selected, |row| row.bg(selected_bg))
             .on_hover({
@@ -2227,8 +2311,8 @@ impl MentionInput {
                         div()
                             .text_size(px(15.))
                             .font_weight(FontWeight::MEDIUM)
-                            .text_color(text_primary)
-                            .child(display),
+                            .text_color(display_color)
+                            .child(highlighted_label(display, &query)),
                     ),
             )
             .when(!secondary.is_empty(), |row| {
@@ -2237,8 +2321,8 @@ impl MentionInput {
                         .flex_shrink_0()
                         .text_size(px(12.))
                         .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(text_muted)
-                        .child(secondary),
+                        .text_color(text_primary)
+                        .child(highlighted_label(secondary, &query)),
                 )
             })
             .into_any_element()
@@ -2282,6 +2366,7 @@ impl MentionInput {
         let count = self.suggestions.len();
         let list_h = (count as f32 * MENTION_ROW_PX).min(MENTION_POPUP_MAX_PX);
         let locale = self.locale(cx);
+        let header_title = self.active_sigil.category_title(&locale);
         let list = uniform_list(
             "mention-suggestion-list",
             count,
@@ -2301,6 +2386,19 @@ impl MentionInput {
         .track_scroll(&self.suggestion_scroll)
         .h(px(list_h))
         .w_full();
+        let header = div()
+            .flex()
+            .items_center()
+            .justify_between()
+            .p_2()
+            .h(px(40.))
+            .child(
+                div()
+                    .text_size(px(12.))
+                    .font_weight(FontWeight::BOLD)
+                    .text_color(theme.tokens.text_theme_primary)
+                    .child(header_title),
+            );
         deferred(
             div()
                 .image_cache(self.avatar_cache.clone())
@@ -2310,7 +2408,6 @@ impl MentionInput {
                 .left_0()
                 .right_0()
                 .mb(px(8.))
-                .p(px(4.))
                 .rounded(px(8.))
                 .border_1()
                 .border_color(border)
@@ -2318,6 +2415,7 @@ impl MentionInput {
                 .shadow_lg()
                 .occlude()
                 .on_mouse_down_out(cx.listener(|this, _event, _window, cx| this.hide(cx)))
+                .child(header)
                 .child(list),
         )
         .into_any_element()
@@ -2406,7 +2504,11 @@ fn role_suggest_pool(cx: &App) -> Vec<RoleSuggestRaw> {
             icon_src: if role.icon.is_empty() {
                 SharedString::default()
             } else {
-                SharedString::from(crate::util::imgproxy::avatar_url(cx, &role.icon))
+                SharedString::from(crate::util::imgproxy::role_icon_url(cx, &role.icon))
+            },
+            color: match mezon_store::parse_role_color(&role.color) {
+                Some(rgba) => Hsla::from(rgba),
+                None => role_fallback_color(),
             },
         })
         .collect()
@@ -2783,6 +2885,94 @@ mod suggest_tests {
     fn sale_id_is_empty_without_extension() {
         assert_eq!(sale_item_id_from_source("https://cdn.example/emojis"), "");
         assert_eq!(sale_item_id_from_source(""), "");
+    }
+}
+
+#[cfg(test)]
+mod suggestion_order_tests {
+    use super::{
+        MentionMemberRaw, RoleSuggestRaw, Suggestion, highlight_match_range, prioritize_and_limit,
+        role_fallback_color,
+    };
+    use gpui::SharedString;
+    use std::rc::Rc;
+
+    fn member(display: &str) -> Suggestion {
+        Suggestion::Member(
+            Rc::new(MentionMemberRaw {
+                user_id: display.to_string(),
+                display: display.to_string(),
+                username: display.to_lowercase(),
+                avatar_raw: String::new(),
+                display_lc: display.to_lowercase(),
+                username_lc: display.to_lowercase(),
+                display_norm: display.to_uppercase(),
+                username_norm: display.to_uppercase(),
+            }),
+            SharedString::default(),
+        )
+    }
+
+    fn role(title: &str) -> Suggestion {
+        Suggestion::Role(Rc::new(RoleSuggestRaw {
+            role_id: title.to_string(),
+            title: title.to_string(),
+            title_lc: title.to_lowercase(),
+            title_norm: title.to_uppercase(),
+            icon_src: SharedString::default(),
+            color: role_fallback_color(),
+        }))
+    }
+
+    fn labels(items: &[Suggestion]) -> Vec<String> {
+        items
+            .iter()
+            .map(|item| match item {
+                Suggestion::Member(m, _) => m.display.clone(),
+                Suggestion::Role(r) => r.title.clone(),
+                Suggestion::Here => "@here".to_string(),
+                _ => String::new(),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn roles_rank_above_members_and_here() {
+        let items = vec![
+            member("alice"),
+            member("bob"),
+            Suggestion::Here,
+            role("admin"),
+            role("mod"),
+        ];
+        assert_eq!(
+            labels(&prioritize_and_limit(items, "")),
+            vec!["admin", "mod", "alice", "bob", "@here"]
+        );
+    }
+
+    #[test]
+    fn relevance_orders_within_the_member_group() {
+        let items = vec![member("zeta"), Suggestion::Here, member("here-bot")];
+        assert_eq!(
+            labels(&prioritize_and_limit(items, "here")),
+            vec!["here-bot", "zeta", "@here"]
+        );
+    }
+
+    #[test]
+    fn highlight_spans_the_query_inside_the_label() {
+        assert_eq!(highlight_match_range("Moderator", "der"), Some(2..5));
+        assert_eq!(highlight_match_range("Moderator", "MOD"), Some(0..3));
+        assert_eq!(highlight_match_range("Moderator", "zz"), None);
+        assert_eq!(highlight_match_range("Moderator", ""), None);
+    }
+
+    #[test]
+    fn highlight_range_is_byte_safe_for_accented_labels() {
+        let label = "Quản trị viên";
+        let range = highlight_match_range(label, "tri").expect("accent-insensitive match");
+        assert_eq!(&label[range], "trị");
     }
 }
 

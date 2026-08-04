@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -75,6 +76,34 @@ pub struct ChannelAttachment {
     pub uploader_avatar_raw: SharedString,
 }
 
+#[derive(Debug, Clone)]
+pub struct AttachmentSeedInput {
+    pub url: String,
+    pub filename: String,
+    pub filetype: String,
+    pub width: u32,
+    pub height: u32,
+}
+
+impl AttachmentSeedInput {
+    pub fn from_message(att: &crate::message::MessageAttachment) -> Self {
+        Self {
+            url: att.url.clone(),
+            filename: att.filename.clone(),
+            filetype: att.filetype.clone(),
+            width: att.width,
+            height: att.height,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct FetchedChannelAttachments {
+    pub attachments: Vec<ChannelAttachment>,
+    pub raw_count: usize,
+    pub oldest_create_time: Option<u32>,
+}
+
 impl ChannelAttachment {
     pub fn from_api(
         mut api: ApiChannelAttachment,
@@ -82,37 +111,85 @@ impl ChannelAttachment {
         clan_id: ClanId,
         cfg: &AppConfig,
     ) -> Self {
-        if let std::borrow::Cow::Owned(url) = cfg.read_media_url(&api.url) {
+        if let Cow::Owned(url) = cfg.read_media_url(&api.url) {
             api.url = url;
         }
-        let is_video = is_video_type(&api.filetype, &api.url);
-        let is_image = !is_video && is_image_type(&api.filetype, &api.url);
-        let (thumb_src, viewer_thumb_src, viewer_src) = if is_video {
-            let url = api.url.clone();
-            (url.clone().into(), url.clone().into(), url.into())
-        } else {
-            (
-                cfg.gallery_thumb_proxy(&api.url).into(),
-                cfg.viewer_thumb_proxy(&api.url).into(),
-                cfg.viewer_proxy(&api.url, api.width.max(0) as u32, api.height.max(0) as u32)
-                    .into(),
-            )
-        };
-        let day_label = format_day(api.create_time_seconds as i64).into();
-        let day_index = day_index(api.create_time_seconds as i64);
-        let viewer_timestamp = format_viewer_timestamp(api.create_time_seconds).into();
-        Self {
-            id: api.id,
+        Self::build(
+            api.url,
+            api.filename,
+            api.filetype,
+            api.width.max(0) as u32,
+            api.height.max(0) as u32,
+            api.create_time_seconds,
+            api.id,
+            MessageId(api.message_id),
+            UserId(api.uploader),
             channel_id,
             clan_id,
-            message_id: MessageId(api.message_id),
-            uploader_id: UserId(api.uploader),
-            url: api.url,
-            filename: api.filename,
-            filetype: api.filetype,
-            width: api.width.max(0) as u32,
-            height: api.height.max(0) as u32,
-            create_time_seconds: api.create_time_seconds,
+            Some(cfg),
+        )
+    }
+
+    pub fn is_media(&self) -> bool {
+        self.is_image || self.is_video
+    }
+
+    pub fn seed_from_message(
+        att: &AttachmentSeedInput,
+        message_id: MessageId,
+        uploader_id: UserId,
+        create_time_seconds: u32,
+        channel_id: ChannelId,
+        clan_id: ClanId,
+        cfg: Option<&AppConfig>,
+    ) -> Self {
+        Self::build(
+            normalize_media_url(&att.url, cfg),
+            att.filename.clone(),
+            att.filetype.clone(),
+            att.width,
+            att.height,
+            create_time_seconds,
+            0,
+            message_id,
+            uploader_id,
+            channel_id,
+            clan_id,
+            cfg,
+        )
+    }
+
+    fn build(
+        url: String,
+        filename: String,
+        filetype: String,
+        width: u32,
+        height: u32,
+        create_time_seconds: u32,
+        id: i64,
+        message_id: MessageId,
+        uploader_id: UserId,
+        channel_id: ChannelId,
+        clan_id: ClanId,
+        cfg: Option<&AppConfig>,
+    ) -> Self {
+        let is_video = is_video_type(&filetype, &url);
+        let is_image = !is_video && is_image_type(&filetype, &url);
+        let (thumb_src, viewer_thumb_src, viewer_src) =
+            media_proxy_urls(&url, is_video, width, height, cfg);
+        let (day_label, day_index, viewer_timestamp) = viewer_day_fields(create_time_seconds);
+        Self {
+            id,
+            channel_id,
+            clan_id,
+            message_id,
+            uploader_id,
+            url,
+            filename,
+            filetype,
+            width,
+            height,
+            create_time_seconds,
             is_image,
             is_video,
             thumb_src,
@@ -126,10 +203,46 @@ impl ChannelAttachment {
             uploader_avatar_raw: SharedString::default(),
         }
     }
+}
 
-    pub fn is_media(&self) -> bool {
-        self.is_image || self.is_video
+fn normalize_media_url(url: &str, cfg: Option<&AppConfig>) -> String {
+    match cfg {
+        Some(cfg) => match cfg.read_media_url(url) {
+            Cow::Owned(u) => u,
+            Cow::Borrowed(u) => u.to_string(),
+        },
+        None => url.to_string(),
     }
+}
+
+fn media_proxy_urls(
+    url: &str,
+    is_video: bool,
+    width: u32,
+    height: u32,
+    cfg: Option<&AppConfig>,
+) -> (SharedString, SharedString, SharedString) {
+    if is_video {
+        let u = url.to_string();
+        (u.clone().into(), u.clone().into(), u.into())
+    } else if let Some(cfg) = cfg {
+        (
+            cfg.gallery_thumb_proxy(url).into(),
+            cfg.viewer_thumb_proxy(url).into(),
+            cfg.viewer_proxy(url, width, height).into(),
+        )
+    } else {
+        let u = url.to_string();
+        (u.clone().into(), u.clone().into(), u.into())
+    }
+}
+
+fn viewer_day_fields(create_time_seconds: u32) -> (SharedString, i64, SharedString) {
+    (
+        format_day(create_time_seconds as i64).into(),
+        day_index(create_time_seconds as i64),
+        format_viewer_timestamp(create_time_seconds).into(),
+    )
 }
 
 pub async fn fetch_channel_attachments(
@@ -140,15 +253,30 @@ pub async fn fetch_channel_attachments(
     before: u32,
     after: u32,
     limit: i32,
-) -> anyhow::Result<Vec<ChannelAttachment>> {
+) -> anyhow::Result<FetchedChannelAttachments> {
     let list = api
         .list_channel_attachments(clan_id.0, channel_id.0, "", 0, limit, before, after)
         .await?;
-    Ok(list
+    let raw_count = list.len();
+    let oldest_create_time = list.last().map(|a| a.create_time_seconds);
+    let attachments = list
         .into_iter()
         .map(|a| ChannelAttachment::from_api(a, channel_id, clan_id, &cfg))
         .filter(ChannelAttachment::is_media)
-        .collect())
+        .collect();
+    Ok(FetchedChannelAttachments {
+        attachments,
+        raw_count,
+        oldest_create_time,
+    })
+}
+
+pub fn initial_page_has_more(raw_count: usize, limit: i32) -> bool {
+    raw_count as i32 >= limit
+}
+
+pub fn next_page_has_more(raw_count: usize, limit: i32, new_items: usize) -> bool {
+    initial_page_has_more(raw_count, limit) && new_items > 0
 }
 
 /// Resolved uploader display info.
@@ -606,8 +734,9 @@ impl GalleryStore {
                 .await;
             let mapped_result = match result {
                 Ok(list) => {
+                    let raw_count = list.len();
                     let cfg = mapping_cfg.clone();
-                    Ok(cx
+                    let mapped = cx
                         .background_executor()
                         .spawn(async move {
                             match cfg {
@@ -621,7 +750,8 @@ impl GalleryStore {
                                 None => Vec::new(),
                             }
                         })
-                        .await)
+                        .await;
+                    Ok((mapped, raw_count))
                 }
                 Err(e) => Err(e),
             };
@@ -629,8 +759,7 @@ impl GalleryStore {
                 let entry = this.by_channel.entry(channel_id).or_default();
                 entry.is_loading = false;
                 match mapped_result {
-                    Ok(mapped) => {
-                        let fetched = mapped.len();
+                    Ok((mapped, raw_count)) => {
                         let added = merge_attachments(
                             &mut entry.attachments,
                             &mut entry.ids,
@@ -638,18 +767,18 @@ impl GalleryStore {
                             reset,
                             direction,
                         );
-                        let full_page = fetched as i32 >= GALLERY_PAGE_SIZE;
-                        let progressed = added > 0;
                         if reset {
-                            entry.has_more_before = full_page;
+                            entry.has_more_before =
+                                initial_page_has_more(raw_count, GALLERY_PAGE_SIZE);
                             entry.has_more_after = false;
                         } else {
+                            let has_more = next_page_has_more(raw_count, GALLERY_PAGE_SIZE, added);
                             match direction {
                                 LoadDirection::Before => {
-                                    entry.has_more_before = full_page && progressed;
+                                    entry.has_more_before = has_more;
                                 }
                                 LoadDirection::After => {
-                                    entry.has_more_after = full_page && progressed;
+                                    entry.has_more_after = has_more;
                                 }
                             }
                         }
@@ -929,5 +1058,97 @@ mod tests {
         let mut atts = vec![att(1, 1, "image/png")];
         enrich_uploader(&mut atts, |_| None);
         assert_eq!(atts[0].uploader_name, SharedString::from("Anonymous"));
+    }
+
+    #[test]
+    fn seed_from_message_uses_clicked_attachment() {
+        let msg_att = crate::message::MessageAttachment {
+            url: "https://cdn.example/checkin.png".into(),
+            filename: "checkin.png".into(),
+            filetype: "image/png".into(),
+            width: 640,
+            height: 640,
+            ..Default::default()
+        };
+        let input = AttachmentSeedInput::from_message(&msg_att);
+        let seed = ChannelAttachment::seed_from_message(
+            &input,
+            MessageId(42),
+            UserId(7),
+            1_700_000_000,
+            ChannelId(1),
+            ClanId(1),
+            None,
+        );
+        assert_eq!(seed.id, 0);
+        assert_eq!(seed.message_id, MessageId(42));
+        assert_eq!(seed.url, "https://cdn.example/checkin.png");
+        assert!(seed.is_image);
+        assert!(!seed.is_video);
+        assert!(seed.uploader_name.is_empty());
+        assert_eq!(seed.create_time_seconds, 1_700_000_000);
+    }
+
+    #[test]
+    fn seed_from_message_rewrites_upload_url_with_config() {
+        let cfg = AppConfig::dev_defaults();
+        let upload = format!("{}/images/checkin.png", cfg.upload_img_url);
+        let msg_att = crate::message::MessageAttachment {
+            url: upload.clone(),
+            filename: "checkin.png".into(),
+            filetype: "image/png".into(),
+            width: 640,
+            height: 640,
+            ..Default::default()
+        };
+        let input = AttachmentSeedInput::from_message(&msg_att);
+        let seed = ChannelAttachment::seed_from_message(
+            &input,
+            MessageId(42),
+            UserId(7),
+            1_700_000_000,
+            ChannelId(1),
+            ClanId(1),
+            Some(&cfg),
+        );
+        assert_eq!(seed.url, cfg.read_media_url(&upload).into_owned());
+    }
+
+    #[test]
+    fn seed_from_message_marks_mkv_as_video() {
+        let input = AttachmentSeedInput {
+            url: "https://cdn.example/clip.mkv".into(),
+            filename: "clip.mkv".into(),
+            filetype: "application/octet-stream".into(),
+            width: 1280,
+            height: 720,
+        };
+        let seed = ChannelAttachment::seed_from_message(
+            &input,
+            MessageId(1),
+            UserId(1),
+            1_700_000_000,
+            ChannelId(1),
+            ClanId(1),
+            None,
+        );
+        assert!(seed.is_video);
+        assert!(!seed.is_image);
+    }
+
+    #[test]
+    fn has_more_uses_raw_page_size_not_filtered_media_count() {
+        assert!(initial_page_has_more(50, GALLERY_PAGE_SIZE));
+        assert!(!initial_page_has_more(49, GALLERY_PAGE_SIZE));
+        assert!(
+            next_page_has_more(50, GALLERY_PAGE_SIZE, 12),
+            "full raw page with some new media must keep paging"
+        );
+        assert!(
+            !next_page_has_more(12, GALLERY_PAGE_SIZE, 12),
+            "short raw page is end-of-list even if all items are new media"
+        );
+        assert!(!next_page_has_more(50, GALLERY_PAGE_SIZE, 0));
+        assert!(!next_page_has_more(0, GALLERY_PAGE_SIZE, 0));
     }
 }

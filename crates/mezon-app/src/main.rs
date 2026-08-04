@@ -307,7 +307,7 @@ fn log_linux_session_notes() {
         .as_deref()
     {
         Some("wayland") => {
-            tracing::warn!("MEZON_LINUX_SESSION=wayland: channel app webviews require X11/XWayland")
+            tracing::warn!("MEZON_LINUX_SESSION=wayland: the app runs on X11/XWayland")
         }
         Some(other) if other != "x11" => {
             tracing::warn!("Unknown MEZON_LINUX_SESSION={other}; expected x11 or wayland")
@@ -582,42 +582,6 @@ fn run_app(lock: SingleInstance, initial_url: Option<String>) {
         install_foreground_watchdog(cx);
 
         #[cfg(target_os = "linux")]
-        {
-            if let Err(error) = mezon_webview::init_gtk() {
-                tracing::error!("gtk init failed: {error:#}");
-            }
-            cx.spawn(async move |async_cx| {
-                let foreground = async_cx.foreground_executor().clone();
-                loop {
-                    async_cx
-                        .background_executor()
-                        .timer(std::time::Duration::from_millis(16))
-                        .await;
-                    foreground
-                        .spawn(async move {
-                            mezon_webview::pump_gtk_events();
-                        })
-                        .detach();
-                }
-            })
-            .detach();
-        }
-
-        #[cfg(target_os = "windows")]
-        {
-            cx.spawn(async move |async_cx| {
-                loop {
-                    async_cx
-                        .background_executor()
-                        .timer(std::time::Duration::from_millis(16))
-                        .await;
-                    mezon_ui::channel_app::process_pending_windows_webviews(async_cx);
-                }
-            })
-            .detach();
-        }
-
-        #[cfg(target_os = "linux")]
         cx.set_text_rendering_mode(gpui::TextRenderingMode::Grayscale);
 
         // Register gg sans font (TTFs pre-decompressed by build.rs)
@@ -742,6 +706,7 @@ fn run_app(lock: SingleInstance, initial_url: Option<String>) {
             {
                 let hwnd = win32.hwnd.get();
                 mezon_native::badge::set_main_window_hwnd(hwnd);
+                mezon_updater::winstore::set_window_handle(hwnd);
                 mezon_native::window_icon::apply_dpi_aware_icons(hwnd);
             }
         }
@@ -941,6 +906,7 @@ fn open_main_window(
 
     let auth_state = cx.new(|_| initial_auth);
     mezon_store::AutoUpdateStore::init(mezon_store::AppConfig::global(cx).update_url.clone(), cx);
+    mezon_store::WinstoreUpdateStore::init(cx);
     let title_bar = cx.new(|cx| TitleBar::new(settings_entity.clone(), cx));
 
     mezon_store::LoginStore::init(client, api.clone(), auth_state.clone(), cx);

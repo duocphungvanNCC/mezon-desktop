@@ -1126,7 +1126,8 @@ impl Render for ChatHeader {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
         if self.stream_sidebar {
-            return render_stream_chat_sidebar_header(&theme, &self.name, cx).into_any_element();
+            return render_stream_chat_sidebar_header(&theme, &self.name, self.layout.clone(), cx)
+                .into_any_element();
         }
         let layout_weak = self.layout.clone();
         let settings = self.settings.clone();
@@ -1300,6 +1301,7 @@ impl Render for ChatHeader {
 fn render_stream_chat_sidebar_header(
     theme: &Theme,
     name: &SharedString,
+    layout: WeakEntity<ChatLayout>,
     _cx: &App,
 ) -> impl IntoElement {
     let label = crate::chat::stream::truncate_label(name, 30);
@@ -1323,11 +1325,10 @@ fn render_stream_chat_sidebar_header(
                 .flex_row()
                 .items_center()
                 .gap_2()
-                .child(
-                    Icon::new(IconName::MessageIcon)
-                        .size(px(20.))
-                        .text_color(theme.text_primary),
-                )
+                .child(crate::chat::voice::chat_toggle_icon(
+                    theme.text_primary,
+                    px(20.),
+                ))
                 .child(
                     div()
                         .text_base()
@@ -1339,6 +1340,7 @@ fn render_stream_chat_sidebar_header(
         .child(
             div()
                 .id("stream-chat-close")
+                .occlude()
                 .flex()
                 .items_center()
                 .justify_center()
@@ -1347,11 +1349,20 @@ fn render_stream_chat_sidebar_header(
                 .hover(move |s| s.bg(hover))
                 .rounded_md()
                 .p_1()
-                .child(Icon::new(IconName::Close).size(px(20.)))
-                .on_click(|_, _, cx| {
+                .child(
+                    Icon::new(IconName::Close)
+                        .size(px(20.))
+                        .text_color(theme.text_primary),
+                )
+                .on_click(move |_, _, cx| {
                     StreamStore::global(cx).update(cx, |store, cx| {
                         if store.show_chat() {
                             store.toggle_chat(cx);
+                        }
+                    });
+                    let _ = layout.update(cx, |layout, cx| {
+                        if layout.voice_show_chat() {
+                            layout.toggle_voice_chat(cx);
                         }
                     });
                 }),

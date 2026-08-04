@@ -1,3 +1,5 @@
+pub mod winstore;
+
 use anyhow::{Context, Result, anyhow, bail};
 use sha2::{Digest, Sha512};
 use std::path::{Path, PathBuf};

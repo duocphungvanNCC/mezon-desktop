@@ -11,7 +11,7 @@ mod embed_fields;
 mod forward_modal;
 mod gif_video;
 pub mod inline_content;
-mod invite_card;
+pub(crate) mod invite_card;
 mod message_actions_panel;
 mod message_buzz_modal;
 mod message_context_menu;
@@ -39,6 +39,7 @@ mod video_player;
 
 pub use channel_messages::{ChannelMessages, ChannelMessagesEvent};
 pub(crate) use content::open_message_link;
+pub(crate) use content::{RichRunPalette, rich_run_highlight};
 pub(crate) use content::{heading_line_height, heading_size};
 pub(crate) use content::{
     pin_link_element, render_pin_rich_layout_element, resolve_message_link_url, text_wrap_children,

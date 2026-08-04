@@ -11,7 +11,7 @@ use gpui::{
 };
 use mezon_store::{
     ChannelId, ChannelList, ChannelType, ClanId, MessageSearchStore, MessageSpan, MessagesStore,
-    RichLayout, RichRunKind, SearchDropdownMode, SearchHit, SearchPageToken, autocomplete_needle,
+    RichLayout, SearchDropdownMode, SearchHit, SearchPageToken, autocomplete_needle,
     has_filter_options, resolve_search_hit_ogp, search_content_highlight_terms,
     search_dropdown_mode, search_page_count, search_page_numbers, should_show_search_dropdown,
 };
@@ -21,7 +21,9 @@ use ui::WithScrollbar;
 
 use crate::chat::layout::ChatLayout;
 use crate::chat::member_list::{MentionMemberRaw, mention_member_pool};
-use crate::chat::message::{format_message_time, open_message_link, render_ogp_preview};
+use crate::chat::message::{
+    RichRunPalette, format_message_time, open_message_link, render_ogp_preview, rich_run_highlight,
+};
 use crate::chat::role_style::message_sender_color;
 use crate::components::primitives::{Icon, IconName, Input, InputState, Sizable, Size, Spinner};
 use crate::image_cache::{
@@ -1103,10 +1105,7 @@ fn render_rich_search_content(
     terms: &[String],
     theme: &Theme,
 ) -> gpui::AnyElement {
-    let mention_color: gpui::Hsla = theme.tokens.mention_color.into();
-    let mention_bg: gpui::Hsla = theme.tokens.mention_primary.into();
-    let code_bg: gpui::Hsla = theme.tokens.bg_markdown_code.into();
-    let link_color: gpui::Hsla = theme.tokens.mention_color.into();
+    let palette = RichRunPalette::from_theme(theme);
     let search_bg: gpui::Hsla = theme.tokens.bg_item_theme_hover.into();
     let text = layout.text.clone();
     let mut highlights: Vec<(Range<usize>, HighlightStyle)> = Vec::new();
@@ -1123,31 +1122,7 @@ fn render_rich_search_content(
     }
 
     for run in layout.runs.iter() {
-        let style = match run.kind {
-            RichRunKind::Bold => HighlightStyle {
-                font_weight: Some(FontWeight::BOLD),
-                ..Default::default()
-            },
-            RichRunKind::Code => HighlightStyle {
-                background_color: Some(code_bg),
-                ..Default::default()
-            },
-            RichRunKind::Link => HighlightStyle {
-                color: Some(link_color),
-                underline: Some(gpui::UnderlineStyle {
-                    thickness: px(1.),
-                    color: Some(link_color),
-                    wavy: false,
-                }),
-                ..Default::default()
-            },
-            RichRunKind::Mention | RichRunKind::Hashtag => HighlightStyle {
-                color: Some(mention_color),
-                background_color: Some(mention_bg),
-                ..Default::default()
-            },
-        };
-        highlights.push((run.range.clone(), style));
+        highlights.push((run.range.clone(), rich_run_highlight(run.kind, &palette)));
     }
 
     div()

@@ -401,8 +401,8 @@ pub const VIEWER_IMAGE_ENTRY_MAX_BYTES: u64 = 24 * 1024 * 1024;
 /// global asset cache (which never evicts and leaks RAM for every URL seen).
 pub const SHARED_IMAGE_CACHE_CAPACITY: usize = 384;
 pub const SHARED_IMAGE_CACHE_BYTES: u64 = 24 * 1024 * 1024;
-pub const GALLERY_IMAGE_CACHE_CAPACITY: usize = 48;
-pub const GALLERY_IMAGE_CACHE_BYTES: u64 = 12 * 1024 * 1024;
+pub const GALLERY_IMAGE_CACHE_CAPACITY: usize = 96;
+pub const GALLERY_IMAGE_CACHE_BYTES: u64 = 16 * 1024 * 1024;
 
 pub const PREVIEW_IMAGE_CACHE_CAPACITY: usize = 64;
 pub const PREVIEW_IMAGE_CACHE_BYTES: u64 = 32 * 1024 * 1024;
@@ -1962,7 +1962,7 @@ mod tests {
         assert_eq!(VIEWER_FETCH_MAX_BYTES, 32 * 1024 * 1024);
         assert_eq!(MESSAGE_IMAGE_CACHE_BYTES, 32 * 1024 * 1024);
         assert_eq!(VIEWER_IMAGE_CACHE_BYTES, 32 * 1024 * 1024);
-        assert_eq!(GALLERY_IMAGE_CACHE_BYTES, 12 * 1024 * 1024);
+        assert_eq!(GALLERY_IMAGE_CACHE_BYTES, 16 * 1024 * 1024);
         assert_eq!(PREVIEW_IMAGE_CACHE_CAPACITY, 64);
         assert_eq!(PREVIEW_IMAGE_CACHE_BYTES, 32 * 1024 * 1024);
         assert_eq!(SHARED_IMAGE_CACHE_BYTES, 24 * 1024 * 1024);

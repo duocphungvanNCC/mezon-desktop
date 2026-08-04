@@ -248,25 +248,83 @@ fn render_deleted_placeholder(msg: &Message, ctx: &RowCtx, theme: &Theme) -> Any
 fn rich_text_plan_matches(
     plan: &RichTextRenderPlan,
     layout: &std::sync::Arc<mezon_store::RichLayout>,
-    colors: [Hsla; 5],
+    colors: [Hsla; 7],
     edited: bool,
 ) -> bool {
     std::sync::Arc::ptr_eq(&plan.layout, layout) && plan.colors == colors && plan.edited == edited
 }
 
+#[derive(Clone, Copy, PartialEq)]
+pub(crate) struct RichRunPalette {
+    pub mention: Hsla,
+    pub mention_bg: Hsla,
+    pub role: Hsla,
+    pub role_bg: Hsla,
+    pub code_bg: Hsla,
+    pub link: Hsla,
+}
+
+impl RichRunPalette {
+    pub(crate) fn from_theme(theme: &Theme) -> Self {
+        Self {
+            mention: theme.tokens.mention_color.into(),
+            mention_bg: theme.tokens.mention_primary.into(),
+            role: theme.tokens.color_mention_evryone.into(),
+            role_bg: theme.tokens.bg_mention_evryone.into(),
+            code_bg: theme.tokens.bg_markdown_code.into(),
+            link: theme.tokens.mention_color.into(),
+        }
+    }
+
+    pub(crate) fn memo_key(&self, text_muted: Hsla) -> [Hsla; 7] {
+        [
+            self.mention,
+            self.mention_bg,
+            self.role,
+            self.role_bg,
+            self.code_bg,
+            self.link,
+            text_muted,
+        ]
+    }
+}
+
+pub(crate) fn rich_run_highlight(kind: RichRunKind, palette: &RichRunPalette) -> HighlightStyle {
+    match kind {
+        RichRunKind::Bold => HighlightStyle {
+            font_weight: Some(FontWeight::BOLD),
+            ..Default::default()
+        },
+        RichRunKind::Code => HighlightStyle {
+            background_color: Some(palette.code_bg),
+            ..Default::default()
+        },
+        RichRunKind::Link => HighlightStyle {
+            color: Some(palette.link),
+            underline: Some(UnderlineStyle {
+                thickness: px(1.),
+                color: Some(palette.link),
+                wavy: false,
+            }),
+            ..Default::default()
+        },
+        RichRunKind::Mention | RichRunKind::Hashtag => HighlightStyle {
+            color: Some(palette.mention),
+            background_color: Some(palette.mention_bg),
+            ..Default::default()
+        },
+        RichRunKind::RoleMention => HighlightStyle {
+            color: Some(palette.role),
+            background_color: Some(palette.role_bg),
+            ..Default::default()
+        },
+    }
+}
+
 fn render_rich_styled(msg: &Message, ctx: &RowCtx, body_color: gpui::Rgba) -> AnyElement {
     let theme = ctx.theme;
-    let mention_color: Hsla = theme.tokens.mention_color.into();
-    let mention_bg: Hsla = theme.tokens.mention_primary.into();
-    let code_bg: Hsla = theme.tokens.bg_markdown_code.into();
-    let link_color: Hsla = theme.tokens.mention_color.into();
-    let colors = [
-        mention_color,
-        mention_bg,
-        code_bg,
-        link_color,
-        theme.text_muted.into(),
-    ];
+    let palette = RichRunPalette::from_theme(theme);
+    let colors = palette.memo_key(theme.text_muted.into());
     let Some(layout) = msg.rich_layout.as_ref() else {
         return div().into_any_element();
     };
@@ -280,44 +338,9 @@ fn render_rich_styled(msg: &Message, ctx: &RowCtx, body_color: gpui::Rgba) -> An
             let mut click_ranges: Vec<Range<usize>> = Vec::new();
             let mut actions: Vec<RichClick> = Vec::new();
             for run in layout.runs.iter() {
-                match run.kind {
-                    RichRunKind::Bold => highlights.push((
-                        run.range.clone(),
-                        HighlightStyle {
-                            font_weight: Some(FontWeight::BOLD),
-                            ..Default::default()
-                        },
-                    )),
-                    RichRunKind::Code => {
-                        highlights.push((
-                            run.range.clone(),
-                            HighlightStyle {
-                                background_color: Some(code_bg),
-                                ..Default::default()
-                            },
-                        ));
-                        font_overrides.push((run.range.clone(), "monospace".into()));
-                    }
-                    RichRunKind::Link => highlights.push((
-                        run.range.clone(),
-                        HighlightStyle {
-                            color: Some(link_color),
-                            underline: Some(UnderlineStyle {
-                                thickness: px(1.),
-                                color: Some(link_color),
-                                wavy: false,
-                            }),
-                            ..Default::default()
-                        },
-                    )),
-                    RichRunKind::Mention | RichRunKind::Hashtag => highlights.push((
-                        run.range.clone(),
-                        HighlightStyle {
-                            color: Some(mention_color),
-                            background_color: Some(mention_bg),
-                            ..Default::default()
-                        },
-                    )),
+                highlights.push((run.range.clone(), rich_run_highlight(run.kind, &palette)));
+                if run.kind == RichRunKind::Code {
+                    font_overrides.push((run.range.clone(), "monospace".into()));
                 }
                 if let Some(click) = run.click.clone() {
                     click_ranges.push(run.range.clone());
@@ -2385,10 +2408,7 @@ pub(crate) fn text_wrap_children(text: &str, color: gpui::Rgba) -> Vec<AnyElemen
 }
 
 pub(crate) fn render_pin_rich_layout_element(layout: &RichLayout, theme: &Theme) -> AnyElement {
-    let mention_color: Hsla = theme.tokens.mention_color.into();
-    let mention_bg: Hsla = theme.tokens.mention_primary.into();
-    let code_bg: Hsla = theme.tokens.bg_markdown_code.into();
-    let link_color: Hsla = theme.tokens.mention_color.into();
+    let palette = RichRunPalette::from_theme(theme);
     let body_color = theme.tokens.text_theme_message;
 
     if layout.runs.is_empty() {
@@ -2408,42 +2428,7 @@ pub(crate) fn render_pin_rich_layout_element(layout: &RichLayout, theme: &Theme)
     let mut click_ranges: Vec<Range<usize>> = Vec::new();
     let mut actions: Vec<RichClick> = Vec::new();
     for run in layout.runs.iter() {
-        match run.kind {
-            RichRunKind::Bold => highlights.push((
-                run.range.clone(),
-                HighlightStyle {
-                    font_weight: Some(FontWeight::BOLD),
-                    ..Default::default()
-                },
-            )),
-            RichRunKind::Code => highlights.push((
-                run.range.clone(),
-                HighlightStyle {
-                    background_color: Some(code_bg),
-                    ..Default::default()
-                },
-            )),
-            RichRunKind::Link => highlights.push((
-                run.range.clone(),
-                HighlightStyle {
-                    color: Some(link_color),
-                    underline: Some(UnderlineStyle {
-                        thickness: px(1.),
-                        color: Some(link_color),
-                        wavy: false,
-                    }),
-                    ..Default::default()
-                },
-            )),
-            RichRunKind::Mention | RichRunKind::Hashtag => highlights.push((
-                run.range.clone(),
-                HighlightStyle {
-                    color: Some(mention_color),
-                    background_color: Some(mention_bg),
-                    ..Default::default()
-                },
-            )),
-        }
+        highlights.push((run.range.clone(), rich_run_highlight(run.kind, &palette)));
         if let Some(click) = run.click.clone() {
             click_ranges.push(run.range.clone());
             actions.push(click);
@@ -2680,11 +2665,12 @@ fn split_unbreakable(text: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        RichTextRenderPlan, SelectableSectionCursor, parse_channel_id, rich_text_plan_matches,
-        selectable_message_layout_identity, selectable_text_chunks,
+        RichRunPalette, RichTextRenderPlan, SelectableSectionCursor, parse_channel_id,
+        rich_run_highlight, rich_text_plan_matches, selectable_message_layout_identity,
+        selectable_text_chunks,
     };
     use gpui::{Hsla, SharedString};
-    use mezon_store::{ChannelId, Message, MessageId, MessageSpan, build_rich_layout};
+    use mezon_store::{ChannelId, Message, MessageId, MessageSpan, RichRunKind, build_rich_layout};
 
     #[test]
     fn parse_channel_id_rejects_zero() {
@@ -2692,10 +2678,51 @@ mod tests {
         assert_eq!(parse_channel_id("12345"), Some(ChannelId(12345)));
     }
 
+    fn test_palette() -> RichRunPalette {
+        RichRunPalette {
+            mention: gpui::rgb(0x3298ff).into(),
+            mention_bg: gpui::rgb(0x4361ee).into(),
+            role: gpui::rgb(0x2eb08c).into(),
+            role_bg: gpui::rgb(0x2eb08b).into(),
+            code_bg: gpui::rgb(0x111111).into(),
+            link: gpui::rgb(0x3298ff).into(),
+        }
+    }
+
+    #[test]
+    fn role_mention_runs_use_the_everyone_palette() {
+        let palette = test_palette();
+        let role = rich_run_highlight(RichRunKind::RoleMention, &palette);
+        assert_eq!(role.color, Some(palette.role));
+        assert_eq!(role.background_color, Some(palette.role_bg));
+    }
+
+    #[test]
+    fn role_and_user_mention_runs_never_share_a_colour() {
+        let palette = test_palette();
+        let role = rich_run_highlight(RichRunKind::RoleMention, &palette);
+        let user = rich_run_highlight(RichRunKind::Mention, &palette);
+        let hashtag = rich_run_highlight(RichRunKind::Hashtag, &palette);
+        assert_eq!(user.color, Some(palette.mention));
+        assert_eq!(user.background_color, Some(palette.mention_bg));
+        assert_eq!(hashtag.color, user.color);
+        assert_ne!(role.color, user.color);
+        assert_ne!(role.background_color, user.background_color);
+    }
+
+    #[test]
+    fn palette_memo_key_changes_when_a_role_colour_changes() {
+        let palette = test_palette();
+        let muted: Hsla = gpui::rgb(0x808080).into();
+        let mut recoloured = palette;
+        recoloured.role = gpui::rgb(0x3d8bff).into();
+        assert_ne!(palette.memo_key(muted), recoloured.memo_key(muted));
+    }
+
     #[test]
     fn rich_text_plan_reuses_only_the_same_layout_and_style() {
         let layout = build_rich_layout(&[MessageSpan::Bold("hello".into())]).unwrap();
-        let colors = [Hsla::default(); 5];
+        let colors = [Hsla::default(); 7];
         let plan = RichTextRenderPlan {
             layout: layout.clone(),
             colors,

@@ -13,7 +13,7 @@ use mezon_store::{
     Settings, StreamMember, StreamStore, VoiceMember,
 };
 
-use crate::channel_app::{is_channel_app_open, launch_channel_app_from_store};
+use crate::channel_app::launch_channel_app_from_store;
 use ui::{ScrollAxes, Scrollbars, Tooltip, WithScrollbar};
 
 use crate::app::shell::Shell;
@@ -673,7 +673,6 @@ impl ChannelSidebar {
         launch_channel_app_from_store(
             app_id,
             app.app_url.clone(),
-            app.app_name.clone(),
             clan_id,
             self.active_clan_name.clone(),
             self.channel_list.clone(),
@@ -1232,18 +1231,6 @@ fn truncate_channel_label(name: &str) -> String {
     }
 }
 
-pub(crate) fn app_channel_open_dot(theme: &Theme) -> gpui::Div {
-    div()
-        .absolute()
-        .top(px(2.))
-        .right(px(2.))
-        .size(px(8.))
-        .rounded_full()
-        .border_2()
-        .border_color(theme.bg_secondary)
-        .bg(theme.status_online)
-}
-
 fn render_banner_and_events(
     banner_url: Option<&str>,
     app_channels: &[AppChannelSlot],
@@ -1396,7 +1383,6 @@ fn render_banner_and_events(
                     .text_color(theme.text_primary)
                     .into_any_element()
             };
-            let is_open = is_channel_app_open(&app.app_id, cx);
             app_row = app_row.child(
                 div()
                     .id(SharedString::from(format!("app-channel-{ix}")))
@@ -1418,8 +1404,7 @@ fn render_banner_and_events(
                             sidebar.launch_channel_app(app.clone(), cx);
                         });
                     })
-                    .child(icon_el)
-                    .when(is_open, |cell| cell.child(app_channel_open_dot(theme))),
+                    .child(icon_el),
             );
         }
         if has_more {

@@ -557,6 +557,25 @@ impl ThreadsStore {
         self.category_id = channel.category_id.clone();
     }
 
+    fn sync_list_scope(&mut self, cx: &App) {
+        let Some(active_id) = ChannelList::global(cx).read(cx).active_channel_id else {
+            return;
+        };
+        if let Some(channel) = ChannelList::global(cx)
+            .read(cx)
+            .find_channel_in_active_clan(active_id)
+        {
+            self.apply_channel(channel);
+            return;
+        }
+        self.list_channel_id = Some(active_id.to_string());
+        self.clan_id = Some("0".to_string());
+    }
+
+    fn resolve_fetch_clan_id(&self) -> Option<String> {
+        self.clan_id.as_ref().filter(|id| !id.is_empty()).cloned()
+    }
+
     fn on_active_channel_changed(&mut self, channel_id: Option<ChannelId>, cx: &mut Context<Self>) {
         match channel_id {
             None => {
@@ -607,8 +626,9 @@ impl ThreadsStore {
     }
 
     pub fn open_popover(&mut self, cx: &mut Context<Self>) {
+        self.sync_list_scope(cx);
         self.ensure_create_permissions(cx);
-        self.ensure_loaded(cx);
+        self.refresh(cx);
     }
 
     pub fn list_clan_id(&self) -> Option<&str> {
@@ -699,10 +719,11 @@ impl ThreadsStore {
     }
 
     fn schedule_search(&mut self, cx: &mut Context<Self>, query: String) {
+        self.sync_list_scope(cx);
         let Some(channel_id) = self.list_channel_id.clone() else {
             return;
         };
-        let Some(clan_id) = self.clan_id.clone() else {
+        let Some(clan_id) = self.resolve_fetch_clan_id() else {
             return;
         };
         self.search_generation = self.search_generation.wrapping_add(1);
@@ -740,8 +761,8 @@ impl ThreadsStore {
                 this.searching = false;
                 match result {
                     Ok(list) => {
-                        let results =
-                            filter_threads(list.into_iter().map(thread_from_api).collect());
+                        let results: Vec<ThreadSummary> =
+                            list.into_iter().map(thread_from_api).collect();
                         this.ensure_clan_members_for_threads(&results, cx);
                         this.search_results = Some(results);
                     }
@@ -775,10 +796,16 @@ impl ThreadsStore {
     }
 
     fn fetch_page(&mut self, page: i32, append: bool, cx: &mut Context<Self>) {
+        self.sync_list_scope(cx);
         let Some(channel_id) = self.list_channel_id.clone() else {
             return;
         };
-        let Some(clan_id) = self.clan_id.clone() else {
+        let Some(clan_id) = self.resolve_fetch_clan_id() else {
+            tracing::warn!(
+                target: "mezon.threads",
+                channel_id = %channel_id,
+                "list_thread_descs skipped: clan_id unavailable"
+            );
             return;
         };
         if append {
@@ -1068,7 +1095,9 @@ fn filter_threads(threads: Vec<ThreadSummary>) -> Vec<ThreadSummary> {
         .into_iter()
         .filter(|t| {
             if t.channel_private != 0 {
-                t.active == THREAD_STATUS_JOINED || t.active == THREAD_STATUS_ACTIVE_PRIVATE
+                t.active == THREAD_STATUS_JOINED
+                    || t.active == THREAD_STATUS_ACTIVE_PRIVATE
+                    || t.active == THREAD_STATUS_ARCHIVED
             } else {
                 true
             }
@@ -1264,6 +1293,38 @@ mod tests {
             threads.iter().chain(results.iter()),
             "9"
         ));
+    }
+
+    #[test]
+    fn filter_threads_keeps_archived_private_threads_in_popover() {
+        let threads = vec![
+            summary("1", 1),
+            {
+                let mut thread = summary("2", 0);
+                thread.active = THREAD_STATUS_ARCHIVED;
+                thread
+            },
+            {
+                let mut thread = summary("3", 1);
+                thread.active = THREAD_STATUS_ARCHIVED;
+                thread
+            },
+        ];
+        let kept = filter_threads(threads);
+        assert_eq!(kept.len(), 3);
+        assert!(kept.iter().any(|t| t.channel_id == "1"));
+        assert!(kept.iter().any(|t| t.channel_id == "2"));
+        assert!(kept.iter().any(|t| t.channel_id == "3"));
+    }
+
+    #[test]
+    fn filter_threads_drops_private_threads_user_has_not_joined() {
+        let threads = vec![{
+            let mut thread = summary("9", 1);
+            thread.active = THREAD_STATUS_ACTIVE_PUBLIC;
+            thread
+        }];
+        assert!(filter_threads(threads).is_empty());
     }
 
     #[test]

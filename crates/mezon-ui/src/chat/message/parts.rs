@@ -8,10 +8,10 @@ use gpui::{
     SharedString, Transformation, Window, div, img, prelude::*, px, radians, rems, rgba,
 };
 use mezon_store::{
-    AccountStore, AlbumLayout, AppConfig, BadgeService, ChannelType, ClanId, ClanList,
-    ClanMembersStore, Emoji, Message, MessageAttachment, MessageCode, MessageId, MessageReference,
-    MessagesStore, PlatformStore, ProfileContext, Reaction, ThreadsStore, TopicsStore, UserId,
-    UsersByUserStore, ViewerMedia, resolve_avatar_url, resolve_user_profile,
+    AccountStore, AlbumLayout, AppConfig, AttachmentSeedInput, BadgeService, ChannelType, ClanId,
+    ClanList, ClanMembersStore, Emoji, Message, MessageAttachment, MessageCode, MessageId,
+    MessageReference, MessagesStore, PlatformStore, ProfileContext, Reaction, ThreadsStore,
+    TopicsStore, UserId, UsersByUserStore, ViewerMedia, resolve_avatar_url, resolve_user_profile,
 };
 use smallvec::SmallVec;
 
@@ -880,8 +880,10 @@ fn render_album(
     for (index, (tile, image)) in layout.tiles.iter().zip(images.iter()).enumerate() {
         let att = image.1;
         let settings = ctx.settings.clone();
-        let raw_url = SharedString::from(att.url.clone());
-        let anchor = (msg.create_time + 86_400).max(0) as u32;
+        let viewer_att = AttachmentSeedInput::from_message(att);
+        let message_id = msg.id;
+        let create_time = msg.create_time;
+        let uploader_id = viewer_uploader_id(msg);
         let mut tile_element = div()
             .id(("msg-album", index))
             .absolute()
@@ -897,14 +899,16 @@ fn render_album(
         if let Some(path) = att.local_source.clone() {
             let selection = ctx.selection.clone();
             tile_element = tile_element.when(
-                !att.uploading && !att.upload_failed && !raw_url.is_empty(),
+                !att.uploading && !att.upload_failed && !viewer_att.url.is_empty(),
                 |d| {
                     d.cursor_pointer().on_click(move |_, window, cx| {
                         if !selection.borrow().has_selection() {
                             open_viewer_from_message(
                                 &settings,
-                                raw_url.clone(),
-                                anchor,
+                                viewer_att.clone(),
+                                message_id,
+                                create_time,
+                                uploader_id,
                                 window,
                                 cx,
                             );
@@ -936,7 +940,15 @@ fn render_album(
                 })
                 .on_click(move |_, window, cx| {
                     if !selection.borrow().has_selection() {
-                        open_viewer_from_message(&settings, raw_url.clone(), anchor, window, cx);
+                        open_viewer_from_message(
+                            &settings,
+                            viewer_att.clone(),
+                            message_id,
+                            create_time,
+                            uploader_id,
+                            window,
+                            cx,
+                        );
                     }
                 });
         }
@@ -1040,8 +1052,10 @@ fn render_photo(
     let theme = ctx.theme;
     if let Some(path) = att.local_source.clone() {
         let settings = ctx.settings.clone();
-        let raw_url = SharedString::from(att.url.clone());
-        let anchor = (msg.create_time + 86_400).max(0) as u32;
+        let viewer_att = AttachmentSeedInput::from_message(att);
+        let message_id = msg.id;
+        let create_time = msg.create_time;
+        let uploader_id = viewer_uploader_id(msg);
         let fallback_bg = theme.bg_tertiary;
         let fallback_fg = theme.text_muted;
         let selection = ctx.selection.clone();
@@ -1053,13 +1067,24 @@ fn render_photo(
             .rounded_md()
             .overflow_hidden()
             .bg(theme.bg_tertiary);
-        el = el.when(!sending && !att.upload_failed && !raw_url.is_empty(), |d| {
-            d.cursor_pointer().on_click(move |_, window, cx| {
-                if !selection.borrow().has_selection() {
-                    open_viewer_from_message(&settings, raw_url.clone(), anchor, window, cx);
-                }
-            })
-        });
+        el = el.when(
+            !sending && !att.upload_failed && !viewer_att.url.is_empty(),
+            |d| {
+                d.cursor_pointer().on_click(move |_, window, cx| {
+                    if !selection.borrow().has_selection() {
+                        open_viewer_from_message(
+                            &settings,
+                            viewer_att.clone(),
+                            message_id,
+                            create_time,
+                            uploader_id,
+                            window,
+                            cx,
+                        );
+                    }
+                })
+            },
+        );
         el = el.child(
             img(path)
                 .id(("msg-img-frames", msg.id.0 as usize))
@@ -1120,8 +1145,10 @@ fn render_photo(
     let fallback_fg = theme.text_muted;
     let is_sticker = att.filetype == "sticker";
     let settings = ctx.settings.clone();
-    let raw_url = SharedString::from(att.url.clone());
-    let anchor = (msg.create_time + 86_400).max(0) as u32;
+    let viewer_att = AttachmentSeedInput::from_message(att);
+    let message_id = msg.id;
+    let create_time = msg.create_time;
+    let uploader_id = viewer_uploader_id(msg);
     let selection = ctx.selection.clone();
     let mut el = div()
         .id(("msg-img", index))
@@ -1134,7 +1161,15 @@ fn render_photo(
     el = el.when(!is_sticker && !att.upload_failed, |d| {
         d.cursor_pointer().on_click(move |_, window, cx| {
             if !selection.borrow().has_selection() {
-                open_viewer_from_message(&settings, raw_url.clone(), anchor, window, cx);
+                open_viewer_from_message(
+                    &settings,
+                    viewer_att.clone(),
+                    message_id,
+                    create_time,
+                    uploader_id,
+                    window,
+                    cx,
+                );
             }
         })
     });
@@ -1194,7 +1229,11 @@ fn render_video_poster(
     let theme = ctx.theme;
     let url = SharedString::from(att.url.clone());
     let filename = SharedString::from(att.filename.clone());
-    let thumbnail = att.thumbnail_proxied.clone();
+    let thumbnail = if att.presign_pending {
+        SharedString::default()
+    } else {
+        att.thumbnail_proxied.clone()
+    };
     let width = att.display_width;
     let height = att.display_height;
     let host = ctx.video_host.clone();
@@ -1227,6 +1266,9 @@ fn render_video_poster(
         return container
             .child(attachment_sending_overlay(theme))
             .into_any_element();
+    }
+    if att.presign_pending {
+        return presign_child(container, att, theme).into_any_element();
     }
     let overlay = div()
         .absolute()
@@ -1573,6 +1615,8 @@ const REACTION_EMOJI_PX: f32 = 16.;
 const REACTION_EMOJI_SOURCE_PX: u32 = 32;
 const RECENT_EMOJI_PX: f32 = 20.;
 const RECENT_EMOJI_SOURCE_PX: u32 = 40;
+const HOVER_ACTIONS_TOP: f32 = -32.;
+const HOVER_ACTIONS_MARGIN_TOP_DIFFERENT_DAY: f32 = 4.;
 
 pub fn recent_emoji_cells(emojis: &[Emoji], cx: &App) -> Vec<RecentEmojiCell> {
     emojis
@@ -1690,19 +1734,13 @@ fn reaction_pill(reaction: &Reaction, message_id: MessageId, ctx: &RowCtx) -> An
     pill.child(emoji_el).child(count_label).into_any_element()
 }
 
-pub fn render_hover_actions(
-    msg: &Message,
-    combined: bool,
-    has_reply: bool,
-    is_different_day: bool,
-    ctx: &RowCtx,
-) -> AnyElement {
-    if ctx.suppress_hover
-        || ctx.context_menu_message == Some(msg.id)
-        || ctx.hovered_row != Some(msg.id)
-    {
-        return div().into_any_element();
-    }
+pub fn hover_actions_visible(msg: &Message, ctx: &RowCtx) -> bool {
+    !ctx.suppress_hover
+        && ctx.context_menu_message != Some(msg.id)
+        && ctx.hovered_row == Some(msg.id)
+}
+
+pub fn render_hover_actions(msg: &Message, is_different_day: bool, ctx: &RowCtx) -> AnyElement {
     let theme = ctx.theme;
     let bg_hover = theme.bg_hover;
     let action = move |id: &'static str, icon: IconName, size: f32| {
@@ -1724,12 +1762,10 @@ pub fn render_hover_actions(
             .child(svg_icon)
     };
 
-    let (top, margin_top) = if is_different_day {
-        (-8., 4.)
-    } else if combined || has_reply {
-        (-8., 0.)
+    let margin_top = if is_different_day {
+        HOVER_ACTIONS_MARGIN_TOP_DIFFERENT_DAY
     } else {
-        (16., 0.)
+        0.
     };
 
     let reply_id = msg.id;
@@ -1825,7 +1861,7 @@ pub fn render_hover_actions(
         })
         .absolute()
         .right(px(24.))
-        .top(px(top))
+        .top(px(HOVER_ACTIONS_TOP))
         .mt(px(margin_top))
         .flex()
         .flex_row()
@@ -1908,14 +1944,20 @@ pub fn render_hover_actions(
 
 fn open_viewer_from_message(
     settings: &Entity<mezon_store::Settings>,
-    url: SharedString,
-    anchor_before: u32,
+    att: AttachmentSeedInput,
+    message_id: mezon_store::MessageId,
+    create_time: i64,
+    uploader_id: mezon_store::UserId,
     window: &gpui::Window,
     cx: &mut gpui::App,
 ) {
     use crate::image_viewer::{OpenViewerRequest, open_image_viewer, resolve_channel_label};
     use crate::router::{Route, Router};
-    use mezon_store::ClanId;
+    use mezon_store::{AppConfig, ChannelAttachment, ClanId};
+
+    if att.url.is_empty() {
+        return;
+    }
 
     let (clan_id, channel_id) = match Router::global(cx).read(cx).route() {
         Route::Channel {
@@ -1936,20 +1978,46 @@ fn open_viewer_from_message(
         _ => return,
     };
 
+    let seed = ChannelAttachment::seed_from_message(
+        &att,
+        message_id,
+        uploader_id,
+        create_time.max(0) as u32,
+        channel_id,
+        clan_id,
+        AppConfig::try_global(cx),
+    );
+    let url = SharedString::from(seed.url.clone());
+    let anchor = (create_time + 86_400).max(0) as u32;
+
     open_image_viewer(
         OpenViewerRequest {
             clan_id,
             channel_id,
             channel_label: resolve_channel_label(clan_id, channel_id, SharedString::default(), cx),
             settings: settings.clone(),
-            attachments: Vec::new(),
+            attachments: vec![seed],
             selected_index: 0,
             selected_url: Some(url),
-            anchor_before: Some(anchor_before),
+            anchor_before: Some(anchor),
         },
         window,
         cx,
     );
+}
+
+fn viewer_uploader_id(msg: &Message) -> mezon_store::UserId {
+    use mezon_store::UserId;
+    msg.sender_user_id
+        .filter(|u| u.0 != 0)
+        .or_else(|| {
+            msg.sender_id
+                .parse::<i64>()
+                .ok()
+                .filter(|&id| id != 0)
+                .map(UserId)
+        })
+        .unwrap_or(UserId(0))
 }
 
 pub fn render_date_divider(theme: &Theme, label: &str) -> AnyElement {
