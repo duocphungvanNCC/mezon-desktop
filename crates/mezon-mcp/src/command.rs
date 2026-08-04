@@ -50,4 +50,11 @@ pub enum McpCommand {
         enabled: bool,
         reply: oneshot::Sender<anyhow::Result<bool>>,
     },
+    GetScrollState {
+        reply: oneshot::Sender<anyhow::Result<Value>>,
+    },
+    LoadMoreMessages {
+        older: bool,
+        reply: oneshot::Sender<anyhow::Result<Value>>,
+    },
 }

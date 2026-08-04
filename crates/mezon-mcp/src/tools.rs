@@ -98,6 +98,16 @@ impl McpBackend {
                 self.search_messages(&query, size).await
             }
             "get_current_context" => self.get_current_context().await,
+            "get_scroll_state" => self.get_scroll_state().await,
+            "load_more_messages" => {
+                self.require_write_mode("load_more_messages")?;
+                let older = arguments
+                    .get("direction")
+                    .and_then(Value::as_str)
+                    .map(|d| !d.eq_ignore_ascii_case("newer"))
+                    .unwrap_or(true);
+                self.load_more_messages(older).await
+            }
             "get_settings" => self.get_settings().await,
             "get_voice_status" => self.get_voice_status().await,
             "list_stickers" => self.list_stickers().await,
@@ -660,6 +670,16 @@ impl McpBackend {
 
     async fn capture(&self, target: CaptureTarget) -> anyhow::Result<Value> {
         self.send_ui_result(|reply| McpCommand::Capture { target, reply })
+            .await
+    }
+
+    async fn get_scroll_state(&self) -> anyhow::Result<Value> {
+        self.send_ui_result(|reply| McpCommand::GetScrollState { reply })
+            .await
+    }
+
+    async fn load_more_messages(&self, older: bool) -> anyhow::Result<Value> {
+        self.send_ui_result(|reply| McpCommand::LoadMoreMessages { older, reply })
             .await
     }
 

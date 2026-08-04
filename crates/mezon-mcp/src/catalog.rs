@@ -166,6 +166,35 @@ Parameters: none.",
         write: false,
     },
     ToolSpec {
+        name: "get_scroll_state",
+        description: "\
+Report what the open channel's message list currently holds.
+
+Returns loaded_count, has_more_top, has_more_bottom, and the active clan/channel ids.
+`list_messages` reads history straight from the API without moving the UI, so use this
+to learn whether the on-screen list still has older or newer pages to pull in, and pair
+it with load_more_messages before capture_chat if you need those rows rendered.
+
+Parameters: none.",
+        write: false,
+    },
+    ToolSpec {
+        name: "load_more_messages",
+        description: "\
+Pull the next page of history into the open channel's message list.
+
+This is the deterministic equivalent of the user scrolling to the top or bottom edge:
+it drives the same store fetch, so the rows become visible to capture_chat. Returns
+started=false when the list already holds that end of the history.
+
+Check has_more_top / has_more_bottom from get_scroll_state first, and call repeatedly
+to walk further back.
+
+Parameters:
+- direction (optional): \"older\" (default) or \"newer\".",
+        write: true,
+    },
+    ToolSpec {
         name: "get_settings",
         description: "\
 Read app settings: theme, language, zoom, notifications, voice state, and related flags.

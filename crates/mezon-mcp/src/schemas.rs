@@ -80,6 +80,7 @@ pub fn input_schema(name: &str) -> Arc<Map<String, Value>> {
         | "list_friends"
         | "get_account"
         | "get_current_context"
+        | "get_scroll_state"
         | "get_settings"
         | "get_voice_status"
         | "list_stickers"
@@ -104,6 +105,12 @@ pub fn input_schema(name: &str) -> Arc<Map<String, Value>> {
             &["clan_id"],
         )),
         "list_threads" | "list_pinned_messages" | "mark_as_read" => Arc::new(clan_channel()),
+        "load_more_messages" => Arc::new(object(
+            json!({
+                "direction": string("\"older\" (default) walks back through history, \"newer\" walks forward."),
+            }),
+            &[],
+        )),
         "list_messages" => Arc::new(object(
             json!({
                 "clan_id": id("Clan snowflake id. Use 0 for direct messages."),

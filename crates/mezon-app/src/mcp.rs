@@ -127,6 +127,14 @@ impl McpRuntime {
                         let result = cx.update(|_| set_cli_enabled(enabled));
                         let _ = reply.send(result);
                     }
+                    McpCommand::GetScrollState { reply } => {
+                        let result = cx.update(scroll_state);
+                        let _ = reply.send(result);
+                    }
+                    McpCommand::LoadMoreMessages { older, reply } => {
+                        let result = cx.update(|cx| load_more_messages(cx, older));
+                        let _ = reply.send(result);
+                    }
                 }
             }
         })
@@ -199,6 +207,38 @@ async fn handle_control_request(
             format!("unknown control method: {other}"),
         )),
     }
+}
+
+fn scroll_state(cx: &mut App) -> anyhow::Result<Value> {
+    let store = mezon_store::MessagesStore::global(cx);
+    let store = store.read(cx);
+    Ok(json!({
+        "channel_id": store.active_channel_id().map(|id| id.to_string()),
+        "loaded_count": store.messages().len(),
+        "has_more_top": store.has_more_top(),
+        "has_more_bottom": store.has_more_bottom(),
+    }))
+}
+
+fn load_more_messages(cx: &mut App, older: bool) -> anyhow::Result<Value> {
+    let store = mezon_store::MessagesStore::global(cx);
+    let (started, before) = store.update(cx, |store, cx| {
+        let before = store.messages().len();
+        let started = if older {
+            store.load_more(cx)
+        } else {
+            store.load_more_bottom(cx)
+        };
+        (started, before)
+    });
+    let store = store.read(cx);
+    Ok(json!({
+        "started": started,
+        "direction": if older { "older" } else { "newer" },
+        "loaded_count_before": before,
+        "has_more_top": store.has_more_top(),
+        "has_more_bottom": store.has_more_bottom(),
+    }))
 }
 
 fn build_context(cx: &App, auth_state: &gpui::Entity<AuthState>) -> Value {
