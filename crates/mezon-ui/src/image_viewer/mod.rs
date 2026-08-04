@@ -58,11 +58,8 @@ fn sort_attachments_desc(attachments: &mut [ChannelAttachment]) {
 
 fn merge_attachment_page(into: &mut Vec<ChannelAttachment>, page: Vec<ChannelAttachment>) {
     for att in page {
-        if let Some(i) = into
-            .iter()
-            .position(|a| (a.id != 0 && a.id == att.id) || a.url == att.url)
-        {
-            if into[i].id == 0 || att.id != 0 {
+        if let Some(i) = into.iter().position(|a| a.url == att.url) {
+            if into[i].id == 0 && att.id != 0 {
                 into[i] = att;
             }
         } else {
@@ -566,8 +563,9 @@ impl ImageViewer {
             let mut accumulated = Vec::new();
             let mut has_more_before = false;
             let mut fetch_error = None;
+            let mut hit_seek_cap = false;
 
-            for _ in 0..VIEWER_SEEK_MAX_PAGES {
+            for page_idx in 0..VIEWER_SEEK_MAX_PAGES {
                 let result = fetch_channel_attachments(
                     api.clone(),
                     cfg.clone(),
@@ -579,30 +577,29 @@ impl ImageViewer {
                 )
                 .await;
                 match result {
-                    Ok(mapped) => {
-                        let page_len = mapped.len() as i32;
-                        if mapped.is_empty() {
+                    Ok(page) => {
+                        let raw_len = page.raw_count as i32;
+                        if raw_len == 0 {
                             has_more_before = false;
                             break;
                         }
-                        let oldest = mapped
-                            .last()
-                            .map(|a| a.create_time_seconds)
-                            .unwrap_or(before);
-                        merge_attachment_page(&mut accumulated, mapped);
-                        sort_attachments_desc(&mut accumulated);
+                        let oldest = page.oldest_create_time.unwrap_or(before);
+                        merge_attachment_page(&mut accumulated, page.items);
                         if let Some(url) = &select_url {
                             if index_of_url(&accumulated, url).is_some() {
-                                has_more_before = page_len >= VIEWER_FETCH_LIMIT;
+                                has_more_before = raw_len >= VIEWER_FETCH_LIMIT;
                                 break;
                             }
                         } else {
-                            has_more_before = page_len >= VIEWER_FETCH_LIMIT;
+                            has_more_before = raw_len >= VIEWER_FETCH_LIMIT;
                             break;
                         }
-                        if page_len < VIEWER_FETCH_LIMIT {
+                        if raw_len < VIEWER_FETCH_LIMIT {
                             has_more_before = false;
                             break;
+                        }
+                        if page_idx == VIEWER_SEEK_MAX_PAGES - 1 {
+                            hit_seek_cap = true;
                         }
                         before = oldest;
                     }
@@ -612,6 +609,10 @@ impl ImageViewer {
                     }
                 }
             }
+            if hit_seek_cap {
+                has_more_before = true;
+            }
+            sort_attachments_desc(&mut accumulated);
 
             let _ = this.update(cx, |this, cx| {
                 if this.list_generation != generation {
@@ -620,9 +621,14 @@ impl ImageViewer {
                 this.loading = false;
                 if let Some(e) = fetch_error {
                     tracing::error!("image viewer fetch failed: {e}");
-                    if this.attachments.is_empty() && !accumulated.is_empty() {
+                    merge_attachment_page(&mut accumulated, prior);
+                    sort_attachments_desc(&mut accumulated);
+                    if !accumulated.is_empty() {
                         resolve_uploaders(&mut accumulated, clan, channel, cx);
                         this.attachments = accumulated;
+                        if let Some(url) = &select_url {
+                            this.index = index_of_url(&this.attachments, url).unwrap_or(0);
+                        }
                     }
                     cx.notify();
                     return;
@@ -636,7 +642,6 @@ impl ImageViewer {
                             merge_attachment_page(&mut accumulated, vec![seed]);
                         }
                     }
-                    sort_attachments_desc(&mut accumulated);
                 }
 
                 resolve_uploaders(&mut accumulated, clan, channel, cx);
@@ -682,37 +687,30 @@ impl ImageViewer {
                 }
                 this.loading = false;
                 match result {
-                    Ok(mut mapped) => {
-                        resolve_uploaders(&mut mapped, clan, channel, cx);
-                        let existing: std::collections::HashSet<i64> =
-                            this.attachments.iter().map(|a| a.id).collect();
-                        let fresh: Vec<ChannelAttachment> = mapped
+                    Ok(mut page) => {
+                        resolve_uploaders(&mut page.items, clan, channel, cx);
+                        let existing_urls: std::collections::HashSet<String> =
+                            this.attachments.iter().map(|a| a.url.clone()).collect();
+                        let fresh: Vec<ChannelAttachment> = page
+                            .items
                             .into_iter()
-                            .filter(|a| a.id != 0 && !existing.contains(&a.id))
+                            .filter(|a| !existing_urls.contains(&a.url))
                             .collect();
                         let added = fresh.len();
                         if added > 0 {
-                            let selected_id = this.attachments.get(this.index).map(|a| a.id);
                             let selected_url =
                                 this.attachments.get(this.index).map(|a| a.url.clone());
                             let mut merged = fresh;
                             merged.extend(std::mem::take(&mut this.attachments));
                             sort_attachments_desc(&mut merged);
-                            this.index = selected_id
-                                .filter(|&id| id != 0)
-                                .and_then(|id| merged.iter().position(|a| a.id == id))
-                                .or_else(|| {
-                                    selected_url
-                                        .as_deref()
-                                        .and_then(|url| index_of_url(&merged, url))
-                                })
+                            this.index = selected_url
+                                .as_deref()
+                                .and_then(|url| index_of_url(&merged, url))
                                 .unwrap_or(this.index);
                             this.attachments = merged;
                             this.video_sync_token = None;
-                            this.pending_thumb_scroll =
-                                this.show_thumbnails && !this.attachments.is_empty();
                         }
-                        this.has_more_after = added as i32 >= VIEWER_FETCH_LIMIT;
+                        this.has_more_after = page.raw_count as i32 >= VIEWER_FETCH_LIMIT;
                         cx.notify();
                     }
                     Err(e) => tracing::error!("image viewer newer fetch failed: {e}"),
@@ -749,18 +747,20 @@ impl ImageViewer {
                 }
                 this.loading = false;
                 match result {
-                    Ok(mut mapped) => {
-                        resolve_uploaders(&mut mapped, clan, channel, cx);
-                        let existing: std::collections::HashSet<i64> =
-                            this.attachments.iter().map(|a| a.id).collect();
+                    Ok(mut page) => {
+                        resolve_uploaders(&mut page.items, clan, channel, cx);
+                        let existing_urls: std::collections::HashSet<String> =
+                            this.attachments.iter().map(|a| a.url.clone()).collect();
                         let before_len = this.attachments.len();
-                        for att in mapped {
-                            if !existing.contains(&att.id) {
+                        for att in page.items {
+                            if !existing_urls.contains(&att.url) {
                                 this.attachments.push(att);
                             }
                         }
+                        sort_attachments_desc(&mut this.attachments);
                         let added = this.attachments.len() - before_len;
-                        this.has_more_before = added > 0;
+                        this.has_more_before =
+                            page.raw_count as i32 >= VIEWER_FETCH_LIMIT && added > 0;
                         cx.notify();
                     }
                     Err(e) => tracing::error!("image viewer page fetch failed: {e}"),
