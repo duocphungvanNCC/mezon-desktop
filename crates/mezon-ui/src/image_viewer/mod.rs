@@ -39,8 +39,36 @@ const ZOOM_STEP: f32 = 0.25;
 const THUMB_ROW_HEIGHT: f32 = 72.0;
 const SIDEBAR_WIDTH: f32 = 96.0;
 const THUMB_SCROLLBAR_GUTTER: f32 = 14.0;
-const VIEWER_FETCH_LIMIT: i32 = 50;
+const VIEWER_FETCH_LIMIT: i32 = 100;
+const VIEWER_SEEK_MAX_PAGES: usize = 20;
 const LOAD_MORE_THRESHOLD: usize = 3;
+
+fn attachment_matches_url(att: &ChannelAttachment, url: &str) -> bool {
+    att.url.as_str() == url || att.viewer_src.as_ref() == url
+}
+
+fn index_of_url(attachments: &[ChannelAttachment], url: &str) -> Option<usize> {
+    attachments
+        .iter()
+        .position(|a| attachment_matches_url(a, url))
+}
+
+fn sort_attachments_desc(attachments: &mut [ChannelAttachment]) {
+    attachments.sort_by_key(|a| std::cmp::Reverse(a.create_time_seconds));
+}
+
+fn merge_attachment_page(into: &mut Vec<ChannelAttachment>, page: Vec<ChannelAttachment>) {
+    for att in page {
+        if let Some(i) = into.iter().position(|a| a.url == att.url) {
+            if into[i].id == 0 && att.id != 0 {
+                into[i] = att;
+            }
+        } else {
+            into.push(att);
+        }
+    }
+}
+
 const VIEWER_VIDEO_MAX_W: f32 = 900.0;
 const VIEWER_VIDEO_MAX_H: f32 = 580.0;
 
@@ -64,7 +92,7 @@ pub struct OpenViewerRequest {
     pub channel_id: ChannelId,
     pub channel_label: SharedString,
     pub settings: Entity<Settings>,
-    /// Pre-loaded playlist (gallery path). Empty for message-click, which fetches.
+    /// Pre-loaded playlist (gallery path), or a single seed attachment (message-click).
     pub attachments: Vec<ChannelAttachment>,
     pub selected_index: usize,
     /// Select this url once the playlist is loaded (message-click path).
@@ -219,6 +247,7 @@ pub struct ImageViewer {
     image_cache: Entity<LruImageCache>,
     thumb_image_cache: Entity<LruImageCache>,
     list_scroll: UniformListScrollHandle,
+    pending_thumb_scroll: bool,
     active_video: Option<Entity<VideoPlayerView>>,
     active_video_url: Option<String>,
     session: u64,
@@ -308,6 +337,7 @@ impl ImageViewer {
             image_cache,
             thumb_image_cache,
             list_scroll: UniformListScrollHandle::new(),
+            pending_thumb_scroll: false,
             active_video: None,
             active_video_url: None,
             session: 0,
@@ -472,18 +502,25 @@ impl ImageViewer {
         self.has_more_after = false;
 
         if let Some(url) = &request.selected_url {
-            self.index = self
-                .attachments
-                .iter()
-                .position(|a| a.viewer_src == *url || a.url.as_str() == url.as_ref())
-                .unwrap_or(0);
+            self.index = index_of_url(&self.attachments, url).unwrap_or(0);
         } else {
             self.index = request
                 .selected_index
                 .min(self.attachments.len().saturating_sub(1));
         }
+        self.pending_thumb_scroll = self.show_thumbnails && !self.attachments.is_empty();
 
-        if self.attachments.is_empty() {
+        let fetch_playlist = request.anchor_before.is_some();
+        if fetch_playlist {
+            if self.attachments.is_empty() {
+                self.loading = true;
+            } else {
+                self.loading = false;
+                resolve_uploaders(&mut self.attachments, self.clan_id, self.channel_id, cx);
+                self.schedule_video_player_sync(window, cx);
+            }
+            self.fetch_initial(request.anchor_before, request.selected_url, cx);
+        } else if self.attachments.is_empty() {
             self.loading = true;
             self.fetch_initial(request.anchor_before, request.selected_url, cx);
         } else {
@@ -520,37 +557,106 @@ impl ImageViewer {
         let api = gallery.read(cx).api();
         let clan = self.clan();
         let channel = self.channel();
-        let before = anchor_before.unwrap_or(0);
+        let mut before = anchor_before.unwrap_or(0);
         let generation = self.list_generation;
+        let prior = self.attachments.clone();
         cx.spawn(async move |this, cx| {
-            let result =
-                fetch_channel_attachments(api, cfg, clan, channel, before, 0, VIEWER_FETCH_LIMIT)
-                    .await;
+            let mut accumulated = Vec::new();
+            let mut has_more_before = false;
+            let mut fetch_error = None;
+            let mut hit_seek_cap = false;
+
+            for page_idx in 0..VIEWER_SEEK_MAX_PAGES {
+                let result = fetch_channel_attachments(
+                    api.clone(),
+                    cfg.clone(),
+                    clan,
+                    channel,
+                    before,
+                    0,
+                    VIEWER_FETCH_LIMIT,
+                )
+                .await;
+                match result {
+                    Ok(page) => {
+                        let raw_len = page.raw_count as i32;
+                        if raw_len == 0 {
+                            has_more_before = false;
+                            break;
+                        }
+                        let oldest = page.oldest_create_time.unwrap_or(before);
+                        merge_attachment_page(&mut accumulated, page.attachments);
+                        if let Some(url) = &select_url {
+                            if index_of_url(&accumulated, url).is_some() {
+                                has_more_before =
+                                    initial_page_has_more(page.raw_count, VIEWER_FETCH_LIMIT);
+                                break;
+                            }
+                        } else {
+                            has_more_before =
+                                initial_page_has_more(page.raw_count, VIEWER_FETCH_LIMIT);
+                            break;
+                        }
+                        if !initial_page_has_more(page.raw_count, VIEWER_FETCH_LIMIT) {
+                            has_more_before = false;
+                            break;
+                        }
+                        if page_idx == VIEWER_SEEK_MAX_PAGES - 1 {
+                            hit_seek_cap = true;
+                        }
+                        before = oldest;
+                    }
+                    Err(e) => {
+                        fetch_error = Some(e);
+                        break;
+                    }
+                }
+            }
+            if hit_seek_cap {
+                has_more_before = true;
+            }
+            sort_attachments_desc(&mut accumulated);
+
             let _ = this.update(cx, |this, cx| {
                 if this.list_generation != generation {
                     return;
                 }
                 this.loading = false;
-                match result {
-                    Ok(page) => {
-                        let mut mapped = page.attachments;
-                        resolve_uploaders(&mut mapped, clan, channel, cx);
-                        this.has_more_before =
-                            initial_page_has_more(page.raw_count, VIEWER_FETCH_LIMIT);
-                        this.attachments = mapped;
+                if let Some(e) = fetch_error {
+                    tracing::error!("image viewer fetch failed: {e}");
+                    merge_attachment_page(&mut accumulated, prior);
+                    sort_attachments_desc(&mut accumulated);
+                    if !accumulated.is_empty() {
+                        resolve_uploaders(&mut accumulated, clan, channel, cx);
+                        this.attachments = accumulated;
                         if let Some(url) = &select_url {
-                            this.index = this
-                                .attachments
-                                .iter()
-                                .position(|a| a.url.as_str() == url.as_ref())
-                                .unwrap_or(0);
+                            this.index = index_of_url(&this.attachments, url).unwrap_or(0);
                         }
-                        this.video_sync_token = None;
-                        this.has_more_after = true;
-                        this.fetch_newer(cx);
                     }
-                    Err(e) => tracing::error!("image viewer fetch failed: {e}"),
+                    cx.notify();
+                    return;
                 }
+
+                if let Some(url) = &select_url
+                    && index_of_url(&accumulated, url).is_none()
+                {
+                    for seed in prior {
+                        if attachment_matches_url(&seed, url) {
+                            merge_attachment_page(&mut accumulated, vec![seed]);
+                        }
+                    }
+                }
+
+                resolve_uploaders(&mut accumulated, clan, channel, cx);
+                this.attachments = accumulated;
+                this.has_more_before = has_more_before;
+                if let Some(url) = &select_url {
+                    this.index = index_of_url(&this.attachments, url).unwrap_or(0);
+                }
+                this.pending_thumb_scroll = this.show_thumbnails && !this.attachments.is_empty();
+                this.video_sync_token = None;
+                this.has_more_after = true;
+                this.fetch_newer(cx);
                 cx.notify();
             });
         })
@@ -584,23 +690,25 @@ impl ImageViewer {
                 }
                 this.loading = false;
                 match result {
-                    Ok(page) => {
-                        let mut mapped = page.attachments;
-                        resolve_uploaders(&mut mapped, clan, channel, cx);
-                        let existing: std::collections::HashSet<i64> =
-                            this.attachments.iter().map(|a| a.id).collect();
-                        let fresh: Vec<ChannelAttachment> = mapped
+                    Ok(mut page) => {
+                        resolve_uploaders(&mut page.attachments, clan, channel, cx);
+                        let existing_urls: std::collections::HashSet<String> =
+                            this.attachments.iter().map(|a| a.url.clone()).collect();
+                        let fresh: Vec<ChannelAttachment> = page
+                            .attachments
                             .into_iter()
-                            .filter(|a| !existing.contains(&a.id))
+                            .filter(|a| !existing_urls.contains(&a.url))
                             .collect();
                         let added = fresh.len();
                         if added > 0 {
-                            let selected_id = this.attachments.get(this.index).map(|a| a.id);
+                            let selected_url =
+                                this.attachments.get(this.index).map(|a| a.url.clone());
                             let mut merged = fresh;
                             merged.extend(std::mem::take(&mut this.attachments));
-                            merged.sort_by_key(|b| std::cmp::Reverse(b.create_time_seconds));
-                            this.index = selected_id
-                                .and_then(|id| merged.iter().position(|a| a.id == id))
+                            sort_attachments_desc(&mut merged);
+                            this.index = selected_url
+                                .as_deref()
+                                .and_then(|url| index_of_url(&merged, url))
                                 .unwrap_or(this.index);
                             this.attachments = merged;
                             this.video_sync_token = None;
@@ -643,17 +751,17 @@ impl ImageViewer {
                 }
                 this.loading = false;
                 match result {
-                    Ok(page) => {
-                        let mut mapped = page.attachments;
-                        resolve_uploaders(&mut mapped, clan, channel, cx);
-                        let existing: std::collections::HashSet<i64> =
-                            this.attachments.iter().map(|a| a.id).collect();
+                    Ok(mut page) => {
+                        resolve_uploaders(&mut page.attachments, clan, channel, cx);
+                        let existing_urls: std::collections::HashSet<String> =
+                            this.attachments.iter().map(|a| a.url.clone()).collect();
                         let before_len = this.attachments.len();
-                        for att in mapped {
-                            if !existing.contains(&att.id) {
+                        for att in page.attachments {
+                            if !existing_urls.contains(&att.url) {
                                 this.attachments.push(att);
                             }
                         }
+                        sort_attachments_desc(&mut this.attachments);
                         let added = this.attachments.len() - before_len;
                         this.has_more_before =
                             next_page_has_more(page.raw_count, VIEWER_FETCH_LIMIT, added);
@@ -708,6 +816,7 @@ impl ImageViewer {
         }
         self.list_scroll
             .scroll_to_item(self.index, gpui::ScrollStrategy::Center);
+        self.pending_thumb_scroll = false;
         cx.notify();
     }
 
@@ -958,6 +1067,11 @@ impl Render for ImageViewer {
             self.thumb_image_cache
                 .update(cx, |cache, cx| cache.sweep_once_per_frame(window, cx));
             self.schedule_video_player_sync(window, cx);
+        }
+        if self.pending_thumb_scroll && self.show_thumbnails && !self.attachments.is_empty() {
+            self.list_scroll
+                .scroll_to_item(self.index, gpui::ScrollStrategy::Center);
+            self.pending_thumb_scroll = false;
         }
         let theme = cx.theme().clone();
         let locale = self.locale(cx);
@@ -1480,6 +1594,9 @@ impl ImageViewer {
                         MouseButton::Left,
                         cx.listener(|this, _: &MouseDownEvent, _, cx| {
                             this.show_thumbnails = !this.show_thumbnails;
+                            if this.show_thumbnails && !this.attachments.is_empty() {
+                                this.pending_thumb_scroll = true;
+                            }
                             cx.notify();
                         }),
                     )),
