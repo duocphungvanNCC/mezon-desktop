@@ -101,6 +101,12 @@ impl SettingsScreen {
     }
 
     pub fn set_page(&mut self, page: SettingsPage, cx: &mut Context<Self>) {
+        if self.current_page == SettingsPage::Profile
+            && page != SettingsPage::Profile
+            && let Some(profile_page) = &self.profile_page
+        {
+            profile_page.update(cx, |page, cx| page.discard_drafts_on_next_render(cx));
+        }
         self.current_page = page;
         self.ensure_page(page, cx);
         self.scroll.set_offset(gpui::point(px(0.0), px(0.0)));
@@ -552,7 +558,12 @@ impl Render for SettingsScreen {
             .id("settings-screen")
             .track_focus(&self.focus_handle)
             .key_context("menu")
-            .on_action(cx.listener(|_, _: &::menu::Cancel, _window, cx| {
+            .on_action(cx.listener(|this, _: &::menu::Cancel, _window, cx| {
+                if this.current_page == SettingsPage::Profile
+                    && let Some(profile_page) = &this.profile_page
+                {
+                    profile_page.update(cx, |page, cx| page.discard_drafts_on_next_render(cx));
+                }
                 crate::router::go_back(cx);
             }))
             .flex_1()
@@ -633,8 +644,9 @@ impl Render for SettingsScreen {
                                             .id("settings-scroll")
                                             .flex_1()
                                             .min_h_0()
-                                            .overflow_y_scroll()
-                                            .track_scroll(&self.scroll)
+                                            .when(!is_profile, |el| {
+                                                el.overflow_y_scroll().track_scroll(&self.scroll)
+                                            })
                                             .pb(px(28.0))
                                             .pl(px(40.0))
                                             .pr(px(28.0))
@@ -642,6 +654,7 @@ impl Render for SettingsScreen {
                                             .child(
                                                 v_flex()
                                                     .max_w(px(740.0))
+                                                    .when(is_profile, |el| el.h_full().min_h_0())
                                                     .pt(px(60.0))
                                                     .child(
                                                         div()
@@ -652,7 +665,13 @@ impl Render for SettingsScreen {
                                                             .text_color(theme.text_primary)
                                                             .child(self.page_title(page, &locale)),
                                                     )
-                                                    .child(content),
+                                                    .child(
+                                                        div()
+                                                            .when(is_profile, |el| {
+                                                                el.flex_1().min_h_0()
+                                                            })
+                                                            .child(content),
+                                                    ),
                                             ),
                                     ),
                             )
@@ -687,9 +706,16 @@ impl Render for SettingsScreen {
                                             .text_color(theme.text_secondary)
                                             .child("ESC"),
                                     )
-                                    .on_click(move |_, _, cx| {
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        if this.current_page == SettingsPage::Profile
+                                            && let Some(profile_page) = &this.profile_page
+                                        {
+                                            profile_page.update(cx, |page, cx| {
+                                                page.discard_drafts_on_next_render(cx)
+                                            });
+                                        }
                                         crate::router::go_back(cx);
-                                    }),
+                                    })),
                             ),
                     ),
             )
