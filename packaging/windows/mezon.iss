@@ -35,8 +35,8 @@ Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; Flags: unchecked
 Source: "{#SourceExe}"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
-Name: "{userprograms}\Mezon"; Filename: "{app}\mezon.exe"
-Name: "{userdesktop}\Mezon"; Filename: "{app}\mezon.exe"; Tasks: desktopicon
+Name: "{userprograms}\Mezon"; Filename: "{app}\mezon.exe"; AppUserModelID: "ai.mezon.Mezon"
+Name: "{userdesktop}\Mezon"; Filename: "{app}\mezon.exe"; Tasks: desktopicon; AppUserModelID: "ai.mezon.Mezon"
 
 [Run]
 Filename: "{app}\mezon.exe"; Description: "{cm:LaunchProgram,Mezon}"; Flags: nowait postinstall skipifsilent

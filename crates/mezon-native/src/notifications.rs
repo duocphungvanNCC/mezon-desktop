@@ -484,9 +484,6 @@ fn ensure_start_menu_shortcut() -> anyhow::Result<()> {
         .join("Start Menu")
         .join("Programs")
         .join("Mezon.lnk");
-    if shortcut.exists() {
-        return Ok(());
-    }
     if let Some(parent) = shortcut.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -512,7 +509,7 @@ fn ensure_start_menu_shortcut() -> anyhow::Result<()> {
         file.Save(&HSTRING::from(shortcut.as_os_str()), true)?;
     }
 
-    tracing::info!("created Start Menu shortcut for toast notifications");
+    tracing::info!("wrote Start Menu shortcut with AppUserModelID for toast notifications");
     Ok(())
 }
 
@@ -524,8 +521,18 @@ fn show_windows(n: &Notification) {
     let icon_path = n.icon_path.clone();
 
     std::thread::spawn(move || {
+        use windows::Win32::System::Com::{
+            COINIT_APARTMENTTHREADED, CoInitializeEx, CoUninitialize,
+        };
+
+        unsafe {
+            let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+        }
         if let Err(e) = try_show_toast(&title, &body, tag.as_deref(), icon_path.as_deref()) {
             tracing::warn!("Windows toast notification failed: {e}");
+        }
+        unsafe {
+            CoUninitialize();
         }
     });
 }
