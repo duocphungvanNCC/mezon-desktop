@@ -18,6 +18,9 @@ impl TitleBar {
         if let Some(store) = AutoUpdateStore::try_global(cx) {
             cx.observe(&store, |_, _, cx| cx.notify()).detach();
         }
+        if let Some(store) = mezon_store::WinstoreUpdateStore::try_global(cx) {
+            cx.observe(&store, |_, _, cx| cx.notify()).detach();
+        }
         Self {
             settings,
             _bounds_observer: None,
@@ -86,16 +89,7 @@ fn update_indicator(
                     .text_color(gpui::rgb(0x22c55e))
                     .cursor_pointer()
                     .hover(move |s| s.bg(bg_hover))
-                    .on_click(|_, _, cx| {
-                        let Some(store) = AutoUpdateStore::try_global(cx) else {
-                            return;
-                        };
-                        if let Some(url) = store.read(cx).store_page_url() {
-                            cx.open_url(url);
-                        } else {
-                            store.update(cx, |store, cx| store.check(true, cx));
-                        }
-                    })
+                    .on_click(|_, _, cx| mezon_store::update_available_clicked(cx))
                     .child(format!(
                         "{} (v{version})",
                         mezon_i18n::t(locale, "setting.update.available")
@@ -118,7 +112,7 @@ fn update_indicator(
                     .text_color(gpui::rgb(0x22c55e))
                     .cursor_pointer()
                     .hover(move |s| s.bg(bg_hover))
-                    .on_click(|_, _, cx| cx.restart())
+                    .on_click(|_, _, cx| mezon_store::update_restart_clicked(cx))
                     .child(format!(
                         "{} (v{version})",
                         mezon_i18n::t(locale, "setting.update.restart")
@@ -133,8 +127,7 @@ impl Render for TitleBar {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.ensure_bounds_observer(window, cx);
         let locale = self.settings.read(cx).language.clone();
-        let update_status =
-            AutoUpdateStore::try_global(cx).map(|store| store.read(cx).status().clone());
+        let update_status = mezon_store::effective_update_status(cx);
         let theme = cx.theme().clone();
 
         div()

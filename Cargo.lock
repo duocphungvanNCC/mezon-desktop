@@ -6008,6 +6008,9 @@ dependencies = [
  "tracing",
  "url",
  "which 6.0.3",
+ "windows 0.61.3",
+ "windows-collections 0.2.0",
+ "windows-future 0.2.1",
  "zed-reqwest",
 ]
 

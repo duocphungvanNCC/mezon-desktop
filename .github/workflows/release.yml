@@ -138,7 +138,10 @@ jobs:
         uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
 
       - name: Build release binary
-        run: cargo build --release -p mezon-app --locked
+        shell: bash
+        run: |
+          VERSION="$(grep -m1 '^version' Cargo.toml | sed -E 's/.*"(.*)".*/\1/')"
+          MEZON_STORE_VERSION="$VERSION" cargo build --release -p mezon-app --locked
 
       - name: Detect signing configuration
         id: signing
@@ -170,6 +173,19 @@ jobs:
           if ($code -ne 0) { exit 1 }
           & $signtool verify /pa target\release\mezon.exe
           if ($LASTEXITCODE -ne 0) { exit 1 }
+
+      - name: Build Microsoft Store package
+        shell: pwsh
+        run: |
+          $version = (Select-String -Path Cargo.toml -Pattern '^version = "(.+)"').Matches[0].Groups[1].Value
+          & .\packaging\windows\build-appx.ps1 -Version $version
+
+      - name: Upload Store package
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: appx-store
+          path: target/appx/*.appx
+          if-no-files-found: error
 
       - name: Package update feed
         shell: bash

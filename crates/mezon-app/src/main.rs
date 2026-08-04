@@ -706,6 +706,7 @@ fn run_app(lock: SingleInstance, initial_url: Option<String>) {
             {
                 let hwnd = win32.hwnd.get();
                 mezon_native::badge::set_main_window_hwnd(hwnd);
+                mezon_updater::winstore::set_window_handle(hwnd);
                 mezon_native::window_icon::apply_dpi_aware_icons(hwnd);
             }
         }
@@ -905,6 +906,7 @@ fn open_main_window(
 
     let auth_state = cx.new(|_| initial_auth);
     mezon_store::AutoUpdateStore::init(mezon_store::AppConfig::global(cx).update_url.clone(), cx);
+    mezon_store::WinstoreUpdateStore::init(cx);
     let title_bar = cx.new(|cx| TitleBar::new(settings_entity.clone(), cx));
 
     mezon_store::LoginStore::init(client, api.clone(), auth_state.clone(), cx);
