@@ -2,8 +2,10 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use anyhow::Result;
+use base64::{Engine as _, engine::general_purpose::STANDARD as B64};
 use futures::AsyncReadExt as _;
 use http_client::{AsyncBody, HttpClient, http};
+use prost::Message as _;
 use url::Url;
 
 use crate::transport_runtime::{http_client, runtime};
@@ -13,6 +15,7 @@ const OGP_MAX_HTML_BYTES: usize = 512 * 1024;
 const OGP_MAX_DECOMPRESSED: usize = 4 * 1024 * 1024;
 const OGP_USER_AGENT: &str =
     "Mozilla/5.0 (compatible; MezonDesktop/1.0; +https://mezon.ai) OpenGraphPreview";
+const INVITE_PREVIEW_MAX_BYTES: usize = 64 * 1024;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct OgpResult {
@@ -21,6 +24,10 @@ pub struct OgpResult {
     pub description: String,
     pub image: String,
     pub is_image: bool,
+    pub banner: String,
+    pub member_count: Option<i64>,
+    pub is_community: bool,
+    pub clan_id: Option<String>,
 }
 
 impl OgpResult {
@@ -30,8 +37,76 @@ impl OgpResult {
             title: self.title.clone(),
             description: self.description.clone(),
             image: self.image.clone(),
+            banner: self.banner.clone(),
+            member_count: self.member_count,
+            is_community: self.is_community,
+            clan_id: self.clan_id.clone(),
         }
     }
+}
+
+pub async fn fetch_invite_preview(
+    gw_host: &str,
+    gw_port: u16,
+    secure: bool,
+    server_key: &str,
+    url: &str,
+    invite_id: &str,
+) -> Result<OgpResult> {
+    let scheme = if secure { "https" } else { "http" };
+    let request_url = format!("{scheme}://{gw_host}:{gw_port}/v2/invite/{invite_id}");
+    let auth_header = format!("Basic {}", B64.encode(format!("{server_key}:")));
+    let page_url = url.to_string();
+    runtime()
+        .spawn(async move {
+            let request = http::Request::builder()
+                .method(http::Method::GET)
+                .uri(&request_url)
+                .header(http::header::AUTHORIZATION, auth_header)
+                .header(http::header::ACCEPT, "application/x-protobuf")
+                .body(AsyncBody::empty())?;
+            let outcome = tokio::time::timeout(OGP_TIMEOUT, async move {
+                let mut response = http_client().send(request).await?;
+                if !response.status().is_success() {
+                    anyhow::bail!("HTTP GET failed with status {}", response.status());
+                }
+                let content_encoding = response
+                    .headers()
+                    .get(http::header::CONTENT_ENCODING)
+                    .and_then(|value| value.to_str().ok())
+                    .unwrap_or("")
+                    .trim()
+                    .to_ascii_lowercase();
+                let mut bytes = Vec::new();
+                let mut limited = response.body_mut().take(INVITE_PREVIEW_MAX_BYTES as u64);
+                limited.read_to_end(&mut bytes).await?;
+                let decoded = decompress_body(&bytes, &content_encoding);
+                let payload = decoded.as_deref().unwrap_or(&bytes);
+                let res = mezon_proto::api::InviteUserRes::decode(payload)?;
+                Ok(OgpResult {
+                    url: page_url,
+                    title: res.clan_name,
+                    image: res.clan_logo,
+                    banner: res.banner,
+                    member_count: Some(res.member_count as i64),
+                    is_community: res.is_community,
+                    clan_id: (res.clan_id != 0).then(|| res.clan_id.to_string()),
+                    ..Default::default()
+                })
+            })
+            .await;
+            match outcome {
+                Ok(inner) => inner,
+                Err(_) => {
+                    anyhow::bail!(
+                        "invite preview fetch timed out after {}s",
+                        OGP_TIMEOUT.as_secs()
+                    )
+                }
+            }
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("invite preview fetch task failed: {e}"))?
 }
 
 pub async fn fetch_ogp(url: &str) -> Result<OgpResult> {

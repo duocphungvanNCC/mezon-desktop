@@ -658,12 +658,7 @@ impl ChatArea {
                 .when(send_denied, |col| col.child(no_permission_notice))
                 .when(!send_denied, |col| {
                     col.when_some(app_channel_bar.as_ref(), |col, target| {
-                        col.child(render_channel_app_bar(
-                            locale,
-                            target.clone(),
-                            cx.theme(),
-                            cx,
-                        ))
+                        col.child(render_channel_app_bar(locale, target.clone(), cx.theme()))
                     })
                     .when(app_channel_bar.is_none(), |col| {
                         col.when_some(input_bar.clone(), |col, input_bar| col.child(input_bar))

@@ -10,8 +10,8 @@ use super::embed_card::render_embeds;
 use super::message_actions_panel::render_actions_panel;
 use super::ogp_embed::render_ogp_embed;
 use super::parts::{
-    avatar_element, render_attachments, render_head, render_hover_actions, render_reactions,
-    render_reply,
+    avatar_element, hover_actions_visible, render_attachments, render_head, render_hover_actions,
+    render_reactions, render_reply,
 };
 use super::poll_card::render_poll_card;
 use super::token_transaction_card::render_token_transaction_card;
@@ -312,14 +312,8 @@ pub fn render_user_message(
             d.child(render_reply(&msg.references[0], ctx))
         })
         .child(body)
-        .when(interactive, |d| {
-            d.child(render_hover_actions(
-                msg,
-                combined,
-                has_reply,
-                is_different_day,
-                ctx,
-            ))
+        .when(interactive && hover_actions_visible(msg, ctx), |d| {
+            d.child(render_hover_actions(msg, is_different_day, ctx))
         })
         .when(
             !ctx.is_topic_box && msg.is_card && !ephemeral && msg.code != MessageCode::Topic,

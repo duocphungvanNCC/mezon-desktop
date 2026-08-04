@@ -17,13 +17,14 @@ use gpui::{
 };
 use mezon_client::transport::QUICK_MENU_TYPE_FLASH;
 use mezon_store::{
-    AccountEvent, AccountStore, AudioStore, BadgeService, Channel, ChannelEvent, ChannelId,
-    ChannelList, ChannelMembersEvent, ChannelMembersStore, ClanList, ClanMembersEvent,
+    AccountEvent, AccountStore, AppConfig, AudioStore, BadgeService, Channel, ChannelEvent,
+    ChannelId, ChannelList, ChannelMembersEvent, ChannelMembersStore, ClanList, ClanMembersEvent,
     ClanMembersStore, ComposeDraft, ComposeStore, ComposeToken, ComposeTokenKind, DirectEvent,
     DirectMessageStore, Emoji, EmojiEvent, EmojiStore, GroupMembersEvent, GroupMembersStore,
     MENTION_HERE_ID, MessageSpan, MessagesStore, OgpResult, OutgoingAttachment, OutgoingContent,
     OutgoingEmoji, OutgoingHashtag, OutgoingMention, OutgoingOgp, QuickMenuStore, RolesEvent,
-    RolesStore, Settings, fetch_ogp, first_previewable_url,
+    RolesStore, Settings, fetch_invite_preview, fetch_ogp, first_previewable_url,
+    invite_id_from_url,
 };
 use std::time::Duration;
 
@@ -1385,6 +1386,20 @@ impl MentionInput {
         self.ogp_generation += 1;
         let generation = self.ogp_generation;
         cx.notify();
+        let invite_id = invite_id_from_url(&url);
+        let invite_gateway = invite_id
+            .is_some()
+            .then(|| {
+                AppConfig::try_global(cx).map(|cfg| {
+                    (
+                        cfg.api_gw_host.clone(),
+                        cfg.api_gw_port,
+                        cfg.api_secure,
+                        cfg.api_key.clone(),
+                    )
+                })
+            })
+            .flatten();
         self._ogp_task = Some(cx.spawn(async move |this, cx| {
             cx.background_executor()
                 .timer(Duration::from_millis(300))
@@ -1395,7 +1410,12 @@ impl MentionInput {
             if !current {
                 return;
             }
-            let result = fetch_ogp(&url).await;
+            let result = match (&invite_id, &invite_gateway) {
+                (Some(invite_id), Some((host, port, secure, key))) => {
+                    fetch_invite_preview(host, *port, *secure, key, &url, invite_id).await
+                }
+                _ => fetch_ogp(&url).await,
+            };
             let _ = this.update(cx, |this, cx| {
                 if this.ogp_generation != generation {
                     return;

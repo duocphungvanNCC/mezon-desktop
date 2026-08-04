@@ -23,7 +23,6 @@ mezon-video.workspace = true
 mezon-audio.workspace = true
 mezon-voice.workspace = true
 mezon-i18n.workspace = true
-mezon-webview.workspace = true
 anyhow.workspace = true
 tracing.workspace = true
 serde.workspace = true

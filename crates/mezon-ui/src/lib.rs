@@ -22,11 +22,7 @@ pub use app::shell::Shell;
 pub use app::title_bar::TitleBar;
 pub use app::wallet_toast::WalletToastBridge;
 pub use auth::login_view::LoginView;
-pub use channel_app::{
-    OpenChannelAppRequest, close_channel_app_window, focus_channel_app_window, is_channel_app_open,
-    is_channel_app_open_id, is_channel_app_window_open, launch_channel_app_from_store,
-    open_channel_app_window, reset_channel_app_from_store,
-};
+pub use channel_app::launch_channel_app_from_store;
 pub use chat::layout::ChatLayout;
 pub use dev::gallery::DevGallery;
 pub use gallery::GalleryModal;
@@ -53,8 +49,7 @@ gpui::actions!(
         HideWindow,
         MinimizeWindow,
         HideApp,
-        OpenCommandPalette,
-        ReloadApp
+        OpenCommandPalette
     ]
 );
 
@@ -100,8 +95,6 @@ pub fn init(cx: &mut gpui::App) {
     cx.on_action(|_: &OpenCommandPalette, cx: &mut gpui::App| {
         command_palette::CommandPaletteModal::try_toggle_authenticated(cx);
     });
-    cx.bind_keys([gpui::KeyBinding::new("secondary-r", ReloadApp, None)]);
-    cx.on_action(|_: &ReloadApp, cx: &mut gpui::App| reload_app(cx));
     components::primitives::init_input(cx);
     components::primitives::init_textarea(cx);
     chat::mention_input::init(cx);
@@ -111,18 +104,6 @@ pub fn init(cx: &mut gpui::App) {
     command_palette::init(cx);
     router::Router::init(cx);
     init_menus(cx);
-}
-
-pub fn reload_app(cx: &mut gpui::App) {
-    let Some(handle) = app::main_window::handle(cx) else {
-        return;
-    };
-    tracing::info!("Reload requested — rebuilding the app shell");
-    cx.defer(move |cx| {
-        if let Err(e) = handle.update(cx, |_, window, cx| RootView::reload(window, cx)) {
-            tracing::warn!("Reload failed: {e}");
-        }
-    });
 }
 
 /// macOS menu bar and standard shortcuts. Edit items reuse the input component's clipboard actions.

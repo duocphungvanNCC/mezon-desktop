@@ -5,10 +5,8 @@ use gpui::{
 use mezon_store::PlatformStore;
 use ui::Tooltip;
 
-use crate::channel_app::is_channel_app_open;
 use crate::components::primitives::{Icon, IconName};
 use crate::sidebar::channel_sidebar::ChannelSidebar;
-use crate::sidebar::channel_sidebar::app_channel_open_dot;
 use crate::sidebar::channel_sidebar::items::AppChannelSlot;
 use crate::theme::ActiveTheme;
 
@@ -59,7 +57,6 @@ pub fn app_list_popover_overlay(
                 .text_color(theme.text_primary)
                 .into_any_element()
         };
-        let is_open = is_channel_app_open(&app.app_id, cx);
         grid = grid.child(
             div()
                 .flex()
@@ -87,8 +84,7 @@ pub fn app_list_popover_overlay(
                                 sidebar.launch_channel_app(slot.clone(), cx);
                             });
                         })
-                        .child(icon_el)
-                        .when(is_open, |cell| cell.child(app_channel_open_dot(theme))),
+                        .child(icon_el),
                 )
                 .child(
                     div()

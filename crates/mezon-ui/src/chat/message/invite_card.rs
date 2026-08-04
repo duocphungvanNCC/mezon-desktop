@@ -317,7 +317,7 @@ fn handle_join_or_goto(joined_clan: Option<ClanId>, url: &str, cx: &mut App) {
     }
 }
 
-fn member_count_label(locale: &str, count: i64) -> SharedString {
+pub(crate) fn member_count_label(locale: &str, count: i64) -> SharedString {
     let key = if count == 1 {
         "linkMessageInvite.memberCount"
     } else {
