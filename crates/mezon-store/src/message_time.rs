@@ -24,6 +24,13 @@ pub fn unix_now_seconds() -> i64 {
         .unwrap_or(0)
 }
 
+pub fn unix_now_millis() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
 pub fn local_datetime(ts: i64) -> Option<chrono::DateTime<Local>> {
     let ts = normalize_unix_seconds(ts);
     if ts == 0 {

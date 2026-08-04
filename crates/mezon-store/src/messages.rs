@@ -2,6 +2,7 @@ use crate::ids::{ChannelId, ClanId, MessageId, UserId};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::time::{Duration, Instant};
 
 use gpui::{
@@ -45,7 +46,7 @@ use crate::message::{
     recompute_message_grouping, rollback_reaction, sort_messages, spans_only_emoji,
     viewer_highlight_direct,
 };
-use crate::message_time::unix_now_seconds;
+use crate::message_time::{unix_now_millis, unix_now_seconds};
 use crate::presign;
 use crate::realtime::{RealtimeDispatch, RealtimeKind};
 use crate::roles::RolesStore;
@@ -70,6 +71,8 @@ const LAST_SEEN_DEBOUNCE: Duration = Duration::from_millis(1000);
 const TYPING_THROTTLE: Duration = Duration::from_millis(1000);
 const GIVE_COFFEE_EMOJI_ID: &str = "7280417126303261185";
 const GIVE_COFFEE_EMOJI: &str = ":coffee:";
+const SNOWFLAKE_TIME_SHIFT: i64 = 22;
+const SNOWFLAKE_SEQUENCE_MASK: i64 = (1 << SNOWFLAKE_TIME_SHIFT) - 1;
 
 #[derive(Clone)]
 struct PendingSendPayload {
@@ -416,8 +419,25 @@ impl MessageList {
         }
     }
 
+    fn is_out_of_order_at(&self, idx: usize) -> bool {
+        let key = message_sort_key(&self.items[idx]);
+        let prev_outranks = idx
+            .checked_sub(1)
+            .is_some_and(|prev| message_sort_key(&self.items[prev]) > key);
+        let next_undercuts = self
+            .items
+            .get(idx + 1)
+            .is_some_and(|next| message_sort_key(next) < key);
+        prev_outranks || next_undercuts
+    }
+
     fn replace_at_and_regroup(&mut self, idx: usize, msg: Message) {
         self.replace_at(idx, msg);
+        if self.is_out_of_order_at(idx) {
+            sort_messages(&mut self.items);
+            trim_messages(&mut self.items);
+            self.reindex();
+        }
         recompute_message_grouping(&mut self.items);
     }
 
@@ -3602,6 +3622,7 @@ impl MessagesStore {
             sender_id.clone()
         };
         let create_time = optimistic_create_time(&channel.messages, &grouping_sender_id);
+        let sort_id = optimistic_sort_id(&channel.messages);
         let temp_id = MessageId::next_optimistic();
         self.pending_send_payloads.insert(
             temp_id,
@@ -3652,6 +3673,7 @@ impl MessagesStore {
             display_name,
             create_time,
         )
+        .with_sort_id(sort_id)
         .with_avatar(avatar_url)
         .with_avatar_proxied(avatar_proxied);
         if !sent.mentions.is_empty()
@@ -4017,6 +4039,7 @@ impl MessagesStore {
             return;
         };
         let create_time = optimistic_create_time(&channel.messages, &sender_id);
+        let sort_id = optimistic_sort_id(&channel.messages);
         let temp_id = MessageId::next_optimistic();
 
         let optimistic_attachment = MessageAttachment::from_api(
@@ -4036,6 +4059,7 @@ impl MessagesStore {
         let (display_name, avatar_url, avatar_proxied) =
             outgoing_sender_profile(&sender_id, &sender_name, clan_id, cx);
         let optimistic = Message::new(temp_id, String::new(), sender_id, display_name, create_time)
+            .with_sort_id(sort_id)
             .with_avatar(avatar_url)
             .with_avatar_proxied(avatar_proxied)
             .with_attachments(vec![optimistic_attachment]);
@@ -5668,7 +5692,7 @@ impl MessagesStore {
 const DELETED_REPLY_PREVIEW: &str = "Original message was deleted";
 
 fn snowflake_seq(id: MessageId) -> i64 {
-    id.get() >> 22
+    id.get() >> SNOWFLAKE_TIME_SHIFT
 }
 
 fn should_write_last_seen(
@@ -6254,6 +6278,23 @@ fn optimistic_create_time_at(messages: &MessageList, sender_id: &str, now: i64) 
         last.create_time.max(now) + 1
     } else {
         now
+    }
+}
+
+fn optimistic_sort_id(messages: &MessageList) -> i64 {
+    optimistic_sort_id_at(messages, unix_now_millis(), next_send_sequence())
+}
+
+fn next_send_sequence() -> i64 {
+    static SEQUENCE: AtomicI64 = AtomicI64::new(0);
+    SEQUENCE.fetch_add(1, Ordering::Relaxed) & SNOWFLAKE_SEQUENCE_MASK
+}
+
+fn optimistic_sort_id_at(messages: &MessageList, now_ms: i64, sequence: i64) -> i64 {
+    let minted = (now_ms << SNOWFLAKE_TIME_SHIFT) | sequence;
+    match messages.last() {
+        Some(last) => minted.max(last.sort_id.saturating_add(1)),
+        None => minted,
     }
 }
 
@@ -8708,6 +8749,125 @@ mod tests {
             MessageList::from_messages(vec![Message::new(MessageId(1), "a", "u1", "U1", 100)]);
         list.push_grouped(Message::new(MessageId(2), "b", "u2", "U2", 105));
         assert!(!list.as_slice()[1].combined_with_prev);
+        assert_list_consistent(&list);
+    }
+
+    const SEND_NOW_MS: i64 = 1_785_000_000_000;
+
+    fn server_id_at(now_ms: i64) -> MessageId {
+        MessageId(now_ms << SNOWFLAKE_TIME_SHIFT)
+    }
+
+    #[test]
+    fn optimistic_sort_id_lands_in_the_server_snowflake_space() {
+        let list = MessageList::from_messages(Vec::new());
+        let sort_id = optimistic_sort_id_at(&list, SEND_NOW_MS, 7);
+        assert_eq!(sort_id >> SNOWFLAKE_TIME_SHIFT, SEND_NOW_MS);
+        assert_eq!(sort_id & SNOWFLAKE_SEQUENCE_MASK, 7);
+        assert!(sort_id < MessageId::next_optimistic().get());
+    }
+
+    #[test]
+    fn optimistic_sort_id_stays_above_a_tail_minted_ahead_of_the_local_clock() {
+        let ahead = server_id_at(SEND_NOW_MS + 5_000);
+        let list = MessageList::from_messages(vec![Message::new(ahead, "a", "u1", "U1", 100)]);
+        assert_eq!(
+            optimistic_sort_id_at(&list, SEND_NOW_MS, 0),
+            ahead.get() + 1
+        );
+    }
+
+    #[test]
+    fn failed_optimistic_row_keeps_its_slot_when_a_later_message_arrives() {
+        let mut list = MessageList::from_messages(vec![Message::new(
+            server_id_at(SEND_NOW_MS - 1_000),
+            "a",
+            "u1",
+            "U1",
+            100,
+        )]);
+        let sort_id = optimistic_sort_id_at(&list, SEND_NOW_MS, 0);
+        let mut failed =
+            Message::new(MessageId::next_optimistic(), "b", "u2", "U2", 110).with_sort_id(sort_id);
+        failed.send_failed = true;
+        list.push_grouped(failed);
+        list.push_grouped(Message::new(
+            server_id_at(SEND_NOW_MS + 1_000),
+            "c",
+            "u3",
+            "U3",
+            120,
+        ));
+        let contents: Vec<&str> = list.as_slice().iter().map(|m| m.content.as_str()).collect();
+        assert_eq!(contents, ["a", "b", "c"]);
+        assert_list_consistent(&list);
+    }
+
+    #[test]
+    fn acking_a_temp_that_is_no_longer_the_tail_restores_id_order() {
+        let mut list = MessageList::from_messages(vec![Message::new(
+            server_id_at(SEND_NOW_MS - 1_000),
+            "old",
+            "u1",
+            "U1",
+            100,
+        )]);
+        let temp_id = MessageId::next_optimistic();
+        list.push_grouped(
+            Message::new(temp_id, "mine", "me", "Me", 110).with_sort_id(optimistic_sort_id_at(
+                &list,
+                SEND_NOW_MS,
+                0,
+            )),
+        );
+        list.push_grouped(Message::new(
+            server_id_at(SEND_NOW_MS + 500),
+            "theirs",
+            "u2",
+            "U2",
+            120,
+        ));
+        let idx = list.position(temp_id).expect("temp row must be present");
+        list.replace_at_and_regroup(
+            idx,
+            Message::new(server_id_at(SEND_NOW_MS + 1_000), "mine", "me", "Me", 110),
+        );
+        let order: Vec<&str> = list.as_slice().iter().map(|m| m.content.as_str()).collect();
+        assert_eq!(order, ["old", "theirs", "mine"]);
+        assert!(
+            list.as_slice()
+                .windows(2)
+                .all(|w| message_sort_key(&w[0]) <= message_sort_key(&w[1]))
+        );
+        assert_list_consistent(&list);
+    }
+
+    #[test]
+    fn acking_a_temp_at_the_tail_does_not_resort() {
+        let mut list = MessageList::from_messages(vec![Message::new(
+            server_id_at(SEND_NOW_MS - 1_000),
+            "old",
+            "u1",
+            "U1",
+            100,
+        )]);
+        let temp_id = MessageId::next_optimistic();
+        list.push_grouped(
+            Message::new(temp_id, "mine", "me", "Me", 110).with_sort_id(optimistic_sort_id_at(
+                &list,
+                SEND_NOW_MS,
+                0,
+            )),
+        );
+        let idx = list.position(temp_id).expect("temp row must be present");
+        assert!(!list.is_out_of_order_at(idx));
+        list.replace_at_and_regroup(
+            idx,
+            Message::new(server_id_at(SEND_NOW_MS + 1_000), "mine", "me", "Me", 110),
+        );
+        assert!(!list.is_out_of_order_at(idx));
+        let order: Vec<&str> = list.as_slice().iter().map(|m| m.content.as_str()).collect();
+        assert_eq!(order, ["old", "mine"]);
         assert_list_consistent(&list);
     }
 
