@@ -149,7 +149,7 @@ impl ReactionPicker {
             })
         });
         let image_cache = cx.new(|cx| {
-            LruImageCache::avatar_thumbnail(
+            LruImageCache::avatar_thumbnail_small(
                 "reaction-picker",
                 256,
                 12 * 1024 * 1024,

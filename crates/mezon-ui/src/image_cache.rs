@@ -131,6 +131,8 @@ const SHARED_SMALL_AVATAR_CACHE_BYTES: u64 = 12 * 1024 * 1024;
 const SHARED_ROLE_ICON_CACHE_CAPACITY: usize = 512;
 const SHARED_ROLE_ICON_CACHE_BYTES: u64 = 4 * 1024 * 1024;
 const ROLE_ICON_ENTRY_MAX_BYTES: u64 = 256 * 1024;
+const SHARED_EMOJI_CACHE_CAPACITY: usize = 256;
+const SHARED_EMOJI_CACHE_BYTES: u64 = 12 * 1024 * 1024;
 
 struct SharedAvatarCache(Entity<LruImageCache>);
 impl Global for SharedAvatarCache {}
@@ -229,6 +231,35 @@ pub fn shared_avatar_cache(cx: &mut App) -> Entity<LruImageCache> {
 
 struct SharedSmallAvatarCache(Entity<LruImageCache>);
 impl Global for SharedSmallAvatarCache {}
+
+struct SharedEmojiCache(Entity<LruImageCache>);
+impl Global for SharedEmojiCache {}
+
+/// Shared decode cache for emoji painted by surfaces that carry no cache of
+/// their own — context menus and their submenus, voice-room reactions. Without
+/// one, `img()` resolves to GPUI's global asset cache, which decodes at full
+/// resolution, keeps every animation frame and never evicts, so each distinct
+/// emoji the user ever sees stays resident for the rest of the session.
+///
+/// A `deferred` boundary needs the cache attached *inside* its own subtree: a
+/// `DeferredDraw` replay paints with an empty `image_cache_stack`, so an
+/// ancestor cache does not reach it.
+pub fn shared_emoji_cache(cx: &mut App) -> Entity<LruImageCache> {
+    if let Some(existing) = cx.try_global::<SharedEmojiCache>() {
+        return existing.0.clone();
+    }
+    let cache = cx.new(|cx| {
+        LruImageCache::avatar_thumbnail(
+            "emoji-shared",
+            SHARED_EMOJI_CACHE_CAPACITY,
+            SHARED_EMOJI_CACHE_BYTES,
+            AVATAR_ENTRY_MAX_BYTES,
+            cx,
+        )
+    });
+    cx.set_global(SharedEmojiCache(cache.clone()));
+    cache
+}
 
 pub fn shared_small_avatar_cache(cx: &mut App) -> Entity<LruImageCache> {
     if let Some(existing) = cx.try_global::<SharedSmallAvatarCache>() {
@@ -419,9 +450,11 @@ pub const PREVIEW_ENTRY_MAX_BYTES: u64 = 4 * 1024 * 1024;
 pub const AVATAR_ANIMATION_MAX_BYTES: u64 = 4 * 1024 * 1024;
 pub const AVATAR_ENTRY_MAX_BYTES: u64 = 2 * 1024 * 1024;
 pub const MESSAGE_ENTRY_MAX_BYTES: u64 = 32 * 1024 * 1024;
+pub const MESSAGE_ANIMATION_MAX_BYTES: u64 = MESSAGE_IMAGE_CACHE_BYTES / 4;
 pub const SHARED_ENTRY_MAX_BYTES: u64 = 12 * 1024 * 1024;
 
 const GRACE_PERIOD: Duration = Duration::from_secs(2);
+const FRAME_BUMP_REARM: Duration = Duration::from_millis(100);
 const STATS_LOG_INTERVAL: u64 = 600;
 const MESSAGE_ANIMATION_MAX_PX: u32 = 400;
 const MESSAGE_STATIC_MAX_PX: u32 = 1024;
@@ -476,8 +509,8 @@ fn image_bytes(image: &RenderImage) -> u64 {
         .sum()
 }
 
-fn entry_in_working_set(touched_epoch: u64, epoch: u64, swept: bool) -> bool {
-    swept && epoch.wrapping_sub(touched_epoch) <= 1
+fn entry_in_working_set(touched_epoch: u64, epoch: u64) -> bool {
+    epoch.wrapping_sub(touched_epoch) <= 1
 }
 
 fn entry_is_stale(touched_epoch: u64, epoch: u64, age: Duration, grace: Duration) -> bool {
@@ -510,6 +543,9 @@ enum LoaderKind {
     AvatarThumbnailSmall,
     IconThumbnail,
     GalleryThumbnail,
+    /// Aspect-preserving, animation-preserving thumbnail for the sticker picker,
+    /// capped at [`STICKER_DECODE_MAX_PX`].
+    StickerThumbnail,
     /// Aspect-preserving thumbnail for OGP link previews, capped at
     /// [`OGP_THUMB_DECODE_MAX_PX`].
     OgpThumbnail,
@@ -536,6 +572,9 @@ pub struct LruImageCache {
     max_entry_bytes: u64,
     total_bytes: u64,
     epoch: u64,
+    frame_bump_armed: Option<Instant>,
+    frame_elapsed: bool,
+    weak: gpui::WeakEntity<Self>,
     sweeps: u64,
     sweep_scheduled: bool,
     metrics: CacheMetrics,
@@ -643,6 +682,23 @@ impl LruImageCache {
         )
     }
 
+    pub fn sticker_thumbnail(
+        label: &'static str,
+        max_items: usize,
+        max_bytes: u64,
+        max_entry_bytes: u64,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        Self::with_loader(
+            label,
+            LoaderKind::StickerThumbnail,
+            max_items,
+            max_bytes,
+            max_entry_bytes,
+            cx,
+        )
+    }
+
     pub fn ogp_thumbnail(
         label: &'static str,
         max_items: usize,
@@ -739,7 +795,7 @@ impl LruImageCache {
 
         let instance = CACHE_INSTANCE_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let weak = cx.weak_entity();
-        cx.default_global::<IdleTrimRegistry>().0.push(weak);
+        cx.default_global::<IdleTrimRegistry>().0.push(weak.clone());
         Self {
             label,
             instance,
@@ -749,6 +805,9 @@ impl LruImageCache {
             max_entry_bytes,
             total_bytes: 0,
             epoch: 0,
+            frame_bump_armed: None,
+            frame_elapsed: false,
+            weak,
             sweeps: 0,
             sweep_scheduled: false,
             metrics: CacheMetrics::default(),
@@ -786,10 +845,36 @@ impl LruImageCache {
         self.total_bytes = 0;
     }
 
-    /// Drop every image that was not requested during the most recent frame,
-    /// then advance the epoch. Call this once per render: anything that has
-    /// scrolled out of the viewport stops being requested and is freed on the
-    /// next sweep, so only the currently-visible images stay in RAM.
+    fn advance_epoch_on_use(&mut self) {
+        if self.frame_elapsed {
+            self.frame_elapsed = false;
+            self.epoch = self.epoch.wrapping_add(1);
+        }
+    }
+
+    fn begin_frame(&mut self, window: &mut Window) {
+        self.advance_epoch_on_use();
+        if self
+            .frame_bump_armed
+            .is_some_and(|at| at.elapsed() < FRAME_BUMP_REARM)
+        {
+            return;
+        }
+        self.frame_bump_armed = Some(Instant::now());
+        let weak = self.weak.clone();
+        window.on_next_frame(move |_, cx| {
+            weak.update(cx, |cache, _| {
+                cache.frame_bump_armed = None;
+                cache.frame_elapsed = true;
+            })
+            .ok();
+        });
+    }
+
+    /// Drop every image that has not been requested for [`GRACE_PERIOD`]. Call
+    /// this once per render: anything that has scrolled out of the viewport
+    /// stops being requested and is freed on the next sweep, so only the
+    /// currently-visible images stay in RAM.
     pub fn sweep(&mut self, window: &mut Window, cx: &mut App) {
         self.sweep_with_grace(GRACE_PERIOD, window, cx);
     }
@@ -821,7 +906,7 @@ impl LruImageCache {
             }
             false
         });
-        self.epoch = self.epoch.wrapping_add(1);
+        self.begin_frame(window);
         self.sweeps = self.sweeps.wrapping_add(1);
         if self.sweeps.is_multiple_of(STATS_LOG_INTERVAL) {
             let stats = self.stats();
@@ -889,19 +974,18 @@ impl LruImageCache {
     /// remaining entry is never evicted, so the image requested this frame
     /// stays resident.
     ///
-    /// On viewport-swept caches the in-viewport working set (entries touched
-    /// this epoch or the previous one — rows below the current paint cursor
-    /// were last touched one epoch ago) is never a victim: when the visible
-    /// images alone exceed the byte budget, evicting one of them just makes
-    /// the next frame re-decode it and evict its neighbour, blinking a
-    /// different visible image every frame. The sweep remains the bound that
-    /// frees them once they scroll out.
+    /// The in-viewport working set (entries touched this frame or the previous
+    /// one — rows below the current paint cursor were last touched one frame
+    /// ago) is never a victim: when the visible images alone exceed the byte
+    /// budget, evicting one of them just makes the next frame re-decode it and
+    /// evict its neighbour, blinking a different visible image every frame.
+    /// The sweep and the idle trim remain the bounds that free them once they
+    /// scroll out.
     fn lru_index(&self) -> Option<usize> {
-        let swept = self.sweeps > 0;
         self.cache
             .values()
             .enumerate()
-            .filter(|(_, entry)| !entry_in_working_set(entry.touched_epoch, self.epoch, swept))
+            .filter(|(_, entry)| !entry_in_working_set(entry.touched_epoch, self.epoch))
             .min_by_key(|(_, entry)| entry.last_used)
             .map(|(index, _)| index)
     }
@@ -933,6 +1017,7 @@ impl LruImageCache {
         window: &mut Window,
         cx: &mut App,
     ) -> Option<Result<Arc<RenderImage>, ImageCacheError>> {
+        self.begin_frame(window);
         let hash = hash(resource);
 
         if self.cache.contains_key(&hash) {
@@ -1038,6 +1123,9 @@ impl LruImageCache {
             LoaderKind::GalleryThumbnail => {
                 AssetLogger::<GalleryImageLoader>::load(resource.clone(), cx).boxed()
             }
+            LoaderKind::StickerThumbnail => {
+                AssetLogger::<StickerImageLoader>::load(resource.clone(), cx).boxed()
+            }
             LoaderKind::OgpThumbnail => {
                 AssetLogger::<OgpImageLoader>::load(resource.clone(), cx).boxed()
             }
@@ -1107,6 +1195,11 @@ const OGP_THUMB_DECODE_MAX_PX: u32 = 512;
 /// featured image stays sharp while grid/card thumbnails (much smaller on
 /// screen) downscale further for free via `object-fit: cover`.
 const GALLERY_PREVIEW_DECODE_MAX_PX: u32 = 768;
+/// Sticker cells are 80px logical, so 160px covers a 2x display. The animation
+/// budget bounds an animated sticker to ~20 frames at that size; the decoder
+/// decimates longer animations instead of dropping them to a still frame.
+const STICKER_DECODE_MAX_PX: u32 = 160;
+const STICKER_ANIMATION_MAX_BYTES: u64 = 2 * 1024 * 1024;
 
 /// An [`Asset`] loader for avatars that, unlike GPUI's stock [`ImageAssetLoader`],
 /// decodes **only the first frame** and **downscales** to avatar size before
@@ -1342,17 +1435,34 @@ where
 {
     let mut out: Vec<image::Frame> = Vec::new();
     let mut target: Option<(u32, u32)> = None;
-    let mut decoded_bytes: u64 = 0;
-    for frame in frames {
+    let mut stride = 1usize;
+    let mut max_frames = usize::MAX;
+    for (source_index, frame) in frames.enumerate() {
         let frame = frame.map_err(|err| AnimationDecodeError::Image(err.into()))?;
         let delay = frame.delay();
         let buffer = frame.into_buffer();
         let (tw, th) = *target
             .get_or_insert_with(|| downscale_dimensions(buffer.width(), buffer.height(), max_px));
-        decoded_bytes = decoded_bytes.saturating_add(u64::from(tw) * u64::from(th) * 4);
-        if decoded_bytes > byte_budget {
-            return Err(AnimationDecodeError::BudgetExceeded);
+        if max_frames == usize::MAX {
+            let frame_bytes = u64::from(tw) * u64::from(th) * 4;
+            if frame_bytes > byte_budget {
+                return Err(AnimationDecodeError::BudgetExceeded);
+            }
+            max_frames = (byte_budget / frame_bytes).max(2) as usize;
         }
+
+        if source_index.is_multiple_of(stride) && out.len() >= max_frames {
+            out = out
+                .into_iter()
+                .step_by(2)
+                .map(|frame| scale_frame_delay(frame, 2))
+                .collect();
+            stride = stride.saturating_mul(2);
+        }
+        if !source_index.is_multiple_of(stride) {
+            continue;
+        }
+
         let mut buffer = if buffer.width() == tw && buffer.height() == th {
             buffer
         } else {
@@ -1700,11 +1810,9 @@ fn load_scaled_aspect(
                 Some(image) => image,
                 None => image::load_from_memory(&bytes)?,
             };
-            let mut data = decoded.into_rgba8();
-            for pixel in data.chunks_exact_mut(4) {
-                pixel.swap(0, 2);
-            }
-            Ok(Arc::new(RenderImage::new(vec![image::Frame::new(data)])))
+            Ok(Arc::new(RenderImage::new(vec![downscaled_static_frame(
+                decoded, max_px,
+            )])))
         } else {
             svg_renderer
                 .render_single_frame(&bytes, 1.0)
@@ -1804,13 +1912,75 @@ impl Asset for MessageImageLoader {
                     &bytes,
                     MESSAGE_ANIMATION_MAX_PX,
                     MESSAGE_STATIC_MAX_PX,
-                    MESSAGE_ENTRY_MAX_BYTES,
+                    MESSAGE_ANIMATION_MAX_BYTES,
                 )
             } else {
                 svg_renderer
                     .render_single_frame(&bytes, 1.0)
                     .map_err(Into::into)
             }
+        }
+    }
+}
+
+/// Fetch + decode aspect-preserving, bounded by a static cap, an animation cap
+/// and an in-decode byte budget. Animated GIF/WebP keep their frames (decimated
+/// to fit the budget) so they still animate.
+fn load_bounded(
+    source: Resource,
+    animation_max_px: u32,
+    static_max_px: u32,
+    animation_byte_budget: u64,
+    cx: &mut App,
+) -> impl Future<Output = Result<Arc<RenderImage>, ImageCacheError>> + Send + 'static {
+    let client = cx.http_client();
+    let svg_renderer = cx.svg_renderer();
+    let asset_source = cx.asset_source().clone();
+    async move {
+        let _permit = acquire_image_pipeline_permit().await?;
+        let bytes = match source.clone() {
+            Resource::Path(uri) => std::fs::read(uri.as_ref())?,
+            Resource::Uri(uri) => {
+                use anyhow::Context as _;
+
+                let mut response = client
+                    .get(uri.as_ref(), ().into(), true)
+                    .await
+                    .with_context(|| format!("loading image from {uri:?}"))?;
+                let body = read_body_limited(&mut response, MESSAGE_FETCH_MAX_BYTES).await?;
+                if !response.status().is_success() {
+                    let mut body = String::from_utf8_lossy(&body).into_owned();
+                    let first_line = body.lines().next().unwrap_or("").trim_end();
+                    body.truncate(first_line.len());
+                    return Err(ImageCacheError::BadStatus {
+                        uri,
+                        status: response.status(),
+                        body,
+                    });
+                }
+                body
+            }
+            Resource::Embedded(path) => match asset_source.load(&path).ok().flatten() {
+                Some(data) => data.to_vec(),
+                None => {
+                    return Err(ImageCacheError::Asset(
+                        format!("Embedded resource not found: {path}").into(),
+                    ));
+                }
+            },
+        };
+
+        if image::guess_format(&bytes).is_ok() {
+            decode_message_image(
+                &bytes,
+                animation_max_px,
+                static_max_px,
+                animation_byte_budget,
+            )
+        } else {
+            svg_renderer
+                .render_single_frame(&bytes, 1.0)
+                .map_err(Into::into)
         }
     }
 }
@@ -1830,56 +2000,38 @@ impl Asset for SharedImageLoader {
         source: Self::Source,
         cx: &mut App,
     ) -> impl Future<Output = Self::Output> + Send + 'static {
-        let client = cx.http_client();
-        let svg_renderer = cx.svg_renderer();
-        let asset_source = cx.asset_source().clone();
-        async move {
-            let _permit = acquire_image_pipeline_permit().await?;
-            let bytes = match source.clone() {
-                Resource::Path(uri) => std::fs::read(uri.as_ref())?,
-                Resource::Uri(uri) => {
-                    use anyhow::Context as _;
+        load_bounded(
+            source,
+            SHARED_ANIMATION_MAX_PX,
+            SHARED_STATIC_MAX_PX,
+            SHARED_ENTRY_MAX_BYTES,
+            cx,
+        )
+    }
+}
 
-                    let mut response = client
-                        .get(uri.as_ref(), ().into(), true)
-                        .await
-                        .with_context(|| format!("loading image from {uri:?}"))?;
-                    let body = read_body_limited(&mut response, MESSAGE_FETCH_MAX_BYTES).await?;
-                    if !response.status().is_success() {
-                        let mut body = String::from_utf8_lossy(&body).into_owned();
-                        let first_line = body.lines().next().unwrap_or("").trim_end();
-                        body.truncate(first_line.len());
-                        return Err(ImageCacheError::BadStatus {
-                            uri,
-                            status: response.status(),
-                            body,
-                        });
-                    }
-                    body
-                }
-                Resource::Embedded(path) => match asset_source.load(&path).ok().flatten() {
-                    Some(data) => data.to_vec(),
-                    None => {
-                        return Err(ImageCacheError::Asset(
-                            format!("Embedded resource not found: {path}").into(),
-                        ));
-                    }
-                },
-            };
+/// Loader for the sticker picker. Stickers are drawn in an 80px cell, so the
+/// app-wide [`SHARED_STATIC_MAX_PX`] decode kept ~40x more pixels than the panel
+/// can show and churned the panel's byte budget on every scroll. Unlike the
+/// avatar loaders this preserves aspect ratio (stickers are not square and the
+/// cell uses `object-fit: contain`) and keeps animation frames.
+pub enum StickerImageLoader {}
 
-            if image::guess_format(&bytes).is_ok() {
-                decode_message_image(
-                    &bytes,
-                    SHARED_ANIMATION_MAX_PX,
-                    SHARED_STATIC_MAX_PX,
-                    SHARED_ENTRY_MAX_BYTES,
-                )
-            } else {
-                svg_renderer
-                    .render_single_frame(&bytes, 1.0)
-                    .map_err(Into::into)
-            }
-        }
+impl Asset for StickerImageLoader {
+    type Source = Resource;
+    type Output = Result<Arc<RenderImage>, ImageCacheError>;
+
+    fn load(
+        source: Self::Source,
+        cx: &mut App,
+    ) -> impl Future<Output = Self::Output> + Send + 'static {
+        load_bounded(
+            source,
+            STICKER_DECODE_MAX_PX,
+            STICKER_DECODE_MAX_PX,
+            STICKER_ANIMATION_MAX_BYTES,
+            cx,
+        )
     }
 }
 
@@ -1987,14 +2139,78 @@ mod tests {
         ));
     }
 
+    #[gpui::test]
+    fn the_epoch_advances_once_per_use_not_once_per_drawn_frame(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let cache = cx.new(|cx| LruImageCache::new(4, 1024, cx));
+            cache.update(cx, |cache, _| {
+                cache.frame_elapsed = true;
+                cache.advance_epoch_on_use();
+                cache.advance_epoch_on_use();
+                assert_eq!(
+                    cache.epoch, 1,
+                    "every image requested during one frame must share an epoch"
+                );
+
+                for _ in 0..10 {
+                    cache.advance_epoch_on_use();
+                }
+                assert_eq!(
+                    cache.epoch, 1,
+                    "frames in which this cache is not used must not age its entries out of \
+                     the working set: their images are still on screen in a render-cache hit"
+                );
+
+                cache.frame_elapsed = true;
+                cache.advance_epoch_on_use();
+                assert_eq!(cache.epoch, 2);
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn budget_eviction_never_picks_an_entry_requested_this_frame(cx: &mut gpui::TestAppContext) {
+        fn entry(touched_epoch: u64, age: Duration) -> CacheEntry {
+            let (abort, _reg) = AbortHandle::new_pair();
+            CacheEntry {
+                item: ImageCacheItem::Loaded(Err(ImageCacheError::Asset("test".into()))),
+                abort,
+                bytes: Some(0),
+                touched_epoch,
+                last_used: Instant::now() - age,
+                failed_at: None,
+            }
+        }
+
+        cx.update(|cx| {
+            let cache = cx.new(|cx| LruImageCache::new(4, 1024, cx));
+            cache.update(cx, |cache, _| {
+                cache.epoch = 9;
+                cache.cache.insert(1, entry(9, Duration::from_secs(1)));
+                cache.cache.insert(2, entry(8, Duration::ZERO));
+                cache.cache.insert(3, entry(6, Duration::ZERO));
+                assert_eq!(
+                    cache.lru_index(),
+                    Some(2),
+                    "only the entry outside the two-frame working set may be evicted"
+                );
+                cache.cache.swap_remove(&3);
+                assert_eq!(
+                    cache.lru_index(),
+                    None,
+                    "a cache whose view never sweeps must still protect the images the \
+                     current frame requested, or budget eviction blinks them"
+                );
+            });
+        });
+    }
+
     #[test]
-    fn budget_eviction_spares_the_visible_working_set_on_swept_caches() {
-        assert!(entry_in_working_set(7, 7, true));
-        assert!(entry_in_working_set(6, 7, true));
-        assert!(!entry_in_working_set(5, 7, true));
-        assert!(entry_in_working_set(u64::MAX, 0, true));
-        assert!(!entry_in_working_set(7, 7, false));
-        assert!(!entry_in_working_set(6, 7, false));
+    fn budget_eviction_spares_the_visible_working_set() {
+        assert!(entry_in_working_set(7, 7));
+        assert!(entry_in_working_set(6, 7));
+        assert!(!entry_in_working_set(5, 7));
+        assert!(entry_in_working_set(u64::MAX, 0));
     }
 
     #[test]
@@ -2097,6 +2313,36 @@ mod tests {
     }
 
     #[test]
+    fn picker_decode_caps_cover_two_x_their_largest_cell() {
+        const EMOJI_PICKER_LARGEST_LOGICAL_PX: u32 = 28;
+        const STICKER_PANEL_CELL_LOGICAL_PX: u32 = 80;
+        const _: () = assert!(AVATAR_SMALL_DECODE_MAX_PX >= EMOJI_PICKER_LARGEST_LOGICAL_PX * 2);
+        const _: () = assert!(STICKER_DECODE_MAX_PX >= STICKER_PANEL_CELL_LOGICAL_PX * 2);
+    }
+
+    #[test]
+    fn a_screenful_of_picker_cells_fits_inside_its_cache_budget() {
+        const EMOJI_PICKER_VISIBLE_CELLS: u64 = 9 * 12;
+        const EMOJI_PICKER_CACHE_BYTES: u64 = 12 * 1024 * 1024;
+        const STICKER_PANEL_VISIBLE_CELLS: u64 = 3 * 8;
+        const STICKER_PANEL_CACHE_BYTES: u64 = 12 * 1024 * 1024;
+
+        let bytes_at_cap = |max_px: u32| u64::from(max_px) * u64::from(max_px) * 4;
+
+        assert!(
+            bytes_at_cap(AVATAR_SMALL_DECODE_MAX_PX) * EMOJI_PICKER_VISIBLE_CELLS
+                <= EMOJI_PICKER_CACHE_BYTES,
+            "a screenful of emoji must fit the picker's budget: once the visible cells alone \
+             exceed it, every frame evicts one of them and blinks a different cell"
+        );
+        assert!(
+            bytes_at_cap(STICKER_DECODE_MAX_PX) * STICKER_PANEL_VISIBLE_CELLS
+                <= STICKER_PANEL_CACHE_BYTES,
+            "a screenful of stickers must fit the sticker panel's budget for the same reason"
+        );
+    }
+
+    #[test]
     fn avatar_gif_retains_animation_frames() {
         use image::codecs::gif::{GifEncoder, Repeat};
         let mut bytes = Vec::new();
@@ -2120,5 +2366,66 @@ mod tests {
         let size = image.size(0);
         assert_eq!(size.width, size.height);
         assert_eq!(image.delay(0), image::Delay::from_numer_denom_ms(50, 1));
+    }
+
+    #[test]
+    fn one_animated_attachment_cannot_starve_the_message_cache() {
+        const _: () = assert!(
+            MESSAGE_ANIMATION_MAX_BYTES * 4 <= MESSAGE_IMAGE_CACHE_BYTES,
+            "a single animated attachment that may occupy the whole cache budget forces \
+             evict_to_budget to drop every entry outside the working set the moment it is on \
+             screen, so scrolling back one row re-fetches images that were visible seconds ago"
+        );
+        const _: () = assert!(
+            MESSAGE_ANIMATION_MAX_BYTES < MESSAGE_ENTRY_MAX_BYTES,
+            "the decode budget must stay under the per-entry rejection cap, or a long animation \
+             is dropped and negatively cached instead of being decimated"
+        );
+    }
+
+    #[test]
+    fn a_long_message_animation_is_decimated_rather_than_frozen() {
+        use image::codecs::gif::{GifEncoder, Repeat};
+        const SOURCE_FRAMES: usize = 16;
+        const SIDE: u32 = 8;
+        let frame_bytes = u64::from(SIDE) * u64::from(SIDE) * 4;
+        let budget = frame_bytes * 4;
+
+        let mut bytes = Vec::new();
+        {
+            let mut encoder = GifEncoder::new(&mut bytes);
+            encoder.set_repeat(Repeat::Infinite).expect("GIF repeat");
+            for i in 0..SOURCE_FRAMES {
+                let shade = (i * 16) as u8;
+                let buffer =
+                    image::RgbaImage::from_pixel(SIDE, SIDE, image::Rgba([shade, 0, 0, 255]));
+                let frame = image::Frame::from_parts(
+                    buffer,
+                    0,
+                    0,
+                    image::Delay::from_numer_denom_ms(50, 1),
+                );
+                encoder.encode_frame(frame).expect("GIF frame");
+            }
+        }
+
+        let image = decode_message_image(&bytes, MESSAGE_ANIMATION_MAX_PX, 1024, budget)
+            .expect("animated attachment");
+
+        assert!(
+            image.frame_count() > 1,
+            "a long animation must keep animating at a lower frame rate; bailing to a single \
+             static frame is what the budget guard used to do"
+        );
+        assert!(
+            image_bytes(&image) <= budget,
+            "decimation must bring the decoded animation inside its byte budget"
+        );
+        assert_eq!(
+            std::time::Duration::from(image.delay(0)),
+            std::time::Duration::from_millis(200),
+            "dropped frames must have their delay folded into the survivors, so the animation \
+             still plays over its original duration"
+        );
     }
 }

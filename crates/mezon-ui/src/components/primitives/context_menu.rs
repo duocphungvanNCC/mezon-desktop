@@ -342,6 +342,7 @@ impl RenderOnce for ContextMenu {
             .border_color(border)
             .bg(bg)
             .shadow_lg()
+            .image_cache(crate::image_cache::shared_emoji_cache(cx))
             .occlude();
 
         if !self.quick_reactions.is_empty() {
