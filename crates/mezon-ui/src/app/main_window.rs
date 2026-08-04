@@ -1,6 +1,6 @@
 use gpui::{
-    AnyWindowHandle, App, AppContext, Bounds, DisplayId, Entity, Global, Pixels, Window,
-    WindowBounds, WindowHandle, WindowKind, px, size,
+    AnyWindowHandle, App, AppContext, Bounds, DisplayId, Entity, Global, Window, WindowBounds,
+    WindowHandle, WindowKind, px, size,
 };
 use mezon_store::Settings;
 
@@ -35,16 +35,6 @@ pub fn register_main_window(handle: AnyWindowHandle, cx: &mut App) {
 
 pub fn handle(cx: &App) -> Option<AnyWindowHandle> {
     cx.try_global::<MainWindowHandle>().map(|g| g.0)
-}
-
-pub fn main_window_bounds(cx: &mut App) -> Option<Bounds<Pixels>> {
-    let handle = handle(cx)?;
-    cx.update_window(handle, |_, window, _| window.window_bounds())
-        .ok()
-        .and_then(|bounds| match bounds {
-            WindowBounds::Windowed(bounds) => Some(bounds),
-            _ => None,
-        })
 }
 
 /// Read a placement straight off a live `Window`. Callers that already hold the main window —

@@ -1,9 +1,10 @@
 use std::collections::HashMap;
 
 use gpui::{
-    Animation, AnimationExt, AnyElement, App, ClipboardItem, Context, Entity, FontWeight, Hsla,
-    MouseButton, MouseDownEvent, ObjectFit, Pixels, ScrollHandle, SharedString, StyledImage,
-    Window, canvas, deferred, div, img, prelude::*, px, relative,
+    Anchor, Animation, AnimationExt, AnyElement, App, ClickEvent, ClipboardItem, Context,
+    CursorStyle, Entity, FontWeight, Hsla, IntoElement, MouseButton, MouseDownEvent, ObjectFit,
+    Pixels, RenderOnce, ScrollHandle, SharedString, StyledImage, Window, canvas, deferred, div,
+    img, point, prelude::*, px, relative,
 };
 use mezon_store::{
     AppConfig, AudioStore, Channel, ChannelId, ClanId, ClanMembersStore, DeviceKind,
@@ -13,11 +14,15 @@ use mezon_store::{
 };
 
 use crate::ChatLayout;
+use crate::chat::inbox::{InboxPopoverPanel, clan_has_inbox_badge};
 use crate::components::primitives::{
     Avatar, ContextMenu, Icon, IconName, Sizable, Size, Spinner, context_menu_at,
 };
 use crate::theme::{ActiveTheme, Theme};
-use ui::{ScrollAxes, Scrollbars, Tooltip, WithScrollbar};
+use ui::{
+    Clickable, PopoverMenu, PopoverMenuHandle, ScrollAxes, Scrollbars, Toggleable, Tooltip,
+    WithScrollbar,
+};
 
 /// Shared brand accent (Discord-style blurple) used across the voice UI and
 /// the screen-share modal. Single source of truth — do not duplicate.
@@ -55,6 +60,8 @@ pub fn render_voice_channel(
     grid_page: usize,
     grid_size: gpui::Size<Pixels>,
     show_members: bool,
+    show_chat: bool,
+    inbox_handle: PopoverMenuHandle<InboxPopoverPanel>,
     visual: &mut VoiceVisualState,
     window_width: Pixels,
     window: &mut Window,
@@ -83,6 +90,8 @@ pub fn render_voice_channel(
             grid_page,
             grid_size,
             show_members,
+            show_chat,
+            inbox_handle,
             visual,
             window,
             cx,
@@ -404,16 +413,92 @@ fn panel_control_button(
         .child(Icon::new(icon).size(px(20.)).text_color(icon_color))
 }
 
-fn voice_header(theme: &Theme, name: &str, in_call: bool) -> AnyElement {
-    let right = in_call.then(|| {
+fn voice_header_icon_shell(
+    id: &'static str,
+    theme: &Theme,
+    active: bool,
+) -> gpui::Stateful<gpui::Div> {
+    let bg_hover = theme.bg_hover;
+    let bg_active = theme.bg_tertiary;
+    div()
+        .id(id)
+        .flex()
+        .items_center()
+        .justify_center()
+        .w(px(32.))
+        .h(px(32.))
+        .rounded_md()
+        .cursor_pointer()
+        .when(active, move |s| s.bg(bg_active))
+        .hover(move |s| s.bg(bg_hover))
+}
+
+fn voice_header(
+    theme: &Theme,
+    locale: &str,
+    name: &str,
+    voice: Option<&Entity<VoiceStore>>,
+    show_chat: bool,
+    inbox_handle: PopoverMenuHandle<InboxPopoverPanel>,
+    clan_id: ClanId,
+    chat: Option<&Entity<ChatLayout>>,
+    cx: &App,
+) -> AnyElement {
+    let right = voice.zip(chat).map(|(voice, chat)| {
+        let is_focused = voice.read(cx).focused_tile().is_some();
+        let layout_icon = if is_focused {
+            IconName::VoiceGridIcon
+        } else {
+            IconName::VoiceFocusIcon
+        };
+        let voice = voice.clone();
+        let chat_toggle = chat.clone();
+        let chat_tooltip = if show_chat {
+            mezon_i18n::t(locale, "channelTopbar.tooltips.hideChat")
+        } else {
+            mezon_i18n::t(locale, "channelTopbar.tooltips.showChat")
+        };
+        let chat_active = theme.tokens.bg_icon_theme_active;
+        let chat_idle = theme.tokens.bg_icon_theme;
         div()
             .flex()
             .flex_row()
             .items_center()
-            .gap_3()
-            .child(decorative_icon(theme, IconName::Chat))
-            .child(decorative_icon(theme, IconName::VoiceGridIcon))
-            .child(decorative_icon(theme, IconName::VoiceFocusIcon))
+            .gap_4()
+            .child(voice_inbox_button(
+                theme,
+                locale,
+                inbox_handle,
+                clan_id.to_string(),
+                cx,
+            ))
+            .child(
+                voice_header_icon_shell("voice-layout-toggle", theme, false)
+                    .tooltip(Tooltip::text(mezon_i18n::t(
+                        locale,
+                        "channelVoice.switchLayout",
+                    )))
+                    .child(
+                        Icon::new(layout_icon)
+                            .size(px(18.))
+                            .text_color(theme.tokens.bg_icon_theme),
+                    )
+                    .on_click(move |_, _, cx| {
+                        voice.update(cx, |store, cx| store.toggle_layout_view(cx));
+                    }),
+            )
+            .child(
+                voice_header_icon_shell("voice-chat-toggle", theme, show_chat)
+                    .tooltip(Tooltip::text(chat_tooltip))
+                    .child(
+                        Icon::new(IconName::Chat)
+                            .size(px(18.))
+                            .text_color(if show_chat { chat_active } else { chat_idle }),
+                    )
+                    .on_click(move |_, _, cx| {
+                        chat_toggle.update(cx, |layout, cx| layout.toggle_voice_chat(cx));
+                    }),
+            )
     });
 
     div()
@@ -450,11 +535,146 @@ fn voice_header(theme: &Theme, name: &str, in_call: bool) -> AnyElement {
         .into_any_element()
 }
 
-fn decorative_icon(theme: &Theme, icon: IconName) -> AnyElement {
-    Icon::new(icon)
-        .size(px(18.))
-        .text_color(theme.text_muted)
+fn voice_inbox_button(
+    theme: &Theme,
+    locale: &str,
+    handle: PopoverMenuHandle<InboxPopoverPanel>,
+    clan_id: String,
+    cx: &App,
+) -> AnyElement {
+    let show_badge = clan_has_inbox_badge(&clan_id, cx);
+    let is_open = handle.is_deployed();
+    let inbox_label = mezon_i18n::t(locale, "notifications.inbox");
+
+    PopoverMenu::new("voice-inbox-popover")
+        .with_handle(handle.clone())
+        .anchor(Anchor::TopRight)
+        .attach(Anchor::BottomRight)
+        .offset(point(px(0.), px(4.)))
+        .menu({
+            let handle = handle.clone();
+            let locale = locale.to_string();
+            move |window, cx| {
+                Some(cx.new(|cx| {
+                    InboxPopoverPanel::new(
+                        clan_id.clone(),
+                        locale.clone(),
+                        handle.clone(),
+                        window,
+                        cx,
+                    )
+                }))
+            }
+        })
+        .trigger(VoiceInboxTrigger::new(
+            theme,
+            is_open,
+            show_badge,
+            theme.mention_badge,
+            inbox_label,
+        ))
         .into_any_element()
+}
+
+#[derive(IntoElement)]
+struct VoiceInboxTrigger {
+    open: bool,
+    show_badge: bool,
+    badge_color: gpui::Rgba,
+    icon_color: gpui::Rgba,
+    icon_active: gpui::Rgba,
+    bg_hover: gpui::Rgba,
+    bg_active: gpui::Rgba,
+    inbox_label: SharedString,
+    on_click: Option<Box<dyn Fn(&ClickEvent, &mut Window, &mut App) + 'static>>,
+}
+
+impl VoiceInboxTrigger {
+    fn new(
+        theme: &Theme,
+        open: bool,
+        show_badge: bool,
+        badge_color: gpui::Rgba,
+        inbox_label: impl Into<SharedString>,
+    ) -> Self {
+        Self {
+            open,
+            show_badge,
+            badge_color,
+            icon_color: theme.tokens.bg_icon_theme,
+            icon_active: theme.tokens.bg_icon_theme_active,
+            bg_hover: theme.bg_hover,
+            bg_active: theme.bg_tertiary,
+            inbox_label: inbox_label.into(),
+            on_click: None,
+        }
+    }
+}
+
+impl Toggleable for VoiceInboxTrigger {
+    fn toggle_state(mut self, selected: bool) -> Self {
+        self.open = selected;
+        self
+    }
+}
+
+impl Clickable for VoiceInboxTrigger {
+    fn on_click(mut self, handler: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static) -> Self {
+        self.on_click = Some(Box::new(handler));
+        self
+    }
+
+    fn cursor_style(self, _cursor_style: CursorStyle) -> Self {
+        self
+    }
+}
+
+impl RenderOnce for VoiceInboxTrigger {
+    fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
+        let tint = if self.open {
+            self.icon_active
+        } else {
+            self.icon_color
+        };
+        let inbox_label = self.inbox_label;
+        let bg_hover = self.bg_hover;
+        let bg_active = self.bg_active;
+        let open = self.open;
+        let mut button = div()
+            .id("voice-inbox-trigger")
+            .flex()
+            .items_center()
+            .justify_center()
+            .w(px(32.))
+            .h(px(32.))
+            .rounded_md()
+            .cursor_pointer()
+            .when(open, move |s| s.bg(bg_active))
+            .hover(move |s| s.bg(bg_hover))
+            .occlude()
+            .tooltip(Tooltip::text(inbox_label))
+            .child(
+                div()
+                    .relative()
+                    .child(Icon::new(IconName::Inbox).size(px(18.)).text_color(tint))
+                    .when(self.show_badge, |d| {
+                        d.child(
+                            div()
+                                .absolute()
+                                .top(px(0.))
+                                .right(px(0.))
+                                .w(px(8.))
+                                .h(px(8.))
+                                .rounded_full()
+                                .bg(self.badge_color),
+                        )
+                    }),
+            );
+        if let Some(on_click) = self.on_click {
+            button = button.on_click(on_click);
+        }
+        button
+    }
 }
 
 fn pre_join_max_members(window_width: f32) -> usize {
@@ -615,7 +835,17 @@ fn render_pre_join(
         .flex_col()
         .flex_1()
         .min_h_0()
-        .child(voice_header(theme, &channel.name, false))
+        .child(voice_header(
+            theme,
+            locale,
+            &channel.name,
+            None,
+            false,
+            PopoverMenuHandle::default(),
+            channel.clan_id,
+            None,
+            cx,
+        ))
         .child(body)
         .into_any_element()
 }
@@ -995,6 +1225,8 @@ fn render_in_call(
     grid_page: usize,
     grid_size: gpui::Size<Pixels>,
     show_members: bool,
+    show_chat: bool,
+    inbox_handle: PopoverMenuHandle<InboxPopoverPanel>,
     visual: &mut VoiceVisualState,
     window: &mut Window,
     cx: &mut App,
@@ -1201,7 +1433,17 @@ fn render_in_call(
         .flex_col()
         .flex_1()
         .min_h_0()
-        .child(voice_header(theme, &channel.name, true))
+        .child(voice_header(
+            theme,
+            locale,
+            &channel.name,
+            Some(voice),
+            show_chat,
+            inbox_handle,
+            channel.clan_id,
+            Some(chat),
+            cx,
+        ))
         .children(body)
         .when(!fullscreen_active, |this| {
             this.child(control_bar(
