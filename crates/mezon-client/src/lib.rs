@@ -51,7 +51,7 @@ pub use network_probe::{
 };
 pub use notification_setting::ChannelNotificationSetting;
 pub use notification_setting::NotificationOverride;
-pub use ogp::{OgpResult, fetch_ogp};
+pub use ogp::{OgpResult, fetch_invite_preview, fetch_ogp};
 pub use search_message::{
     SEARCH_PAGE_SIZE, SearchDropdownMode, SearchPageToken, active_search_trigger,
     autocomplete_needle, build_clan_channel_content_search, build_direct_content_search,

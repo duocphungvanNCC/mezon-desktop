@@ -1,5 +1,5 @@
 pub use mezon_client::transport::OutgoingOgp;
-pub use mezon_client::{OgpResult, fetch_ogp};
+pub use mezon_client::{OgpResult, fetch_invite_preview, fetch_ogp};
 
 const EXCLUDED_HOSTS: &[&str] = &[
     "youtube.com",
@@ -11,6 +11,20 @@ const EXCLUDED_HOSTS: &[&str] = &[
 ];
 
 const TRAILING_PUNCTUATION: &[char] = &['.', ',', ';', ':', '!', '?', ')', ']', '}', '\'', '"'];
+
+pub fn invite_id_from_url(url: &str) -> Option<String> {
+    const NEEDLE: &[u8] = b"/invite/";
+    let idx = url
+        .as_bytes()
+        .windows(NEEDLE.len())
+        .position(|window| window.eq_ignore_ascii_case(NEEDLE))?;
+    let rest = &url[idx + NEEDLE.len()..];
+    let end = rest
+        .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '-'))
+        .unwrap_or(rest.len());
+    let id = &rest[..end];
+    (!id.is_empty()).then(|| id.to_string())
+}
 
 /// The first URL in `text` eligible for an OGP link preview, or `None`.
 ///
@@ -134,5 +148,25 @@ mod tests {
     #[test]
     fn none_when_no_url() {
         assert_eq!(first_previewable_url("just some text", None), None);
+    }
+
+    #[test]
+    fn extracts_invite_id() {
+        assert_eq!(
+            invite_id_from_url("https://mezon.ai/invite/1840670747886882816").as_deref(),
+            Some("1840670747886882816")
+        );
+        assert_eq!(
+            invite_id_from_url("https://mezon.ai/invite/abc-DEF_123?ref=x").as_deref(),
+            Some("abc-DEF_123")
+        );
+        assert_eq!(
+            invite_id_from_url("https://mezon.ai/channels/1").as_deref(),
+            None
+        );
+        assert_eq!(
+            invite_id_from_url("https://mezon.ai/invite/").as_deref(),
+            None
+        );
     }
 }
