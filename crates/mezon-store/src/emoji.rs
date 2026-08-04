@@ -17,6 +17,7 @@ use crate::realtime::{RealtimeDispatch, RealtimeKind};
 const RECENT_EMOJI_CAP: usize = 20;
 const RECENT_FETCH_ATTEMPTS: u32 = 3;
 const RECENT_FETCH_RETRY_DELAY: Duration = Duration::from_secs(1);
+const LAG_REFRESH_MIN_INTERVAL: Duration = Duration::from_secs(30);
 const EMOJI_ACTION_CREATED: i32 = 1;
 const EMOJI_ACTION_UPDATE: i32 = 2;
 const EMOJI_ACTION_DELETE: i32 = 3;
@@ -52,6 +53,7 @@ pub struct EmojiStore {
     recent_ids: Vec<String>,
     freshness: Freshness,
     recent_freshness: Freshness,
+    lag_refresh: Freshness,
     loading: bool,
     loading_recent: bool,
     reset_generation: u32,
@@ -85,6 +87,7 @@ impl EmojiStore {
         self.recent_ids.clear();
         self.freshness.mark_stale();
         self.recent_freshness.mark_stale();
+        self.lag_refresh.mark_stale();
         self.loading = false;
         self.loading_recent = false;
         self.reset_generation = self.reset_generation.wrapping_add(1);
@@ -102,6 +105,7 @@ impl EmojiStore {
             recent_ids: Vec::new(),
             freshness: Freshness::new(),
             recent_freshness: Freshness::new(),
+            lag_refresh: Freshness::new(),
             loading: false,
             loading_recent: false,
             reset_generation: 0,
@@ -119,7 +123,7 @@ impl EmojiStore {
             dispatch.on(RealtimeKind::MessageReaction, &entity, |this, event, cx| {
                 this.handle_reaction_echo(event, cx)
             });
-            dispatch.on_lagged(&entity, |this, cx| this.refresh(cx));
+            dispatch.on_lagged(&entity, |this, cx| this.refresh_after_lag(cx));
         });
     }
 
@@ -173,6 +177,14 @@ impl EmojiStore {
         self.fetch_recent(cx);
     }
 
+    fn refresh_after_lag(&mut self, cx: &mut Context<Self>) {
+        if self.lag_refresh.is_fresh(LAG_REFRESH_MIN_INTERVAL) {
+            return;
+        }
+        self.lag_refresh.mark_fetched();
+        self.refresh(cx);
+    }
+
     fn fetch(&mut self, cx: &mut Context<Self>) -> Task<()> {
         if self.loading {
             return Task::ready(());
@@ -193,21 +205,24 @@ impl EmojiStore {
                         .filter_map(emoji_from_proto)
                         .collect::<Vec<_>>()
                 }) {
-                    Ok(emojis) => {
-                        this.by_id.clear();
-                        this.order.clear();
-                        for emoji in emojis {
-                            this.insert(emoji);
-                        }
-                        this.freshness.mark_fetched();
-                        tracing::info!("EmojiStore: fetched {} emojis", this.order.len());
-                        cx.emit(EmojiEvent::Changed);
-                        cx.notify();
-                    }
+                    Ok(emojis) => this.apply_catalog(emojis, cx),
                     Err(e) => tracing::error!("list_emojis_by_user_id failed: {e}"),
                 }
             });
         })
+    }
+
+    fn apply_catalog(&mut self, emojis: Vec<Emoji>, cx: &mut Context<Self>) {
+        let (by_id, order) = index_emojis(emojis);
+        self.freshness.mark_fetched();
+        if by_id == self.by_id && order == self.order {
+            return;
+        }
+        self.by_id = by_id;
+        self.order = order;
+        tracing::info!("EmojiStore: fetched {} emojis", self.order.len());
+        cx.emit(EmojiEvent::Changed);
+        cx.notify();
     }
 
     fn apply_recents_if_current(
@@ -220,13 +235,17 @@ impl EmojiStore {
             return false;
         }
         let mut seen = HashSet::new();
-        self.recent_ids = recents
+        let recent_ids: Vec<String> = recents
             .into_iter()
             .map(|r| r.emoji_id.to_string())
             .filter(|id| seen.insert(id.clone()))
             .take(RECENT_EMOJI_CAP)
             .collect();
         self.recent_freshness.mark_fetched();
+        if recent_ids == self.recent_ids {
+            return true;
+        }
+        self.recent_ids = recent_ids;
         cx.emit(EmojiEvent::Changed);
         cx.notify();
         true
@@ -255,7 +274,9 @@ impl EmojiStore {
                         tracing::error!(
                             "emoji_recent_list failed (attempt {attempt}/{RECENT_FETCH_ATTEMPTS}): {e}"
                         );
-                        if attempt == RECENT_FETCH_ATTEMPTS {
+                        if attempt == RECENT_FETCH_ATTEMPTS
+                            || api.connection_status() != ConnectionStatus::Connected
+                        {
                             break;
                         }
                         cx.background_executor().timer(delay).await;
@@ -472,6 +493,18 @@ impl EmojiStore {
             cx.notify();
         }
     }
+}
+
+fn index_emojis(emojis: Vec<Emoji>) -> (HashMap<String, Emoji>, Vec<String>) {
+    let mut by_id = HashMap::with_capacity(emojis.len());
+    let mut order = Vec::with_capacity(emojis.len());
+    for emoji in emojis {
+        let id = emoji.id.clone();
+        if by_id.insert(id.clone(), emoji).is_none() {
+            order.push(id);
+        }
+    }
+    (by_id, order)
 }
 
 fn push_recent(recent_ids: &mut Vec<String>, id: String) {
@@ -883,6 +916,21 @@ mod tests {
         store.read_with(cx, |store, _| store.loading_recent)
     }
 
+    fn count_changed_events(
+        store: &Entity<EmojiStore>,
+        cx: &mut gpui::TestAppContext,
+    ) -> std::rc::Rc<std::cell::Cell<usize>> {
+        let seen = std::rc::Rc::new(std::cell::Cell::new(0));
+        let sink = seen.clone();
+        cx.update(|cx| {
+            cx.subscribe(store, move |_, _: &EmojiEvent, _| {
+                sink.set(sink.get() + 1);
+            })
+            .detach();
+        });
+        seen
+    }
+
     fn settle_recent_fetch_with_success(store: &Entity<EmojiStore>, cx: &mut gpui::TestAppContext) {
         store.update(cx, |store, cx| {
             let generation = store.reset_generation;
@@ -1081,6 +1129,68 @@ mod tests {
             );
             assert!(store.recent_ids.is_empty());
             assert!(!store.recent_freshness.is_fresh(crate::CACHE_TTL));
+        });
+    }
+
+    #[gpui::test]
+    fn an_unchanged_recent_list_does_not_wake_the_pickers(cx: &mut gpui::TestAppContext) {
+        let (_api, store) = init_emoji_store(cx);
+        let changed = count_changed_events(&store, cx);
+
+        store.update(cx, |store, cx| {
+            let generation = store.reset_generation;
+            store.apply_recents_if_current(generation, vec![recent(1), recent(2)], cx);
+            store.apply_recents_if_current(generation, vec![recent(1), recent(2)], cx);
+        });
+        cx.run_until_parked();
+
+        assert_eq!(
+            changed.get(),
+            1,
+            "an identical response must refresh the TTL without rebuilding every picker"
+        );
+        assert!(
+            store.read_with(cx, |store, _| store
+                .recent_freshness
+                .is_fresh(crate::CACHE_TTL)),
+            "the TTL must still be refreshed on the second response"
+        );
+    }
+
+    #[gpui::test]
+    fn an_unchanged_catalog_does_not_wake_the_pickers(cx: &mut gpui::TestAppContext) {
+        let (_api, store) = init_emoji_store(cx);
+        let changed = count_changed_events(&store, cx);
+        let catalog = vec![emoji("1", "smile", "Faces", "A")];
+
+        store.update(cx, |store, cx| {
+            store.apply_catalog(catalog.clone(), cx);
+            store.apply_catalog(catalog.clone(), cx);
+        });
+        cx.run_until_parked();
+
+        assert_eq!(changed.get(), 1, "an identical catalog must not re-emit");
+    }
+
+    #[gpui::test]
+    fn a_lag_storm_refreshes_at_most_once_per_interval(cx: &mut gpui::TestAppContext) {
+        let (_api, store) = init_emoji_store(cx);
+
+        store.update(cx, |store, cx| {
+            store.refresh_after_lag(cx);
+            assert!(store.loading, "the first lag must refresh the catalog");
+
+            store.loading = false;
+            store.loading_recent = false;
+            store.refresh_after_lag(cx);
+            assert!(
+                !store.loading,
+                "a second lag inside the interval must not refetch the catalog"
+            );
+
+            store.lag_refresh.mark_stale();
+            store.refresh_after_lag(cx);
+            assert!(store.loading, "a lag past the interval must refresh again");
         });
     }
 
