@@ -350,7 +350,7 @@ impl ChatLayout {
                         .update(cx, |page, cx| page.reset_search(cx)),
                     Route::ClanChannels { .. } => this
                         .clan_channels_page
-                        .update(cx, |page, cx| page.reset_search(cx)),
+                        .update(cx, |page, cx| page.deactivate(cx)),
                     _ => {}
                 }
                 this.last_route = next_route.clone();

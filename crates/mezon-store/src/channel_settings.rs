@@ -54,6 +54,9 @@ pub enum ChannelSettingsEvent {
 pub struct ChannelSettingsStore {
     rows: HashMap<(ClanId, ChannelId), Vec<ChannelSetting>>,
     loading: HashSet<(ClanId, ChannelId)>,
+    discarded: HashSet<(ClanId, ChannelId)>,
+    pending_reload: HashSet<(ClanId, ChannelId)>,
+    pending_events: HashMap<(ClanId, ChannelId), Vec<RealtimeEvent>>,
     api: Arc<AppApi>,
 }
 
@@ -67,6 +70,9 @@ impl ChannelSettingsStore {
             let store = Self {
                 rows: HashMap::new(),
                 loading: HashSet::new(),
+                discarded: HashSet::new(),
+                pending_reload: HashSet::new(),
+                pending_events: HashMap::new(),
                 api,
             };
             Self::register_realtime(cx);
@@ -91,8 +97,25 @@ impl ChannelSettingsStore {
         self.loading.contains(&(clan_id, parent_id))
     }
 
+    pub fn reset_clan(&mut self, clan_id: ClanId, cx: &mut Context<Self>) {
+        self.rows
+            .retain(|(row_clan_id, _), _| *row_clan_id != clan_id);
+        self.pending_reload
+            .retain(|(row_clan_id, _)| *row_clan_id != clan_id);
+        self.pending_events
+            .retain(|(row_clan_id, _), _| *row_clan_id != clan_id);
+        self.discarded.extend(
+            self.loading
+                .iter()
+                .filter(|(row_clan_id, _)| *row_clan_id == clan_id)
+                .copied(),
+        );
+        cx.notify();
+    }
+
     pub fn ensure_loaded(&mut self, clan_id: ClanId, parent_id: ChannelId, cx: &mut Context<Self>) {
         let key = (clan_id, parent_id);
+        self.discarded.remove(&key);
         if self.rows.contains_key(&key) || !self.loading.insert(key) {
             return;
         }
@@ -101,6 +124,7 @@ impl ChannelSettingsStore {
 
     fn reload(&mut self, key: (ClanId, ChannelId), cx: &mut Context<Self>) {
         if !self.loading.insert(key) {
+            self.pending_reload.insert(key);
             return;
         }
         self.fetch(key, cx);
@@ -135,6 +159,11 @@ impl ChannelSettingsStore {
             };
             let _ = this.update(cx, |this, cx| {
                 this.loading.remove(&key);
+                if this.discarded.remove(&key) {
+                    this.pending_reload.remove(&key);
+                    this.pending_events.remove(&key);
+                    return;
+                }
                 match result {
                     Ok(rows) => {
                         this.rows.insert(key, rows);
@@ -145,6 +174,14 @@ impl ChannelSettingsStore {
                     ),
                 }
                 cx.notify();
+                if let Some(events) = this.pending_events.remove(&key) {
+                    for event in events {
+                        this.handle_realtime_event(&event, cx);
+                    }
+                }
+                if this.pending_reload.remove(&key) {
+                    this.reload(key, cx);
+                }
             });
         })
         .detach();
@@ -154,15 +191,19 @@ impl ChannelSettingsStore {
         let entity = cx.entity();
         RealtimeDispatch::global(cx).update(cx, |dispatch, _| {
             dispatch.on(RealtimeKind::ChannelMessage, &entity, |this, event, cx| {
-                this.handle_message(event, cx)
+                this.handle_realtime_event(event, cx)
             });
             for kind in [
                 RealtimeKind::ChannelCreated,
                 RealtimeKind::ChannelUpdated,
                 RealtimeKind::ChannelDeleted,
+                RealtimeKind::UserChannelAdded,
+                RealtimeKind::UserChannelRemoved,
                 RealtimeKind::ChannelArchive,
             ] {
-                dispatch.on(kind, &entity, |this, _, cx| this.reload_loaded(cx));
+                dispatch.on(kind, &entity, |this, event, cx| {
+                    this.handle_realtime_event(event, cx)
+                });
             }
             dispatch.on_lagged(&entity, |this, cx| this.reload_loaded(cx));
         });
@@ -178,52 +219,218 @@ impl ChannelSettingsStore {
 
         if matches!(
             code,
-            MessageCode::Typing
-                | MessageCode::Indicator
-                | MessageCode::ChatUpdate
-                | MessageCode::UpdateEphemeralMsg
-        ) {
-            return;
-        }
-
-        if matches!(
-            code,
             MessageCode::ChatRemove | MessageCode::DeleteEphemeralMsg
         ) {
-            self.reload_channel(clan_id, channel_id, cx);
+            self.patch_message_count(clan_id, channel_id, -1, None, cx);
             return;
         }
-
-        let mut changed = Vec::new();
-        for (&(row_clan_id, parent_id), rows) in &mut self.rows {
-            if row_clan_id != clan_id {
-                continue;
-            }
-            if let Some(row) = rows.iter_mut().find(|row| row.id == channel_id) {
-                row.message_count = row.message_count.saturating_add(1);
-                row.last_sender_id = UserId(message.sender_id);
-                row.last_sent_seconds = message.create_time_seconds;
-                changed.push(parent_id);
-            }
+        if !counts_as_channel_message(code) {
+            return;
         }
-        for parent_id in changed {
+        self.patch_message_count(
+            clan_id,
+            channel_id,
+            1,
+            Some((UserId(message.sender_id), message.create_time_seconds)),
+            cx,
+        );
+    }
+
+    fn handle_realtime_event(&mut self, event: &RealtimeEvent, cx: &mut Context<Self>) {
+        if let Some(key) = self.loading_key_for_event(event)
+            && self.loading.contains(&key)
+        {
+            self.pending_events
+                .entry(key)
+                .or_default()
+                .push(event.clone());
+            return;
+        }
+        if matches!(event, RealtimeEvent::ChannelMessage(_)) {
+            self.handle_message(event, cx);
+        } else {
+            self.handle_channel_event(event, cx);
+        }
+    }
+
+    fn loading_key_for_event(&self, event: &RealtimeEvent) -> Option<(ClanId, ChannelId)> {
+        let target = match event {
+            RealtimeEvent::ChannelCreated(event) => {
+                (ClanId(event.clan_id), ChannelId(event.parent_id))
+            }
+            RealtimeEvent::ChannelUpdated(event) => {
+                (ClanId(event.clan_id), ChannelId(event.parent_id))
+            }
+            RealtimeEvent::ChannelDeleted(event) => {
+                (ClanId(event.clan_id), ChannelId(event.parent_id))
+            }
+            RealtimeEvent::ChannelArchive(event) => {
+                (ClanId(event.clan_id), ChannelId(event.parent_id))
+            }
+            RealtimeEvent::UserChannelAdded(event) => {
+                let desc = event.channel_desc.as_ref()?;
+                (ClanId(event.clan_id), ChannelId(desc.parent_id))
+            }
+            RealtimeEvent::UserChannelRemoved(event) => {
+                self.find_row_key(ClanId(event.clan_id), ChannelId(event.channel_id))?
+            }
+            RealtimeEvent::ChannelMessage(event) => {
+                self.find_row_key(ClanId(event.clan_id), ChannelId(event.channel_id))?
+            }
+            _ => return None,
+        };
+        Some(target)
+    }
+
+    fn find_row_key(&self, clan_id: ClanId, channel_id: ChannelId) -> Option<(ClanId, ChannelId)> {
+        self.rows.iter().find_map(|(&key, rows)| {
+            (key.0 == clan_id && rows.iter().any(|row| row.id == channel_id)).then_some(key)
+        })
+    }
+
+    fn patch_message_count(
+        &mut self,
+        clan_id: ClanId,
+        channel_id: ChannelId,
+        delta: i64,
+        last_sent: Option<(UserId, u32)>,
+        cx: &mut Context<Self>,
+    ) {
+        let changed = patch_matching_rows(&mut self.rows, clan_id, channel_id, |row| {
+            row.message_count = (row.message_count + delta).max(0);
+            if let Some((sender_id, timestamp)) = last_sent {
+                row.last_sender_id = sender_id;
+                row.last_sent_seconds = timestamp;
+            }
+        });
+        self.notify_changed(clan_id, changed, cx);
+    }
+
+    fn handle_channel_event(&mut self, event: &RealtimeEvent, cx: &mut Context<Self>) {
+        let changed = match event {
+            RealtimeEvent::ChannelCreated(event) => {
+                let clan_id = ClanId(event.clan_id);
+                let parent_id = ChannelId(event.parent_id);
+                let key = (clan_id, parent_id);
+                let Some(rows) = self.rows.get_mut(&key) else {
+                    return;
+                };
+                let row = ChannelSetting {
+                    id: ChannelId(event.channel_id),
+                    creator_id: UserId(event.creator_id),
+                    parent_id,
+                    label: event.channel_label.clone(),
+                    private: event.channel_private != 0,
+                    channel_type: event.channel_type,
+                    ..Default::default()
+                };
+                if rows.iter().any(|existing| existing.id == row.id) {
+                    return;
+                }
+                rows.push(row);
+                (clan_id, vec![parent_id])
+            }
+            RealtimeEvent::ChannelUpdated(event) => {
+                let clan_id = ClanId(event.clan_id);
+                let changed = patch_matching_rows(
+                    &mut self.rows,
+                    clan_id,
+                    ChannelId(event.channel_id),
+                    |row| {
+                        row.label = event.channel_label.clone();
+                        row.private = event.channel_private;
+                        row.channel_type = event.channel_type;
+                    },
+                );
+                (clan_id, changed)
+            }
+            RealtimeEvent::ChannelDeleted(event) => {
+                let clan_id = ClanId(event.clan_id);
+                let channel_id = ChannelId(event.channel_id);
+                self.rows.remove(&(clan_id, channel_id));
+                let changed = remove_matching_rows(&mut self.rows, clan_id, channel_id);
+                (clan_id, changed)
+            }
+            RealtimeEvent::ChannelArchive(event) => {
+                let clan_id = ClanId(event.clan_id);
+                let channel_id = ChannelId(event.channel_id);
+                if event.active == 0 {
+                    let changed = remove_matching_rows(&mut self.rows, clan_id, channel_id);
+                    (clan_id, changed)
+                } else {
+                    let parent_id = ChannelId(event.parent_id);
+                    let Some(rows) = self.rows.get_mut(&(clan_id, parent_id)) else {
+                        return;
+                    };
+                    if rows.iter().any(|row| row.id == channel_id) {
+                        return;
+                    }
+                    rows.push(ChannelSetting {
+                        id: channel_id,
+                        creator_id: UserId(event.creator_id),
+                        parent_id,
+                        label: event.channel_label.clone(),
+                        private: event.channel_private,
+                        channel_type: event.channel_type,
+                        user_ids: event.user_ids.iter().copied().map(UserId).collect(),
+                        ..Default::default()
+                    });
+                    (clan_id, vec![parent_id])
+                }
+            }
+            RealtimeEvent::UserChannelAdded(event) => {
+                let Some(desc) = event.channel_desc.as_ref() else {
+                    return;
+                };
+                let clan_id = ClanId(event.clan_id);
+                let users = event
+                    .users
+                    .iter()
+                    .map(|user| UserId(user.user_id))
+                    .collect::<Vec<_>>();
+                let changed = patch_matching_rows(
+                    &mut self.rows,
+                    clan_id,
+                    ChannelId(desc.channel_id),
+                    |row| {
+                        for user_id in &users {
+                            if !row.user_ids.contains(user_id) {
+                                row.user_ids.push(*user_id);
+                            }
+                        }
+                    },
+                );
+                (clan_id, changed)
+            }
+            RealtimeEvent::UserChannelRemoved(event) => {
+                let clan_id = ClanId(event.clan_id);
+                let removed = event
+                    .user_ids
+                    .iter()
+                    .copied()
+                    .map(UserId)
+                    .collect::<HashSet<_>>();
+                let changed = patch_matching_rows(
+                    &mut self.rows,
+                    clan_id,
+                    ChannelId(event.channel_id),
+                    |row| row.user_ids.retain(|user_id| !removed.contains(user_id)),
+                );
+                (clan_id, changed)
+            }
+            _ => return,
+        };
+        self.notify_changed(changed.0, changed.1, cx);
+    }
+
+    fn notify_changed(&self, clan_id: ClanId, parent_ids: Vec<ChannelId>, cx: &mut Context<Self>) {
+        if parent_ids.is_empty() {
+            return;
+        }
+        for parent_id in parent_ids {
             cx.emit(ChannelSettingsEvent::Changed { clan_id, parent_id });
         }
         cx.notify();
-    }
-
-    fn reload_channel(&mut self, clan_id: ClanId, channel_id: ChannelId, cx: &mut Context<Self>) {
-        let keys = self
-            .rows
-            .iter()
-            .filter(|((row_clan_id, _), rows)| {
-                *row_clan_id == clan_id && rows.iter().any(|row| row.id == channel_id)
-            })
-            .map(|(&key, _)| key)
-            .collect::<Vec<_>>();
-        for key in keys {
-            self.reload(key, cx);
-        }
     }
 
     fn reload_loaded(&mut self, cx: &mut Context<Self>) {
@@ -231,5 +438,109 @@ impl ChannelSettingsStore {
         for key in keys {
             self.reload(key, cx);
         }
+    }
+}
+
+fn counts_as_channel_message(code: MessageCode) -> bool {
+    matches!(
+        code,
+        MessageCode::Chat
+            | MessageCode::Welcome
+            | MessageCode::CreateThread
+            | MessageCode::CreatePin
+            | MessageCode::MessageBuzz
+            | MessageCode::Topic
+            | MessageCode::AuditLog
+            | MessageCode::SendToken
+            | MessageCode::UpcomingEvent
+            | MessageCode::ShareContact
+            | MessageCode::Location
+            | MessageCode::Poll
+    )
+}
+
+fn patch_matching_rows(
+    rows_by_key: &mut HashMap<(ClanId, ChannelId), Vec<ChannelSetting>>,
+    clan_id: ClanId,
+    channel_id: ChannelId,
+    mut patch: impl FnMut(&mut ChannelSetting),
+) -> Vec<ChannelId> {
+    let mut changed = Vec::new();
+    for (&(row_clan_id, parent_id), rows) in rows_by_key {
+        if row_clan_id == clan_id
+            && let Some(row) = rows.iter_mut().find(|row| row.id == channel_id)
+        {
+            patch(row);
+            changed.push(parent_id);
+        }
+    }
+    changed
+}
+
+fn remove_matching_rows(
+    rows_by_key: &mut HashMap<(ClanId, ChannelId), Vec<ChannelSetting>>,
+    clan_id: ClanId,
+    channel_id: ChannelId,
+) -> Vec<ChannelId> {
+    let mut changed = Vec::new();
+    for (&(row_clan_id, parent_id), rows) in rows_by_key {
+        if row_clan_id != clan_id {
+            continue;
+        }
+        let old_len = rows.len();
+        rows.retain(|row| row.id != channel_id);
+        if rows.len() != old_len {
+            changed.push(parent_id);
+        }
+    }
+    changed
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn row(id: i64, count: i64) -> ChannelSetting {
+        ChannelSetting {
+            id: ChannelId(id),
+            message_count: count,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn message_allow_list_excludes_mutations_ephemeral_and_unknown_codes() {
+        assert!(counts_as_channel_message(MessageCode::Chat));
+        assert!(counts_as_channel_message(MessageCode::Poll));
+        assert!(!counts_as_channel_message(MessageCode::ChatUpdate));
+        assert!(!counts_as_channel_message(MessageCode::ChatRemove));
+        assert!(!counts_as_channel_message(MessageCode::Ephemeral));
+        assert!(!counts_as_channel_message(MessageCode::Unknown(99)));
+    }
+
+    #[test]
+    fn patch_matching_rows_is_scoped_to_clan_and_reports_parent() {
+        let mut rows = HashMap::from([
+            ((ClanId(1), ChannelId(0)), vec![row(10, 2)]),
+            ((ClanId(2), ChannelId(0)), vec![row(10, 7)]),
+        ]);
+        let changed = patch_matching_rows(&mut rows, ClanId(1), ChannelId(10), |row| {
+            row.message_count += 1
+        });
+        assert_eq!(changed, vec![ChannelId(0)]);
+        assert_eq!(rows[&(ClanId(1), ChannelId(0))][0].message_count, 3);
+        assert_eq!(rows[&(ClanId(2), ChannelId(0))][0].message_count, 7);
+    }
+
+    #[test]
+    fn removing_channel_only_changes_its_loaded_parent() {
+        let mut rows = HashMap::from([
+            ((ClanId(1), ChannelId(0)), vec![row(10, 2)]),
+            ((ClanId(1), ChannelId(10)), vec![row(20, 1)]),
+        ]);
+        let changed = remove_matching_rows(&mut rows, ClanId(1), ChannelId(20));
+        assert_eq!(changed, vec![ChannelId(10)]);
+        assert!(rows[&(ClanId(1), ChannelId(10))].is_empty());
+        assert_eq!(rows[&(ClanId(1), ChannelId(0))].len(), 1);
     }
 }
