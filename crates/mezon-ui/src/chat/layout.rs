@@ -2246,6 +2246,10 @@ impl ChatLayout {
         cx.notify();
     }
 
+    pub(crate) fn voice_show_chat(&self) -> bool {
+        self.voice_show_chat
+    }
+
     pub(crate) fn record_voice_strip_width(&mut self, width: Pixels, cx: &mut Context<Self>) {
         if (self.voice_strip_width - width).abs() > px(0.5) {
             self.voice_strip_width = width;
