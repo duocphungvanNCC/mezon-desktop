@@ -411,6 +411,7 @@ fn stream_header(
         .child(
             div()
                 .id("stream-chat-toggle")
+                .occlude()
                 .flex()
                 .items_center()
                 .justify_center()
@@ -420,15 +421,14 @@ fn stream_header(
                 .hover(|s| s.bg(theme.bg_tertiary))
                 .when(show_chat, |el| el.bg(theme.bg_tertiary))
                 .tooltip(Tooltip::text(chat_label))
-                .child(
-                    Icon::new(IconName::MessageIcon)
-                        .size(px(20.))
-                        .text_color(if show_chat {
-                            theme.tokens.bg_icon_theme_active
-                        } else {
-                            theme.tokens.bg_icon_theme
-                        }),
-                )
+                .child(crate::chat::voice::chat_toggle_icon(
+                    if show_chat {
+                        theme.tokens.bg_icon_theme_active
+                    } else {
+                        theme.tokens.bg_icon_theme
+                    },
+                    px(20.),
+                ))
                 .on_click(move |_, _, cx| {
                     stream_toggle.update(cx, |store, cx| store.toggle_chat(cx));
                 }),

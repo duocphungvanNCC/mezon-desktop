@@ -24,6 +24,7 @@ pub mod transport_runtime;
 pub use abridged_tcp_adapter::AbridgedTcpAdapter;
 pub use app_api::{
     AppApi, AttachmentUploadOutcome, ConnectionStatus, UploadFile, UploadThumbnail, UrlAttachment,
+    sanitize_upload_filename,
 };
 pub use attachment_download::{
     clean_download_url, download_url_to_downloads, resolve_download_filename, sanitize_filename,
@@ -50,7 +51,7 @@ pub use network_probe::{
 };
 pub use notification_setting::ChannelNotificationSetting;
 pub use notification_setting::NotificationOverride;
-pub use ogp::{OgpResult, fetch_ogp};
+pub use ogp::{OgpResult, fetch_invite_preview, fetch_ogp};
 pub use search_message::{
     SEARCH_PAGE_SIZE, SearchDropdownMode, SearchPageToken, active_search_trigger,
     autocomplete_needle, build_clan_channel_content_search, build_direct_content_search,

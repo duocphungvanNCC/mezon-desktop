@@ -12,7 +12,8 @@ use gpui::{
 };
 use mezon_store::{
     AppConfig, ChannelAttachment, ChannelId, ChannelList, ClanId, DirectMessageStore, GalleryStore,
-    PlatformStore, Settings, UploaderInfo, fetch_channel_attachments, resolve_attachment_uploader,
+    PlatformStore, Settings, UploaderInfo, fetch_channel_attachments, initial_page_has_more,
+    next_page_has_more, resolve_attachment_uploader,
 };
 use ui::{ScrollAxes, Scrollbars, WithScrollbar};
 
@@ -584,17 +585,19 @@ impl ImageViewer {
                             break;
                         }
                         let oldest = page.oldest_create_time.unwrap_or(before);
-                        merge_attachment_page(&mut accumulated, page.items);
+                        merge_attachment_page(&mut accumulated, page.attachments);
                         if let Some(url) = &select_url {
                             if index_of_url(&accumulated, url).is_some() {
-                                has_more_before = raw_len >= VIEWER_FETCH_LIMIT;
+                                has_more_before =
+                                    initial_page_has_more(page.raw_count, VIEWER_FETCH_LIMIT);
                                 break;
                             }
                         } else {
-                            has_more_before = raw_len >= VIEWER_FETCH_LIMIT;
+                            has_more_before =
+                                initial_page_has_more(page.raw_count, VIEWER_FETCH_LIMIT);
                             break;
                         }
-                        if raw_len < VIEWER_FETCH_LIMIT {
+                        if !initial_page_has_more(page.raw_count, VIEWER_FETCH_LIMIT) {
                             has_more_before = false;
                             break;
                         }
@@ -688,11 +691,11 @@ impl ImageViewer {
                 this.loading = false;
                 match result {
                     Ok(mut page) => {
-                        resolve_uploaders(&mut page.items, clan, channel, cx);
+                        resolve_uploaders(&mut page.attachments, clan, channel, cx);
                         let existing_urls: std::collections::HashSet<String> =
                             this.attachments.iter().map(|a| a.url.clone()).collect();
                         let fresh: Vec<ChannelAttachment> = page
-                            .items
+                            .attachments
                             .into_iter()
                             .filter(|a| !existing_urls.contains(&a.url))
                             .collect();
@@ -710,7 +713,8 @@ impl ImageViewer {
                             this.attachments = merged;
                             this.video_sync_token = None;
                         }
-                        this.has_more_after = page.raw_count as i32 >= VIEWER_FETCH_LIMIT;
+                        this.has_more_after =
+                            next_page_has_more(page.raw_count, VIEWER_FETCH_LIMIT, added);
                         cx.notify();
                     }
                     Err(e) => tracing::error!("image viewer newer fetch failed: {e}"),
@@ -748,11 +752,11 @@ impl ImageViewer {
                 this.loading = false;
                 match result {
                     Ok(mut page) => {
-                        resolve_uploaders(&mut page.items, clan, channel, cx);
+                        resolve_uploaders(&mut page.attachments, clan, channel, cx);
                         let existing_urls: std::collections::HashSet<String> =
                             this.attachments.iter().map(|a| a.url.clone()).collect();
                         let before_len = this.attachments.len();
-                        for att in page.items {
+                        for att in page.attachments {
                             if !existing_urls.contains(&att.url) {
                                 this.attachments.push(att);
                             }
@@ -760,7 +764,7 @@ impl ImageViewer {
                         sort_attachments_desc(&mut this.attachments);
                         let added = this.attachments.len() - before_len;
                         this.has_more_before =
-                            page.raw_count as i32 >= VIEWER_FETCH_LIMIT && added > 0;
+                            next_page_has_more(page.raw_count, VIEWER_FETCH_LIMIT, added);
                         cx.notify();
                     }
                     Err(e) => tracing::error!("image viewer page fetch failed: {e}"),

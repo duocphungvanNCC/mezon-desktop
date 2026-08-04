@@ -138,6 +138,15 @@ impl ClanChannelsPage {
         cx.notify();
     }
 
+    pub fn deactivate(&mut self, cx: &mut Context<Self>) {
+        if self.clan_id.get() != 0 {
+            ChannelSettingsStore::global(cx)
+                .update(cx, |store, cx| store.reset_clan(self.clan_id, cx));
+            self.clan_id = ClanId(0);
+        }
+        self.reset_search(cx);
+    }
+
     fn ensure_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let locale = self.settings.read(cx).language.clone();
         let placeholder = tr(&locale, "setting.channelSetting.searchByChannelLabel");

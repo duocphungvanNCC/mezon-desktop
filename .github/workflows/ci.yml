@@ -93,6 +93,13 @@ jobs:
   test:
     name: Test
     runs-on: ubuntu-latest
+    # Building the tests compiles the vendored Linux crates (libspa, zed-scap,
+    # gpui_linux), and the repo rule is to never lint vendored code - a path
+    # dependency gets no cap-lints, so the workflow-wide `-D warnings` turns
+    # their upstream warnings into build failures. Owned-crate lints are covered
+    # by the macOS `lint` job, same as the `windows-check` job below.
+    env:
+      RUSTFLAGS: ""
     steps:
       - name: Checkout
         uses: actions/checkout@v4

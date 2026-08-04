@@ -2380,6 +2380,10 @@ pub struct OutgoingOgp {
     pub title: String,
     pub description: String,
     pub image: String,
+    pub banner: String,
+    pub member_count: Option<i64>,
+    pub is_community: bool,
+    pub clan_id: Option<String>,
 }
 
 pub const OGP_MARKDOWN_KIND: &str = "lk_ogp";
@@ -2396,6 +2400,10 @@ impl OutgoingOgp {
             description: (!self.description.is_empty())
                 .then(|| self.description.chars().take(OGP_DESCRIPTION_MAX).collect()),
             image: (!self.image.is_empty()).then(|| self.image.clone()),
+            banner: (!self.banner.is_empty()).then(|| self.banner.clone()),
+            member_count: self.member_count,
+            is_community: self.is_community,
+            clan_id: self.clan_id.clone(),
             ..Default::default()
         }
     }
@@ -2820,6 +2828,18 @@ fn with_ogp_token(content_json: String, ogp: &OutgoingOgp) -> String {
     }
     if !ogp.image.is_empty() {
         token.insert("image".into(), ogp.image.clone().into());
+    }
+    if !ogp.banner.is_empty() {
+        token.insert("banner".into(), ogp.banner.clone().into());
+    }
+    if let Some(member_count) = ogp.member_count {
+        token.insert("member_count".into(), member_count.into());
+    }
+    if ogp.is_community {
+        token.insert("is_community".into(), ogp.is_community.into());
+    }
+    if let Some(clan_id) = &ogp.clan_id {
+        token.insert("clanId".into(), clan_id.clone().into());
     }
     let entry = obj
         .entry("mk")
@@ -8660,6 +8680,7 @@ impl MezonTransport {
         display_name: Option<&str>,
         avatar_url: Option<&str>,
         about_me: Option<&str>,
+        logo: Option<&str>,
     ) -> Result<()> {
         let cid = self.generate_cid();
 
@@ -8669,6 +8690,7 @@ impl MezonTransport {
                 .map(|s| s.to_string()),
             avatar_url: avatar_url.filter(|s| !s.is_empty()).map(|s| s.to_string()),
             about_me: about_me.filter(|s| !s.is_empty()).map(|s| s.to_string()),
+            logo: logo.map(str::to_string),
             ..Default::default()
         }
         .encode_to_vec();
@@ -9189,6 +9211,38 @@ mod tests {
         let tokens = parse_message_content_tokens(raw);
         assert!(tokens.t.is_empty());
         assert!(tokens.embed.is_empty());
+    }
+
+    #[test]
+    fn with_ogp_token_includes_invite_fields_on_the_wire() {
+        let ogp = OutgoingOgp {
+            url: "https://mezon.ai/invite/1840670747886882816".into(),
+            title: "KOMU".into(),
+            image: "https://cdn.mezon.ai/logo.png".into(),
+            banner: "https://cdn.mezon.ai/banner.png".into(),
+            member_count: Some(374),
+            is_community: true,
+            clan_id: Some("123456".into()),
+            ..Default::default()
+        };
+        let content_json = with_ogp_token(
+            r#"{"t":"https://mezon.ai/invite/1840670747886882816"}"#.into(),
+            &ogp,
+        );
+        let tokens = parse_message_content_tokens(&content_json);
+        let token = tokens
+            .mk
+            .iter()
+            .find(|t| t.kind.as_deref() == Some(OGP_MARKDOWN_KIND))
+            .expect("lk_ogp token present");
+        assert_eq!(token.title.as_deref(), Some("KOMU"));
+        assert_eq!(token.member_count, Some(374));
+        assert!(token.is_community);
+        assert_eq!(token.clan_id.as_deref(), Some("123456"));
+        assert_eq!(
+            token.banner.as_deref(),
+            Some("https://cdn.mezon.ai/banner.png")
+        );
     }
 
     #[test]

@@ -1,12 +1,15 @@
+use crate::chat::message::invite_card::member_count_label;
 use crate::chat::{MentionInput, ReplyTarget};
 use crate::components::primitives::{Icon, IconName};
 use crate::image_cache::LruImageCache;
 use crate::theme::{ActiveTheme, Theme};
 use gpui::{
     Context, Entity, FontWeight, ObjectFit, Render, SharedString, Subscription, Window, div, img,
-    prelude::*, px, radians,
+    prelude::*, px, radians, rgb,
 };
 use mezon_store::{MessagesEvent, MessagesStore, OgpResult, Settings, TopicsStore};
+
+const OGP_PREVIEW_MEMBER_DOT: u32 = 0x22_c5_5e;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ReplyClearSource {
@@ -166,6 +169,24 @@ impl InputBar {
                     .text_size(px(13.))
                     .text_color(theme.text_muted)
                     .child(SharedString::from(preview.description.clone())),
+            );
+        }
+        if let Some(count) = preview.member_count {
+            text_col = text_col.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .text_size(px(13.))
+                    .text_color(theme.text_muted)
+                    .child(
+                        div()
+                            .w(px(6.))
+                            .h(px(6.))
+                            .rounded_full()
+                            .bg(rgb(OGP_PREVIEW_MEMBER_DOT)),
+                    )
+                    .child(member_count_label(&self.locale, count)),
             );
         }
         div()

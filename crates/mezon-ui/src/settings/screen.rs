@@ -3,7 +3,10 @@ use gpui::{
     App, Context, Entity, FocusHandle, Focusable, ScrollHandle, SharedString, Window, div,
     prelude::*, px,
 };
-use mezon_store::{AuthState, AutoUpdateStatus, AutoUpdateStore, ClanList, LoginStore, Settings};
+use mezon_store::{
+    AuthState, AutoUpdateStatus, ClanList, LoginStore, Settings, effective_update_status,
+    update_available_clicked, update_check_clicked, update_restart_clicked,
+};
 
 use super::account_page::AccountPage;
 use super::activity_page::ActivityPage;
@@ -101,6 +104,12 @@ impl SettingsScreen {
     }
 
     pub fn set_page(&mut self, page: SettingsPage, cx: &mut Context<Self>) {
+        if self.current_page == SettingsPage::Profile
+            && page != SettingsPage::Profile
+            && let Some(profile_page) = &self.profile_page
+        {
+            profile_page.update(cx, |page, cx| page.discard_drafts_on_next_render(cx));
+        }
         self.current_page = page;
         self.ensure_page(page, cx);
         self.scroll.set_offset(gpui::point(px(0.0), px(0.0)));
@@ -245,8 +254,7 @@ impl Render for SettingsScreen {
         const SETTINGS_CONTENT_WIDTH: f32 = 808.0;
         let theme = cx.theme().clone();
         let locale = self.settings.read(cx).language.clone();
-        let update_status =
-            AutoUpdateStore::try_global(cx).map(|store| store.read(cx).status().clone());
+        let update_status = effective_update_status(cx);
         let page = self.current_page;
 
         let just_switched_to_device =
@@ -314,7 +322,7 @@ impl Render for SettingsScreen {
                 .child(text.to_uppercase())
         }
 
-        fn auto_update_row(
+        fn update_row(
             status: Option<AutoUpdateStatus>,
             locale: &str,
             theme: &Theme,
@@ -364,8 +372,11 @@ impl Render for SettingsScreen {
                     mezon_i18n::t(locale, "setting.update.upToDate").to_string(),
                     theme.text_muted,
                 ),
-                AutoUpdateStatus::Errored { .. } => (
-                    mezon_i18n::t(locale, "setting.update.failed").to_string(),
+                AutoUpdateStatus::Errored { message } => (
+                    format!(
+                        "{}: {message}",
+                        mezon_i18n::t(locale, "setting.update.failed")
+                    ),
                     gpui::rgb(0xef4444),
                 ),
             };
@@ -389,32 +400,19 @@ impl Render for SettingsScreen {
                     row = row
                         .cursor_pointer()
                         .hover(move |s| s.bg(bg_hover))
-                        .on_click(|_, _, cx| {
-                            if let Some(store) = AutoUpdateStore::try_global(cx) {
-                                store.update(cx, |store, cx| store.check(true, cx));
-                            }
-                        });
+                        .on_click(|_, _, cx| update_check_clicked(cx));
                 }
                 AutoUpdateStatus::UpdateAvailable { .. } => {
                     row = row
                         .cursor_pointer()
                         .hover(move |s| s.bg(bg_hover))
-                        .on_click(|_, _, cx| {
-                            let Some(store) = AutoUpdateStore::try_global(cx) else {
-                                return;
-                            };
-                            if let Some(url) = store.read(cx).store_page_url() {
-                                cx.open_url(url);
-                            } else {
-                                store.update(cx, |store, cx| store.check(true, cx));
-                            }
-                        });
+                        .on_click(|_, _, cx| update_available_clicked(cx));
                 }
                 AutoUpdateStatus::Updated { .. } => {
                     row = row
                         .cursor_pointer()
                         .hover(move |s| s.bg(bg_hover))
-                        .on_click(|_, _, cx| cx.restart());
+                        .on_click(|_, _, cx| update_restart_clicked(cx));
                 }
                 _ => {}
             }
@@ -538,7 +536,7 @@ impl Render for SettingsScreen {
                         cx.quit();
                     }),
             )
-            .child(auto_update_row(update_status, &locale, &theme))
+            .child(update_row(update_status, &locale, &theme))
             .child(
                 div()
                     .mt(px(4.0))
@@ -552,7 +550,12 @@ impl Render for SettingsScreen {
             .id("settings-screen")
             .track_focus(&self.focus_handle)
             .key_context("menu")
-            .on_action(cx.listener(|_, _: &::menu::Cancel, _window, cx| {
+            .on_action(cx.listener(|this, _: &::menu::Cancel, _window, cx| {
+                if this.current_page == SettingsPage::Profile
+                    && let Some(profile_page) = &this.profile_page
+                {
+                    profile_page.update(cx, |page, cx| page.discard_drafts_on_next_render(cx));
+                }
                 crate::router::go_back(cx);
             }))
             .flex_1()
@@ -633,8 +636,9 @@ impl Render for SettingsScreen {
                                             .id("settings-scroll")
                                             .flex_1()
                                             .min_h_0()
-                                            .overflow_y_scroll()
-                                            .track_scroll(&self.scroll)
+                                            .when(!is_profile, |el| {
+                                                el.overflow_y_scroll().track_scroll(&self.scroll)
+                                            })
                                             .pb(px(28.0))
                                             .pl(px(40.0))
                                             .pr(px(28.0))
@@ -642,6 +646,7 @@ impl Render for SettingsScreen {
                                             .child(
                                                 v_flex()
                                                     .max_w(px(740.0))
+                                                    .when(is_profile, |el| el.h_full().min_h_0())
                                                     .pt(px(60.0))
                                                     .child(
                                                         div()
@@ -652,7 +657,13 @@ impl Render for SettingsScreen {
                                                             .text_color(theme.text_primary)
                                                             .child(self.page_title(page, &locale)),
                                                     )
-                                                    .child(content),
+                                                    .child(
+                                                        div()
+                                                            .when(is_profile, |el| {
+                                                                el.flex_1().min_h_0()
+                                                            })
+                                                            .child(content),
+                                                    ),
                                             ),
                                     ),
                             )
@@ -687,9 +698,16 @@ impl Render for SettingsScreen {
                                             .text_color(theme.text_secondary)
                                             .child("ESC"),
                                     )
-                                    .on_click(move |_, _, cx| {
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        if this.current_page == SettingsPage::Profile
+                                            && let Some(profile_page) = &this.profile_page
+                                        {
+                                            profile_page.update(cx, |page, cx| {
+                                                page.discard_drafts_on_next_render(cx)
+                                            });
+                                        }
                                         crate::router::go_back(cx);
-                                    }),
+                                    })),
                             ),
                     ),
             )

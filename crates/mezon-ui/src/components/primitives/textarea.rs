@@ -219,6 +219,7 @@ pub struct TextArea {
     padding_x: Pixels,
     min_height: Pixels,
     max_visible_lines: usize,
+    max_length: Option<usize>,
     caret_blink: CaretBlink,
     undo_stack: Vec<HistoryEntry>,
     redo_stack: Vec<HistoryEntry>,
@@ -266,6 +267,7 @@ impl TextArea {
             padding_x: px(12.),
             min_height: px(36.),
             max_visible_lines: DEFAULT_MAX_VISIBLE_LINES,
+            max_length: None,
             caret_blink: CaretBlink::new(),
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
@@ -334,6 +336,11 @@ impl TextArea {
         self
     }
 
+    pub fn max_length(mut self, length: usize) -> Self {
+        self.max_length = Some(length);
+        self
+    }
+
     pub fn value(&self) -> &str {
         self.content.as_ref()
     }
@@ -349,7 +356,10 @@ impl TextArea {
     }
 
     fn set_content(&mut self, content: impl Into<SharedString>) {
-        self.content = content.into();
+        let content = content.into();
+        self.content = self.max_length.map_or(content.clone(), |max_length| {
+            content.chars().take(max_length).collect::<String>().into()
+        });
         self.line_count = self.content.split('\n').count().max(1);
         self.selected_range = self.clamp_range(self.selected_range.clone());
         if let Some(marked) = self.marked_range.clone() {
@@ -916,7 +926,8 @@ impl EntityInputHandler for TextArea {
         self.record_history(kind);
         let next = self.content[0..range.start].to_owned() + new_text + &self.content[range.end..];
         self.set_content(next);
-        self.selected_range = range.start + new_text.len()..range.start + new_text.len();
+        let cursor = self.clamp_offset((range.start + new_text.len()).min(self.content.len()));
+        self.selected_range = cursor..cursor;
         self.marked_range = None;
         self.caret_blink.pause_blinking(cx);
         cx.notify();
@@ -945,7 +956,10 @@ impl EntityInputHandler for TextArea {
         if new_text.is_empty() {
             self.marked_range = None;
         } else {
-            self.marked_range = Some(range.start..range.start + new_text.len());
+            self.marked_range =
+                Some(self.clamp_range(
+                    range.start..(range.start + new_text.len()).min(self.content.len()),
+                ));
         }
         self.selected_range = new_selected_range_utf16
             .as_ref()

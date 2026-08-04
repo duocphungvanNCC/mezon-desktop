@@ -58,6 +58,7 @@ pub mod voice;
 pub mod wallet;
 mod wallet_persist;
 pub mod webhook;
+pub mod winstore_update;
 
 use anyhow::{Context, Result};
 use dirs::config_dir;
@@ -132,9 +133,9 @@ pub use files::{
 };
 pub use friend::{Friend, FriendEvent, FriendState, FriendStore};
 pub use gallery::{
-    AttachmentSeedInput, ChannelAttachment, ChannelAttachmentsPage, GalleryEvent, GalleryStore,
+    AttachmentSeedInput, ChannelAttachment, FetchedChannelAttachments, GalleryEvent, GalleryStore,
     LoadDirection, MediaFilter, UploaderInfo, enrich_uploader, fetch_channel_attachments,
-    resolve_attachment_uploader,
+    initial_page_has_more, next_page_has_more, resolve_attachment_uploader,
 };
 pub use gif::{Gif, GifCategory, GifEvent, GifStore};
 pub use group_members::{GroupMember, GroupMembersEvent, GroupMembersStore};
@@ -164,7 +165,10 @@ pub use mezon_client::{
 pub use mmn_client::{DECIMAL_FACTOR as TOKEN_DECIMAL_FACTOR, DECIMALS as TOKEN_DECIMALS};
 pub use notification_push::NotificationPushStore;
 pub use notification_setting::{NotificationSettingEvent, NotificationSettingStore};
-pub use ogp::{OgpResult, OutgoingOgp, fetch_ogp, first_previewable_url};
+pub use ogp::{
+    OgpResult, OutgoingOgp, fetch_invite_preview, fetch_ogp, first_previewable_url,
+    invite_id_from_url,
+};
 pub use permissions::{
     ClanSettingsPermissions, PERMISSION_ADMINISTRATOR, PERMISSION_CLAN_OWNER,
     PERMISSION_MANAGE_CHANNEL, PERMISSION_MANAGE_CLAN, PERMISSION_SCOPE_CHANNEL,
@@ -215,6 +219,10 @@ pub use wallet::{
 pub use webhook::{
     ChannelWebhook, ClanWebhook, MAX_WEBHOOK_AVATAR_BYTES, WEBHOOK_NAME_MAX_LENGTH, WebhookEvent,
     WebhookStore,
+};
+pub use winstore_update::{
+    WinstoreUpdateStore, effective_update_status, update_available_clicked, update_check_clicked,
+    update_restart_clicked,
 };
 
 pub const CACHE_TTL: Duration = Duration::from_secs(20 * 60);
