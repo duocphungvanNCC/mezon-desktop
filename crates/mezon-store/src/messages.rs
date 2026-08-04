@@ -534,6 +534,7 @@ pub struct MessagesStore {
     embed_form: HashMap<MessageId, HashMap<SharedString, SharedString>>,
     forward_task: Option<Task<()>>,
     forward_in_flight: bool,
+    presign_expiry_task: Option<Task<()>>,
     pending_send_payloads: HashMap<MessageId, PendingSendPayload>,
     anonymous_clans: HashSet<ClanId>,
     topic_anonymous_mode: bool,
@@ -948,6 +949,7 @@ impl MessagesStore {
             select_ui: HashMap::new(),
             embed_form: HashMap::new(),
             forward_task: None,
+            presign_expiry_task: None,
             forward_in_flight: false,
             pending_send_payloads: HashMap::new(),
             anonymous_clans: HashSet::new(),
@@ -2856,7 +2858,7 @@ impl MessagesStore {
             async move |_this, cx| match api.create_message_2_inbox(request).await {
                 Ok(()) => {
                     let notification = inbox_notification_from_marked_message_local(&marked);
-                    let _ = cx.update(|cx| {
+                    cx.update(|cx| {
                         InboxStore::global(cx).update(cx, |store, cx| {
                             store.prepend_local(
                                 GLOBAL_INBOX_BUCKET_CLAN_ID,
@@ -3105,6 +3107,71 @@ impl MessagesStore {
         });
         self.forward_task = Some(task);
         true
+    }
+
+    /// Re-run the presign gate so attachments whose upload never completed are
+    /// dropped once they pass their expiry, then arm the next deadline. Without
+    /// this the placeholder would sit there until some unrelated update for that
+    /// channel happened to arrive.
+    fn sweep_expired_presign(&mut self, cx: &mut Context<Self>) {
+        let config = AppConfig::try_global(cx).cloned();
+        let base_img = config
+            .as_ref()
+            .map(|c| c.base_img_url.clone())
+            .unwrap_or_default();
+        let now = now_unix_seconds();
+        let mut changed = false;
+        for channel in self.cache.values_mut() {
+            for message in channel.messages.items.iter_mut() {
+                if !message.attachments.iter().any(|a| a.presign_pending) {
+                    continue;
+                }
+                let Some(keys) = presign::parse_presign_finish_keys(&message.content) else {
+                    continue;
+                };
+                let before = message.attachments.len();
+                apply_presign_gate_at(
+                    &mut message.attachments,
+                    &keys,
+                    &base_img,
+                    message.create_time,
+                    now,
+                );
+                if message.attachments.len() != before {
+                    // The album layout and the viewer list are built from the
+                    // attachments, so dropping one leaves them describing tiles
+                    // that are no longer there.
+                    let (album_layout, viewer_media) =
+                        build_media_presentation(&message.attachments, config.as_ref());
+                    message.album_layout = album_layout;
+                    message.viewer_media = viewer_media;
+                    changed = true;
+                }
+            }
+        }
+        if changed {
+            cx.notify();
+        }
+        self.schedule_presign_expiry(cx);
+    }
+
+    fn schedule_presign_expiry(&mut self, cx: &mut Context<Self>) {
+        let now = now_unix_seconds();
+        let deadlines = self.cache.values_mut().flat_map(|channel| {
+            channel
+                .messages
+                .items
+                .iter()
+                .filter_map(presign_expiry_deadline)
+        });
+        let Some(delay) = next_presign_expiry_in(deadlines, now) else {
+            self.presign_expiry_task = None;
+            return;
+        };
+        self.presign_expiry_task = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(delay).await;
+            let _ = this.update(cx, |this, cx| this.sweep_expired_presign(cx));
+        }));
     }
 
     pub fn share_contact(
@@ -4244,6 +4311,7 @@ impl MessagesStore {
                 let messages =
                     prepare_messages(page.messages, AppConfig::try_global(cx), viewer_user_id(cx));
                 self.set_channel(channel_id, messages);
+                self.schedule_presign_expiry(cx);
                 if is_current {
                     self.loading = false;
                     let count = self.messages().len();
@@ -4400,6 +4468,9 @@ impl MessagesStore {
             return;
         }
         let tail_id = msg.id;
+        // Arming the expiry timer walks every cached message, so only pay for it
+        // when this message can actually be waiting on an upload.
+        let arms_expiry = msg.attachments.iter().any(|a| a.presign_pending);
         let old_len = channel.messages.len();
         let appended = match channel
             .messages
@@ -4418,6 +4489,9 @@ impl MessagesStore {
         };
         let last_id = channel.messages.last().map(|m| m.id).unwrap_or(tail_id);
         self.set_last_message(storage_id, last_id);
+        if arms_expiry {
+            self.schedule_presign_expiry(cx);
+        }
         if is_buzz && appended {
             self.play_buzz_sound(cx);
         }
@@ -4466,7 +4540,11 @@ impl MessagesStore {
                 existing.create_time,
             );
         }
+        let arms_expiry = existing.attachments.iter().any(|a| a.presign_pending);
         patch_reply_previews_after_update(&mut channel.messages, message_id, &preview);
+        if arms_expiry {
+            self.schedule_presign_expiry(cx);
+        }
         if self.active_topic_id == Some(storage_id) {
             cx.emit(MessagesEvent::TopicUpdated {
                 topic_id: storage_id.get(),
@@ -6054,6 +6132,29 @@ fn apply_presign_gate(
     create_time: i64,
 ) {
     apply_presign_gate_at(attachments, keys, base_img, create_time, now_unix_seconds());
+}
+
+/// When this message's pending attachments become droppable, or `None` when the
+/// sweep would not touch it. It must agree with `sweep_expired_presign`: a
+/// message the sweep skips but this counts would be rescheduled at zero delay
+/// forever.
+fn presign_expiry_deadline(message: &Message) -> Option<i64> {
+    if message.create_time <= 0 || !message.attachments.iter().any(|a| a.presign_pending) {
+        return None;
+    }
+    presign::parse_presign_finish_keys(&message.content)?;
+    Some(message.create_time + presign::PRESIGN_PENDING_MAX_AGE_SEC)
+}
+
+/// How long until the earliest deadline, relative to `now`. `None` when nothing
+/// is waiting.
+fn next_presign_expiry_in(
+    deadlines: impl Iterator<Item = i64>,
+    now: i64,
+) -> Option<std::time::Duration> {
+    deadlines
+        .min()
+        .map(|deadline| std::time::Duration::from_secs((deadline - now).max(0) as u64))
 }
 
 fn apply_presign_gate_at(
@@ -9081,6 +9182,68 @@ mod tests {
             attachments.is_empty(),
             "a stale never-uploaded attachment is dropped instead of rendering broken forever"
         );
+    }
+
+    #[test]
+    fn expiry_is_scheduled_for_the_earliest_pending_message() {
+        let now = 1000;
+        let max = presign::PRESIGN_PENDING_MAX_AGE_SEC;
+        let delay = next_presign_expiry_in([now - 60 + max, now - 300 + max].into_iter(), now)
+            .expect("a pending attachment arms the timer");
+        assert_eq!(
+            delay.as_secs() as i64,
+            max - 300,
+            "the timer follows the message closest to its expiry"
+        );
+
+        assert!(
+            next_presign_expiry_in(std::iter::empty(), now).is_none(),
+            "nothing pending leaves the timer disarmed"
+        );
+        assert_eq!(
+            next_presign_expiry_in([now - 60].into_iter(), now)
+                .expect("an overdue message still fires")
+                .as_secs(),
+            0,
+            "an already expired attachment sweeps immediately instead of waiting"
+        );
+    }
+
+    #[test]
+    fn an_ordinary_message_does_not_arm_the_expiry_timer() {
+        // Arming walks every cached message, and this runs on every socket
+        // arrival, so a message with nothing pending must not trigger it.
+        let mut plain = Message::new(MessageId(9), "hi".to_string(), "5".to_string(), "me", 1000);
+        plain.create_time = 1000;
+        assert_eq!(presign_expiry_deadline(&plain), None);
+
+        plain.attachments = vec![cdn_attachment("https://cdn.example/uploads/photo.png")];
+        plain.content = r#"{"t":"hi","presign_finish":["photo"]}"#.to_string();
+        assert_eq!(
+            presign_expiry_deadline(&plain),
+            None,
+            "a finished attachment has nothing left to expire"
+        );
+    }
+
+    #[test]
+    fn a_message_the_sweep_cannot_clear_is_never_scheduled() {
+        let mut pending = Message::new(MessageId(1), "hi".to_string(), "5".to_string(), "me", 1000);
+        pending.create_time = 1000;
+        pending.attachments = vec![cdn_attachment("https://cdn.example/uploads/photo.png")];
+        pending.attachments[0].presign_pending = true;
+
+        pending.content = r#"{"t":"hi","presign_finish":[]}"#.to_string();
+        assert_eq!(
+            presign_expiry_deadline(&pending),
+            Some(1000 + presign::PRESIGN_PENDING_MAX_AGE_SEC),
+            "a pending message the sweep can act on arms the timer"
+        );
+
+        // The sweep skips a message whose content no longer carries the field, so
+        // counting it here would re-arm the timer at zero delay forever.
+        pending.content = r#"{"t":"hi"}"#.to_string();
+        assert_eq!(presign_expiry_deadline(&pending), None);
     }
 
     #[test]

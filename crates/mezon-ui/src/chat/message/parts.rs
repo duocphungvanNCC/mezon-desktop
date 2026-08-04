@@ -1194,7 +1194,11 @@ fn render_video_poster(
     let theme = ctx.theme;
     let url = SharedString::from(att.url.clone());
     let filename = SharedString::from(att.filename.clone());
-    let thumbnail = att.thumbnail_proxied.clone();
+    let thumbnail = if att.presign_pending {
+        SharedString::default()
+    } else {
+        att.thumbnail_proxied.clone()
+    };
     let width = att.display_width;
     let height = att.display_height;
     let host = ctx.video_host.clone();
@@ -1227,6 +1231,9 @@ fn render_video_poster(
         return container
             .child(attachment_sending_overlay(theme))
             .into_any_element();
+    }
+    if att.presign_pending {
+        return presign_child(container, att, theme).into_any_element();
     }
     let overlay = div()
         .absolute()
@@ -1573,6 +1580,8 @@ const REACTION_EMOJI_PX: f32 = 16.;
 const REACTION_EMOJI_SOURCE_PX: u32 = 32;
 const RECENT_EMOJI_PX: f32 = 20.;
 const RECENT_EMOJI_SOURCE_PX: u32 = 40;
+const HOVER_ACTIONS_TOP: f32 = -32.;
+const HOVER_ACTIONS_MARGIN_TOP_DIFFERENT_DAY: f32 = 4.;
 
 pub fn recent_emoji_cells(emojis: &[Emoji], cx: &App) -> Vec<RecentEmojiCell> {
     emojis
@@ -1690,19 +1699,13 @@ fn reaction_pill(reaction: &Reaction, message_id: MessageId, ctx: &RowCtx) -> An
     pill.child(emoji_el).child(count_label).into_any_element()
 }
 
-pub fn render_hover_actions(
-    msg: &Message,
-    combined: bool,
-    has_reply: bool,
-    is_different_day: bool,
-    ctx: &RowCtx,
-) -> AnyElement {
-    if ctx.suppress_hover
-        || ctx.context_menu_message == Some(msg.id)
-        || ctx.hovered_row != Some(msg.id)
-    {
-        return div().into_any_element();
-    }
+pub fn hover_actions_visible(msg: &Message, ctx: &RowCtx) -> bool {
+    !ctx.suppress_hover
+        && ctx.context_menu_message != Some(msg.id)
+        && ctx.hovered_row == Some(msg.id)
+}
+
+pub fn render_hover_actions(msg: &Message, is_different_day: bool, ctx: &RowCtx) -> AnyElement {
     let theme = ctx.theme;
     let bg_hover = theme.bg_hover;
     let action = move |id: &'static str, icon: IconName, size: f32| {
@@ -1724,12 +1727,10 @@ pub fn render_hover_actions(
             .child(svg_icon)
     };
 
-    let (top, margin_top) = if is_different_day {
-        (-8., 4.)
-    } else if combined || has_reply {
-        (-8., 0.)
+    let margin_top = if is_different_day {
+        HOVER_ACTIONS_MARGIN_TOP_DIFFERENT_DAY
     } else {
-        (16., 0.)
+        0.
     };
 
     let reply_id = msg.id;
@@ -1825,7 +1826,7 @@ pub fn render_hover_actions(
         })
         .absolute()
         .right(px(24.))
-        .top(px(top))
+        .top(px(HOVER_ACTIONS_TOP))
         .mt(px(margin_top))
         .flex()
         .flex_row()

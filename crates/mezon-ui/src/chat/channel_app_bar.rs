@@ -1,8 +1,6 @@
-use gpui::{App, FontWeight, div, prelude::*, px};
+use gpui::{FontWeight, div, prelude::*, px};
 
-use crate::channel_app::{
-    is_channel_app_open_id, launch_channel_app_from_store, reset_channel_app_from_store,
-};
+use crate::channel_app::launch_channel_app_from_store;
 use crate::components::primitives::{Icon, IconName};
 use crate::theme::Theme;
 
@@ -10,7 +8,6 @@ use crate::theme::Theme;
 pub struct ChannelAppBarTarget {
     pub app_id: i64,
     pub app_url: String,
-    pub app_name: String,
     pub clan_id: mezon_store::ClanId,
     pub clan_name: String,
     pub channel_list: gpui::Entity<mezon_store::ChannelList>,
@@ -20,14 +17,8 @@ pub fn render_channel_app_bar(
     locale: &str,
     target: ChannelAppBarTarget,
     theme: &Theme,
-    cx: &App,
 ) -> impl IntoElement {
-    let app_open = is_channel_app_open_id(target.app_id, cx);
-    let launch_label = if app_open {
-        mezon_i18n::t(locale, "common.resetApp")
-    } else {
-        mezon_i18n::t(locale, "common.launchApp")
-    };
+    let launch_label = mezon_i18n::t(locale, "common.launchApp");
     let help_label = mezon_i18n::t(locale, "common.help");
 
     let launch_target = target;
@@ -63,27 +54,14 @@ pub fn render_channel_app_bar(
                         .text_color(theme.tokens.text_theme_primary_hover)
                 })
                 .on_click(move |_, _, cx| {
-                    if app_open {
-                        reset_channel_app_from_store(
-                            launch_target.app_id,
-                            launch_target.app_url.clone(),
-                            launch_target.app_name.clone(),
-                            launch_target.clan_id,
-                            launch_target.clan_name.clone(),
-                            launch_target.channel_list.clone(),
-                            cx,
-                        );
-                    } else {
-                        launch_channel_app_from_store(
-                            launch_target.app_id,
-                            launch_target.app_url.clone(),
-                            launch_target.app_name.clone(),
-                            launch_target.clan_id,
-                            launch_target.clan_name.clone(),
-                            launch_target.channel_list.clone(),
-                            cx,
-                        );
-                    }
+                    launch_channel_app_from_store(
+                        launch_target.app_id,
+                        launch_target.app_url.clone(),
+                        launch_target.clan_id,
+                        launch_target.clan_name.clone(),
+                        launch_target.channel_list.clone(),
+                        cx,
+                    );
                 })
                 .child(
                     Icon::new(IconName::Joystick)

@@ -733,6 +733,21 @@ fn pagination_direction(
     }
 }
 
+fn hover_show_target(pointer: Option<MessageId>, shown: Option<MessageId>) -> Option<MessageId> {
+    pointer.filter(|target| shown != Some(*target))
+}
+
+fn hover_hide_target(
+    pointer: Option<MessageId>,
+    shown: Option<MessageId>,
+    menu_latched: bool,
+) -> Option<MessageId> {
+    if menu_latched {
+        return None;
+    }
+    shown.filter(|shown| pointer != Some(*shown))
+}
+
 fn deadline_remaining(last_activity: Instant, now: Instant, delay: Duration) -> Option<Duration> {
     let elapsed = now.saturating_duration_since(last_activity);
     if elapsed < delay {
@@ -1133,6 +1148,49 @@ mod pagination_tests {
 }
 
 #[cfg(test)]
+mod hover_schedule_tests {
+    use super::*;
+
+    const A: MessageId = MessageId(1);
+    const B: MessageId = MessageId(2);
+
+    #[test]
+    fn pointing_at_an_unshown_row_schedules_a_show() {
+        assert_eq!(hover_show_target(Some(A), None), Some(A));
+        assert_eq!(hover_show_target(Some(B), Some(A)), Some(B));
+    }
+
+    #[test]
+    fn the_already_shown_row_schedules_nothing() {
+        assert_eq!(hover_show_target(Some(A), Some(A)), None);
+        assert_eq!(hover_hide_target(Some(A), Some(A), false), None);
+    }
+
+    #[test]
+    fn leaving_the_shown_row_schedules_a_hide() {
+        assert_eq!(hover_hide_target(None, Some(A), false), Some(A));
+        assert_eq!(hover_hide_target(Some(B), Some(A), false), Some(A));
+    }
+
+    #[test]
+    fn sweeping_across_rows_keeps_one_hide_target_so_the_timer_is_not_restarted() {
+        let shown = Some(A);
+        let first = hover_hide_target(Some(B), shown, false);
+        let then = hover_hide_target(Some(MessageId(3)), shown, false);
+        assert_eq!(first, Some(A));
+        assert_eq!(
+            first, then,
+            "an unchanged hide target must not respawn the timer"
+        );
+    }
+
+    #[test]
+    fn an_open_context_menu_keeps_its_row_latched() {
+        assert_eq!(hover_hide_target(None, Some(A), true), None);
+    }
+}
+
+#[cfg(test)]
 mod scroll_idle_tests {
     use super::*;
 
@@ -1211,6 +1269,8 @@ pub struct ChannelMessages {
     overlay_hover: Option<MessageId>,
     _hover_show_task: Option<Task<()>>,
     _hover_hide_task: Option<Task<()>>,
+    pending_show: Option<MessageId>,
+    pending_hide: Option<MessageId>,
     scroll_relief_armed: bool,
     paginate_armed_top: bool,
     paginate_armed_bottom: bool,
@@ -1432,8 +1492,7 @@ impl ChannelMessages {
                     this.hovered_row = None;
                     this.raw_hover = None;
                     this.overlay_hover = None;
-                    this._hover_show_task = None;
-                    this._hover_hide_task = None;
+                    this.clear_hover_tasks();
                     this.edit_input = None;
                     this._edit_input_sub = None;
                     Rc::make_mut(&mut this.active_videos).clear();
@@ -1768,18 +1827,6 @@ impl ChannelMessages {
                 if visible_range_changed {
                     this.schedule_pagination_check(window, cx);
                 }
-                if this.hovered_row.is_some()
-                    || this.raw_hover.is_some()
-                    || this.overlay_hover.is_some()
-                    || this._hover_show_task.is_some()
-                    || this._hover_hide_task.is_some()
-                {
-                    this.hovered_row = None;
-                    this.raw_hover = None;
-                    this.overlay_hover = None;
-                    this._hover_show_task = None;
-                    this._hover_hide_task = None;
-                }
             });
         });
 
@@ -1904,6 +1951,8 @@ impl ChannelMessages {
             overlay_hover: None,
             _hover_show_task: None,
             _hover_hide_task: None,
+            pending_show: None,
+            pending_hide: None,
             scroll_relief_armed: false,
             paginate_armed_top: true,
             paginate_armed_bottom: true,
@@ -2480,11 +2529,8 @@ impl ChannelMessages {
             _ => false,
         };
         self.ensure_topic_create_permissions(cx);
-        self._hover_show_task = None;
-        self._hover_hide_task = None;
+        self.clear_hover_tasks();
         self.hovered_row = None;
-        self.raw_hover = None;
-        self.overlay_hover = None;
         self.reaction_submenu_open = false;
         self.context_menu_target = Some((message_id, position));
         cx.notify();
@@ -2496,6 +2542,7 @@ impl ChannelMessages {
             if self.hover_target().is_none() {
                 self.hovered_row = None;
             }
+            self.sync_hover_tasks(cx);
             cx.notify();
         }
     }
@@ -2543,44 +2590,55 @@ impl ChannelMessages {
         self.sync_hover_tasks(cx);
     }
 
+    fn clear_hover_tasks(&mut self) {
+        self._hover_show_task = None;
+        self._hover_hide_task = None;
+        self.pending_show = None;
+        self.pending_hide = None;
+    }
+
     fn sync_hover_tasks(&mut self, cx: &mut Context<Self>) {
         let raw = self.hover_target();
+        let shown = self.hovered_row;
+        let menu_latched =
+            shown.is_some_and(|shown| self.context_menu_target.is_some_and(|(id, _)| id == shown));
 
-        match raw {
-            Some(target) if self.hovered_row != Some(target) => {
-                self._hover_show_task = Some(cx.spawn(async move |this, cx| {
+        let show = hover_show_target(raw, shown);
+        if self.pending_show != show {
+            self.pending_show = show;
+            self._hover_show_task = show.map(|target| {
+                cx.spawn(async move |this, cx| {
                     cx.background_executor()
                         .timer(Duration::from_millis(HOVER_SHOW_DELAY_MS))
                         .await;
                     let _ = this.update(cx, |this, cx| {
+                        this.pending_show = None;
                         if this.hover_target() == Some(target) && this.hovered_row != Some(target) {
                             this.hovered_row = Some(target);
                             cx.notify();
                         }
                     });
-                }));
-            }
-            _ => self._hover_show_task = None,
+                })
+            });
         }
 
-        match self.hovered_row {
-            Some(shown) if raw != Some(shown) => {
-                if self.context_menu_target.is_some_and(|(id, _)| id == shown) {
-                    return;
-                }
-                self._hover_hide_task = Some(cx.spawn(async move |this, cx| {
+        let hide = hover_hide_target(raw, shown, menu_latched);
+        if self.pending_hide != hide {
+            self.pending_hide = hide;
+            self._hover_hide_task = hide.map(|shown| {
+                cx.spawn(async move |this, cx| {
                     cx.background_executor()
                         .timer(Duration::from_millis(HOVER_HIDE_DELAY_MS))
                         .await;
                     let _ = this.update(cx, |this, cx| {
+                        this.pending_hide = None;
                         if this.hover_target() != Some(shown) && this.hovered_row == Some(shown) {
                             this.hovered_row = None;
                             cx.notify();
                         }
                     });
-                }));
-            }
-            _ => self._hover_hide_task = None,
+                })
+            });
         }
     }
 
