@@ -39,6 +39,7 @@ mod video_player;
 
 pub use channel_messages::{ChannelMessages, ChannelMessagesEvent};
 pub(crate) use content::open_message_link;
+pub(crate) use content::{RichRunPalette, rich_run_highlight};
 pub(crate) use content::{heading_line_height, heading_size};
 pub(crate) use content::{
     pin_link_element, render_pin_rich_layout_element, resolve_message_link_url, text_wrap_children,

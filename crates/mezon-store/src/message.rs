@@ -565,6 +565,7 @@ pub enum RichRunKind {
     Code,
     Link,
     Mention,
+    RoleMention,
     Hashtag,
 }
 
@@ -924,18 +925,19 @@ pub fn parse_spans(content: &ApiMessageContent) -> Vec<MessageSpan> {
         let inner = slice(s, e);
         match kind {
             Kind::Mention => {
-                let is_user = tok
+                let has_user = tok
                     .user_id
                     .as_deref()
-                    .is_some_and(|u| u != "0" && !u.is_empty())
-                    || tok.username.is_some();
-                if is_user {
+                    .is_some_and(|u| u != "0" && !u.is_empty());
+                let has_role = tok.role_id.as_deref().is_some_and(|r| !r.is_empty());
+                let has_username = tok.username.as_deref().is_some_and(|u| !u.is_empty());
+                if has_user || has_username {
                     spans.push(MessageSpan::Mention {
                         display: inner.into(),
                         user_id: tok.user_id.clone(),
                         role_id: None,
                     });
-                } else if tok.role_id.as_deref().is_some_and(|r| !r.is_empty()) {
+                } else if has_role {
                     spans.push(MessageSpan::Mention {
                         display: inner.into(),
                         user_id: None,
@@ -1326,19 +1328,24 @@ pub fn build_rich_layout(spans: &[MessageSpan]) -> Option<Arc<RichLayout>> {
             } => {
                 let start = text.len();
                 text.push_str(display);
-                let click = if role_id.as_deref().is_none_or(str::is_empty) {
+                let is_role = role_id.as_deref().is_some_and(|r| !r.is_empty());
+                let click = if is_role {
+                    None
+                } else {
                     user_id
                         .as_deref()
                         .filter(|u| !u.is_empty() && *u != "0" && !is_here_user_id(u))
                         .and_then(|u| u.parse::<i64>().ok())
                         .map(UserId)
                         .map(RichClick::Mention)
-                } else {
-                    None
                 };
                 runs.push(RichRun {
                     range: start..text.len(),
-                    kind: RichRunKind::Mention,
+                    kind: if is_role {
+                        RichRunKind::RoleMention
+                    } else {
+                        RichRunKind::Mention
+                    },
                     click,
                 });
             }
@@ -1790,6 +1797,115 @@ mod tests {
                     role_id: None,
                 },
                 MessageSpan::Text(" !".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_spans_keeps_role_id_when_token_carries_an_empty_username() {
+        let content = ApiMessageContent {
+            t: "hi @Admin".into(),
+            mentions: vec![ContentToken {
+                role_id: Some("9".into()),
+                username: Some(String::new()),
+                ..token(3, 9)
+            }],
+            ..Default::default()
+        };
+        assert_eq!(
+            parse_spans(&content),
+            vec![
+                MessageSpan::Text("hi ".into()),
+                MessageSpan::Mention {
+                    display: "@Admin".into(),
+                    user_id: None,
+                    role_id: Some("9".into()),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_spans_prefers_user_when_a_role_token_carries_a_real_username() {
+        let content = ApiMessageContent {
+            t: "hi @Admin".into(),
+            mentions: vec![ContentToken {
+                role_id: Some("9".into()),
+                username: Some("@Admin".into()),
+                ..token(3, 9)
+            }],
+            ..Default::default()
+        };
+        assert_eq!(
+            parse_spans(&content),
+            vec![
+                MessageSpan::Text("hi ".into()),
+                MessageSpan::Mention {
+                    display: "@Admin".into(),
+                    user_id: None,
+                    role_id: None,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_spans_reads_role_token_without_username() {
+        let content: ApiMessageContent =
+            serde_json::from_str(r#"{"t":"hi @Admin","mentions":[{"s":3,"e":9,"role_id":9}]}"#)
+                .expect("role mention token json");
+        assert_eq!(
+            parse_spans(&content),
+            vec![
+                MessageSpan::Text("hi ".into()),
+                MessageSpan::Mention {
+                    display: "@Admin".into(),
+                    user_id: None,
+                    role_id: Some("9".into()),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_spans_keeps_username_only_mention_as_user() {
+        let content = ApiMessageContent {
+            t: "hi @bob".into(),
+            mentions: vec![ContentToken {
+                username: Some("bob".into()),
+                ..token(3, 7)
+            }],
+            ..Default::default()
+        };
+        assert_eq!(
+            parse_spans(&content),
+            vec![
+                MessageSpan::Text("hi ".into()),
+                MessageSpan::Mention {
+                    display: "@bob".into(),
+                    user_id: None,
+                    role_id: None,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_spans_treats_idless_empty_username_mention_as_plain_text() {
+        let content = ApiMessageContent {
+            t: "hi @here".into(),
+            mentions: vec![ContentToken {
+                user_id: Some("0".into()),
+                username: Some(String::new()),
+                ..token(3, 8)
+            }],
+            ..Default::default()
+        };
+        assert_eq!(
+            parse_spans(&content),
+            vec![
+                MessageSpan::Text("hi ".into()),
+                MessageSpan::Text("@here".into())
             ]
         );
     }
@@ -2331,6 +2447,19 @@ mod tests {
         assert_eq!(run.range, 3..7);
         assert_eq!(&layout.text[run.range.clone()], "@bob");
         assert_eq!(run.click, Some(RichClick::Mention(UserId(42))));
+    }
+
+    #[test]
+    fn rich_layout_tags_role_mentions_apart_from_user_mentions() {
+        let spans = vec![MessageSpan::Mention {
+            display: "@Everyone".into(),
+            user_id: None,
+            role_id: Some("1841396057137745920".into()),
+        }];
+        let layout = build_rich_layout(&spans).expect("rich layout");
+        assert_eq!(layout.runs.len(), 1);
+        assert_eq!(layout.runs[0].kind, RichRunKind::RoleMention);
+        assert_eq!(layout.runs[0].click, None);
     }
 
     #[test]

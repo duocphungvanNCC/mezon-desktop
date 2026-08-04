@@ -1192,21 +1192,19 @@ pub fn enrich_content_tokens(tokens: &mut ApiMessageContent, entity_mentions: &[
         }
         let user_id = (m.user_id != 0).then(|| m.user_id.to_string());
         let role_id = (m.role_id != 0).then(|| m.role_id.to_string());
-        let duplicate = tokens.mentions.iter().any(|tok| {
-            tok.s == Some(i64::from(m.s))
-                && tok.e == Some(i64::from(m.e))
-                && tok.user_id == user_id
-                && tok.role_id == role_id
-        });
-        if duplicate {
+        let already_described = tokens
+            .mentions
+            .iter()
+            .any(|tok| tok.s == Some(i64::from(m.s)) && tok.e == Some(i64::from(m.e)));
+        if already_described {
             continue;
         }
         tokens.mentions.push(ContentToken {
             s: Some(i64::from(m.s)),
             e: Some(i64::from(m.e)),
+            username: (role_id.is_none() && !m.username.is_empty()).then(|| m.username.clone()),
             user_id,
             role_id,
-            username: (!m.username.is_empty()).then(|| m.username.clone()),
             ..Default::default()
         });
     }
@@ -2228,14 +2226,23 @@ pub struct OutgoingMention {
 
 impl OutgoingMention {
     fn is_here(&self) -> bool {
-        self.user_id == MENTION_HERE_ID
+        is_here_user_id(&self.user_id)
+    }
+
+    fn wire_user_id(&self) -> &str {
+        if self.is_here() {
+            MENTION_HERE_USER_ID
+        } else {
+            &self.user_id
+        }
     }
 
     fn to_content_token(&self) -> ContentToken {
+        let user_id = self.wire_user_id();
         ContentToken {
             s: Some(i64::from(self.s)),
             e: Some(i64::from(self.e)),
-            user_id: (!self.user_id.is_empty()).then(|| self.user_id.clone()),
+            user_id: (!user_id.is_empty()).then(|| user_id.to_string()),
             role_id: (!self.role_id.is_empty()).then(|| self.role_id.clone()),
             username: (!self.username.is_empty()).then(|| self.username.clone()),
             ..Default::default()
@@ -2243,10 +2250,7 @@ impl OutgoingMention {
     }
 
     fn to_proto(&self) -> Option<api::MessageMention> {
-        if self.is_here() {
-            return None;
-        }
-        let user_id = match self.user_id.as_str() {
+        let user_id = match self.wire_user_id() {
             "" => 0,
             raw => match raw.parse::<i64>() {
                 Ok(id) => id,
@@ -2869,8 +2873,9 @@ fn build_message_content_json(
             .iter()
             .map(|m| {
                 let mut o = serde_json::Map::new();
-                if !m.user_id.is_empty() {
-                    o.insert("user_id".into(), m.user_id.clone().into());
+                let user_id = m.wire_user_id();
+                if !user_id.is_empty() {
+                    o.insert("user_id".into(), user_id.into());
                 }
                 if !m.role_id.is_empty() {
                     o.insert("role_id".into(), m.role_id.clone().into());
@@ -9069,7 +9074,7 @@ mod tests {
 
     fn here_mention(s: i32, e: i32) -> OutgoingMention {
         OutgoingMention {
-            user_id: MENTION_HERE_ID.into(),
+            user_id: MENTION_HERE_USER_ID.into(),
             role_id: String::new(),
             username: "@here".into(),
             s,
@@ -9078,7 +9083,7 @@ mod tests {
     }
 
     #[test]
-    fn here_mention_sets_everyone_and_is_excluded_from_proto() {
+    fn here_mention_sets_everyone_and_is_sent_in_the_proto() {
         let mentions = [user_mention("42", 0, 4), here_mention(5, 10)];
         let everyone = mentions.iter().any(OutgoingMention::is_here);
         let proto: Vec<_> = mentions
@@ -9086,11 +9091,43 @@ mod tests {
             .filter_map(OutgoingMention::to_proto)
             .collect();
         assert!(everyone);
-        assert_eq!(proto.len(), 1);
+        assert_eq!(proto.len(), 2);
         assert_eq!(proto[0].user_id, 42);
-        assert_eq!(proto[0].s, 0);
-        assert_eq!(proto[0].e, 4);
         assert_eq!(proto[0].username, "@bob");
+        assert_eq!(
+            proto[1].user_id,
+            MENTION_HERE_USER_ID
+                .parse::<i64>()
+                .expect("numeric here id")
+        );
+        assert_eq!(proto[1].s, 5);
+        assert_eq!(proto[1].e, 10);
+    }
+
+    #[test]
+    fn legacy_here_sentinel_is_normalised_to_the_numeric_id() {
+        let legacy = OutgoingMention {
+            user_id: MENTION_HERE_ID.into(),
+            ..here_mention(0, 5)
+        };
+        assert!(legacy.is_here());
+        assert_eq!(
+            legacy.to_proto().expect("here mention is sent").user_id,
+            MENTION_HERE_USER_ID
+                .parse::<i64>()
+                .expect("numeric here id")
+        );
+        assert_eq!(
+            legacy.to_content_token().user_id.as_deref(),
+            Some(MENTION_HERE_USER_ID)
+        );
+        let sent = build_send_content("@here", std::slice::from_ref(&legacy), &[], &[]);
+        let parsed: ApiMessageContent =
+            serde_json::from_str(&sent.json).expect("wire content json");
+        assert_eq!(
+            parsed.mentions[0].user_id.as_deref(),
+            Some(MENTION_HERE_USER_ID)
+        );
     }
 
     #[test]
@@ -9337,11 +9374,61 @@ mod tests {
     }
 
     #[test]
+    fn enrich_never_adds_a_username_to_a_role_mention() {
+        let mut tokens = ApiMessageContent {
+            t: "@Everyone".into(),
+            ..Default::default()
+        };
+        enrich_content_tokens(
+            &mut tokens,
+            &[ApiEntityMention {
+                user_id: 0,
+                role_id: 9,
+                username: "@Everyone".into(),
+                s: 0,
+                e: 9,
+            }],
+        );
+        assert_eq!(tokens.mentions.len(), 1);
+        assert_eq!(tokens.mentions[0].role_id.as_deref(), Some("9"));
+        assert_eq!(tokens.mentions[0].username.as_deref(), None);
+    }
+
+    #[test]
+    fn enrich_leaves_a_span_the_content_json_already_describes() {
+        let mut tokens = ApiMessageContent {
+            t: "@Everyone".into(),
+            mentions: vec![ContentToken {
+                s: Some(0),
+                e: Some(9),
+                role_id: Some("9".into()),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        enrich_content_tokens(
+            &mut tokens,
+            &[ApiEntityMention {
+                user_id: 0,
+                role_id: 9,
+                username: "@Everyone".into(),
+                s: 0,
+                e: 9,
+            }],
+        );
+        assert_eq!(tokens.mentions.len(), 1);
+        assert_eq!(tokens.mentions[0].username.as_deref(), None);
+    }
+
+    #[test]
     fn content_json_keeps_here_mention_for_receive_colouring() {
         let json = build_message_content_json("@here", &[here_mention(0, 5)], &[], &[], &[]);
         let parsed: ApiMessageContent = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.mentions.len(), 1);
-        assert_eq!(parsed.mentions[0].user_id.as_deref(), Some("here"));
+        assert_eq!(
+            parsed.mentions[0].user_id.as_deref(),
+            Some(MENTION_HERE_USER_ID)
+        );
     }
 
     fn role_mention(role_id: &str, s: i32, e: i32) -> OutgoingMention {
