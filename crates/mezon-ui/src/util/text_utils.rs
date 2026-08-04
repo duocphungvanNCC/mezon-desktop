@@ -14,19 +14,29 @@ pub(crate) fn normalize_string(value: &str) -> String {
     out
 }
 
+fn push_search_normalized_part(part: char, out: &mut String) {
+    if ('\u{0300}'..='\u{036f}').contains(&part) {
+        return;
+    }
+    match part {
+        '-' | '_' | '+' => out.push(' '),
+        _ => out.extend(part.to_uppercase()),
+    }
+}
+
+pub(crate) fn push_search_normalized(ch: char, out: &mut String) {
+    for part in ch.nfd() {
+        push_search_normalized_part(part, out);
+    }
+}
+
 pub(crate) fn normalize_search_string(value: &str) -> String {
     if value.is_empty() {
         return String::new();
     }
     let mut out = String::with_capacity(value.len());
-    for ch in value.nfd() {
-        if ('\u{0300}'..='\u{036f}').contains(&ch) {
-            continue;
-        }
-        match ch {
-            '-' | '_' | '+' => out.push(' '),
-            _ => out.extend(ch.to_uppercase()),
-        }
+    for part in value.nfd() {
+        push_search_normalized_part(part, &mut out);
     }
     out
 }

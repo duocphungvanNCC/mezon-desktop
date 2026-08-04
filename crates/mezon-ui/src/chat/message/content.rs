@@ -248,7 +248,7 @@ fn render_deleted_placeholder(msg: &Message, ctx: &RowCtx, theme: &Theme) -> Any
 fn rich_text_plan_matches(
     plan: &RichTextRenderPlan,
     layout: &std::sync::Arc<mezon_store::RichLayout>,
-    colors: [Hsla; 5],
+    colors: [Hsla; 7],
     edited: bool,
 ) -> bool {
     std::sync::Arc::ptr_eq(&plan.layout, layout) && plan.colors == colors && plan.edited == edited
@@ -258,11 +258,15 @@ fn render_rich_styled(msg: &Message, ctx: &RowCtx, body_color: gpui::Rgba) -> An
     let theme = ctx.theme;
     let mention_color: Hsla = theme.tokens.mention_color.into();
     let mention_bg: Hsla = theme.tokens.mention_primary.into();
+    let role_color: Hsla = theme.tokens.color_mention_evryone.into();
+    let role_bg: Hsla = theme.tokens.bg_mention_evryone.into();
     let code_bg: Hsla = theme.tokens.bg_markdown_code.into();
     let link_color: Hsla = theme.tokens.mention_color.into();
     let colors = [
         mention_color,
         mention_bg,
+        role_color,
+        role_bg,
         code_bg,
         link_color,
         theme.text_muted.into(),
@@ -315,6 +319,14 @@ fn render_rich_styled(msg: &Message, ctx: &RowCtx, body_color: gpui::Rgba) -> An
                         HighlightStyle {
                             color: Some(mention_color),
                             background_color: Some(mention_bg),
+                            ..Default::default()
+                        },
+                    )),
+                    RichRunKind::RoleMention => highlights.push((
+                        run.range.clone(),
+                        HighlightStyle {
+                            color: Some(role_color),
+                            background_color: Some(role_bg),
                             ..Default::default()
                         },
                     )),
@@ -2387,6 +2399,8 @@ pub(crate) fn text_wrap_children(text: &str, color: gpui::Rgba) -> Vec<AnyElemen
 pub(crate) fn render_pin_rich_layout_element(layout: &RichLayout, theme: &Theme) -> AnyElement {
     let mention_color: Hsla = theme.tokens.mention_color.into();
     let mention_bg: Hsla = theme.tokens.mention_primary.into();
+    let role_color: Hsla = theme.tokens.color_mention_evryone.into();
+    let role_bg: Hsla = theme.tokens.bg_mention_evryone.into();
     let code_bg: Hsla = theme.tokens.bg_markdown_code.into();
     let link_color: Hsla = theme.tokens.mention_color.into();
     let body_color = theme.tokens.text_theme_message;
@@ -2440,6 +2454,14 @@ pub(crate) fn render_pin_rich_layout_element(layout: &RichLayout, theme: &Theme)
                 HighlightStyle {
                     color: Some(mention_color),
                     background_color: Some(mention_bg),
+                    ..Default::default()
+                },
+            )),
+            RichRunKind::RoleMention => highlights.push((
+                run.range.clone(),
+                HighlightStyle {
+                    color: Some(role_color),
+                    background_color: Some(role_bg),
                     ..Default::default()
                 },
             )),
@@ -2695,7 +2717,7 @@ mod tests {
     #[test]
     fn rich_text_plan_reuses_only_the_same_layout_and_style() {
         let layout = build_rich_layout(&[MessageSpan::Bold("hello".into())]).unwrap();
-        let colors = [Hsla::default(); 5];
+        let colors = [Hsla::default(); 7];
         let plan = RichTextRenderPlan {
             layout: layout.clone(),
             colors,

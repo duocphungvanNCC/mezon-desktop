@@ -160,7 +160,7 @@ impl RowMemo {
 #[derive(Clone)]
 pub struct RichTextRenderPlan {
     pub layout: Arc<RichLayout>,
-    pub colors: [Hsla; 5],
+    pub colors: [Hsla; 7],
     pub edited: bool,
     pub text: SharedString,
     pub highlights: Arc<[(Range<usize>, HighlightStyle)]>,

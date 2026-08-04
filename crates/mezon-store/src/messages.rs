@@ -182,10 +182,11 @@ pub struct OutgoingMention {
 
 impl OutgoingMention {
     pub(crate) fn into_transport(self) -> TransportMention {
+        let is_role = self.user_id.is_empty() && !self.role_id.is_empty();
         TransportMention {
+            username: if is_role { String::new() } else { self.display },
             user_id: self.user_id,
             role_id: self.role_id,
-            username: self.display,
             s: self.s,
             e: self.e,
         }
@@ -7941,6 +7942,67 @@ mod tests {
                     display: "@bob".into(),
                     user_id: Some("42".into()),
                     role_id: None,
+                },
+                MessageSpan::Text(" hi".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn role_mention_survives_the_full_send_wire_json() {
+        let transport: Vec<TransportMention> = vec![OutgoingMention {
+            user_id: String::new(),
+            role_id: "9".into(),
+            display: "@Everyone".into(),
+            s: 0,
+            e: 9,
+        }]
+        .into_iter()
+        .map(OutgoingMention::into_transport)
+        .collect();
+        let sent =
+            mezon_client::transport::build_send_content("@Everyone hi", &transport, &[], &[]);
+        let parsed: ApiMessageContent =
+            serde_json::from_str(&sent.json).expect("wire content json");
+        assert_eq!(parsed.mentions.len(), 1);
+        assert_eq!(parsed.mentions[0].role_id.as_deref(), Some("9"));
+        assert_eq!(parsed.mentions[0].username.as_deref(), None);
+        assert_eq!(
+            parse_spans(&parsed)[0],
+            MessageSpan::Mention {
+                display: "@Everyone".into(),
+                user_id: None,
+                role_id: Some("9".into()),
+            }
+        );
+    }
+
+    #[test]
+    fn role_mention_tokens_round_trip_without_a_username() {
+        let mentions = vec![OutgoingMention {
+            user_id: String::new(),
+            role_id: "9".into(),
+            display: "@Admin".into(),
+            s: 0,
+            e: 6,
+        }];
+        let transport: Vec<TransportMention> = mentions
+            .into_iter()
+            .map(OutgoingMention::into_transport)
+            .collect();
+        assert_eq!(transport[0].username, "");
+        let tokens = ApiMessageContent {
+            t: "@Admin hi".into(),
+            mentions: mention_content_tokens(&transport),
+            ..Default::default()
+        };
+        assert_eq!(
+            parse_spans(&tokens),
+            vec![
+                MessageSpan::Mention {
+                    display: "@Admin".into(),
+                    user_id: None,
+                    role_id: Some("9".into()),
                 },
                 MessageSpan::Text(" hi".into()),
             ]

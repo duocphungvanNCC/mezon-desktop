@@ -1146,6 +1146,11 @@ fn render_rich_search_content(
                 background_color: Some(mention_bg),
                 ..Default::default()
             },
+            RichRunKind::RoleMention => HighlightStyle {
+                color: Some(theme.tokens.color_mention_evryone.into()),
+                background_color: Some(theme.tokens.bg_mention_evryone.into()),
+                ..Default::default()
+            },
         };
         highlights.push((run.range.clone(), style));
     }
