@@ -432,9 +432,23 @@ unsafe fn attach_icon_macos(content: *mut objc::runtime::Object, path: &str) {
 // ─── Windows ──────────────────────────────────────────────────────────────────
 
 #[cfg(target_os = "windows")]
+fn running_packaged() -> bool {
+    use windows::Win32::Foundation::ERROR_INSUFFICIENT_BUFFER;
+    use windows::Win32::Storage::Packaging::Appx::GetCurrentPackageFullName;
+
+    let mut len = 0u32;
+    unsafe { GetCurrentPackageFullName(&mut len, None) == ERROR_INSUFFICIENT_BUFFER }
+}
+
+#[cfg(target_os = "windows")]
 fn init_windows() {
     use windows::Win32::UI::Shell::SetCurrentProcessExplicitAppUserModelID;
     use windows::core::HSTRING;
+
+    if running_packaged() {
+        tracing::debug!("packaged install detected; toasts use the package identity");
+        return;
+    }
 
     unsafe {
         if let Err(e) = SetCurrentProcessExplicitAppUserModelID(&HSTRING::from(APP_USER_MODEL_ID)) {
@@ -551,8 +565,11 @@ fn try_show_toast(
     let doc = XmlDocument::new()?;
     doc.LoadXml(&HSTRING::from(xml_str))?;
 
-    let notifier =
-        ToastNotificationManager::CreateToastNotifierWithId(&HSTRING::from(APP_USER_MODEL_ID))?;
+    let notifier = if running_packaged() {
+        ToastNotificationManager::CreateToastNotifier()?
+    } else {
+        ToastNotificationManager::CreateToastNotifierWithId(&HSTRING::from(APP_USER_MODEL_ID))?
+    };
     let toast = ToastNotification::CreateToastNotification(&doc)?;
     if let Some(tag) = tag {
         let tag: String = tag.chars().take(64).collect();

@@ -244,6 +244,9 @@ impl ChatLayout {
         if let Some(update_store) = AutoUpdateStore::try_global(cx) {
             cx.observe(&update_store, |_, _, cx| cx.notify()).detach();
         }
+        if let Some(update_store) = mezon_store::WinstoreUpdateStore::try_global(cx) {
+            cx.observe(&update_store, |_, _, cx| cx.notify()).detach();
+        }
 
         let voice_store = VoiceStore::global(cx);
         cx.observe(&voice_store, |this, voice, cx| {
@@ -1599,8 +1602,8 @@ impl Render for ChatLayout {
                 )
             }
         }
-        let update_pill = AutoUpdateStore::try_global(cx)
-            .filter(|store| matches!(store.read(cx).status(), AutoUpdateStatus::Updated { .. }))
+        let update_pill = mezon_store::effective_update_status(cx)
+            .filter(|status| matches!(status, AutoUpdateStatus::Updated { .. }))
             .map(|_| {
                 let locale = self.settings.read(cx).language.clone();
                 div()
@@ -1618,7 +1621,7 @@ impl Render for ChatLayout {
                     .bg(update_banner_bg(false))
                     .cursor_pointer()
                     .hover(|s| s.bg(update_banner_bg(true)))
-                    .on_click(|_, _, cx| cx.restart())
+                    .on_click(|_, _, cx| mezon_store::update_restart_clicked(cx))
                     .child(
                         Icon::new(IconName::ReloadIcon)
                             .size(px(16.0))
@@ -1632,9 +1635,9 @@ impl Render for ChatLayout {
                             .child(mezon_i18n::t(&locale, "common.updateMezon").to_string()),
                     )
             });
-        let update_available_pill = AutoUpdateStore::try_global(cx)
-            .and_then(|store| match store.read(cx).status() {
-                AutoUpdateStatus::UpdateAvailable { version } => Some(version.clone()),
+        let update_available_pill = mezon_store::effective_update_status(cx)
+            .and_then(|status| match status {
+                AutoUpdateStatus::UpdateAvailable { version } => Some(version),
                 _ => None,
             })
             .map(|version| {
@@ -1654,16 +1657,7 @@ impl Render for ChatLayout {
                     .bg(update_banner_bg(false))
                     .cursor_pointer()
                     .hover(|s| s.bg(update_banner_bg(true)))
-                    .on_click(|_, _, cx| {
-                        let Some(store) = AutoUpdateStore::try_global(cx) else {
-                            return;
-                        };
-                        if let Some(url) = store.read(cx).store_page_url() {
-                            cx.open_url(url);
-                        } else {
-                            store.update(cx, |store, cx| store.check(true, cx));
-                        }
-                    })
+                    .on_click(|_, _, cx| mezon_store::update_available_clicked(cx))
                     .child(
                         Icon::new(IconName::Download)
                             .size(px(16.0))

@@ -58,6 +58,7 @@ pub mod voice;
 pub mod wallet;
 mod wallet_persist;
 pub mod webhook;
+pub mod winstore_update;
 
 use anyhow::{Context, Result};
 use dirs::config_dir;
@@ -218,6 +219,10 @@ pub use wallet::{
 pub use webhook::{
     ChannelWebhook, ClanWebhook, MAX_WEBHOOK_AVATAR_BYTES, WEBHOOK_NAME_MAX_LENGTH, WebhookEvent,
     WebhookStore,
+};
+pub use winstore_update::{
+    WinstoreUpdateStore, effective_update_status, update_available_clicked, update_check_clicked,
+    update_restart_clicked,
 };
 
 pub const CACHE_TTL: Duration = Duration::from_secs(20 * 60);

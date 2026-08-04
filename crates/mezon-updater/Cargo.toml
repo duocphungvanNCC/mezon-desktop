@@ -19,3 +19,13 @@ tempfile.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
 which.workspace = true
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { workspace = true, features = [
+    "Foundation",
+    "Foundation_Collections",
+    "Services_Store",
+    "Win32_System_Recovery",
+] }
+windows-collections = "0.2"
+windows-future = "0.2"

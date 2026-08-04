@@ -3,7 +3,10 @@ use gpui::{
     App, Context, Entity, FocusHandle, Focusable, ScrollHandle, SharedString, Window, div,
     prelude::*, px,
 };
-use mezon_store::{AuthState, AutoUpdateStatus, AutoUpdateStore, ClanList, LoginStore, Settings};
+use mezon_store::{
+    AuthState, AutoUpdateStatus, ClanList, LoginStore, Settings, effective_update_status,
+    update_available_clicked, update_check_clicked, update_restart_clicked,
+};
 
 use super::account_page::AccountPage;
 use super::activity_page::ActivityPage;
@@ -251,8 +254,7 @@ impl Render for SettingsScreen {
         const SETTINGS_CONTENT_WIDTH: f32 = 808.0;
         let theme = cx.theme().clone();
         let locale = self.settings.read(cx).language.clone();
-        let update_status =
-            AutoUpdateStore::try_global(cx).map(|store| store.read(cx).status().clone());
+        let update_status = effective_update_status(cx);
         let page = self.current_page;
 
         let just_switched_to_device =
@@ -320,7 +322,7 @@ impl Render for SettingsScreen {
                 .child(text.to_uppercase())
         }
 
-        fn auto_update_row(
+        fn update_row(
             status: Option<AutoUpdateStatus>,
             locale: &str,
             theme: &Theme,
@@ -370,8 +372,11 @@ impl Render for SettingsScreen {
                     mezon_i18n::t(locale, "setting.update.upToDate").to_string(),
                     theme.text_muted,
                 ),
-                AutoUpdateStatus::Errored { .. } => (
-                    mezon_i18n::t(locale, "setting.update.failed").to_string(),
+                AutoUpdateStatus::Errored { message } => (
+                    format!(
+                        "{}: {message}",
+                        mezon_i18n::t(locale, "setting.update.failed")
+                    ),
                     gpui::rgb(0xef4444),
                 ),
             };
@@ -395,32 +400,19 @@ impl Render for SettingsScreen {
                     row = row
                         .cursor_pointer()
                         .hover(move |s| s.bg(bg_hover))
-                        .on_click(|_, _, cx| {
-                            if let Some(store) = AutoUpdateStore::try_global(cx) {
-                                store.update(cx, |store, cx| store.check(true, cx));
-                            }
-                        });
+                        .on_click(|_, _, cx| update_check_clicked(cx));
                 }
                 AutoUpdateStatus::UpdateAvailable { .. } => {
                     row = row
                         .cursor_pointer()
                         .hover(move |s| s.bg(bg_hover))
-                        .on_click(|_, _, cx| {
-                            let Some(store) = AutoUpdateStore::try_global(cx) else {
-                                return;
-                            };
-                            if let Some(url) = store.read(cx).store_page_url() {
-                                cx.open_url(url);
-                            } else {
-                                store.update(cx, |store, cx| store.check(true, cx));
-                            }
-                        });
+                        .on_click(|_, _, cx| update_available_clicked(cx));
                 }
                 AutoUpdateStatus::Updated { .. } => {
                     row = row
                         .cursor_pointer()
                         .hover(move |s| s.bg(bg_hover))
-                        .on_click(|_, _, cx| cx.restart());
+                        .on_click(|_, _, cx| update_restart_clicked(cx));
                 }
                 _ => {}
             }
@@ -544,7 +536,7 @@ impl Render for SettingsScreen {
                         cx.quit();
                     }),
             )
-            .child(auto_update_row(update_status, &locale, &theme))
+            .child(update_row(update_status, &locale, &theme))
             .child(
                 div()
                     .mt(px(4.0))
