@@ -2,10 +2,11 @@ use std::borrow::Cow;
 use std::rc::Rc;
 
 use gpui::{
-    AnyElement, App, AvailableSpace, Bounds, Corners, CursorStyle, DispatchPhase, Element,
-    ElementId, FontWeight, GlobalElementId, Hitbox, HitboxBehavior, Hsla, InspectorElementId,
-    IntoElement, LayoutId, MouseButton, MouseDownEvent, Pixels, Point, SharedString, Style,
-    TextAlign, TextRun, TransformationMatrix, TruncateFrom, Window, fill, point, px, size,
+    AnyElement, App, AvailableSpace, Bounds, ContentMask, Corners, CursorStyle, DispatchPhase,
+    Element, ElementId, FontWeight, GlobalElementId, Hitbox, HitboxBehavior, Hsla,
+    InspectorElementId, IntoElement, LayoutId, LineWrapperHandle, MouseButton, MouseDownEvent,
+    Pixels, Point, SharedString, Style, TextAlign, TextRun, TransformationMatrix, TruncateFrom,
+    Window, fill, point, px, size,
 };
 
 use crate::components::primitives::IconName;
@@ -108,26 +109,16 @@ fn line_height(window: &Window, font_size: Pixels) -> Pixels {
         .to_pixels(font_size.into(), window.rem_size())
 }
 
-fn truncate_to_width(
-    cx: &App,
-    window: &Window,
+fn truncate_to_width<'a>(
+    line_wrapper: &mut LineWrapperHandle,
     text: SharedString,
-    font_size: Pixels,
-    runs: &[TextRun],
     max_width: Pixels,
-) -> (SharedString, Vec<TextRun>) {
+    runs: &'a [TextRun],
+) -> (SharedString, Cow<'a, [TextRun]>) {
     if max_width <= px(0.) {
-        return (SharedString::default(), Vec::new());
+        return (SharedString::default(), Cow::Borrowed(&[]));
     }
-    let text_style = window.text_style();
-    let mut line_wrapper = cx.text_system().line_wrapper(text_style.font(), font_size);
-    let (truncated, runs_cow) =
-        line_wrapper.truncate_line(text, max_width, ELLIPSIS, runs, TruncateFrom::End);
-    let runs = match runs_cow {
-        Cow::Borrowed(r) => r.to_vec(),
-        Cow::Owned(r) => r,
-    };
-    (truncated, runs)
+    line_wrapper.truncate_line(text, max_width, ELLIPSIS, runs, TruncateFrom::End)
 }
 
 impl Element for MemberRowElement {
@@ -276,23 +267,32 @@ impl Element for MemberRowElement {
         let mut name_run = window.text_style().to_run(self.name.len());
         name_run.color = self.name_color;
         name_run.font.weight = FontWeight::MEDIUM;
+        let mut name_wrapper = cx
+            .text_system()
+            .line_wrapper(name_run.font.clone(), NAME_FONT_SIZE);
         let (name_text, name_runs) = truncate_to_width(
-            cx,
-            window,
+            &mut name_wrapper,
             self.name.clone(),
-            NAME_FONT_SIZE,
-            std::slice::from_ref(&name_run),
             name_max_width,
+            std::slice::from_ref(&name_run),
         );
         let name_line = text_system.shape_line(name_text, NAME_FONT_SIZE, &name_runs, None);
-        let _ = name_line.paint(
-            point(left + text_x, name_y),
-            name_line_height,
-            TextAlign::Left,
-            None,
-            window,
-            cx,
-        );
+        let name_clip = ContentMask {
+            bounds: Bounds {
+                origin: point(left + text_x, top),
+                size: size(name_max_width, ROW_HEIGHT),
+            },
+        };
+        window.with_content_mask(Some(name_clip), |window| {
+            let _ = name_line.paint(
+                point(left + text_x, name_y),
+                name_line_height,
+                TextAlign::Left,
+                None,
+                window,
+                cx,
+            );
+        });
 
         if let Some(color) = self.owner_icon {
             let owner_bounds = Bounds {
@@ -340,24 +340,33 @@ impl Element for MemberRowElement {
             };
             let mut status_run = window.text_style().to_run(text.len());
             status_run.color = color;
+            let mut status_wrapper = cx
+                .text_system()
+                .line_wrapper(status_run.font.clone(), STATUS_FONT_SIZE);
             let (status_text, status_runs) = truncate_to_width(
-                cx,
-                window,
+                &mut status_wrapper,
                 text,
-                STATUS_FONT_SIZE,
-                std::slice::from_ref(&status_run),
                 status_text_max_width,
+                std::slice::from_ref(&status_run),
             );
             let status_line =
                 text_system.shape_line(status_text, STATUS_FONT_SIZE, &status_runs, None);
-            let _ = status_line.paint(
-                point(status_text_x, status_y),
-                status_line_height,
-                TextAlign::Left,
-                None,
-                window,
-                cx,
-            );
+            let status_clip = ContentMask {
+                bounds: Bounds {
+                    origin: point(left + text_x, top),
+                    size: size(status_area_width, ROW_HEIGHT),
+                },
+            };
+            window.with_content_mask(Some(status_clip), |window| {
+                let _ = status_line.paint(
+                    point(status_text_x, status_y),
+                    status_line_height,
+                    TextAlign::Left,
+                    None,
+                    window,
+                    cx,
+                );
+            });
         }
     }
 }
@@ -367,5 +376,50 @@ impl IntoElement for MemberRowElement {
 
     fn into_element(self) -> Self::Element {
         self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use gpui::{FontWeight, SharedString, TestAppContext, px};
+
+    use super::{ELLIPSIS, NAME_FONT_SIZE, truncate_to_width};
+
+    #[gpui::test]
+    fn truncate_uses_medium_weight_for_name(cx: &mut TestAppContext) {
+        let text: SharedString = "phuong.nguyenhonghang.wider".into();
+        let max_width = px(172.);
+
+        let mut medium_run = gpui::TextRun::default();
+        medium_run.len = text.len();
+        medium_run.font.weight = FontWeight::MEDIUM;
+        let mut medium_wrapper = cx
+            .text_system()
+            .line_wrapper(medium_run.font.clone(), NAME_FONT_SIZE);
+        let (medium_text, _) = truncate_to_width(
+            &mut medium_wrapper,
+            text.clone(),
+            max_width,
+            std::slice::from_ref(&medium_run),
+        );
+
+        let mut regular_run = gpui::TextRun::default();
+        regular_run.len = text.len();
+        let mut regular_wrapper = cx
+            .text_system()
+            .line_wrapper(regular_run.font.clone(), NAME_FONT_SIZE);
+        let (regular_text, _) = truncate_to_width(
+            &mut regular_wrapper,
+            text,
+            max_width,
+            std::slice::from_ref(&regular_run),
+        );
+
+        assert!(medium_text.ends_with(ellipsis_char()));
+        assert!(regular_text.len() >= medium_text.len());
+    }
+
+    fn ellipsis_char() -> char {
+        ELLIPSIS.chars().next().unwrap()
     }
 }
