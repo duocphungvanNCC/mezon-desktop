@@ -2873,8 +2873,9 @@ fn build_message_content_json(
             .iter()
             .map(|m| {
                 let mut o = serde_json::Map::new();
-                if !m.user_id.is_empty() {
-                    o.insert("user_id".into(), m.user_id.clone().into());
+                let user_id = m.wire_user_id();
+                if !user_id.is_empty() {
+                    o.insert("user_id".into(), user_id.into());
                 }
                 if !m.role_id.is_empty() {
                     o.insert("role_id".into(), m.role_id.clone().into());
@@ -9116,6 +9117,13 @@ mod tests {
         );
         assert_eq!(
             legacy.to_content_token().user_id.as_deref(),
+            Some(MENTION_HERE_USER_ID)
+        );
+        let sent = build_send_content("@here", std::slice::from_ref(&legacy), &[], &[]);
+        let parsed: ApiMessageContent =
+            serde_json::from_str(&sent.json).expect("wire content json");
+        assert_eq!(
+            parsed.mentions[0].user_id.as_deref(),
             Some(MENTION_HERE_USER_ID)
         );
     }
