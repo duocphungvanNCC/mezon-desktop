@@ -131,6 +131,17 @@ impl McpRuntime {
                         let result = cx.update(scroll_state);
                         let _ = reply.send(result);
                     }
+                    McpCommand::ListEmojis {
+                        clan_id,
+                        query,
+                        limit,
+                        reply,
+                    } => {
+                        let result = cx.update(|cx| {
+                            list_emojis(cx, clan_id.as_deref(), query.as_deref(), limit)
+                        });
+                        let _ = reply.send(result);
+                    }
                     McpCommand::LoadMoreMessages { older, reply } => {
                         let result = cx.update(|cx| load_more_messages(cx, older));
                         let _ = reply.send(result);
@@ -207,6 +218,37 @@ async fn handle_control_request(
             format!("unknown control method: {other}"),
         )),
     }
+}
+
+fn list_emojis(
+    cx: &mut App,
+    clan_id: Option<&str>,
+    query: Option<&str>,
+    limit: usize,
+) -> anyhow::Result<Value> {
+    let store = mezon_store::EmojiStore::global(cx);
+    let store = store.read(cx);
+    let needle = query.map(str::to_lowercase);
+    let items: Vec<Value> = store
+        .all()
+        .into_iter()
+        .filter(|emoji| clan_id.is_none_or(|id| emoji.clan_id == id))
+        .filter(|emoji| {
+            needle
+                .as_deref()
+                .is_none_or(|needle| emoji.shortname.to_lowercase().contains(needle))
+        })
+        .take(limit)
+        .map(|emoji| {
+            json!({
+                "emoji_id": emoji.id,
+                "shortname": emoji.shortname,
+                "category": emoji.category,
+                "clan_id": emoji.clan_id,
+            })
+        })
+        .collect();
+    Ok(json!({ "count": items.len(), "emojis": items }))
 }
 
 fn scroll_state(cx: &mut App) -> anyhow::Result<Value> {

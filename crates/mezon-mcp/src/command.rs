@@ -53,6 +53,12 @@ pub enum McpCommand {
     GetScrollState {
         reply: oneshot::Sender<anyhow::Result<Value>>,
     },
+    ListEmojis {
+        clan_id: Option<String>,
+        query: Option<String>,
+        limit: usize,
+        reply: oneshot::Sender<anyhow::Result<Value>>,
+    },
     LoadMoreMessages {
         older: bool,
         reply: oneshot::Sender<anyhow::Result<Value>>,

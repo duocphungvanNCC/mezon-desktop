@@ -3,7 +3,7 @@ use anyhow::Context as _;
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use futures::channel::mpsc::UnboundedSender;
 use mezon_client::transport::{
-    ApiComponentPayload, ApiEmbed, ApiMessage, ApiMessageComponent, OutgoingReply,
+    ApiComponentPayload, ApiEmbed, ApiMessage, ApiMessageComponent, OutgoingEmoji, OutgoingReply,
 };
 use mezon_client::{AppApi, ConnectionStatus, UploadFile, UrlAttachment};
 use mezon_proto::api::SearchMessageDocument;
@@ -99,6 +99,33 @@ impl McpBackend {
             }
             "get_current_context" => self.get_current_context().await,
             "get_scroll_state" => self.get_scroll_state().await,
+            "list_emojis" => {
+                let clan_id = arguments
+                    .get("clan_id")
+                    .and_then(|value| {
+                        value
+                            .as_str()
+                            .map(str::to_string)
+                            .or_else(|| value.as_i64().map(|id| id.to_string()))
+                    })
+                    .filter(|id| id != "0");
+                let query = arguments
+                    .get("query")
+                    .and_then(Value::as_str)
+                    .map(str::to_string);
+                let limit = arguments
+                    .get("limit")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(100)
+                    .clamp(1, 1000) as usize;
+                self.send_ui_result(|reply| McpCommand::ListEmojis {
+                    clan_id,
+                    query,
+                    limit,
+                    reply,
+                })
+                .await
+            }
             "load_more_messages" => {
                 self.require_write_mode("load_more_messages")?;
                 let older = arguments
@@ -173,7 +200,9 @@ impl McpBackend {
                     .and_then(Value::as_str)
                     .ok_or_else(|| anyhow::anyhow!("send_message requires string field content"))?
                     .to_string();
-                self.send_message(clan_id, channel_id, &content).await
+                let emojis = build_emoji_spans(&content, arguments.get("emojis"))?;
+                self.send_message(clan_id, channel_id, &content, emojis)
+                    .await
             }
             "reply_to_message" => {
                 self.require_write_mode("reply_to_message")?;
@@ -819,6 +848,7 @@ impl McpBackend {
         clan_id: i64,
         channel_id: i64,
         content: &str,
+        emojis: Vec<OutgoingEmoji>,
     ) -> anyhow::Result<Value> {
         let (clan_id, is_public, mode) = self.resolve_channel_mode(clan_id, channel_id).await?;
         let message = self
@@ -831,7 +861,7 @@ impl McpBackend {
                 mode,
                 Vec::new(),
                 Vec::new(),
-                Vec::new(),
+                emojis,
                 None,
             )
             .await?;
@@ -1515,6 +1545,47 @@ fn resolve_button_id(message: &ApiMessage, arguments: &Value) -> anyhow::Result<
     anyhow::bail!("button not found with label: {label}")
 }
 
+fn build_emoji_spans(content: &str, emojis: Option<&Value>) -> anyhow::Result<Vec<OutgoingEmoji>> {
+    let Some(items) = emojis else {
+        return Ok(Vec::new());
+    };
+    let items = items
+        .as_array()
+        .ok_or_else(|| anyhow::anyhow!("send_message field emojis must be an array"))?;
+    let mut spans = Vec::new();
+    for item in items {
+        let shortname = item
+            .get("shortname")
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| anyhow::anyhow!("each emojis entry requires a non-empty shortname"))?;
+        let emoji_id = item
+            .get("emoji_id")
+            .and_then(|value| {
+                value
+                    .as_str()
+                    .map(str::to_string)
+                    .or_else(|| value.as_i64().map(|id| id.to_string()))
+            })
+            .ok_or_else(|| anyhow::anyhow!("each emojis entry requires emoji_id"))?;
+        let mut from = 0usize;
+        while let Some(offset) = content[from..].find(shortname) {
+            let start = from + offset;
+            spans.push(OutgoingEmoji {
+                emoji_id: emoji_id.clone(),
+                s: start as i32,
+                e: (start + shortname.len()) as i32,
+            });
+            from = start + shortname.len();
+        }
+        if !spans.iter().any(|span| span.emoji_id == emoji_id) {
+            anyhow::bail!("shortname {shortname} does not appear in content");
+        }
+    }
+    spans.sort_by_key(|span| span.s);
+    Ok(spans)
+}
+
 fn parse_i64_field(arguments: &Value, field: &str) -> anyhow::Result<i64> {
     let raw = arguments
         .get(field)
@@ -1649,5 +1720,55 @@ mod tests {
     fn validate_navigate_path_rejects_urls() {
         assert!(validate_navigate_path("http://evil.com").is_err());
         assert!(validate_navigate_path("/chat/clans/1/channels/2").is_ok());
+    }
+
+    #[test]
+    fn emoji_spans_cover_every_occurrence() {
+        let spans = build_emoji_spans(
+            "hi :joy: there :joy:",
+            Some(&serde_json::json!([{ "shortname": ":joy:", "emoji_id": "12" }])),
+        )
+        .expect("spans");
+        assert_eq!(spans.len(), 2);
+        assert_eq!((spans[0].s, spans[0].e), (3, 8));
+        assert_eq!((spans[1].s, spans[1].e), (15, 20));
+    }
+
+    #[test]
+    fn emoji_spans_use_byte_offsets_like_the_composer() {
+        let content = "chào :joy:";
+        let spans = build_emoji_spans(
+            content,
+            Some(&serde_json::json!([{ "shortname": ":joy:", "emoji_id": "12" }])),
+        )
+        .expect("spans");
+        let span = spans.first().expect("one span");
+        assert_eq!(
+            &content[span.s as usize..span.e as usize],
+            ":joy:",
+            "the composer indexes the input by byte offset, so a multi-byte prefix must not \
+             shift the span onto the wrong characters"
+        );
+    }
+
+    #[test]
+    fn emoji_spans_reject_a_shortname_missing_from_content() {
+        assert!(
+            build_emoji_spans(
+                "no emoji here",
+                Some(&serde_json::json!([{ "shortname": ":joy:", "emoji_id": "12" }])),
+            )
+            .is_err(),
+            "a span pointing outside the text would render as a stray emoji at offset 0"
+        );
+    }
+
+    #[test]
+    fn emoji_spans_default_to_empty() {
+        assert!(
+            build_emoji_spans("plain text", None)
+                .expect("spans")
+                .is_empty()
+        );
     }
 }

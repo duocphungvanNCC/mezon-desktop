@@ -211,8 +211,28 @@ pub fn input_schema(name: &str) -> Arc<Map<String, Value>> {
                 "clan_id": id("Clan snowflake id. Use 0 for the current direct message."),
                 "channel_id": id("Channel snowflake id."),
                 "content": string("Plain-text message body."),
+                "emojis": {
+                    "type": "array",
+                    "description": "Custom emoji to render inside content. Each shortname must appear in content; every occurrence becomes a span. Look ids up with list_emojis.",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "shortname": { "type": "string", "description": "Literal text in content, e.g. \":pepe_joy:\"." },
+                            "emoji_id": { "type": "string", "description": "Emoji snowflake id from list_emojis." }
+                        },
+                        "required": ["shortname", "emoji_id"]
+                    }
+                },
             }),
             &["clan_id", "channel_id", "content"],
+        )),
+        "list_emojis" => Arc::new(object(
+            json!({
+                "clan_id": id("Optional clan snowflake id to filter by."),
+                "query": string("Optional case-insensitive substring match on shortname."),
+                "limit": integer("Max entries to return. Default 100.", Some(100)),
+            }),
+            &[],
         )),
         "reply_to_message" => Arc::new(object(
             json!({

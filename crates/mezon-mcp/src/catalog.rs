@@ -195,6 +195,21 @@ Parameters:
         write: true,
     },
     ToolSpec {
+        name: "list_emojis",
+        description: "\
+List custom emoji available to the signed-in user.
+
+Emoji in a message body are spans, not text: sending the literal \":shortname:\" through
+send_message renders as plain characters. Look the emoji up here, then pass its
+shortname and emoji_id in send_message's `emojis` array so it renders.
+
+Parameters:
+- clan_id (optional): restrict to one clan's emoji.
+- query (optional): case-insensitive substring match on shortname.
+- limit (optional): max entries to return. Default 100.",
+        write: false,
+    },
+    ToolSpec {
         name: "pin_message",
         description: "\
 Pin a message to the channel.
