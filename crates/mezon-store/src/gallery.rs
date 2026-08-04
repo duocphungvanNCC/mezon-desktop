@@ -130,6 +130,69 @@ impl ChannelAttachment {
     pub fn is_media(&self) -> bool {
         self.is_image || self.is_video
     }
+
+    pub fn seed_from_message(
+        att: &crate::message::MessageAttachment,
+        message_id: MessageId,
+        uploader_id: UserId,
+        create_time_seconds: u32,
+        uploader_name: SharedString,
+        uploader_avatar: SharedString,
+        uploader_avatar_raw: SharedString,
+        channel_id: ChannelId,
+        clan_id: ClanId,
+        cfg: Option<&AppConfig>,
+    ) -> Self {
+        let url = match cfg {
+            Some(cfg) => match cfg.read_media_url(&att.url) {
+                std::borrow::Cow::Owned(u) => u,
+                std::borrow::Cow::Borrowed(u) => u.to_string(),
+            },
+            None => att.url.clone(),
+        };
+        let is_video = att.is_video();
+        let is_image = !is_video && att.is_image();
+        let (thumb_src, viewer_thumb_src, viewer_src) = if is_video {
+            let u = url.clone();
+            (u.clone().into(), u.clone().into(), u.into())
+        } else if let Some(cfg) = cfg {
+            (
+                cfg.gallery_thumb_proxy(&url).into(),
+                cfg.viewer_thumb_proxy(&url).into(),
+                cfg.viewer_proxy(&url, att.width, att.height).into(),
+            )
+        } else {
+            let u = url.clone();
+            (u.clone().into(), u.clone().into(), u.into())
+        };
+        let day_label = format_day(create_time_seconds as i64).into();
+        let day_index = day_index(create_time_seconds as i64);
+        let viewer_timestamp = format_viewer_timestamp(create_time_seconds).into();
+        Self {
+            id: 0,
+            channel_id,
+            clan_id,
+            message_id,
+            uploader_id,
+            url,
+            filename: att.filename.clone(),
+            filetype: att.filetype.clone(),
+            width: att.width,
+            height: att.height,
+            create_time_seconds,
+            is_image,
+            is_video,
+            thumb_src,
+            viewer_thumb_src,
+            viewer_src,
+            day_label,
+            day_index,
+            viewer_timestamp,
+            uploader_name,
+            uploader_avatar,
+            uploader_avatar_raw,
+        }
+    }
 }
 
 pub async fn fetch_channel_attachments(
@@ -929,5 +992,36 @@ mod tests {
         let mut atts = vec![att(1, 1, "image/png")];
         enrich_uploader(&mut atts, |_| None);
         assert_eq!(atts[0].uploader_name, SharedString::from("Anonymous"));
+    }
+
+    #[test]
+    fn seed_from_message_uses_clicked_attachment() {
+        let msg_att = crate::message::MessageAttachment {
+            url: "https://cdn.example/checkin.png".into(),
+            filename: "checkin.png".into(),
+            filetype: "image/png".into(),
+            width: 640,
+            height: 640,
+            ..Default::default()
+        };
+        let seed = ChannelAttachment::seed_from_message(
+            &msg_att,
+            MessageId(42),
+            UserId(7),
+            1_700_000_000,
+            "alice".into(),
+            "https://cdn.example/a.png".into(),
+            "https://cdn.example/a.png".into(),
+            ChannelId(1),
+            ClanId(1),
+            None,
+        );
+        assert_eq!(seed.id, 0);
+        assert_eq!(seed.message_id, MessageId(42));
+        assert_eq!(seed.url, "https://cdn.example/checkin.png");
+        assert!(seed.is_image);
+        assert!(!seed.is_video);
+        assert_eq!(seed.uploader_name.as_ref(), "alice");
+        assert_eq!(seed.create_time_seconds, 1_700_000_000);
     }
 }
