@@ -31,6 +31,7 @@ struct ProfileState {
     original_display_name: SharedString,
     original_about_me: SharedString,
     original_avatar_url: Option<SharedString>,
+    original_logo_url: Option<SharedString>,
     loading: bool,
     saving: bool,
 }
@@ -51,6 +52,7 @@ impl ProfileState {
             original_display_name: display_name,
             original_about_me: about_me,
             original_avatar_url: avatar_url,
+            original_logo_url: account.logo.clone().map(Into::into),
             loading: false,
             saving: false,
         }
@@ -73,6 +75,7 @@ pub struct ProfilePage {
     banner_color: Option<Rgba>,
     banner_source: String,
     banner_task: Option<Task<()>>,
+    discard_on_next_render: bool,
     #[allow(dead_code)]
     show_delete_confirm: bool,
 }
@@ -101,6 +104,7 @@ impl ProfilePage {
                 if !this.account_loaded {
                     this.account_loaded = true;
                     this.profile = Some(ProfileState::from_account(account));
+                    this.refresh_banner_color(cx);
                     cx.notify();
                 } else if let Some(profile) = &mut this.profile
                     && (profile.status.as_ref() != account.status
@@ -111,6 +115,7 @@ impl ProfilePage {
                     cx.notify();
                 }
             }
+            this.refresh_banner_color(cx);
         })
         .detach();
         cx.subscribe(
@@ -125,6 +130,7 @@ impl ProfilePage {
                         state.original_display_name = state.display_name.clone();
                         state.original_about_me = state.about_me.clone();
                         state.original_avatar_url = state.avatar_url.clone();
+                        state.original_logo_url = state.logo_url.clone();
                         state.saving = false;
                     }
                     this.show_toast("Profile saved", cx);
@@ -139,9 +145,10 @@ impl ProfilePage {
                     if let Some(state) = &mut this.profile {
                         state.avatar_url = Some(url.clone().into());
                     }
+                    this.refresh_banner_color(cx);
                     cx.notify();
                 }
-                AccountEvent::AvatarUploadFailed(msg) => {
+                AccountEvent::UserAvatarUploadFailed(msg) => {
                     this.show_toast(format!("Failed to upload avatar: {}", msg), cx);
                 }
                 AccountEvent::DirectMessageIconUploaded(url) => {
@@ -166,7 +173,7 @@ impl ProfilePage {
             None => (None, false),
         };
 
-        Self {
+        let mut this = Self {
             settings,
             clan_list,
             active_tab: ProfileTab::User,
@@ -182,8 +189,16 @@ impl ProfilePage {
             banner_color: None,
             banner_source: String::new(),
             banner_task: None,
+            discard_on_next_render: false,
             show_delete_confirm: false,
-        }
+        };
+        this.refresh_banner_color(cx);
+        this
+    }
+
+    pub fn discard_drafts_on_next_render(&mut self, cx: &mut Context<Self>) {
+        self.discard_on_next_render = true;
+        cx.notify();
     }
 
     pub fn show_user_profile(&mut self, cx: &mut Context<Self>) {
@@ -215,7 +230,14 @@ impl ProfilePage {
         );
         let section = self.ensure_clan_section(cx);
         section.update(cx, |section, cx| {
-            section.set_user_profile(display_name, username, avatar_url, status, custom_status);
+            section.set_user_profile(
+                display_name,
+                username,
+                avatar_url,
+                status,
+                custom_status,
+                cx,
+            );
             section.fetch(&clan_id.get().to_string(), cx);
         });
         cx.notify();
@@ -269,6 +291,7 @@ impl ProfilePage {
                 .placeholder(about_ph)
                 .min_height(px(112.))
                 .max_visible_lines(6)
+                .max_length(128)
         });
 
         if let Some(state) = &self.profile {
@@ -301,7 +324,7 @@ impl ProfilePage {
                     && let Some(state) = &mut this.profile
                     && !state.saving
                 {
-                    let value = about.read(cx).value().chars().take(128).collect::<String>();
+                    let value = about.read(cx).value().to_string();
                     state.about_me = value.into();
                     cx.notify();
                 }
@@ -317,6 +340,7 @@ impl ProfilePage {
             state.display_name != state.original_display_name
                 || state.about_me != state.original_about_me
                 || state.avatar_url != state.original_avatar_url
+                || state.logo_url != state.original_logo_url
         } else {
             false
         }
@@ -328,18 +352,21 @@ impl ProfilePage {
                 s.original_display_name.clone(),
                 s.original_about_me.clone(),
                 s.original_avatar_url.clone(),
+                s.original_logo_url.clone(),
             )
         });
 
-        if let (Some((display_name, about_me, avatar_url)), Some(state)) =
+        if let (Some((display_name, about_me, avatar_url, logo_url)), Some(state)) =
             (original.clone(), &mut self.profile)
         {
             state.display_name = display_name;
             state.about_me = about_me;
             state.avatar_url = avatar_url;
+            state.logo_url = logo_url;
         }
+        self.refresh_banner_color(cx);
 
-        if let Some((display_name, about_me, _)) = original {
+        if let Some((display_name, about_me, _, _)) = original {
             if let Some(input) = &self.display_name_input {
                 input.update(cx, |input_state: &mut InputState, input_cx| {
                     input_state.set_value(display_name.clone(), window, input_cx);
@@ -370,15 +397,20 @@ impl ProfilePage {
         let display_name: String = state.display_name.to_string();
         let about_me: String = state.about_me.to_string();
         let avatar_url: Option<String> = state.avatar_url.as_ref().map(|s| s.to_string());
+        let logo_url = Some(
+            state
+                .logo_url
+                .as_ref()
+                .map(ToString::to_string)
+                .unwrap_or_default(),
+        );
 
         AccountStore::global(cx).update(cx, |store, cx| {
-            store.save_account(display_name, avatar_url, about_me, cx);
+            store.save_account(display_name, avatar_url, about_me, logo_url, cx);
         });
     }
 
     fn render_user_section(&mut self, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
-        self.refresh_banner_color(cx);
-        let entity = cx.entity().clone();
         let locale = self.settings.read(cx).language.clone();
         let avatar_display = self
             .profile
@@ -387,9 +419,6 @@ impl ProfilePage {
             .map(|url| SharedString::from(crate::util::imgproxy::profile_url(cx, url.as_ref())));
         let form = self.render_form(theme, cx, avatar_display.clone());
         let preview = self.render_preview(theme, &locale, avatar_display);
-        let is_dirty = self.is_dirty();
-        let saving = self.profile.as_ref().map(|p| p.saving).unwrap_or(false);
-
         v_flex()
             .gap_6()
             .child(
@@ -399,71 +428,6 @@ impl ProfilePage {
                     .child(div().min_w_0().flex_1().flex_basis(px(0.)).child(form))
                     .child(div().min_w_0().flex_1().flex_basis(px(0.)).child(preview)),
             )
-            .when(false && (is_dirty || saving), |el| {
-                el.child(
-                    h_flex()
-                        .absolute()
-                        .left_0()
-                        .right_0()
-                        .bottom(px(16.))
-                        .min_h(px(64.))
-                        .p_3()
-                        .gap_3()
-                        .items_center()
-                        .justify_between()
-                        .rounded_lg()
-                        .border_1()
-                        .border_color(theme.border)
-                        .bg(theme.bg_floating)
-                        .shadow_lg()
-                        .child(
-                            div()
-                                .flex_1()
-                                .text_base()
-                                .text_color(theme.text_primary)
-                                .child(mezon_i18n::t(&locale, "setting.profile.unsavedWarning")),
-                        )
-                        .child(
-                            h_flex()
-                                .flex_row_reverse()
-                                .gap_3()
-                                .child(
-                                    GpuiButton::new("user-save-btn")
-                                        .label(if saving {
-                                            mezon_i18n::t(&locale, "setting.profile.saving")
-                                        } else {
-                                            mezon_i18n::t(&locale, "setting.profile.saveChanges")
-                                        })
-                                        .disabled(saving)
-                                        .primary()
-                                        .on_click({
-                                            let e = entity.clone();
-                                            move |_, _, cx| {
-                                                e.update(cx, |this, view_cx| {
-                                                    this.save(view_cx);
-                                                });
-                                            }
-                                        }),
-                                )
-                                .child(
-                                    GpuiButton::new("user-discard-btn")
-                                        .label(mezon_i18n::t(&locale, "profileSetting.reset"))
-                                        .disabled(saving)
-                                        .text_color(theme.text_primary)
-                                        .ghost()
-                                        .on_click({
-                                            let e = entity.clone();
-                                            move |_, window, cx| {
-                                                e.update(cx, |this, view_cx| {
-                                                    this.discard_changes(window, view_cx);
-                                                    view_cx.notify();
-                                                });
-                                            }
-                                        }),
-                                ),
-                        ),
-                )
-            })
             .when_some(self.toast_message.clone(), |this, msg| {
                 this.child(
                     div()
@@ -481,6 +445,13 @@ impl ProfilePage {
 
 impl Render for ProfilePage {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.discard_on_next_render {
+            self.discard_on_next_render = false;
+            self.discard_changes(window, cx);
+            if let Some(section) = &self.clan_section {
+                section.update(cx, |section, cx| section.discard_changes(window, cx));
+            }
+        }
         if self.profile.as_ref().is_some_and(|p| !p.loading) && self.display_name_input.is_none() {
             self.init_inputs(window, cx);
         }
@@ -610,6 +581,7 @@ impl Render for ProfilePage {
                                     avatar_url,
                                     status,
                                     custom_status,
+                                    cx,
                                 );
                                 s.fetch(&active_clan_id.to_string(), cx);
                             });
@@ -864,6 +836,7 @@ impl ProfilePage {
                                         if let Some(state) = &mut this.profile {
                                             state.avatar_url = None;
                                         }
+                                        this.refresh_banner_color(cx);
                                         cx.notify();
                                     })),
                             ),
@@ -896,7 +869,7 @@ impl ProfilePage {
                             .text_right()
                             .text_sm()
                             .text_color(theme.text_muted)
-                            .child(format!("{}/128", about_me.len())),
+                            .child(format!("{}/128", about_me.chars().count())),
                     ),
             )
             .child(
@@ -927,7 +900,7 @@ impl ProfilePage {
                             .items_center()
                             .justify_center()
                             .cursor_pointer()
-                            .when_some(logo_url, |element, url| {
+                            .when_some(logo_url.clone(), |element, url| {
                                 element.child(
                                     img(crate::util::imgproxy::profile_url(cx, &url))
                                         .size_full()
@@ -976,7 +949,25 @@ impl ProfilePage {
                                 })
                                 .detach();
                             })),
-                    ),
+                    )
+                    .when(logo_url.is_some(), |element| {
+                        element.child(
+                            GpuiButton::new("remove-direct-message-icon-btn")
+                                .label(mezon_i18n::t(
+                                    &locale,
+                                    "clanRoles.roleManagement.removeIcon",
+                                ))
+                                .text_color(theme.text_muted)
+                                .border_1()
+                                .border_color(theme.border)
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    if let Some(profile) = &mut this.profile {
+                                        profile.logo_url = None;
+                                    }
+                                    cx.notify();
+                                })),
+                        )
+                    }),
             )
     }
 

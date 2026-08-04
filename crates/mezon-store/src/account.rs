@@ -53,7 +53,8 @@ pub enum AccountEvent {
     AccountSaveFailed(String),
     UserAvatarUploaded(String),
     ClanAvatarUploaded(String),
-    AvatarUploadFailed(String),
+    UserAvatarUploadFailed(String),
+    ClanAvatarUploadFailed(String),
     DirectMessageIconUploaded(String),
     DirectMessageIconUploadFailed(String),
     ClanProfileLoaded,
@@ -308,6 +309,7 @@ impl AccountStore {
         display_name: String,
         avatar_url: Option<String>,
         about_me: String,
+        logo_url: Option<String>,
         cx: &mut Context<Self>,
     ) {
         let api = self.api.clone();
@@ -317,7 +319,7 @@ impl AccountStore {
                     Some(&display_name),
                     avatar_url.as_deref(),
                     Some(&about_me),
-                    None,
+                    logo_url.as_deref(),
                 )
                 .await
             {
@@ -327,6 +329,7 @@ impl AccountStore {
                             account.display_name = display_name;
                             account.avatar_url = avatar_url;
                             account.about_me = Some(about_me);
+                            account.logo = logo_url.filter(|url| !url.is_empty());
                         }
                         if let Some(account) = &this.account {
                             Self::spawn_persist_cache(account, cx);
@@ -431,7 +434,11 @@ impl AccountStore {
                 }
                 Err(e) => {
                     let _ = this.update(cx, |_, cx| {
-                        cx.emit(AccountEvent::AvatarUploadFailed(e.to_string()));
+                        if clan_profile {
+                            cx.emit(AccountEvent::ClanAvatarUploadFailed(e.to_string()));
+                        } else {
+                            cx.emit(AccountEvent::UserAvatarUploadFailed(e.to_string()));
+                        }
                         cx.notify();
                     });
                 }
@@ -454,21 +461,11 @@ impl AccountStore {
         cx.spawn(async move |this, cx| {
             let result = cx
                 .background_executor()
-                .spawn(async move {
-                    let url = api.upload_avatar(&path).await?;
-                    api.update_account(None, None, None, Some(&url)).await?;
-                    anyhow::Ok(url)
-                })
+                .spawn(async move { api.upload_avatar(&path).await })
                 .await;
             match result {
                 Ok(url) => {
-                    let _ = this.update(cx, |this, cx| {
-                        if let Some(account) = &mut this.account {
-                            account.logo = Some(url.clone());
-                        }
-                        if let Some(account) = &this.account {
-                            Self::spawn_persist_cache(account, cx);
-                        }
+                    let _ = this.update(cx, |_, cx| {
                         cx.emit(AccountEvent::DirectMessageIconUploaded(url));
                         cx.notify();
                     });

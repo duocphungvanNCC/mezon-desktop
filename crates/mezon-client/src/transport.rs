@@ -8670,7 +8670,7 @@ impl MezonTransport {
                 .map(|s| s.to_string()),
             avatar_url: avatar_url.filter(|s| !s.is_empty()).map(|s| s.to_string()),
             about_me: about_me.filter(|s| !s.is_empty()).map(|s| s.to_string()),
-            logo: logo.filter(|s| !s.is_empty()).map(|s| s.to_string()),
+            logo: logo.map(str::to_string),
             ..Default::default()
         }
         .encode_to_vec();

@@ -101,8 +101,11 @@ impl SettingsScreen {
     }
 
     pub fn set_page(&mut self, page: SettingsPage, cx: &mut Context<Self>) {
-        if self.current_page == SettingsPage::Profile && page != SettingsPage::Profile {
-            self.profile_page = None;
+        if self.current_page == SettingsPage::Profile
+            && page != SettingsPage::Profile
+            && let Some(profile_page) = &self.profile_page
+        {
+            profile_page.update(cx, |page, cx| page.discard_drafts_on_next_render(cx));
         }
         self.current_page = page;
         self.ensure_page(page, cx);
@@ -556,8 +559,10 @@ impl Render for SettingsScreen {
             .track_focus(&self.focus_handle)
             .key_context("menu")
             .on_action(cx.listener(|this, _: &::menu::Cancel, _window, cx| {
-                if this.current_page == SettingsPage::Profile {
-                    this.profile_page = None;
+                if this.current_page == SettingsPage::Profile
+                    && let Some(profile_page) = &this.profile_page
+                {
+                    profile_page.update(cx, |page, cx| page.discard_drafts_on_next_render(cx));
                 }
                 crate::router::go_back(cx);
             }))
@@ -702,8 +707,12 @@ impl Render for SettingsScreen {
                                             .child("ESC"),
                                     )
                                     .on_click(cx.listener(|this, _, _, cx| {
-                                        if this.current_page == SettingsPage::Profile {
-                                            this.profile_page = None;
+                                        if this.current_page == SettingsPage::Profile
+                                            && let Some(profile_page) = &this.profile_page
+                                        {
+                                            profile_page.update(cx, |page, cx| {
+                                                page.discard_drafts_on_next_render(cx)
+                                            });
                                         }
                                         crate::router::go_back(cx);
                                     })),

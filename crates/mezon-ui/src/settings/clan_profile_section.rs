@@ -96,6 +96,7 @@ impl ClanProfileSection {
                     cx.notify();
                 }
             }
+            this.refresh_banner_color(cx);
         })
         .detach();
         cx.subscribe(
@@ -145,9 +146,10 @@ impl ClanProfileSection {
                     if let Some(state) = &mut this.profile {
                         state.avatar_url = Some(url.clone().into());
                     }
+                    this.refresh_banner_color(cx);
                     cx.notify();
                 }
-                AccountEvent::AvatarUploadFailed(msg) => {
+                AccountEvent::ClanAvatarUploadFailed(msg) => {
                     let locale = this.settings.read(cx).language.clone();
                     this.show_toast(
                         format!(
@@ -162,7 +164,7 @@ impl ClanProfileSection {
             },
         )
         .detach();
-        Self {
+        let mut this = Self {
             settings,
             clan_list,
             profile: None,
@@ -180,7 +182,9 @@ impl ClanProfileSection {
             banner_color: None,
             banner_source: String::new(),
             banner_task: None,
-        }
+        };
+        this.refresh_banner_color(cx);
+        this
     }
 
     pub fn set_user_profile(
@@ -190,12 +194,14 @@ impl ClanProfileSection {
         avatar_url: Option<SharedString>,
         status: SharedString,
         custom_status: SharedString,
+        cx: &mut Context<Self>,
     ) {
         self.display_name = display_name;
         self.username = username;
         self.user_avatar_url = avatar_url;
         self.status = status;
         self.custom_status = custom_status;
+        self.refresh_banner_color(cx);
     }
 
     fn show_toast(&mut self, message: impl Into<SharedString>, cx: &mut Context<Self>) {
@@ -320,6 +326,7 @@ impl ClanProfileSection {
             state.avatar_url = state.original_avatar_url.clone();
             state.duplicate_error = false;
         }
+        self.refresh_banner_color(cx);
         if let (Some(input), Some(state)) = (&self.nick_name_input, &self.profile) {
             input.update(cx, |input_state, cx| {
                 input_state.set_value(state.nick_name.clone(), window, cx);
@@ -340,6 +347,7 @@ impl ClanProfileSection {
             duplicate_error: false,
             fetched: false,
         });
+        self.refresh_banner_color(cx);
         cx.notify();
         AccountStore::global(cx).update(cx, |store, cx| {
             store.fetch_clan_profile(clan_id.parse().unwrap_or_default(), cx)
@@ -373,7 +381,6 @@ impl ClanProfileSection {
 
 impl Render for ClanProfileSection {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        self.refresh_banner_color(cx);
         let theme = cx.theme().clone();
         let locale = self.settings.read(cx).language.clone();
 
@@ -381,10 +388,7 @@ impl Render for ClanProfileSection {
             self.init_inputs(window, cx);
         }
 
-        let is_dirty = self.is_dirty();
-        let entity = cx.entity().clone();
         let loading = self.profile.as_ref().is_some_and(|p| p.loading);
-        let saving = self.profile.as_ref().map(|p| p.saving).unwrap_or(false);
 
         let clans = self.clan_list.read(cx);
         let clan_options: Vec<(SharedString, SharedString)> = clans
@@ -443,70 +447,6 @@ impl Render for ClanProfileSection {
                     .child(div().min_w_0().flex_1().flex_basis(px(0.)).child(form))
                     .child(div().min_w_0().flex_1().flex_basis(px(0.)).child(preview)),
             )
-            .when(false && (is_dirty || saving), |el| {
-                el.child(
-                    h_flex()
-                        .absolute()
-                        .left_0()
-                        .right_0()
-                        .bottom(px(16.))
-                        .min_h(px(64.))
-                        .p_3()
-                        .gap_3()
-                        .items_center()
-                        .justify_between()
-                        .rounded_lg()
-                        .border_1()
-                        .border_color(theme.border)
-                        .bg(theme.bg_floating)
-                        .shadow_lg()
-                        .child(
-                            div()
-                                .flex_1()
-                                .text_base()
-                                .text_color(theme.text_primary)
-                                .child(mezon_i18n::t(&locale, "setting.profile.unsavedWarning")),
-                        )
-                        .child(
-                            h_flex()
-                                .flex_row_reverse()
-                                .gap_3()
-                                .child(
-                                    GpuiButton::new("clan-save-btn")
-                                        .label(if saving {
-                                            mezon_i18n::t(&locale, "setting.profile.saving")
-                                        } else {
-                                            mezon_i18n::t(&locale, "setting.profile.saveChanges")
-                                        })
-                                        .disabled(saving)
-                                        .primary()
-                                        .on_click({
-                                            let e = entity.clone();
-                                            move |_, _, cx| {
-                                                e.update(cx, |this, cx| {
-                                                    this.save(cx);
-                                                });
-                                            }
-                                        }),
-                                )
-                                .child(
-                                    GpuiButton::new("clan-discard-btn")
-                                        .label(mezon_i18n::t(&locale, "profileSetting.reset"))
-                                        .disabled(saving)
-                                        .text_color(theme.text_primary)
-                                        .ghost()
-                                        .on_click({
-                                            let e = entity.clone();
-                                            move |_, window, cx| {
-                                                e.update(cx, |this, cx| {
-                                                    this.discard(window, cx);
-                                                });
-                                            }
-                                        }),
-                                ),
-                        ),
-                )
-            })
             .when_some(self.toast_message.clone(), |this, msg| {
                 this.child(
                     div()
@@ -712,6 +652,7 @@ impl ClanProfileSection {
                                                             if let Some(state) = &mut this.profile {
                                                                 state.avatar_url = None;
                                                             }
+                                                            this.refresh_banner_color(cx);
                                                             cx.notify();
                                                         });
                                                     }
