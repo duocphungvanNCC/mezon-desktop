@@ -563,7 +563,7 @@ impl Render for SettingsScreen {
             .w_full()
             .h_full()
             .relative()
-            .bg(theme.tokens.theme_setting_primary)
+            .bg(theme.tokens.theme_setting_nav)
             .child(
                 v_flex()
                     .id("settings-nav")
