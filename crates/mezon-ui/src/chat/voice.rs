@@ -1,10 +1,11 @@
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use gpui::{
     Anchor, Animation, AnimationExt, AnyElement, App, ClickEvent, ClipboardItem, Context,
-    CursorStyle, Entity, FontWeight, Hsla, IntoElement, MouseButton, MouseDownEvent, ObjectFit,
-    Pixels, RenderOnce, ScrollHandle, SharedString, StyledImage, Window, canvas, deferred, div,
-    img, point, prelude::*, px, relative,
+    CursorStyle, Entity, FontWeight, Hsla, Image, ImageFormat, IntoElement, MouseButton,
+    MouseDownEvent, ObjectFit, Pixels, RenderOnce, Rgba, ScrollHandle, SharedString, StyledImage,
+    Window, canvas, deferred, div, img, point, prelude::*, px, relative,
 };
 use mezon_store::{
     AppConfig, AudioStore, Channel, ChannelId, ClanId, ClanMembersStore, DeviceKind,
@@ -413,6 +414,24 @@ fn panel_control_button(
         .child(Icon::new(icon).size(px(20.)).text_color(icon_color))
 }
 
+const CHAT_ICON_SVG: &str = include_str!("../../assets/icons/chat.svg");
+
+pub(crate) fn chat_toggle_icon(color: Rgba, size: Pixels) -> gpui::Img {
+    let fill = format!(
+        "rgba({}, {}, {}, {})",
+        (color.r * 255.0).round() as u8,
+        (color.g * 255.0).round() as u8,
+        (color.b * 255.0).round() as u8,
+        color.a
+    );
+    let svg = CHAT_ICON_SVG.replace("currentColor", &fill);
+    img(Arc::new(Image::from_bytes(
+        ImageFormat::Svg,
+        svg.into_bytes(),
+    )))
+    .size(size)
+}
+
 fn voice_header_icon_shell(
     id: &'static str,
     theme: &Theme,
@@ -422,6 +441,7 @@ fn voice_header_icon_shell(
     let bg_active = theme.bg_tertiary;
     div()
         .id(id)
+        .occlude()
         .flex()
         .items_center()
         .justify_center()
@@ -458,8 +478,6 @@ fn voice_header(
         } else {
             mezon_i18n::t(locale, "channelTopbar.tooltips.showChat")
         };
-        let chat_active = theme.tokens.bg_icon_theme_active;
-        let chat_idle = theme.tokens.bg_icon_theme;
         div()
             .flex()
             .flex_row()
@@ -490,11 +508,14 @@ fn voice_header(
             .child(
                 voice_header_icon_shell("voice-chat-toggle", theme, show_chat)
                     .tooltip(Tooltip::text(chat_tooltip))
-                    .child(
-                        Icon::new(IconName::Chat)
-                            .size(px(18.))
-                            .text_color(if show_chat { chat_active } else { chat_idle }),
-                    )
+                    .child(chat_toggle_icon(
+                        if show_chat {
+                            theme.tokens.bg_icon_theme_active
+                        } else {
+                            theme.tokens.bg_icon_theme
+                        },
+                        px(18.),
+                    ))
                     .on_click(move |_, _, cx| {
                         chat_toggle.update(cx, |layout, cx| layout.toggle_voice_chat(cx));
                     }),

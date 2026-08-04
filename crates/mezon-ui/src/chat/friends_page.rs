@@ -1343,7 +1343,7 @@ fn render_row_actions(
             .gap_3()
             .flex_shrink_0()
             .child(
-                round_button(("friend-chat", id.get() as usize), IconName::Chat, theme).on_click({
+                round_chat_button(("friend-chat", id.get() as usize), theme).on_click({
                     let err =
                         SharedString::from(mezon_i18n::t(locale, "shareContact.card.messageError"));
                     move |_, _window, cx| {
@@ -1464,6 +1464,23 @@ fn round_button(
                 .size_4()
                 .text_color(theme.tokens.text_theme_primary),
         )
+}
+
+fn round_chat_button(id: impl Into<gpui::ElementId>, theme: &Theme) -> gpui::Stateful<gpui::Div> {
+    div()
+        .id(id)
+        .flex()
+        .items_center()
+        .justify_center()
+        .p_2()
+        .rounded_full()
+        .cursor_pointer()
+        .occlude()
+        .hover(|s| s.bg(theme.tokens.bg_secondary_button_hover))
+        .child(crate::chat::voice::chat_toggle_icon(
+            theme.tokens.text_theme_primary,
+            px(16.),
+        ))
 }
 
 fn circle_button(

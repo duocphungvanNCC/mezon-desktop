@@ -657,20 +657,18 @@ impl ChatArea {
                 ))
                 .when(send_denied, |col| col.child(no_permission_notice))
                 .when(!send_denied, |col| {
-                    col.when_some(app_channel_bar.as_ref(), |col, target| {
-                        col.child(render_channel_app_bar(locale, target.clone(), cx.theme()))
-                    })
-                    .when(app_channel_bar.is_none(), |col| {
-                        col.when_some(input_bar.clone(), |col, input_bar| col.child(input_bar))
-                    })
-                    .child(
-                        AnyView::from(self.typing.clone()).cached(
-                            StyleRefinement::default()
-                                .w_full()
-                                .h(px(16.))
-                                .flex_shrink_0(),
-                        ),
-                    )
+                    col.when_some(input_bar.clone(), |col, input_bar| col.child(input_bar))
+                        .when_some(app_channel_bar.as_ref(), |col, target| {
+                            col.child(render_channel_app_bar(locale, target.clone(), cx.theme()))
+                        })
+                        .child(
+                            AnyView::from(self.typing.clone()).cached(
+                                StyleRefinement::default()
+                                    .w_full()
+                                    .h(px(16.))
+                                    .flex_shrink_0(),
+                            ),
+                        )
                 })
                 .when_some(drop_overlay, |col, overlay| col.child(overlay))
             });
