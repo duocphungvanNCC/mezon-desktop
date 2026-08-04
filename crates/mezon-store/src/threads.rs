@@ -568,33 +568,12 @@ impl ThreadsStore {
             self.apply_channel(channel);
             return;
         }
-        self.list_channel_id = Some(list_channel_id_for_active(active_id, cx));
-        if self
-            .clan_id
-            .as_deref()
-            .is_none_or(|id| id == "0" || id.is_empty())
-        {
-            self.clan_id = ClanList::global(cx)
-                .read(cx)
-                .active_clan_id
-                .filter(|id| !id.is_zero())
-                .map(|id| id.to_string());
-        }
+        self.list_channel_id = Some(active_id.to_string());
+        self.clan_id = Some("0".to_string());
     }
 
-    fn resolve_fetch_clan_id(&self, cx: &App) -> Option<String> {
-        if let Some(clan_id) = self
-            .clan_id
-            .as_ref()
-            .filter(|id| *id != "0" && !id.is_empty())
-        {
-            return Some(clan_id.clone());
-        }
-        ClanList::global(cx)
-            .read(cx)
-            .active_clan_id
-            .filter(|id| !id.is_zero())
-            .map(|id| id.to_string())
+    fn resolve_fetch_clan_id(&self) -> Option<String> {
+        self.clan_id.as_ref().filter(|id| !id.is_empty()).cloned()
     }
 
     fn on_active_channel_changed(&mut self, channel_id: Option<ChannelId>, cx: &mut Context<Self>) {
@@ -611,12 +590,8 @@ impl ThreadsStore {
                 {
                     self.apply_channel(channel);
                 } else {
-                    self.list_channel_id = Some(list_channel_id_for_active(id, cx));
-                    self.clan_id = ClanList::global(cx)
-                        .read(cx)
-                        .active_clan_id
-                        .filter(|clan_id| !clan_id.is_zero())
-                        .map(|clan_id| clan_id.to_string());
+                    self.list_channel_id = Some(id.to_string());
+                    self.clan_id = Some("0".to_string());
                     self.category_id = None;
                 }
             }
@@ -748,7 +723,7 @@ impl ThreadsStore {
         let Some(channel_id) = self.list_channel_id.clone() else {
             return;
         };
-        let Some(clan_id) = self.resolve_fetch_clan_id(cx) else {
+        let Some(clan_id) = self.resolve_fetch_clan_id() else {
             return;
         };
         self.search_generation = self.search_generation.wrapping_add(1);
@@ -786,8 +761,8 @@ impl ThreadsStore {
                 this.searching = false;
                 match result {
                     Ok(list) => {
-                        let results =
-                            filter_threads(list.into_iter().map(thread_from_api).collect());
+                        let results: Vec<ThreadSummary> =
+                            list.into_iter().map(thread_from_api).collect();
                         this.ensure_clan_members_for_threads(&results, cx);
                         this.search_results = Some(results);
                     }
@@ -825,7 +800,7 @@ impl ThreadsStore {
         let Some(channel_id) = self.list_channel_id.clone() else {
             return;
         };
-        let Some(clan_id) = self.resolve_fetch_clan_id(cx) else {
+        let Some(clan_id) = self.resolve_fetch_clan_id() else {
             tracing::warn!(
                 target: "mezon.threads",
                 channel_id = %channel_id,
@@ -861,18 +836,8 @@ impl ThreadsStore {
                 }
                 match result {
                     Ok(list) => {
-                        let raw_count = list.len();
-                        let page_full = page_has_more(raw_count);
+                        let page_full = page_has_more(list.len());
                         let batch = filter_threads(list.into_iter().map(thread_from_api).collect());
-                        tracing::info!(
-                            target: "mezon.threads",
-                            channel_id = %channel_id,
-                            clan_id = %clan_id,
-                            page = page,
-                            raw_count,
-                            kept_count = batch.len(),
-                            "list_thread_descs response"
-                        );
                         this.ensure_clan_members_for_threads(&batch, cx);
                         if append {
                             merge_threads(&mut this.threads, batch);
@@ -1069,14 +1034,6 @@ fn list_channel_id_for(channel: &Channel) -> String {
     } else {
         channel.id.to_string()
     }
-}
-
-fn list_channel_id_for_active(channel_id: ChannelId, cx: &App) -> String {
-    ChannelList::global(cx)
-        .read(cx)
-        .find_channel_in_active_clan(channel_id)
-        .map(list_channel_id_for)
-        .unwrap_or_else(|| channel_id.to_string())
 }
 
 fn thread_creation_scope(
@@ -1339,24 +1296,25 @@ mod tests {
     }
 
     #[test]
-    fn filter_threads_keeps_archived_private_threads() {
+    fn filter_threads_keeps_archived_private_threads_in_popover() {
         let threads = vec![
             summary("1", 1),
             {
-                let mut thread = summary("2", 1);
+                let mut thread = summary("2", 0);
                 thread.active = THREAD_STATUS_ARCHIVED;
                 thread
             },
             {
                 let mut thread = summary("3", 1);
-                thread.active = THREAD_STATUS_ACTIVE_PUBLIC;
+                thread.active = THREAD_STATUS_ARCHIVED;
                 thread
             },
         ];
         let kept = filter_threads(threads);
-        assert_eq!(kept.len(), 2);
+        assert_eq!(kept.len(), 3);
         assert!(kept.iter().any(|t| t.channel_id == "1"));
         assert!(kept.iter().any(|t| t.channel_id == "2"));
+        assert!(kept.iter().any(|t| t.channel_id == "3"));
     }
 
     #[test]

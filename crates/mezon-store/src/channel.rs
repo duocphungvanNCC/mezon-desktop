@@ -908,6 +908,7 @@ impl ChannelList {
         self.user_channels_order
             .iter()
             .filter_map(|id| self.user_channels.get(id))
+            .filter(|channel| !channel.is_archived())
     }
 
     pub fn ensure_user_channels_loaded(&mut self, cx: &mut Context<Self>) {
@@ -1362,11 +1363,13 @@ impl ChannelList {
     }
 
     fn sync_user_channel_from(&mut self, source: &Channel, cx: &mut Context<Self>) {
-        if upsert_user_channel(
-            &mut self.user_channels,
-            &mut self.user_channels_order,
-            source.clone(),
-        ) {
+        let Some(user_channel) = self.user_channels.get_mut(&source.id) else {
+            return;
+        };
+        let was_unread = user_channel.is_unread();
+        let was_badge = user_channel.badge_count;
+        copy_channel_unread_fields(user_channel, source);
+        if was_unread != user_channel.is_unread() || was_badge != user_channel.badge_count {
             cx.notify();
         }
     }
@@ -1376,6 +1379,8 @@ impl ChannelList {
         descs: Vec<mezon_client::transport::ApiChannelDesc>,
         cx: &mut Context<Self>,
     ) {
+        self.user_channels.clear();
+        self.user_channels_order.clear();
         for d in descs {
             let channel = channel_from_desc(d, 0, Vec::new(), false);
             upsert_user_channel(
@@ -1387,11 +1392,25 @@ impl ChannelList {
         self.sync_user_channels_from_all_loaded_caches(cx);
     }
 
-    fn sync_user_channels_from_all_loaded_caches(&mut self, cx: &mut Context<Self>) {
-        let snapshots: Vec<Vec<Category>> =
-            self.cache.iter().map(|(_, cats)| cats.clone()).collect();
-        for categories in snapshots {
-            self.sync_user_channels_from_clan_structure(&categories, cx);
+    fn sync_user_channels_from_all_loaded_caches(&mut self, _cx: &mut Context<Self>) {
+        let clan_ids: Vec<ClanId> = self.cache.iter().map(|(id, _)| *id).collect();
+        for clan_id in clan_ids {
+            let batch: Vec<Channel> = self
+                .cache
+                .get(&clan_id)
+                .into_iter()
+                .flat_map(|categories| categories.iter())
+                .flat_map(|category| category.channels.iter())
+                .filter(|channel| should_sync_channel_to_user_list(channel))
+                .cloned()
+                .collect();
+            for channel in batch {
+                upsert_user_channel(
+                    &mut self.user_channels,
+                    &mut self.user_channels_order,
+                    channel,
+                );
+            }
         }
     }
 
@@ -3357,8 +3376,7 @@ fn upsert_user_channel(
 ) -> bool {
     let channel_id = channel.id;
     if let Some(existing) = user_channels.get_mut(&channel_id) {
-        merge_user_channel_from_structure(existing, &channel);
-        true
+        merge_user_channel_from_structure(existing, &channel)
     } else {
         user_channels.insert(channel_id, channel);
         order.push(channel_id);
@@ -3366,32 +3384,71 @@ fn upsert_user_channel(
     }
 }
 
-fn merge_user_channel_from_structure(target: &mut Channel, source: &Channel) {
-    target.name = source.name.clone();
-    target.channel_type = source.channel_type;
-    target.private = source.private;
-    target.clan_id = source.clan_id;
-    target.clan_name = source.clan_name.clone();
-    target.category_name = source.category_name.clone();
-    target.category_id = source.category_id.clone();
-    target.parent_id = source.parent_id;
-    target.member_count = source.member_count;
-    target.muted = source.muted;
-    target.is_favorite = source.is_favorite;
-    target.creator_id = source.creator_id;
-    target.active = source.active;
-    target.avatar_url = source.avatar_url.clone();
-    if source.last_sent_timestamp >= target.last_sent_timestamp {
-        copy_channel_unread_fields(target, source);
+fn merge_user_channel_from_structure(target: &mut Channel, source: &Channel) -> bool {
+    let mut changed = false;
+    if target.name != source.name {
+        target.name = source.name.clone();
+        changed = true;
     }
-}
-
-fn add_user_channel(
-    user_channels: &mut HashMap<ChannelId, Channel>,
-    order: &mut Vec<ChannelId>,
-    channel: Channel,
-) -> bool {
-    upsert_user_channel(user_channels, order, channel)
+    if target.channel_type != source.channel_type {
+        target.channel_type = source.channel_type;
+        changed = true;
+    }
+    if target.private != source.private {
+        target.private = source.private;
+        changed = true;
+    }
+    if target.clan_id != source.clan_id {
+        target.clan_id = source.clan_id;
+        changed = true;
+    }
+    if target.clan_name != source.clan_name {
+        target.clan_name = source.clan_name.clone();
+        changed = true;
+    }
+    if target.category_name != source.category_name {
+        target.category_name = source.category_name.clone();
+        changed = true;
+    }
+    if target.category_id != source.category_id {
+        target.category_id = source.category_id.clone();
+        changed = true;
+    }
+    if target.parent_id != source.parent_id {
+        target.parent_id = source.parent_id;
+        changed = true;
+    }
+    if target.member_count != source.member_count {
+        target.member_count = source.member_count;
+        changed = true;
+    }
+    if target.muted != source.muted {
+        target.muted = source.muted;
+        changed = true;
+    }
+    if target.is_favorite != source.is_favorite {
+        target.is_favorite = source.is_favorite;
+        changed = true;
+    }
+    if target.creator_id != source.creator_id {
+        target.creator_id = source.creator_id;
+        changed = true;
+    }
+    if target.active != source.active {
+        target.active = source.active;
+        changed = true;
+    }
+    if target.avatar_url != source.avatar_url {
+        target.avatar_url = source.avatar_url.clone();
+        changed = true;
+    }
+    if source.last_sent_timestamp >= target.last_sent_timestamp {
+        let was_unread = target.is_unread();
+        let was_badge = target.badge_count;
+        copy_channel_unread_fields(target, source);
+        changed |= was_unread != target.is_unread() || was_badge != target.badge_count;
+    }
+    changed
 }
 
 fn remove_user_channel(
@@ -5038,15 +5095,15 @@ mod tests {
         cx.update(|cx| {
             let channels = init_authenticated_channel_list(cx);
             channels.update(cx, |channels, cx| {
-                channels.apply_clan_structure(ClanId(1), structure_with_a_thread(), cx);
-                assert!(
-                    channels.user_channel(ChannelId(9)).is_some(),
-                    "clan structure syncs threads into user_channels for Ctrl+K"
-                );
+                channels.apply_clan_structure(ClanId(1), structure_with_two_channels(), cx);
+                assert!(channels.user_channel(ChannelId(9)).is_none());
 
                 channels.handle_event(&added_to_channel(9, 1, &[REMOVED_SELF]), cx);
 
-                assert!(channels.user_channel(ChannelId(9)).is_some());
+                assert!(
+                    channels.user_channel(ChannelId(9)).is_some(),
+                    "UserChannelAdded must upsert threads missing from clan structure"
+                );
             });
         });
     }
