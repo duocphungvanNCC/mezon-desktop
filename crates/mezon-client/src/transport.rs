@@ -7422,7 +7422,7 @@ impl MezonTransport {
         message_id: i64,
         channel_id: i64,
         clan_id: i64,
-    ) -> Result<api::ChannelMessageHeader> {
+    ) -> Result<()> {
         let cid = self.generate_cid();
         let body = api::PinMessageRequest {
             message_id,
@@ -7430,11 +7430,11 @@ impl MezonTransport {
             clan_id,
         }
         .encode_to_vec();
-        let (code, response) = self.send_api_request(cid, "CreatePinMessage", body).await?;
+        let (code, _response) = self.send_api_request(cid, "CreatePinMessage", body).await?;
         if code != 0 {
             return Err(anyhow::anyhow!("API error: code={}", code));
         }
-        Ok(api::ChannelMessageHeader::decode(response.as_slice())?)
+        Ok(())
     }
 
     /// Delete pin message.

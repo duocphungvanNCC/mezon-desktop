@@ -105,6 +105,44 @@ pub fn input_schema(name: &str) -> Arc<Map<String, Value>> {
             &["clan_id"],
         )),
         "list_threads" | "list_pinned_messages" | "mark_as_read" => Arc::new(clan_channel()),
+        "pin_message" => Arc::new(clan_channel_message()),
+        "unpin_message" => Arc::new(object(
+            json!({
+                "clan_id": id("Clan snowflake id. Use 0 for direct messages."),
+                "channel_id": id("Channel snowflake id."),
+                "message_id": id("Pinned message id."),
+                "pin_id": id("Pin entry id from list_pinned_messages."),
+            }),
+            &["clan_id", "channel_id", "message_id", "pin_id"],
+        )),
+        "create_poll" => Arc::new(object(
+            json!({
+                "clan_id": id("Clan snowflake id. Use 0 for direct messages."),
+                "channel_id": id("Channel snowflake id."),
+                "question": string("Poll question."),
+                "answers": {
+                    "type": "array",
+                    "description": "Answer options, at least two.",
+                    "items": { "type": "string" }
+                },
+                "expire_hours": integer("Hours until the poll closes. Default 24.", Some(24)),
+                "poll_type": integer("0 = single choice (default), 1 = multiple choice.", Some(0)),
+            }),
+            &["clan_id", "channel_id", "question", "answers"],
+        )),
+        "vote_poll" => Arc::new(object(
+            json!({
+                "poll_id": id("Poll snowflake id."),
+                "message_id": id("Id of the message carrying the poll."),
+                "channel_id": id("Channel snowflake id."),
+                "answers": {
+                    "type": "array",
+                    "description": "Zero-based answer indices.",
+                    "items": { "type": "integer" }
+                },
+            }),
+            &["poll_id", "message_id", "channel_id", "answers"],
+        )),
         "load_more_messages" => Arc::new(object(
             json!({
                 "direction": string("\"older\" (default) walks back through history, \"newer\" walks forward."),

@@ -195,6 +195,62 @@ Parameters:
         write: true,
     },
     ToolSpec {
+        name: "pin_message",
+        description: "\
+Pin a message to the channel.
+
+The pin shows up for everyone in the channel; list_pinned_messages reads them back.
+
+Parameters:
+- clan_id (required): clan snowflake id. Use 0 for direct messages.
+- channel_id (required): channel snowflake id.
+- message_id (required): message to pin.",
+        write: true,
+    },
+    ToolSpec {
+        name: "unpin_message",
+        description: "\
+Remove a pinned message from the channel.
+
+Call list_pinned_messages first: `pin_id` is the entry's own id, which is not the
+message id.
+
+Parameters:
+- clan_id (required): clan snowflake id. Use 0 for direct messages.
+- channel_id (required): channel snowflake id.
+- message_id (required): the pinned message's id.
+- pin_id (required): the pin entry id from list_pinned_messages.",
+        write: true,
+    },
+    ToolSpec {
+        name: "create_poll",
+        description: "\
+Post a poll to the channel.
+
+Returns the created poll so its id can be passed to vote_poll.
+
+Parameters:
+- clan_id (required): clan snowflake id. Use 0 for direct messages.
+- channel_id (required): channel snowflake id.
+- question (required): poll question.
+- answers (required): array of 2 or more answer strings.
+- expire_hours (optional): hours until the poll closes. Default 24.
+- poll_type (optional): 0 = single choice (default), 1 = multiple choice.",
+        write: true,
+    },
+    ToolSpec {
+        name: "vote_poll",
+        description: "\
+Cast a vote on an existing poll.
+
+Parameters:
+- poll_id (required): poll snowflake id.
+- message_id (required): id of the message carrying the poll.
+- channel_id (required): channel snowflake id.
+- answers (required): array of zero-based answer indices. Single-choice polls take one.",
+        write: true,
+    },
+    ToolSpec {
         name: "get_settings",
         description: "\
 Read app settings: theme, language, zoom, notifications, voice state, and related flags.

@@ -183,6 +183,22 @@ impl McpBackend {
                 self.require_write_mode("react_to_message")?;
                 self.react_to_message(&arguments).await
             }
+            "pin_message" => {
+                self.require_write_mode("pin_message")?;
+                self.pin_message(&arguments).await
+            }
+            "unpin_message" => {
+                self.require_write_mode("unpin_message")?;
+                self.unpin_message(&arguments).await
+            }
+            "create_poll" => {
+                self.require_write_mode("create_poll")?;
+                self.create_poll(&arguments).await
+            }
+            "vote_poll" => {
+                self.require_write_mode("vote_poll")?;
+                self.vote_poll(&arguments).await
+            }
             "click_message_button" => {
                 self.require_write_mode("click_message_button")?;
                 self.click_message_button(&arguments).await
@@ -671,6 +687,102 @@ impl McpBackend {
     async fn capture(&self, target: CaptureTarget) -> anyhow::Result<Value> {
         self.send_ui_result(|reply| McpCommand::Capture { target, reply })
             .await
+    }
+
+    async fn pin_message(&self, arguments: &Value) -> anyhow::Result<Value> {
+        let clan_id = parse_i64_field(arguments, "clan_id")?;
+        let channel_id = parse_i64_field(arguments, "channel_id")?;
+        let message_id = parse_i64_field(arguments, "message_id")?;
+        self.api
+            .create_pin_message(message_id, channel_id, clan_id)
+            .await?;
+        Ok(serde_json::json!({ "ok": true, "message_id": message_id.to_string() }))
+    }
+
+    async fn unpin_message(&self, arguments: &Value) -> anyhow::Result<Value> {
+        let clan_id = parse_i64_field(arguments, "clan_id")?;
+        let channel_id = parse_i64_field(arguments, "channel_id")?;
+        let message_id = parse_i64_field(arguments, "message_id")?;
+        let pin_id = parse_i64_field(arguments, "pin_id")?;
+        self.api
+            .delete_pin_message(
+                &pin_id.to_string(),
+                &message_id.to_string(),
+                &channel_id.to_string(),
+                &clan_id.to_string(),
+            )
+            .await?;
+        Ok(serde_json::json!({ "ok": true, "pin_id": pin_id.to_string() }))
+    }
+
+    async fn create_poll(&self, arguments: &Value) -> anyhow::Result<Value> {
+        let clan_id = parse_i64_field(arguments, "clan_id")?;
+        let channel_id = parse_i64_field(arguments, "channel_id")?;
+        let question = arguments
+            .get("question")
+            .and_then(Value::as_str)
+            .ok_or_else(|| anyhow::anyhow!("create_poll requires string field question"))?
+            .to_string();
+        let answers: Vec<String> = arguments
+            .get("answers")
+            .and_then(Value::as_array)
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(|item| item.as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default();
+        if answers.len() < 2 {
+            anyhow::bail!("create_poll requires at least two answers");
+        }
+        let expire_hours = arguments
+            .get("expire_hours")
+            .and_then(Value::as_i64)
+            .unwrap_or(24) as i32;
+        let poll_type = arguments
+            .get("poll_type")
+            .and_then(Value::as_i64)
+            .unwrap_or(0) as i32;
+        let response = self
+            .api
+            .create_poll(
+                channel_id,
+                clan_id,
+                question,
+                answers,
+                expire_hours,
+                poll_type,
+            )
+            .await?;
+        Ok(serde_json::json!({
+            "ok": true,
+            "poll_id": response.poll_id.to_string(),
+            "message_id": response.message_id.to_string(),
+        }))
+    }
+
+    async fn vote_poll(&self, arguments: &Value) -> anyhow::Result<Value> {
+        let poll_id = parse_i64_field(arguments, "poll_id")?;
+        let message_id = parse_i64_field(arguments, "message_id")?;
+        let channel_id = parse_i64_field(arguments, "channel_id")?;
+        let answers: Vec<i32> = arguments
+            .get("answers")
+            .and_then(Value::as_array)
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(|item| item.as_i64().map(|value| value as i32))
+                    .collect()
+            })
+            .unwrap_or_default();
+        if answers.is_empty() {
+            anyhow::bail!("vote_poll requires at least one answer index");
+        }
+        self.api
+            .vote_poll(poll_id, message_id, channel_id, answers)
+            .await?;
+        Ok(serde_json::json!({ "ok": true, "poll_id": poll_id.to_string() }))
     }
 
     async fn get_scroll_state(&self) -> anyhow::Result<Value> {
