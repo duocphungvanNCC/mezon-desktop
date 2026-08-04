@@ -200,6 +200,9 @@ pub fn build_palette_items(cx: &App) -> Vec<PaletteItem> {
     let channels = channel_list.read(cx);
     let clans = clan_list.read(cx);
     for channel in channels.user_channels() {
+        if channel.is_archived() {
+            continue;
+        }
         let raw_type = channel.channel_type.as_raw();
         if channel.clan_id.is_zero()
             && (raw_type == 2 || raw_type == 3)
