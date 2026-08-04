@@ -25,11 +25,28 @@ pub fn parse_presign_finish_keys(content: &str) -> Option<Vec<String>> {
     )
 }
 
+/// Every CDN an attachment can be presigned onto, mirroring the web client
+/// (`isMezonCdnUrl`). The configured `base_img_url` is only one of them, and a
+/// message can carry an attachment uploaded by a client pointed at another one —
+/// gating solely on our own host would let those through to imgproxy before the
+/// upload is confirmed, which caches a not-found for the real object.
+const PRESIGN_CDN_HOSTS: [&str; 3] = ["cdn.komu.vn", "cdn.komu.ai", "cdn.mezon.ai"];
+
+fn host_matches(host: &str, allowed: &str) -> bool {
+    host == allowed || host.ends_with(&format!(".{allowed}"))
+}
+
 pub fn is_mezon_cdn(url: &str, base_img_url: &str) -> bool {
-    let (Some(host), Some(allowed)) = (url_host(url), url_host(base_img_url)) else {
+    let Some(host) = url_host(url) else {
         return false;
     };
-    host == allowed || host.ends_with(&format!(".{allowed}"))
+    if PRESIGN_CDN_HOSTS
+        .iter()
+        .any(|allowed| host_matches(&host, allowed))
+    {
+        return true;
+    }
+    url_host(base_img_url).is_some_and(|allowed| host_matches(&host, &allowed))
 }
 
 pub fn presign_pending(url: &str, keys: Option<&[String]>, base_img_url: &str) -> bool {
@@ -115,6 +132,21 @@ mod tests {
         assert!(is_mezon_cdn("https://media.cdn.example/x/photo.png", CDN));
         assert!(!is_mezon_cdn("https://example.com/x/photo.png", CDN));
         assert!(!is_mezon_cdn("blob:https://cdn.example/uuid", CDN));
+    }
+
+    #[test]
+    fn every_mezon_cdn_is_gated_even_when_it_is_not_our_configured_host() {
+        for url in [
+            "https://cdn.mezon.ai/uploads/photo.png",
+            "https://cdn.komu.vn/uploads/photo.png",
+            "https://cdn.komu.ai/uploads/photo.png",
+        ] {
+            assert!(is_mezon_cdn(url, CDN), "{url} must be gated");
+            assert!(
+                presign_pending(url, Some(&["other".to_string()]), CDN),
+                "{url} must stay pending until its key arrives"
+            );
+        }
     }
 
     #[test]

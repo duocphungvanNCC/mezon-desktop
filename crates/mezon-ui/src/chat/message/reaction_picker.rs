@@ -79,6 +79,7 @@ pub struct ReactionPicker {
     search: Entity<InputState>,
     query: String,
     snapshot: Vec<CategorySnapshot>,
+    snapshot_stale: bool,
     rows: Vec<PickerRow>,
     nav: Vec<NavCategory>,
     collapsed: HashSet<String>,
@@ -143,7 +144,7 @@ impl ReactionPicker {
         });
         let emoji_sub = EmojiStore::try_global(cx).map(|store| {
             cx.subscribe(&store, |this, _store, _event: &EmojiEvent, cx| {
-                this.rebuild_snapshot(cx);
+                this.snapshot_stale = true;
                 cx.notify();
             })
         });
@@ -161,6 +162,7 @@ impl ReactionPicker {
             search,
             query: String::new(),
             snapshot: Vec::new(),
+            snapshot_stale: false,
             rows: Vec::new(),
             nav: Vec::new(),
             collapsed: HashSet::new(),
@@ -178,6 +180,7 @@ impl ReactionPicker {
     }
 
     fn rebuild_snapshot(&mut self, cx: &mut Context<Self>) {
+        self.snapshot_stale = false;
         let active = ClanList::global(cx)
             .read(cx)
             .active_clan_id
@@ -327,6 +330,9 @@ impl ReactionPicker {
 
 impl Render for ReactionPicker {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.snapshot_stale {
+            self.rebuild_snapshot(cx);
+        }
         let theme = cx.theme();
         let bg_tertiary = theme.bg_tertiary;
         let text_muted = theme.text_muted;
