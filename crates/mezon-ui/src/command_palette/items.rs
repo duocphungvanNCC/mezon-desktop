@@ -148,7 +148,7 @@ fn channel_voice_busy(
     }
     channels
         .channel(clan_id, channel_id)
-        .is_some_and(|channel| channel.voice_members.len() >= 2)
+        .is_some_and(|channel| channel.voice_busy())
 }
 
 pub fn build_palette_items(cx: &App) -> Vec<PaletteItem> {

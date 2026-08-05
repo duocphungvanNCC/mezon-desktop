@@ -251,6 +251,7 @@ struct ChannelSuggestRaw {
     name_norm: String,
     sub_text: String,
     sub_text_norm: String,
+    voice_busy: bool,
 }
 
 #[derive(Clone)]
@@ -2207,6 +2208,7 @@ impl MentionInput {
         let query = self.active_query.clone();
 
         let mut display_color = Hsla::from(text_primary);
+        let voice_busy = matches!(suggestion, Suggestion::Channel(channel) if channel.voice_busy);
         let (leading, display, secondary): (Option<AnyElement>, SharedString, SharedString) =
             match suggestion {
                 Suggestion::Here => (
@@ -2344,7 +2346,17 @@ impl MentionInput {
                             .font_weight(FontWeight::MEDIUM)
                             .text_color(display_color)
                             .child(highlighted_label(display, &query)),
-                    ),
+                    )
+                    .when(voice_busy, |row| {
+                        row.child(
+                            div()
+                                .flex_shrink_0()
+                                .text_size(px(15.))
+                                .italic()
+                                .text_color(theme.status_dnd)
+                                .child("(busy)"),
+                        )
+                    }),
             )
             .when(!secondary.is_empty(), |row| {
                 row.child(
@@ -2480,6 +2492,7 @@ fn channel_suggest_raw(channel: &Channel) -> ChannelSuggestRaw {
         name_norm: normalize_search_string(&channel.name),
         sub_text_norm: normalize_search_string(&sub_text),
         sub_text,
+        voice_busy: channel.voice_busy(),
     }
 }
 
