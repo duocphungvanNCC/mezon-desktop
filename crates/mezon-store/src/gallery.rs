@@ -76,13 +76,19 @@ pub struct ChannelAttachment {
     pub uploader_avatar_raw: SharedString,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct AttachmentSeedInput {
     pub url: String,
     pub filename: String,
     pub filetype: String,
     pub width: u32,
     pub height: u32,
+    /// The upload is on the CDN but its presign has not been finished yet, so
+    /// the url does not resolve for anyone — including the sender. Carried here
+    /// so every viewer entry point can refuse to open on it; a seed built from
+    /// the gallery, whose attachments are all long since finished, leaves it
+    /// false.
+    pub presign_pending: bool,
 }
 
 impl AttachmentSeedInput {
@@ -93,6 +99,7 @@ impl AttachmentSeedInput {
             filetype: att.filetype.clone(),
             width: att.width,
             height: att.height,
+            presign_pending: att.presign_pending,
         }
     }
 }
@@ -1090,6 +1097,28 @@ mod tests {
     }
 
     #[test]
+    fn seed_carries_the_presign_gate_from_the_attachment() {
+        let pending = crate::message::MessageAttachment {
+            url: "https://cdn.example/just-uploaded.png".into(),
+            filename: "just-uploaded.png".into(),
+            filetype: "image/png".into(),
+            presign_pending: true,
+            ..Default::default()
+        };
+        assert!(
+            AttachmentSeedInput::from_message(&pending).presign_pending,
+            "the viewer refuses to open on a pending attachment, so the seed has to carry the \
+             gate to every entry point that builds one"
+        );
+
+        let finished = crate::message::MessageAttachment {
+            presign_pending: false,
+            ..pending
+        };
+        assert!(!AttachmentSeedInput::from_message(&finished).presign_pending);
+    }
+
+    #[test]
     fn seed_from_message_rewrites_upload_url_with_config() {
         let cfg = AppConfig::dev_defaults();
         let upload = format!("{}/images/checkin.png", cfg.upload_img_url);
@@ -1122,6 +1151,7 @@ mod tests {
             filetype: "application/octet-stream".into(),
             width: 1280,
             height: 720,
+            ..Default::default()
         };
         let seed = ChannelAttachment::seed_from_message(
             &input,
