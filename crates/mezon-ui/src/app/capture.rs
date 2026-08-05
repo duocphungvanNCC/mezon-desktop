@@ -301,6 +301,26 @@ pub fn set_composer_panel(cx: &mut App, kind: Option<&str>) -> anyhow::Result<Va
     Ok(serde_json::json!({ "ok": true, "panel": open }))
 }
 
+pub fn scroll_messages(cx: &mut App, to_top: bool) -> anyhow::Result<Value> {
+    let timeline = crate::chat::message::ChannelMessages::active_timeline(cx)
+        .ok_or_else(|| anyhow::anyhow!("no message list is mounted; open a channel first"))?;
+    let (item_count, first_visible, at_bottom) = timeline.update(cx, |timeline, cx| {
+        if to_top {
+            timeline.scroll_viewport_to_top(cx);
+        } else {
+            timeline.scroll_viewport_to_bottom(cx);
+        }
+        timeline.viewport_state()
+    });
+    Ok(json!({
+        "ok": true,
+        "to": if to_top { "top" } else { "bottom" },
+        "item_count": item_count,
+        "first_visible_index": first_visible,
+        "at_bottom": at_bottom,
+    }))
+}
+
 pub fn open_message_image_viewer(
     settings: &gpui::Entity<mezon_store::Settings>,
     message_id: i64,

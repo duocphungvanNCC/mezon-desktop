@@ -231,6 +231,22 @@ Parameters:
         write: true,
     },
     ToolSpec {
+        name: "scroll_messages",
+        description: "\
+Move the open channel's message list to the top or the bottom.
+
+load_more_messages prepends older rows and drops the newest ones to stay inside the
+buffer cap, which is invisible when the reader is already at the top but pulls rows
+out from under a reader sitting at the bottom. Scroll to the top first to walk back
+through history the way a user does.
+
+Returns item_count, first_visible_index and at_bottom.
+
+Parameters:
+- to (optional): \"top\" (default) or \"bottom\".",
+        write: true,
+    },
+    ToolSpec {
         name: "list_emojis",
         description: "\
 List custom emoji available to the signed-in user.

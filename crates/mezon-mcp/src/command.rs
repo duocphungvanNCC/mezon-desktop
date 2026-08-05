@@ -62,6 +62,10 @@ pub enum McpCommand {
         attachment_index: usize,
         reply: oneshot::Sender<anyhow::Result<Value>>,
     },
+    ScrollMessages {
+        to_top: bool,
+        reply: oneshot::Sender<anyhow::Result<Value>>,
+    },
     ListEmojis {
         clan_id: Option<String>,
         query: Option<String>,

@@ -234,6 +234,12 @@ pub fn input_schema(name: &str) -> Arc<Map<String, Value>> {
             }),
             &["message_id"],
         )),
+        "scroll_messages" => Arc::new(object(
+            json!({
+                "to": string("\"top\" (default) or \"bottom\"."),
+            }),
+            &[],
+        )),
         "open_panel" => Arc::new(object(
             json!({
                 "kind": string("Which composer panel to show: \"emoji\", \"sticker\", \"gif\" or \"sound\"."),

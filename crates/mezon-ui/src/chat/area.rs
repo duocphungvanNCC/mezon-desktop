@@ -64,6 +64,7 @@ impl ChatArea {
             let settings = settings.clone();
             move |cx| ChannelMessages::new(settings, cx)
         });
+        ChannelMessages::register_as_active_timeline(&timeline, cx);
         let layout = cx.weak_entity();
         let header = cx.new(|cx| ChatHeader::new(layout, &settings, cx));
         let typing = cx.new(|cx| ChannelTyping::new(&settings, cx));

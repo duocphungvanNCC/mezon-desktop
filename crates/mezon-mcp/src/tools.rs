@@ -99,6 +99,16 @@ impl McpBackend {
             }
             "get_current_context" => self.get_current_context().await,
             "get_scroll_state" => self.get_scroll_state().await,
+            "scroll_messages" => {
+                self.require_write_mode("scroll_messages")?;
+                let to_top = arguments
+                    .get("to")
+                    .and_then(Value::as_str)
+                    .map(|to| !to.eq_ignore_ascii_case("bottom"))
+                    .unwrap_or(true);
+                self.send_ui_result(|reply| McpCommand::ScrollMessages { to_top, reply })
+                    .await
+            }
             "open_panel" => {
                 self.require_write_mode("open_panel")?;
                 let kind = arguments
