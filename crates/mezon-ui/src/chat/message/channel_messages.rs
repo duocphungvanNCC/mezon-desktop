@@ -4685,27 +4685,17 @@ pub(crate) fn unread_boundary_for_messages(
     current_user_id: Option<UserId>,
 ) -> Option<MessageId> {
     let last_read = last_read.filter(|id| !id.is_zero())?;
-    if messages.is_empty() {
+    let read_idx = messages.iter().position(|m| m.id == last_read)?;
+    let curr = messages[read_idx + 1..]
+        .iter()
+        .find(|m| !m.id.is_optimistic())?;
+    if channel_tail.is_some_and(|tail| tail == last_read) {
         return None;
     }
-    for i in 1..messages.len() {
-        let prev = &messages[i - 1];
-        let curr = &messages[i];
-        if curr.id.is_optimistic() {
-            continue;
-        }
-        if prev.id != last_read {
-            continue;
-        }
-        if channel_tail.is_some_and(|tail| prev.id == tail) {
-            return None;
-        }
-        if current_user_id.is_some_and(|uid| curr.sender_user_id == Some(uid)) {
-            return None;
-        }
-        return Some(curr.id);
+    if current_user_id.is_some_and(|uid| curr.sender_user_id == Some(uid)) {
+        return None;
     }
-    None
+    Some(curr.id)
 }
 
 fn unread_boundary(
@@ -5020,6 +5010,44 @@ mod skeleton_tests {
         let messages = vec![Message::new(read, "old", "2", "them", 0), other.clone()];
         assert_eq!(
             unread_boundary_for_messages(&messages, Some(read), Some(other.id), Some(UserId(1))),
+            Some(other.id)
+        );
+    }
+
+    #[test]
+    fn unread_break_survives_a_failed_send_sitting_after_last_read() {
+        use super::unread_boundary_for_messages;
+        use mezon_store::{Message, MessageId, UserId};
+
+        let read = MessageId(10);
+        let mut failed = Message::new(MessageId::next_optimistic(), "mine", "1", "me", 0);
+        failed.send_failed = true;
+        let other = Message::new(MessageId(12), "hey", "2", "them", 0);
+        let messages = vec![
+            Message::new(read, "old", "2", "them", 0),
+            failed,
+            other.clone(),
+        ];
+        assert_eq!(
+            unread_boundary_for_messages(&messages, Some(read), Some(other.id), Some(UserId(1))),
+            Some(other.id)
+        );
+    }
+
+    #[test]
+    fn unread_break_resolves_when_last_read_is_an_optimistic_row() {
+        use super::unread_boundary_for_messages;
+        use mezon_store::{Message, MessageId, UserId};
+
+        let mine = Message::new(MessageId::next_optimistic(), "mine", "1", "me", 0);
+        let other = Message::new(MessageId(12), "hey", "2", "them", 0);
+        let messages = vec![
+            Message::new(MessageId(10), "old", "2", "them", 0),
+            mine.clone(),
+            other.clone(),
+        ];
+        assert_eq!(
+            unread_boundary_for_messages(&messages, Some(mine.id), Some(other.id), Some(UserId(1))),
             Some(other.id)
         );
     }
