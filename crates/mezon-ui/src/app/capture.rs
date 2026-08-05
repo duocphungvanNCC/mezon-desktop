@@ -370,6 +370,12 @@ pub fn open_message_image_viewer(
         let attachment = message.attachments.get(attachment_index).ok_or_else(|| {
             anyhow::anyhow!("message {message_id} has no attachment at index {attachment_index}")
         })?;
+        if attachment.presign_pending {
+            anyhow::bail!(
+                "attachment {attachment_index} of message {message_id} is still waiting for its \
+                 presign to finish, so its url does not resolve yet"
+            );
+        }
         (
             mezon_store::AttachmentSeedInput::from_message(attachment),
             message.id,
