@@ -218,7 +218,7 @@ mod windows_impl {
             return None;
         }
         let mut buffer = vec![0u16; len as usize];
-        unsafe {
+        let queried = unsafe {
             AssocQueryStringW(
                 ASSOCF_IS_PROTOCOL,
                 ASSOCSTR_EXECUTABLE,
@@ -227,7 +227,9 @@ mod windows_impl {
                 Some(windows::core::PWSTR(buffer.as_mut_ptr())),
                 &mut len,
             )
-            .ok()?;
+        };
+        if queried.is_err() {
+            return None;
         }
         let end = buffer.iter().position(|c| *c == 0).unwrap_or(buffer.len());
         let path = String::from_utf16(&buffer[..end]).ok()?;
