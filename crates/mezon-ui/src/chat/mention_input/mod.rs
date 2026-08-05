@@ -24,7 +24,7 @@ use mezon_store::{
     MENTION_HERE_USER_ID, MessageSpan, MessagesStore, OgpResult, OutgoingAttachment,
     OutgoingContent, OutgoingEmoji, OutgoingHashtag, OutgoingMention, OutgoingOgp, QuickMenuStore,
     RolesEvent, RolesStore, Settings, fetch_invite_preview, fetch_ogp, first_previewable_url,
-    invite_id_from_url,
+    internal_invite_id,
 };
 use std::time::Duration;
 
@@ -1426,7 +1426,8 @@ impl MentionInput {
         if self.compact {
             return;
         }
-        let candidate = first_previewable_url(content, None);
+        let internal_domain = AppConfig::try_global(cx).map(|cfg| cfg.domain_url.clone());
+        let candidate = first_previewable_url(content, internal_domain.as_deref());
         let Some(url) = candidate else {
             if self.ogp_url.take().is_some() || self.ogp_preview.take().is_some() {
                 self._ogp_task = None;
@@ -1443,7 +1444,7 @@ impl MentionInput {
         self.ogp_generation += 1;
         let generation = self.ogp_generation;
         cx.notify();
-        let invite_id = invite_id_from_url(&url);
+        let invite_id = internal_invite_id(&url, internal_domain.as_deref());
         let invite_gateway = invite_id
             .is_some()
             .then(|| {
