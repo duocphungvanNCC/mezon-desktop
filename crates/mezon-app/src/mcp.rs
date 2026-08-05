@@ -157,8 +157,7 @@ impl McpRuntime {
                         ticks,
                         reply,
                     } => {
-                        let result = cx
-                            .update(|cx| mezon_ui::app::capture::scroll_wheel(cx, delta_y, ticks));
+                        let result = scroll_wheel(cx, delta_y, ticks).await;
                         let _ = reply.send(result);
                     }
                     McpCommand::ScrollMessages { to_top, reply } => {
@@ -284,6 +283,37 @@ fn list_emojis(
         })
         .collect();
     Ok(json!({ "count": items.len(), "emojis": items }))
+}
+
+async fn scroll_wheel(cx: &mut AsyncApp, delta_y: f32, ticks: u32) -> anyhow::Result<Value> {
+    use mezon_ui::app::capture::{
+        WHEEL_MAX_TICKS, WHEEL_TICK_INTERVAL, dispatch_wheel_tick, message_viewport_state,
+    };
+    let ticks = ticks.clamp(1, WHEEL_MAX_TICKS);
+    let before = cx.update(|cx| message_viewport_state(cx));
+    let mut delivered = 0u32;
+    let mut consumed = 0u32;
+    for tick in 0..ticks {
+        if cx.update(|cx| dispatch_wheel_tick(cx, delta_y))? {
+            consumed += 1;
+        }
+        delivered += 1;
+        if tick + 1 < ticks {
+            cx.background_executor().timer(WHEEL_TICK_INTERVAL).await;
+        }
+    }
+    let after = cx.update(|cx| message_viewport_state(cx));
+    let (item_count, first_visible, at_bottom) = after.unwrap_or((0, 0, false));
+    Ok(json!({
+        "ok": true,
+        "ticks": delivered,
+        "consumed_ticks": consumed,
+        "moved": before != after,
+        "delta_y": delta_y,
+        "item_count": item_count,
+        "first_visible_index": first_visible,
+        "at_bottom": at_bottom,
+    }))
 }
 
 fn scroll_state(cx: &mut App) -> anyhow::Result<Value> {

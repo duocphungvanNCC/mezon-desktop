@@ -1372,6 +1372,11 @@ impl ChannelMessages {
         cx.notify();
     }
 
+    pub fn list_bounds(&self) -> Option<gpui::Bounds<gpui::Pixels>> {
+        let bounds = self.list_state.viewport_bounds();
+        (bounds.size.width > gpui::px(0.) && bounds.size.height > gpui::px(0.)).then_some(bounds)
+    }
+
     pub fn viewport_state(&self) -> (usize, usize, bool) {
         let top = self.list_state.logical_scroll_top();
         (
