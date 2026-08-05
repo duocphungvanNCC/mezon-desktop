@@ -62,6 +62,11 @@ pub enum McpCommand {
         attachment_index: usize,
         reply: oneshot::Sender<anyhow::Result<Value>>,
     },
+    ScrollWheel {
+        delta_y: f32,
+        ticks: u32,
+        reply: oneshot::Sender<anyhow::Result<Value>>,
+    },
     ScrollMessages {
         to_top: bool,
         reply: oneshot::Sender<anyhow::Result<Value>>,

@@ -233,6 +233,26 @@ Parameters:
         write: true,
     },
     ToolSpec {
+        name: "scroll_wheel",
+        description: "\
+Send wheel events to the message list, the way a mouse wheel does.
+
+scroll_messages jumps the viewport, which cancels the wheel animation and never sets
+the list's scroll-active flag. That flag matters: while it is set the chat suppresses
+its image-cache sweep, so a jump measures the app under lighter memory pressure than
+real scrolling does. Use this when the run has to reproduce scrolling behaviour, and
+scroll_messages when you only need to land at an edge.
+
+Events go through GPUI's own dispatch, not the OS, so they cannot land in another
+application if the window is not frontmost.
+
+Parameters:
+- delta_y (optional): pixels per tick. Negative scrolls toward older messages
+  (content moves down). Default -120.
+- ticks (optional): how many wheel events to send, 1-500. Default 10.",
+        write: true,
+    },
+    ToolSpec {
         name: "scroll_messages",
         description: "\
 Move the open channel's message list to the top or the bottom.

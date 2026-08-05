@@ -152,6 +152,15 @@ impl McpRuntime {
                         });
                         let _ = reply.send(result);
                     }
+                    McpCommand::ScrollWheel {
+                        delta_y,
+                        ticks,
+                        reply,
+                    } => {
+                        let result = cx
+                            .update(|cx| mezon_ui::app::capture::scroll_wheel(cx, delta_y, ticks));
+                        let _ = reply.send(result);
+                    }
                     McpCommand::ScrollMessages { to_top, reply } => {
                         let result =
                             cx.update(|cx| mezon_ui::app::capture::scroll_messages(cx, to_top));

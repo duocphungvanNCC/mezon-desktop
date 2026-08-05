@@ -99,6 +99,20 @@ impl McpBackend {
             }
             "get_current_context" => self.get_current_context().await,
             "get_scroll_state" => self.get_scroll_state().await,
+            "scroll_wheel" => {
+                self.require_write_mode("scroll_wheel")?;
+                let delta_y = arguments
+                    .get("delta_y")
+                    .and_then(Value::as_f64)
+                    .unwrap_or(-120.0) as f32;
+                let ticks = arguments.get("ticks").and_then(Value::as_u64).unwrap_or(10) as u32;
+                self.send_ui_result(|reply| McpCommand::ScrollWheel {
+                    delta_y,
+                    ticks,
+                    reply,
+                })
+                .await
+            }
             "scroll_messages" => {
                 self.require_write_mode("scroll_messages")?;
                 let to_top = arguments

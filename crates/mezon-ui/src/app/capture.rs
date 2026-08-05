@@ -301,6 +301,42 @@ pub fn set_composer_panel(cx: &mut App, kind: Option<&str>) -> anyhow::Result<Va
     Ok(serde_json::json!({ "ok": true, "panel": open }))
 }
 
+pub fn scroll_wheel(cx: &mut App, delta_y: f32, ticks: u32) -> anyhow::Result<Value> {
+    let main_handle = handle(cx).ok_or_else(|| anyhow::anyhow!("main window not found"))?;
+    let ticks = ticks.clamp(1, 500);
+    let delivered = cx.update_window(main_handle, |_, window, cx| {
+        let viewport = window.viewport_size();
+        let position = gpui::point(
+            gpui::px(CHAT_SIDEBAR_WIDTH + (f32::from(viewport.width) - CHAT_SIDEBAR_WIDTH) * 0.4),
+            gpui::px(f32::from(viewport.height) * 0.45),
+        );
+        let mut delivered = 0u32;
+        for _ in 0..ticks {
+            let event = gpui::PlatformInput::ScrollWheel(gpui::ScrollWheelEvent {
+                position,
+                delta: gpui::ScrollDelta::Pixels(gpui::point(gpui::px(0.), gpui::px(delta_y))),
+                modifiers: gpui::Modifiers::default(),
+                touch_phase: gpui::TouchPhase::Moved,
+            });
+            window.dispatch_event(event, cx);
+            delivered += 1;
+        }
+        delivered
+    })?;
+    let timeline = crate::chat::message::ChannelMessages::active_timeline(cx);
+    let (item_count, first_visible, at_bottom) = timeline
+        .map(|timeline| timeline.read(cx).viewport_state())
+        .unwrap_or((0, 0, false));
+    Ok(json!({
+        "ok": true,
+        "ticks": delivered,
+        "delta_y": delta_y,
+        "item_count": item_count,
+        "first_visible_index": first_visible,
+        "at_bottom": at_bottom,
+    }))
+}
+
 pub fn scroll_messages(cx: &mut App, to_top: bool) -> anyhow::Result<Value> {
     let timeline = crate::chat::message::ChannelMessages::active_timeline(cx)
         .ok_or_else(|| anyhow::anyhow!("no message list is mounted; open a channel first"))?;

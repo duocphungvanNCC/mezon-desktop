@@ -234,6 +234,13 @@ pub fn input_schema(name: &str) -> Arc<Map<String, Value>> {
             }),
             &["message_id"],
         )),
+        "scroll_wheel" => Arc::new(object(
+            json!({
+                "delta_y": { "type": "number", "description": "Pixels per tick. Negative scrolls toward older messages. Default -120.", "default": -120 },
+                "ticks": integer("How many wheel events to send, 1-500. Default 10.", Some(10)),
+            }),
+            &[],
+        )),
         "scroll_messages" => Arc::new(object(
             json!({
                 "to": string("\"top\" (default) or \"bottom\"."),
