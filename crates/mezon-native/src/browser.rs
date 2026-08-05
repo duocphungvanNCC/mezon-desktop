@@ -39,26 +39,38 @@ fn is_chromium_stem(stem: &str) -> bool {
 
 #[allow(dead_code)]
 fn is_chromium_mac_app(app_name: &str) -> bool {
-    let name = app_name
-        .trim()
-        .trim_end_matches(".app")
-        .to_ascii_lowercase();
-    CHROMIUM_MAC_APPS.iter().any(|known| name == *known)
+    let lowered = app_name.trim().to_ascii_lowercase();
+    let name = lowered.strip_suffix(".app").unwrap_or(&lowered);
+    CHROMIUM_MAC_APPS.contains(&name)
 }
 
 #[allow(dead_code)]
 fn desktop_entry_stem(desktop_file: &str) -> &str {
-    desktop_file
-        .trim()
-        .rsplit('/')
-        .next()
-        .unwrap_or("")
-        .trim_end_matches(".desktop")
+    let file = desktop_file.trim().rsplit('/').next().unwrap_or("");
+    file.strip_suffix(".desktop").unwrap_or(file)
 }
 
 #[allow(dead_code)]
 fn executable_stem(path: &Path) -> Option<String> {
     Some(path.file_stem()?.to_string_lossy().to_ascii_lowercase())
+}
+
+#[allow(dead_code)]
+fn chromium_app_bundle(handler: PathBuf) -> Option<PathBuf> {
+    let name = handler.file_name()?.to_string_lossy().to_string();
+    is_chromium_mac_app(&name).then_some(handler)
+}
+
+#[allow(dead_code)]
+fn chromium_executable(handler: PathBuf) -> Option<PathBuf> {
+    let stem = executable_stem(&handler)?;
+    is_chromium_stem(&stem).then_some(handler)
+}
+
+#[allow(dead_code)]
+fn chromium_desktop_stem(xdg_settings_output: &str) -> Option<&str> {
+    let stem = desktop_entry_stem(xdg_settings_output);
+    is_chromium_stem(stem).then_some(stem)
 }
 
 /// Open `url` in a chromeless browser window when the user's default browser can
@@ -73,6 +85,11 @@ fn executable_stem(path: &Path) -> Option<String> {
 /// a dedicated profile — Chromium drops `--window-position`/`--window-size` when
 /// it hands the command line to a running instance — and a dedicated profile
 /// leaves instances behind that the app cannot reliably find and close again.
+///
+/// Probing the default browser blocks (a LaunchServices round-trip on macOS, an
+/// `xdg-settings` subprocess on Linux), so callers must run this off the UI
+/// thread — `PlatformStore::app_window_opener` exists to make that the only
+/// reachable shape.
 pub fn open_url_app_window(url: &str) -> anyhow::Result<()> {
     crate::ensure_http_url(url)?;
     match default_chromium_browser() {
@@ -84,50 +101,80 @@ pub fn open_url_app_window(url: &str) -> anyhow::Result<()> {
     }
 }
 
+fn silenced(command: &mut std::process::Command) -> &mut std::process::Command {
+    command
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+}
+
 #[cfg(target_os = "macos")]
 fn launch_app_window(browser: &Path, url: &str) -> anyhow::Result<()> {
-    let child = std::process::Command::new("/usr/bin/open")
+    let mut command = std::process::Command::new("/usr/bin/open");
+    command
         .arg("-n")
         .arg("-a")
         .arg(browser)
         .arg("--args")
-        .arg(format!("--app={url}"))
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
+        .arg(format!("--app={url}"));
+    let status = silenced(&mut command)
+        .status()
         .map_err(|e| anyhow::anyhow!("failed to open {}: {e}", browser.display()))?;
-    reap(child);
+    if !status.success() {
+        anyhow::bail!("failed to open {}: {status}", browser.display());
+    }
     Ok(())
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(all(unix, not(target_os = "macos")))]
 fn launch_app_window(browser: &Path, url: &str) -> anyhow::Result<()> {
-    let child = std::process::Command::new(browser)
-        .arg(format!("--app={url}"))
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
+    use std::os::unix::process::CommandExt;
+
+    let mut command = std::process::Command::new(browser);
+    command.arg(format!("--app={url}"));
+    silenced(&mut command);
+    unsafe {
+        command.pre_exec(|| {
+            match libc::fork() {
+                -1 => return Err(std::io::Error::last_os_error()),
+                0 => (),
+                _ => libc::_exit(0),
+            }
+            if libc::setsid() == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    let mut child = command
         .spawn()
         .map_err(|e| anyhow::anyhow!("failed to open {}: {e}", browser.display()))?;
-    reap(child);
+    child
+        .wait()
+        .map_err(|e| anyhow::anyhow!("failed to open {}: {e}", browser.display()))?;
     Ok(())
 }
 
-/// The browser is not ours to manage — it is launched by the OS and outlives the
-/// app — but the spawned handle still has to be waited on, or every launch leaves
-/// a zombie behind until the app exits.
-fn reap(mut child: std::process::Child) {
-    std::thread::spawn(move || {
-        let _ = child.wait();
-    });
+#[cfg(target_os = "windows")]
+fn launch_app_window(browser: &Path, url: &str) -> anyhow::Result<()> {
+    use std::os::windows::process::CommandExt;
+
+    const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+    let mut command = std::process::Command::new(browser);
+    command
+        .arg(format!("--app={url}"))
+        .creation_flags(CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW);
+    silenced(&mut command)
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| anyhow::anyhow!("failed to open {}: {e}", browser.display()))
 }
 
 #[cfg(target_os = "macos")]
 fn default_chromium_browser() -> Option<PathBuf> {
-    let app = macos::default_http_handler()?;
-    let name = app.file_name()?.to_string_lossy().to_string();
-    is_chromium_mac_app(&name).then_some(app)
+    chromium_app_bundle(macos::default_http_handler()?)
 }
 
 #[cfg(target_os = "macos")]
@@ -137,21 +184,16 @@ mod macos {
     use core_foundation::base::TCFType;
     use core_foundation::error::{CFError, CFErrorRef};
     use core_foundation::string::CFString;
-    use core_foundation::url::{CFURL, CFURLRef};
+    use core_foundation::url::{CFURL, CFURLCreateWithString, CFURLRef};
 
-    const K_LS_ROLES_ALL: u32 = 0xFFFF_FFFF;
+    const LS_ROLES_ALL: u32 = 0xFFFF_FFFF;
 
+    #[link(name = "CoreServices", kind = "framework")]
     unsafe extern "C" {
         fn LSCopyDefaultApplicationURLForURL(
             in_url: CFURLRef,
             in_role_mask: u32,
             out_error: *mut CFErrorRef,
-        ) -> CFURLRef;
-
-        fn CFURLCreateWithString(
-            allocator: *const std::ffi::c_void,
-            url_string: core_foundation::string::CFStringRef,
-            base_url: CFURLRef,
         ) -> CFURLRef;
     }
 
@@ -173,7 +215,7 @@ mod macos {
         let raw = unsafe {
             LSCopyDefaultApplicationURLForURL(
                 probe_url.as_concrete_TypeRef(),
-                K_LS_ROLES_ALL,
+                LS_ROLES_ALL,
                 &mut error,
             )
         };
@@ -190,9 +232,7 @@ mod macos {
 
 #[cfg(target_os = "windows")]
 fn default_chromium_browser() -> Option<PathBuf> {
-    let exe = windows_impl::default_http_handler()?;
-    let stem = executable_stem(&exe)?;
-    is_chromium_stem(&stem).then_some(exe)
+    chromium_executable(windows_impl::default_http_handler()?)
 }
 
 #[cfg(target_os = "windows")]
@@ -247,19 +287,21 @@ fn default_chromium_browser() -> Option<PathBuf> {
         return None;
     }
     let desktop = String::from_utf8(output.stdout).ok()?;
-    let stem = desktop_entry_stem(&desktop);
-    if !is_chromium_stem(stem) {
-        return None;
-    }
-    which_binary(stem)
+    which_binary(chromium_desktop_stem(&desktop)?)
 }
 
 #[cfg(all(unix, not(target_os = "macos")))]
 fn which_binary(stem: &str) -> Option<PathBuf> {
+    use std::os::unix::fs::PermissionsExt;
+
     let path = std::env::var_os("PATH")?;
     std::env::split_paths(&path)
         .map(|dir| dir.join(stem))
-        .find(|candidate| candidate.is_file())
+        .find(|candidate| {
+            candidate
+                .metadata()
+                .is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
+        })
 }
 
 #[cfg(test)]
@@ -288,6 +330,7 @@ mod tests {
         assert!(is_chromium_mac_app("Google Chrome.app"));
         assert!(is_chromium_mac_app("Microsoft Edge"));
         assert!(is_chromium_mac_app("Brave Browser.app"));
+        assert!(is_chromium_mac_app("Google Chrome.APP"));
     }
 
     #[test]
@@ -295,6 +338,7 @@ mod tests {
         assert!(!is_chromium_mac_app("Safari.app"));
         assert!(!is_chromium_mac_app("Firefox.app"));
         assert!(!is_chromium_mac_app("Google Chrome Helper.app"));
+        assert!(!is_chromium_mac_app("Chromium.app.app"));
     }
 
     #[test]
@@ -310,6 +354,55 @@ mod tests {
         assert_eq!(desktop_entry_stem(""), "");
     }
 
+    #[test]
+    fn reads_the_stem_of_an_executable() {
+        assert_eq!(
+            executable_stem(Path::new("/opt/google/chrome/chrome")).as_deref(),
+            Some("chrome")
+        );
+        assert_eq!(
+            executable_stem(Path::new("MSEdge.exe")).as_deref(),
+            Some("msedge")
+        );
+        assert_eq!(executable_stem(Path::new("")), None);
+    }
+
+    #[test]
+    fn selects_only_chromium_app_bundles() {
+        let chrome = PathBuf::from("/Applications/Google Chrome.app");
+        assert_eq!(chromium_app_bundle(chrome.clone()), Some(chrome));
+        assert_eq!(
+            chromium_app_bundle(PathBuf::from("/Applications/Safari.app")),
+            None
+        );
+        assert_eq!(chromium_app_bundle(PathBuf::from("/")), None);
+    }
+
+    #[test]
+    fn selects_only_chromium_executables() {
+        let edge = PathBuf::from("/Program Files/Microsoft/Edge/msedge.exe");
+        assert_eq!(chromium_executable(edge.clone()), Some(edge));
+        assert_eq!(
+            chromium_executable(PathBuf::from("/Windows/system32/OpenWith.exe")),
+            None
+        );
+        assert_eq!(
+            chromium_executable(PathBuf::from("/usr/lib/firefox/firefox")),
+            None
+        );
+    }
+
+    #[test]
+    fn selects_only_chromium_desktop_entries() {
+        assert_eq!(
+            chromium_desktop_stem("google-chrome.desktop\n"),
+            Some("google-chrome")
+        );
+        assert_eq!(chromium_desktop_stem("firefox.desktop\n"), None);
+        assert_eq!(chromium_desktop_stem("com.google.Chrome.desktop\n"), None);
+        assert_eq!(chromium_desktop_stem(""), None);
+    }
+
     #[cfg(target_os = "macos")]
     #[test]
     #[ignore = "environment dependent: reports the default browser of the machine it runs on"]
@@ -320,9 +413,10 @@ mod tests {
 
     #[test]
     fn app_window_rejects_non_http_schemes() {
-        assert!(open_url_app_window("file:///etc/passwd").is_err());
-        assert!(open_url_app_window("javascript:alert(1)").is_err());
-        assert!(open_url_app_window("--app=evil").is_err());
-        assert!(open_url_app_window("").is_err());
+        assert!(crate::ensure_http_url("file:///etc/passwd").is_err());
+        assert!(crate::ensure_http_url("javascript:alert(1)").is_err());
+        assert!(crate::ensure_http_url("--app=evil").is_err());
+        assert!(crate::ensure_http_url("").is_err());
+        assert!(crate::ensure_http_url("https://mezon.ai/app").is_ok());
     }
 }
