@@ -285,6 +285,8 @@ fn scroll_state(cx: &mut App) -> anyhow::Result<Value> {
         "loaded_count": store.messages().len(),
         "has_more_top": store.has_more_top(),
         "has_more_bottom": store.has_more_bottom(),
+        "loading": store.is_loading(),
+        "loading_more": store.is_loading_more(),
     }))
 }
 

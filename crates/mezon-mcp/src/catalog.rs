@@ -170,7 +170,9 @@ Parameters: none.",
         description: "\
 Report what the open channel's message list currently holds.
 
-Returns loaded_count, has_more_top, has_more_bottom, and the active clan/channel ids.
+Returns loaded_count, has_more_top, has_more_bottom, loading, loading_more and the
+active clan/channel ids. load_more_messages refuses while loading or loading_more is
+true, so wait for both to clear rather than treating the refusal as end-of-history.
 `list_messages` reads history straight from the API without moving the UI, so use this
 to learn whether the on-screen list still has older or newer pages to pull in, and pair
 it with load_more_messages before capture_chat if you need those rows rendered.
