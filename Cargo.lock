@@ -5829,6 +5829,7 @@ dependencies = [
  "tracing",
  "url",
  "webpki-roots 1.0.8",
+ "windows 0.61.3",
 ]
 
 [[package]]
