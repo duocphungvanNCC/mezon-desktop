@@ -5,6 +5,8 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, LazyLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use futures::FutureExt as _;
+use futures::future::Shared;
 use gpui::{App, AppContext, Context, Entity, EventEmitter, Global, Subscription, Task};
 use mezon_client::transport::{ApiCategoryDesc, ApiChannelDesc};
 use mezon_client::{
@@ -284,7 +286,7 @@ pub struct ChannelList {
     user_channels_loading: bool,
     in_voice: HashMap<UserId, InVoiceInfo>,
     user_channels_loaded: bool,
-    loading: HashSet<ClanId>,
+    loading: HashMap<ClanId, Shared<Task<()>>>,
     active_clan_id: Option<ClanId>,
     pub active_channel_id: Option<ChannelId>,
     remembered_channels: HashMap<ClanId, ChannelId>,
@@ -518,7 +520,7 @@ impl ChannelList {
             user_channels_loading: false,
             in_voice: HashMap::new(),
             user_channels_loaded: false,
-            loading: HashSet::new(),
+            loading: HashMap::new(),
             active_clan_id: None,
             active_channel_id: None,
             remembered_channels: HashMap::new(),
@@ -585,7 +587,15 @@ impl ChannelList {
         }
         let api = self.api.clone();
         let generation = self.reset_generation;
+        let structure_ready = self.clan_structure_ready(clan_id);
         cx.spawn(async move |this, cx| {
+            structure_ready.await;
+            let still_current = this
+                .update(cx, |this, _| this.reset_generation == generation)
+                .unwrap_or(false);
+            if !still_current {
+                return;
+            }
             if let Err(e) = api.join_clan_chat(clan_id.get()).await {
                 tracing::error!(target: "clan_load", "join_clan_chat failed for clan {clan_id}: {e}");
             }
@@ -836,34 +846,45 @@ impl ChannelList {
     }
 
     fn fetch_clan(&mut self, clan_id: ClanId, cx: &mut Context<Self>) {
-        if self.loading.contains(&clan_id) {
+        if self.loading.contains_key(&clan_id) {
             return;
         }
-        self.loading.insert(clan_id);
         let api = self.api.clone();
         let generation = self.reset_generation;
-        cx.spawn(async move |this, cx| {
-            let result = Self::fetch_clan_structure(&api, clan_id).await;
-            match result {
-                Ok(categories) => {
-                    let _ = this.update(cx, |this, cx| {
-                        this.loading.remove(&clan_id);
-                        if this.reset_generation != generation {
-                            return;
-                        }
-                        this.apply_clan_structure(clan_id, categories, cx);
-                    });
+        let task = cx
+            .spawn(async move |this, cx| {
+                let result = Self::fetch_clan_structure(&api, clan_id).await;
+                match result {
+                    Ok(categories) => {
+                        let _ = this.update(cx, |this, cx| {
+                            if this.reset_generation != generation {
+                                return;
+                            }
+                            this.apply_clan_structure(clan_id, categories, cx);
+                            this.loading.remove(&clan_id);
+                        });
+                    }
+                    Err(e) => {
+                        tracing::error!("Failed to load channels for clan {clan_id}: {e}");
+                        let _ = this.update(cx, |this, cx| {
+                            if this.reset_generation != generation {
+                                return;
+                            }
+                            this.loading.remove(&clan_id);
+                            cx.notify();
+                        });
+                    }
                 }
-                Err(e) => {
-                    tracing::error!("Failed to load channels for clan {clan_id}: {e}");
-                    let _ = this.update(cx, |this, cx| {
-                        this.loading.remove(&clan_id);
-                        cx.notify();
-                    });
-                }
-            }
-        })
-        .detach();
+            })
+            .shared();
+        self.loading.insert(clan_id, task);
+    }
+
+    fn clan_structure_ready(&self, clan_id: ClanId) -> Shared<Task<()>> {
+        self.loading
+            .get(&clan_id)
+            .cloned()
+            .unwrap_or_else(|| Task::ready(()).shared())
     }
 
     fn fetch_user_channels(&mut self, cx: &mut Context<Self>) {
@@ -2301,7 +2322,7 @@ impl ChannelList {
     }
 
     pub fn is_loading_clan(&self, clan_id: ClanId) -> bool {
-        self.loading.contains(&clan_id)
+        self.loading.contains_key(&clan_id)
     }
 
     pub fn app_channels_for_clan(&self, clan_id: ClanId) -> &[AppChannel] {
@@ -5469,6 +5490,60 @@ mod tests {
                 assert!(
                     channels.extras_loading.is_empty(),
                     "once loaded, re-entering must not re-issue them"
+                );
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn seed_badges_waits_on_the_in_flight_structure_fetch(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let channels = init_channel_list(cx);
+            channels.update(cx, |channels, cx| {
+                channels.load_for_clan(ClanId(1), cx);
+                assert!(
+                    channels.is_loading_clan(ClanId(1)),
+                    "an in-flight structure fetch must report the clan as loading"
+                );
+
+                let listing = channels.clan_structure_ready(ClanId(1));
+                assert!(
+                    listing.clone().now_or_never().is_none(),
+                    "seed_badges must not reach join_clan_chat while the listing is in flight"
+                );
+
+                channels.refresh_clan(ClanId(1), cx);
+                assert_eq!(
+                    channels.loading.len(),
+                    1,
+                    "a second load must reuse the in-flight fetch, not spawn a duplicate"
+                );
+                assert!(
+                    Shared::ptr_eq(&listing, &channels.clan_structure_ready(ClanId(1))),
+                    "every waiter must observe the same listing fetch"
+                );
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn seed_badges_does_not_wait_when_no_listing_is_in_flight(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let channels = init_channel_list(cx);
+            channels.update(cx, |channels, cx| {
+                channels.apply_clan_structure(ClanId(1), structure_with_two_channels(), cx);
+                channels.load_for_clan(ClanId(1), cx);
+
+                assert!(
+                    !channels.is_loading_clan(ClanId(1)),
+                    "a fresh cache must not open the loading gate"
+                );
+                assert!(
+                    channels
+                        .clan_structure_ready(ClanId(1))
+                        .now_or_never()
+                        .is_some(),
+                    "with the listing already cached the gate must resolve immediately"
                 );
             });
         });

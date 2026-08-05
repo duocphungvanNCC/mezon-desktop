@@ -8,6 +8,7 @@ edition = "2024"
 workspace = true
 
 [dependencies]
+futures.workspace = true
 mezon-client.workspace = true
 mezon-proto.workspace = true
 mezon-i18n.workspace = true
