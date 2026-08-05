@@ -8,7 +8,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use futures::FutureExt as _;
 use futures::future::Shared;
 use gpui::{App, AppContext, Context, Entity, EventEmitter, Global, Subscription, Task};
-use mezon_client::transport::{ApiCategoryDesc, ApiChannelDesc};
+use mezon_client::transport::{ApiCategoryDesc, ApiChannelDesc, is_channel_limit_api_error};
 use mezon_client::{
     ApiChannelApp, AppApi, ChannelAppLaunchParams, ConnectionStatus, RealtimeEvent,
     build_channel_app_url,
@@ -216,6 +216,7 @@ pub fn validate_category_name(name: &str) -> Result<String, CreateCategoryError>
 pub enum CreateChannelError {
     InvalidName,
     DuplicateName,
+    ChannelLimitExceeded,
     Other(String),
 }
 
@@ -225,6 +226,13 @@ pub fn validate_channel_name(name: &str) -> Result<String, CreateChannelError> {
         CreateCategoryError::DuplicateName => CreateChannelError::DuplicateName,
         CreateCategoryError::Other(msg) => CreateChannelError::Other(msg),
     })
+}
+
+fn map_create_channel_api_error(err: anyhow::Error) -> CreateChannelError {
+    if is_channel_limit_api_error(&err) {
+        return CreateChannelError::ChannelLimitExceeded;
+    }
+    CreateChannelError::Other(err.to_string())
 }
 
 fn collapse_state_path() -> std::path::PathBuf {
@@ -1840,7 +1848,7 @@ impl ChannelList {
                     channel_private,
                 )
                 .await
-                .map_err(|e| CreateChannelError::Other(e.to_string()))?;
+                .map_err(map_create_channel_api_error)?;
             desc.category_id = effective_category_id(desc.category_id, category_id_num);
             let channel_id = ChannelId(desc.channel_id);
             let created_type = ChannelType::from_raw(desc.channel_type);
@@ -3880,6 +3888,23 @@ fn effective_category_id(desc_category_id: i64, requested: Option<i64>) -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn map_create_channel_api_error_maps_out_of_range_to_limit() {
+        use mezon_client::ApiStatusError;
+        let err = anyhow::Error::from(ApiStatusError {
+            code: ApiStatusError::OUT_OF_RANGE,
+        });
+        assert_eq!(
+            map_create_channel_api_error(err),
+            CreateChannelError::ChannelLimitExceeded
+        );
+        let err = anyhow::Error::from(ApiStatusError { code: 13 });
+        assert!(matches!(
+            map_create_channel_api_error(err),
+            CreateChannelError::Other(_)
+        ));
+    }
 
     #[test]
     fn collapse_state_roundtrip() {

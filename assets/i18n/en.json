@@ -2111,6 +2111,7 @@
   "common.uploadLimit.emoji": "Max emoji limit exceeded",
   "common.uploadLimit.sticker": "Max sticker limit exceeded",
   "common.uploadLimit.voiceSticker": "Max voice sticker limit exceeded",
+  "channel.createLimitExceeded": "Maximum channel limit reached for this clan",
   "common.uploadToChannel": "Upload To #{{channelName}}",
   "common.userProfile.aboutMe": "About Me",
   "common.userProfile.activity": "Activity",

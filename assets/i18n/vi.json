@@ -2102,6 +2102,7 @@
   "common.uploadLimit.emoji": "Đạt giới hạn biểu cảm",
   "common.uploadLimit.sticker": "Đạt giới hạn nhãn dán",
   "common.uploadLimit.voiceSticker": "Đạt giới hạn hiệu ứng âm thanh",
+  "channel.createLimitExceeded": "Clan đã đạt giới hạn số lượng kênh tối đa",
   "common.uploadToChannel": "Tải lên #{{channelName}}",
   "common.userProfile.aboutMe": "Thông tin",
   "common.userProfile.activity": "Hoạt động",

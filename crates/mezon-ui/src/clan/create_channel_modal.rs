@@ -16,6 +16,7 @@ use mezon_store::{ChannelList, ChannelType, ClanId, CreateChannelError, validate
 enum Validation {
     InvalidName,
     DuplicateName,
+    ChannelLimit,
     Validated,
 }
 
@@ -171,6 +172,14 @@ impl CreateChannelModal {
                     cx.notify();
                 });
             }
+            Err(CreateChannelError::ChannelLimitExceeded) => {
+                let _ = this.update(cx, |this, cx| {
+                    this.validation = Validation::ChannelLimit;
+                    this.validation_visible = true;
+                    this.creating = false;
+                    cx.notify();
+                });
+            }
             Err(CreateChannelError::Other(msg)) => {
                 tracing::error!("create channel failed: {msg}");
                 let _ = this.update(cx, |this, cx| {
@@ -231,6 +240,9 @@ impl Render for CreateChannelModal {
             mezon_i18n::t(&locale, "createChannel.validation.duplicateName")
                 .to_string()
                 .into();
+        let channel_limit_msg: SharedString = mezon_i18n::t(&locale, "channel.createLimitExceeded")
+            .to_string()
+            .into();
         let private_label: SharedString = mezon_i18n::t(&locale, "createChannel.privacy.private")
             .to_string()
             .into();
@@ -254,6 +266,8 @@ impl Render for CreateChannelModal {
         let show_invalid = self.validation_visible && self.validation == Validation::InvalidName;
         let show_duplicate =
             self.validation_visible && self.validation == Validation::DuplicateName;
+        let show_channel_limit =
+            self.validation_visible && self.validation == Validation::ChannelLimit;
         let can_create = self.validation == Validation::Validated && !self.creating;
         let selected_type = self.channel_type;
 
@@ -363,7 +377,7 @@ impl Render for CreateChannelModal {
                             .pl(px(12.))
                             .rounded(px(4.))
                             .border_1()
-                            .border_color(if show_invalid || show_duplicate {
+                            .border_color(if show_invalid || show_duplicate || show_channel_limit {
                                 theme.status_dnd
                             } else {
                                 theme.tokens.border_focus
@@ -384,7 +398,8 @@ impl Render for CreateChannelModal {
                             .font_weight(FontWeight::MEDIUM)
                             .text_color(theme.status_dnd)
                             .when(show_invalid, |el| el.child(invalid_msg))
-                            .when(show_duplicate, |el| el.child(duplicate_msg)),
+                            .when(show_duplicate, |el| el.child(duplicate_msg))
+                            .when(show_channel_limit, |el| el.child(channel_limit_msg)),
                     ),
             )
             .when(selected_type == ChannelType::Text, |el| {
