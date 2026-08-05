@@ -157,6 +157,13 @@ impl Channel {
     pub fn visible_in_sidebar(&self) -> bool {
         !self.is_archived()
     }
+
+    /// A voice channel already holding a conversation, which the command
+    /// palette and the hashtag suggestions both mark as `(busy)`. One person
+    /// sitting in a channel is someone waiting, not a call to interrupt.
+    pub fn voice_busy(&self) -> bool {
+        self.channel_type == ChannelType::Voice && self.voice_members.len() >= 2
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -3973,6 +3980,35 @@ mod tests {
             active: CHANNEL_ACTIVE_JOINED,
             avatar_url: String::new(),
         }
+    }
+
+    #[test]
+    fn a_voice_channel_is_busy_only_once_someone_has_company() {
+        let member = |id: i64| VoiceMember {
+            user_id: UserId(id),
+            display_name: format!("user{id}"),
+            avatar_url: String::new(),
+        };
+
+        let mut voice = make_channel(1, "General Voice", "cat");
+        voice.channel_type = ChannelType::Voice;
+        assert!(!voice.voice_busy(), "an empty voice channel is free");
+
+        voice.voice_members = vec![member(1)];
+        assert!(
+            !voice.voice_busy(),
+            "one person in a voice channel is someone waiting, not a call to interrupt"
+        );
+
+        voice.voice_members.push(member(2));
+        assert!(voice.voice_busy());
+
+        let mut text = make_channel(2, "general", "cat");
+        text.voice_members = vec![member(1), member(2)];
+        assert!(
+            !text.voice_busy(),
+            "only voice channels can be busy, whatever a text channel carries"
+        );
     }
 
     fn make_thread(id: i64, parent_id: i64, cat_id: &str) -> Channel {
