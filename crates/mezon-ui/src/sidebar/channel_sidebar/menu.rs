@@ -1,6 +1,6 @@
-use gpui::{App, ClickEvent, Entity, Pixels, Point, WeakEntity, Window};
+use gpui::{App, ClickEvent, ClipboardItem, Entity, Pixels, Point, WeakEntity, Window};
 use mezon_store::{
-    BadgeService, ChannelId, ChannelList, ChannelType, ClanId, PERMISSION_ADMINISTRATOR,
+    AppConfig, BadgeService, ChannelId, ChannelList, ChannelType, ClanId, PERMISSION_ADMINISTRATOR,
     PERMISSION_CLAN_OWNER, PERMISSION_MANAGE_CHANNEL, PERMISSION_MANAGE_CLAN,
     PERMISSION_MANAGE_THREAD, PermissionStore,
 };
@@ -130,6 +130,20 @@ fn coming_soon_modal(title: String, locale: String) -> impl Fn(&mut Window, &mut
         Shell::global(cx).update(cx, |shell, cx| {
             shell.show_coming_soon(title, &locale, window, cx);
         });
+    }
+}
+
+fn copy_channel_link(
+    clan_id: ClanId,
+    channel_id: ChannelId,
+) -> impl Fn(&mut Window, &mut App) + 'static {
+    move |_window: &mut Window, cx: &mut App| {
+        let Some(link) = AppConfig::try_global(cx)
+            .map(|cfg| cfg.channel_link(&clan_id.to_string(), &channel_id.to_string()))
+        else {
+            return;
+        };
+        cx.write_to_clipboard(ClipboardItem::new_string(link));
     }
 }
 
@@ -405,7 +419,7 @@ pub(super) fn build_channel_menu(
     menu = menu
         .item(
             t("channelMenu.menu.inviteMenu.copyLink"),
-            coming_soon_toast(coming_soon.clone()),
+            copy_channel_link(clan_id, channel_id),
         )
         .separator();
 
