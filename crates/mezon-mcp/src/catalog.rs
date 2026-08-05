@@ -195,6 +195,28 @@ Parameters:
         write: true,
     },
     ToolSpec {
+        name: "open_panel",
+        description: "\
+Open one of the composer panels: emoji, sticker, gif or sound.
+
+The panel renders over the chat, so pair it with capture_window to see it. It stays
+open until close_panel or until the user dismisses it.
+
+Parameters:
+- kind (required): \"emoji\", \"sticker\", \"gif\" or \"sound\".",
+        write: true,
+    },
+    ToolSpec {
+        name: "close_panel",
+        description: "\
+Close the composer panel opened by open_panel.
+
+Returns ok even when no panel was open.
+
+Parameters: none.",
+        write: true,
+    },
+    ToolSpec {
         name: "list_emojis",
         description: "\
 List custom emoji available to the signed-in user.

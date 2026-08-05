@@ -200,6 +200,7 @@ impl ChatArea {
             let placeholder = mezon_i18n::t(&locale, "messageBox.placeholder");
             let settings = self.settings.clone();
             let mention_input = cx.new(|cx| MentionInput::new(placeholder, settings, window, cx));
+            MentionInput::register_as_active_composer(&mention_input, cx);
             let submit_sub = cx.subscribe_in(
                 &mention_input,
                 window,

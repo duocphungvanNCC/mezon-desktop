@@ -422,6 +422,9 @@ pub enum MentionInputEvent {
     EditLastMessage,
 }
 
+struct ActiveComposer(gpui::WeakEntity<MentionInput>);
+impl gpui::Global for ActiveComposer {}
+
 pub struct MentionInput {
     input: Entity<MentionInputState>,
     committed: Vec<CommittedToken>,
@@ -2076,6 +2079,33 @@ impl MentionInput {
     fn close_popup(&mut self) {
         self.popup = None;
         self._popup_subs.clear();
+    }
+
+    pub fn show_panel(&mut self, tab: SubPanel, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(popup) = &self.popup {
+            popup.update(cx, |popup, cx| popup.set_tab(tab, window, cx));
+        } else {
+            self.open_popup(tab, window, cx);
+        }
+        cx.notify();
+    }
+
+    pub fn hide_panel(&mut self, cx: &mut Context<Self>) {
+        self.close_popup();
+        cx.notify();
+    }
+
+    pub fn active_panel(&self, cx: &App) -> Option<SubPanel> {
+        self.popup.as_ref().map(|popup| popup.read(cx).active_tab())
+    }
+
+    pub fn register_as_active_composer(entity: &Entity<Self>, cx: &mut App) {
+        cx.set_global(ActiveComposer(entity.downgrade()));
+    }
+
+    pub fn active_composer(cx: &App) -> Option<Entity<Self>> {
+        cx.try_global::<ActiveComposer>()
+            .and_then(|composer| composer.0.upgrade())
     }
 
     fn insert_emoji(

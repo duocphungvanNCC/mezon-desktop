@@ -131,6 +131,12 @@ impl McpRuntime {
                         let result = cx.update(scroll_state);
                         let _ = reply.send(result);
                     }
+                    McpCommand::SetPanel { kind, reply } => {
+                        let result = cx.update(|cx| {
+                            mezon_ui::app::capture::set_composer_panel(cx, kind.as_deref())
+                        });
+                        let _ = reply.send(result);
+                    }
                     McpCommand::ListEmojis {
                         clan_id,
                         query,

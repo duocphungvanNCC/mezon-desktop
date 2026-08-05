@@ -272,6 +272,35 @@ pub fn show_main_window(cx: &mut App) -> anyhow::Result<()> {
     Ok(())
 }
 
+pub fn set_composer_panel(cx: &mut App, kind: Option<&str>) -> anyhow::Result<Value> {
+    let tab = match kind {
+        None => None,
+        Some(kind) => Some(match kind.to_ascii_lowercase().as_str() {
+            "emoji" | "emojis" => crate::chat::gif_sticker_emoji::SubPanel::Emoji,
+            "sticker" | "stickers" => crate::chat::gif_sticker_emoji::SubPanel::Stickers,
+            "gif" | "gifs" => crate::chat::gif_sticker_emoji::SubPanel::Gifs,
+            "sound" | "sounds" => crate::chat::gif_sticker_emoji::SubPanel::Sounds,
+            other => anyhow::bail!("unknown panel kind: {other}"),
+        }),
+    };
+    let composer = crate::chat::mention_input::MentionInput::active_composer(cx)
+        .ok_or_else(|| anyhow::anyhow!("no composer is mounted; open a channel first"))?;
+    let main_handle = handle(cx).ok_or_else(|| anyhow::anyhow!("main window not found"))?;
+    cx.update_window(main_handle, |_, window, cx| {
+        composer.update(cx, |composer, cx| match tab {
+            Some(tab) => composer.show_panel(tab, window, cx),
+            None => composer.hide_panel(cx),
+        });
+    })?;
+    let open = composer.read(cx).active_panel(cx).map(|tab| match tab {
+        crate::chat::gif_sticker_emoji::SubPanel::Emoji => "emoji",
+        crate::chat::gif_sticker_emoji::SubPanel::Stickers => "sticker",
+        crate::chat::gif_sticker_emoji::SubPanel::Gifs => "gif",
+        crate::chat::gif_sticker_emoji::SubPanel::Sounds => "sound",
+    });
+    Ok(serde_json::json!({ "ok": true, "panel": open }))
+}
+
 pub fn go_back(cx: &mut App) -> anyhow::Result<()> {
     crate::router::Router::global(cx).update(cx, |router, _| router.go_back());
     Ok(())

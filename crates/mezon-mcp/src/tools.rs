@@ -99,6 +99,24 @@ impl McpBackend {
             }
             "get_current_context" => self.get_current_context().await,
             "get_scroll_state" => self.get_scroll_state().await,
+            "open_panel" => {
+                self.require_write_mode("open_panel")?;
+                let kind = arguments
+                    .get("kind")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| anyhow::anyhow!("open_panel requires string field kind"))?
+                    .to_string();
+                self.send_ui_result(|reply| McpCommand::SetPanel {
+                    kind: Some(kind),
+                    reply,
+                })
+                .await
+            }
+            "close_panel" => {
+                self.require_write_mode("close_panel")?;
+                self.send_ui_result(|reply| McpCommand::SetPanel { kind: None, reply })
+                    .await
+            }
             "list_emojis" => {
                 let clan_id = arguments
                     .get("clan_id")

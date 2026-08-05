@@ -81,6 +81,7 @@ pub fn input_schema(name: &str) -> Arc<Map<String, Value>> {
         | "get_account"
         | "get_current_context"
         | "get_scroll_state"
+        | "close_panel"
         | "get_settings"
         | "get_voice_status"
         | "list_stickers"
@@ -225,6 +226,12 @@ pub fn input_schema(name: &str) -> Arc<Map<String, Value>> {
                 },
             }),
             &["clan_id", "channel_id", "content"],
+        )),
+        "open_panel" => Arc::new(object(
+            json!({
+                "kind": string("Which composer panel to show: \"emoji\", \"sticker\", \"gif\" or \"sound\"."),
+            }),
+            &["kind"],
         )),
         "list_emojis" => Arc::new(object(
             json!({
