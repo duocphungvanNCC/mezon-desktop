@@ -15,7 +15,7 @@ pub mod window_icon;
 pub(crate) fn ensure_http_url(url: &str) -> anyhow::Result<()> {
     if !url.starts_with("https://") && !url.starts_with("http://") {
         return Err(anyhow::anyhow!(
-            "open_url rejected: only http(s) scheme is allowed"
+            "url rejected: only http(s) scheme is allowed"
         ));
     }
     Ok(())
