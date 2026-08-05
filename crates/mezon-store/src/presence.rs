@@ -23,11 +23,20 @@ struct TypingEntry {
     at: Instant,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PresenceEvent {
     TypingChanged { channel_id: ChannelId },
     ChannelPresenceChanged { channel_id: ChannelId },
     StatusChanged,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum DmAvatarPresence {
+    None = 0,
+    Online = 1,
+    Idle = 2,
+    Dnd = 3,
 }
 
 #[derive(Debug)]
@@ -106,6 +115,23 @@ impl PresenceStore {
             .get(&user_id)
             .map(String::as_str)
             .filter(|s| !s.is_empty())
+    }
+
+    pub fn dm_avatar_presence(&self, user_id: UserId, api_online: bool) -> DmAvatarPresence {
+        if !self.is_online(user_id) && !api_online {
+            return DmAvatarPresence::None;
+        }
+        match self
+            .presence_status(user_id)
+            .map(|status| status.to_ascii_lowercase())
+            .as_deref()
+        {
+            Some("idle") => DmAvatarPresence::Idle,
+            Some("dnd") | Some("do not disturb") => DmAvatarPresence::Dnd,
+            Some("invisible") | Some("offline") => DmAvatarPresence::None,
+            Some("online") | None => DmAvatarPresence::Online,
+            Some(_) => DmAvatarPresence::Online,
+        }
     }
 
     fn new(_api: Arc<mezon_client::AppApi>, cx: &mut Context<Self>) -> Self {
@@ -629,5 +655,44 @@ mod tests {
     fn typing_users_returns_empty_for_unknown_channel() {
         let store = empty_store();
         assert!(store.typing_users(ChannelId(999)).is_empty());
+    }
+
+    #[test]
+    fn dm_avatar_presence_prefers_realtime_idle_over_stale_api_offline() {
+        let mut store = empty_store();
+        let user_id = UserId(42);
+        store.user_online.insert(user_id);
+        store.presence_status.insert(user_id, "Idle".to_string());
+        assert_eq!(
+            store.dm_avatar_presence(user_id, false),
+            DmAvatarPresence::Idle
+        );
+    }
+
+    #[test]
+    fn dm_avatar_presence_falls_back_to_api_online_before_realtime() {
+        let store = empty_store();
+        assert_eq!(
+            store.dm_avatar_presence(UserId(1), true),
+            DmAvatarPresence::Online
+        );
+    }
+
+    #[test]
+    fn dm_avatar_presence_hides_offline_and_invisible_users() {
+        let store = empty_store();
+        assert_eq!(
+            store.dm_avatar_presence(UserId(1), false),
+            DmAvatarPresence::None
+        );
+        let mut store = empty_store();
+        let user_id = UserId(7);
+        store
+            .presence_status
+            .insert(user_id, "Invisible".to_string());
+        assert_eq!(
+            store.dm_avatar_presence(user_id, true),
+            DmAvatarPresence::None
+        );
     }
 }

@@ -1,5 +1,5 @@
-use gpui::{AnyElement, ElementId, SharedString, div, prelude::*, px};
-use mezon_store::DirectKind;
+use gpui::{AnyElement, ElementId, Pixels, Rgba, SharedString, div, prelude::*, px};
+use mezon_store::{DirectKind, DmAvatarPresence};
 
 use crate::components::primitives::{Avatar, Icon, IconName};
 use crate::router::{Route, navigate};
@@ -7,13 +7,16 @@ use crate::theme::Theme;
 
 pub const DM_ROW_HEIGHT: f32 = 42.;
 
+const DM_AVATAR_SIZE: Pixels = px(32.);
+const PRESENCE_DOT_SIZE: Pixels = px(12.);
+
 pub struct DmRow {
     id: SharedString,
     label: SharedString,
     kind: DirectKind,
     selected: bool,
     unread: bool,
-    online: bool,
+    presence_badge: DmAvatarPresence,
     avatar_src: SharedString,
     avatar_raw: SharedString,
     elem_id: ElementId,
@@ -52,7 +55,7 @@ impl DmRow {
             kind,
             selected: false,
             unread: false,
-            online: false,
+            presence_badge: DmAvatarPresence::None,
             avatar_src: SharedString::from(""),
             avatar_raw: SharedString::from(""),
             elem_id,
@@ -84,8 +87,8 @@ impl DmRow {
         self
     }
 
-    pub fn online(mut self, online: bool) -> Self {
-        self.online = online;
+    pub fn presence_badge(mut self, badge: DmAvatarPresence) -> Self {
+        self.presence_badge = badge;
         self
     }
 
@@ -206,8 +209,7 @@ impl DmRow {
     }
 
     fn render_avatar(&self, theme: &Theme) -> AnyElement {
-        let size = px(32.);
-        let online = self.online && self.kind == DirectKind::Dm;
+        let size = DM_AVATAR_SIZE;
 
         let inner: AnyElement = if self.kind == DirectKind::Group && self.avatar_src.is_empty() {
             div()
@@ -246,19 +248,60 @@ impl DmRow {
             .flex_shrink_0()
             .size(size)
             .child(inner)
-            .when(online, |this| {
-                this.child(
+            .when_some(self.render_presence_badge(theme), |this, badge| {
+                this.child(badge)
+            })
+            .into_any_element()
+    }
+
+    fn render_presence_badge(&self, theme: &Theme) -> Option<AnyElement> {
+        let badge_size = PRESENCE_DOT_SIZE;
+        let border = theme.bg_secondary;
+        match self.presence_badge {
+            DmAvatarPresence::None => None,
+            DmAvatarPresence::Online => Some(
+                div()
+                    .absolute()
+                    .bottom(px(-1.))
+                    .right(px(-1.))
+                    .size(badge_size)
+                    .rounded_full()
+                    .border_2()
+                    .border_color(border)
+                    .bg(theme.status_online)
+                    .into_any_element(),
+            ),
+            DmAvatarPresence::Dnd => Some(
+                div()
+                    .absolute()
+                    .bottom(px(-1.))
+                    .right(px(-1.))
+                    .size(badge_size)
+                    .rounded_full()
+                    .border_2()
+                    .border_color(border)
+                    .bg(theme.status_dnd)
+                    .into_any_element(),
+            ),
+            DmAvatarPresence::Idle => {
+                let idle: Rgba = theme.status_idle;
+                Some(
                     div()
                         .absolute()
                         .bottom(px(-1.))
                         .right(px(-1.))
-                        .size(px(10.))
-                        .rounded_full()
-                        .border_2()
-                        .border_color(theme.bg_secondary)
-                        .bg(theme.status_online),
+                        .size(badge_size)
+                        .flex()
+                        .items_end()
+                        .justify_end()
+                        .child(
+                            Icon::new(IconName::DarkModeIcon)
+                                .size(badge_size)
+                                .text_color(idle),
+                        )
+                        .into_any_element(),
                 )
-            })
-            .into_any_element()
+            }
+        }
     }
 }
