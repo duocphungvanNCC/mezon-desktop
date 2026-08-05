@@ -113,6 +113,7 @@ pub struct DownloadedUpdate {
 
 pub struct InstallOutcome {
     pub restart_path: Option<PathBuf>,
+    pub manual_deb: Option<PathBuf>,
 }
 
 fn insecure_loopback_allowed(parsed: &url::Url) -> bool {
@@ -594,7 +595,10 @@ async fn install_macos(
             )
             .await
             .unwrap_or_else(|e| tracing::warn!("failed to detach update image: {e}"));
-            Ok(InstallOutcome { restart_path: None })
+            Ok(InstallOutcome {
+                restart_path: None,
+                manual_deb: None,
+            })
         }
         Err(error) => {
             if let Ok(Some(volume)) = find_first_dir(&mount_root).await {
@@ -645,36 +649,122 @@ async fn find_app_bundle(volume: &Path) -> Result<Option<PathBuf>> {
 }
 
 #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
+const PRIVILEGED_INSTALL_TIMEOUT: Duration = Duration::from_secs(300);
+
+#[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
 async fn install_linux_deb(update: &DownloadedUpdate) -> Result<InstallOutcome> {
+    use std::process::Stdio;
+
     let current_exe = std::env::current_exe().context("failed to locate running executable")?;
 
-    let output = tokio::process::Command::new("pkexec")
+    let child = match tokio::process::Command::new("pkexec")
         .arg("/usr/bin/dpkg")
         .arg("-i")
         .arg(&update.archive)
-        .output()
-        .await
-        .map_err(|e| {
-            if e.kind() == std::io::ErrorKind::NotFound {
-                anyhow!("pkexec (polkit) not found; update with your package manager instead")
-            } else {
-                anyhow!("failed to run pkexec: {e}")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            tracing::warn!("pkexec not available for privileged .deb install: {error}");
+            return install_deb_fallback(update).await;
+        }
+        Err(error) => return Err(anyhow!("failed to run pkexec: {error}")),
+    };
+
+    let output =
+        match tokio::time::timeout(PRIVILEGED_INSTALL_TIMEOUT, child.wait_with_output()).await {
+            Ok(Ok(output)) => output,
+            Ok(Err(error)) => return Err(anyhow!("failed to run pkexec: {error}")),
+            Err(_) => {
+                tracing::warn!(
+                    "privileged .deb install timed out after {}s",
+                    PRIVILEGED_INSTALL_TIMEOUT.as_secs()
+                );
+                return install_deb_fallback(update).await;
             }
-        })?;
-    if !output.status.success() {
-        return Err(match output.status.code() {
-            Some(126) => anyhow!("update canceled: the authorization prompt was dismissed"),
-            Some(127) => anyhow!("update not authorized"),
-            _ => anyhow!(
-                "dpkg failed: {}",
-                String::from_utf8_lossy(&output.stderr).trim()
-            ),
+        };
+
+    if output.status.success() {
+        return Ok(InstallOutcome {
+            restart_path: Some(current_exe),
+            manual_deb: None,
         });
     }
 
+    let code = output.status.code();
+    let stderr_raw = String::from_utf8_lossy(&output.stderr);
+    let stderr = stderr_raw.trim();
+    if stderr.is_empty() {
+        tracing::warn!("privileged .deb install failed (pkexec exit {code:?})");
+    } else {
+        tracing::warn!("privileged .deb install failed (pkexec exit {code:?}): {stderr}");
+    }
+
+    if !matches!(code, Some(126) | Some(127)) {
+        return Err(anyhow!(
+            "dpkg failed to install the update{}",
+            if stderr.is_empty() {
+                String::new()
+            } else {
+                format!(": {stderr}")
+            }
+        ));
+    }
+
+    install_deb_fallback(update).await
+}
+
+#[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
+async fn install_deb_fallback(update: &DownloadedUpdate) -> Result<InstallOutcome> {
+    let deb = persist_deb_for_manual_install(&update.archive)
+        .await
+        .unwrap_or_else(|| update.archive.clone());
     Ok(InstallOutcome {
-        restart_path: Some(current_exe),
+        restart_path: None,
+        manual_deb: Some(deb),
     })
+}
+
+#[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
+fn update_cache_dir() -> Option<PathBuf> {
+    if let Some(xdg) = std::env::var_os("XDG_CACHE_HOME") {
+        let xdg = PathBuf::from(xdg);
+        if xdg.is_absolute() {
+            return Some(xdg.join("mezon").join("updates"));
+        }
+    }
+    let home = std::env::var_os("HOME")?;
+    Some(
+        PathBuf::from(home)
+            .join(".cache")
+            .join("mezon")
+            .join("updates"),
+    )
+}
+
+#[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
+async fn persist_deb_for_manual_install(archive: &Path) -> Option<PathBuf> {
+    use std::os::unix::fs::PermissionsExt;
+    let file_name = archive.file_name()?;
+    let dir = update_cache_dir()?;
+    if let Err(error) = tokio::fs::create_dir_all(&dir).await {
+        tracing::warn!(
+            "failed to create update cache dir {}: {error}",
+            dir.display()
+        );
+        return None;
+    }
+    let dest = dir.join(file_name);
+    if let Err(error) = tokio::fs::copy(archive, &dest).await {
+        tracing::warn!("failed to preserve update package for manual install: {error}");
+        return None;
+    }
+    let _ = tokio::fs::set_permissions(&dest, std::fs::Permissions::from_mode(0o644)).await;
+    Some(dest)
 }
 
 #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
@@ -726,6 +816,7 @@ async fn install_linux(update: &DownloadedUpdate) -> Result<InstallOutcome> {
 
     Ok(InstallOutcome {
         restart_path: Some(current_exe),
+        manual_deb: None,
     })
 }
 
@@ -785,6 +876,7 @@ async fn install_windows(update: &DownloadedUpdate) -> Result<InstallOutcome> {
 
     Ok(InstallOutcome {
         restart_path: Some(current_exe),
+        manual_deb: None,
     })
 }
 

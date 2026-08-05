@@ -222,7 +222,7 @@ pub use webhook::{
 };
 pub use winstore_update::{
     WinstoreUpdateStore, effective_update_status, update_available_clicked, update_check_clicked,
-    update_restart_clicked,
+    update_manual_install_clicked, update_restart_clicked,
 };
 
 pub const CACHE_TTL: Duration = Duration::from_secs(20 * 60);

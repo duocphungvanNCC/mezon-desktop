@@ -22,6 +22,10 @@ pub enum AutoUpdateStatus {
     Updated {
         version: SharedString,
     },
+    ManualInstall {
+        version: SharedString,
+        deb_path: SharedString,
+    },
     UpToDate,
     Errored {
         message: SharedString,
@@ -94,6 +98,10 @@ fn running_from_cargo_target() -> bool {
     std::env::current_exe()
         .map(|exe| exe.components().any(|c| c.as_os_str() == "target"))
         .unwrap_or(true)
+}
+
+pub fn manual_install_command(deb_path: &str) -> String {
+    format!("sudo dpkg -i {deb_path}")
 }
 
 impl AutoUpdateStore {
@@ -253,12 +261,20 @@ impl AutoUpdateStore {
                 this.pending = None;
                 this.status = match result {
                     Ok(CheckOutcome::Installed { version, outcome }) => {
-                        if let Some(restart_path) = outcome.restart_path {
-                            cx.set_restart_path(restart_path);
-                        }
-                        tracing::info!("update installed; restart to apply v{version}");
-                        AutoUpdateStatus::Updated {
-                            version: SharedString::from(version),
+                        if let Some(deb) = outcome.manual_deb {
+                            tracing::info!("update v{version} ready; manual install required");
+                            AutoUpdateStatus::ManualInstall {
+                                version: SharedString::from(version),
+                                deb_path: SharedString::from(deb.to_string_lossy().into_owned()),
+                            }
+                        } else {
+                            if let Some(restart_path) = outcome.restart_path {
+                                cx.set_restart_path(restart_path);
+                            }
+                            tracing::info!("update installed; restart to apply v{version}");
+                            AutoUpdateStatus::Updated {
+                                version: SharedString::from(version),
+                            }
                         }
                     }
                     Ok(CheckOutcome::ManualInstallAvailable { version }) => {

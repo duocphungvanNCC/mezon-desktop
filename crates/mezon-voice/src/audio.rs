@@ -328,7 +328,7 @@ impl AudioIo {
                             }
                         }
                         AudioCmd::SetOutputDevice(device_id) => {
-                            if current_output_id == device_id {
+                            if device_id.is_some() && current_output_id == device_id {
                                 continue;
                             }
                             current_output_id = device_id;
