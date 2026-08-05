@@ -217,6 +217,20 @@ Parameters: none.",
         write: true,
     },
     ToolSpec {
+        name: "open_image_viewer",
+        description: "\
+Open the full-screen image viewer on a message attachment.
+
+The message must be in the open channel's loaded history, so call open_channel first
+and load_more_messages if it sits further back. The viewer fetches the rest of the
+channel's media itself, so it can be paged once open.
+
+Parameters:
+- message_id (required): message carrying the attachment.
+- attachment_index (optional): zero-based index on that message. Default 0.",
+        write: true,
+    },
+    ToolSpec {
         name: "list_emojis",
         description: "\
 List custom emoji available to the signed-in user.

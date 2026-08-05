@@ -57,6 +57,11 @@ pub enum McpCommand {
         kind: Option<String>,
         reply: oneshot::Sender<anyhow::Result<Value>>,
     },
+    OpenImageViewer {
+        message_id: i64,
+        attachment_index: usize,
+        reply: oneshot::Sender<anyhow::Result<Value>>,
+    },
     ListEmojis {
         clan_id: Option<String>,
         query: Option<String>,

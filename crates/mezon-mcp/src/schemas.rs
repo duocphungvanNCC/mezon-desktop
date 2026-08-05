@@ -227,6 +227,13 @@ pub fn input_schema(name: &str) -> Arc<Map<String, Value>> {
             }),
             &["clan_id", "channel_id", "content"],
         )),
+        "open_image_viewer" => Arc::new(object(
+            json!({
+                "message_id": id("Message carrying the attachment."),
+                "attachment_index": integer("Zero-based attachment index. Default 0.", Some(0)),
+            }),
+            &["message_id"],
+        )),
         "open_panel" => Arc::new(object(
             json!({
                 "kind": string("Which composer panel to show: \"emoji\", \"sticker\", \"gif\" or \"sound\"."),

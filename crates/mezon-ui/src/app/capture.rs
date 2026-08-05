@@ -301,6 +301,48 @@ pub fn set_composer_panel(cx: &mut App, kind: Option<&str>) -> anyhow::Result<Va
     Ok(serde_json::json!({ "ok": true, "panel": open }))
 }
 
+pub fn open_message_image_viewer(
+    settings: &gpui::Entity<mezon_store::Settings>,
+    message_id: i64,
+    attachment_index: usize,
+    cx: &mut App,
+) -> anyhow::Result<Value> {
+    let store = mezon_store::MessagesStore::global(cx);
+    let (seed, id, create_time, uploader_id) = {
+        let store = store.read(cx);
+        let message = store
+            .messages()
+            .iter()
+            .find(|message| message.id.0 == message_id)
+            .ok_or_else(|| {
+                anyhow::anyhow!("message {message_id} is not in the open channel's loaded history")
+            })?;
+        let attachment = message.attachments.get(attachment_index).ok_or_else(|| {
+            anyhow::anyhow!("message {message_id} has no attachment at index {attachment_index}")
+        })?;
+        (
+            mezon_store::AttachmentSeedInput::from_message(attachment),
+            message.id,
+            message.create_time,
+            crate::chat::message::parts::viewer_uploader_id(message),
+        )
+    };
+    let main_handle = handle(cx).ok_or_else(|| anyhow::anyhow!("main window not found"))?;
+    let opened = seed.url.clone();
+    cx.update_window(main_handle, |_, window, cx| {
+        crate::chat::message::parts::open_viewer_from_message(
+            settings,
+            seed,
+            id,
+            create_time,
+            uploader_id,
+            window,
+            cx,
+        );
+    })?;
+    Ok(serde_json::json!({ "ok": true, "url": opened }))
+}
+
 pub fn go_back(cx: &mut App) -> anyhow::Result<()> {
     crate::router::Router::global(cx).update(cx, |router, _| router.go_back());
     Ok(())

@@ -137,6 +137,21 @@ impl McpRuntime {
                         });
                         let _ = reply.send(result);
                     }
+                    McpCommand::OpenImageViewer {
+                        message_id,
+                        attachment_index,
+                        reply,
+                    } => {
+                        let result = cx.update(|cx| {
+                            mezon_ui::app::capture::open_message_image_viewer(
+                                &settings,
+                                message_id,
+                                attachment_index,
+                                cx,
+                            )
+                        });
+                        let _ = reply.send(result);
+                    }
                     McpCommand::ListEmojis {
                         clan_id,
                         query,

@@ -112,6 +112,20 @@ impl McpBackend {
                 })
                 .await
             }
+            "open_image_viewer" => {
+                self.require_write_mode("open_image_viewer")?;
+                let message_id = parse_i64_field(&arguments, "message_id")?;
+                let attachment_index = arguments
+                    .get("attachment_index")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0) as usize;
+                self.send_ui_result(|reply| McpCommand::OpenImageViewer {
+                    message_id,
+                    attachment_index,
+                    reply,
+                })
+                .await
+            }
             "close_panel" => {
                 self.require_write_mode("close_panel")?;
                 self.send_ui_result(|reply| McpCommand::SetPanel { kind: None, reply })
