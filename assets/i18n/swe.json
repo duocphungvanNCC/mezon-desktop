@@ -1990,7 +1990,7 @@
   "common.uploadLimit.emoji": "Uttrycksgräns nådd",
   "common.uploadLimit.sticker": "Sticker-gräns nådd",
   "common.uploadLimit.voiceSticker": "Ljudstickers-gräns nådd",
-  "common.uploadLimit.channel": "Kanalgräns nådd för detta clan",
+  "channel.createLimitExceeded": "Kanalgräns nådd för detta clan",
   "common.uploadToChannel": "Ladda upp till #{{channelName}}",
   "common.userProfile.aboutMe": "Om mig",
   "common.userProfile.activity": "Aktivitet",

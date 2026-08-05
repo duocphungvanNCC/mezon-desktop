@@ -2014,7 +2014,7 @@
   "common.uploadLimit.emoji": "Límite máximo de emojis superado",
   "common.uploadLimit.sticker": "Límite máximo de stickers superado",
   "common.uploadLimit.voiceSticker": "Límite máximo de stickers de voz superado",
-  "common.uploadLimit.channel": "Límite máximo de canales alcanzado para este clan",
+  "channel.createLimitExceeded": "Límite máximo de canales alcanzado para este clan",
   "common.uploadToChannel": "Subir a #{{channelName}}",
   "common.userProfile.aboutMe": "Sobre mí",
   "common.userProfile.activity": "Actividad",

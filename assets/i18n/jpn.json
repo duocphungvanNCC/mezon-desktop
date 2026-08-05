@@ -1990,7 +1990,7 @@
   "common.uploadLimit.emoji": "絵文字制限に達しました",
   "common.uploadLimit.sticker": "スタンプ制限に達しました",
   "common.uploadLimit.voiceSticker": "音声スタンプ制限に達しました",
-  "common.uploadLimit.channel": "このクランのチャンネル制限に達しました",
+  "channel.createLimitExceeded": "このクランのチャンネル制限に達しました",
   "common.uploadToChannel": "#{{channelName}}にアップロード",
   "common.userProfile.aboutMe": "概要",
   "common.userProfile.activity": "アクティビティ",

@@ -6,9 +6,7 @@ use std::sync::{Arc, LazyLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use gpui::{App, AppContext, Context, Entity, EventEmitter, Global, Subscription, Task};
-use mezon_client::transport::{
-    ApiCategoryDesc, ApiChannelDesc, ApiStatusError, api_status_from_error,
-};
+use mezon_client::transport::{ApiCategoryDesc, ApiChannelDesc, is_channel_limit_api_error};
 use mezon_client::{
     ApiChannelApp, AppApi, ChannelAppLaunchParams, ConnectionStatus, RealtimeEvent,
     build_channel_app_url,
@@ -229,9 +227,7 @@ pub fn validate_channel_name(name: &str) -> Result<String, CreateChannelError> {
 }
 
 fn map_create_channel_api_error(err: anyhow::Error) -> CreateChannelError {
-    if let Some(status) = api_status_from_error(&err)
-        && status.code == ApiStatusError::OUT_OF_RANGE
-    {
+    if is_channel_limit_api_error(&err) {
         return CreateChannelError::ChannelLimitExceeded;
     }
     CreateChannelError::Other(err.to_string())
@@ -3871,6 +3867,23 @@ fn effective_category_id(desc_category_id: i64, requested: Option<i64>) -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn map_create_channel_api_error_maps_out_of_range_to_limit() {
+        use mezon_client::ApiStatusError;
+        let err = anyhow::Error::from(ApiStatusError {
+            code: ApiStatusError::OUT_OF_RANGE,
+        });
+        assert_eq!(
+            map_create_channel_api_error(err),
+            CreateChannelError::ChannelLimitExceeded
+        );
+        let err = anyhow::Error::from(ApiStatusError { code: 13 });
+        assert!(matches!(
+            map_create_channel_api_error(err),
+            CreateChannelError::Other(_)
+        ));
+    }
 
     #[test]
     fn collapse_state_roundtrip() {

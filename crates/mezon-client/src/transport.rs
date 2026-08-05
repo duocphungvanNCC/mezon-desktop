@@ -43,6 +43,14 @@ pub struct ApiStatusError {
 
 impl ApiStatusError {
     pub const OUT_OF_RANGE: u32 = 11;
+
+    pub fn is_out_of_range(self) -> bool {
+        self.code == Self::OUT_OF_RANGE
+    }
+
+    pub fn is_create_channel_limit_exceeded(self) -> bool {
+        self.is_out_of_range()
+    }
 }
 
 impl std::fmt::Display for ApiStatusError {
@@ -55,6 +63,10 @@ impl std::error::Error for ApiStatusError {}
 
 pub fn api_status_from_error(err: &anyhow::Error) -> Option<ApiStatusError> {
     err.downcast_ref().copied()
+}
+
+pub fn is_channel_limit_api_error(err: &anyhow::Error) -> bool {
+    api_status_from_error(err).is_some_and(|status| status.is_create_channel_limit_exceeded())
 }
 
 fn api_status_error(code: u32) -> anyhow::Error {
@@ -10227,5 +10239,16 @@ mod tests {
         assert_eq!(value["mentions"][0]["user_id"], "7");
         assert_eq!(value["presign_finish"][0], "key-1");
         assert_eq!(value["create_time_seconds"], 1700);
+    }
+
+    #[test]
+    fn is_channel_limit_api_error_matches_create_channel_desc_out_of_range() {
+        let err: anyhow::Error = ApiStatusError {
+            code: ApiStatusError::OUT_OF_RANGE,
+        }
+        .into();
+        assert!(is_channel_limit_api_error(&err));
+        let err: anyhow::Error = ApiStatusError { code: 13 }.into();
+        assert!(!is_channel_limit_api_error(&err));
     }
 }

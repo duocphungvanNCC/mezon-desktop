@@ -6,8 +6,8 @@ use mezon_client::AppApi;
 use mezon_client::ConnectionStatus;
 use mezon_client::MezonTransport;
 use mezon_client::RealtimeEvent;
-use mezon_client::api_status_from_error;
-use mezon_client::transport::{ApiStatusError, ApiThreadDesc, THREAD_LIST_LIMIT};
+use mezon_client::is_channel_limit_api_error;
+use mezon_client::transport::{ApiThreadDesc, THREAD_LIST_LIMIT};
 use mezon_proto::{api, realtime};
 
 use crate::channel::{Channel, ChannelEvent, ChannelList, ChannelType};
@@ -52,7 +52,7 @@ pub struct ThreadSummary {
 pub enum ThreadsEvent {
     ThreadCreated { channel_id: String, clan_id: String },
     CreateFailed { reason: ThreadCreateFailReason },
-    LeaveFailed { message: String },
+    LeaveFailed,
     OpenPopoverRequested,
 }
 
@@ -79,7 +79,6 @@ pub struct ThreadsStore {
     searching: bool,
     creating: bool,
     submitting: bool,
-    create_request_generation: u64,
     _create_task: Option<Task<()>>,
     create_private: i32,
     name_error: Option<String>,
@@ -134,7 +133,6 @@ impl ThreadsStore {
             searching: false,
             creating: false,
             submitting: false,
-            create_request_generation: 0,
             _create_task: None,
             create_private: 0,
             name_error: None,
@@ -334,9 +332,7 @@ impl ThreadsStore {
             if let Err(e) = api.leave_thread(clan_id.get(), channel_id.get()).await {
                 tracing::error!("leave_thread failed for {channel_id}: {e}");
                 let _ = this.update(cx, |_this, cx| {
-                    cx.emit(ThreadsEvent::LeaveFailed {
-                        message: e.to_string(),
-                    });
+                    cx.emit(ThreadsEvent::LeaveFailed);
                 });
                 return;
             }
@@ -588,19 +584,13 @@ impl ThreadsStore {
     }
 
     fn invalidate_create_request(&mut self) {
-        self.create_request_generation = self.create_request_generation.wrapping_add(1);
         self._create_task = None;
         self.submitting = false;
     }
 
-    fn finish_create_request(&mut self, generation: u64) -> bool {
-        if self.create_request_generation != generation {
-            self._create_task = None;
-            return false;
-        }
+    fn finish_create_request(&mut self) {
         self.submitting = false;
         self._create_task = None;
-        true
     }
 
     fn on_active_channel_changed(&mut self, channel_id: Option<ChannelId>, cx: &mut Context<Self>) {
@@ -943,8 +933,6 @@ impl ThreadsStore {
         let category_id = self.category_id.clone();
         let channel_private = self.create_private;
 
-        self.create_request_generation = self.create_request_generation.wrapping_add(1);
-        let generation = self.create_request_generation;
         self.name_error = None;
         self.creating = true;
         self.submitting = true;
@@ -954,27 +942,27 @@ impl ThreadsStore {
         let task = cx.spawn(async move |this, cx| {
             match api.check_duplicate_thread_name(&name, &parent_id).await {
                 Ok(true) => {
-                    let _ = this.update(cx, |this, cx| {
-                        if !this.finish_create_request(generation) {
-                            return;
-                        }
+                    if let Err(e) = this.update(cx, |this, cx| {
+                        this.finish_create_request();
                         this.name_error = Some("thread_name_exists".into());
                         cx.notify();
-                    });
+                    }) {
+                        tracing::error!("threads create state update failed: {e}");
+                    }
                     return;
                 }
                 Ok(false) => {}
                 Err(e) => {
                     tracing::error!("check_duplicate_thread_name failed: {e}");
-                    let _ = this.update(cx, |this, cx| {
-                        if !this.finish_create_request(generation) {
-                            return;
-                        }
+                    if let Err(e) = this.update(cx, |this, cx| {
+                        this.finish_create_request();
                         cx.emit(ThreadsEvent::CreateFailed {
                             reason: thread_create_fail_reason(&e),
                         });
                         cx.notify();
-                    });
+                    }) {
+                        tracing::error!("threads create state update failed: {e}");
+                    }
                     return;
                 }
             }
@@ -994,15 +982,15 @@ impl ThreadsStore {
                 Ok(t) => t,
                 Err(e) => {
                     tracing::error!("create_channel (thread) failed: {e}");
-                    let _ = this.update(cx, |this, cx| {
-                        if !this.finish_create_request(generation) {
-                            return;
-                        }
+                    if let Err(e) = this.update(cx, |this, cx| {
+                        this.finish_create_request();
                         cx.emit(ThreadsEvent::CreateFailed {
                             reason: thread_create_fail_reason(&e),
                         });
                         cx.notify();
-                    });
+                    }) {
+                        tracing::error!("threads create state update failed: {e}");
+                    }
                     return;
                 }
             };
@@ -1025,15 +1013,15 @@ impl ThreadsStore {
                 .await
             {
                 tracing::error!("send starter message to thread failed: {e}");
-                let _ = this.update(cx, |this, cx| {
-                    if !this.finish_create_request(generation) {
-                        return;
-                    }
+                if let Err(e) = this.update(cx, |this, cx| {
+                    this.finish_create_request();
                     cx.emit(ThreadsEvent::CreateFailed {
                         reason: ThreadCreateFailReason::Other,
                     });
                     cx.notify();
-                });
+                }) {
+                    tracing::error!("threads create state update failed: {e}");
+                }
                 return;
             }
 
@@ -1044,14 +1032,9 @@ impl ThreadsStore {
                 tracing::warn!("join_chat after thread create failed: {e}");
             }
 
-            let _ = this.update(cx, |this, cx| {
-                if this.create_request_generation != generation {
-                    this._create_task = None;
-                    return;
-                }
+            if let Err(e) = this.update(cx, |this, cx| {
                 this.creating = false;
-                this.submitting = false;
-                this._create_task = None;
+                this.finish_create_request();
                 this.loaded_channel = None;
                 let clan_id_for_refresh = clan_id.parse::<ClanId>().unwrap_or(ClanId(0));
                 ChannelList::global(cx).update(cx, |list, cx| {
@@ -1062,19 +1045,20 @@ impl ThreadsStore {
                     clan_id: clan_id.clone(),
                 });
                 cx.notify();
-            });
+            }) {
+                tracing::error!("threads create state update failed: {e}");
+            }
         });
         self._create_task = Some(task);
     }
 }
 
 fn thread_create_fail_reason(err: &anyhow::Error) -> ThreadCreateFailReason {
-    if let Some(status) = api_status_from_error(err)
-        && status.code == ApiStatusError::OUT_OF_RANGE
-    {
-        return ThreadCreateFailReason::ChannelLimitExceeded;
+    if is_channel_limit_api_error(err) {
+        ThreadCreateFailReason::ChannelLimitExceeded
+    } else {
+        ThreadCreateFailReason::Other
     }
-    ThreadCreateFailReason::Other
 }
 
 fn list_channel_id_for(channel: &Channel) -> String {
@@ -1548,5 +1532,44 @@ mod tests {
         assert_eq!(joined, vec![0]);
         assert_eq!(active, vec![2]);
         assert_eq!(older, vec![1]);
+    }
+
+    #[test]
+    fn thread_create_fail_reason_maps_create_channel_limit() {
+        use mezon_client::ApiStatusError;
+        let err: anyhow::Error = ApiStatusError {
+            code: ApiStatusError::OUT_OF_RANGE,
+        }
+        .into();
+        assert_eq!(
+            thread_create_fail_reason(&err),
+            ThreadCreateFailReason::ChannelLimitExceeded
+        );
+        let err: anyhow::Error = ApiStatusError { code: 13 }.into();
+        assert_eq!(
+            thread_create_fail_reason(&err),
+            ThreadCreateFailReason::Other
+        );
+    }
+
+    #[gpui::test]
+    fn cancel_create_clears_submitting_guard(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let api = Arc::new(mezon_client::AppApi::new(
+                Arc::new(mezon_client::TransportClient::new(String::new())),
+                String::new(),
+            ));
+            RealtimeDispatch::init(api.clone(), cx);
+            ClanList::init(api.clone(), cx);
+            ChannelList::init(api.clone(), cx);
+            let store = ThreadsStore::init(api, cx);
+            store.update(cx, |store, cx| {
+                store.creating = true;
+                store.submitting = true;
+                store.cancel_create(cx);
+                assert!(!store.is_submitting());
+                assert!(!store.is_creating());
+            });
+        });
     }
 }

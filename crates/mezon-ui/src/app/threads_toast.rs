@@ -4,6 +4,7 @@ use mezon_store::{Settings, ThreadCreateFailReason, ThreadsEvent, ThreadsStore};
 use crate::app::shell::Shell;
 
 const THREAD_CREATE_FAILED_TOAST_KEY: &str = "thread-create-failed";
+const THREAD_LEAVE_FAILED_TOAST_KEY: &str = "thread-leave-failed";
 
 pub struct ThreadCreateToastBridge {
     _sub: Subscription,
@@ -17,23 +18,32 @@ impl ThreadCreateToastBridge {
         let threads = ThreadsStore::global(cx);
         let entity = cx.new(|cx| {
             let sub = cx.subscribe(&threads, |_this, _threads, event: &ThreadsEvent, cx| {
-                let ThreadsEvent::CreateFailed { reason } = event else {
-                    return;
-                };
                 let locale = Settings::try_global(cx)
                     .map(|settings| settings.read(cx).language.clone())
                     .unwrap_or_else(|| "en".to_string());
-                let message = match reason {
-                    ThreadCreateFailReason::ChannelLimitExceeded => {
-                        mezon_i18n::t(&locale, "common.uploadLimit.channel").to_string()
+                match event {
+                    ThreadsEvent::CreateFailed { reason } => {
+                        let message = match reason {
+                            ThreadCreateFailReason::ChannelLimitExceeded => {
+                                mezon_i18n::t(&locale, "channel.createLimitExceeded").to_string()
+                            }
+                            ThreadCreateFailReason::Other => {
+                                mezon_i18n::t(&locale, "common.somethingWentWrong").to_string()
+                            }
+                        };
+                        Shell::global(cx).update(cx, |shell, cx| {
+                            shell.error_once(THREAD_CREATE_FAILED_TOAST_KEY, message, cx);
+                        });
                     }
-                    ThreadCreateFailReason::Other => {
-                        mezon_i18n::t(&locale, "common.somethingWentWrong").to_string()
+                    ThreadsEvent::LeaveFailed => {
+                        let message =
+                            mezon_i18n::t(&locale, "common.somethingWentWrong").to_string();
+                        Shell::global(cx).update(cx, |shell, cx| {
+                            shell.error_once(THREAD_LEAVE_FAILED_TOAST_KEY, message, cx);
+                        });
                     }
-                };
-                Shell::global(cx).update(cx, |shell, cx| {
-                    shell.error_once(THREAD_CREATE_FAILED_TOAST_KEY, message, cx);
-                });
+                    _ => {}
+                }
             });
             Self { _sub: sub }
         });

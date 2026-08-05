@@ -174,24 +174,10 @@ impl Shell {
         if self.toasts.iter().any(|t| t.key.as_ref() == Some(&key)) {
             return;
         }
-        let id = self.next_id;
-        self.next_id = self.next_id.wrapping_add(1);
-        let ttl = cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(TOAST_TTL).await;
-            let _ = this.update(cx, |this, cx| {
-                this.toasts.retain(|t| t.id != id);
-                cx.notify();
-            });
-        });
-        self.toasts.push(ToastItem {
-            id,
-            key: Some(key),
-            message: message.into(),
-            kind: ToastKind::Error,
-            progress: None,
-            _ttl: Some(ttl),
-        });
-        cx.notify();
+        self.toast(ToastKind::Error, message, cx);
+        if let Some(item) = self.toasts.last_mut() {
+            item.key = Some(key);
+        }
     }
 
     /// Show `view` as the active modal (backdrop click dismisses). The view renders its own card.

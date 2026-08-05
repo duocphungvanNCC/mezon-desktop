@@ -2021,7 +2021,7 @@
   "common.uploadLimit.emoji": "Максимальный лимит эмодзи превышен",
   "common.uploadLimit.sticker": "Максимальное ограничение на стикеры превышено",
   "common.uploadLimit.voiceSticker": "Превышено максимальное ограничение на наличие голосовых стикеров",
-  "common.uploadLimit.channel": "Максимальный лимит каналов для этого клана превышен",
+  "channel.createLimitExceeded": "Максимальный лимит каналов для этого клана превышен",
   "common.uploadToChannel": "Загрузить в #{{channelName}}",
   "common.userProfile.aboutMe": "Обо мне",
   "common.userProfile.activity": "Активность",
