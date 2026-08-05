@@ -15,6 +15,13 @@ fn surface_bg(theme: &Theme) -> gpui::Rgba {
     theme.tokens.bg_surface
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DatePickerPopupMode {
+    #[default]
+    DeferredOverlay,
+    InlineExpand,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DatePickerEvent {
     Change(Option<NaiveDate>),
@@ -30,6 +37,7 @@ pub struct DatePicker {
     max_date: Option<NaiveDate>,
     locale: SharedString,
     field_height: f32,
+    popup_mode: DatePickerPopupMode,
 }
 
 impl EventEmitter<DatePickerEvent> for DatePicker {}
@@ -49,7 +57,19 @@ impl DatePicker {
             max_date: None,
             locale: SharedString::default(),
             field_height: DEFAULT_FIELD_HEIGHT,
+            popup_mode: DatePickerPopupMode::default(),
         }
+    }
+
+    pub fn set_popup_mode(&mut self, mode: DatePickerPopupMode, cx: &mut Context<Self>) {
+        if self.popup_mode != mode {
+            self.popup_mode = mode;
+            cx.notify();
+        }
+    }
+
+    pub fn popup_mode(&self) -> DatePickerPopupMode {
+        self.popup_mode
     }
 
     pub fn set_field_height(&mut self, height: f32, cx: &mut Context<Self>) {
@@ -233,8 +253,8 @@ impl Render for DatePicker {
                             .text_color(theme.text_secondary),
                     ),
             )
-            .when(self.open, |el| {
-                el.child(
+            .when(self.open, |el| match self.popup_mode {
+                DatePickerPopupMode::DeferredOverlay => el.child(
                     deferred(render_calendar(
                         &theme,
                         &locale,
@@ -245,9 +265,22 @@ impl Render for DatePicker {
                         self.max_date,
                         field_height,
                         entity,
+                        false,
                     ))
                     .with_priority(1),
-                )
+                ),
+                DatePickerPopupMode::InlineExpand => el.child(render_calendar(
+                    &theme,
+                    &locale,
+                    self.view_year,
+                    self.view_month,
+                    self.selected,
+                    self.min_date,
+                    self.max_date,
+                    field_height,
+                    entity,
+                    true,
+                )),
             })
     }
 }
@@ -262,18 +295,15 @@ fn render_calendar(
     max_date: Option<NaiveDate>,
     field_height: f32,
     entity: Entity<DatePicker>,
+    inline: bool,
 ) -> impl IntoElement {
     let month_label = month_title(year, month);
     let today = Local::now().date_naive();
     let clear_label = mezon_i18n::t(locale, "channelTopbar.gallery.buttons.clearAll");
     let today_label = mezon_i18n::t(locale, "common.today");
 
-    div()
+    let mut root = div()
         .occlude()
-        .absolute()
-        .top(px(field_height + 4.))
-        .left_0()
-        .w(px(CALENDAR_WIDTH))
         .p_3()
         .flex()
         .flex_col()
@@ -282,100 +312,108 @@ fn render_calendar(
         .bg(surface_bg(theme))
         .border_1()
         .border_color(theme.border)
-        .shadow_lg()
-        .on_mouse_down(MouseButton::Left, |_: &MouseDownEvent, _, cx| {
-            cx.stop_propagation();
-        })
-        .on_mouse_down_out({
-            let entity = entity.clone();
-            move |_: &MouseDownEvent, _window, cx: &mut App| {
-                entity.update(cx, |this, cx| this.close(cx));
-            }
-        })
-        .child(
-            div()
-                .flex()
-                .flex_row()
-                .items_center()
-                .justify_between()
-                .child(
-                    div()
-                        .text_size(px(14.))
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(theme.text_primary)
-                        .child(month_label),
-                )
-                .child(
-                    div()
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .gap_1()
-                        .child(calendar_nav_button(IconName::ArrowDown, theme, true, {
-                            let entity = entity.clone();
-                            move |_: &MouseDownEvent, _window, cx: &mut App| {
-                                cx.stop_propagation();
-                                entity.update(cx, |this, cx| this.prev_month(cx));
-                            }
-                        }))
-                        .child(calendar_nav_button(IconName::ArrowDown, theme, false, {
-                            let entity = entity.clone();
-                            move |_: &MouseDownEvent, _window, cx: &mut App| {
-                                cx.stop_propagation();
-                                entity.update(cx, |this, cx| this.next_month(cx));
-                            }
-                        })),
-                ),
-        )
-        .child(render_weekday_header(theme))
-        .children(render_day_rows(
-            theme,
-            year,
-            month,
-            selected,
-            today,
-            min_date,
-            max_date,
-            entity.clone(),
-        ))
-        .child(
-            div()
-                .flex()
-                .flex_row()
-                .items_center()
-                .justify_between()
-                .pt_1()
-                .child(
-                    div()
-                        .text_size(px(12.))
-                        .text_color(theme.text_secondary)
-                        .cursor_pointer()
-                        .hover(|el| el.text_color(theme.interactive_hover))
-                        .child(clear_label)
-                        .on_mouse_down(MouseButton::Left, {
-                            let entity = entity.clone();
-                            move |_: &MouseDownEvent, _window, cx: &mut App| {
-                                cx.stop_propagation();
-                                entity.update(cx, |this, cx| this.clear(cx));
-                            }
-                        }),
-                )
-                .child(
-                    div()
-                        .text_size(px(12.))
-                        .text_color(theme.brand)
-                        .cursor_pointer()
-                        .hover(|el| el.text_color(theme.brand_hover))
-                        .child(today_label)
-                        .on_mouse_down(MouseButton::Left, {
-                            let entity = entity.clone();
-                            move |_: &MouseDownEvent, _window, cx: &mut App| {
-                                cx.stop_propagation();
-                                entity.update(cx, |this, cx| this.pick_today(cx));
-                            }
-                        }),
-                ),
-        )
+        .shadow_lg();
+    root = if inline {
+        root.w_full().mt(px(4.))
+    } else {
+        root.absolute()
+            .top(px(field_height + 4.))
+            .left_0()
+            .w(px(CALENDAR_WIDTH))
+    };
+    root.on_mouse_down(MouseButton::Left, |_: &MouseDownEvent, _, cx| {
+        cx.stop_propagation();
+    })
+    .on_mouse_down_out({
+        let entity = entity.clone();
+        move |_: &MouseDownEvent, _window, cx: &mut App| {
+            entity.update(cx, |this, cx| this.close(cx));
+        }
+    })
+    .child(
+        div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .justify_between()
+            .child(
+                div()
+                    .text_size(px(14.))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(theme.text_primary)
+                    .child(month_label),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_1()
+                    .child(calendar_nav_button(IconName::ArrowDown, theme, true, {
+                        let entity = entity.clone();
+                        move |_: &MouseDownEvent, _window, cx: &mut App| {
+                            cx.stop_propagation();
+                            entity.update(cx, |this, cx| this.prev_month(cx));
+                        }
+                    }))
+                    .child(calendar_nav_button(IconName::ArrowDown, theme, false, {
+                        let entity = entity.clone();
+                        move |_: &MouseDownEvent, _window, cx: &mut App| {
+                            cx.stop_propagation();
+                            entity.update(cx, |this, cx| this.next_month(cx));
+                        }
+                    })),
+            ),
+    )
+    .child(render_weekday_header(theme))
+    .children(render_day_rows(
+        theme,
+        year,
+        month,
+        selected,
+        today,
+        min_date,
+        max_date,
+        entity.clone(),
+    ))
+    .child(
+        div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .justify_between()
+            .pt_1()
+            .child(
+                div()
+                    .text_size(px(12.))
+                    .text_color(theme.text_secondary)
+                    .cursor_pointer()
+                    .hover(|el| el.text_color(theme.interactive_hover))
+                    .child(clear_label)
+                    .on_mouse_down(MouseButton::Left, {
+                        let entity = entity.clone();
+                        move |_: &MouseDownEvent, _window, cx: &mut App| {
+                            cx.stop_propagation();
+                            entity.update(cx, |this, cx| this.clear(cx));
+                        }
+                    }),
+            )
+            .child(
+                div()
+                    .text_size(px(12.))
+                    .text_color(theme.brand)
+                    .cursor_pointer()
+                    .hover(|el| el.text_color(theme.brand_hover))
+                    .child(today_label)
+                    .on_mouse_down(MouseButton::Left, {
+                        let entity = entity.clone();
+                        move |_: &MouseDownEvent, _window, cx: &mut App| {
+                            cx.stop_propagation();
+                            entity.update(cx, |this, cx| this.pick_today(cx));
+                        }
+                    }),
+            ),
+    )
 }
 
 fn calendar_nav_button(
