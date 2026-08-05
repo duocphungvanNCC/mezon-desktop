@@ -10,7 +10,9 @@ use mezon_store::{
 };
 use ui::{ScrollAxes, Scrollbars, WithScrollbar};
 
-use crate::components::primitives::{DatePicker, DatePickerEvent, Icon, IconName};
+use crate::components::primitives::{
+    DatePicker, DatePickerEvent, DatePickerPopupMode, Icon, IconName,
+};
 use crate::image_cache::{GALLERY_IMAGE_CACHE_BYTES, GALLERY_IMAGE_CACHE_CAPACITY, LruImageCache};
 use crate::image_viewer::{OpenViewerRequest, open_image_viewer};
 use crate::theme::{ActiveTheme, Theme};
@@ -91,6 +93,8 @@ pub struct GalleryModal {
     _release: Subscription,
     _from_picker_sub: Subscription,
     _to_picker_sub: Subscription,
+    _from_picker_obs: Subscription,
+    _to_picker_obs: Subscription,
 }
 
 impl GalleryModal {
@@ -129,8 +133,16 @@ impl GalleryModal {
             }
             crate::image_cache::release_freed_memory_to_os(cx);
         });
-        let from_date_picker = cx.new(DatePicker::new);
-        let to_date_picker = cx.new(DatePicker::new);
+        let from_date_picker = cx.new(|cx| {
+            let mut picker = DatePicker::new(cx);
+            picker.set_popup_mode(DatePickerPopupMode::InlineExpand, cx);
+            picker
+        });
+        let to_date_picker = cx.new(|cx| {
+            let mut picker = DatePicker::new(cx);
+            picker.set_popup_mode(DatePickerPopupMode::InlineExpand, cx);
+            picker
+        });
         let mut this = Self {
             focus_handle,
             clan_id,
@@ -153,11 +165,16 @@ impl GalleryModal {
             _release: release,
             _from_picker_sub: Subscription::new(|| ()),
             _to_picker_sub: Subscription::new(|| ()),
+            _from_picker_obs: Subscription::new(|| ()),
+            _to_picker_obs: Subscription::new(|| ()),
         };
+        this._from_picker_obs = cx.observe(&from_date_picker, |_, _, cx| cx.notify());
+        this._to_picker_obs = cx.observe(&to_date_picker, |_, _, cx| cx.notify());
         this._from_picker_sub = cx.subscribe(&from_date_picker, |this, _, event, cx| match event {
             DatePickerEvent::Opened => {
                 this.to_date_picker
                     .update(cx, |picker, cx| picker.close(cx));
+                cx.notify();
             }
             DatePickerEvent::Change(from) => {
                 this.to_date_picker.update(cx, |picker, cx| {
@@ -171,6 +188,7 @@ impl GalleryModal {
             DatePickerEvent::Opened => {
                 this.from_date_picker
                     .update(cx, |picker, cx| picker.close(cx));
+                cx.notify();
             }
             DatePickerEvent::Change(to) => {
                 this.from_date_picker.update(cx, |picker, cx| {
@@ -229,6 +247,9 @@ impl GalleryModal {
     }
 
     fn sync_rows_from_store(&mut self, cx: &mut Context<Self>) {
+        if self.any_calendar_open(cx) {
+            return;
+        }
         let snapshot = self.rows_snapshot(cx);
         if self.rows_snapshot == Some(snapshot) {
             return;
@@ -261,7 +282,7 @@ impl GalleryModal {
         self.rows = rows;
         self.rows_snapshot = Some(self.rows_snapshot(cx));
 
-        if old_count == 0 || prefix == 0 {
+        if self.any_calendar_open(cx) || old_count == 0 || prefix == 0 {
             self.list_state.reset(new_count);
         } else if prefix < old_count || new_count != old_count {
             self.list_state
@@ -377,10 +398,14 @@ impl GalleryModal {
     }
 
     fn close_calendar_pickers(&mut self, cx: &mut Context<Self>) {
+        let had_open_calendar = self.any_calendar_open(cx);
         self.from_date_picker
             .update(cx, |picker, cx| picker.close(cx));
         self.to_date_picker
             .update(cx, |picker, cx| picker.close(cx));
+        if had_open_calendar {
+            self.sync_rows_from_store(cx);
+        }
     }
 
     fn any_calendar_open(&self, cx: &App) -> bool {
@@ -578,8 +603,11 @@ impl EventEmitter<DismissEvent> for GalleryModal {}
 
 impl Render for GalleryModal {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        self.image_cache
-            .update(cx, |cache, cx| cache.sweep_once_per_frame(window, cx));
+        let calendar_open = self.any_calendar_open(cx);
+        if !calendar_open {
+            self.image_cache
+                .update(cx, |cache, cx| cache.sweep_once_per_frame(window, cx));
+        }
         let theme = cx.theme().clone();
         let locale = self.locale(cx);
         let t = |key: &'static str| mezon_i18n::t(&locale, key).to_string();
@@ -639,7 +667,11 @@ impl Render for GalleryModal {
                 .into_any_element()
         };
 
+        let from_calendar_open = self.from_date_picker.read(cx).is_open();
+        let to_calendar_open = self.to_date_picker.read(cx).is_open();
+
         div()
+            .id("gallery-modal")
             .key_context("menu")
             .track_focus(&self.focus_handle)
             .on_action(cx.listener(|this, _: &::menu::Cancel, window, cx| {
@@ -700,13 +732,6 @@ impl Render for GalleryModal {
                     .child(body),
             )
             .when(self.date_filter_open, |el| {
-                let locale = self.locale(cx);
-                self.from_date_picker.update(cx, |picker, _| {
-                    picker.set_locale(locale.clone());
-                });
-                self.to_date_picker.update(cx, |picker, _| {
-                    picker.set_locale(locale.clone());
-                });
                 el.child(
                     div()
                         .absolute()
@@ -718,6 +743,8 @@ impl Render for GalleryModal {
                             self.from_date_picker.clone(),
                             self.to_date_picker.clone(),
                             self.date_validation_error.clone(),
+                            from_calendar_open,
+                            to_calendar_open,
                             &cx.entity(),
                         )),
                 )
@@ -862,11 +889,14 @@ fn render_date_filter_panel(
     from_picker: Entity<DatePicker>,
     to_picker: Entity<DatePicker>,
     validation_error: Option<String>,
+    from_calendar_open: bool,
+    to_calendar_open: bool,
     entity: &Entity<GalleryModal>,
 ) -> impl IntoElement {
     let has_error = validation_error.is_some();
     let entity_clear = entity.clone();
     let entity_apply = entity.clone();
+    let show_footer = !from_calendar_open && !to_calendar_open;
 
     div()
         .id("gallery-date-filter-panel")
@@ -895,77 +925,81 @@ fn render_date_filter_panel(
                 )
                 .child(div().w_full().child(from_picker)),
         )
-        .child(
-            div()
-                .flex()
-                .flex_col()
-                .gap_2()
-                .child(
-                    div()
-                        .text_size(px(12.))
-                        .font_weight(gpui::FontWeight::MEDIUM)
-                        .text_color(theme.text_secondary)
-                        .child(mezon_i18n::t(locale, "channelTopbar.gallery.toDate")),
-                )
-                .child(div().w_full().child(to_picker)),
-        )
-        .when_some(validation_error, |el, error| {
+        .when(!from_calendar_open, |el| {
             el.child(
                 div()
-                    .text_size(px(12.))
-                    .text_color(theme.danger_text)
-                    .child(error),
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .child(
+                        div()
+                            .text_size(px(12.))
+                            .font_weight(gpui::FontWeight::MEDIUM)
+                            .text_color(theme.text_secondary)
+                            .child(mezon_i18n::t(locale, "channelTopbar.gallery.toDate")),
+                    )
+                    .child(div().w_full().child(to_picker)),
             )
         })
-        .child(
-            div()
-                .flex()
-                .flex_row()
-                .items_center()
-                .justify_between()
-                .child(
+        .when(show_footer, |el| {
+            el.when_some(validation_error, |el, error| {
+                el.child(
                     div()
                         .text_size(px(12.))
-                        .text_color(theme.text_secondary)
-                        .cursor_pointer()
-                        .hover(|el| el.text_color(theme.interactive_hover))
-                        .child(mezon_i18n::t(
-                            locale,
-                            "channelTopbar.gallery.buttons.clearAll",
-                        ))
-                        .on_mouse_down(
-                            MouseButton::Left,
-                            move |_: &MouseDownEvent, window, cx: &mut App| {
-                                entity_clear.update(cx, |this, cx| {
-                                    this.clear_date_filter(window, cx);
-                                });
-                            },
-                        ),
+                        .text_color(theme.danger_text)
+                        .child(error),
                 )
-                .child(
-                    div()
-                        .px_3()
-                        .py_1()
-                        .rounded(px(6.))
-                        .text_size(px(12.))
-                        .cursor_pointer()
-                        .when(!has_error, |el| {
-                            el.bg(theme.brand).text_color(gpui::white())
-                        })
-                        .when(has_error, |el| {
-                            el.bg(theme.bg_tertiary).text_color(theme.text_muted)
-                        })
-                        .child(mezon_i18n::t(locale, "channelTopbar.gallery.buttons.apply"))
-                        .on_mouse_down(
-                            MouseButton::Left,
-                            move |_: &MouseDownEvent, _window, cx: &mut App| {
-                                entity_apply.update(cx, |this, cx| {
-                                    this.apply_date_filter(cx);
-                                });
-                            },
-                        ),
-                ),
-        )
+            })
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .justify_between()
+                    .child(
+                        div()
+                            .text_size(px(12.))
+                            .text_color(theme.text_secondary)
+                            .cursor_pointer()
+                            .hover(|el| el.text_color(theme.interactive_hover))
+                            .child(mezon_i18n::t(
+                                locale,
+                                "channelTopbar.gallery.buttons.clearAll",
+                            ))
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                move |_: &MouseDownEvent, window, cx: &mut App| {
+                                    entity_clear.update(cx, |this, cx| {
+                                        this.clear_date_filter(window, cx);
+                                    });
+                                },
+                            ),
+                    )
+                    .child(
+                        div()
+                            .px_3()
+                            .py_1()
+                            .rounded(px(6.))
+                            .text_size(px(12.))
+                            .cursor_pointer()
+                            .when(!has_error, |el| {
+                                el.bg(theme.brand).text_color(gpui::white())
+                            })
+                            .when(has_error, |el| {
+                                el.bg(theme.bg_tertiary).text_color(theme.text_muted)
+                            })
+                            .child(mezon_i18n::t(locale, "channelTopbar.gallery.buttons.apply"))
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                move |_: &MouseDownEvent, _window, cx: &mut App| {
+                                    entity_apply.update(cx, |this, cx| {
+                                        this.apply_date_filter(cx);
+                                    });
+                                },
+                            ),
+                    ),
+            )
+        })
 }
 
 fn filter_tab(
