@@ -837,7 +837,7 @@ async fn start_screen_track(
                 simulcast: false,
                 video_encoding: Some(VideoEncoding {
                     max_bitrate: 5_000_000,
-                    max_framerate: 30.0,
+                    max_framerate: 60.0,
                 }),
                 ..Default::default()
             },
