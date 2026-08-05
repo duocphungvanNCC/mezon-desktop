@@ -64,6 +64,7 @@ impl ChatArea {
             let settings = settings.clone();
             move |cx| ChannelMessages::new(settings, cx)
         });
+        ChannelMessages::register_as_active_timeline(&timeline, cx);
         let layout = cx.weak_entity();
         let header = cx.new(|cx| ChatHeader::new(layout, &settings, cx));
         let typing = cx.new(|cx| ChannelTyping::new(&settings, cx));
@@ -200,6 +201,7 @@ impl ChatArea {
             let placeholder = mezon_i18n::t(&locale, "messageBox.placeholder");
             let settings = self.settings.clone();
             let mention_input = cx.new(|cx| MentionInput::new(placeholder, settings, window, cx));
+            MentionInput::register_as_active_composer(&mention_input, cx);
             let submit_sub = cx.subscribe_in(
                 &mention_input,
                 window,

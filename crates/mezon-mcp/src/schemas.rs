@@ -80,6 +80,8 @@ pub fn input_schema(name: &str) -> Arc<Map<String, Value>> {
         | "list_friends"
         | "get_account"
         | "get_current_context"
+        | "get_scroll_state"
+        | "close_panel"
         | "get_settings"
         | "get_voice_status"
         | "list_stickers"
@@ -104,6 +106,50 @@ pub fn input_schema(name: &str) -> Arc<Map<String, Value>> {
             &["clan_id"],
         )),
         "list_threads" | "list_pinned_messages" | "mark_as_read" => Arc::new(clan_channel()),
+        "pin_message" => Arc::new(clan_channel_message()),
+        "unpin_message" => Arc::new(object(
+            json!({
+                "clan_id": id("Clan snowflake id. Use 0 for direct messages."),
+                "channel_id": id("Channel snowflake id."),
+                "message_id": id("Pinned message id."),
+                "pin_id": id("Pin entry id from list_pinned_messages."),
+            }),
+            &["clan_id", "channel_id", "message_id", "pin_id"],
+        )),
+        "create_poll" => Arc::new(object(
+            json!({
+                "clan_id": id("Clan snowflake id. Use 0 for direct messages."),
+                "channel_id": id("Channel snowflake id."),
+                "question": string("Poll question."),
+                "answers": {
+                    "type": "array",
+                    "description": "Answer options, at least two.",
+                    "items": { "type": "string" }
+                },
+                "expire_hours": integer("Hours until the poll closes. Default 24.", Some(24)),
+                "poll_type": integer("0 = single choice (default), 1 = multiple choice.", Some(0)),
+            }),
+            &["clan_id", "channel_id", "question", "answers"],
+        )),
+        "vote_poll" => Arc::new(object(
+            json!({
+                "poll_id": id("Poll snowflake id."),
+                "message_id": id("Id of the message carrying the poll."),
+                "channel_id": id("Channel snowflake id."),
+                "answers": {
+                    "type": "array",
+                    "description": "Zero-based answer indices.",
+                    "items": { "type": "integer" }
+                },
+            }),
+            &["poll_id", "message_id", "channel_id", "answers"],
+        )),
+        "load_more_messages" => Arc::new(object(
+            json!({
+                "direction": string("\"older\" (default) walks back through history, \"newer\" walks forward."),
+            }),
+            &[],
+        )),
         "list_messages" => Arc::new(object(
             json!({
                 "clan_id": id("Clan snowflake id. Use 0 for direct messages."),
@@ -166,8 +212,54 @@ pub fn input_schema(name: &str) -> Arc<Map<String, Value>> {
                 "clan_id": id("Clan snowflake id. Use 0 for the current direct message."),
                 "channel_id": id("Channel snowflake id."),
                 "content": string("Plain-text message body."),
+                "emojis": {
+                    "type": "array",
+                    "description": "Custom emoji to render inside content. Each shortname must appear in content; every occurrence becomes a span. Look ids up with list_emojis.",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "shortname": { "type": "string", "description": "Literal text in content, e.g. \":pepe_joy:\"." },
+                            "emoji_id": { "type": "string", "description": "Emoji snowflake id from list_emojis." }
+                        },
+                        "required": ["shortname", "emoji_id"]
+                    }
+                },
             }),
             &["clan_id", "channel_id", "content"],
+        )),
+        "open_image_viewer" => Arc::new(object(
+            json!({
+                "message_id": id("Message carrying the attachment."),
+                "attachment_index": integer("Zero-based attachment index. Default 0.", Some(0)),
+            }),
+            &["message_id"],
+        )),
+        "scroll_wheel" => Arc::new(object(
+            json!({
+                "delta_y": { "type": "number", "description": "Pixels per tick. Negative scrolls toward older messages. Default -120.", "default": -120 },
+                "ticks": integer("How many wheel events to send, 1-500. Default 10.", Some(10)),
+            }),
+            &[],
+        )),
+        "scroll_messages" => Arc::new(object(
+            json!({
+                "to": string("\"top\" (default) or \"bottom\"."),
+            }),
+            &[],
+        )),
+        "open_panel" => Arc::new(object(
+            json!({
+                "kind": string("Which composer panel to show: \"emoji\", \"sticker\", \"gif\" or \"sound\"."),
+            }),
+            &["kind"],
+        )),
+        "list_emojis" => Arc::new(object(
+            json!({
+                "clan_id": id("Optional clan snowflake id to filter by."),
+                "query": string("Optional case-insensitive substring match on shortname."),
+                "limit": integer("Max entries to return. Default 100.", Some(100)),
+            }),
+            &[],
         )),
         "reply_to_message" => Arc::new(object(
             json!({

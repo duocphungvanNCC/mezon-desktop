@@ -1236,6 +1236,9 @@ pub enum ChannelMessagesEvent {
     EditClosed,
 }
 
+struct ActiveTimeline(gpui::WeakEntity<ChannelMessages>);
+impl gpui::Global for ActiveTimeline {}
+
 pub struct ChannelMessages {
     pub(crate) list_state: ListState,
     focus_handle: FocusHandle,
@@ -1347,6 +1350,42 @@ pub struct ChannelMessages {
 }
 
 impl ChannelMessages {
+    pub fn register_as_active_timeline(entity: &Entity<Self>, cx: &mut App) {
+        cx.set_global(ActiveTimeline(entity.downgrade()));
+    }
+
+    pub fn active_timeline(cx: &App) -> Option<Entity<Self>> {
+        cx.try_global::<ActiveTimeline>()
+            .and_then(|timeline| timeline.0.upgrade())
+    }
+
+    pub fn scroll_viewport_to_top(&mut self, cx: &mut Context<Self>) {
+        self.list_state.scroll_to(gpui::ListOffset {
+            item_ix: 0,
+            offset_in_item: gpui::px(0.),
+        });
+        cx.notify();
+    }
+
+    pub fn scroll_viewport_to_bottom(&mut self, cx: &mut Context<Self>) {
+        self.list_state.scroll_to_end();
+        cx.notify();
+    }
+
+    pub fn list_bounds(&self) -> Option<gpui::Bounds<gpui::Pixels>> {
+        let bounds = self.list_state.viewport_bounds();
+        (bounds.size.width > gpui::px(0.) && bounds.size.height > gpui::px(0.)).then_some(bounds)
+    }
+
+    pub fn viewport_state(&self) -> (usize, usize, bool) {
+        let top = self.list_state.logical_scroll_top();
+        (
+            self.list_state.item_count(),
+            top.item_ix,
+            self.list_state.is_scrolled_to_end().unwrap_or(false),
+        )
+    }
+
     pub fn new(settings: Entity<Settings>, cx: &mut Context<Self>) -> Self {
         let mut subs: Vec<Subscription> = Vec::new();
         subs.push(cx.observe(&settings, |this, settings, cx| {

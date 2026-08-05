@@ -50,4 +50,35 @@ pub enum McpCommand {
         enabled: bool,
         reply: oneshot::Sender<anyhow::Result<bool>>,
     },
+    GetScrollState {
+        reply: oneshot::Sender<anyhow::Result<Value>>,
+    },
+    SetPanel {
+        kind: Option<String>,
+        reply: oneshot::Sender<anyhow::Result<Value>>,
+    },
+    OpenImageViewer {
+        message_id: i64,
+        attachment_index: usize,
+        reply: oneshot::Sender<anyhow::Result<Value>>,
+    },
+    ScrollWheel {
+        delta_y: f32,
+        ticks: u32,
+        reply: oneshot::Sender<anyhow::Result<Value>>,
+    },
+    ScrollMessages {
+        to_top: bool,
+        reply: oneshot::Sender<anyhow::Result<Value>>,
+    },
+    ListEmojis {
+        clan_id: Option<String>,
+        query: Option<String>,
+        limit: usize,
+        reply: oneshot::Sender<anyhow::Result<Value>>,
+    },
+    LoadMoreMessages {
+        older: bool,
+        reply: oneshot::Sender<anyhow::Result<Value>>,
+    },
 }

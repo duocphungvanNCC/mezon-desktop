@@ -1382,7 +1382,7 @@ impl TransportClient {
         message_id: i64,
         channel_id: i64,
         clan_id: i64,
-    ) -> Result<mezon_proto::api::ChannelMessageHeader> {
+    ) -> Result<()> {
         let transport = self.inner.clone();
 
         runtime()

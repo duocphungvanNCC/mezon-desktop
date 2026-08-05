@@ -166,6 +166,187 @@ Parameters: none.",
         write: false,
     },
     ToolSpec {
+        name: "get_scroll_state",
+        description: "\
+Report what the open channel's message list currently holds.
+
+Returns loaded_count, has_more_top, has_more_bottom, loading, loading_more and the
+active clan/channel ids. load_more_messages refuses while loading or loading_more is
+true, so wait for both to clear rather than treating the refusal as end-of-history.
+`list_messages` reads history straight from the API without moving the UI, so use this
+to learn whether the on-screen list still has older or newer pages to pull in, and pair
+it with load_more_messages before capture_chat if you need those rows rendered.
+
+Parameters: none.",
+        write: false,
+    },
+    ToolSpec {
+        name: "load_more_messages",
+        description: "\
+Pull the next page of history into the open channel's message list.
+
+This is the deterministic equivalent of the user scrolling to the top or bottom edge:
+it drives the same store fetch, so the rows become visible to capture_chat. Returns
+started=false when the list already holds that end of the history.
+
+Check has_more_top / has_more_bottom from get_scroll_state first, and call repeatedly
+to walk further back.
+
+Parameters:
+- direction (optional): \"older\" (default) or \"newer\".",
+        write: false,
+    },
+    ToolSpec {
+        name: "open_panel",
+        description: "\
+Open one of the composer panels: emoji, sticker, gif or sound.
+
+The panel renders over the chat, so pair it with capture_window to see it. It stays
+open until close_panel or until the user dismisses it.
+
+Parameters:
+- kind (required): \"emoji\", \"sticker\", \"gif\" or \"sound\".",
+        write: false,
+    },
+    ToolSpec {
+        name: "close_panel",
+        description: "\
+Close the composer panel opened by open_panel.
+
+Returns ok even when no panel was open.
+
+Parameters: none.",
+        write: false,
+    },
+    ToolSpec {
+        name: "open_image_viewer",
+        description: "\
+Open the full-screen image viewer on a message attachment.
+
+The message must be in the open channel's loaded history, so call open_channel first
+and load_more_messages if it sits further back. The viewer fetches the rest of the
+channel's media itself, so it can be paged once open.
+
+Parameters:
+- message_id (required): message carrying the attachment.
+- attachment_index (optional): zero-based index on that message. Default 0.",
+        write: false,
+    },
+    ToolSpec {
+        name: "scroll_wheel",
+        description: "\
+Send wheel events to the message list, the way a mouse wheel does.
+
+scroll_messages jumps the viewport, which cancels the wheel animation and never sets
+the list's scroll-active flag. That flag matters: while it is set the chat suppresses
+its image-cache sweep, so a jump measures the app under lighter memory pressure than
+real scrolling does. Use this when the run has to reproduce scrolling behaviour, and
+scroll_messages when you only need to land at an edge.
+
+Events go through GPUI's own dispatch, not the OS, so they cannot land in another
+application if the window is not frontmost. They are aimed at the message list's real
+bounds and paced one per frame, so the list animates and loads history the way it does
+under a hand on the wheel; a run of 500 ticks therefore takes about 8 seconds.
+
+Read `moved` to tell a real scroll from a no-op: it compares the viewport before and
+after. `consumed_ticks` counts events a handler stopped propagating, which the message
+list does not do even when it scrolls, so it stays 0 on a working scroll and is only
+useful for debugging.
+
+Parameters:
+- delta_y (optional): pixels per tick. Negative scrolls toward older messages
+  (content moves down). Default -120.
+- ticks (optional): how many wheel events to send, 1-500. Default 10.",
+        write: false,
+    },
+    ToolSpec {
+        name: "scroll_messages",
+        description: "\
+Move the open channel's message list to the top or the bottom.
+
+load_more_messages prepends older rows and drops the newest ones to stay inside the
+buffer cap, which is invisible when the reader is already at the top but pulls rows
+out from under a reader sitting at the bottom. Scroll to the top first to walk back
+through history the way a user does.
+
+Returns item_count, first_visible_index and at_bottom.
+
+Parameters:
+- to (optional): \"top\" (default) or \"bottom\".",
+        write: false,
+    },
+    ToolSpec {
+        name: "list_emojis",
+        description: "\
+List custom emoji available to the signed-in user.
+
+Emoji in a message body are spans, not text: sending the literal \":shortname:\" through
+send_message renders as plain characters. Look the emoji up here, then pass its
+shortname and emoji_id in send_message's `emojis` array so it renders.
+
+Parameters:
+- clan_id (optional): restrict to one clan's emoji.
+- query (optional): case-insensitive substring match on shortname.
+- limit (optional): max entries to return. Default 100.",
+        write: false,
+    },
+    ToolSpec {
+        name: "pin_message",
+        description: "\
+Pin a message to the channel.
+
+The pin shows up for everyone in the channel; list_pinned_messages reads them back.
+
+Parameters:
+- clan_id (required): clan snowflake id. Use 0 for direct messages.
+- channel_id (required): channel snowflake id.
+- message_id (required): message to pin.",
+        write: true,
+    },
+    ToolSpec {
+        name: "unpin_message",
+        description: "\
+Remove a pinned message from the channel.
+
+Call list_pinned_messages first: `pin_id` is the entry's own id, which is not the
+message id.
+
+Parameters:
+- clan_id (required): clan snowflake id. Use 0 for direct messages.
+- channel_id (required): channel snowflake id.
+- message_id (required): the pinned message's id.
+- pin_id (required): the pin entry id from list_pinned_messages.",
+        write: true,
+    },
+    ToolSpec {
+        name: "create_poll",
+        description: "\
+Post a poll to the channel.
+
+Returns the created poll so its id can be passed to vote_poll.
+
+Parameters:
+- clan_id (required): clan snowflake id. Use 0 for direct messages.
+- channel_id (required): channel snowflake id.
+- question (required): poll question.
+- answers (required): array of 2 or more answer strings.
+- expire_hours (optional): hours until the poll closes. Default 24.
+- poll_type (optional): 0 = single choice (default), 1 = multiple choice.",
+        write: true,
+    },
+    ToolSpec {
+        name: "vote_poll",
+        description: "\
+Cast a vote on an existing poll.
+
+Parameters:
+- poll_id (required): poll snowflake id.
+- message_id (required): id of the message carrying the poll.
+- channel_id (required): channel snowflake id.
+- answers (required): array of zero-based answer indices. Single-choice polls take one.",
+        write: true,
+    },
+    ToolSpec {
         name: "get_settings",
         description: "\
 Read app settings: theme, language, zoom, notifications, voice state, and related flags.
