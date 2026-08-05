@@ -454,6 +454,19 @@ impl MessageList {
         let Some(existing) = self.get_by_id(id).cloned() else {
             return false;
         };
+        if !existing.sender_id.is_empty()
+            && !incoming.sender_id.is_empty()
+            && incoming.sender_id != "0"
+            && existing.sender_id != incoming.sender_id
+        {
+            tracing::warn!(
+                message_id = id.get(),
+                existing_sender = %existing.sender_id,
+                incoming_sender = %incoming.sender_id,
+                "a re-delivered message overwrote a row belonging to a different sender; \
+                 two rows are sharing one id"
+            );
+        }
         let merged = merge_sparse_sender(&existing, incoming);
         if let Some(slot) = self.get_mut_by_id(id) {
             *slot = merged;
@@ -4412,13 +4425,34 @@ impl MessagesStore {
 
         let storage_id = storage_channel_id(m);
         let parent_id = parent_channel_id(m);
+        let viewer_id = viewer_user_id(cx);
+
+        // A mutation names the row it edits. Synthesizing an id for one that
+        // does not would aim it at a row picked by arithmetic on whatever is
+        // currently loaded, so drop it instead.
+        if matches!(
+            code,
+            MessageCode::ChatUpdate
+                | MessageCode::UpdateEphemeralMsg
+                | MessageCode::ChatRemove
+                | MessageCode::DeleteEphemeralMsg
+        ) && m.message_id <= 0
+        {
+            tracing::warn!(
+                channel_id = m.channel_id,
+                topic_id = m.topic_id,
+                ?code,
+                "dropping a message mutation that carries no message id"
+            );
+            return;
+        }
+
         let message_id = MessageId(synthesize_ws_message_id(
             self,
             storage_id,
             parent_id,
             m.message_id,
         ));
-        let viewer_id = viewer_user_id(cx);
 
         match code {
             MessageCode::ChatUpdate | MessageCode::UpdateEphemeralMsg => {
@@ -5772,16 +5806,30 @@ fn mutation_bucket_for(
     if bucket_contains(named) {
         return named;
     }
-    [
+    if let Some(bucket) = [
         Some(ChannelId(m.channel_id)),
         (m.topic_id != 0).then_some(ChannelId(m.topic_id)),
-        active_topic_id,
-        active_channel_id,
     ]
     .into_iter()
     .flatten()
     .find(|bucket| bucket_contains(*bucket))
-    .unwrap_or(named)
+    {
+        return bucket;
+    }
+    // Only a frame that names no bucket at all may be resolved against whatever
+    // the user happens to be looking at. A frame that does name one and whose
+    // channel simply is not cached has no local row to edit: searching on would
+    // hand a bot's edit in an unopened channel to whichever message in the open
+    // channel shares its id, which is how a music bot's card ended up rewriting
+    // someone else's message.
+    if m.channel_id != 0 || m.topic_id != 0 {
+        return named;
+    }
+    [active_topic_id, active_channel_id]
+        .into_iter()
+        .flatten()
+        .find(|bucket| bucket_contains(*bucket))
+        .unwrap_or(named)
 }
 
 fn mark_topic_reply_counted(
@@ -9405,6 +9453,24 @@ mod tests {
             b == ChannelId(99)
         });
         assert_eq!(bucket, ChannelId(99));
+    }
+
+    #[test]
+    fn mutation_bucket_for_never_redirects_a_named_channel_into_the_open_one() {
+        let mut edit = mezon_proto::api::ChannelMessage {
+            channel_id: 555,
+            ..Default::default()
+        };
+        edit.content = r#"{"t":"now playing"}"#.into();
+
+        let bucket = mutation_bucket_for(&edit, None, Some(ChannelId(10)), |b| b == ChannelId(10));
+
+        assert_eq!(
+            bucket,
+            ChannelId(555),
+            "an edit from a channel that is not cached has no local row to touch; resolving it \
+             against the open channel hands a bot's edit to whichever message there shares its id"
+        );
     }
 
     #[test]
