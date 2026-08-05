@@ -448,6 +448,11 @@ pub const PREVIEW_ENTRY_MAX_BYTES: u64 = 4 * 1024 * 1024;
 /// blowing up RAM by refusing to retain anything decoded larger than this and
 /// negatively caching it (shown as the initials fallback instead).
 pub const AVATAR_ANIMATION_MAX_BYTES: u64 = 4 * 1024 * 1024;
+/// Every cache fed by the icon loader keeps a 256 KB per-entry cap, so an
+/// animated emoji or role icon has to be decimated to fit inside it. Decoding
+/// against the larger avatar budget instead produced entries the cache then
+/// threw away, leaving the error placeholder in place of the emoji.
+pub const ICON_ANIMATION_MAX_BYTES: u64 = 256 * 1024;
 pub const AVATAR_ENTRY_MAX_BYTES: u64 = 2 * 1024 * 1024;
 pub const MESSAGE_ENTRY_MAX_BYTES: u64 = 32 * 1024 * 1024;
 pub const MESSAGE_ANIMATION_MAX_BYTES: u64 = MESSAGE_IMAGE_CACHE_BYTES / 4;
@@ -493,13 +498,38 @@ struct CacheEntry {
     /// When a transient load failure was first observed. Deterministic
     /// failures — oversized-image rejections (`bytes == Some(0)`), canvas/
     /// dimension guards (`Asset`), decode/limits errors (`Image`), bad SVGs
-    /// (`Usvg`) — are never retried; only network-shaped failures (`Io`,
-    /// `BadStatus`, `Other`) are retried once per
+    /// (`Usvg`), and any [`retryable_status`] rejection — are never retried;
+    /// only transport failures and retryable statuses are retried once per
     /// [`NEGATIVE_CACHE_RETRY_TTL`] while the image keeps being requested.
     failed_at: Option<Instant>,
 }
 
 const NEGATIVE_CACHE_RETRY_TTL: Duration = Duration::from_secs(15);
+
+/// A deleted avatar answers 404 for as long as the row stays on screen, so
+/// retrying it on the [`NEGATIVE_CACHE_RETRY_TTL`] the way a 5xx deserves only
+/// makes the row flicker between its initials and the load placeholder every
+/// few seconds. Retry the statuses that describe a busy or broken server, and
+/// treat the rest of the 4xx range as the permanent answer it is.
+fn retryable_status(status: u16) -> bool {
+    status >= 500 || status == 408 || status == 429
+}
+
+fn retryable_failure(error: &ImageCacheError) -> bool {
+    match error {
+        ImageCacheError::Io(_) | ImageCacheError::Other(_) => true,
+        ImageCacheError::BadStatus { status, .. } => retryable_status(status.as_u16()),
+        _ => false,
+    }
+}
+
+fn resource_source(resource: &Resource) -> String {
+    match resource {
+        Resource::Uri(uri) => uri.to_string(),
+        Resource::Path(path) => path.display().to_string(),
+        Resource::Embedded(path) => path.to_string(),
+    }
+}
 
 /// Sum of the decoded byte size across all frames of an image.
 fn image_bytes(image: &RenderImage) -> u64 {
@@ -1024,12 +1054,7 @@ impl LruImageCache {
             let retry_failed = {
                 let entry = self.cache.get_mut(&hash).expect("checked contains_key");
                 let transient_failure = entry.bytes.is_none()
-                    && matches!(
-                        entry.item.get(),
-                        Some(Err(ImageCacheError::Io(_)
-                            | ImageCacheError::BadStatus { .. }
-                            | ImageCacheError::Other(_)))
-                    );
+                    && matches!(entry.item.get(), Some(Err(error)) if retryable_failure(&error));
                 if transient_failure {
                     match entry.failed_at {
                         Some(failed_at) => failed_at.elapsed() >= NEGATIVE_CACHE_RETRY_TTL,
@@ -1157,9 +1182,18 @@ impl LruImageCache {
 
         let entity = window.current_view();
         let notify_task = task.clone();
+        let label = self.label;
+        let instance = self.instance;
+        let source = resource_source(resource);
         window
             .spawn(cx, async move |cx| {
-                let _ = Abortable::new(notify_task, abort_reg).await;
+                if let Ok(Err(error)) = Abortable::new(notify_task, abort_reg).await
+                    && !retryable_failure(&error)
+                {
+                    tracing::warn!(
+                        "[imgcache:{label}#{instance}] {source} failed to decode: {error}"
+                    );
+                }
                 let _ = cx.update(|_, cx| schedule_decode_notify(entity, cx));
             })
             .detach();
@@ -1261,7 +1295,9 @@ fn load_avatar_scaled(
         };
 
         if image::guess_format(&bytes).is_ok() {
-            let animation_budget = if max_px <= AVATAR_SMALL_DECODE_MAX_PX {
+            let animation_budget = if max_px <= ICON_DECODE_MAX_PX {
+                ICON_ANIMATION_MAX_BYTES
+            } else if max_px <= AVATAR_SMALL_DECODE_MAX_PX {
                 AVATAR_ANIMATION_MAX_BYTES
             } else {
                 AVATAR_ENTRY_MAX_BYTES
@@ -2366,6 +2402,84 @@ mod tests {
         let size = image.size(0);
         assert_eq!(size.width, size.height);
         assert_eq!(image.delay(0), image::Delay::from_numer_denom_ms(50, 1));
+    }
+
+    #[test]
+    fn only_a_busy_or_broken_server_is_worth_retrying() {
+        for status in [400, 401, 403, 404, 410, 451] {
+            assert!(
+                !retryable_status(status),
+                "{status} is the server's final answer, and retrying it every \
+                 {NEGATIVE_CACHE_RETRY_TTL:?} flickers the row between its fallback and the \
+                 load placeholder for as long as it stays on screen"
+            );
+        }
+        for status in [408, 429, 500, 502, 503, 504] {
+            assert!(
+                retryable_status(status),
+                "{status} can succeed on a later attempt"
+            );
+        }
+    }
+
+    #[test]
+    fn a_deleted_avatar_is_negatively_cached_for_good() {
+        let bad_status = |status: u16| ImageCacheError::BadStatus {
+            uri: gpui::SharedUri::from("https://cdn.example/deleted.jpg".to_string()),
+            status: gpui::http_client::StatusCode::from_u16(status).expect("status"),
+            body: String::new(),
+        };
+
+        assert!(
+            !retryable_failure(&bad_status(404)),
+            "a deleted avatar answers 404 every time, so re-requesting it drops the row back to \
+             the load placeholder once per retry window for as long as it is on screen"
+        );
+        assert!(retryable_failure(&bad_status(503)));
+        assert!(!retryable_failure(&ImageCacheError::Asset("decode".into())));
+    }
+
+    #[test]
+    fn an_animated_icon_decodes_within_the_icon_cache_entry_cap() {
+        use image::codecs::gif::{GifEncoder, Repeat};
+        const _: () = assert!(
+            ICON_ANIMATION_MAX_BYTES <= ROLE_ICON_ENTRY_MAX_BYTES,
+            "every cache fed by the icon loader rejects entries above its per-entry cap, so a \
+             decode budget above that cap produces animated emoji and role icons that are \
+             decoded and then thrown away, leaving the error placeholder on screen"
+        );
+
+        let mut bytes = Vec::new();
+        {
+            let mut encoder = GifEncoder::new(&mut bytes);
+            encoder.set_repeat(Repeat::Infinite).expect("GIF repeat");
+            for index in 0..40u8 {
+                let buffer = image::RgbaImage::from_pixel(
+                    ICON_DECODE_MAX_PX,
+                    ICON_DECODE_MAX_PX,
+                    image::Rgba([index.wrapping_mul(6), 0, 0, 255]),
+                );
+                let frame = image::Frame::from_parts(
+                    buffer,
+                    0,
+                    0,
+                    image::Delay::from_numer_denom_ms(50, 1),
+                );
+                encoder.encode_frame(frame).expect("GIF frame");
+            }
+        }
+
+        let image = decode_avatar_image(&bytes, ICON_DECODE_MAX_PX, ICON_ANIMATION_MAX_BYTES)
+            .expect("animated icon");
+        assert!(
+            image.frame_count() > 1,
+            "the animation must be decimated, not flattened"
+        );
+        assert!(
+            image_bytes(&image) <= ROLE_ICON_ENTRY_MAX_BYTES,
+            "a 40-frame icon decoded to {} bytes, above the {ROLE_ICON_ENTRY_MAX_BYTES}-byte cap",
+            image_bytes(&image)
+        );
     }
 
     #[test]
