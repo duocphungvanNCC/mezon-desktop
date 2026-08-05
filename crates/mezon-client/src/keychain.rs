@@ -90,6 +90,8 @@ mod dev_file {
 #[cfg(all(not(debug_assertions), target_os = "windows"))]
 mod dpapi_store {
     use std::path::{Path, PathBuf};
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicU64, Ordering};
 
     use anyhow::{Context, bail};
     use windows::Win32::Foundation::{HLOCAL, LocalFree};
@@ -103,11 +105,19 @@ mod dpapi_store {
     const LEGACY_SERVICE: &str = "mezon-desktop";
     const LEGACY_USERNAME: &str = "session";
 
+    static COMMIT_LOCK: Mutex<()> = Mutex::new(());
+    static STAGED_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
     fn session_path() -> PathBuf {
         dirs::config_dir()
             .unwrap_or_else(|| PathBuf::from("."))
             .join("mezon")
             .join("session.dat")
+    }
+
+    fn staged_path(path: &Path) -> PathBuf {
+        let sequence = STAGED_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        path.with_extension(format!("dat.{}.{sequence}.tmp", std::process::id()))
     }
 
     fn take_blob(blob: &mut CRYPT_INTEGER_BLOB) -> Vec<u8> {
@@ -200,17 +210,27 @@ mod dpapi_store {
         parse_session(&entry.get_password().ok()?)
     }
 
+    fn clear_legacy_credential() {
+        if let Ok(entry) = keyring::Entry::new(LEGACY_SERVICE, LEGACY_USERNAME) {
+            let _ = entry.delete_credential();
+        }
+    }
+
     pub fn save_session(session: &Session) -> Result<()> {
         let json = serde_json::to_string(session)?;
         let protected = protect(json.as_bytes())?;
         let path = session_path();
         let parent = path.parent().context("session path has no parent")?;
         std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
-        let staged = path.with_extension("dat.tmp");
+
+        let _commit = COMMIT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let staged = staged_path(&path);
         std::fs::write(&staged, &protected)
             .with_context(|| format!("write {}", staged.display()))?;
-        std::fs::rename(&staged, &path)
-            .with_context(|| format!("rename into {}", path.display()))?;
+        if let Err(e) = std::fs::rename(&staged, &path) {
+            let _ = std::fs::remove_file(&staged);
+            return Err(e).with_context(|| format!("rename into {}", path.display()));
+        }
         tracing::debug!(
             "Session saved to {} (user_id={})",
             path.display(),
@@ -226,8 +246,9 @@ mod dpapi_store {
         }
         let session = load_legacy_credential()?;
         tracing::info!("Migrating the stored session out of the credential store");
-        if let Err(e) = save_session(&session) {
-            tracing::warn!("Failed to migrate the stored session: {e:#}");
+        match save_session(&session) {
+            Ok(()) => clear_legacy_credential(),
+            Err(e) => tracing::warn!("Failed to migrate the stored session: {e:#}"),
         }
         Some(session)
     }
@@ -239,9 +260,7 @@ mod dpapi_store {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
             Err(e) => return Err(e).with_context(|| format!("remove {}", path.display())),
         }
-        if let Ok(entry) = keyring::Entry::new(LEGACY_SERVICE, LEGACY_USERNAME) {
-            let _ = entry.delete_credential();
-        }
+        clear_legacy_credential();
         tracing::debug!("Session cleared from {}", path.display());
         Ok(())
     }
