@@ -194,7 +194,7 @@ to walk further back.
 
 Parameters:
 - direction (optional): \"older\" (default) or \"newer\".",
-        write: true,
+        write: false,
     },
     ToolSpec {
         name: "open_panel",
@@ -206,7 +206,7 @@ open until close_panel or until the user dismisses it.
 
 Parameters:
 - kind (required): \"emoji\", \"sticker\", \"gif\" or \"sound\".",
-        write: true,
+        write: false,
     },
     ToolSpec {
         name: "close_panel",
@@ -216,7 +216,7 @@ Close the composer panel opened by open_panel.
 Returns ok even when no panel was open.
 
 Parameters: none.",
-        write: true,
+        write: false,
     },
     ToolSpec {
         name: "open_image_viewer",
@@ -230,7 +230,7 @@ channel's media itself, so it can be paged once open.
 Parameters:
 - message_id (required): message carrying the attachment.
 - attachment_index (optional): zero-based index on that message. Default 0.",
-        write: true,
+        write: false,
     },
     ToolSpec {
         name: "scroll_wheel",
@@ -244,13 +244,20 @@ real scrolling does. Use this when the run has to reproduce scrolling behaviour,
 scroll_messages when you only need to land at an edge.
 
 Events go through GPUI's own dispatch, not the OS, so they cannot land in another
-application if the window is not frontmost.
+application if the window is not frontmost. They are aimed at the message list's real
+bounds and paced one per frame, so the list animates and loads history the way it does
+under a hand on the wheel; a run of 500 ticks therefore takes about 8 seconds.
+
+Read `moved` to tell a real scroll from a no-op: it compares the viewport before and
+after. `consumed_ticks` counts events a handler stopped propagating, which the message
+list does not do even when it scrolls, so it stays 0 on a working scroll and is only
+useful for debugging.
 
 Parameters:
 - delta_y (optional): pixels per tick. Negative scrolls toward older messages
   (content moves down). Default -120.
 - ticks (optional): how many wheel events to send, 1-500. Default 10.",
-        write: true,
+        write: false,
     },
     ToolSpec {
         name: "scroll_messages",
@@ -266,7 +273,7 @@ Returns item_count, first_visible_index and at_bottom.
 
 Parameters:
 - to (optional): \"top\" (default) or \"bottom\".",
-        write: true,
+        write: false,
     },
     ToolSpec {
         name: "list_emojis",
