@@ -711,7 +711,7 @@ fn preview_image(preview: Option<&EmoticonPreview>) -> gpui::AnyElement {
             .object_fit(gpui::ObjectFit::Contain)
             .rounded_md()
             .into_any_element(),
-        None => Icon::new(IconName::ImageUploadIcon)
+        None => Icon::new(IconName::UploadImage)
             .size(px(32.))
             .text_color(gpui::rgb(0x80848e))
             .into_any_element(),
