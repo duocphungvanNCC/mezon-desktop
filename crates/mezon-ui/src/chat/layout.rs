@@ -11,9 +11,9 @@ use mezon_store::{
     Channel, ChannelId, ChannelList, ChannelType, ClanId, ClanList, ClanMembersStore,
     DirectChannel, DirectKind, DirectMessageStore, GroupMembersStore, InboxStore,
     MessageSearchEvent, MessageSearchStore, MessagesStore, PinnedEvent, PinnedMessagesStore,
-    Settings, StreamStore, THREAD_STATUS_ARCHIVED, ThreadCreateFailReason, ThreadsEvent,
-    ThreadsStore, TopicsEvent, TopicsStore, UiState, VoiceConnection, VoiceMember,
-    VoiceModerationError, VoiceStore, expand_mention_name_tokens,
+    Settings, StreamStore, THREAD_STATUS_ARCHIVED, ThreadsEvent, ThreadsStore, TopicsEvent,
+    TopicsStore, UiState, VoiceConnection, VoiceMember, VoiceModerationError, VoiceStore,
+    expand_mention_name_tokens,
 };
 use ui::PopoverMenuHandle;
 
@@ -116,6 +116,7 @@ pub struct ChatLayout {
     _ns_slider_sub: Subscription,
     stream_volume_slider: Entity<SliderState>,
     _stream_volume_slider_sub: Subscription,
+    _threads_event_sub: Subscription,
     ns_popover_open: bool,
     ns_hovered: bool,
     ns_dragging: bool,
@@ -293,10 +294,9 @@ impl ChatLayout {
             }
         })
         .detach();
-        cx.subscribe(&threads_store, |this, _, event, cx| {
+        let threads_event_sub = cx.subscribe(&threads_store, |this, _, event, cx| {
             this.on_threads_event(event, cx);
-        })
-        .detach();
+        });
 
         cx.subscribe(&PinnedMessagesStore::global(cx), |this, _, event, cx| {
             this.on_pinned_event(event, cx);
@@ -525,6 +525,7 @@ impl ChatLayout {
             _ns_slider_sub: ns_slider_sub,
             stream_volume_slider,
             _stream_volume_slider_sub: stream_volume_slider_sub,
+            _threads_event_sub: threads_event_sub,
             ns_popover_open: false,
             ns_hovered: false,
             ns_dragging: false,
@@ -1959,21 +1960,7 @@ impl ChatLayout {
                 self.navigate_to_thread(channel_id, clan_id, "", "", cx);
                 ThreadsStore::global(cx).update(cx, |store, cx| store.refresh(cx));
             }
-            ThreadsEvent::CreateFailed { reason } => {
-                let locale = self.settings.read(cx).language.clone();
-                let message = match reason {
-                    ThreadCreateFailReason::ChannelLimitExceeded => {
-                        mezon_i18n::t(&locale, "common.uploadLimit.channel").to_string()
-                    }
-                    ThreadCreateFailReason::Other => {
-                        mezon_i18n::t(&locale, "common.somethingWentWrong").to_string()
-                    }
-                };
-                Shell::global(cx).update(cx, |shell, cx| {
-                    shell.error(message, cx);
-                });
-                cx.notify();
-            }
+            ThreadsEvent::CreateFailed { .. } => {}
             ThreadsEvent::LeaveFailed { message } => {
                 Shell::global(cx).update(cx, |shell, cx| {
                     shell.error(message.clone(), cx);

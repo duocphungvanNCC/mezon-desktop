@@ -79,6 +79,8 @@ pub struct ThreadsStore {
     searching: bool,
     creating: bool,
     submitting: bool,
+    create_request_generation: u64,
+    _create_task: Option<Task<()>>,
     create_private: i32,
     name_error: Option<String>,
     api: Arc<AppApi>,
@@ -132,6 +134,8 @@ impl ThreadsStore {
             searching: false,
             creating: false,
             submitting: false,
+            create_request_generation: 0,
+            _create_task: None,
             create_private: 0,
             name_error: None,
             api,
@@ -583,6 +587,22 @@ impl ThreadsStore {
         self.clan_id.as_ref().filter(|id| !id.is_empty()).cloned()
     }
 
+    fn invalidate_create_request(&mut self) {
+        self.create_request_generation = self.create_request_generation.wrapping_add(1);
+        self._create_task = None;
+        self.submitting = false;
+    }
+
+    fn finish_create_request(&mut self, generation: u64) -> bool {
+        if self.create_request_generation != generation {
+            self._create_task = None;
+            return false;
+        }
+        self.submitting = false;
+        self._create_task = None;
+        true
+    }
+
     fn on_active_channel_changed(&mut self, channel_id: Option<ChannelId>, cx: &mut Context<Self>) {
         match channel_id {
             None => {
@@ -613,7 +633,7 @@ impl ThreadsStore {
         self.has_more = false;
         self.loading_more = false;
         self.fetch_error = false;
-        self.submitting = false;
+        self.invalidate_create_request();
         self.name_error = None;
         cx.notify();
     }
@@ -882,6 +902,7 @@ impl ThreadsStore {
 
     pub fn cancel_create(&mut self, cx: &mut Context<Self>) {
         if !self.creating
+            && self._create_task.is_none()
             && !self.submitting
             && self.create_private == 0
             && self.name_error.is_none()
@@ -889,14 +910,14 @@ impl ThreadsStore {
             return;
         }
         self.creating = false;
-        self.submitting = false;
+        self.invalidate_create_request();
         self.create_private = 0;
         self.name_error = None;
         cx.notify();
     }
 
     pub fn submit_create(&mut self, name: String, message: String, cx: &mut Context<Self>) {
-        if self.submitting || !self.can_create_thread(cx) {
+        if self._create_task.is_some() || self.submitting || !self.can_create_thread(cx) {
             return;
         }
         let name = name.trim().to_string();
@@ -922,17 +943,21 @@ impl ThreadsStore {
         let category_id = self.category_id.clone();
         let channel_private = self.create_private;
 
+        self.create_request_generation = self.create_request_generation.wrapping_add(1);
+        let generation = self.create_request_generation;
         self.name_error = None;
         self.creating = true;
         self.submitting = true;
         cx.notify();
 
         let api = self.api.clone();
-        cx.spawn(async move |this, cx| {
+        let task = cx.spawn(async move |this, cx| {
             match api.check_duplicate_thread_name(&name, &parent_id).await {
                 Ok(true) => {
                     let _ = this.update(cx, |this, cx| {
-                        this.submitting = false;
+                        if !this.finish_create_request(generation) {
+                            return;
+                        }
                         this.name_error = Some("thread_name_exists".into());
                         cx.notify();
                     });
@@ -942,7 +967,9 @@ impl ThreadsStore {
                 Err(e) => {
                     tracing::error!("check_duplicate_thread_name failed: {e}");
                     let _ = this.update(cx, |this, cx| {
-                        this.submitting = false;
+                        if !this.finish_create_request(generation) {
+                            return;
+                        }
                         cx.emit(ThreadsEvent::CreateFailed {
                             reason: thread_create_fail_reason(&e),
                         });
@@ -968,7 +995,9 @@ impl ThreadsStore {
                 Err(e) => {
                     tracing::error!("create_channel (thread) failed: {e}");
                     let _ = this.update(cx, |this, cx| {
-                        this.submitting = false;
+                        if !this.finish_create_request(generation) {
+                            return;
+                        }
                         cx.emit(ThreadsEvent::CreateFailed {
                             reason: thread_create_fail_reason(&e),
                         });
@@ -997,7 +1026,9 @@ impl ThreadsStore {
             {
                 tracing::error!("send starter message to thread failed: {e}");
                 let _ = this.update(cx, |this, cx| {
-                    this.submitting = false;
+                    if !this.finish_create_request(generation) {
+                        return;
+                    }
                     cx.emit(ThreadsEvent::CreateFailed {
                         reason: ThreadCreateFailReason::Other,
                     });
@@ -1014,8 +1045,13 @@ impl ThreadsStore {
             }
 
             let _ = this.update(cx, |this, cx| {
+                if this.create_request_generation != generation {
+                    this._create_task = None;
+                    return;
+                }
                 this.creating = false;
                 this.submitting = false;
+                this._create_task = None;
                 this.loaded_channel = None;
                 let clan_id_for_refresh = clan_id.parse::<ClanId>().unwrap_or(ClanId(0));
                 ChannelList::global(cx).update(cx, |list, cx| {
@@ -1027,8 +1063,8 @@ impl ThreadsStore {
                 });
                 cx.notify();
             });
-        })
-        .detach();
+        });
+        self._create_task = Some(task);
     }
 }
 
