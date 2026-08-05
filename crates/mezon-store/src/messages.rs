@@ -42,8 +42,8 @@ use crate::message::{
     MessageCode, MessageComponent, MessageComponentRow, MessageReference, MessageSelect,
     MessageSelectOption, MessageSpan, OgpPreview, PollAnswerView, PollData, PollDetail,
     PollLabelSegment, PollVoter, ViewerMedia, aggregate_reactions, apply_reaction_event,
-    message_combined_with_prev, message_sort_key, parse_spans, reaction_key,
-    recompute_message_grouping, rollback_reaction, sort_messages, spans_only_emoji,
+    compute_show_forwarded_label, message_combined_with_prev, message_sort_key, parse_spans,
+    reaction_key, recompute_message_grouping, rollback_reaction, sort_messages, spans_only_emoji,
     viewer_highlight_direct,
 };
 use crate::message_time::{unix_now_millis, unix_now_seconds};
@@ -395,11 +395,16 @@ impl MessageList {
     }
 
     fn regroup_row(&mut self, idx: usize) {
-        let combined = {
+        let (combined, show_forwarded_label) = {
             let prev = idx.checked_sub(1).map(|p| &self.items[p]);
-            message_combined_with_prev(prev, &self.items[idx])
+            let row = &self.items[idx];
+            (
+                message_combined_with_prev(prev, row),
+                compute_show_forwarded_label(prev, row),
+            )
         };
         self.items[idx].combined_with_prev = combined;
+        self.items[idx].show_forwarded_label = show_forwarded_label;
     }
 
     fn replace_at(&mut self, idx: usize, msg: Message) {
@@ -8749,6 +8754,31 @@ mod tests {
             MessageList::from_messages(vec![Message::new(MessageId(1), "a", "u1", "U1", 100)]);
         list.push_grouped(Message::new(MessageId(2), "b", "u2", "U2", 105));
         assert!(!list.as_slice()[1].combined_with_prev);
+        assert_list_consistent(&list);
+    }
+
+    #[test]
+    fn push_message_grouped_sets_forwarded_label_on_first_realtime_forward() {
+        let mut list =
+            MessageList::from_messages(vec![Message::new(MessageId(1), "a", "u1", "U1", 100)]);
+        list.push_grouped(Message::new(MessageId(2), "fwd", "u1", "U1", 110).with_forwarded(true));
+        assert!(list.as_slice()[1].is_forwarded);
+        assert!(list.as_slice()[1].show_forwarded_label);
+        assert_list_consistent(&list);
+    }
+
+    #[test]
+    fn push_message_grouped_hides_forwarded_label_for_same_sender_burst() {
+        let mut list =
+            MessageList::from_messages(vec![Message::new(MessageId(1), "a", "u1", "U1", 100)]);
+        list.push_grouped(
+            Message::new(MessageId(2), "fwd-a", "u1", "U1", 110).with_forwarded(true),
+        );
+        list.push_grouped(
+            Message::new(MessageId(3), "fwd-b", "u1", "U1", 120).with_forwarded(true),
+        );
+        assert!(list.as_slice()[1].show_forwarded_label);
+        assert!(!list.as_slice()[2].show_forwarded_label);
         assert_list_consistent(&list);
     }
 

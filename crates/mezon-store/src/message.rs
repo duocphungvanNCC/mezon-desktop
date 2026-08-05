@@ -1423,7 +1423,7 @@ pub fn recompute_message_grouping(messages: &mut [Message]) {
     }
 }
 
-fn compute_show_forwarded_label(prev: Option<&Message>, msg: &Message) -> bool {
+pub(crate) fn compute_show_forwarded_label(prev: Option<&Message>, msg: &Message) -> bool {
     if !msg.is_forwarded {
         return false;
     }
