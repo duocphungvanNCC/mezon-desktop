@@ -1081,7 +1081,7 @@ impl ChatLayout {
         } else {
             self.pending_channel_id = Some(channel_id);
             self.channel_list.update(cx, |channel_list, cx| {
-                let _fetch = channel_list.load_for_clan(clan_id, cx);
+                channel_list.load_for_clan(clan_id, cx);
             });
         }
     }
