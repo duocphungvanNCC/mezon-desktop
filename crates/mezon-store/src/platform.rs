@@ -145,6 +145,7 @@ pub struct DesktopNotification {
 
 pub struct PlatformStore {
     open_url: Option<OpenUrlFn>,
+    open_url_app_window: Option<OpenUrlFn>,
     save_attachment: Option<SaveAttachmentFn>,
     notifier: Option<NotifyFn>,
     cli_install: Option<CliInstallHooks>,
@@ -157,6 +158,7 @@ impl PlatformStore {
     pub fn init(cx: &mut App) -> Entity<Self> {
         let entity = cx.new(|_| Self {
             open_url: None,
+            open_url_app_window: None,
             save_attachment: None,
             notifier: None,
             cli_install: None,
@@ -188,6 +190,21 @@ impl PlatformStore {
             store.save_attachment = Some(f);
             cx.notify();
         });
+    }
+
+    pub fn set_open_url_app_window(entity: &Entity<Self>, f: OpenUrlFn, cx: &mut App) {
+        entity.update(cx, |store, _| {
+            store.open_url_app_window = Some(f);
+        });
+    }
+
+    /// Open `url` in a toolbar-less browser window, falling back to a normal tab
+    /// when the platform layer has not registered the hook.
+    pub fn open_url_app_window(&self, url: &str) -> anyhow::Result<()> {
+        match &self.open_url_app_window {
+            Some(f) => f(url),
+            None => self.open_url_external(url),
+        }
     }
 
     pub fn open_url_external(&self, url: &str) -> anyhow::Result<()> {

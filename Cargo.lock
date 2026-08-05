@@ -5866,6 +5866,7 @@ dependencies = [
  "anyhow",
  "auto-launch",
  "block",
+ "core-foundation 0.10.0",
  "cpal",
  "crossbeam-channel",
  "dirs 5.0.1",

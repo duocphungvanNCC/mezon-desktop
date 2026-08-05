@@ -30,6 +30,7 @@ tray-icon = { version = "0.19", features = ["common-controls-v6"] }
 [target.'cfg(target_os = "macos")'.dependencies]
 objc.workspace = true
 block = "0.1"
+core-foundation.workspace = true
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows.workspace = true

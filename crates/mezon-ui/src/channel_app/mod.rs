@@ -6,7 +6,7 @@ fn open_in_browser(url: &str, cx: &App) {
         tracing::warn!("channel app launch skipped — platform store is missing");
         return;
     };
-    if let Err(error) = platform.read(cx).open_url_external(url) {
+    if let Err(error) = platform.read(cx).open_url_app_window(url) {
         tracing::warn!("channel app launch failed: {error:#}");
     }
 }

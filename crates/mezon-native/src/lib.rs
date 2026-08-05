@@ -1,6 +1,7 @@
 pub mod audio;
 pub mod autostart;
 pub mod badge;
+pub mod browser;
 pub mod cli_install;
 pub mod control;
 pub mod deep_link;
@@ -11,15 +12,20 @@ pub mod power;
 pub mod tray;
 pub mod window_icon;
 
-/// Opens a URL in the system default browser.
-///
-/// Only `http://` and `https://` URLs are accepted; other schemes are rejected.
-pub fn open_url(url: &str) -> anyhow::Result<()> {
+pub(crate) fn ensure_http_url(url: &str) -> anyhow::Result<()> {
     if !url.starts_with("https://") && !url.starts_with("http://") {
         return Err(anyhow::anyhow!(
             "open_url rejected: only http(s) scheme is allowed"
         ));
     }
+    Ok(())
+}
+
+/// Opens a URL in the system default browser.
+///
+/// Only `http://` and `https://` URLs are accepted; other schemes are rejected.
+pub fn open_url(url: &str) -> anyhow::Result<()> {
+    ensure_http_url(url)?;
     open::that_detached(url).map_err(|e| anyhow::anyhow!("Failed to open URL: {}", e))
 }
 
