@@ -100,7 +100,6 @@ impl McpBackend {
             "get_current_context" => self.get_current_context().await,
             "get_scroll_state" => self.get_scroll_state().await,
             "scroll_wheel" => {
-                self.require_write_mode("scroll_wheel")?;
                 let delta_y = arguments
                     .get("delta_y")
                     .and_then(Value::as_f64)
@@ -114,7 +113,6 @@ impl McpBackend {
                 .await
             }
             "scroll_messages" => {
-                self.require_write_mode("scroll_messages")?;
                 let to_top = arguments
                     .get("to")
                     .and_then(Value::as_str)
@@ -124,7 +122,6 @@ impl McpBackend {
                     .await
             }
             "open_panel" => {
-                self.require_write_mode("open_panel")?;
                 let kind = arguments
                     .get("kind")
                     .and_then(Value::as_str)
@@ -137,7 +134,6 @@ impl McpBackend {
                 .await
             }
             "open_image_viewer" => {
-                self.require_write_mode("open_image_viewer")?;
                 let message_id = parse_i64_field(&arguments, "message_id")?;
                 let attachment_index = arguments
                     .get("attachment_index")
@@ -151,7 +147,6 @@ impl McpBackend {
                 .await
             }
             "close_panel" => {
-                self.require_write_mode("close_panel")?;
                 self.send_ui_result(|reply| McpCommand::SetPanel { kind: None, reply })
                     .await
             }
@@ -183,7 +178,6 @@ impl McpBackend {
                 .await
             }
             "load_more_messages" => {
-                self.require_write_mode("load_more_messages")?;
                 let older = arguments
                     .get("direction")
                     .and_then(Value::as_str)
@@ -1624,6 +1618,7 @@ fn build_emoji_spans(content: &str, emojis: Option<&Value>) -> anyhow::Result<Ve
                     .or_else(|| value.as_i64().map(|id| id.to_string()))
             })
             .ok_or_else(|| anyhow::anyhow!("each emojis entry requires emoji_id"))?;
+        let before = spans.len();
         let mut from = 0usize;
         while let Some(offset) = content[from..].find(shortname) {
             let start = from + offset;
@@ -1634,7 +1629,7 @@ fn build_emoji_spans(content: &str, emojis: Option<&Value>) -> anyhow::Result<Ve
             });
             from = start + shortname.len();
         }
-        if !spans.iter().any(|span| span.emoji_id == emoji_id) {
+        if spans.len() == before {
             anyhow::bail!("shortname {shortname} does not appear in content");
         }
     }
@@ -1804,6 +1799,23 @@ mod tests {
             ":joy:",
             "the composer indexes the input by byte offset, so a multi-byte prefix must not \
              shift the span onto the wrong characters"
+        );
+    }
+
+    #[test]
+    fn emoji_spans_reject_a_missing_shortname_that_shares_an_id_with_a_present_one() {
+        assert!(
+            build_emoji_spans(
+                "only :joy: here",
+                Some(&serde_json::json!([
+                    { "shortname": ":joy:", "emoji_id": "12" },
+                    { "shortname": ":absent:", "emoji_id": "12" },
+                ])),
+            )
+            .is_err(),
+            "checking for any span carrying this emoji_id lets a second entry pass on the \
+             strength of the first one's match, so a shortname that is not in the text is \
+             silently dropped instead of rejected"
         );
     }
 
