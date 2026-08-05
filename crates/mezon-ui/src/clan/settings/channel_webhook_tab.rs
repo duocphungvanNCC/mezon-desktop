@@ -53,7 +53,9 @@ impl ChannelWebhookTab {
         settings: Entity<Settings>,
         cx: &mut Context<Self>,
     ) -> Self {
-        channel_list.update(cx, |store, cx| store.load_for_clan(clan_id, cx));
+        channel_list.update(cx, |store, cx| {
+            let _fetch = store.load_for_clan(clan_id, cx);
+        });
         WebhookStore::global(cx).update(cx, |store, cx| {
             store.ensure_channel_webhooks_loaded(clan_id, cx);
         });

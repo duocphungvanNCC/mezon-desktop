@@ -75,8 +75,12 @@ impl ClanLoadScheduler {
         self.load_task = Some(cx.spawn(async move |this, cx| {
             cx.update(|cx| {
                 ChannelList::global(cx)
-                    .update(cx, |channels, cx| channels.load_for_clan(clan_id, cx));
-            });
+                    .update(cx, |channels, cx| channels.load_for_clan(clan_id, cx))
+            })
+            .await;
+            if !is_current(&this, cx, generation) {
+                return;
+            }
 
             cx.update(|cx| {
                 ChannelList::global(cx).update(cx, |channels, cx| channels.seed_badges(clan_id, cx))

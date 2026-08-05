@@ -5,6 +5,8 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, LazyLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use futures::FutureExt as _;
+use futures::future::Shared;
 use gpui::{App, AppContext, Context, Entity, EventEmitter, Global, Subscription, Task};
 use mezon_client::transport::{ApiCategoryDesc, ApiChannelDesc};
 use mezon_client::{
@@ -284,7 +286,7 @@ pub struct ChannelList {
     user_channels_loading: bool,
     in_voice: HashMap<UserId, InVoiceInfo>,
     user_channels_loaded: bool,
-    loading: HashSet<ClanId>,
+    loading: HashMap<ClanId, Shared<Task<()>>>,
     active_clan_id: Option<ClanId>,
     pub active_channel_id: Option<ChannelId>,
     remembered_channels: HashMap<ClanId, ChannelId>,
@@ -518,7 +520,7 @@ impl ChannelList {
             user_channels_loading: false,
             in_voice: HashMap::new(),
             user_channels_loaded: false,
-            loading: HashSet::new(),
+            loading: HashMap::new(),
             active_clan_id: None,
             active_channel_id: None,
             remembered_channels: HashMap::new(),
@@ -719,20 +721,20 @@ impl ChannelList {
         })
     }
 
-    pub fn load_for_clan(&mut self, clan_id: ClanId, cx: &mut Context<Self>) {
+    pub fn load_for_clan(&mut self, clan_id: ClanId, cx: &mut Context<Self>) -> Shared<Task<()>> {
         self.want_extras.insert(clan_id);
         if self.cache.is_fresh(&clan_id, crate::CACHE_TTL) {
             self.ensure_extras(clan_id, cx);
-            return;
+            return Task::ready(()).shared();
         }
-        self.fetch_clan(clan_id, cx);
+        self.fetch_clan(clan_id, cx)
     }
 
     pub fn load_structure_for_clan(&mut self, clan_id: ClanId, cx: &mut Context<Self>) {
         if self.cache.is_fresh(&clan_id, crate::CACHE_TTL) {
             return;
         }
-        self.fetch_clan(clan_id, cx);
+        let _fetch = self.fetch_clan(clan_id, cx);
     }
 
     fn ensure_extras(&mut self, clan_id: ClanId, cx: &mut Context<Self>) {
@@ -765,7 +767,7 @@ impl ChannelList {
     pub fn refresh_clan(&mut self, clan_id: ClanId, cx: &mut Context<Self>) {
         self.want_extras.insert(clan_id);
         self.extras_loaded.remove(&clan_id);
-        self.fetch_clan(clan_id, cx);
+        let _fetch = self.fetch_clan(clan_id, cx);
     }
 
     pub fn fetch_archived_channels(
@@ -835,35 +837,35 @@ impl ChannelList {
         }
     }
 
-    fn fetch_clan(&mut self, clan_id: ClanId, cx: &mut Context<Self>) {
-        if self.loading.contains(&clan_id) {
-            return;
+    fn fetch_clan(&mut self, clan_id: ClanId, cx: &mut Context<Self>) -> Shared<Task<()>> {
+        if let Some(in_flight) = self.loading.get(&clan_id)
+            && in_flight.peek().is_none()
+        {
+            return in_flight.clone();
         }
-        self.loading.insert(clan_id);
         let api = self.api.clone();
         let generation = self.reset_generation;
-        cx.spawn(async move |this, cx| {
-            let result = Self::fetch_clan_structure(&api, clan_id).await;
-            match result {
-                Ok(categories) => {
-                    let _ = this.update(cx, |this, cx| {
-                        this.loading.remove(&clan_id);
-                        if this.reset_generation != generation {
-                            return;
-                        }
-                        this.apply_clan_structure(clan_id, categories, cx);
-                    });
+        let task = cx
+            .spawn(async move |this, cx| {
+                let result = Self::fetch_clan_structure(&api, clan_id).await;
+                match result {
+                    Ok(categories) => {
+                        let _ = this.update(cx, |this, cx| {
+                            if this.reset_generation != generation {
+                                return;
+                            }
+                            this.apply_clan_structure(clan_id, categories, cx);
+                        });
+                    }
+                    Err(e) => {
+                        tracing::error!("Failed to load channels for clan {clan_id}: {e}");
+                        let _ = this.update(cx, |_, cx| cx.notify());
+                    }
                 }
-                Err(e) => {
-                    tracing::error!("Failed to load channels for clan {clan_id}: {e}");
-                    let _ = this.update(cx, |this, cx| {
-                        this.loading.remove(&clan_id);
-                        cx.notify();
-                    });
-                }
-            }
-        })
-        .detach();
+            })
+            .shared();
+        self.loading.insert(clan_id, task.clone());
+        task
     }
 
     fn fetch_user_channels(&mut self, cx: &mut Context<Self>) {
@@ -2285,7 +2287,7 @@ impl ChannelList {
         self.extras_loaded.clear();
         self.fetch_user_channels(cx);
         if let Some(clan_id) = self.active_clan_id {
-            self.load_for_clan(clan_id, cx);
+            let _fetch = self.load_for_clan(clan_id, cx);
             self.seed_badges(clan_id, cx).detach();
         }
     }
@@ -2301,7 +2303,9 @@ impl ChannelList {
     }
 
     pub fn is_loading_clan(&self, clan_id: ClanId) -> bool {
-        self.loading.contains(&clan_id)
+        self.loading
+            .get(&clan_id)
+            .is_some_and(|task| task.peek().is_none())
     }
 
     pub fn app_channels_for_clan(&self, clan_id: ClanId) -> &[AppChannel] {
@@ -5443,7 +5447,7 @@ mod tests {
         cx.update(|cx| {
             let channels = init_channel_list(cx);
             channels.update(cx, |channels, cx| {
-                channels.load_for_clan(ClanId(1), cx);
+                let _fetch = channels.load_for_clan(ClanId(1), cx);
                 channels.apply_clan_structure(ClanId(1), structure_with_two_channels(), cx);
                 channels.finish_extras(
                     ClanId(1),
@@ -5457,7 +5461,7 @@ mod tests {
                 channels.extras_loading.clear();
 
                 assert!(channels.cache.is_fresh(&ClanId(1), crate::CACHE_TTL));
-                channels.load_for_clan(ClanId(1), cx);
+                let _fetch = channels.load_for_clan(ClanId(1), cx);
                 assert!(
                     channels.extras_loading.contains(&ClanId(1)),
                     "re-entering the clan must issue the extras calls again"
@@ -5465,7 +5469,7 @@ mod tests {
 
                 channels.extras_loading.clear();
                 channels.finish_extras(ClanId(1), favorite_extras(&[ChannelId(2)]), cx);
-                channels.load_for_clan(ClanId(1), cx);
+                let _fetch = channels.load_for_clan(ClanId(1), cx);
                 assert!(
                     channels.extras_loading.is_empty(),
                     "once loaded, re-entering must not re-issue them"

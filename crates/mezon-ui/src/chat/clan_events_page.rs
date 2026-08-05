@@ -42,7 +42,9 @@ impl ClanEventsModal {
         let channels_subscription = cx.observe(&ChannelList::global(cx), |_, _, cx| cx.notify());
         EventsStore::global(cx).update(cx, |store, cx| store.ensure_loaded(clan_id, cx));
         ClanMembersStore::global(cx).update(cx, |store, cx| store.ensure_loaded(clan_id, cx));
-        ChannelList::global(cx).update(cx, |store, cx| store.load_for_clan(clan_id, cx));
+        ChannelList::global(cx).update(cx, |store, cx| {
+            let _fetch = store.load_for_clan(clan_id, cx);
+        });
         Self {
             clan_id,
             settings,

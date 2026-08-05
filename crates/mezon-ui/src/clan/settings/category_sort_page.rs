@@ -122,7 +122,9 @@ pub struct CategorySortPage {
 
 impl CategorySortPage {
     pub fn new(clan_id: ClanId, channel_list: Entity<ChannelList>, cx: &mut Context<Self>) -> Self {
-        channel_list.update(cx, |list, cx| list.load_for_clan(clan_id, cx));
+        channel_list.update(cx, |list, cx| {
+            let _fetch = list.load_for_clan(clan_id, cx);
+        });
         let categories = Self::build_categories(channel_list.read(cx), clan_id);
         let saved_categories = categories.clone();
 

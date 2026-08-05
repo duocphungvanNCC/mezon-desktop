@@ -95,7 +95,7 @@ impl InboxPopoverPanel {
                 store.ensure_loaded(clan, cx);
             });
             ChannelList::global(cx).update(cx, |store, cx| {
-                store.load_for_clan(clan, cx);
+                let _fetch = store.load_for_clan(clan, cx);
             });
             RolesStore::global(cx).update(cx, |store, cx| {
                 store.ensure_loaded(clan, cx);
@@ -206,7 +206,7 @@ impl InboxPopoverPanel {
                 store.ensure_loaded(clan, cx);
             });
             ChannelList::global(cx).update(cx, |store, cx| {
-                store.load_for_clan(clan, cx);
+                let _fetch = store.load_for_clan(clan, cx);
             });
             RolesStore::global(cx).update(cx, |store, cx| {
                 store.ensure_loaded(clan, cx);
