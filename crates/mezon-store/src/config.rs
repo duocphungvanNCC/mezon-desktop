@@ -417,6 +417,11 @@ impl AppConfig {
         }
     }
 
+    pub fn channel_link(&self, clan_id: &str, channel_id: &str) -> String {
+        let base = self.redirect_uri.trim_end_matches('/');
+        format!("{base}/chat/clans/{clan_id}/channels/{channel_id}")
+    }
+
     pub fn community_clan_url(&self, short_url: &str) -> String {
         let base = self.domain_url.trim_end_matches('/');
         format!("{base}/clans/clan/{short_url}")
@@ -738,6 +743,30 @@ mod tests {
     #[test]
     fn media_dimensions_landscape_caps_to_available_width() {
         assert_eq!(dims(800, 600), (464.0, 348.0, false));
+    }
+
+    #[test]
+    fn channel_link_matches_the_react_copy_link_format() {
+        let cfg = AppConfig {
+            redirect_uri: "https://mezon.ai".into(),
+            ..AppConfig::default()
+        };
+        assert_eq!(
+            cfg.channel_link("1840691926756495360", "1840691926777466880"),
+            "https://mezon.ai/chat/clans/1840691926756495360/channels/1840691926777466880"
+        );
+    }
+
+    #[test]
+    fn channel_link_tolerates_a_trailing_slash_on_the_origin() {
+        let cfg = AppConfig {
+            redirect_uri: "https://mezon.ai/".into(),
+            ..AppConfig::default()
+        };
+        assert_eq!(
+            cfg.channel_link("1", "2"),
+            "https://mezon.ai/chat/clans/1/channels/2"
+        );
     }
 
     #[test]
