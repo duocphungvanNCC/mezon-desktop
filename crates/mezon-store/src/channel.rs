@@ -6,7 +6,9 @@ use std::sync::{Arc, LazyLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use gpui::{App, AppContext, Context, Entity, EventEmitter, Global, Subscription, Task};
-use mezon_client::transport::{ApiCategoryDesc, ApiChannelDesc};
+use mezon_client::transport::{
+    ApiCategoryDesc, ApiChannelDesc, ApiStatusError, api_status_from_error,
+};
 use mezon_client::{
     ApiChannelApp, AppApi, ChannelAppLaunchParams, ConnectionStatus, RealtimeEvent,
     build_channel_app_url,
@@ -214,6 +216,7 @@ pub fn validate_category_name(name: &str) -> Result<String, CreateCategoryError>
 pub enum CreateChannelError {
     InvalidName,
     DuplicateName,
+    ChannelLimitExceeded,
     Other(String),
 }
 
@@ -223,6 +226,15 @@ pub fn validate_channel_name(name: &str) -> Result<String, CreateChannelError> {
         CreateCategoryError::DuplicateName => CreateChannelError::DuplicateName,
         CreateCategoryError::Other(msg) => CreateChannelError::Other(msg),
     })
+}
+
+fn map_create_channel_api_error(err: anyhow::Error) -> CreateChannelError {
+    if let Some(status) = api_status_from_error(&err)
+        && status.code == ApiStatusError::OUT_OF_RANGE
+    {
+        return CreateChannelError::ChannelLimitExceeded;
+    }
+    CreateChannelError::Other(err.to_string())
 }
 
 fn collapse_state_path() -> std::path::PathBuf {
@@ -1819,7 +1831,7 @@ impl ChannelList {
                     channel_private,
                 )
                 .await
-                .map_err(|e| CreateChannelError::Other(e.to_string()))?;
+                .map_err(map_create_channel_api_error)?;
             desc.category_id = effective_category_id(desc.category_id, category_id_num);
             let channel_id = ChannelId(desc.channel_id);
             let created_type = ChannelType::from_raw(desc.channel_type);

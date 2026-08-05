@@ -71,6 +71,7 @@ pub use transport::{
     CANVAS_LIST_LIMIT, CANVAS_STATUS_CREATED, CANVAS_STATUS_UPDATE, HttpFallbackSession,
     parse_search_attachment_field, parse_search_mentions_field,
 };
+pub use transport::{ApiStatusError, api_status_from_error};
 pub use transport_adapter::TransportAdapter;
 pub use transport_runtime::TransportClient;
 

@@ -6,7 +6,8 @@ use mezon_client::AppApi;
 use mezon_client::ConnectionStatus;
 use mezon_client::MezonTransport;
 use mezon_client::RealtimeEvent;
-use mezon_client::transport::{ApiThreadDesc, THREAD_LIST_LIMIT};
+use mezon_client::api_status_from_error;
+use mezon_client::transport::{ApiStatusError, ApiThreadDesc, THREAD_LIST_LIMIT};
 use mezon_proto::{api, realtime};
 
 use crate::channel::{Channel, ChannelEvent, ChannelList, ChannelType};
@@ -50,9 +51,15 @@ pub struct ThreadSummary {
 #[derive(Debug, Clone)]
 pub enum ThreadsEvent {
     ThreadCreated { channel_id: String, clan_id: String },
-    CreateFailed { message: String },
+    CreateFailed { reason: ThreadCreateFailReason },
     LeaveFailed { message: String },
     OpenPopoverRequested,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ThreadCreateFailReason {
+    ChannelLimitExceeded,
+    Other,
 }
 
 pub struct ThreadsStore {
@@ -937,7 +944,7 @@ impl ThreadsStore {
                     let _ = this.update(cx, |this, cx| {
                         this.submitting = false;
                         cx.emit(ThreadsEvent::CreateFailed {
-                            message: e.to_string(),
+                            reason: thread_create_fail_reason(&e),
                         });
                         cx.notify();
                     });
@@ -963,7 +970,7 @@ impl ThreadsStore {
                     let _ = this.update(cx, |this, cx| {
                         this.submitting = false;
                         cx.emit(ThreadsEvent::CreateFailed {
-                            message: e.to_string(),
+                            reason: thread_create_fail_reason(&e),
                         });
                         cx.notify();
                     });
@@ -992,7 +999,7 @@ impl ThreadsStore {
                 let _ = this.update(cx, |this, cx| {
                     this.submitting = false;
                     cx.emit(ThreadsEvent::CreateFailed {
-                        message: e.to_string(),
+                        reason: ThreadCreateFailReason::Other,
                     });
                     cx.notify();
                 });
@@ -1023,6 +1030,15 @@ impl ThreadsStore {
         })
         .detach();
     }
+}
+
+fn thread_create_fail_reason(err: &anyhow::Error) -> ThreadCreateFailReason {
+    if let Some(status) = api_status_from_error(err)
+        && status.code == ApiStatusError::OUT_OF_RANGE
+    {
+        return ThreadCreateFailReason::ChannelLimitExceeded;
+    }
+    ThreadCreateFailReason::Other
 }
 
 fn list_channel_id_for(channel: &Channel) -> String {

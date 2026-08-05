@@ -1983,6 +1983,7 @@
   "common.uploadLimit.emoji": "이모지 제한 도달",
   "common.uploadLimit.sticker": "스티커 제한 도달",
   "common.uploadLimit.voiceSticker": "사운드 효과 제한 도달",
+  "common.uploadLimit.channel": "이 클랜의 채널 제한에 도달했습니다",
   "common.uploadToChannel": "#{{channelName}} 으로 업로드",
   "common.userProfile.aboutMe": "소개",
   "common.userProfile.activity": "활동",

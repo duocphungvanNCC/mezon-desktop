@@ -1990,6 +1990,7 @@
   "common.uploadLimit.emoji": "Limite de emojis atingido",
   "common.uploadLimit.sticker": "Limite de figurinhas atingido",
   "common.uploadLimit.voiceSticker": "Limite de efeitos sonoros atingido",
+  "common.uploadLimit.channel": "Limite de canais atingido para este clã",
   "common.uploadToChannel": "Carregar em #{{channelName}}",
   "common.userProfile.aboutMe": "Sobre mim",
   "common.userProfile.activity": "Atividade",

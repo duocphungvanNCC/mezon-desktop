@@ -11,9 +11,9 @@ use mezon_store::{
     Channel, ChannelId, ChannelList, ChannelType, ClanId, ClanList, ClanMembersStore,
     DirectChannel, DirectKind, DirectMessageStore, GroupMembersStore, InboxStore,
     MessageSearchEvent, MessageSearchStore, MessagesStore, PinnedEvent, PinnedMessagesStore,
-    Settings, StreamStore, THREAD_STATUS_ARCHIVED, ThreadsEvent, ThreadsStore, TopicsEvent,
-    TopicsStore, UiState, VoiceConnection, VoiceMember, VoiceModerationError, VoiceStore,
-    expand_mention_name_tokens,
+    Settings, StreamStore, THREAD_STATUS_ARCHIVED, ThreadCreateFailReason, ThreadsEvent,
+    ThreadsStore, TopicsEvent, TopicsStore, UiState, VoiceConnection, VoiceMember,
+    VoiceModerationError, VoiceStore, expand_mention_name_tokens,
 };
 use ui::PopoverMenuHandle;
 
@@ -1959,7 +1959,22 @@ impl ChatLayout {
                 self.navigate_to_thread(channel_id, clan_id, "", "", cx);
                 ThreadsStore::global(cx).update(cx, |store, cx| store.refresh(cx));
             }
-            ThreadsEvent::CreateFailed { message } | ThreadsEvent::LeaveFailed { message } => {
+            ThreadsEvent::CreateFailed { reason } => {
+                let locale = self.settings.read(cx).language.clone();
+                let message = match reason {
+                    ThreadCreateFailReason::ChannelLimitExceeded => {
+                        mezon_i18n::t(&locale, "common.uploadLimit.channel").to_string()
+                    }
+                    ThreadCreateFailReason::Other => {
+                        mezon_i18n::t(&locale, "common.somethingWentWrong").to_string()
+                    }
+                };
+                Shell::global(cx).update(cx, |shell, cx| {
+                    shell.error(message, cx);
+                });
+                cx.notify();
+            }
+            ThreadsEvent::LeaveFailed { message } => {
                 Shell::global(cx).update(cx, |shell, cx| {
                     shell.error(message.clone(), cx);
                 });

@@ -66,8 +66,8 @@ impl RenderOnce for Toast {
             .py(px(10.))
             .rounded_md()
             .border_1()
-            .border_color(theme.border)
-            .bg(theme.bg_floating)
+            .border_color(theme.tokens.border_primary)
+            .bg(theme.bg_primary)
             .shadow_lg()
             .child(Icon::new(icon).size_4().text_color(accent))
             .child(

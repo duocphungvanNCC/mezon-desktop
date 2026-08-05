@@ -171,6 +171,15 @@ impl CreateChannelModal {
                     cx.notify();
                 });
             }
+            Err(CreateChannelError::ChannelLimitExceeded) => {
+                let _ = this.update(cx, |this, cx| {
+                    let message =
+                        mezon_i18n::t(&this.locale, "common.uploadLimit.channel").to_string();
+                    this.creating = false;
+                    Shell::global(cx).update(cx, |shell, cx| shell.error(message, cx));
+                    cx.notify();
+                });
+            }
             Err(CreateChannelError::Other(msg)) => {
                 tracing::error!("create channel failed: {msg}");
                 let _ = this.update(cx, |this, cx| {

@@ -36,6 +36,31 @@ where
         .map_err(|e| anyhow::anyhow!("invalid id {value:?}: {e}"))
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ApiStatusError {
+    pub code: u32,
+}
+
+impl ApiStatusError {
+    pub const OUT_OF_RANGE: u32 = 11;
+}
+
+impl std::fmt::Display for ApiStatusError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "API error: code={}", self.code)
+    }
+}
+
+impl std::error::Error for ApiStatusError {}
+
+pub fn api_status_from_error(err: &anyhow::Error) -> Option<ApiStatusError> {
+    err.downcast_ref().copied()
+}
+
+fn api_status_error(code: u32) -> anyhow::Error {
+    ApiStatusError { code }.into()
+}
+
 /// Promise executor for matching responses to requests.
 struct PromiseExecutor {
     sender: oneshot::Sender<(u32, Vec<u8>)>,
@@ -6103,7 +6128,7 @@ impl MezonTransport {
             .await?;
 
         if code != 0 {
-            return Err(anyhow::anyhow!("API error: code={}", code));
+            return Err(api_status_error(code));
         }
 
         let channel = api::ChannelDescription::decode(response.as_slice())?;
