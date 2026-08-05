@@ -568,7 +568,7 @@ fn render_palette_label(
                 .flex_shrink_0()
                 .text_size(px(15.))
                 .italic()
-                .text_color(theme.status_dnd)
+                .text_color(theme.danger_text)
                 .child("(busy)"),
         )
         .into_any_element()

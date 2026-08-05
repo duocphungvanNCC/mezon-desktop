@@ -18,13 +18,13 @@ use gpui::{
 use mezon_client::transport::QUICK_MENU_TYPE_FLASH;
 use mezon_store::{
     AccountEvent, AccountStore, AppConfig, AudioStore, BadgeService, Channel, ChannelEvent,
-    ChannelId, ChannelList, ChannelMembersEvent, ChannelMembersStore, ClanList, ClanMembersEvent,
-    ClanMembersStore, ComposeDraft, ComposeStore, ComposeToken, ComposeTokenKind, DirectEvent,
-    DirectMessageStore, Emoji, EmojiEvent, EmojiStore, GroupMembersEvent, GroupMembersStore,
-    MENTION_HERE_USER_ID, MessageSpan, MessagesStore, OgpResult, OutgoingAttachment,
-    OutgoingContent, OutgoingEmoji, OutgoingHashtag, OutgoingMention, OutgoingOgp, QuickMenuStore,
-    RolesEvent, RolesStore, Settings, fetch_invite_preview, fetch_ogp, first_previewable_url,
-    internal_invite_id,
+    ChannelId, ChannelList, ChannelMembersEvent, ChannelMembersStore, ClanId, ClanList,
+    ClanMembersEvent, ClanMembersStore, ComposeDraft, ComposeStore, ComposeToken, ComposeTokenKind,
+    DirectEvent, DirectMessageStore, Emoji, EmojiEvent, EmojiStore, GroupMembersEvent,
+    GroupMembersStore, MENTION_HERE_USER_ID, MessageSpan, MessagesStore, OgpResult,
+    OutgoingAttachment, OutgoingContent, OutgoingEmoji, OutgoingHashtag, OutgoingMention,
+    OutgoingOgp, QuickMenuStore, RolesEvent, RolesStore, Settings, fetch_invite_preview, fetch_ogp,
+    first_previewable_url, internal_invite_id,
 };
 use std::time::Duration;
 
@@ -246,12 +246,18 @@ impl CommittedToken {
 #[derive(Clone)]
 struct ChannelSuggestRaw {
     channel_id: String,
+    /// Same channel as `channel_id`, kept typed so a row can look its voice
+    /// occupancy up at render time. The pool outlives every join and leave —
+    /// it is only rebuilt when the channel list itself reloads — so a `(busy)`
+    /// flag baked in here would keep claiming whatever was true when you first
+    /// typed `#` in this channel.
+    id: ChannelId,
+    clan_id: ClanId,
     name: String,
     name_lc: String,
     name_norm: String,
     sub_text: String,
     sub_text_norm: String,
-    voice_busy: bool,
 }
 
 #[derive(Clone)]
@@ -2199,6 +2205,7 @@ impl MentionInput {
         locale: &str,
         index: usize,
         suggestion: &Suggestion,
+        voice_busy: bool,
         entity: &Entity<MentionInput>,
     ) -> AnyElement {
         let text_primary = theme.tokens.text_theme_primary;
@@ -2208,7 +2215,6 @@ impl MentionInput {
         let query = self.active_query.clone();
 
         let mut display_color = Hsla::from(text_primary);
-        let voice_busy = matches!(suggestion, Suggestion::Channel(channel) if channel.voice_busy);
         let (leading, display, secondary): (Option<AnyElement>, SharedString, SharedString) =
             match suggestion {
                 Suggestion::Here => (
@@ -2353,7 +2359,7 @@ impl MentionInput {
                                 .flex_shrink_0()
                                 .text_size(px(15.))
                                 .italic()
-                                .text_color(theme.status_dnd)
+                                .text_color(theme.danger_text)
                                 .child("(busy)"),
                         )
                     }),
@@ -2415,11 +2421,20 @@ impl MentionInput {
             count,
             move |range, _window, cx| {
                 let theme = cx.theme();
+                let channels = ChannelList::global(cx).read(cx);
                 let this = entity.read(cx);
                 range
                     .map(|ix| match this.suggestions.get(ix) {
                         Some(suggestion) => {
-                            this.render_suggestion_row(theme, &locale, ix, suggestion, &entity)
+                            let voice_busy = match suggestion {
+                                Suggestion::Channel(channel) => channels
+                                    .channel(channel.clan_id, channel.id)
+                                    .is_some_and(Channel::voice_busy),
+                                _ => false,
+                            };
+                            this.render_suggestion_row(
+                                theme, &locale, ix, suggestion, voice_busy, &entity,
+                            )
                         }
                         None => div().h(px(MENTION_ROW_PX)).into_any_element(),
                     })
@@ -2487,12 +2502,13 @@ fn channel_suggest_raw(channel: &Channel) -> ChannelSuggestRaw {
     };
     ChannelSuggestRaw {
         channel_id: channel.id.to_string(),
+        id: channel.id,
+        clan_id: channel.clan_id,
         name: channel.name.clone(),
         name_lc: channel.name.to_lowercase(),
         name_norm: normalize_search_string(&channel.name),
         sub_text_norm: normalize_search_string(&sub_text),
         sub_text,
-        voice_busy: channel.voice_busy(),
     }
 }
 
