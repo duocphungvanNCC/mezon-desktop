@@ -452,6 +452,7 @@ fn install_foreground_watchdog(cx: &mut gpui::App) {
                         );
                         eprintln!("{line}");
                         tracing::error!("{line}");
+                        capture_hang_sample(stalled_ms / 1000);
                     }
                 } else {
                     stale_checks = 0;
@@ -465,6 +466,52 @@ fn install_foreground_watchdog(cx: &mut gpui::App) {
         .map_err(|e| tracing::error!("failed to start the foreground watchdog thread: {e}"))
         .ok();
 }
+
+#[cfg(target_os = "macos")]
+fn capture_hang_sample(stalled_secs: u64) {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let ts = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or_default();
+    let name = format!("mezon-hang-{ts}.txt");
+    let path = std::env::var_os("HOME")
+        .map(|home| std::path::PathBuf::from(home).join("Library/Logs/Mezon"))
+        .filter(|dir| std::fs::create_dir_all(dir).is_ok())
+        .map(|dir| dir.join(&name))
+        .unwrap_or_else(|| std::env::temp_dir().join(&name));
+
+    let starting = format!(
+        "[watchdog] main thread stalled {stalled_secs}s; capturing sample to {}",
+        path.display()
+    );
+    eprintln!("{starting}");
+    tracing::error!("{starting}");
+
+    match std::process::Command::new("/usr/bin/sample")
+        .arg(std::process::id().to_string())
+        .arg("5")
+        .arg("-file")
+        .arg(&path)
+        .output()
+    {
+        Ok(out) if out.status.success() => {
+            let done = format!("[watchdog] hang sample written to {}", path.display());
+            eprintln!("{done}");
+            tracing::error!("{done}");
+        }
+        Ok(out) => tracing::error!(
+            "[watchdog] sample exited with {}: {}",
+            out.status,
+            String::from_utf8_lossy(&out.stderr).trim()
+        ),
+        Err(e) => tracing::error!("[watchdog] failed to launch sample: {e}"),
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn capture_hang_sample(_stalled_secs: u64) {}
 
 fn install_panic_hook() {
     let default_hook = std::panic::take_hook();
@@ -956,11 +1003,17 @@ fn open_main_window(
     mezon_store::ComposeStore::init(cx);
     mezon_store::WalletStore::init(auth_state.clone(), cx);
     mezon_ui::WalletToastBridge::init(cx);
+    mezon_ui::ThreadCreateToastBridge::init(cx);
     mezon_ui::chat::channel_settings::channel_acl::init(api.clone(), cx);
     let platform_store = mezon_store::PlatformStore::init(cx);
     mezon_store::PlatformStore::set_open_url(
         &platform_store,
         std::sync::Arc::new(|url: &str| mezon_native::open_url(url)),
+        cx,
+    );
+    mezon_store::PlatformStore::set_open_url_app_window(
+        &platform_store,
+        std::sync::Arc::new(|url: &str| mezon_native::browser::open_url_app_window(url)),
         cx,
     );
     mezon_store::PlatformStore::set_save_attachment(

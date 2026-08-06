@@ -513,6 +513,46 @@ fn ensure_start_menu_shortcut() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// `ToastNotification::Activated` is an in-process COM callback, so it can only
+/// arrive while the apartment that raised the toast is still alive.
+///
+/// Raising a toast from a thread that calls `CoInitializeEx(APARTMENTTHREADED)`
+/// and then `CoUninitialize` before exiting tears that apartment down
+/// immediately, which is why the click only dismissed the toast. Leaving the
+/// thread apartment-less instead makes `windows-rs` fall back to
+/// `CoIncrementMTAUsage` when it resolves the activation factory, and that
+/// keeps an implicit MTA alive for the rest of the process, so the callback
+/// still has somewhere to land after the thread is gone.
+#[cfg(target_os = "windows")]
+fn ensure_toast_apartment() {
+    use windows::Win32::System::Com::CoIncrementMTAUsage;
+
+    static MTA: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+
+    MTA.get_or_init(|| unsafe {
+        if let Err(e) = CoIncrementMTAUsage() {
+            tracing::warn!("could not join the process MTA for toasts: {e}");
+        }
+    });
+}
+
+#[cfg(target_os = "windows")]
+fn retain_toast(toast: windows::UI::Notifications::ToastNotification) {
+    use windows::UI::Notifications::ToastNotification;
+
+    const LIVE_TOAST_LIMIT: usize = 32;
+
+    static LIVE: std::sync::Mutex<Vec<ToastNotification>> = std::sync::Mutex::new(Vec::new());
+
+    let Ok(mut live) = LIVE.lock() else {
+        return;
+    };
+    if live.len() >= LIVE_TOAST_LIMIT {
+        live.remove(0);
+    }
+    live.push(toast);
+}
+
 #[cfg(target_os = "windows")]
 fn show_windows(n: &Notification) {
     let title = n.title.clone();
@@ -521,18 +561,10 @@ fn show_windows(n: &Notification) {
     let icon_path = n.icon_path.clone();
 
     std::thread::spawn(move || {
-        use windows::Win32::System::Com::{
-            COINIT_APARTMENTTHREADED, CoInitializeEx, CoUninitialize,
-        };
-
-        unsafe {
-            let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
-        }
-        if let Err(e) = try_show_toast(&title, &body, tag.as_deref(), icon_path.as_deref()) {
-            tracing::warn!("Windows toast notification failed: {e}");
-        }
-        unsafe {
-            CoUninitialize();
+        ensure_toast_apartment();
+        match try_show_toast(&title, &body, tag.as_deref(), icon_path.as_deref()) {
+            Ok(toast) => retain_toast(toast),
+            Err(e) => tracing::warn!("Windows toast notification failed: {e}"),
         }
     });
 }
@@ -543,7 +575,7 @@ fn try_show_toast(
     body: &str,
     tag: Option<&str>,
     icon_path: Option<&str>,
-) -> windows::core::Result<()> {
+) -> windows::core::Result<windows::UI::Notifications::ToastNotification> {
     use windows::Data::Xml::Dom::XmlDocument;
     use windows::UI::Notifications::{ToastNotification, ToastNotificationManager};
     use windows::core::HSTRING;
@@ -596,7 +628,7 @@ fn try_show_toast(
     }))?;
 
     notifier.Show(&toast)?;
-    Ok(())
+    Ok(toast)
 }
 
 #[cfg(target_os = "windows")]

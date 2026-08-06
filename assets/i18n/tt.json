@@ -1596,6 +1596,7 @@
   "common.uploadLimit.emoji": "Максималь эмодзи чиге арттырылды",
   "common.uploadLimit.sticker": "Максималь стикер чиге арттырылды",
   "common.uploadLimit.voiceSticker": "Максималь тавыш стикеры чиге арттырылды",
+  "channel.createLimitExceeded": "Бу клан өчен максималь канал чиге арттырылды",
   "common.userProfile.aboutMe": "Миңа хакта",
   "common.userProfile.activity": "Эшчәнлек",
   "common.userProfile.addNotePlaceholder": "Искәрмә өстәү өчен басыгыз",

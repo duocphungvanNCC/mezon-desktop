@@ -17,6 +17,7 @@ use crate::theme::ActiveTheme;
 
 use mezon_store::TOKEN_DECIMAL_FACTOR as DECIMAL_FACTOR;
 const MAX_CANDIDATES_SHOWN: usize = 50;
+const MAX_AMOUNT_DIGITS: usize = 15;
 
 #[derive(Clone)]
 struct Candidate {
@@ -39,6 +40,7 @@ pub struct SendTokenModal {
     error: Option<SharedString>,
     sending: bool,
     suppress_search_change: bool,
+    amount_reformat_queued: bool,
     _search_sub: Subscription,
     _amount_sub: Subscription,
 }
@@ -73,9 +75,11 @@ impl SendTokenModal {
                 ))
             });
             let amount = cx.new(|cx| {
-                InputState::new(window, cx).placeholder(tr(
-                    "userProfile.statusProfile.sendTokenModal.placeholders.amountPlaceholder",
-                ))
+                InputState::new(window, cx)
+                    .placeholder(tr(
+                        "userProfile.statusProfile.sendTokenModal.placeholders.amountPlaceholder",
+                    ))
+                    .validate(|candidate, _| digit_count(candidate) <= MAX_AMOUNT_DIGITS)
             });
             let note = cx.new(|cx| {
                 InputState::new(window, cx).placeholder(tr(
@@ -106,13 +110,21 @@ impl SendTokenModal {
                         return;
                     }
                     this.error = None;
-                    let raw = input.read(cx).value().to_string();
-                    let formatted = format_amount_input(&raw, &this.locale);
-                    if formatted != raw {
+                    let raw = input.read(cx).value();
+                    let needs_reformat = format_amount_input(raw, &this.locale) != raw;
+                    if needs_reformat && !this.amount_reformat_queued {
+                        this.amount_reformat_queued = true;
                         let input = input.clone();
+                        let locale = this.locale.clone();
+                        let view = cx.entity();
                         window.defer(cx, move |window, cx| {
+                            view.update(cx, |this, _| this.amount_reformat_queued = false);
                             input.update(cx, |input, cx| {
-                                input.set_value(formatted, window, cx);
+                                let current = input.value().to_string();
+                                let formatted = format_amount_input(&current, &locale);
+                                if formatted != current {
+                                    input.set_value(formatted, window, cx);
+                                }
                             });
                         });
                     }
@@ -133,6 +145,7 @@ impl SendTokenModal {
                 error: None,
                 sending: false,
                 suppress_search_change: false,
+                amount_reformat_queued: false,
                 _search_sub: search_sub,
                 _amount_sub: amount_sub,
             };
@@ -624,9 +637,17 @@ impl Render for SendTokenModal {
     }
 }
 
+fn digit_count(raw: &str) -> usize {
+    raw.chars().filter(|c| c.is_ascii_digit()).count()
+}
+
 fn parse_whole_token_amount(raw: &str) -> i64 {
     let digits: String = raw.chars().filter(|c| c.is_ascii_digit()).collect();
-    digits.parse().unwrap_or(0)
+    let significant = digits.trim_start_matches('0');
+    if significant.is_empty() {
+        return 0;
+    }
+    significant.parse().unwrap_or(i64::MAX)
 }
 
 fn amount_exceeds_balance(amount: i64, balance: &str) -> bool {
@@ -680,8 +701,8 @@ fn section(theme: &crate::theme::Theme, label: impl Into<SharedString>) -> gpui:
 #[cfg(test)]
 mod tests {
     use super::{
-        DECIMAL_FACTOR, amount_exceeds_balance, format_amount_input, format_thousands,
-        parse_whole_token_amount,
+        DECIMAL_FACTOR, MAX_AMOUNT_DIGITS, amount_exceeds_balance, digit_count,
+        format_amount_input, format_thousands, parse_whole_token_amount,
     };
 
     #[test]
@@ -702,8 +723,51 @@ mod tests {
     }
 
     #[test]
-    fn overlong_digit_runs_fall_back_to_zero_not_panic() {
-        assert_eq!(parse_whole_token_amount(&"9".repeat(40)), 0);
+    fn an_overlong_digit_run_saturates_instead_of_reading_as_empty() {
+        assert_eq!(parse_whole_token_amount(&"9".repeat(40)), i64::MAX);
+        assert_eq!(parse_whole_token_amount(&"2".repeat(20)), i64::MAX);
+    }
+
+    #[test]
+    fn leading_zeros_do_not_change_the_amount() {
+        assert_eq!(parse_whole_token_amount("0"), 0);
+        assert_eq!(parse_whole_token_amount("007"), 7);
+        assert_eq!(parse_whole_token_amount(&"0".repeat(40)), 0);
+    }
+
+    #[test]
+    fn the_digit_cap_keeps_the_amount_inside_i64() {
+        let at_cap = "9".repeat(MAX_AMOUNT_DIGITS);
+        assert_eq!(digit_count(&at_cap), MAX_AMOUNT_DIGITS);
+        assert!(parse_whole_token_amount(&at_cap) < i64::MAX);
+        assert!(
+            (parse_whole_token_amount(&at_cap) as i128).saturating_mul(DECIMAL_FACTOR) < i128::MAX
+        );
+    }
+
+    #[test]
+    fn separators_do_not_count_against_the_digit_cap() {
+        assert_eq!(digit_count("222,222,222"), 9);
+        assert_eq!(digit_count("222.222.222"), 9);
+        assert_eq!(digit_count(""), 0);
+    }
+
+    #[test]
+    fn formatting_an_already_formatted_amount_changes_nothing() {
+        for locale in ["en", "vi"] {
+            for raw in [
+                "0",
+                "1",
+                "222",
+                "2222",
+                "222222222",
+                &"2".repeat(MAX_AMOUNT_DIGITS),
+            ] {
+                let once = format_amount_input(raw, locale);
+                let twice = format_amount_input(&once, locale);
+                assert_eq!(once, twice, "locale={locale} raw={raw}");
+            }
+        }
     }
 
     #[test]

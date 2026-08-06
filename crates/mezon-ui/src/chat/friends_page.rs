@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use gpui::{
     App, ClickEvent, Context, Entity, InteractiveElement, IntoElement, ParentElement, Pixels,
     Point, SharedString, StatefulInteractiveElement, Styled, Subscription, UniformListScrollHandle,
@@ -178,7 +180,7 @@ impl FriendsPage {
             |this, _, event, cx| match event {
                 PresenceEvent::ChannelPresenceChanged { .. } | PresenceEvent::StatusChanged => {
                     if on_friends_route(cx) {
-                        this.rebuild(cx);
+                        this.apply_presence(cx);
                     }
                 }
                 PresenceEvent::TypingChanged { .. } => {}
@@ -189,7 +191,7 @@ impl FriendsPage {
             |this, _, event, cx| match event {
                 ActivityEvent::Changed => {
                     if on_friends_route(cx) {
-                        this.rebuild(cx);
+                        this.rebuild_activity_rows(cx);
                     }
                 }
             },
@@ -250,7 +252,7 @@ impl FriendsPage {
             self._subs
                 .push(cx.subscribe(&search, |this, _, event: &InputEvent, cx| {
                     if matches!(event, InputEvent::Change) {
-                        this.rebuild(cx);
+                        this.rebuild_friend_rows(cx);
                     }
                 }));
             self.search = Some(search);
@@ -296,6 +298,44 @@ impl FriendsPage {
     }
 
     fn rebuild(&mut self, cx: &mut Context<Self>) {
+        self.rebuild_friend_rows(cx);
+        self.rebuild_activity_rows(cx);
+    }
+
+    fn rebuild_activity_rows(&mut self, cx: &mut Context<Self>) {
+        let store = FriendStore::global(cx);
+        let locale = self.settings.read(cx).language.clone();
+        self.activity_rows =
+            build_activity_rows(&locale, store.read(cx), ActivityStore::global(cx), cx);
+        cx.notify();
+    }
+
+    fn apply_presence(&mut self, cx: &mut Context<Self>) {
+        if self.selected_tab == FriendsTab::Online {
+            self.rebuild_friend_rows(cx);
+            return;
+        }
+        let store = PresenceStore::global(cx);
+        let presence = store.read(cx);
+        let mut changed = false;
+        for row in &mut self.rows {
+            let online = presence.is_online(row.id);
+            if row.online != online {
+                row.online = online;
+                changed = true;
+            }
+            let status = presence.user_status(row.id).unwrap_or("");
+            if row.user_status.as_ref() != status {
+                row.user_status = SharedString::from(status.to_string());
+                changed = true;
+            }
+        }
+        if changed {
+            cx.notify();
+        }
+    }
+
+    fn rebuild_friend_rows(&mut self, cx: &mut Context<Self>) {
         let store = FriendStore::global(cx);
         let presence = PresenceStore::global(cx);
         let me = Self::current_user_id(cx);
@@ -348,8 +388,6 @@ impl FriendsPage {
             })
             .collect();
 
-        self.activity_rows = build_activity_rows(&locale, friends, ActivityStore::global(cx), cx);
-
         self.pending_count = pending;
         self.list_header = SharedString::from(format!(
             "{} - {}",
@@ -376,7 +414,7 @@ impl FriendsPage {
     fn select_tab(&mut self, tab: FriendsTab, cx: &mut Context<Self>) {
         self.selected_tab = tab;
         self.add_friend_open = false;
-        self.rebuild(cx);
+        self.rebuild_friend_rows(cx);
     }
 
     fn submit_add_friend(&mut self, cx: &mut Context<Self>) {
@@ -531,26 +569,21 @@ fn build_activity_rows(
     cx: &App,
 ) -> Vec<ActivityRow> {
     let activities = activities.read(cx);
+    let by_id: HashMap<UserId, &Friend> = friends.friends().iter().map(|f| (f.id, f)).collect();
     let mut rows = Vec::new();
     for (activity_type, key) in ACTIVITY_SECTIONS {
-        let group: Vec<&UserActivity> = activities
+        let group: Vec<(&UserActivity, &Friend)> = activities
             .activities()
             .iter()
-            .filter(|a| {
-                a.activity_type == activity_type
-                    && a.user_id != UserId(0)
-                    && friends.friend(a.user_id).is_some()
-            })
+            .filter(|a| a.activity_type == activity_type && a.user_id != UserId(0))
+            .filter_map(|a| by_id.get(&a.user_id).map(|f| (a, *f)))
             .collect();
         rows.push(ActivityRow::Header(SharedString::from(format!(
             "{} - {}",
             mezon_i18n::t(locale, key).to_uppercase(),
             group.len()
         ))));
-        for a in group {
-            let Some(f) = friends.friend(a.user_id) else {
-                continue;
-            };
+        for (a, f) in group {
             let description = if a.activity_description.is_empty() {
                 a.activity_name.clone()
             } else {
@@ -830,7 +863,7 @@ impl FriendsPage {
                             if let Some(search) = this.search.clone() {
                                 search.update(cx, |input, cx| input.clear(cx));
                             }
-                            this.rebuild(cx);
+                            this.rebuild_friend_rows(cx);
                         }))
                         .child("×"),
                 )
@@ -903,6 +936,7 @@ impl FriendsPage {
                 })
                 .collect::<Vec<_>>()
         })
+        .suppress_hover_while_scrolling()
         .track_scroll(&self.list_scroll)
         .flex_1()
         .min_h_0();
@@ -1264,8 +1298,10 @@ fn render_activity_row(
         ActivityRow::Header(title) => div()
             .flex()
             .items_center()
+            .w_full()
             .px_4()
             .h(px(48.))
+            .truncate()
             .text_size(px(14.))
             .font_weight(gpui::FontWeight::SEMIBOLD)
             .text_color(theme.tokens.text_theme_primary)
@@ -1296,9 +1332,11 @@ fn render_activity_row(
             div()
                 .flex()
                 .items_center()
+                .w_full()
                 .gap(px(9.))
                 .px_4()
                 .h(px(48.))
+                .overflow_hidden()
                 .child(div().flex_shrink_0().size(px(AVATAR_SIZE)).child(avatar))
                 .child(
                     div()

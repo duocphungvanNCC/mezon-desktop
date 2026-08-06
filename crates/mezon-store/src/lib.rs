@@ -191,8 +191,8 @@ pub use roles::{
 pub use sticker::{ClanSound, Sticker, StickerEvent, StickerStore};
 pub use stream::{StreamMember, StreamPhase, StreamStore};
 pub use threads::{
-    THREAD_STATUS_ARCHIVED, THREAD_STATUS_JOINED, ThreadSummary, ThreadsEvent, ThreadsStore,
-    group_threads,
+    THREAD_STATUS_ARCHIVED, THREAD_STATUS_JOINED, ThreadCreateFailReason, ThreadSummary,
+    ThreadsEvent, ThreadsStore, group_threads,
 };
 pub use topic_badges::{TopicBadgeEvent, TopicBadgeStore};
 pub use topics::{TopicsEvent, TopicsStore};
@@ -222,7 +222,7 @@ pub use webhook::{
 };
 pub use winstore_update::{
     WinstoreUpdateStore, effective_update_status, update_available_clicked, update_check_clicked,
-    update_restart_clicked,
+    update_manual_install_clicked, update_restart_clicked,
 };
 
 pub const CACHE_TTL: Duration = Duration::from_secs(20 * 60);

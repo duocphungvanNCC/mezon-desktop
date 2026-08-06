@@ -8,7 +8,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use futures::FutureExt as _;
 use futures::future::Shared;
 use gpui::{App, AppContext, Context, Entity, EventEmitter, Global, Subscription, Task};
-use mezon_client::transport::{ApiCategoryDesc, ApiChannelDesc};
+use mezon_client::transport::{ApiCategoryDesc, ApiChannelDesc, is_channel_limit_api_error};
 use mezon_client::{
     ApiChannelApp, AppApi, ChannelAppLaunchParams, ConnectionStatus, RealtimeEvent,
     build_channel_app_url,
@@ -157,6 +157,13 @@ impl Channel {
     pub fn visible_in_sidebar(&self) -> bool {
         !self.is_archived()
     }
+
+    /// A voice channel already holding a conversation, which the command
+    /// palette and the hashtag suggestions both mark as `(busy)`. One person
+    /// sitting in a channel is someone waiting, not a call to interrupt.
+    pub fn voice_busy(&self) -> bool {
+        self.channel_type == ChannelType::Voice && self.voice_members.len() >= 2
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -216,6 +223,7 @@ pub fn validate_category_name(name: &str) -> Result<String, CreateCategoryError>
 pub enum CreateChannelError {
     InvalidName,
     DuplicateName,
+    ChannelLimitExceeded,
     Other(String),
 }
 
@@ -225,6 +233,13 @@ pub fn validate_channel_name(name: &str) -> Result<String, CreateChannelError> {
         CreateCategoryError::DuplicateName => CreateChannelError::DuplicateName,
         CreateCategoryError::Other(msg) => CreateChannelError::Other(msg),
     })
+}
+
+fn map_create_channel_api_error(err: anyhow::Error) -> CreateChannelError {
+    if is_channel_limit_api_error(&err) {
+        return CreateChannelError::ChannelLimitExceeded;
+    }
+    CreateChannelError::Other(err.to_string())
 }
 
 fn collapse_state_path() -> std::path::PathBuf {
@@ -1840,7 +1855,7 @@ impl ChannelList {
                     channel_private,
                 )
                 .await
-                .map_err(|e| CreateChannelError::Other(e.to_string()))?;
+                .map_err(map_create_channel_api_error)?;
             desc.category_id = effective_category_id(desc.category_id, category_id_num);
             let channel_id = ChannelId(desc.channel_id);
             let created_type = ChannelType::from_raw(desc.channel_type);
@@ -3882,6 +3897,23 @@ mod tests {
     use super::*;
 
     #[test]
+    fn map_create_channel_api_error_maps_out_of_range_to_limit() {
+        use mezon_client::ApiStatusError;
+        let err = anyhow::Error::from(ApiStatusError {
+            code: ApiStatusError::OUT_OF_RANGE,
+        });
+        assert_eq!(
+            map_create_channel_api_error(err),
+            CreateChannelError::ChannelLimitExceeded
+        );
+        let err = anyhow::Error::from(ApiStatusError { code: 13 });
+        assert!(matches!(
+            map_create_channel_api_error(err),
+            CreateChannelError::Other(_)
+        ));
+    }
+
+    #[test]
     fn collapse_state_roundtrip() {
         let mut collapsed: HashSet<(String, String)> = HashSet::new();
         collapsed.insert(("clan1".into(), "cat1".into()));
@@ -3948,6 +3980,35 @@ mod tests {
             active: CHANNEL_ACTIVE_JOINED,
             avatar_url: String::new(),
         }
+    }
+
+    #[test]
+    fn a_voice_channel_is_busy_only_once_someone_has_company() {
+        let member = |id: i64| VoiceMember {
+            user_id: UserId(id),
+            display_name: format!("user{id}"),
+            avatar_url: String::new(),
+        };
+
+        let mut voice = make_channel(1, "General Voice", "cat");
+        voice.channel_type = ChannelType::Voice;
+        assert!(!voice.voice_busy(), "an empty voice channel is free");
+
+        voice.voice_members = vec![member(1)];
+        assert!(
+            !voice.voice_busy(),
+            "one person in a voice channel is someone waiting, not a call to interrupt"
+        );
+
+        voice.voice_members.push(member(2));
+        assert!(voice.voice_busy());
+
+        let mut text = make_channel(2, "general", "cat");
+        text.voice_members = vec![member(1), member(2)];
+        assert!(
+            !text.voice_busy(),
+            "only voice channels can be busy, whatever a text channel carries"
+        );
     }
 
     fn make_thread(id: i64, parent_id: i64, cat_id: &str) -> Channel {

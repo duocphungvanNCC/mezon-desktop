@@ -899,7 +899,10 @@ fn render_album(
         if let Some(path) = att.local_source.clone() {
             let selection = ctx.selection.clone();
             tile_element = tile_element.when(
-                !att.uploading && !att.upload_failed && !viewer_att.url.is_empty(),
+                !att.uploading
+                    && !att.upload_failed
+                    && !att.presign_pending
+                    && !viewer_att.url.is_empty(),
                 |d| {
                     d.cursor_pointer().on_click(move |_, window, cx| {
                         if !selection.borrow().has_selection() {
@@ -1068,7 +1071,7 @@ fn render_photo(
             .overflow_hidden()
             .bg(theme.bg_tertiary);
         el = el.when(
-            !sending && !att.upload_failed && !viewer_att.url.is_empty(),
+            !sending && !att.upload_failed && !att.presign_pending && !viewer_att.url.is_empty(),
             |d| {
                 d.cursor_pointer().on_click(move |_, window, cx| {
                     if !selection.borrow().has_selection() {
@@ -1956,6 +1959,9 @@ pub(crate) fn open_viewer_from_message(
     use mezon_store::{AppConfig, ChannelAttachment, ClanId};
 
     if att.url.is_empty() {
+        return;
+    }
+    if att.presign_pending {
         return;
     }
 

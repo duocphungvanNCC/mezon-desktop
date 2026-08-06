@@ -145,6 +145,7 @@ pub struct DesktopNotification {
 
 pub struct PlatformStore {
     open_url: Option<OpenUrlFn>,
+    open_url_app_window: Option<OpenUrlFn>,
     save_attachment: Option<SaveAttachmentFn>,
     notifier: Option<NotifyFn>,
     cli_install: Option<CliInstallHooks>,
@@ -157,6 +158,7 @@ impl PlatformStore {
     pub fn init(cx: &mut App) -> Entity<Self> {
         let entity = cx.new(|_| Self {
             open_url: None,
+            open_url_app_window: None,
             save_attachment: None,
             notifier: None,
             cli_install: None,
@@ -188,6 +190,24 @@ impl PlatformStore {
             store.save_attachment = Some(f);
             cx.notify();
         });
+    }
+
+    pub fn set_open_url_app_window(entity: &Entity<Self>, f: OpenUrlFn, cx: &mut App) {
+        entity.update(cx, |store, _| {
+            store.open_url_app_window = Some(f);
+        });
+    }
+
+    /// Hand back the toolbar-less-window opener, falling back to the normal-tab
+    /// one when the platform layer has not registered it.
+    ///
+    /// This returns the closure instead of calling it because opening an app
+    /// window probes the OS for the default browser, which blocks; callers must
+    /// run it on a background thread, not on the foreground/UI thread.
+    pub fn app_window_opener(&self) -> Option<OpenUrlFn> {
+        self.open_url_app_window
+            .clone()
+            .or_else(|| self.open_url.clone())
     }
 
     pub fn open_url_external(&self, url: &str) -> anyhow::Result<()> {

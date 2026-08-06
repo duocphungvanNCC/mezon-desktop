@@ -1675,6 +1675,49 @@ impl Render for ChatLayout {
                             )),
                     )
             });
+        let manual_install_pill = mezon_store::effective_update_status(cx)
+            .and_then(|status| match status {
+                AutoUpdateStatus::ManualInstall { version, .. } => Some(version),
+                _ => None,
+            })
+            .map(|version| {
+                let locale = self.settings.read(cx).language.clone();
+                div()
+                    .id("update-manual-install-pill")
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .gap_2()
+                    .mx_2()
+                    .mt_3()
+                    .mb_2()
+                    .h(px(36.0))
+                    .flex_none()
+                    .rounded(px(8.0))
+                    .bg(update_banner_bg(false))
+                    .cursor_pointer()
+                    .hover(|s| s.bg(update_banner_bg(true)))
+                    .on_click(|_, _, cx| {
+                        mezon_store::update_manual_install_clicked(cx);
+                        crate::router::navigate(cx, Route::SettingsAccount);
+                    })
+                    .child(
+                        Icon::new(IconName::Download)
+                            .size(px(16.0))
+                            .text_color(gpui::white()),
+                    )
+                    .child(
+                        div()
+                            .text_sm()
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .text_color(gpui::white())
+                            .child(format!(
+                                "{} (v{})",
+                                mezon_i18n::t(&locale, "setting.update.readyToInstall"),
+                                version
+                            )),
+                    )
+            });
         let fullscreen = if self.connected_call_is_active(cx) {
             let chat = cx.entity();
             crate::chat::voice::render_screen_fullscreen_overlay(
@@ -1774,6 +1817,7 @@ impl Render for ChatLayout {
                             }))
                             .children(update_available_pill)
                             .children(update_pill)
+                            .children(manual_install_pill)
                             .child(
                                 div()
                                     .w_full()
@@ -1959,12 +2003,7 @@ impl ChatLayout {
                 self.navigate_to_thread(channel_id, clan_id, "", "", cx);
                 ThreadsStore::global(cx).update(cx, |store, cx| store.refresh(cx));
             }
-            ThreadsEvent::CreateFailed { message } | ThreadsEvent::LeaveFailed { message } => {
-                Shell::global(cx).update(cx, |shell, cx| {
-                    shell.error(message.clone(), cx);
-                });
-                cx.notify();
-            }
+            ThreadsEvent::CreateFailed { .. } | ThreadsEvent::LeaveFailed => {}
             ThreadsEvent::OpenPopoverRequested => {
                 self.pending_open_threads_popover = true;
                 cx.notify();

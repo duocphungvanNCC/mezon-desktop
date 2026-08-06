@@ -1,7 +1,7 @@
 use gpui::{App, AppContext, Context, Entity, Global, SharedString, Task};
 use std::time::Duration;
 
-use crate::auto_update::{AutoUpdateStatus, AutoUpdateStore};
+use crate::auto_update::{AutoUpdateStatus, AutoUpdateStore, manual_install_command};
 
 pub fn effective_update_status(cx: &App) -> Option<AutoUpdateStatus> {
     if let Some(store) = WinstoreUpdateStore::try_global(cx) {
@@ -41,6 +41,15 @@ pub fn update_restart_clicked(cx: &mut App) {
         return;
     }
     cx.restart();
+}
+
+pub fn update_manual_install_clicked(cx: &mut App) {
+    let Some(AutoUpdateStatus::ManualInstall { deb_path, .. }) = effective_update_status(cx) else {
+        return;
+    };
+    cx.write_to_clipboard(gpui::ClipboardItem::new_string(manual_install_command(
+        &deb_path,
+    )));
 }
 
 const FIRST_POLL_DELAY: Duration = Duration::from_secs(5);

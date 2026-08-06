@@ -533,7 +533,7 @@ fn render_add_card(theme: &Theme, entity: Entity<StickerSettingPage>) -> impl In
         .rounded_lg()
         .border_1()
         .border_dashed()
-        .border_color(theme.tokens.bg_tertiary)
+        .border_color(theme.border)
         .flex()
         .flex_col()
         .items_center()
@@ -543,9 +543,44 @@ fn render_add_card(theme: &Theme, entity: Entity<StickerSettingPage>) -> impl In
             entity.update(cx, |this, cx| this.open_create_modal(window, cx));
         })
         .child(
-            Icon::new(IconName::ImageUploadIcon)
-                .size(px(28.0))
-                .text_color(theme.text_secondary),
+            div()
+                .relative()
+                .size(px(36.0))
+                .child(
+                    div()
+                        .absolute()
+                        .top_0()
+                        .left_0()
+                        .size(px(30.0))
+                        .rounded(px(10.0))
+                        .bg(theme.text_secondary)
+                        .child(
+                            div().absolute().top(px(3.0)).left(px(3.0)).child(
+                                Icon::new(IconName::EmojiCatStar)
+                                    .size(px(15.0))
+                                    .text_color(gpui::white()),
+                            ),
+                        ),
+                )
+                .child(
+                    div()
+                        .absolute()
+                        .right_0()
+                        .bottom_0()
+                        .size(px(20.0))
+                        .rounded_full()
+                        .border(px(3.0))
+                        .border_color(theme.tokens.theme_setting_primary)
+                        .bg(theme.brand)
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child(
+                            Icon::new(IconName::Plus)
+                                .size(px(11.0))
+                                .text_color(gpui::white()),
+                        ),
+                ),
         )
 }
 
