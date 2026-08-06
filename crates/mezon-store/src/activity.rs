@@ -121,6 +121,16 @@ impl ActivityStore {
         &self.activities
     }
 
+    fn apply_activities(&mut self, next: Vec<UserActivity>, cx: &mut Context<Self>) {
+        self.freshness.mark_fetched();
+        if next == self.activities {
+            return;
+        }
+        self.activities = next;
+        cx.emit(ActivityEvent::Changed);
+        cx.notify();
+    }
+
     pub fn refresh(&mut self, cx: &mut Context<Self>) {
         self.fetch(cx);
     }
@@ -146,13 +156,10 @@ impl ActivityStore {
                 }
                 this.loading = false;
                 match result {
-                    Ok(list) => {
-                        this.activities =
-                            list.activities.into_iter().map(activity_from_api).collect();
-                        this.freshness.mark_fetched();
-                        cx.emit(ActivityEvent::Changed);
-                        cx.notify();
-                    }
+                    Ok(list) => this.apply_activities(
+                        list.activities.into_iter().map(activity_from_api).collect(),
+                        cx,
+                    ),
                     Err(e) => tracing::error!("list_activity failed: {e}"),
                 }
             });
@@ -163,7 +170,61 @@ impl ActivityStore {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
     use super::*;
+
+    fn init_store(cx: &mut App) -> Entity<ActivityStore> {
+        let api = Arc::new(mezon_client::AppApi::new(
+            Arc::new(mezon_client::TransportClient::new(String::new())),
+            String::new(),
+        ));
+        cx.new(|cx| ActivityStore::new(api, cx))
+    }
+
+    fn work(user_id: i64, name: &str) -> UserActivity {
+        UserActivity {
+            user_id: UserId(user_id),
+            activity_type: ACTIVITY_TYPE_WORK,
+            activity_name: name.into(),
+            activity_description: String::new(),
+        }
+    }
+
+    #[gpui::test]
+    fn an_identical_refetch_emits_nothing(cx: &mut gpui::TestAppContext) {
+        let emitted = Arc::new(AtomicUsize::new(0));
+        let (store, _sub) = cx.update(|cx| {
+            let store = init_store(cx);
+            let counter = emitted.clone();
+            let sub = cx.subscribe(&store, move |_, _: &ActivityEvent, _| {
+                counter.fetch_add(1, Ordering::SeqCst);
+            });
+            (store, sub)
+        });
+
+        for _ in 0..2 {
+            cx.update(|cx| {
+                store.update(cx, |store, cx| {
+                    store.apply_activities(vec![work(1, "Visual Studio Code")], cx);
+                });
+            });
+        }
+
+        assert_eq!(emitted.load(Ordering::SeqCst), 1);
+    }
+
+    #[gpui::test]
+    fn a_changed_refetch_emits_and_replaces(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let store = init_store(cx);
+            store.update(cx, |store, cx| {
+                store.apply_activities(vec![work(1, "Visual Studio Code")], cx);
+                store.apply_activities(vec![work(1, "Spotify")], cx);
+                assert_eq!(store.activities(), &[work(1, "Spotify")]);
+            });
+        });
+    }
 
     #[test]
     fn activity_from_api_maps_fields() {
