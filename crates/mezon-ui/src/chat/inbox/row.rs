@@ -1294,7 +1294,7 @@ fn render_attachment_preview(
         })
 }
 
-fn render_message_head(
+pub(crate) fn render_message_head(
     theme: &Theme,
     sender_name: &SharedString,
     time_label: &SharedString,

@@ -3112,6 +3112,7 @@
   "searchMessageChannel.cancel": "Кире кагу",
   "searchMessageChannel.channels": "Каналлар",
   "searchMessageChannel.emptySearch.title": "Без һәр яктан эзләдек. Кызганычка каршы, нәтиҗәләр табылмады.",
+  "searchMessageChannel.emptyPage": "Бу биттә хәбәр юк. Башка битне карагыз.",
   "searchMessageChannel.enter": "Кертү",
   "searchMessageChannel.filterOptions.fromUser": "Билгеле кулланучыдан",
   "searchMessageChannel.filterOptions.inChannel": "Билгеле каналда",

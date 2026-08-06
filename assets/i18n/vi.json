@@ -3781,6 +3781,7 @@
   "searchMessageChannel.cancel": "Huỷ",
   "searchMessageChannel.channels": "Kênh",
   "searchMessageChannel.emptySearch.title": "Chúng tôi đã tìm kiếm khắp nơi. Thật không may, không tìm thấy kết quả nào.",
+  "searchMessageChannel.emptyPage": "Không có tin nhắn trên trang này. Hãy thử trang khác.",
   "searchMessageChannel.enter": "Enter",
   "searchMessageChannel.filterOptions.fromUser": "Từ một người cụ thể",
   "searchMessageChannel.filterOptions.inChannel": "Trong một kênh cụ thể",

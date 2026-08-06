@@ -3640,6 +3640,7 @@
   "searchMessageChannel.cancel": "Avbryt",
   "searchMessageChannel.channels": "Kanaler",
   "searchMessageChannel.emptySearch.title": "Vi har letat överallt. Tyvärr, inga resultat hittades.",
+  "searchMessageChannel.emptyPage": "Inga meddelanden på den här sidan. Prova en annan sida.",
   "searchMessageChannel.enter": "Enter",
   "searchMessageChannel.filterOptions.fromUser": "Från en specifik person",
   "searchMessageChannel.filterOptions.inChannel": "I en specifik kanal",

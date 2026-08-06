@@ -1772,6 +1772,13 @@ impl MessagesStore {
         message_id: MessageId,
         cx: &mut Context<Self>,
     ) {
+        if message_id.is_optimistic() {
+            tracing::debug!(
+                channel_id = channel_id.get(),
+                "request_jump: skipped optimistic message id"
+            );
+            return;
+        }
         self.pending_jump = Some((channel_id, message_id));
         self.try_consume_pending_jump(cx);
     }

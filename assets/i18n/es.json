@@ -3654,6 +3654,7 @@
   "searchMessageChannel.cancel": "Cancelar",
   "searchMessageChannel.channels": "Canales",
   "searchMessageChannel.emptySearch.title": "Hemos buscado a fondo. Desafortunadamente, no se encontraron resultados.",
+  "searchMessageChannel.emptyPage": "No hay mensajes en esta página. Prueba otra página.",
   "searchMessageChannel.enter": "Ingresar",
   "searchMessageChannel.filterOptions.fromUser": "De un usuario específico",
   "searchMessageChannel.filterOptions.inChannel": "En un canal específico",

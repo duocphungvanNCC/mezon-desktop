@@ -6,6 +6,8 @@ pub use row::{
     FOR_YOU_ROW_HEIGHT, MENTION_ROW_HEIGHT, MESSAGE_ROW_HEIGHT, ROW_HEIGHT, TOPIC_ROW_HEIGHT,
 };
 
+pub(crate) use row::render_message_head;
+
 use mezon_store::InboxCategory;
 
 pub const fn row_height_for_tab(tab: InboxTab) -> f32 {
