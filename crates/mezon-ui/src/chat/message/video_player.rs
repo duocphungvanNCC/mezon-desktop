@@ -163,6 +163,8 @@ impl VideoPlayerView {
         player: Rc<VideoPlayer>,
         shared: Shared,
         poster: SharedString,
+        width: f32,
+        height: f32,
         window: &mut Window,
         cx: &mut App,
     ) {
@@ -174,8 +176,8 @@ impl VideoPlayerView {
             url: SharedString::default(),
             filename: SharedString::default(),
             poster,
-            width: 0.0,
-            height: 0.0,
+            width,
+            height,
             player: Some(player),
             shared,
             track_bounds: Bounds::default(),
@@ -383,6 +385,8 @@ impl VideoPlayerView {
                         player,
                         self.shared.clone(),
                         self.poster.clone(),
+                        self.width,
+                        self.height,
                         window,
                         cx,
                     );
@@ -745,8 +749,13 @@ impl Render for VideoPlayerView {
             root.w_full().h_full()
         } else if self.theater {
             let viewport = window.viewport_size();
-            root.w(viewport.width * THEATER_FILL)
-                .h(viewport.height * THEATER_FILL)
+            let (w, h) = theater_box(
+                viewport.width * THEATER_FILL,
+                viewport.height * THEATER_FILL,
+                self.width,
+                self.height,
+            );
+            root.w(w).h(h)
         } else {
             root.w(px(self.width))
                 .h(px(self.height))
@@ -788,6 +797,19 @@ impl Render for VideoPlayerView {
             .child(self.download_button(cx))
             .into_any_element()
     }
+}
+
+fn theater_box(
+    max_width: Pixels,
+    max_height: Pixels,
+    media_width: f32,
+    media_height: f32,
+) -> (Pixels, Pixels) {
+    if media_width <= 0.0 || media_height <= 0.0 {
+        return (max_width, max_height);
+    }
+    let scale = (f32::from(max_width) / media_width).min(f32::from(max_height) / media_height);
+    (px(media_width * scale), px(media_height * scale))
 }
 
 fn control_button(
@@ -865,4 +887,48 @@ fn whole_seconds(total: f64) -> u64 {
 fn format_seconds(total: f64) -> String {
     let seconds = whole_seconds(total);
     format!("{:02}:{:02}", seconds / 60, seconds % 60)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{THEATER_FILL, theater_box};
+    use gpui::px;
+
+    #[test]
+    fn a_portrait_video_gets_a_portrait_theater_box() {
+        let (w, h) = theater_box(
+            px(1920. * THEATER_FILL),
+            px(1080. * THEATER_FILL),
+            576.,
+            1024.,
+        );
+        assert_eq!(h, px(1080. * THEATER_FILL));
+        assert!(w < px(700.));
+    }
+
+    #[test]
+    fn a_landscape_video_fills_the_available_width() {
+        let (w, h) = theater_box(
+            px(1920. * THEATER_FILL),
+            px(1080. * THEATER_FILL),
+            1920.,
+            1080.,
+        );
+        assert_eq!(w, px(1920. * THEATER_FILL));
+        assert_eq!(h, px(1080. * THEATER_FILL));
+    }
+
+    #[test]
+    fn a_small_video_is_scaled_up_but_keeps_its_ratio() {
+        let (w, h) = theater_box(px(1000.), px(1000.), 100., 200.);
+        assert_eq!(w, px(500.));
+        assert_eq!(h, px(1000.));
+    }
+
+    #[test]
+    fn unknown_dimensions_fall_back_to_the_whole_box() {
+        let (w, h) = theater_box(px(800.), px(600.), 0., 0.);
+        assert_eq!(w, px(800.));
+        assert_eq!(h, px(600.));
+    }
 }
