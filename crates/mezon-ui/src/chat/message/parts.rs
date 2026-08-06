@@ -899,7 +899,10 @@ fn render_album(
         if let Some(path) = att.local_source.clone() {
             let selection = ctx.selection.clone();
             tile_element = tile_element.when(
-                !att.uploading && !att.upload_failed && !viewer_att.url.is_empty(),
+                !att.uploading
+                    && !att.upload_failed
+                    && !att.presign_pending
+                    && !viewer_att.url.is_empty(),
                 |d| {
                     d.cursor_pointer().on_click(move |_, window, cx| {
                         if !selection.borrow().has_selection() {
@@ -1068,7 +1071,7 @@ fn render_photo(
             .overflow_hidden()
             .bg(theme.bg_tertiary);
         el = el.when(
-            !sending && !att.upload_failed && !viewer_att.url.is_empty(),
+            !sending && !att.upload_failed && !att.presign_pending && !viewer_att.url.is_empty(),
             |d| {
                 d.cursor_pointer().on_click(move |_, window, cx| {
                     if !selection.borrow().has_selection() {
@@ -1942,7 +1945,7 @@ pub fn render_hover_actions(msg: &Message, is_different_day: bool, ctx: &RowCtx)
         .into_any_element()
 }
 
-fn open_viewer_from_message(
+pub(crate) fn open_viewer_from_message(
     settings: &Entity<mezon_store::Settings>,
     att: AttachmentSeedInput,
     message_id: mezon_store::MessageId,
@@ -1956,6 +1959,9 @@ fn open_viewer_from_message(
     use mezon_store::{AppConfig, ChannelAttachment, ClanId};
 
     if att.url.is_empty() {
+        return;
+    }
+    if att.presign_pending {
         return;
     }
 
@@ -2006,7 +2012,7 @@ fn open_viewer_from_message(
     );
 }
 
-fn viewer_uploader_id(msg: &Message) -> mezon_store::UserId {
+pub(crate) fn viewer_uploader_id(msg: &Message) -> mezon_store::UserId {
     use mezon_store::UserId;
     msg.sender_user_id
         .filter(|u| u.0 != 0)

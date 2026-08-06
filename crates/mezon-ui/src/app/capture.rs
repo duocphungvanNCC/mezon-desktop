@@ -272,6 +272,133 @@ pub fn show_main_window(cx: &mut App) -> anyhow::Result<()> {
     Ok(())
 }
 
+pub fn set_composer_panel(cx: &mut App, kind: Option<&str>) -> anyhow::Result<Value> {
+    let tab = match kind {
+        None => None,
+        Some(kind) => Some(match kind.to_ascii_lowercase().as_str() {
+            "emoji" | "emojis" => crate::chat::gif_sticker_emoji::SubPanel::Emoji,
+            "sticker" | "stickers" => crate::chat::gif_sticker_emoji::SubPanel::Stickers,
+            "gif" | "gifs" => crate::chat::gif_sticker_emoji::SubPanel::Gifs,
+            "sound" | "sounds" => crate::chat::gif_sticker_emoji::SubPanel::Sounds,
+            other => anyhow::bail!("unknown panel kind: {other}"),
+        }),
+    };
+    let composer = crate::chat::mention_input::MentionInput::active_composer(cx)
+        .ok_or_else(|| anyhow::anyhow!("no composer is mounted; open a channel first"))?;
+    let main_handle = handle(cx).ok_or_else(|| anyhow::anyhow!("main window not found"))?;
+    cx.update_window(main_handle, |_, window, cx| {
+        composer.update(cx, |composer, cx| match tab {
+            Some(tab) => composer.show_panel(tab, window, cx),
+            None => composer.hide_panel(cx),
+        });
+    })?;
+    let open = composer.read(cx).active_panel(cx).map(|tab| match tab {
+        crate::chat::gif_sticker_emoji::SubPanel::Emoji => "emoji",
+        crate::chat::gif_sticker_emoji::SubPanel::Stickers => "sticker",
+        crate::chat::gif_sticker_emoji::SubPanel::Gifs => "gif",
+        crate::chat::gif_sticker_emoji::SubPanel::Sounds => "sound",
+    });
+    Ok(serde_json::json!({ "ok": true, "panel": open }))
+}
+
+pub const WHEEL_TICK_INTERVAL: std::time::Duration = std::time::Duration::from_millis(16);
+pub const WHEEL_MAX_TICKS: u32 = 500;
+
+pub fn message_viewport_state(cx: &App) -> Option<(usize, usize, bool)> {
+    crate::chat::message::ChannelMessages::active_timeline(cx)
+        .map(|timeline| timeline.read(cx).viewport_state())
+}
+
+pub fn dispatch_wheel_tick(cx: &mut App, delta_y: f32) -> anyhow::Result<bool> {
+    let main_handle = handle(cx).ok_or_else(|| anyhow::anyhow!("main window not found"))?;
+    let bounds = message_list_bounds(cx)
+        .ok_or_else(|| anyhow::anyhow!("no message list is mounted; open a channel first"))?;
+    let consumed = cx.update_window(main_handle, |_, window, cx| {
+        let event = gpui::PlatformInput::ScrollWheel(gpui::ScrollWheelEvent {
+            position: bounds.center(),
+            delta: gpui::ScrollDelta::Pixels(gpui::point(gpui::px(0.), gpui::px(delta_y))),
+            modifiers: gpui::Modifiers::default(),
+            touch_phase: gpui::TouchPhase::Moved,
+        });
+        !window.dispatch_event(event, cx).propagate
+    })?;
+    Ok(consumed)
+}
+
+fn message_list_bounds(cx: &App) -> Option<gpui::Bounds<gpui::Pixels>> {
+    crate::chat::message::ChannelMessages::active_timeline(cx)
+        .and_then(|timeline| timeline.read(cx).list_bounds())
+        .filter(|bounds| bounds.size.width > gpui::px(0.) && bounds.size.height > gpui::px(0.))
+}
+
+pub fn scroll_messages(cx: &mut App, to_top: bool) -> anyhow::Result<Value> {
+    let timeline = crate::chat::message::ChannelMessages::active_timeline(cx)
+        .ok_or_else(|| anyhow::anyhow!("no message list is mounted; open a channel first"))?;
+    let (item_count, first_visible, at_bottom) = timeline.update(cx, |timeline, cx| {
+        if to_top {
+            timeline.scroll_viewport_to_top(cx);
+        } else {
+            timeline.scroll_viewport_to_bottom(cx);
+        }
+        timeline.viewport_state()
+    });
+    Ok(json!({
+        "ok": true,
+        "to": if to_top { "top" } else { "bottom" },
+        "item_count": item_count,
+        "first_visible_index": first_visible,
+        "at_bottom": at_bottom,
+    }))
+}
+
+pub fn open_message_image_viewer(
+    settings: &gpui::Entity<mezon_store::Settings>,
+    message_id: i64,
+    attachment_index: usize,
+    cx: &mut App,
+) -> anyhow::Result<Value> {
+    let store = mezon_store::MessagesStore::global(cx);
+    let (seed, id, create_time, uploader_id) = {
+        let store = store.read(cx);
+        let message = store
+            .messages()
+            .iter()
+            .find(|message| message.id.0 == message_id)
+            .ok_or_else(|| {
+                anyhow::anyhow!("message {message_id} is not in the open channel's loaded history")
+            })?;
+        let attachment = message.attachments.get(attachment_index).ok_or_else(|| {
+            anyhow::anyhow!("message {message_id} has no attachment at index {attachment_index}")
+        })?;
+        if attachment.presign_pending {
+            anyhow::bail!(
+                "attachment {attachment_index} of message {message_id} is still waiting for its \
+                 presign to finish, so its url does not resolve yet"
+            );
+        }
+        (
+            mezon_store::AttachmentSeedInput::from_message(attachment),
+            message.id,
+            message.create_time,
+            crate::chat::message::parts::viewer_uploader_id(message),
+        )
+    };
+    let main_handle = handle(cx).ok_or_else(|| anyhow::anyhow!("main window not found"))?;
+    let opened = seed.url.clone();
+    cx.update_window(main_handle, |_, window, cx| {
+        crate::chat::message::parts::open_viewer_from_message(
+            settings,
+            seed,
+            id,
+            create_time,
+            uploader_id,
+            window,
+            cx,
+        );
+    })?;
+    Ok(serde_json::json!({ "ok": true, "url": opened }))
+}
+
 pub fn go_back(cx: &mut App) -> anyhow::Result<()> {
     crate::router::Router::global(cx).update(cx, |router, _| router.go_back());
     Ok(())

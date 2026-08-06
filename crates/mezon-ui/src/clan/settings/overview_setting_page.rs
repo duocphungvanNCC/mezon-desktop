@@ -3,8 +3,8 @@ use gpui::{
     Task, Window, deferred, div, img, prelude::*, px,
 };
 use mezon_store::{
-    ChannelId, ChannelList, ChannelType, ClanId, ClanImageMimeType, ClanList, ClanOverviewDraft,
-    ClanSystemMessage, MAX_CLAN_BANNER_BYTES, MAX_CLAN_LOGO_BYTES, Settings,
+    AppConfig, ChannelId, ChannelList, ChannelType, ClanId, ClanImageMimeType, ClanList,
+    ClanOverviewDraft, ClanSystemMessage, MAX_CLAN_BANNER_BYTES, MAX_CLAN_LOGO_BYTES, Settings,
 };
 
 use crate::app::shell::Shell;
@@ -194,7 +194,6 @@ impl OverviewSettingPage {
                 .placeholder(placeholder)
                 .height(px(40.0))
                 .text_size(px(16.0))
-                .borderless()
                 .bg(input_bg)
         });
         name_input.update(cx, |input, cx| {
@@ -662,6 +661,9 @@ impl OverviewSettingPage {
     ) -> impl IntoElement {
         let logo = self.draft.logo.clone();
         let has_logo = !logo.is_empty();
+        let logo_preview = AppConfig::try_global(cx)
+            .map(|config| config.imgproxy_url(&logo, 200, 200, "fill"))
+            .unwrap_or(logo);
 
         let avatar = div()
             .absolute()
@@ -677,7 +679,7 @@ impl OverviewSettingPage {
             .justify_center()
             .when(has_logo, |el| {
                 el.child(
-                    img(logo)
+                    img(logo_preview)
                         .size_full()
                         .rounded_full()
                         .object_fit(gpui::ObjectFit::Cover),
@@ -689,7 +691,15 @@ impl OverviewSettingPage {
                         .size(px(32.0))
                         .text_color(theme.text_secondary),
                 )
-            });
+            })
+            .child(
+                div()
+                    .absolute()
+                    .inset_0()
+                    .rounded_full()
+                    .border_1()
+                    .border_color(theme.border),
+            );
 
         div()
             .relative()

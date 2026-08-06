@@ -20,6 +20,7 @@ pub fn app_list_popover_overlay(
     locale: &str,
     sidebar: WeakEntity<ChannelSidebar>,
     suppress_hover: bool,
+    icon_cache: gpui::Entity<crate::image_cache::LruImageCache>,
     cx: &App,
 ) -> impl IntoElement {
     let theme = cx.theme();
@@ -108,6 +109,7 @@ pub fn app_list_popover_overlay(
             .occlude()
             .child(
                 div()
+                    .image_cache(icon_cache)
                     .id("app-list-popover")
                     .absolute()
                     .top(px(196.))

@@ -645,16 +645,21 @@ impl Render for ProfilePage {
                     // Delete Account button (only for user profile tab)
                     .when(!is_clan, |el| {
                         el.child(
-                            GpuiButton::new("delete-account-btn")
-                                .label(mezon_i18n::t(&locale, "setting.profile.deleteAccount"))
-                                .danger()
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    let locale = this.settings.read(cx).language.clone();
-                                    this.show_toast(
-                                        mezon_i18n::t(&locale, "setting.profile.deleteComingSoon"),
-                                        cx,
-                                    );
-                                })),
+                            h_flex().child(
+                                GpuiButton::new("delete-account-btn")
+                                    .label(mezon_i18n::t(&locale, "setting.profile.deleteAccount"))
+                                    .danger()
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        let locale = this.settings.read(cx).language.clone();
+                                        this.show_toast(
+                                            mezon_i18n::t(
+                                                &locale,
+                                                "setting.profile.deleteComingSoon",
+                                            ),
+                                            cx,
+                                        );
+                                    })),
+                            ),
                         )
                     }),
             )

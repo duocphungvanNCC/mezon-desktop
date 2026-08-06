@@ -148,7 +148,7 @@ fn channel_voice_busy(
     }
     channels
         .channel(clan_id, channel_id)
-        .is_some_and(|channel| channel.voice_members.len() >= 2)
+        .is_some_and(|channel| channel.voice_busy())
 }
 
 pub fn build_palette_items(cx: &App) -> Vec<PaletteItem> {
@@ -568,7 +568,7 @@ fn render_palette_label(
                 .flex_shrink_0()
                 .text_size(px(15.))
                 .italic()
-                .text_color(theme.status_dnd)
+                .text_color(theme.danger_text)
                 .child("(busy)"),
         )
         .into_any_element()

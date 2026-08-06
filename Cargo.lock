@@ -5714,7 +5714,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-app"
-version = "2.0.3"
+version = "2.0.6"
 dependencies = [
  "anyhow",
  "dirs 5.0.1",
@@ -5745,7 +5745,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-audio"
-version = "2.0.3"
+version = "2.0.6"
 dependencies = [
  "anyhow",
  "flume",
@@ -5760,7 +5760,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-canvas"
-version = "2.0.3"
+version = "2.0.6"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -5782,7 +5782,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-cli"
-version = "2.0.3"
+version = "2.0.6"
 dependencies = [
  "anyhow",
  "clap",
@@ -5798,7 +5798,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-client"
-version = "2.0.3"
+version = "2.0.6"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5829,18 +5829,19 @@ dependencies = [
  "tracing",
  "url",
  "webpki-roots 1.0.8",
+ "windows 0.61.3",
 ]
 
 [[package]]
 name = "mezon-i18n"
-version = "2.0.3"
+version = "2.0.6"
 dependencies = [
  "serde_json",
 ]
 
 [[package]]
 name = "mezon-mcp"
-version = "2.0.3"
+version = "2.0.6"
 dependencies = [
  "anyhow",
  "axum",
@@ -5861,11 +5862,12 @@ dependencies = [
 
 [[package]]
 name = "mezon-native"
-version = "2.0.3"
+version = "2.0.6"
 dependencies = [
  "anyhow",
  "auto-launch",
  "block",
+ "core-foundation 0.10.0",
  "cpal",
  "crossbeam-channel",
  "dirs 5.0.1",
@@ -5887,7 +5889,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-proto"
-version = "2.0.3"
+version = "2.0.6"
 dependencies = [
  "prost 0.13.5",
  "prost-build 0.13.5",
@@ -5898,12 +5900,13 @@ dependencies = [
 
 [[package]]
 name = "mezon-store"
-version = "2.0.3"
+version = "2.0.6"
 dependencies = [
  "anyhow",
  "chrono",
  "dirs 5.0.1",
  "flume",
+ "futures",
  "gpui",
  "image",
  "keyring",
@@ -5928,7 +5931,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-stream"
-version = "2.0.3"
+version = "2.0.6"
 dependencies = [
  "anyhow",
  "flume",
@@ -5946,7 +5949,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-theme"
-version = "2.0.3"
+version = "2.0.6"
 dependencies = [
  "gpui",
  "theme",
@@ -5954,7 +5957,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-ui"
-version = "2.0.3"
+version = "2.0.6"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -5995,7 +5998,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-updater"
-version = "2.0.3"
+version = "2.0.6"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -6016,7 +6019,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-video"
-version = "2.0.3"
+version = "2.0.6"
 dependencies = [
  "anyhow",
  "core-foundation 0.10.0",
@@ -6038,7 +6041,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-voice"
-version = "2.0.3"
+version = "2.0.6"
 dependencies = [
  "anyhow",
  "block",
@@ -6067,7 +6070,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-widgets"
-version = "2.0.3"
+version = "2.0.6"
 dependencies = [
  "gpui",
  "mezon-store",
@@ -6131,7 +6134,7 @@ dependencies = [
 
 [[package]]
 name = "mmn-client"
-version = "2.0.3"
+version = "2.0.6"
 dependencies = [
  "base64 0.22.1",
  "bs58",

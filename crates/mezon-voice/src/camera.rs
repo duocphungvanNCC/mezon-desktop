@@ -252,6 +252,7 @@ fn push_camera_frame(
     } else {
         i420
     };
+    let i420 = flip_i420_horizontal(&i420);
     let fw = i420.width();
     let fh = i420.height();
 
@@ -281,6 +282,47 @@ fn push_camera_frame(
     source.capture_frame(&frame);
     if let Some(recycled) = frame_store.publish(key, fw, fh, std::mem::take(preview)) {
         *preview = recycled;
+    }
+}
+
+fn flip_i420_horizontal(src: &I420Buffer) -> I420Buffer {
+    let width = src.width();
+    let height = src.height();
+    let mut dst = I420Buffer::new(width, height);
+
+    let (ssy, ssu, ssv) = src.strides();
+    let (src_y, src_u, src_v) = src.data();
+    let (dsy, dsu, dsv) = dst.strides();
+    let (dst_y, dst_u, dst_v) = dst.data_mut();
+
+    let w = width as usize;
+    let h = height as usize;
+    let cw = w.div_ceil(2);
+    let ch = h.div_ceil(2);
+
+    flip_plane(src_y, ssy as usize, dst_y, dsy as usize, w, h);
+    flip_plane(src_u, ssu as usize, dst_u, dsu as usize, cw, ch);
+    flip_plane(src_v, ssv as usize, dst_v, dsv as usize, cw, ch);
+
+    dst
+}
+
+fn flip_plane(
+    src: &[u8],
+    src_stride: usize,
+    dst: &mut [u8],
+    dst_stride: usize,
+    width: usize,
+    height: usize,
+) {
+    let rows = src
+        .chunks(src_stride)
+        .zip(dst.chunks_mut(dst_stride))
+        .take(height);
+    for (s, d) in rows {
+        for (out, inp) in d[..width].iter_mut().zip(s[..width].iter().rev()) {
+            *out = *inp;
+        }
     }
 }
 

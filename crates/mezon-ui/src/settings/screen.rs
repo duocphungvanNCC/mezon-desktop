@@ -5,7 +5,8 @@ use gpui::{
 };
 use mezon_store::{
     AuthState, AutoUpdateStatus, ClanList, LoginStore, Settings, effective_update_status,
-    update_available_clicked, update_check_clicked, update_restart_clicked,
+    update_available_clicked, update_check_clicked, update_manual_install_clicked,
+    update_restart_clicked,
 };
 
 use super::account_page::AccountPage;
@@ -67,6 +68,7 @@ pub struct SettingsScreen {
     nav_scroll: ScrollHandle,
     focus_handle: FocusHandle,
     focus_on_show: bool,
+    update_command_copied: bool,
 }
 
 impl SettingsScreen {
@@ -100,7 +102,25 @@ impl SettingsScreen {
             nav_scroll: ScrollHandle::new(),
             focus_handle: cx.focus_handle(),
             focus_on_show: false,
+            update_command_copied: false,
         }
+    }
+
+    fn copy_manual_install_command(&mut self, cx: &mut Context<Self>) {
+        update_manual_install_clicked(cx);
+        self.update_command_copied = true;
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(2500))
+                .await;
+            this.update(cx, |this, cx| {
+                this.update_command_copied = false;
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 
     pub fn set_page(&mut self, page: SettingsPage, cx: &mut Context<Self>) {
@@ -326,8 +346,50 @@ impl Render for SettingsScreen {
             status: Option<AutoUpdateStatus>,
             locale: &str,
             theme: &Theme,
+            command_copied: bool,
+            entity: &Entity<SettingsScreen>,
         ) -> gpui::Stateful<gpui::Div> {
             let status = status.unwrap_or(AutoUpdateStatus::Idle);
+            if let AutoUpdateStatus::ManualInstall { version, .. } = &status {
+                let entity = entity.clone();
+                let bg_hover = theme.bg_hover;
+                let hint = if command_copied {
+                    mezon_i18n::t(locale, "setting.update.copiedHint")
+                } else {
+                    mezon_i18n::t(locale, "setting.update.copyHint")
+                };
+                return div()
+                    .id("check-updates-btn")
+                    .mt(px(4.0))
+                    .w_full()
+                    .px(px(10.0))
+                    .py(px(4.0))
+                    .rounded(px(4.0))
+                    .flex()
+                    .flex_col()
+                    .cursor_pointer()
+                    .hover(move |s| s.bg(bg_hover))
+                    .on_click(move |_, _, cx| {
+                        entity.update(cx, |this, cx| this.copy_manual_install_command(cx));
+                    })
+                    .child(
+                        div()
+                            .text_base()
+                            .font_weight(gpui::FontWeight::MEDIUM)
+                            .text_color(gpui::rgb(0x22c55e))
+                            .child(format!(
+                                "{} (v{version})",
+                                mezon_i18n::t(locale, "setting.update.readyToInstall")
+                            )),
+                    )
+                    .child(
+                        div()
+                            .mt(px(1.0))
+                            .text_xs()
+                            .text_color(theme.text_muted)
+                            .child(hint.to_string()),
+                    );
+            }
             let (label, color): (String, gpui::Rgba) = match &status {
                 AutoUpdateStatus::Idle => (
                     mezon_i18n::t(locale, "setting.update.check").to_string(),
@@ -365,6 +427,13 @@ impl Render for SettingsScreen {
                     format!(
                         "{} (v{version})",
                         mezon_i18n::t(locale, "setting.update.restart")
+                    ),
+                    gpui::rgb(0x22c55e),
+                ),
+                AutoUpdateStatus::ManualInstall { version, .. } => (
+                    format!(
+                        "{} (v{version})",
+                        mezon_i18n::t(locale, "setting.update.readyToInstall")
                     ),
                     gpui::rgb(0x22c55e),
                 ),
@@ -536,7 +605,13 @@ impl Render for SettingsScreen {
                         cx.quit();
                     }),
             )
-            .child(update_row(update_status, &locale, &theme))
+            .child(update_row(
+                update_status,
+                &locale,
+                &theme,
+                self.update_command_copied,
+                &cx.entity(),
+            ))
             .child(
                 div()
                     .mt(px(4.0))

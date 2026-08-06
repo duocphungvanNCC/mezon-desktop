@@ -2,6 +2,7 @@ use crate::ids::{ChannelId, ClanId, MessageId, UserId};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::time::{Duration, Instant};
 
 use gpui::{
@@ -41,11 +42,11 @@ use crate::message::{
     MessageCode, MessageComponent, MessageComponentRow, MessageReference, MessageSelect,
     MessageSelectOption, MessageSpan, OgpPreview, PollAnswerView, PollData, PollDetail,
     PollLabelSegment, PollVoter, ViewerMedia, aggregate_reactions, apply_reaction_event,
-    message_combined_with_prev, message_sort_key, parse_spans, reaction_key,
-    recompute_message_grouping, rollback_reaction, sort_messages, spans_only_emoji,
+    compute_show_forwarded_label, message_combined_with_prev, message_sort_key, parse_spans,
+    reaction_key, recompute_message_grouping, rollback_reaction, sort_messages, spans_only_emoji,
     viewer_highlight_direct,
 };
-use crate::message_time::unix_now_seconds;
+use crate::message_time::{unix_now_millis, unix_now_seconds};
 use crate::presign;
 use crate::realtime::{RealtimeDispatch, RealtimeKind};
 use crate::roles::RolesStore;
@@ -70,6 +71,8 @@ const LAST_SEEN_DEBOUNCE: Duration = Duration::from_millis(1000);
 const TYPING_THROTTLE: Duration = Duration::from_millis(1000);
 const GIVE_COFFEE_EMOJI_ID: &str = "7280417126303261185";
 const GIVE_COFFEE_EMOJI: &str = ":coffee:";
+const SNOWFLAKE_TIME_SHIFT: i64 = 22;
+const SNOWFLAKE_SEQUENCE_MASK: i64 = (1 << SNOWFLAKE_TIME_SHIFT) - 1;
 
 #[derive(Clone)]
 struct PendingSendPayload {
@@ -392,11 +395,16 @@ impl MessageList {
     }
 
     fn regroup_row(&mut self, idx: usize) {
-        let combined = {
+        let (combined, show_forwarded_label) = {
             let prev = idx.checked_sub(1).map(|p| &self.items[p]);
-            message_combined_with_prev(prev, &self.items[idx])
+            let row = &self.items[idx];
+            (
+                message_combined_with_prev(prev, row),
+                compute_show_forwarded_label(prev, row),
+            )
         };
         self.items[idx].combined_with_prev = combined;
+        self.items[idx].show_forwarded_label = show_forwarded_label;
     }
 
     fn replace_at(&mut self, idx: usize, msg: Message) {
@@ -416,8 +424,25 @@ impl MessageList {
         }
     }
 
+    fn is_out_of_order_at(&self, idx: usize) -> bool {
+        let key = message_sort_key(&self.items[idx]);
+        let prev_outranks = idx
+            .checked_sub(1)
+            .is_some_and(|prev| message_sort_key(&self.items[prev]) > key);
+        let next_undercuts = self
+            .items
+            .get(idx + 1)
+            .is_some_and(|next| message_sort_key(next) < key);
+        prev_outranks || next_undercuts
+    }
+
     fn replace_at_and_regroup(&mut self, idx: usize, msg: Message) {
         self.replace_at(idx, msg);
+        if self.is_out_of_order_at(idx) {
+            sort_messages(&mut self.items);
+            trim_messages(&mut self.items);
+            self.reindex();
+        }
         recompute_message_grouping(&mut self.items);
     }
 
@@ -429,6 +454,19 @@ impl MessageList {
         let Some(existing) = self.get_by_id(id).cloned() else {
             return false;
         };
+        if !existing.sender_id.is_empty()
+            && !incoming.sender_id.is_empty()
+            && incoming.sender_id != "0"
+            && existing.sender_id != incoming.sender_id
+        {
+            tracing::warn!(
+                message_id = id.get(),
+                existing_sender = %existing.sender_id,
+                incoming_sender = %incoming.sender_id,
+                "a re-delivered message overwrote a row belonging to a different sender; \
+                 two rows are sharing one id"
+            );
+        }
         let merged = merge_sparse_sender(&existing, incoming);
         if let Some(slot) = self.get_mut_by_id(id) {
             *slot = merged;
@@ -3602,6 +3640,7 @@ impl MessagesStore {
             sender_id.clone()
         };
         let create_time = optimistic_create_time(&channel.messages, &grouping_sender_id);
+        let sort_id = optimistic_sort_id(&channel.messages);
         let temp_id = MessageId::next_optimistic();
         self.pending_send_payloads.insert(
             temp_id,
@@ -3652,6 +3691,7 @@ impl MessagesStore {
             display_name,
             create_time,
         )
+        .with_sort_id(sort_id)
         .with_avatar(avatar_url)
         .with_avatar_proxied(avatar_proxied);
         if !sent.mentions.is_empty()
@@ -4017,6 +4057,7 @@ impl MessagesStore {
             return;
         };
         let create_time = optimistic_create_time(&channel.messages, &sender_id);
+        let sort_id = optimistic_sort_id(&channel.messages);
         let temp_id = MessageId::next_optimistic();
 
         let optimistic_attachment = MessageAttachment::from_api(
@@ -4036,6 +4077,7 @@ impl MessagesStore {
         let (display_name, avatar_url, avatar_proxied) =
             outgoing_sender_profile(&sender_id, &sender_name, clan_id, cx);
         let optimistic = Message::new(temp_id, String::new(), sender_id, display_name, create_time)
+            .with_sort_id(sort_id)
             .with_avatar(avatar_url)
             .with_avatar_proxied(avatar_proxied)
             .with_attachments(vec![optimistic_attachment]);
@@ -4383,13 +4425,34 @@ impl MessagesStore {
 
         let storage_id = storage_channel_id(m);
         let parent_id = parent_channel_id(m);
+        let viewer_id = viewer_user_id(cx);
+
+        // A mutation names the row it edits. Synthesizing an id for one that
+        // does not would aim it at a row picked by arithmetic on whatever is
+        // currently loaded, so drop it instead.
+        if matches!(
+            code,
+            MessageCode::ChatUpdate
+                | MessageCode::UpdateEphemeralMsg
+                | MessageCode::ChatRemove
+                | MessageCode::DeleteEphemeralMsg
+        ) && m.message_id <= 0
+        {
+            tracing::warn!(
+                channel_id = m.channel_id,
+                topic_id = m.topic_id,
+                ?code,
+                "dropping a message mutation that carries no message id"
+            );
+            return;
+        }
+
         let message_id = MessageId(synthesize_ws_message_id(
             self,
             storage_id,
             parent_id,
             m.message_id,
         ));
-        let viewer_id = viewer_user_id(cx);
 
         match code {
             MessageCode::ChatUpdate | MessageCode::UpdateEphemeralMsg => {
@@ -5668,7 +5731,7 @@ impl MessagesStore {
 const DELETED_REPLY_PREVIEW: &str = "Original message was deleted";
 
 fn snowflake_seq(id: MessageId) -> i64 {
-    id.get() >> 22
+    id.get() >> SNOWFLAKE_TIME_SHIFT
 }
 
 fn should_write_last_seen(
@@ -5743,16 +5806,30 @@ fn mutation_bucket_for(
     if bucket_contains(named) {
         return named;
     }
-    [
+    if let Some(bucket) = [
         Some(ChannelId(m.channel_id)),
         (m.topic_id != 0).then_some(ChannelId(m.topic_id)),
-        active_topic_id,
-        active_channel_id,
     ]
     .into_iter()
     .flatten()
     .find(|bucket| bucket_contains(*bucket))
-    .unwrap_or(named)
+    {
+        return bucket;
+    }
+    // Only a frame that names no bucket at all may be resolved against whatever
+    // the user happens to be looking at. A frame that does name one and whose
+    // channel simply is not cached has no local row to edit: searching on would
+    // hand a bot's edit in an unopened channel to whichever message in the open
+    // channel shares its id, which is how a music bot's card ended up rewriting
+    // someone else's message.
+    if m.channel_id != 0 || m.topic_id != 0 {
+        return named;
+    }
+    [active_topic_id, active_channel_id]
+        .into_iter()
+        .flatten()
+        .find(|bucket| bucket_contains(*bucket))
+        .unwrap_or(named)
 }
 
 fn mark_topic_reply_counted(
@@ -6254,6 +6331,23 @@ fn optimistic_create_time_at(messages: &MessageList, sender_id: &str, now: i64) 
         last.create_time.max(now) + 1
     } else {
         now
+    }
+}
+
+fn optimistic_sort_id(messages: &MessageList) -> i64 {
+    optimistic_sort_id_at(messages, unix_now_millis(), next_send_sequence())
+}
+
+fn next_send_sequence() -> i64 {
+    static SEQUENCE: AtomicI64 = AtomicI64::new(0);
+    SEQUENCE.fetch_add(1, Ordering::Relaxed) & SNOWFLAKE_SEQUENCE_MASK
+}
+
+fn optimistic_sort_id_at(messages: &MessageList, now_ms: i64, sequence: i64) -> i64 {
+    let minted = (now_ms << SNOWFLAKE_TIME_SHIFT) | sequence;
+    match messages.last() {
+        Some(last) => minted.max(last.sort_id.saturating_add(1)),
+        None => minted,
     }
 }
 
@@ -8712,6 +8806,150 @@ mod tests {
     }
 
     #[test]
+    fn push_message_grouped_sets_forwarded_label_on_first_realtime_forward() {
+        let mut list =
+            MessageList::from_messages(vec![Message::new(MessageId(1), "a", "u1", "U1", 100)]);
+        list.push_grouped(Message::new(MessageId(2), "fwd", "u1", "U1", 110).with_forwarded(true));
+        assert!(list.as_slice()[1].is_forwarded);
+        assert!(list.as_slice()[1].show_forwarded_label);
+        assert_list_consistent(&list);
+    }
+
+    #[test]
+    fn push_message_grouped_hides_forwarded_label_for_same_sender_burst() {
+        let mut list =
+            MessageList::from_messages(vec![Message::new(MessageId(1), "a", "u1", "U1", 100)]);
+        list.push_grouped(
+            Message::new(MessageId(2), "fwd-a", "u1", "U1", 110).with_forwarded(true),
+        );
+        list.push_grouped(
+            Message::new(MessageId(3), "fwd-b", "u1", "U1", 120).with_forwarded(true),
+        );
+        assert!(list.as_slice()[1].show_forwarded_label);
+        assert!(!list.as_slice()[2].show_forwarded_label);
+        assert_list_consistent(&list);
+    }
+
+    const SEND_NOW_MS: i64 = 1_785_000_000_000;
+
+    fn server_id_at(now_ms: i64) -> MessageId {
+        MessageId(now_ms << SNOWFLAKE_TIME_SHIFT)
+    }
+
+    #[test]
+    fn optimistic_sort_id_lands_in_the_server_snowflake_space() {
+        let list = MessageList::from_messages(Vec::new());
+        let sort_id = optimistic_sort_id_at(&list, SEND_NOW_MS, 7);
+        assert_eq!(sort_id >> SNOWFLAKE_TIME_SHIFT, SEND_NOW_MS);
+        assert_eq!(sort_id & SNOWFLAKE_SEQUENCE_MASK, 7);
+        assert!(sort_id < MessageId::next_optimistic().get());
+    }
+
+    #[test]
+    fn optimistic_sort_id_stays_above_a_tail_minted_ahead_of_the_local_clock() {
+        let ahead = server_id_at(SEND_NOW_MS + 5_000);
+        let list = MessageList::from_messages(vec![Message::new(ahead, "a", "u1", "U1", 100)]);
+        assert_eq!(
+            optimistic_sort_id_at(&list, SEND_NOW_MS, 0),
+            ahead.get() + 1
+        );
+    }
+
+    #[test]
+    fn failed_optimistic_row_keeps_its_slot_when_a_later_message_arrives() {
+        let mut list = MessageList::from_messages(vec![Message::new(
+            server_id_at(SEND_NOW_MS - 1_000),
+            "a",
+            "u1",
+            "U1",
+            100,
+        )]);
+        let sort_id = optimistic_sort_id_at(&list, SEND_NOW_MS, 0);
+        let mut failed =
+            Message::new(MessageId::next_optimistic(), "b", "u2", "U2", 110).with_sort_id(sort_id);
+        failed.send_failed = true;
+        list.push_grouped(failed);
+        list.push_grouped(Message::new(
+            server_id_at(SEND_NOW_MS + 1_000),
+            "c",
+            "u3",
+            "U3",
+            120,
+        ));
+        let contents: Vec<&str> = list.as_slice().iter().map(|m| m.content.as_str()).collect();
+        assert_eq!(contents, ["a", "b", "c"]);
+        assert_list_consistent(&list);
+    }
+
+    #[test]
+    fn acking_a_temp_that_is_no_longer_the_tail_restores_id_order() {
+        let mut list = MessageList::from_messages(vec![Message::new(
+            server_id_at(SEND_NOW_MS - 1_000),
+            "old",
+            "u1",
+            "U1",
+            100,
+        )]);
+        let temp_id = MessageId::next_optimistic();
+        list.push_grouped(
+            Message::new(temp_id, "mine", "me", "Me", 110).with_sort_id(optimistic_sort_id_at(
+                &list,
+                SEND_NOW_MS,
+                0,
+            )),
+        );
+        list.push_grouped(Message::new(
+            server_id_at(SEND_NOW_MS + 500),
+            "theirs",
+            "u2",
+            "U2",
+            120,
+        ));
+        let idx = list.position(temp_id).expect("temp row must be present");
+        list.replace_at_and_regroup(
+            idx,
+            Message::new(server_id_at(SEND_NOW_MS + 1_000), "mine", "me", "Me", 110),
+        );
+        let order: Vec<&str> = list.as_slice().iter().map(|m| m.content.as_str()).collect();
+        assert_eq!(order, ["old", "theirs", "mine"]);
+        assert!(
+            list.as_slice()
+                .windows(2)
+                .all(|w| message_sort_key(&w[0]) <= message_sort_key(&w[1]))
+        );
+        assert_list_consistent(&list);
+    }
+
+    #[test]
+    fn acking_a_temp_at_the_tail_does_not_resort() {
+        let mut list = MessageList::from_messages(vec![Message::new(
+            server_id_at(SEND_NOW_MS - 1_000),
+            "old",
+            "u1",
+            "U1",
+            100,
+        )]);
+        let temp_id = MessageId::next_optimistic();
+        list.push_grouped(
+            Message::new(temp_id, "mine", "me", "Me", 110).with_sort_id(optimistic_sort_id_at(
+                &list,
+                SEND_NOW_MS,
+                0,
+            )),
+        );
+        let idx = list.position(temp_id).expect("temp row must be present");
+        assert!(!list.is_out_of_order_at(idx));
+        list.replace_at_and_regroup(
+            idx,
+            Message::new(server_id_at(SEND_NOW_MS + 1_000), "mine", "me", "Me", 110),
+        );
+        assert!(!list.is_out_of_order_at(idx));
+        let order: Vec<&str> = list.as_slice().iter().map(|m| m.content.as_str()).collect();
+        assert_eq!(order, ["old", "mine"]);
+        assert_list_consistent(&list);
+    }
+
+    #[test]
     fn trim_messages_drops_oldest() {
         let mut msgs: Vec<Message> = (0..MAX_MESSAGES_PER_CHANNEL + 5)
             .map(|i| Message::new(MessageId(i as i64), format!("m{i}"), "u", "User", i as i64))
@@ -9215,6 +9453,24 @@ mod tests {
             b == ChannelId(99)
         });
         assert_eq!(bucket, ChannelId(99));
+    }
+
+    #[test]
+    fn mutation_bucket_for_never_redirects_a_named_channel_into_the_open_one() {
+        let mut edit = mezon_proto::api::ChannelMessage {
+            channel_id: 555,
+            ..Default::default()
+        };
+        edit.content = r#"{"t":"now playing"}"#.into();
+
+        let bucket = mutation_bucket_for(&edit, None, Some(ChannelId(10)), |b| b == ChannelId(10));
+
+        assert_eq!(
+            bucket,
+            ChannelId(555),
+            "an edit from a channel that is not cached has no local row to touch; resolving it \
+             against the open channel hands a bot's edit to whichever message there shares its id"
+        );
     }
 
     #[test]

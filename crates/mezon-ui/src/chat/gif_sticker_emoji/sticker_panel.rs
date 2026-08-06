@@ -7,7 +7,7 @@ use gpui::{
 use mezon_store::{ClanList, StickerEvent, StickerStore};
 
 use crate::components::primitives::{Icon, IconName};
-use crate::image_cache::{LruImageCache, SHARED_ENTRY_MAX_BYTES};
+use crate::image_cache::LruImageCache;
 use crate::theme::{ActiveTheme, Theme};
 
 const RAIL_W: f32 = 44.;
@@ -19,7 +19,8 @@ const STICKER_IMG_PX: f32 = 80.;
 const STICKER_ROW_PX: f32 = 104.;
 const HEADER_PX: f32 = 40.;
 const STICKER_CACHE_CAPACITY: usize = 96;
-const STICKER_CACHE_BYTES: u64 = 32 * 1024 * 1024;
+const STICKER_CACHE_BYTES: u64 = 12 * 1024 * 1024;
+const STICKER_ENTRY_MAX_BYTES: u64 = 4 * 1024 * 1024;
 
 #[derive(Clone)]
 struct StickerCell {
@@ -75,11 +76,11 @@ impl StickerPanel {
             })
         });
         let image_cache = cx.new(|cx| {
-            LruImageCache::labeled(
+            LruImageCache::sticker_thumbnail(
                 "gse-sticker-panel",
                 STICKER_CACHE_CAPACITY,
                 STICKER_CACHE_BYTES,
-                SHARED_ENTRY_MAX_BYTES,
+                STICKER_ENTRY_MAX_BYTES,
                 cx,
             )
         });

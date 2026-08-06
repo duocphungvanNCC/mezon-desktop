@@ -806,6 +806,7 @@ impl Render for ChannelSidebar {
             )
         });
 
+        let app_list_icon_cache = self.icon_image_cache.clone();
         let app_list_overlay = self
             .app_list_open
             .then(|| (self.app_list_apps.clone(), locale.clone()));
@@ -1090,6 +1091,7 @@ impl Render for ChannelSidebar {
                     &locale,
                     sidebar.clone(),
                     suppress_hover,
+                    app_list_icon_cache.clone(),
                     cx,
                 ))
             })

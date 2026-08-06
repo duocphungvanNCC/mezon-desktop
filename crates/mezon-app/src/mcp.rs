@@ -127,6 +127,59 @@ impl McpRuntime {
                         let result = cx.update(|_| set_cli_enabled(enabled));
                         let _ = reply.send(result);
                     }
+                    McpCommand::GetScrollState { reply } => {
+                        let result = cx.update(scroll_state);
+                        let _ = reply.send(result);
+                    }
+                    McpCommand::SetPanel { kind, reply } => {
+                        let result = cx.update(|cx| {
+                            mezon_ui::app::capture::set_composer_panel(cx, kind.as_deref())
+                        });
+                        let _ = reply.send(result);
+                    }
+                    McpCommand::OpenImageViewer {
+                        message_id,
+                        attachment_index,
+                        reply,
+                    } => {
+                        let result = cx.update(|cx| {
+                            mezon_ui::app::capture::open_message_image_viewer(
+                                &settings,
+                                message_id,
+                                attachment_index,
+                                cx,
+                            )
+                        });
+                        let _ = reply.send(result);
+                    }
+                    McpCommand::ScrollWheel {
+                        delta_y,
+                        ticks,
+                        reply,
+                    } => {
+                        let result = scroll_wheel(cx, delta_y, ticks).await;
+                        let _ = reply.send(result);
+                    }
+                    McpCommand::ScrollMessages { to_top, reply } => {
+                        let result =
+                            cx.update(|cx| mezon_ui::app::capture::scroll_messages(cx, to_top));
+                        let _ = reply.send(result);
+                    }
+                    McpCommand::ListEmojis {
+                        clan_id,
+                        query,
+                        limit,
+                        reply,
+                    } => {
+                        let result = cx.update(|cx| {
+                            list_emojis(cx, clan_id.as_deref(), query.as_deref(), limit)
+                        });
+                        let _ = reply.send(result);
+                    }
+                    McpCommand::LoadMoreMessages { older, reply } => {
+                        let result = cx.update(|cx| load_more_messages(cx, older));
+                        let _ = reply.send(result);
+                    }
                 }
             }
         })
@@ -199,6 +252,102 @@ async fn handle_control_request(
             format!("unknown control method: {other}"),
         )),
     }
+}
+
+fn list_emojis(
+    cx: &mut App,
+    clan_id: Option<&str>,
+    query: Option<&str>,
+    limit: usize,
+) -> anyhow::Result<Value> {
+    let store = mezon_store::EmojiStore::global(cx);
+    let store = store.read(cx);
+    let needle = query.map(str::to_lowercase);
+    let items: Vec<Value> = store
+        .all()
+        .into_iter()
+        .filter(|emoji| clan_id.is_none_or(|id| emoji.clan_id == id))
+        .filter(|emoji| {
+            needle
+                .as_deref()
+                .is_none_or(|needle| emoji.shortname.to_lowercase().contains(needle))
+        })
+        .take(limit)
+        .map(|emoji| {
+            json!({
+                "emoji_id": emoji.id,
+                "shortname": emoji.shortname,
+                "category": emoji.category,
+                "clan_id": emoji.clan_id,
+            })
+        })
+        .collect();
+    Ok(json!({ "count": items.len(), "emojis": items }))
+}
+
+async fn scroll_wheel(cx: &mut AsyncApp, delta_y: f32, ticks: u32) -> anyhow::Result<Value> {
+    use mezon_ui::app::capture::{
+        WHEEL_MAX_TICKS, WHEEL_TICK_INTERVAL, dispatch_wheel_tick, message_viewport_state,
+    };
+    let ticks = ticks.clamp(1, WHEEL_MAX_TICKS);
+    let before = cx.update(|cx| message_viewport_state(cx));
+    let mut delivered = 0u32;
+    let mut consumed = 0u32;
+    for tick in 0..ticks {
+        if cx.update(|cx| dispatch_wheel_tick(cx, delta_y))? {
+            consumed += 1;
+        }
+        delivered += 1;
+        if tick + 1 < ticks {
+            cx.background_executor().timer(WHEEL_TICK_INTERVAL).await;
+        }
+    }
+    let after = cx.update(|cx| message_viewport_state(cx));
+    let (item_count, first_visible, at_bottom) = after.unwrap_or((0, 0, false));
+    Ok(json!({
+        "ok": true,
+        "ticks": delivered,
+        "consumed_ticks": consumed,
+        "moved": before != after,
+        "delta_y": delta_y,
+        "item_count": item_count,
+        "first_visible_index": first_visible,
+        "at_bottom": at_bottom,
+    }))
+}
+
+fn scroll_state(cx: &mut App) -> anyhow::Result<Value> {
+    let store = mezon_store::MessagesStore::global(cx);
+    let store = store.read(cx);
+    Ok(json!({
+        "channel_id": store.active_channel_id().map(|id| id.to_string()),
+        "loaded_count": store.messages().len(),
+        "has_more_top": store.has_more_top(),
+        "has_more_bottom": store.has_more_bottom(),
+        "loading": store.is_loading(),
+        "loading_more": store.is_loading_more(),
+    }))
+}
+
+fn load_more_messages(cx: &mut App, older: bool) -> anyhow::Result<Value> {
+    let store = mezon_store::MessagesStore::global(cx);
+    let (started, before) = store.update(cx, |store, cx| {
+        let before = store.messages().len();
+        let started = if older {
+            store.load_more(cx)
+        } else {
+            store.load_more_bottom(cx)
+        };
+        (started, before)
+    });
+    let store = store.read(cx);
+    Ok(json!({
+        "started": started,
+        "direction": if older { "older" } else { "newer" },
+        "loaded_count_before": before,
+        "has_more_top": store.has_more_top(),
+        "has_more_bottom": store.has_more_bottom(),
+    }))
 }
 
 fn build_context(cx: &App, auth_state: &gpui::Entity<AuthState>) -> Value {

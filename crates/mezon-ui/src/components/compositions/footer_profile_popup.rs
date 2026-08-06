@@ -1,16 +1,18 @@
+use std::time::Duration;
+
 use gpui::{
     App, ClickEvent, ClipboardItem, Context, DismissEvent, EventEmitter, FocusHandle, Focusable,
-    FontWeight, Rgba, SharedString, Window, deferred, div, prelude::*, px,
+    FontWeight, Rgba, SharedString, Task, Window, deferred, div, prelude::*, px,
 };
 use mezon_store::{AccountStore, BadgeService, Settings, WalletStore};
 
-use crate::app::shell::Shell;
 use crate::chat::message::{CustomStatusModal, SendTokenModal, TransactionHistoryModal};
 use crate::components::primitives::{Avatar, Icon, IconName};
 use crate::theme::ActiveTheme;
 
 use mezon_store::TOKEN_DECIMAL_FACTOR as DECIMAL_FACTOR;
 const CURRENCY_SYMBOL: &str = "đồng";
+const COPY_USER_ID_RESET_MS: u64 = 1000;
 
 const STATUS_ONLINE: &str = "Online";
 const STATUS_IDLE: &str = "Idle";
@@ -75,6 +77,8 @@ pub struct FooterProfilePopup {
     status_menu_open: bool,
     status_duration_for: Option<&'static str>,
     custom_status_expanded: bool,
+    user_id_copied: bool,
+    _copy_user_id_reset: Option<Task<()>>,
 }
 
 impl Focusable for FooterProfilePopup {
@@ -145,7 +149,30 @@ impl FooterProfilePopup {
             status_menu_open: false,
             status_duration_for: None,
             custom_status_expanded: false,
+            user_id_copied: false,
+            _copy_user_id_reset: None,
         }
+    }
+
+    fn copy_user_id(&mut self, cx: &mut Context<Self>) {
+        if self.user_id.is_empty() {
+            return;
+        }
+        cx.write_to_clipboard(ClipboardItem::new_string(self.user_id.clone()));
+        self.user_id_copied = true;
+        cx.notify();
+        self._copy_user_id_reset.take();
+        let executor = cx.background_executor().clone();
+        self._copy_user_id_reset = Some(cx.spawn(async move |this, cx| {
+            executor
+                .timer(Duration::from_millis(COPY_USER_ID_RESET_MS))
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                this.user_id_copied = false;
+                this._copy_user_id_reset = None;
+                cx.notify();
+            });
+        }));
     }
 
     fn apply_status(
@@ -602,17 +629,34 @@ impl Render for FooterProfilePopup {
             ))
             .child(status_section)
             .child(div().w_full().my_1().h(px(1.)).bg(border).opacity(0.7))
-            .child(Self::action_row(
-                "footer-action-copy-id",
-                IconName::CopyIcon,
-                tk("userProfile.statusProfile.copyUserId"),
-                |this, _window, cx| {
-                    cx.write_to_clipboard(ClipboardItem::new_string(this.user_id.clone()));
-                    let msg = mezon_i18n::t(&this.locale, "token.copyAddressSuccess").to_string();
-                    Shell::global(cx).update(cx, |shell, cx| shell.success(msg, cx));
-                },
-                cx,
-            ));
+            .child({
+                let user_id_copied = self.user_id_copied;
+                let copy_label = tk("userProfile.statusProfile.copyUserId");
+                div()
+                    .id("footer-action-copy-id")
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_3()
+                    .px_2()
+                    .py(px(6.))
+                    .rounded_sm()
+                    .cursor_pointer()
+                    .hover(move |s| s.bg(hover_bg))
+                    .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| {
+                        this.copy_user_id(cx);
+                    }))
+                    .child(
+                        Icon::new(if user_id_copied {
+                            IconName::Tick
+                        } else {
+                            IconName::CopyIcon
+                        })
+                        .size(px(16.))
+                        .text_color(text_secondary),
+                    )
+                    .child(div().text_sm().text_color(text_primary).child(copy_label))
+            });
 
         div()
             .track_focus(&self.focus_handle)

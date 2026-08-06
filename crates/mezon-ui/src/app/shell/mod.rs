@@ -164,6 +164,22 @@ impl Shell {
         self.toast(ToastKind::Error, message, cx);
     }
 
+    pub fn error_once(
+        &mut self,
+        key: impl Into<SharedString>,
+        message: impl Into<SharedString>,
+        cx: &mut Context<Self>,
+    ) {
+        let key = key.into();
+        if self.toasts.iter().any(|t| t.key.as_ref() == Some(&key)) {
+            return;
+        }
+        self.toast(ToastKind::Error, message, cx);
+        if let Some(item) = self.toasts.last_mut() {
+            item.key = Some(key);
+        }
+    }
+
     /// Show `view` as the active modal (backdrop click dismisses). The view renders its own card.
     pub fn show_modal(&mut self, view: AnyView, cx: &mut Context<Self>) {
         self.command_palette_open = false;

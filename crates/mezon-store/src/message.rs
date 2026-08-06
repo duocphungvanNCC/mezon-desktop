@@ -606,6 +606,7 @@ pub struct TokenTransaction {
 #[derive(Debug, Clone)]
 pub struct Message {
     pub id: MessageId,
+    pub sort_id: i64,
     pub row_anchor_id: MessageId,
     pub content: String,
     pub sender_id: String,
@@ -1422,7 +1423,7 @@ pub fn recompute_message_grouping(messages: &mut [Message]) {
     }
 }
 
-fn compute_show_forwarded_label(prev: Option<&Message>, msg: &Message) -> bool {
+pub(crate) fn compute_show_forwarded_label(prev: Option<&Message>, msg: &Message) -> bool {
     if !msg.is_forwarded {
         return false;
     }
@@ -1437,7 +1438,7 @@ fn compute_show_forwarded_label(prev: Option<&Message>, msg: &Message) -> bool {
 
 pub fn message_sort_key(m: &Message) -> (u8, i64) {
     let not_first = u8::from(m.code != MessageCode::Indicator);
-    (not_first, m.id.get())
+    (not_first, m.sort_id)
 }
 
 pub fn sort_messages(messages: &mut [Message]) {
@@ -1463,6 +1464,7 @@ impl Message {
         let rich_layout = build_rich_layout(&spans);
         Self {
             id,
+            sort_id: id.get(),
             row_anchor_id: id,
             content,
             sender_id,
@@ -1504,6 +1506,11 @@ impl Message {
             viewer_media: Vec::new().into(),
             raw_content: None,
         }
+    }
+
+    pub fn with_sort_id(mut self, sort_id: i64) -> Self {
+        self.sort_id = sort_id;
+        self
     }
 
     pub fn with_raw_content(mut self, raw: &str) -> Self {

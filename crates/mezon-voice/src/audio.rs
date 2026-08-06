@@ -1,6 +1,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::time::{Duration, Instant};
 
 use anyhow::{Result, anyhow, bail};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
@@ -191,6 +192,7 @@ enum AudioCmd {
     SetInputActive(bool),
     SetInputDevice(Option<String>),
     SetOutputDevice(Option<String>),
+    RebuildOutput,
     Shutdown,
 }
 
@@ -246,17 +248,25 @@ impl AudioIo {
             .spawn(move || run_apm(capture_rx, reverse_rx, mic_tx, ns_enabled_apm, ns_level_apm))?;
 
         let mixer_for_thread = mixer.clone();
+        let rebuild_tx = ctrl_tx.clone();
         std::thread::Builder::new()
             .name("mezon-voice-audio".into())
             .spawn(move || {
                 let out_latency_ms = Arc::new(AtomicU32::new(0));
+                let rebuild_pending = Arc::new(AtomicBool::new(false));
                 let mut current_input_id = input_device_id;
                 let mut current_output_id = output_device_id;
+                let mut out_alive = Arc::new(AtomicBool::new(true));
                 let prepared = prepare_output(
                     current_output_id.as_deref(),
                     mixer_for_thread.clone(),
                     reverse_tx.clone(),
                     out_latency_ms.clone(),
+                    OutputErrorHook {
+                        ctrl_tx: rebuild_tx.clone(),
+                        rebuild_pending: rebuild_pending.clone(),
+                        stream_alive: out_alive.clone(),
+                    },
                 );
                 let (mut out_stream, mut out_fmt) = match prepared {
                     Ok(pair) => pair,
@@ -269,6 +279,8 @@ impl AudioIo {
                 let host = cpal::default_host();
                 let mut in_stream: Option<cpal::Stream> = None;
                 let mut capture_started = false;
+                let mut output_healthy = true;
+                let mut last_rebuild: Option<Instant> = None;
                 while let Ok(cmd) = ctrl_rx.recv() {
                     match cmd {
                         AudioCmd::SetInputActive(active) => {
@@ -328,18 +340,34 @@ impl AudioIo {
                             }
                         }
                         AudioCmd::SetOutputDevice(device_id) => {
-                            if current_output_id == device_id {
+                            if output_healthy
+                                && device_id.is_some()
+                                && current_output_id == device_id
+                            {
                                 continue;
                             }
                             current_output_id = device_id;
+                            let new_alive = Arc::new(AtomicBool::new(true));
                             match prepare_output(
                                 current_output_id.as_deref(),
                                 mixer_for_thread.clone(),
                                 reverse_tx.clone(),
                                 out_latency_ms.clone(),
+                                OutputErrorHook {
+                                    ctrl_tx: rebuild_tx.clone(),
+                                    rebuild_pending: rebuild_pending.clone(),
+                                    stream_alive: new_alive.clone(),
+                                },
                             ) {
                                 Ok((new_stream, new_fmt)) => {
-                                    out_stream = new_stream;
+                                    out_alive.store(false, Ordering::Relaxed);
+                                    out_alive = new_alive;
+                                    drop_stream_detached(std::mem::replace(
+                                        &mut out_stream,
+                                        new_stream,
+                                    ));
+                                    output_healthy = true;
+                                    rebuild_pending.store(false, Ordering::Relaxed);
                                     let changed = new_fmt.sample_rate != out_fmt.sample_rate
                                         || new_fmt.channels != out_fmt.channels;
                                     out_fmt = new_fmt;
@@ -348,9 +376,60 @@ impl AudioIo {
                                     }
                                 }
                                 Err(e) => {
+                                    output_healthy = false;
                                     tracing::warn!("voice output stream rebuild failed: {e}")
                                 }
                             }
+                        }
+                        AudioCmd::RebuildOutput => {
+                            if !rebuild_pending.load(Ordering::Relaxed) {
+                                continue;
+                            }
+                            if let Some(last) = last_rebuild
+                                && let Some(wait) =
+                                    OUTPUT_REBUILD_MIN_INTERVAL.checked_sub(last.elapsed())
+                            {
+                                std::thread::sleep(wait);
+                            }
+                            last_rebuild = Some(Instant::now());
+                            let new_alive = Arc::new(AtomicBool::new(true));
+                            match prepare_output(
+                                current_output_id.as_deref(),
+                                mixer_for_thread.clone(),
+                                reverse_tx.clone(),
+                                out_latency_ms.clone(),
+                                OutputErrorHook {
+                                    ctrl_tx: rebuild_tx.clone(),
+                                    rebuild_pending: rebuild_pending.clone(),
+                                    stream_alive: new_alive.clone(),
+                                },
+                            ) {
+                                Ok((new_stream, new_fmt)) => {
+                                    out_alive.store(false, Ordering::Relaxed);
+                                    out_alive = new_alive;
+                                    drop_stream_detached(std::mem::replace(
+                                        &mut out_stream,
+                                        new_stream,
+                                    ));
+                                    output_healthy = true;
+                                    tracing::info!(
+                                        "voice output stream recovered after stream error: {}Hz/{}ch",
+                                        new_fmt.sample_rate,
+                                        new_fmt.channels,
+                                    );
+                                    let changed = new_fmt.sample_rate != out_fmt.sample_rate
+                                        || new_fmt.channels != out_fmt.channels;
+                                    out_fmt = new_fmt;
+                                    if changed {
+                                        let _ = out_change_tx.send(new_fmt);
+                                    }
+                                }
+                                Err(e) => {
+                                    output_healthy = false;
+                                    tracing::warn!("voice output stream recovery failed: {e}");
+                                }
+                            }
+                            rebuild_pending.store(false, Ordering::Relaxed);
                         }
                         AudioCmd::Shutdown => break,
                     }
@@ -391,6 +470,45 @@ impl Drop for AudioIo {
 
 fn err_fn(e: cpal::StreamError) {
     tracing::warn!("voice audio stream error: {e}");
+}
+
+const OUTPUT_REBUILD_MIN_INTERVAL: Duration = Duration::from_secs(1);
+const OUTPUT_ERROR_LOG_INTERVAL: Duration = Duration::from_secs(1);
+
+#[derive(Clone)]
+struct OutputErrorHook {
+    ctrl_tx: flume::Sender<AudioCmd>,
+    rebuild_pending: Arc<AtomicBool>,
+    stream_alive: Arc<AtomicBool>,
+}
+
+impl OutputErrorHook {
+    fn fire_rebuild(&self) {
+        if self.stream_alive.load(Ordering::Relaxed)
+            && !self.rebuild_pending.swap(true, Ordering::Relaxed)
+        {
+            let _ = self.ctrl_tx.send(AudioCmd::RebuildOutput);
+        }
+    }
+}
+
+fn output_err_fn(hook: OutputErrorHook) -> impl FnMut(cpal::StreamError) + Send + 'static {
+    let mut last_log: Option<Instant> = None;
+    move |e| {
+        if last_log.is_none_or(|at| at.elapsed() >= OUTPUT_ERROR_LOG_INTERVAL) {
+            last_log = Some(Instant::now());
+            tracing::warn!("voice audio output stream error: {e}");
+        }
+        if !matches!(e, cpal::StreamError::BufferUnderrun) {
+            hook.fire_rebuild();
+        }
+    }
+}
+
+fn drop_stream_detached(stream: cpal::Stream) {
+    let _ = std::thread::Builder::new()
+        .name("mezon-voice-stream-drop".into())
+        .spawn(move || drop(stream));
 }
 
 #[cfg(target_os = "macos")]
@@ -463,6 +581,7 @@ fn prepare_output(
     mixer: Arc<PlaybackMixer>,
     reverse_tx: flume::Sender<ReverseChunk>,
     out_latency_ms: Arc<AtomicU32>,
+    err_hook: OutputErrorHook,
 ) -> Result<(cpal::Stream, AudioFormat)> {
     let host = cpal::default_host();
     if let Some(id) = output_device_id {
@@ -472,6 +591,7 @@ fn prepare_output(
                 mixer.clone(),
                 reverse_tx.clone(),
                 out_latency_ms.clone(),
+                err_hook.clone(),
             )
         });
         match opened {
@@ -480,7 +600,7 @@ fn prepare_output(
         }
     }
     let device = select_output(&host, None)?;
-    open_output(&device, mixer, reverse_tx, out_latency_ms)
+    open_output(&device, mixer, reverse_tx, out_latency_ms, err_hook)
 }
 
 fn open_output(
@@ -488,13 +608,21 @@ fn open_output(
     mixer: Arc<PlaybackMixer>,
     reverse_tx: flume::Sender<ReverseChunk>,
     out_latency_ms: Arc<AtomicU32>,
+    err_hook: OutputErrorHook,
 ) -> Result<(cpal::Stream, AudioFormat)> {
     let supported = device.default_output_config()?;
     let out_fmt = AudioFormat {
         sample_rate: supported.sample_rate(),
         channels: supported.channels() as u32,
     };
-    let stream = build_output(device, &supported, mixer, reverse_tx, out_latency_ms)?;
+    let stream = build_output(
+        device,
+        &supported,
+        mixer,
+        reverse_tx,
+        out_latency_ms,
+        err_hook,
+    )?;
     stream.play()?;
     Ok((stream, out_fmt))
 }
@@ -617,6 +745,7 @@ fn build_output(
     mixer: Arc<PlaybackMixer>,
     reverse_tx: flume::Sender<ReverseChunk>,
     out_latency_ms: Arc<AtomicU32>,
+    err_hook: OutputErrorHook,
 ) -> Result<cpal::Stream> {
     let mut config: cpal::StreamConfig = supported.config();
     config.buffer_size = low_latency_buffer(supported);
@@ -641,7 +770,7 @@ fn build_output(
                         *o = i16_to_f32(s);
                     }
                 },
-                err_fn,
+                output_err_fn(err_hook),
                 None,
             )?
         }
@@ -656,7 +785,7 @@ fn build_output(
                     rev.extend_from_slice(out);
                     flush_reverse(&mut rev, frame, rate, channels, &tx);
                 },
-                err_fn,
+                output_err_fn(err_hook),
                 None,
             )?
         }
@@ -677,7 +806,7 @@ fn build_output(
                         *o = (s as i32 + 32768) as u16;
                     }
                 },
-                err_fn,
+                output_err_fn(err_hook),
                 None,
             )?
         }

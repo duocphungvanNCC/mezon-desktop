@@ -12,7 +12,7 @@ const EXCLUDED_HOSTS: &[&str] = &[
 
 const TRAILING_PUNCTUATION: &[char] = &['.', ',', ';', ':', '!', '?', ')', ']', '}', '\'', '"'];
 
-pub fn invite_id_from_url(url: &str) -> Option<String> {
+fn invite_id_from_url(url: &str) -> Option<String> {
     const NEEDLE: &[u8] = b"/invite/";
     let idx = url
         .as_bytes()
@@ -66,6 +66,36 @@ fn next_scheme(text: &str) -> Option<usize> {
     }
 }
 
+/// The invite id in `url`, but only when `url` points at our own domain.
+///
+/// An invite id is a gateway credential: it is forwarded to the Mezon invite API
+/// together with the api key, so a `/invite/<id>` path on a foreign host must
+/// never be treated as one.
+pub fn internal_invite_id(url: &str, internal_domain: Option<&str>) -> Option<String> {
+    is_internal_host(url, internal_domain)
+        .then(|| invite_id_from_url(url))
+        .flatten()
+}
+
+fn normalized_internal_domain(internal_domain: Option<&str>) -> Option<String> {
+    let internal = internal_domain?
+        .trim()
+        .trim_start_matches("https://")
+        .trim_start_matches("http://")
+        .trim_end_matches('/')
+        .trim_start_matches("www.")
+        .to_ascii_lowercase();
+    (!internal.is_empty()).then_some(internal)
+}
+
+fn is_internal_host(url: &str, internal_domain: Option<&str>) -> bool {
+    let (Some(host), Some(internal)) = (host_of(url), normalized_internal_domain(internal_domain))
+    else {
+        return false;
+    };
+    host_matches(&host, &internal)
+}
+
 fn is_previewable(url: &str, internal_domain: Option<&str>) -> bool {
     let Some(host) = host_of(url) else {
         return false;
@@ -76,14 +106,8 @@ fn is_previewable(url: &str, internal_domain: Option<&str>) -> bool {
     {
         return false;
     }
-    if let Some(internal) = internal_domain {
-        let internal = internal
-            .trim()
-            .trim_start_matches("www.")
-            .to_ascii_lowercase();
-        if !internal.is_empty() && host_matches(&host, &internal) {
-            return false;
-        }
+    if is_internal_host(url, internal_domain) {
+        return invite_id_from_url(url).is_some();
     }
     true
 }
@@ -142,6 +166,107 @@ mod tests {
         assert_eq!(
             first_previewable_url("https://app.mezon.ai/x", Some("mezon.ai")),
             None
+        );
+    }
+
+    #[test]
+    fn skips_internal_domain_given_with_a_scheme() {
+        assert_eq!(
+            first_previewable_url("https://mezon.ai/channels/1/2", Some("https://mezon.ai")),
+            None
+        );
+        assert_eq!(
+            first_previewable_url(
+                "https://mezon.ai/chat/clans/1/channels/2",
+                Some("https://mezon.ai/")
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn an_invite_path_on_a_foreign_host_is_not_an_invite() {
+        assert_eq!(
+            internal_invite_id(
+                "https://evil.com/invite/1840670747886882816",
+                Some("mezon.ai")
+            ),
+            None
+        );
+        assert_eq!(
+            internal_invite_id(
+                "https://mezon.ai.evil.com/invite/1840670747886882816",
+                Some("mezon.ai")
+            ),
+            None
+        );
+        assert_eq!(
+            internal_invite_id(
+                "https://evil.com/x?next=https://mezon.ai/invite/123",
+                Some("mezon.ai")
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn an_invite_on_our_own_host_is_accepted() {
+        assert_eq!(
+            internal_invite_id(
+                "https://mezon.ai/invite/1840670747886882816",
+                Some("https://mezon.ai")
+            )
+            .as_deref(),
+            Some("1840670747886882816")
+        );
+        assert_eq!(
+            internal_invite_id("https://app.mezon.ai/invite/abc-DEF_1", Some("mezon.ai"))
+                .as_deref(),
+            Some("abc-DEF_1")
+        );
+    }
+
+    #[test]
+    fn no_internal_domain_means_no_invite_is_trusted() {
+        assert_eq!(
+            internal_invite_id("https://mezon.ai/invite/123", None),
+            None
+        );
+        assert_eq!(
+            internal_invite_id("https://mezon.ai/invite/123", Some("")),
+            None
+        );
+    }
+
+    #[test]
+    fn keeps_an_internal_invite_link() {
+        assert_eq!(
+            first_previewable_url(
+                "join https://mezon.ai/invite/1840670747886882816",
+                Some("https://mezon.ai")
+            )
+            .as_deref(),
+            Some("https://mezon.ai/invite/1840670747886882816")
+        );
+    }
+
+    #[test]
+    fn falls_through_to_the_next_url_after_an_internal_one() {
+        assert_eq!(
+            first_previewable_url(
+                "https://mezon.ai/channels/1 then https://example.com/b",
+                Some("https://mezon.ai")
+            )
+            .as_deref(),
+            Some("https://example.com/b")
+        );
+    }
+
+    #[test]
+    fn an_unset_internal_domain_previews_everything() {
+        assert_eq!(
+            first_previewable_url("https://mezon.ai/channels/1", Some("")).as_deref(),
+            Some("https://mezon.ai/channels/1")
         );
     }
 

@@ -46,7 +46,7 @@ pub(crate) use avatar::{avatar_color, name_initials};
 pub use badge::Badge;
 pub use checkbox::{Checkbox, Radio};
 pub use context_menu::{ContextMenu, SubmenuOption, context_menu_at};
-pub use date_picker::{DatePicker, DatePickerEvent};
+pub use date_picker::{DatePicker, DatePickerEvent, DatePickerPopupMode};
 pub use divider::Divider;
 pub use dropdown::{Dropdown, DropdownTriggerStyle};
 pub use label::Label;

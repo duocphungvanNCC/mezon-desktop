@@ -119,6 +119,32 @@ fn update_indicator(
                     )),
             )
         }
+        AutoUpdateStatus::ManualInstall { version, .. } => {
+            let bg_hover = theme.bg_hover;
+            Some(
+                div()
+                    .id("titlebar-update-manual-install")
+                    .flex()
+                    .items_center()
+                    .h(px(22.0))
+                    .px_2()
+                    .mr_2()
+                    .rounded(px(4.0))
+                    .text_xs()
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(gpui::rgb(0x22c55e))
+                    .cursor_pointer()
+                    .hover(move |s| s.bg(bg_hover))
+                    .on_click(|_, _, cx| {
+                        mezon_store::update_manual_install_clicked(cx);
+                        crate::router::navigate(cx, crate::router::Route::SettingsAccount);
+                    })
+                    .child(format!(
+                        "{} (v{version})",
+                        mezon_i18n::t(locale, "setting.update.readyToInstall")
+                    )),
+            )
+        }
         _ => None,
     }
 }

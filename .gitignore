@@ -1,5 +1,7 @@
 # Rust build artifacts
 target/
+# Alternate CARGO_TARGET_DIR checkouts (review/bench worktrees) — multi-GB each
+target-*/
 
 # macOS
 .DS_Store

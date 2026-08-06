@@ -29,7 +29,7 @@ use crate::video::i420_to_bgra_into;
 use crate::video::nv12_full_to_i420;
 use crate::video::{VideoFrameStore, local_screen_key};
 
-const CAPTURE_FPS: u32 = 30;
+const CAPTURE_FPS: u32 = 60;
 #[cfg(not(target_os = "macos"))]
 const PREVIEW_MAX_WIDTH: u32 = 1280;
 #[cfg(not(target_os = "macos"))]
@@ -346,9 +346,7 @@ pub fn start_screen(
                 }
 
                 #[cfg(target_os = "macos")]
-                if width == full_w && height == full_h {
-                    frame_store.publish_surface(key, src_w, src_h, captured.core_video_buffer());
-                } else {
+                {
                     let i420 = &frame.buffer;
                     let (sy, su, sv) = i420.strides();
                     let (y, u, v) = i420.data();

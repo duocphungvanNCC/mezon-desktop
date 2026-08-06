@@ -86,30 +86,6 @@ impl VideoFrameStore {
         recycled
     }
 
-    #[cfg(target_os = "macos")]
-    pub fn publish_surface(
-        &self,
-        key: u64,
-        width: u32,
-        height: u32,
-        surface: core_video::pixel_buffer::CVPixelBuffer,
-    ) {
-        let seq = self.seq.fetch_add(1, Ordering::Relaxed);
-        let frame = Arc::new(VideoFrameData {
-            width,
-            height,
-            bgra: Vec::new(),
-            surface: Some(VideoSurface(surface)),
-            seq,
-        });
-        {
-            let mut state = self.state.lock();
-            state.active.insert(key);
-            state.frames.insert(key, frame);
-        }
-        self.frame_tx.send_replace(seq.wrapping_add(1));
-    }
-
     pub fn get(&self, key: u64) -> Option<Arc<VideoFrameData>> {
         self.state.lock().frames.get(&key).cloned()
     }
