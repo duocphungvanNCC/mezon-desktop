@@ -31,7 +31,6 @@ pub struct ChannelSearchState {
     pub loaded_page: i32,
     pub is_searching: bool,
     pub has_error: bool,
-    pub page_empty: bool,
     pub generation: u64,
     pub revision: u64,
 }
@@ -212,7 +211,6 @@ impl MessageSearchStore {
 
         if state.loaded_page != page {
             state.results.clear();
-            state.page_empty = false;
         }
         state.current_page = page;
         state.is_searching = true;
@@ -373,7 +371,6 @@ impl MessageSearchStore {
                             }
                         }
                         state.has_error = false;
-                        state.page_empty = page_empty;
                         state.total = total;
                         state.current_page = page;
                         state.loaded_page = page;
@@ -393,7 +390,6 @@ impl MessageSearchStore {
                         tracing::warn!("search_message failed: {err}");
                         state.is_searching = false;
                         state.has_error = true;
-                        state.page_empty = false;
                         state.loaded_page = 0;
                         state.results.clear();
                         cx.emit(MessageSearchEvent::SearchFailed);

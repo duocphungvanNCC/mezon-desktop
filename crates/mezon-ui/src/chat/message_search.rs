@@ -11,7 +11,7 @@ use gpui::{
 };
 use mezon_store::{
     ChannelId, ChannelList, ChannelType, ClanId, MessageSearchStore, MessageSpan, MessagesStore,
-    RichLayout, SearchDropdownMode, SearchHit, SearchPageToken, autocomplete_needle,
+    RichLayout, RichRunKind, SearchDropdownMode, SearchHit, SearchPageToken, autocomplete_needle,
     has_filter_options, resolve_search_hit_ogp, search_content_highlight_terms,
     search_dropdown_mode, search_page_count, search_page_numbers, should_show_search_dropdown,
 };
@@ -247,39 +247,34 @@ impl MessageSearchPanel {
         }
     }
 
-    fn set_results_page(&mut self, page: i32, cx: &mut Context<Self>) {
-        if self.last_results_page != page {
-            self.last_results_page = page;
-            self.list_state.scroll_to(ListOffset {
-                item_ix: 0,
-                offset_in_item: px(0.),
-            });
-            cx.notify();
-        }
-    }
-
     fn sync_results_list(&mut self, state: &mezon_store::ChannelSearchState) {
         if state.loaded_page != state.current_page {
             return;
         }
 
         let fp = (state.generation, state.revision, state.loaded_page);
-        let content_changed = self.rows_cache_fp != Some(fp);
-        let page_changed = self.last_results_page != state.current_page;
-
-        if content_changed {
-            self.rows_cache_fp = Some(fp);
-            self.cached_rows = Rc::new(build_search_list_rows(&state.results));
-            self.cached_highlights = Rc::new(search_content_highlight_terms(&state.query));
+        if self.rows_cache_fp == Some(fp) {
+            return;
         }
 
-        if content_changed || page_changed {
+        let page_changed = self.last_results_page != state.loaded_page;
+        let generation_changed = self
+            .rows_cache_fp
+            .is_none_or(|(generation, _, _)| generation != state.generation);
+        let prev_row_count = self.cached_rows.len();
+
+        self.rows_cache_fp = Some(fp);
+        self.cached_rows = Rc::new(build_search_list_rows(&state.results));
+        self.cached_highlights = Rc::new(search_content_highlight_terms(&state.query));
+
+        let row_count_changed = self.cached_rows.len() != prev_row_count;
+        if page_changed || row_count_changed || generation_changed {
             self.list_state.reset(self.cached_rows.len());
             self.list_state.scroll_to(ListOffset {
                 item_ix: 0,
                 offset_in_item: px(0.),
             });
-            self.last_results_page = state.current_page;
+            self.last_results_page = state.loaded_page;
         }
     }
 
@@ -316,7 +311,6 @@ impl Render for MessageSearchPanel {
         let is_direct = self.is_direct;
         let state = MessageSearchStore::global(cx).read(cx).state(channel_id);
         let entity = cx.weak_entity();
-        self.set_results_page(state.current_page, cx);
         let page_count = search_page_count(state.total);
 
         let page_mismatch = state.loaded_page != state.current_page;
@@ -1144,16 +1138,25 @@ fn render_rich_search_content(
                 color: Some(body_color),
                 ..Default::default()
             },
+            SearchHighlightKind::QueryMatch,
         ));
     }
 
     for run in layout.runs.iter() {
-        tokens.push((run.range.clone(), rich_run_highlight(run.kind, &palette)));
+        tokens.push((
+            run.range.clone(),
+            rich_run_highlight(run.kind, &palette),
+            SearchHighlightKind::Rich(run.kind),
+        ));
     }
 
     let occupied: Vec<(Range<usize>, HighlightStyle)> =
-        tokens.iter().map(|(r, s)| (r.clone(), *s)).collect();
-    tokens.extend(search_auto_link_highlights(theme, text.as_ref(), &occupied));
+        tokens.iter().map(|(r, s, _)| (r.clone(), *s)).collect();
+    tokens.extend(
+        search_auto_link_highlights(theme, text.as_ref(), &occupied)
+            .into_iter()
+            .map(|(range, style)| (range, style, SearchHighlightKind::Link)),
+    );
 
     let highlights = search_merge_content_highlights(text.as_ref(), tokens, body_style);
 
@@ -1180,11 +1183,16 @@ fn render_search_styled_plain(text: &str, terms: &[String], theme: &Theme) -> gp
                 color: Some(body_color),
                 ..Default::default()
             },
+            SearchHighlightKind::QueryMatch,
         ));
     }
     let occupied: Vec<(Range<usize>, HighlightStyle)> =
-        tokens.iter().map(|(r, s)| (r.clone(), *s)).collect();
-    tokens.extend(search_auto_link_highlights(theme, text, &occupied));
+        tokens.iter().map(|(r, s, _)| (r.clone(), *s)).collect();
+    tokens.extend(
+        search_auto_link_highlights(theme, text, &occupied)
+            .into_iter()
+            .map(|(range, style)| (range, style, SearchHighlightKind::Link)),
+    );
     let highlights = search_merge_content_highlights(text, tokens, body_style);
     div()
         .w_full()
@@ -1210,10 +1218,6 @@ fn search_link_highlight_style(theme: &Theme) -> HighlightStyle {
         }),
         ..Default::default()
     }
-}
-
-fn search_is_link_highlight(style: &HighlightStyle) -> bool {
-    style.underline.is_some()
 }
 
 fn search_ranges_overlap(a: &Range<usize>, b: &Range<usize>) -> bool {
@@ -1310,30 +1314,38 @@ fn search_auto_link_highlights(
     out
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SearchHighlightKind {
+    QueryMatch,
+    Rich(RichRunKind),
+    Link,
+}
+
 fn search_merge_content_highlights(
     text: &str,
-    tokens: Vec<(Range<usize>, HighlightStyle)>,
+    tokens: Vec<(Range<usize>, HighlightStyle, SearchHighlightKind)>,
     body_style: HighlightStyle,
 ) -> Vec<(Range<usize>, HighlightStyle)> {
     let text_len = text.len();
-    let mut mentions = Vec::new();
+    let mut styled = Vec::new();
     let mut links = Vec::new();
-    for (range, style) in tokens {
+    for (range, style, kind) in tokens {
         if range.start >= range.end || range.end > text_len {
             continue;
         }
         if !text.is_char_boundary(range.start) || !text.is_char_boundary(range.end) {
             continue;
         }
-        if style.background_color.is_some() {
-            mentions.push((range, style));
-        } else if search_is_link_highlight(&style) {
-            links.push((range, style));
+        match kind {
+            SearchHighlightKind::Link => links.push((range, style)),
+            SearchHighlightKind::QueryMatch => styled.push((range, style)),
+            SearchHighlightKind::Rich(RichRunKind::Link) => links.push((range, style)),
+            SearchHighlightKind::Rich(_) => styled.push((range, style)),
         }
     }
-    mentions.sort_by_key(|(range, _)| range.start);
+    styled.sort_by_key(|(range, _)| range.start);
     links.sort_by_key(|(range, _)| range.start);
-    let mut picked = mentions;
+    let mut picked = styled;
     for (link_range, link_style) in links {
         if !picked
             .iter()
