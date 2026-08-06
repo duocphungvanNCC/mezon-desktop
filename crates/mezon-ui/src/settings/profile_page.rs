@@ -3,8 +3,8 @@ use crate::components::primitives::{
     Label, TextArea, TextAreaEvent, TextAreaField, h_flex, v_flex,
 };
 use gpui::{
-    Context, Entity, FontWeight, PathPromptOptions, Rgba, SharedString, Subscription, Task, Window,
-    div, img, prelude::*, px,
+    Context, Entity, FontWeight, MouseButton, MouseDownEvent, PathPromptOptions, Pixels, Point,
+    Rgba, SharedString, Subscription, Task, Window, anchored, deferred, div, img, prelude::*, px,
 };
 use mezon_store::{AccountEvent, AccountStore, AppConfig, ClanList, Settings, UserAccount};
 
@@ -74,6 +74,7 @@ pub struct ProfilePage {
     account_loaded: bool,
     clan_section: Option<Entity<ClanProfileSection>>,
     avatar_local_preview: Option<std::path::PathBuf>,
+    dm_icon_menu_position: Option<Point<Pixels>>,
     avatar_image_cache: Entity<LruImageCache>,
     banner_color: Option<Rgba>,
     banner_source: String,
@@ -208,6 +209,7 @@ impl ProfilePage {
             account_loaded,
             clan_section: None,
             avatar_local_preview: None,
+            dm_icon_menu_position: None,
             avatar_image_cache: crate::image_cache::shared_avatar_cache(cx),
             banner_color: None,
             banner_source: String::new(),
@@ -766,6 +768,60 @@ impl ProfilePage {
             .profile
             .as_ref()
             .and_then(|profile| profile.logo_url.clone());
+        let dm_icon_menu = self.dm_icon_menu_position.map(|position| {
+            let dismiss = cx.entity().downgrade();
+            let remove = cx.entity().downgrade();
+            let label = mezon_i18n::t(&locale, "clanRoles.roleManagement.removeIcon");
+            deferred(
+                div()
+                    .child(anchored().position(Point::default()).child(
+                        div().w(px(100000.)).h(px(100000.)).on_mouse_down(
+                            MouseButton::Left,
+                            move |_: &MouseDownEvent, _, cx| {
+                                let _ = dismiss.update(cx, |this, cx| {
+                                    this.dm_icon_menu_position = None;
+                                    cx.notify();
+                                });
+                            },
+                        ),
+                    ))
+                    .child(
+                        anchored().position(position).snap_to_window().child(
+                            div()
+                                .w(px(132.))
+                                .p_1()
+                                .rounded_md()
+                                .border_1()
+                                .border_color(theme.border)
+                                .bg(theme.tokens.bg_theme_contexify)
+                                .shadow_lg()
+                                .occlude()
+                                .child(
+                                    div()
+                                        .id("dm-icon-remove-menu-item")
+                                        .w_full()
+                                        .px_2()
+                                        .py_1()
+                                        .rounded_sm()
+                                        .text_sm()
+                                        .text_color(theme.text_primary)
+                                        .cursor_pointer()
+                                        .hover(|element| element.bg(theme.bg_hover))
+                                        .child(label)
+                                        .on_click(move |_, _, cx| {
+                                            let _ = remove.update(cx, |this, cx| {
+                                                if let Some(profile) = &mut this.profile {
+                                                    profile.logo_url = None;
+                                                }
+                                                this.dm_icon_menu_position = None;
+                                                cx.notify();
+                                            });
+                                        }),
+                                ),
+                        ),
+                    ),
+            )
+        });
 
         v_flex()
             .gap_4()
@@ -926,129 +982,143 @@ impl ProfilePage {
                     ),
             )
             .child(
-                h_flex()
-                    .justify_between()
-                    .items_center()
-                    .p_4()
-                    .rounded_lg()
-                    .border_1()
-                    .border_color(theme.border)
-                    .bg(theme.bg_primary)
+                div()
+                    .relative()
                     .child(
-                        div()
-                            .text_sm()
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(theme.text_muted)
-                            .child(mezon_i18n::t(&locale, "profileSetting.directMessageIcon")),
-                    )
-                    .child(
-                        div()
-                            .id("direct-message-icon-upload")
-                            .size(px(48.))
-                            .rounded_md()
+                        h_flex()
+                            .justify_between()
+                            .items_center()
+                            .p_4()
+                            .rounded_lg()
                             .border_1()
                             .border_color(theme.border)
-                            .bg(theme.bg_secondary)
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .cursor_pointer()
-                            .when_some(logo_url.clone(), |element, url| {
-                                element.child(
-                                    img(crate::util::imgproxy::profile_url(cx, &url))
-                                        .size_full()
-                                        .rounded_md()
-                                        .object_fit(gpui::ObjectFit::Cover),
-                                )
-                            })
-                            .when(
-                                self.profile
-                                    .as_ref()
-                                    .and_then(|profile| profile.logo_url.as_ref())
-                                    .is_none(),
-                                |element| {
-                                    element.child(
-                                        Icon::new(IconName::Plus)
-                                            .size(px(22.))
-                                            .text_color(theme.text_muted),
-                                    )
-                                },
+                            .bg(theme.bg_primary)
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(theme.text_muted)
+                                    .child(mezon_i18n::t(
+                                        &locale,
+                                        "profileSetting.directMessageIcon",
+                                    )),
                             )
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                let root = cx.entity().clone();
-                                let locale = this.settings.read(cx).language.clone();
-                                let rx = cx.prompt_for_paths(PathPromptOptions {
-                                    files: true,
-                                    directories: false,
-                                    multiple: false,
-                                    prompt: Some(
-                                        mezon_i18n::t(&locale, "setting.profile.chooseAvatar")
-                                            .into(),
-                                    ),
-                                });
-                                cx.spawn(async move |_this, cx| {
-                                    let paths = match rx.await {
-                                        Ok(Ok(Some(paths))) => paths,
-                                        _ => return,
-                                    };
-                                    let Some(path) = paths.into_iter().next() else {
-                                        return;
-                                    };
-                                    root.update(cx, |_, cx| {
-                                        if path
-                                            .metadata()
-                                            .map(|metadata| metadata.len())
-                                            .unwrap_or(u64::MAX)
-                                            > 1024 * 1024
-                                        {
-                                            let title =
-                                                mezon_i18n::t(&locale, "common.filesTooPowerful");
-                                            let content =
-                                                mezon_i18n::t(&locale, "common.maxFileSize")
-                                                    .replace("{{sizeLimit}}", "1 MB");
-                                            if let Some(handle) =
-                                                crate::app::main_window::handle(cx)
+                            .child(
+                                div()
+                                    .id("direct-message-icon-upload")
+                                    .size(px(48.))
+                                    .rounded_md()
+                                    .border_1()
+                                    .border_color(theme.border)
+                                    .bg(theme.bg_secondary)
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .cursor_pointer()
+                                    .on_mouse_down(
+                                        MouseButton::Right,
+                                        cx.listener(|this, event: &MouseDownEvent, _, cx| {
+                                            if this
+                                                .profile
+                                                .as_ref()
+                                                .and_then(|profile| profile.logo_url.as_ref())
+                                                .is_some()
                                             {
-                                                let _ =
-                                                    cx.update_window(handle, |_, window, cx| {
-                                                        Shell::global(cx).update(
-                                                            cx,
-                                                            |shell, cx| {
-                                                                shell.show_upload_limit(
-                                                                    title, content, window, cx,
+                                                this.dm_icon_menu_position = Some(event.position);
+                                                cx.notify();
+                                            }
+                                        }),
+                                    )
+                                    .when_some(logo_url.clone(), |element, url| {
+                                        element.child(
+                                            img(crate::util::imgproxy::profile_url(cx, &url))
+                                                .size_full()
+                                                .rounded_md()
+                                                .object_fit(gpui::ObjectFit::Cover),
+                                        )
+                                    })
+                                    .when(
+                                        self.profile
+                                            .as_ref()
+                                            .and_then(|profile| profile.logo_url.as_ref())
+                                            .is_none(),
+                                        |element| {
+                                            element.child(
+                                                Icon::new(IconName::Plus)
+                                                    .size(px(22.))
+                                                    .text_color(theme.text_muted),
+                                            )
+                                        },
+                                    )
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        let root = cx.entity().clone();
+                                        let locale = this.settings.read(cx).language.clone();
+                                        let rx = cx.prompt_for_paths(PathPromptOptions {
+                                            files: true,
+                                            directories: false,
+                                            multiple: false,
+                                            prompt: Some(
+                                                mezon_i18n::t(
+                                                    &locale,
+                                                    "setting.profile.chooseAvatar",
+                                                )
+                                                .into(),
+                                            ),
+                                        });
+                                        cx.spawn(async move |_this, cx| {
+                                            let paths = match rx.await {
+                                                Ok(Ok(Some(paths))) => paths,
+                                                _ => return,
+                                            };
+                                            let Some(path) = paths.into_iter().next() else {
+                                                return;
+                                            };
+                                            root.update(cx, |_, cx| {
+                                                if path
+                                                    .metadata()
+                                                    .map(|metadata| metadata.len())
+                                                    .unwrap_or(u64::MAX)
+                                                    > 1024 * 1024
+                                                {
+                                                    let title = mezon_i18n::t(
+                                                        &locale,
+                                                        "common.filesTooPowerful",
+                                                    );
+                                                    let content = mezon_i18n::t(
+                                                        &locale,
+                                                        "common.maxFileSize",
+                                                    )
+                                                    .replace("{{sizeLimit}}", "1 MB");
+                                                    if let Some(handle) =
+                                                        crate::app::main_window::handle(cx)
+                                                    {
+                                                        let _ = cx.update_window(
+                                                            handle,
+                                                            |_, window, cx| {
+                                                                Shell::global(cx).update(
+                                                                    cx,
+                                                                    |shell, cx| {
+                                                                        shell.show_upload_limit(
+                                                                            title, content, window,
+                                                                            cx,
+                                                                        );
+                                                                    },
                                                                 );
                                                             },
                                                         );
-                                                    });
-                                            }
-                                            return;
-                                        }
-                                        AccountStore::global(cx).update(cx, |store, cx| {
-                                            store.upload_direct_message_icon(&path, cx)
+                                                    }
+                                                    return;
+                                                }
+                                                AccountStore::global(cx).update(cx, |store, cx| {
+                                                    store.upload_direct_message_icon(&path, cx)
+                                                })
+                                            });
                                         })
-                                    });
-                                })
-                                .detach();
-                            })),
+                                        .detach();
+                                    })),
+                            ),
                     )
-                    .when(logo_url.is_some(), |element| {
-                        element.child(
-                            GpuiButton::new("remove-direct-message-icon-btn")
-                                .label(mezon_i18n::t(
-                                    &locale,
-                                    "clanRoles.roleManagement.removeIcon",
-                                ))
-                                .text_color(theme.text_muted)
-                                .border_1()
-                                .border_color(theme.border)
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    if let Some(profile) = &mut this.profile {
-                                        profile.logo_url = None;
-                                    }
-                                    cx.notify();
-                                })),
-                        )
-                    }),
+                    .when_some(dm_icon_menu, |element, menu| element.child(menu)),
             )
     }
 
