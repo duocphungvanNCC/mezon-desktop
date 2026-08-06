@@ -209,10 +209,7 @@ impl DirectSidebar {
         })
         .detach();
         cx.subscribe(&PresenceStore::global(cx), |this, _, event, cx| {
-            if matches!(
-                event,
-                PresenceEvent::StatusChanged | PresenceEvent::ChannelPresenceChanged { .. }
-            ) {
+            if matches!(event, PresenceEvent::StatusChanged) {
                 this.refresh_dm_items(cx);
             }
         })

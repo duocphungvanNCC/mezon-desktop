@@ -1,4 +1,4 @@
-use gpui::{AnyElement, ElementId, Pixels, Rgba, SharedString, div, prelude::*, px};
+use gpui::{AnyElement, ElementId, Pixels, SharedString, div, prelude::*, px};
 use mezon_store::{DirectKind, DmAvatarPresence};
 
 use crate::components::primitives::{Avatar, Icon, IconName};
@@ -9,6 +9,7 @@ pub const DM_ROW_HEIGHT: f32 = 42.;
 
 const DM_AVATAR_SIZE: Pixels = px(32.);
 const PRESENCE_DOT_SIZE: Pixels = px(12.);
+const PRESENCE_IDLE_ICON_SIZE: Pixels = px(10.);
 
 pub struct DmRow {
     id: SharedString,
@@ -259,49 +260,41 @@ impl DmRow {
         let border = theme.bg_secondary;
         match self.presence_badge {
             DmAvatarPresence::None => None,
-            DmAvatarPresence::Online => Some(
-                div()
-                    .absolute()
-                    .bottom(px(-1.))
-                    .right(px(-1.))
-                    .size(badge_size)
-                    .rounded_full()
-                    .border_2()
-                    .border_color(border)
-                    .bg(theme.status_online)
-                    .into_any_element(),
-            ),
-            DmAvatarPresence::Dnd => Some(
-                div()
-                    .absolute()
-                    .bottom(px(-1.))
-                    .right(px(-1.))
-                    .size(badge_size)
-                    .rounded_full()
-                    .border_2()
-                    .border_color(border)
-                    .bg(theme.status_dnd)
-                    .into_any_element(),
-            ),
-            DmAvatarPresence::Idle => {
-                let idle: Rgba = theme.status_idle;
+            DmAvatarPresence::Online | DmAvatarPresence::Dnd => {
+                let fill = if self.presence_badge == DmAvatarPresence::Dnd {
+                    theme.status_dnd
+                } else {
+                    theme.status_online
+                };
                 Some(
                     div()
                         .absolute()
                         .bottom(px(-1.))
                         .right(px(-1.))
                         .size(badge_size)
-                        .flex()
-                        .items_end()
-                        .justify_end()
-                        .child(
-                            Icon::new(IconName::DarkModeIcon)
-                                .size(badge_size)
-                                .text_color(idle),
-                        )
+                        .rounded_full()
+                        .border_2()
+                        .border_color(border)
+                        .bg(fill)
                         .into_any_element(),
                 )
             }
+            DmAvatarPresence::Idle => Some(
+                div()
+                    .absolute()
+                    .bottom(px(-1.))
+                    .right(px(-1.))
+                    .size(badge_size)
+                    .flex()
+                    .items_end()
+                    .justify_end()
+                    .child(
+                        Icon::new(IconName::DarkModeIcon)
+                            .size(PRESENCE_IDLE_ICON_SIZE)
+                            .text_color(theme.status_idle),
+                    )
+                    .into_any_element(),
+            ),
         }
     }
 }
