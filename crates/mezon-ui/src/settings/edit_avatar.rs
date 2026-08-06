@@ -51,7 +51,7 @@ impl EditAvatar {
         let executor = cx.background_executor().clone();
         cx.spawn(async move |cx| {
             let prepared = executor.spawn(async move { prepare_editor(source) }).await;
-            let _ = view.update(cx, |this, cx| {
+            view.update(cx, |this, cx| {
                 this.loading = false;
                 match prepared {
                     Ok((source, render_images, crop_mask)) => {
