@@ -11,11 +11,13 @@ use gpui::{
     px, rgb, size,
 };
 use image::{DynamicImage, GenericImageView, imageops::FilterType};
+use mezon_store::Settings;
 
 use crate::{
     app::shell::Shell,
     components::primitives::{
-        Button, ButtonVariants, Icon, IconName, Slider, SliderEvent, SliderState, h_flex, v_flex,
+        Button, ButtonVariants, Icon, IconName, Slider, SliderEvent, SliderState, Spinner, h_flex,
+        v_flex,
     },
     theme::ActiveTheme,
 };
@@ -32,6 +34,7 @@ pub struct EditAvatar {
     drag_from: Option<Point<Pixels>>,
     slider: Entity<SliderState>,
     error: Option<SharedString>,
+    loading: bool,
     on_apply: ApplyHandler,
     _slider_subscription: Subscription,
 }
@@ -42,12 +45,30 @@ impl EditAvatar {
         on_apply: impl Fn(PathBuf, &mut Window, &mut App) + 'static,
         cx: &mut App,
     ) {
-        let view = cx.new(|cx| Self::new(source, on_apply, cx));
-        Shell::global(cx).update(cx, |shell, cx| shell.show_modal(view.into(), cx));
+        let view = cx.new(|cx| Self::new(on_apply, cx));
+        Shell::global(cx).update(cx, |shell, cx| shell.show_modal(view.clone().into(), cx));
+
+        let executor = cx.background_executor().clone();
+        cx.spawn(async move |cx| {
+            let prepared = executor.spawn(async move { prepare_editor(source) }).await;
+            let _ = view.update(cx, |this, cx| {
+                this.loading = false;
+                match prepared {
+                    Ok((source, render_images, crop_mask)) => {
+                        this.source = source;
+                        this.render_images = render_images;
+                        this.crop_mask = crop_mask;
+                        this.error = None;
+                    }
+                    Err(error) => this.error = Some(error.to_string().into()),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     fn new(
-        source_path: PathBuf,
         on_apply: impl Fn(PathBuf, &mut Window, &mut App) + 'static,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -64,39 +85,17 @@ impl EditAvatar {
             cx.notify();
         });
 
-        let decoded = image::open(&source_path);
-        let (source, render_images, error) = match decoded {
-            Ok(image) => {
-                let source = Arc::new(image);
-                let preview = source.thumbnail(2048, 2048);
-                let render_images = [
-                    preview.clone(),
-                    preview.rotate90(),
-                    preview.rotate180(),
-                    preview.rotate270(),
-                ]
-                .into_iter()
-                .map(render_image)
-                .collect();
-                (source, render_images, None)
-            }
-            Err(error) => (
-                Arc::new(DynamicImage::new_rgba8(1, 1)),
-                Vec::new(),
-                Some(error.to_string().into()),
-            ),
-        };
-
         Self {
-            source,
-            render_images,
-            crop_mask: render_image(crop_mask()),
+            source: Arc::new(DynamicImage::new_rgba8(1, 1)),
+            render_images: Vec::new(),
+            crop_mask: render_image(DynamicImage::new_rgba8(1, 1)),
             zoom: 1.0,
             rotation: 0,
             pan: point(px(0.), px(0.)),
             drag_from: None,
             slider,
-            error,
+            error: None,
+            loading: true,
             on_apply: Rc::new(on_apply),
             _slider_subscription: slider_subscription,
         }
@@ -110,6 +109,9 @@ impl EditAvatar {
 impl Render for EditAvatar {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
+        let locale = Settings::try_global(cx)
+            .map(|settings| settings.read(cx).language.clone())
+            .unwrap_or_default();
         let apply = self.on_apply.clone();
         let source = self.source.clone();
         let zoom = self.zoom;
@@ -140,7 +142,7 @@ impl Render for EditAvatar {
                             .text_xl()
                             .font_weight(gpui::FontWeight::SEMIBOLD)
                             .text_color(theme.text_primary)
-                            .child("Edit Avatar"),
+                            .child(mezon_i18n::t(&locale, "profileSetting.editImage")),
                     )
                     .child(
                         div()
@@ -172,6 +174,9 @@ impl Render for EditAvatar {
                             .size(px(canvas_size))
                             .overflow_hidden()
                             .bg(rgb(0x111214))
+                            .flex()
+                            .items_center()
+                            .justify_center()
                             .child(
                                 canvas(
                                     move |_, _, _| {
@@ -216,6 +221,9 @@ impl Render for EditAvatar {
                                 )
                                 .size_full(),
                             )
+                            .when(self.loading, |element| {
+                                element.child(div().absolute().child(Spinner::new()))
+                            })
                             .on_mouse_down(
                                 MouseButton::Left,
                                 cx.listener(|this, event: &MouseDownEvent, _, _| {
@@ -292,7 +300,7 @@ impl Render for EditAvatar {
                     .bg(theme.bg_primary)
                     .child(
                         Button::new("edit-avatar-reset")
-                            .label("Reset")
+                            .label(mezon_i18n::t(&locale, "profileSetting.reset"))
                             .text_color(theme.text_muted)
                             .ghost()
                             .on_click(cx.listener(|this, _, window, cx| {
@@ -309,13 +317,13 @@ impl Render for EditAvatar {
                             .gap_3()
                             .child(
                                 Button::new("edit-avatar-cancel")
-                                    .label("Cancel")
+                                    .label(mezon_i18n::t(&locale, "profileSetting.cancel"))
                                     .ghost()
                                     .on_click(|_, _, cx| Self::close(cx)),
                             )
                             .child(
                                 Button::new("edit-avatar-apply")
-                                    .label("Apply")
+                                    .label(mezon_i18n::t(&locale, "profileSetting.apply"))
                                     .primary()
                                     .on_click(move |_, window, cx| {
                                         let output = temp_png("cropped");
@@ -347,6 +355,22 @@ fn render_image(image: DynamicImage) -> Arc<RenderImage> {
     Arc::new(RenderImage::new(vec![image::Frame::new(buffer)]))
 }
 
+fn prepare_editor(
+    source_path: PathBuf,
+) -> anyhow::Result<(Arc<DynamicImage>, Vec<Arc<RenderImage>>, Arc<RenderImage>)> {
+    let source = image::open(source_path)?.thumbnail(1024, 1024);
+    let render_images = [
+        source.clone(),
+        source.rotate90(),
+        source.rotate180(),
+        source.rotate270(),
+    ]
+    .into_iter()
+    .map(render_image)
+    .collect();
+    Ok((Arc::new(source), render_images, render_image(crop_mask())))
+}
+
 fn editor_image_size(container: Size<Pixels>, content: Size<Pixels>, zoom: f32) -> Size<Pixels> {
     let scale = (f32::from(container.width) / f32::from(content.width))
         .min(f32::from(container.height) / f32::from(content.height))
@@ -366,22 +390,23 @@ fn editor_image_size(container: Size<Pixels>, content: Size<Pixels>, zoom: f32) 
 }
 
 fn crop_mask() -> DynamicImage {
-    const SIDE: u32 = 500;
-    const CENTER: f32 = 250.0;
-    const RADIUS: f32 = 200.0;
-    const HALF_STROKE: f32 = 1.5;
+    const SIDE: u32 = 1000;
+    const CENTER: f32 = 500.0;
+    const RADIUS: f32 = 400.0;
+    const HALF_STROKE: f32 = 3.0;
     let mut mask = image::RgbaImage::new(SIDE, SIDE);
     for (x, y, pixel) in mask.enumerate_pixels_mut() {
         let dx = x as f32 + 0.5 - CENTER;
         let dy = y as f32 + 0.5 - CENTER;
         let distance = (dx * dx + dy * dy).sqrt();
-        *pixel = if (distance - RADIUS).abs() <= HALF_STROKE {
-            image::Rgba([255, 255, 255, 255])
-        } else if distance > RADIUS {
-            image::Rgba([0, 0, 0, 128])
+        let stroke_coverage = (HALF_STROKE + 1.0 - (distance - RADIUS).abs()).clamp(0.0, 1.0);
+        if stroke_coverage > 0.0 {
+            let alpha = (stroke_coverage * 255.0).round() as u8;
+            *pixel = image::Rgba([255, 255, 255, alpha]);
         } else {
-            image::Rgba([0, 0, 0, 0])
-        };
+            let outside_coverage = (distance - RADIUS + 0.5).clamp(0.0, 1.0);
+            *pixel = image::Rgba([0, 0, 0, (outside_coverage * 128.0).round() as u8]);
+        }
     }
     DynamicImage::ImageRgba8(mask)
 }
@@ -425,7 +450,7 @@ fn crop_avatar(
     let resized = rotated.resize_exact(
         (display_width * output_scale).round().max(1.0) as u32,
         (display_height * output_scale).round().max(1.0) as u32,
-        FilterType::Lanczos3,
+        FilterType::Triangle,
     );
     let mut cropped = image::RgbaImage::new(400, 400);
     let output_x = ((image_left - crop_left) * output_scale).round() as i64;

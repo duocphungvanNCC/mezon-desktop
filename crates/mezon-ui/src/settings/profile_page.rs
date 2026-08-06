@@ -1,5 +1,3 @@
-use std::time::Duration;
-
 use crate::components::primitives::{
     Avatar, Button as GpuiButton, ButtonVariants, Icon, IconName, Input, InputEvent, InputState,
     Label, TextArea, TextAreaEvent, TextAreaField, h_flex, v_flex,
@@ -72,7 +70,7 @@ pub struct ProfilePage {
     fetch_error: bool,
     account_loaded: bool,
     clan_section: Option<Entity<ClanProfileSection>>,
-    toast_message: Option<SharedString>,
+    avatar_local_preview: Option<std::path::PathBuf>,
     avatar_image_cache: Entity<LruImageCache>,
     banner_color: Option<Rgba>,
     banner_source: String,
@@ -131,6 +129,7 @@ impl ProfilePage {
                         this.display_name_input = None;
                         this.about_me_input = None;
                         this._subscriptions.clear();
+                        this.avatar_local_preview = None;
                         this.refresh_banner_color(cx);
                         cx.notify();
                     }
@@ -147,13 +146,15 @@ impl ProfilePage {
                         state.original_logo_url = state.logo_url.clone();
                         state.saving = false;
                     }
-                    this.show_toast("Profile saved", cx);
+                    Shell::global(cx).update(cx, |shell, cx| shell.success("Profile saved", cx));
                 }
                 AccountEvent::AccountSaveFailed(msg) => {
                     if let Some(state) = &mut this.profile {
                         state.saving = false;
                     }
-                    this.show_toast(format!("Failed to save: {}", msg), cx);
+                    Shell::global(cx).update(cx, |shell, cx| {
+                        shell.error(format!("Failed to save: {}", msg), cx)
+                    });
                 }
                 AccountEvent::UserAvatarUploaded(url) => {
                     if let Some(state) = &mut this.profile {
@@ -163,24 +164,21 @@ impl ProfilePage {
                     cx.notify();
                 }
                 AccountEvent::UserAvatarUploadFailed(msg) => {
-                    this.show_toast(format!("Failed to upload avatar: {}", msg), cx);
+                    this.avatar_local_preview = None;
+                    Shell::global(cx).update(cx, |shell, cx| {
+                        shell.error(format!("Failed to upload avatar: {}", msg), cx)
+                    });
                 }
                 AccountEvent::DirectMessageIconUploaded(url) => {
                     if let Some(state) = &mut this.profile {
                         state.logo_url = Some(url.clone().into());
-                        state.original_logo_url = state.logo_url.clone();
-                    }
-                    cx.notify();
-                }
-                AccountEvent::DirectMessageIconRemoved => {
-                    if let Some(state) = &mut this.profile {
-                        state.logo_url = None;
-                        state.original_logo_url = None;
                     }
                     cx.notify();
                 }
                 AccountEvent::DirectMessageIconUploadFailed(msg) => {
-                    this.show_toast(format!("Failed to upload direct message icon: {}", msg), cx);
+                    Shell::global(cx).update(cx, |shell, cx| {
+                        shell.error(format!("Failed to upload direct message icon: {}", msg), cx)
+                    });
                 }
                 _ => {}
             },
@@ -206,7 +204,7 @@ impl ProfilePage {
             fetch_error: false,
             account_loaded,
             clan_section: None,
-            toast_message: None,
+            avatar_local_preview: None,
             avatar_image_cache: crate::image_cache::shared_avatar_cache(cx),
             banner_color: None,
             banner_source: String::new(),
@@ -263,21 +261,6 @@ impl ProfilePage {
             section.fetch(&clan_id.get().to_string(), cx);
         });
         cx.notify();
-    }
-
-    fn show_toast(&mut self, message: impl Into<SharedString>, cx: &mut Context<Self>) {
-        self.toast_message = Some(message.into());
-        cx.notify();
-
-        cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(Duration::from_secs(2)).await;
-            this.update(cx, |this, cx| {
-                this.toast_message = None;
-                cx.notify();
-            })
-            .ok();
-        })
-        .detach();
     }
 
     fn refresh_banner_color(&mut self, cx: &mut Context<Self>) {
@@ -440,28 +423,19 @@ impl ProfilePage {
             .and_then(|p| p.avatar_url.as_ref())
             .map(|url| SharedString::from(crate::util::imgproxy::profile_url(cx, url.as_ref())));
         let form = self.render_form(theme, cx, avatar_display.clone());
-        let preview = self.render_preview(theme, &locale, avatar_display);
-        v_flex()
-            .gap_6()
-            .child(
-                h_flex()
-                    .gap_8()
-                    .items_start()
-                    .child(div().min_w_0().flex_1().flex_basis(px(0.)).child(form))
-                    .child(div().min_w_0().flex_1().flex_basis(px(0.)).child(preview)),
-            )
-            .when_some(self.toast_message.clone(), |this, msg| {
-                this.child(
-                    div()
-                        .px_3()
-                        .py_2()
-                        .bg(theme.bg_floating)
-                        .rounded_md()
-                        .text_sm()
-                        .text_color(theme.text_primary)
-                        .child(msg),
-                )
-            })
+        let preview = self.render_preview(
+            theme,
+            &locale,
+            avatar_display,
+            self.avatar_local_preview.clone(),
+        );
+        v_flex().gap_6().child(
+            h_flex()
+                .gap_8()
+                .items_start()
+                .child(div().min_w_0().flex_1().flex_basis(px(0.)).child(form))
+                .child(div().min_w_0().flex_1().flex_basis(px(0.)).child(preview)),
+        )
     }
 }
 
@@ -672,10 +646,10 @@ impl Render for ProfilePage {
                                 .danger()
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     let locale = this.settings.read(cx).language.clone();
-                                    this.show_toast(
-                                        mezon_i18n::t(&locale, "setting.profile.deleteComingSoon"),
-                                        cx,
-                                    );
+                                    let message =
+                                        mezon_i18n::t(&locale, "setting.profile.deleteComingSoon");
+                                    Shell::global(cx)
+                                        .update(cx, |shell, cx| shell.info(message, cx));
                                 })),
                         )
                     }),
@@ -846,10 +820,20 @@ impl ProfilePage {
                                                     extension.eq_ignore_ascii_case("gif")
                                                 });
                                             if !is_gif {
+                                                let preview_entity = root_entity.clone();
                                                 cx.update(|cx| {
                                                     EditAvatar::open(
                                                         path,
                                                         move |cropped, _, cx| {
+                                                            let preview_path = cropped.clone();
+                                                            preview_entity.update(
+                                                                cx,
+                                                                |this, cx| {
+                                                                    this.avatar_local_preview =
+                                                                        Some(preview_path);
+                                                                    cx.notify();
+                                                                },
+                                                            );
                                                             AccountStore::global(cx).update(
                                                                 cx,
                                                                 |store, cx| {
@@ -864,7 +848,9 @@ impl ProfilePage {
                                                 });
                                                 return;
                                             }
-                                            root_entity.update(cx, |_, cx| {
+                                            root_entity.update(cx, |this, cx| {
+                                                this.avatar_local_preview = Some(path.clone());
+                                                cx.notify();
                                                 AccountStore::global(cx).update(cx, |store, cx| {
                                                     store.upload_user_avatar(&path, cx)
                                                 })
@@ -880,6 +866,7 @@ impl ProfilePage {
                                     .border_1()
                                     .border_color(theme.border)
                                     .on_click(cx.listener(|this, _, _, cx| {
+                                        this.avatar_local_preview = None;
                                         if let Some(state) = &mut this.profile {
                                             state.avatar_url = Some(
                                                 AppConfig::global(cx).logo_mezon.clone().into(),
@@ -1037,10 +1024,11 @@ impl ProfilePage {
                                 .text_color(theme.text_muted)
                                 .border_1()
                                 .border_color(theme.border)
-                                .on_click(cx.listener(|_this, _, _, cx| {
-                                    AccountStore::global(cx).update(cx, |store, cx| {
-                                        store.remove_direct_message_icon(cx)
-                                    });
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    if let Some(profile) = &mut this.profile {
+                                        profile.logo_url = None;
+                                    }
+                                    cx.notify();
                                 })),
                         )
                     }),
@@ -1052,6 +1040,7 @@ impl ProfilePage {
         theme: &Theme,
         locale: &str,
         avatar_display: Option<SharedString>,
+        avatar_local_preview: Option<std::path::PathBuf>,
     ) -> impl IntoElement {
         let display_name: SharedString = self
             .profile
@@ -1131,13 +1120,26 @@ impl ProfilePage {
                             .rounded_full()
                             .bg(theme.bg_secondary)
                             .p(px(6.))
-                            .child(
+                            .child(if let Some(path) = avatar_local_preview {
+                                div()
+                                    .size(px(80.))
+                                    .rounded_full()
+                                    .overflow_hidden()
+                                    .child(
+                                        img(path)
+                                            .size_full()
+                                            .rounded_full()
+                                            .object_fit(gpui::ObjectFit::Cover),
+                                    )
+                                    .into_any_element()
+                            } else {
                                 Avatar::new()
-                                    .when_some(avatar_display, |av, url| av.src(url))
+                                    .when_some(avatar_display, |avatar, url| avatar.src(url))
                                     .name(display_name)
                                     .size_px(px(80.))
-                                    .image_cache(self.avatar_image_cache.clone()),
-                            )
+                                    .image_cache(self.avatar_image_cache.clone())
+                                    .into_any_element()
+                            })
                             .child(
                                 div()
                                     .absolute()

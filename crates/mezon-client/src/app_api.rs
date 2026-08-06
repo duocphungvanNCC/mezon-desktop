@@ -2114,6 +2114,23 @@ impl AppApi {
             .transport
             .upload_attachment_file(filename, filetype, size, width, height)
             .await?;
+        crate::transport_runtime::put_bytes_to_url(&upload.url, data).await?;
+        attachment_cdn_url(&self.base_img_url, &upload.filename)
+    }
+
+    async fn upload_avatar_bytes(
+        &self,
+        filename: &str,
+        filetype: &str,
+        size: i32,
+        width: i32,
+        height: i32,
+        data: Vec<u8>,
+    ) -> Result<String> {
+        let upload = self
+            .transport
+            .upload_attachment_file(filename, filetype, size, width, height)
+            .await?;
         crate::transport_runtime::put_bytes_to_content_type(&upload.url, data, filetype).await?;
         attachment_cdn_url(&self.base_img_url, &upload.filename)
     }
@@ -2282,7 +2299,7 @@ impl AppApi {
         );
 
         let permanent_url = self
-            .upload_bytes(&filename, filetype, size, width, height, data)
+            .upload_avatar_bytes(&filename, filetype, size, width, height, data)
             .await?;
 
         tracing::info!("Avatar upload complete: url={}", permanent_url);

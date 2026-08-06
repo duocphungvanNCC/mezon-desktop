@@ -543,6 +543,8 @@ impl ClanList {
                 this.update_clans(mapped, cx);
                 if let Some(clan_id) = this.active_clan_id {
                     this.fire_join_clan_chat(clan_id, cx);
+                } else if let Some(clan_id) = this.clans.first().map(|clan| clan.id) {
+                    this.fire_join_clan_chat(clan_id, cx);
                 }
             });
         })
@@ -733,6 +735,13 @@ impl ClanList {
         self.active_clan_id = Some(id);
         cx.emit(ClanEvent::ActiveClanChanged(self.active_clan_id));
         cx.notify();
+    }
+
+    pub fn clear_active_clan(&mut self, cx: &mut Context<Self>) {
+        if self.active_clan_id.take().is_some() {
+            cx.emit(ClanEvent::ActiveClanChanged(None));
+            cx.notify();
+        }
     }
 
     pub fn update_clans(&mut self, mut clans: Vec<Clan>, cx: &mut Context<Self>) {
