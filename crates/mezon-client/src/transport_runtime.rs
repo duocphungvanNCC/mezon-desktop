@@ -1085,10 +1085,17 @@ impl TransportClient {
         &self,
         ws_base: String,
         token: String,
-    ) -> tokio::sync::mpsc::UnboundedReceiver<crate::gotify::GotifyNotification> {
+    ) -> (
+        tokio::sync::mpsc::UnboundedReceiver<crate::gotify::GotifyNotification>,
+        tokio::sync::oneshot::Receiver<crate::gotify::StreamEnd>,
+    ) {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-        runtime().spawn(crate::gotify::run_stream(ws_base, token, tx));
-        rx
+        let (end_tx, end_rx) = tokio::sync::oneshot::channel();
+        runtime().spawn(async move {
+            let end = crate::gotify::run_once(&ws_base, &token, &tx).await;
+            let _ = end_tx.send(end);
+        });
+        (rx, end_rx)
     }
 
     pub async fn regist_fcm_device_token(

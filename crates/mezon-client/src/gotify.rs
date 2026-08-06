@@ -5,9 +5,10 @@ use serde::Deserialize;
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message;
 
-const BACKOFF_BASE: Duration = Duration::from_secs(1);
-const BACKOFF_MAX: Duration = Duration::from_secs(32);
+pub const BACKOFF_BASE: Duration = Duration::from_secs(1);
+pub const BACKOFF_MAX: Duration = Duration::from_secs(32);
 const PING_TIMEOUT: Duration = Duration::from_secs(60);
+const JITTER_NUMERATOR: u32 = 4;
 
 /// Server-rendered notification payload from the Gotify `/stream` endpoint,
 /// mirroring the React `NotificationData` shape. Snowflake ids arrive on the wire
@@ -56,61 +57,49 @@ where
     }
 }
 
-/// Run the Gotify notification stream until `tx` is closed. Reconnects with exponential backoff
-/// (1s→32s, ×2, reset on a clean open) and replies `pong` to each `ping`, treating a 60s ping gap
-/// as a dead connection. Parsed notifications are forwarded to `tx`; suppression is the caller's
-/// job.
-pub async fn run_stream(
-    ws_base: String,
-    token: String,
-    tx: mpsc::UnboundedSender<GotifyNotification>,
-) {
-    let url = format!("{}/stream?token={token}", ws_base.trim_end_matches('/'));
-    let mut backoff = BACKOFF_BASE;
-
-    loop {
-        if tx.is_closed() {
-            return;
-        }
-        match connect_once(&url, &token, &tx).await {
-            ConnectOutcome::StopClean => return,
-            ConnectOutcome::Opened => backoff = BACKOFF_BASE,
-            ConnectOutcome::FailedBeforeOpen => {}
-        }
-
-        tokio::time::sleep(backoff).await;
-        backoff = next_backoff(backoff);
-    }
+/// Why a [`run_once`] session ended. The caller owns retry policy: it decides the backoff, when
+/// to stop, and whether the notification token needs re-registering.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StreamEnd {
+    /// Opened and later dropped by ping-timeout or read error.
+    Dropped,
+    /// Never opened — the endpoint was unreachable or the handshake failed at the transport level.
+    ConnectFailed,
+    /// The handshake was refused with a 4xx, so the notification token is likely dead.
+    Rejected,
+    /// The server closed the stream cleanly.
+    ClosedByServer,
+    /// The notification consumer went away; there is nothing left to reconnect for.
+    ReceiverGone,
 }
 
-fn next_backoff(current: Duration) -> Duration {
-    current.saturating_mul(2).min(BACKOFF_MAX)
-}
-
-enum ConnectOutcome {
-    /// Opened and later dropped by ping-timeout or read error — reconnect.
-    Opened,
-    /// Never opened (connect error) — reconnect after backoff.
-    FailedBeforeOpen,
-    /// Clean close (server Close frame / receiver dropped) — do not reconnect,
-    /// matching React's `onclose` which only marks the socket inactive.
-    StopClean,
-}
-
-async fn connect_once(
-    url: &str,
+/// Open the Gotify stream once and pump it until it ends, replying `pong` to each `ping` and
+/// treating a 60s ping gap as a dead connection. Parsed notifications are forwarded to `tx`;
+/// suppression is the caller's job.
+pub async fn run_once(
+    ws_base: &str,
     token: &str,
     tx: &mpsc::UnboundedSender<GotifyNotification>,
-) -> ConnectOutcome {
-    let stream = match tokio_tungstenite::connect_async(url).await {
+) -> StreamEnd {
+    let url = format!("{}/stream?token={token}", ws_base.trim_end_matches('/'));
+    let stream = match tokio_tungstenite::connect_async(&url).await {
         Ok((stream, _)) => stream,
         Err(e) => {
+            let rejected = matches!(
+                &e,
+                tokio_tungstenite::tungstenite::Error::Http(response)
+                    if response.status().is_client_error()
+            );
             // The error may embed the URL, which carries the auth token — redact it.
             tracing::warn!(
                 "gotify: connect failed: {}",
                 e.to_string().replace(token, "***")
             );
-            return ConnectOutcome::FailedBeforeOpen;
+            return if rejected {
+                StreamEnd::Rejected
+            } else {
+                StreamEnd::ConnectFailed
+            };
         }
     };
     tracing::debug!("gotify: stream connected");
@@ -124,13 +113,13 @@ async fn connect_once(
         let frame = tokio::select! {
             () = tokio::time::sleep_until(deadline) => {
                 tracing::debug!("gotify: ping timeout, reconnecting");
-                return ConnectOutcome::Opened;
+                return StreamEnd::Dropped;
             }
             frame = read.next() => match frame {
-                None => return ConnectOutcome::StopClean,
+                None => return StreamEnd::ClosedByServer,
                 Some(Err(e)) => {
                     tracing::warn!("gotify: read error: {e}");
-                    return ConnectOutcome::Opened;
+                    return StreamEnd::Dropped;
                 }
                 Some(Ok(frame)) => frame,
             },
@@ -146,7 +135,7 @@ async fn connect_once(
                 let _ = write.send(Message::Pong(p)).await;
                 continue;
             }
-            Message::Close(_) => return ConnectOutcome::StopClean,
+            Message::Close(_) => return StreamEnd::ClosedByServer,
             _ => continue,
         };
 
@@ -160,12 +149,28 @@ async fn connect_once(
         match serde_json::from_str::<GotifyNotification>(trimmed) {
             Ok(notification) => {
                 if tx.send(notification).is_err() {
-                    return ConnectOutcome::StopClean;
+                    return StreamEnd::ReceiverGone;
                 }
             }
             Err(e) => tracing::debug!("gotify: unparseable frame: {e}"),
         }
     }
+}
+
+pub fn next_backoff(current: Duration) -> Duration {
+    current.saturating_mul(2).min(BACKOFF_MAX)
+}
+
+/// Spread reconnects over ±1/4 of the delay so a server-side outage doesn't bring every client
+/// back in lockstep once it recovers.
+pub fn with_jitter(delay: Duration) -> Duration {
+    let spread = delay / JITTER_NUMERATOR;
+    let spread_micros = spread.as_micros() as u64;
+    if spread_micros == 0 {
+        return delay;
+    }
+    let offset = rand::random_range(0..=spread_micros * 2);
+    (delay - spread).saturating_add(Duration::from_micros(offset))
 }
 
 #[cfg(test)]
@@ -196,5 +201,30 @@ mod backoff_tests {
             delay = next_backoff(delay);
         }
         assert_eq!(delay, BACKOFF_MAX);
+    }
+
+    #[test]
+    fn jitter_stays_within_a_quarter_of_the_delay() {
+        for _ in 0..1000 {
+            let jittered = with_jitter(BACKOFF_MAX);
+            assert!(jittered >= BACKOFF_MAX - BACKOFF_MAX / 4);
+            assert!(jittered <= BACKOFF_MAX + BACKOFF_MAX / 4);
+        }
+    }
+
+    #[test]
+    fn jitter_keeps_a_sub_millisecond_delay_in_range() {
+        let tiny = Duration::from_micros(400);
+        for _ in 0..1000 {
+            let jittered = with_jitter(tiny);
+            assert!(jittered >= tiny - tiny / 4);
+            assert!(jittered <= tiny + tiny / 4);
+        }
+    }
+
+    #[test]
+    fn jitter_leaves_a_delay_too_small_to_split_alone() {
+        let tiny = Duration::from_nanos(3);
+        assert_eq!(with_jitter(tiny), tiny);
     }
 }
