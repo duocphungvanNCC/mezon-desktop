@@ -28,6 +28,37 @@ fn should_refresh_balance(refreshing: bool, force: bool, same_user: bool, fresh:
     force || !same_user || !fresh
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TokenDirection {
+    Received,
+    Sent,
+    Unrelated,
+}
+
+fn token_direction(my_id: &str, sender_id: &str, receiver_id: &str) -> TokenDirection {
+    if my_id.is_empty() {
+        return TokenDirection::Unrelated;
+    }
+    if receiver_id == my_id {
+        TokenDirection::Received
+    } else if sender_id == my_id {
+        TokenDirection::Sent
+    } else {
+        TokenDirection::Unrelated
+    }
+}
+
+fn balance_after_delta(current: &str, scaled: &str, add: bool) -> Option<String> {
+    let current: i128 = current.trim().parse().ok()?;
+    let delta: i128 = scaled.trim().parse().ok()?;
+    let next = if add {
+        current.saturating_add(delta)
+    } else {
+        current.saturating_sub(delta)
+    };
+    Some(next.max(0).to_string())
+}
+
 static BANK_SOUND: &[u8] = include_bytes!("../assets/audio/bankSound.mp3");
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -127,6 +158,7 @@ pub struct WalletStore {
     pending_give_coffee: bool,
     enabled_user: Option<String>,
     enabling_user: Option<String>,
+    auth_user: Option<String>,
     balance_user: Option<String>,
     balance_refreshing: bool,
     balance_freshness: Freshness,
@@ -158,6 +190,7 @@ impl WalletStore {
                 pending_give_coffee: false,
                 enabled_user: None,
                 enabling_user: None,
+                auth_user: None,
                 balance_user: None,
                 balance_refreshing: false,
                 balance_freshness: Freshness::new(),
@@ -288,6 +321,7 @@ impl WalletStore {
             }
             _ => return,
         };
+        self.auth_user = Some(user_id.clone());
         self.try_restore_persisted(&user_id, cx);
         self.ensure_wallet_balance(user_id, cx);
     }
@@ -689,7 +723,7 @@ impl WalletStore {
         let RealtimeEvent::TokenSent(token) = event else {
             return;
         };
-        let Some(my_id) = self.enabled_user.clone() else {
+        let Some(my_id) = self.auth_user.clone() else {
             return;
         };
         let amount = token.amount as i64;
@@ -702,14 +736,18 @@ impl WalletStore {
             return;
         };
 
-        if receiver_id == my_id {
-            self.apply_balance_delta(&scaled, true);
-            cx.emit(WalletEvent::TokenReceived { amount, sender_id });
-            self.play_bank_sound(cx);
-            cx.notify();
-        } else if sender_id == my_id {
-            self.apply_balance_delta(&scaled, false);
-            cx.notify();
+        match token_direction(&my_id, &sender_id, &receiver_id) {
+            TokenDirection::Received => {
+                self.apply_balance_delta(&scaled, true, cx);
+                cx.emit(WalletEvent::TokenReceived { amount, sender_id });
+                self.play_bank_sound(cx);
+                cx.notify();
+            }
+            TokenDirection::Sent => {
+                self.apply_balance_delta(&scaled, false, cx);
+                cx.notify();
+            }
+            TokenDirection::Unrelated => {}
         }
     }
 
@@ -744,20 +782,20 @@ impl WalletStore {
         .detach();
     }
 
-    fn apply_balance_delta(&mut self, scaled: &str, add: bool) {
-        let Some(wallet) = self.wallet.as_mut() else {
-            return;
-        };
-        let Ok(current) = wallet.balance.trim().parse::<i128>() else {
-            return;
-        };
-        let delta: i128 = scaled.trim().parse().unwrap_or(0);
-        let next = if add {
-            current.saturating_add(delta)
-        } else {
-            current.saturating_sub(delta)
-        };
-        wallet.balance = next.max(0).to_string();
+    fn apply_balance_delta(&mut self, scaled: &str, add: bool, cx: &mut Context<Self>) {
+        let updated = self
+            .wallet
+            .as_ref()
+            .and_then(|wallet| balance_after_delta(&wallet.balance, scaled, add));
+        match (updated, self.wallet.as_mut()) {
+            (Some(next), Some(wallet)) => wallet.balance = next,
+            _ => {
+                self.balance_freshness.mark_stale();
+                if let Some(user_id) = self.auth_user.clone() {
+                    self.refresh_wallet(user_id, cx);
+                }
+            }
+        }
     }
 
     pub fn reset_generation(&self) -> u64 {
@@ -808,6 +846,7 @@ impl WalletStore {
         self.is_enabled = false;
         self.pending_give_coffee = false;
         self.enabled_user = None;
+        self.auth_user = None;
         self.balance_user = None;
         self.balance_refreshing = false;
         self.balance_freshness.mark_stale();
@@ -818,7 +857,52 @@ impl WalletStore {
 
 #[cfg(test)]
 mod tests {
-    use super::should_refresh_balance;
+    use super::{TokenDirection, balance_after_delta, should_refresh_balance, token_direction};
+
+    #[test]
+    fn a_transfer_is_classified_from_the_signed_in_user() {
+        assert_eq!(token_direction("u1", "u2", "u1"), TokenDirection::Received);
+        assert_eq!(token_direction("u1", "u1", "u2"), TokenDirection::Sent);
+        assert_eq!(token_direction("u1", "u2", "u3"), TokenDirection::Unrelated);
+    }
+
+    #[test]
+    fn a_self_transfer_counts_as_received() {
+        assert_eq!(token_direction("u1", "u1", "u1"), TokenDirection::Received);
+    }
+
+    #[test]
+    fn an_unknown_user_ignores_every_transfer() {
+        assert_eq!(token_direction("", "u1", "u2"), TokenDirection::Unrelated);
+        assert_eq!(token_direction("", "u1", ""), TokenDirection::Unrelated);
+    }
+
+    #[test]
+    fn a_delta_moves_the_balance_in_both_directions() {
+        assert_eq!(
+            balance_after_delta("1000", "250", true).as_deref(),
+            Some("1250")
+        );
+        assert_eq!(
+            balance_after_delta("1000", "250", false).as_deref(),
+            Some("750")
+        );
+    }
+
+    #[test]
+    fn a_balance_never_goes_negative() {
+        assert_eq!(
+            balance_after_delta("100", "250", false).as_deref(),
+            Some("0")
+        );
+    }
+
+    #[test]
+    fn an_unparsable_balance_yields_no_update() {
+        assert_eq!(balance_after_delta("", "250", true), None);
+        assert_eq!(balance_after_delta("abc", "250", true), None);
+        assert_eq!(balance_after_delta("1000", "", true), None);
+    }
 
     #[test]
     fn an_in_flight_refresh_blocks_every_caller() {
