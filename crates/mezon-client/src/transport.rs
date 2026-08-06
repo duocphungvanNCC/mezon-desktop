@@ -114,6 +114,7 @@ pub enum RealtimeEvent {
     UserClanRemoved(realtime::UserClanRemoved),
     ClanUpdated(realtime::ClanUpdatedEvent),
     ClanProfileUpdated(realtime::ClanProfileUpdatedEvent),
+    UserProfileUpdated(realtime::UserProfileUpdatedEvent),
     ClanDeleted(realtime::ClanDeletedEvent),
     ClanEmoji(realtime::EventEmoji),
     AddFriend(realtime::AddFriend),
@@ -168,6 +169,7 @@ impl RealtimeEvent {
             Self::UserClanRemoved(_) => "UserClanRemoved",
             Self::ClanUpdated(_) => "ClanUpdated",
             Self::ClanProfileUpdated(_) => "ClanProfileUpdated",
+            Self::UserProfileUpdated(_) => "UserProfileUpdated",
             Self::ClanDeleted(_) => "ClanDeleted",
             Self::ClanEmoji(_) => "ClanEmoji",
             Self::AddFriend(_) => "AddFriend",
@@ -227,6 +229,9 @@ impl TryFrom<realtime::envelope::Message> for RealtimeEvent {
             realtime::envelope::Message::ClanUpdatedEvent(m) => Ok(Self::ClanUpdated(m)),
             realtime::envelope::Message::ClanProfileUpdatedEvent(m) => {
                 Ok(Self::ClanProfileUpdated(m))
+            }
+            realtime::envelope::Message::UserProfileUpdatedEvent(m) => {
+                Ok(Self::UserProfileUpdated(m))
             }
             realtime::envelope::Message::ClanDeletedEvent(m) => Ok(Self::ClanDeleted(m)),
             realtime::envelope::Message::EventEmoji(m) => Ok(Self::ClanEmoji(m)),
@@ -8929,8 +8934,8 @@ impl MezonTransport {
             display_name: display_name
                 .filter(|s| !s.is_empty())
                 .map(|s| s.to_string()),
-            avatar_url: avatar_url.filter(|s| !s.is_empty()).map(|s| s.to_string()),
-            about_me: about_me.filter(|s| !s.is_empty()).map(|s| s.to_string()),
+            avatar_url: avatar_url.map(str::to_string),
+            about_me: about_me.map(str::to_string),
             logo: logo.map(str::to_string),
             ..Default::default()
         }
