@@ -313,6 +313,7 @@ impl ClanProfileSection {
     }
 
     pub fn fetch(&mut self, clan_id: &str, cx: &mut Context<Self>) {
+        let clan_id_value = clan_id.parse().unwrap_or_default();
         self._subscriptions.clear();
         self.nick_name_input = None;
         self.selected_clan_id = clan_id.to_string();
@@ -329,9 +330,11 @@ impl ClanProfileSection {
         });
         self.refresh_banner_color(cx);
         cx.notify();
-        AccountStore::global(cx).update(cx, |store, cx| {
-            store.fetch_clan_profile(clan_id.parse().unwrap_or_default(), cx)
+        self.clan_list.update(cx, |clans, cx| {
+            clans.subscribe_clan_realtime(clan_id_value, cx);
         });
+        AccountStore::global(cx)
+            .update(cx, |store, cx| store.fetch_clan_profile(clan_id_value, cx));
     }
 
     fn refresh_banner_color(&mut self, cx: &mut Context<Self>) {

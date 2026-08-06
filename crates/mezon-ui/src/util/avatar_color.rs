@@ -4,7 +4,7 @@
 //! GPUI has no equivalent hook, so the color is read back out of the decoded
 //! image once the avatar the view already renders lands in the image cache.
 
-use std::time::Duration;
+use std::{path::PathBuf, time::Duration};
 
 use gpui::{Context, Entity, Rgba, Task};
 
@@ -70,6 +70,29 @@ pub fn spawn_banner_color_task<T: 'static>(
             cx.background_executor()
                 .timer(Duration::from_millis(delay_ms))
                 .await;
+        }
+    }))
+}
+
+pub fn spawn_local_banner_color_task<T: 'static>(
+    avatar_path: PathBuf,
+    cx: &mut Context<T>,
+    apply: impl Fn(&mut T, Rgba, &mut Context<T>) + 'static,
+) -> Option<Task<()>> {
+    let executor = cx.background_executor().clone();
+    Some(cx.spawn(async move |this, cx| {
+        let color = executor
+            .spawn(async move {
+                let rgba = image::open(avatar_path).ok()?.to_rgba8();
+                let mut bgra = rgba.into_raw();
+                for pixel in bgra.chunks_exact_mut(4) {
+                    pixel.swap(0, 2);
+                }
+                average_bgra_color(&bgra)
+            })
+            .await;
+        if let Some(color) = color {
+            let _ = this.update(cx, |this, cx| apply(this, color, cx));
         }
     }))
 }

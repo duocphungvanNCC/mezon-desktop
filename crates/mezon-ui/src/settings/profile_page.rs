@@ -12,7 +12,10 @@ use super::clan_profile_section::ClanProfileSection;
 use super::edit_avatar::EditAvatar;
 use crate::app::shell::Shell;
 use crate::theme::{ActiveTheme, Theme};
-use crate::{image_cache::LruImageCache, util::avatar_color::spawn_banner_color_task};
+use crate::{
+    image_cache::LruImageCache,
+    util::avatar_color::{spawn_banner_color_task, spawn_local_banner_color_task},
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ProfileTab {
@@ -264,6 +267,19 @@ impl ProfilePage {
     }
 
     fn refresh_banner_color(&mut self, cx: &mut Context<Self>) {
+        if let Some(path) = self.avatar_local_preview.clone() {
+            let source = format!("local:{}", path.display());
+            if source == self.banner_source {
+                return;
+            }
+            self.banner_source = source;
+            self.banner_color = None;
+            self.banner_task = spawn_local_banner_color_task(path, cx, |this, color, cx| {
+                this.banner_color = Some(color);
+                cx.notify();
+            });
+            return;
+        }
         let source = self
             .profile
             .as_ref()
@@ -369,6 +385,7 @@ impl ProfilePage {
             state.avatar_url = avatar_url;
             state.logo_url = logo_url;
         }
+        self.avatar_local_preview = None;
         self.refresh_banner_color(cx);
 
         if let Some((display_name, about_me, _, _)) = original {

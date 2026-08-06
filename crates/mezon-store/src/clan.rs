@@ -728,6 +728,10 @@ impl ClanList {
         .detach();
     }
 
+    pub fn subscribe_clan_realtime(&self, clan_id: ClanId, cx: &mut Context<Self>) {
+        self.fire_join_clan_chat(clan_id, cx);
+    }
+
     pub fn select_clan(&mut self, id: ClanId, cx: &mut Context<Self>) {
         if self.active_clan_id == Some(id) {
             return;
