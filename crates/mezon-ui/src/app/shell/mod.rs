@@ -106,6 +106,57 @@ impl Shell {
         cx.notify();
     }
 
+    /// Show a keyed toast that stays until something dismisses it. Used for conditions the user
+    /// is still living with — being offline is not news that expires after four seconds.
+    pub fn sticky(
+        &mut self,
+        key: impl Into<SharedString>,
+        kind: ToastKind,
+        message: impl Into<SharedString>,
+        cx: &mut Context<Self>,
+    ) {
+        let key = key.into();
+        if let Some(item) = self
+            .toasts
+            .iter_mut()
+            .find(|t| t.key.as_ref() == Some(&key))
+        {
+            item.message = message.into();
+            item.kind = kind;
+            cx.notify();
+            return;
+        }
+        let id = self.next_id;
+        self.next_id = self.next_id.wrapping_add(1);
+        self.toasts.push(ToastItem {
+            id,
+            key: Some(key),
+            message: message.into(),
+            kind,
+            progress: None,
+            _ttl: None,
+        });
+        cx.notify();
+    }
+
+    /// Remove a keyed toast — the condition it reported is over.
+    pub fn dismiss(&mut self, key: impl Into<SharedString>, cx: &mut Context<Self>) {
+        let key = key.into();
+        let before = self.toasts.len();
+        self.toasts.retain(|t| t.key.as_ref() != Some(&key));
+        if self.toasts.len() != before {
+            cx.notify();
+        }
+    }
+
+    fn dismiss_by_id(&mut self, id: usize, cx: &mut Context<Self>) {
+        let before = self.toasts.len();
+        self.toasts.retain(|t| t.id != id);
+        if self.toasts.len() != before {
+            cx.notify();
+        }
+    }
+
     /// Show or update a keyed progress toast. It does not auto-dismiss; call
     /// [`Shell::finish_toast`] with the same key when the operation completes.
     pub fn progress_toast(
@@ -634,10 +685,10 @@ impl Shell {
         let modal = self.modal.clone();
         let fullscreen = self.modal_fullscreen;
         let has_toasts = !self.toasts.is_empty();
-        let toasts: Vec<(SharedString, ToastKind, Option<f32>)> = self
+        let toasts: Vec<(usize, SharedString, ToastKind, Option<f32>)> = self
             .toasts
             .iter()
-            .map(|t| (t.message.clone(), t.kind, t.progress))
+            .map(|t| (t.id, t.message.clone(), t.kind, t.progress))
             .collect();
 
         div()
@@ -688,8 +739,15 @@ impl Shell {
                         .flex()
                         .flex_col()
                         .gap_2()
-                        .children(toasts.into_iter().map(|(message, kind, progress)| {
-                            Toast::new(message).kind(kind).progress(progress)
+                        .children(toasts.into_iter().map(|(id, message, kind, progress)| {
+                            div()
+                                .id(("toast", id))
+                                .cursor_pointer()
+                                .on_click(move |_, _window, cx| {
+                                    Shell::global(cx)
+                                        .update(cx, |shell, cx| shell.dismiss_by_id(id, cx));
+                                })
+                                .child(Toast::new(message).kind(kind).progress(progress))
                         })),
                 ))
             })

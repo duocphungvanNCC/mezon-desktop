@@ -186,6 +186,14 @@ impl AppApi {
         self.transport.set_http_fallback(fallback);
     }
 
+    pub async fn renew_fallback_token(&self) -> Result<(String, String)> {
+        self.transport.renew_fallback_token().await
+    }
+
+    pub fn renewed_tokens(&self) -> tokio::sync::watch::Receiver<Option<(String, String)>> {
+        self.transport.renewed_tokens()
+    }
+
     pub fn subscribe(&self) -> tokio::sync::broadcast::Receiver<RealtimeEvent> {
         self.realtime_tx.subscribe()
     }

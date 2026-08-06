@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use prost::Message;
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::{Mutex, mpsc, oneshot};
@@ -310,10 +310,18 @@ fn log_realtime_envelope(payload: &[u8]) {
 
 type TlsStream = tokio_rustls::client::TlsStream<TcpStream>;
 
+fn is_unauthorized_status_line(status_line: &str) -> bool {
+    status_line
+        .split_whitespace()
+        .any(|token| token == "401" || token == "403")
+}
+
 struct IoLoopState {
     handlers: Arc<Mutex<AdapterHandlers>>,
     streams: HashMap<u16, Vec<Vec<u8>>>,
     is_connected: Arc<AtomicBool>,
+    frames_received: Arc<AtomicU64>,
+    credential_rejected: Arc<AtomicBool>,
     read_buffer: Vec<u8>,
 }
 
@@ -321,6 +329,8 @@ pub struct AbridgedTcpAdapter {
     write_tx: Arc<Mutex<Option<mpsc::Sender<Vec<u8>>>>>,
     handlers: Arc<Mutex<AdapterHandlers>>,
     is_connected: Arc<AtomicBool>,
+    frames_received: Arc<AtomicU64>,
+    credential_rejected: Arc<AtomicBool>,
     io_task: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
 }
 
@@ -330,6 +340,8 @@ impl AbridgedTcpAdapter {
             write_tx: Arc::new(Mutex::new(None)),
             handlers: Arc::new(Mutex::new(AdapterHandlers::default())),
             is_connected: Arc::new(AtomicBool::new(false)),
+            frames_received: Arc::new(AtomicU64::new(0)),
+            credential_rejected: Arc::new(AtomicBool::new(false)),
             io_task: Arc::new(Mutex::new(None)),
         }
     }
@@ -601,6 +613,7 @@ impl AbridgedTcpAdapter {
                         }
                         Ok(n) => {
                             read_count += 1;
+                            state.frames_received.fetch_add(1, Ordering::Release);
                             tracing::trace!(
                                 "READ {} bytes [{}] (reads: {}) {:02x?}",
                                 n,
@@ -615,9 +628,20 @@ impl AbridgedTcpAdapter {
                                 || chunk.starts_with(b"POST ")
                             {
                                 let preview = String::from_utf8_lossy(&chunk[..n.min(120)]);
+                                let status_line = preview.lines().next().unwrap_or("?");
+                                if is_unauthorized_status_line(status_line) {
+                                    state
+                                        .credential_rejected
+                                        .store(true, Ordering::Release);
+                                    tracing::warn!(
+                                        "Gateway refused the socket credential: {status_line}"
+                                    );
+                                    break LoopExit::Error(
+                                        "gateway rejected the socket credential".into(),
+                                    );
+                                }
                                 tracing::error!(
-                                    "Server returned HTTP on abridged TCP port (expected binary framing, not nginx/WSS). Response: {}",
-                                    preview.lines().next().unwrap_or("?")
+                                    "Server returned HTTP on abridged TCP port (expected binary framing, not nginx/WSS). Response: {status_line}"
                                 );
                                 break LoopExit::Error(
                                     "server spoke HTTP instead of abridged TCP".into(),
@@ -729,6 +753,8 @@ impl Default for AbridgedTcpAdapter {
 impl TransportAdapter for AbridgedTcpAdapter {
     async fn connect(&self, host: &str, port: u16, token: &str) -> Result<()> {
         tracing::info!("=== CONNECT START: {}:{} ===", host, port);
+        self.frames_received.store(0, Ordering::Release);
+        self.credential_rejected.store(false, Ordering::Release);
 
         let config = build_client_config();
         let connector = tokio_rustls::TlsConnector::from(Arc::new(config));
@@ -765,6 +791,8 @@ impl TransportAdapter for AbridgedTcpAdapter {
             handlers: self.handlers.clone(),
             streams: HashMap::new(),
             is_connected: self.is_connected.clone(),
+            frames_received: self.frames_received.clone(),
+            credential_rejected: self.credential_rejected.clone(),
             read_buffer: Vec::new(),
         };
 
@@ -916,6 +944,15 @@ impl TransportAdapter for AbridgedTcpAdapter {
     fn is_open(&self) -> bool {
         self.is_connected.load(Ordering::Acquire)
     }
+
+    fn frames_received(&self) -> u64 {
+        self.frames_received.load(Ordering::Acquire)
+    }
+
+    fn credential_rejected(&self) -> bool {
+        self.credential_rejected.load(Ordering::Acquire)
+    }
+
     async fn close(&self) -> Result<()> {
         self.is_connected.store(false, Ordering::Release);
         *self.write_tx.lock().await = None;
@@ -1025,6 +1062,8 @@ mod tests {
             handlers: Arc::new(Mutex::new(handlers.clone())),
             streams: HashMap::new(),
             is_connected: Arc::new(AtomicBool::new(true)),
+            frames_received: Arc::new(AtomicU64::new(0)),
+            credential_rejected: Arc::new(AtomicBool::new(false)),
             read_buffer: Vec::new(),
         };
         (state, handlers, received)

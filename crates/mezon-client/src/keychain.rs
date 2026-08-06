@@ -15,10 +15,15 @@ fn parse_session(json: &str) -> Option<Session> {
 #[cfg(debug_assertions)]
 mod dev_file {
     use std::path::{Path, PathBuf};
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicU64, Ordering};
 
     use anyhow::Context;
 
     use super::*;
+
+    static COMMIT_LOCK: Mutex<()> = Mutex::new(());
+    static STAGED_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
     fn persist_path() -> PathBuf {
         dirs::config_dir()
@@ -39,6 +44,26 @@ mod dev_file {
         paths
     }
 
+    /// The debug store keeps the token pair in the clear, and the default umask would leave it
+    /// readable by every local account. The rename below carries this mode onto the live file.
+    fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+        #[cfg(unix)]
+        {
+            use std::io::Write as _;
+            use std::os::unix::fs::OpenOptionsExt as _;
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .mode(0o600)
+                .open(path)?;
+            file.write_all(bytes)?;
+            file.sync_all()
+        }
+        #[cfg(not(unix))]
+        std::fs::write(path, bytes)
+    }
+
     fn read_from_path(path: &Path) -> Option<Session> {
         let json = std::fs::read_to_string(path).ok()?;
         parse_session(&json).inspect(|session| {
@@ -57,7 +82,16 @@ mod dev_file {
                 .with_context(|| format!("create {}", parent.display()))?;
         }
         let json = serde_json::to_string(session)?;
-        std::fs::write(&path, json).with_context(|| format!("write {}", path.display()))?;
+
+        let _commit = COMMIT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let sequence = STAGED_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let staged = path.with_extension(format!("json.{}.{sequence}.tmp", std::process::id()));
+        write_private(&staged, json.as_bytes())
+            .with_context(|| format!("write {}", staged.display()))?;
+        if let Err(e) = std::fs::rename(&staged, &path) {
+            let _ = std::fs::remove_file(&staged);
+            return Err(e).with_context(|| format!("rename into {}", path.display()));
+        }
         tracing::debug!(
             "Session saved to {} (user_id={})",
             path.display(),
@@ -268,6 +302,8 @@ mod dpapi_store {
 
 #[cfg(all(not(debug_assertions), not(target_os = "windows")))]
 mod keychain_store {
+    use std::sync::Mutex;
+
     use keyring::Entry;
 
     use super::*;
@@ -275,8 +311,11 @@ mod keychain_store {
     const SERVICE: &str = "mezon-desktop";
     const USERNAME: &str = "session";
 
+    static COMMIT_LOCK: Mutex<()> = Mutex::new(());
+
     pub fn save_session(session: &Session) -> Result<()> {
         let json = serde_json::to_string(session)?;
+        let _commit = COMMIT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let entry = Entry::new(SERVICE, USERNAME)?;
         entry.set_password(&json)?;
         tracing::debug!("Session saved to keychain (user_id={})", session.user_id);
