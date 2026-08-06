@@ -41,7 +41,7 @@ use super::video_player::{VideoActivation, VideoPlayerView};
 use crate::app::shell::Shell;
 use crate::chat::mention_input::{MentionInput, MentionInputEvent};
 use crate::chat::user_profile_popover::UserProfilePopover;
-use crate::components::primitives::input::Copy;
+use crate::components::primitives::text_actions::Copy;
 use crate::components::primitives::{Icon, IconName, TextArea, TextAreaEvent, context_menu_at};
 use crate::image_cache::{
     LruImageCache, MESSAGE_ENTRY_MAX_BYTES, MESSAGE_IMAGE_CACHE_BYTES, MESSAGE_IMAGE_CACHE_CAPACITY,

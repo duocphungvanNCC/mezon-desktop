@@ -5,135 +5,30 @@ use super::blink_manager::{CaretBlink, HasCaretBlink};
 use gpui::{
     App, Bounds, ClipboardItem, Context, Corners, CursorStyle, Div, Element, ElementId,
     ElementInputHandler, Entity, EntityInputHandler, EventEmitter, FocusHandle, Focusable,
-    FontWeight, GlobalElementId, Hsla, InspectorElementId, IntoElement, KeyBinding, LayoutId,
-    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point, Render,
-    RenderOnce, ShapedLine, SharedString, Style, StyleRefinement, Styled, TextAlign, TextRun,
-    UTF16Selection, UnderlineStyle, Window, WrappedLine, actions, div, fill, point, prelude::*, px,
-    size, svg,
+    FontWeight, GlobalElementId, Hsla, InspectorElementId, IntoElement, LayoutId, MouseButton,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point, Render, RenderOnce,
+    ShapedLine, SharedString, Style, StyleRefinement, Styled, TextAlign, TextRun, UTF16Selection,
+    UnderlineStyle, Window, WrappedLine, div, fill, point, prelude::*, px, size, svg,
 };
 use unicode_segmentation::UnicodeSegmentation;
 
 use mezon_theme::ActiveTheme;
 
+use crate::text_actions::{
+    Backspace, Copy, Cut, Delete, DeleteToLineEnd, DeleteToLineStart, DeleteToNextWordEnd,
+    DeleteToPreviousWordStart, Down, End, Enter, Home, Left, MoveToDocEnd, MoveToDocStart,
+    MoveToNextWordEnd, MoveToPreviousWordStart, Newline, Paste, Redo, Right, SelectAll, SelectDown,
+    SelectLeft, SelectRight, SelectToDocEnd, SelectToDocStart, SelectToLineEnd, SelectToLineStart,
+    SelectToNextWordEnd, SelectToPreviousWordStart, SelectUp, ShowCharacterPalette,
+    TEXT_INPUT_CONTEXT, Undo, Up,
+};
 use crate::text_edit::{
-    EditKind, HistoryEntry, MAX_UNDO_HISTORY, home_target, line_end, line_start,
-    next_word_boundary, previous_word_boundary, should_coalesce,
+    EditKind, HistoryEntry, MAX_UNDO_HISTORY, SelectGranularity, extend_range_for_granularity,
+    granularity_for_click, home_target, line_end, line_start, next_word_boundary,
+    previous_word_boundary, range_for_granularity, should_coalesce,
 };
 
 const MASK: char = '\u{2022}';
-const KEY_CONTEXT: &str = "MezonInput";
-
-actions!(
-    mezon_input,
-    [
-        Backspace,
-        Delete,
-        Enter,
-        Left,
-        Right,
-        SelectLeft,
-        SelectRight,
-        SelectAll,
-        Home,
-        End,
-        MoveToPreviousWordStart,
-        MoveToNextWordEnd,
-        SelectToPreviousWordStart,
-        SelectToNextWordEnd,
-        DeleteToPreviousWordStart,
-        DeleteToNextWordEnd,
-        SelectToLineStart,
-        SelectToLineEnd,
-        MoveToDocStart,
-        MoveToDocEnd,
-        SelectToDocStart,
-        SelectToDocEnd,
-        DeleteToLineStart,
-        DeleteToLineEnd,
-        Undo,
-        Redo,
-        ShowCharacterPalette,
-        Paste,
-        Cut,
-        Copy,
-    ]
-);
-
-pub fn init(cx: &mut App) {
-    let mut bindings = vec![
-        KeyBinding::new("backspace", Backspace, Some(KEY_CONTEXT)),
-        KeyBinding::new("delete", Delete, Some(KEY_CONTEXT)),
-        KeyBinding::new("enter", Enter, Some(KEY_CONTEXT)),
-        KeyBinding::new("left", Left, Some(KEY_CONTEXT)),
-        KeyBinding::new("right", Right, Some(KEY_CONTEXT)),
-        KeyBinding::new("shift-left", SelectLeft, Some(KEY_CONTEXT)),
-        KeyBinding::new("shift-right", SelectRight, Some(KEY_CONTEXT)),
-        KeyBinding::new("home", Home, Some(KEY_CONTEXT)),
-        KeyBinding::new("end", End, Some(KEY_CONTEXT)),
-        KeyBinding::new("shift-home", SelectToLineStart, Some(KEY_CONTEXT)),
-        KeyBinding::new("shift-end", SelectToLineEnd, Some(KEY_CONTEXT)),
-        KeyBinding::new("secondary-a", SelectAll, Some(KEY_CONTEXT)),
-        KeyBinding::new("secondary-v", Paste, Some(KEY_CONTEXT)),
-        KeyBinding::new("secondary-c", Copy, Some(KEY_CONTEXT)),
-        KeyBinding::new("secondary-x", Cut, Some(KEY_CONTEXT)),
-        KeyBinding::new("secondary-z", Undo, Some(KEY_CONTEXT)),
-        KeyBinding::new("secondary-shift-z", Redo, Some(KEY_CONTEXT)),
-        KeyBinding::new("ctrl-cmd-space", ShowCharacterPalette, Some(KEY_CONTEXT)),
-    ];
-
-    #[cfg(target_os = "macos")]
-    bindings.extend([
-        KeyBinding::new("alt-left", MoveToPreviousWordStart, Some(KEY_CONTEXT)),
-        KeyBinding::new("alt-right", MoveToNextWordEnd, Some(KEY_CONTEXT)),
-        KeyBinding::new(
-            "alt-shift-left",
-            SelectToPreviousWordStart,
-            Some(KEY_CONTEXT),
-        ),
-        KeyBinding::new("alt-shift-right", SelectToNextWordEnd, Some(KEY_CONTEXT)),
-        KeyBinding::new(
-            "alt-backspace",
-            DeleteToPreviousWordStart,
-            Some(KEY_CONTEXT),
-        ),
-        KeyBinding::new("alt-delete", DeleteToNextWordEnd, Some(KEY_CONTEXT)),
-        KeyBinding::new("cmd-left", Home, Some(KEY_CONTEXT)),
-        KeyBinding::new("cmd-right", End, Some(KEY_CONTEXT)),
-        KeyBinding::new("cmd-shift-left", SelectToLineStart, Some(KEY_CONTEXT)),
-        KeyBinding::new("cmd-shift-right", SelectToLineEnd, Some(KEY_CONTEXT)),
-        KeyBinding::new("cmd-up", MoveToDocStart, Some(KEY_CONTEXT)),
-        KeyBinding::new("cmd-down", MoveToDocEnd, Some(KEY_CONTEXT)),
-        KeyBinding::new("cmd-shift-up", SelectToDocStart, Some(KEY_CONTEXT)),
-        KeyBinding::new("cmd-shift-down", SelectToDocEnd, Some(KEY_CONTEXT)),
-        KeyBinding::new("cmd-backspace", DeleteToLineStart, Some(KEY_CONTEXT)),
-        KeyBinding::new("cmd-delete", DeleteToLineEnd, Some(KEY_CONTEXT)),
-    ]);
-
-    #[cfg(not(target_os = "macos"))]
-    bindings.extend([
-        KeyBinding::new("ctrl-left", MoveToPreviousWordStart, Some(KEY_CONTEXT)),
-        KeyBinding::new("ctrl-right", MoveToNextWordEnd, Some(KEY_CONTEXT)),
-        KeyBinding::new(
-            "ctrl-shift-left",
-            SelectToPreviousWordStart,
-            Some(KEY_CONTEXT),
-        ),
-        KeyBinding::new("ctrl-shift-right", SelectToNextWordEnd, Some(KEY_CONTEXT)),
-        KeyBinding::new(
-            "ctrl-backspace",
-            DeleteToPreviousWordStart,
-            Some(KEY_CONTEXT),
-        ),
-        KeyBinding::new("ctrl-delete", DeleteToNextWordEnd, Some(KEY_CONTEXT)),
-        KeyBinding::new("ctrl-home", MoveToDocStart, Some(KEY_CONTEXT)),
-        KeyBinding::new("ctrl-end", MoveToDocEnd, Some(KEY_CONTEXT)),
-        KeyBinding::new("ctrl-shift-home", SelectToDocStart, Some(KEY_CONTEXT)),
-        KeyBinding::new("ctrl-shift-end", SelectToDocEnd, Some(KEY_CONTEXT)),
-        KeyBinding::new("ctrl-y", Redo, Some(KEY_CONTEXT)),
-    ]);
-
-    cx.bind_keys(bindings);
-}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum InputEvent {
@@ -156,6 +51,8 @@ pub struct InputState {
     line_height: Pixels,
     page_scroll_offset: Point<Pixels>,
     is_selecting: bool,
+    select_granularity: SelectGranularity,
+    select_anchor: Range<usize>,
     masked: bool,
     multi_line: bool,
     embedded: bool,
@@ -205,6 +102,8 @@ impl InputState {
             line_height: Pixels::ZERO,
             page_scroll_offset: Point::default(),
             is_selecting: false,
+            select_granularity: SelectGranularity::Character,
+            select_anchor: 0..0,
             masked: false,
             multi_line: false,
             embedded: false,
@@ -418,6 +317,71 @@ impl InputState {
         } else {
             self.move_to(self.selected_range.end, cx)
         }
+    }
+
+    fn caret_line_target(&self, delta: isize) -> usize {
+        if !self.multi_line || self.last_lines.len() <= 1 || self.line_height <= Pixels::ZERO {
+            return if delta < 0 { 0 } else { self.content.len() };
+        }
+        let line_height = self.line_height;
+        let display_offset = self.to_display_offset(self.cursor_offset());
+        let (line_ix, local) = self
+            .last_lines
+            .iter()
+            .enumerate()
+            .rev()
+            .find(|(_, line)| line.start <= display_offset)
+            .map(|(ix, line)| (ix, display_offset - line.start))
+            .unwrap_or((0, 0));
+        let caret_x = self.last_lines[line_ix]
+            .line
+            .position_for_index(local, line_height)
+            .map(|position| position.x)
+            .unwrap_or(Pixels::ZERO);
+        let target_ix = line_ix as isize + delta;
+        if target_ix < 0 {
+            return 0;
+        }
+        let Some(target) = self.last_lines.get(target_ix as usize) else {
+            return self.content.len();
+        };
+        let local_target = target
+            .line
+            .closest_index_for_position(point(caret_x, px(0.)), line_height)
+            .unwrap_or_else(|ix| ix);
+        self.display_to_content_offset(target.start + local_target)
+    }
+
+    fn up(&mut self, _: &Up, _: &mut Window, cx: &mut Context<Self>) {
+        if !self.multi_line {
+            cx.propagate();
+            return;
+        }
+        self.move_to(self.caret_line_target(-1), cx);
+    }
+
+    fn down(&mut self, _: &Down, _: &mut Window, cx: &mut Context<Self>) {
+        if !self.multi_line {
+            cx.propagate();
+            return;
+        }
+        self.move_to(self.caret_line_target(1), cx);
+    }
+
+    fn select_up(&mut self, _: &SelectUp, _: &mut Window, cx: &mut Context<Self>) {
+        self.select_to(self.caret_line_target(-1), cx);
+    }
+
+    fn select_down(&mut self, _: &SelectDown, _: &mut Window, cx: &mut Context<Self>) {
+        self.select_to(self.caret_line_target(1), cx);
+    }
+
+    fn newline(&mut self, _: &Newline, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.multi_line {
+            cx.propagate();
+            return;
+        }
+        self.replace_text_in_range(None, "\n", window, cx);
     }
 
     fn select_left(&mut self, _: &SelectLeft, _: &mut Window, cx: &mut Context<Self>) {
@@ -680,11 +644,35 @@ impl InputState {
         window.focus(&self.focus_handle, cx);
         self.caret_blink.sync_focused(cx);
         self.is_selecting = true;
+        let offset = self.index_for_mouse_position(event.position);
+
         if event.modifiers.shift {
-            self.select_to(self.index_for_mouse_position(event.position), cx);
-        } else {
-            self.move_to(self.index_for_mouse_position(event.position), cx)
+            self.select_granularity = SelectGranularity::Character;
+            self.select_to(offset, cx);
+            return;
         }
+
+        self.select_granularity = granularity_for_click(event.click_count);
+        if self.select_granularity == SelectGranularity::Character {
+            self.select_anchor = offset..offset;
+            self.move_to(offset, cx);
+            return;
+        }
+
+        let range = self.granularity_range(offset, self.select_granularity);
+        self.select_anchor = range.clone();
+        self.selection_reversed = false;
+        self.selected_range = range;
+        self.last_edit_kind = None;
+        self.pause_caret_blink(cx);
+        cx.notify();
+    }
+
+    fn granularity_range(&self, offset: usize, granularity: SelectGranularity) -> Range<usize> {
+        if self.is_masked() {
+            return 0..self.content.len();
+        }
+        range_for_granularity(&self.content, offset, granularity, self.multi_line)
     }
 
     fn on_mouse_up(&mut self, _: &MouseUpEvent, _: &mut Window, _: &mut Context<Self>) {
@@ -692,9 +680,32 @@ impl InputState {
     }
 
     fn on_mouse_move(&mut self, event: &MouseMoveEvent, _: &mut Window, cx: &mut Context<Self>) {
-        if self.is_selecting {
-            self.select_to(self.index_for_mouse_position(event.position), cx);
+        if !self.is_selecting {
+            return;
         }
+        let offset = self.index_for_mouse_position(event.position);
+        if self.select_granularity == SelectGranularity::Character {
+            self.select_to(offset, cx);
+            return;
+        }
+        if self.is_masked() {
+            return;
+        }
+        let (range, reversed) = extend_range_for_granularity(
+            &self.content,
+            &self.select_anchor,
+            offset,
+            self.select_granularity,
+            self.multi_line,
+        );
+        if range == self.selected_range && reversed == self.selection_reversed {
+            return;
+        }
+        self.selected_range = range;
+        self.selection_reversed = reversed;
+        self.last_edit_kind = None;
+        self.pause_caret_blink(cx);
+        cx.notify();
     }
 
     fn show_character_palette(
@@ -1136,16 +1147,21 @@ impl Render for InputState {
         let show_border = self.show_border;
 
         div()
-            .key_context(KEY_CONTEXT)
+            .key_context(TEXT_INPUT_CONTEXT)
             .track_focus(&self.focus_handle)
             .cursor(CursorStyle::IBeam)
             .on_action(cx.listener(Self::backspace))
             .on_action(cx.listener(Self::delete))
             .on_action(cx.listener(Self::enter))
+            .on_action(cx.listener(Self::newline))
             .on_action(cx.listener(Self::left))
             .on_action(cx.listener(Self::right))
+            .on_action(cx.listener(Self::up))
+            .on_action(cx.listener(Self::down))
             .on_action(cx.listener(Self::select_left))
             .on_action(cx.listener(Self::select_right))
+            .on_action(cx.listener(Self::select_up))
+            .on_action(cx.listener(Self::select_down))
             .on_action(cx.listener(Self::select_all))
             .on_action(cx.listener(Self::home))
             .on_action(cx.listener(Self::end))
