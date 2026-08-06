@@ -79,6 +79,7 @@ impl ClanProfileSection {
                     let store = store.read(cx);
                     if let Some(clan_profile) = store.clan_profile.as_ref()
                         && clan_profile.clan_id.to_string() == this.selected_clan_id
+                        && !this.is_dirty()
                     {
                         let nick: SharedString = clan_profile.nick_name.clone().into();
                         let avatar = clan_profile.avatar_url.clone().map(Into::into);

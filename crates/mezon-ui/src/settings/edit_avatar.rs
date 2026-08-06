@@ -37,6 +37,7 @@ pub struct EditAvatar {
     loading: bool,
     on_apply: ApplyHandler,
     _slider_subscription: Subscription,
+    _release_subscription: Subscription,
 }
 
 impl EditAvatar {
@@ -84,6 +85,12 @@ impl EditAvatar {
             this.zoom = value.start();
             cx.notify();
         });
+        let release_subscription = cx.on_release(|this, cx| {
+            for image in std::mem::take(&mut this.render_images) {
+                cx.drop_image(image, None);
+            }
+            cx.drop_image(this.crop_mask.clone(), None);
+        });
 
         Self {
             source: Arc::new(DynamicImage::new_rgba8(1, 1)),
@@ -98,6 +105,7 @@ impl EditAvatar {
             loading: true,
             on_apply: Rc::new(on_apply),
             _slider_subscription: slider_subscription,
+            _release_subscription: release_subscription,
         }
     }
 
@@ -121,6 +129,8 @@ impl Render for EditAvatar {
         let canvas_size = (f32::from(window.viewport_size().height) - 330.0).clamp(300.0, 500.0);
         let card_width = canvas_size + 64.0;
         let pan = self.pan;
+        let view = cx.entity().clone();
+        let executor = cx.background_executor().clone();
 
         v_flex()
             .id("edit-avatar-modal")
@@ -327,19 +337,52 @@ impl Render for EditAvatar {
                                     .primary()
                                     .on_click(move |_, window, cx| {
                                         let output = temp_png("cropped");
-                                        if crop_avatar(
-                                            &source,
-                                            &output,
-                                            zoom,
-                                            rotation,
-                                            pan,
-                                            canvas_size,
-                                        )
-                                        .is_ok()
-                                        {
-                                            apply(output, window, cx);
-                                            Self::close(cx);
-                                        }
+                                        let source = source.clone();
+                                        let output_for_crop = output.clone();
+                                        let apply = apply.clone();
+                                        let view = view.clone();
+                                        let executor = executor.clone();
+                                        let window_handle = window.window_handle();
+                                        view.update(cx, |this, cx| {
+                                            this.loading = true;
+                                            this.error = None;
+                                            cx.notify();
+                                        });
+                                        cx.spawn(async move |cx| {
+                                            let result = executor
+                                                .spawn(async move {
+                                                    crop_avatar(
+                                                        &source,
+                                                        &output_for_crop,
+                                                        zoom,
+                                                        rotation,
+                                                        pan,
+                                                        canvas_size,
+                                                    )
+                                                })
+                                                .await;
+                                            let _ =
+                                                cx.update_window(window_handle, |_, window, cx| {
+                                                    view.update(cx, |this, cx| {
+                                                        this.loading = false;
+                                                        match result {
+                                                            Ok(()) => {
+                                                                apply(output, window, cx);
+                                                                Self::close(cx);
+                                                            }
+                                                            Err(error) => {
+                                                                tracing::error!(
+                                                                    "failed to crop avatar: {error}"
+                                                                );
+                                                                this.error =
+                                                                    Some(error.to_string().into());
+                                                                cx.notify();
+                                                            }
+                                                        }
+                                                    });
+                                                });
+                                        })
+                                        .detach();
                                     }),
                             ),
                     ),

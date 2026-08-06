@@ -195,11 +195,11 @@ impl AccountStore {
                 }
                 cx.emit(AccountEvent::AccountLoaded);
                 cx.notify();
+                // The event has no `logo` field, so always refetch as well; this is
+                // what makes direct-message icon changes propagate across clients.
+                self.account_freshness.mark_stale();
+                self.fetch_account(cx);
             }
-            // The event has no `logo` field, so always refetch as well; this is
-            // what makes direct-message icon changes propagate across clients.
-            self.account_freshness.mark_stale();
-            self.fetch_account(cx);
             return;
         }
         if let RealtimeEvent::ClanProfileUpdated(e) = event {
