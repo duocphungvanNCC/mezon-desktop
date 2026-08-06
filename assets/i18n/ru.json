@@ -3649,6 +3649,7 @@
   "searchMessageChannel.cancel": "Отменить",
   "searchMessageChannel.channels": "Каналы",
   "searchMessageChannel.emptySearch.title": "Мы искали по всем направлениям. К сожалению, результаты не найдены.",
+  "searchMessageChannel.emptyPage": "На этой странице нет сообщений. Попробуйте другую страницу.",
   "searchMessageChannel.enter": "Введите",
   "searchMessageChannel.filterOptions.fromUser": "От конкретного пользователя",
   "searchMessageChannel.filterOptions.inChannel": "В конкретном канале",

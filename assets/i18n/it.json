@@ -3640,6 +3640,7 @@
   "searchMessageChannel.cancel": "Annulla",
   "searchMessageChannel.channels": "Canali",
   "searchMessageChannel.emptySearch.title": "Abbiamo cercato ovunque, ma purtroppo non abbiamo trovato alcun risultato.",
+  "searchMessageChannel.emptyPage": "Nessun messaggio in questa pagina. Prova un'altra pagina.",
   "searchMessageChannel.enter": "Invio",
   "searchMessageChannel.filterOptions.fromUser": "Da un utente specifico",
   "searchMessageChannel.filterOptions.inChannel": "In un canale specifico",

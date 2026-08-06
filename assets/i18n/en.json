@@ -3792,6 +3792,7 @@
   "searchMessageChannel.cancel": "Cancel",
   "searchMessageChannel.channels": "Channels",
   "searchMessageChannel.emptySearch.title": "We searched far and wide. Unfortunately, no results were found.",
+  "searchMessageChannel.emptyPage": "No messages on this page. Try another page.",
   "searchMessageChannel.enter": "Enter",
   "searchMessageChannel.filterOptions.fromUser": "From a specific user",
   "searchMessageChannel.filterOptions.inChannel": "In a specific channel",

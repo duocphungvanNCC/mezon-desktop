@@ -3640,6 +3640,7 @@
   "searchMessageChannel.cancel": "キャンセル",
   "searchMessageChannel.channels": "チャンネル",
   "searchMessageChannel.emptySearch.title": "私たちは隅々まで検索しました。残念ながら、結果は見つかりませんでした。",
+  "searchMessageChannel.emptyPage": "このページにメッセージはありません。別のページをお試しください。",
   "searchMessageChannel.enter": "Enter",
   "searchMessageChannel.filterOptions.fromUser": "特定のユーザーから",
   "searchMessageChannel.filterOptions.inChannel": "特定のチャンネル内",
