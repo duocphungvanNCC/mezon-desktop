@@ -7,7 +7,6 @@ use tokio_tungstenite::tungstenite::Message;
 
 const BACKOFF_BASE: Duration = Duration::from_secs(1);
 const BACKOFF_MAX: Duration = Duration::from_secs(32);
-const MAX_RECONNECT_ATTEMPTS: u32 = 10;
 const PING_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Server-rendered notification payload from the Gotify `/stream` endpoint,
@@ -57,17 +56,16 @@ where
     }
 }
 
-/// Run the Gotify notification stream until `tx` is closed. Reconnects with
-/// exponential backoff (1s→32s, ×2, cap 10 attempts, reset on a clean open) and
-/// replies `pong` to each `ping`, treating a 60s ping gap as a dead connection.
-/// Parsed notifications are forwarded to `tx`; suppression is the caller's job.
+/// Run the Gotify notification stream until `tx` is closed. Reconnects with exponential backoff
+/// (1s→32s, ×2, reset on a clean open) and replies `pong` to each `ping`, treating a 60s ping gap
+/// as a dead connection. Parsed notifications are forwarded to `tx`; suppression is the caller's
+/// job.
 pub async fn run_stream(
     ws_base: String,
     token: String,
     tx: mpsc::UnboundedSender<GotifyNotification>,
 ) {
     let url = format!("{}/stream?token={token}", ws_base.trim_end_matches('/'));
-    let mut attempts: u32 = 0;
     let mut backoff = BACKOFF_BASE;
 
     loop {
@@ -76,21 +74,17 @@ pub async fn run_stream(
         }
         match connect_once(&url, &token, &tx).await {
             ConnectOutcome::StopClean => return,
-            ConnectOutcome::Opened => {
-                attempts = 0;
-                backoff = BACKOFF_BASE;
-            }
+            ConnectOutcome::Opened => backoff = BACKOFF_BASE,
             ConnectOutcome::FailedBeforeOpen => {}
         }
 
-        attempts += 1;
-        if attempts >= MAX_RECONNECT_ATTEMPTS {
-            tracing::warn!("gotify: giving up after {MAX_RECONNECT_ATTEMPTS} reconnect attempts");
-            return;
-        }
         tokio::time::sleep(backoff).await;
-        backoff = (backoff * 2).min(BACKOFF_MAX);
+        backoff = next_backoff(backoff);
     }
+}
+
+fn next_backoff(current: Duration) -> Duration {
+    current.saturating_mul(2).min(BACKOFF_MAX)
 }
 
 enum ConnectOutcome {
@@ -171,5 +165,36 @@ async fn connect_once(
             }
             Err(e) => tracing::debug!("gotify: unparseable frame: {e}"),
         }
+    }
+}
+
+#[cfg(test)]
+mod backoff_tests {
+    use super::*;
+
+    #[test]
+    fn backoff_doubles_up_to_the_cap() {
+        let mut delay = BACKOFF_BASE;
+        let mut seen = vec![delay];
+        for _ in 0..8 {
+            delay = next_backoff(delay);
+            seen.push(delay);
+        }
+        assert_eq!(
+            seen,
+            vec![1, 2, 4, 8, 16, 32, 32, 32, 32]
+                .into_iter()
+                .map(Duration::from_secs)
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn backoff_never_grows_past_the_cap() {
+        let mut delay = BACKOFF_MAX;
+        for _ in 0..100 {
+            delay = next_backoff(delay);
+        }
+        assert_eq!(delay, BACKOFF_MAX);
     }
 }
