@@ -96,6 +96,9 @@ pub fn word_range_at(text: &str, offset: usize) -> Range<usize> {
     let before = text[..offset].chars().next_back().map(char_kind);
     let after = text[offset..].chars().next().map(char_kind);
     let kind = match (before, after) {
+        (Some(b), Some(a)) if b != CharKind::Whitespace && a != CharKind::Whitespace => {
+            if b == CharKind::Word { b } else { a }
+        }
         (_, Some(a)) if a != CharKind::Whitespace => a,
         (Some(b), _) if b != CharKind::Whitespace => b,
         (_, Some(a)) => a,
@@ -270,6 +273,13 @@ mod tests {
     fn word_range_treats_punctuation_as_its_own_run() {
         let text = "foo.bar";
         assert_eq!(word_range_at(text, 0), 0..3);
+        assert_eq!(word_range_at(text, 4), 4..7);
+    }
+
+    #[test]
+    fn word_range_at_a_run_boundary_prefers_the_word_over_the_punctuation() {
+        let text = "foo.bar";
+        assert_eq!(word_range_at(text, 3), 0..3);
         assert_eq!(word_range_at(text, 4), 4..7);
     }
 

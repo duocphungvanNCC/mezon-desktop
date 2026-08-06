@@ -410,18 +410,34 @@ impl TextArea {
     }
 
     fn up(&mut self, _: &Up, _: &mut Window, cx: &mut Context<Self>) {
+        if self.single_line {
+            cx.propagate();
+            return;
+        }
         self.move_caret_line(-1, cx);
     }
 
     fn down(&mut self, _: &Down, _: &mut Window, cx: &mut Context<Self>) {
+        if self.single_line {
+            cx.propagate();
+            return;
+        }
         self.move_caret_line(1, cx);
     }
 
     fn select_up(&mut self, _: &SelectUp, _: &mut Window, cx: &mut Context<Self>) {
+        if self.single_line {
+            cx.propagate();
+            return;
+        }
         self.select_to(self.caret_line_target(-1), cx);
     }
 
     fn select_down(&mut self, _: &SelectDown, _: &mut Window, cx: &mut Context<Self>) {
+        if self.single_line {
+            cx.propagate();
+            return;
+        }
         self.select_to(self.caret_line_target(1), cx);
     }
 

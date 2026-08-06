@@ -369,10 +369,18 @@ impl InputState {
     }
 
     fn select_up(&mut self, _: &SelectUp, _: &mut Window, cx: &mut Context<Self>) {
+        if !self.multi_line {
+            cx.propagate();
+            return;
+        }
         self.select_to(self.caret_line_target(-1), cx);
     }
 
     fn select_down(&mut self, _: &SelectDown, _: &mut Window, cx: &mut Context<Self>) {
+        if !self.multi_line {
+            cx.propagate();
+            return;
+        }
         self.select_to(self.caret_line_target(1), cx);
     }
 

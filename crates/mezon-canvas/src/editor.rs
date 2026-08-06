@@ -1342,50 +1342,30 @@ impl CanvasEditorState {
         self.insert_hard_break(cx);
     }
 
-    fn left(&mut self, _: &Left, window: &mut Window, cx: &mut Context<Self>) {
-        let offset = self.previous_boundary(self.cursor_offset());
-        if window.modifiers().shift {
-            self.select_to(offset, cx);
-        } else {
-            self.move_to(offset, cx);
-        }
+    fn left(&mut self, _: &Left, _: &mut Window, cx: &mut Context<Self>) {
+        self.move_to(self.previous_boundary(self.cursor_offset()), cx);
     }
 
-    fn right(&mut self, _: &Right, window: &mut Window, cx: &mut Context<Self>) {
-        let offset = self.next_boundary(self.cursor_offset());
-        if window.modifiers().shift {
-            self.select_to(offset, cx);
-        } else {
-            self.move_to(offset, cx);
-        }
+    fn right(&mut self, _: &Right, _: &mut Window, cx: &mut Context<Self>) {
+        self.move_to(self.next_boundary(self.cursor_offset()), cx);
     }
 
-    fn up(&mut self, _: &Up, window: &mut Window, cx: &mut Context<Self>) {
+    fn up(&mut self, _: &Up, _: &mut Window, cx: &mut Context<Self>) {
         let (line, col) = self.offset_to_line_col(self.cursor_offset());
         if line == 0 {
             return;
         }
         let prev_len = self.lines[line - 1].text.len();
-        let offset = self.line_col_to_offset(line - 1, col.min(prev_len));
-        if window.modifiers().shift {
-            self.select_to(offset, cx);
-        } else {
-            self.move_to(offset, cx);
-        }
+        self.move_to(self.line_col_to_offset(line - 1, col.min(prev_len)), cx);
     }
 
-    fn down(&mut self, _: &Down, window: &mut Window, cx: &mut Context<Self>) {
+    fn down(&mut self, _: &Down, _: &mut Window, cx: &mut Context<Self>) {
         let (line, col) = self.offset_to_line_col(self.cursor_offset());
         if line + 1 >= self.lines.len() {
             return;
         }
         let next_len = self.lines[line + 1].text.len();
-        let offset = self.line_col_to_offset(line + 1, col.min(next_len));
-        if window.modifiers().shift {
-            self.select_to(offset, cx);
-        } else {
-            self.move_to(offset, cx);
-        }
+        self.move_to(self.line_col_to_offset(line + 1, col.min(next_len)), cx);
     }
 
     fn select_up(&mut self, _: &SelectUp, _: &mut Window, cx: &mut Context<Self>) {
@@ -1504,24 +1484,17 @@ impl CanvasEditorState {
         self.select_to(self.content.len(), cx);
     }
 
-    fn home(&mut self, _: &Home, window: &mut Window, cx: &mut Context<Self>) {
+    fn home(&mut self, _: &Home, _: &mut Window, cx: &mut Context<Self>) {
         let (line, _) = self.offset_to_line_col(self.cursor_offset());
-        let offset = self.line_col_to_offset(line, 0);
-        if window.modifiers().shift {
-            self.select_to(offset, cx);
-        } else {
-            self.move_to(offset, cx);
-        }
+        self.move_to(self.line_col_to_offset(line, 0), cx);
     }
 
-    fn end(&mut self, _: &End, window: &mut Window, cx: &mut Context<Self>) {
+    fn end(&mut self, _: &End, _: &mut Window, cx: &mut Context<Self>) {
         let (line, _) = self.offset_to_line_col(self.cursor_offset());
-        let offset = self.line_col_to_offset(line, self.lines[line].text.len());
-        if window.modifiers().shift {
-            self.select_to(offset, cx);
-        } else {
-            self.move_to(offset, cx);
-        }
+        self.move_to(
+            self.line_col_to_offset(line, self.lines[line].text.len()),
+            cx,
+        );
     }
 
     fn paste(&mut self, _: &Paste, window: &mut Window, cx: &mut Context<Self>) {
@@ -1812,39 +1785,41 @@ impl Render for CanvasEditorState {
                 el.key_context(editor_key_context())
                     .track_focus(&self.focus_handle)
                     .cursor(CursorStyle::IBeam)
-                    .on_action(cx.listener(Self::backspace))
-                    .on_action(cx.listener(Self::delete))
-                    .on_action(cx.listener(Self::enter))
-                    .on_action(cx.listener(Self::shift_enter))
-                    .on_action(cx.listener(Self::left))
-                    .on_action(cx.listener(Self::right))
-                    .on_action(cx.listener(Self::up))
-                    .on_action(cx.listener(Self::down))
-                    .on_action(cx.listener(Self::select_left))
-                    .on_action(cx.listener(Self::select_right))
-                    .on_action(cx.listener(Self::select_up))
-                    .on_action(cx.listener(Self::select_down))
-                    .on_action(cx.listener(Self::select_home))
-                    .on_action(cx.listener(Self::select_end))
-                    .on_action(cx.listener(Self::select_all))
-                    .on_action(cx.listener(Self::home))
-                    .on_action(cx.listener(Self::end))
-                    .on_action(cx.listener(Self::move_to_previous_word_start))
-                    .on_action(cx.listener(Self::move_to_next_word_end))
-                    .on_action(cx.listener(Self::select_to_previous_word_start))
-                    .on_action(cx.listener(Self::select_to_next_word_end))
-                    .on_action(cx.listener(Self::move_to_doc_start))
-                    .on_action(cx.listener(Self::move_to_doc_end))
-                    .on_action(cx.listener(Self::select_to_doc_start))
-                    .on_action(cx.listener(Self::select_to_doc_end))
-                    .on_action(cx.listener(Self::paste))
-                    .on_action(cx.listener(Self::cut))
-                    .on_action(cx.listener(Self::copy))
-                    .on_action(cx.listener(Self::bold))
-                    .on_action(cx.listener(Self::italic))
-                    .on_action(cx.listener(Self::strike_through))
-                    .on_action(cx.listener(Self::code_block))
-                    .on_action(cx.listener(Self::link))
+                    .when(focused, |el| {
+                        el.on_action(cx.listener(Self::backspace))
+                            .on_action(cx.listener(Self::delete))
+                            .on_action(cx.listener(Self::enter))
+                            .on_action(cx.listener(Self::shift_enter))
+                            .on_action(cx.listener(Self::left))
+                            .on_action(cx.listener(Self::right))
+                            .on_action(cx.listener(Self::up))
+                            .on_action(cx.listener(Self::down))
+                            .on_action(cx.listener(Self::select_left))
+                            .on_action(cx.listener(Self::select_right))
+                            .on_action(cx.listener(Self::select_up))
+                            .on_action(cx.listener(Self::select_down))
+                            .on_action(cx.listener(Self::select_home))
+                            .on_action(cx.listener(Self::select_end))
+                            .on_action(cx.listener(Self::select_all))
+                            .on_action(cx.listener(Self::home))
+                            .on_action(cx.listener(Self::end))
+                            .on_action(cx.listener(Self::move_to_previous_word_start))
+                            .on_action(cx.listener(Self::move_to_next_word_end))
+                            .on_action(cx.listener(Self::select_to_previous_word_start))
+                            .on_action(cx.listener(Self::select_to_next_word_end))
+                            .on_action(cx.listener(Self::move_to_doc_start))
+                            .on_action(cx.listener(Self::move_to_doc_end))
+                            .on_action(cx.listener(Self::select_to_doc_start))
+                            .on_action(cx.listener(Self::select_to_doc_end))
+                            .on_action(cx.listener(Self::paste))
+                            .on_action(cx.listener(Self::cut))
+                            .on_action(cx.listener(Self::copy))
+                            .on_action(cx.listener(Self::bold))
+                            .on_action(cx.listener(Self::italic))
+                            .on_action(cx.listener(Self::strike_through))
+                            .on_action(cx.listener(Self::code_block))
+                            .on_action(cx.listener(Self::link))
+                    })
                     .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
                     .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
                     .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))

@@ -168,6 +168,7 @@ pub fn init(cx: &mut App) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gpui::KeyContext;
     use std::collections::HashMap;
 
     #[test]
@@ -188,12 +189,23 @@ mod tests {
     }
 
     #[test]
-    fn every_bound_action_is_reachable_from_one_context() {
+    fn every_binding_fires_only_inside_the_text_input_context() {
+        let mut inside = KeyContext::default();
+        inside.add(TEXT_INPUT_CONTEXT);
+        let outside = KeyContext::default();
+
         for binding in text_input_bindings() {
+            let name = binding.action().name().to_string();
+            let predicate = binding
+                .predicate()
+                .unwrap_or_else(|| panic!("{name} must be scoped to a context"));
             assert!(
-                binding.predicate().is_some(),
-                "{} must be scoped to the text input context",
-                binding.action().name()
+                predicate.eval(std::slice::from_ref(&inside)),
+                "{name} must fire inside {TEXT_INPUT_CONTEXT}"
+            );
+            assert!(
+                !predicate.eval(std::slice::from_ref(&outside)),
+                "{name} must not fire outside {TEXT_INPUT_CONTEXT}"
             );
         }
     }
