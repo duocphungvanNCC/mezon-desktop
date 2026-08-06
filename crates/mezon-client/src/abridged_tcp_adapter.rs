@@ -256,6 +256,7 @@ fn envelope_kind(envelope: &mezon_proto::realtime::Envelope) -> &'static str {
         Some(M::UserClanRemovedEvent(_)) => "UserClanRemoved",
         Some(M::ClanUpdatedEvent(_)) => "ClanUpdated",
         Some(M::ClanProfileUpdatedEvent(_)) => "ClanProfileUpdated",
+        Some(M::UserProfileUpdatedEvent(_)) => "UserProfileUpdated",
         Some(M::ClanDeletedEvent(_)) => "ClanDeleted",
         Some(M::AddFriend(_)) => "AddFriend",
         Some(M::RemoveFriend(_)) => "RemoveFriend",

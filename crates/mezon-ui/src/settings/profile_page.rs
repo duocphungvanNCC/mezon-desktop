@@ -8,9 +8,11 @@ use gpui::{
     Context, Entity, FontWeight, PathPromptOptions, Rgba, SharedString, Subscription, Task, Window,
     div, img, prelude::*, px,
 };
-use mezon_store::{AccountEvent, AccountStore, ClanList, Settings, UserAccount};
+use mezon_store::{AccountEvent, AccountStore, AppConfig, ClanList, Settings, UserAccount};
 
 use super::clan_profile_section::ClanProfileSection;
+use super::edit_avatar::EditAvatar;
+use crate::app::shell::Shell;
 use crate::theme::{ActiveTheme, Theme};
 use crate::{image_cache::LruImageCache, util::avatar_color::spawn_banner_color_task};
 
@@ -120,7 +122,19 @@ impl ProfilePage {
         .detach();
         cx.subscribe(
             &AccountStore::global(cx),
-            |this, _, event, cx| match event {
+            |this, store, event, cx| match event {
+                AccountEvent::AccountLoaded => {
+                    if !this.is_dirty()
+                        && let Some(account) = store.read(cx).account.as_ref()
+                    {
+                        this.profile = Some(ProfileState::from_account(account));
+                        this.display_name_input = None;
+                        this.about_me_input = None;
+                        this._subscriptions.clear();
+                        this.refresh_banner_color(cx);
+                        cx.notify();
+                    }
+                }
                 AccountEvent::AccountLoadFailed => {
                     this.fetch_error = true;
                     cx.notify();
@@ -154,6 +168,14 @@ impl ProfilePage {
                 AccountEvent::DirectMessageIconUploaded(url) => {
                     if let Some(state) = &mut this.profile {
                         state.logo_url = Some(url.clone().into());
+                        state.original_logo_url = state.logo_url.clone();
+                    }
+                    cx.notify();
+                }
+                AccountEvent::DirectMessageIconRemoved => {
+                    if let Some(state) = &mut this.profile {
+                        state.logo_url = None;
+                        state.original_logo_url = None;
                     }
                     cx.notify();
                 }
@@ -817,6 +839,31 @@ impl ProfilePage {
                                             let Some(path) = paths.into_iter().next() else {
                                                 return;
                                             };
+                                            let is_gif = path
+                                                .extension()
+                                                .and_then(|extension| extension.to_str())
+                                                .is_some_and(|extension| {
+                                                    extension.eq_ignore_ascii_case("gif")
+                                                });
+                                            if !is_gif {
+                                                cx.update(|cx| {
+                                                    EditAvatar::open(
+                                                        path,
+                                                        move |cropped, _, cx| {
+                                                            AccountStore::global(cx).update(
+                                                                cx,
+                                                                |store, cx| {
+                                                                    store.upload_user_avatar(
+                                                                        &cropped, cx,
+                                                                    )
+                                                                },
+                                                            );
+                                                        },
+                                                        cx,
+                                                    );
+                                                });
+                                                return;
+                                            }
                                             root_entity.update(cx, |_, cx| {
                                                 AccountStore::global(cx).update(cx, |store, cx| {
                                                     store.upload_user_avatar(&path, cx)
@@ -834,7 +881,9 @@ impl ProfilePage {
                                     .border_color(theme.border)
                                     .on_click(cx.listener(|this, _, _, cx| {
                                         if let Some(state) = &mut this.profile {
-                                            state.avatar_url = None;
+                                            state.avatar_url = Some(
+                                                AppConfig::global(cx).logo_mezon.clone().into(),
+                                            );
                                         }
                                         this.refresh_banner_color(cx);
                                         cx.notify();
@@ -942,6 +991,34 @@ impl ProfilePage {
                                         return;
                                     };
                                     root.update(cx, |_, cx| {
+                                        if path
+                                            .metadata()
+                                            .map(|metadata| metadata.len())
+                                            .unwrap_or(u64::MAX)
+                                            > 1024 * 1024
+                                        {
+                                            let title =
+                                                mezon_i18n::t(&locale, "common.filesTooPowerful");
+                                            let content =
+                                                mezon_i18n::t(&locale, "common.maxFileSize")
+                                                    .replace("{{sizeLimit}}", "1 MB");
+                                            if let Some(handle) =
+                                                crate::app::main_window::handle(cx)
+                                            {
+                                                let _ =
+                                                    cx.update_window(handle, |_, window, cx| {
+                                                        Shell::global(cx).update(
+                                                            cx,
+                                                            |shell, cx| {
+                                                                shell.show_upload_limit(
+                                                                    title, content, window, cx,
+                                                                );
+                                                            },
+                                                        );
+                                                    });
+                                            }
+                                            return;
+                                        }
                                         AccountStore::global(cx).update(cx, |store, cx| {
                                             store.upload_direct_message_icon(&path, cx)
                                         })
@@ -960,11 +1037,10 @@ impl ProfilePage {
                                 .text_color(theme.text_muted)
                                 .border_1()
                                 .border_color(theme.border)
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    if let Some(profile) = &mut this.profile {
-                                        profile.logo_url = None;
-                                    }
-                                    cx.notify();
+                                .on_click(cx.listener(|_this, _, _, cx| {
+                                    AccountStore::global(cx).update(cx, |store, cx| {
+                                        store.remove_direct_message_icon(cx)
+                                    });
                                 })),
                         )
                     }),

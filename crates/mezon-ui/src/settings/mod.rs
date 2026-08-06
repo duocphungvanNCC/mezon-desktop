@@ -4,6 +4,7 @@ mod advanced_page;
 mod appearance_page;
 mod clan_profile_section;
 mod device_page;
+mod edit_avatar;
 mod language_page;
 mod notifications_page;
 mod profile_page;

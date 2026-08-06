@@ -10,6 +10,7 @@ use gpui::{
 };
 use mezon_store::{AccountEvent, AccountStore, ClanList, Settings};
 
+use super::edit_avatar::EditAvatar;
 use super::profile_page::profile_status;
 use crate::theme::{ActiveTheme, Theme};
 use crate::{image_cache::LruImageCache, util::avatar_color::spawn_banner_color_task};
@@ -142,8 +143,10 @@ impl ClanProfileSection {
                     }
                     cx.notify();
                 }
-                AccountEvent::ClanAvatarUploaded(url) => {
-                    if let Some(state) = &mut this.profile {
+                AccountEvent::ClanAvatarUploaded(clan_id, url) => {
+                    if let Some(state) = &mut this.profile
+                        && state.selected_clan_id.as_ref() == clan_id.to_string()
+                    {
                         state.avatar_url = Some(url.clone().into());
                     }
                     this.refresh_banner_color(cx);
@@ -601,8 +604,10 @@ impl ClanProfileSection {
                                                         &locale,
                                                         "setting.profile.chooseAvatar",
                                                     );
+                                                    let clan_id = selected_clan_id.clone();
                                                     move |_, _, cx| {
                                                         let entity = entity.clone();
+                                                        let clan_id = clan_id.clone();
                                                         let rx = cx.prompt_for_paths(
                                                             PathPromptOptions {
                                                                 files: true,
@@ -621,12 +626,41 @@ impl ClanProfileSection {
                                                                     Some(p) => p,
                                                                     None => return,
                                                                 };
+                                                            let is_gif = path
+                                                                .extension()
+                                                                .and_then(|extension| extension.to_str())
+                                                                .is_some_and(|extension| extension.eq_ignore_ascii_case("gif"));
+                                                            if !is_gif {
+                                                                let apply_clan_id = clan_id.clone();
+                                                                cx.update(|cx| {
+                                                                    EditAvatar::open(
+                                                                        path,
+                                                                        move |cropped, _, cx| {
+                                                                            AccountStore::global(cx).update(cx, |store, cx| {
+                                                                                store.upload_clan_avatar(
+                                                                                    apply_clan_id.as_ref().parse().unwrap_or_default(),
+                                                                                    &cropped,
+                                                                                    cx,
+                                                                                )
+                                                                            });
+                                                                        },
+                                                                        cx,
+                                                                    );
+                                                                });
+                                                                return;
+                                                            }
                                                             entity.update(cx, |_, cx| {
                                                                 AccountStore::global(cx).update(
                                                                     cx,
                                                                     |store, cx| {
                                                                         store.upload_clan_avatar(
-                                                                            &path, cx,
+                                                                            clan_id
+                                                                                .as_ref()
+                                                                                .parse()
+                                                                                .unwrap_or_default(
+                                                                                ),
+                                                                            &path,
+                                                                            cx,
                                                                         );
                                                                     },
                                                                 );
@@ -647,10 +681,11 @@ impl ClanProfileSection {
                                                 .border_color(theme.border)
                                                 .on_click({
                                                     let entity = cx.entity().clone();
+                                                    let user_avatar_url = self.user_avatar_url.clone();
                                                     move |_, _, cx| {
                                                         entity.clone().update(cx, |this, cx| {
                                                             if let Some(state) = &mut this.profile {
-                                                                state.avatar_url = None;
+                                                                state.avatar_url = user_avatar_url.clone();
                                                             }
                                                             this.refresh_banner_color(cx);
                                                             cx.notify();

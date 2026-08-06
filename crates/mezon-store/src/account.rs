@@ -52,10 +52,11 @@ pub enum AccountEvent {
     AccountSaved,
     AccountSaveFailed(String),
     UserAvatarUploaded(String),
-    ClanAvatarUploaded(String),
+    ClanAvatarUploaded(ClanId, String),
     UserAvatarUploadFailed(String),
     ClanAvatarUploadFailed(String),
     DirectMessageIconUploaded(String),
+    DirectMessageIconRemoved,
     DirectMessageIconUploadFailed(String),
     ClanProfileLoaded,
     ClanProfileLoadFailed(String),
@@ -153,6 +154,11 @@ impl AccountStore {
                 &entity,
                 |this, event, cx| this.handle_event(event, cx),
             );
+            dispatch.on(
+                RealtimeKind::UserProfileUpdated,
+                &entity,
+                |this, event, cx| this.handle_event(event, cx),
+            );
             dispatch.on_lagged(&entity, |this, cx| {
                 tracing::warn!("AccountStore realtime lagged — refetching account");
                 if this.account.is_some() || this.account_loading {
@@ -163,6 +169,16 @@ impl AccountStore {
     }
 
     fn handle_event(&mut self, event: &RealtimeEvent, cx: &mut Context<Self>) {
+        if let RealtimeEvent::UserProfileUpdated(e) = event {
+            let is_current_user = crate::BadgeService::try_global(cx)
+                .and_then(|badges| badges.read(cx).current_user_id(cx))
+                .is_some_and(|user_id| user_id.get() == e.user_id);
+            if is_current_user {
+                self.account_freshness.mark_stale();
+                self.fetch_account(cx);
+            }
+            return;
+        }
         if let RealtimeEvent::ClanProfileUpdated(e) = event {
             let clan_id = ClanId(e.clan_id);
             if self
@@ -171,12 +187,8 @@ impl AccountStore {
                 .is_some_and(|p| p.clan_id == clan_id)
             {
                 if let Some(profile) = &mut self.clan_profile {
-                    if !e.clan_nick.is_empty() {
-                        profile.nick_name = e.clan_nick.clone();
-                    }
-                    if !e.clan_avatar.is_empty() {
-                        profile.avatar_url = Some(e.clan_avatar.clone());
-                    }
+                    profile.nick_name = e.clan_nick.clone();
+                    profile.avatar_url = (!e.clan_avatar.is_empty()).then(|| e.clan_avatar.clone());
                 }
                 cx.emit(AccountEvent::ClanProfileLoaded);
                 cx.notify();
@@ -317,7 +329,7 @@ impl AccountStore {
             match api
                 .update_account(
                     Some(&display_name),
-                    avatar_url.as_deref(),
+                    Some(avatar_url.as_deref().unwrap_or_default()),
                     Some(&about_me),
                     logo_url.as_deref(),
                 )
@@ -407,38 +419,25 @@ impl AccountStore {
         .detach();
     }
 
-    fn upload_avatar_for(&mut self, path: &Path, clan_profile: bool, cx: &mut Context<Self>) {
+    pub fn upload_user_avatar(&mut self, path: &Path, cx: &mut Context<Self>) {
         let api = self.api.clone();
         let path = path.to_path_buf();
         cx.spawn(async move |this, cx| {
+            let upload_api = api.clone();
             let result = cx
                 .background_executor()
-                .spawn(async move { api.upload_avatar(&path).await })
+                .spawn(async move { upload_api.upload_avatar(&path).await })
                 .await;
             match result {
                 Ok(url) => {
-                    let _ = this.update(cx, |this, cx| {
-                        if clan_profile {
-                            cx.emit(AccountEvent::ClanAvatarUploaded(url));
-                        } else {
-                            if let Some(account) = &mut this.account {
-                                account.avatar_url = Some(url.clone());
-                            }
-                            if let Some(account) = &this.account {
-                                Self::spawn_persist_cache(account, cx);
-                            }
-                            cx.emit(AccountEvent::UserAvatarUploaded(url));
-                        }
+                    let _ = this.update(cx, |_, cx| {
+                        cx.emit(AccountEvent::UserAvatarUploaded(url));
                         cx.notify();
                     });
                 }
                 Err(e) => {
                     let _ = this.update(cx, |_, cx| {
-                        if clan_profile {
-                            cx.emit(AccountEvent::ClanAvatarUploadFailed(e.to_string()));
-                        } else {
-                            cx.emit(AccountEvent::UserAvatarUploadFailed(e.to_string()));
-                        }
+                        cx.emit(AccountEvent::UserAvatarUploadFailed(e.to_string()));
                         cx.notify();
                     });
                 }
@@ -447,15 +446,7 @@ impl AccountStore {
         .detach();
     }
 
-    pub fn upload_user_avatar(&mut self, path: &Path, cx: &mut Context<Self>) {
-        self.upload_avatar_for(path, false, cx);
-    }
-
-    pub fn upload_clan_avatar(&mut self, path: &Path, cx: &mut Context<Self>) {
-        self.upload_avatar_for(path, true, cx);
-    }
-
-    pub fn upload_direct_message_icon(&mut self, path: &Path, cx: &mut Context<Self>) {
+    pub fn upload_clan_avatar(&mut self, clan_id: ClanId, path: &Path, cx: &mut Context<Self>) {
         let api = self.api.clone();
         let path = path.to_path_buf();
         cx.spawn(async move |this, cx| {
@@ -463,10 +454,87 @@ impl AccountStore {
                 .background_executor()
                 .spawn(async move { api.upload_avatar(&path).await })
                 .await;
+            let _ = this.update(cx, |_, cx| {
+                match result {
+                    Ok(url) => cx.emit(AccountEvent::ClanAvatarUploaded(clan_id, url)),
+                    Err(error) => cx.emit(AccountEvent::ClanAvatarUploadFailed(error.to_string())),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    pub fn upload_direct_message_icon(&mut self, path: &Path, cx: &mut Context<Self>) {
+        if path
+            .metadata()
+            .map(|metadata| metadata.len())
+            .unwrap_or(u64::MAX)
+            > 1024 * 1024
+        {
+            cx.emit(AccountEvent::DirectMessageIconUploadFailed(
+                "image exceeds the 1 MB direct-message icon limit".into(),
+            ));
+            cx.notify();
+            return;
+        }
+        let api = self.api.clone();
+        let path = path.to_path_buf();
+        cx.spawn(async move |this, cx| {
+            let upload_api = api.clone();
+            let result = cx
+                .background_executor()
+                .spawn(async move { upload_api.upload_avatar(&path).await })
+                .await;
             match result {
-                Ok(url) => {
+                Ok(url) => match api.update_account(None, None, None, Some(&url)).await {
+                    Ok(()) => {
+                        let _ = this.update(cx, |this, cx| {
+                            if let Some(account) = &mut this.account {
+                                account.logo = Some(url.clone());
+                            }
+                            if let Some(account) = &this.account {
+                                Self::spawn_persist_cache(account, cx);
+                            }
+                            cx.emit(AccountEvent::DirectMessageIconUploaded(url));
+                            cx.notify();
+                        });
+                    }
+                    Err(error) => {
+                        let _ = this.update(cx, |_, cx| {
+                            cx.emit(AccountEvent::DirectMessageIconUploadFailed(
+                                error.to_string(),
+                            ));
+                            cx.notify();
+                        });
+                    }
+                },
+                Err(error) => {
                     let _ = this.update(cx, |_, cx| {
-                        cx.emit(AccountEvent::DirectMessageIconUploaded(url));
+                        cx.emit(AccountEvent::DirectMessageIconUploadFailed(
+                            error.to_string(),
+                        ));
+                        cx.notify();
+                    });
+                }
+            }
+        })
+        .detach();
+    }
+
+    pub fn remove_direct_message_icon(&mut self, cx: &mut Context<Self>) {
+        let api = self.api.clone();
+        cx.spawn(async move |this, cx| {
+            match api.update_account(None, None, None, Some("")).await {
+                Ok(()) => {
+                    let _ = this.update(cx, |this, cx| {
+                        if let Some(account) = &mut this.account {
+                            account.logo = None;
+                        }
+                        if let Some(account) = &this.account {
+                            Self::spawn_persist_cache(account, cx);
+                        }
+                        cx.emit(AccountEvent::DirectMessageIconRemoved);
                         cx.notify();
                     });
                 }
@@ -570,7 +638,11 @@ impl AccountStore {
         let api = self.api.clone();
         cx.spawn(async move |this, cx| {
             match api
-                .update_user_clan_profile(clan_id.get(), &nick_name, avatar_url.as_deref())
+                .update_user_clan_profile(
+                    clan_id.get(),
+                    &nick_name,
+                    Some(avatar_url.as_deref().unwrap_or_default()),
+                )
                 .await
             {
                 Ok(()) => {
