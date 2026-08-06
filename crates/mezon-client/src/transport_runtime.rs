@@ -427,6 +427,26 @@ impl TransportClient {
         self.inner.set_http_fallback(fallback);
     }
 
+    pub fn frames_received(&self) -> u64 {
+        self.inner.frames_received()
+    }
+
+    pub fn credential_rejected(&self) -> bool {
+        self.inner.credential_rejected()
+    }
+
+    pub async fn renew_fallback_token(&self) -> Result<(String, String)> {
+        let transport = self.inner.clone();
+        runtime()
+            .spawn(async move { transport.renew_fallback_token().await })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
+    pub fn renewed_tokens(&self) -> tokio::sync::watch::Receiver<Option<(String, String)>> {
+        self.inner.renewed_tokens()
+    }
+
     pub async fn connect(
         &self,
         host: &str,

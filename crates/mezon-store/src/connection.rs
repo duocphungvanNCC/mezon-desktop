@@ -23,15 +23,41 @@ const HEARTBEAT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1
 const CONNECT_CONFIRM_GRACE: std::time::Duration = std::time::Duration::from_secs(1);
 const MAX_CONSECUTIVE_FAILURES: u32 = 5;
 const RECONNECT_BACKOFF_CAP_SECS: u64 = 60;
+const NETWORK_PROBE_RETRY_MIN_SECS: u64 = 1;
+const NETWORK_PROBE_RETRY_CAP_SECS: u64 = 15;
 const DEFAULT_TLS_PORT: u16 = 443;
+/// The gateway discards its own 401 before it reaches the wire (`cleanup_connection` clears the
+/// write queue that `flush_ssl_wbio` had only queued), so a dead `session_id`, the per-user session
+/// limit and a plain outage all arrive as an identical silent close. After this many silent
+/// refusals we stop guessing and re-handshake with the JWT — the one credential the server has just
+/// confirmed by minting it.
+const SSID_REFUSALS_BEFORE_JWT: u32 = 1;
+/// How many refusals of the JWT itself before asking the API host whether the account still
+/// exists. The JWT was just minted by the server, so its refusal means either the whole session is
+/// gone or the gateway is turning connections away for its own reasons — only an authenticated
+/// HTTP call separates the two.
+const JWT_REFUSALS_BEFORE_PROBE: u32 = 1;
+const JWT_SKEW: std::time::Duration = std::time::Duration::from_secs(60);
 /// Result of a single reconnect attempt. Only a rejected credential (the server accepted the TCP
 /// connection but refused the handshake) is treated as a dead session; an unreachable server must
 /// never discard the persisted session.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum ConnectOutcome {
     Confirmed,
-    HandshakeRejected,
-    TransportError,
+    /// The gateway took the connection and then dropped it. It is up and choosing not to serve us,
+    /// so the credentials are worth questioning.
+    Refused,
+    /// The host never answered — DNS, routing, a dead port. This says nothing about credentials
+    /// and must never advance the checks that can end in a logout.
+    Unreachable,
+}
+
+/// What a `SessionRefresh` concluded. `Rejected` is the only server-confirmed proof that the
+/// credentials are dead — everything else must keep the session.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum RefreshVerdict {
+    Renewed,
+    Transient,
 }
 
 /// Owns the transport connection manager task + the auth-state observation. Registered as a
@@ -44,6 +70,7 @@ pub struct ConnectionStore {
     _manager: Task<()>,
     _auth_observe: Subscription,
     _heartbeat: Task<()>,
+    _token_watch: Task<()>,
     _online_watch: Task<()>,
     _network: NetworkMonitor,
 }
@@ -131,6 +158,7 @@ impl ConnectionStore {
             })
         };
 
+        let token_watch = Self::spawn_token_watch(api.clone(), auth_state.clone(), cx);
         let heartbeat = Self::spawn_heartbeat(transport.clone(), api.clone(), wake.clone(), cx);
         let transport_handle = transport.clone();
         let wake_handle = wake.clone();
@@ -141,17 +169,21 @@ impl ConnectionStore {
         let tcp_default_port = AppConfig::try_global(cx).and_then(|cfg| cfg.tcp_port);
         let configured_api_base = AppConfig::try_global(cx).map(configured_api_base_url);
         let auth_client = crate::login::LoginStore::global(cx).read(cx).client();
-        let online_signal = network.online();
+        let api_server_key = AppConfig::try_global(cx)
+            .map(|cfg| cfg.api_key.clone())
+            .unwrap_or_default();
 
         let manager = cx.spawn(async move |this, cx| {
             let exec = cx.background_executor().clone();
             let mut connected_user_id: Option<String> = None;
             let mut retry_backoff_secs = 1u64;
             let mut consecutive_failures = 0u32;
-            let mut handshake_rejections = 0u32;
             let mut connect_ack_rx = connect_ack_rx;
-            let mut renewal_retry_at: Option<std::time::Instant> = None;
-            let mut renewal_backoff = TOKEN_RENEWAL_RETRY_MIN;
+            let mut network_retry_secs = NETWORK_PROBE_RETRY_MIN_SECS;
+            let mut refreshed_this_run = false;
+            let mut gateway_refusals = 0u32;
+            let mut jwt_refusals = 0u32;
+            let mut probed_this_outage = false;
 
             loop {
                 let (session, is_connecting) = cx.update(|cx| match auth_state.read(cx).clone() {
@@ -168,7 +200,7 @@ impl ConnectionStore {
                     }
                 });
 
-                let Some(session) = session else {
+                let Some(mut session) = session else {
                     api.set_http_fallback(None);
                     if connected_user_id.take().is_some() {
                         if let Err(e) = transport.close().await {
@@ -178,63 +210,125 @@ impl ConnectionStore {
                     }
                     retry_backoff_secs = 1;
                     consecutive_failures = 0;
-                    handshake_rejections = 0;
-                    renewal_retry_at = None;
-                    renewal_backoff = TOKEN_RENEWAL_RETRY_MIN;
+                    network_retry_secs = NETWORK_PROBE_RETRY_MIN_SECS;
                     wake.notified().await;
                     continue;
                 };
 
-                // `wake` fires on every heartbeat miss, network flap and status change, so an
-                // ungated renewal here turns one failing endpoint into a REST call per wake-up.
-                let session = if renewal_retry_at.is_some_and(|at| std::time::Instant::now() < at) {
-                    session
-                } else {
-                    let (session, outcome) =
-                        renew_expiring_token(&auth_client, &auth_state, session, cx).await;
-                    match outcome {
-                        RenewalOutcome::Failed => {
-                            renewal_retry_at =
-                                Some(std::time::Instant::now() + renewal_backoff);
-                            renewal_backoff =
-                                (renewal_backoff * 2).min(TOKEN_RENEWAL_RETRY_MAX);
-                        }
-                        RenewalOutcome::Renewed => {
-                            renewal_retry_at = None;
-                            renewal_backoff = TOKEN_RENEWAL_RETRY_MIN;
-                        }
-                        RenewalOutcome::NotNeeded => {}
-                    }
-                    session
-                };
-                api.set_http_fallback(http_fallback_session(&session, configured_api_base.as_deref()));
+                api.set_http_fallback(http_fallback_session(
+                    &session,
+                    configured_api_base.as_deref(),
+                    &api_server_key,
+                ));
 
                 if connected_user_id.as_deref() == Some(session.user_id.as_str())
                     && transport.is_open().await
                 {
                     retry_backoff_secs = 1;
                     consecutive_failures = 0;
-                    handshake_rejections = 0;
-                    tokio::select! {
-                        _ = wake.notified() => {}
-                        _ = exec.timer(token_renewal_delay(&session)) => {}
-                    }
+                    wake.notified().await;
                     continue;
                 }
 
+                let mut network_confirmed = false;
                 if requires_network_probe(consecutive_failures) {
-                    let os_online = *online_signal.borrow();
-                    let reachable = os_online
-                        && probe_network_reachability(&probe_url, RECONNECT_NETWORK_PROBE_TIMEOUT)
-                            .await;
+                    // Probe the deployment this session actually belongs to; the baked config can
+                    // point somewhere else entirely.
+                    let target = session
+                        .api_url
+                        .as_deref()
+                        .filter(|url| !url.is_empty())
+                        .map(favicon_probe_url)
+                        .unwrap_or_else(|| probe_url.clone());
+                    let reachable =
+                        probe_network_reachability(&target, RECONNECT_NETWORK_PROBE_TIMEOUT).await;
+                    let _ = this.update(cx, |store, cx| {
+                        if store.online != reachable {
+                            store.online = reachable;
+                            cx.notify();
+                        }
+                    });
                     if !reachable {
-                        tracing::warn!(
-                            "Network unreachable before reconnect attempt — backing off without consuming a retry"
-                        );
+                        if network_retry_secs == NETWORK_PROBE_RETRY_MIN_SECS {
+                            tracing::warn!(
+                                "Network unreachable ({target} did not answer) — pausing reconnect until it is back"
+                            );
+                        }
                         promote_connecting_to_authenticated(&auth_state, cx);
-                        retry_backoff_secs = next_backoff_secs(retry_backoff_secs);
-                        backoff_wait(&exec, &wake, retry_backoff_secs).await;
+                        backoff_wait(&exec, &wake, network_retry_secs).await;
+                        network_retry_secs = next_network_retry_secs(network_retry_secs);
                         continue;
+                    }
+                    network_confirmed = true;
+                    if network_retry_secs != NETWORK_PROBE_RETRY_MIN_SECS {
+                        tracing::info!("Network reachable again — resuming reconnect");
+                        network_retry_secs = NETWORK_PROBE_RETRY_MIN_SECS;
+                    }
+
+                }
+
+                // Two credentials authenticate the same session; the JWT is the escape hatch when
+                // the stored `session_id` keeps being refused.
+                let use_jwt =
+                    session.session_id.is_empty() || gateway_refusals >= SSID_REFUSALS_BEFORE_JWT;
+                if use_jwt && !jwt_is_fresh(&session) {
+                    let (renewed, verdict) =
+                        refresh_jwt_for_fallback(&api, &auth_state, session.clone(), cx).await;
+                    session = renewed;
+                    if verdict == RefreshVerdict::Renewed {
+                        // This rotation counts as the once-per-run keep-alive.
+                        refreshed_this_run = true;
+                    }
+                }
+
+                // Probe only with a token the server would still accept. A JWT we failed to renew
+                // (a 503 from SessionRefresh is enough) answers 403 because it is expired, not
+                // because the account is gone — concluding "session dead" from that would log the
+                // user out over a transient backend hiccup.
+                if use_jwt
+                    && jwt_is_fresh(&session)
+                    && jwt_refusals >= JWT_REFUSALS_BEFORE_PROBE
+                    && !probed_this_outage
+                {
+                    probed_this_outage = true;
+                    let api_base = session
+                        .api_url
+                        .clone()
+                        .filter(|url| !url.is_empty())
+                        .or_else(|| configured_api_base.clone());
+                    if let Some(api_base) = api_base {
+                        match auth_client.probe_session(&api_base, &session.token).await {
+                            mezon_client::SessionProbe::Rejected(status) => {
+                                tracing::warn!(
+                                    "Both socket credentials refused and the API host rejected the token (HTTP {status}) — the session is gone, logging out"
+                                );
+                                let credentials =
+                                    cx.update(|cx| session_credentials(auth_state.read(cx)));
+                                spawn_session_logout(api.clone(), credentials, &exec);
+                                cx.update(|cx| {
+                                    auth_state.update(cx, |state, cx| {
+                                        *state = AuthState::NotAuthenticated;
+                                        cx.notify();
+                                    });
+                                    crate::login::LoginStore::reset_all_user_stores(cx);
+                                });
+                                connected_user_id = None;
+                                consecutive_failures = 0;
+                                gateway_refusals = 0;
+                                jwt_refusals = 0;
+                                retry_backoff_secs = 1;
+                                continue;
+                            }
+                            mezon_client::SessionProbe::Alive => {
+                                tracing::warn!(
+                                    "The API host still accepts this session — the gateway is refusing the connection, keeping the session"
+                                );
+                            }
+                            mezon_client::SessionProbe::Inconclusive => {
+                                tracing::warn!("Session probe was inconclusive — keeping the session");
+                                probed_this_outage = false;
+                            }
+                        }
                     }
                 }
 
@@ -254,7 +348,14 @@ impl ConnectionStore {
 
                 tracing::info!("Connecting shared abridged TCP transport to {endpoint_label}");
                 api.set_status(ConnectionStatus::Connecting);
-                let token = session.ws_credential().to_string();
+                let token = if use_jwt {
+                    tracing::info!(
+                        "Handshaking with the JWT after {gateway_refusals} refusals by the gateway"
+                    );
+                    session.token.clone()
+                } else {
+                    session.ws_credential().to_string()
+                };
                 let api_for_publish = api.clone();
                 let api_for_close = api.clone();
                 let wake_for_close = wake.clone();
@@ -290,16 +391,20 @@ impl ConnectionStore {
                         if handshake_ok {
                             ConnectOutcome::Confirmed
                         } else {
-                            tracing::warn!(
-                                "Connection not confirmed — handshake rejected or dropped"
-                            );
+                            let rejected = transport.credential_rejected();
                             let _ = transport.close().await;
-                            ConnectOutcome::HandshakeRejected
+                            tracing::warn!(
+                                "Gateway dropped the connection (explicit rejection: {rejected}, server frames: {})",
+                                transport.frames_received()
+                            );
+                            ConnectOutcome::Refused
                         }
                     }
                     Err(e) => {
-                        tracing::error!("Shared abridged TCP transport connect failed: {e}");
-                        ConnectOutcome::TransportError
+                        tracing::warn!(
+                            "Could not reach {endpoint_label}: {e} — a reachability failure, not a credential one"
+                        );
+                        ConnectOutcome::Unreachable
                     }
                 };
 
@@ -307,9 +412,23 @@ impl ConnectionStore {
                     connected_user_id = Some(session.user_id.clone());
                     retry_backoff_secs = 1;
                     consecutive_failures = 0;
-                    handshake_rejections = 0;
+                    gateway_refusals = 0;
+                    jwt_refusals = 0;
+                    probed_this_outage = false;
+                    network_retry_secs = NETWORK_PROBE_RETRY_MIN_SECS;
                     api.set_status(ConnectionStatus::Connected);
                     tracing::info!("Connection confirmed — handshake accepted");
+                    if !refreshed_this_run {
+                        refreshed_this_run = true;
+                        let (renewed, _) =
+                            refresh_jwt_for_fallback(&api, &auth_state, session.clone(), cx).await;
+                        api.set_http_fallback(http_fallback_session(
+                            &renewed,
+                            configured_api_base.as_deref(),
+                            &api_server_key,
+                        ));
+                    }
+
                     let api_for_join = api.clone();
                     exec.spawn(async move {
                         match api_for_join.join_clan_chat(0).await {
@@ -335,40 +454,24 @@ impl ConnectionStore {
                 connected_user_id = None;
                 api.set_status(ConnectionStatus::Disconnected);
                 consecutive_failures += 1;
+                // Count a refusal only when the probe has just shown the network up. A link that
+                // dies mid-handshake also looks like a refusal, and letting that arm the credential
+                // checks would hand a network problem a path towards logging the user out.
+                if outcome == ConnectOutcome::Refused && network_confirmed {
+                    gateway_refusals += 1;
+                    if use_jwt {
+                        jwt_refusals += 1;
+                    }
+                } else if outcome == ConnectOutcome::Refused {
+                    tracing::info!(
+                        "Refusal seen without a confirmed network — not counting it against the credentials"
+                    );
+                }
 
-                match outcome {
-                    ConnectOutcome::HandshakeRejected => {
-                        handshake_rejections += 1;
-                        if reached_failure_limit(handshake_rejections) {
-                            tracing::warn!(
-                                "Handshake rejected {handshake_rejections} times consecutively — session credential is no longer valid, logging out"
-                            );
-                            let credentials =
-                                cx.update(|cx| session_credentials(auth_state.read(cx)));
-                            spawn_session_logout(api.clone(), credentials, &exec);
-                            cx.update(|cx| {
-                                auth_state.update(cx, |state, cx| {
-                                    *state = AuthState::NotAuthenticated;
-                                    cx.notify();
-                                });
-                                crate::login::LoginStore::reset_all_user_stores(cx);
-                            });
-                            consecutive_failures = 0;
-                            handshake_rejections = 0;
-                            retry_backoff_secs = 1;
-                            continue;
-                        }
-                    }
-                    ConnectOutcome::TransportError => {
-                        handshake_rejections = 0;
-                        if reached_failure_limit(consecutive_failures) {
-                            tracing::warn!(
-                                "Backend unreachable after {consecutive_failures} attempts — keeping session, retrying in the background"
-                            );
-                            promote_connecting_to_authenticated(&auth_state, cx);
-                        }
-                    }
-                    ConnectOutcome::Confirmed => {}
+                // No connect failure ends the session: a refusal is answered by trying the other
+                // credential and then asking the API host, an unreachable host by waiting.
+                if reached_failure_limit(consecutive_failures) {
+                    promote_connecting_to_authenticated(&auth_state, cx);
                 }
 
                 retry_backoff_secs = next_backoff_secs(retry_backoff_secs);
@@ -384,9 +487,56 @@ impl ConnectionStore {
             _manager: manager,
             _auth_observe: auth_observe,
             _heartbeat: heartbeat,
+            _token_watch: token_watch,
             _online_watch: online_watch,
             _network: network,
         }
+    }
+
+    /// Adopt token pairs the HTTP fallback minted for itself. Without this the connection loop
+    /// would re-arm the fallback with the stale token it still holds, and the keychain would keep
+    /// a refresh token the server has already rotated away.
+    fn spawn_token_watch(
+        api: Arc<AppApi>,
+        auth_state: Entity<AuthState>,
+        cx: &mut Context<Self>,
+    ) -> Task<()> {
+        let mut renewed = api.renewed_tokens();
+        cx.spawn(async move |_, cx| {
+            while renewed.changed().await.is_ok() {
+                let Some((token, refresh_token)) = renewed.borrow_and_update().clone() else {
+                    continue;
+                };
+                let persisted = cx.update(|cx| {
+                    auth_state.update(cx, |state, cx| {
+                        let session = match state {
+                            AuthState::Authenticated(s) | AuthState::Connecting(s) => s,
+                            _ => return None,
+                        };
+                        if session.token == token {
+                            return None;
+                        }
+                        session.apply_refresh(&token, &refresh_token, "");
+                        cx.notify();
+                        Some(session.clone())
+                    })
+                });
+                let Some(session) = persisted else {
+                    continue;
+                };
+                tracing::info!(
+                    "Adopted the token the HTTP fallback minted: jwt_valid_for={}s",
+                    session.expires_at.saturating_sub(now_secs())
+                );
+                cx.background_executor()
+                    .spawn(async move {
+                        if let Err(e) = keychain::save_session(&session) {
+                            tracing::warn!("Failed to persist the renewed session: {e}");
+                        }
+                    })
+                    .await;
+            }
+        })
     }
 
     fn spawn_heartbeat(
@@ -428,18 +578,26 @@ impl ConnectionStore {
                         return;
                     };
                     connect_ack_tx.send_modify(|n| *n = n.wrapping_add(1));
-                    if ev.session_id.is_empty() && ev.token.is_empty() {
-                        return;
-                    }
-                    tracing::info!(
-                        "Session refreshed over socket for user_id={} token_renewed={} sid_renewed={}",
-                        ev.user_id,
-                        !ev.token.is_empty(),
-                        !ev.session_id.is_empty()
-                    );
                     match state {
                         AuthState::Authenticated(session) | AuthState::Connecting(session) => {
+                            let token_changed = !ev.token.is_empty() && ev.token != session.token;
+                            let sid_changed =
+                                !ev.session_id.is_empty() && ev.session_id != session.session_id;
                             session.apply_refresh(&ev.token, &ev.refresh_token, &ev.session_id);
+                            tracing::info!(
+                                "refresh_session_event user_id={} token_sent={} token_changed={} refresh_token_sent={} sid_sent={} sid_changed={} jwt_valid_for={}s jwt_expired={}",
+                                ev.user_id,
+                                !ev.token.is_empty(),
+                                token_changed,
+                                !ev.refresh_token.is_empty(),
+                                !ev.session_id.is_empty(),
+                                sid_changed,
+                                session.expires_at.saturating_sub(now_secs()),
+                                session.expires_at != 0 && now_secs() >= session.expires_at,
+                            );
+                            if ev.token.is_empty() && ev.session_id.is_empty() {
+                                return;
+                            }
                             let session_clone = session.clone();
                             cx.background_executor()
                                 .spawn(async move {
@@ -458,95 +616,81 @@ impl ConnectionStore {
     }
 }
 
-const TOKEN_RENEWAL_SKEW: std::time::Duration = std::time::Duration::from_secs(5 * 60);
-const TOKEN_RENEWAL_MIN_DELAY: std::time::Duration = std::time::Duration::from_secs(5 * 60);
-const TOKEN_RENEWAL_MAX_DELAY: std::time::Duration = std::time::Duration::from_secs(60 * 60);
-const TOKEN_RENEWAL_RETRY_MIN: std::time::Duration = std::time::Duration::from_secs(30);
-const TOKEN_RENEWAL_RETRY_MAX: std::time::Duration = std::time::Duration::from_secs(15 * 60);
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum RenewalOutcome {
-    NotNeeded,
-    Renewed,
-    Failed,
-}
-
 fn now_secs() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
+    mezon_client::server_now_secs()
 }
 
-fn token_renewal_delay(session: &Session) -> std::time::Duration {
-    if session.expires_at == 0 || session.refresh_token.is_empty() {
-        return TOKEN_RENEWAL_MAX_DELAY;
-    }
-    let deadline = session
-        .expires_at
-        .saturating_sub(TOKEN_RENEWAL_SKEW.as_secs());
-    std::time::Duration::from_secs(deadline.saturating_sub(now_secs()))
-        .clamp(TOKEN_RENEWAL_MIN_DELAY, TOKEN_RENEWAL_MAX_DELAY)
-}
-
-fn token_needs_renewal(session: &Session) -> bool {
-    !session.refresh_token.is_empty()
-        && session.expires_at != 0
-        && now_secs() + TOKEN_RENEWAL_SKEW.as_secs() >= session.expires_at
-}
-
-async fn renew_expiring_token(
-    client: &Arc<mezon_client::MezonClient>,
+/// Rotate the token pair once per app run, right after the first confirmed handshake. Its job is
+/// to keep the *refresh* token alive — that one lives a week (`RefreshTokenExpirySec: 604800`)
+/// while the JWT lives ten minutes, so a launch-time rotation is enough to never need a re-login.
+/// The JWT for the HTTP fallback is minted separately, at send time, by the transport. The
+/// response carries no `session_id`, so the socket credential is left alone.
+async fn refresh_jwt_for_fallback(
+    api: &Arc<AppApi>,
     auth_state: &Entity<AuthState>,
     session: Session,
     cx: &mut AsyncApp,
-) -> (Session, RenewalOutcome) {
-    if !token_needs_renewal(&session) {
-        return (session, RenewalOutcome::NotNeeded);
-    }
-    tracing::info!("JWT expiring — renewing the session over REST");
-    let renewed = match client
-        .refresh_session(&session.refresh_token, session.is_remember)
-        .await
-    {
-        Ok(renewed) => renewed,
-        Err(e) => {
-            tracing::warn!("Session renewal failed ({e}) — keeping the current session");
-            return (session, RenewalOutcome::Failed);
-        }
-    };
-    if renewed.token.is_empty() || renewed.user_id != session.user_id {
-        tracing::warn!("Session renewal returned an unusable session — keeping the current one");
-        return (session, RenewalOutcome::Failed);
+) -> (Session, RefreshVerdict) {
+    if session.refresh_token.is_empty() {
+        return (session, RefreshVerdict::Transient);
     }
 
+    tracing::info!("Rotating the session token pair to keep the refresh token alive");
+    let (token, refresh_token) = match api.renew_fallback_token().await {
+        Ok(pair) => pair,
+        Err(e) => {
+            tracing::warn!("SessionRefresh failed ({e}) — keeping the current session");
+            return (session, RefreshVerdict::Transient);
+        }
+    };
+
+    let mut session = session;
+    session.apply_refresh(&token, &refresh_token, "");
+    tracing::info!(
+        "SessionRefresh applied: jwt_valid_for={}s refresh_token_renewed={}",
+        session.expires_at.saturating_sub(now_secs()),
+        !refresh_token.is_empty(),
+    );
+
+    // Persist what `auth_state` holds, never the local copy: the handshake that just completed
+    // pushed a rotated `session_id` into it, and this call started from a snapshot taken before
+    // that. Saving the snapshot would write the retired credential back over the live one, and the
+    // next launch would connect with an id the server has already deleted.
     let applied = cx.update(|cx| {
         auth_state.update(cx, |state, cx| {
             let current = match state {
                 AuthState::Authenticated(s) | AuthState::Connecting(s) => s,
-                _ => return false,
+                _ => return None,
             };
-            if current.user_id != renewed.user_id {
-                return false;
+            if current.user_id != session.user_id {
+                return None;
             }
-            *current = renewed.clone();
+            current.apply_refresh(&token, &refresh_token, "");
             cx.notify();
-            true
+            Some(current.clone())
         })
     });
-    if !applied {
-        return (session, RenewalOutcome::Failed);
-    }
+    let Some(session) = applied else {
+        return (session, RefreshVerdict::Transient);
+    };
 
-    let persisted = renewed.clone();
+    // Awaited, not detached: quitting inside this window would otherwise leave the file holding a
+    // refresh token the server has already rotated away.
+    let persisted = session.clone();
     cx.background_executor()
         .spawn(async move {
             if let Err(e) = keychain::save_session(&persisted) {
                 tracing::warn!("Failed to persist the renewed session: {e}");
             }
         })
-        .detach();
-    (renewed, RenewalOutcome::Renewed)
+        .await;
+    (session, RefreshVerdict::Renewed)
+}
+
+/// Whether the JWT can still authenticate a handshake or an HTTP call.
+fn jwt_is_fresh(session: &Session) -> bool {
+    !session.token.is_empty()
+        && (session.expires_at == 0 || now_secs() + JWT_SKEW.as_secs() < session.expires_at)
 }
 
 fn configured_api_base_url(config: &AppConfig) -> String {
@@ -557,6 +701,7 @@ fn configured_api_base_url(config: &AppConfig) -> String {
 fn http_fallback_session(
     session: &Session,
     configured_api_base: Option<&str>,
+    api_server_key: &str,
 ) -> Option<HttpFallbackSession> {
     if session.token.is_empty() {
         return None;
@@ -570,6 +715,10 @@ fn http_fallback_session(
     Some(HttpFallbackSession {
         base_url,
         token: session.token.clone(),
+        expires_at: session.expires_at,
+        refresh_token: session.refresh_token.clone(),
+        is_remember: session.is_remember,
+        server_key: api_server_key.to_owned(),
     })
 }
 
@@ -585,6 +734,10 @@ fn next_backoff_secs(current: u64) -> u64 {
     current.saturating_mul(2).min(RECONNECT_BACKOFF_CAP_SECS)
 }
 
+fn next_network_retry_secs(current: u64) -> u64 {
+    current.saturating_mul(2).min(NETWORK_PROBE_RETRY_CAP_SECS)
+}
+
 /// Wait out a reconnect backoff, but wake early if auth/connection state changes.
 async fn backoff_wait(exec: &BackgroundExecutor, wake: &tokio::sync::Notify, secs: u64) {
     let base_ms = secs.saturating_mul(1000);
@@ -594,8 +747,27 @@ async fn backoff_wait(exec: &BackgroundExecutor, wake: &tokio::sync::Notify, sec
         .map(|d| u64::from(d.subsec_nanos()) % jitter_cap)
         .unwrap_or(0);
     let delay = std::time::Duration::from_millis(base_ms + jitter_ms);
+    wait_or_wake(exec, wake, delay).await;
+}
+
+/// Wait out `delay`, cut short only by an event that arrives **during** the wait.
+///
+/// `Notify::notify_one` parks a permit when nobody is waiting, and the transport's close callback
+/// fires one on every failed connect — so a plain `wake.notified()` here consumes that stale permit
+/// and returns instantly, collapsing every backoff to zero. That turned reconnect into a one-per-
+/// second hammer, which is enough on its own to keep a user pinned at the gateway's session limit.
+async fn wait_or_wake(
+    exec: &BackgroundExecutor,
+    wake: &tokio::sync::Notify,
+    delay: std::time::Duration,
+) {
+    let mut notified = Box::pin(wake.notified());
+    if notified.as_mut().enable() {
+        notified = Box::pin(wake.notified());
+        notified.as_mut().enable();
+    }
     tokio::select! {
-        _ = wake.notified() => {}
+        _ = notified => {}
         _ = exec.timer(delay) => {}
     }
 }
@@ -647,67 +819,20 @@ mod tests {
     use super::*;
     use mezon_client::Session;
 
-    fn session_expiring_in(secs: u64) -> Session {
-        Session {
-            token: "jwt".into(),
-            refresh_token: "refresh".into(),
-            expires_at: now_secs() + secs,
-            ..Default::default()
-        }
-    }
-
-    #[test]
-    fn token_renewal_triggers_inside_the_skew_window() {
-        assert!(!token_needs_renewal(&session_expiring_in(3600)));
-        assert!(token_needs_renewal(&session_expiring_in(60)));
-
-        let expired = Session {
-            expires_at: now_secs().saturating_sub(60),
-            ..session_expiring_in(0)
-        };
-        assert!(token_needs_renewal(&expired));
-    }
-
-    #[test]
-    fn token_renewal_needs_a_refresh_token_and_a_known_expiry() {
-        let no_refresh = Session {
-            refresh_token: String::new(),
-            ..session_expiring_in(60)
-        };
-        assert!(!token_needs_renewal(&no_refresh));
-
-        let no_expiry = Session {
-            expires_at: 0,
-            ..session_expiring_in(60)
-        };
-        assert!(!token_needs_renewal(&no_expiry));
-    }
-
-    #[test]
-    fn token_renewal_delay_stays_within_its_bounds() {
-        assert_eq!(
-            token_renewal_delay(&session_expiring_in(0)),
-            TOKEN_RENEWAL_MIN_DELAY
-        );
-        assert_eq!(
-            token_renewal_delay(&session_expiring_in(48 * 3600)),
-            TOKEN_RENEWAL_MAX_DELAY
-        );
-
-        let mid = token_renewal_delay(&session_expiring_in(TOKEN_RENEWAL_SKEW.as_secs() + 15 * 60));
-        assert!(mid > TOKEN_RENEWAL_MIN_DELAY && mid < TOKEN_RENEWAL_MAX_DELAY);
-    }
-
     #[test]
     fn http_fallback_prefers_server_issued_api_url() {
+        let expires_at = now_secs() + 3600;
         let s = Session {
             token: "jwt".into(),
             api_url: Some("https://api.mezon.ai".into()),
+            expires_at,
             ..Default::default()
         };
-        let fallback = http_fallback_session(&s, Some("https://baked:8088")).expect("fallback");
+        let fallback =
+            http_fallback_session(&s, Some("https://baked:8088"), "key").expect("fallback");
         assert_eq!(fallback.base_url, "https://api.mezon.ai");
         assert_eq!(fallback.token, "jwt");
+        assert_eq!(fallback.expires_at, expires_at);
     }
 
     #[test]
@@ -717,7 +842,8 @@ mod tests {
             api_url: Some(String::new()),
             ..Default::default()
         };
-        let fallback = http_fallback_session(&s, Some("https://baked:8088")).expect("fallback");
+        let fallback =
+            http_fallback_session(&s, Some("https://baked:8088"), "key").expect("fallback");
         assert_eq!(fallback.base_url, "https://baked:8088");
     }
 
@@ -727,13 +853,46 @@ mod tests {
             api_url: Some("https://api.mezon.ai".into()),
             ..Default::default()
         };
-        assert!(http_fallback_session(&no_token, Some("https://baked:8088")).is_none());
+        assert!(http_fallback_session(&no_token, Some("https://baked:8088"), "key").is_none());
 
         let no_base = Session {
             token: "jwt".into(),
             ..Default::default()
         };
-        assert!(http_fallback_session(&no_base, None).is_none());
+        assert!(http_fallback_session(&no_base, None, "key").is_none());
+    }
+
+    /// `SessionRefresh` rotates the socket credential, so its response must replace the stored
+    /// one. Keeping the old `session_id` is what left a reconnect presenting a retired credential.
+    #[test]
+    fn a_refresh_response_replaces_the_socket_credential() {
+        let mut session = Session {
+            token: "old-jwt".into(),
+            refresh_token: "old-refresh".into(),
+            session_id: "retired-sid".into(),
+            ..Default::default()
+        };
+        session.apply_refresh("new-jwt", "new-refresh", "rotated-sid");
+        assert_eq!(session.session_id, "rotated-sid");
+        assert_eq!(session.ws_credential(), "rotated-sid");
+    }
+
+    /// The fallback is armed whenever a token exists — an expired one is renewed at send time by
+    /// the transport, which is the only caller that runs while the socket is down.
+    #[test]
+    fn http_fallback_carries_everything_needed_to_renew_itself() {
+        let session = Session {
+            token: "jwt".into(),
+            refresh_token: "refresh".into(),
+            is_remember: true,
+            api_url: Some("https://api.mezon.ai".into()),
+            expires_at: now_secs().saturating_sub(60),
+            ..Default::default()
+        };
+        let fallback = http_fallback_session(&session, None, "api-key").expect("fallback");
+        assert_eq!(fallback.refresh_token, "refresh");
+        assert!(fallback.is_remember);
+        assert_eq!(fallback.server_key, "api-key");
     }
 
     #[test]
@@ -798,6 +957,51 @@ mod tests {
     }
 
     #[test]
+    fn network_retry_backoff_doubles_up_to_its_own_cap() {
+        assert_eq!(next_network_retry_secs(NETWORK_PROBE_RETRY_MIN_SECS), 2);
+        assert_eq!(next_network_retry_secs(4), 8);
+        assert_eq!(next_network_retry_secs(8), NETWORK_PROBE_RETRY_CAP_SECS);
+        assert_eq!(
+            next_network_retry_secs(NETWORK_PROBE_RETRY_CAP_SECS),
+            NETWORK_PROBE_RETRY_CAP_SECS
+        );
+    }
+
+    #[test]
+    fn a_session_without_an_id_authenticates_with_the_jwt() {
+        let jwt_only = Session {
+            token: "jwt".into(),
+            expires_at: now_secs() + 600,
+            ..Default::default()
+        };
+        assert!(jwt_only.session_id.is_empty());
+        assert_eq!(jwt_only.ws_credential(), "jwt");
+        assert!(jwt_is_fresh(&jwt_only));
+    }
+
+    #[test]
+    fn a_stale_jwt_is_renewed_before_it_is_used_as_a_credential() {
+        let stale = Session {
+            token: "jwt".into(),
+            expires_at: now_secs().saturating_sub(1),
+            ..Default::default()
+        };
+        assert!(!jwt_is_fresh(&stale));
+
+        let inside_skew = Session {
+            expires_at: now_secs() + JWT_SKEW.as_secs() / 2,
+            ..stale.clone()
+        };
+        assert!(!jwt_is_fresh(&inside_skew));
+
+        let live = Session {
+            expires_at: now_secs() + 600,
+            ..stale
+        };
+        assert!(jwt_is_fresh(&live));
+    }
+
+    #[test]
     fn failure_limit_reached_only_after_five() {
         assert!(!reached_failure_limit(0));
         assert!(!reached_failure_limit(4));
@@ -812,9 +1016,12 @@ mod tests {
         LoggedOut,
     }
 
+    /// Models the loop's decision state: what a connect outcome advances, and what may end in a
+    /// logout. Only a gateway refusal followed by a refused API probe may.
     struct ReconnectSim {
         consecutive_failures: u32,
-        handshake_rejections: u32,
+        gateway_refusals: u32,
+        jwt_refusals: u32,
         logout_count: u32,
         surface: Surface,
         displayed_attempt: u32,
@@ -824,7 +1031,8 @@ mod tests {
         fn new() -> Self {
             Self {
                 consecutive_failures: 0,
-                handshake_rejections: 0,
+                gateway_refusals: 0,
+                jwt_refusals: 0,
                 logout_count: 0,
                 surface: Surface::Connecting,
                 displayed_attempt: 0,
@@ -843,116 +1051,110 @@ mod tests {
             requires_network_probe(self.consecutive_failures)
         }
 
-        fn record_offline_gate(&mut self) {
-            self.surface = Surface::AppShell;
+        fn uses_jwt(&self) -> bool {
+            self.gateway_refusals >= SSID_REFUSALS_BEFORE_JWT
         }
 
-        fn record_handshake_rejection(&mut self) {
+        fn record_unreachable(&mut self) {
             self.consecutive_failures += 1;
-            self.handshake_rejections += 1;
-            if reached_failure_limit(self.handshake_rejections) {
-                self.logout_count += 1;
-                self.consecutive_failures = 0;
-                self.handshake_rejections = 0;
-                self.surface = Surface::LoggedOut;
-            }
-        }
-
-        fn record_transport_error(&mut self) {
-            self.consecutive_failures += 1;
-            self.handshake_rejections = 0;
             if reached_failure_limit(self.consecutive_failures) {
                 self.surface = Surface::AppShell;
             }
         }
 
+        fn record_refusal(&mut self) {
+            self.consecutive_failures += 1;
+            let was_jwt = self.uses_jwt();
+            self.gateway_refusals += 1;
+            if was_jwt {
+                self.jwt_refusals += 1;
+            }
+            if reached_failure_limit(self.consecutive_failures) {
+                self.surface = Surface::AppShell;
+            }
+        }
+
+        /// The API host answering 403 is the only thing that ends the session.
+        fn record_api_probe(&mut self, session_alive: bool) {
+            if self.jwt_refusals < JWT_REFUSALS_BEFORE_PROBE {
+                return;
+            }
+            if !session_alive {
+                self.logout_count += 1;
+                self.surface = Surface::LoggedOut;
+            }
+        }
+
         fn record_connect_success(&mut self) {
             self.consecutive_failures = 0;
-            self.handshake_rejections = 0;
+            self.gateway_refusals = 0;
+            self.jwt_refusals = 0;
             self.surface = Surface::AppShell;
         }
     }
 
+    /// The whole point: a network problem produces refusals of a kind that can never reach the
+    /// logout branch, however long it lasts.
     #[test]
-    fn five_consecutive_handshake_rejections_log_out_once_then_reset() {
+    fn an_unreachable_host_never_logs_out() {
         let mut sim = ReconnectSim::new();
-        for _ in 0..4 {
-            sim.record_handshake_rejection();
-            assert_eq!(sim.logout_count, 0);
-        }
-        sim.record_handshake_rejection();
-        assert_eq!(sim.logout_count, 1);
-        assert_eq!(sim.consecutive_failures, 0);
-        assert_eq!(sim.handshake_rejections, 0);
-        assert!(!sim.probe_required());
-    }
-
-    #[test]
-    fn transport_errors_never_log_out() {
-        let mut sim = ReconnectSim::new();
-        for _ in 0..50 {
-            sim.record_transport_error();
+        for _ in 0..200 {
+            sim.record_unreachable();
+            sim.record_api_probe(false);
         }
         assert_eq!(sim.logout_count, 0);
-    }
-
-    #[test]
-    fn transport_error_at_limit_promotes_to_app_shell_keeping_session() {
-        let mut sim = ReconnectSim::new();
-        for _ in 0..4 {
-            sim.record_transport_error();
-            assert_eq!(sim.surface, Surface::Connecting);
-        }
-        sim.record_transport_error();
+        assert_eq!(
+            sim.gateway_refusals, 0,
+            "reachability failures are not refusals"
+        );
+        assert!(!sim.uses_jwt(), "the JWT escape hatch must stay disarmed");
         assert_eq!(sim.surface, Surface::AppShell);
-        assert_eq!(sim.logout_count, 0);
     }
 
+    /// A dead session must be decided fast: one refusal of each credential, then the probe.
     #[test]
-    fn transport_error_resets_handshake_rejection_streak() {
+    fn a_dead_session_logs_out_after_one_refusal_of_each_credential() {
         let mut sim = ReconnectSim::new();
-        for _ in 0..4 {
-            sim.record_handshake_rejection();
-        }
-        assert_eq!(sim.handshake_rejections, 4);
+        sim.record_refusal();
+        assert!(
+            sim.uses_jwt(),
+            "the JWT is tried straight after the first refusal"
+        );
+        sim.record_refusal();
+        assert_eq!(sim.jwt_refusals, JWT_REFUSALS_BEFORE_PROBE);
 
-        sim.record_transport_error();
-        assert_eq!(sim.handshake_rejections, 0);
-        assert_eq!(sim.logout_count, 0);
-
-        for _ in 0..4 {
-            sim.record_handshake_rejection();
-        }
-        assert_eq!(sim.logout_count, 0);
-        sim.record_handshake_rejection();
+        sim.record_api_probe(false);
         assert_eq!(sim.logout_count, 1);
+        assert_eq!(sim.surface, Surface::LoggedOut);
+    }
+
+    /// Same refusals, but the account is fine — the gateway is simply turning us away.
+    #[test]
+    fn refusals_with_a_live_account_keep_the_session() {
+        let mut sim = ReconnectSim::new();
+        for _ in 0..20 {
+            sim.record_refusal();
+            sim.record_api_probe(true);
+        }
+        assert_eq!(sim.logout_count, 0);
+        assert_eq!(sim.surface, Surface::AppShell);
     }
 
     #[test]
-    fn success_resets_failure_counter() {
+    fn a_successful_connect_disarms_everything() {
         let mut sim = ReconnectSim::new();
-        for _ in 0..4 {
-            sim.record_handshake_rejection();
-        }
-        assert_eq!(sim.consecutive_failures, 4);
-
+        sim.record_refusal();
+        sim.record_refusal();
         sim.record_connect_success();
-        assert_eq!(sim.consecutive_failures, 0);
-        assert_eq!(sim.handshake_rejections, 0);
-        assert_eq!(sim.logout_count, 0);
-
-        for _ in 0..4 {
-            sim.record_handshake_rejection();
-        }
-        assert_eq!(sim.logout_count, 0);
-        sim.record_handshake_rejection();
-        assert_eq!(sim.logout_count, 1);
+        assert_eq!(sim.gateway_refusals, 0);
+        assert_eq!(sim.jwt_refusals, 0);
+        assert!(!sim.uses_jwt());
     }
 
     #[test]
     fn offline_skips_do_not_consume_attempts_or_log_out() {
         let mut sim = ReconnectSim::new();
-        sim.record_transport_error();
+        sim.record_unreachable();
         assert!(sim.probe_required());
 
         for _ in 0..50 {
@@ -963,48 +1165,13 @@ mod tests {
     }
 
     #[test]
-    fn online_failure_below_limit_keeps_connecting() {
-        let mut sim = ReconnectSim::new();
-        for expected in 1..=4 {
-            sim.record_handshake_rejection();
-            assert_eq!(sim.consecutive_failures, expected);
-            assert_eq!(sim.surface, Surface::Connecting);
-        }
-    }
-
-    #[test]
-    fn offline_gate_promotes_to_app_shell_without_consuming_attempt() {
-        let mut sim = ReconnectSim::new();
-        sim.record_transport_error();
-        assert_eq!(sim.surface, Surface::Connecting);
-        sim.begin_iteration();
-        assert!(sim.probe_required());
-
-        sim.record_offline_gate();
-        assert_eq!(sim.surface, Surface::AppShell);
-        assert_eq!(sim.consecutive_failures, 1);
-        assert_eq!(sim.logout_count, 0);
-    }
-
-    #[test]
-    fn fifth_handshake_rejection_logs_out_and_leaves_connecting() {
-        let mut sim = ReconnectSim::new();
-        for _ in 0..4 {
-            sim.record_handshake_rejection();
-            assert_eq!(sim.surface, Surface::Connecting);
-        }
-        sim.record_handshake_rejection();
-        assert_eq!(sim.surface, Surface::LoggedOut);
-    }
-
-    #[test]
     fn connecting_attempt_mirrors_failures_and_resets_on_success() {
         let mut sim = ReconnectSim::new();
         sim.begin_iteration();
         assert_eq!(sim.displayed_attempt, 0);
 
-        sim.record_handshake_rejection();
-        sim.record_handshake_rejection();
+        sim.record_refusal();
+        sim.record_refusal();
         sim.begin_iteration();
         assert_eq!(sim.displayed_attempt, 2);
 
@@ -1019,7 +1186,7 @@ mod tests {
         let mut sim = ReconnectSim::new();
         sim.record_connect_success();
         for _ in 0..4 {
-            sim.record_handshake_rejection();
+            sim.record_refusal();
             sim.begin_iteration();
             assert_eq!(sim.surface, Surface::AppShell);
             assert_eq!(sim.displayed_attempt, 0);

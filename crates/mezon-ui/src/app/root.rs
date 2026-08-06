@@ -30,6 +30,7 @@ pub struct RootView {
     cached_locale: String,
     image_cache: Entity<LruImageCache>,
     connecting_since: Option<Instant>,
+    network_online: bool,
     _splash_delay: Option<Task<()>>,
 }
 
@@ -109,8 +110,29 @@ impl RootView {
         })
         .detach();
 
-        cx.observe(&ConnectionStore::global(cx), |_, _, cx| cx.notify())
-            .detach();
+        cx.observe(&ConnectionStore::global(cx), |this, store, cx| {
+            let online = store.read(cx).is_online();
+            if this.network_online != online {
+                this.network_online = online;
+                let locale = this.cached_locale.clone();
+                crate::app::shell::Shell::global(cx).update(cx, |shell, cx| {
+                    if online {
+                        shell.dismiss(NETWORK_OFFLINE_TOAST_KEY, cx);
+                    } else {
+                        let message =
+                            mezon_i18n::t(&locale, "common.errorBoundary.stillOffline").to_string();
+                        shell.sticky(
+                            NETWORK_OFFLINE_TOAST_KEY,
+                            crate::components::primitives::ToastKind::Error,
+                            message,
+                            cx,
+                        );
+                    }
+                });
+            }
+            cx.notify();
+        })
+        .detach();
 
         let clan_list: Entity<ClanList> = ClanList::global(cx);
 
@@ -178,6 +200,7 @@ impl RootView {
                 cx,
             )
         });
+        let network_online = ConnectionStore::global(cx).read(cx).is_online();
         let connecting_at_start = matches!(*auth_state.read(cx), AuthState::Connecting(_));
         let (connecting_since, splash_delay) = if connecting_at_start {
             (Some(Instant::now()), Some(spawn_splash_delay(cx)))
@@ -196,6 +219,7 @@ impl RootView {
             cached_locale,
             image_cache,
             connecting_since,
+            network_online,
             _splash_delay: splash_delay,
         }
     }
@@ -286,7 +310,7 @@ impl Render for RootView {
                     .map(|since| since.elapsed())
                     .unwrap_or_default();
                 if should_show_splash(attempt, online, waited) {
-                    render_connecting(locale, attempt, window.is_window_active())
+                    render_connecting(locale, attempt, online, window.is_window_active())
                 } else {
                     render_quiet_startup()
                 }
@@ -401,6 +425,7 @@ fn render_awaiting_callback(theme: &Theme, locale: &str) -> gpui::AnyElement {
         .into_any_element()
 }
 
+const NETWORK_OFFLINE_TOAST_KEY: &str = "network-offline";
 const SPLASH_BG: u32 = 0x1e1f22;
 const SPLASH_ACCENT: u32 = 0x5865f2;
 const SPLASH_ACCENT_END: u32 = 0x7289da;
@@ -497,8 +522,10 @@ fn render_quiet_startup() -> gpui::AnyElement {
         .into_any_element()
 }
 
-fn render_connecting(locale: &str, attempt: u32, animate: bool) -> gpui::AnyElement {
-    let label = if attempt > 0 {
+fn render_connecting(locale: &str, attempt: u32, online: bool, animate: bool) -> gpui::AnyElement {
+    let label = if !online {
+        mezon_i18n::t(locale, "common.errorBoundary.stillOffline").to_string()
+    } else if attempt > 0 {
         mezon_i18n::t(locale, "root.reconnectingAttempt").replace("{{count}}", &attempt.to_string())
     } else {
         mezon_i18n::t(locale, "root.loading").to_string()

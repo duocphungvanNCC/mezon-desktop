@@ -231,15 +231,19 @@ pub(crate) fn spawn_session_logout(
 ) {
     background
         .spawn(async move {
+            // Drop the stored session first. Telling the server is best-effort and, on the path
+            // that matters most — a session the socket already refuses — it only returns once the
+            // connect gate times out; quitting in that window would leave the dead session on disk
+            // for the next launch to replay.
+            if let Err(e) = keychain::clear_session() {
+                tracing::warn!("Failed to clear keychain session: {e}");
+            }
+            crate::account::clear_cached_account();
             if let Some((token, refresh_token)) = credentials
                 && let Err(e) = api.session_logout(&token, &refresh_token).await
             {
                 tracing::warn!("session_logout request failed (ignored): {e}");
             }
-            if let Err(e) = keychain::clear_session() {
-                tracing::warn!("Failed to clear keychain session: {e}");
-            }
-            crate::account::clear_cached_account();
         })
         .detach();
 }

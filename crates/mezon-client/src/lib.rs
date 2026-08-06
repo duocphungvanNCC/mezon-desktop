@@ -15,6 +15,7 @@ pub mod network_probe;
 pub mod notification_setting;
 pub mod ogp;
 pub mod search_message;
+pub mod server_clock;
 pub mod session;
 pub mod tls_crypto;
 pub mod transport;
@@ -32,6 +33,7 @@ pub use attachment_download::{
 };
 pub use auth::MezonClient;
 pub use auth::QrLoginId;
+pub use auth::SessionProbe;
 pub use auth::{DEFAULT_API_HOST, DEFAULT_API_PORT, DEFAULT_API_SECURE, DEFAULT_SERVER_KEY};
 pub use channel_app_launch::{ChannelAppLaunchParams, build_channel_app_url};
 pub use gotify::{GotifyExtras, GotifyNotification};
@@ -62,6 +64,7 @@ pub use search_message::{
     search_dropdown_mode, search_filter_chip_ranges, search_page_count, search_page_numbers,
     should_show_search_dropdown, username_filter,
 };
+pub use server_clock::{now_secs as server_now_secs, observe_http_date};
 pub use session::Session;
 pub use transport::MezonTransport;
 pub use transport::RealtimeEvent;
