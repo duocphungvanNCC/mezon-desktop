@@ -58,7 +58,9 @@ impl ChannelTyping {
                 let locale = &self.settings.read(cx).language;
                 Some(TypingContent::One {
                     suffix: SharedString::from(
-                        mezon_i18n::t(locale, "common.isTyping").trim_end_matches(['.', '…']),
+                        mezon_i18n::t(locale, "common.isTyping")
+                            .trim()
+                            .trim_end_matches(['.', '…']),
                     ),
                     name: users.into_iter().next()?,
                 })
@@ -92,6 +94,7 @@ impl Render for ChannelTyping {
             .whitespace_nowrap()
             .pr_1()
             .text_xs()
+            .line_height(px(16.))
             .text_color(primary);
         match self.content(cx) {
             Some(TypingContent::One { name, suffix }) => bar
@@ -104,13 +107,23 @@ impl Render for ChannelTyping {
                 )
                 .child(
                     div()
-                        .flex_none()
-                        .mr(px(2.))
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(active)
-                        .child(name),
-                )
-                .child(div().flex_none().text_color(primary).child(suffix)),
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .flex_1()
+                        .min_w_0()
+                        .child(
+                            div()
+                                .flex_initial()
+                                .min_w_0()
+                                .mr(px(2.))
+                                .truncate()
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(active)
+                                .child(name),
+                        )
+                        .child(div().flex_none().text_color(primary).child(suffix)),
+                ),
             Some(TypingContent::Several(text)) => bar.child(text),
             None => bar,
         }
