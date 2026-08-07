@@ -2468,7 +2468,10 @@ impl AppApi {
         &self,
         ws_base: String,
         token: String,
-    ) -> tokio::sync::mpsc::UnboundedReceiver<crate::gotify::GotifyNotification> {
+    ) -> (
+        tokio::sync::mpsc::UnboundedReceiver<crate::gotify::GotifyNotification>,
+        tokio::sync::oneshot::Receiver<crate::gotify::StreamEnd>,
+    ) {
         self.transport.spawn_gotify_stream(ws_base, token)
     }
 
