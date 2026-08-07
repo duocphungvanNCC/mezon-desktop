@@ -1298,7 +1298,6 @@ pub struct ChannelMessages {
     scroll_anchors: HashMap<ChannelId, SavedScrollAnchor>,
     last_scroll_sync: Option<(ChannelId, usize, u32, usize, u32, u32, bool)>,
     current_channel: Option<ChannelId>,
-    restore_pending: Option<ChannelId>,
     welcome: Option<WelcomeContext>,
     onboarding: Option<OnboardingContext>,
     cached_unread_boundary: Option<MessageId>,
@@ -1514,6 +1513,7 @@ impl ChannelMessages {
             let structural = matches!(
                 event,
                 MessagesEvent::Reset { .. }
+                    | MessagesEvent::Resized { .. }
                     | MessagesEvent::Shifted { .. }
                     | MessagesEvent::RemovedAt { .. }
             );
@@ -1522,90 +1522,15 @@ impl ChannelMessages {
             }
             match event {
                 MessagesEvent::Reset { count } => {
-                    this.reaction_picker = None;
-                    this._reaction_picker_sub = None;
-                    this._reaction_picker_dismiss_sub = None;
-                    this.mention_popover = None;
-                    this._mention_popover_sub = None;
-                    this.context_menu_target = None;
-                    this.hovered_row = None;
-                    this.raw_hover = None;
-                    this.overlay_hover = None;
-                    this.clear_hover_tasks();
-                    this.edit_input = None;
-                    this._edit_input_sub = None;
-                    Rc::make_mut(&mut this.active_videos).clear();
-                    Rc::make_mut(&mut this.active_audios).clear();
-                    Rc::make_mut(&mut this.gif_videos).clear();
-                    Rc::make_mut(&mut this.embed_inputs).clear();
-                    this.embed_input_subs.clear();
-                    this.embed_input_fingerprint = None;
-                    this.embed_select_seeded.clear();
-                    this.list_state.reset(*count);
-                    this.last_visible_start = 0;
-                    this.last_visible_end = 0;
-                    this.paginate_retry_pending = false;
-                    this.header_shown = false;
-
-                    let new_channel = _store.read(cx).active_channel_id();
-                    if new_channel != this.current_channel {
-                        this.last_seen_at_bottom = None;
-                    }
-                    let is_loading = _store.read(cx).is_loading();
-                    let transition = reset_transition(
-                        this.current_channel,
-                        new_channel,
-                        this.restore_pending,
-                        this.fab_scroll_pending,
-                        is_loading,
-                    );
-                    this.current_channel = transition.current_channel;
-                    this.restore_pending = transition.restore_pending;
-                    this.fab_scroll_pending = false;
-
-                    let anchor = new_channel
-                        .and_then(|channel_id| this.scroll_anchors.get(&channel_id).copied());
-                    let decision = decide_reset_scroll(
-                        transition.want_restore,
-                        is_loading,
-                        anchor,
-                        _store.read(cx).viewport_messages(),
-                        _store.read(cx).has_more_bottom(),
-                    );
-                    let at_bottom = match decision {
-                        ResetScroll::Restore {
-                            item_ix,
-                            offset_in_item,
-                        } => {
-                            this.list_state.scroll_to(gpui::ListOffset {
-                                item_ix,
-                                offset_in_item,
-                            });
-                            false
-                        }
-                        ResetScroll::ToBottom => {
-                            this.list_state.scroll_to_end();
-                            true
-                        }
-                        ResetScroll::Defer => true,
-                    };
-                    this.at_bottom = at_bottom;
-
-                    if let Some(channel_id) = new_channel {
-                        _store.update(cx, |store, _cx| {
-                            store.set_viewing_older(channel_id, !at_bottom);
-                        });
-                    }
-                    if matches!(decision, ResetScroll::ToBottom) {
-                        if let Some(last) = _store
-                            .read(cx)
-                            .viewport_messages()
-                            .last()
-                            .filter(|m| !m.id.is_optimistic())
-                        {
-                            this.last_seen_at_bottom = Some(last.id);
-                        }
-                        this.sync_channel_seen(cx);
+                    this.clear_row_ui_state();
+                    this.rebuild_list(&_store, *count, cx);
+                }
+                MessagesEvent::Resized { count } => {
+                    let rows = this.list_state.item_count();
+                    if rows == *count + usize::from(this.header_shown) {
+                        this.list_state.remeasure_items(0..rows);
+                    } else {
+                        this.rebuild_list(&_store, *count, cx);
                     }
                 }
                 MessagesEvent::Shifted {
@@ -1785,6 +1710,9 @@ impl ChannelMessages {
             };
             let finished = this.pagination_fetch_active && !fetching;
             this.pagination_fetch_active = fetching;
+            if this.list_state.item_count() == 0 && !store.read(cx).viewport_messages().is_empty() {
+                store.update(cx, |store, cx| store.resync_viewport(cx));
+            }
             if !finished {
                 return;
             }
@@ -2013,7 +1941,6 @@ impl ChannelMessages {
             scroll_anchors: HashMap::new(),
             last_scroll_sync: None,
             current_channel: None,
-            restore_pending: None,
             welcome,
             onboarding,
             cached_unread_boundary,
@@ -3142,6 +3069,95 @@ impl ChannelMessages {
         self.cached_unread_boundary = unread;
         self.cached_fab_unread_count = fab_unread_count;
         true
+    }
+
+    fn clear_row_ui_state(&mut self) {
+        self.reaction_picker = None;
+        self._reaction_picker_sub = None;
+        self._reaction_picker_dismiss_sub = None;
+        self.mention_popover = None;
+        self._mention_popover_sub = None;
+        self.context_menu_target = None;
+        self.hovered_row = None;
+        self.raw_hover = None;
+        self.overlay_hover = None;
+        self.clear_hover_tasks();
+        self.edit_input = None;
+        self._edit_input_sub = None;
+        Rc::make_mut(&mut self.active_videos).clear();
+        Rc::make_mut(&mut self.active_audios).clear();
+        Rc::make_mut(&mut self.gif_videos).clear();
+        Rc::make_mut(&mut self.embed_inputs).clear();
+        self.embed_input_subs.clear();
+        self.embed_input_fingerprint = None;
+        self.embed_select_seeded.clear();
+    }
+
+    fn rebuild_list(
+        &mut self,
+        store: &Entity<MessagesStore>,
+        count: usize,
+        cx: &mut Context<Self>,
+    ) {
+        self.list_state.reset(count);
+        self.last_visible_start = 0;
+        self.last_visible_end = 0;
+        self.paginate_retry_pending = false;
+        self.header_shown = false;
+
+        let new_channel = store.read(cx).active_channel_id();
+        if new_channel != self.current_channel {
+            self.last_seen_at_bottom = None;
+        }
+        let is_loading = store.read(cx).is_loading();
+        let transition = reset_transition(new_channel, self.fab_scroll_pending);
+        self.current_channel = transition.current_channel;
+        self.fab_scroll_pending = false;
+
+        let anchor =
+            new_channel.and_then(|channel_id| self.scroll_anchors.get(&channel_id).copied());
+        let decision = decide_reset_scroll(
+            transition.want_restore,
+            is_loading,
+            anchor,
+            store.read(cx).viewport_messages(),
+            store.read(cx).has_more_bottom(),
+        );
+        let at_bottom = match decision {
+            ResetScroll::Restore {
+                item_ix,
+                offset_in_item,
+            } => {
+                self.list_state.scroll_to(gpui::ListOffset {
+                    item_ix,
+                    offset_in_item,
+                });
+                false
+            }
+            ResetScroll::ToBottom => {
+                self.list_state.scroll_to_end();
+                true
+            }
+            ResetScroll::Defer => true,
+        };
+        self.at_bottom = at_bottom;
+
+        if let Some(channel_id) = new_channel {
+            store.update(cx, |store, _cx| {
+                store.set_viewing_older(channel_id, !at_bottom);
+            });
+        }
+        if matches!(decision, ResetScroll::ToBottom) {
+            if let Some(last) = store
+                .read(cx)
+                .viewport_messages()
+                .last()
+                .filter(|m| !m.id.is_optimistic())
+            {
+                self.last_seen_at_bottom = Some(last.id);
+            }
+            self.sync_channel_seen(cx);
+        }
     }
 
     fn sync_header(&mut self, is_empty: bool, has_more_top: bool) {
@@ -4759,27 +4775,13 @@ const RESET_NEAR_BOTTOM_ROWS: usize = 10;
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 struct ResetTransition {
     current_channel: Option<ChannelId>,
-    restore_pending: Option<ChannelId>,
     want_restore: bool,
 }
 
-fn reset_transition(
-    _prev_channel: Option<ChannelId>,
-    new_channel: Option<ChannelId>,
-    _prev_restore_pending: Option<ChannelId>,
-    fab_scroll_pending: bool,
-    is_loading: bool,
-) -> ResetTransition {
-    let want_restore = !fab_scroll_pending && new_channel.is_some();
-    let restore_pending = if is_loading && want_restore {
-        new_channel
-    } else {
-        None
-    };
+fn reset_transition(new_channel: Option<ChannelId>, fab_scroll_pending: bool) -> ResetTransition {
     ResetTransition {
         current_channel: new_channel,
-        restore_pending,
-        want_restore,
+        want_restore: !fab_scroll_pending && new_channel.is_some(),
     }
 }
 
@@ -5381,65 +5383,30 @@ mod scroll_restore_tests {
         );
     }
 
-    const X: Option<ChannelId> = Some(ChannelId(1));
     const Y: Option<ChannelId> = Some(ChannelId(2));
     const Z: Option<ChannelId> = Some(ChannelId(3));
 
     #[test]
-    fn cold_miss_double_reset_arms_then_finalizes() {
-        let intermediate = reset_transition(X, Y, None, false, true);
-        assert_eq!(
-            intermediate,
-            ResetTransition {
-                current_channel: Y,
-                restore_pending: Y,
-                want_restore: true,
-            }
-        );
-        let settled = reset_transition(Y, Y, Y, false, false);
-        assert_eq!(
-            settled,
-            ResetTransition {
-                current_channel: Y,
-                restore_pending: None,
-                want_restore: true,
-            }
-        );
-    }
-
-    #[test]
-    fn warm_stale_double_reset_keeps_restore_armed_until_settled() {
-        let intermediate = reset_transition(X, Y, None, false, true);
-        assert!(intermediate.want_restore && intermediate.restore_pending == Y);
-        let settled = reset_transition(Y, Y, Y, false, false);
-        assert!(settled.want_restore && settled.restore_pending.is_none());
-    }
-
-    #[test]
     fn fab_scroll_pending_forces_bottom() {
-        let transition = reset_transition(Y, Y, Y, true, false);
+        let transition = reset_transition(Y, true);
         assert!(!transition.want_restore);
-        assert_eq!(transition.restore_pending, None);
+        assert_eq!(transition.current_channel, Y);
     }
 
     #[test]
-    fn same_channel_resync_preserves_anchor() {
-        let loading = reset_transition(Y, Y, None, false, true);
-        assert!(loading.want_restore);
-        assert_eq!(loading.restore_pending, Y);
-        let settled = reset_transition(Y, Y, None, false, false);
-        assert!(settled.want_restore);
-        assert_eq!(settled.restore_pending, None);
+    fn closed_conversation_does_not_restore() {
+        let transition = reset_transition(None, false);
+        assert!(!transition.want_restore);
+        assert_eq!(transition.current_channel, None);
     }
 
     #[test]
-    fn switching_again_rearms_to_new_channel() {
-        let transition = reset_transition(Y, Z, Y, false, true);
+    fn switching_adopts_new_channel_and_restores() {
+        let transition = reset_transition(Z, false);
         assert_eq!(
             transition,
             ResetTransition {
                 current_channel: Z,
-                restore_pending: Z,
                 want_restore: true,
             }
         );
