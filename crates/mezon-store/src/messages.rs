@@ -951,6 +951,9 @@ impl MessagesStore {
 
         let channel_sub = cx.subscribe(&ChannelList::global(cx), |this, _channel, event, cx| {
             if let ChannelEvent::ActiveChannelChanged(channel_id) = event {
+                if channel_id.is_none() && this.is_dm {
+                    return;
+                }
                 this.on_active_channel_changed(*channel_id, cx);
             }
         });
@@ -7686,6 +7689,81 @@ mod tests {
             Some(&("reset", 0)),
             "the last structural event must not claim zero rows"
         );
+    }
+
+    #[gpui::test]
+    fn clearing_the_active_clan_channel_must_not_close_an_open_dm(cx: &mut gpui::TestAppContext) {
+        let (store, dm) = cx.update(|cx| {
+            let api = Arc::new(mezon_client::AppApi::new(
+                Arc::new(mezon_client::TransportClient::new(String::new())),
+                String::new(),
+            ));
+            crate::realtime::RealtimeDispatch::init(api.clone(), cx);
+            crate::clan::ClanList::init(api.clone(), cx);
+            ChannelList::init(api.clone(), cx);
+            let store = MessagesStore::init(api, cx);
+            let dm = ChannelId(11);
+            store.update(cx, |store, cx| {
+                store.set_channel(dm, vec![Message::new(MessageId(1), "hi", "5", "Bob", 100)]);
+                store.activate(ClanId(0), dm, false, true, 3, 4, cx);
+            });
+            (store, dm)
+        });
+
+        cx.update(|cx| {
+            ChannelList::global(cx).update(cx, |_, cx| {
+                cx.emit(ChannelEvent::ActiveChannelChanged(None));
+            });
+        });
+
+        cx.update(|cx| {
+            let store = store.read(cx);
+            assert_eq!(
+                store.active_channel_id(),
+                Some(dm),
+                "a dm is not a clan channel, so clearing the clan selection must leave it open"
+            );
+            assert_eq!(store.viewport_messages().len(), 1, "its rows must survive");
+        });
+    }
+
+    #[gpui::test]
+    fn clearing_the_active_clan_channel_still_closes_an_open_clan_channel(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let store = cx.update(|cx| {
+            let api = Arc::new(mezon_client::AppApi::new(
+                Arc::new(mezon_client::TransportClient::new(String::new())),
+                String::new(),
+            ));
+            crate::realtime::RealtimeDispatch::init(api.clone(), cx);
+            crate::clan::ClanList::init(api.clone(), cx);
+            ChannelList::init(api.clone(), cx);
+            let store = MessagesStore::init(api, cx);
+            let channel = ChannelId(22);
+            store.update(cx, |store, cx| {
+                store.set_channel(
+                    channel,
+                    vec![Message::new(MessageId(2), "yo", "6", "Eve", 200)],
+                );
+                store.activate(ClanId(1), channel, true, false, 1, 2, cx);
+            });
+            store
+        });
+
+        cx.update(|cx| {
+            ChannelList::global(cx).update(cx, |_, cx| {
+                cx.emit(ChannelEvent::ActiveChannelChanged(None));
+            });
+        });
+
+        cx.update(|cx| {
+            assert_eq!(
+                store.read(cx).active_channel_id(),
+                None,
+                "a clan channel still follows the clan selection"
+            );
+        });
     }
 
     #[gpui::test]
