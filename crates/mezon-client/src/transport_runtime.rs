@@ -2083,6 +2083,17 @@ impl TransportClient {
             .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
     }
 
+    pub async fn create_event(
+        &self,
+        request: mezon_proto::api::CreateEventRequest,
+    ) -> Result<mezon_proto::api::EventManagement> {
+        let transport = self.inner.clone();
+        runtime()
+            .spawn(async move { transport.create_event(request).await })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
     pub async fn list_role_users(
         &self,
         role_id: i64,

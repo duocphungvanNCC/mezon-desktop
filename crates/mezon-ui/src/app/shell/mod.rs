@@ -54,6 +54,7 @@ struct ToastItem {
 pub struct Shell {
     toasts: Vec<ToastItem>,
     modal: Option<AnyView>,
+    modal_underlay: Option<(AnyView, bool, bool)>,
     modal_fullscreen: bool,
     command_palette_open: bool,
     next_id: usize,
@@ -67,6 +68,7 @@ impl Shell {
         let entity = cx.new(|_| Self {
             toasts: Vec::new(),
             modal: None,
+            modal_underlay: None,
             modal_fullscreen: false,
             command_palette_open: false,
             next_id: 0,
@@ -632,6 +634,9 @@ impl Shell {
         });
         let focus_handle = view.read(cx).focus_handle.clone();
         window.focus(&focus_handle, cx);
+        if let Some(current) = self.modal.take() {
+            self.modal_underlay = Some((current, self.modal_fullscreen, self.command_palette_open));
+        }
         self.show_modal(view.into(), cx);
     }
 
@@ -670,8 +675,14 @@ impl Shell {
 
     pub fn close_modal(&mut self, cx: &mut Context<Self>) {
         if self.modal.take().is_some() {
-            self.command_palette_open = false;
-            self.modal_fullscreen = false;
+            if let Some((underlay, fullscreen, command_palette_open)) = self.modal_underlay.take() {
+                self.modal = Some(underlay);
+                self.modal_fullscreen = fullscreen;
+                self.command_palette_open = command_palette_open;
+            } else {
+                self.command_palette_open = false;
+                self.modal_fullscreen = false;
+            }
             cx.notify();
         }
     }
@@ -684,6 +695,10 @@ impl Shell {
     pub fn render_overlay(&self) -> impl IntoElement {
         let modal = self.modal.clone();
         let fullscreen = self.modal_fullscreen;
+        let modal_underlay = self
+            .modal_underlay
+            .as_ref()
+            .map(|(view, fullscreen, _)| (view.clone(), *fullscreen));
         let has_toasts = !self.toasts.is_empty();
         let toasts: Vec<(usize, SharedString, ToastKind, Option<f32>)> = self
             .toasts
@@ -696,6 +711,29 @@ impl Shell {
             .top_0()
             .left_0()
             .size_full()
+            .when_some(modal_underlay, |el, (view, fullscreen)| {
+                el.child(deferred(if fullscreen {
+                    div()
+                        .absolute()
+                        .top_0()
+                        .left_0()
+                        .size_full()
+                        .child(div().size_full().child(view))
+                        .into_any_element()
+                } else {
+                    div()
+                        .absolute()
+                        .top_0()
+                        .left_0()
+                        .size_full()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .bg(hsla(0., 0., 0., 0.5))
+                        .child(view)
+                        .into_any_element()
+                }))
+            })
             .when_some(modal, |el, view| {
                 el.child(deferred(if fullscreen {
                     div()
