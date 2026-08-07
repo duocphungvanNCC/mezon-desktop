@@ -1,7 +1,7 @@
 use gpui::{
     AnyElement, App, FontWeight, ObjectFit, SharedString, div, img, prelude::*, px, rgb, rgba,
 };
-use mezon_store::{ClanId, ClanList, InvitePreview};
+use mezon_store::{AcceptInviteError, AcceptInviteResult, ClanId, ClanList, InvitePreview};
 
 use super::content::{SelectableSectionCursor, SelectableTextContext, open_message_link};
 use super::context::RowCtx;
@@ -60,14 +60,12 @@ pub fn render_invite_card(
         .map(|c| c.to_uppercase().to_string())
         .unwrap_or_else(|| "M".to_string())
         .into();
-    let joined_clan = joined_clan_id(invite, ctx.app);
-    let is_joined = joined_clan.is_some();
     let clan_list = ClanList::global(ctx.app);
-    let joining = clan_list.read(ctx.app).is_joining_invite(&invite.url);
-    let join_error = clan_list
-        .read(ctx.app)
-        .invite_join_error(&invite.url)
-        .map(SharedString::from);
+    let clans = clan_list.read(ctx.app);
+    let joined_clan = joined_clan_id(invite, clans);
+    let is_joined = joined_clan.is_some();
+    let joining = clans.is_joining_invite(&invite.url);
+    let join_failed = clans.has_invite_join_error(&invite.url);
 
     let mut avatar_inner = div().size_full();
     if invite.image_proxied.is_empty() {
@@ -207,6 +205,7 @@ pub fn render_invite_card(
     let join_selection = ctx.selection.clone();
     let failed_to_join =
         SharedString::from(mezon_i18n::t(ctx.locale, "linkMessageInvite.failedToJoin"));
+    let failed_to_join_for_click = failed_to_join.clone();
     let mut button = div()
         .id(SharedString::from(format!("invite-join-{}", invite.url)))
         .mt_4()
@@ -218,29 +217,35 @@ pub fn render_invite_card(
         .rounded_lg()
         .cursor_pointer()
         .bg(rgb(JOIN_GREEN))
-        .hover(|s| s.bg(rgb(JOIN_GREEN_HOVER)))
         .text_size(px(16.))
         .font_weight(FontWeight::SEMIBOLD)
         .text_color(rgb(WHITE));
     if joining {
         button = button.opacity(0.6).cursor_default();
     } else {
-        button = button.on_click(move |_, _, cx| {
-            if !join_selection.borrow().has_selection() {
-                handle_join_or_goto(joined_clan, &join_url, failed_to_join.clone(), cx);
-            }
-        });
+        button = button
+            .hover(|s| s.bg(rgb(JOIN_GREEN_HOVER)))
+            .on_click(move |_, _, cx| {
+                if !join_selection.borrow().has_selection() {
+                    handle_join_or_goto(
+                        joined_clan,
+                        &join_url,
+                        failed_to_join_for_click.clone(),
+                        cx,
+                    );
+                }
+            });
     }
     let button = button.child(button_label);
 
     let mut body = div().px_4().pb_4().pt_10().child(header_block);
-    if let Some(error) = join_error {
+    if join_failed {
         body = body.child(
             div()
                 .mt_2()
                 .text_size(px(12.))
                 .text_color(rgb(ERROR_TEXT))
-                .child(error),
+                .child(failed_to_join),
         );
     }
     let body = body.child(button);
@@ -317,14 +322,14 @@ fn render_invalid_invite(
         .into_any_element()
 }
 
-fn joined_clan_id(invite: &InvitePreview, cx: &App) -> Option<ClanId> {
+fn joined_clan_id(invite: &InvitePreview, clans: &ClanList) -> Option<ClanId> {
     let clan_id = invite
         .clan_id
         .as_deref()
         .and_then(|raw| raw.parse::<i64>().ok())
         .map(ClanId)
         .filter(|id| !id.is_zero())?;
-    ClanList::global(cx).read(cx).clan(clan_id).map(|_| clan_id)
+    clans.clan(clan_id).map(|_| clan_id)
 }
 
 fn handle_join_or_goto(
@@ -351,24 +356,41 @@ fn accept_invite_link(url: &str, failed_to_join: SharedString, cx: &mut App) {
     });
     cx.spawn(async move |cx| match task.await {
         Ok(accept) => {
-            cx.update(|cx| {
-                navigate(
-                    cx,
-                    Route::Channel {
-                        clan_id: accept.clan_id,
-                        channel_id: accept.channel_id,
-                    },
-                );
-            });
+            cx.update(|cx| navigate_after_invite_accept(accept, cx));
         }
+        Err(AcceptInviteError::AlreadyJoining) => {}
         Err(err) => {
-            tracing::warn!("accept invite failed: {err}");
+            tracing::warn!("accept invite failed: {err:?}");
             cx.update(|cx| {
                 Shell::global(cx).update(cx, |shell, cx| shell.error(failed_to_join, cx));
             });
         }
     })
     .detach();
+}
+
+fn navigate_after_invite_accept(accept: AcceptInviteResult, cx: &mut App) {
+    let channel_id = if accept.channel_id.is_zero() {
+        ClanList::global(cx)
+            .read(cx)
+            .welcome_channel_id(accept.clan_id)
+            .filter(|id| !id.is_zero())
+            .unwrap_or(accept.channel_id)
+    } else {
+        accept.channel_id
+    };
+    if channel_id.is_zero() {
+        ClanList::global(cx).update(cx, |list, cx| list.select_clan(accept.clan_id, cx));
+        navigate(cx, Route::Chat);
+        return;
+    }
+    navigate(
+        cx,
+        Route::Channel {
+            clan_id: accept.clan_id,
+            channel_id,
+        },
+    );
 }
 
 pub(crate) fn member_count_label(locale: &str, count: i64) -> SharedString {
