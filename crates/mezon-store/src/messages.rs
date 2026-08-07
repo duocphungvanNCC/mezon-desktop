@@ -4193,16 +4193,6 @@ impl MessagesStore {
         self.open_channel(channel_id, cx);
     }
 
-    fn fetch_in_flight(&self, channel_id: ChannelId) -> bool {
-        self.latest_fetch.contains_key(&channel_id)
-    }
-
-    pub fn resync_viewport(&mut self, cx: &mut Context<Self>) {
-        let count = self.messages().len();
-        cx.emit(MessagesEvent::Resized { count });
-        cx.notify();
-    }
-
     pub fn close(&mut self, cx: &mut Context<Self>) {
         self.pending_jump = None;
         if self.active_channel_id.is_none() && !self.is_dm {
@@ -4230,7 +4220,7 @@ impl MessagesStore {
         cx: &mut Context<Self>,
     ) {
         if self.active_channel_id == Some(channel_id) && !self.is_dm {
-            if self.fetch_in_flight(channel_id) {
+            if self.loading {
                 return;
             }
             let empty = self
@@ -4281,7 +4271,7 @@ impl MessagesStore {
         cx: &mut Context<Self>,
     ) {
         if self.active_channel_id == Some(channel_id) && self.is_dm {
-            if self.fetch_in_flight(channel_id) {
+            if self.loading {
                 return;
             }
             let empty = self
@@ -7767,6 +7757,47 @@ mod tests {
     }
 
     #[gpui::test]
+    fn a_late_page_for_the_open_channel_resizes_the_timeline(cx: &mut gpui::TestAppContext) {
+        let seen = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let sink = seen.clone();
+        cx.update(|cx| {
+            let api = Arc::new(mezon_client::AppApi::new(
+                Arc::new(mezon_client::TransportClient::new(String::new())),
+                String::new(),
+            ));
+            crate::realtime::RealtimeDispatch::init(api.clone(), cx);
+            crate::clan::ClanList::init(api.clone(), cx);
+            ChannelList::init(api.clone(), cx);
+            let store = MessagesStore::init(api, cx);
+            let dm = ChannelId(11);
+
+            cx.subscribe(&store, move |_, event: &MessagesEvent, _| match event {
+                MessagesEvent::Reset { count } => sink.borrow_mut().push(("reset", *count)),
+                MessagesEvent::Resized { count } => sink.borrow_mut().push(("resized", *count)),
+                _ => {}
+            })
+            .detach();
+
+            store.update(cx, |store, cx| {
+                store.active_channel_id = Some(dm);
+                store.active_clan_id = Some(ClanId(0));
+                store.is_dm = true;
+                store.fetch_generation = 5;
+                store.latest_fetch.insert(dm, 3);
+
+                store.apply_initial_fetch_result(dm, 3, Ok(api_page(&[1, 2])), cx);
+            });
+        });
+
+        assert_eq!(
+            seen.borrow().as_slice(),
+            &[("resized", 2)],
+            "a page that is still the newest for the open channel must resize the timeline \
+             even though a channel switch has moved the generation on"
+        );
+    }
+
+    #[gpui::test]
     fn a_superseded_page_never_overwrites_newer_rows(cx: &mut gpui::TestAppContext) {
         cx.update(|cx| {
             let api = Arc::new(mezon_client::AppApi::new(
@@ -7843,14 +7874,14 @@ mod tests {
                     "the newer fetch keeps its slot"
                 );
                 assert!(
-                    store.fetch_in_flight(channel),
+                    store.latest_fetch.contains_key(&channel),
                     "the channel is still fetching"
                 );
 
                 store.apply_initial_fetch_result(channel, 7, Err(anyhow::anyhow!("failed")), cx);
                 assert!(!store.loading, "the awaited result settles the flag");
                 assert!(
-                    !store.fetch_in_flight(channel),
+                    !store.latest_fetch.contains_key(&channel),
                     "a settled fetch releases its slot"
                 );
             });

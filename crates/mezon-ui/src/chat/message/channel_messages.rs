@@ -1710,9 +1710,6 @@ impl ChannelMessages {
             };
             let finished = this.pagination_fetch_active && !fetching;
             this.pagination_fetch_active = fetching;
-            if this.list_state.item_count() == 0 && !store.read(cx).viewport_messages().is_empty() {
-                store.update(cx, |store, cx| store.resync_viewport(cx));
-            }
             if !finished {
                 return;
             }
