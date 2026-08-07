@@ -104,6 +104,11 @@ impl ConnectionStore {
         cx.global::<GlobalConnectionStore>().0.clone()
     }
 
+    pub fn try_global(cx: &App) -> Option<Entity<Self>> {
+        cx.try_global::<GlobalConnectionStore>()
+            .map(|g| g.0.clone())
+    }
+
     pub fn reconnect(&self, cx: &mut Context<Self>) {
         let transport = self.transport.clone();
         let wake = self.wake.clone();

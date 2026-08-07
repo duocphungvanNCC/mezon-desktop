@@ -1,11 +1,13 @@
 use std::sync::Arc;
 
 use gpui::{App, AppContext, Context, Entity, Global, Subscription, Task};
-use mezon_client::{AppApi, GotifyNotification};
+use mezon_client::gotify::{BACKOFF_BASE, next_backoff, with_jitter};
+use mezon_client::{AppApi, GotifyNotification, StreamEnd};
 
 use crate::channel::ChannelList;
 use crate::clan::ClanList;
 use crate::config::AppConfig;
+use crate::connection::ConnectionStore;
 use crate::ids::ChannelId;
 use crate::messages::MessagesStore;
 use crate::platform::{DesktopNotification, PlatformStore};
@@ -27,7 +29,9 @@ pub struct NotificationPushStore {
     connection: Option<Task<()>>,
     connected_user: Option<String>,
     device_id: Option<String>,
+    online: tokio::sync::watch::Sender<bool>,
     _auth_sub: Subscription,
+    _connection_sub: Option<Subscription>,
 }
 
 struct GlobalNotificationPushStore(Entity<NotificationPushStore>);
@@ -37,13 +41,31 @@ impl NotificationPushStore {
     pub fn init(api: Arc<AppApi>, auth_state: Entity<AuthState>, cx: &mut App) -> Entity<Self> {
         let entity = cx.new(|cx| {
             let auth_sub = cx.observe(&auth_state, Self::on_auth_changed);
+            let connection_store = ConnectionStore::try_global(cx);
+            let starts_online = connection_store
+                .as_ref()
+                .map(|store| store.read(cx).is_online())
+                .unwrap_or(true);
+            let (online, _) = tokio::sync::watch::channel(starts_online);
+            let connection_sub = connection_store.map(|store| {
+                cx.observe(&store, |this: &mut Self, store, cx| {
+                    let is_online = store.read(cx).is_online();
+                    this.online.send_if_modified(|current| {
+                        let changed = *current != is_online;
+                        *current = is_online;
+                        changed
+                    });
+                })
+            });
             let mut this = Self {
                 auth_state: auth_state.clone(),
                 api,
                 connection: None,
                 connected_user: None,
                 device_id: None,
+                online,
                 _auth_sub: auth_sub,
+                _connection_sub: connection_sub,
             };
             this.sync_connection(cx);
             this
@@ -97,58 +119,111 @@ impl NotificationPushStore {
             return;
         }
         let api = self.api.clone();
-        let cached_device_id = self.device_id.clone().unwrap_or_default();
+        let mut online = self.online.subscribe();
+        let timer = cx.background_executor().clone();
         self.connected_user = Some(user_id.clone());
         self.connection = Some(cx.spawn(async move |this, cx| {
-            let token = match api
-                .regist_fcm_device_token(&cached_device_id, "", DEVICE_PLATFORM)
-                .await
-            {
-                Ok((token, device_id)) if !token.trim().is_empty() => {
-                    let _ = this.update(cx, |store, _| {
-                        if !device_id.is_empty() {
-                            store.device_id = Some(device_id);
-                        }
-                    });
-                    token.trim().to_string()
-                }
-                Ok(_) => {
-                    tracing::warn!("gotify: empty notification token; not connecting");
-                    return;
-                }
-                Err(e) => {
-                    tracing::warn!("gotify: failed to register device token: {e}");
-                    return;
-                }
-            };
-            tracing::debug!("gotify: token acquired, opening stream");
-            let mut rx = api.spawn_gotify_stream(ws_base, token);
-            while let Some(notification) = rx.recv().await {
-                let prepared = this
-                    .update(cx, |_, cx| {
-                        note_dm_unread(cx, &user_id, &notification);
-                        prepare(cx, &user_id, &notification)
-                    })
-                    .ok()
-                    .flatten();
-                let Some(prepared) = prepared else {
-                    if this.update(cx, |_, _| {}).is_err() {
-                        break;
+            let mut backoff = BACKOFF_BASE;
+            let mut token: Option<String> = None;
+
+            loop {
+                if !*online.borrow() {
+                    tracing::debug!("gotify: offline, parking until the network returns");
+                    if online.wait_for(|up| *up).await.is_err() {
+                        return;
                     }
-                    continue;
-                };
-                let icon_path = match prepared.icon_url.as_deref() {
-                    Some(url) => api
-                        .download_notification_icon(url)
-                        .await
-                        .ok()
-                        .map(|p| p.to_string_lossy().into_owned()),
-                    None => None,
-                };
-                let delivered = this.update(cx, |_, cx| show_prepared(cx, prepared, icon_path));
-                if delivered.is_err() {
-                    break;
+                    tracing::debug!("gotify: network back, reconnecting");
+                    backoff = BACKOFF_BASE;
                 }
+
+                let stream_token = match token.clone() {
+                    Some(token) => token,
+                    None => {
+                        let Ok(device_id) =
+                            this.update(cx, |store, _| store.device_id.clone().unwrap_or_default())
+                        else {
+                            return;
+                        };
+                        match api
+                            .regist_fcm_device_token(&device_id, "", DEVICE_PLATFORM)
+                            .await
+                        {
+                            Ok((fresh, device_id)) if !fresh.trim().is_empty() => {
+                                if this
+                                    .update(cx, |store, _| {
+                                        if !device_id.is_empty() {
+                                            store.device_id = Some(device_id);
+                                        }
+                                    })
+                                    .is_err()
+                                {
+                                    return;
+                                }
+                                tracing::debug!("gotify: notification token registered");
+                                let fresh = fresh.trim().to_string();
+                                token = Some(fresh.clone());
+                                fresh
+                            }
+                            Ok(_) => {
+                                tracing::warn!("gotify: empty notification token; retrying");
+                                timer.timer(with_jitter(backoff)).await;
+                                backoff = next_backoff(backoff);
+                                continue;
+                            }
+                            Err(e) => {
+                                tracing::warn!("gotify: failed to register device token: {e}");
+                                timer.timer(with_jitter(backoff)).await;
+                                backoff = next_backoff(backoff);
+                                continue;
+                            }
+                        }
+                    }
+                };
+
+                tracing::debug!("gotify: opening stream");
+                let (mut rx, ended) = api.spawn_gotify_stream(ws_base.clone(), stream_token);
+                while let Some(notification) = rx.recv().await {
+                    let prepared = this
+                        .update(cx, |_, cx| {
+                            note_dm_unread(cx, &user_id, &notification);
+                            prepare(cx, &user_id, &notification)
+                        })
+                        .ok()
+                        .flatten();
+                    let Some(prepared) = prepared else {
+                        if this.update(cx, |_, _| {}).is_err() {
+                            return;
+                        }
+                        continue;
+                    };
+                    let icon_path = match prepared.icon_url.as_deref() {
+                        Some(url) => api
+                            .download_notification_icon(url)
+                            .await
+                            .ok()
+                            .map(|p| p.to_string_lossy().into_owned()),
+                        None => None,
+                    };
+                    if this
+                        .update(cx, |_, cx| show_prepared(cx, prepared, icon_path))
+                        .is_err()
+                    {
+                        return;
+                    }
+                }
+
+                match ended.await.unwrap_or(StreamEnd::ConnectFailed) {
+                    StreamEnd::ReceiverGone => return,
+                    StreamEnd::Dropped => backoff = BACKOFF_BASE,
+                    StreamEnd::Rejected => {
+                        tracing::warn!("gotify: stream refused the token, re-registering");
+                        token = None;
+                    }
+                    StreamEnd::ConnectFailed | StreamEnd::ClosedByServer => {}
+                }
+
+                timer.timer(with_jitter(backoff)).await;
+                backoff = next_backoff(backoff);
             }
         }));
     }
