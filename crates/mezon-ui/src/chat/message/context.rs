@@ -132,6 +132,7 @@ pub struct RowMemo {
     pub selection_layouts: HashMap<MessageId, super::content::SelectableMessageLayoutCacheEntry>,
     pub selection_text_pieces:
         HashMap<SharedString, Rc<[super::content::CachedSelectableTextPiece]>>,
+    pub hovered_rich_link: Option<(MessageId, Range<usize>)>,
     pub poll_scrolls: HashMap<MessageId, gpui::ScrollHandle>,
 }
 

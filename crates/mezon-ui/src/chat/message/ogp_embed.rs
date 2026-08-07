@@ -3,7 +3,9 @@ use mezon_store::{Message, MessageId, MessagesStore, OgpPreview};
 
 use crate::image_cache::LruImageCache;
 
-use super::content::{SelectableSectionCursor, SelectableTextContext, open_message_link};
+use super::content::{
+    SelectableSectionCursor, SelectableTextContext, hover_link_text_segments, open_message_link,
+};
 use super::context::RowCtx;
 use crate::components::primitives::{Icon, IconName};
 use crate::theme::Theme;
@@ -63,26 +65,33 @@ fn render_ogp_preview_impl(
         let mut block = div().flex().flex_col().gap_0p5();
         if !ogp.title.is_empty() {
             let range = cursor.section(&ogp.title);
+            let title_group = SharedString::from(format!("ogp-title-{}-{}", message_id.0, ogp.url));
+            if let (Some(context), Some(range)) = (selection_context, range) {
+                context.register_text_segment(&ogp.title, range);
+            }
             block = block.child(
                 div()
                     .id("ogp-title")
-                    .cursor(gpui::CursorStyle::IBeam)
+                    .group(title_group.clone())
+                    .cursor_pointer()
                     .text_size(px(14.))
                     .font_weight(gpui::FontWeight::BOLD)
-                    .text_color(rgb(OGP_TITLE_COLOR))
                     .line_clamp(2)
-                    .hover(|s| s.text_color(rgb(OGP_TITLE_HOVER_COLOR)))
-                    .child(
-                        if let (Some(context), Some(range)) = (selection_context, range) {
-                            context.text_node(&ogp.title, range).into_any_element()
-                        } else {
-                            ogp.title.clone().into_any_element()
-                        },
-                    ),
+                    .flex()
+                    .flex_row()
+                    .flex_wrap()
+                    .children(hover_link_text_segments(
+                        &ogp.title,
+                        title_group,
+                        rgb(OGP_TITLE_COLOR),
+                        rgb(OGP_TITLE_HOVER_COLOR),
+                        true,
+                    )),
             );
         }
         if !ogp.description.is_empty() {
-            let range = cursor.section(&ogp.description);
+            let description = collapse_ogp_description(&ogp.description);
+            let range = cursor.section(&description);
             block = block.child(
                 div()
                     .cursor(gpui::CursorStyle::IBeam)
@@ -92,11 +101,9 @@ fn render_ogp_preview_impl(
                     .line_clamp(2)
                     .child(
                         if let (Some(context), Some(range)) = (selection_context, range) {
-                            context
-                                .text_node(&ogp.description, range)
-                                .into_any_element()
+                            context.text_node(&description, range).into_any_element()
                         } else {
-                            ogp.description.clone().into_any_element()
+                            description.into_any_element()
                         },
                     ),
             );
@@ -189,12 +196,17 @@ fn ogp_remove_button(message_id: MessageId, theme: &Theme) -> AnyElement {
 }
 
 pub(crate) fn selectable_ogp_text(ogp: &OgpPreview) -> String {
-    match (ogp.title.is_empty(), ogp.description.is_empty()) {
-        (false, false) => format!("{}\n{}", ogp.title, ogp.description),
+    let description = collapse_ogp_description(&ogp.description);
+    match (ogp.title.is_empty(), description.is_empty()) {
+        (false, false) => format!("{}\n{}", ogp.title, description),
         (false, true) => ogp.title.to_string(),
-        (true, false) => ogp.description.to_string(),
+        (true, false) => description,
         (true, true) => String::new(),
     }
+}
+
+fn collapse_ogp_description(description: &str) -> String {
+    description.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 fn ogp_image(src: SharedString, fallback_fg: gpui::Rgba) -> AnyElement {
