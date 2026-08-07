@@ -6062,6 +6062,7 @@ dependencies = [
  "screencapturekit-sys",
  "tokio",
  "tracing",
+ "windows 0.61.3",
  "windows-capture 2.0.0",
  "xcb",
  "yuv",

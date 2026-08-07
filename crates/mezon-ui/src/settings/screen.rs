@@ -5,8 +5,8 @@ use gpui::{
 };
 use mezon_store::{
     AuthState, AutoUpdateStatus, ClanList, LoginStore, Settings, effective_update_status,
-    update_available_clicked, update_check_clicked, update_manual_install_clicked,
-    update_restart_clicked,
+    update_available_clicked, update_check_clicked, update_error_clicked,
+    update_manual_install_clicked, update_restart_clicked,
 };
 
 use super::account_page::AccountPage;
@@ -463,13 +463,17 @@ impl Render for SettingsScreen {
                 .text_color(color)
                 .child(label);
             match &status {
-                AutoUpdateStatus::Idle
-                | AutoUpdateStatus::UpToDate
-                | AutoUpdateStatus::Errored { .. } => {
+                AutoUpdateStatus::Idle | AutoUpdateStatus::UpToDate => {
                     row = row
                         .cursor_pointer()
                         .hover(move |s| s.bg(bg_hover))
                         .on_click(|_, _, cx| update_check_clicked(cx));
+                }
+                AutoUpdateStatus::Errored { .. } => {
+                    row = row
+                        .cursor_pointer()
+                        .hover(move |s| s.bg(bg_hover))
+                        .on_click(|_, _, cx| update_error_clicked(cx));
                 }
                 AutoUpdateStatus::UpdateAvailable { .. } => {
                     row = row

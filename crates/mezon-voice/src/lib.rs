@@ -59,6 +59,8 @@ use crate::video::{local_camera_key, local_screen_key, track_frame_key};
 const MAX_REMOTE_VIDEO_WIDTH: u32 = 1920;
 const MAX_REMOTE_VIDEO_HEIGHT: u32 = 1080;
 
+const AUDIO_SOURCE_QUEUE_SIZE_MS: u32 = 100;
+
 #[derive(Clone, Debug, Default)]
 pub struct IceServerConfig {
     pub urls: Vec<String>,
@@ -337,7 +339,7 @@ async fn session_main(
                                 AudioSourceOptions::default(),
                                 in_fmt.sample_rate,
                                 in_fmt.channels,
-                                1000,
+                                AUDIO_SOURCE_QUEUE_SIZE_MS,
                             );
                             let mic_track = LocalAudioTrack::create_audio_track(
                                 "microphone",
@@ -871,7 +873,7 @@ async fn start_screen_audio_track(room: &Room) -> Result<ScreenAudioSession> {
         AudioSourceOptions::default(),
         screen_audio::SCREEN_AUDIO_SAMPLE_RATE,
         screen_audio::SCREEN_AUDIO_CHANNELS,
-        1000,
+        AUDIO_SOURCE_QUEUE_SIZE_MS,
     );
     let track =
         LocalAudioTrack::create_audio_track("screen-audio", RtcAudioSource::Native(source.clone()));
