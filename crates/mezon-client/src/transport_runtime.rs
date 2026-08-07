@@ -2572,6 +2572,14 @@ impl TransportClient {
             .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
     }
 
+    pub async fn invite_user(&self, invite_id: i64) -> Result<mezon_proto::api::InviteUserRes> {
+        let transport = self.inner.clone();
+        runtime()
+            .spawn(async move { transport.invite_user(invite_id).await })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
     pub async fn list_friends(&self) -> Result<Vec<crate::transport::ApiFriend>> {
         let transport = self.inner.clone();
         runtime()

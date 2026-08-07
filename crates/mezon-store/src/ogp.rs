@@ -12,7 +12,7 @@ const EXCLUDED_HOSTS: &[&str] = &[
 
 const TRAILING_PUNCTUATION: &[char] = &['.', ',', ';', ':', '!', '?', ')', ']', '}', '\'', '"'];
 
-fn invite_id_from_url(url: &str) -> Option<String> {
+pub fn invite_id_from_url(url: &str) -> Option<String> {
     const NEEDLE: &[u8] = b"/invite/";
     let idx = url
         .as_bytes()
