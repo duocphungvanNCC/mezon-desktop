@@ -109,6 +109,9 @@ pub enum MessagesEvent {
     Reset {
         count: usize,
     },
+    Resized {
+        count: usize,
+    },
     /// The viewport window slid: rows were added/removed at either edge. The UI
     /// applies the matching splices so the visible scroll position is preserved.
     Shifted {
@@ -547,6 +550,7 @@ pub struct MessagesStore {
     last_load_more: Option<Instant>,
     consecutive_loads: u32,
     fetch_generation: u64,
+    latest_fetch: HashMap<ChannelId, u64>,
     reset_generation: u64,
     /// Active reply target for the composer, if any.
     reply_target: Option<ReplyDraft>,
@@ -917,6 +921,7 @@ impl MessagesStore {
         self.last_load_more = None;
         self.consecutive_loads = 0;
         self.fetch_generation = self.fetch_generation.wrapping_add(1);
+        self.latest_fetch.clear();
         self.reset_generation = self.reset_generation.wrapping_add(1);
         self.reply_target = None;
         self.editing = None;
@@ -969,6 +974,7 @@ impl MessagesStore {
             last_load_more: None,
             consecutive_loads: 0,
             fetch_generation: 0,
+            latest_fetch: HashMap::new(),
             reset_generation: 0,
             reply_target: None,
             editing: None,
@@ -4184,6 +4190,16 @@ impl MessagesStore {
         self.open_channel(channel_id, cx);
     }
 
+    fn fetch_in_flight(&self, channel_id: ChannelId) -> bool {
+        self.latest_fetch.contains_key(&channel_id)
+    }
+
+    pub fn resync_viewport(&mut self, cx: &mut Context<Self>) {
+        let count = self.messages().len();
+        cx.emit(MessagesEvent::Resized { count });
+        cx.notify();
+    }
+
     pub fn close(&mut self, cx: &mut Context<Self>) {
         self.pending_jump = None;
         if self.active_channel_id.is_none() && !self.is_dm {
@@ -4211,7 +4227,7 @@ impl MessagesStore {
         cx: &mut Context<Self>,
     ) {
         if self.active_channel_id == Some(channel_id) && !self.is_dm {
-            if self.loading {
+            if self.fetch_in_flight(channel_id) {
                 return;
             }
             let empty = self
@@ -4262,7 +4278,7 @@ impl MessagesStore {
         cx: &mut Context<Self>,
     ) {
         if self.active_channel_id == Some(channel_id) && self.is_dm {
-            if self.loading {
+            if self.fetch_in_flight(channel_id) {
                 return;
             }
             let empty = self
@@ -4336,6 +4352,7 @@ impl MessagesStore {
             cx.emit(MessagesEvent::Reset { count: 0 });
         }
         cx.notify();
+        self.latest_fetch.insert(channel_id, generation);
         self.spawn_initial_fetch(clan_id, channel_id, generation, cx);
     }
 
@@ -4385,8 +4402,19 @@ impl MessagesStore {
         result: Result<mezon_client::transport::ListChannelMessagesResult, anyhow::Error>,
         cx: &mut Context<Self>,
     ) {
+        if self
+            .latest_fetch
+            .get(&channel_id)
+            .is_some_and(|latest| *latest != generation)
+        {
+            return;
+        }
+        self.latest_fetch.remove(&channel_id);
         let is_active = self.active_channel_id == Some(channel_id);
         let is_current = is_active && self.fetch_generation == generation;
+        if is_active {
+            self.loading = false;
+        }
 
         match result {
             Ok(page) => {
@@ -4400,20 +4428,24 @@ impl MessagesStore {
                 self.set_channel(channel_id, messages);
                 self.schedule_presign_expiry(cx);
                 if is_current {
-                    self.loading = false;
                     let count = self.messages().len();
                     cx.emit(MessagesEvent::Reset { count });
                     cx.notify();
                     self.try_consume_pending_jump(cx);
+                } else if is_active {
+                    let count = self.messages().len();
+                    cx.emit(MessagesEvent::Resized { count });
+                    cx.notify();
                 }
             }
             Err(e) => {
                 tracing::error!("Failed to fetch messages for {channel_id}: {e}");
                 if is_current {
-                    self.loading = false;
                     let count = self.messages().len();
                     cx.emit(MessagesEvent::Reset { count });
                     self.try_consume_pending_jump(cx);
+                    cx.notify();
+                } else if is_active {
                     cx.notify();
                 }
             }
@@ -5686,6 +5718,7 @@ impl MessagesStore {
         self.loading_more = false;
         self.fetch_generation = self.fetch_generation.wrapping_add(1);
         let generation = self.fetch_generation;
+        self.latest_fetch.insert(channel_id, generation);
         cx.notify();
 
         let api = self.api.clone();
@@ -7510,6 +7543,56 @@ mod tests {
         assert_eq!(first_non_empty("live", "baked"), "live");
         assert_eq!(first_non_empty("", "baked"), "baked");
         assert_eq!(first_non_empty("", ""), "");
+    }
+
+    #[gpui::test]
+    fn a_superseded_fetch_result_is_dropped(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let api = Arc::new(mezon_client::AppApi::new(
+                Arc::new(mezon_client::TransportClient::new(String::new())),
+                String::new(),
+            ));
+            crate::realtime::RealtimeDispatch::init(api.clone(), cx);
+            crate::clan::ClanList::init(api.clone(), cx);
+            ChannelList::init(api.clone(), cx);
+            let store = MessagesStore::init(api, cx);
+            let channel = ChannelId(9);
+
+            store.update(cx, |store, cx| {
+                store.active_channel_id = Some(channel);
+                store.active_clan_id = Some(ClanId(1));
+                store.loading = true;
+                store.fetch_generation = 7;
+                store.latest_fetch.insert(channel, 7);
+
+                store.apply_initial_fetch_result(
+                    channel,
+                    5,
+                    Err(anyhow::anyhow!("superseded")),
+                    cx,
+                );
+                assert!(
+                    store.loading,
+                    "a superseded result must not settle the newer fetch"
+                );
+                assert_eq!(
+                    store.latest_fetch.get(&channel),
+                    Some(&7),
+                    "the newer fetch keeps its slot"
+                );
+                assert!(
+                    store.fetch_in_flight(channel),
+                    "the channel is still fetching"
+                );
+
+                store.apply_initial_fetch_result(channel, 7, Err(anyhow::anyhow!("failed")), cx);
+                assert!(!store.loading, "the awaited result settles the flag");
+                assert!(
+                    !store.fetch_in_flight(channel),
+                    "a settled fetch releases its slot"
+                );
+            });
+        });
     }
 
     #[gpui::test]
