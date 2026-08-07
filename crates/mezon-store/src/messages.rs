@@ -951,6 +951,9 @@ impl MessagesStore {
 
         let channel_sub = cx.subscribe(&ChannelList::global(cx), |this, _channel, event, cx| {
             if let ChannelEvent::ActiveChannelChanged(channel_id) = event {
+                if channel_id.is_none() && this.is_dm {
+                    return;
+                }
                 this.on_active_channel_changed(*channel_id, cx);
             }
         });
@@ -4190,16 +4193,6 @@ impl MessagesStore {
         self.open_channel(channel_id, cx);
     }
 
-    fn fetch_in_flight(&self, channel_id: ChannelId) -> bool {
-        self.latest_fetch.contains_key(&channel_id)
-    }
-
-    pub fn resync_viewport(&mut self, cx: &mut Context<Self>) {
-        let count = self.messages().len();
-        cx.emit(MessagesEvent::Resized { count });
-        cx.notify();
-    }
-
     pub fn close(&mut self, cx: &mut Context<Self>) {
         self.pending_jump = None;
         if self.active_channel_id.is_none() && !self.is_dm {
@@ -4227,7 +4220,7 @@ impl MessagesStore {
         cx: &mut Context<Self>,
     ) {
         if self.active_channel_id == Some(channel_id) && !self.is_dm {
-            if self.fetch_in_flight(channel_id) {
+            if self.loading {
                 return;
             }
             let empty = self
@@ -4278,7 +4271,7 @@ impl MessagesStore {
         cx: &mut Context<Self>,
     ) {
         if self.active_channel_id == Some(channel_id) && self.is_dm {
-            if self.fetch_in_flight(channel_id) {
+            if self.loading {
                 return;
             }
             let empty = self
@@ -4402,17 +4395,23 @@ impl MessagesStore {
         result: Result<mezon_client::transport::ListChannelMessagesResult, anyhow::Error>,
         cx: &mut Context<Self>,
     ) {
-        if self
+        let superseded = self
             .latest_fetch
             .get(&channel_id)
-            .is_some_and(|latest| *latest != generation)
-        {
+            .is_some_and(|latest| *latest != generation);
+        let have_rows = self
+            .cache
+            .get(&channel_id)
+            .is_some_and(|channel| !channel.messages.is_empty());
+        if superseded && have_rows {
             return;
         }
-        self.latest_fetch.remove(&channel_id);
+        if !superseded {
+            self.latest_fetch.remove(&channel_id);
+        }
         let is_active = self.active_channel_id == Some(channel_id);
-        let is_current = is_active && self.fetch_generation == generation;
-        if is_active {
+        let is_current = !superseded && is_active && self.fetch_generation == generation;
+        if is_active && !superseded {
             self.loading = false;
         }
 
@@ -7546,6 +7545,300 @@ mod tests {
     }
 
     #[gpui::test]
+    fn returning_to_a_dm_from_a_clan_channel_keeps_its_rows(cx: &mut gpui::TestAppContext) {
+        let seen = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let sink = seen.clone();
+        cx.update(|cx| {
+            let api = Arc::new(mezon_client::AppApi::new(
+                Arc::new(mezon_client::TransportClient::new(String::new())),
+                String::new(),
+            ));
+            crate::realtime::RealtimeDispatch::init(api.clone(), cx);
+            crate::clan::ClanList::init(api.clone(), cx);
+            ChannelList::init(api.clone(), cx);
+            let store = MessagesStore::init(api, cx);
+
+            let dm = ChannelId(11);
+            let clan_channel = ChannelId(22);
+            let clan = ClanId(1);
+
+            cx.subscribe(&store, move |_, event: &MessagesEvent, _| match event {
+                MessagesEvent::Reset { count } => sink.borrow_mut().push(("reset", *count)),
+                MessagesEvent::Resized { count } => sink.borrow_mut().push(("resized", *count)),
+                _ => {}
+            })
+            .detach();
+
+            store.update(cx, |store, cx| {
+                store.set_channel(dm, vec![Message::new(MessageId(1), "hi", "5", "Bob", 100)]);
+                store.set_channel(
+                    clan_channel,
+                    vec![
+                        Message::new(MessageId(2), "yo", "6", "Eve", 200),
+                        Message::new(MessageId(3), "sup", "6", "Eve", 300),
+                    ],
+                );
+
+                store.activate(ClanId(0), dm, false, true, 3, 4, cx);
+                store.close(cx);
+                store.activate(clan, clan_channel, true, false, 1, 2, cx);
+                store.activate(ClanId(0), dm, false, true, 3, 4, cx);
+
+                assert_eq!(
+                    store.active_channel_id(),
+                    Some(dm),
+                    "the dm must be the open conversation again"
+                );
+                assert_eq!(
+                    store.viewport_messages().len(),
+                    1,
+                    "the dm buffer must survive the round trip"
+                );
+            });
+        });
+
+        assert_eq!(
+            seen.borrow().as_slice(),
+            &[("reset", 1), ("reset", 0), ("reset", 2), ("reset", 1)],
+            "returning to the dm must re-emit its real row count, not zero"
+        );
+    }
+
+    fn api_page(ids: &[i64]) -> mezon_client::transport::ListChannelMessagesResult {
+        mezon_client::transport::ListChannelMessagesResult {
+            messages: ids
+                .iter()
+                .map(|id| ApiMessage {
+                    message_id: *id,
+                    content: "hi".into(),
+                    content_raw: String::new(),
+                    content_tokens: mezon_client::transport::ApiMessageContent {
+                        t: "hi".into(),
+                        ..Default::default()
+                    },
+                    code: 0,
+                    sender_id: 5,
+                    sender_name: "Bob".into(),
+                    avatar: "av.png".into(),
+                    create_time: 100 + *id,
+                    update_time: 0,
+                    hide_editted: false,
+                    attachments: vec![],
+                    references: vec![],
+                    reactions: vec![],
+                    entity_mentions: vec![],
+                })
+                .collect(),
+            last_seen_message_id: 0,
+        }
+    }
+
+    #[gpui::test]
+    fn a_failed_refetch_must_not_leave_the_open_dm_empty(cx: &mut gpui::TestAppContext) {
+        let seen = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let sink = seen.clone();
+        let rows = cx.update(|cx| {
+            let api = Arc::new(mezon_client::AppApi::new(
+                Arc::new(mezon_client::TransportClient::new(String::new())),
+                String::new(),
+            ));
+            crate::realtime::RealtimeDispatch::init(api.clone(), cx);
+            crate::clan::ClanList::init(api.clone(), cx);
+            ChannelList::init(api.clone(), cx);
+            let store = MessagesStore::init(api, cx);
+            let dm = ChannelId(11);
+
+            cx.subscribe(&store, move |_, event: &MessagesEvent, _| match event {
+                MessagesEvent::Reset { count } => sink.borrow_mut().push(("reset", *count)),
+                MessagesEvent::Resized { count } => sink.borrow_mut().push(("resized", *count)),
+                _ => {}
+            })
+            .detach();
+
+            store.update(cx, |store, cx| {
+                store.active_channel_id = Some(dm);
+                store.active_clan_id = Some(ClanId(0));
+                store.is_dm = true;
+                store.loading = true;
+                store.fetch_generation = 3;
+                store.latest_fetch.insert(dm, 3);
+
+                store.apply_initial_fetch_result(dm, 1, Ok(api_page(&[1, 2])), cx);
+                store.apply_initial_fetch_result(dm, 3, Err(anyhow::anyhow!("code=3")), cx);
+
+                store.viewport_messages().len()
+            })
+        });
+
+        assert!(
+            rows > 0,
+            "the open dm must not be left with an empty buffer after a failed refetch"
+        );
+        assert_ne!(
+            seen.borrow().last(),
+            Some(&("reset", 0)),
+            "the last structural event must not claim zero rows"
+        );
+    }
+
+    #[gpui::test]
+    fn clearing_the_active_clan_channel_must_not_close_an_open_dm(cx: &mut gpui::TestAppContext) {
+        let (store, dm) = cx.update(|cx| {
+            let api = Arc::new(mezon_client::AppApi::new(
+                Arc::new(mezon_client::TransportClient::new(String::new())),
+                String::new(),
+            ));
+            crate::realtime::RealtimeDispatch::init(api.clone(), cx);
+            crate::clan::ClanList::init(api.clone(), cx);
+            ChannelList::init(api.clone(), cx);
+            let store = MessagesStore::init(api, cx);
+            let dm = ChannelId(11);
+            store.update(cx, |store, cx| {
+                store.set_channel(dm, vec![Message::new(MessageId(1), "hi", "5", "Bob", 100)]);
+                store.activate(ClanId(0), dm, false, true, 3, 4, cx);
+            });
+            (store, dm)
+        });
+
+        cx.update(|cx| {
+            ChannelList::global(cx).update(cx, |_, cx| {
+                cx.emit(ChannelEvent::ActiveChannelChanged(None));
+            });
+        });
+
+        cx.update(|cx| {
+            let store = store.read(cx);
+            assert_eq!(
+                store.active_channel_id(),
+                Some(dm),
+                "a dm is not a clan channel, so clearing the clan selection must leave it open"
+            );
+            assert_eq!(store.viewport_messages().len(), 1, "its rows must survive");
+        });
+    }
+
+    #[gpui::test]
+    fn clearing_the_active_clan_channel_still_closes_an_open_clan_channel(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let store = cx.update(|cx| {
+            let api = Arc::new(mezon_client::AppApi::new(
+                Arc::new(mezon_client::TransportClient::new(String::new())),
+                String::new(),
+            ));
+            crate::realtime::RealtimeDispatch::init(api.clone(), cx);
+            crate::clan::ClanList::init(api.clone(), cx);
+            ChannelList::init(api.clone(), cx);
+            let store = MessagesStore::init(api, cx);
+            let channel = ChannelId(22);
+            store.update(cx, |store, cx| {
+                store.set_channel(
+                    channel,
+                    vec![Message::new(MessageId(2), "yo", "6", "Eve", 200)],
+                );
+                store.activate(ClanId(1), channel, true, false, 1, 2, cx);
+            });
+            store
+        });
+
+        cx.update(|cx| {
+            ChannelList::global(cx).update(cx, |_, cx| {
+                cx.emit(ChannelEvent::ActiveChannelChanged(None));
+            });
+        });
+
+        cx.update(|cx| {
+            assert_eq!(
+                store.read(cx).active_channel_id(),
+                None,
+                "a clan channel still follows the clan selection"
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn a_late_page_for_the_open_channel_resizes_the_timeline(cx: &mut gpui::TestAppContext) {
+        let seen = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let sink = seen.clone();
+        cx.update(|cx| {
+            let api = Arc::new(mezon_client::AppApi::new(
+                Arc::new(mezon_client::TransportClient::new(String::new())),
+                String::new(),
+            ));
+            crate::realtime::RealtimeDispatch::init(api.clone(), cx);
+            crate::clan::ClanList::init(api.clone(), cx);
+            ChannelList::init(api.clone(), cx);
+            let store = MessagesStore::init(api, cx);
+            let dm = ChannelId(11);
+
+            cx.subscribe(&store, move |_, event: &MessagesEvent, _| match event {
+                MessagesEvent::Reset { count } => sink.borrow_mut().push(("reset", *count)),
+                MessagesEvent::Resized { count } => sink.borrow_mut().push(("resized", *count)),
+                _ => {}
+            })
+            .detach();
+
+            store.update(cx, |store, cx| {
+                store.active_channel_id = Some(dm);
+                store.active_clan_id = Some(ClanId(0));
+                store.is_dm = true;
+                store.fetch_generation = 5;
+                store.latest_fetch.insert(dm, 3);
+
+                store.apply_initial_fetch_result(dm, 3, Ok(api_page(&[1, 2])), cx);
+            });
+        });
+
+        assert_eq!(
+            seen.borrow().as_slice(),
+            &[("resized", 2)],
+            "a page that is still the newest for the open channel must resize the timeline \
+             even though a channel switch has moved the generation on"
+        );
+    }
+
+    #[gpui::test]
+    fn a_superseded_page_never_overwrites_newer_rows(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let api = Arc::new(mezon_client::AppApi::new(
+                Arc::new(mezon_client::TransportClient::new(String::new())),
+                String::new(),
+            ));
+            crate::realtime::RealtimeDispatch::init(api.clone(), cx);
+            crate::clan::ClanList::init(api.clone(), cx);
+            ChannelList::init(api.clone(), cx);
+            let store = MessagesStore::init(api, cx);
+            let dm = ChannelId(11);
+
+            store.update(cx, |store, cx| {
+                store.active_channel_id = Some(dm);
+                store.active_clan_id = Some(ClanId(0));
+                store.is_dm = true;
+                store.fetch_generation = 3;
+                store.latest_fetch.insert(dm, 3);
+
+                store.apply_initial_fetch_result(dm, 3, Ok(api_page(&[7, 8, 9])), cx);
+                assert_eq!(store.viewport_messages().len(), 3);
+
+                store.latest_fetch.insert(dm, 5);
+                store.fetch_generation = 5;
+                store.apply_initial_fetch_result(dm, 3, Ok(api_page(&[7])), cx);
+
+                assert_eq!(
+                    store.viewport_messages().len(),
+                    3,
+                    "an older page must not roll the open conversation back"
+                );
+                assert_eq!(
+                    store.latest_fetch.get(&dm),
+                    Some(&5),
+                    "the newer fetch keeps its slot"
+                );
+            });
+        });
+    }
+
+    #[gpui::test]
     fn a_superseded_fetch_result_is_dropped(cx: &mut gpui::TestAppContext) {
         cx.update(|cx| {
             let api = Arc::new(mezon_client::AppApi::new(
@@ -7581,14 +7874,14 @@ mod tests {
                     "the newer fetch keeps its slot"
                 );
                 assert!(
-                    store.fetch_in_flight(channel),
+                    store.latest_fetch.contains_key(&channel),
                     "the channel is still fetching"
                 );
 
                 store.apply_initial_fetch_result(channel, 7, Err(anyhow::anyhow!("failed")), cx);
                 assert!(!store.loading, "the awaited result settles the flag");
                 assert!(
-                    !store.fetch_in_flight(channel),
+                    !store.latest_fetch.contains_key(&channel),
                     "a settled fetch releases its slot"
                 );
             });
