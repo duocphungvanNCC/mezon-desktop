@@ -5,8 +5,8 @@ use crate::components::primitives::{
     InputEvent, InputState, Label, h_flex, v_flex,
 };
 use gpui::{
-    Context, Entity, FontWeight, PathPromptOptions, Rgba, SharedString, Subscription, Task, Window,
-    div, prelude::*, px,
+    App, Context, Entity, FontWeight, PathPromptOptions, Rgba, SharedString, Subscription, Task,
+    Window, div, prelude::*, px,
 };
 use mezon_store::{AccountEvent, AccountStore, ClanList, Settings};
 
@@ -46,6 +46,7 @@ pub struct ClanProfileSection {
     banner_color: Option<Rgba>,
     banner_source: String,
     banner_task: Option<Task<()>>,
+    custom_status_expanded: bool,
 }
 
 impl ClanProfileSection {
@@ -176,6 +177,7 @@ impl ClanProfileSection {
             banner_color: None,
             banner_source: String::new(),
             banner_task: None,
+            custom_status_expanded: false,
         };
         this.refresh_banner_color(cx);
         this
@@ -399,6 +401,13 @@ impl Render for ClanProfileSection {
 
         let duplicate_error = self.profile.as_ref().is_some_and(|s| s.duplicate_error);
 
+        let on_custom_status_hover = cx.listener(|this, hovered: &bool, _window, cx| {
+            let expanded = *hovered && this.custom_status.chars().count() > 24;
+            if this.custom_status_expanded != expanded {
+                this.custom_status_expanded = expanded;
+                cx.notify();
+            }
+        });
         let form = self.render_clan_form(
             &theme,
             &clan_options,
@@ -409,7 +418,7 @@ impl Render for ClanProfileSection {
             duplicate_error,
             cx,
         );
-        let preview = Self::render_clan_preview(
+        let preview = self.render_clan_preview(
             &theme,
             &locale,
             &nick_name,
@@ -420,6 +429,7 @@ impl Render for ClanProfileSection {
             &self.custom_status,
             self.banner_color,
             self.avatar_image_cache.clone(),
+            on_custom_status_hover,
         );
 
         v_flex()
@@ -669,6 +679,7 @@ impl ClanProfileSection {
     }
 
     fn render_clan_preview(
+        &self,
         theme: &Theme,
         locale: &str,
         nick_name: &SharedString,
@@ -679,6 +690,7 @@ impl ClanProfileSection {
         custom_status: &SharedString,
         banner_color: Option<Rgba>,
         avatar_image_cache: Entity<LruImageCache>,
+        on_custom_status_hover: impl Fn(&bool, &mut Window, &mut App) + 'static,
     ) -> impl IntoElement {
         let display_label = if nick_name.is_empty() {
             display_name.clone()
@@ -686,6 +698,7 @@ impl ClanProfileSection {
             nick_name.clone()
         };
         let (status_icon, status_color) = profile_status(status, theme);
+        let custom_status_expandable = custom_status.chars().count() > 24;
         let banner_color = banner_color
             .map(gpui::Hsla::from)
             .unwrap_or(theme.tokens.bg_secondary.into());
@@ -702,7 +715,7 @@ impl ClanProfileSection {
             .child(
                 div()
                     .relative()
-                    .h(px(330.))
+                    .h(px(320.))
                     .w_full()
                     .rounded_lg()
                     .overflow_hidden()
@@ -722,7 +735,7 @@ impl ClanProfileSection {
                             .absolute()
                             .left(px(20.))
                             .right(px(20.))
-                            .bottom(px(48.))
+                            .bottom(px(20.))
                             .p_4()
                             .rounded_lg()
                             .border_1()
@@ -788,11 +801,13 @@ impl ClanProfileSection {
             .when(!custom_status.is_empty(), |preview| {
                 preview.child(
                     div()
+                        .id("clan-profile-preview-custom-status")
                         .absolute()
                         .left(px(120.))
+                        .when(custom_status_expandable, |status| status.right(px(20.)))
+                        .when(!custom_status_expandable, |status| status.max_w(px(214.)))
                         .top(px(168.))
-                        .max_w(px(250.))
-                        .max_h(px(64.))
+                        .max_h(px(144.))
                         .px_4()
                         .py_3()
                         .rounded_xl()
@@ -803,6 +818,17 @@ impl ClanProfileSection {
                         .text_sm()
                         .text_color(theme.text_secondary)
                         .overflow_hidden()
+                        .when(
+                            custom_status_expandable && !self.custom_status_expanded,
+                            |status| status.truncate(),
+                        )
+                        .when(!custom_status_expandable, |status| {
+                            status.whitespace_nowrap()
+                        })
+                        .when(self.custom_status_expanded, |status| {
+                            status.whitespace_normal()
+                        })
+                        .on_hover(on_custom_status_hover)
                         .child(custom_status.clone()),
                 )
             })

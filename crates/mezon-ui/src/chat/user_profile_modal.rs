@@ -30,6 +30,7 @@ pub struct UserProfileModal {
     edit_options_open: bool,
     live_status: String,
     live_custom_status: String,
+    custom_status_expanded: bool,
     _banner_task: Option<Task<()>>,
     _members_sub: Subscription,
     _presence_sub: Subscription,
@@ -104,6 +105,7 @@ impl UserProfileModal {
             edit_options_open: false,
             live_status,
             live_custom_status,
+            custom_status_expanded: false,
             _banner_task: None,
             _members_sub: members_sub,
             _presence_sub: presence_sub,
@@ -445,15 +447,23 @@ impl Render for UserProfileModal {
                     .when(!custom_status.is_empty(), |card| {
                         card.child(deferred(
                             div()
+                                .id("full-profile-custom-status")
                                 .absolute()
                                 .left(px(134.))
                                 .top(px(194.))
+                                .w(px(250.))
                                 .max_w(px(250.))
-                                .max_h(px(64.))
+                                .max_h(px(144.))
+                                .on_hover(cx.listener(|this, hovered: &bool, _window, cx| {
+                                    if this.custom_status_expanded != *hovered {
+                                        this.custom_status_expanded = *hovered;
+                                        cx.notify();
+                                    }
+                                }))
                                 .child(
                                     div()
-                                        .max_w(px(250.))
-                                        .max_h(px(64.))
+                                        .w_full()
+                                        .max_h(px(144.))
                                         .px_4()
                                         .py_3()
                                         .rounded_xl()
@@ -464,6 +474,12 @@ impl Render for UserProfileModal {
                                         .text_sm()
                                         .text_color(theme.text_secondary)
                                         .overflow_hidden()
+                                        .when(!self.custom_status_expanded, |status| {
+                                            status.truncate()
+                                        })
+                                        .when(self.custom_status_expanded, |status| {
+                                            status.whitespace_normal()
+                                        })
                                         .child(custom_status),
                                 ),
                         ))

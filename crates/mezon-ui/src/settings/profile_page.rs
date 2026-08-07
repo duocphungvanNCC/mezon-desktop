@@ -3,8 +3,9 @@ use crate::components::primitives::{
     Label, TextArea, TextAreaEvent, TextAreaField, h_flex, v_flex,
 };
 use gpui::{
-    Context, Entity, FontWeight, MouseButton, MouseDownEvent, PathPromptOptions, Pixels, Point,
-    Rgba, SharedString, Subscription, Task, Window, anchored, deferred, div, img, prelude::*, px,
+    App, Context, Entity, FontWeight, MouseButton, MouseDownEvent, PathPromptOptions, Pixels,
+    Point, Rgba, SharedString, Subscription, Task, Window, anchored, deferred, div, img,
+    prelude::*, px,
 };
 use mezon_store::{AccountEvent, AccountStore, AppConfig, ClanList, Settings, UserAccount};
 
@@ -80,6 +81,7 @@ pub struct ProfilePage {
     banner_source: String,
     banner_task: Option<Task<()>>,
     discard_on_next_render: bool,
+    custom_status_expanded: bool,
     #[allow(dead_code)]
     show_delete_confirm: bool,
 }
@@ -215,6 +217,7 @@ impl ProfilePage {
             banner_source: String::new(),
             banner_task: None,
             discard_on_next_render: false,
+            custom_status_expanded: false,
             show_delete_confirm: false,
         };
         this.refresh_banner_color(cx);
@@ -441,12 +444,24 @@ impl ProfilePage {
             .as_ref()
             .and_then(|p| p.avatar_url.as_ref())
             .map(|url| SharedString::from(crate::util::imgproxy::profile_url(cx, url.as_ref())));
+        let on_custom_status_hover = cx.listener(|this, hovered: &bool, _window, cx| {
+            let expandable = this
+                .profile
+                .as_ref()
+                .is_some_and(|profile| profile.custom_status.chars().count() > 24);
+            let expanded = *hovered && expandable;
+            if this.custom_status_expanded != expanded {
+                this.custom_status_expanded = expanded;
+                cx.notify();
+            }
+        });
         let form = self.render_form(theme, cx, avatar_display.clone());
         let preview = self.render_preview(
             theme,
             &locale,
             avatar_display,
             self.avatar_local_preview.clone(),
+            on_custom_status_hover,
         );
         v_flex().gap_6().child(
             h_flex()
@@ -1124,6 +1139,7 @@ impl ProfilePage {
                     )
                     .when_some(dm_icon_menu, |element, menu| element.child(menu)),
             )
+            .into_any_element()
     }
 
     fn render_preview(
@@ -1132,6 +1148,7 @@ impl ProfilePage {
         locale: &str,
         avatar_display: Option<SharedString>,
         avatar_local_preview: Option<std::path::PathBuf>,
+        on_custom_status_hover: impl Fn(&bool, &mut Window, &mut App) + 'static,
     ) -> impl IntoElement {
         let display_name: SharedString = self
             .profile
@@ -1149,6 +1166,7 @@ impl ProfilePage {
             .profile
             .as_ref()
             .map_or_else(SharedString::default, |p| p.custom_status.clone());
+        let custom_status_expandable = custom_status.chars().count() > 24;
         let (status_icon, status_color) = profile_status(status, theme);
         let banner_color = self
             .banner_color
@@ -1167,7 +1185,7 @@ impl ProfilePage {
             .child(
                 div()
                     .relative()
-                    .h(px(330.))
+                    .h(px(320.))
                     .w_full()
                     .rounded_lg()
                     .overflow_hidden()
@@ -1188,7 +1206,7 @@ impl ProfilePage {
                             .absolute()
                             .left(px(20.))
                             .right(px(20.))
-                            .bottom(px(48.))
+                            .bottom(px(20.))
                             .p_4()
                             .rounded_lg()
                             .border_1()
@@ -1263,11 +1281,13 @@ impl ProfilePage {
             .when(!custom_status.is_empty(), |preview| {
                 preview.child(
                     div()
+                        .id("user-profile-preview-custom-status")
                         .absolute()
                         .left(px(120.))
+                        .when(custom_status_expandable, |status| status.right(px(20.)))
+                        .when(!custom_status_expandable, |status| status.max_w(px(214.)))
                         .top(px(168.))
-                        .max_w(px(250.))
-                        .max_h(px(64.))
+                        .max_h(px(144.))
                         .px_4()
                         .py_3()
                         .rounded_xl()
@@ -1278,6 +1298,17 @@ impl ProfilePage {
                         .text_sm()
                         .text_color(theme.text_secondary)
                         .overflow_hidden()
+                        .when(
+                            custom_status_expandable && !self.custom_status_expanded,
+                            |status| status.truncate(),
+                        )
+                        .when(!custom_status_expandable, |status| {
+                            status.whitespace_nowrap()
+                        })
+                        .when(self.custom_status_expanded, |status| {
+                            status.whitespace_normal()
+                        })
+                        .on_hover(on_custom_status_hover)
                         .child(custom_status),
                 )
             })
