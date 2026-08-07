@@ -6696,9 +6696,14 @@ pub(crate) fn build_ogp_preview(
     Some(Box::new(OgpPreview {
         url,
         title: title.into(),
-        description: description.into(),
+        description: description.clone().into(),
+        description_collapsed: collapse_ogp_description(&description).into(),
         image_proxied: image_proxied.into(),
     }))
+}
+
+fn collapse_ogp_description(description: &str) -> String {
+    description.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 fn utf16_slice(text: &str, start: i64, end: i64) -> String {

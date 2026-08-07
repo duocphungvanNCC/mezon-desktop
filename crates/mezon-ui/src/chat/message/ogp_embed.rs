@@ -3,9 +3,7 @@ use mezon_store::{Message, MessageId, MessagesStore, OgpPreview};
 
 use crate::image_cache::LruImageCache;
 
-use super::content::{
-    SelectableSectionCursor, SelectableTextContext, hover_link_text_segments, open_message_link,
-};
+use super::content::SelectableSectionCursor;
 use super::context::RowCtx;
 use crate::components::primitives::{Icon, IconName};
 use crate::theme::Theme;
@@ -17,7 +15,7 @@ pub fn render_ogp_embed(
     msg: &Message,
     ctx: &RowCtx,
     base: usize,
-    selection_context: &SelectableTextContext,
+    selection_context: &super::content::SelectableTextContext,
 ) -> Option<AnyElement> {
     let can_remove =
         !ctx.current_user_id.is_empty() && msg.sender_id.as_str() == ctx.current_user_id;
@@ -48,12 +46,12 @@ fn render_ogp_preview_impl(
     og_cache: Entity<LruImageCache>,
     selectable: Option<(
         usize,
-        &SelectableTextContext,
+        &super::content::SelectableTextContext,
         super::selection::SharedSelection,
     )>,
 ) -> Option<AnyElement> {
     let url = ogp.url.clone();
-    let has_text = !ogp.title.is_empty() || !ogp.description.is_empty();
+    let has_text = !ogp.title.is_empty() || !ogp.description_collapsed.is_empty();
     let base = selectable.as_ref().map_or(0, |value| value.0);
     let selection_context = selectable.as_ref().map(|value| value.1);
     let click_selection = selectable
@@ -65,33 +63,27 @@ fn render_ogp_preview_impl(
         let mut block = div().flex().flex_col().gap_0p5();
         if !ogp.title.is_empty() {
             let range = cursor.section(&ogp.title);
-            let title_group = SharedString::from(format!("ogp-title-{}-{}", message_id.0, ogp.url));
-            if let (Some(context), Some(range)) = (selection_context, range) {
-                context.register_text_segment(&ogp.title, range);
-            }
             block = block.child(
                 div()
                     .id("ogp-title")
-                    .group(title_group.clone())
                     .cursor_pointer()
                     .text_size(px(14.))
                     .font_weight(gpui::FontWeight::BOLD)
+                    .text_color(rgb(OGP_TITLE_COLOR))
                     .line_clamp(2)
-                    .flex()
-                    .flex_row()
-                    .flex_wrap()
-                    .children(hover_link_text_segments(
-                        &ogp.title,
-                        title_group,
-                        rgb(OGP_TITLE_COLOR),
-                        rgb(OGP_TITLE_HOVER_COLOR),
-                        true,
-                    )),
+                    .hover(|s| s.text_color(rgb(OGP_TITLE_HOVER_COLOR)))
+                    .child(
+                        if let (Some(context), Some(range)) = (selection_context, range) {
+                            context.text_node(&ogp.title, range).into_any_element()
+                        } else {
+                            ogp.title.clone().into_any_element()
+                        },
+                    ),
             );
         }
-        if !ogp.description.is_empty() {
-            let description = collapse_ogp_description(&ogp.description);
-            let range = cursor.section(&description);
+        if !ogp.description_collapsed.is_empty() {
+            let description = ogp.description_collapsed.as_ref();
+            let range = cursor.section(description);
             block = block.child(
                 div()
                     .cursor(gpui::CursorStyle::IBeam)
@@ -101,9 +93,9 @@ fn render_ogp_preview_impl(
                     .line_clamp(2)
                     .child(
                         if let (Some(context), Some(range)) = (selection_context, range) {
-                            context.text_node(&description, range).into_any_element()
+                            context.text_node(description, range).into_any_element()
                         } else {
-                            description.into_any_element()
+                            ogp.description_collapsed.clone().into_any_element()
                         },
                     ),
             );
@@ -148,7 +140,7 @@ fn render_ogp_preview_impl(
                 {
                     return;
                 }
-                open_message_link(url.clone(), cx);
+                super::content::open_message_link(url.clone(), cx);
             })
             .child(
                 div()
@@ -196,17 +188,12 @@ fn ogp_remove_button(message_id: MessageId, theme: &Theme) -> AnyElement {
 }
 
 pub(crate) fn selectable_ogp_text(ogp: &OgpPreview) -> String {
-    let description = collapse_ogp_description(&ogp.description);
-    match (ogp.title.is_empty(), description.is_empty()) {
-        (false, false) => format!("{}\n{}", ogp.title, description),
+    match (ogp.title.is_empty(), ogp.description_collapsed.is_empty()) {
+        (false, false) => format!("{}\n{}", ogp.title, ogp.description_collapsed),
         (false, true) => ogp.title.to_string(),
-        (true, false) => description,
+        (true, false) => ogp.description_collapsed.to_string(),
         (true, true) => String::new(),
     }
-}
-
-fn collapse_ogp_description(description: &str) -> String {
-    description.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 fn ogp_image(src: SharedString, fallback_fg: gpui::Rgba) -> AnyElement {
