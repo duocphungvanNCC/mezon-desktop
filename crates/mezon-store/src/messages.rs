@@ -951,7 +951,7 @@ impl MessagesStore {
 
         let channel_sub = cx.subscribe(&ChannelList::global(cx), |this, _channel, event, cx| {
             if let ChannelEvent::ActiveChannelChanged(channel_id) = event {
-                if channel_id.is_none() && this.is_dm {
+                if this.is_dm {
                     return;
                 }
                 this.on_active_channel_changed(*channel_id, cx);
@@ -7714,6 +7714,72 @@ mod tests {
                 "a dm is not a clan channel, so clearing the clan selection must leave it open"
             );
             assert_eq!(store.viewport_messages().len(), 1, "its rows must survive");
+        });
+    }
+
+    #[gpui::test]
+    fn selecting_a_clan_channel_must_not_hijack_an_open_dm(cx: &mut gpui::TestAppContext) {
+        let (store, dm) = cx.update(|cx| {
+            let api = Arc::new(mezon_client::AppApi::new(
+                Arc::new(mezon_client::TransportClient::new(String::new())),
+                String::new(),
+            ));
+            crate::realtime::RealtimeDispatch::init(api.clone(), cx);
+            crate::clan::ClanList::init(api.clone(), cx);
+            ChannelList::init(api.clone(), cx);
+            let store = MessagesStore::init(api, cx);
+            let dm = ChannelId(11);
+            store.update(cx, |store, cx| {
+                store.set_channel(dm, vec![Message::new(MessageId(1), "hi", "5", "Bob", 100)]);
+                store.activate(ClanId(0), dm, false, true, 3, 4, cx);
+            });
+            (store, dm)
+        });
+
+        cx.update(|cx| {
+            ChannelList::global(cx).update(cx, |channels, cx| {
+                channels.seed_clan_channels_for_test(
+                    ClanId(1),
+                    vec![crate::channel::Category {
+                        id: "1".into(),
+                        clan_id: ClanId(1),
+                        name: "General".into(),
+                        order: 0,
+                        channels: vec![crate::channel::Channel {
+                            id: ChannelId(22),
+                            name: "general".into(),
+                            channel_type: crate::channel::ChannelType::Text,
+                            private: false,
+                            clan_id: ClanId(1),
+                            clan_name: String::new(),
+                            category_name: "General".into(),
+                            category_id: Some("1".into()),
+                            member_count: 0,
+                            badge_count: 0,
+                            muted: false,
+                            parent_id: None,
+                            last_seen_message_id: MessageId(0),
+                            last_seen_timestamp: 0,
+                            last_sent_message_id: MessageId(0),
+                            last_sent_timestamp: 0,
+                            voice_members: Vec::new(),
+                            is_favorite: false,
+                            creator_id: UserId(0),
+                            active: crate::channel::CHANNEL_ACTIVE_JOINED,
+                            avatar_url: String::new(),
+                        }],
+                    }],
+                );
+                cx.emit(ChannelEvent::ActiveChannelChanged(Some(ChannelId(22))));
+            });
+        });
+
+        cx.update(|cx| {
+            assert_eq!(
+                store.read(cx).active_channel_id(),
+                Some(dm),
+                "the clan channel selection must not move a dm timeline; the route drives it"
+            );
         });
     }
 

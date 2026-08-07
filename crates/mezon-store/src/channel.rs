@@ -835,6 +835,17 @@ impl ChannelList {
         })
     }
 
+    #[cfg(test)]
+    pub(crate) fn seed_clan_channels_for_test(
+        &mut self,
+        clan_id: ClanId,
+        categories: Vec<Category>,
+    ) {
+        self.active_clan_id = Some(clan_id);
+        self.cache.insert(clan_id, categories, None);
+        self.invalidate_channel_index(clan_id);
+    }
+
     fn apply_clan_structure(
         &mut self,
         clan_id: ClanId,
