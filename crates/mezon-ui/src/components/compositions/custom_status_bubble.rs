@@ -11,6 +11,12 @@ pub struct CustomStatusBubble {
     expanded: bool,
 }
 
+impl Default for CustomStatusBubble {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl CustomStatusBubble {
     pub fn new() -> Self {
         Self {
