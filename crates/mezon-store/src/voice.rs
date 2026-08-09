@@ -53,6 +53,8 @@ const DEFAULT_NOISE_SUPPRESSION_LEVEL: u8 = 20;
 pub const MAX_SOUND_BYTES: u64 = 1024 * 1024;
 pub const SOUND_ALLOWED_EXTENSIONS: &[&str] = &["mp3", "wav", "mpeg"];
 const KICK_SUPPRESS_TIMEOUT: Duration = Duration::from_secs(5);
+const RECONNECT_STALL_TIMEOUT: Duration = Duration::from_secs(15);
+const RECONNECT_RETRY_DELAY: Duration = Duration::from_secs(5);
 static RAISE_HAND_SOUND: &[u8] = include_bytes!("../assets/audio/raising-hand.mp3");
 static JOIN_VOICE_SOUND: &[u8] = include_bytes!("../assets/audio/joincallsound.mp3");
 
@@ -187,6 +189,8 @@ pub struct VoiceStore {
     reaction_seq: u64,
     last_emoji_at: Option<Instant>,
     session: Option<VoiceSession>,
+    session_generation: u64,
+    reconnect_generation: u64,
     frame_store: Option<Arc<VideoFrameStore>>,
     camera_devices: Vec<CameraDeviceInfo>,
     device_menu: Option<DeviceMenuKind>,
@@ -198,9 +202,24 @@ pub struct VoiceStore {
     pending_texture_work: AtomicBool,
     cached_meet_token: Option<CachedMeetToken>,
     meet_token_prefetching: Option<String>,
+    last_screen_share: Option<(PickedScreen, bool)>,
     link_copied: bool,
     _events_task: Option<Task<()>>,
+    _reconnect_watch_task: Option<Task<()>>,
     _link_copied_reset: Option<Task<()>>,
+}
+
+#[derive(Clone)]
+struct VoiceReconnectSnapshot {
+    channel_id: String,
+    clan_id: String,
+    ws_url: String,
+    input_device_id: Option<String>,
+    output_device_id: Option<String>,
+    camera_device_id: Option<String>,
+    mic_enabled: bool,
+    camera_enabled: bool,
+    screen_share: Option<(PickedScreen, bool)>,
 }
 
 struct PipWindow {
@@ -341,6 +360,8 @@ impl VoiceStore {
             reaction_seq: 0,
             last_emoji_at: None,
             session: None,
+            session_generation: 0,
+            reconnect_generation: 0,
             frame_store: None,
             camera_devices: Vec::new(),
             device_menu: None,
@@ -352,8 +373,10 @@ impl VoiceStore {
             pending_texture_work: AtomicBool::new(false),
             cached_meet_token: None,
             meet_token_prefetching: None,
+            last_screen_share: None,
             link_copied: false,
             _events_task: None,
+            _reconnect_watch_task: None,
             _link_copied_reset: None,
         }
     }
@@ -1637,6 +1660,10 @@ impl VoiceStore {
             return;
         }
 
+        self.session_generation = self.session_generation.wrapping_add(1);
+        let session_generation = self.session_generation;
+        self._events_task = None;
+        self.session = None;
         let ice_servers = Self::ice_servers(cx);
         let session = VoiceSession::connect(
             ws_url,
@@ -1680,7 +1707,11 @@ impl VoiceStore {
                     event
                 };
                 if this
-                    .update(cx, |this, cx| this.handle_engine_event(event, cx))
+                    .update(cx, |this, cx| {
+                        if this.session_generation == session_generation {
+                            this.handle_engine_event(event, cx);
+                        }
+                    })
                     .is_err()
                 {
                     break;
@@ -1712,6 +1743,228 @@ impl VoiceStore {
         }]
     }
 
+    fn active_connection_ids(&self) -> Option<(String, String)> {
+        match &self.connection {
+            VoiceConnection::Connecting {
+                channel_id,
+                clan_id,
+            }
+            | VoiceConnection::Connected {
+                channel_id,
+                clan_id,
+            } => Some((channel_id.clone(), clan_id.clone())),
+            VoiceConnection::Idle | VoiceConnection::Failed { .. } => None,
+        }
+    }
+
+    fn configured_voice_devices(cx: &App) -> (Option<String>, Option<String>, Option<String>) {
+        crate::Settings::try_global(cx)
+            .map(|settings| {
+                let settings = settings.read(cx);
+                (
+                    settings.input_device_id.clone(),
+                    settings.output_device_id.clone(),
+                    settings.camera_device_id.clone(),
+                )
+            })
+            .unwrap_or_default()
+    }
+
+    fn reconnect_snapshot(&self, cx: &App) -> Option<VoiceReconnectSnapshot> {
+        let (channel_id, clan_id) = self.active_connection_ids()?;
+        let ws_url = AppConfig::global(cx).meet_ws_url.clone();
+        if ws_url.is_empty() {
+            return None;
+        }
+        let (input_device_id, output_device_id, camera_device_id) =
+            Self::configured_voice_devices(cx);
+        let screen_share = self
+            .screen_share_enabled
+            .then(|| self.last_screen_share.clone())
+            .flatten();
+        if self.screen_share_enabled && screen_share.is_none() {
+            tracing::warn!("voice reconnect cannot restore screen share without a saved target");
+        }
+        Some(VoiceReconnectSnapshot {
+            channel_id,
+            clan_id,
+            ws_url,
+            input_device_id,
+            output_device_id,
+            camera_device_id,
+            mic_enabled: self.mic_enabled,
+            camera_enabled: self.camera_enabled,
+            screen_share,
+        })
+    }
+
+    fn reconnect_still_pending(&self, generation: u64) -> bool {
+        self.reconnect_generation == generation
+            && matches!(self.call_status, VoiceCallStatus::Reconnecting)
+            && self.connection.active_channel_id().is_some()
+    }
+
+    fn arm_reconnect_watchdog(&mut self, delay: Duration, cx: &mut Context<Self>) {
+        self.reconnect_generation = self.reconnect_generation.wrapping_add(1);
+        let generation = self.reconnect_generation;
+        self.schedule_reconnect_recovery(generation, delay, cx);
+    }
+
+    fn cancel_reconnect_watchdog(&mut self) {
+        self.reconnect_generation = self.reconnect_generation.wrapping_add(1);
+        self._reconnect_watch_task = None;
+    }
+
+    fn schedule_reconnect_recovery(
+        &mut self,
+        generation: u64,
+        delay: Duration,
+        cx: &mut Context<Self>,
+    ) {
+        let api = self.api.clone();
+        self._reconnect_watch_task = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(delay).await;
+
+            let snapshot = match this.update(cx, |this, cx| {
+                if !this.reconnect_still_pending(generation) {
+                    return None;
+                }
+                this._reconnect_watch_task = None;
+                this.reconnect_snapshot(cx)
+            }) {
+                Ok(snapshot) => snapshot,
+                Err(_) => return,
+            };
+            let Some(snapshot) = snapshot else {
+                return;
+            };
+
+            let token = api.generate_meet_token(&snapshot.channel_id, "").await;
+            let _ = this.update(cx, |this, cx| {
+                if !this.reconnect_still_pending(generation) {
+                    return;
+                }
+                match token {
+                    Ok(token) => {
+                        tracing::info!(
+                            "voice reconnect watchdog rebuilding LiveKit session for channel {}",
+                            snapshot.channel_id
+                        );
+                        this.cached_meet_token = Some(CachedMeetToken {
+                            channel_id: snapshot.channel_id.clone(),
+                            token: token.clone(),
+                            fetched_at: Instant::now(),
+                        });
+                        this.restart_livekit_session(generation, snapshot, token, cx);
+                    }
+                    Err(e) => {
+                        tracing::warn!("voice reconnect token refresh failed: {e:#}");
+                        this.schedule_reconnect_recovery(generation, RECONNECT_RETRY_DELAY, cx);
+                    }
+                }
+            });
+        }));
+    }
+
+    fn clear_session_handles(&mut self, mut window: Option<&mut Window>, cx: &mut Context<Self>) {
+        self.session_generation = self.session_generation.wrapping_add(1);
+        self._events_task = None;
+        self.session = None;
+        self.frame_store = None;
+        #[cfg_attr(not(target_os = "macos"), allow(clippy::unnecessary_filter_map))]
+        let stale: Vec<Arc<RenderImage>> = {
+            let mut cache = self.render_cache.lock();
+            cache
+                .drain()
+                .filter_map(|(_, entry)| match entry.frame {
+                    VoiceRenderFrame::Image(image) => Some(image),
+                    #[cfg(target_os = "macos")]
+                    VoiceRenderFrame::Surface(_) => None,
+                })
+                .collect()
+        };
+        for image in stale {
+            cx.drop_image(image, window.as_deref_mut());
+        }
+        self.flush_texture_drops(window, cx);
+    }
+
+    fn restart_livekit_session(
+        &mut self,
+        generation: u64,
+        snapshot: VoiceReconnectSnapshot,
+        token: String,
+        cx: &mut Context<Self>,
+    ) {
+        if self.active_connection_ids()
+            != Some((snapshot.channel_id.clone(), snapshot.clan_id.clone()))
+        {
+            return;
+        }
+
+        let mic_enabled = snapshot.mic_enabled && !mezon_voice::microphone_denied();
+        self.mic_permission_denied = snapshot.mic_enabled && !mic_enabled;
+        self.close_pip(cx);
+        self.fullscreen_screen = None;
+        self.clear_session_handles(None, cx);
+        self.call_status = VoiceCallStatus::Reconnecting;
+
+        self.start_session(
+            snapshot.ws_url,
+            token,
+            snapshot.channel_id.clone(),
+            snapshot.input_device_id,
+            snapshot.output_device_id,
+            snapshot.camera_device_id,
+            cx,
+        );
+        self.restore_media_after_reconnect(
+            mic_enabled,
+            snapshot.camera_enabled,
+            snapshot.screen_share,
+        );
+        if self.reconnect_still_pending(generation) {
+            self.schedule_reconnect_recovery(generation, RECONNECT_STALL_TIMEOUT, cx);
+        }
+        cx.notify();
+    }
+
+    fn restore_media_after_reconnect(
+        &mut self,
+        mic_enabled: bool,
+        camera_enabled: bool,
+        screen_share: Option<(PickedScreen, bool)>,
+    ) {
+        self.mic_enabled = mic_enabled;
+        self.camera_enabled = camera_enabled;
+        self.screen_share_enabled = screen_share.is_some();
+        self.last_screen_share = screen_share.clone();
+
+        if let Some(session) = &self.session {
+            session.set_mic_enabled(mic_enabled);
+            session.set_camera_enabled(camera_enabled);
+            if let Some((pick, share_audio)) = screen_share {
+                session.start_screen_share(pick, share_audio);
+            }
+        }
+    }
+
+    fn should_recover_after_disconnect(&self, reason: &str) -> bool {
+        if !matches!(self.call_status, VoiceCallStatus::Reconnecting)
+            || self.connection.active_channel_id().is_none()
+        {
+            return false;
+        }
+        let reason = reason.trim();
+        reason != "left"
+            && !reason.contains("ClientInitiated")
+            && !reason.contains("ParticipantRemoved")
+            && !reason.contains("RoomDeleted")
+            && !reason.contains("RoomClosed")
+            && !reason.contains("UserRejected")
+            && !reason.contains("UserUnavailable")
+    }
+
     pub fn has_active_video(&self) -> bool {
         self.camera_enabled
             || self.screen_share_enabled
@@ -1725,6 +1978,7 @@ impl VoiceStore {
         match event {
             VoiceEvent::Connected { room_name } => {
                 self.room_name = room_name;
+                self.cancel_reconnect_watchdog();
                 if let VoiceConnection::Connecting {
                     channel_id,
                     clan_id,
@@ -1740,9 +1994,11 @@ impl VoiceStore {
             }
             VoiceEvent::Reconnecting => {
                 self.call_status = VoiceCallStatus::Reconnecting;
+                self.arm_reconnect_watchdog(RECONNECT_STALL_TIMEOUT, cx);
             }
             VoiceEvent::Reconnected => {
                 self.call_status = VoiceCallStatus::Stable;
+                self.cancel_reconnect_watchdog();
             }
             VoiceEvent::NetworkWeak => {
                 if !matches!(self.call_status, VoiceCallStatus::Reconnecting) {
@@ -1793,6 +2049,15 @@ impl VoiceStore {
                 self.sync_screen_full_res();
             }
             VoiceEvent::Disconnected { reason } => {
+                if self.should_recover_after_disconnect(&reason) {
+                    tracing::warn!(
+                        "voice disconnected while reconnecting ({reason}); scheduling session rebuild"
+                    );
+                    self.call_status = VoiceCallStatus::Reconnecting;
+                    self.arm_reconnect_watchdog(Duration::ZERO, cx);
+                    cx.notify();
+                    return;
+                }
                 tracing::info!("voice disconnected: {reason}");
                 self.teardown(None, cx);
             }
@@ -1802,6 +2067,7 @@ impl VoiceStore {
                     self.camera_enabled = false;
                 } else if message.starts_with("screen:") {
                     self.screen_share_enabled = false;
+                    self.last_screen_share = None;
                 } else if let VoiceConnection::Connecting { channel_id, .. } = &self.connection {
                     self.connection = VoiceConnection::Failed {
                         channel_id: channel_id.clone(),
@@ -1963,6 +2229,7 @@ impl VoiceStore {
         if self.screen_share_enabled {
             return;
         }
+        self.last_screen_share = Some((pick.clone(), share_audio));
         if let Some(session) = &self.session {
             session.start_screen_share(pick, share_audio);
         }
@@ -1973,6 +2240,7 @@ impl VoiceStore {
         if !self.screen_share_enabled {
             return;
         }
+        self.last_screen_share = None;
         if let Some(session) = &self.session {
             session.stop_screen_share();
         }
@@ -1980,27 +2248,10 @@ impl VoiceStore {
     }
 
     fn teardown(&mut self, mut window: Option<&mut Window>, cx: &mut Context<Self>) {
+        self.cancel_reconnect_watchdog();
         self.close_pip(cx);
         self.fullscreen_screen = None;
-        self.session = None;
-        self.frame_store = None;
-        #[cfg_attr(not(target_os = "macos"), allow(clippy::unnecessary_filter_map))]
-        let stale: Vec<Arc<RenderImage>> = {
-            let mut cache = self.render_cache.lock();
-            cache
-                .drain()
-                .filter_map(|(_, entry)| match entry.frame {
-                    VoiceRenderFrame::Image(image) => Some(image),
-                    #[cfg(target_os = "macos")]
-                    VoiceRenderFrame::Surface(_) => None,
-                })
-                .collect()
-        };
-        for image in stale {
-            cx.drop_image(image, window.as_deref_mut());
-        }
-        self.flush_texture_drops(window, cx);
-        self._events_task = None;
+        self.clear_session_handles(window.as_deref_mut(), cx);
         self.connection = VoiceConnection::Idle;
         self.call_status = VoiceCallStatus::Stable;
         self.channel_label.clear();
@@ -2037,6 +2288,7 @@ impl VoiceStore {
         self.displayed_reactions.clear();
         self.last_emoji_at = None;
         self.meet_token_prefetching = None;
+        self.last_screen_share = None;
         self.link_copied = false;
         self._link_copied_reset = None;
     }
