@@ -20,7 +20,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use futures::StreamExt;
-use livekit::options::{TrackPublishOptions, VideoEncoding};
+use livekit::options::{DegradationPreference, TrackPublishOptions, VideoEncoding};
 use livekit::participant::ParticipantKind;
 use livekit::prelude::*;
 use livekit::track::{
@@ -63,6 +63,7 @@ const MAX_REMOTE_VIDEO_HEIGHT: u32 = 1080;
 const AUDIO_SOURCE_QUEUE_SIZE_MS: u32 = 100;
 const MIC_PUBLISH_RETRY_INTERVAL: Duration = Duration::from_secs(2);
 const PLAYBACK_RESTART_DELAY: Duration = Duration::from_millis(500);
+const MAX_PLAYBACK_RESTARTS: u32 = 3;
 
 #[derive(Clone, Debug, Default)]
 pub struct IceServerConfig {
@@ -272,6 +273,8 @@ fn room_options(ice_servers: Vec<IceServerConfig>) -> RoomOptions {
         .collect();
 
     let mut options = RoomOptions::default();
+    options.adaptive_stream = true;
+    options.dynacast = true;
     options.rtc_config.ice_servers = ice_servers;
     options
 }
@@ -871,7 +874,7 @@ async fn start_camera_track(
             LocalTrack::Video(track.clone()),
             TrackPublishOptions {
                 source: TrackSource::Camera,
-                simulcast: false,
+                simulcast: true,
                 video_encoding: Some(VideoEncoding {
                     max_bitrate: 1_200_000,
                     max_framerate: 30.0,
@@ -905,9 +908,10 @@ async fn start_screen_track(
                 source: TrackSource::Screenshare,
                 simulcast: false,
                 video_encoding: Some(VideoEncoding {
-                    max_bitrate: 5_000_000,
-                    max_framerate: 60.0,
+                    max_bitrate: 2_500_000,
+                    max_framerate: 15.0,
                 }),
+                degradation_preference: Some(DegradationPreference::MaintainResolution),
                 ..Default::default()
             },
         )
@@ -988,6 +992,7 @@ fn spawn_playback(
     out_fmt: AudioFormat,
 ) -> tokio::task::JoinHandle<()> {
     runtime::runtime().spawn(async move {
+        let mut restart_attempts = 0;
         loop {
             let rtc_track = track.rtc_track();
             let mut stream = NativeAudioStream::new(
@@ -1001,10 +1006,21 @@ fn spawn_playback(
                 mixer.push(key, &frame.data);
             }
             mixer.remove(key);
-            if saw_frame {
-                tracing::warn!("remote audio stream ended; restarting playback reader");
+
+            if restart_attempts >= MAX_PLAYBACK_RESTARTS {
+                tracing::warn!(
+                    "remote audio stream ended after {MAX_PLAYBACK_RESTARTS} restart attempts; stopping playback reader"
+                );
+                break;
             }
-            tokio::time::sleep(PLAYBACK_RESTART_DELAY).await;
+
+            let delay = PLAYBACK_RESTART_DELAY * 2u32.pow(restart_attempts);
+            restart_attempts += 1;
+            tracing::warn!(
+                "remote audio stream ended (received_frames={saw_frame}); restart attempt {restart_attempts}/{MAX_PLAYBACK_RESTARTS} in {}ms",
+                delay.as_millis()
+            );
+            tokio::time::sleep(delay).await;
         }
     })
 }
