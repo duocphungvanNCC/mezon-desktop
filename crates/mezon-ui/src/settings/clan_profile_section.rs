@@ -1,12 +1,13 @@
 use std::time::Duration;
 
+use crate::components::compositions::CustomStatusBubble;
 use crate::components::primitives::{
     Avatar, Button as GpuiButton, ButtonVariants, Dropdown, DropdownTriggerStyle, Icon, Input,
     InputEvent, InputState, Label, h_flex, v_flex,
 };
 use gpui::{
-    App, Context, Entity, FontWeight, PathPromptOptions, Rgba, SharedString, Subscription, Task,
-    Window, div, prelude::*, px,
+    Context, Entity, FontWeight, PathPromptOptions, Rgba, SharedString, Subscription, Task, Window,
+    div, prelude::*, px,
 };
 use mezon_store::{AccountEvent, AccountStore, ClanList, Settings};
 
@@ -46,7 +47,7 @@ pub struct ClanProfileSection {
     banner_color: Option<Rgba>,
     banner_source: String,
     banner_task: Option<Task<()>>,
-    custom_status_expanded: bool,
+    custom_status_bubble: Entity<CustomStatusBubble>,
 }
 
 impl ClanProfileSection {
@@ -177,7 +178,7 @@ impl ClanProfileSection {
             banner_color: None,
             banner_source: String::new(),
             banner_task: None,
-            custom_status_expanded: false,
+            custom_status_bubble: cx.new(|_| CustomStatusBubble::new()),
         };
         this.refresh_banner_color(cx);
         this
@@ -400,14 +401,18 @@ impl Render for ClanProfileSection {
             .map(|url| SharedString::from(crate::util::imgproxy::profile_url(cx, url.as_ref())));
 
         let duplicate_error = self.profile.as_ref().is_some_and(|s| s.duplicate_error);
-
-        let on_custom_status_hover = cx.listener(|this, hovered: &bool, _window, cx| {
-            let expanded = *hovered && this.custom_status.chars().count() > 24;
-            if this.custom_status_expanded != expanded {
-                this.custom_status_expanded = expanded;
-                cx.notify();
-            }
+        let custom_status_bubble = self.custom_status_bubble.clone();
+        custom_status_bubble.update(cx, |bubble, cx| {
+            bubble.set_content(
+                self.custom_status.clone(),
+                px(214.),
+                theme.tokens.bg_secondary,
+                theme.border,
+                theme.text_secondary,
+                cx,
+            );
         });
+
         let form = self.render_clan_form(
             &theme,
             &clan_options,
@@ -429,7 +434,6 @@ impl Render for ClanProfileSection {
             &self.custom_status,
             self.banner_color,
             self.avatar_image_cache.clone(),
-            on_custom_status_hover,
         );
 
         v_flex()
@@ -690,7 +694,6 @@ impl ClanProfileSection {
         custom_status: &SharedString,
         banner_color: Option<Rgba>,
         avatar_image_cache: Entity<LruImageCache>,
-        on_custom_status_hover: impl Fn(&bool, &mut Window, &mut App) + 'static,
     ) -> impl IntoElement {
         let display_label = if nick_name.is_empty() {
             display_name.clone()
@@ -698,7 +701,6 @@ impl ClanProfileSection {
             nick_name.clone()
         };
         let (status_icon, status_color) = profile_status(status, theme);
-        let custom_status_expandable = custom_status.chars().count() > 24;
         let banner_color = banner_color
             .map(gpui::Hsla::from)
             .unwrap_or(theme.tokens.bg_secondary.into());
@@ -802,34 +804,20 @@ impl ClanProfileSection {
                 preview.child(
                     div()
                         .id("clan-profile-preview-custom-status")
+                        .group("clan-profile-preview-custom-status")
                         .absolute()
                         .left(px(120.))
-                        .when(custom_status_expandable, |status| status.right(px(20.)))
-                        .when(!custom_status_expandable, |status| status.max_w(px(214.)))
                         .top(px(168.))
-                        .max_h(px(144.))
-                        .px_4()
-                        .py_3()
-                        .rounded_xl()
-                        .bg(theme.tokens.bg_secondary)
-                        .border_1()
-                        .border_color(theme.border)
-                        .shadow_md()
-                        .text_sm()
-                        .text_color(theme.text_secondary)
-                        .overflow_hidden()
-                        .when(
-                            custom_status_expandable && !self.custom_status_expanded,
-                            |status| status.truncate(),
-                        )
-                        .when(!custom_status_expandable, |status| {
-                            status.whitespace_nowrap()
+                        .max_w(px(214.))
+                        .on_hover({
+                            let custom_status_bubble = self.custom_status_bubble.clone();
+                            move |hovered: &bool, _window, cx| {
+                                custom_status_bubble.update(cx, |bubble, cx| {
+                                    bubble.set_expanded(*hovered, cx);
+                                });
+                            }
                         })
-                        .when(self.custom_status_expanded, |status| {
-                            status.whitespace_normal()
-                        })
-                        .on_hover(on_custom_status_hover)
-                        .child(custom_status.clone()),
+                        .child(self.custom_status_bubble.clone()),
                 )
             })
     }

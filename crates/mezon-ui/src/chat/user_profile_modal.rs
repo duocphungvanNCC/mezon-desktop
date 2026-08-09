@@ -3,6 +3,7 @@ use crate::chat::message::{SendTokenModal, ShareContactModal, share_contact_subj
 use crate::chat::user_profile_popover::{
     banner_icon_button, banner_icon_shell, format_member_since, share_contact_icon,
 };
+use crate::components::compositions::CustomStatusBubble;
 use crate::components::primitives::{Avatar, Icon, IconName};
 use crate::image_cache::LruImageCache;
 use crate::router::{Route, navigate};
@@ -30,7 +31,7 @@ pub struct UserProfileModal {
     edit_options_open: bool,
     live_status: String,
     live_custom_status: String,
-    custom_status_expanded: bool,
+    custom_status_bubble: Entity<CustomStatusBubble>,
     _banner_task: Option<Task<()>>,
     _members_sub: Subscription,
     _presence_sub: Subscription,
@@ -105,7 +106,7 @@ impl UserProfileModal {
             edit_options_open: false,
             live_status,
             live_custom_status,
-            custom_status_expanded: false,
+            custom_status_bubble: cx.new(|_| CustomStatusBubble::new()),
             _banner_task: None,
             _members_sub: members_sub,
             _presence_sub: presence_sub,
@@ -240,7 +241,7 @@ impl Focusable for UserProfileModal {
 
 impl Render for UserProfileModal {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = cx.theme();
+        let theme = cx.theme().clone();
         let locale = self.settings.read(cx).language.clone();
         let member = ClanMembersStore::global(cx)
             .read(cx)
@@ -261,7 +262,18 @@ impl Render for UserProfileModal {
         let avatar = crate::util::imgproxy::avatar_url(cx, &raw_avatar);
         let is_self = self.is_self;
         let custom_status = self.live_custom_status.clone();
-        let (status_icon, status_color) = profile_status(&self.live_status, theme);
+        let custom_status_bubble = self.custom_status_bubble.clone();
+        custom_status_bubble.update(cx, |bubble, cx| {
+            bubble.set_content(
+                custom_status.clone().into(),
+                px(250.),
+                theme.tokens.bg_secondary,
+                theme.border,
+                theme.text_secondary,
+                cx,
+            );
+        });
+        let (status_icon, status_color) = profile_status(&self.live_status, &theme);
         let friend_state = FriendStore::global(cx)
             .read(cx)
             .friend(self.user_id)
@@ -448,40 +460,20 @@ impl Render for UserProfileModal {
                         card.child(deferred(
                             div()
                                 .id("full-profile-custom-status")
+                                .group("full-profile-custom-status")
                                 .absolute()
                                 .left(px(134.))
                                 .top(px(194.))
-                                .w(px(250.))
                                 .max_w(px(250.))
-                                .max_h(px(144.))
-                                .on_hover(cx.listener(|this, hovered: &bool, _window, cx| {
-                                    if this.custom_status_expanded != *hovered {
-                                        this.custom_status_expanded = *hovered;
-                                        cx.notify();
+                                .on_hover({
+                                    let custom_status_bubble = custom_status_bubble.clone();
+                                    move |hovered: &bool, _window, cx| {
+                                        custom_status_bubble.update(cx, |bubble, cx| {
+                                            bubble.set_expanded(*hovered, cx);
+                                        });
                                     }
-                                }))
-                                .child(
-                                    div()
-                                        .w_full()
-                                        .max_h(px(144.))
-                                        .px_4()
-                                        .py_3()
-                                        .rounded_xl()
-                                        .bg(theme.tokens.bg_secondary)
-                                        .border_1()
-                                        .border_color(theme.border)
-                                        .shadow_md()
-                                        .text_sm()
-                                        .text_color(theme.text_secondary)
-                                        .overflow_hidden()
-                                        .when(!self.custom_status_expanded, |status| {
-                                            status.truncate()
-                                        })
-                                        .when(self.custom_status_expanded, |status| {
-                                            status.whitespace_normal()
-                                        })
-                                        .child(custom_status),
-                                ),
+                                })
+                                .child(custom_status_bubble),
                         ))
                     })
                     .when(is_self, |card| {

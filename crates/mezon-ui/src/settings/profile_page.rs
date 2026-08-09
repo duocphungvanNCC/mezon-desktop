@@ -1,11 +1,11 @@
+use crate::components::compositions::CustomStatusBubble;
 use crate::components::primitives::{
     Avatar, Button as GpuiButton, ButtonVariants, Icon, IconName, Input, InputEvent, InputState,
     Label, TextArea, TextAreaEvent, TextAreaField, h_flex, v_flex,
 };
 use gpui::{
-    App, Context, Entity, FontWeight, MouseButton, MouseDownEvent, PathPromptOptions, Pixels,
-    Point, Rgba, SharedString, Subscription, Task, Window, anchored, deferred, div, img,
-    prelude::*, px,
+    Context, Entity, FontWeight, MouseButton, MouseDownEvent, PathPromptOptions, Pixels, Point,
+    Rgba, SharedString, Subscription, Task, Window, anchored, deferred, div, img, prelude::*, px,
 };
 use mezon_store::{AccountEvent, AccountStore, AppConfig, ClanList, Settings, UserAccount};
 
@@ -81,7 +81,7 @@ pub struct ProfilePage {
     banner_source: String,
     banner_task: Option<Task<()>>,
     discard_on_next_render: bool,
-    custom_status_expanded: bool,
+    custom_status_bubble: Entity<CustomStatusBubble>,
     #[allow(dead_code)]
     show_delete_confirm: bool,
 }
@@ -217,7 +217,7 @@ impl ProfilePage {
             banner_source: String::new(),
             banner_task: None,
             discard_on_next_render: false,
-            custom_status_expanded: false,
+            custom_status_bubble: cx.new(|_| CustomStatusBubble::new()),
             show_delete_confirm: false,
         };
         this.refresh_banner_color(cx);
@@ -444,16 +444,22 @@ impl ProfilePage {
             .as_ref()
             .and_then(|p| p.avatar_url.as_ref())
             .map(|url| SharedString::from(crate::util::imgproxy::profile_url(cx, url.as_ref())));
-        let on_custom_status_hover = cx.listener(|this, hovered: &bool, _window, cx| {
-            let expandable = this
-                .profile
-                .as_ref()
-                .is_some_and(|profile| profile.custom_status.chars().count() > 24);
-            let expanded = *hovered && expandable;
-            if this.custom_status_expanded != expanded {
-                this.custom_status_expanded = expanded;
-                cx.notify();
-            }
+        let custom_status = self
+            .profile
+            .as_ref()
+            .map_or_else(SharedString::default, |profile| {
+                profile.custom_status.clone()
+            });
+        let custom_status_bubble = self.custom_status_bubble.clone();
+        custom_status_bubble.update(cx, |bubble, cx| {
+            bubble.set_content(
+                custom_status,
+                px(214.),
+                theme.tokens.bg_secondary,
+                theme.border,
+                theme.text_secondary,
+                cx,
+            );
         });
         let form = self.render_form(theme, cx, avatar_display.clone());
         let preview = self.render_preview(
@@ -461,7 +467,6 @@ impl ProfilePage {
             &locale,
             avatar_display,
             self.avatar_local_preview.clone(),
-            on_custom_status_hover,
         );
         v_flex().gap_6().child(
             h_flex()
@@ -1139,7 +1144,6 @@ impl ProfilePage {
                     )
                     .when_some(dm_icon_menu, |element, menu| element.child(menu)),
             )
-            .into_any_element()
     }
 
     fn render_preview(
@@ -1148,7 +1152,6 @@ impl ProfilePage {
         locale: &str,
         avatar_display: Option<SharedString>,
         avatar_local_preview: Option<std::path::PathBuf>,
-        on_custom_status_hover: impl Fn(&bool, &mut Window, &mut App) + 'static,
     ) -> impl IntoElement {
         let display_name: SharedString = self
             .profile
@@ -1166,7 +1169,6 @@ impl ProfilePage {
             .profile
             .as_ref()
             .map_or_else(SharedString::default, |p| p.custom_status.clone());
-        let custom_status_expandable = custom_status.chars().count() > 24;
         let (status_icon, status_color) = profile_status(status, theme);
         let banner_color = self
             .banner_color
@@ -1282,34 +1284,20 @@ impl ProfilePage {
                 preview.child(
                     div()
                         .id("user-profile-preview-custom-status")
+                        .group("user-profile-preview-custom-status")
                         .absolute()
                         .left(px(120.))
-                        .when(custom_status_expandable, |status| status.right(px(20.)))
-                        .when(!custom_status_expandable, |status| status.max_w(px(214.)))
                         .top(px(168.))
-                        .max_h(px(144.))
-                        .px_4()
-                        .py_3()
-                        .rounded_xl()
-                        .bg(theme.tokens.bg_secondary)
-                        .border_1()
-                        .border_color(theme.border)
-                        .shadow_md()
-                        .text_sm()
-                        .text_color(theme.text_secondary)
-                        .overflow_hidden()
-                        .when(
-                            custom_status_expandable && !self.custom_status_expanded,
-                            |status| status.truncate(),
-                        )
-                        .when(!custom_status_expandable, |status| {
-                            status.whitespace_nowrap()
+                        .max_w(px(214.))
+                        .on_hover({
+                            let custom_status_bubble = self.custom_status_bubble.clone();
+                            move |hovered: &bool, _window, cx| {
+                                custom_status_bubble.update(cx, |bubble, cx| {
+                                    bubble.set_expanded(*hovered, cx);
+                                });
+                            }
                         })
-                        .when(self.custom_status_expanded, |status| {
-                            status.whitespace_normal()
-                        })
-                        .on_hover(on_custom_status_hover)
-                        .child(custom_status),
+                        .child(self.custom_status_bubble.clone()),
                 )
             })
     }
