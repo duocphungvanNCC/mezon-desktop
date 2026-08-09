@@ -458,13 +458,13 @@ fn build_row_index(
         return None;
     }
 
-    let (joined, active, older) = group_threads(threads);
+    let (joined, active, archived) = group_threads(threads);
     let mut rows = Vec::with_capacity(threads.len() + 3);
 
     for (key, bucket) in [
         ("channelTopbar.joinedThreads", joined),
         ("channelTopbar.activeThreads", active),
-        ("channelTopbar.archivedThreads", older),
+        ("channelTopbar.archivedThreads", archived),
     ] {
         if bucket.is_empty() {
             continue;
