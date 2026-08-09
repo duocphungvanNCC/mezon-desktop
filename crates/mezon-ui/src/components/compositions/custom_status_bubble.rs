@@ -7,6 +7,7 @@ pub struct CustomStatusBubble {
     background: Rgba,
     border: Rgba,
     text_color: Rgba,
+    expandable: bool,
     expanded: bool,
 }
 
@@ -18,6 +19,7 @@ impl CustomStatusBubble {
             background: gpui::rgba(0x00000000),
             border: gpui::rgba(0x00000000),
             text_color: gpui::rgba(0x00000000),
+            expandable: false,
             expanded: false,
         }
     }
@@ -44,11 +46,13 @@ impl CustomStatusBubble {
         self.background = background;
         self.border = border;
         self.text_color = text_color;
+        self.expandable = false;
         self.expanded = false;
         cx.notify();
     }
 
     pub fn set_expanded(&mut self, expanded: bool, cx: &mut Context<Self>) {
+        let expanded = expanded && self.expandable;
         if self.expanded != expanded {
             self.expanded = expanded;
             cx.notify();
@@ -76,7 +80,19 @@ impl CustomStatusBubble {
             .overflow_hidden()
             .whitespace_normal()
             .when(!expanded, |surface| surface.h(px(64.)))
-            .child(div().w_full().min_w_0().whitespace_normal().child(text))
+            .child(
+                div()
+                    .id(if expanded {
+                        "custom-status-expanded-text"
+                    } else {
+                        "custom-status-collapsed-text"
+                    })
+                    .w_full()
+                    .min_w_0()
+                    .whitespace_normal()
+                    .when(!expanded, |text| text.line_clamp(2).text_ellipsis())
+                    .child(text),
+            )
     }
 }
 
@@ -88,7 +104,8 @@ impl Render for CustomStatusBubble {
             .shape_line(self.text.clone(), px(14.), &[run], None)
             .width();
         let width = (text_width + px(40.)).min(self.max_width);
-        let show_full = self.expanded || text_width + px(40.) <= self.max_width;
+        self.expandable = text_width + px(40.) > self.max_width;
+        let show_full = self.expanded || !self.expandable;
         let text = break_long_words(self.text.as_ref());
 
         div()

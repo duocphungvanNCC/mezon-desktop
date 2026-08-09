@@ -1215,12 +1215,26 @@ impl ProfilePage {
                             .border_color(theme.border)
                             .bg(theme.bg_primary)
                             .child(
-                                Label::new(display_name.clone())
-                                    .text_xl()
-                                    .font_weight(FontWeight::BOLD)
-                                    .text_color(theme.text_secondary),
-                            )
-                            .child(Label::new(username).text_sm().text_color(theme.text_muted)),
+                                v_flex()
+                                    .w(px(300.))
+                                    .max_w_full()
+                                    .min_w_0()
+                                    .child(
+                                        Label::new(display_name.clone())
+                                            .w_full()
+                                            .truncate()
+                                            .text_xl()
+                                            .font_weight(FontWeight::BOLD)
+                                            .text_color(theme.text_secondary),
+                                    )
+                                    .child(
+                                        Label::new(username)
+                                            .w_full()
+                                            .truncate()
+                                            .text_sm()
+                                            .text_color(theme.text_muted),
+                                    ),
+                            ),
                     )
                     .child(
                         div()

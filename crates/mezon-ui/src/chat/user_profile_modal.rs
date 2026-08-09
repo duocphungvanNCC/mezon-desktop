@@ -355,8 +355,12 @@ impl Render for UserProfileModal {
                             .bg(theme.tokens.bg_primary)
                             .child(
                                 div()
+                                    .w(px(96.))
+                                    .min_w_0()
                                     .child(
                                         div()
+                                            .w_full()
+                                            .truncate()
                                             .text_size(px(24.))
                                             .font_weight(FontWeight::SEMIBOLD)
                                             .text_color(theme.text_secondary)
@@ -364,6 +368,8 @@ impl Render for UserProfileModal {
                                     )
                                     .child(
                                         div()
+                                            .w_full()
+                                            .truncate()
                                             .text_sm()
                                             .text_color(theme.text_secondary)
                                             .child(username),
