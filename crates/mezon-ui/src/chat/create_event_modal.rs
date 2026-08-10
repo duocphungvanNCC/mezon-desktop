@@ -1,8 +1,7 @@
-use chrono::{Duration, Local, TimeZone, Timelike};
+use chrono::{Datelike, Duration, Local, TimeZone, Timelike};
 use gpui::{
     AnyElement, App, Context, ElementId, Entity, EventEmitter, FocusHandle, Focusable, FontWeight,
-    MouseButton, PathPromptOptions, Render, SharedString, Subscription, Task, Window, deferred,
-    div, img, prelude::*, px,
+    PathPromptOptions, Render, SharedString, Subscription, Task, Window, div, img, prelude::*, px,
 };
 use mezon_store::{
     ChannelId, ChannelList, ChannelType, ClanId, ClanImageMimeType, ClanList, CreateEventDraft,
@@ -11,8 +10,8 @@ use mezon_store::{
 
 use crate::app::shell::Shell;
 use crate::components::primitives::{
-    Button, ButtonVariants, DatePicker, DatePickerEvent, Icon, IconName, Input, InputEvent,
-    InputState, TextArea, TextAreaEvent,
+    Button, ButtonVariants, DatePicker, DatePickerEvent, Dropdown, DropdownPlacement,
+    DropdownTriggerStyle, Icon, IconName, Input, InputEvent, InputState, TextArea, TextAreaEvent,
 };
 use crate::theme::ActiveTheme;
 
@@ -28,6 +27,47 @@ enum LocationKind {
     Voice,
     Somewhere,
     External,
+}
+
+fn event_repeat_labels(locale: &str, date: chrono::NaiveDate) -> Vec<SharedString> {
+    let t = |key| mezon_i18n::t(locale, key).to_string();
+    let weekday_key = match date.weekday() {
+        chrono::Weekday::Mon => "common.dateTime.daysShort.mon",
+        chrono::Weekday::Tue => "common.dateTime.daysShort.tue",
+        chrono::Weekday::Wed => "common.dateTime.daysShort.wed",
+        chrono::Weekday::Thu => "common.dateTime.daysShort.thu",
+        chrono::Weekday::Fri => "common.dateTime.daysShort.fri",
+        chrono::Weekday::Sat => "common.dateTime.daysShort.sat",
+        chrono::Weekday::Sun => "common.dateTime.daysShort.sun",
+    };
+    let month_key = [
+        "common.dateTime.monthsShort.jan",
+        "common.dateTime.monthsShort.feb",
+        "common.dateTime.monthsShort.mar",
+        "common.dateTime.monthsShort.apr",
+        "common.dateTime.monthsShort.may",
+        "common.dateTime.monthsShort.jun",
+        "common.dateTime.monthsShort.jul",
+        "common.dateTime.monthsShort.aug",
+        "common.dateTime.monthsShort.sep",
+        "common.dateTime.monthsShort.oct",
+        "common.dateTime.monthsShort.nov",
+        "common.dateTime.monthsShort.dec",
+    ][date.month0() as usize];
+    let weekday = t(weekday_key);
+    let month_day = format!("{} {}", t(month_key), date.day());
+    [
+        t("eventCreator.fields.eventFrequency.noRepeat"),
+        t("eventCreator.fields.eventFrequency.weeklyOn").replace("{{name}}", &weekday),
+        t("eventCreator.fields.eventFrequency.everyOther").replace("{{name}}", &weekday),
+        t("eventCreator.fields.eventFrequency.monthlyOn")
+            .replace("{{name}}", &date.day().to_string()),
+        t("eventCreator.fields.eventFrequency.annuallyOn").replace("{{name}}", &month_day),
+        t("eventCreator.fields.eventFrequency.everyWeekday"),
+    ]
+    .into_iter()
+    .map(Into::into)
+    .collect()
 }
 
 pub enum EventSelectEvent {
@@ -61,8 +101,8 @@ impl EventSelect {
             icons: Vec::new(),
             selected: None,
             open: false,
-            placeholder: "Select…".into(),
-            no_results: "No result".into(),
+            placeholder: SharedString::default(),
+            no_results: SharedString::default(),
             placement: EventSelectPlacement::Down,
         }
     }
@@ -99,160 +139,68 @@ impl EventSelect {
         self.selected = value;
         cx.notify();
     }
+
+    fn set_items(
+        &mut self,
+        items: Vec<SharedString>,
+        icons: Vec<Option<IconName>>,
+        cx: &mut Context<Self>,
+    ) {
+        self.items = items;
+        self.icons = icons;
+        if self.selected.is_some_and(|index| index >= self.items.len()) {
+            self.selected = None;
+        }
+        cx.notify();
+    }
 }
 
 impl Render for EventSelect {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
-        let this = cx.weak_entity();
-        let label = self
-            .value()
-            .cloned()
-            .unwrap_or_else(|| self.placeholder.clone());
-        let selected_icon = self
-            .selected
-            .and_then(|index| self.icons.get(index).copied().flatten());
-        let menu_id = self.id.clone();
-        let items = self.items.clone();
-        let icons = self.icons.clone();
-        let selected = self.selected;
-        let no_results = self.no_results.clone();
-        let placement = self.placement;
-
-        div()
-            .relative()
-            .w_full()
-            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-            .child(
-                div()
-                    .id(self.id.clone())
-                    .h(px(40.))
-                    .w_full()
-                    .px_3()
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .rounded_md()
-                    .border_2()
-                    .border_color(theme.border)
-                    .bg(theme.bg_secondary)
-                    .text_sm()
-                    .text_color(theme.text_primary)
-                    .cursor_pointer()
-                    .hover(|style| style.border_color(theme.bg_hover))
-                    .on_click(move |_, _, cx| {
-                        this.update(cx, |select, cx| {
-                            select.open = !select.open;
-                            cx.notify();
-                        })
-                        .ok();
+        let toggle_entity = cx.weak_entity();
+        let close_entity = cx.weak_entity();
+        let select_entity = cx.weak_entity();
+        let next_open = !self.open;
+        Dropdown::new(self.id.clone())
+            .items(self.items.clone())
+            .icons(self.icons.clone())
+            .selected(self.selected)
+            .open(self.open)
+            .placeholder(self.placeholder.clone())
+            .no_results(self.no_results.clone())
+            .placement(match self.placement {
+                EventSelectPlacement::Up => DropdownPlacement::Up,
+                EventSelectPlacement::Down => DropdownPlacement::Down,
+            })
+            .trigger_style(DropdownTriggerStyle::InputPrimary)
+            .trigger_background(theme.bg_secondary.into())
+            .popup_background(theme.bg_primary.into())
+            .on_toggle(move |_, cx| {
+                toggle_entity
+                    .update(cx, |select, cx| {
+                        select.open = next_open;
+                        cx.notify();
                     })
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .min_w_0()
-                            .gap_2()
-                            .when_some(selected_icon, |d, icon| {
-                                d.child(Icon::new(icon).size_4().text_color(theme.text_secondary))
-                            })
-                            .child(label),
-                    )
-                    .child(
-                        Icon::new(IconName::ArrowDown)
-                            .size_4()
-                            .text_color(theme.text_muted),
-                    ),
-            )
-            .when(self.open, |root| {
-                let outside = cx.weak_entity();
-                root.child(deferred(
-                    div()
-                        .id((menu_id, "event-menu"))
-                        .absolute()
-                        .left_0()
-                        .right_0()
-                        .when(placement == EventSelectPlacement::Down, |d| {
-                            d.top_full().mt_1()
-                        })
-                        .when(placement == EventSelectPlacement::Up, |d| {
-                            d.bottom_full().mb_1()
-                        })
-                        .p_1()
-                        .rounded_md()
-                        .border_2()
-                        .border_color(theme.border)
-                        .bg(theme.bg_primary)
-                        .shadow_lg()
-                        .occlude()
-                        .overflow_y_scroll()
-                        .max_h(px(208.))
-                        .on_mouse_down_out(move |_, _, cx| {
-                            outside
-                                .update(cx, |select, cx| {
-                                    select.open = false;
-                                    cx.notify();
-                                })
-                                .ok();
-                        })
-                        .when(items.is_empty(), |d| {
-                            d.child(
-                                div()
-                                    .w_full()
-                                    .py_4()
-                                    .text_center()
-                                    .text_sm()
-                                    .text_color(theme.text_muted)
-                                    .child(no_results),
-                            )
-                        })
-                        .children(items.into_iter().enumerate().map(|(index, item)| {
-                            let this = cx.weak_entity();
-                            div()
-                                .id(("event-select-item", index))
-                                .w_full()
-                                .px_2()
-                                .py_2()
-                                .flex()
-                                .items_center()
-                                .justify_between()
-                                .rounded_sm()
-                                .cursor_pointer()
-                                .text_color(theme.text_primary)
-                                .hover(|style| style.bg(theme.bg_hover))
-                                .on_click(move |_, _, cx| {
-                                    this.update(cx, |select, cx| {
-                                        select.selected = Some(index);
-                                        select.open = false;
-                                        cx.emit(EventSelectEvent::Change(index));
-                                        cx.notify();
-                                    })
-                                    .ok();
-                                })
-                                .child(
-                                    div()
-                                        .flex()
-                                        .items_center()
-                                        .gap_2()
-                                        .when_some(
-                                            icons.get(index).copied().flatten(),
-                                            |d, icon| {
-                                                d.child(
-                                                    Icon::new(icon)
-                                                        .size_4()
-                                                        .text_color(theme.text_secondary),
-                                                )
-                                            },
-                                        )
-                                        .child(item),
-                                )
-                                .when(selected == Some(index), |d| {
-                                    d.child(
-                                        Icon::new(IconName::Check).size_4().text_color(theme.brand),
-                                    )
-                                })
-                        })),
-                ))
+                    .ok();
+            })
+            .on_close(move |_, cx| {
+                close_entity
+                    .update(cx, |select, cx| {
+                        select.open = false;
+                        cx.notify();
+                    })
+                    .ok();
+            })
+            .on_select(move |index, _, cx| {
+                select_entity
+                    .update(cx, |select, cx| {
+                        select.selected = Some(index);
+                        select.open = false;
+                        cx.emit(EventSelectEvent::Change(index));
+                        cx.notify();
+                    })
+                    .ok();
             })
     }
 }
@@ -274,6 +222,7 @@ pub struct CreateEventModal {
     end_date: Entity<DatePicker>,
     address: Entity<InputState>,
     topic: Entity<InputState>,
+    topic_dirty: bool,
     description: Entity<TextArea>,
     focus_handle: FocusHandle,
     creating: bool,
@@ -299,6 +248,7 @@ impl CreateEventModal {
         cx: &mut Context<Self>,
     ) -> Self {
         let channels_entity = ChannelList::global(cx);
+        channels_entity.update(cx, |channels, cx| channels.load_for_clan(clan_id, cx));
         let channels = channels_entity.read(cx);
         let mut seen = std::collections::HashSet::new();
         let mut voice_channels = Vec::new();
@@ -368,36 +318,13 @@ impl CreateEventModal {
                     .collect(),
             )
         });
-        let repeat_labels = [
-            t("eventCreator.fields.eventFrequency.noRepeat"),
-            t("eventCreator.fields.eventFrequency.weeklyOn")
-                .replace("{{name}}", "")
-                .trim()
-                .to_string(),
-            t("eventCreator.fields.eventFrequency.everyOther")
-                .replace("{{name}}", "")
-                .trim()
-                .to_string(),
-            t("eventCreator.fields.eventFrequency.monthlyOn")
-                .replace("{{name}}", "")
-                .trim()
-                .to_string(),
-            t("eventCreator.fields.eventFrequency.annuallyOn")
-                .replace("{{name}}", "")
-                .trim()
-                .to_string(),
-            t("eventCreator.fields.eventFrequency.everyWeekday"),
-        ];
+        let now = Local::now();
+        let repeat_labels = event_repeat_labels(&locale, now.date_naive());
         let repeat_select = cx.new(|_| {
-            EventSelect::new(
-                "event-repeat",
-                repeat_labels.into_iter().map(Into::into).collect(),
-            )
-            .placement(EventSelectPlacement::Down)
+            EventSelect::new("event-repeat", repeat_labels).placement(EventSelectPlacement::Down)
         });
         repeat_select.update(cx, |select, cx| select.set_selected(Some(0), cx));
 
-        let now = Local::now();
         let mut start_at = now;
         if now.minute() != 0 || now.second() != 0 || now.nanosecond() != 0 {
             start_at += Duration::hours(1);
@@ -466,12 +393,15 @@ impl CreateEventModal {
                 .max_visible_lines(5)
         });
         let mut subscriptions = Vec::new();
-        for input in [&address, &topic] {
-            subscriptions.push(cx.subscribe(input, |this, _, _: &InputEvent, cx| {
-                this.error = None;
-                cx.notify();
-            }));
-        }
+        subscriptions.push(cx.subscribe(&address, |this, _, _: &InputEvent, cx| {
+            this.error = None;
+            cx.notify();
+        }));
+        subscriptions.push(cx.subscribe(&topic, |this, _, _: &InputEvent, cx| {
+            this.topic_dirty = true;
+            this.error = None;
+            cx.notify();
+        }));
         subscriptions.push(cx.subscribe(&description, |_, _, _: &TextAreaEvent, cx| cx.notify()));
         subscriptions.push(
             cx.subscribe(&voice_select, |this, _, _: &EventSelectEvent, cx| {
@@ -505,8 +435,15 @@ impl CreateEventModal {
         subscriptions.push(
             cx.subscribe(&start_date, |this, _, event: &DatePickerEvent, cx| {
                 if let DatePickerEvent::Change(Some(date)) = event {
-                    this.end_date
-                        .update(cx, |picker, cx| picker.set_min(Some(*date), cx));
+                    this.end_date.update(cx, |picker, cx| {
+                        picker.set_min(Some(*date), cx);
+                        if picker.selected().is_some_and(|end| end < *date) {
+                            picker.set_selected_silent(Some(*date), cx);
+                        }
+                    });
+                    let labels = event_repeat_labels(&this.settings.read(cx).language, *date);
+                    this.repeat_select
+                        .update(cx, |select, cx| select.set_items(labels, Vec::new(), cx));
                 }
                 this.error = None;
                 cx.notify();
@@ -515,6 +452,9 @@ impl CreateEventModal {
         subscriptions.push(cx.subscribe(&end_date, |this, _, _: &DatePickerEvent, cx| {
             this.error = None;
             cx.notify();
+        }));
+        subscriptions.push(cx.observe(&channels_entity, |this, _, cx| {
+            this.refresh_channels(cx);
         }));
 
         Self {
@@ -534,6 +474,7 @@ impl CreateEventModal {
             end_date,
             address,
             topic,
+            topic_dirty: false,
             description,
             focus_handle: cx.focus_handle(),
             creating: false,
@@ -548,6 +489,72 @@ impl CreateEventModal {
 
     fn tr(&self, key: &'static str, cx: &App) -> String {
         mezon_i18n::t(&self.settings.read(cx).language, key).to_string()
+    }
+
+    fn refresh_channels(&mut self, cx: &mut Context<Self>) {
+        let channels_entity = ChannelList::global(cx);
+        let channels = channels_entity.read(cx);
+        let mut seen = std::collections::HashSet::new();
+        let mut voice_channels = Vec::new();
+        let mut audience_channels = Vec::new();
+        for channel in channels
+            .categories_for_clan(self.clan_id)
+            .iter()
+            .flat_map(|category| &category.channels)
+        {
+            if !seen.insert(channel.id) || !channel.visible_in_sidebar() {
+                continue;
+            }
+            if channel.channel_type == ChannelType::Voice {
+                voice_channels.push((channel.id, channel.name.clone()));
+            }
+            if channel.private
+                && matches!(
+                    channel.channel_type,
+                    ChannelType::Text | ChannelType::Thread
+                )
+            {
+                audience_channels.push((
+                    channel.id,
+                    channel.name.clone(),
+                    channel.channel_type,
+                    channel.private,
+                ));
+            }
+        }
+        self.voice_channels = voice_channels;
+        self.audience_channels = audience_channels;
+        self.voice_select.update(cx, |select, cx| {
+            select.set_items(
+                self.voice_channels
+                    .iter()
+                    .map(|(_, name)| name.clone().into())
+                    .collect(),
+                vec![Some(IconName::Speaker); self.voice_channels.len()],
+                cx,
+            )
+        });
+        self.audience_select.update(cx, |select, cx| {
+            select.set_items(
+                self.audience_channels
+                    .iter()
+                    .map(|(_, name, _, _)| name.clone().into())
+                    .collect(),
+                self.audience_channels
+                    .iter()
+                    .map(|(_, _, ty, private)| {
+                        Some(match (ty, private) {
+                            (ChannelType::Thread, true) => IconName::ThreadIconLocker,
+                            (ChannelType::Thread, false) => IconName::ThreadIcon,
+                            (_, true) => IconName::HashtagLocked,
+                            _ => IconName::Hashtag,
+                        })
+                    })
+                    .collect(),
+                cx,
+            )
+        });
+        cx.notify();
     }
     fn return_to_events(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         super::clan_events_page::open_clan_events_modal(
@@ -616,18 +623,7 @@ impl CreateEventModal {
             Step::Location if self.valid_location(cx) => self.step = Step::Details,
             Step::Details if self.valid_details(cx) => self.step = Step::Review,
             Step::Location => self.error = Some(self.tr("eventCreator.notify.type", cx).into()),
-            Step::Details if !self.topic_is_valid(cx) => {
-                self.error = Some(
-                    self.tr("eventCreator.errorMessages.invalidTopic", cx)
-                        .into(),
-                )
-            }
-            Step::Details => {
-                self.error = Some(
-                    self.tr("eventCreator.errorMessages.endTimeAfterStart", cx)
-                        .into(),
-                )
-            }
+            Step::Details => {}
             Step::Review => {}
         }
         cx.notify();
@@ -768,7 +764,10 @@ impl CreateEventModal {
             if !ClanImageMimeType::is_allowed_extension(&extension) {
                 let _ = this.update(cx, |this, cx| {
                     this.uploading_cover = false;
-                    this.error = Some("Unsupported image type".into());
+                    this.error = Some(
+                        this.tr("eventCreator.errorMessages.unsupportedImageType", cx)
+                            .into(),
+                    );
                     cx.notify();
                 });
                 return;
@@ -1075,6 +1074,16 @@ impl CreateEventModal {
                 self.topic.clone(),
                 cx,
             ))
+            .when(self.topic_dirty && !self.topic_is_valid(cx), |d| {
+                d.child(
+                    div()
+                        .mt_1()
+                        .text_size(px(12.))
+                        .italic()
+                        .text_color(theme.danger_text)
+                        .child(self.tr("eventCreator.errorMessages.invalidTopic", cx)),
+                )
+            })
             .child(
                 div()
                     .flex()
@@ -1235,7 +1244,7 @@ impl CreateEventModal {
         } else if let Some(index) = self.audience_select.read(cx).selected() {
             let (_, name, ty, _) = &self.audience_channels[index];
             format!(
-                "{} {}:{}",
+                "{} {}{}",
                 self.tr("eventCreator.eventDetail.audienceConsists", cx),
                 if *ty == ChannelType::Thread {
                     self.tr("eventCreator.eventDetail.thread", cx)
@@ -1389,89 +1398,97 @@ impl Render for CreateEventModal {
             Step::Details => self.details_content(cx),
             Step::Review => self.review_content(cx),
         };
-        let footer =
-            div()
-                .mt_5()
-                .flex()
-                .items_center()
-                .justify_between()
-                .child(
-                    div()
-                        .when(self.step != Step::Location, |d| {
-                            d.child(
-                                Button::new("back-create-event")
-                                    .label(self.tr("eventCreator.actions.back", cx))
-                                    .ghost()
-                                    .on_click(cx.listener(|this, _, _, cx| this.back(cx))),
-                            )
-                        })
-                        .child(div()),
-                )
-                .child(
-                    div()
-                        .flex()
-                        .gap_3()
-                        .child(
-                            Button::new("cancel-create-event")
-                                .label(self.tr("eventCreator.actions.cancel", cx))
-                                .on_click(cx.listener(|this, _, window, cx| {
-                                    this.return_to_events(window, cx)
-                                })),
+        let footer = div()
+            .mt_5()
+            .flex_shrink_0()
+            .flex()
+            .items_center()
+            .justify_between()
+            .child(
+                div()
+                    .when(self.step != Step::Location, |d| {
+                        d.child(
+                            Button::new("back-create-event")
+                                .label(self.tr("eventCreator.actions.back", cx))
+                                .ghost()
+                                .on_click(cx.listener(|this, _, _, cx| this.back(cx))),
                         )
-                        .child(
-                            Button::new("next-create-event")
-                                .label(if is_review {
-                                    self.tr("eventCreator.actions.create", cx)
+                    })
+                    .child(div()),
+            )
+            .child(
+                div()
+                    .flex()
+                    .gap_3()
+                    .child(
+                        Button::new("cancel-create-event")
+                            .label(self.tr("eventCreator.actions.cancel", cx))
+                            .disabled(self.creating)
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                if !this.creating {
+                                    this.return_to_events(window, cx)
+                                }
+                            })),
+                    )
+                    .child(
+                        Button::new("next-create-event")
+                            .label(if is_review {
+                                self.tr("eventCreator.actions.create", cx)
+                            } else {
+                                self.tr("eventCreator.actions.next", cx)
+                            })
+                            .primary()
+                            .disabled(!can_continue || self.creating)
+                            .loading(self.creating)
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                if is_review {
+                                    this.create(window, cx)
                                 } else {
-                                    self.tr("eventCreator.actions.next", cx)
-                                })
-                                .primary()
-                                .disabled(!can_continue || self.creating)
-                                .loading(self.creating)
-                                .on_click(cx.listener(move |this, _, window, cx| {
-                                    if is_review {
-                                        this.create(window, cx)
-                                    } else {
-                                        this.next(cx)
-                                    }
-                                })),
-                        ),
-                );
-        let card =
-            div()
-                .track_focus(&self.focus_handle)
-                .key_context("menu")
-                .on_action(cx.listener(|this, _: &::menu::Cancel, window, cx| {
+                                    this.next(cx)
+                                }
+                            })),
+                    ),
+            );
+        let card = div()
+            .track_focus(&self.focus_handle)
+            .key_context("menu")
+            .on_action(cx.listener(|this, _: &::menu::Cancel, window, cx| {
+                if !this.creating {
                     this.return_to_events(window, cx)
-                }))
-                .relative()
-                .w(px(520.))
-                .max_h(px(690.))
-                .rounded_lg()
-                .overflow_hidden()
-                .bg(theme.bg_primary)
-                .text_color(theme.text_primary)
-                .p_5()
-                .child(self.progress(cx))
-                .child(
-                    div()
-                        .id("create-event-scroll")
-                        .max_h(px(590.))
-                        .overflow_y_scroll()
-                        .mt_6()
-                        .px_3()
-                        .child(content)
-                        .when_some(self.error.clone(), |d, error| {
-                            d.child(
-                                div()
-                                    .mt_2()
-                                    .text_size(px(12.))
-                                    .text_color(theme.danger_text)
-                                    .child(error),
-                            )
-                        })
-                        .child(footer),
-                );
+                }
+            }))
+            .relative()
+            .w(px(520.))
+            .max_h(gpui::relative(0.9))
+            .flex()
+            .flex_col()
+            .rounded_lg()
+            .overflow_hidden()
+            .bg(theme.bg_primary)
+            .text_color(theme.text_primary)
+            .p_5()
+            .child(self.progress(cx))
+            .child(
+                div()
+                    .id("create-event-scroll")
+                    .max_h(px(520.))
+                    .flex_shrink_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .mt_6()
+                    .px_3()
+                    .child(content)
+                    .when_some(self.error.clone(), |d, error| {
+                        d.child(
+                            div()
+                                .mt_2()
+                                .text_size(px(12.))
+                                .text_color(theme.danger_text)
+                                .child(error),
+                        )
+                    }),
+            )
+            .child(footer);
 
         div()
             .absolute()
@@ -1492,6 +1509,8 @@ pub fn open_create_event_modal(
     cx: &mut App,
 ) {
     let modal = cx.new(|cx| CreateEventModal::new(clan_id, settings, window, cx));
+    let focus_handle = modal.read(cx).focus_handle.clone();
+    window.focus(&focus_handle, cx);
     Shell::global(cx).update(cx, |shell, cx| {
         shell.show_fullscreen_modal(modal.into(), cx)
     });

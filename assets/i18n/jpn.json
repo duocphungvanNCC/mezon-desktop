@@ -2418,6 +2418,7 @@
   "eventCreator.emptyState.title": "今後のイベントはありません。",
   "eventCreator.errorMessages.endTimeAfterStart": "終了時間は開始時間より大きい必要があります。",
   "eventCreator.errorMessages.invalidTopic": "無効なイベントトピック。文字 '`', '<', '>', ',', '/', '\\\"', '\\\\',および'''は許可されません。",
+  "eventCreator.errorMessages.unsupportedImageType": "サポートされていない画像形式です。",
   "eventCreator.errorMessages.startTimeFuture": "開始時間は未来である必要があります。",
   "eventCreator.eventDetail.audienceConsists": "視聴者は以下からのメンバーで構成されています",
   "eventCreator.eventDetail.channel": "チャンネル:",

@@ -2418,6 +2418,7 @@
   "eventCreator.emptyState.title": "Não há eventos próximos.",
   "eventCreator.errorMessages.endTimeAfterStart": "A hora de término deve ser após a hora de início.",
   "eventCreator.errorMessages.invalidTopic": "Título do evento inválido. Os caracteres '`', '<', '>', ',', '/', '\"', '\\', e ''' não são permitidos.",
+  "eventCreator.errorMessages.unsupportedImageType": "Tipo de imagem não suportado.",
   "eventCreator.errorMessages.startTimeFuture": "A hora de início deve ser no futuro.",
   "eventCreator.eventDetail.audienceConsists": "O público inclui membros de",
   "eventCreator.eventDetail.channel": "canal:",

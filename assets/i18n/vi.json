@@ -2537,6 +2537,7 @@
   "eventCreator.emptyState.title": "Không có sự kiện nào sắp tới.",
   "eventCreator.errorMessages.endTimeAfterStart": "Thời gian kết thúc phải lớn hơn thời gian bắt đầu.",
   "eventCreator.errorMessages.invalidTopic": "Chủ đề sự kiện không hợp lệ. Các ký tự '`', '<', '>', ',', '/', '\"', '\\', và ''' không được phép.",
+  "eventCreator.errorMessages.unsupportedImageType": "Định dạng ảnh không được hỗ trợ.",
   "eventCreator.errorMessages.locationMaxLength": "Độ dài phải từ 100 ký tự trở xuống.",
   "eventCreator.errorMessages.startTimeFuture": "Thời gian bắt đầu phải ở tương lai.",
   "eventCreator.eventDetail.audienceConsists": "Khán giả bao gồm các thành viên từ",

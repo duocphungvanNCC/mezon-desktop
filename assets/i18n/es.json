@@ -2433,6 +2433,7 @@
   "eventCreator.emptyState.title": "No hay eventos próximos.",
   "eventCreator.errorMessages.endTimeAfterStart": "La hora de fin debe ser posterior a la hora de inicio.",
   "eventCreator.errorMessages.locationMaxLength": "Debe tener 100 caracteres o menos.",
+  "eventCreator.errorMessages.unsupportedImageType": "Tipo de imagen no compatible.",
   "eventCreator.errorMessages.startTimeFuture": "La hora de inicio debe ser posterior a la hora actual.",
   "eventCreator.eventDetail.audienceConsists": "La audiencia consiste en miembros de",
   "eventCreator.eventDetail.channel": "canal:",

@@ -2004,6 +2004,7 @@
   "eventCreator.emptyState.description2": "Киләчәк чаралар өчен үз идеяләрен тәкъдим итүләре өчен башка катнашучыларны чакыра аласыз.",
   "eventCreator.emptyState.title": "Планлаштырылган чаралар юк.",
   "eventCreator.errorMessages.endTimeAfterStart": "Тәмамлану вакыты башлану вакытыннан соңрак булырга тиеш.",
+  "eventCreator.errorMessages.unsupportedImageType": "Бу рәсем форматы хупланмый.",
   "eventCreator.errorMessages.startTimeFuture": "Башлану вакыты киләчәктә булырга тиеш.",
   "eventCreator.eventDetail.audienceConsists": "Аудитория катнашучылардан тора",
   "eventCreator.eventDetail.channel": "канал:",
