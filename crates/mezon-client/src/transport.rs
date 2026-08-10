@@ -267,16 +267,17 @@ fn dispatch_realtime_push(
                             | RealtimeEvent::StatusPresence(_)
                     ) {
                         if let RealtimeEvent::Unhandled(inner) = &event {
-                            let detail = format!("{inner:?}");
-                            let end = detail
-                                .char_indices()
-                                .nth(300)
-                                .map(|(i, _)| i)
-                                .unwrap_or(detail.len());
-                            tracing::debug!(
-                                "server push (cid={cid}): Unhandled variant: {}",
-                                &detail[..end]
-                            );
+                            if tracing::enabled!(tracing::Level::DEBUG) {
+                                let detail = format!("{inner:?}");
+                                let name = detail
+                                    .split(['(', '{', ' '])
+                                    .next()
+                                    .filter(|n| !n.is_empty())
+                                    .unwrap_or("unknown");
+                                tracing::debug!(
+                                    "server push (cid={cid}): Unhandled variant: {name}"
+                                );
+                            }
                         } else {
                             tracing::debug!("server push (cid={cid}): {}", event.kind_name());
                         }

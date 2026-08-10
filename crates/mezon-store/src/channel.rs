@@ -880,6 +880,7 @@ impl ChannelList {
         self.cache.insert(clan_id, categories, None);
         self.invalidate_channel_index(clan_id);
         self.channel_detail_failed.clear();
+        self.sync_clan_after_read(clan_id, 0, cx);
         cx.emit(ChannelEvent::ClanChannelsLoaded(clan_id));
         cx.notify();
         if self.want_extras.contains(&clan_id) {
@@ -1309,6 +1310,7 @@ impl ChannelList {
                 cleared_badge += Self::mark_channels_read(&mut category.channels);
             }
         }
+        self.drop_pending_badges_for_clan(clan_id);
         clear_topic_badges_for_clan(&mut self.topic_parent_badges, clan_id);
         if should_notify {
             self.notify_channel_list(clan_id, cx);
@@ -1352,6 +1354,7 @@ impl ChannelList {
         }
         for &channel_id in &parent_ids {
             self.drop_seeded_badge(clan_id, channel_id);
+            self.pending_channel_badges.remove(&channel_id);
         }
         self.topic_parent_badges
             .retain(|_, tracked| !parent_ids.contains(&tracked.parent_id));
@@ -1383,19 +1386,23 @@ impl ChannelList {
                 found = true;
                 let was_unread = ch.is_unread();
                 let was_badge = ch.badge_count;
-                if ts > 0 {
+                if ts > ch.last_sent_timestamp {
                     ch.last_sent_timestamp = ts;
                     if !message_id.is_zero() {
                         ch.last_sent_message_id = message_id;
                     }
-                    if seen {
-                        ch.last_seen_timestamp = ts;
-                        if !message_id.is_zero() {
-                            ch.last_seen_message_id = message_id;
-                        }
+                }
+                if seen && ts > ch.last_seen_timestamp {
+                    ch.last_seen_timestamp = ts;
+                    if !message_id.is_zero() {
+                        ch.last_seen_message_id = message_id;
                     }
                 }
-                if is_mention && !seen {
+                let counts_badge = !matches!(
+                    ch.channel_type,
+                    ChannelType::App | ChannelType::Voice | ChannelType::Stream
+                );
+                if is_mention && !seen && counts_badge {
                     ch.badge_count = ch.badge_count.saturating_add(1);
                 }
                 visible_changed =
@@ -1714,8 +1721,23 @@ impl ChannelList {
                 Self::mark_channels_read(&mut category.channels);
             }
         }
+        self.drop_pending_badges_for_clan(clan_id);
         if changed {
             self.notify_channel_list(clan_id, cx);
+        }
+    }
+
+    fn drop_pending_badges_for_clan(&mut self, clan_id: ClanId) {
+        let Some(categories) = self.cache.get(&clan_id) else {
+            return;
+        };
+        let ids: Vec<ChannelId> = categories
+            .iter()
+            .flat_map(|category| &category.channels)
+            .map(|ch| ch.id)
+            .collect();
+        for id in ids {
+            self.pending_channel_badges.remove(&id);
         }
     }
 
@@ -2025,6 +2047,8 @@ impl ChannelList {
             seen_ts,
             "apply_last_seen (realtime LastSeenUpdated)"
         );
+        self.pending_channel_badges.remove(&channel_id);
+        self.drop_seeded_badge(clan_id, channel_id);
         let mut visible_changed = false;
         let mut badge_delta = 0;
         let mut computed = false;
@@ -3639,6 +3663,15 @@ fn collect_channel_badges(
         .unwrap_or_default()
 }
 
+fn suppress_read_badge(ch: &mut Channel) {
+    if ch.badge_count > 0
+        && ch.last_sent_timestamp > 0
+        && ch.last_seen_timestamp >= ch.last_sent_timestamp
+    {
+        ch.badge_count = 0;
+    }
+}
+
 fn carry_live_channel_badges(
     categories: &mut [Category],
     previous: &HashMap<ChannelId, LiveUnreadState>,
@@ -3647,7 +3680,7 @@ fn carry_live_channel_badges(
         let Some(live) = previous.get(&ch.id) else {
             continue;
         };
-        ch.badge_count = live.badge_count;
+        ch.badge_count = ch.badge_count.max(live.badge_count);
         if live.last_seen_timestamp > ch.last_seen_timestamp
             || (live.last_seen_timestamp == ch.last_seen_timestamp
                 && ch.last_seen_message_id.is_zero())
@@ -3662,6 +3695,7 @@ fn carry_live_channel_badges(
             ch.last_sent_timestamp = live.last_sent_timestamp;
             ch.last_sent_message_id = live.last_sent_message_id;
         }
+        suppress_read_badge(ch);
     }
 }
 
@@ -3796,6 +3830,7 @@ fn apply_unread_seed_into(
             ch.last_sent_timestamp = s.last_sent_timestamp;
             ch.last_sent_message_id = s.last_sent_message_id;
         }
+        suppress_read_badge(ch);
         changed = changed || was_badge != ch.badge_count || was_unread != ch.is_unread();
     }
     changed
@@ -3812,13 +3847,18 @@ fn merge_pending_badges_into(
     for category in categories.iter_mut() {
         for ch in category.channels.iter_mut() {
             if let Some(&overlay) = pending.get(&ch.id) {
-                ch.badge_count = ch.badge_count.max(overlay.count);
+                if overlay.last_sent_timestamp == 0
+                    || overlay.last_sent_timestamp > ch.last_seen_timestamp
+                {
+                    ch.badge_count = ch.badge_count.max(overlay.count);
+                }
                 if overlay.last_sent_timestamp > ch.last_sent_timestamp {
                     ch.last_sent_timestamp = overlay.last_sent_timestamp;
                     if !overlay.last_sent_message_id.is_zero() {
                         ch.last_sent_message_id = overlay.last_sent_message_id;
                     }
                 }
+                suppress_read_badge(ch);
                 applied.push(ch.id);
             }
         }
@@ -5750,13 +5790,29 @@ mod tests {
                     4,
                     "the first structure insert (list_channel_descs always reports 0) must pick up the parked seed"
                 );
+                assert!(
+                    channels
+                        .pending_badge_seed
+                        .get(&ClanId(1))
+                        .is_some_and(|seed| seed.contains_key(&ChannelId(1))),
+                    "the parked seed must be retained after being applied, not consumed"
+                );
 
+                for ch in channels
+                    .cache
+                    .get_mut(&ClanId(1))
+                    .unwrap()
+                    .iter_mut()
+                    .flat_map(|c| c.channels.iter_mut())
+                {
+                    ch.badge_count = 0;
+                }
                 channels.apply_clan_structure(ClanId(1), structure_with_two_channels(), cx);
                 assert_eq!(
                     channels.channel(ClanId(1), ChannelId(1)).unwrap().badge_count,
                     4,
-                    "a later refetch (e.g. after the clan's CACHE_TTL expires) must reapply the same \
-                     seed rather than losing it — seed_badges only runs once per clan per session"
+                    "a later refetch (e.g. after the clan's CACHE_TTL expires) must reapply the \
+                     seed itself — the zeroed live rows prove the carry cannot mask this"
                 );
             });
         });
@@ -6032,6 +6088,13 @@ mod tests {
                         .badge_count,
                     0,
                     "marking the category read must clear the live badge"
+                );
+                assert!(
+                    !channels
+                        .pending_badge_seed
+                        .get(&ClanId(1))
+                        .is_some_and(|seed| seed.contains_key(&ChannelId(1))),
+                    "marking the category read must evict the channel from the parked seed"
                 );
 
                 channels.apply_clan_structure(ClanId(1), structure_with_two_channels(), cx);

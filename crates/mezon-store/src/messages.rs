@@ -1242,9 +1242,7 @@ impl MessagesStore {
         }
         let live_badge = self.channel_badge_count(channel_id, clan_id, cx);
         let badge_count = match &self.pending_last_seen {
-            Some(p) if p.channel_id == channel_id && p.message_id == message_id => {
-                p.badge_count.max(live_badge)
-            }
+            Some(p) if p.channel_id == channel_id => p.badge_count.max(live_badge),
             _ => live_badge,
         };
         tracing::debug!(
@@ -1263,10 +1261,10 @@ impl MessagesStore {
             mode: self.mode,
             badge_count,
         };
-        let already_applied =
-            self.last_read_message_by_channel.get(&channel_id) == Some(&message_id);
-        if !already_applied || live_badge > 0 {
+        if live_badge > 0 || self.channel_is_unread(channel_id, clan_id, cx) {
             self.apply_local_last_seen(&pending, cx);
+        } else {
+            self.set_last_read_message(channel_id, message_id);
         }
         self.pending_last_seen = Some(pending);
         self.arm_last_seen_debounce(cx);
@@ -1287,17 +1285,73 @@ impl MessagesStore {
 
     fn channel_badge_count(&self, channel_id: ChannelId, clan_id: ClanId, cx: &App) -> u32 {
         if self.is_dm {
-            DirectMessageStore::global(cx)
-                .read(cx)
-                .find(channel_id)
-                .map(|c| c.unread_count)
+            DirectMessageStore::try_global(cx)
+                .and_then(|dm| dm.read(cx).find(channel_id).map(|c| c.unread_count))
                 .unwrap_or(0)
         } else {
-            ChannelList::global(cx)
-                .read(cx)
-                .channel(clan_id, channel_id)
-                .map(|c| c.badge_count)
+            ChannelList::try_global(cx)
+                .and_then(|cl| {
+                    cl.read(cx)
+                        .channel(clan_id, channel_id)
+                        .map(|c| c.badge_count)
+                })
                 .unwrap_or(0)
+        }
+    }
+
+    fn mark_empty_channel_seen(&mut self, channel_id: ChannelId, cx: &mut Context<Self>) {
+        let Some(clan_id) = self.active_clan_id else {
+            return;
+        };
+        if self.channel_badge_count(channel_id, clan_id, cx) == 0
+            && !self.channel_is_unread(channel_id, clan_id, cx)
+        {
+            return;
+        }
+        let (tail_id, tail_ts) = if self.is_dm {
+            (MessageId(0), 0)
+        } else {
+            ChannelList::try_global(cx)
+                .and_then(|cl| {
+                    cl.read(cx)
+                        .channel(clan_id, channel_id)
+                        .map(|ch| (ch.last_sent_message_id, ch.last_sent_timestamp))
+                })
+                .unwrap_or((MessageId(0), 0))
+        };
+        let pending = PendingLastSeen {
+            clan_id,
+            channel_id,
+            message_id: tail_id,
+            create_time: tail_ts,
+            mode: self.mode,
+            badge_count: self.channel_badge_count(channel_id, clan_id, cx),
+        };
+        tracing::debug!(
+            target: "badge_flow",
+            clan = clan_id.get(),
+            channel = channel_id.get(),
+            badge_count = pending.badge_count,
+            "empty channel opened — clearing its unread state"
+        );
+        self.apply_local_last_seen(&pending, cx);
+        self.pending_last_seen = Some(pending);
+        self.arm_last_seen_debounce(cx);
+    }
+
+    fn channel_is_unread(&self, channel_id: ChannelId, clan_id: ClanId, cx: &App) -> bool {
+        if self.is_dm {
+            DirectMessageStore::try_global(cx).is_some_and(|dm| {
+                dm.read(cx).find(channel_id).is_some_and(|c| {
+                    c.unread_count > 0 || c.last_sent_timestamp > c.last_seen_timestamp
+                })
+            })
+        } else {
+            ChannelList::try_global(cx).is_some_and(|cl| {
+                cl.read(cx)
+                    .channel(clan_id, channel_id)
+                    .is_some_and(|c| c.is_unread())
+            })
         }
     }
 
@@ -1354,9 +1408,15 @@ impl MessagesStore {
             channel = pending.channel_id.get(),
             message = pending.message_id.get(),
             badge_count = pending.badge_count,
-            "send_last_seen — clearing local badge and writing to server"
+            "send_last_seen — writing last seen to server"
         );
-        self.apply_local_last_seen(&pending, cx);
+        let newer_than_tracked = self
+            .last_read_message_by_channel
+            .get(&pending.channel_id)
+            .is_none_or(|cur| snowflake_seq(pending.message_id) >= snowflake_seq(*cur));
+        if newer_than_tracked {
+            self.set_last_read_message(pending.channel_id, pending.message_id);
+        }
         self.last_seen_fingerprint
             .insert(pending.channel_id, fingerprint);
 
@@ -4454,6 +4514,9 @@ impl MessagesStore {
                     prepare_messages(page.messages, AppConfig::try_global(cx), viewer_user_id(cx));
                 self.set_channel(channel_id, messages);
                 self.schedule_presign_expiry(cx);
+                if is_current && self.messages().is_empty() {
+                    self.mark_empty_channel_seen(channel_id, cx);
+                }
                 if is_current {
                     let count = self.messages().len();
                     cx.emit(MessagesEvent::Reset { count });
