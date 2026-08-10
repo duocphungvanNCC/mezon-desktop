@@ -32,10 +32,10 @@ pub(crate) fn selectable_invite_text(invite: &InvitePreview, locale: &str) -> St
     )
 }
 
+const INVITE_CARD_RADIUS: f32 = 16.0;
 const INVITE_AVATAR_BOX: f32 = 72.0;
-const INVITE_AVATAR_BORDER: f32 = 4.0;
 const INVITE_AVATAR_RADIUS: f32 = 22.0;
-const INVITE_AVATAR_INNER_RADIUS: f32 = INVITE_AVATAR_RADIUS - INVITE_AVATAR_BORDER;
+const INVITE_AVATAR_INNER_RADIUS: f32 = 18.0;
 
 pub fn render_invite_card(
     invite: &InvitePreview,
@@ -89,18 +89,24 @@ pub fn render_invite_card(
         );
     }
 
+    let card_radius = px(INVITE_CARD_RADIUS);
     let mut banner = div()
         .relative()
         .w_full()
         .h(px(76.))
+        .flex_shrink_0()
+        .rounded_tl(card_radius)
+        .rounded_tr(card_radius)
         .overflow_hidden()
-        .bg(theme.tokens.theme_setting_nav);
+        .bg(theme.tokens.theme_setting_nav)
+        .image_cache(ctx.ogp_cache.clone());
     if !invite.banner_proxied.is_empty() {
         banner = banner.child(
             img(invite.banner_proxied.clone())
-                .absolute()
-                .inset_0()
-                .size_full()
+                .w_full()
+                .h_full()
+                .rounded_tl(card_radius)
+                .rounded_tr(card_radius)
                 .object_fit(ObjectFit::Cover),
         );
     }
@@ -253,11 +259,11 @@ pub fn render_invite_card(
     let card = div()
         .relative()
         .w_full()
+        .rounded(card_radius)
         .overflow_hidden()
-        .rounded_2xl()
+        .bg(theme.tokens.bg_item_theme_hover)
         .border_1()
         .border_color(theme.tokens.border_primary)
-        .bg(theme.tokens.bg_item_theme_hover)
         .child(banner)
         .child(
             div()
@@ -271,6 +277,7 @@ pub fn render_invite_card(
                 .border_4()
                 .border_color(theme.tokens.border_primary)
                 .bg(theme.tokens.theme_setting_primary)
+                .image_cache(ctx.avatar_cache.clone())
                 .child(avatar_inner),
         )
         .child(body);
