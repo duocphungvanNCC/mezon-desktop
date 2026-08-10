@@ -1240,15 +1240,35 @@ impl MessagesStore {
         ) {
             return;
         }
-        let badge_count = self.channel_badge_count(channel_id, clan_id, cx);
-        self.pending_last_seen = Some(PendingLastSeen {
+        let live_badge = self.channel_badge_count(channel_id, clan_id, cx);
+        let badge_count = match &self.pending_last_seen {
+            Some(p) if p.channel_id == channel_id && p.message_id == message_id => {
+                p.badge_count.max(live_badge)
+            }
+            _ => live_badge,
+        };
+        tracing::debug!(
+            target: "badge_flow",
+            clan = clan_id.get(),
+            channel = channel_id.get(),
+            message = message_id.get(),
+            badge_count,
+            "viewport seen — arming last-seen debounce"
+        );
+        let pending = PendingLastSeen {
             clan_id,
             channel_id,
             message_id,
             create_time,
             mode: self.mode,
             badge_count,
-        });
+        };
+        let already_applied =
+            self.last_read_message_by_channel.get(&channel_id) == Some(&message_id);
+        if !already_applied || live_badge > 0 {
+            self.apply_local_last_seen(&pending, cx);
+        }
+        self.pending_last_seen = Some(pending);
         self.arm_last_seen_debounce(cx);
     }
 
@@ -1328,6 +1348,14 @@ impl MessagesStore {
             return;
         }
 
+        tracing::debug!(
+            target: "badge_flow",
+            clan = pending.clan_id.get(),
+            channel = pending.channel_id.get(),
+            message = pending.message_id.get(),
+            badge_count = pending.badge_count,
+            "send_last_seen — clearing local badge and writing to server"
+        );
         self.apply_local_last_seen(&pending, cx);
         self.last_seen_fingerprint
             .insert(pending.channel_id, fingerprint);
@@ -5778,9 +5806,10 @@ fn should_write_last_seen(
     channel_tail: Option<MessageId>,
     viewport_id: MessageId,
 ) -> bool {
-    if let Some(seen) = last_seen_id
-        && snowflake_seq(viewport_id) >= snowflake_seq(seen)
-    {
+    let Some(seen) = last_seen_id else {
+        return true;
+    };
+    if snowflake_seq(viewport_id) >= snowflake_seq(seen) {
         return true;
     }
     channel_tail == Some(viewport_id)
@@ -9798,6 +9827,13 @@ mod tests {
         assert!(should_write_last_seen(Some(seen), Some(tail), newer));
         assert!(should_write_last_seen(Some(seen), Some(tail), tail));
         assert!(!should_write_last_seen(Some(newer), Some(tail), seen));
+        assert!(
+            should_write_last_seen(None, Some(tail), newer),
+            "a first-ever visit (no known last-seen, e.g. an unopened thread whose seed rows \
+             carry zeros) counts what the viewer is looking at as seen — otherwise a stale \
+             channel tail starves the gate and the badge never clears"
+        );
+        assert!(should_write_last_seen(None, None, newer));
     }
 
     fn topic_proto(

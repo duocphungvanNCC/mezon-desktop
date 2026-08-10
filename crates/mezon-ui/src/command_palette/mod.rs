@@ -351,7 +351,6 @@ impl CommandPaletteModal {
                 ChannelList::global(cx).update(cx, |store, cx| {
                     store.record_previous_channel(clan_id, channel_id, cx);
                     store.reset_user_channel_unread(channel_id, cx);
-                    store.apply_read(clan_id, channel_id, cx);
                 });
                 navigate(
                     cx,
@@ -373,9 +372,6 @@ impl CommandPaletteModal {
                 ChannelList::global(cx).update(cx, |store, cx| {
                     store.record_previous_channel(ClanId(0), direct_id, cx);
                 });
-                DirectMessageStore::global(cx).update(cx, |store, cx| {
-                    store.note_read(direct_id, cx);
-                });
                 navigate(
                     cx,
                     Route::DirectMessage {
@@ -395,9 +391,6 @@ impl CommandPaletteModal {
                 if let Some((direct_id, channel_type)) = find_dm_for_user(user_id, cx) {
                     ChannelList::global(cx).update(cx, |store, cx| {
                         store.record_previous_channel(ClanId(0), direct_id, cx);
-                    });
-                    DirectMessageStore::global(cx).update(cx, |store, cx| {
-                        store.note_read(direct_id, cx);
                     });
                     navigate(
                         cx,
