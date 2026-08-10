@@ -81,6 +81,13 @@ pub fn hide_main_window(window: &mut Window, cx: &App) -> bool {
 
 pub fn configure_window<V: 'static>(cx: &mut App, handle: WindowHandle<V>) {
     if let Err(error) = cx.update_window(handle.into(), |_, window, cx| {
+        #[cfg(target_os = "linux")]
+        window.on_window_should_close(cx, |_, cx| {
+            cx.quit();
+            false
+        });
+
+        #[cfg(not(target_os = "linux"))]
         window.on_window_should_close(cx, |window, cx| !hide_main_window(window, cx));
 
         #[cfg(target_os = "macos")]

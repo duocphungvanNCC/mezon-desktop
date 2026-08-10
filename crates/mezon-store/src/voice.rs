@@ -6,7 +6,7 @@ use std::sync::{
 };
 use std::time::{Duration, Instant};
 
-use gpui::{App, AppContext, Context, Entity, Global, RenderImage, Task, Window};
+use gpui::{App, AppContext, Context, Entity, Global, RenderImage, Subscription, Task, Window};
 use mezon_audio::{AudioPlayer, DecodedPcm};
 use mezon_client::{AppApi, RealtimeEvent};
 use mezon_voice::{IceServerConfig, VoiceEvent, VoiceSession};
@@ -207,6 +207,7 @@ pub struct VoiceStore {
     _events_task: Option<Task<()>>,
     _reconnect_watch_task: Option<Task<()>>,
     _link_copied_reset: Option<Task<()>>,
+    _app_quit_subscription: Subscription,
 }
 
 #[derive(Clone)]
@@ -319,6 +320,11 @@ impl VoiceStore {
 
     fn new(api: Arc<AppApi>, cx: &mut Context<Self>) -> Self {
         Self::register_realtime(cx);
+        let app_quit_subscription = cx.on_app_quit(|this, cx| {
+            tracing::info!("tearing down voice session before app quit");
+            this.teardown(None, cx);
+            async {}
+        });
         Self {
             api,
             connection: VoiceConnection::Idle,
@@ -378,6 +384,7 @@ impl VoiceStore {
             _events_task: None,
             _reconnect_watch_task: None,
             _link_copied_reset: None,
+            _app_quit_subscription: app_quit_subscription,
         }
     }
 
