@@ -891,6 +891,10 @@ fn normalize(value: &str) -> String {
         .nfkd()
         .filter(|ch| !is_combining_mark(*ch))
         .flat_map(char::to_lowercase)
+        .map(|character| match character {
+            '\u{0111}' => 'd',
+            _ => character,
+        })
         .collect()
 }
 
