@@ -868,11 +868,12 @@ impl AppApi {
         hashtags: Vec<crate::transport::OutgoingHashtag>,
         emojis: Vec<crate::transport::OutgoingEmoji>,
         reply: Option<crate::transport::OutgoingReply>,
+        flags: crate::transport::OutgoingMessageFlags,
     ) -> Result<ApiMessage> {
         self.transport
             .send_topic_message(
                 clan_id, channel_id, content, is_public, mode, topic_id, mentions, hashtags,
-                emojis, reply,
+                emojis, reply, flags,
             )
             .await
     }
@@ -887,6 +888,7 @@ impl AppApi {
         topic_id: i64,
         attachments: Vec<UrlAttachment>,
         reply: Option<crate::transport::OutgoingReply>,
+        flags: crate::transport::OutgoingMessageFlags,
     ) -> Result<ApiMessage> {
         let proto: Vec<mezon_proto::api::MessageAttachment> = attachments
             .iter()
@@ -929,6 +931,7 @@ impl AppApi {
                 Vec::new(),
                 None,
                 reply,
+                flags,
             )
             .await?;
         sent.attachments = echo;
@@ -949,11 +952,12 @@ impl AppApi {
         hashtags: Vec<crate::transport::OutgoingHashtag>,
         emojis: Vec<crate::transport::OutgoingEmoji>,
         ogp: Option<crate::transport::OutgoingOgp>,
+        flags: crate::transport::OutgoingMessageFlags,
     ) -> Result<ApiMessage> {
         self.transport
             .send_channel_message_reply(
                 clan_id, channel_id, content, is_public, mode, reply, mentions, hashtags, emojis,
-                ogp,
+                ogp, flags,
             )
             .await
     }
@@ -1021,6 +1025,8 @@ impl AppApi {
         mentions: Vec<crate::transport::OutgoingMention>,
         hashtags: Vec<crate::transport::OutgoingHashtag>,
         emojis: Vec<crate::transport::OutgoingEmoji>,
+        attachments: Vec<mezon_proto::api::MessageAttachment>,
+        reply: Option<crate::transport::OutgoingReply>,
     ) -> Result<()> {
         self.transport
             .write_ephemeral_message(
@@ -1033,6 +1039,8 @@ impl AppApi {
                 mentions,
                 hashtags,
                 emojis,
+                attachments,
+                reply,
             )
             .await
     }
@@ -1664,6 +1672,7 @@ impl AppApi {
                 Vec::new(),
                 Vec::new(),
                 None,
+                crate::transport::OutgoingMessageFlags::default(),
             )
             .await
     }
@@ -1747,6 +1756,20 @@ impl AppApi {
         })
     }
 
+    /// Upload every presigned attachment and wait for all of them. Used by the
+    /// send paths that have no message id to patch afterwards (ephemeral), so the
+    /// bytes must be in place before the message goes out.
+    pub async fn upload_presigned_all(&self, presigned: Vec<PresignedAttachment>) -> Result<()> {
+        use futures::StreamExt as _;
+        futures::stream::iter(presigned.into_iter().map(|item| self.execute_upload(item)))
+            .buffered(ATTACHMENT_UPLOAD_CONCURRENCY)
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<Result<Vec<_>>>()?;
+        Ok(())
+    }
+
     pub async fn execute_upload(&self, presigned: PresignedAttachment) -> Result<()> {
         match presigned.plan {
             UploadPlan::Single { put_url, path } => {
@@ -1822,6 +1845,7 @@ impl AppApi {
         hashtags: Vec<crate::transport::OutgoingHashtag>,
         emojis: Vec<crate::transport::OutgoingEmoji>,
         presign_finish: Vec<String>,
+        flags: crate::transport::OutgoingMessageFlags,
     ) -> Result<ApiMessage> {
         let echo: Vec<crate::transport::ApiAttachment> = attachments
             .iter()
@@ -1850,6 +1874,7 @@ impl AppApi {
                 hashtags,
                 emojis,
                 Some(presign_finish),
+                flags,
             )
             .await?;
         sent.attachments = echo;
@@ -1871,6 +1896,7 @@ impl AppApi {
         emojis: Vec<crate::transport::OutgoingEmoji>,
         presign_finish: Vec<String>,
         reply: Option<crate::transport::OutgoingReply>,
+        flags: crate::transport::OutgoingMessageFlags,
     ) -> Result<ApiMessage> {
         let echo: Vec<crate::transport::ApiAttachment> = attachments
             .iter()
@@ -1900,6 +1926,7 @@ impl AppApi {
                 emojis,
                 Some(presign_finish),
                 reply,
+                flags,
             )
             .await?;
         sent.attachments = echo;
@@ -2047,6 +2074,7 @@ impl AppApi {
         is_public: bool,
         mode: i32,
         attachments: Vec<UrlAttachment>,
+        flags: crate::transport::OutgoingMessageFlags,
     ) -> Result<ApiMessage> {
         let proto: Vec<mezon_proto::api::MessageAttachment> = attachments
             .iter()
@@ -2088,6 +2116,7 @@ impl AppApi {
                 Vec::new(),
                 Vec::new(),
                 None,
+                flags,
             )
             .await?;
         sent.attachments = echo;

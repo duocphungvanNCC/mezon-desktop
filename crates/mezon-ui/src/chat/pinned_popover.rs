@@ -15,7 +15,8 @@ use ui::{PopoverMenuHandle, ScrollAxes, Scrollbars, WithScrollbar};
 
 use crate::chat::file_type_icon::file_type_icon_for;
 use crate::chat::message::parts::{
-    effective_clan_id, resolve_pin_avatar_url, resolve_pin_sender_label_with_message,
+    effective_clan_id, is_anonymous_sender, resolve_pin_avatar_url,
+    resolve_pin_sender_label_with_message,
 };
 use crate::chat::message::{
     ConfirmUnpinMessageModal, heading_line_height, heading_size, pin_link_element,
@@ -49,6 +50,7 @@ struct PinCardVm {
     message_id: SharedString,
     create_time: i64,
     sender_label: SharedString,
+    is_anonymous: bool,
     avatar_src: Option<SharedString>,
     avatar_fallback: Option<SharedString>,
     pin: Arc<PinnedMessage>,
@@ -76,6 +78,7 @@ impl PinCardVm {
             message_id: msg.message_id.clone().into(),
             create_time: msg.create_time,
             sender_label,
+            is_anonymous: is_anonymous_sender(&msg.sender_id, cx),
             avatar_src,
             avatar_fallback,
             pin: Arc::new(msg.clone()),
@@ -221,6 +224,7 @@ impl PinnedPopoverPanel {
                 channel_id,
                 cx,
             );
+            vm.is_anonymous = is_anonymous_sender(&pin.sender_id, cx);
             (vm.avatar_src, vm.avatar_fallback) =
                 resolve_pin_avatar_urls(pin, clan_id, channel_id, cx);
         }
@@ -500,12 +504,15 @@ fn pin_card(
     let mut avatar = Avatar::new()
         .name(&sender_label)
         .with_size(Size::Small)
+        .anonymous(vm.is_anonymous)
         .image_cache(avatar_cache.clone());
-    if let Some(src) = &avatar_src {
-        avatar = avatar.src(src.clone());
-    }
-    if let Some(fallback) = &avatar_fallback {
-        avatar = avatar.fallback_src(fallback.clone());
+    if !vm.is_anonymous {
+        if let Some(src) = &avatar_src {
+            avatar = avatar.src(src.clone());
+        }
+        if let Some(fallback) = &avatar_fallback {
+            avatar = avatar.fallback_src(fallback.clone());
+        }
     }
 
     let name_row = h_flex()

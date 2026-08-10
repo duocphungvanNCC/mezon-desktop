@@ -136,6 +136,14 @@ fn open_message_buzz(window: &mut Window, cx: &mut App) {
     let locale = Settings::try_global(cx)
         .map(|settings| SharedString::from(settings.read(cx).language.clone()))
         .unwrap_or_else(|| SharedString::from("en"));
+    // The backend splits an anonymous buzz into a buzz under the real sender plus an
+    // anonymous copy, so the identity leaks. Blocked here until that is fixed.
+    if MessagesStore::global(cx).read(cx).is_anonymous_mode() {
+        let message =
+            SharedString::from(mezon_i18n::t(&locale, "common.cannotSendBuzzWithAnonymous"));
+        Shell::global(cx).update(cx, |shell, cx| shell.info(message, cx));
+        return;
+    }
     MessageBuzzModal::open(locale, window, cx);
 }
 

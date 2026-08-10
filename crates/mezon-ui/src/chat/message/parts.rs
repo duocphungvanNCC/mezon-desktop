@@ -31,6 +31,7 @@ use crate::components::primitives::{Avatar, Icon, IconName, Sizable, Size, Spinn
 use crate::theme::Theme;
 
 const DELETED_REPLY_PREVIEW: &str = "Original message was deleted";
+const ANONYMOUS_SENDER_NAME: &str = "Anonymous";
 const FILE_NAME_COLOR: u32 = 0x3b_82_f6;
 
 pub fn effective_clan_id(clan_id: Option<ClanId>, cx: &App) -> Option<ClanId> {
@@ -52,7 +53,7 @@ pub fn resolve_pin_sender_label_with_message(
         && !config.anonymous_user_id.is_empty()
         && sender_id == config.anonymous_user_id
     {
-        return SharedString::from("Anonymous");
+        return SharedString::from(ANONYMOUS_SENDER_NAME);
     }
 
     let clan_id = effective_clan_id(clan_id, cx);
@@ -270,13 +271,13 @@ pub fn resolve_message_display_name(msg: &Message, ctx: &RowCtx, cx: &App) -> Sh
     msg.sender_name.clone()
 }
 
-fn is_anonymous_sender(sender_id: &str, cx: &App) -> bool {
+pub(crate) fn is_anonymous_sender(sender_id: &str, cx: &App) -> bool {
     AppConfig::try_global(cx)
         .map(|config| !config.anonymous_user_id.is_empty() && sender_id == config.anonymous_user_id)
         .unwrap_or(false)
 }
 
-fn is_anonymous_user_id(user_id: UserId, cx: &App) -> bool {
+pub(crate) fn is_anonymous_user_id(user_id: UserId, cx: &App) -> bool {
     AppConfig::try_global(cx)
         .and_then(|config| config.anonymous_user_id.parse::<i64>().ok())
         .is_some_and(|anonymous| anonymous == user_id.get())
@@ -311,9 +312,13 @@ fn resolve_reference_identity(
 ) -> (SharedString, SharedString) {
     let baked_name = || SharedString::from(reference.sender_name.clone());
     let baked_avatar = || SharedString::from(reference.sender_avatar.clone());
-    let clan_id = role_scope(ctx.profile_context)
-        .filter(|_| !reference.sender_id.is_zero())
-        .filter(|_| !is_anonymous_user_id(reference.sender_id, cx));
+    if is_anonymous_user_id(reference.sender_id, cx) {
+        return (
+            SharedString::from(ANONYMOUS_SENDER_NAME),
+            SharedString::default(),
+        );
+    }
+    let clan_id = role_scope(ctx.profile_context).filter(|_| !reference.sender_id.is_zero());
     let Some(clan_id) = clan_id else {
         return (baked_name(), baked_avatar());
     };
@@ -464,6 +469,9 @@ fn profile_name_trigger(msg: &Message, ctx: &RowCtx, name: gpui::Div) -> AnyElem
     let (Some(profile_ctx), Some(user_id)) = (ctx.profile_context, msg.sender_user_id) else {
         return name.into_any_element();
     };
+    if is_anonymous_user_id(user_id, ctx.app) {
+        return name.into_any_element();
+    }
     let key = user_id.get() as usize;
     profile_popover_trigger(
         ("msg-head-trigger", key),
@@ -521,7 +529,14 @@ pub fn render_reply(reference: &MessageReference, ctx: &RowCtx) -> AnyElement {
     let has_attachment_ref = reference.has_attachment || reference.has_embed;
     let is_deleted = reference.content == DELETED_REPLY_PREVIEW;
     let (sender_name, sender_avatar) = resolve_reference_identity(reference, ctx, ctx.app);
-    let avatar = if sender_avatar.is_empty() {
+    let is_anonymous = is_anonymous_user_id(reference.sender_id, ctx.app);
+    let avatar = if is_anonymous {
+        Avatar::new()
+            .name(sender_name.clone())
+            .size_px(px(20.))
+            .anonymous(true)
+            .image_cache(ctx.avatar_cache.clone())
+    } else if sender_avatar.is_empty() {
         Avatar::new()
             .name(sender_name.clone())
             .size_px(px(20.))
@@ -621,7 +636,7 @@ fn reply_avatar_trigger(
     let Some(profile_ctx) = ctx.profile_context else {
         return avatar;
     };
-    if reference.sender_id.is_zero() {
+    if reference.sender_id.is_zero() || is_anonymous_user_id(reference.sender_id, ctx.app) {
         return avatar;
     }
     let user_id = reference.sender_id;

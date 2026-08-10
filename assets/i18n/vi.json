@@ -1687,6 +1687,7 @@
   "common.cannotFetchClans": "Không thể tải danh sách clan, vui lòng thử lại sau",
   "common.cannotJoinClan": "Không thể tham gia clan",
   "common.cannotSendLocationWithAnonymous": "Không thể gửi vị trí khi đang ẩn danh.",
+  "common.cannotSendBuzzWithAnonymous": "Không thể gửi buzz khi đang ẩn danh.",
   "common.canvas.deleteMessage": "Canvas này sẽ bị xóa vĩnh viễn. Hành động này không thể hoàn tác.",
   "common.canvas.error": "Lỗi",
   "common.canvas.failedToRefresh": "Không thể làm mới dữ liệu canvas",
