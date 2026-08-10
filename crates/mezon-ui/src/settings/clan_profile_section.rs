@@ -1,5 +1,6 @@
 use std::time::Duration;
 
+use crate::components::compositions::CustomStatusBubble;
 use crate::components::primitives::{
     Avatar, Button as GpuiButton, ButtonVariants, Dropdown, DropdownTriggerStyle, Icon, Input,
     InputEvent, InputState, Label, h_flex, v_flex,
@@ -46,6 +47,7 @@ pub struct ClanProfileSection {
     banner_color: Option<Rgba>,
     banner_source: String,
     banner_task: Option<Task<()>>,
+    custom_status_bubble: Entity<CustomStatusBubble>,
 }
 
 impl ClanProfileSection {
@@ -176,6 +178,7 @@ impl ClanProfileSection {
             banner_color: None,
             banner_source: String::new(),
             banner_task: None,
+            custom_status_bubble: cx.new(|_| CustomStatusBubble::new()),
         };
         this.refresh_banner_color(cx);
         this
@@ -398,6 +401,17 @@ impl Render for ClanProfileSection {
             .map(|url| SharedString::from(crate::util::imgproxy::profile_url(cx, url.as_ref())));
 
         let duplicate_error = self.profile.as_ref().is_some_and(|s| s.duplicate_error);
+        let custom_status_bubble = self.custom_status_bubble.clone();
+        custom_status_bubble.update(cx, |bubble, cx| {
+            bubble.set_content(
+                self.custom_status.clone(),
+                px(214.),
+                theme.tokens.bg_secondary,
+                theme.border,
+                theme.text_secondary,
+                cx,
+            );
+        });
 
         let form = self.render_clan_form(
             &theme,
@@ -409,7 +423,7 @@ impl Render for ClanProfileSection {
             duplicate_error,
             cx,
         );
-        let preview = Self::render_clan_preview(
+        let preview = self.render_clan_preview(
             &theme,
             &locale,
             &nick_name,
@@ -669,6 +683,7 @@ impl ClanProfileSection {
     }
 
     fn render_clan_preview(
+        &self,
         theme: &Theme,
         locale: &str,
         nick_name: &SharedString,
@@ -702,7 +717,7 @@ impl ClanProfileSection {
             .child(
                 div()
                     .relative()
-                    .h(px(330.))
+                    .h(px(320.))
                     .w_full()
                     .rounded_lg()
                     .overflow_hidden()
@@ -722,22 +737,32 @@ impl ClanProfileSection {
                             .absolute()
                             .left(px(20.))
                             .right(px(20.))
-                            .bottom(px(48.))
+                            .bottom(px(20.))
                             .p_4()
                             .rounded_lg()
                             .border_1()
                             .border_color(theme.border)
                             .bg(theme.bg_primary)
                             .child(
-                                Label::new(display_label.clone())
-                                    .text_xl()
-                                    .font_weight(FontWeight::BOLD)
-                                    .text_color(theme.text_secondary),
-                            )
-                            .child(
-                                Label::new(username.clone())
-                                    .text_sm()
-                                    .text_color(theme.text_muted),
+                                v_flex()
+                                    .w(px(300.))
+                                    .max_w_full()
+                                    .min_w_0()
+                                    .child(
+                                        Label::new(display_label.clone())
+                                            .w_full()
+                                            .truncate()
+                                            .text_xl()
+                                            .font_weight(FontWeight::BOLD)
+                                            .text_color(theme.text_secondary),
+                                    )
+                                    .child(
+                                        Label::new(username.clone())
+                                            .w_full()
+                                            .truncate()
+                                            .text_sm()
+                                            .text_color(theme.text_muted),
+                                    ),
                             ),
                     )
                     .child(
@@ -788,22 +813,21 @@ impl ClanProfileSection {
             .when(!custom_status.is_empty(), |preview| {
                 preview.child(
                     div()
+                        .id("clan-profile-preview-custom-status")
+                        .group("clan-profile-preview-custom-status")
                         .absolute()
                         .left(px(120.))
                         .top(px(168.))
-                        .max_w(px(250.))
-                        .max_h(px(64.))
-                        .px_4()
-                        .py_3()
-                        .rounded_xl()
-                        .bg(theme.tokens.bg_secondary)
-                        .border_1()
-                        .border_color(theme.border)
-                        .shadow_md()
-                        .text_sm()
-                        .text_color(theme.text_secondary)
-                        .overflow_hidden()
-                        .child(custom_status.clone()),
+                        .max_w(px(214.))
+                        .on_hover({
+                            let custom_status_bubble = self.custom_status_bubble.clone();
+                            move |hovered: &bool, _window, cx| {
+                                custom_status_bubble.update(cx, |bubble, cx| {
+                                    bubble.set_expanded(*hovered, cx);
+                                });
+                            }
+                        })
+                        .child(self.custom_status_bubble.clone()),
                 )
             })
     }
