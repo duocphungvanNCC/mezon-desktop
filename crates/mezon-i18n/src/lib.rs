@@ -87,6 +87,11 @@ mod tests {
     }
 
     #[test]
+    fn archived_threads_section_label() {
+        assert_eq!(t("en", "channelTopbar.archivedThreads"), "Archived Threads");
+    }
+
+    #[test]
     fn full_react_corpus_present() {
         assert_eq!(t("en", "clan.title"), "Customize Your Clan");
         assert_eq!(t("en", "channelCreator.monthsShort.0"), "JAN");

@@ -1,10 +1,11 @@
 use gpui::{
     AnyElement, App, FontWeight, ObjectFit, SharedString, div, img, prelude::*, px, rgb, rgba,
 };
-use mezon_store::{ClanId, ClanList, InvitePreview};
+use mezon_store::{AcceptInviteError, AcceptInviteResult, ClanId, ClanList, InvitePreview};
 
 use super::content::{SelectableSectionCursor, SelectableTextContext, open_message_link};
 use super::context::RowCtx;
+use crate::app::shell::Shell;
 use crate::components::primitives::{Icon, IconName};
 use crate::router::{Route, navigate};
 
@@ -31,10 +32,10 @@ pub(crate) fn selectable_invite_text(invite: &InvitePreview, locale: &str) -> St
     )
 }
 
+const INVITE_CARD_RADIUS: f32 = 16.0;
 const INVITE_AVATAR_BOX: f32 = 72.0;
-const INVITE_AVATAR_BORDER: f32 = 4.0;
 const INVITE_AVATAR_RADIUS: f32 = 22.0;
-const INVITE_AVATAR_INNER_RADIUS: f32 = INVITE_AVATAR_RADIUS - INVITE_AVATAR_BORDER;
+const INVITE_AVATAR_INNER_RADIUS: f32 = 18.0;
 
 pub fn render_invite_card(
     invite: &InvitePreview,
@@ -59,8 +60,12 @@ pub fn render_invite_card(
         .map(|c| c.to_uppercase().to_string())
         .unwrap_or_else(|| "M".to_string())
         .into();
-    let joined_clan = joined_clan_id(invite, ctx.app);
+    let clan_list = ClanList::global(ctx.app);
+    let clans = clan_list.read(ctx.app);
+    let joined_clan = joined_clan_id(invite, clans);
     let is_joined = joined_clan.is_some();
+    let joining = clans.is_joining_invite(&invite.url);
+    let join_failed = clans.has_invite_join_error(&invite.url);
 
     let mut avatar_inner = div().size_full();
     if invite.image_proxied.is_empty() {
@@ -84,18 +89,24 @@ pub fn render_invite_card(
         );
     }
 
+    let card_radius = px(INVITE_CARD_RADIUS);
     let mut banner = div()
         .relative()
         .w_full()
         .h(px(76.))
+        .flex_shrink_0()
+        .rounded_tl(card_radius)
+        .rounded_tr(card_radius)
         .overflow_hidden()
-        .bg(theme.tokens.theme_setting_nav);
+        .bg(theme.tokens.theme_setting_nav)
+        .image_cache(ctx.ogp_cache.clone());
     if !invite.banner_proxied.is_empty() {
         banner = banner.child(
             img(invite.banner_proxied.clone())
-                .absolute()
-                .inset_0()
-                .size_full()
+                .w_full()
+                .h_full()
+                .rounded_tl(card_radius)
+                .rounded_tr(card_radius)
                 .object_fit(ObjectFit::Cover),
         );
     }
@@ -189,14 +200,19 @@ pub fn render_invite_card(
         .child(title_row)
         .child(member_row);
 
-    let button_label = if is_joined {
+    let button_label = if joining {
+        mezon_i18n::t(ctx.locale, "linkMessageInvite.joining")
+    } else if is_joined {
         mezon_i18n::t(ctx.locale, "linkMessageInvite.goToClan")
     } else {
         mezon_i18n::t(ctx.locale, "linkMessageInvite.join")
     };
     let join_url = invite.url.clone();
     let join_selection = ctx.selection.clone();
-    let button = div()
+    let failed_to_join =
+        SharedString::from(mezon_i18n::t(ctx.locale, "linkMessageInvite.failedToJoin"));
+    let failed_to_join_for_click = failed_to_join.clone();
+    let mut button = div()
         .id(SharedString::from(format!("invite-join-{}", invite.url)))
         .mt_4()
         .w_full()
@@ -207,32 +223,47 @@ pub fn render_invite_card(
         .rounded_lg()
         .cursor_pointer()
         .bg(rgb(JOIN_GREEN))
-        .hover(|s| s.bg(rgb(JOIN_GREEN_HOVER)))
         .text_size(px(16.))
         .font_weight(FontWeight::SEMIBOLD)
-        .text_color(rgb(WHITE))
-        .on_click(move |_, _, cx| {
-            if !join_selection.borrow().has_selection() {
-                handle_join_or_goto(joined_clan, &join_url, cx);
-            }
-        })
-        .child(button_label);
+        .text_color(rgb(WHITE));
+    if joining {
+        button = button.opacity(0.6).cursor_default();
+    } else {
+        button = button
+            .hover(|s| s.bg(rgb(JOIN_GREEN_HOVER)))
+            .on_click(move |_, _, cx| {
+                if !join_selection.borrow().has_selection() {
+                    handle_join_or_goto(
+                        joined_clan,
+                        &join_url,
+                        failed_to_join_for_click.clone(),
+                        cx,
+                    );
+                }
+            });
+    }
+    let button = button.child(button_label);
 
-    let body = div()
-        .px_4()
-        .pb_4()
-        .pt_10()
-        .child(header_block)
-        .child(button);
+    let mut body = div().px_4().pb_4().pt_10().child(header_block);
+    if join_failed {
+        body = body.child(
+            div()
+                .mt_2()
+                .text_size(px(12.))
+                .text_color(rgb(ERROR_TEXT))
+                .child(failed_to_join),
+        );
+    }
+    let body = body.child(button);
 
     let card = div()
         .relative()
         .w_full()
+        .rounded(card_radius)
         .overflow_hidden()
-        .rounded_2xl()
+        .bg(theme.tokens.bg_item_theme_hover)
         .border_1()
         .border_color(theme.tokens.border_primary)
-        .bg(theme.tokens.bg_item_theme_hover)
         .child(banner)
         .child(
             div()
@@ -246,6 +277,7 @@ pub fn render_invite_card(
                 .border_4()
                 .border_color(theme.tokens.border_primary)
                 .bg(theme.tokens.theme_setting_primary)
+                .image_cache(ctx.avatar_cache.clone())
                 .child(avatar_inner),
         )
         .child(body);
@@ -297,24 +329,75 @@ fn render_invalid_invite(
         .into_any_element()
 }
 
-fn joined_clan_id(invite: &InvitePreview, cx: &App) -> Option<ClanId> {
+fn joined_clan_id(invite: &InvitePreview, clans: &ClanList) -> Option<ClanId> {
     let clan_id = invite
         .clan_id
         .as_deref()
         .and_then(|raw| raw.parse::<i64>().ok())
         .map(ClanId)
         .filter(|id| !id.is_zero())?;
-    ClanList::global(cx).read(cx).clan(clan_id).map(|_| clan_id)
+    clans.clan(clan_id).map(|_| clan_id)
 }
 
-fn handle_join_or_goto(joined_clan: Option<ClanId>, url: &str, cx: &mut App) {
+fn handle_join_or_goto(
+    joined_clan: Option<ClanId>,
+    url: &str,
+    failed_to_join: SharedString,
+    cx: &mut App,
+) {
     match joined_clan {
         Some(clan_id) => {
             ClanList::global(cx).update(cx, |list, cx| list.select_clan(clan_id, cx));
             navigate(cx, Route::Chat);
         }
-        None => open_message_link(url.to_string(), cx),
+        None => accept_invite_link(url, failed_to_join, cx),
     }
+}
+
+fn accept_invite_link(url: &str, failed_to_join: SharedString, cx: &mut App) {
+    let Some(store) = ClanList::try_global(cx) else {
+        return;
+    };
+    let task = store.update(cx, |store, cx| {
+        store.accept_invite_link(url.to_string(), cx)
+    });
+    cx.spawn(async move |cx| match task.await {
+        Ok(accept) => {
+            cx.update(|cx| navigate_after_invite_accept(accept, cx));
+        }
+        Err(AcceptInviteError::AlreadyJoining) => {}
+        Err(err) => {
+            tracing::warn!("accept invite failed: {err:?}");
+            cx.update(|cx| {
+                Shell::global(cx).update(cx, |shell, cx| shell.error(failed_to_join, cx));
+            });
+        }
+    })
+    .detach();
+}
+
+fn navigate_after_invite_accept(accept: AcceptInviteResult, cx: &mut App) {
+    let channel_id = if accept.channel_id.is_zero() {
+        ClanList::global(cx)
+            .read(cx)
+            .welcome_channel_id(accept.clan_id)
+            .filter(|id| !id.is_zero())
+            .unwrap_or(accept.channel_id)
+    } else {
+        accept.channel_id
+    };
+    if channel_id.is_zero() {
+        ClanList::global(cx).update(cx, |list, cx| list.select_clan(accept.clan_id, cx));
+        navigate(cx, Route::Chat);
+        return;
+    }
+    navigate(
+        cx,
+        Route::Channel {
+            clan_id: accept.clan_id,
+            channel_id,
+        },
+    );
 }
 
 pub(crate) fn member_count_label(locale: &str, count: i64) -> SharedString {

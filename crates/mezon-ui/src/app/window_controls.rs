@@ -1,5 +1,5 @@
 use gpui::{
-    App, Context, CursorStyle, Decorations, Div, Global, MouseButton, QuitMode, ResizeEdge, Tiling,
+    App, Context, CursorStyle, Decorations, Div, Global, MouseButton, QuitMode, ResizeEdge,
     TitlebarOptions, Window, WindowDecorations, WindowHandle, div, prelude::*, px,
 };
 
@@ -81,6 +81,13 @@ pub fn hide_main_window(window: &mut Window, cx: &App) -> bool {
 
 pub fn configure_window<V: 'static>(cx: &mut App, handle: WindowHandle<V>) {
     if let Err(error) = cx.update_window(handle.into(), |_, window, cx| {
+        #[cfg(target_os = "linux")]
+        window.on_window_should_close(cx, |_, cx| {
+            cx.quit();
+            false
+        });
+
+        #[cfg(not(target_os = "linux"))]
         window.on_window_should_close(cx, |window, cx| !hide_main_window(window, cx));
 
         #[cfg(target_os = "macos")]
@@ -140,18 +147,14 @@ pub fn is_edge_resizable() -> bool {
 }
 
 pub fn render_resize_edges(window: &mut Window) -> impl IntoElement {
-    if !is_edge_resizable() || window.is_maximized() {
+    let Decorations::Client { tiling } = window.window_decorations() else {
         return div().id("window-resize-edges-disabled");
-    }
-
-    let decorations = window.window_decorations();
-    let tiling = match decorations {
-        Decorations::Client { tiling } => tiling,
-        Decorations::Server => Tiling::default(),
     };
 
-    if matches!(decorations, Decorations::Client { .. }) {
-        window.set_client_inset(px(RESIZE_BORDER_SIZE));
+    window.set_client_inset(px(RESIZE_BORDER_SIZE));
+
+    if !is_edge_resizable() || window.is_maximized() || window.is_fullscreen() {
+        return div().id("window-resize-edges-disabled");
     }
 
     let border = px(RESIZE_BORDER_SIZE);

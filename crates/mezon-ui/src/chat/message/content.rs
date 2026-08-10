@@ -136,10 +136,6 @@ fn render_message_content_with_options(
 
     let needs_chip_path = spans_need_chip_path(&msg.spans);
 
-    if is_link_only(&msg.spans) && !msg.is_edited && !needs_chip_path {
-        return render_link_only_spans(msg, ctx, theme, selection_context);
-    }
-
     let has_code_block = msg
         .spans
         .iter()
@@ -148,7 +144,11 @@ fn render_message_content_with_options(
         .spans
         .iter()
         .any(|s| matches!(s, MessageSpan::Emoji { emoji_id, .. } if !emoji_id.is_empty()));
-    if !options.inline && !msg.is_edited && !has_code_block && !has_custom_emoji && !needs_chip_path
+    if !options.inline
+        && !has_code_block
+        && !has_custom_emoji
+        && !needs_chip_path
+        && msg.rich_layout.is_some()
     {
         return render_rich_styled(msg, ctx, body_color);
     }
@@ -159,10 +159,13 @@ fn render_message_content_with_options(
         px(EMOJI_SIZE)
     };
     if !options.inline
-        && !msg.is_edited
         && let Some(inline) = build_inline_content(msg, ctx, body_color)
     {
-        return inline;
+        let mut row = rich_content_row(body_color, false).child(inline);
+        if msg.is_edited {
+            row = row.child(edited_marker(theme, ctx.locale));
+        }
+        return row.into_any_element();
     }
     if !options.inline {
         return render_selectable_segmented_content(
@@ -174,6 +177,7 @@ fn render_message_content_with_options(
         );
     }
     let mut row = rich_content_row(body_color, options.inline);
+    let mut link_key = 0usize;
     match msg
         .rich_layout
         .as_deref()
@@ -190,13 +194,14 @@ fn render_message_content_with_options(
                         ctx,
                         body_color,
                         emoji_size,
+                        &mut link_key,
                     ),
                 };
             }
         }
         None => {
             for span in &msg.spans {
-                row = append_span(row, span, ctx, body_color, emoji_size);
+                row = append_span(row, span, ctx, body_color, emoji_size, &mut link_key);
             }
         }
     }
@@ -301,11 +306,6 @@ pub(crate) fn rich_run_highlight(kind: RichRunKind, palette: &RichRunPalette) ->
         },
         RichRunKind::Link => HighlightStyle {
             color: Some(palette.link),
-            underline: Some(UnderlineStyle {
-                thickness: px(1.),
-                color: Some(palette.link),
-                wavy: false,
-            }),
             ..Default::default()
         },
         RichRunKind::Mention | RichRunKind::Hashtag => HighlightStyle {
@@ -319,6 +319,46 @@ pub(crate) fn rich_run_highlight(kind: RichRunKind, palette: &RichRunPalette) ->
             ..Default::default()
         },
     }
+}
+
+pub(crate) fn rich_run_highlight_with_link_underline(
+    kind: RichRunKind,
+    palette: &RichRunPalette,
+) -> HighlightStyle {
+    let mut style = rich_run_highlight(kind, palette);
+    if kind == RichRunKind::Link {
+        style.underline = Some(UnderlineStyle {
+            thickness: px(1.),
+            color: Some(palette.link),
+            wavy: false,
+        });
+    }
+    style
+}
+
+fn rich_highlights_with_link_hover(
+    highlights: &[(Range<usize>, HighlightStyle)],
+    hovered_link: Option<&Range<usize>>,
+    link_color: Hsla,
+) -> Vec<(Range<usize>, HighlightStyle)> {
+    let Some(hovered_link) = hovered_link else {
+        return highlights.to_vec();
+    };
+    highlights
+        .iter()
+        .map(|(range, style)| {
+            if range.start >= hovered_link.end || range.end <= hovered_link.start {
+                return (range.clone(), *style);
+            }
+            let mut merged = *style;
+            merged.underline = Some(UnderlineStyle {
+                thickness: px(1.),
+                color: Some(style.color.unwrap_or(link_color)),
+                wavy: false,
+            });
+            (range.clone(), merged)
+        })
+        .collect()
 }
 
 fn render_rich_styled(msg: &Message, ctx: &RowCtx, body_color: gpui::Rgba) -> AnyElement {
@@ -370,9 +410,24 @@ fn render_rich_styled(msg: &Message, ctx: &RowCtx, body_color: gpui::Rgba) -> An
     };
 
     let selection_range = ctx.selection.borrow().range_for_message(msg.id, &plan.text);
+    let hovered_link = ctx
+        .row_memo
+        .borrow()
+        .hovered_rich_link
+        .as_ref()
+        .filter(|(id, _)| *id == msg.id)
+        .map(|(_, range)| range.clone());
+    let highlights = hovered_link.as_ref().map(|hovered| {
+        rich_highlights_with_link_hover(&plan.highlights, Some(hovered), palette.link)
+    });
     let mut styled = if let Some(range) = selection_range {
-        let merged = merge_selection_background(&plan.highlights, range, rgba(SELECTION_BG).into());
+        let base = highlights
+            .as_ref()
+            .map_or(plan.highlights.as_ref(), |h| h.as_slice());
+        let merged = merge_selection_background(base, range, rgba(SELECTION_BG).into());
         StyledText::new(plan.text.clone()).with_highlights(merged)
+    } else if let Some(highlights) = highlights {
+        StyledText::new(plan.text.clone()).with_highlights(highlights)
     } else {
         StyledText::new(plan.text.clone()).with_shared_highlights(plan.highlights.clone())
     };
@@ -391,44 +446,100 @@ fn render_rich_styled(msg: &Message, ctx: &RowCtx, body_color: gpui::Rgba) -> An
         let profile_context = ctx.profile_context;
         let settings = ctx.settings.clone();
         let host = ctx.video_host.clone();
+        let hover_host = ctx.video_host.clone();
         let avatar_cache = ctx.large_avatar_cache.clone();
         let actions = plan.actions.clone();
+        let hover_actions = plan.actions.clone();
         let locale = plan.locale.clone();
         let text_selection = ctx.selection.clone();
-        InteractiveText::new(("msg-itext", msg.row_anchor_id.0 as usize), styled)
-            .on_click_shared(plan.click_ranges.clone(), move |range_ix, window, cx| {
-                if text_selection.borrow().has_selection() {
+        let click_ranges = plan.click_ranges.clone();
+        let row_memo = ctx.row_memo.clone();
+        let message_id = msg.id;
+        let clear_row_memo = row_memo.clone();
+        let clear_hover_host = hover_host.clone();
+        let clear_message_id = message_id;
+        let hover_epoch = row_memo.borrow().rich_link_hover_epoch;
+        let itext_id = (msg.row_anchor_id.0 as u64) << 32 | u64::from(hover_epoch);
+        div()
+            .id(("msg-link-hover", msg.row_anchor_id.0 as usize))
+            .max_w_full()
+            .min_w_0()
+            .on_hover(move |hovered, _, cx| {
+                if *hovered {
                     return;
                 }
-                let Some(action) = actions.get(range_ix) else {
-                    return;
-                };
-                match action {
-                    RichClick::Link(url) => open_message_link(url.to_string(), cx),
-                    RichClick::Channel(channel_id) => {
-                        navigate_to_channel(*channel_id, locale.as_ref(), cx)
-                    }
-                    RichClick::Mention(user_id) => {
-                        let Some(context) = profile_context else {
-                            return;
-                        };
-                        let position = window.mouse_position();
-                        let popover = cx.new(|cx| {
-                            UserProfilePopover::new(
-                                *user_id,
-                                context,
-                                settings.clone(),
-                                avatar_cache.clone(),
-                                window,
-                                cx,
-                            )
-                        });
-                        let _ = host.update(cx, move |this, cx| {
-                            this.set_mention_popover(popover, position, window, cx);
-                        });
-                    }
+                let mut memo = clear_row_memo.borrow_mut();
+                if memo
+                    .hovered_rich_link
+                    .as_ref()
+                    .is_some_and(|(id, _)| *id == clear_message_id)
+                {
+                    memo.hovered_rich_link = None;
+                    memo.rich_link_hover_epoch = memo.rich_link_hover_epoch.wrapping_add(1);
+                    drop(memo);
+                    let _ = clear_hover_host.update(cx, |_, cx| cx.notify());
                 }
             })
+            .child(
+                InteractiveText::new(("msg-itext", itext_id), styled)
+                    .on_click_shared(click_ranges.clone(), move |range_ix, window, cx| {
+                        if text_selection.borrow().has_selection() {
+                            return;
+                        }
+                        let Some(action) = actions.get(range_ix) else {
+                            return;
+                        };
+                        match action {
+                            RichClick::Link(url) => open_message_link(url.to_string(), cx),
+                            RichClick::Channel(channel_id) => {
+                                navigate_to_channel(*channel_id, locale.as_ref(), cx)
+                            }
+                            RichClick::Mention(user_id) => {
+                                let Some(context) = profile_context else {
+                                    return;
+                                };
+                                let position = window.mouse_position();
+                                let popover = cx.new(|cx| {
+                                    UserProfilePopover::new(
+                                        *user_id,
+                                        context,
+                                        settings.clone(),
+                                        avatar_cache.clone(),
+                                        window,
+                                        cx,
+                                    )
+                                });
+                                let _ = host.update(cx, move |this, cx| {
+                                    this.set_mention_popover(popover, position, window, cx);
+                                });
+                            }
+                        }
+                    })
+                    .on_hover(move |index, _, _, cx| {
+                        let next = index.and_then(|offset| {
+                            click_ranges.iter().zip(hover_actions.iter()).find_map(
+                                |(range, action)| {
+                                    if !range.contains(&offset) {
+                                        return None;
+                                    }
+                                    match action {
+                                        RichClick::Link(_) | RichClick::Channel(_) => {
+                                            Some((message_id, range.clone()))
+                                        }
+                                        RichClick::Mention(_) => None,
+                                    }
+                                },
+                            )
+                        });
+                        let mut memo = row_memo.borrow_mut();
+                        if memo.hovered_rich_link == next {
+                            return;
+                        }
+                        memo.hovered_rich_link = next;
+                        drop(memo);
+                        let _ = hover_host.update(cx, |_, cx| cx.notify());
+                    }),
+            )
             .into_any_element()
     };
 
@@ -454,12 +565,13 @@ fn render_mention_only_content(
         return div().into_any_element();
     }
     let mut row = rich_content_row(body_color, inline);
+    let mut link_key = 0usize;
     for span in msg
         .spans
         .iter()
         .filter(|s| matches!(s, MessageSpan::Mention { .. }))
     {
-        row = append_span(row, span, ctx, body_color, px(EMOJI_SIZE));
+        row = append_span(row, span, ctx, body_color, px(EMOJI_SIZE), &mut link_key);
     }
     if msg.is_edited {
         row = row.child(edited_marker(ctx.theme, ctx.locale));
@@ -492,6 +604,7 @@ fn render_selectable_segmented_content(
         &canonical,
         msg.is_edited,
         selection_context,
+        false,
     )
 }
 
@@ -506,6 +619,7 @@ fn render_selectable_segmented_spans(
     canonical: &SharedString,
     show_edited: bool,
     selection_context: Option<&SelectableTextContext>,
+    block_layout: bool,
 ) -> AnyElement {
     let selected = selection_context.map_or_else(
         || ctx.selection.borrow().range_for_message(msg.id, canonical),
@@ -671,9 +785,11 @@ fn render_selectable_segmented_spans(
                         segments.push(TextSegment::text(styled.layout().clone(), start..end));
                         let selection = ctx.selection.clone();
                         let target = resolved.clone();
+                        let link_key = link_part_index;
+                        link_part_index += 1;
                         row = row.child(
                             div()
-                                .id((SharedString::from(resolved.clone()), link_part_index))
+                                .id(("msg-link", link_key))
                                 .cursor_pointer()
                                 .text_color(ctx.theme.tokens.mention_color)
                                 .on_click(move |_, _, cx| {
@@ -684,7 +800,6 @@ fn render_selectable_segmented_spans(
                                 .child(styled),
                         );
                         part_base += part.len();
-                        link_part_index += 1;
                     }
                     line_base += line.len() + 1;
                 }
@@ -692,21 +807,27 @@ fn render_selectable_segmented_spans(
             }
             MessageSpan::Link { text, url, kind } => {
                 let resolved = SharedString::from(resolve_link_url(url, text));
-                let mut url_row = div()
+                let mut url_col = div()
                     .flex()
-                    .flex_row()
-                    .flex_wrap()
-                    .items_baseline()
+                    .flex_col()
                     .min_w_0()
                     .w_full()
                     .text_size(px(14.))
                     .text_color(ctx.theme.tokens.mention_color)
                     .cursor(gpui::CursorStyle::IBeam);
                 let mut line_base = 0usize;
-                for (line_index, line) in text.split('\n').enumerate() {
-                    if line_index > 0 {
-                        url_row = url_row.child(div().w_full().h_0());
+                for line in text.split('\n') {
+                    if line.trim().is_empty() {
+                        line_base += line.len() + 1;
+                        continue;
                     }
+                    let mut url_row = div()
+                        .flex()
+                        .flex_row()
+                        .flex_wrap()
+                        .items_baseline()
+                        .min_w_0()
+                        .w_full();
                     let mut part_base = 0usize;
                     for part in split_unbreakable(line) {
                         let start = base + line_base + part_base;
@@ -722,13 +843,18 @@ fn render_selectable_segmented_spans(
                         url_row = url_row.child(styled);
                         part_base += part.len();
                     }
+                    url_col = url_col.child(if line.trim().is_empty() {
+                        empty_text_line()
+                    } else {
+                        url_row
+                    });
                     line_base += line.len() + 1;
                 }
                 row = row.child(render_social_link_card(
                     *kind,
                     &ctx.selection,
                     resolved,
-                    url_row,
+                    url_col,
                 ));
                 base += text.len();
             }
@@ -768,16 +894,16 @@ fn render_selectable_segmented_spans(
                 let end = base + text.len();
                 let styled = selectable_segment(text, base, selected.as_ref());
                 segments.push(TextSegment::text(styled.layout().clone(), base..end));
-                row = row.child(
-                    div()
-                        .w_full()
-                        .min_w_0()
-                        .my(px(4.))
-                        .text_size(heading_size(*level))
-                        .line_height(heading_line_height(*level))
-                        .font_weight(FontWeight::BOLD)
-                        .child(styled),
-                );
+                let mut heading = div()
+                    .w_full()
+                    .min_w_0()
+                    .text_size(heading_size(*level))
+                    .line_height(heading_line_height(*level))
+                    .font_weight(FontWeight::BOLD);
+                if !block_layout {
+                    heading = heading.my(px(4.));
+                }
+                row = row.child(heading.child(styled));
                 base = end;
             }
         }
@@ -814,6 +940,7 @@ pub(crate) fn render_selectable_embed_description(
         &selection_context.canonical,
         false,
         Some(selection_context),
+        true,
     )
 }
 
@@ -1249,20 +1376,6 @@ pub(crate) fn selectable_message_layout(
     }
 }
 
-fn selectable_message_body_shared(msg: &Message, locale: &str, cx: &App) -> SharedString {
-    let rich_layout_matches = msg.attachments.is_empty()
-        && msg.spans.iter().all(|span| {
-            !matches!(
-                span,
-                MessageSpan::CodeBlock { .. } | MessageSpan::Hashtag { .. }
-            )
-        });
-    if rich_layout_matches && let Some(layout) = msg.rich_layout.as_ref() {
-        return layout.text.clone();
-    }
-    selectable_message_body_text(msg, locale, cx).into()
-}
-
 pub(crate) fn selectable_message_text(
     msg: &Message,
     locale: &str,
@@ -1286,6 +1399,10 @@ pub(crate) enum CachedSelectableTextPiece {
         range: Range<usize>,
     },
     LineBreak,
+}
+
+fn empty_text_line() -> gpui::Div {
+    div().w_full().h(rems(1.375))
 }
 
 fn memoized_selectable_text_pieces(
@@ -1507,6 +1624,7 @@ fn append_span(
     ctx: &RowCtx,
     body_color: gpui::Rgba,
     emoji_size: Pixels,
+    link_key: &mut usize,
 ) -> gpui::Div {
     let theme = ctx.theme;
     match span {
@@ -1559,17 +1677,15 @@ fn append_span(
             ))
         }
         MessageSpan::Link { text, url, .. } => {
-            let resolved = SharedString::from(resolve_link_url(url, text));
-            let segments = link_to_wrap_segments(text, resolved, theme.tokens.mention_color);
-            row.child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .flex_wrap()
-                    .items_baseline()
-                    .min_w_0()
-                    .children(segments),
-            )
+            let key = *link_key;
+            *link_key += 1;
+            row.child(message_link_element(
+                text,
+                &resolve_link_url(url, text),
+                theme.tokens.mention_color,
+                ctx.selection.clone(),
+                key,
+            ))
         }
         MessageSpan::Mention {
             display,
@@ -2226,15 +2342,6 @@ fn clan_for_channel(channel_id: ChannelId, cx: &App) -> Option<ClanId> {
     })
 }
 
-fn is_link_only(spans: &[MessageSpan]) -> bool {
-    spans.iter().any(|s| matches!(s, MessageSpan::Link { .. }))
-        && spans.iter().all(|s| match s {
-            MessageSpan::Link { .. } => true,
-            MessageSpan::Text(text) => text.trim().is_empty(),
-            _ => false,
-        })
-}
-
 fn render_plain_text_spans(msg: &Message, ctx: &RowCtx, color: gpui::Rgba) -> AnyElement {
     let text: SharedString = match msg.spans.as_slice() {
         [MessageSpan::Text(t)] => t.clone(),
@@ -2273,84 +2380,6 @@ fn render_plain_text_spans(msg: &Message, ctx: &RowCtx, color: gpui::Rgba) -> An
         .line_height(rems(1.375))
         .text_color(color)
         .child(styled)
-        .into_any_element()
-}
-
-fn render_link_only_spans(
-    msg: &Message,
-    ctx: &RowCtx,
-    theme: &Theme,
-    selection_context: Option<&SelectableTextContext>,
-) -> AnyElement {
-    let link_color = theme.tokens.mention_color;
-    let text = selection_context.map_or_else(
-        || selectable_message_body_shared(msg, ctx.locale, ctx.app),
-        |context| context.canonical.clone(),
-    );
-    let selected = selection_context.map_or_else(
-        || ctx.selection.borrow().range_for_message(msg.id, &text),
-        |context| context.selected.clone(),
-    );
-    let mut col = div()
-        .flex()
-        .flex_col()
-        .w_full()
-        .min_w_0()
-        .text_base()
-        .gap_1();
-    let mut base = 0usize;
-    let mut link_index = 0usize;
-    let mut owned_segments = selection_context.is_none().then(|| {
-        ctx.selection
-            .borrow_mut()
-            .take_segment_buffer(msg.id, text.clone())
-    });
-    let mut context_segments = selection_context.map(|context| context.segments.borrow_mut());
-    let segments: &mut Vec<TextSegment> = match (&mut owned_segments, &mut context_segments) {
-        (Some(segments), None) => segments,
-        (None, Some(segments)) => segments,
-        _ => unreachable!("exactly one segment buffer is available"),
-    };
-    for span in &msg.spans {
-        match span {
-            MessageSpan::Text(text) => base += text.len(),
-            MessageSpan::Link { text, url, .. } => {
-                let resolved = resolve_link_url(url, text);
-                let mut line_base = 0usize;
-                for line in text.split('\n') {
-                    if !line.is_empty() {
-                        let styled = selectable_segment(line, base + line_base, selected.as_ref());
-                        segments.push(TextSegment::text(
-                            styled.layout().clone(),
-                            base + line_base..base + line_base + line.len(),
-                        ));
-                        col = col.child(link_block(
-                            link_index,
-                            resolved.clone(),
-                            styled,
-                            link_color,
-                            ctx.selection.clone(),
-                        ));
-                        link_index += 1;
-                    }
-                    line_base += line.len() + 1;
-                }
-                base += text.len();
-            }
-            _ => {}
-        }
-    }
-    drop(context_segments);
-    if let Some(segments) = owned_segments {
-        ctx.selection
-            .borrow_mut()
-            .store_segment_buffer(msg.id, text, segments);
-    }
-    div()
-        .w_full()
-        .min_w_0()
-        .cursor(gpui::CursorStyle::IBeam)
-        .child(col)
         .into_any_element()
 }
 
@@ -2428,7 +2457,10 @@ pub(crate) fn render_pin_rich_layout_element(layout: &RichLayout, theme: &Theme)
     let mut click_ranges: Vec<Range<usize>> = Vec::new();
     let mut actions: Vec<RichClick> = Vec::new();
     for run in layout.runs.iter() {
-        highlights.push((run.range.clone(), rich_run_highlight(run.kind, &palette)));
+        highlights.push((
+            run.range.clone(),
+            rich_run_highlight_with_link_underline(run.kind, &palette),
+        ));
         if let Some(click) = run.click.clone() {
             click_ranges.push(run.range.clone());
             actions.push(click);
@@ -2466,34 +2498,70 @@ pub(crate) fn pin_link_element(
     url: &str,
     color: gpui::Rgba,
     full_width: bool,
+    link_key: usize,
+) -> AnyElement {
+    link_element(text, url, color, full_width, true, None, link_key)
+}
+
+fn message_link_element(
+    text: &str,
+    url: &str,
+    color: gpui::Rgba,
+    selection: SharedSelection,
+    link_key: usize,
+) -> AnyElement {
+    link_element(text, url, color, false, false, Some(selection), link_key)
+}
+
+fn link_element(
+    text: &str,
+    url: &str,
+    color: gpui::Rgba,
+    full_width: bool,
+    pin_typography: bool,
+    selection: Option<SharedSelection>,
+    link_key: usize,
 ) -> AnyElement {
     let resolved = SharedString::from(resolve_link_url(url, text));
-    let group_name = SharedString::from(format!("pin-link-{resolved}"));
+    let group_name = SharedString::from(format!("msg-link-{link_key}"));
     let url_for_click = resolved.clone();
     let mut container = div()
-        .id(resolved.clone())
+        .id(("msg-link", link_key))
         .group(group_name.clone())
         .cursor_pointer()
         .text_color(color)
-        .text_sm()
-        .line_height(rems(1.25))
-        .on_click(move |_, _, cx| open_message_link(url_for_click.to_string(), cx))
+        .on_click(move |_, _, cx| {
+            if selection
+                .as_ref()
+                .is_some_and(|state| state.borrow().has_selection())
+            {
+                return;
+            }
+            open_message_link(url_for_click.to_string(), cx);
+        })
         .flex()
         .flex_row()
         .flex_wrap()
         .items_baseline()
         .min_w_0()
-        .children(pin_link_text_segments(text, group_name, color));
+        .children(hover_link_text_segments(
+            text, group_name, color, color, false,
+        ));
+    if pin_typography {
+        container = container.text_sm().line_height(rems(1.25));
+    }
     if full_width {
         container = container.w_full();
     }
     container.into_any_element()
 }
 
-fn pin_link_text_segments(
+pub(crate) fn hover_link_text_segments(
     text: &str,
     group_name: SharedString,
     color: gpui::Rgba,
+    hover_color: gpui::Rgba,
+    clickable: bool,
 ) -> Vec<AnyElement> {
     let mut out = Vec::new();
     let mut index = 0usize;
@@ -2506,22 +2574,28 @@ fn pin_link_text_segments(
         if line.chars().any(char::is_whitespace) {
             for word in line.split_whitespace() {
                 for segment in split_unbreakable(word) {
-                    out.push(pin_link_text_segment(
+                    out.push(hover_link_text_segment(
                         group_name.clone(),
                         segment,
                         color,
+                        hover_color,
                         index,
+                        true,
+                        clickable,
                     ));
                     index += 1;
                 }
             }
         } else {
             for segment in split_unbreakable(line) {
-                out.push(pin_link_text_segment(
+                out.push(hover_link_text_segment(
                     group_name.clone(),
                     segment,
                     color,
+                    hover_color,
                     index,
+                    true,
+                    clickable,
                 ));
                 index += 1;
             }
@@ -2530,50 +2604,29 @@ fn pin_link_text_segments(
     out
 }
 
-fn pin_link_text_segment(
+fn hover_link_text_segment(
     group_name: SharedString,
     display: String,
     color: gpui::Rgba,
+    hover_color: gpui::Rgba,
     index: usize,
+    hover_color_change: bool,
+    clickable: bool,
 ) -> AnyElement {
-    div()
+    let mut segment = div()
         .id((group_name.clone(), index))
         .text_color(color)
-        .group_hover(group_name, |s| s.underline())
-        .child(display)
-        .into_any_element()
-}
-
-fn link_block(
-    index: usize,
-    url: String,
-    display: StyledText,
-    color: gpui::Rgba,
-    selection: SharedSelection,
-) -> AnyElement {
-    div()
-        .id(("msg-link", index))
-        .w_full()
-        .min_w_0()
-        .cursor_pointer()
-        .text_color(color)
-        .on_click(move |_, _, cx| {
-            if !selection.borrow().has_selection() {
-                open_message_link(url.clone(), cx);
+        .group_hover(group_name, move |s| {
+            if hover_color_change {
+                s.underline().text_color(hover_color)
+            } else {
+                s.underline()
             }
-        })
-        .child(display)
-        .into_any_element()
-}
-
-fn link_segment(url: SharedString, display: String, color: gpui::Rgba, index: usize) -> AnyElement {
-    div()
-        .id((url.clone(), index))
-        .cursor_pointer()
-        .text_color(color)
-        .on_click(move |_, _, cx| open_message_link(url.to_string(), cx))
-        .child(display)
-        .into_any_element()
+        });
+    if clickable {
+        segment = segment.cursor_pointer();
+    }
+    segment.child(display).into_any_element()
 }
 
 fn text_to_words(text: &str) -> Vec<AnyElement> {
@@ -2587,32 +2640,6 @@ fn text_to_words(text: &str) -> Vec<AnyElement> {
         for word in line.split_whitespace() {
             for segment in split_unbreakable(word) {
                 out.push(segment.into_any_element());
-            }
-        }
-    }
-    out
-}
-
-fn link_to_wrap_segments(text: &str, url: SharedString, color: gpui::Rgba) -> Vec<AnyElement> {
-    let mut out: Vec<AnyElement> = Vec::new();
-    let mut index = 0usize;
-    let mut first_line = true;
-    for line in text.split('\n') {
-        if !first_line {
-            out.push(div().w_full().h_0().into_any_element());
-        }
-        first_line = false;
-        if line.chars().any(char::is_whitespace) {
-            for word in line.split_whitespace() {
-                for segment in split_unbreakable(word) {
-                    out.push(link_segment(url.clone(), segment, color, index));
-                    index += 1;
-                }
-            }
-        } else {
-            for segment in split_unbreakable(line) {
-                out.push(link_segment(url.clone(), segment, color, index));
-                index += 1;
             }
         }
     }
@@ -2666,8 +2693,9 @@ fn split_unbreakable(text: &str) -> Vec<String> {
 mod tests {
     use super::{
         RichRunPalette, RichTextRenderPlan, SelectableSectionCursor, parse_channel_id,
-        rich_run_highlight, rich_text_plan_matches, selectable_message_layout_identity,
-        selectable_text_chunks,
+        rich_highlights_with_link_hover, rich_run_highlight,
+        rich_run_highlight_with_link_underline, rich_text_plan_matches,
+        selectable_message_layout_identity, selectable_text_chunks,
     };
     use gpui::{Hsla, SharedString};
     use mezon_store::{ChannelId, Message, MessageId, MessageSpan, RichRunKind, build_rich_layout};
@@ -2740,6 +2768,33 @@ mod tests {
 
         let replacement = std::sync::Arc::new((*layout).clone());
         assert!(!rich_text_plan_matches(&plan, &replacement, colors, false));
+    }
+
+    #[test]
+    fn link_runs_do_not_paint_a_permanent_underline() {
+        let palette = test_palette();
+        let link = rich_run_highlight(RichRunKind::Link, &palette);
+        assert_eq!(link.color, Some(palette.link));
+        assert!(link.underline.is_none());
+    }
+
+    #[test]
+    fn pinned_link_runs_paint_a_permanent_underline() {
+        let palette = test_palette();
+        let link = rich_run_highlight_with_link_underline(RichRunKind::Link, &palette);
+        assert_eq!(link.color, Some(palette.link));
+        assert!(link.underline.is_some());
+    }
+
+    #[test]
+    fn hovered_rich_link_underlines_the_whole_range() {
+        let palette = test_palette();
+        let base = [(0..32, rich_run_highlight(RichRunKind::Link, &palette))];
+        let hovered = rich_highlights_with_link_hover(&base, Some(&(0..32)), palette.link);
+        assert_eq!(hovered.len(), 1);
+        assert_eq!(hovered[0].0, 0..32);
+        assert_eq!(hovered[0].1.color, Some(palette.link));
+        assert!(hovered[0].1.underline.is_some());
     }
 
     #[test]

@@ -167,7 +167,7 @@ pub use notification_push::NotificationPushStore;
 pub use notification_setting::{NotificationSettingEvent, NotificationSettingStore};
 pub use ogp::{
     OgpResult, OutgoingOgp, fetch_invite_preview, fetch_ogp, first_previewable_url,
-    internal_invite_id,
+    internal_invite_id, invite_id_from_url, trusted_invite_id,
 };
 pub use permissions::{
     ClanSettingsPermissions, PERMISSION_ADMINISTRATOR, PERMISSION_CLAN_OWNER,
@@ -191,8 +191,8 @@ pub use roles::{
 pub use sticker::{ClanSound, Sticker, StickerEvent, StickerStore};
 pub use stream::{StreamMember, StreamPhase, StreamStore};
 pub use threads::{
-    THREAD_STATUS_ARCHIVED, THREAD_STATUS_JOINED, ThreadCreateFailReason, ThreadSummary,
-    ThreadsEvent, ThreadsStore, group_threads,
+    GroupedThreadIndexes, THREAD_STATUS_ARCHIVED, THREAD_STATUS_JOINED, ThreadCreateFailReason,
+    ThreadSummary, ThreadsEvent, ThreadsStore, group_threads,
 };
 pub use topic_badges::{TopicBadgeEvent, TopicBadgeStore};
 pub use topics::{TopicsEvent, TopicsStore};
