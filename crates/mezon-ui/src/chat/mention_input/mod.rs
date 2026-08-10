@@ -705,11 +705,20 @@ impl MentionInput {
         let outgoing = self
             .draft_channel
             .map(|leaving| (leaving, self.take_draft(cx)));
+        let persist_leaving = outgoing.as_ref().map(|(leaving, _)| {
+            ChannelList::global(cx)
+                .read(cx)
+                .should_persist_compose_draft(*leaving)
+        });
         let incoming = store.update(cx, |store, _| {
             if let Some((leaving, draft)) = outgoing {
-                match draft {
-                    Some(draft) => store.set_draft(leaving, draft),
-                    None => store.clear_draft(leaving),
+                if persist_leaving.unwrap_or(false) {
+                    match draft {
+                        Some(draft) => store.set_draft(leaving, draft),
+                        None => store.clear_draft(leaving),
+                    }
+                } else {
+                    store.clear_draft(leaving);
                 }
             }
             channel_id.and_then(|channel_id| store.take_draft(channel_id))
@@ -1666,6 +1675,7 @@ impl MentionInput {
                         this.invalidate_pool(Sigil::Hash, cx);
                     }
                     ChannelEvent::Unread(_) | ChannelEvent::InVoiceChanged => {}
+                    ChannelEvent::ArchivedByAdministrator { .. } => {}
                 },
             ),
             cx.subscribe(

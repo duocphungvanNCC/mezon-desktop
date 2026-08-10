@@ -700,6 +700,8 @@
   "channelMenu.modalConfirmArchiveThread.title": "Archive Thread",
   "channelMenu.notify.serverIDCopied": "Copied Channel ID",
   "channelMenu.toastArchiveChannel": "Channel archived successfully.",
+  "channelMenu.toastArchiveFailed": "Failed to archive. Please try again.",
+  "channelMenu.toastArchivePermissionDenied": "You don't have permission to archive this channel or thread.",
   "channelMenu.toastArchiveThread": "Thread archived successfully.",
   "channelMenu.toastArchivedByAdministrator": "This channel has been archived by the administrator",
   "channelMenu.toastArchivedThreadByAdministrator": "This thread has been archived by the administrator",

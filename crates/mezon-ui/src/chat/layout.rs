@@ -8,7 +8,7 @@ use gpui::{
 };
 use mezon_store::{
     AuthState, AutoUpdateStatus, AutoUpdateStore, CHANNEL_ACTIVE_ARCHIVED, CHANNEL_ACTIVE_JOINED,
-    Channel, ChannelId, ChannelList, ChannelType, ClanId, ClanList, ClanMembersStore,
+    Channel, ChannelEvent, ChannelId, ChannelList, ChannelType, ClanId, ClanList, ClanMembersStore,
     DirectChannel, DirectKind, DirectMessageStore, GroupMembersStore, InboxStore,
     MessageSearchEvent, MessageSearchStore, MessagesStore, PinnedEvent, PinnedMessagesStore,
     Settings, StreamStore, THREAD_STATUS_ARCHIVED, ThreadsEvent, ThreadsStore, TopicsEvent,
@@ -342,6 +342,23 @@ impl ChatLayout {
                 this.canvas_popover_handle.hide(cx);
                 cx.notify();
             }
+        })
+        .detach();
+        cx.subscribe(&channel_list, |this, _, event, cx| {
+            let ChannelEvent::ArchivedByAdministrator { is_thread } = event else {
+                return;
+            };
+            let locale = this.settings.read(cx).language.clone();
+            let key = if *is_thread {
+                "channelMenu.toastArchivedThreadByAdministrator"
+            } else {
+                "channelMenu.toastArchivedByAdministrator"
+            };
+            Shell::global(cx).update(cx, |shell, cx| {
+                shell.success(mezon_i18n::t(&locale, key).to_string(), cx);
+            });
+            this.redirect_archived_thread_route(cx);
+            this.ensure_active_channel_for_clan(cx);
         })
         .detach();
         cx.observe(&Router::global(cx), |this, _, cx| {
@@ -1125,6 +1142,16 @@ impl ChatLayout {
                 return;
             }
             if channel_list.channel_in_clan(clan_id, thread_id) {
+                return;
+            }
+            if channel_list.is_locally_archived(thread_id) {
+                crate::router::replace(
+                    cx,
+                    Route::Channel {
+                        clan_id,
+                        channel_id,
+                    },
+                );
                 return;
             }
         }

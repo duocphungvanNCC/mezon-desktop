@@ -2346,6 +2346,10 @@ impl AppApi {
             .await
     }
 
+    pub async fn archive_channel(&self, clan_id: i64, channel_id: i64) -> Result<()> {
+        self.transport.archive_channel(clan_id, channel_id).await
+    }
+
     pub async fn list_clan_badge_count(&self) -> Result<Vec<(String, i32, bool)>> {
         self.transport.list_clan_badge_count().await
     }

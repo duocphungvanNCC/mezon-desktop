@@ -695,6 +695,8 @@
   "channelMenu.modalConfirmArchiveThread.title": "Lưu trữ chủ đề",
   "channelMenu.notify.serverIDCopied": "Đã sao chép ID kênh",
   "channelMenu.toastArchiveChannel": "Lưu trữ kênh thành công.",
+  "channelMenu.toastArchiveFailed": "Lưu trữ không thành công. Vui lòng thử lại.",
+  "channelMenu.toastArchivePermissionDenied": "Bạn không có quyền lưu trữ kênh hoặc chủ đề này.",
   "channelMenu.toastArchiveThread": "Lưu trữ chủ đề thành công.",
   "channelMenu.toastArchivedByAdministrator": "Kênh này đã được quản trị viên lưu trữ",
   "channelMenu.toastArchivedThreadByAdministrator": "Chủ đề này đã được quản trị viên lưu trữ",

@@ -17,8 +17,13 @@ use mezon_client::{
 use crate::KeyedCache;
 use crate::badge::BadgeService;
 use crate::clan::{ClanEvent, ClanList};
+use crate::compose::ComposeStore;
 use crate::event_targets_user;
 use crate::messages::MessagesStore;
+use crate::permissions::{
+    PERMISSION_ADMINISTRATOR, PERMISSION_CLAN_OWNER, PERMISSION_MANAGE_CHANNEL,
+    PERMISSION_MANAGE_CLAN, PermissionStore,
+};
 use crate::realtime::{RealtimeDispatch, RealtimeKind};
 use crate::threads::CHANNEL_TYPE_THREAD;
 
@@ -111,6 +116,8 @@ impl From<ApiChannelApp> for AppChannel {
 
 pub const CHANNEL_ACTIVE_ARCHIVED: i32 = 0;
 pub const CHANNEL_ACTIVE_JOINED: i32 = 1;
+pub const ARCHIVE_ERR_IN_PROGRESS: &str = "archive already in progress";
+pub const ARCHIVE_ERR_PERMISSION: &str = "permission denied";
 pub const STREAM_MODE_THREAD: i32 = 6;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ArchivedChannelDesc {
@@ -166,6 +173,68 @@ impl Channel {
     }
 }
 
+pub fn archive_menu_hidden(channel_type: ChannelType, is_welcome_channel: bool) -> bool {
+    matches!(
+        channel_type,
+        ChannelType::Voice | ChannelType::Stream | ChannelType::App
+    ) || is_welcome_channel
+}
+
+pub fn archive_allowed_by_server(
+    is_thread: bool,
+    is_creator: bool,
+    has_owner: bool,
+    has_administrator: bool,
+    has_manage_clan: bool,
+    has_manage_channel: bool,
+) -> bool {
+    if is_creator || has_owner || has_administrator {
+        return true;
+    }
+    if is_thread {
+        has_manage_channel
+    } else {
+        has_manage_clan
+    }
+}
+
+pub fn can_archive_channel(clan_id: ClanId, channel_id: ChannelId, cx: &App) -> bool {
+    ChannelList::global(cx)
+        .read(cx)
+        .can_archive_channel_for(clan_id, channel_id, cx)
+}
+
+fn archive_permission_for(
+    channel_list: &ChannelList,
+    clan_id: ClanId,
+    channel_id: ChannelId,
+    cx: &App,
+) -> bool {
+    let Some(channel) = channel_list.channel(clan_id, channel_id) else {
+        return false;
+    };
+    let is_welcome = ClanList::global(cx).read(cx).welcome_channel_id(clan_id) == Some(channel_id);
+    if archive_menu_hidden(channel.channel_type, is_welcome) {
+        return false;
+    }
+    let is_thread = channel.parent_id.is_some();
+    let is_creator = BadgeService::try_global(cx)
+        .and_then(|badges| badges.read(cx).current_user_id(cx))
+        .is_some_and(|me| me == channel.creator_id);
+    let Some(permissions) = PermissionStore::try_global(cx) else {
+        return is_creator;
+    };
+    let permissions = permissions.read(cx);
+    archive_allowed_by_server(
+        is_thread,
+        is_creator,
+        permissions.check(clan_id, None, PERMISSION_CLAN_OWNER, cx),
+        permissions.check(clan_id, None, PERMISSION_ADMINISTRATOR, cx),
+        permissions.check(clan_id, None, PERMISSION_MANAGE_CLAN, cx),
+        permissions.check(clan_id, Some(channel_id), PERMISSION_MANAGE_CHANNEL, cx),
+    )
+}
+
 #[derive(Debug, Clone)]
 pub struct Category {
     pub id: String,
@@ -182,6 +251,7 @@ pub enum ChannelEvent {
     InVoiceChanged,
     ClanChannelsLoaded(ClanId),
     UserChannelsLoaded,
+    ArchivedByAdministrator { is_thread: bool },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -319,6 +389,8 @@ pub struct ChannelList {
     channel_index: RefCell<ChannelLocationCache>,
     reset_generation: u64,
     reactivating: HashSet<ChannelId>,
+    archiving: HashSet<ChannelId>,
+    archived_channel_ids: HashSet<ChannelId>,
     channel_detail_pending: HashSet<ChannelId>,
     channel_detail_failed: HashSet<ChannelId>,
     _previous_channels_persist: Task<()>,
@@ -407,6 +479,15 @@ impl ChannelList {
         cx.try_global::<GlobalChannelList>().map(|g| g.0.clone())
     }
 
+    pub fn can_archive_channel_for(
+        &self,
+        clan_id: ClanId,
+        channel_id: ChannelId,
+        cx: &App,
+    ) -> bool {
+        archive_permission_for(self, clan_id, channel_id, cx)
+    }
+
     pub fn fetch_channel_app_url(
         &self,
         app_id: i64,
@@ -470,6 +551,8 @@ impl ChannelList {
         self.persist_previous_channels(cx);
         self.invalidate_channel_index_all();
         self.reactivating.clear();
+        self.archiving.clear();
+        self.archived_channel_ids.clear();
         self.channel_detail_pending.clear();
         self.channel_detail_failed.clear();
         self.active_clan_id = None;
@@ -553,6 +636,8 @@ impl ChannelList {
             channel_index: RefCell::new(ChannelLocationCache::default()),
             reset_generation: 0,
             reactivating: HashSet::new(),
+            archiving: HashSet::new(),
+            archived_channel_ids: HashSet::new(),
             channel_detail_pending: HashSet::new(),
             channel_detail_failed: HashSet::new(),
             _previous_channels_persist: Task::ready(()),
@@ -842,6 +927,58 @@ impl ChannelList {
         })
     }
 
+    pub fn archive_channel(
+        &self,
+        clan_id: ClanId,
+        channel_id: ChannelId,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<(), String>> {
+        cx.spawn(async move |this, cx| {
+            let prep = this.update(cx, |this, cx| {
+                if !this.can_archive_channel_for(clan_id, channel_id, cx) {
+                    return Some(Err(ARCHIVE_ERR_PERMISSION.into()));
+                }
+                if !this.begin_archiving(channel_id) {
+                    return Some(Err(ARCHIVE_ERR_IN_PROGRESS.into()));
+                }
+                let parent_id = this
+                    .channel(clan_id, channel_id)
+                    .and_then(|ch| ch.parent_id)
+                    .unwrap_or(ChannelId(0));
+                Some(Ok((parent_id, this.api.clone())))
+            });
+            let Some(prep) = prep.ok().flatten() else {
+                return Err("archive channel store unavailable".into());
+            };
+            let (parent_id, api) = match prep {
+                Ok(value) => value,
+                Err(err) => {
+                    let _ = this.update(cx, |this, _| {
+                        this.finish_archiving(channel_id);
+                    });
+                    return Err(err);
+                }
+            };
+
+            let result = api
+                .archive_channel(clan_id.get(), channel_id.get())
+                .await
+                .map_err(|e| e.to_string());
+
+            if result.is_ok() {
+                let _ = this.update(cx, |this, cx| {
+                    this.apply_local_archive(clan_id, channel_id, parent_id, cx);
+                });
+            }
+
+            let _ = this.update(cx, |this, _| {
+                this.finish_archiving(channel_id);
+            });
+
+            result
+        })
+    }
+
     #[cfg(test)]
     pub(crate) fn seed_clan_channels_for_test(
         &mut self,
@@ -872,7 +1009,11 @@ impl ChannelList {
         );
         let previous_voice = collect_voice_members(&self.cache, clan_id);
         merge_previous_voice_members(&mut categories, &previous_voice);
-        let categories = rebuild_favorites(categories, clan_id, self.favorites.get(&clan_id));
+        let mut categories = rebuild_favorites(categories, clan_id, self.favorites.get(&clan_id));
+        for cat in categories.iter_mut() {
+            cat.channels
+                .retain(|ch| !self.archived_channel_ids.contains(&ch.id));
+        }
         if seed_in_voice_from_categories(&mut self.in_voice, clan_id, &categories) {
             cx.emit(ChannelEvent::InVoiceChanged);
         }
@@ -985,12 +1126,19 @@ impl ChannelList {
     /// channel/thread absent from the clan structure, fetch its detail and insert it. Returns
     /// `true` while the channel is present or still being resolved (caller should wait), and
     /// `false` once the fetch has definitively failed (caller may fall back).
+    pub fn is_locally_archived(&self, channel_id: ChannelId) -> bool {
+        self.archived_channel_ids.contains(&channel_id)
+    }
+
     pub fn ensure_channel_in_clan(
         &mut self,
         clan_id: ClanId,
         channel_id: ChannelId,
         cx: &mut Context<Self>,
     ) -> bool {
+        if self.archived_channel_ids.contains(&channel_id) {
+            return false;
+        }
         if self.channel_in_clan(clan_id, channel_id) {
             return true;
         }
@@ -1048,8 +1196,15 @@ impl ChannelList {
         desc: ApiChannelDesc,
         cx: &mut Context<Self>,
     ) {
+        let channel_id = ChannelId(desc.channel_id);
+        if self.archived_channel_ids.contains(&channel_id) {
+            return;
+        }
         let badge = desc.badge_count.max(0) as u32;
         let mut channel = channel_from_desc(desc, badge, Vec::new(), false);
+        if !channel.visible_in_sidebar() {
+            return;
+        }
         channel.clan_id = clan_id;
         let Some(categories) = self.cache.get_mut(&clan_id) else {
             return;
@@ -2170,6 +2325,10 @@ impl ChannelList {
             }
             RealtimeEvent::ChannelCreated(e) => {
                 let clan_id = ClanId(e.clan_id);
+                let channel_id = ChannelId(e.channel_id);
+                if self.archived_channel_ids.contains(&channel_id) {
+                    return;
+                }
                 if self.cache.contains(&clan_id) {
                     let channel = Channel {
                         id: ChannelId(e.channel_id),
@@ -2320,6 +2479,10 @@ impl ChannelList {
                 let Some(ref desc) = e.channel_desc else {
                     return;
                 };
+                let channel_id = ChannelId(desc.channel_id);
+                if self.archived_channel_ids.contains(&channel_id) {
+                    return;
+                }
                 let channel_type = desc.r#type as u32;
                 if channel_type == 2 || channel_type == 3 {
                     return;
@@ -2331,7 +2494,6 @@ impl ChannelList {
                     return;
                 }
                 let clan_id = ClanId(e.clan_id);
-                let channel_id = ChannelId(desc.channel_id);
                 let last_sent = desc.last_sent_message.as_ref();
                 let (last_sent_message_id, last_sent_timestamp) = match last_sent {
                     Some(header) => (
@@ -2729,6 +2891,136 @@ impl ChannelList {
         self.reactivating.remove(&channel_id);
     }
 
+    pub fn begin_archiving(&mut self, channel_id: ChannelId) -> bool {
+        self.archiving.insert(channel_id)
+    }
+
+    pub fn finish_archiving(&mut self, channel_id: ChannelId) {
+        self.archiving.remove(&channel_id);
+    }
+
+    pub fn is_archiving(&self, channel_id: ChannelId) -> bool {
+        self.archiving.contains(&channel_id)
+    }
+
+    pub fn should_persist_compose_draft(&self, channel_id: ChannelId) -> bool {
+        if self.archiving.contains(&channel_id) {
+            return false;
+        }
+        if self
+            .user_channels
+            .get(&channel_id)
+            .is_some_and(|ch| ch.active == CHANNEL_ACTIVE_ARCHIVED)
+        {
+            return false;
+        }
+        self.cache.iter().any(|(_, cats)| {
+            cats.iter()
+                .flat_map(|c| &c.channels)
+                .any(|ch| ch.id == channel_id)
+        })
+    }
+
+    pub fn clear_compose_draft(&self, channel_id: ChannelId, cx: &mut Context<Self>) {
+        if let Some(store) = ComposeStore::try_global(cx) {
+            store.update(cx, |store, _| store.clear_draft(channel_id));
+        }
+    }
+
+    pub fn apply_local_archive(
+        &mut self,
+        clan_id: ClanId,
+        channel_id: ChannelId,
+        parent_id: ChannelId,
+        cx: &mut Context<Self>,
+    ) {
+        self.archived_channel_ids.insert(channel_id);
+        self.channel_detail_pending.remove(&channel_id);
+        self.channel_detail_failed.remove(&channel_id);
+        let mut removed = false;
+        let mut swept_all = false;
+        if let Some(cats) = self.cache.get_mut(&clan_id) {
+            removed = remove_channel(cats, channel_id);
+        } else {
+            swept_all = true;
+            for cats in self.cache.values_mut() {
+                removed |= remove_channel(cats, channel_id);
+            }
+        }
+        if removed {
+            if swept_all {
+                self.invalidate_channel_index_all();
+            } else {
+                self.invalidate_channel_index(clan_id);
+            }
+        }
+        if self.active_channel_id == Some(channel_id) {
+            let redirect = (!parent_id.is_zero()).then_some(parent_id);
+            self.active_channel_id = redirect;
+            cx.emit(ChannelEvent::ActiveChannelChanged(redirect));
+        }
+        cx.notify();
+        if let Some(user_channel) = self.user_channels.get_mut(&channel_id) {
+            user_channel.active = CHANNEL_ACTIVE_ARCHIVED;
+        }
+        crate::threads::ThreadsStore::global(cx).update(cx, |store, cx| {
+            store.mark_thread_archived(&channel_id.to_string(), cx);
+        });
+        self.clear_compose_draft(channel_id, cx);
+        if parent_id.is_zero() {
+            self.remove_child_threads_of_channel(clan_id, channel_id, cx);
+            self.remove_favorite_locally(channel_id, clan_id, cx);
+        }
+    }
+
+    fn remove_child_threads_of_channel(
+        &mut self,
+        clan_id: ClanId,
+        parent_channel_id: ChannelId,
+        cx: &mut Context<Self>,
+    ) {
+        let child_ids: Vec<ChannelId> = self
+            .cache
+            .get(&clan_id)
+            .map(|cats| {
+                cats.iter()
+                    .flat_map(|c| &c.channels)
+                    .filter(|ch| ch.parent_id == Some(parent_channel_id))
+                    .map(|ch| ch.id)
+                    .collect()
+            })
+            .unwrap_or_default();
+        if child_ids.is_empty() {
+            return;
+        }
+        let mut removed_any = false;
+        if let Some(cats) = self.cache.get_mut(&clan_id) {
+            for child_id in &child_ids {
+                removed_any |= remove_channel(cats, *child_id);
+            }
+        }
+        for child_id in child_ids {
+            self.archived_channel_ids.insert(child_id);
+            self.channel_detail_pending.remove(&child_id);
+            self.channel_detail_failed.remove(&child_id);
+            if self.active_channel_id == Some(child_id) {
+                self.active_channel_id = Some(parent_channel_id);
+                cx.emit(ChannelEvent::ActiveChannelChanged(Some(parent_channel_id)));
+            }
+            if let Some(user_channel) = self.user_channels.get_mut(&child_id) {
+                user_channel.active = CHANNEL_ACTIVE_ARCHIVED;
+            }
+            crate::threads::ThreadsStore::global(cx).update(cx, |store, cx| {
+                store.mark_thread_archived(&child_id.to_string(), cx);
+            });
+            self.clear_compose_draft(child_id, cx);
+        }
+        if removed_any {
+            self.invalidate_channel_index(clan_id);
+            cx.notify();
+        }
+    }
+
     pub fn apply_self_removed_from_channel(
         &mut self,
         channel_id: ChannelId,
@@ -2796,38 +3088,21 @@ impl ChannelList {
         let is_archive = e.active == CHANNEL_ACTIVE_ARCHIVED;
 
         if is_archive {
-            let mut removed = false;
-            let mut swept_all = false;
-            if let Some(cats) = self.cache.get_mut(&clan_id) {
-                removed = remove_channel(cats, channel_id);
-            } else {
-                swept_all = true;
-                for cats in self.cache.values_mut() {
-                    removed |= remove_channel(cats, channel_id);
-                }
+            let was_viewing = self.active_channel_id == Some(channel_id);
+            let is_thread = !parent_id.is_zero();
+            let archived_by_other = crate::badge::BadgeService::try_global(cx)
+                .and_then(|badges| badges.read(cx).current_user_id(cx))
+                .is_some_and(|me| me.get() != e.creator_id);
+
+            self.apply_local_archive(clan_id, channel_id, parent_id, cx);
+
+            if was_viewing && archived_by_other {
+                cx.emit(ChannelEvent::ArchivedByAdministrator { is_thread });
             }
-            if removed {
-                if swept_all {
-                    self.invalidate_channel_index_all();
-                } else {
-                    self.invalidate_channel_index(clan_id);
-                }
-            }
-            if self.active_channel_id == Some(channel_id) {
-                let redirect = (!parent_id.is_zero()).then_some(parent_id);
-                self.active_channel_id = redirect;
-                cx.emit(ChannelEvent::ActiveChannelChanged(redirect));
-            }
-            cx.notify();
-            if let Some(user_channel) = self.user_channels.get_mut(&channel_id) {
-                user_channel.active = CHANNEL_ACTIVE_ARCHIVED;
-            }
-            crate::threads::ThreadsStore::global(cx).update(cx, |store, cx| {
-                store.mark_thread_archived(&channel_id.to_string(), cx);
-            });
             return;
         }
 
+        self.archived_channel_ids.remove(&channel_id);
         let label = e.channel_label.clone();
         if !parent_id.is_zero() {
             self.ensure_thread_with_parent_active(
@@ -5210,6 +5485,37 @@ mod tests {
         build_categories(api_cats, &mut channels)
     }
 
+    fn structure_with_parent_and_two_threads() -> Vec<Category> {
+        let api_cats = vec![ApiCategoryDesc {
+            category_id: 1,
+            category_name: "General".into(),
+            clan_id: 1,
+            category_order: 0,
+        }];
+        let mut channels = vec![
+            {
+                let mut ch = make_channel(1, "parent", "1");
+                ch.clan_id = ClanId(1);
+                ch
+            },
+            {
+                let mut ch = make_channel(9, "thread-a", "1");
+                ch.clan_id = ClanId(1);
+                ch.parent_id = Some(ChannelId(1));
+                ch.channel_type = ChannelType::Thread;
+                ch
+            },
+            {
+                let mut ch = make_channel(10, "thread-b", "1");
+                ch.clan_id = ClanId(1);
+                ch.parent_id = Some(ChannelId(1));
+                ch.channel_type = ChannelType::Thread;
+                ch
+            },
+        ];
+        build_categories(api_cats, &mut channels)
+    }
+
     fn make_clan(id: i64) -> crate::clan::Clan {
         crate::clan::Clan {
             id: ClanId(id),
@@ -5517,6 +5823,230 @@ mod tests {
                 assert!(!channels.channel_in_clan(ClanId(1), ChannelId(9)));
             });
         });
+    }
+
+    fn channel_archive_event(
+        clan_id: i64,
+        channel_id: i64,
+        parent_id: i64,
+        active: i32,
+    ) -> mezon_proto::realtime::ChannelArchiveEvent {
+        mezon_proto::realtime::ChannelArchiveEvent {
+            clan_id,
+            channel_id,
+            parent_id,
+            active,
+            status: 1,
+            ..Default::default()
+        }
+    }
+
+    fn init_channel_list_with_threads(cx: &mut App) -> Entity<ChannelList> {
+        let api = Arc::new(mezon_client::AppApi::new(
+            Arc::new(mezon_client::TransportClient::new(String::new())),
+            String::new(),
+        ));
+        RealtimeDispatch::init(api.clone(), cx);
+        let auth_state = cx.new(|_| {
+            crate::AuthState::Authenticated(mezon_client::Session {
+                user_id: REMOVED_SELF.to_string(),
+                ..Default::default()
+            })
+        });
+        crate::badge::BadgeService::init(auth_state, cx);
+        crate::clan::ClanList::init(api.clone(), cx);
+        let channels = ChannelList::init(api.clone(), cx);
+        crate::threads::ThreadsStore::init(api, cx);
+        channels
+    }
+
+    #[gpui::test]
+    fn begin_archiving_blocks_duplicate_calls(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let channels = init_channel_list_with_threads(cx);
+            channels.update(cx, |channels, _| {
+                assert!(channels.begin_archiving(ChannelId(9)));
+                assert!(!channels.begin_archiving(ChannelId(9)));
+                assert!(channels.is_archiving(ChannelId(9)));
+                channels.finish_archiving(ChannelId(9));
+                assert!(!channels.is_archiving(ChannelId(9)));
+                assert!(channels.begin_archiving(ChannelId(9)));
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn apply_local_archive_removes_thread_and_redirects_to_parent(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let channels = init_channel_list_with_threads(cx);
+            channels.update(cx, |channels, cx| {
+                channels.apply_clan_structure(ClanId(1), structure_with_a_thread(), cx);
+                channels.select_channel(ChannelId(9), cx);
+
+                channels.apply_local_archive(ClanId(1), ChannelId(9), ChannelId(1), cx);
+
+                assert!(!channels.channel_in_clan(ClanId(1), ChannelId(9)));
+                assert_eq!(channels.active_channel_id, Some(ChannelId(1)));
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn channel_archive_socket_event_applies_local_archive(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let channels = init_channel_list_with_threads(cx);
+            channels.update(cx, |channels, cx| {
+                channels.apply_clan_structure(ClanId(1), structure_with_a_thread(), cx);
+                channels.select_channel(ChannelId(9), cx);
+
+                channels.handle_event(
+                    &RealtimeEvent::ChannelArchive(channel_archive_event(1, 9, 1, 0)),
+                    cx,
+                );
+
+                assert!(!channels.channel_in_clan(ClanId(1), ChannelId(9)));
+                assert_eq!(channels.active_channel_id, Some(ChannelId(1)));
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn apply_local_archive_is_idempotent(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let channels = init_channel_list_with_threads(cx);
+            channels.update(cx, |channels, cx| {
+                channels.apply_clan_structure(ClanId(1), structure_with_a_thread(), cx);
+                channels.apply_local_archive(ClanId(1), ChannelId(9), ChannelId(1), cx);
+                channels.apply_local_archive(ClanId(1), ChannelId(9), ChannelId(1), cx);
+                assert!(!channels.channel_in_clan(ClanId(1), ChannelId(9)));
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn parent_archive_cascade_removes_child_threads(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let channels = init_channel_list_with_threads(cx);
+            channels.update(cx, |channels, cx| {
+                channels.apply_clan_structure(
+                    ClanId(1),
+                    structure_with_parent_and_two_threads(),
+                    cx,
+                );
+                channels.apply_local_archive(ClanId(1), ChannelId(1), ChannelId(0), cx);
+                assert!(!channels.channel_in_clan(ClanId(1), ChannelId(1)));
+                assert!(!channels.channel_in_clan(ClanId(1), ChannelId(9)));
+                assert!(!channels.channel_in_clan(ClanId(1), ChannelId(10)));
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn archive_socket_cascade_removes_child_threads(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let channels = init_channel_list_with_threads(cx);
+            channels.update(cx, |channels, cx| {
+                channels.apply_clan_structure(
+                    ClanId(1),
+                    structure_with_parent_and_two_threads(),
+                    cx,
+                );
+                channels.handle_event(
+                    &RealtimeEvent::ChannelArchive(channel_archive_event(1, 1, 0, 0)),
+                    cx,
+                );
+                assert!(!channels.channel_in_clan(ClanId(1), ChannelId(1)));
+                assert!(!channels.channel_in_clan(ClanId(1), ChannelId(9)));
+                assert!(!channels.channel_in_clan(ClanId(1), ChannelId(10)));
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn archive_socket_emits_admin_event_for_passive_viewer(cx: &mut gpui::TestAppContext) {
+        use std::cell::Cell;
+        use std::rc::Rc;
+
+        let seen = Rc::new(Cell::new(false));
+        let sink = seen.clone();
+        cx.update(|cx| {
+            let channels = init_channel_list_with_threads(cx);
+            cx.subscribe(&channels, move |_, event, _| {
+                if let ChannelEvent::ArchivedByAdministrator { is_thread } = event {
+                    assert!(*is_thread);
+                    sink.set(true);
+                }
+            })
+            .detach();
+            channels.update(cx, |channels, cx| {
+                channels.apply_clan_structure(ClanId(1), structure_with_a_thread(), cx);
+                channels.select_channel(ChannelId(9), cx);
+                let mut event = channel_archive_event(1, 9, 1, 0);
+                event.creator_id = REMOVED_SELF + 1;
+                channels.handle_event(&RealtimeEvent::ChannelArchive(event), cx);
+            });
+        });
+        assert!(seen.get());
+    }
+
+    #[gpui::test]
+    fn archive_socket_skips_admin_event_for_self_initiated_archive(cx: &mut gpui::TestAppContext) {
+        use std::cell::Cell;
+        use std::rc::Rc;
+
+        let seen = Rc::new(Cell::new(false));
+        let sink = seen.clone();
+        cx.update(|cx| {
+            let channels = init_channel_list_with_threads(cx);
+            cx.subscribe(&channels, move |_, event, _| {
+                if matches!(event, ChannelEvent::ArchivedByAdministrator { .. }) {
+                    sink.set(true);
+                }
+            })
+            .detach();
+            channels.update(cx, |channels, cx| {
+                channels.apply_clan_structure(ClanId(1), structure_with_a_thread(), cx);
+                channels.select_channel(ChannelId(9), cx);
+                let mut event = channel_archive_event(1, 9, 1, 0);
+                event.creator_id = REMOVED_SELF;
+                channels.handle_event(&RealtimeEvent::ChannelArchive(event), cx);
+            });
+        });
+        assert!(!seen.get());
+    }
+
+    #[gpui::test]
+    fn archive_channel_returns_error_when_already_in_flight(cx: &mut gpui::TestAppContext) {
+        use std::sync::{Arc, Mutex};
+
+        let outcome: Arc<Mutex<Option<Result<(), String>>>> = Arc::new(Mutex::new(None));
+        let sink = outcome.clone();
+        cx.update(|cx| {
+            let channels = init_channel_list_with_threads(cx);
+            channels.update(cx, |channels, cx| {
+                channels.apply_clan_structure(ClanId(1), structure_with_a_thread(), cx);
+                if let Some(ch) = channels.channel_mut(ClanId(1), ChannelId(9)) {
+                    ch.creator_id = UserId(REMOVED_SELF);
+                }
+                assert!(channels.begin_archiving(ChannelId(9)));
+            });
+            let task = channels.update(cx, |channels, cx| {
+                channels.archive_channel(ClanId(1), ChannelId(9), cx)
+            });
+            cx.background_executor()
+                .spawn(async move {
+                    *sink.lock().expect("archive outcome lock") = Some(task.await);
+                })
+                .detach();
+        });
+        cx.run_until_parked();
+        let result = outcome
+            .lock()
+            .expect("archive outcome lock")
+            .clone()
+            .expect("task should finish");
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err(), ARCHIVE_ERR_IN_PROGRESS);
     }
 
     #[gpui::test]
@@ -7002,5 +7532,157 @@ mod tests {
         assert!(insert_channel(&mut cats, thread));
         assert!(remove_channel(&mut cats, ChannelId(500)));
         assert!(!cats[0].channels.iter().any(|c| c.id == ChannelId(500)));
+    }
+
+    #[test]
+    fn begin_archiving_rejects_duplicate_in_flight() {
+        let mut archiving = HashSet::new();
+        assert!(archiving.insert(ChannelId(1)));
+        assert!(!archiving.insert(ChannelId(1)));
+        assert!(archiving.insert(ChannelId(2)));
+    }
+
+    #[test]
+    fn archive_allowed_top_level_needs_manage_clan_not_manage_channel() {
+        assert!(!archive_allowed_by_server(
+            false, false, false, false, false, true
+        ));
+        assert!(archive_allowed_by_server(
+            false, false, false, false, true, false
+        ));
+        assert!(archive_allowed_by_server(
+            false, true, false, false, false, false
+        ));
+    }
+
+    #[test]
+    fn archive_allowed_thread_needs_manage_channel_not_creator_only() {
+        assert!(archive_allowed_by_server(
+            true, false, false, false, true, true
+        ));
+        assert!(!archive_allowed_by_server(
+            true, false, false, false, false, false
+        ));
+        assert!(archive_allowed_by_server(
+            true, true, false, false, false, false
+        ));
+    }
+
+    #[test]
+    fn archive_menu_hidden_for_voice_and_welcome() {
+        assert!(archive_menu_hidden(ChannelType::Voice, false));
+        assert!(archive_menu_hidden(ChannelType::Text, true));
+        assert!(!archive_menu_hidden(ChannelType::Text, false));
+    }
+
+    #[gpui::test]
+    fn ensure_channel_in_clan_skips_locally_archived_thread(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let channels = init_channel_list_with_threads(cx);
+            channels.update(cx, |channels, cx| {
+                channels.apply_clan_structure(ClanId(1), structure_with_a_thread(), cx);
+                channels.apply_local_archive(ClanId(1), ChannelId(9), ChannelId(1), cx);
+                assert!(!channels.ensure_channel_in_clan(ClanId(1), ChannelId(9), cx));
+                assert!(!channels.channel_detail_pending.contains(&ChannelId(9)));
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn apply_channel_detail_after_archive_does_not_reinsert_thread(cx: &mut gpui::TestAppContext) {
+        use mezon_client::transport::ApiChannelDesc;
+
+        cx.update(|cx| {
+            let channels = init_channel_list_with_threads(cx);
+            channels.update(cx, |channels, cx| {
+                channels.apply_clan_structure(ClanId(1), structure_with_a_thread(), cx);
+                channels.apply_local_archive(ClanId(1), ChannelId(9), ChannelId(1), cx);
+                assert!(!channels.channel_in_clan(ClanId(1), ChannelId(9)));
+                channels.apply_channel_detail(
+                    ClanId(1),
+                    ApiChannelDesc {
+                        channel_id: 9,
+                        channel_label: "Rust 1".into(),
+                        channel_type: CHANNEL_TYPE_THREAD as u32,
+                        clan_id: 1,
+                        category_name: String::new(),
+                        category_id: 0,
+                        channel_private: 0,
+                        count_mess_unread: 0,
+                        member_count: 0,
+                        parent_id: 1,
+                        is_mute: false,
+                        last_seen_message_id: 0,
+                        last_seen_timestamp: 0,
+                        last_sent_message_id: 0,
+                        last_sent_timestamp: 0,
+                        badge_count: 0,
+                        active: CHANNEL_ACTIVE_JOINED,
+                        creator_id: 0,
+                        clan_name: String::new(),
+                        channel_avatar: String::new(),
+                    },
+                    cx,
+                );
+                assert!(!channels.channel_in_clan(ClanId(1), ChannelId(9)));
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn archive_clears_compose_draft(cx: &mut gpui::TestAppContext) {
+        use crate::compose::ComposeDraft;
+
+        cx.update(|cx| {
+            ComposeStore::init(cx);
+            let channels = init_channel_list_with_threads(cx);
+            channels.update(cx, |channels, cx| {
+                channels.apply_clan_structure(ClanId(1), structure_with_a_thread(), cx);
+                ComposeStore::global(cx).update(cx, |store, _| {
+                    store.set_draft(
+                        ChannelId(9),
+                        ComposeDraft {
+                            text: "draft before archive".into(),
+                            ..Default::default()
+                        },
+                    );
+                });
+                channels.apply_local_archive(ClanId(1), ChannelId(9), ChannelId(1), cx);
+                assert!(
+                    ComposeStore::global(cx)
+                        .read(cx)
+                        .draft(ChannelId(9))
+                        .is_none()
+                );
+                assert!(!channels.should_persist_compose_draft(ChannelId(9)));
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn top_level_archive_removes_favorite(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let channels = init_channel_list_with_threads(cx);
+            channels.update(cx, |channels, cx| {
+                channels.apply_clan_structure(ClanId(1), structure_with_two_channels(), cx);
+                channels.finish_extras(ClanId(1), favorite_extras(&[ChannelId(1)]), cx);
+                assert!(
+                    channels
+                        .categories_for_clan(ClanId(1))
+                        .iter()
+                        .any(|cat| cat.id == FAVOR_CATE_ID
+                            && cat.channels.iter().any(|ch| ch.id == ChannelId(1)))
+                );
+                channels.apply_local_archive(ClanId(1), ChannelId(1), ChannelId(0), cx);
+                assert!(!channels.channel_in_clan(ClanId(1), ChannelId(1)));
+                assert!(
+                    channels
+                        .categories_for_clan(ClanId(1))
+                        .iter()
+                        .find(|cat| cat.id == FAVOR_CATE_ID)
+                        .is_none_or(|cat| !cat.channels.iter().any(|ch| ch.id == ChannelId(1)))
+                );
+            });
+        });
     }
 }
