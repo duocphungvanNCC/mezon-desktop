@@ -7,9 +7,9 @@ pub struct ScreenSharePreview {
     pub rgba: Vec<u8>,
 }
 
-#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 const PREVIEW_MAX_WIDTH: u32 = 420;
-#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 const PREVIEW_MAX_HEIGHT: u32 = 236;
 
 pub fn capture_screen_share_preview(pick: &PickedScreen) -> Option<ScreenSharePreview> {
@@ -25,7 +25,12 @@ pub fn capture_screen_share_preview(pick: &PickedScreen) -> Option<ScreenSharePr
                 capture_x11_preview(target)
             }
 
-            #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+            #[cfg(target_os = "windows")]
+            {
+                capture_windows_preview(target)
+            }
+
+            #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
             {
                 let _ = target;
                 None
@@ -186,7 +191,176 @@ fn capture_x11_preview(target: &scap::Target) -> Option<ScreenSharePreview> {
     })
 }
 
-#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[cfg(target_os = "windows")]
+fn capture_windows_preview(target: &scap::Target) -> Option<ScreenSharePreview> {
+    use windows::Win32::Foundation::RECT;
+    use windows::Win32::Graphics::Gdi::{
+        BitBlt, CAPTUREBLT, GetDC, GetMonitorInfoW, MONITORINFO, ROP_CODE, ReleaseDC, SRCCOPY,
+    };
+    use windows::Win32::Storage::Xps::{PRINT_WINDOW_FLAGS, PrintWindow};
+    use windows::Win32::UI::WindowsAndMessaging::{GetWindowRect, IsIconic, PW_RENDERFULLCONTENT};
+
+    unsafe {
+        let screen_dc = GetDC(None);
+        if screen_dc.is_invalid() {
+            return None;
+        }
+
+        let captured = match target {
+            scap::Target::Window(win) => {
+                let hwnd = win.raw_handle;
+                if IsIconic(hwnd).as_bool() {
+                    None
+                } else {
+                    let mut rect = RECT::default();
+                    if GetWindowRect(hwnd, &mut rect).is_ok() {
+                        let width = rect.right - rect.left;
+                        let height = rect.bottom - rect.top;
+                        capture_windows_dib(screen_dc, width, height, |dc| {
+                            PrintWindow(hwnd, dc, PRINT_WINDOW_FLAGS(PW_RENDERFULLCONTENT))
+                                .as_bool()
+                        })
+                        .map(|bgra| (width as u32, height as u32, bgra))
+                    } else {
+                        None
+                    }
+                }
+            }
+            scap::Target::Display(display) => {
+                let mut info = MONITORINFO {
+                    cbSize: core::mem::size_of::<MONITORINFO>() as u32,
+                    ..Default::default()
+                };
+                if GetMonitorInfoW(display.raw_handle, &mut info).as_bool() {
+                    let rect = info.rcMonitor;
+                    let width = rect.right - rect.left;
+                    let height = rect.bottom - rect.top;
+                    capture_windows_dib(screen_dc, width, height, |dc| {
+                        BitBlt(
+                            dc,
+                            0,
+                            0,
+                            width,
+                            height,
+                            Some(screen_dc),
+                            rect.left,
+                            rect.top,
+                            ROP_CODE(SRCCOPY.0 | CAPTUREBLT.0),
+                        )
+                        .is_ok()
+                    })
+                    .map(|bgra| (width as u32, height as u32, bgra))
+                } else {
+                    None
+                }
+            }
+        };
+
+        ReleaseDC(None, screen_dc);
+
+        let (width, height, bgra) = captured?;
+        windows_bgra_to_preview(width, height, &bgra)
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn capture_windows_dib(
+    screen_dc: windows::Win32::Graphics::Gdi::HDC,
+    width: i32,
+    height: i32,
+    fill: impl FnOnce(windows::Win32::Graphics::Gdi::HDC) -> bool,
+) -> Option<Vec<u8>> {
+    use windows::Win32::Graphics::Gdi::{
+        BI_RGB, BITMAPINFO, BITMAPINFOHEADER, CreateCompatibleDC, CreateDIBSection, DIB_RGB_COLORS,
+        DeleteDC, DeleteObject, HGDIOBJ, SelectObject,
+    };
+
+    if width <= 0 || height <= 0 {
+        return None;
+    }
+
+    unsafe {
+        let mem_dc = CreateCompatibleDC(Some(screen_dc));
+        if mem_dc.is_invalid() {
+            return None;
+        }
+
+        let info = BITMAPINFO {
+            bmiHeader: BITMAPINFOHEADER {
+                biSize: core::mem::size_of::<BITMAPINFOHEADER>() as u32,
+                biWidth: width,
+                biHeight: -height,
+                biPlanes: 1,
+                biBitCount: 32,
+                biCompression: BI_RGB.0,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let mut bits: *mut core::ffi::c_void = core::ptr::null_mut();
+        let dib = match CreateDIBSection(Some(mem_dc), &info, DIB_RGB_COLORS, &mut bits, None, 0) {
+            Ok(dib) if !bits.is_null() => dib,
+            _ => {
+                let _ = DeleteDC(mem_dc);
+                return None;
+            }
+        };
+
+        let previous = SelectObject(mem_dc, HGDIOBJ(dib.0));
+        let ok = fill(mem_dc);
+
+        let pixels = if ok {
+            let len = width as usize * height as usize * 4;
+            Some(std::slice::from_raw_parts(bits as *const u8, len).to_vec())
+        } else {
+            None
+        };
+
+        SelectObject(mem_dc, previous);
+        let _ = DeleteObject(HGDIOBJ(dib.0));
+        let _ = DeleteDC(mem_dc);
+        pixels
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn windows_bgra_to_preview(width: u32, height: u32, bgra: &[u8]) -> Option<ScreenSharePreview> {
+    if width == 0 || height == 0 {
+        return None;
+    }
+    let stride = width as usize * 4;
+    if bgra.len() < stride * height as usize {
+        return None;
+    }
+
+    let (thumb_w, thumb_h) = preview_dimensions(width, height);
+    let mut rgba = vec![0u8; (thumb_w * thumb_h * 4) as usize];
+
+    for y in 0..thumb_h as usize {
+        let src_y = y * height as usize / thumb_h as usize;
+        for x in 0..thumb_w as usize {
+            let src_x = x * width as usize / thumb_w as usize;
+            let src_offset = src_y * stride + src_x * 4;
+            let dst_offset = (y * thumb_w as usize + x) * 4;
+            if src_offset + 3 >= bgra.len() {
+                continue;
+            }
+            rgba[dst_offset] = bgra[src_offset + 2];
+            rgba[dst_offset + 1] = bgra[src_offset + 1];
+            rgba[dst_offset + 2] = bgra[src_offset];
+            rgba[dst_offset + 3] = 0xff;
+        }
+    }
+
+    Some(ScreenSharePreview {
+        width: thumb_w,
+        height: thumb_h,
+        rgba,
+    })
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 fn preview_dimensions(width: u32, height: u32) -> (u32, u32) {
     let width = width.max(1);
     let height = height.max(1);

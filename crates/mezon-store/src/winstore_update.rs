@@ -35,6 +35,14 @@ pub fn update_available_clicked(cx: &mut App) {
     }
 }
 
+pub fn update_error_clicked(cx: &mut App) {
+    if WinstoreUpdateStore::try_global(cx).is_some() {
+        cx.open_url("ms-windows-store://downloadsandupdates");
+        return;
+    }
+    update_check_clicked(cx);
+}
+
 pub fn update_restart_clicked(cx: &mut App) {
     if let Some(store) = WinstoreUpdateStore::try_global(cx) {
         store.update(cx, |store, cx| store.install(cx));
