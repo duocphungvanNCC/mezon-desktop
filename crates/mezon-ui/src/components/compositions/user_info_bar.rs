@@ -191,9 +191,6 @@ impl Render for UserInfoBar {
             avatar = avatar.src(self.avatar_raw.clone());
         }
 
-        // Positioning (absolute / insets) is applied by the cached wrapper in
-        // the chat layout so this view can be `.cached()`; keep only the visual
-        // box here.
         div()
             .relative()
             .w_full()
