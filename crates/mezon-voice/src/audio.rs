@@ -858,11 +858,20 @@ fn open_output(
 }
 
 fn select_input(host: &cpal::Host, id: Option<&str>) -> Result<cpal::Device> {
-    if let Some(id) = id
-        && let Ok(mut devices) = host.input_devices()
-        && let Some(device) = devices.find(|d| matches!(d.id(), Ok(did) if did.to_string() == id))
-    {
-        return Ok(device);
+    if let Some(id) = id {
+        #[cfg(target_os = "windows")]
+        let resolved_id = mezon_native::audio::resolve_input_device_id(id)
+            .map_err(|error| anyhow!("failed to resolve Windows input device: {error}"))?;
+        #[cfg(target_os = "windows")]
+        let id = resolved_id.as_str();
+
+        if let Ok(mut devices) = host.input_devices()
+            && let Some(device) =
+                devices.find(|device| matches!(device.id(), Ok(found) if found.to_string() == id))
+        {
+            return Ok(device);
+        }
+        return Err(anyhow!("audio input device is unavailable: {id}"));
     }
     host.default_input_device()
         .ok_or_else(|| anyhow!("no audio input device available"))
@@ -920,6 +929,14 @@ fn open_input(
     err_hook: InputErrorHook,
 ) -> Result<(cpal::Stream, AudioFormat)> {
     let supported = device.default_input_config()?;
+    let device_id = device
+        .id()
+        .map(|id| id.to_string())
+        .unwrap_or_else(|_| "unknown".to_string());
+    let device_name = device
+        .description()
+        .map(|description| description.to_string())
+        .unwrap_or_else(|_| "unknown".to_string());
     let in_fmt = AudioFormat {
         sample_rate: supported.sample_rate(),
         channels: supported.channels() as u32,
@@ -974,6 +991,14 @@ fn open_input(
         }
         other => bail!("unsupported input sample format: {other:?}"),
     };
+    tracing::info!(
+        device_id,
+        device_name,
+        sample_rate = in_fmt.sample_rate,
+        channels = in_fmt.channels,
+        sample_format = ?supported.sample_format(),
+        "voice mic stream opened",
+    );
     Ok((stream, in_fmt))
 }
 
