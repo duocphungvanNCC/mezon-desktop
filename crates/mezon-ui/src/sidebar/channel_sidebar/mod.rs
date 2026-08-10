@@ -322,13 +322,15 @@ impl ChannelSidebar {
             } else {
                 self.loaded_clans.insert(*clan_id);
                 for category in categories {
-                    if !channels.is_show_empty_category(*clan_id)
-                        && category.channels.is_empty()
-                        && category.id != FAVOR_CATE_ID
-                    {
+                    let is_favorites = category.id == FAVOR_CATE_ID;
+                    let hide_category = if is_favorites {
+                        !category.channels.iter().any(|ch| ch.visible_in_sidebar())
+                    } else {
+                        !channels.is_show_empty_category(*clan_id) && category.channels.is_empty()
+                    };
+                    if hide_category {
                         continue;
                     }
-                    let is_favorites = category.id == FAVOR_CATE_ID;
                     let collapsed = channels.is_category_collapsed(*clan_id, &category.id);
                     let name = if is_favorites {
                         mezon_i18n::t(&locale, "channelList.favoriteChannel").to_string()
@@ -514,6 +516,7 @@ impl ChannelSidebar {
         let new_count = items.len();
         let old_count = self.items.len();
         let items_changed = *self.items != items;
+        let changed = changed_range(&self.items, &items);
         self.items = Rc::new(items);
 
         self.first_badged_index = self.items.iter().position(|item| {
@@ -525,11 +528,12 @@ impl ChannelSidebar {
 
         if clan_changed || old_count == 0 {
             self.list_state.reset(new_count);
-        } else if new_count > old_count {
-            self.list_state
-                .splice(old_count..old_count, new_count - old_count);
-        } else if new_count < old_count {
-            self.list_state.splice(new_count..old_count, 0);
+        } else if let Some((old_range, new_len)) = changed {
+            if old_range.len() == new_len {
+                self.list_state.remeasure_items(old_range);
+            } else {
+                self.list_state.splice(old_range, new_len);
+            }
         }
 
         let skeleton_changed = self.advance_skeleton(cold_loading, new_clan_id, cx);
@@ -1204,6 +1208,31 @@ fn route_active_channel(cx: &gpui::App) -> Option<ChannelId> {
         | crate::router::Route::Canvas { channel_id, .. } => Some(channel_id),
         _ => None,
     }
+}
+
+fn changed_range(
+    old: &[SidebarItem],
+    new: &[SidebarItem],
+) -> Option<(std::ops::Range<usize>, usize)> {
+    let prefix = old
+        .iter()
+        .zip(new.iter())
+        .take_while(|(a, b)| a == b)
+        .count();
+    let max_suffix = old.len().min(new.len()) - prefix;
+    let suffix = old
+        .iter()
+        .rev()
+        .zip(new.iter().rev())
+        .take(max_suffix)
+        .take_while(|(a, b)| a == b)
+        .count();
+    let old_range = prefix..old.len() - suffix;
+    let new_len = new.len() - suffix - prefix;
+    if old_range.is_empty() && new_len == 0 {
+        return None;
+    }
+    Some((old_range, new_len))
 }
 
 fn clan_inputs_fingerprint(clans: &ClanList) -> (Option<ClanId>, u64) {
@@ -1950,5 +1979,64 @@ fn render_sidebar_item(
 
             channel_col.into_any_element()
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{SidebarItem, changed_range};
+    use gpui::SharedString;
+
+    fn cat(id: &str) -> SidebarItem {
+        SidebarItem::Category {
+            elem_id: SharedString::from(format!("cat-{id}")),
+            name: id.to_string(),
+            name_upper: id.to_uppercase(),
+            id: id.to_string(),
+            collapsed: false,
+        }
+    }
+
+    #[test]
+    fn unchanged_items_need_no_list_update() {
+        let old = [cat("banner"), cat("general")];
+        let new = [cat("banner"), cat("general")];
+        assert_eq!(changed_range(&old, &new), None);
+    }
+
+    #[test]
+    fn favorites_appearing_splices_at_the_head_not_the_tail() {
+        let old = [cat("banner"), cat("general"), cat("voice")];
+        let new = [
+            cat("banner"),
+            cat("favorites"),
+            cat("general"),
+            cat("voice"),
+        ];
+        assert_eq!(changed_range(&old, &new), Some((1..1, 1)));
+    }
+
+    #[test]
+    fn favorites_disappearing_removes_the_head_range() {
+        let old = [cat("banner"), cat("favorites"), cat("general")];
+        let new = [cat("banner"), cat("general")];
+        assert_eq!(changed_range(&old, &new), Some((1..2, 0)));
+    }
+
+    #[test]
+    fn in_place_content_change_keeps_the_item_count() {
+        let old = [cat("banner"), cat("general"), cat("voice")];
+        let mut new = old.clone();
+        new[1] = cat("renamed");
+        let (range, len) = changed_range(&old, &new).expect("change detected");
+        assert_eq!(range, 1..2);
+        assert_eq!(range.len(), len);
+    }
+
+    #[test]
+    fn trailing_append_is_still_reported_at_the_tail() {
+        let old = [cat("banner"), cat("general")];
+        let new = [cat("banner"), cat("general"), cat("voice")];
+        assert_eq!(changed_range(&old, &new), Some((2..2, 1)));
     }
 }
