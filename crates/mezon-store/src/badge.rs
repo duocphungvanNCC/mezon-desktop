@@ -370,6 +370,21 @@ impl BadgeService {
                             &mut self.processed_badge_order,
                             (channel_id, message_id),
                         );
+                    tracing::debug!(
+                        target: "badge_flow",
+                        clan = m.clan_id,
+                        channel = channel_id.get(),
+                        message = message_id.get(),
+                        ts,
+                        from_me,
+                        seen,
+                        already_seen,
+                        mentions_me,
+                        badge_mention,
+                        topic = m.topic_id,
+                        skip = skip_unread_activity,
+                        "socket ChannelMessage decision"
+                    );
                     if m.topic_id == 0 && !skip_unread_activity {
                         ChannelList::global(cx).update(cx, |cl, cx| {
                             cl.note_channel_message(
