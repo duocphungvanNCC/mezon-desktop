@@ -78,13 +78,14 @@ impl ChannelTyping {
 
 impl Render for ChannelTyping {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let (primary, active) = {
-            let theme = cx.theme();
-            (theme.tokens.text_theme_primary, theme.tokens.text_secondary)
-        };
+        let theme = cx.theme();
+        let primary = theme.tokens.text_theme_primary;
+        let name_color = theme.tokens.text_theme_primary_hover;
         let bar = div()
             .pl_3()
-            .h(px(16.))
+            .pr_1()
+            .h_full()
+            .w_full()
             .flex_none()
             .flex()
             .flex_row()
@@ -92,7 +93,6 @@ impl Render for ChannelTyping {
             .gap_1p5()
             .overflow_hidden()
             .whitespace_nowrap()
-            .pr_1()
             .text_xs()
             .line_height(px(16.))
             .text_color(primary);
@@ -110,16 +110,15 @@ impl Render for ChannelTyping {
                         .flex()
                         .flex_row()
                         .items_center()
-                        .flex_1()
                         .min_w_0()
+                        .overflow_hidden()
                         .child(
                             div()
-                                .flex_initial()
                                 .min_w_0()
                                 .mr(px(2.))
                                 .truncate()
                                 .font_weight(FontWeight::SEMIBOLD)
-                                .text_color(active)
+                                .text_color(name_color)
                                 .child(name),
                         )
                         .child(div().flex_none().text_color(primary).child(suffix)),

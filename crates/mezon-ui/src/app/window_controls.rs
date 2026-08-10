@@ -147,19 +147,23 @@ pub fn is_edge_resizable() -> bool {
 }
 
 pub fn render_resize_edges(window: &mut Window) -> impl IntoElement {
-    if !is_edge_resizable() || window.is_maximized() {
+    if !is_edge_resizable() {
         return div().id("window-resize-edges-disabled");
     }
 
     let decorations = window.window_decorations();
+    if matches!(decorations, Decorations::Client { .. }) {
+        window.set_client_inset(px(RESIZE_BORDER_SIZE));
+    }
+
+    if window.is_maximized() {
+        return div().id("window-resize-edges-disabled");
+    }
+
     let tiling = match decorations {
         Decorations::Client { tiling } => tiling,
         Decorations::Server => Tiling::default(),
     };
-
-    if matches!(decorations, Decorations::Client { .. }) {
-        window.set_client_inset(px(RESIZE_BORDER_SIZE));
-    }
 
     let border = px(RESIZE_BORDER_SIZE);
     let mut layer = div()
