@@ -16,10 +16,11 @@ mod video;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use futures::StreamExt;
-use livekit::options::{TrackPublishOptions, VideoEncoding};
+use livekit::options::{DegradationPreference, TrackPublishOptions, VideoEncoding};
 use livekit::participant::ParticipantKind;
 use livekit::prelude::*;
 use livekit::track::{
@@ -60,6 +61,9 @@ const MAX_REMOTE_VIDEO_WIDTH: u32 = 1920;
 const MAX_REMOTE_VIDEO_HEIGHT: u32 = 1080;
 
 const AUDIO_SOURCE_QUEUE_SIZE_MS: u32 = 100;
+const MIC_PUBLISH_RETRY_INTERVAL: Duration = Duration::from_secs(2);
+const PLAYBACK_RESTART_DELAY: Duration = Duration::from_millis(500);
+const MAX_PLAYBACK_RESTARTS: u32 = 3;
 
 #[derive(Clone, Debug, Default)]
 pub struct IceServerConfig {
@@ -269,6 +273,8 @@ fn room_options(ice_servers: Vec<IceServerConfig>) -> RoomOptions {
         .collect();
 
     let mut options = RoomOptions::default();
+    options.adaptive_stream = true;
+    options.dynacast = true;
     options.rtc_config.ice_servers = ice_servers;
     options
 }
@@ -323,50 +329,30 @@ async fn session_main(
                 let mut source: Option<NativeAudioSource> = None;
                 let mut channels: u32 = 1;
                 let mut sample_rate: u32 = 48_000;
+                let mut current_in_fmt: Option<AudioFormat> = None;
+                let mut last_publish_attempt: Option<Instant> = None;
                 loop {
                     tokio::select! {
                         biased;
                         reconfigure = input_format_rx.recv_async() => {
                             let Ok(in_fmt) = reconfigure else { break };
-                            let previous = mic_publication_task.lock().take();
-                            if let Some(previous) = previous {
-                                let _ = room_for_mic
-                                    .local_participant()
-                                    .unpublish_track(&previous.sid())
-                                    .await;
-                            }
-                            let new_source = NativeAudioSource::new(
-                                AudioSourceOptions::default(),
-                                in_fmt.sample_rate,
-                                in_fmt.channels,
-                                AUDIO_SOURCE_QUEUE_SIZE_MS,
-                            );
-                            let mic_track = LocalAudioTrack::create_audio_track(
-                                "microphone",
-                                RtcAudioSource::Native(new_source.clone()),
-                            );
-                            match room_for_mic
-                                .local_participant()
-                                .publish_track(
-                                    LocalTrack::Audio(mic_track),
-                                    TrackPublishOptions {
-                                        source: TrackSource::Microphone,
-                                        ..Default::default()
-                                    },
-                                )
-                                .await
+                            current_in_fmt = Some(in_fmt);
+                            last_publish_attempt = Some(Instant::now());
+                            match publish_microphone_track(
+                                &room_for_mic,
+                                &mic_publication_task,
+                                &mic_enabled,
+                                in_fmt,
+                            )
+                            .await
                             {
-                                Ok(publication) => {
-                                    if !mic_enabled.load(Ordering::Relaxed) {
-                                        publication.mute();
-                                    }
-                                    *mic_publication_task.lock() = Some(publication);
-                                    channels = in_fmt.channels.max(1);
-                                    sample_rate = in_fmt.sample_rate;
-                                    source = Some(new_source);
+                                Ok(new_source) => {
+                                    channels = new_source.channels;
+                                    sample_rate = new_source.sample_rate;
+                                    source = Some(new_source.source);
                                 }
                                 Err(e) => {
-                                    tracing::warn!("failed to publish mic track: {e}");
+                                    tracing::warn!("failed to publish mic track: {e:#}");
                                     source = None;
                                 }
                             }
@@ -376,7 +362,32 @@ async fn session_main(
                             if !mic_enabled.load(Ordering::Relaxed) {
                                 continue;
                             }
-                            let Some(source) = source.as_ref() else {
+                            if source.is_none()
+                                && last_publish_attempt
+                                    .is_none_or(|at| at.elapsed() >= MIC_PUBLISH_RETRY_INTERVAL)
+                            {
+                                if let Some(in_fmt) = current_in_fmt {
+                                    last_publish_attempt = Some(Instant::now());
+                                    match publish_microphone_track(
+                                        &room_for_mic,
+                                        &mic_publication_task,
+                                        &mic_enabled,
+                                        in_fmt,
+                                    )
+                                    .await
+                                    {
+                                        Ok(new_source) => {
+                                            channels = new_source.channels;
+                                            sample_rate = new_source.sample_rate;
+                                            source = Some(new_source.source);
+                                        }
+                                        Err(e) => {
+                                            tracing::warn!("failed to retry mic track publish: {e:#}");
+                                        }
+                                    }
+                                }
+                            }
+                            let Some(mic_source) = source.as_ref() else {
                                 continue;
                             };
                             let samples_per_channel = samples.len() as u32 / channels;
@@ -389,7 +400,10 @@ async fn session_main(
                                 sample_rate,
                                 samples_per_channel,
                             };
-                            let _ = source.capture_frame(&frame).await;
+                            if let Err(e) = mic_source.capture_frame(&frame).await {
+                                tracing::warn!("failed to capture mic frame: {e}");
+                                source = None;
+                            }
                         }
                     }
                 }
@@ -526,6 +540,13 @@ async fn session_main(
                             &mut last_participants,
                         );
                     }
+                    RoomEvent::ConnectionStateChanged(ConnectionState::Reconnecting) => {
+                        let _ = evt_tx.send(VoiceEvent::Reconnecting);
+                    }
+                    RoomEvent::ConnectionStateChanged(ConnectionState::Connected) => {
+                        let _ = evt_tx.send(VoiceEvent::Reconnected);
+                    }
+                    RoomEvent::ConnectionStateChanged(ConnectionState::Disconnected) => {}
                     RoomEvent::Reconnecting => {
                         let _ = evt_tx.send(VoiceEvent::Reconnecting);
                     }
@@ -787,6 +808,55 @@ async fn session_main(
     Ok(())
 }
 
+struct PublishedMicSource {
+    source: NativeAudioSource,
+    channels: u32,
+    sample_rate: u32,
+}
+
+async fn publish_microphone_track(
+    room: &Room,
+    mic_publication: &Arc<Mutex<Option<LocalTrackPublication>>>,
+    mic_enabled: &Arc<AtomicBool>,
+    in_fmt: AudioFormat,
+) -> Result<PublishedMicSource> {
+    let previous = mic_publication.lock().take();
+    if let Some(previous) = previous {
+        let _ = room
+            .local_participant()
+            .unpublish_track(&previous.sid())
+            .await;
+    }
+
+    let source = NativeAudioSource::new(
+        AudioSourceOptions::default(),
+        in_fmt.sample_rate,
+        in_fmt.channels,
+        AUDIO_SOURCE_QUEUE_SIZE_MS,
+    );
+    let mic_track =
+        LocalAudioTrack::create_audio_track("microphone", RtcAudioSource::Native(source.clone()));
+    let publication = room
+        .local_participant()
+        .publish_track(
+            LocalTrack::Audio(mic_track),
+            TrackPublishOptions {
+                source: TrackSource::Microphone,
+                ..Default::default()
+            },
+        )
+        .await?;
+    if !mic_enabled.load(Ordering::Relaxed) {
+        publication.mute();
+    }
+    *mic_publication.lock() = Some(publication);
+    Ok(PublishedMicSource {
+        source,
+        channels: in_fmt.channels.max(1),
+        sample_rate: in_fmt.sample_rate,
+    })
+}
+
 async fn start_camera_track(
     room: &Room,
     identity: &str,
@@ -804,7 +874,7 @@ async fn start_camera_track(
             LocalTrack::Video(track.clone()),
             TrackPublishOptions {
                 source: TrackSource::Camera,
-                simulcast: false,
+                simulcast: true,
                 video_encoding: Some(VideoEncoding {
                     max_bitrate: 1_200_000,
                     max_framerate: 30.0,
@@ -838,9 +908,10 @@ async fn start_screen_track(
                 source: TrackSource::Screenshare,
                 simulcast: false,
                 video_encoding: Some(VideoEncoding {
-                    max_bitrate: 5_000_000,
-                    max_framerate: 60.0,
+                    max_bitrate: 2_500_000,
+                    max_framerate: 15.0,
                 }),
+                degradation_preference: Some(DegradationPreference::MaintainResolution),
                 ..Default::default()
             },
         )
@@ -920,17 +991,37 @@ fn spawn_playback(
     mixer: Arc<audio::PlaybackMixer>,
     out_fmt: AudioFormat,
 ) -> tokio::task::JoinHandle<()> {
-    let rtc_track = track.rtc_track();
     runtime::runtime().spawn(async move {
-        let mut stream = NativeAudioStream::new(
-            rtc_track,
-            out_fmt.sample_rate as i32,
-            out_fmt.channels as i32,
-        );
-        while let Some(frame) = stream.next().await {
-            mixer.push(key, &frame.data);
+        let mut restart_attempts = 0;
+        loop {
+            let rtc_track = track.rtc_track();
+            let mut stream = NativeAudioStream::new(
+                rtc_track,
+                out_fmt.sample_rate as i32,
+                out_fmt.channels as i32,
+            );
+            let mut saw_frame = false;
+            while let Some(frame) = stream.next().await {
+                saw_frame = true;
+                mixer.push(key, &frame.data);
+            }
+            mixer.remove(key);
+
+            if restart_attempts >= MAX_PLAYBACK_RESTARTS {
+                tracing::warn!(
+                    "remote audio stream ended after {MAX_PLAYBACK_RESTARTS} restart attempts; stopping playback reader"
+                );
+                break;
+            }
+
+            let delay = PLAYBACK_RESTART_DELAY * 2u32.pow(restart_attempts);
+            restart_attempts += 1;
+            tracing::warn!(
+                "remote audio stream ended (received_frames={saw_frame}); restart attempt {restart_attempts}/{MAX_PLAYBACK_RESTARTS} in {}ms",
+                delay.as_millis()
+            );
+            tokio::time::sleep(delay).await;
         }
-        mixer.remove(key);
     })
 }
 

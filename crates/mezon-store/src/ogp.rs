@@ -12,7 +12,7 @@ const EXCLUDED_HOSTS: &[&str] = &[
 
 const TRAILING_PUNCTUATION: &[char] = &['.', ',', ';', ':', '!', '?', ')', ']', '}', '\'', '"'];
 
-fn invite_id_from_url(url: &str) -> Option<String> {
+pub fn invite_id_from_url(url: &str) -> Option<String> {
     const NEEDLE: &[u8] = b"/invite/";
     let idx = url
         .as_bytes()
@@ -75,6 +75,12 @@ pub fn internal_invite_id(url: &str, internal_domain: Option<&str>) -> Option<St
     is_internal_host(url, internal_domain)
         .then(|| invite_id_from_url(url))
         .flatten()
+}
+
+pub fn trusted_invite_id(url: &str, internal_domain: Option<&str>) -> Option<i64> {
+    internal_invite_id(url, internal_domain)
+        .and_then(|id| id.parse::<i64>().ok())
+        .filter(|id| *id != 0)
 }
 
 fn normalized_internal_domain(internal_domain: Option<&str>) -> Option<String> {
@@ -234,6 +240,28 @@ mod tests {
         );
         assert_eq!(
             internal_invite_id("https://mezon.ai/invite/123", Some("")),
+            None
+        );
+    }
+
+    #[test]
+    fn trusted_invite_id_requires_internal_host() {
+        assert_eq!(
+            trusted_invite_id(
+                "https://evil.com/invite/1840670747886882816",
+                Some("mezon.ai")
+            ),
+            None
+        );
+        assert_eq!(
+            trusted_invite_id(
+                "https://mezon.ai/invite/1840670747886882816",
+                Some("mezon.ai")
+            ),
+            Some(1840670747886882816)
+        );
+        assert_eq!(
+            trusted_invite_id("https://mezon.ai/invite/0", Some("mezon.ai")),
             None
         );
     }

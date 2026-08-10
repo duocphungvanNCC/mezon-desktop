@@ -2681,6 +2681,10 @@ impl AppApi {
             .create_link_invite_user(clan_id, channel_id, expiry_time)
             .await
     }
+
+    pub async fn invite_user(&self, invite_id: i64) -> Result<mezon_proto::api::InviteUserRes> {
+        self.transport.invite_user(invite_id).await
+    }
 }
 
 #[cfg(test)]
