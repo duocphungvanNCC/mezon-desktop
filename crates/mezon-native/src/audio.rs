@@ -3,6 +3,9 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use flume::Sender;
 use std::sync::Mutex;
 
+#[cfg(target_os = "windows")]
+pub const WINDOWS_COMMUNICATIONS_INPUT_DEVICE_ID: &str = "mezon:audio-input:windows-communications";
+
 /// Describes a detected audio device.
 #[derive(Debug, Clone)]
 pub struct AudioDeviceInfo {
@@ -22,7 +25,17 @@ pub fn enumerate_input_devices() -> Vec<AudioDeviceInfo> {
         tracing::warn!("Failed to enumerate input devices");
         return vec![];
     };
-    collect_devices(devices)
+    let devices = collect_devices(devices);
+    #[cfg(target_os = "windows")]
+    {
+        let mut devices = devices;
+        append_windows_communications_input(&mut devices);
+        devices
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        devices
+    }
 }
 
 /// Enumerate all available audio output (speaker/headphone) devices.
@@ -46,6 +59,87 @@ fn collect_devices(devices: impl Iterator<Item = cpal::Device>) -> Vec<AudioDevi
             Some(AudioDeviceInfo { id, name })
         })
         .collect()
+}
+
+#[cfg(target_os = "windows")]
+fn append_windows_communications_input(devices: &mut Vec<AudioDeviceInfo>) {
+    let resolved = match resolve_input_device_id(WINDOWS_COMMUNICATIONS_INPUT_DEVICE_ID) {
+        Ok(id) => id,
+        Err(error) => {
+            tracing::warn!("Failed to resolve Windows communications microphone: {error}");
+            return;
+        }
+    };
+    let Some(device) = devices.iter().find(|device| device.id == resolved) else {
+        tracing::warn!("Windows communications microphone is not in the active device list");
+        return;
+    };
+    devices.push(AudioDeviceInfo {
+        id: WINDOWS_COMMUNICATIONS_INPUT_DEVICE_ID.to_string(),
+        name: format!("Communications - {}", device.name),
+    });
+}
+
+#[cfg(target_os = "windows")]
+pub fn resolve_input_device_id(device_id: &str) -> Result<String, String> {
+    if device_id != WINDOWS_COMMUNICATIONS_INPUT_DEVICE_ID {
+        return Ok(device_id.to_string());
+    }
+    windows_default_input_device_id(windows::Win32::Media::Audio::eCommunications)
+}
+
+#[cfg(target_os = "windows")]
+fn windows_default_input_device_id(
+    role: windows::Win32::Media::Audio::ERole,
+) -> Result<String, String> {
+    use windows::Win32::Foundation::RPC_E_CHANGED_MODE;
+    use windows::Win32::Media::Audio::{IMMDeviceEnumerator, MMDeviceEnumerator, eCapture};
+    use windows::Win32::System::Com::{
+        CLSCTX_ALL, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx, CoTaskMemFree,
+        CoUninitialize,
+    };
+
+    struct ComGuard(bool);
+    impl Drop for ComGuard {
+        fn drop(&mut self) {
+            if self.0 {
+                unsafe { CoUninitialize() };
+            }
+        }
+    }
+
+    let initialized = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) };
+    if initialized.is_err() && initialized != RPC_E_CHANGED_MODE {
+        return Err(format!("COM initialization failed: {initialized}"));
+    }
+    let _com = ComGuard(initialized.is_ok());
+
+    let endpoint_id = unsafe {
+        let enumerator: IMMDeviceEnumerator =
+            CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)
+                .map_err(|error| format!("MMDeviceEnumerator creation failed: {error}"))?;
+        let endpoint = enumerator
+            .GetDefaultAudioEndpoint(eCapture, role)
+            .map_err(|error| format!("default capture endpoint lookup failed: {error}"))?;
+        let id = endpoint
+            .GetId()
+            .map_err(|error| format!("capture endpoint ID lookup failed: {error}"))?;
+        let result = id
+            .to_string()
+            .map_err(|error| format!("capture endpoint ID conversion failed: {error}"));
+        CoTaskMemFree(Some(id.0.cast()));
+        result?
+    };
+
+    let host = cpal::default_host();
+    let devices = host
+        .input_devices()
+        .map_err(|error| format!("input device enumeration failed: {error}"))?;
+    devices
+        .filter_map(|device| device.id().ok())
+        .find(|id| id.1 == endpoint_id)
+        .map(|id| id.to_string())
+        .ok_or_else(|| "default capture endpoint is not available through CPAL".to_string())
 }
 
 #[cfg(target_os = "linux")]
@@ -140,6 +234,12 @@ impl MicCapture {
     /// Returns an error if the device cannot be found or the stream fails to open.
     pub fn start(device_id: &str, sender: Sender<f32>) -> Result<Self, MicCaptureError> {
         let host = cpal::default_host();
+
+        #[cfg(target_os = "windows")]
+        let resolved_device_id = resolve_input_device_id(device_id)
+            .map_err(|error| MicCaptureError::DeviceNotFound(error.to_string()))?;
+        #[cfg(target_os = "windows")]
+        let device_id = resolved_device_id.as_str();
 
         let mut devices = host
             .input_devices()

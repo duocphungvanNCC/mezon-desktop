@@ -6109,6 +6109,7 @@ dependencies = [
  "libc",
  "livekit",
  "livekit-protocol",
+ "mezon-native",
  "nokhwa",
  "objc",
  "parking_lot",
