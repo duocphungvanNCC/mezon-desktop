@@ -266,7 +266,20 @@ fn dispatch_realtime_push(
                             | RealtimeEvent::ChannelPresence(_)
                             | RealtimeEvent::StatusPresence(_)
                     ) {
-                        tracing::debug!("server push (cid={cid}): {}", event.kind_name());
+                        if let RealtimeEvent::Unhandled(inner) = &event {
+                            let detail = format!("{inner:?}");
+                            let end = detail
+                                .char_indices()
+                                .nth(300)
+                                .map(|(i, _)| i)
+                                .unwrap_or(detail.len());
+                            tracing::debug!(
+                                "server push (cid={cid}): Unhandled variant: {}",
+                                &detail[..end]
+                            );
+                        } else {
+                            tracing::debug!("server push (cid={cid}): {}", event.kind_name());
+                        }
                     }
                     on_event(event);
                 }
