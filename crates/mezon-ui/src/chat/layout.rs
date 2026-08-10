@@ -4,7 +4,7 @@ use crate::chat::channel_app_bar::ChannelAppBarTarget;
 use gpui::{
     AnyView, App, Context, DismissEvent, Entity, FocusHandle, Focusable, Pixels, ScrollHandle,
     Size, StyleRefinement, Subscription, Task, Window, deferred, div, linear_color_stop,
-    linear_gradient, prelude::*, px,
+    linear_gradient, prelude::*, px, relative,
 };
 use mezon_store::{
     AuthState, AutoUpdateStatus, AutoUpdateStore, CHANNEL_ACTIVE_ARCHIVED, CHANNEL_ACTIVE_JOINED,
@@ -1747,6 +1747,7 @@ impl Render for ChatLayout {
                     .flex_col()
                     .w(px(344.0))
                     .h_full()
+                    .bg(theme.bg_tertiary)
                     .child(
                         div()
                             .flex()
@@ -1766,24 +1767,34 @@ impl Render for ChatLayout {
                     .child(
                         div()
                             .flex_none()
-                            .mx_2()
+                            .ml(px(12.))
+                            .mr_2()
                             .mb_3()
                             .flex()
                             .flex_col()
+                            .max_h(relative(0.5))
+                            .min_h_0()
                             .rounded(px(12.0))
                             .overflow_hidden()
                             .border_1()
                             .border_color(theme.tokens.border_primary)
                             .shadow_lg()
                             .bg(theme.tokens.bg_surface)
-                            .occlude()
-                            .children(stream_connected_bar)
-                            .children(voice_mini_bar)
-                            .children(update_available_pill)
-                            .children(update_pill)
-                            .children(manual_install_pill)
                             .child(
                                 div()
+                                    .id("clan-footer-bars")
+                                    .flex_1()
+                                    .min_h_0()
+                                    .overflow_y_scroll()
+                                    .children(stream_connected_bar)
+                                    .children(voice_mini_bar)
+                                    .children(update_available_pill)
+                                    .children(update_pill)
+                                    .children(manual_install_pill),
+                            )
+                            .child(
+                                div()
+                                    .flex_none()
                                     .w_full()
                                     .h(px(56.0))
                                     .child(AnyView::from(self.user_info_bar.clone())),

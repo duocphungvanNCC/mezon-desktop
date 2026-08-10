@@ -14,7 +14,6 @@ use crate::util::assets::STREAM_THUMBNAIL;
 use ui::Tooltip;
 
 const MEMBER_AVATAR_SIZE: f32 = 40.;
-const STREAM_CONNECTED_BAR_HEIGHT: f32 = 52.;
 
 fn theme_is_light(theme: &Theme) -> bool {
     let bg = theme.bg_primary;
@@ -221,10 +220,6 @@ fn stream_session_channel(cx: &App, store: &StreamStore) -> Option<Channel> {
         _ => return None,
     };
     ChannelList::try_global(cx).and_then(|list| list.read(cx).channel(clan_id, channel_id).cloned())
-}
-
-pub fn stream_connected_bar_height() -> f32 {
-    STREAM_CONNECTED_BAR_HEIGHT
 }
 
 pub fn render_stream_connected_bar(
