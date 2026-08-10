@@ -344,7 +344,6 @@ impl Render for ClanSidebar {
             .flex_col()
             .w_full()
             .h_full()
-            .pb(px(68.))
             .items_center()
             .child(
                 div()

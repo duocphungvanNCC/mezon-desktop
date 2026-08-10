@@ -897,7 +897,6 @@ impl Render for ChannelSidebar {
             .flex_col()
             .w_full()
             .h_full()
-            .pb(px(68.))
             .bg(theme.bg_secondary)
             .child({
                 let sidebar = sidebar.clone();
