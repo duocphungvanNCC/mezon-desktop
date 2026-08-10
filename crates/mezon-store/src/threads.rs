@@ -1208,7 +1208,13 @@ fn patch_thread_in_list(
     true
 }
 
-pub fn group_threads(threads: &[ThreadSummary]) -> (Vec<usize>, Vec<usize>, Vec<usize>) {
+pub struct GroupedThreadIndexes {
+    pub joined: Vec<usize>,
+    pub active: Vec<usize>,
+    pub archived: Vec<usize>,
+}
+
+pub fn group_threads(threads: &[ThreadSummary]) -> GroupedThreadIndexes {
     let mut joined = Vec::new();
     let mut active = Vec::new();
     let mut archived = Vec::new();
@@ -1228,7 +1234,11 @@ pub fn group_threads(threads: &[ThreadSummary]) -> (Vec<usize>, Vec<usize>, Vec<
     sort(&mut active);
     sort(&mut archived);
 
-    (joined, active, archived)
+    GroupedThreadIndexes {
+        joined,
+        active,
+        archived,
+    }
 }
 
 #[cfg(test)]
@@ -1480,7 +1490,7 @@ mod tests {
     }
 
     #[test]
-    fn group_threads_moves_archived_to_archived_bucket() {
+    fn group_threads_partitions_by_status() {
         let threads = vec![
             ThreadSummary {
                 channel_id: "1".into(),
@@ -1528,10 +1538,10 @@ mod tests {
                 member_count: 0,
             },
         ];
-        let (joined, active, archived) = group_threads(&threads);
-        assert_eq!(joined, vec![0]);
-        assert_eq!(active, vec![2]);
-        assert_eq!(archived, vec![1]);
+        let grouped = group_threads(&threads);
+        assert_eq!(grouped.joined, vec![0]);
+        assert_eq!(grouped.active, vec![2]);
+        assert_eq!(grouped.archived, vec![1]);
     }
 
     #[test]
