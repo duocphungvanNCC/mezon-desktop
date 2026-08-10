@@ -1,6 +1,8 @@
 use crate::channel::ChannelList;
 use crate::config::AppConfig;
 use crate::ids::{ChannelId, ClanId, UserId};
+use crate::ogp::trusted_invite_id;
+use std::collections::HashSet;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -337,6 +339,19 @@ impl From<ApiClanDesc> for Clan {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AcceptInviteResult {
+    pub clan_id: ClanId,
+    pub channel_id: ChannelId,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AcceptInviteError {
+    AlreadyJoining,
+    InvalidLink,
+    Failed(String),
+}
+
 /// Typed events emitted by [`ClanList`] — the analog of Zed's `ChannelEvent`
 /// (`channel_store.rs:144`). Other stores/views `cx.subscribe` to react to specific changes.
 #[derive(Debug, Clone)]
@@ -359,8 +374,11 @@ pub struct ClanList {
     api: Arc<AppApi>,
     loading: bool,
     badges_loaded: bool,
+    reload_pending: bool,
     reset_generation: u64,
     saved_order: Vec<ClanId>,
+    joining_invite_urls: HashSet<String>,
+    invite_join_failed_urls: HashSet<String>,
     _connection_watch: Task<()>,
     _saved_order_load: Task<()>,
 }
@@ -393,6 +411,9 @@ impl ClanList {
         self.clans.clear();
         self.loading = false;
         self.badges_loaded = false;
+        self.reload_pending = false;
+        self.joining_invite_urls.clear();
+        self.invite_join_failed_urls.clear();
         if self.active_clan_id.take().is_some() {
             cx.emit(ClanEvent::ActiveClanChanged(None));
         }
@@ -420,8 +441,11 @@ impl ClanList {
             api,
             loading: false,
             badges_loaded: false,
+            reload_pending: false,
             reset_generation: 0,
             saved_order: Vec::new(),
+            joining_invite_urls: HashSet::new(),
+            invite_join_failed_urls: HashSet::new(),
             _connection_watch: connection_watch,
             _saved_order_load: saved_order_load,
         }
@@ -472,6 +496,7 @@ impl ClanList {
 
     pub fn reload(&mut self, cx: &mut Context<Self>) {
         if self.loading {
+            self.reload_pending = true;
             return;
         }
         self.loading = true;
@@ -545,6 +570,10 @@ impl ClanList {
                     this.fire_join_clan_chat(clan_id, cx);
                 } else if let Some(clan_id) = this.clans.first().map(|clan| clan.id) {
                     this.fire_join_clan_chat(clan_id, cx);
+                }
+                if this.reload_pending {
+                    this.reload_pending = false;
+                    this.reload(cx);
                 }
             });
         })
@@ -730,6 +759,70 @@ impl ClanList {
 
     pub fn subscribe_clan_realtime(&self, clan_id: ClanId, cx: &mut Context<Self>) {
         self.fire_join_clan_chat(clan_id, cx);
+    }
+
+    pub fn is_joining_invite(&self, invite_url: &str) -> bool {
+        self.joining_invite_urls.contains(invite_url)
+    }
+
+    pub fn has_invite_join_error(&self, invite_url: &str) -> bool {
+        self.invite_join_failed_urls.contains(invite_url)
+    }
+
+    pub fn accept_invite_link(
+        &mut self,
+        invite_url: String,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<AcceptInviteResult, AcceptInviteError>> {
+        if self.joining_invite_urls.contains(&invite_url) {
+            return Task::ready(Err(AcceptInviteError::AlreadyJoining));
+        }
+        let internal_domain = AppConfig::try_global(cx).map(|cfg| cfg.domain_url.as_str());
+        let Some(invite_id) = trusted_invite_id(&invite_url, internal_domain) else {
+            return Task::ready(Err(AcceptInviteError::InvalidLink));
+        };
+        self.joining_invite_urls.insert(invite_url.clone());
+        self.invite_join_failed_urls.remove(&invite_url);
+        cx.notify();
+        let api = self.api.clone();
+        let generation = self.reset_generation;
+        let invite_url_for_task = invite_url;
+        cx.spawn(async move |this, cx| {
+            let result = api
+                .invite_user(invite_id)
+                .await
+                .map_err(|e| AcceptInviteError::Failed(e.to_string()))
+                .and_then(|res| {
+                    if res.clan_id == 0 {
+                        Err(AcceptInviteError::Failed("cannot join clan".into()))
+                    } else {
+                        Ok(AcceptInviteResult {
+                            clan_id: ClanId(res.clan_id),
+                            channel_id: ChannelId(res.channel_id),
+                        })
+                    }
+                });
+            let _ = this.update(cx, |this, cx| {
+                this.joining_invite_urls.remove(&invite_url_for_task);
+                if this.reset_generation != generation {
+                    return;
+                }
+                match &result {
+                    Ok(accept) => {
+                        this.invite_join_failed_urls.remove(&invite_url_for_task);
+                        this.select_clan(accept.clan_id, cx);
+                        this.fire_join_clan_chat(accept.clan_id, cx);
+                        this.reload(cx);
+                    }
+                    Err(AcceptInviteError::AlreadyJoining) => {}
+                    Err(_) => {
+                        this.invite_join_failed_urls.insert(invite_url_for_task);
+                    }
+                }
+                cx.notify();
+            });
+            result
+        })
     }
 
     pub fn select_clan(&mut self, id: ClanId, cx: &mut Context<Self>) {
@@ -1635,6 +1728,18 @@ mod tests {
             clan.has_unread = false;
         }
         assert_eq!(c[0].badge_count, 3);
+    }
+
+    #[test]
+    fn accept_invite_error_variants_are_distinct() {
+        assert_ne!(
+            AcceptInviteError::AlreadyJoining,
+            AcceptInviteError::InvalidLink
+        );
+        assert_ne!(
+            AcceptInviteError::InvalidLink,
+            AcceptInviteError::Failed("x".into())
+        );
     }
 
     #[test]
