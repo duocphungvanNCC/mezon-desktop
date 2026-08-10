@@ -96,8 +96,7 @@ pub fn init(cx: &mut gpui::App) {
     cx.on_action(|_: &OpenCommandPalette, cx: &mut gpui::App| {
         command_palette::CommandPaletteModal::try_toggle_authenticated(cx);
     });
-    components::primitives::init_input(cx);
-    components::primitives::init_textarea(cx);
+    components::primitives::init_text_input(cx);
     chat::mention_input::init(cx);
     mezon_canvas::init(cx);
     canvas_navigation::init(cx);
@@ -109,7 +108,7 @@ pub fn init(cx: &mut gpui::App) {
 
 /// macOS menu bar and standard shortcuts. Edit items reuse the input component's clipboard actions.
 fn init_menus(cx: &mut gpui::App) {
-    use crate::components::primitives::input::{Copy, Cut, Paste, SelectAll};
+    use crate::components::primitives::text_actions::{Copy, Cut, Paste, SelectAll};
 
     #[cfg(target_os = "macos")]
     init_macos_menu_actions(cx);
@@ -149,10 +148,10 @@ fn init_macos_menu_actions(cx: &mut gpui::App) {
 }
 
 fn app_menus(
-    cut: crate::components::primitives::input::Cut,
-    copy: crate::components::primitives::input::Copy,
-    paste: crate::components::primitives::input::Paste,
-    select_all: crate::components::primitives::input::SelectAll,
+    cut: crate::components::primitives::text_actions::Cut,
+    copy: crate::components::primitives::text_actions::Copy,
+    paste: crate::components::primitives::text_actions::Paste,
+    select_all: crate::components::primitives::text_actions::SelectAll,
 ) -> Vec<gpui::Menu> {
     use gpui::{Menu, MenuItem};
 
@@ -184,10 +183,10 @@ fn app_menus(
 }
 
 fn edit_menu_items(
-    cut: crate::components::primitives::input::Cut,
-    copy: crate::components::primitives::input::Copy,
-    paste: crate::components::primitives::input::Paste,
-    select_all: crate::components::primitives::input::SelectAll,
+    cut: crate::components::primitives::text_actions::Cut,
+    copy: crate::components::primitives::text_actions::Copy,
+    paste: crate::components::primitives::text_actions::Paste,
+    select_all: crate::components::primitives::text_actions::SelectAll,
 ) -> [gpui::MenuItem; 5] {
     use gpui::{MenuItem, OsAction};
 

@@ -3633,6 +3633,7 @@
   "searchMessageChannel.cancel": "취소",
   "searchMessageChannel.channels": "채널",
   "searchMessageChannel.emptySearch.title": "우리는 모든 곳을 검색했습니다. 불행히도 결과가 없습니다.",
+  "searchMessageChannel.emptyPage": "이 페이지에 메시지가 없습니다. 다른 페이지를 시도해 보세요.",
   "searchMessageChannel.enter": "Enter",
   "searchMessageChannel.filterOptions.fromUser": "특정 사람",
   "searchMessageChannel.filterOptions.inChannel": "특정 채널",

@@ -186,6 +186,14 @@ impl AppApi {
         self.transport.set_http_fallback(fallback);
     }
 
+    pub async fn renew_fallback_token(&self) -> Result<(String, String)> {
+        self.transport.renew_fallback_token().await
+    }
+
+    pub fn renewed_tokens(&self) -> tokio::sync::watch::Receiver<Option<(String, String)>> {
+        self.transport.renewed_tokens()
+    }
+
     pub fn subscribe(&self) -> tokio::sync::broadcast::Receiver<RealtimeEvent> {
         self.realtime_tx.subscribe()
     }
@@ -2118,6 +2126,23 @@ impl AppApi {
         attachment_cdn_url(&self.base_img_url, &upload.filename)
     }
 
+    async fn upload_avatar_bytes(
+        &self,
+        filename: &str,
+        filetype: &str,
+        size: i32,
+        width: i32,
+        height: i32,
+        data: Vec<u8>,
+    ) -> Result<String> {
+        let upload = self
+            .transport
+            .upload_attachment_file(filename, filetype, size, width, height)
+            .await?;
+        crate::transport_runtime::put_bytes_to_content_type(&upload.url, data, filetype).await?;
+        attachment_cdn_url(&self.base_img_url, &upload.filename)
+    }
+
     async fn upload_media_from_url(
         &self,
         url: &str,
@@ -2250,6 +2275,9 @@ impl AppApi {
 
     pub async fn upload_avatar(&self, path: &Path) -> Result<String> {
         let data = crate::transport_runtime::read_file(path.to_path_buf()).await?;
+        if data.len() > 10 * 1024 * 1024 {
+            anyhow::bail!("image exceeds the 10 MB avatar limit");
+        }
 
         let raw_filename = path
             .file_name()
@@ -2257,12 +2285,15 @@ impl AppApi {
             .unwrap_or("avatar")
             .to_string();
         let filename = sanitize_upload_filename(&raw_filename);
-        let ext = path
-            .extension()
-            .and_then(|e| e.to_str())
-            .unwrap_or("png")
-            .to_string();
-        let filetype = format!("image/{}", ext);
+        let format =
+            image::guess_format(&data).map_err(|_| anyhow::anyhow!("unsupported image type"))?;
+        let filetype = match format {
+            image::ImageFormat::Jpeg => "image/jpeg",
+            image::ImageFormat::Png => "image/png",
+            image::ImageFormat::Gif => "image/gif",
+            image::ImageFormat::WebP => "image/webp",
+            _ => anyhow::bail!("unsupported image type; use JPEG, PNG, GIF, or WEBP"),
+        };
         let size = clamp_i32(data.len());
         let (width, height) = image_dimensions(&data);
 
@@ -2276,7 +2307,7 @@ impl AppApi {
         );
 
         let permanent_url = self
-            .upload_bytes(&filename, &filetype, size, width, height, data)
+            .upload_avatar_bytes(&filename, filetype, size, width, height, data)
             .await?;
 
         tracing::info!("Avatar upload complete: url={}", permanent_url);
@@ -2437,7 +2468,10 @@ impl AppApi {
         &self,
         ws_base: String,
         token: String,
-    ) -> tokio::sync::mpsc::UnboundedReceiver<crate::gotify::GotifyNotification> {
+    ) -> (
+        tokio::sync::mpsc::UnboundedReceiver<crate::gotify::GotifyNotification>,
+        tokio::sync::oneshot::Receiver<crate::gotify::StreamEnd>,
+    ) {
         self.transport.spawn_gotify_stream(ws_base, token)
     }
 

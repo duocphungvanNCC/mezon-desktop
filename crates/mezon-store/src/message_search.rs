@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use chrono::NaiveDate;
+use chrono::{Local, NaiveDate, Timelike};
 use gpui::{App, AppContext, Context, Entity, EventEmitter, Global, SharedString, Task};
 use mezon_client::AppApi;
 use mezon_client::transport::{
@@ -28,6 +28,7 @@ pub struct ChannelSearchState {
     pub results: Vec<SearchHit>,
     pub total: i32,
     pub current_page: i32,
+    pub loaded_page: i32,
     pub is_searching: bool,
     pub has_error: bool,
     pub generation: u64,
@@ -44,6 +45,7 @@ pub struct SearchHitImage {
 #[derive(Debug, Clone)]
 pub struct SearchHit {
     pub message_id: MessageId,
+    pub can_jump: bool,
     pub channel_id: ChannelId,
     pub clan_id: ClanId,
     pub channel_type: i32,
@@ -73,7 +75,10 @@ pub struct MessageSearchStore {
     states: KeyedCache<ChannelId, ChannelSearchState>,
     api: Arc<AppApi>,
     search_generation: u64,
+    page_debounce_generation: u64,
+    ogp_hydrate_generation: u64,
     _search_task: Task<()>,
+    _page_debounce_task: Task<()>,
     _ogp_hydrate_task: Task<()>,
 }
 
@@ -82,13 +87,20 @@ impl Global for GlobalMessageSearchStore {}
 
 impl EventEmitter<MessageSearchEvent> for MessageSearchStore {}
 
+const EMPTY_PAGE_RETRY_LIMIT: u8 = 2;
+const EMPTY_PAGE_RETRY_DELAY_MS: u64 = 150;
+const PAGE_SET_DEBOUNCE_MS: u64 = 250;
+
 impl MessageSearchStore {
     pub fn init(api: Arc<AppApi>, cx: &mut App) -> Entity<Self> {
         let entity = cx.new(|_| Self {
             states: KeyedCache::new(Some(32)),
             api,
             search_generation: 0,
+            page_debounce_generation: 0,
+            ogp_hydrate_generation: 0,
             _search_task: Task::ready(()),
+            _page_debounce_task: Task::ready(()),
             _ogp_hydrate_task: Task::ready(()),
         });
         cx.set_global(GlobalMessageSearchStore(entity.clone()));
@@ -111,8 +123,18 @@ impl MessageSearchStore {
         self.search_generation = self.search_generation.wrapping_add(1);
     }
 
+    fn cancel_ogp_hydrate(&mut self) {
+        self.ogp_hydrate_generation = self.ogp_hydrate_generation.wrapping_add(1);
+    }
+
+    fn search_stale(&self, store_generation: u64) -> bool {
+        self.search_generation != store_generation
+    }
+
     pub fn clear_channel(&mut self, channel_id: ChannelId, cx: &mut Context<Self>) {
         self.cancel_pending();
+        self.page_debounce_generation = self.page_debounce_generation.wrapping_add(1);
+        self.cancel_ogp_hydrate();
         let (generation, revision) = self
             .state_ref(channel_id)
             .map(|state| (state.generation, state.revision))
@@ -146,11 +168,15 @@ impl MessageSearchStore {
         let mut state = self.states.get(&channel_id).cloned().unwrap_or_default();
         state.query = trimmed;
         state.current_page = 1;
+        state.loaded_page = 0;
         state.is_searching = true;
         state.has_error = false;
+        state.total = 0;
         state.results.clear();
         state.generation = state.generation.wrapping_add(1);
         let generation = state.generation;
+        self.page_debounce_generation = self.page_debounce_generation.wrapping_add(1);
+        self.cancel_ogp_hydrate();
         self.states.insert(channel_id, state, None);
         cx.notify();
 
@@ -175,19 +201,45 @@ impl MessageSearchStore {
         if page < 1 || page > page_count {
             return;
         }
-        if state.current_page == page {
+        if state.current_page == page
+            && state.loaded_page == page
+            && !state.is_searching
+            && !state.results.is_empty()
+        {
             return;
         }
 
+        if state.loaded_page != page {
+            state.results.clear();
+        }
         state.current_page = page;
         state.is_searching = true;
         state.has_error = false;
         state.generation = state.generation.wrapping_add(1);
-        let generation = state.generation;
+        self.cancel_ogp_hydrate();
         self.states.insert(channel_id, state, None);
         cx.notify();
 
-        self.run_search(channel_id, clan_id, is_direct, page, generation, cx);
+        self.page_debounce_generation = self.page_debounce_generation.wrapping_add(1);
+        let debounce_token = self.page_debounce_generation;
+        self._page_debounce_task = cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(PAGE_SET_DEBOUNCE_MS))
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                if this.page_debounce_generation != debounce_token {
+                    return;
+                }
+                let Some(state) = this.states.get(&channel_id).cloned() else {
+                    return;
+                };
+                if state.current_page != page {
+                    return;
+                }
+                let generation = state.generation;
+                this.run_search(channel_id, clan_id, is_direct, page, generation, cx);
+            });
+        });
     }
 
     fn run_search(
@@ -217,68 +269,131 @@ impl MessageSearchStore {
                 return;
             }
 
-            let request = if is_direct {
-                build_direct_content_search(channel_id.get(), &query, page)
-            } else {
-                build_clan_channel_content_search(channel_id.get(), clan_id.get(), &query, page)
-            };
-
-            let result = api.search_message(request).await;
-            let mapped = match result {
-                Ok(response) => {
-                    let cfg = mapping_cfg.clone();
-                    let total = response.total;
-                    let results = cx
-                        .background_executor()
-                        .spawn(async move {
-                            response
-                                .messages
-                                .iter()
-                                .filter_map(|doc| search_hit_from_document(doc, cfg.as_ref()))
-                                .collect::<Vec<_>>()
-                        })
-                        .await;
-                    Ok((total, results))
+            let mut mapped = None;
+            for attempt in 0..=EMPTY_PAGE_RETRY_LIMIT {
+                if this
+                    .update(cx, |this, _| this.search_stale(store_generation))
+                    .unwrap_or(true)
+                {
+                    return;
                 }
-                Err(err) => Err(err),
-            };
 
-            let _ = this.update(cx, |this, cx| {
-                let missing_ogp = {
-                    let Some(state) = this.states.get_mut(&channel_id) else {
-                        return;
-                    };
-                    if !search_response_matches(state, generation, &query, page) {
-                        if state.generation == generation {
-                            state.is_searching = false;
-                            cx.notify();
-                        }
+                let request = if is_direct {
+                    build_direct_content_search(channel_id.get(), &query, page)
+                } else {
+                    build_clan_channel_content_search(channel_id.get(), clan_id.get(), &query, page)
+                };
+
+                let result = api.search_message(request).await;
+                if this
+                    .update(cx, |this, _| this.search_stale(store_generation))
+                    .unwrap_or(true)
+                {
+                    return;
+                }
+                let next = match result {
+                    Ok(response) => {
+                        let cfg = mapping_cfg.clone();
+                        let total = response.total;
+                        let raw_count = response.messages.len();
+                        let results = cx
+                            .background_executor()
+                            .spawn(async move {
+                                response
+                                    .messages
+                                    .iter()
+                                    .filter_map(|doc| search_hit_from_document(doc, cfg.as_ref()))
+                                    .collect::<Vec<_>>()
+                            })
+                            .await;
+                        Ok((total, raw_count, results))
+                    }
+                    Err(err) => Err(err),
+                };
+                let retry = matches!(
+                    &next,
+                    Ok((total, raw_count, results))
+                        if results.is_empty()
+                            && *total > 0
+                            && *raw_count == 0
+                            && attempt < EMPTY_PAGE_RETRY_LIMIT
+                );
+                if retry {
+                    tracing::warn!(
+                        channel_id = channel_id.get(),
+                        page,
+                        attempt = attempt + 1,
+                        "search_message returned empty page; retrying"
+                    );
+                    cx.background_executor()
+                        .timer(std::time::Duration::from_millis(EMPTY_PAGE_RETRY_DELAY_MS))
+                        .await;
+                    if this
+                        .update(cx, |this, _| this.search_stale(store_generation))
+                        .unwrap_or(true)
+                    {
                         return;
                     }
-                    state.is_searching = false;
-                    state.revision = state.revision.wrapping_add(1);
-                    match mapped {
-                        Ok((total, results)) => {
-                            state.has_error = false;
-                            state.total = total;
-                            state.current_page = page;
-                            state.results = results;
-                            enrich_search_results_ogp(&mut state.results, cx);
-                            state
-                                .results
-                                .iter()
-                                .filter(|hit| hit.ogp.is_none() && search_hit_may_have_ogp(hit))
-                                .map(|hit| (hit.clan_id, hit.channel_id, hit.message_id))
-                                .collect::<Vec<_>>()
+                    continue;
+                }
+                mapped = Some(next);
+                break;
+            }
+            let mapped = mapped.expect("search loop always resolves");
+
+            let _ = this.update(cx, |this, cx| {
+                let Some(state) = this.states.get_mut(&channel_id) else {
+                    return;
+                };
+                if !search_response_matches(state, generation, &query, page) {
+                    return;
+                }
+                state.revision = state.revision.wrapping_add(1);
+                let missing_ogp = match mapped {
+                    Ok((total, raw_count, results)) => {
+                        let page_empty = results.is_empty() && total > 0;
+                        if page_empty {
+                            if raw_count == 0 {
+                                tracing::warn!(
+                                    channel_id = channel_id.get(),
+                                    page,
+                                    total,
+                                    "search_message returned empty message page after retries"
+                                );
+                            } else {
+                                tracing::warn!(
+                                    channel_id = channel_id.get(),
+                                    page,
+                                    total,
+                                    raw_count,
+                                    "search_message mapped zero hits from non-empty page"
+                                );
+                            }
                         }
-                        Err(err) => {
-                            tracing::warn!("search_message failed: {err}");
-                            state.has_error = true;
-                            state.total = 0;
-                            state.results.clear();
-                            cx.emit(MessageSearchEvent::SearchFailed);
-                            Vec::new()
-                        }
+                        state.has_error = false;
+                        state.total = total;
+                        state.current_page = page;
+                        state.loaded_page = page;
+                        state.is_searching = false;
+                        state.results = results;
+                        enrich_search_results_ogp(&mut state.results, cx);
+                        state
+                            .results
+                            .iter()
+                            .filter(|hit| {
+                                hit.can_jump && hit.ogp.is_none() && search_hit_may_have_ogp(hit)
+                            })
+                            .map(|hit| (hit.clan_id, hit.channel_id, hit.message_id))
+                            .collect::<Vec<_>>()
+                    }
+                    Err(err) => {
+                        tracing::warn!("search_message failed: {err}");
+                        state.is_searching = false;
+                        state.has_error = true;
+                        state.loaded_page = 0;
+                        state.results.clear();
+                        cx.emit(MessageSearchEvent::SearchFailed);
+                        Vec::new()
                     }
                 };
                 cx.notify();
@@ -298,14 +413,24 @@ impl MessageSearchStore {
     ) {
         let api = self.api.clone();
         let cfg = AppConfig::try_global(cx).cloned();
+        let hydrate_generation = self.ogp_hydrate_generation;
         self._ogp_hydrate_task = cx.spawn(async move |this, cx| {
             for (clan_id, hit_channel_id, message_id) in missing {
-                let Some(still_needed) = this
+                if this
+                    .update(cx, |this, _| {
+                        this.ogp_hydrate_generation != hydrate_generation
+                            || this
+                                .states
+                                .get(&channel_id)
+                                .is_none_or(|state| state.generation != generation)
+                    })
+                    .unwrap_or(true)
+                {
+                    return;
+                }
+                let still_needed = this
                     .update(cx, |this, _| {
                         let state = this.states.get(&channel_id)?;
-                        if state.generation != generation {
-                            return None;
-                        }
                         Some(
                             state
                                 .results
@@ -315,9 +440,7 @@ impl MessageSearchStore {
                     })
                     .ok()
                     .flatten()
-                else {
-                    return;
-                };
+                    .unwrap_or(false);
                 if !still_needed {
                     continue;
                 }
@@ -341,6 +464,18 @@ impl MessageSearchStore {
                         continue;
                     }
                 };
+                if this
+                    .update(cx, |this, _| {
+                        this.ogp_hydrate_generation != hydrate_generation
+                            || this
+                                .states
+                                .get(&channel_id)
+                                .is_none_or(|state| state.generation != generation)
+                    })
+                    .unwrap_or(true)
+                {
+                    return;
+                }
                 let ogp = page
                     .messages
                     .into_iter()
@@ -386,12 +521,21 @@ pub fn search_hit_from_document(
     doc: &SearchMessageDocument,
     cfg: Option<&AppConfig>,
 ) -> Option<SearchHit> {
-    let message_id = raw_to_message_id(&doc.message_id)?;
-    let channel_id = raw_to_channel_id(&doc.channel_id)?;
+    let message_id = resolve_search_message_id(doc);
+    let can_jump = raw_to_message_id(&doc.message_id).is_some();
+    let channel_id = match raw_to_channel_id(&doc.channel_id) {
+        Some(id) => id,
+        None => {
+            tracing::warn!(
+                message_id = message_id.get(),
+                raw_channel_id = %doc.channel_id,
+                "search_hit_from_document: invalid channel_id, skipping document"
+            );
+            return None;
+        }
+    };
     let clan_id = raw_to_clan_id(&doc.clan_id).unwrap_or(ClanId(0));
-    let create_time_seconds = parse_create_time_seconds(&doc.create_time);
-    let local_date = local_datetime(create_time_seconds).map(|dt| dt.date_naive());
-    let time_hhmm = format_local_time_hhmm(create_time_seconds).into();
+    let (create_time_seconds, time_hhmm, local_date) = search_hit_time_fields(&doc.create_time);
     let sender_name = if !doc.display_name.is_empty() {
         doc.display_name.clone()
     } else if !doc.username.is_empty() {
@@ -409,6 +553,7 @@ pub fn search_hit_from_document(
 
     Some(SearchHit {
         message_id,
+        can_jump,
         channel_id,
         clan_id,
         channel_type: doc.channel_type,
@@ -576,6 +721,39 @@ fn clamp_search_media_size(width: f32, height: f32) -> (f32, f32) {
     ((width * scale).max(1.), (height * scale).max(1.))
 }
 
+fn search_hit_time_fields(create_time_raw: &str) -> (i64, SharedString, Option<chrono::NaiveDate>) {
+    let seconds = parse_create_time_seconds(create_time_raw);
+    if seconds > 0 {
+        return (
+            seconds,
+            format_local_time_hhmm(seconds).into(),
+            local_datetime(seconds).map(|dt| dt.date_naive()),
+        );
+    }
+    let Some(dt) = parse_create_time_local(create_time_raw) else {
+        return (0, SharedString::default(), None);
+    };
+    (
+        0,
+        format!("{:02}:{:02}", dt.hour(), dt.minute()).into(),
+        Some(dt.date_naive()),
+    )
+}
+
+fn parse_create_time_local(raw: &str) -> Option<chrono::DateTime<Local>> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(trimmed) {
+        return Some(dt.with_timezone(&Local));
+    }
+    chrono::NaiveDateTime::parse_from_str(trimmed, "%Y-%m-%dT%H:%M:%S%.fZ")
+        .or_else(|_| chrono::NaiveDateTime::parse_from_str(trimmed, "%Y-%m-%d %H:%M:%S"))
+        .ok()
+        .and_then(|naive| naive.and_local_timezone(Local).single())
+}
+
 fn parse_create_time_seconds(raw: &str) -> i64 {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
@@ -601,6 +779,10 @@ fn parse_create_time_seconds(raw: &str) -> i64 {
         .or_else(|_| chrono::NaiveDateTime::parse_from_str(trimmed, "%Y-%m-%d %H:%M:%S"))
         .map(|dt| dt.and_utc().timestamp())
         .unwrap_or(0)
+}
+
+fn resolve_search_message_id(doc: &SearchMessageDocument) -> MessageId {
+    raw_to_message_id(&doc.message_id).unwrap_or_else(MessageId::next_optimistic)
 }
 
 fn raw_to_message_id(raw: &str) -> Option<MessageId> {
@@ -702,13 +884,43 @@ mod tests {
     }
 
     #[test]
-    fn search_hit_skips_invalid_message_id() {
+    fn search_hit_assigns_fallback_message_id_when_missing() {
+        let doc = SearchMessageDocument {
+            message_id: String::new(),
+            channel_id: "42".into(),
+            content: r#"{"t":"hello"}"#.into(),
+            ..Default::default()
+        };
+        let hit = search_hit_from_document(&doc, None).expect("hit");
+        assert!(hit.message_id.is_optimistic());
+        assert!(!hit.can_jump);
+        assert_eq!(hit.content_preview.as_ref(), "hello");
+    }
+
+    #[test]
+    fn search_hit_assigns_fallback_message_id_when_zero() {
         let doc = SearchMessageDocument {
             message_id: "0".into(),
             channel_id: "42".into(),
+            content: r#"{"t":"hello"}"#.into(),
             ..Default::default()
         };
-        assert!(search_hit_from_document(&doc, None).is_none());
+        let hit = search_hit_from_document(&doc, None).expect("hit");
+        assert!(hit.message_id.is_optimistic());
+        assert!(!hit.can_jump);
+    }
+
+    #[test]
+    fn search_hit_can_jump_when_message_id_present() {
+        let doc = SearchMessageDocument {
+            message_id: "123456789012345678".into(),
+            channel_id: "42".into(),
+            content: r#"{"t":"hello"}"#.into(),
+            ..Default::default()
+        };
+        let hit = search_hit_from_document(&doc, None).expect("hit");
+        assert!(!hit.message_id.is_optimistic());
+        assert!(hit.can_jump);
     }
 
     #[test]
@@ -719,6 +931,23 @@ mod tests {
             ..Default::default()
         };
         assert!(search_hit_from_document(&doc, None).is_none());
+    }
+
+    #[test]
+    fn search_hit_formats_epoch_create_time_from_iso_string() {
+        let doc = SearchMessageDocument {
+            message_id: "100".into(),
+            channel_id: "200".into(),
+            create_time: "1970-01-01T00:00:00.000000Z".into(),
+            ..Default::default()
+        };
+        let hit = search_hit_from_document(&doc, None).expect("hit");
+        assert_eq!(hit.create_time_seconds, 0);
+        assert!(!hit.time_hhmm.is_empty());
+        assert_eq!(
+            hit.local_date,
+            Some(chrono::NaiveDate::from_ymd_opt(1970, 1, 1).unwrap())
+        );
     }
 
     #[test]

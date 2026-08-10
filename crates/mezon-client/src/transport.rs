@@ -114,6 +114,7 @@ pub enum RealtimeEvent {
     UserClanRemoved(realtime::UserClanRemoved),
     ClanUpdated(realtime::ClanUpdatedEvent),
     ClanProfileUpdated(realtime::ClanProfileUpdatedEvent),
+    UserProfileUpdated(realtime::UserProfileUpdatedEvent),
     ClanDeleted(realtime::ClanDeletedEvent),
     ClanEmoji(realtime::EventEmoji),
     AddFriend(realtime::AddFriend),
@@ -168,6 +169,7 @@ impl RealtimeEvent {
             Self::UserClanRemoved(_) => "UserClanRemoved",
             Self::ClanUpdated(_) => "ClanUpdated",
             Self::ClanProfileUpdated(_) => "ClanProfileUpdated",
+            Self::UserProfileUpdated(_) => "UserProfileUpdated",
             Self::ClanDeleted(_) => "ClanDeleted",
             Self::ClanEmoji(_) => "ClanEmoji",
             Self::AddFriend(_) => "AddFriend",
@@ -227,6 +229,9 @@ impl TryFrom<realtime::envelope::Message> for RealtimeEvent {
             realtime::envelope::Message::ClanUpdatedEvent(m) => Ok(Self::ClanUpdated(m)),
             realtime::envelope::Message::ClanProfileUpdatedEvent(m) => {
                 Ok(Self::ClanProfileUpdated(m))
+            }
+            realtime::envelope::Message::UserProfileUpdatedEvent(m) => {
+                Ok(Self::UserProfileUpdated(m))
             }
             realtime::envelope::Message::ClanDeletedEvent(m) => Ok(Self::ClanDeleted(m)),
             realtime::envelope::Message::EventEmoji(m) => Ok(Self::ClanEmoji(m)),
@@ -336,6 +341,41 @@ fn encode_envelope_cid_last(mut envelope: realtime::Envelope) -> Vec<u8> {
 pub struct HttpFallbackSession {
     pub base_url: String,
     pub token: String,
+    pub expires_at: u64,
+    /// Everything needed to mint a fresh `token` without a socket. The fallback is the one caller
+    /// that runs while the socket is down, so it has to be able to renew on its own.
+    pub refresh_token: String,
+    pub is_remember: bool,
+    pub server_key: String,
+}
+
+fn jwt_expiry(token: &str) -> u64 {
+    use base64::Engine as _;
+
+    let Some(payload) = token.split('.').nth(1) else {
+        return 0;
+    };
+    let Ok(decoded) = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(payload) else {
+        return 0;
+    };
+    serde_json::from_slice::<serde_json::Value>(&decoded)
+        .ok()
+        .and_then(|claims| claims.get("exp").and_then(|exp| exp.as_u64()))
+        .unwrap_or(0)
+}
+
+impl HttpFallbackSession {
+    fn token_expired(&self) -> bool {
+        self.token_lifetime().1
+    }
+
+    fn token_lifetime(&self) -> (u64, bool) {
+        let now = crate::server_clock::now_secs();
+        (
+            self.expires_at.saturating_sub(now),
+            self.expires_at != 0 && now >= self.expires_at,
+        )
+    }
 }
 
 /// Main transport client.
@@ -352,6 +392,10 @@ pub struct MezonTransport {
     /// (`call#2` for a one-shot List means something is fetching twice).
     api_call_counts: Arc<Mutex<HashMap<String, u64>>>,
     http_fallback: Arc<RwLock<Option<Arc<HttpFallbackSession>>>>,
+    fallback_refresh_lock: Arc<tokio::sync::Mutex<()>>,
+    /// Token pairs minted by the fallback, published so the store can persist them — otherwise the
+    /// connection loop re-arms the fallback with the stale token it still holds.
+    renewed_tokens: watch::Sender<Option<(String, String)>>,
     #[allow(dead_code)]
     base_path: String,
 }
@@ -370,6 +414,8 @@ impl MezonTransport {
             connected_rx,
             api_call_counts: Arc::new(Mutex::new(HashMap::new())),
             http_fallback: Arc::new(RwLock::new(None)),
+            fallback_refresh_lock: Arc::new(tokio::sync::Mutex::new(())),
+            renewed_tokens: watch::channel(None).0,
             base_path,
         }
     }
@@ -379,8 +425,30 @@ impl MezonTransport {
         self.send_timeout_ms = Duration::from_millis(timeout_ms);
     }
 
+    /// Arm the fallback, but never downgrade a token the fallback minted for itself: the
+    /// connection loop re-arms from a snapshot it read earlier, so a refresh that lands in between
+    /// would otherwise be undone and the next send would rotate the refresh token a second time.
     pub fn set_http_fallback(&self, fallback: Option<HttpFallbackSession>) {
-        *self.http_fallback.write() = fallback.map(Arc::new);
+        let mut slot = self.http_fallback.write();
+        if let (Some(incoming), Some(current)) = (&fallback, slot.as_ref())
+            && incoming.token != current.token
+            && incoming.expires_at < current.expires_at
+        {
+            return;
+        }
+        *slot = fallback.map(Arc::new);
+    }
+
+    /// Renew the fallback token through the same single-flight path a send would use, so the
+    /// connection store and a concurrent send can never spend the same refresh token twice.
+    pub async fn renew_fallback_token(&self) -> Result<(String, String)> {
+        let current = self
+            .http_fallback
+            .read()
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("no session for the HTTP fallback"))?;
+        let renewed = self.refresh_fallback_token(&current).await?;
+        Ok((renewed.token.clone(), renewed.refresh_token.clone()))
     }
 
     /// Generate a unique correlation ID.
@@ -604,6 +672,9 @@ pub struct ApiSession {
     pub token: String,
     pub refresh_token: String,
     pub user_id: i64,
+    /// Socket credential for the rotated session. `SessionRefresh` rotates it, so dropping this
+    /// leaves the client reconnecting with a credential the server has already retired.
+    pub session_id: String,
 }
 
 /// A friend relationship: the friend's account plus the relationship state and
@@ -3165,12 +3236,138 @@ impl MezonTransport {
         Ok((code, response))
     }
 
+    pub fn frames_received(&self) -> u64 {
+        self.adapter.frames_received()
+    }
+
+    pub fn credential_rejected(&self) -> bool {
+        self.adapter.credential_rejected()
+    }
+
+    pub fn renewed_tokens(&self) -> watch::Receiver<Option<(String, String)>> {
+        self.renewed_tokens.subscribe()
+    }
+
+    /// Mint a JWT for the fallback while the socket is down. Single-flight: a burst of queued
+    /// sends triggers one refresh, the rest reuse its result.
+    async fn refresh_fallback_token(
+        &self,
+        stale: &HttpFallbackSession,
+    ) -> Result<Arc<HttpFallbackSession>> {
+        let _guard = self.fallback_refresh_lock.lock().await;
+        let current = self.http_fallback.read().clone();
+        if let Some(current) = current
+            && !current.token_expired()
+        {
+            return Ok(current);
+        }
+
+        let body = api::SessionRefreshRequest {
+            token: stale.refresh_token.clone(),
+            is_remember: stale.is_remember,
+            vars: std::collections::HashMap::from([("m".to_owned(), "true".to_owned())]),
+        }
+        .encode_to_vec();
+        let url = format!(
+            "{}/mezon.api.Mezon/SessionRefresh",
+            stale.base_url.trim_end_matches('/')
+        );
+        let auth = {
+            use base64::Engine as _;
+            format!(
+                "Basic {}",
+                base64::engine::general_purpose::STANDARD
+                    .encode(format!("{}:", stale.server_key).as_bytes())
+            )
+        };
+        let request = http::Request::builder()
+            .method(http::Method::POST)
+            .uri(&url)
+            .header("Authorization", auth)
+            .header("Content-Type", "application/proto")
+            .header("Accept", "application/proto")
+            .body(AsyncBody::from(body))
+            .context("failed to build the SessionRefresh request")?;
+
+        let mut response = tokio::time::timeout(
+            HTTP_FALLBACK_TIMEOUT,
+            crate::transport_runtime::http_client().send(request),
+        )
+        .await
+        .map_err(|_| anyhow::anyhow!("SessionRefresh timed out"))?
+        .context("network error on SessionRefresh")?;
+
+        if let Some(date) = response
+            .headers()
+            .get(http::header::DATE)
+            .and_then(|v| v.to_str().ok())
+        {
+            crate::server_clock::observe_http_date(date);
+        }
+        let status = response.status();
+        let mut bytes: Vec<u8> = Vec::new();
+        response
+            .body_mut()
+            .take(MAX_HTTP_FALLBACK_RESPONSE_BYTES + 1)
+            .read_to_end(&mut bytes)
+            .await
+            .context("failed to read the SessionRefresh response")?;
+        if !status.is_success() {
+            anyhow::bail!("SessionRefresh failed with status {}", status.as_u16());
+        }
+
+        let session = api::Session::decode(bytes.as_slice())?;
+        if session.token.is_empty() {
+            anyhow::bail!("SessionRefresh returned no token");
+        }
+        let renewed = Arc::new(HttpFallbackSession {
+            base_url: stale.base_url.clone(),
+            token: session.token.clone(),
+            expires_at: jwt_expiry(&session.token),
+            refresh_token: if session.refresh_token.is_empty() {
+                stale.refresh_token.clone()
+            } else {
+                session.refresh_token.clone()
+            },
+            is_remember: stale.is_remember,
+            server_key: stale.server_key.clone(),
+        });
+        *self.http_fallback.write() = Some(renewed.clone());
+        self.renewed_tokens
+            .send_replace(Some((session.token, session.refresh_token)));
+        tracing::info!(
+            target: "socket",
+            "api_http_token_renewed: jwt_valid_for={}s",
+            renewed.token_lifetime().0
+        );
+        Ok(renewed)
+    }
+
     async fn send_api_request_over_http(&self, api_name: &str, body: Vec<u8>) -> Result<Vec<u8>> {
         let fallback = self
             .http_fallback
             .read()
             .clone()
             .ok_or_else(|| anyhow::anyhow!("no session for the HTTP fallback"))?;
+
+        let fallback = if fallback.token_expired() && !fallback.refresh_token.is_empty() {
+            tracing::info!(
+                target: "socket",
+                "api_http_token_expired: action={api_name} — minting one before sending"
+            );
+            self.refresh_fallback_token(&fallback)
+                .await
+                .context("could not renew the token for the HTTP fallback")?
+        } else {
+            fallback
+        };
+
+        let (token_valid_for, token_expired) = fallback.token_lifetime();
+        tracing::info!(
+            target: "socket",
+            "api_http_send: action={api_name} base={} jwt_valid_for={token_valid_for}s jwt_expired={token_expired}",
+            fallback.base_url
+        );
 
         let url = format!(
             "{}/mezon.api.Mezon/{api_name}",
@@ -3208,6 +3405,13 @@ impl MezonTransport {
             .await
             .context("failed to read the HTTP fallback response body")?;
         if !status.is_success() {
+            if status == http::StatusCode::UNAUTHORIZED || status == http::StatusCode::FORBIDDEN {
+                tracing::warn!(
+                    target: "socket",
+                    "api_http_unauthorized: action={api_name} status={} jwt_valid_for={token_valid_for}s jwt_expired={token_expired} — the socket has not issued a fresh token",
+                    status.as_u16()
+                );
+            }
             anyhow::bail!("HTTP fallback failed with status {}", status.as_u16());
         }
         if bytes.len() as u64 > MAX_HTTP_FALLBACK_RESPONSE_BYTES {
@@ -8730,8 +8934,8 @@ impl MezonTransport {
             display_name: display_name
                 .filter(|s| !s.is_empty())
                 .map(|s| s.to_string()),
-            avatar_url: avatar_url.filter(|s| !s.is_empty()).map(|s| s.to_string()),
-            about_me: about_me.filter(|s| !s.is_empty()).map(|s| s.to_string()),
+            avatar_url: avatar_url.map(str::to_string),
+            about_me: about_me.map(str::to_string),
             logo: logo.map(str::to_string),
             ..Default::default()
         }
@@ -8791,6 +8995,7 @@ impl MezonTransport {
             token: session.token,
             refresh_token: session.refresh_token,
             user_id: session.user_id,
+            session_id: session.session_id,
         })
     }
 
@@ -8812,6 +9017,7 @@ impl MezonTransport {
             token: session.token,
             refresh_token: session.refresh_token,
             user_id: session.user_id,
+            session_id: session.session_id,
         })
     }
 
@@ -8828,6 +9034,7 @@ impl MezonTransport {
             token: session.token,
             refresh_token: session.refresh_token,
             user_id: session.user_id,
+            session_id: session.session_id,
         })
     }
 
@@ -8855,6 +9062,7 @@ impl MezonTransport {
             token: session.token,
             refresh_token: session.refresh_token,
             user_id: session.user_id,
+            session_id: session.session_id,
         })
     }
 
@@ -8887,6 +9095,7 @@ impl MezonTransport {
             token: session.token,
             refresh_token: session.refresh_token,
             user_id: session.user_id,
+            session_id: session.session_id,
         })
     }
 
@@ -9862,6 +10071,164 @@ mod tests {
 
     fn transport(send_ok: bool) -> MezonTransport {
         MezonTransport::new(Box::new(MockAdapter { send_ok }), String::new())
+    }
+
+    /// A `MockAdapter` that reports the socket as down, so the fallback branch is reachable.
+    struct ClosedAdapter;
+
+    #[async_trait::async_trait]
+    impl TransportAdapter for ClosedAdapter {
+        async fn connect(&self, _host: &str, _port: u16, _token: &str) -> Result<()> {
+            Ok(())
+        }
+        async fn send(&self, _message: Vec<u8>) -> Result<()> {
+            Err(anyhow::anyhow!("socket is down"))
+        }
+        async fn send_ping(&self, _cid: u16) -> Result<()> {
+            Ok(())
+        }
+        fn is_open(&self) -> bool {
+            false
+        }
+        async fn close(&self) -> Result<()> {
+            Ok(())
+        }
+        async fn set_on_message(&self, _handler: crate::transport_adapter::MessageHandler) {}
+        async fn set_on_open(&self, _handler: crate::transport_adapter::OpenHandler) {}
+        async fn set_on_close(&self, _handler: crate::transport_adapter::CloseHandler) {}
+        async fn set_on_error(&self, _handler: crate::transport_adapter::ErrorHandler) {}
+    }
+
+    /// Minimal HTTP/1.1 origin that counts what the fallback asked for. Returns the port and the
+    /// per-path hit counters.
+    async fn fake_api() -> (u16, Arc<Mutex<HashMap<String, u32>>>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let hits: Arc<Mutex<HashMap<String, u32>>> = Arc::new(Mutex::new(HashMap::new()));
+        let counters = hits.clone();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut stream, _)) = listener.accept().await else {
+                    return;
+                };
+                let counters = counters.clone();
+                tokio::spawn(async move {
+                    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                    let mut buf = vec![0u8; 8192];
+                    let Ok(n) = stream.read(&mut buf).await else {
+                        return;
+                    };
+                    let head = String::from_utf8_lossy(&buf[..n]).to_string();
+                    let path = head.split_whitespace().nth(1).unwrap_or("").to_string();
+                    *counters.lock().entry(path.clone()).or_insert(0) += 1;
+
+                    let body: Vec<u8> = if path.ends_with("SessionRefresh") {
+                        // api.Session { token = 2, refresh_token = 3 }
+                        let jwt = fake_jwt_expiring_in(600);
+                        let mut out = vec![0x12, jwt.len() as u8];
+                        out.extend_from_slice(jwt.as_bytes());
+                        out.extend_from_slice(&[0x1a, 0x03, b'n', b'e', b'w']);
+                        out
+                    } else {
+                        Vec::new()
+                    };
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        body.len()
+                    );
+                    let _ = stream.write_all(response.as_bytes()).await;
+                    let _ = stream.write_all(&body).await;
+                    let _ = stream.flush().await;
+                });
+            }
+        });
+        (port, hits)
+    }
+
+    fn fake_jwt_expiring_in(secs: i64) -> String {
+        use base64::Engine as _;
+        let exp = crate::server_clock::now_secs() as i64 + secs;
+        let claims = format!("{{\"exp\":{exp}}}");
+        let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(claims);
+        format!("h.{payload}.s")
+    }
+
+    fn expired_fallback(port: u16) -> HttpFallbackSession {
+        HttpFallbackSession {
+            base_url: format!("http://127.0.0.1:{port}"),
+            token: fake_jwt_expiring_in(-60),
+            expires_at: crate::server_clock::now_secs().saturating_sub(60),
+            refresh_token: "refresh".into(),
+            is_remember: false,
+            server_key: "key".into(),
+        }
+    }
+
+    /// With the socket down, a send must go out over HTTP rather than block on the connect gate.
+    #[tokio::test]
+    async fn a_send_falls_back_to_http_while_the_socket_is_down() {
+        let (port, hits) = fake_api().await;
+        let t = MezonTransport::new(Box::new(ClosedAdapter), String::new());
+        t.set_http_fallback(Some(expired_fallback(port)));
+
+        t.send_api_request_with_http_fallback(1, "SendChannelMessage", Vec::new())
+            .await
+            .expect("the fallback should carry the send");
+
+        let hits = hits.lock().clone();
+        assert_eq!(hits.get("/mezon.api.Mezon/SendChannelMessage"), Some(&1));
+        assert_eq!(
+            hits.get("/mezon.api.Mezon/SessionRefresh"),
+            Some(&1),
+            "an expired token must be renewed before the send"
+        );
+    }
+
+    /// A burst of sends must share one refresh, not spend the refresh token once per message.
+    #[tokio::test]
+    async fn concurrent_sends_share_a_single_token_refresh() {
+        let (port, hits) = fake_api().await;
+        let t = Arc::new(MezonTransport::new(Box::new(ClosedAdapter), String::new()));
+        t.set_http_fallback(Some(expired_fallback(port)));
+
+        let mut tasks = Vec::new();
+        for cid in 1..=8u16 {
+            let t = t.clone();
+            tasks.push(tokio::spawn(async move {
+                t.send_api_request_with_http_fallback(cid, "SendChannelMessage", Vec::new())
+                    .await
+            }));
+        }
+        for task in tasks {
+            task.await.unwrap().expect("every send should go out");
+        }
+
+        let hits = hits.lock().clone();
+        assert_eq!(hits.get("/mezon.api.Mezon/SendChannelMessage"), Some(&8));
+        assert_eq!(
+            hits.get("/mezon.api.Mezon/SessionRefresh"),
+            Some(&1),
+            "single-flight must collapse the burst into one refresh"
+        );
+    }
+
+    /// A live token must not trigger a refresh at all.
+    #[tokio::test]
+    async fn a_live_token_sends_without_renewing() {
+        let (port, hits) = fake_api().await;
+        let t = MezonTransport::new(Box::new(ClosedAdapter), String::new());
+        let mut fallback = expired_fallback(port);
+        fallback.token = fake_jwt_expiring_in(600);
+        fallback.expires_at = crate::server_clock::now_secs() + 600;
+        t.set_http_fallback(Some(fallback));
+
+        t.send_api_request_with_http_fallback(1, "SendChannelMessage", Vec::new())
+            .await
+            .unwrap();
+
+        let hits = hits.lock().clone();
+        assert_eq!(hits.get("/mezon.api.Mezon/SendChannelMessage"), Some(&1));
+        assert_eq!(hits.get("/mezon.api.Mezon/SessionRefresh"), None);
     }
 
     #[tokio::test]

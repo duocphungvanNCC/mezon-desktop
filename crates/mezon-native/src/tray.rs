@@ -309,6 +309,14 @@ mod desktop {
     }
 
     fn build_tray_icon() -> tray_icon::Icon {
+        #[cfg(target_os = "windows")]
+        {
+            if let Ok(handle) = crate::window_icon::load_tray_icon_handle() {
+                return tray_icon::Icon::from_handle(handle.0 as isize);
+            }
+            tracing::warn!("Failed to load tray icon from embedded app.ico resource");
+        }
+
         let pixels = tray_pixels();
         match tray_icon::Icon::from_rgba(pixels.rgba, pixels.width, pixels.height) {
             Ok(icon) => icon,

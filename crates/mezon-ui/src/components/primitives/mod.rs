@@ -29,6 +29,10 @@ pub mod input {
     pub use mezon_widgets::input::*;
 }
 
+pub mod text_actions {
+    pub use mezon_widgets::text_actions::*;
+}
+
 pub mod sizing {
     pub use mezon_widgets::{Sizable, Size};
 }
@@ -68,5 +72,4 @@ pub use sizing::{Sizable, Size};
 pub use spinner::Spinner;
 pub use stack::{h_flex, v_flex};
 
-pub use mezon_widgets::init_input;
-pub use textarea::init as init_textarea;
+pub use mezon_widgets::init_text_input;

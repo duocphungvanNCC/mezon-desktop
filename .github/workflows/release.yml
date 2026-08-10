@@ -231,143 +231,143 @@ jobs:
           path: target/update-feed/*
           if-no-files-found: error
 
-  macos:
-    name: macOS artifacts
-    runs-on: macos-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-        with:
-          submodules: recursive
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master @ 2026-07-12
-        with:
-          toolchain: 1.95.0
-          targets: aarch64-apple-darwin,x86_64-apple-darwin
-
-      - name: Cache Cargo
-        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
-
-      - name: Build universal binary
-        run: |
-          cargo build --release -p mezon-app --locked --target aarch64-apple-darwin
-          cargo build --release -p mezon-app --locked --target x86_64-apple-darwin
-
-      - name: Detect signing configuration
-        id: signing
-        env:
-          MACOS_CERT_P12: ${{ secrets.MACOS_CERT_P12 }}
-          APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
-        run: |
-          if [ -n "$MACOS_CERT_P12" ]; then
-            echo "has_cert=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "has_cert=false" >> "$GITHUB_OUTPUT"
-          fi
-          if [ -n "$APPLE_API_KEY_P8" ]; then
-            echo "has_notary=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "has_notary=false" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Import Developer ID certificate
-        if: steps.signing.outputs.has_cert == 'true'
-        env:
-          MACOS_CERT_P12: ${{ secrets.MACOS_CERT_P12 }}
-          MACOS_CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
-          MACOS_SIGN_IDENTITY: ${{ secrets.MACOS_SIGN_IDENTITY }}
-        run: |
-          KEYCHAIN="build.keychain"
-          KEYCHAIN_PASSWORD="$(uuidgen)"
-          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
-          security set-keychain-settings -lut 21600 "$KEYCHAIN"
-          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
-          security list-keychains -d user -s "$KEYCHAIN" login.keychain
-          printf '%s' "$MACOS_CERT_P12" | base64 --decode > /tmp/cert.p12
-          security import /tmp/cert.p12 -k "$KEYCHAIN" -P "$MACOS_CERT_PASSWORD" -T /usr/bin/codesign
-          rm -f /tmp/cert.p12
-          security set-key-partition-list -S apple-tool:,apple: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN" >/dev/null
-          IDENTITY="${MACOS_SIGN_IDENTITY:-}"
-          if [ -z "$IDENTITY" ]; then
-            IDENTITY="$(security find-identity -v -p codesigning "$KEYCHAIN" | awk -F'"' '/Developer ID Application/{print $2; exit}')"
-          fi
-          if [ -z "$IDENTITY" ]; then
-            echo "No 'Developer ID Application' identity found in MACOS_CERT_P12 (set MACOS_SIGN_IDENTITY to override)" >&2
-            exit 1
-          fi
-          echo "SIGN_IDENTITY=$IDENTITY" >> "$GITHUB_ENV"
-
-      - name: Assemble Mezon.app and DMG
-        run: |
-          VERSION="$(grep -m1 '^version' Cargo.toml | sed -E 's/.*"(.*)".*/\1/')"
-          APP="target/dist-ci/Mezon.app"
-          rm -rf "$APP"
-          mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
-          lipo -create -output "$APP/Contents/MacOS/mezon" \
-            target/aarch64-apple-darwin/release/mezon \
-            target/x86_64-apple-darwin/release/mezon
-          chmod +x "$APP/Contents/MacOS/mezon"
-          rm -rf target/aarch64-apple-darwin target/x86_64-apple-darwin
-          df -h /
-          cp assets/icons/app.icns "$APP/Contents/Resources/app.icns"
-          cp crates/mezon-app/Info.plist "$APP/Contents/Info.plist"
-          /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString ${VERSION}" "$APP/Contents/Info.plist"
-          /usr/libexec/PlistBuddy -c "Set :CFBundleVersion ${GITHUB_RUN_NUMBER}" "$APP/Contents/Info.plist"
-          if [ -n "${SIGN_IDENTITY:-}" ]; then
-            codesign --force --timestamp --options runtime \
-              --entitlements packaging/macos/entitlements.plist \
-              --sign "$SIGN_IDENTITY" "$APP"
-            codesign --verify --deep --strict "$APP"
-          else
-            codesign --force --deep --sign - "$APP"
-          fi
-          STAGE="target/dist-ci/stage"
-          rm -rf "$STAGE"
-          mkdir -p "$STAGE"
-          cp -R "$APP" "$STAGE/"
-          ln -s /Applications "$STAGE/Applications"
-          for attempt in 1 2 3; do
-            if hdiutil create -volname "Mezon" -srcfolder "$STAGE" -ov -format UDZO -size 1g target/dist-ci/Mezon.dmg; then
-              break
-            fi
-            if [ "$attempt" = 3 ]; then
-              echo "hdiutil create failed after 3 attempts" >&2
-              exit 1
-            fi
-            echo "hdiutil create failed (attempt $attempt); retrying in 10s..." >&2
-            sleep 10
-          done
-
-      - name: Notarize DMG
-        if: steps.signing.outputs.has_cert == 'true' && steps.signing.outputs.has_notary == 'true'
-        env:
-          APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
-          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
-          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
-        run: |
-          printf '%s' "$APPLE_API_KEY_P8" > /tmp/notary-key.p8
-          xcrun notarytool submit target/dist-ci/Mezon.dmg \
-            --key /tmp/notary-key.p8 \
-            --key-id "$APPLE_API_KEY_ID" \
-            --issuer "$APPLE_API_ISSUER" \
-            --wait
-          rm -f /tmp/notary-key.p8
-          xcrun stapler staple target/dist-ci/Mezon.dmg
-
-      - name: Package update feed
-        run: bash scripts/make-update-feed.sh macos target/dist-ci/Mezon.dmg
-
-      - name: Upload feed
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: update-feed-macos
-          path: target/update-feed/*
-          if-no-files-found: error
+#   macos:
+#     name: macOS artifacts
+#     runs-on: macos-latest
+#     steps:
+#       - name: Checkout
+#         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+#         with:
+#           submodules: recursive
+# 
+#       - name: Install Rust toolchain
+#         uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master @ 2026-07-12
+#         with:
+#           toolchain: 1.95.0
+#           targets: aarch64-apple-darwin,x86_64-apple-darwin
+# 
+#       - name: Cache Cargo
+#         uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+# 
+#       - name: Build universal binary
+#         run: |
+#           cargo build --release -p mezon-app --locked --target aarch64-apple-darwin
+#           cargo build --release -p mezon-app --locked --target x86_64-apple-darwin
+# 
+#       - name: Detect signing configuration
+#         id: signing
+#         env:
+#           MACOS_CERT_P12: ${{ secrets.MACOS_CERT_P12 }}
+#           APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
+#         run: |
+#           if [ -n "$MACOS_CERT_P12" ]; then
+#             echo "has_cert=true" >> "$GITHUB_OUTPUT"
+#           else
+#             echo "has_cert=false" >> "$GITHUB_OUTPUT"
+#           fi
+#           if [ -n "$APPLE_API_KEY_P8" ]; then
+#             echo "has_notary=true" >> "$GITHUB_OUTPUT"
+#           else
+#             echo "has_notary=false" >> "$GITHUB_OUTPUT"
+#           fi
+# 
+#       - name: Import Developer ID certificate
+#         if: steps.signing.outputs.has_cert == 'true'
+#         env:
+#           MACOS_CERT_P12: ${{ secrets.MACOS_CERT_P12 }}
+#           MACOS_CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
+#           MACOS_SIGN_IDENTITY: ${{ secrets.MACOS_SIGN_IDENTITY }}
+#         run: |
+#           KEYCHAIN="build.keychain"
+#           KEYCHAIN_PASSWORD="$(uuidgen)"
+#           security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+#           security set-keychain-settings -lut 21600 "$KEYCHAIN"
+#           security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+#           security list-keychains -d user -s "$KEYCHAIN" login.keychain
+#           printf '%s' "$MACOS_CERT_P12" | base64 --decode > /tmp/cert.p12
+#           security import /tmp/cert.p12 -k "$KEYCHAIN" -P "$MACOS_CERT_PASSWORD" -T /usr/bin/codesign
+#           rm -f /tmp/cert.p12
+#           security set-key-partition-list -S apple-tool:,apple: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN" >/dev/null
+#           IDENTITY="${MACOS_SIGN_IDENTITY:-}"
+#           if [ -z "$IDENTITY" ]; then
+#             IDENTITY="$(security find-identity -v -p codesigning "$KEYCHAIN" | awk -F'"' '/Developer ID Application/{print $2; exit}')"
+#           fi
+#           if [ -z "$IDENTITY" ]; then
+#             echo "No 'Developer ID Application' identity found in MACOS_CERT_P12 (set MACOS_SIGN_IDENTITY to override)" >&2
+#             exit 1
+#           fi
+#           echo "SIGN_IDENTITY=$IDENTITY" >> "$GITHUB_ENV"
+# 
+#       - name: Assemble Mezon.app and DMG
+#         run: |
+#           VERSION="$(grep -m1 '^version' Cargo.toml | sed -E 's/.*"(.*)".*/\1/')"
+#           APP="target/dist-ci/Mezon.app"
+#           rm -rf "$APP"
+#           mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
+#           lipo -create -output "$APP/Contents/MacOS/mezon" \
+#             target/aarch64-apple-darwin/release/mezon \
+#             target/x86_64-apple-darwin/release/mezon
+#           chmod +x "$APP/Contents/MacOS/mezon"
+#           rm -rf target/aarch64-apple-darwin target/x86_64-apple-darwin
+#           df -h /
+#           cp assets/icons/app.icns "$APP/Contents/Resources/app.icns"
+#           cp crates/mezon-app/Info.plist "$APP/Contents/Info.plist"
+#           /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString ${VERSION}" "$APP/Contents/Info.plist"
+#           /usr/libexec/PlistBuddy -c "Set :CFBundleVersion ${GITHUB_RUN_NUMBER}" "$APP/Contents/Info.plist"
+#           if [ -n "${SIGN_IDENTITY:-}" ]; then
+#             codesign --force --timestamp --options runtime \
+#               --entitlements packaging/macos/entitlements.plist \
+#               --sign "$SIGN_IDENTITY" "$APP"
+#             codesign --verify --deep --strict "$APP"
+#           else
+#             codesign --force --deep --sign - "$APP"
+#           fi
+#           STAGE="target/dist-ci/stage"
+#           rm -rf "$STAGE"
+#           mkdir -p "$STAGE"
+#           cp -R "$APP" "$STAGE/"
+#           ln -s /Applications "$STAGE/Applications"
+#           for attempt in 1 2 3; do
+#             if hdiutil create -volname "Mezon" -srcfolder "$STAGE" -ov -format UDZO -size 1g target/dist-ci/Mezon.dmg; then
+#               break
+#             fi
+#             if [ "$attempt" = 3 ]; then
+#               echo "hdiutil create failed after 3 attempts" >&2
+#               exit 1
+#             fi
+#             echo "hdiutil create failed (attempt $attempt); retrying in 10s..." >&2
+#             sleep 10
+#           done
+# 
+#       - name: Notarize DMG
+#         if: steps.signing.outputs.has_cert == 'true' && steps.signing.outputs.has_notary == 'true'
+#         env:
+#           APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
+#           APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+#           APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+#         run: |
+#           printf '%s' "$APPLE_API_KEY_P8" > /tmp/notary-key.p8
+#           xcrun notarytool submit target/dist-ci/Mezon.dmg \
+#             --key /tmp/notary-key.p8 \
+#             --key-id "$APPLE_API_KEY_ID" \
+#             --issuer "$APPLE_API_ISSUER" \
+#             --wait
+#           rm -f /tmp/notary-key.p8
+#           xcrun stapler staple target/dist-ci/Mezon.dmg
+# 
+#       - name: Package update feed
+#         run: bash scripts/make-update-feed.sh macos target/dist-ci/Mezon.dmg
+# 
+#       - name: Upload feed
+#         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+#         with:
+#           name: update-feed-macos
+#           path: target/update-feed/*
+#           if-no-files-found: error
 
   release:
     name: Create GitHub Release
-    needs: [linux, windows, macos]
+    needs: [linux, windows]
     runs-on: ubuntu-latest
     steps:
       - name: Checkout

@@ -90,13 +90,21 @@ impl ClanSidebar {
             }
         });
         let router_sub = cx.observe(&Router::global(cx), |this, router, cx| {
-            let router = router.read(cx);
-            let new_dm_active = matches!(
-                router.route(),
-                Route::Direct | Route::DirectMessage { .. } | Route::Friends
-            );
-            let new_can_go_back = router.can_go_back();
-            let new_can_go_forward = router.can_go_forward();
+            let (new_dm_active, new_can_go_back, new_can_go_forward) = {
+                let router = router.read(cx);
+                (
+                    matches!(
+                        router.route(),
+                        Route::Direct | Route::DirectMessage { .. } | Route::Friends
+                    ),
+                    router.can_go_back(),
+                    router.can_go_forward(),
+                )
+            };
+            if new_dm_active && !this.dm_active {
+                this.clan_list
+                    .update(cx, |clans, cx| clans.clear_active_clan(cx));
+            }
             if new_dm_active != this.dm_active
                 || new_can_go_back != this.can_go_back
                 || new_can_go_forward != this.can_go_forward

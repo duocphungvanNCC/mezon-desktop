@@ -20,7 +20,7 @@ pub fn favicon_probe_url(origin: &str) -> String {
 }
 
 pub async fn probe_network_reachability(probe_url: &str, timeout: Duration) -> bool {
-    let url = with_cache_buster(probe_url);
+    let url = probe_url.to_string();
 
     let probe = transport_runtime::handle().spawn(async move {
         let request = match http::Request::builder()
@@ -38,15 +38,6 @@ pub async fn probe_network_reachability(probe_url: &str, timeout: Duration) -> b
     });
 
     probe.await.unwrap_or(false)
-}
-
-fn with_cache_buster(probe_url: &str) -> String {
-    let stamp = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|elapsed| elapsed.as_millis())
-        .unwrap_or(0);
-    let separator = if probe_url.contains('?') { '&' } else { '?' };
-    format!("{probe_url}{separator}t={stamp}")
 }
 
 #[cfg(test)]
@@ -75,14 +66,7 @@ mod tests {
     }
 
     #[test]
-    fn cache_buster_uses_query_separator() {
-        let url = with_cache_buster("https://mezon.ai/assets/favicon.ico");
-        assert!(url.starts_with("https://mezon.ai/assets/favicon.ico?t="));
-    }
-
-    #[test]
-    fn cache_buster_appends_to_existing_query() {
-        let url = with_cache_buster("https://mezon.ai/assets/favicon.ico?v=1");
-        assert!(url.starts_with("https://mezon.ai/assets/favicon.ico?v=1&t="));
+    fn probe_url_stays_cacheable() {
+        assert!(!favicon_probe_url("https://mezon.ai").contains('?'));
     }
 }

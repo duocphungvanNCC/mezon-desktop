@@ -49,3 +49,4 @@ xcb = "1.4.0"
 [target.'cfg(target_os = "windows")'.dependencies]
 nokhwa = { version = "0.10", default-features = false, features = ["input-msmf"] }
 windows-capture = "2.0"
+windows = { workspace = true }

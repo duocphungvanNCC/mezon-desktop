@@ -10,7 +10,9 @@ use gpui::{
 };
 use mezon_store::{AccountEvent, AccountStore, ClanList, Settings};
 
+use super::edit_avatar::EditAvatar;
 use super::profile_page::profile_status;
+use crate::app::shell::Shell;
 use crate::theme::{ActiveTheme, Theme};
 use crate::{image_cache::LruImageCache, util::avatar_color::spawn_banner_color_task};
 
@@ -38,7 +40,6 @@ pub struct ClanProfileSection {
     custom_status: SharedString,
     nick_name_input: Option<Entity<InputState>>,
     _subscriptions: Vec<Subscription>,
-    toast_message: Option<SharedString>,
     selected_clan_id: String,
     clan_dropdown_open: bool,
     avatar_image_cache: Entity<LruImageCache>,
@@ -68,40 +69,37 @@ impl ClanProfileSection {
                     cx.notify();
                 }
             }
-            let store = store.read(cx);
-            if let Some(clan_profile) = store.clan_profile.as_ref()
-                && clan_profile.clan_id.to_string() == this.selected_clan_id
-            {
-                let nick: SharedString = clan_profile.nick_name.clone().into();
-                let avatar: Option<SharedString> = clan_profile.avatar_url.clone().map(Into::into);
-                let should_sync = this.profile.as_ref().is_none_or(|profile| {
-                    profile.loading
-                        || profile.selected_clan_id.as_ref() != clan_profile.clan_id.to_string()
-                        || (!this.is_dirty()
-                            && (profile.original_nick_name != nick
-                                || profile.original_avatar_url != avatar))
-                });
-                if should_sync {
-                    this.profile = Some(ClanProfileState {
-                        selected_clan_id: clan_profile.clan_id.to_string().into(),
-                        nick_name: nick.clone(),
-                        avatar_url: avatar.clone(),
-                        original_nick_name: nick,
-                        original_avatar_url: avatar,
-                        loading: store.clan_profile_loading,
-                        saving: false,
-                        duplicate_error: store.nickname_duplicate,
-                        fetched: true,
-                    });
-                    cx.notify();
-                }
-            }
             this.refresh_banner_color(cx);
         })
         .detach();
         cx.subscribe(
             &AccountStore::global(cx),
-            |this, _store, event, cx| match event {
+            |this, store, event, cx| match event {
+                AccountEvent::ClanProfileLoaded => {
+                    let store = store.read(cx);
+                    if let Some(clan_profile) = store.clan_profile.as_ref()
+                        && clan_profile.clan_id.to_string() == this.selected_clan_id
+                        && !this.is_dirty()
+                    {
+                        let nick: SharedString = clan_profile.nick_name.clone().into();
+                        let avatar = clan_profile.avatar_url.clone().map(Into::into);
+                        this._subscriptions.clear();
+                        this.nick_name_input = None;
+                        this.profile = Some(ClanProfileState {
+                            selected_clan_id: clan_profile.clan_id.to_string().into(),
+                            nick_name: nick.clone(),
+                            avatar_url: avatar.clone(),
+                            original_nick_name: nick,
+                            original_avatar_url: avatar,
+                            loading: false,
+                            saving: false,
+                            duplicate_error: store.nickname_duplicate,
+                            fetched: true,
+                        });
+                        this.refresh_banner_color(cx);
+                        cx.notify();
+                    }
+                }
                 AccountEvent::ClanProfileSaved => {
                     if let Some(state) = &mut this.profile {
                         state.original_nick_name = state.nick_name.clone();
@@ -109,32 +107,29 @@ impl ClanProfileSection {
                         state.saving = false;
                     }
                     let locale = this.settings.read(cx).language.clone();
-                    this.show_toast(mezon_i18n::t(&locale, "setting.clanProfile.saved"), cx);
+                    let message = mezon_i18n::t(&locale, "setting.clanProfile.saved");
+                    Shell::global(cx).update(cx, |shell, cx| shell.success(message, cx));
                 }
                 AccountEvent::ClanProfileSaveFailed(msg) => {
                     if let Some(state) = &mut this.profile {
                         state.saving = false;
                     }
                     let locale = this.settings.read(cx).language.clone();
-                    this.show_toast(
-                        format!(
-                            "{} {}",
-                            mezon_i18n::t(&locale, "setting.clanProfile.saveFailed"),
-                            msg
-                        ),
-                        cx,
+                    let message = format!(
+                        "{} {}",
+                        mezon_i18n::t(&locale, "setting.clanProfile.saveFailed"),
+                        msg
                     );
+                    Shell::global(cx).update(cx, |shell, cx| shell.error(message, cx));
                 }
                 AccountEvent::ClanProfileLoadFailed(msg) => {
                     let locale = this.settings.read(cx).language.clone();
-                    this.show_toast(
-                        format!(
-                            "{} {}",
-                            mezon_i18n::t(&locale, "setting.clanProfile.loadFailed"),
-                            msg
-                        ),
-                        cx,
+                    let message = format!(
+                        "{} {}",
+                        mezon_i18n::t(&locale, "setting.clanProfile.loadFailed"),
+                        msg
                     );
+                    Shell::global(cx).update(cx, |shell, cx| shell.error(message, cx));
                 }
                 AccountEvent::NicknameDuplicateChecked(is_dup) => {
                     if let Some(state) = &mut this.profile {
@@ -142,8 +137,10 @@ impl ClanProfileSection {
                     }
                     cx.notify();
                 }
-                AccountEvent::ClanAvatarUploaded(url) => {
-                    if let Some(state) = &mut this.profile {
+                AccountEvent::ClanAvatarUploaded(clan_id, url) => {
+                    if let Some(state) = &mut this.profile
+                        && state.selected_clan_id.as_ref() == clan_id.to_string()
+                    {
                         state.avatar_url = Some(url.clone().into());
                     }
                     this.refresh_banner_color(cx);
@@ -151,14 +148,12 @@ impl ClanProfileSection {
                 }
                 AccountEvent::ClanAvatarUploadFailed(msg) => {
                     let locale = this.settings.read(cx).language.clone();
-                    this.show_toast(
-                        format!(
-                            "{} {}",
-                            mezon_i18n::t(&locale, "setting.clanProfile.avatarUploadFailed"),
-                            msg
-                        ),
-                        cx,
+                    let message = format!(
+                        "{} {}",
+                        mezon_i18n::t(&locale, "setting.clanProfile.avatarUploadFailed"),
+                        msg
                     );
+                    Shell::global(cx).update(cx, |shell, cx| shell.error(message, cx));
                 }
                 _ => {}
             },
@@ -175,7 +170,6 @@ impl ClanProfileSection {
             custom_status: SharedString::default(),
             nick_name_input: None,
             _subscriptions: Vec::new(),
-            toast_message: None,
             selected_clan_id: String::new(),
             clan_dropdown_open: false,
             avatar_image_cache: crate::image_cache::shared_avatar_cache(cx),
@@ -202,21 +196,6 @@ impl ClanProfileSection {
         self.status = status;
         self.custom_status = custom_status;
         self.refresh_banner_color(cx);
-    }
-
-    fn show_toast(&mut self, message: impl Into<SharedString>, cx: &mut Context<Self>) {
-        self.toast_message = Some(message.into());
-        cx.notify();
-
-        cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(Duration::from_secs(2)).await;
-            this.update(cx, |this, cx| {
-                this.toast_message = None;
-                cx.notify();
-            })
-            .ok();
-        })
-        .detach();
     }
 
     fn init_inputs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -335,6 +314,9 @@ impl ClanProfileSection {
     }
 
     pub fn fetch(&mut self, clan_id: &str, cx: &mut Context<Self>) {
+        let clan_id_value = clan_id.parse().unwrap_or_default();
+        self._subscriptions.clear();
+        self.nick_name_input = None;
         self.selected_clan_id = clan_id.to_string();
         self.profile = Some(ClanProfileState {
             selected_clan_id: clan_id.into(),
@@ -349,9 +331,11 @@ impl ClanProfileSection {
         });
         self.refresh_banner_color(cx);
         cx.notify();
-        AccountStore::global(cx).update(cx, |store, cx| {
-            store.fetch_clan_profile(clan_id.parse().unwrap_or_default(), cx)
+        self.clan_list.update(cx, |clans, cx| {
+            clans.subscribe_clan_realtime(clan_id_value, cx);
         });
+        AccountStore::global(cx)
+            .update(cx, |store, cx| store.fetch_clan_profile(clan_id_value, cx));
     }
 
     fn refresh_banner_color(&mut self, cx: &mut Context<Self>) {
@@ -447,18 +431,6 @@ impl Render for ClanProfileSection {
                     .child(div().min_w_0().flex_1().flex_basis(px(0.)).child(form))
                     .child(div().min_w_0().flex_1().flex_basis(px(0.)).child(preview)),
             )
-            .when_some(self.toast_message.clone(), |this, msg| {
-                this.child(
-                    div()
-                        .px_3()
-                        .py_2()
-                        .bg(theme.bg_floating)
-                        .rounded_md()
-                        .text_sm()
-                        .text_color(theme.text_primary)
-                        .child(msg),
-                )
-            })
             .into_any_element()
     }
 }
@@ -601,8 +573,10 @@ impl ClanProfileSection {
                                                         &locale,
                                                         "setting.profile.chooseAvatar",
                                                     );
+                                                    let clan_id = selected_clan_id.clone();
                                                     move |_, _, cx| {
                                                         let entity = entity.clone();
+                                                        let clan_id = clan_id.clone();
                                                         let rx = cx.prompt_for_paths(
                                                             PathPromptOptions {
                                                                 files: true,
@@ -621,12 +595,41 @@ impl ClanProfileSection {
                                                                     Some(p) => p,
                                                                     None => return,
                                                                 };
+                                                            let is_gif = path
+                                                                .extension()
+                                                                .and_then(|extension| extension.to_str())
+                                                                .is_some_and(|extension| extension.eq_ignore_ascii_case("gif"));
+                                                            if !is_gif {
+                                                                let apply_clan_id = clan_id.clone();
+                                                                cx.update(|cx| {
+                                                                    EditAvatar::open(
+                                                                        path,
+                                                                        move |cropped, _, cx| {
+                                                                            AccountStore::global(cx).update(cx, |store, cx| {
+                                                                                store.upload_clan_avatar(
+                                                                                    apply_clan_id.as_ref().parse().unwrap_or_default(),
+                                                                                    &cropped,
+                                                                                    cx,
+                                                                                )
+                                                                            });
+                                                                        },
+                                                                        cx,
+                                                                    );
+                                                                });
+                                                                return;
+                                                            }
                                                             entity.update(cx, |_, cx| {
                                                                 AccountStore::global(cx).update(
                                                                     cx,
                                                                     |store, cx| {
                                                                         store.upload_clan_avatar(
-                                                                            &path, cx,
+                                                                            clan_id
+                                                                                .as_ref()
+                                                                                .parse()
+                                                                                .unwrap_or_default(
+                                                                                ),
+                                                                            &path,
+                                                                            cx,
                                                                         );
                                                                     },
                                                                 );
@@ -647,10 +650,11 @@ impl ClanProfileSection {
                                                 .border_color(theme.border)
                                                 .on_click({
                                                     let entity = cx.entity().clone();
+                                                    let user_avatar_url = self.user_avatar_url.clone();
                                                     move |_, _, cx| {
                                                         entity.clone().update(cx, |this, cx| {
                                                             if let Some(state) = &mut this.profile {
-                                                                state.avatar_url = None;
+                                                                state.avatar_url = user_avatar_url.clone();
                                                             }
                                                             this.refresh_banner_color(cx);
                                                             cx.notify();

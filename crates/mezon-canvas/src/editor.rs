@@ -10,11 +10,12 @@ use gpui::{
     Anchor, App, Bounds, ClickEvent, ClipboardEntry, ClipboardItem, Context, CursorStyle,
     DispatchPhase, Div, Element, ElementId, ElementInputHandler, Entity, EntityInputHandler,
     FocusHandle, Focusable, FontStyle, FontWeight, GlobalElementId, Hsla, Image, ImageFormat,
-    InspectorElementId, InteractiveElement as _, IntoElement, KeyBinding, LayoutId, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point, Render, RenderOnce,
-    ScrollDelta, ScrollHandle, ScrollWheelEvent, ShapedLine, SharedString, StrikethroughStyle,
-    Style, StyleRefinement, Styled, TextAlign, TextRun, UTF16Selection, UnderlineStyle, Window,
-    WrappedLine, actions, anchored, deferred, div, fill, point, prelude::*, px, size,
+    InspectorElementId, InteractiveElement as _, IntoElement, KeyBinding, KeyContext, LayoutId,
+    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point, Render,
+    RenderOnce, ScrollDelta, ScrollHandle, ScrollWheelEvent, ShapedLine, SharedString,
+    StrikethroughStyle, Style, StyleRefinement, Styled, TextAlign, TextRun, UTF16Selection,
+    UnderlineStyle, Window, WrappedLine, actions, anchored, deferred, div, fill, point, prelude::*,
+    px, size,
 };
 use mezon_store::{CanvasStore, PlatformStore};
 use serde_json::{Value, json};
@@ -31,11 +32,28 @@ use crate::view::{
     is_tiptap_content_empty, parse_tiptap_doc,
 };
 use mezon_theme::ActiveTheme;
+use mezon_widgets::text_actions::{
+    Backspace, Copy, Cut, Delete, Down, End, Enter, Home, Left, MoveToDocEnd, MoveToDocStart,
+    MoveToNextWordEnd, MoveToPreviousWordStart, Newline, Paste, Right, SelectAll, SelectDown,
+    SelectLeft, SelectRight, SelectToDocEnd, SelectToDocStart, SelectToLineEnd, SelectToLineStart,
+    SelectToNextWordEnd, SelectToPreviousWordStart, SelectUp, TEXT_INPUT_CONTEXT, Up,
+};
+use mezon_widgets::text_edit::{
+    SelectGranularity, extend_range_for_granularity, granularity_for_click, next_word_boundary,
+    previous_word_boundary, range_for_granularity,
+};
 use mezon_widgets::{
     Button, ButtonVariants, Icon, IconName, Input, InputState, Sizable, Size, h_flex, v_flex,
 };
 
-const KEY_CONTEXT: &str = "MezonCanvasEditor";
+const FORMAT_KEY_CONTEXT: &str = "MezonCanvasEditor";
+
+fn editor_key_context() -> KeyContext {
+    let mut context = KeyContext::default();
+    context.add(TEXT_INPUT_CONTEXT);
+    context.add(FORMAT_KEY_CONTEXT);
+    context
+}
 const CANVAS_IMAGE_MARGIN: Pixels = px(16.);
 const CANVAS_MIN_LAYOUT_WIDTH: Pixels = px(64.);
 const CANVAS_LAYOUT_WIDTH_FALLBACK: Pixels = px(480.);
@@ -74,62 +92,16 @@ fn apply_mark_font(run: &mut TextRun, block_weight: FontWeight, bold: bool, ital
 
 actions!(
     canvas_editor,
-    [
-        Backspace,
-        Delete,
-        Enter,
-        ShiftEnter,
-        Left,
-        Right,
-        Up,
-        Down,
-        SelectLeft,
-        SelectRight,
-        SelectUp,
-        SelectDown,
-        SelectHome,
-        SelectEnd,
-        SelectAll,
-        Home,
-        End,
-        Paste,
-        Cut,
-        Copy,
-        Bold,
-        Italic,
-        StrikeThrough,
-        CodeBlock,
-        Link,
-    ]
+    [Bold, Italic, StrikeThrough, CodeBlock, Link]
 );
 
 pub fn init(cx: &mut App) {
     cx.bind_keys([
-        KeyBinding::new("backspace", Backspace, Some(KEY_CONTEXT)),
-        KeyBinding::new("delete", Delete, Some(KEY_CONTEXT)),
-        KeyBinding::new("enter", Enter, Some(KEY_CONTEXT)),
-        KeyBinding::new("shift-enter", ShiftEnter, Some(KEY_CONTEXT)),
-        KeyBinding::new("left", Left, Some(KEY_CONTEXT)),
-        KeyBinding::new("right", Right, Some(KEY_CONTEXT)),
-        KeyBinding::new("up", Up, Some(KEY_CONTEXT)),
-        KeyBinding::new("down", Down, Some(KEY_CONTEXT)),
-        KeyBinding::new("shift-left", SelectLeft, Some(KEY_CONTEXT)),
-        KeyBinding::new("shift-right", SelectRight, Some(KEY_CONTEXT)),
-        KeyBinding::new("shift-up", SelectUp, Some(KEY_CONTEXT)),
-        KeyBinding::new("shift-down", SelectDown, Some(KEY_CONTEXT)),
-        KeyBinding::new("shift-home", SelectHome, Some(KEY_CONTEXT)),
-        KeyBinding::new("shift-end", SelectEnd, Some(KEY_CONTEXT)),
-        KeyBinding::new("secondary-a", SelectAll, Some(KEY_CONTEXT)),
-        KeyBinding::new("secondary-v", Paste, Some(KEY_CONTEXT)),
-        KeyBinding::new("secondary-c", Copy, Some(KEY_CONTEXT)),
-        KeyBinding::new("secondary-x", Cut, Some(KEY_CONTEXT)),
-        KeyBinding::new("home", Home, Some(KEY_CONTEXT)),
-        KeyBinding::new("end", End, Some(KEY_CONTEXT)),
-        KeyBinding::new("secondary-b", Bold, Some(KEY_CONTEXT)),
-        KeyBinding::new("secondary-i", Italic, Some(KEY_CONTEXT)),
-        KeyBinding::new("shift-secondary-s", StrikeThrough, Some(KEY_CONTEXT)),
-        KeyBinding::new("secondary-k", Link, Some(KEY_CONTEXT)),
-        KeyBinding::new("secondary-alt-c", CodeBlock, Some(KEY_CONTEXT)),
+        KeyBinding::new("secondary-b", Bold, Some(FORMAT_KEY_CONTEXT)),
+        KeyBinding::new("secondary-i", Italic, Some(FORMAT_KEY_CONTEXT)),
+        KeyBinding::new("shift-secondary-s", StrikeThrough, Some(FORMAT_KEY_CONTEXT)),
+        KeyBinding::new("secondary-k", Link, Some(FORMAT_KEY_CONTEXT)),
+        KeyBinding::new("secondary-alt-c", CodeBlock, Some(FORMAT_KEY_CONTEXT)),
     ]);
 }
 
@@ -242,6 +214,8 @@ pub struct CanvasEditorState {
     link_menu_open: bool,
     link_input: Entity<InputState>,
     is_selecting: bool,
+    select_granularity: SelectGranularity,
+    select_anchor: Range<usize>,
     layout_generation: u64,
     layout_cache: RefCell<Option<Arc<EditorShapeCache>>>,
     doc_json_cache: RefCell<Option<String>>,
@@ -285,6 +259,8 @@ impl CanvasEditorState {
             link_menu_open: false,
             link_input,
             is_selecting: false,
+            select_granularity: SelectGranularity::Character,
+            select_anchor: 0..0,
             layout_generation: 0,
             layout_cache: RefCell::new(None),
             doc_json_cache: RefCell::new(None),
@@ -1178,11 +1154,26 @@ impl CanvasEditorState {
         self.caret_blink.sync_focused(cx);
         self.is_selecting = true;
         let offset = self.index_for_mouse_position(event.position);
+
         if event.modifiers.shift {
+            self.select_granularity = SelectGranularity::Character;
             self.select_to(offset, cx);
-        } else {
-            self.move_to(offset, cx);
+            return;
         }
+
+        self.select_granularity = granularity_for_click(event.click_count);
+        if self.select_granularity == SelectGranularity::Character {
+            self.select_anchor = offset..offset;
+            self.move_to(offset, cx);
+            return;
+        }
+
+        let range = range_for_granularity(&self.content, offset, self.select_granularity, true);
+        self.select_anchor = range.clone();
+        self.selection_reversed = false;
+        self.selected_range = range;
+        self.caret_blink.pause_blinking(cx);
+        cx.notify();
     }
 
     fn on_mouse_up(&mut self, event: &MouseUpEvent, _: &mut Window, cx: &mut Context<Self>) {
@@ -1196,9 +1187,28 @@ impl CanvasEditorState {
     }
 
     fn on_mouse_move(&mut self, event: &MouseMoveEvent, _: &mut Window, cx: &mut Context<Self>) {
-        if self.is_selecting {
-            self.select_to(self.index_for_mouse_position(event.position), cx);
+        if !self.is_selecting {
+            return;
         }
+        let offset = self.index_for_mouse_position(event.position);
+        if self.select_granularity == SelectGranularity::Character {
+            self.select_to(offset, cx);
+            return;
+        }
+        let (range, reversed) = extend_range_for_granularity(
+            &self.content,
+            &self.select_anchor,
+            offset,
+            self.select_granularity,
+            true,
+        );
+        if range == self.selected_range && reversed == self.selection_reversed {
+            return;
+        }
+        self.selected_range = range;
+        self.selection_reversed = reversed;
+        self.caret_blink.pause_blinking(cx);
+        cx.notify();
     }
 
     fn on_read_only_mouse_up(
@@ -1328,54 +1338,34 @@ impl CanvasEditorState {
         self.split_paragraph(cx);
     }
 
-    fn shift_enter(&mut self, _: &ShiftEnter, _: &mut Window, cx: &mut Context<Self>) {
+    fn shift_enter(&mut self, _: &Newline, _: &mut Window, cx: &mut Context<Self>) {
         self.insert_hard_break(cx);
     }
 
-    fn left(&mut self, _: &Left, window: &mut Window, cx: &mut Context<Self>) {
-        let offset = self.previous_boundary(self.cursor_offset());
-        if window.modifiers().shift {
-            self.select_to(offset, cx);
-        } else {
-            self.move_to(offset, cx);
-        }
+    fn left(&mut self, _: &Left, _: &mut Window, cx: &mut Context<Self>) {
+        self.move_to(self.previous_boundary(self.cursor_offset()), cx);
     }
 
-    fn right(&mut self, _: &Right, window: &mut Window, cx: &mut Context<Self>) {
-        let offset = self.next_boundary(self.cursor_offset());
-        if window.modifiers().shift {
-            self.select_to(offset, cx);
-        } else {
-            self.move_to(offset, cx);
-        }
+    fn right(&mut self, _: &Right, _: &mut Window, cx: &mut Context<Self>) {
+        self.move_to(self.next_boundary(self.cursor_offset()), cx);
     }
 
-    fn up(&mut self, _: &Up, window: &mut Window, cx: &mut Context<Self>) {
+    fn up(&mut self, _: &Up, _: &mut Window, cx: &mut Context<Self>) {
         let (line, col) = self.offset_to_line_col(self.cursor_offset());
         if line == 0 {
             return;
         }
         let prev_len = self.lines[line - 1].text.len();
-        let offset = self.line_col_to_offset(line - 1, col.min(prev_len));
-        if window.modifiers().shift {
-            self.select_to(offset, cx);
-        } else {
-            self.move_to(offset, cx);
-        }
+        self.move_to(self.line_col_to_offset(line - 1, col.min(prev_len)), cx);
     }
 
-    fn down(&mut self, _: &Down, window: &mut Window, cx: &mut Context<Self>) {
+    fn down(&mut self, _: &Down, _: &mut Window, cx: &mut Context<Self>) {
         let (line, col) = self.offset_to_line_col(self.cursor_offset());
         if line + 1 >= self.lines.len() {
             return;
         }
         let next_len = self.lines[line + 1].text.len();
-        let offset = self.line_col_to_offset(line + 1, col.min(next_len));
-        if window.modifiers().shift {
-            self.select_to(offset, cx);
-        } else {
-            self.move_to(offset, cx);
-        }
+        self.move_to(self.line_col_to_offset(line + 1, col.min(next_len)), cx);
     }
 
     fn select_up(&mut self, _: &SelectUp, _: &mut Window, cx: &mut Context<Self>) {
@@ -1396,12 +1386,12 @@ impl CanvasEditorState {
         self.select_to(self.line_col_to_offset(line + 1, col.min(next_len)), cx);
     }
 
-    fn select_home(&mut self, _: &SelectHome, _: &mut Window, cx: &mut Context<Self>) {
+    fn select_home(&mut self, _: &SelectToLineStart, _: &mut Window, cx: &mut Context<Self>) {
         let (line, _) = self.offset_to_line_col(self.cursor_offset());
         self.select_to(self.line_col_to_offset(line, 0), cx);
     }
 
-    fn select_end(&mut self, _: &SelectEnd, _: &mut Window, cx: &mut Context<Self>) {
+    fn select_end(&mut self, _: &SelectToLineEnd, _: &mut Window, cx: &mut Context<Self>) {
         let (line, _) = self.offset_to_line_col(self.cursor_offset());
         self.select_to(
             self.line_col_to_offset(line, self.lines[line].text.len()),
@@ -1423,24 +1413,88 @@ impl CanvasEditorState {
         cx.notify();
     }
 
-    fn home(&mut self, _: &Home, window: &mut Window, cx: &mut Context<Self>) {
-        let (line, _) = self.offset_to_line_col(self.cursor_offset());
-        let offset = self.line_col_to_offset(line, 0);
-        if window.modifiers().shift {
-            self.select_to(offset, cx);
-        } else {
-            self.move_to(offset, cx);
-        }
+    fn previous_word_offset(&self) -> usize {
+        snap_offset(
+            &self.content,
+            previous_word_boundary(&self.content, self.cursor_offset()),
+        )
     }
 
-    fn end(&mut self, _: &End, window: &mut Window, cx: &mut Context<Self>) {
+    fn next_word_offset(&self) -> usize {
+        snap_offset(
+            &self.content,
+            next_word_boundary(&self.content, self.cursor_offset()),
+        )
+    }
+
+    fn move_to_previous_word_start(
+        &mut self,
+        _: &MoveToPreviousWordStart,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.move_to(self.previous_word_offset(), cx);
+    }
+
+    fn move_to_next_word_end(
+        &mut self,
+        _: &MoveToNextWordEnd,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.move_to(self.next_word_offset(), cx);
+    }
+
+    fn select_to_previous_word_start(
+        &mut self,
+        _: &SelectToPreviousWordStart,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.select_to(self.previous_word_offset(), cx);
+    }
+
+    fn select_to_next_word_end(
+        &mut self,
+        _: &SelectToNextWordEnd,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.select_to(self.next_word_offset(), cx);
+    }
+
+    fn move_to_doc_start(&mut self, _: &MoveToDocStart, _: &mut Window, cx: &mut Context<Self>) {
+        self.move_to(0, cx);
+    }
+
+    fn move_to_doc_end(&mut self, _: &MoveToDocEnd, _: &mut Window, cx: &mut Context<Self>) {
+        self.move_to(self.content.len(), cx);
+    }
+
+    fn select_to_doc_start(
+        &mut self,
+        _: &SelectToDocStart,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.select_to(0, cx);
+    }
+
+    fn select_to_doc_end(&mut self, _: &SelectToDocEnd, _: &mut Window, cx: &mut Context<Self>) {
+        self.select_to(self.content.len(), cx);
+    }
+
+    fn home(&mut self, _: &Home, _: &mut Window, cx: &mut Context<Self>) {
         let (line, _) = self.offset_to_line_col(self.cursor_offset());
-        let offset = self.line_col_to_offset(line, self.lines[line].text.len());
-        if window.modifiers().shift {
-            self.select_to(offset, cx);
-        } else {
-            self.move_to(offset, cx);
-        }
+        self.move_to(self.line_col_to_offset(line, 0), cx);
+    }
+
+    fn end(&mut self, _: &End, _: &mut Window, cx: &mut Context<Self>) {
+        let (line, _) = self.offset_to_line_col(self.cursor_offset());
+        self.move_to(
+            self.line_col_to_offset(line, self.lines[line].text.len()),
+            cx,
+        );
     }
 
     fn paste(&mut self, _: &Paste, window: &mut Window, cx: &mut Context<Self>) {
@@ -1728,34 +1782,44 @@ impl Render for CanvasEditorState {
             .when(page_scroll, |el| el.h(layout_height))
             .when(!page_scroll, |el| el.flex_1().min_h_0())
             .when(!read_only, |el| {
-                el.key_context(KEY_CONTEXT)
+                el.key_context(editor_key_context())
                     .track_focus(&self.focus_handle)
                     .cursor(CursorStyle::IBeam)
-                    .on_action(cx.listener(Self::backspace))
-                    .on_action(cx.listener(Self::delete))
-                    .on_action(cx.listener(Self::enter))
-                    .on_action(cx.listener(Self::shift_enter))
-                    .on_action(cx.listener(Self::left))
-                    .on_action(cx.listener(Self::right))
-                    .on_action(cx.listener(Self::up))
-                    .on_action(cx.listener(Self::down))
-                    .on_action(cx.listener(Self::select_left))
-                    .on_action(cx.listener(Self::select_right))
-                    .on_action(cx.listener(Self::select_up))
-                    .on_action(cx.listener(Self::select_down))
-                    .on_action(cx.listener(Self::select_home))
-                    .on_action(cx.listener(Self::select_end))
-                    .on_action(cx.listener(Self::select_all))
-                    .on_action(cx.listener(Self::home))
-                    .on_action(cx.listener(Self::end))
-                    .on_action(cx.listener(Self::paste))
-                    .on_action(cx.listener(Self::cut))
-                    .on_action(cx.listener(Self::copy))
-                    .on_action(cx.listener(Self::bold))
-                    .on_action(cx.listener(Self::italic))
-                    .on_action(cx.listener(Self::strike_through))
-                    .on_action(cx.listener(Self::code_block))
-                    .on_action(cx.listener(Self::link))
+                    .when(focused, |el| {
+                        el.on_action(cx.listener(Self::backspace))
+                            .on_action(cx.listener(Self::delete))
+                            .on_action(cx.listener(Self::enter))
+                            .on_action(cx.listener(Self::shift_enter))
+                            .on_action(cx.listener(Self::left))
+                            .on_action(cx.listener(Self::right))
+                            .on_action(cx.listener(Self::up))
+                            .on_action(cx.listener(Self::down))
+                            .on_action(cx.listener(Self::select_left))
+                            .on_action(cx.listener(Self::select_right))
+                            .on_action(cx.listener(Self::select_up))
+                            .on_action(cx.listener(Self::select_down))
+                            .on_action(cx.listener(Self::select_home))
+                            .on_action(cx.listener(Self::select_end))
+                            .on_action(cx.listener(Self::select_all))
+                            .on_action(cx.listener(Self::home))
+                            .on_action(cx.listener(Self::end))
+                            .on_action(cx.listener(Self::move_to_previous_word_start))
+                            .on_action(cx.listener(Self::move_to_next_word_end))
+                            .on_action(cx.listener(Self::select_to_previous_word_start))
+                            .on_action(cx.listener(Self::select_to_next_word_end))
+                            .on_action(cx.listener(Self::move_to_doc_start))
+                            .on_action(cx.listener(Self::move_to_doc_end))
+                            .on_action(cx.listener(Self::select_to_doc_start))
+                            .on_action(cx.listener(Self::select_to_doc_end))
+                            .on_action(cx.listener(Self::paste))
+                            .on_action(cx.listener(Self::cut))
+                            .on_action(cx.listener(Self::copy))
+                            .on_action(cx.listener(Self::bold))
+                            .on_action(cx.listener(Self::italic))
+                            .on_action(cx.listener(Self::strike_through))
+                            .on_action(cx.listener(Self::code_block))
+                            .on_action(cx.listener(Self::link))
+                    })
                     .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
                     .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
                     .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))

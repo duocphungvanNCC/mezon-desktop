@@ -287,6 +287,7 @@ mod tests {
     #[test]
     fn account_profile_maps_signed_in_user() {
         let account = crate::account::UserAccount {
+            user_id: 1,
             username: "me".into(),
             display_name: "Hello Me".into(),
             email: None,

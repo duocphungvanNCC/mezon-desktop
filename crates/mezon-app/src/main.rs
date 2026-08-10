@@ -959,6 +959,7 @@ fn open_main_window(
     mezon_store::LoginStore::init(client, api.clone(), auth_state.clone(), cx);
     mezon_store::RealtimeDispatch::init(api.clone(), cx);
     mezon_store::ConnectionStore::init(transport, api.clone(), auth_state.clone(), cx);
+    mezon_store::AccountStore::init(api.clone(), cx);
     mezon_store::ClanList::init(api.clone(), cx);
     mezon_store::ChannelList::init(api.clone(), cx);
     mezon_store::ChannelSettingsStore::init(api.clone(), cx);
@@ -1004,8 +1005,6 @@ fn open_main_window(
     mezon_ui::WalletToastBridge::init(cx);
     mezon_ui::ThreadCreateToastBridge::init(cx);
     mezon_ui::chat::channel_settings::channel_acl::init(api.clone(), cx);
-    mezon_store::AccountStore::init(api, cx);
-
     let platform_store = mezon_store::PlatformStore::init(cx);
     mezon_store::PlatformStore::set_open_url(
         &platform_store,

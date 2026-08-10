@@ -23,11 +23,20 @@ struct TypingEntry {
     at: Instant,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PresenceEvent {
     TypingChanged { channel_id: ChannelId },
     ChannelPresenceChanged { channel_id: ChannelId },
     StatusChanged,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum DmAvatarPresence {
+    None = 0,
+    Online = 1,
+    Idle = 2,
+    Dnd = 3,
 }
 
 #[derive(Debug)]
@@ -37,6 +46,7 @@ pub struct PresenceStore {
     pub user_online: HashSet<UserId>,
     pub presence_status: HashMap<UserId, String>,
     pub user_status: HashMap<UserId, String>,
+    presence_known: HashSet<UserId>,
     status_notify_task: Option<Task<()>>,
     typing_sweep_task: Option<Task<()>>,
     _channel_sub: Subscription,
@@ -69,6 +79,7 @@ impl PresenceStore {
         self.user_online.clear();
         self.presence_status.clear();
         self.user_status.clear();
+        self.presence_known.clear();
         cx.emit(PresenceEvent::StatusChanged);
         cx.notify();
     }
@@ -108,6 +119,21 @@ impl PresenceStore {
             .filter(|s| !s.is_empty())
     }
 
+    pub fn dm_avatar_presence(&self, user_id: UserId, api_online: bool) -> DmAvatarPresence {
+        let bootstrap = api_online && !self.presence_known.contains(&user_id);
+        if !self.is_online(user_id) && !bootstrap {
+            return DmAvatarPresence::None;
+        }
+        match self.presence_status(user_id) {
+            Some(status) => dm_presence_from_status(status),
+            None => DmAvatarPresence::Online,
+        }
+    }
+
+    fn mark_presence_known(&mut self, user_id: UserId) {
+        self.presence_known.insert(user_id);
+    }
+
     fn new(_api: Arc<mezon_client::AppApi>, cx: &mut Context<Self>) -> Self {
         Self::register_realtime(cx);
 
@@ -125,6 +151,7 @@ impl PresenceStore {
             user_online: HashSet::new(),
             presence_status: HashMap::new(),
             user_status: HashMap::new(),
+            presence_known: HashSet::new(),
             status_notify_task: None,
             typing_sweep_task: None,
             _channel_sub: channel_sub,
@@ -223,6 +250,7 @@ impl PresenceStore {
                     self.user_online.insert(user_id);
                 }
                 self.presence_status.insert(user_id, status.to_string());
+                self.mark_presence_known(user_id);
                 Self::sync_self_account(e.user_id, Some(status), None, cx);
                 self.schedule_status_notify(cx);
             }
@@ -350,10 +378,12 @@ impl PresenceStore {
     fn apply_presence_statuses(&mut self, statuses: &[(UserId, String)], leaves: &[UserId]) {
         for uid in leaves {
             self.presence_status.insert(*uid, "offline".to_string());
+            self.mark_presence_known(*uid);
         }
         for (uid, status) in statuses {
             let value = if status.is_empty() { "online" } else { status };
             self.presence_status.insert(*uid, value.to_string());
+            self.mark_presence_known(*uid);
         }
     }
 
@@ -429,6 +459,18 @@ impl PresenceStore {
     }
 }
 
+fn dm_presence_from_status(status: &str) -> DmAvatarPresence {
+    if status.eq_ignore_ascii_case("idle") {
+        DmAvatarPresence::Idle
+    } else if status.eq_ignore_ascii_case("dnd") || status.eq_ignore_ascii_case("do not disturb") {
+        DmAvatarPresence::Dnd
+    } else if status.eq_ignore_ascii_case("invisible") || status.eq_ignore_ascii_case("offline") {
+        DmAvatarPresence::None
+    } else {
+        DmAvatarPresence::Online
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -440,6 +482,7 @@ mod tests {
             user_online: HashSet::new(),
             presence_status: HashMap::new(),
             user_status: HashMap::new(),
+            presence_known: HashSet::new(),
             status_notify_task: None,
             typing_sweep_task: None,
             _channel_sub: gpui::Subscription::new(|| {}),
@@ -629,5 +672,71 @@ mod tests {
     fn typing_users_returns_empty_for_unknown_channel() {
         let store = empty_store();
         assert!(store.typing_users(ChannelId(999)).is_empty());
+    }
+
+    #[test]
+    fn dm_avatar_presence_prefers_realtime_idle_over_stale_api_offline() {
+        let mut store = empty_store();
+        let user_id = UserId(42);
+        store.user_online.insert(user_id);
+        store.presence_status.insert(user_id, "Idle".to_string());
+        assert_eq!(
+            store.dm_avatar_presence(user_id, false),
+            DmAvatarPresence::Idle
+        );
+    }
+
+    #[test]
+    fn dm_avatar_presence_falls_back_to_api_online_before_realtime() {
+        let store = empty_store();
+        assert_eq!(
+            store.dm_avatar_presence(UserId(1), true),
+            DmAvatarPresence::Online
+        );
+    }
+
+    #[test]
+    fn dm_avatar_presence_ignores_stale_api_after_presence_known() {
+        let mut store = empty_store();
+        let user_id = UserId(1);
+        store.mark_presence_known(user_id);
+        store.user_online.remove(&user_id);
+        store.presence_status.clear();
+        assert_eq!(
+            store.dm_avatar_presence(user_id, true),
+            DmAvatarPresence::None
+        );
+    }
+
+    #[test]
+    fn dm_avatar_presence_maps_dnd_status() {
+        let mut store = empty_store();
+        let user_id = UserId(3);
+        store.user_online.insert(user_id);
+        store
+            .presence_status
+            .insert(user_id, "Do Not Disturb".to_string());
+        assert_eq!(
+            store.dm_avatar_presence(user_id, false),
+            DmAvatarPresence::Dnd
+        );
+    }
+
+    #[test]
+    fn dm_avatar_presence_hides_offline_and_invisible_users() {
+        let store = empty_store();
+        assert_eq!(
+            store.dm_avatar_presence(UserId(1), false),
+            DmAvatarPresence::None
+        );
+        let mut store = empty_store();
+        let user_id = UserId(7);
+        store
+            .presence_status
+            .insert(user_id, "Invisible".to_string());
+        assert_eq!(
+            store.dm_avatar_presence(user_id, true),
+            DmAvatarPresence::None
+        );
     }
 }

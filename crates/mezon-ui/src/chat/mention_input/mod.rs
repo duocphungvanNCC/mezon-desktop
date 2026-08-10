@@ -83,7 +83,6 @@ actions!(
 );
 
 pub fn init(cx: &mut App) {
-    text_field::init(cx);
     cx.bind_keys([
         KeyBinding::new("tab", MentionAccept, Some(KEY_CONTEXT)),
         KeyBinding::new("escape", MentionDismiss, Some(KEY_CONTEXT)),

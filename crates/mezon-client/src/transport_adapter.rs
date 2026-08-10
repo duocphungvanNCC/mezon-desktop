@@ -20,6 +20,20 @@ pub trait TransportAdapter: Send + Sync {
 
     fn is_open(&self) -> bool;
 
+    /// How many frames the server has sent since the current connect started. Zero after the
+    /// socket dies means the peer never answered, which is a transport failure — not the server
+    /// refusing the credential.
+    fn frames_received(&self) -> u64 {
+        0
+    }
+
+    /// Whether the gateway answered the handshake with an HTTP 401/403. That is the only signal
+    /// that names the credential as dead — a silent close means the connection was refused for
+    /// another reason (the per-user session limit, an outage) and must not discard the session.
+    fn credential_rejected(&self) -> bool {
+        false
+    }
+
     async fn close(&self) -> Result<()>;
 
     async fn set_on_message(&self, handler: MessageHandler);

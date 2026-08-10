@@ -4,14 +4,14 @@ use std::rc::Rc;
 
 use chrono::Local;
 use gpui::{
-    App, Context, Entity, FocusHandle, Focusable, FontWeight, Global, HighlightStyle,
+    App, Context, Entity, FocusHandle, Focusable, FontWeight, Global, HighlightStyle, Hsla,
     ListAlignment, ListOffset, ListState, MouseButton, MouseDownEvent, ObjectFit, Render,
-    SharedString, StyledText, Subscription, Transformation, WeakEntity, Window, deferred, div, img,
-    list, prelude::*, px, radians,
+    SharedString, StyledText, Subscription, Transformation, UnderlineStyle, WeakEntity, Window,
+    deferred, div, img, list, prelude::*, px, radians,
 };
 use mezon_store::{
     ChannelId, ChannelList, ChannelType, ClanId, MessageSearchStore, MessageSpan, MessagesStore,
-    RichLayout, SearchDropdownMode, SearchHit, SearchPageToken, autocomplete_needle,
+    RichLayout, RichRunKind, SearchDropdownMode, SearchHit, SearchPageToken, autocomplete_needle,
     has_filter_options, resolve_search_hit_ogp, search_content_highlight_terms,
     search_dropdown_mode, search_page_count, search_page_numbers, should_show_search_dropdown,
 };
@@ -19,6 +19,7 @@ use ui::ScrollAxes;
 use ui::Scrollbars;
 use ui::WithScrollbar;
 
+use crate::chat::inbox::render_message_head;
 use crate::chat::layout::ChatLayout;
 use crate::chat::member_list::{MentionMemberRaw, mention_member_pool};
 use crate::chat::message::{
@@ -170,8 +171,8 @@ pub struct MessageSearchPanel {
     ogp_image_cache: Entity<LruImageCache>,
     cached_rows: Rc<Vec<SearchListRow>>,
     cached_highlights: Rc<Vec<String>>,
-    rows_cache_fp: Option<(u64, u64)>,
-    observed_store_fp: Option<(u64, u64)>,
+    rows_cache_fp: Option<(u64, u64, i32)>,
+    observed_store_fp: Option<(u64, u64, i32)>,
     _subs: [Subscription; 1],
 }
 
@@ -195,12 +196,11 @@ impl MessageSearchPanel {
                 let fp = store
                     .read(cx)
                     .state_ref(this.channel_id)
-                    .map(|state| (state.generation, state.revision));
+                    .map(|state| (state.generation, state.revision, state.current_page));
                 if fp == this.observed_store_fp {
                     return;
                 }
                 this.observed_store_fp = fp;
-                this.list_state.remeasure();
                 cx.notify();
             }),
         ];
@@ -247,14 +247,34 @@ impl MessageSearchPanel {
         }
     }
 
-    fn set_results_page(&mut self, page: i32, cx: &mut Context<Self>) {
-        if self.last_results_page != page {
-            self.last_results_page = page;
+    fn sync_results_list(&mut self, state: &mezon_store::ChannelSearchState) {
+        if state.loaded_page != state.current_page {
+            return;
+        }
+
+        let fp = (state.generation, state.revision, state.loaded_page);
+        if self.rows_cache_fp == Some(fp) {
+            return;
+        }
+
+        let page_changed = self.last_results_page != state.loaded_page;
+        let generation_changed = self
+            .rows_cache_fp
+            .is_none_or(|(generation, _, _)| generation != state.generation);
+        let prev_row_count = self.cached_rows.len();
+
+        self.rows_cache_fp = Some(fp);
+        self.cached_rows = Rc::new(build_search_list_rows(&state.results));
+        self.cached_highlights = Rc::new(search_content_highlight_terms(&state.query));
+
+        let row_count_changed = self.cached_rows.len() != prev_row_count;
+        if page_changed || row_count_changed || generation_changed {
+            self.list_state.reset(self.cached_rows.len());
             self.list_state.scroll_to(ListOffset {
                 item_ix: 0,
                 offset_in_item: px(0.),
             });
-            cx.notify();
+            self.last_results_page = state.loaded_page;
         }
     }
 
@@ -265,6 +285,9 @@ impl MessageSearchPanel {
     }
 
     fn jump_to_hit(&self, hit: &SearchHit, cx: &mut App) {
+        if !hit.can_jump {
+            return;
+        }
         let route = jump_route_for_hit(hit);
         navigate(cx, route);
         MessagesStore::global(cx).update(cx, |store, cx| {
@@ -288,13 +311,18 @@ impl Render for MessageSearchPanel {
         let is_direct = self.is_direct;
         let state = MessageSearchStore::global(cx).read(cx).state(channel_id);
         let entity = cx.weak_entity();
-        if !state.is_searching {
-            self.set_results_page(state.current_page, cx);
-        }
         let page_count = search_page_count(state.total);
-        let show_searching_body = state.is_searching;
 
-        let header_label: SharedString = if show_searching_body {
+        let page_mismatch = state.loaded_page != state.current_page;
+        let show_searching_header = state.is_searching || page_mismatch;
+        let show_loading_body = page_mismatch || (state.is_searching && state.results.is_empty());
+        let show_empty_page = !show_loading_body
+            && !state.has_error
+            && !page_mismatch
+            && state.results.is_empty()
+            && state.total > 0;
+
+        let header_label: SharedString = if show_searching_header {
             mezon_i18n::t(&locale, "searchMessageChannel.searching").into()
         } else if state.has_error {
             mezon_i18n::t(&locale, "searchMessageChannel.searchFailed").into()
@@ -306,7 +334,7 @@ impl Render for MessageSearchPanel {
                 .into()
         };
 
-        let body: gpui::AnyElement = if show_searching_body {
+        let body: gpui::AnyElement = if show_loading_body {
             div()
                 .flex_1()
                 .min_h_0()
@@ -337,7 +365,7 @@ impl Render for MessageSearchPanel {
                         .child(mezon_i18n::t(&locale, "searchMessageChannel.searchFailed")),
                 )
                 .into_any_element()
-        } else if state.results.is_empty() && !state.is_searching {
+        } else if state.results.is_empty() && state.total < 1 {
             div()
                 .flex_1()
                 .flex()
@@ -371,13 +399,35 @@ impl Render for MessageSearchPanel {
                         ),
                 )
                 .into_any_element()
+        } else if show_empty_page {
+            let current_page = state.current_page;
+            let panel = cx.weak_entity();
+            let pagination = (page_count > 1)
+                .then(|| render_search_pagination(&theme, current_page, page_count, panel));
+            div()
+                .flex_1()
+                .min_h_0()
+                .flex()
+                .flex_col()
+                .child(
+                    div()
+                        .flex_1()
+                        .flex()
+                        .flex_col()
+                        .items_center()
+                        .justify_center()
+                        .p_4()
+                        .child(
+                            div()
+                                .text_size(px(14.))
+                                .text_color(theme.tokens.text_theme_primary)
+                                .child(mezon_i18n::t(&locale, "searchMessageChannel.emptyPage")),
+                        ),
+                )
+                .children(pagination)
+                .into_any_element()
         } else {
-            let fp = (state.generation, state.revision);
-            if self.rows_cache_fp != Some(fp) {
-                self.rows_cache_fp = Some(fp);
-                self.cached_rows = Rc::new(build_search_list_rows(&state.results));
-                self.cached_highlights = Rc::new(search_content_highlight_terms(&state.query));
-            }
+            self.sync_results_list(&state);
             let current_page = state.current_page;
             let panel = cx.weak_entity();
             let now = Local::now();
@@ -387,9 +437,6 @@ impl Render for MessageSearchPanel {
             let ogp_cache = self.ogp_image_cache.clone();
             let pagination = (page_count > 1)
                 .then(|| render_search_pagination(&theme, current_page, page_count, panel));
-            if self.list_state.item_count() != self.cached_rows.len() {
-                self.list_state.reset(self.cached_rows.len());
-            }
             let list_state = self.list_state.clone();
             let flat_rows = self.cached_rows.clone();
             let theme_for_list = theme.clone();
@@ -506,13 +553,14 @@ fn render_search_pagination(
     div()
         .flex_shrink_0()
         .mt_4()
-        .h(px(40.))
         .w_full()
         .flex()
         .flex_row()
+        .flex_wrap()
         .items_center()
         .justify_center()
         .gap_2()
+        .py_2()
         .child(render_pagination_nav_button(theme, true, prev_disabled, {
             let panel = panel.clone();
             let page = current_page - 1;
@@ -522,35 +570,25 @@ fn render_search_pagination(
                 }
             }
         }))
-        .child(
-            div()
-                .flex()
-                .flex_row()
-                .flex_wrap()
-                .items_center()
-                .justify_center()
-                .gap_2()
-                .min_w_0()
-                .children(pages.into_iter().map(|token| {
-                    let panel = panel.clone();
-                    match token {
-                        SearchPageToken::Ellipsis => div()
-                            .px_2()
-                            .text_size(px(14.))
-                            .text_color(theme.text_muted)
-                            .child("...")
-                            .into_any_element(),
-                        SearchPageToken::Page(page) => {
-                            let active = page == current_page;
-                            render_pagination_page_button(theme, page, active, move |_, _, cx| {
-                                if let Some(panel) = panel.upgrade() {
-                                    panel.update(cx, |panel, cx| panel.go_to_page(page, cx));
-                                }
-                            })
+        .children(pages.into_iter().map(|token| {
+            let panel = panel.clone();
+            match token {
+                SearchPageToken::Ellipsis => div()
+                    .px_2()
+                    .text_size(px(14.))
+                    .text_color(theme.text_muted)
+                    .child("...")
+                    .into_any_element(),
+                SearchPageToken::Page(page) => {
+                    let active = page == current_page;
+                    render_pagination_page_button(theme, page, active, move |_, _, cx| {
+                        if let Some(panel) = panel.upgrade() {
+                            panel.update(cx, |panel, cx| panel.go_to_page(page, cx));
                         }
-                    }
-                })),
-        )
+                    })
+                }
+            }
+        }))
         .child(render_pagination_nav_button(theme, false, next_disabled, {
             let panel = panel.clone();
             let page = current_page + 1;
@@ -703,6 +741,34 @@ fn render_search_row(
     let hit_for_jump = hit.clone();
     let entity_for_jump = entity.clone();
     let jump_label = mezon_i18n::t(locale, "searchMessageChannel.jump");
+    let jump_button = hit.can_jump.then(|| {
+        div()
+            .absolute()
+            .top(px(10.))
+            .right_3()
+            .opacity(0.)
+            .group_hover("message-search-hit", |s| s.opacity(100.))
+            .child(
+                div()
+                    .px_2()
+                    .py_1()
+                    .rounded(px(6.))
+                    .bg(theme.tokens.bg_secondary)
+                    .text_size(px(10.))
+                    .text_color(theme.tokens.text_theme_primary)
+                    .cursor_pointer()
+                    .on_mouse_down(MouseButton::Left, move |_, _, cx| {
+                        cx.stop_propagation();
+                        if let Some(panel) = entity_for_jump.upgrade() {
+                            panel.update(cx, |panel, cx| {
+                                panel.jump_to_hit(&hit_for_jump, cx);
+                            });
+                        }
+                    })
+                    .child(jump_label),
+            )
+    });
+    let head_right_padding = if hit.can_jump { px(56.) } else { px(0.) };
     let time_label = format_message_time(&hit.time_hhmm, hit.local_date, locale, now);
     let has_text = !hit.content_preview.is_empty()
         || hit
@@ -787,33 +853,7 @@ fn render_search_row(
                 .pb_3()
                 .rounded_md()
                 .bg(theme.tokens.bg_active_member_channel)
-                .child(
-                    div()
-                        .absolute()
-                        .top(px(10.))
-                        .right_3()
-                        .opacity(0.)
-                        .group_hover("message-search-hit", |s| s.opacity(100.))
-                        .child(
-                            div()
-                                .px_2()
-                                .py_1()
-                                .rounded(px(6.))
-                                .bg(theme.tokens.bg_secondary)
-                                .text_size(px(10.))
-                                .text_color(theme.tokens.text_theme_primary)
-                                .cursor_pointer()
-                                .on_mouse_down(MouseButton::Left, move |_, _, cx| {
-                                    cx.stop_propagation();
-                                    if let Some(panel) = entity_for_jump.upgrade() {
-                                        panel.update(cx, |panel, cx| {
-                                            panel.jump_to_hit(&hit_for_jump, cx);
-                                        });
-                                    }
-                                })
-                                .child(jump_label),
-                        ),
-                )
+                .children(jump_button)
                 .child(
                     div()
                         .flex()
@@ -831,34 +871,14 @@ fn render_search_row(
                                 .flex()
                                 .flex_col()
                                 .gap_1()
-                                .child(
-                                    div()
-                                        .flex()
-                                        .flex_row()
-                                        .items_baseline()
-                                        .gap_2()
-                                        .w_full()
-                                        .min_w_0()
-                                        .child(
-                                            div()
-                                                .max_w_full()
-                                                .min_w_0()
-                                                .text_size(px(16.))
-                                                .font_weight(FontWeight::SEMIBOLD)
-                                                .text_color(sender_color)
-                                                .child(hit.sender_name.to_string()),
-                                        )
-                                        .when(!time_label.is_empty(), |el| {
-                                            el.child(
-                                                div()
-                                                    .flex_shrink_0()
-                                                    .text_size(px(12.))
-                                                    .font_weight(FontWeight::MEDIUM)
-                                                    .text_color(theme.tokens.text_theme_primary)
-                                                    .child(time_label),
-                                            )
-                                        }),
-                                )
+                                .child(div().w_full().min_w_0().pr(head_right_padding).child(
+                                    render_message_head(
+                                        theme,
+                                        &hit.sender_name,
+                                        &time_label,
+                                        sender_color,
+                                    ),
+                                ))
                                 .when(has_text, |el| {
                                     el.child(
                                         div()
@@ -929,7 +949,7 @@ fn render_search_message_content(
     if hit
         .spans
         .iter()
-        .any(|span| !matches!(span, MessageSpan::CodeBlock { .. }))
+        .any(|span| matches!(span, MessageSpan::CodeBlock { .. }))
     {
         return render_search_spans(&hit.spans, theme);
     }
@@ -939,7 +959,7 @@ fn render_search_message_content(
         return render_rich_search_content(layout, terms, theme);
     }
     if !hit.content_preview.is_empty() {
-        return render_highlighted_content(hit.content_preview.as_ref(), terms, theme);
+        return render_search_styled_plain(hit.content_preview.as_ref(), terms, theme);
     }
     div().into_any_element()
 }
@@ -1001,8 +1021,7 @@ fn render_search_spans(spans: &[MessageSpan], theme: &Theme) -> gpui::AnyElement
             MessageSpan::Mention { display, .. } | MessageSpan::Hashtag { display, .. } => {
                 row = row.child(
                     div()
-                        .max_w_full()
-                        .min_w_0()
+                        .flex_none()
                         .px(px(2.))
                         .rounded_sm()
                         .font_weight(FontWeight::MEDIUM)
@@ -1045,11 +1064,7 @@ fn search_link_element(
     *link_index += 1;
     let mut link = div()
         .id(("search-link", index))
-        .min_w_0()
-        .max_w_full()
-        .flex()
-        .flex_row()
-        .flex_wrap()
+        .flex_none()
         .cursor_pointer()
         .text_color(color)
         .on_mouse_down(MouseButton::Left, move |_, _, cx| {
@@ -1106,47 +1121,256 @@ fn render_rich_search_content(
     theme: &Theme,
 ) -> gpui::AnyElement {
     let palette = RichRunPalette::from_theme(theme);
-    let search_bg: gpui::Hsla = theme.tokens.bg_item_theme_hover.into();
+    let search_bg: Hsla = theme.tokens.bg_item_theme_hover.into();
+    let body_color: Hsla = theme.tokens.text_theme_message.into();
+    let body_style = HighlightStyle {
+        color: Some(body_color),
+        ..Default::default()
+    };
     let text = layout.text.clone();
-    let mut highlights: Vec<(Range<usize>, HighlightStyle)> = Vec::new();
+    let mut tokens = Vec::new();
 
     for range in search_highlight_ranges(text.as_ref(), terms) {
-        highlights.push((
+        tokens.push((
             range,
             HighlightStyle {
                 background_color: Some(search_bg),
-                color: Some(theme.tokens.text_theme_message.into()),
+                color: Some(body_color),
                 ..Default::default()
             },
+            SearchHighlightKind::QueryMatch,
         ));
     }
 
     for run in layout.runs.iter() {
-        highlights.push((run.range.clone(), rich_run_highlight(run.kind, &palette)));
+        tokens.push((
+            run.range.clone(),
+            rich_run_highlight(run.kind, &palette),
+            SearchHighlightKind::Rich(run.kind),
+        ));
     }
 
+    let occupied: Vec<(Range<usize>, HighlightStyle)> =
+        tokens.iter().map(|(r, s, _)| (r.clone(), *s)).collect();
+    tokens.extend(
+        search_auto_link_highlights(theme, text.as_ref(), &occupied)
+            .into_iter()
+            .map(|(range, style)| (range, style, SearchHighlightKind::Link)),
+    );
+
+    let highlights = search_merge_content_highlights(text.as_ref(), tokens, body_style);
+
     div()
+        .w_full()
+        .min_w_0()
         .child(StyledText::new(text).with_highlights(highlights))
         .into_any_element()
 }
 
-fn render_highlighted_content(text: &str, terms: &[String], theme: &Theme) -> gpui::AnyElement {
-    let ranges = search_highlight_ranges(text, terms);
-    if ranges.is_empty() {
-        return div().child(text.to_string()).into_any_element();
-    }
-    let highlight_style = HighlightStyle {
-        background_color: Some(theme.tokens.bg_item_theme_hover.into()),
-        color: Some(theme.tokens.text_theme_message.into()),
+fn render_search_styled_plain(text: &str, terms: &[String], theme: &Theme) -> gpui::AnyElement {
+    let search_bg: Hsla = theme.tokens.bg_item_theme_hover.into();
+    let body_color: Hsla = theme.tokens.text_theme_message.into();
+    let body_style = HighlightStyle {
+        color: Some(body_color),
         ..Default::default()
     };
-    let highlights = ranges
-        .into_iter()
-        .map(|range| (range, highlight_style))
-        .collect::<Vec<_>>();
+    let mut tokens = Vec::new();
+    for range in search_highlight_ranges(text, terms) {
+        tokens.push((
+            range,
+            HighlightStyle {
+                background_color: Some(search_bg),
+                color: Some(body_color),
+                ..Default::default()
+            },
+            SearchHighlightKind::QueryMatch,
+        ));
+    }
+    let occupied: Vec<(Range<usize>, HighlightStyle)> =
+        tokens.iter().map(|(r, s, _)| (r.clone(), *s)).collect();
+    tokens.extend(
+        search_auto_link_highlights(theme, text, &occupied)
+            .into_iter()
+            .map(|(range, style)| (range, style, SearchHighlightKind::Link)),
+    );
+    let highlights = search_merge_content_highlights(text, tokens, body_style);
     div()
-        .child(StyledText::new(text).with_highlights(highlights))
+        .w_full()
+        .min_w_0()
+        .child(
+            StyledText::new(text.to_string()).with_highlights(if highlights.is_empty() {
+                vec![(0..text.len(), body_style)]
+            } else {
+                highlights
+            }),
+        )
         .into_any_element()
+}
+
+fn search_link_highlight_style(theme: &Theme) -> HighlightStyle {
+    let link_color: Hsla = theme.tokens.mention_color.into();
+    HighlightStyle {
+        color: Some(link_color),
+        underline: Some(UnderlineStyle {
+            thickness: px(1.),
+            color: Some(link_color),
+            wavy: false,
+        }),
+        ..Default::default()
+    }
+}
+
+fn search_ranges_overlap(a: &Range<usize>, b: &Range<usize>) -> bool {
+    a.start < b.end && b.start < a.end
+}
+
+fn search_next_char_index(text: &str, index: usize) -> usize {
+    if index >= text.len() {
+        return text.len();
+    }
+    let Some(ch) = text[index..].chars().next() else {
+        return text.len();
+    };
+    index + ch.len_utf8()
+}
+
+fn search_char_boundary_range(text: &str, range: Range<usize>) -> Option<Range<usize>> {
+    if range.start >= range.end || range.end > text.len() {
+        return None;
+    }
+    if !text.is_char_boundary(range.start) || !text.is_char_boundary(range.end) {
+        return None;
+    }
+    Some(range)
+}
+
+fn search_auto_link_highlights(
+    theme: &Theme,
+    text: &str,
+    occupied: &[(Range<usize>, HighlightStyle)],
+) -> Vec<(Range<usize>, HighlightStyle)> {
+    let mut out = Vec::new();
+    let mut index = 0usize;
+    while index < text.len() {
+        if !text.is_char_boundary(index) {
+            index = search_next_char_index(text, index);
+            continue;
+        }
+        let rest = &text[index..];
+        let scheme_len = if rest.starts_with("https://") {
+            8
+        } else if rest.starts_with("http://") {
+            7
+        } else {
+            index = search_next_char_index(text, index);
+            continue;
+        };
+        let start = index;
+        let mut end = index + scheme_len;
+        while end < text.len() {
+            if !text.is_char_boundary(end) {
+                break;
+            }
+            let Some(ch) = text[end..].chars().next() else {
+                break;
+            };
+            if ch.is_whitespace() || matches!(ch, '<' | '>' | '"' | '(' | '[') {
+                break;
+            }
+            if matches!(ch, ')' | ']') {
+                break;
+            }
+            end += ch.len_utf8();
+        }
+        while end > start + scheme_len {
+            if !text.is_char_boundary(end) {
+                break;
+            }
+            let Some(ch) = text[..end].chars().last() else {
+                break;
+            };
+            if matches!(ch, '.' | ',' | ';' | '!' | '?' | ')' | ']') {
+                end -= ch.len_utf8();
+            } else {
+                break;
+            }
+        }
+        let range = start..end;
+        if end > start + scheme_len
+            && search_char_boundary_range(text, range.clone()).is_some()
+            && !occupied
+                .iter()
+                .any(|(occupied_range, _)| search_ranges_overlap(occupied_range, &range))
+            && !out
+                .iter()
+                .any(|(existing, _)| search_ranges_overlap(existing, &range))
+        {
+            out.push((range, search_link_highlight_style(theme)));
+            index = end;
+        } else {
+            index = search_next_char_index(text, index);
+        }
+    }
+    out
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SearchHighlightKind {
+    QueryMatch,
+    Rich(RichRunKind),
+    Link,
+}
+
+fn search_merge_content_highlights(
+    text: &str,
+    tokens: Vec<(Range<usize>, HighlightStyle, SearchHighlightKind)>,
+    body_style: HighlightStyle,
+) -> Vec<(Range<usize>, HighlightStyle)> {
+    let text_len = text.len();
+    let mut styled = Vec::new();
+    let mut links = Vec::new();
+    for (range, style, kind) in tokens {
+        if range.start >= range.end || range.end > text_len {
+            continue;
+        }
+        if !text.is_char_boundary(range.start) || !text.is_char_boundary(range.end) {
+            continue;
+        }
+        match kind {
+            SearchHighlightKind::Link => links.push((range, style)),
+            SearchHighlightKind::QueryMatch => styled.push((range, style)),
+            SearchHighlightKind::Rich(RichRunKind::Link) => links.push((range, style)),
+            SearchHighlightKind::Rich(_) => styled.push((range, style)),
+        }
+    }
+    styled.sort_by_key(|(range, _)| range.start);
+    links.sort_by_key(|(range, _)| range.start);
+    let mut picked = styled;
+    for (link_range, link_style) in links {
+        if !picked
+            .iter()
+            .any(|(range, _)| search_ranges_overlap(range, &link_range))
+        {
+            picked.push((link_range, link_style));
+        }
+    }
+    picked.sort_by_key(|(range, _)| range.start);
+    let mut highlights = Vec::with_capacity(picked.len() * 2 + 1);
+    let mut cursor = 0usize;
+    for (range, style) in picked {
+        if range.start < cursor {
+            continue;
+        }
+        if cursor < range.start {
+            highlights.push((cursor..range.start, body_style));
+        }
+        highlights.push((range.clone(), style));
+        cursor = range.end;
+    }
+    if cursor < text_len {
+        highlights.push((cursor..text_len, body_style));
+    }
+    highlights
 }
 
 fn search_highlight_ranges(text: &str, terms: &[String]) -> Vec<Range<usize>> {

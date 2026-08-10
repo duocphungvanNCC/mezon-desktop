@@ -20,6 +20,15 @@ use serde::{Deserialize, Serialize};
 
 use crate::session::{Session, decode_jwt_claims};
 
+fn observe_date_header(headers: &http::HeaderMap) {
+    if let Some(date) = headers
+        .get(http::header::DATE)
+        .and_then(|v| v.to_str().ok())
+    {
+        crate::server_clock::observe_http_date(date);
+    }
+}
+
 // ─── Default connection constants ────────────────────────────────────────────
 // Defaults for `MezonClient::default()`. Per-deployment config lives in
 // [`mezon_store::AppConfig`] (`NX_*` baked at build time via `option_env!`).
@@ -32,6 +41,18 @@ pub const DEFAULT_API_PORT: u16 = 8088;
 pub const DEFAULT_API_SECURE: bool = true;
 /// Server key for Basic auth (`NX_CHAT_APP_API_KEY`)
 pub const DEFAULT_SERVER_KEY: &str = "defaultkey";
+
+const PROTO_CONTENT_TYPE: &str = "application/proto";
+
+/// Whether the server still recognises a session. `SessionRefresh` answers every failure with a
+/// 500 (`codes.Internal`), so it cannot tell a dead credential from a backend incident; a plain
+/// authenticated call does — 403 for a refused token, 200 for a live one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionProbe {
+    Alive,
+    Rejected(u16),
+    Inconclusive,
+}
 
 // ─── Wire types ──────────────────────────────────────────────────────────────
 
@@ -93,12 +114,6 @@ struct OtpAccount<'a> {
 struct ConfirmOtpBody<'a> {
     otp_code: &'a str,
     req_id: &'a str,
-}
-
-#[derive(Debug, Serialize)]
-struct RefreshBody<'a> {
-    token: &'a str,
-    is_remember: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -264,6 +279,45 @@ impl MezonClient {
             .with_context(|| format!("Failed to parse JSON response from POST {url}"))
     }
 
+    /// Ask the API host whether this token is still accepted. Used only after both socket
+    /// credentials have been refused, to tell "the account is gone" from "the gateway would not
+    /// take the connection" — the gateway itself never delivers that distinction.
+    pub async fn probe_session(&self, api_base: &str, token: &str) -> SessionProbe {
+        let url = format!(
+            "{}/mezon.api.Mezon/GetAccount",
+            api_base.trim_end_matches('/')
+        );
+        let Ok(request) = http::Request::builder()
+            .method(http::Method::POST)
+            .uri(&url)
+            .header("Authorization", format!("Bearer {token}"))
+            .header("Content-Type", PROTO_CONTENT_TYPE)
+            .header("Accept", PROTO_CONTENT_TYPE)
+            .body(AsyncBody::empty())
+        else {
+            return SessionProbe::Inconclusive;
+        };
+
+        let status = match self.http.send(request).await {
+            Ok(response) => {
+                observe_date_header(response.headers());
+                response.status()
+            }
+            Err(e) => {
+                tracing::warn!("Session probe could not reach {url}: {e}");
+                return SessionProbe::Inconclusive;
+            }
+        };
+        if status.is_success() {
+            SessionProbe::Alive
+        } else if status == http::StatusCode::UNAUTHORIZED || status == http::StatusCode::FORBIDDEN
+        {
+            SessionProbe::Rejected(status.as_u16())
+        } else {
+            SessionProbe::Inconclusive
+        }
+    }
+
     /// Convert an `ApiSession` wire response into our internal `Session`.
     fn parse_session(&self, api: ApiSession) -> Session {
         let (user_id, username, expires_at) = decode_jwt_claims(&api.token);
@@ -333,18 +387,6 @@ impl MezonClient {
         let api: ApiSession = self
             .post_json("/v2/account/authenticate/confirmotp", &body)
             .await?;
-        Ok(self.parse_session(api))
-    }
-
-    /// Refresh an existing session using its refresh token.
-    ///
-    /// `POST /v2/account/session/refresh`
-    pub async fn refresh_session(&self, refresh_token: &str, is_remember: bool) -> Result<Session> {
-        let body = RefreshBody {
-            token: refresh_token,
-            is_remember,
-        };
-        let api: ApiSession = self.post_json("/v2/account/session/refresh", &body).await?;
         Ok(self.parse_session(api))
     }
 

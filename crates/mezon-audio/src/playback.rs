@@ -303,7 +303,7 @@ impl AudioPlayer {
 
 impl Drop for AudioPlayer {
     fn drop(&mut self) {
-        self.player.clear();
+        self.player.stop();
     }
 }
 

@@ -91,6 +91,85 @@ pub fn home_target(text: &str, offset: usize) -> usize {
     }
 }
 
+pub fn word_range_at(text: &str, offset: usize) -> Range<usize> {
+    let offset = offset.min(text.len());
+    let before = text[..offset].chars().next_back().map(char_kind);
+    let after = text[offset..].chars().next().map(char_kind);
+    let kind = match (before, after) {
+        (Some(b), Some(a)) if b != CharKind::Whitespace && a != CharKind::Whitespace => {
+            if b == CharKind::Word { b } else { a }
+        }
+        (_, Some(a)) if a != CharKind::Whitespace => a,
+        (Some(b), _) if b != CharKind::Whitespace => b,
+        (_, Some(a)) => a,
+        (Some(b), None) => b,
+        (None, None) => return 0..0,
+    };
+    let start = text[..offset]
+        .char_indices()
+        .rev()
+        .take_while(|(_, c)| char_kind(*c) == kind)
+        .map(|(idx, _)| idx)
+        .last()
+        .unwrap_or(offset);
+    let end = text[offset..]
+        .char_indices()
+        .take_while(|(_, c)| char_kind(*c) == kind)
+        .map(|(idx, c)| offset + idx + c.len_utf8())
+        .last()
+        .unwrap_or(offset);
+    start..end
+}
+
+pub fn line_range_at(text: &str, offset: usize) -> Range<usize> {
+    line_start(text, offset)..line_end(text, offset)
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum SelectGranularity {
+    #[default]
+    Character,
+    Word,
+    Line,
+}
+
+pub fn granularity_for_click(click_count: usize) -> SelectGranularity {
+    match click_count {
+        0 | 1 => SelectGranularity::Character,
+        2 => SelectGranularity::Word,
+        _ => SelectGranularity::Line,
+    }
+}
+
+pub fn range_for_granularity(
+    text: &str,
+    offset: usize,
+    granularity: SelectGranularity,
+    multi_line: bool,
+) -> Range<usize> {
+    match granularity {
+        SelectGranularity::Character => offset..offset,
+        SelectGranularity::Word => word_range_at(text, offset),
+        SelectGranularity::Line if multi_line => line_range_at(text, offset),
+        SelectGranularity::Line => 0..text.len(),
+    }
+}
+
+pub fn extend_range_for_granularity(
+    text: &str,
+    anchor: &Range<usize>,
+    offset: usize,
+    granularity: SelectGranularity,
+    multi_line: bool,
+) -> (Range<usize>, bool) {
+    let unit = range_for_granularity(text, offset, granularity, multi_line);
+    if unit.start < anchor.start {
+        (unit.start..anchor.end, true)
+    } else {
+        (anchor.start..unit.end.max(anchor.end), false)
+    }
+}
+
 #[derive(Clone)]
 pub struct HistoryEntry {
     pub content: SharedString,
@@ -173,5 +252,88 @@ mod tests {
         let text = "one\ntwo";
         assert_eq!(home_target(text, 6), 4);
         assert_eq!(home_target(text, 4), 4);
+    }
+
+    #[test]
+    fn word_range_covers_the_word_under_the_caret() {
+        let text = "foo bar baz";
+        assert_eq!(word_range_at(text, 5), 4..7);
+        assert_eq!(word_range_at(text, 4), 4..7);
+        assert_eq!(word_range_at(text, 7), 4..7);
+    }
+
+    #[test]
+    fn word_range_prefers_the_word_before_a_trailing_space() {
+        let text = "foo bar";
+        assert_eq!(word_range_at(text, 3), 0..3);
+        assert_eq!(word_range_at(text, 7), 4..7);
+    }
+
+    #[test]
+    fn word_range_treats_punctuation_as_its_own_run() {
+        let text = "foo.bar";
+        assert_eq!(word_range_at(text, 0), 0..3);
+        assert_eq!(word_range_at(text, 4), 4..7);
+    }
+
+    #[test]
+    fn word_range_at_a_run_boundary_prefers_the_word_over_the_punctuation() {
+        let text = "foo.bar";
+        assert_eq!(word_range_at(text, 3), 0..3);
+        assert_eq!(word_range_at(text, 4), 4..7);
+    }
+
+    #[test]
+    fn word_range_respects_utf8_boundaries() {
+        let text = "chào bạn";
+        assert_eq!(word_range_at(text, 2), 0..5);
+        assert_eq!(word_range_at(text, 7), 6..text.len());
+    }
+
+    #[test]
+    fn word_range_on_empty_text_is_empty() {
+        assert_eq!(word_range_at("", 0), 0..0);
+        assert_eq!(word_range_at("   ", 1), 0..3);
+    }
+
+    #[test]
+    fn triple_click_selects_the_line_only_when_multi_line() {
+        let text = "one\ntwo";
+        let line = SelectGranularity::Line;
+        assert_eq!(range_for_granularity(text, 5, line, true), 4..7);
+        assert_eq!(range_for_granularity(text, 5, line, false), 0..7);
+    }
+
+    #[test]
+    fn granularity_maps_click_count_to_word_then_line() {
+        assert_eq!(granularity_for_click(1), SelectGranularity::Character);
+        assert_eq!(granularity_for_click(2), SelectGranularity::Word);
+        assert_eq!(granularity_for_click(3), SelectGranularity::Line);
+        assert_eq!(granularity_for_click(4), SelectGranularity::Line);
+    }
+
+    #[test]
+    fn dragging_by_word_keeps_the_anchor_word_whole() {
+        let text = "foo bar baz";
+        let anchor = 4..7;
+        let word = SelectGranularity::Word;
+
+        let (forward, reversed) = extend_range_for_granularity(text, &anchor, 9, word, false);
+        assert_eq!(forward, 4..11);
+        assert!(!reversed);
+
+        let (backward, reversed) = extend_range_for_granularity(text, &anchor, 1, word, false);
+        assert_eq!(backward, 0..7);
+        assert!(reversed);
+    }
+
+    #[test]
+    fn dragging_back_inside_the_anchor_word_does_not_shrink_it() {
+        let text = "foo bar baz";
+        let anchor = 4..7;
+        let (range, reversed) =
+            extend_range_for_granularity(text, &anchor, 5, SelectGranularity::Word, false);
+        assert_eq!(range, 4..7);
+        assert!(!reversed);
     }
 }

@@ -52,12 +52,29 @@ mod imp {
         updates.cast().context("store update list is not iterable")
     }
 
+    fn update_failure_reason(state: StorePackageUpdateState) -> String {
+        if state == StorePackageUpdateState::Canceled {
+            "it was canceled".to_owned()
+        } else if state == StorePackageUpdateState::ErrorLowBattery {
+            "the device battery is too low; plug in and retry".to_owned()
+        } else if state == StorePackageUpdateState::ErrorWiFiRequired
+            || state == StorePackageUpdateState::ErrorWiFiRecommended
+        {
+            "a Wi-Fi or unmetered connection is required; connect and retry".to_owned()
+        } else if state == StorePackageUpdateState::OtherError {
+            "open the Microsoft Store (Library > Get updates) or run wsreset, then retry".to_owned()
+        } else {
+            format!("unexpected state {state:?}")
+        }
+    }
+
     fn ensure_completed(state: StorePackageUpdateState, action: &str) -> Result<()> {
         if state == StorePackageUpdateState::Completed {
             Ok(())
         } else {
             Err(anyhow!(
-                "Microsoft Store {action} did not complete: {state:?}"
+                "Microsoft Store {action} couldn't complete - {}",
+                update_failure_reason(state)
             ))
         }
     }
