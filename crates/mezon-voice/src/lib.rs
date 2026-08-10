@@ -365,25 +365,24 @@ async fn session_main(
                             if source.is_none()
                                 && last_publish_attempt
                                     .is_none_or(|at| at.elapsed() >= MIC_PUBLISH_RETRY_INTERVAL)
+                                && let Some(in_fmt) = current_in_fmt
                             {
-                                if let Some(in_fmt) = current_in_fmt {
-                                    last_publish_attempt = Some(Instant::now());
-                                    match publish_microphone_track(
-                                        &room_for_mic,
-                                        &mic_publication_task,
-                                        &mic_enabled,
-                                        in_fmt,
-                                    )
-                                    .await
-                                    {
-                                        Ok(new_source) => {
-                                            channels = new_source.channels;
-                                            sample_rate = new_source.sample_rate;
-                                            source = Some(new_source.source);
-                                        }
-                                        Err(e) => {
-                                            tracing::warn!("failed to retry mic track publish: {e:#}");
-                                        }
+                                last_publish_attempt = Some(Instant::now());
+                                match publish_microphone_track(
+                                    &room_for_mic,
+                                    &mic_publication_task,
+                                    &mic_enabled,
+                                    in_fmt,
+                                )
+                                .await
+                                {
+                                    Ok(new_source) => {
+                                        channels = new_source.channels;
+                                        sample_rate = new_source.sample_rate;
+                                        source = Some(new_source.source);
+                                    }
+                                    Err(e) => {
+                                        tracing::warn!("failed to retry mic track publish: {e:#}");
                                     }
                                 }
                             }
