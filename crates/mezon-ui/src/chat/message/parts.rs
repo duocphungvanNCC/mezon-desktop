@@ -31,7 +31,6 @@ use crate::components::primitives::{Avatar, Icon, IconName, Sizable, Size, Spinn
 use crate::theme::Theme;
 
 const DELETED_REPLY_PREVIEW: &str = "Original message was deleted";
-const ANONYMOUS_SENDER_NAME: &str = "Anonymous";
 const FILE_NAME_COLOR: u32 = 0x3b_82_f6;
 
 pub fn effective_clan_id(clan_id: Option<ClanId>, cx: &App) -> Option<ClanId> {
@@ -53,7 +52,7 @@ pub fn resolve_pin_sender_label_with_message(
         && !config.anonymous_user_id.is_empty()
         && sender_id == config.anonymous_user_id
     {
-        return SharedString::from(ANONYMOUS_SENDER_NAME);
+        return SharedString::from(mezon_store::ANONYMOUS_SENDER_NAME);
     }
 
     let clan_id = effective_clan_id(clan_id, cx);
@@ -271,18 +270,6 @@ pub fn resolve_message_display_name(msg: &Message, ctx: &RowCtx, cx: &App) -> Sh
     msg.sender_name.clone()
 }
 
-pub(crate) fn is_anonymous_sender(sender_id: &str, cx: &App) -> bool {
-    AppConfig::try_global(cx)
-        .map(|config| !config.anonymous_user_id.is_empty() && sender_id == config.anonymous_user_id)
-        .unwrap_or(false)
-}
-
-pub(crate) fn is_anonymous_user_id(user_id: UserId, cx: &App) -> bool {
-    AppConfig::try_global(cx)
-        .and_then(|config| config.anonymous_user_id.parse::<i64>().ok())
-        .is_some_and(|anonymous| anonymous == user_id.get())
-}
-
 fn reference_avatar(
     clan_id: ClanId,
     user_id: UserId,
@@ -307,14 +294,15 @@ fn reference_avatar(
 
 fn resolve_reference_identity(
     reference: &MessageReference,
+    is_anonymous: bool,
     ctx: &RowCtx,
     cx: &App,
 ) -> (SharedString, SharedString) {
     let baked_name = || SharedString::from(reference.sender_name.clone());
     let baked_avatar = || SharedString::from(reference.sender_avatar.clone());
-    if is_anonymous_user_id(reference.sender_id, cx) {
+    if is_anonymous {
         return (
-            SharedString::from(ANONYMOUS_SENDER_NAME),
+            SharedString::from(mezon_store::ANONYMOUS_SENDER_NAME),
             SharedString::default(),
         );
     }
@@ -346,7 +334,7 @@ fn first_non_empty<'a>(preferred: &'a str, fallback: &'a str) -> &'a str {
 }
 
 pub fn avatar_element(msg: &Message, ctx: &RowCtx, cx: &App) -> AnyElement {
-    let is_anonymous = is_anonymous_sender(&msg.sender_id, cx);
+    let is_anonymous = mezon_store::is_anonymous_sender_id(&msg.sender_id, cx);
     let (raw_url, proxied) = resolve_message_avatar_urls(msg, ctx, cx);
     let display_name = resolve_message_display_name(msg, ctx, cx);
     let mut avatar = Avatar::new()
@@ -469,7 +457,7 @@ fn profile_name_trigger(msg: &Message, ctx: &RowCtx, name: gpui::Div) -> AnyElem
     let (Some(profile_ctx), Some(user_id)) = (ctx.profile_context, msg.sender_user_id) else {
         return name.into_any_element();
     };
-    if is_anonymous_user_id(user_id, ctx.app) {
+    if mezon_store::is_anonymous_user_id(user_id, ctx.app) {
         return name.into_any_element();
     }
     let key = user_id.get() as usize;
@@ -528,8 +516,9 @@ pub fn render_reply(reference: &MessageReference, ctx: &RowCtx) -> AnyElement {
 
     let has_attachment_ref = reference.has_attachment || reference.has_embed;
     let is_deleted = reference.content == DELETED_REPLY_PREVIEW;
-    let (sender_name, sender_avatar) = resolve_reference_identity(reference, ctx, ctx.app);
-    let is_anonymous = is_anonymous_user_id(reference.sender_id, ctx.app);
+    let is_anonymous = mezon_store::is_anonymous_user_id(reference.sender_id, ctx.app);
+    let (sender_name, sender_avatar) =
+        resolve_reference_identity(reference, is_anonymous, ctx, ctx.app);
     let avatar = if is_anonymous {
         Avatar::new()
             .name(sender_name.clone())
@@ -574,6 +563,7 @@ pub fn render_reply(reference: &MessageReference, ctx: &RowCtx) -> AnyElement {
         )
         .child(reply_avatar_trigger(
             reference,
+            is_anonymous,
             avatar.into_any_element(),
             ctx,
         ))
@@ -630,13 +620,14 @@ pub fn render_reply(reference: &MessageReference, ctx: &RowCtx) -> AnyElement {
 
 fn reply_avatar_trigger(
     reference: &MessageReference,
+    is_anonymous: bool,
     avatar: AnyElement,
     ctx: &RowCtx,
 ) -> AnyElement {
     let Some(profile_ctx) = ctx.profile_context else {
         return avatar;
     };
-    if reference.sender_id.is_zero() || is_anonymous_user_id(reference.sender_id, ctx.app) {
+    if reference.sender_id.is_zero() || is_anonymous {
         return avatar;
     }
     let user_id = reference.sender_id;

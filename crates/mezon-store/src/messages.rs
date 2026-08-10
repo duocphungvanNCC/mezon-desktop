@@ -65,7 +65,7 @@ const CHANNEL_TYPE_CHANNEL: i32 = 1;
 const CHANNEL_TYPE_THREAD: i32 = 7;
 use crate::message::STICKER_FILETYPE;
 const AUDIO_FILETYPE: &str = "audio/mpeg";
-const ANONYMOUS_SENDER_NAME: &str = "Anonymous";
+pub const ANONYMOUS_SENDER_NAME: &str = "Anonymous";
 const MAX_MESSAGES_PER_CHANNEL: usize = 200;
 const MAX_CACHED_CHANNELS: usize = 30;
 const LAST_SEEN_DEBOUNCE: Duration = Duration::from_millis(1000);
@@ -106,6 +106,9 @@ pub struct TopicAppend {
 
 #[derive(Debug, Clone)]
 pub enum MessagesEvent {
+    /// A send failed with no row to mark (the channel's first page had not landed,
+    /// so there is no optimistic row) — the UI has to surface it as a toast.
+    SendFailedWithoutRow,
     /// The whole viewport was replaced (channel switch / fetch). `count` is the
     /// new row count.
     Reset {
@@ -601,7 +604,7 @@ pub struct MessagesStore {
     pending_send_payloads: HashMap<MessageId, PendingSendPayload>,
     anonymous_clans: HashSet<ClanId>,
     topic_anonymous_mode: bool,
-    last_anonymous_mode: bool,
+    last_anonymous_mode: (bool, bool),
     last_typing_sent: Option<(ChannelId, Instant)>,
     buzz_player: Option<AudioPlayer>,
     buzz_sound_loading: bool,
@@ -1022,7 +1025,7 @@ impl MessagesStore {
             pending_send_payloads: HashMap::new(),
             anonymous_clans: HashSet::new(),
             topic_anonymous_mode: false,
-            last_anonymous_mode: false,
+            last_anonymous_mode: (false, false),
             last_typing_sent: None,
             buzz_player: None,
             buzz_sound_loading: false,
@@ -2085,15 +2088,12 @@ impl MessagesStore {
     }
 
     pub fn is_anonymous_mode(&self) -> bool {
-        if self.active_topic_id.is_some() && self.topic_anonymous_mode {
-            return true;
-        }
         self.active_clan_id
-            .is_some_and(|id| self.anonymous_clans.contains(&id))
+            .is_some_and(|id| !id.is_zero() && self.anonymous_clans.contains(&id))
     }
 
     pub(crate) fn sync_anonymous_mode(&mut self, cx: &mut Context<Self>) {
-        let next = self.is_anonymous_mode();
+        let next = (self.is_anonymous_mode(), self.topic_anonymous_mode);
         if self.last_anonymous_mode == next {
             return;
         }
@@ -2436,7 +2436,6 @@ impl MessagesStore {
             return;
         }
         let storage_id = self.reaction_storage_channel(message_id);
-        let payload = self.pending_send_payloads.remove(&message_id);
         let snapshot = self
             .cache
             .get(&storage_id)
@@ -2446,6 +2445,7 @@ impl MessagesStore {
         let Some(failed) = snapshot else {
             return;
         };
+        let payload = self.pending_send_payloads.remove(&message_id);
         if let Some(payload) = payload {
             self.apply_message_remove(storage_id, message_id, cx);
             let (uid, uname) = (failed.sender_id.clone(), failed.sender_name.to_string());
@@ -2458,6 +2458,7 @@ impl MessagesStore {
                     attachment.height,
                     uid,
                     uname,
+                    payload.anonymous,
                     cx,
                 );
                 return;
@@ -3160,10 +3161,8 @@ impl MessagesStore {
         let cfg = AppConfig::try_global(cx);
         let viewer_id = viewer_user_id(cx);
         let mut msg = message_from_api(api_msg, cfg, viewer_id);
-        if anonymous {
-            anonymize_sender(&mut msg, cfg);
-        }
-        enrich_sparse_topic_ack(&mut msg, viewer_id, self.active_clan_id, anonymous, cx);
+        let masked = anonymous && anonymize_sender(&mut msg, cfg);
+        enrich_sparse_topic_ack(&mut msg, viewer_id, self.active_clan_id, masked, cx);
         mark_pending_attachments_uploading(&mut msg.attachments);
         let message_id = msg.id;
         let create_time = if msg.create_time > 0 {
@@ -3729,8 +3728,6 @@ impl MessagesStore {
         let clan_num = clan_id.get();
         let channel_num = channel_id.get();
         cx.spawn(async move |_this, _cx| {
-            // No message id comes back from an ephemeral send, so there is nothing to
-            // patch afterwards: the bytes have to be uploaded before the message goes out.
             let proto_attachments = match upload_attachments_now(&api, attachments).await {
                 Ok(attachments) => attachments,
                 Err(e) => {
@@ -3833,8 +3830,6 @@ impl MessagesStore {
         } else {
             sender_id.clone()
         };
-        // A channel has no cache entry until its first fetch lands; the send still has
-        // to go out, it just gets no optimistic row to attach to.
         let unloaded = MessageList::default();
         let loaded = self
             .cache
@@ -3959,7 +3954,7 @@ impl MessagesStore {
                 .with_media_presentation(album_layout, viewer_media);
         }
         if anonymous {
-            anonymize_sender(&mut optimistic, AppConfig::try_global(cx));
+            let _ = anonymize_sender(&mut optimistic, AppConfig::try_global(cx));
         }
         if message_code == MESSAGE_BUZZ_CODE {
             optimistic.code = MessageCode::MessageBuzz;
@@ -4073,7 +4068,7 @@ impl MessagesStore {
                     let mut confirmed =
                         message_from_api(sent, AppConfig::try_global(cx), viewer_user_id(cx));
                     if anonymous {
-                        anonymize_sender(&mut confirmed, AppConfig::try_global(cx));
+                        let _ = anonymize_sender(&mut confirmed, AppConfig::try_global(cx));
                     }
                     this.reconcile_temp(channel_id, temp_id, confirmed, cx);
                 });
@@ -4151,7 +4146,7 @@ impl MessagesStore {
                                 viewer_user_id(cx),
                             );
                             if anonymous {
-                                anonymize_sender(&mut confirmed, AppConfig::try_global(cx));
+                                let _ = anonymize_sender(&mut confirmed, AppConfig::try_global(cx));
                             }
                             this.reconcile_temp(channel_id, temp_id, confirmed, cx);
                         });
@@ -4184,6 +4179,7 @@ impl MessagesStore {
             0,
             sender_id,
             sender_name,
+            self.is_anonymous_mode(),
             cx,
         );
     }
@@ -4205,6 +4201,7 @@ impl MessagesStore {
             height,
             sender_id,
             sender_name,
+            self.is_anonymous_mode(),
             cx,
         );
     }
@@ -4225,6 +4222,7 @@ impl MessagesStore {
             0,
             sender_id,
             sender_name,
+            self.is_anonymous_mode(),
             cx,
         );
     }
@@ -4238,6 +4236,7 @@ impl MessagesStore {
         height: i32,
         sender_id: String,
         sender_name: String,
+        anonymous: bool,
         cx: &mut Context<Self>,
     ) {
         if url.is_empty() {
@@ -4251,7 +4250,6 @@ impl MessagesStore {
         };
         let is_public = self.is_public;
         let mode = self.mode;
-        let anonymous = self.is_anonymous_mode();
         self.clear_last_read_message(channel_id);
         let grouping_sender_id = if anonymous {
             AppConfig::try_global(cx)
@@ -4261,8 +4259,6 @@ impl MessagesStore {
         } else {
             sender_id.clone()
         };
-        // A channel has no cache entry until its first fetch lands; the send still has
-        // to go out, it just gets no optimistic row to attach to.
         let unloaded = MessageList::default();
         let loaded = self
             .cache
@@ -4314,7 +4310,7 @@ impl MessagesStore {
                 .with_avatar_proxied(avatar_proxied)
                 .with_attachments(vec![optimistic_attachment]);
         if anonymous {
-            anonymize_sender(&mut optimistic, AppConfig::try_global(cx));
+            let _ = anonymize_sender(&mut optimistic, AppConfig::try_global(cx));
         }
         let appended = self.cache.get_mut(&channel_id).map(|channel| {
             let old_len = channel.messages.len();
@@ -4353,7 +4349,7 @@ impl MessagesStore {
                         let mut confirmed =
                             message_from_api(sent, AppConfig::try_global(cx), viewer_user_id(cx));
                         if anonymous {
-                            anonymize_sender(&mut confirmed, AppConfig::try_global(cx));
+                            let _ = anonymize_sender(&mut confirmed, AppConfig::try_global(cx));
                         }
                         this.reconcile_temp(channel_id, temp_id, confirmed, cx);
                     });
@@ -5794,26 +5790,25 @@ impl MessagesStore {
     ) {
         self.pending_send_payloads.remove(&temp_id);
         let confirmed_id = confirmed.id;
-        let (pushed, old_len) = {
-            let Some(channel) = self.cache.get_mut(&channel_id) else {
-                return;
-            };
-            let old_len = channel.messages.len();
-            if let Some(idx) = channel.messages.position(temp_id) {
-                let temp = channel
-                    .messages
-                    .get_by_id(temp_id)
-                    .expect("temp row must exist at position")
-                    .clone();
-                let confirmed = merge_sparse_sender(&temp, confirmed);
-                channel.messages.replace_at_and_regroup(idx, confirmed);
-                (false, old_len)
-            } else if !channel.messages.contains_id(confirmed.id) {
-                channel.messages.push_sorted(confirmed);
-                (true, old_len)
-            } else {
-                (false, old_len)
-            }
+        let Some(channel) = self.cache.get_mut(&channel_id) else {
+            self.set_last_message(channel_id, confirmed_id);
+            return;
+        };
+        let old_len = channel.messages.len();
+        let pushed = if let Some(idx) = channel.messages.position(temp_id) {
+            let temp = channel
+                .messages
+                .get_by_id(temp_id)
+                .expect("temp row must exist at position")
+                .clone();
+            let confirmed = merge_sparse_sender(&temp, confirmed);
+            channel.messages.replace_at_and_regroup(idx, confirmed);
+            false
+        } else if !channel.messages.contains_id(confirmed.id) {
+            channel.messages.push_sorted(confirmed);
+            true
+        } else {
+            false
         };
         self.set_last_message(channel_id, confirmed_id);
         if self.active_channel_id != Some(channel_id) {
@@ -5835,18 +5830,16 @@ impl MessagesStore {
         temp_id: MessageId,
         cx: &mut Context<Self>,
     ) {
-        let marked = {
-            let Some(channel) = self.cache.get_mut(&channel_id) else {
-                return;
-            };
-            match channel.messages.get_mut_by_id(temp_id) {
-                Some(message) => {
-                    message.send_failed = true;
-                    true
-                }
-                None => false,
-            }
-        };
+        let marked = self
+            .cache
+            .get_mut(&channel_id)
+            .and_then(|channel| channel.messages.get_mut_by_id(temp_id))
+            .map(|message| message.send_failed = true)
+            .is_some();
+        if !marked {
+            self.pending_send_payloads.remove(&temp_id);
+            cx.emit(MessagesEvent::SendFailedWithoutRow);
+        }
         if marked && self.active_channel_id == Some(channel_id) {
             cx.emit(MessagesEvent::Updated {
                 message_id: Some(temp_id),
@@ -6381,13 +6374,13 @@ fn enrich_sparse_topic_ack(
     msg: &mut Message,
     viewer_id: Option<UserId>,
     clan_id: Option<ClanId>,
-    anonymous: bool,
+    masked: bool,
     cx: &App,
 ) {
     let Some(gaps) = sparse_topic_ack_gaps(msg) else {
         return;
     };
-    if anonymous {
+    if masked {
         if gaps.time {
             msg.set_create_time(unix_now_seconds());
         }
@@ -6516,23 +6509,30 @@ async fn upload_attachments_now(
     Ok(uploaded)
 }
 
-fn is_anonymous_sender_id(sender_id: &str, cx: &App) -> bool {
+pub fn is_anonymous_sender_id(sender_id: &str, cx: &App) -> bool {
     AppConfig::try_global(cx)
         .is_some_and(|cfg| !cfg.anonymous_user_id.is_empty() && sender_id == cfg.anonymous_user_id)
 }
 
-fn anonymize_sender(msg: &mut Message, cfg: Option<&AppConfig>) {
+pub fn is_anonymous_user_id(user_id: UserId, cx: &App) -> bool {
+    AppConfig::try_global(cx)
+        .and_then(|cfg| cfg.anonymous_user_id.parse::<i64>().ok())
+        .is_some_and(|anonymous| anonymous == user_id.get())
+}
+
+fn anonymize_sender(msg: &mut Message, cfg: Option<&AppConfig>) -> bool {
     let Some(anonymous_user_id) = cfg
         .map(|c| c.anonymous_user_id.as_str())
         .filter(|id| !id.is_empty())
     else {
-        return;
+        return false;
     };
     msg.sender_id = anonymous_user_id.to_string();
     msg.sender_user_id = anonymous_user_id.parse::<i64>().ok().map(UserId);
     msg.sender_name = ANONYMOUS_SENDER_NAME.into();
     msg.avatar_url = SharedString::default();
     msg.avatar_proxied = SharedString::default();
+    true
 }
 
 fn merge_sparse_sender(prior: &Message, mut incoming: Message) -> Message {

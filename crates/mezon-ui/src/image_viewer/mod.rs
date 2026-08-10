@@ -24,7 +24,6 @@ use crate::app::main_window::{
 use crate::app::shell::Shell;
 use crate::app::title_bar::TitleBar;
 use crate::app::window_controls;
-use crate::chat::message::parts::is_anonymous_user_id;
 use crate::chat::message::{VideoActivation, VideoFullscreenMode, VideoLayout, VideoPlayerView};
 use crate::components::primitives::{Avatar, Icon, IconName, Spinner};
 use crate::components::primitives::{ContextMenu, context_menu_at};
@@ -1475,7 +1474,8 @@ impl ImageViewer {
     ) -> impl IntoElement {
         let att = self.current();
         let uploader = att.map(|a| a.uploader_name.clone()).unwrap_or_default();
-        let is_anonymous = att.is_some_and(|a| is_anonymous_user_id(a.uploader_id, cx));
+        let is_anonymous =
+            att.is_some_and(|a| mezon_store::is_anonymous_user_id(a.uploader_id, cx));
         let avatar_widget = {
             let mut avatar = Avatar::new()
                 .name(uploader.clone())

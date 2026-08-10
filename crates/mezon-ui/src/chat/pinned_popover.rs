@@ -15,8 +15,7 @@ use ui::{PopoverMenuHandle, ScrollAxes, Scrollbars, WithScrollbar};
 
 use crate::chat::file_type_icon::file_type_icon_for;
 use crate::chat::message::parts::{
-    effective_clan_id, is_anonymous_sender, resolve_pin_avatar_url,
-    resolve_pin_sender_label_with_message,
+    effective_clan_id, resolve_pin_avatar_url, resolve_pin_sender_label_with_message,
 };
 use crate::chat::message::{
     ConfirmUnpinMessageModal, heading_line_height, heading_size, pin_link_element,
@@ -78,7 +77,7 @@ impl PinCardVm {
             message_id: msg.message_id.clone().into(),
             create_time: msg.create_time,
             sender_label,
-            is_anonymous: is_anonymous_sender(&msg.sender_id, cx),
+            is_anonymous: mezon_store::is_anonymous_sender_id(&msg.sender_id, cx),
             avatar_src,
             avatar_fallback,
             pin: Arc::new(msg.clone()),
@@ -224,7 +223,7 @@ impl PinnedPopoverPanel {
                 channel_id,
                 cx,
             );
-            vm.is_anonymous = is_anonymous_sender(&pin.sender_id, cx);
+            vm.is_anonymous = mezon_store::is_anonymous_sender_id(&pin.sender_id, cx);
             (vm.avatar_src, vm.avatar_fallback) =
                 resolve_pin_avatar_urls(pin, clan_id, channel_id, cx);
         }

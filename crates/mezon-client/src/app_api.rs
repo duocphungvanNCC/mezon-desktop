@@ -1756,9 +1756,6 @@ impl AppApi {
         })
     }
 
-    /// Upload every presigned attachment and wait for all of them. Used by the
-    /// send paths that have no message id to patch afterwards (ephemeral), so the
-    /// bytes must be in place before the message goes out.
     pub async fn upload_presigned_all(&self, presigned: Vec<PresignedAttachment>) -> Result<()> {
         use futures::StreamExt as _;
         futures::stream::iter(presigned.into_iter().map(|item| self.execute_upload(item)))
