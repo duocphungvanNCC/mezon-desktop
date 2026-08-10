@@ -951,7 +951,7 @@ impl MessagesStore {
 
         let channel_sub = cx.subscribe(&ChannelList::global(cx), |this, _channel, event, cx| {
             if let ChannelEvent::ActiveChannelChanged(channel_id) = event {
-                if channel_id.is_none() && this.is_dm {
+                if this.is_dm {
                     return;
                 }
                 this.on_active_channel_changed(*channel_id, cx);
@@ -1240,15 +1240,33 @@ impl MessagesStore {
         ) {
             return;
         }
-        let badge_count = self.channel_badge_count(channel_id, clan_id, cx);
-        self.pending_last_seen = Some(PendingLastSeen {
+        let live_badge = self.channel_badge_count(channel_id, clan_id, cx);
+        let badge_count = match &self.pending_last_seen {
+            Some(p) if p.channel_id == channel_id => p.badge_count.max(live_badge),
+            _ => live_badge,
+        };
+        tracing::debug!(
+            target: "badge_flow",
+            clan = clan_id.get(),
+            channel = channel_id.get(),
+            message = message_id.get(),
+            badge_count,
+            "viewport seen — arming last-seen debounce"
+        );
+        let pending = PendingLastSeen {
             clan_id,
             channel_id,
             message_id,
             create_time,
             mode: self.mode,
             badge_count,
-        });
+        };
+        if live_badge > 0 || self.channel_is_unread(channel_id, clan_id, cx) {
+            self.apply_local_last_seen(&pending, cx);
+        } else {
+            self.set_last_read_message(channel_id, message_id);
+        }
+        self.pending_last_seen = Some(pending);
         self.arm_last_seen_debounce(cx);
     }
 
@@ -1267,17 +1285,73 @@ impl MessagesStore {
 
     fn channel_badge_count(&self, channel_id: ChannelId, clan_id: ClanId, cx: &App) -> u32 {
         if self.is_dm {
-            DirectMessageStore::global(cx)
-                .read(cx)
-                .find(channel_id)
-                .map(|c| c.unread_count)
+            DirectMessageStore::try_global(cx)
+                .and_then(|dm| dm.read(cx).find(channel_id).map(|c| c.unread_count))
                 .unwrap_or(0)
         } else {
-            ChannelList::global(cx)
-                .read(cx)
-                .channel(clan_id, channel_id)
-                .map(|c| c.badge_count)
+            ChannelList::try_global(cx)
+                .and_then(|cl| {
+                    cl.read(cx)
+                        .channel(clan_id, channel_id)
+                        .map(|c| c.badge_count)
+                })
                 .unwrap_or(0)
+        }
+    }
+
+    fn mark_empty_channel_seen(&mut self, channel_id: ChannelId, cx: &mut Context<Self>) {
+        let Some(clan_id) = self.active_clan_id else {
+            return;
+        };
+        if self.channel_badge_count(channel_id, clan_id, cx) == 0
+            && !self.channel_is_unread(channel_id, clan_id, cx)
+        {
+            return;
+        }
+        let (tail_id, tail_ts) = if self.is_dm {
+            (MessageId(0), 0)
+        } else {
+            ChannelList::try_global(cx)
+                .and_then(|cl| {
+                    cl.read(cx)
+                        .channel(clan_id, channel_id)
+                        .map(|ch| (ch.last_sent_message_id, ch.last_sent_timestamp))
+                })
+                .unwrap_or((MessageId(0), 0))
+        };
+        let pending = PendingLastSeen {
+            clan_id,
+            channel_id,
+            message_id: tail_id,
+            create_time: tail_ts,
+            mode: self.mode,
+            badge_count: self.channel_badge_count(channel_id, clan_id, cx),
+        };
+        tracing::debug!(
+            target: "badge_flow",
+            clan = clan_id.get(),
+            channel = channel_id.get(),
+            badge_count = pending.badge_count,
+            "empty channel opened — clearing its unread state"
+        );
+        self.apply_local_last_seen(&pending, cx);
+        self.pending_last_seen = Some(pending);
+        self.arm_last_seen_debounce(cx);
+    }
+
+    fn channel_is_unread(&self, channel_id: ChannelId, clan_id: ClanId, cx: &App) -> bool {
+        if self.is_dm {
+            DirectMessageStore::try_global(cx).is_some_and(|dm| {
+                dm.read(cx).find(channel_id).is_some_and(|c| {
+                    c.unread_count > 0 || c.last_sent_timestamp > c.last_seen_timestamp
+                })
+            })
+        } else {
+            ChannelList::try_global(cx).is_some_and(|cl| {
+                cl.read(cx)
+                    .channel(clan_id, channel_id)
+                    .is_some_and(|c| c.is_unread())
+            })
         }
     }
 
@@ -1328,7 +1402,21 @@ impl MessagesStore {
             return;
         }
 
-        self.apply_local_last_seen(&pending, cx);
+        tracing::debug!(
+            target: "badge_flow",
+            clan = pending.clan_id.get(),
+            channel = pending.channel_id.get(),
+            message = pending.message_id.get(),
+            badge_count = pending.badge_count,
+            "send_last_seen — writing last seen to server"
+        );
+        let newer_than_tracked = self
+            .last_read_message_by_channel
+            .get(&pending.channel_id)
+            .is_none_or(|cur| snowflake_seq(pending.message_id) >= snowflake_seq(*cur));
+        if newer_than_tracked {
+            self.set_last_read_message(pending.channel_id, pending.message_id);
+        }
         self.last_seen_fingerprint
             .insert(pending.channel_id, fingerprint);
 
@@ -4426,6 +4514,9 @@ impl MessagesStore {
                     prepare_messages(page.messages, AppConfig::try_global(cx), viewer_user_id(cx));
                 self.set_channel(channel_id, messages);
                 self.schedule_presign_expiry(cx);
+                if is_current && self.messages().is_empty() {
+                    self.mark_empty_channel_seen(channel_id, cx);
+                }
                 if is_current {
                     let count = self.messages().len();
                     cx.emit(MessagesEvent::Reset { count });
@@ -5778,9 +5869,10 @@ fn should_write_last_seen(
     channel_tail: Option<MessageId>,
     viewport_id: MessageId,
 ) -> bool {
-    if let Some(seen) = last_seen_id
-        && snowflake_seq(viewport_id) >= snowflake_seq(seen)
-    {
+    let Some(seen) = last_seen_id else {
+        return true;
+    };
+    if snowflake_seq(viewport_id) >= snowflake_seq(seen) {
         return true;
     }
     channel_tail == Some(viewport_id)
@@ -6696,9 +6788,14 @@ pub(crate) fn build_ogp_preview(
     Some(Box::new(OgpPreview {
         url,
         title: title.into(),
-        description: description.into(),
+        description: description.clone().into(),
+        description_collapsed: collapse_ogp_description(&description).into(),
         image_proxied: image_proxied.into(),
     }))
+}
+
+fn collapse_ogp_description(description: &str) -> String {
+    description.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 fn utf16_slice(text: &str, start: i64, end: i64) -> String {
@@ -7714,6 +7811,72 @@ mod tests {
                 "a dm is not a clan channel, so clearing the clan selection must leave it open"
             );
             assert_eq!(store.viewport_messages().len(), 1, "its rows must survive");
+        });
+    }
+
+    #[gpui::test]
+    fn selecting_a_clan_channel_must_not_hijack_an_open_dm(cx: &mut gpui::TestAppContext) {
+        let (store, dm) = cx.update(|cx| {
+            let api = Arc::new(mezon_client::AppApi::new(
+                Arc::new(mezon_client::TransportClient::new(String::new())),
+                String::new(),
+            ));
+            crate::realtime::RealtimeDispatch::init(api.clone(), cx);
+            crate::clan::ClanList::init(api.clone(), cx);
+            ChannelList::init(api.clone(), cx);
+            let store = MessagesStore::init(api, cx);
+            let dm = ChannelId(11);
+            store.update(cx, |store, cx| {
+                store.set_channel(dm, vec![Message::new(MessageId(1), "hi", "5", "Bob", 100)]);
+                store.activate(ClanId(0), dm, false, true, 3, 4, cx);
+            });
+            (store, dm)
+        });
+
+        cx.update(|cx| {
+            ChannelList::global(cx).update(cx, |channels, cx| {
+                channels.seed_clan_channels_for_test(
+                    ClanId(1),
+                    vec![crate::channel::Category {
+                        id: "1".into(),
+                        clan_id: ClanId(1),
+                        name: "General".into(),
+                        order: 0,
+                        channels: vec![crate::channel::Channel {
+                            id: ChannelId(22),
+                            name: "general".into(),
+                            channel_type: crate::channel::ChannelType::Text,
+                            private: false,
+                            clan_id: ClanId(1),
+                            clan_name: String::new(),
+                            category_name: "General".into(),
+                            category_id: Some("1".into()),
+                            member_count: 0,
+                            badge_count: 0,
+                            muted: false,
+                            parent_id: None,
+                            last_seen_message_id: MessageId(0),
+                            last_seen_timestamp: 0,
+                            last_sent_message_id: MessageId(0),
+                            last_sent_timestamp: 0,
+                            voice_members: Vec::new(),
+                            is_favorite: false,
+                            creator_id: UserId(0),
+                            active: crate::channel::CHANNEL_ACTIVE_JOINED,
+                            avatar_url: String::new(),
+                        }],
+                    }],
+                );
+                cx.emit(ChannelEvent::ActiveChannelChanged(Some(ChannelId(22))));
+            });
+        });
+
+        cx.update(|cx| {
+            assert_eq!(
+                store.read(cx).active_channel_id(),
+                Some(dm),
+                "the clan channel selection must not move a dm timeline; the route drives it"
+            );
         });
     }
 
@@ -9732,6 +9895,13 @@ mod tests {
         assert!(should_write_last_seen(Some(seen), Some(tail), newer));
         assert!(should_write_last_seen(Some(seen), Some(tail), tail));
         assert!(!should_write_last_seen(Some(newer), Some(tail), seen));
+        assert!(
+            should_write_last_seen(None, Some(tail), newer),
+            "a first-ever visit (no known last-seen, e.g. an unopened thread whose seed rows \
+             carry zeros) counts what the viewer is looking at as seen — otherwise a stale \
+             channel tail starves the gate and the badge never clears"
+        );
+        assert!(should_write_last_seen(None, None, newer));
     }
 
     fn topic_proto(

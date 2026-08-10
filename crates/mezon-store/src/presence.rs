@@ -19,8 +19,15 @@ const TYPING_SWEEP_MS: u64 = 1000;
 
 #[derive(Debug)]
 struct TypingEntry {
-    name: String,
+    name: SharedString,
     at: Instant,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ChannelTypingState {
+    Idle,
+    One(SharedString),
+    Several,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -88,17 +95,49 @@ impl PresenceStore {
         self.typing_users_at(channel_id, Instant::now())
     }
 
+    pub fn channel_typing_state(&self, channel_id: ChannelId) -> ChannelTypingState {
+        self.channel_typing_state_at(channel_id, Instant::now())
+    }
+
+    fn channel_typing_state_at(&self, channel_id: ChannelId, now: Instant) -> ChannelTypingState {
+        let Some(users) = self.typing_by_channel.get(&channel_id) else {
+            return ChannelTypingState::Idle;
+        };
+        let mut first: Option<SharedString> = None;
+        let mut count = 0usize;
+        for entry in users.values() {
+            if now.duration_since(entry.at) >= TYPING_TTL {
+                continue;
+            }
+            count += 1;
+            if count == 1 {
+                first = Some(entry.name.clone());
+            } else {
+                return ChannelTypingState::Several;
+            }
+        }
+        match first {
+            Some(name) => ChannelTypingState::One(name),
+            None => ChannelTypingState::Idle,
+        }
+    }
+
     fn typing_users_at(&self, channel_id: ChannelId, now: Instant) -> Vec<SharedString> {
-        self.typing_by_channel
-            .get(&channel_id)
-            .map(|users| {
-                users
-                    .values()
-                    .filter(|entry| now.duration_since(entry.at) < TYPING_TTL)
-                    .map(|entry| SharedString::from(entry.name.clone()))
-                    .collect()
-            })
-            .unwrap_or_default()
+        match self.channel_typing_state_at(channel_id, now) {
+            ChannelTypingState::Idle => Vec::new(),
+            ChannelTypingState::One(name) => vec![name],
+            ChannelTypingState::Several => self
+                .typing_by_channel
+                .get(&channel_id)
+                .map(|users| {
+                    users
+                        .values()
+                        .filter(|entry| now.duration_since(entry.at) < TYPING_TTL)
+                        .map(|entry| entry.name.clone())
+                        .collect()
+                })
+                .unwrap_or_default(),
+        }
     }
 
     pub fn is_online(&self, user_id: UserId) -> bool {
@@ -327,11 +366,11 @@ impl PresenceStore {
         sender_id: UserId,
     ) -> ChannelId {
         let name = if !display_name.is_empty() {
-            display_name.to_owned()
+            SharedString::from(display_name.to_owned())
         } else if !username.is_empty() {
-            username.to_owned()
+            SharedString::from(username.to_owned())
         } else {
-            sender_id.to_string()
+            SharedString::from(sender_id.to_string())
         };
         self.typing_by_channel
             .entry(channel_id)
@@ -547,7 +586,7 @@ mod tests {
             .insert(
                 UserId(1),
                 TypingEntry {
-                    name: "Old".to_owned(),
+                    name: "Old".into(),
                     at: base,
                 },
             );

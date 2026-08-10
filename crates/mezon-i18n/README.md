@@ -1,8 +1,9 @@
 # mezon-i18n
 
-Localization for Mezon Desktop. The translation data is a **full mirror of the
-mezon-react corpus** (`mezon` repo → `libs/translations`), so screens migrated
-from React already have their strings available here.
+Localization for Mezon Desktop. Translation data lives in `assets/i18n/<locale>.json`
+(one flat `key → value` file per locale). Keys follow the same dot-key convention as
+mezon-react (`namespace.key.path`) from the initial web corpus import; **web and
+desktop strings are maintained independently** — edit the JSON files here directly.
 
 ## TL;DR
 
@@ -20,7 +21,6 @@ from React already have their strings available here.
 |------|------|
 | `assets/i18n/<locale>.json` | The strings. One file per locale, flat dot-keys, UTF-8, sorted. |
 | `crates/mezon-i18n/src/lib.rs` | The runtime: `t()` + the per-locale loader. |
-| `scripts/sync_i18n.py` | Re-mirrors the React corpus into the JSON files. |
 | `crates/mezon-ui/src/settings/language_page.rs` | The language picker screen (`LANGUAGES` list). |
 | `crates/mezon-ui/assets/icons/flags/<locale>.svg` | Flag shown per language. |
 
@@ -59,27 +59,16 @@ So when migrating a React component, change `t('ns:key.path')` →
 
 ## Adding / changing a key
 
-### Case A — a new desktop-only string (not in React)
-
-1. Add the key to `assets/i18n/en.json` (**required** — English is the fallback).
-   Add it to other locale files as you translate them; any locale missing the key
-   falls back to English automatically.
+1. Add or edit the key in `assets/i18n/en.json` (**required** — English is the
+   fallback). Add it to other locale files as you translate them; any locale missing
+   the key falls back to English automatically.
 2. Use it: `mezon_i18n::t(&locale, "your.new.key")` (the key must be a string
    literal).
 3. Rebuild — see below.
 
-### Case B — pull more keys from React
-
-```sh
-python3 scripts/sync_i18n.py
-# React lives at ../mezon by default; override with:
-MEZON_TRANSLATIONS_DIR=/path/to/mezon/libs/translations/src/languages python3 scripts/sync_i18n.py
-```
-
-React is authoritative for any key it defines. Desktop-only keys that React does
-**not** have are preserved (login.*, root.*, dm.*, chat.*, nav.*, the
-`setting.{account,devices,voice,profile,clanProfile,activity,advanced,notifications}.*`
-families, and the language-name autonyms). The script is idempotent.
+When a string should match the web app, update `assets/i18n/*.json` here and
+`mezon/libs/translations` in the React repo in separate PRs — there is no
+automated sync step.
 
 ## Rebuilding (yes, it is required)
 
@@ -101,8 +90,7 @@ Incremental, so it is fast — only `mezon-i18n` and crates that use it recompil
 
 ## Adding a new locale
 
-1. Create `assets/i18n/<code>.json` (e.g. via `sync_i18n.py` once React has it, or
-   by hand).
+1. Create `assets/i18n/<code>.json` by hand (copy an existing locale as a template).
 2. Add a match arm in `crates/mezon-i18n/src/lib.rs` → `data()`:
    ```rust
    "<code>" => load!("../../../assets/i18n/<code>.json"),

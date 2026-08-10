@@ -307,6 +307,7 @@ async fn session_main(
     let mut out_fmt = None;
     let mut audio_io: Option<audio::AudioIo> = None;
     let mut out_change_rx: Option<flume::Receiver<AudioFormat>> = None;
+    let mut microphone_task: Option<tokio::task::JoinHandle<()>> = None;
 
     let audio = tokio::task::spawn_blocking(move || {
         audio::AudioIo::start(input_device_id, output_device_id)
@@ -325,7 +326,7 @@ async fn session_main(
             let mic_rx = audio.mic_rx.clone();
             let input_format_rx = audio.input_format_rx.clone();
             let room_for_mic = room.clone();
-            runtime::runtime().spawn(async move {
+            microphone_task = Some(runtime::runtime().spawn(async move {
                 let mut source: Option<NativeAudioSource> = None;
                 let mut channels: u32 = 1;
                 let mut sample_rate: u32 = 48_000;
@@ -365,25 +366,24 @@ async fn session_main(
                             if source.is_none()
                                 && last_publish_attempt
                                     .is_none_or(|at| at.elapsed() >= MIC_PUBLISH_RETRY_INTERVAL)
+                                && let Some(in_fmt) = current_in_fmt
                             {
-                                if let Some(in_fmt) = current_in_fmt {
-                                    last_publish_attempt = Some(Instant::now());
-                                    match publish_microphone_track(
-                                        &room_for_mic,
-                                        &mic_publication_task,
-                                        &mic_enabled,
-                                        in_fmt,
-                                    )
-                                    .await
-                                    {
-                                        Ok(new_source) => {
-                                            channels = new_source.channels;
-                                            sample_rate = new_source.sample_rate;
-                                            source = Some(new_source.source);
-                                        }
-                                        Err(e) => {
-                                            tracing::warn!("failed to retry mic track publish: {e:#}");
-                                        }
+                                last_publish_attempt = Some(Instant::now());
+                                match publish_microphone_track(
+                                    &room_for_mic,
+                                    &mic_publication_task,
+                                    &mic_enabled,
+                                    in_fmt,
+                                )
+                                .await
+                                {
+                                    Ok(new_source) => {
+                                        channels = new_source.channels;
+                                        sample_rate = new_source.sample_rate;
+                                        source = Some(new_source.source);
+                                    }
+                                    Err(e) => {
+                                        tracing::warn!("failed to retry mic track publish: {e:#}");
                                     }
                                 }
                             }
@@ -407,7 +407,7 @@ async fn session_main(
                         }
                     }
                 }
-            });
+            }));
 
             audio_io = Some(audio);
         }
@@ -704,6 +704,8 @@ async fn session_main(
                         }
                     }
                     Ok(Command::Disconnect) | Err(_) => {
+                        abort_task(&mut microphone_task).await;
+                        shutdown_audio_io(&mut audio_io).await;
                         if let Some(task) = camera_task.take() {
                             task.abort();
                         }
@@ -801,11 +803,29 @@ async fn session_main(
     for handle in video_tracks.into_values() {
         handle.stop();
     }
+    abort_task(&mut microphone_task).await;
+    shutdown_audio_io(&mut audio_io).await;
 
     #[cfg(all(target_os = "linux", target_env = "gnu"))]
     trim_task.abort();
 
     Ok(())
+}
+
+async fn abort_task(task: &mut Option<tokio::task::JoinHandle<()>>) {
+    if let Some(task) = task.take() {
+        task.abort();
+        let _ = task.await;
+    }
+}
+
+async fn shutdown_audio_io(audio_io: &mut Option<audio::AudioIo>) {
+    let Some(audio_io) = audio_io.take() else {
+        return;
+    };
+    if let Err(error) = tokio::task::spawn_blocking(move || drop(audio_io)).await {
+        tracing::warn!("voice audio shutdown task failed: {error}");
+    }
 }
 
 struct PublishedMicSource {

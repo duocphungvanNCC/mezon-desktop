@@ -521,7 +521,6 @@ impl Render for DirectSidebar {
             .flex()
             .flex_col()
             .size_full()
-            .pb(px(68.))
             .bg(theme.bg_secondary)
             .child(self.render_search(theme, &locale))
             .child(div().px_2().pt_2().child(self.render_friends_button(

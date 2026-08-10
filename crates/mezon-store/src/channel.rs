@@ -284,12 +284,19 @@ struct ChannelUnreadSeed {
     last_sent_message_id: MessageId,
 }
 
+#[derive(Default, Clone, Copy)]
+struct PendingBadge {
+    count: u32,
+    last_sent_timestamp: i64,
+    last_sent_message_id: MessageId,
+}
+
 pub struct ChannelList {
     cache: KeyedCache<ClanId, Vec<Category>>,
     app_channels_cache: HashMap<ClanId, Vec<AppChannel>>,
     favorites: HashMap<ClanId, HashSet<ChannelId>>,
     topic_parent_badges: HashMap<ChannelId, TopicParentBadge>,
-    pending_channel_badges: HashMap<ChannelId, u32>,
+    pending_channel_badges: HashMap<ChannelId, PendingBadge>,
     pending_badge_seed: HashMap<ClanId, HashMap<ChannelId, ChannelUnreadSeed>>,
     want_extras: HashSet<ClanId>,
     extras_loaded: HashSet<ClanId>,
@@ -574,8 +581,8 @@ impl ChannelList {
     }
 
     fn consume_badge_seed(&mut self, clan_id: ClanId, categories: &mut [Category]) {
-        if let Some(seed) = self.pending_badge_seed.remove(&clan_id) {
-            let applied = apply_unread_seed_into(&seed, categories);
+        if let Some(seed) = self.pending_badge_seed.get(&clan_id) {
+            let applied = apply_unread_seed_into(seed, categories);
             tracing::debug!(
                 target: "clan_load",
                 clan_id = clan_id.get(),
@@ -835,6 +842,17 @@ impl ChannelList {
         })
     }
 
+    #[cfg(test)]
+    pub(crate) fn seed_clan_channels_for_test(
+        &mut self,
+        clan_id: ClanId,
+        categories: Vec<Category>,
+    ) {
+        self.active_clan_id = Some(clan_id);
+        self.cache.insert(clan_id, categories, None);
+        self.invalidate_channel_index(clan_id);
+    }
+
     fn apply_clan_structure(
         &mut self,
         clan_id: ClanId,
@@ -843,6 +861,15 @@ impl ChannelList {
     ) {
         self.consume_badge_seed(clan_id, &mut categories);
         self.merge_pending_badges(&mut categories);
+        let previous_badges = collect_channel_badges(&self.cache, clan_id);
+        carry_live_channel_badges(&mut categories, &previous_badges);
+        tracing::debug!(
+            target: "badge_flow",
+            clan = clan_id.get(),
+            carried_channels = previous_badges.len(),
+            carried_badged = previous_badges.values().filter(|s| s.badge_count > 0).count(),
+            "apply_clan_structure carried live badges"
+        );
         let previous_voice = collect_voice_members(&self.cache, clan_id);
         merge_previous_voice_members(&mut categories, &previous_voice);
         let categories = rebuild_favorites(categories, clan_id, self.favorites.get(&clan_id));
@@ -853,6 +880,7 @@ impl ChannelList {
         self.cache.insert(clan_id, categories, None);
         self.invalidate_channel_index(clan_id);
         self.channel_detail_failed.clear();
+        self.sync_clan_after_read(clan_id, 0, cx);
         cx.emit(ChannelEvent::ClanChannelsLoaded(clan_id));
         cx.notify();
         if self.want_extras.contains(&clan_id) {
@@ -1270,8 +1298,10 @@ impl ChannelList {
     }
 
     pub fn apply_mark_as_read_clan(&mut self, clan_id: ClanId, cx: &mut Context<Self>) {
+        tracing::debug!(target: "badge_flow", clan = clan_id.get(), "apply_mark_as_read_clan");
         let mut cleared_badge = 0;
         let mut should_notify = false;
+        self.pending_badge_seed.remove(&clan_id);
         if let Some(categories) = self.cache.get_mut(&clan_id) {
             for category in categories.iter_mut() {
                 for ch in &category.channels {
@@ -1280,6 +1310,7 @@ impl ChannelList {
                 cleared_badge += Self::mark_channels_read(&mut category.channels);
             }
         }
+        self.drop_pending_badges_for_clan(clan_id);
         clear_topic_badges_for_clan(&mut self.topic_parent_badges, clan_id);
         if should_notify {
             self.notify_channel_list(clan_id, cx);
@@ -1293,6 +1324,12 @@ impl ChannelList {
         category_id: i64,
         cx: &mut Context<Self>,
     ) {
+        tracing::debug!(
+            target: "badge_flow",
+            clan = clan_id.get(),
+            category = category_id,
+            "apply_mark_as_read_category"
+        );
         let category_key = category_id.to_string();
         let mut cleared_badge = 0;
         let mut should_notify = false;
@@ -1314,6 +1351,10 @@ impl ChannelList {
                 ch.last_seen_timestamp = ch.last_sent_timestamp;
                 ch.last_seen_message_id = ch.last_sent_message_id;
             }
+        }
+        for &channel_id in &parent_ids {
+            self.drop_seeded_badge(clan_id, channel_id);
+            self.pending_channel_badges.remove(&channel_id);
         }
         self.topic_parent_badges
             .retain(|_, tracked| !parent_ids.contains(&tracked.parent_id));
@@ -1345,19 +1386,23 @@ impl ChannelList {
                 found = true;
                 let was_unread = ch.is_unread();
                 let was_badge = ch.badge_count;
-                if ts > 0 {
+                if ts > ch.last_sent_timestamp {
                     ch.last_sent_timestamp = ts;
                     if !message_id.is_zero() {
                         ch.last_sent_message_id = message_id;
                     }
-                    if seen {
-                        ch.last_seen_timestamp = ts;
-                        if !message_id.is_zero() {
-                            ch.last_seen_message_id = message_id;
-                        }
+                }
+                if seen && ts > ch.last_seen_timestamp {
+                    ch.last_seen_timestamp = ts;
+                    if !message_id.is_zero() {
+                        ch.last_seen_message_id = message_id;
                     }
                 }
-                if is_mention && !seen {
+                let counts_badge = !matches!(
+                    ch.channel_type,
+                    ChannelType::App | ChannelType::Voice | ChannelType::Stream
+                );
+                if is_mention && !seen && counts_badge {
                     ch.badge_count = ch.badge_count.saturating_add(1);
                 }
                 visible_changed =
@@ -1366,13 +1411,34 @@ impl ChannelList {
             }
         }
         if !found {
-            if is_mention && !seen {
-                *self.pending_channel_badges.entry(channel_id).or_default() += 1;
+            if !seen && (is_mention || ts > 0) {
+                let overlay = self.pending_channel_badges.entry(channel_id).or_default();
+                if is_mention {
+                    overlay.count += 1;
+                }
+                if ts > overlay.last_sent_timestamp {
+                    overlay.last_sent_timestamp = ts;
+                    if !message_id.is_zero() {
+                        overlay.last_sent_message_id = message_id;
+                    }
+                }
             }
             self.patch_user_channel_message(channel_id, is_mention, seen, ts, message_id, cx);
         } else if let Some(channel) = updated_channel {
             self.sync_user_channel_from(&channel, cx);
         }
+        tracing::debug!(
+            target: "badge_flow",
+            clan = clan_id.get(),
+            channel = channel_id.get(),
+            is_mention,
+            seen,
+            ts,
+            found,
+            visible_changed,
+            badge = self.channel_badge_count(clan_id, channel_id),
+            "note_channel_message applied"
+        );
         if visible_changed {
             self.notify_channel_list(clan_id, cx);
         }
@@ -1390,10 +1456,10 @@ impl ChannelList {
             .pending_channel_badges
             .get(&channel.id)
             .copied()
-            .unwrap_or(0);
+            .unwrap_or_default();
         (
-            channel.badge_count.max(pending),
-            channel.last_sent_timestamp,
+            channel.badge_count.max(pending.count),
+            channel.last_sent_timestamp.max(pending.last_sent_timestamp),
             channel.last_seen_timestamp,
         )
     }
@@ -1619,8 +1685,16 @@ impl ChannelList {
         let overlaid = self.pending_channel_badges.remove(&channel_id);
         self.drop_seeded_badge(clan_id, channel_id);
         if !found {
-            cleared_badge = overlaid.unwrap_or(0);
+            cleared_badge = overlaid.map(|o| o.count).unwrap_or(0);
         }
+        tracing::debug!(
+            target: "badge_flow",
+            clan = clan_id.get(),
+            channel = channel_id.get(),
+            found,
+            cleared_badge,
+            "apply_read"
+        );
         clear_topic_badges_for_parent(&mut self.topic_parent_badges, channel_id);
         if let Some(user_channel) = self.user_channels.get_mut(&channel_id) {
             user_channel.badge_count = 0;
@@ -1647,8 +1721,23 @@ impl ChannelList {
                 Self::mark_channels_read(&mut category.channels);
             }
         }
+        self.drop_pending_badges_for_clan(clan_id);
         if changed {
             self.notify_channel_list(clan_id, cx);
+        }
+    }
+
+    fn drop_pending_badges_for_clan(&mut self, clan_id: ClanId) {
+        let Some(categories) = self.cache.get(&clan_id) else {
+            return;
+        };
+        let ids: Vec<ChannelId> = categories
+            .iter()
+            .flat_map(|category| &category.channels)
+            .map(|ch| ch.id)
+            .collect();
+        for id in ids {
+            self.pending_channel_badges.remove(&id);
         }
     }
 
@@ -1950,6 +2039,16 @@ impl ChannelList {
         seen_message_id: MessageId,
         cx: &mut Context<Self>,
     ) {
+        tracing::debug!(
+            target: "badge_flow",
+            clan = clan_id.get(),
+            channel = channel_id.get(),
+            new_badge,
+            seen_ts,
+            "apply_last_seen (realtime LastSeenUpdated)"
+        );
+        self.pending_channel_badges.remove(&channel_id);
+        self.drop_seeded_badge(clan_id, channel_id);
         let mut visible_changed = false;
         let mut badge_delta = 0;
         let mut computed = false;
@@ -1999,7 +2098,10 @@ impl ChannelList {
         let changed = match self.cache.get_mut(&clan_id) {
             Some(categories) => add_channel_badge(categories, parent_id),
             None => {
-                *self.pending_channel_badges.entry(parent_id).or_default() += 1;
+                self.pending_channel_badges
+                    .entry(parent_id)
+                    .or_default()
+                    .count += 1;
                 false
             }
         };
@@ -2447,27 +2549,13 @@ impl ChannelList {
         if self.active_channel_id == Some(id) {
             return;
         }
+        tracing::debug!(target: "badge_flow", channel = id.get(), "select_channel (no badge mutation)");
         self.active_channel_id = Some(id);
         if let Some(clan_id) = self.clan_id_for_channel(id) {
             self.remembered_channels.insert(clan_id, id);
-            self.apply_read(clan_id, id, cx);
-        } else {
-            self.mark_read(id);
         }
         cx.emit(ChannelEvent::ActiveChannelChanged(self.active_channel_id));
         cx.notify();
-    }
-
-    pub fn mark_read(&mut self, id: ChannelId) {
-        if let Some(ch) = self
-            .cache
-            .values_mut()
-            .flat_map(|cats| cats.iter_mut().flat_map(|c| &mut c.channels))
-            .find(|ch| ch.id == id)
-        {
-            ch.badge_count = 0;
-            ch.last_seen_timestamp = ch.last_sent_timestamp;
-        }
     }
 
     pub fn channel(&self, clan_id: ClanId, channel_id: ChannelId) -> Option<&Channel> {
@@ -3540,6 +3628,77 @@ fn merge_previous_voice_members(
     }
 }
 
+struct LiveUnreadState {
+    badge_count: u32,
+    last_seen_timestamp: i64,
+    last_seen_message_id: MessageId,
+    last_sent_timestamp: i64,
+    last_sent_message_id: MessageId,
+}
+
+fn collect_channel_badges(
+    cache: &KeyedCache<ClanId, Vec<Category>>,
+    clan_id: ClanId,
+) -> HashMap<ChannelId, LiveUnreadState> {
+    cache
+        .get(&clan_id)
+        .map(|categories| {
+            categories
+                .iter()
+                .flat_map(|c| &c.channels)
+                .map(|ch| {
+                    (
+                        ch.id,
+                        LiveUnreadState {
+                            badge_count: ch.badge_count,
+                            last_seen_timestamp: ch.last_seen_timestamp,
+                            last_seen_message_id: ch.last_seen_message_id,
+                            last_sent_timestamp: ch.last_sent_timestamp,
+                            last_sent_message_id: ch.last_sent_message_id,
+                        },
+                    )
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn suppress_read_badge(ch: &mut Channel) {
+    if ch.badge_count > 0
+        && ch.last_sent_timestamp > 0
+        && ch.last_seen_timestamp >= ch.last_sent_timestamp
+    {
+        ch.badge_count = 0;
+    }
+}
+
+fn carry_live_channel_badges(
+    categories: &mut [Category],
+    previous: &HashMap<ChannelId, LiveUnreadState>,
+) {
+    for ch in categories.iter_mut().flat_map(|c| c.channels.iter_mut()) {
+        let Some(live) = previous.get(&ch.id) else {
+            continue;
+        };
+        ch.badge_count = ch.badge_count.max(live.badge_count);
+        if live.last_seen_timestamp > ch.last_seen_timestamp
+            || (live.last_seen_timestamp == ch.last_seen_timestamp
+                && ch.last_seen_message_id.is_zero())
+        {
+            ch.last_seen_timestamp = live.last_seen_timestamp;
+            ch.last_seen_message_id = live.last_seen_message_id;
+        }
+        if live.last_sent_timestamp > ch.last_sent_timestamp
+            || (live.last_sent_timestamp == ch.last_sent_timestamp
+                && ch.last_sent_message_id.is_zero())
+        {
+            ch.last_sent_timestamp = live.last_sent_timestamp;
+            ch.last_sent_message_id = live.last_sent_message_id;
+        }
+        suppress_read_badge(ch);
+    }
+}
+
 fn rebuild_favorites(
     mut categories: Vec<Category>,
     clan_id: ClanId,
@@ -3658,21 +3817,29 @@ fn apply_unread_seed_into(
         };
         let was_unread = ch.is_unread();
         let was_badge = ch.badge_count;
-        ch.badge_count = s.badge_count;
-        if s.last_seen_timestamp > 0 {
+        if s.last_sent_timestamp >= ch.last_sent_timestamp {
+            ch.badge_count = s.badge_count;
+        } else {
+            ch.badge_count = ch.badge_count.max(s.badge_count);
+        }
+        if s.last_seen_timestamp > ch.last_seen_timestamp {
             ch.last_seen_timestamp = s.last_seen_timestamp;
             ch.last_seen_message_id = s.last_seen_message_id;
         }
-        if s.last_sent_timestamp > 0 {
+        if s.last_sent_timestamp > ch.last_sent_timestamp {
             ch.last_sent_timestamp = s.last_sent_timestamp;
             ch.last_sent_message_id = s.last_sent_message_id;
         }
+        suppress_read_badge(ch);
         changed = changed || was_badge != ch.badge_count || was_unread != ch.is_unread();
     }
     changed
 }
 
-fn merge_pending_badges_into(pending: &mut HashMap<ChannelId, u32>, categories: &mut [Category]) {
+fn merge_pending_badges_into(
+    pending: &mut HashMap<ChannelId, PendingBadge>,
+    categories: &mut [Category],
+) {
     if pending.is_empty() {
         return;
     }
@@ -3680,7 +3847,18 @@ fn merge_pending_badges_into(pending: &mut HashMap<ChannelId, u32>, categories: 
     for category in categories.iter_mut() {
         for ch in category.channels.iter_mut() {
             if let Some(&overlay) = pending.get(&ch.id) {
-                ch.badge_count = ch.badge_count.max(overlay);
+                if overlay.last_sent_timestamp == 0
+                    || overlay.last_sent_timestamp > ch.last_seen_timestamp
+                {
+                    ch.badge_count = ch.badge_count.max(overlay.count);
+                }
+                if overlay.last_sent_timestamp > ch.last_sent_timestamp {
+                    ch.last_sent_timestamp = overlay.last_sent_timestamp;
+                    if !overlay.last_sent_message_id.is_zero() {
+                        ch.last_sent_message_id = overlay.last_sent_message_id;
+                    }
+                }
+                suppress_read_badge(ch);
                 applied.push(ch.id);
             }
         }
@@ -5588,6 +5766,352 @@ mod tests {
     }
 
     #[gpui::test]
+    fn parked_badge_seed_survives_more_than_one_structure_refetch(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let channels = init_channel_list(cx);
+            channels.update(cx, |channels, cx| {
+                channels.pending_badge_seed.insert(
+                    ClanId(1),
+                    HashMap::from([(
+                        ChannelId(1),
+                        ChannelUnreadSeed {
+                            badge_count: 4,
+                            last_seen_timestamp: 0,
+                            last_seen_message_id: MessageId(0),
+                            last_sent_timestamp: 100,
+                            last_sent_message_id: MessageId(5),
+                        },
+                    )]),
+                );
+
+                channels.apply_clan_structure(ClanId(1), structure_with_two_channels(), cx);
+                assert_eq!(
+                    channels.channel(ClanId(1), ChannelId(1)).unwrap().badge_count,
+                    4,
+                    "the first structure insert (list_channel_descs always reports 0) must pick up the parked seed"
+                );
+                assert!(
+                    channels
+                        .pending_badge_seed
+                        .get(&ClanId(1))
+                        .is_some_and(|seed| seed.contains_key(&ChannelId(1))),
+                    "the parked seed must be retained after being applied, not consumed"
+                );
+
+                for ch in channels
+                    .cache
+                    .get_mut(&ClanId(1))
+                    .unwrap()
+                    .iter_mut()
+                    .flat_map(|c| c.channels.iter_mut())
+                {
+                    ch.badge_count = 0;
+                }
+                channels.apply_clan_structure(ClanId(1), structure_with_two_channels(), cx);
+                assert_eq!(
+                    channels.channel(ClanId(1), ChannelId(1)).unwrap().badge_count,
+                    4,
+                    "a later refetch (e.g. after the clan's CACHE_TTL expires) must reapply the \
+                     seed itself — the zeroed live rows prove the carry cannot mask this"
+                );
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn live_channel_badges_survive_a_structure_refetch_without_any_parked_seed(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| {
+            let channels = init_channel_list(cx);
+            channels.update(cx, |channels, cx| {
+                channels.apply_clan_structure(ClanId(1), structure_with_two_channels(), cx);
+                channels.note_channel_message(ClanId(1), ChannelId(1), true, false, 100, MessageId(9), cx);
+                assert_eq!(
+                    channels.channel(ClanId(1), ChannelId(1)).unwrap().badge_count,
+                    1,
+                    "a realtime mention must bump the live badge"
+                );
+
+                channels.apply_clan_structure(ClanId(1), structure_with_two_channels(), cx);
+                assert_eq!(
+                    channels.channel(ClanId(1), ChannelId(1)).unwrap().badge_count,
+                    1,
+                    "a structure refetch (list_channel_descs always reports 0) must carry the live \
+                     badge forward instead of resetting it, exactly like ClanList::carry_live_badges \
+                     does for the clan-icon aggregate"
+                );
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn carry_keeps_the_unread_dot_and_respects_a_fresher_server_read_state(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| {
+            let channels = init_channel_list(cx);
+            channels.update(cx, |channels, cx| {
+                channels.apply_clan_structure(ClanId(1), structure_with_two_channels(), cx);
+                {
+                    let cats = channels.cache.get_mut(&ClanId(1)).unwrap();
+                    for ch in cats.iter_mut().flat_map(|c| c.channels.iter_mut()) {
+                        if ch.id == ChannelId(1) {
+                            ch.last_sent_timestamp = 600;
+                            ch.last_sent_message_id = MessageId(60);
+                            ch.last_seen_timestamp = 500;
+                            ch.last_seen_message_id = MessageId(50);
+                        }
+                    }
+                }
+
+                channels.apply_clan_structure(ClanId(1), structure_with_two_channels(), cx);
+                let ch = channels.channel(ClanId(1), ChannelId(1)).unwrap();
+                assert_eq!(
+                    (ch.last_sent_timestamp, ch.last_seen_timestamp),
+                    (600, 500),
+                    "a refetch whose descs report zero timestamps must not erase the live \
+                     unread-dot state (last_sent > last_seen)"
+                );
+
+                let mut fresher = structure_with_two_channels();
+                for ch in fresher.iter_mut().flat_map(|c| c.channels.iter_mut()) {
+                    if ch.id == ChannelId(1) {
+                        ch.last_seen_timestamp = 700;
+                        ch.last_seen_message_id = MessageId(70);
+                    }
+                }
+                channels.apply_clan_structure(ClanId(1), fresher, cx);
+                let ch = channels.channel(ClanId(1), ChannelId(1)).unwrap();
+                assert_eq!(
+                    ch.last_seen_timestamp, 700,
+                    "a server-reported read state newer than the local one (read on another \
+                     device, realtime missed) must win over the stale live value"
+                );
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn a_mention_arriving_before_the_structure_survives_a_fresh_ts_stale_badge_seed(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| {
+            let channels = init_channel_list(cx);
+            channels.update(cx, |channels, cx| {
+                channels.note_channel_message(
+                    ClanId(1),
+                    ChannelId(1),
+                    true,
+                    false,
+                    1000,
+                    MessageId(90),
+                    cx,
+                );
+
+                channels.apply_clan_structure(ClanId(1), structure_with_two_channels(), cx);
+                let ch = channels.channel(ClanId(1), ChannelId(1)).unwrap();
+                assert_eq!(
+                    ch.badge_count, 1,
+                    "the parked mention overlay must land on the freshly inserted structure"
+                );
+                assert_eq!(
+                    ch.last_sent_timestamp, 1000,
+                    "the overlay must carry the mention's activity timestamp onto the structure, \
+                     or a later seed with the same server-side timestamp outranks local knowledge"
+                );
+
+                let cats = channels.cache.get_mut(&ClanId(1)).unwrap();
+                let server_row = HashMap::from([(
+                    ChannelId(1),
+                    ChannelUnreadSeed {
+                        badge_count: 0,
+                        last_seen_timestamp: 400,
+                        last_seen_message_id: MessageId(40),
+                        last_sent_timestamp: 900,
+                        last_sent_message_id: MessageId(80),
+                    },
+                )]);
+                apply_unread_seed_into(&server_row, cats);
+                let ch = channels.channel(ClanId(1), ChannelId(1)).unwrap();
+                assert_eq!(
+                    ch.badge_count, 1,
+                    "a seed snapshot that predates the client-witnessed mention (its last_sent \
+                     is older than the overlay-carried activity) must not wipe the badge"
+                );
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn a_stale_badge_seed_cannot_wipe_a_fresher_realtime_mention(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let channels = init_channel_list(cx);
+            channels.update(cx, |channels, cx| {
+                channels.apply_clan_structure(ClanId(1), structure_with_two_channels(), cx);
+                channels.note_channel_message(
+                    ClanId(1),
+                    ChannelId(1),
+                    true,
+                    false,
+                    1000,
+                    MessageId(90),
+                    cx,
+                );
+                assert_eq!(
+                    channels
+                        .channel(ClanId(1), ChannelId(1))
+                        .unwrap()
+                        .badge_count,
+                    1
+                );
+
+                channels.pending_badge_seed.insert(
+                    ClanId(1),
+                    HashMap::from([(
+                        ChannelId(1),
+                        ChannelUnreadSeed {
+                            badge_count: 0,
+                            last_seen_timestamp: 400,
+                            last_seen_message_id: MessageId(40),
+                            last_sent_timestamp: 500,
+                            last_sent_message_id: MessageId(50),
+                        },
+                    )]),
+                );
+                channels.apply_clan_structure(ClanId(1), structure_with_two_channels(), cx);
+                let ch = channels.channel(ClanId(1), ChannelId(1)).unwrap();
+                assert_eq!(
+                    ch.badge_count, 1,
+                    "a server badge snapshot older than the realtime mention (stale List* cache) \
+                     must not zero the live badge"
+                );
+                assert_eq!(
+                    ch.last_sent_timestamp, 1000,
+                    "the fresher realtime activity timestamp must survive the stale seed"
+                );
+
+                let cats = channels.cache.get_mut(&ClanId(1)).unwrap();
+                let stale = HashMap::from([(
+                    ChannelId(1),
+                    ChannelUnreadSeed {
+                        badge_count: 0,
+                        last_seen_timestamp: 400,
+                        last_seen_message_id: MessageId(40),
+                        last_sent_timestamp: 500,
+                        last_sent_message_id: MessageId(50),
+                    },
+                )]);
+                apply_unread_seed_into(&stale, cats);
+                let ch = channels.channel(ClanId(1), ChannelId(1)).unwrap();
+                assert_eq!(
+                    ch.badge_count, 1,
+                    "seed_badges direct-apply of a stale snapshot must not wipe the live mention"
+                );
+
+                let cats = channels.cache.get_mut(&ClanId(1)).unwrap();
+                let equal_ts = HashMap::from([(
+                    ChannelId(1),
+                    ChannelUnreadSeed {
+                        badge_count: 0,
+                        last_seen_timestamp: 1000,
+                        last_seen_message_id: MessageId(90),
+                        last_sent_timestamp: 1000,
+                        last_sent_message_id: MessageId(90),
+                    },
+                )]);
+                apply_unread_seed_into(&equal_ts, cats);
+                let ch = channels.channel(ClanId(1), ChannelId(1)).unwrap();
+                assert_eq!(
+                    ch.badge_count, 0,
+                    "a seed that knows the same activity tail as the client (read on another \
+                     device while offline, no newer messages) is authoritative — the fixed \
+                     ListChannelBadgeCount backend counts every mention it has seen"
+                );
+
+                let cats = channels.cache.get_mut(&ClanId(1)).unwrap();
+                let authoritative = HashMap::from([(
+                    ChannelId(1),
+                    ChannelUnreadSeed {
+                        badge_count: 0,
+                        last_seen_timestamp: 1100,
+                        last_seen_message_id: MessageId(95),
+                        last_sent_timestamp: 1100,
+                        last_sent_message_id: MessageId(95),
+                    },
+                )]);
+                apply_unread_seed_into(&authoritative, cats);
+                let ch = channels.channel(ClanId(1), ChannelId(1)).unwrap();
+                assert_eq!(
+                    ch.badge_count, 0,
+                    "a seed that knows strictly newer activity than the client stays \
+                     authoritative and clears the badge"
+                );
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn mark_as_read_category_evicts_the_parked_seed_so_a_refetch_cannot_resurrect_it(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| {
+            let channels = init_channel_list(cx);
+            channels.update(cx, |channels, cx| {
+                channels.pending_badge_seed.insert(
+                    ClanId(1),
+                    HashMap::from([(
+                        ChannelId(1),
+                        ChannelUnreadSeed {
+                            badge_count: 7,
+                            last_seen_timestamp: 0,
+                            last_seen_message_id: MessageId(0),
+                            last_sent_timestamp: 100,
+                            last_sent_message_id: MessageId(5),
+                        },
+                    )]),
+                );
+                channels.apply_clan_structure(ClanId(1), structure_with_two_channels(), cx);
+                assert_eq!(
+                    channels
+                        .channel(ClanId(1), ChannelId(1))
+                        .unwrap()
+                        .badge_count,
+                    7
+                );
+
+                channels.apply_mark_as_read_category(ClanId(1), 1, cx);
+                assert_eq!(
+                    channels
+                        .channel(ClanId(1), ChannelId(1))
+                        .unwrap()
+                        .badge_count,
+                    0,
+                    "marking the category read must clear the live badge"
+                );
+                assert!(
+                    !channels
+                        .pending_badge_seed
+                        .get(&ClanId(1))
+                        .is_some_and(|seed| seed.contains_key(&ChannelId(1))),
+                    "marking the category read must evict the channel from the parked seed"
+                );
+
+                channels.apply_clan_structure(ClanId(1), structure_with_two_channels(), cx);
+                assert_eq!(
+                    channels
+                        .channel(ClanId(1), ChannelId(1))
+                        .unwrap()
+                        .badge_count,
+                    0,
+                    "a later structure refetch must not resurrect a badge whose category was \
+                     already explicitly marked as read"
+                );
+            });
+        });
+    }
+
+    #[gpui::test]
     fn seed_badges_does_not_wait_when_no_listing_is_in_flight(cx: &mut gpui::TestAppContext) {
         cx.update(|cx| {
             let channels = init_channel_list(cx);
@@ -5670,7 +6194,13 @@ mod tests {
     #[test]
     fn overlay_merge_applies_when_server_badge_zero() {
         let mut categories = categories();
-        let mut pending: HashMap<ChannelId, u32> = HashMap::from([(ChannelId(10), 1)]);
+        let mut pending: HashMap<ChannelId, PendingBadge> = HashMap::from([(
+            ChannelId(10),
+            PendingBadge {
+                count: 1,
+                ..Default::default()
+            },
+        )]);
         merge_pending_badges_into(&mut pending, &mut categories);
         assert_eq!(categories[0].channels[0].badge_count, 1);
         assert!(pending.is_empty());
@@ -5680,12 +6210,24 @@ mod tests {
     fn overlay_merge_takes_max_of_server_and_overlay() {
         let mut categories = categories();
         categories[0].channels[0].badge_count = 2;
-        let mut pending: HashMap<ChannelId, u32> = HashMap::from([(ChannelId(10), 1)]);
+        let mut pending: HashMap<ChannelId, PendingBadge> = HashMap::from([(
+            ChannelId(10),
+            PendingBadge {
+                count: 1,
+                ..Default::default()
+            },
+        )]);
         merge_pending_badges_into(&mut pending, &mut categories);
         assert_eq!(categories[0].channels[0].badge_count, 2);
 
         categories[0].channels[1].badge_count = 1;
-        let mut pending: HashMap<ChannelId, u32> = HashMap::from([(ChannelId(11), 3)]);
+        let mut pending: HashMap<ChannelId, PendingBadge> = HashMap::from([(
+            ChannelId(11),
+            PendingBadge {
+                count: 3,
+                ..Default::default()
+            },
+        )]);
         merge_pending_badges_into(&mut pending, &mut categories);
         assert_eq!(categories[0].channels[1].badge_count, 3);
     }
@@ -5693,7 +6235,13 @@ mod tests {
     #[test]
     fn overlay_merge_consumes_entry_so_refetch_does_not_readd() {
         let mut categories = categories();
-        let mut pending: HashMap<ChannelId, u32> = HashMap::from([(ChannelId(10), 1)]);
+        let mut pending: HashMap<ChannelId, PendingBadge> = HashMap::from([(
+            ChannelId(10),
+            PendingBadge {
+                count: 1,
+                ..Default::default()
+            },
+        )]);
         merge_pending_badges_into(&mut pending, &mut categories);
         assert_eq!(categories[0].channels[0].badge_count, 1);
 
@@ -5813,9 +6361,15 @@ mod tests {
     #[test]
     fn overlay_merge_keeps_entries_for_channels_in_another_clan() {
         let mut categories = categories();
-        let mut pending: HashMap<ChannelId, u32> = HashMap::from([(ChannelId(999), 4)]);
+        let mut pending: HashMap<ChannelId, PendingBadge> = HashMap::from([(
+            ChannelId(999),
+            PendingBadge {
+                count: 4,
+                ..Default::default()
+            },
+        )]);
         merge_pending_badges_into(&mut pending, &mut categories);
-        assert_eq!(pending.get(&ChannelId(999)), Some(&4));
+        assert_eq!(pending.get(&ChannelId(999)).map(|o| o.count), Some(4));
     }
 
     #[test]

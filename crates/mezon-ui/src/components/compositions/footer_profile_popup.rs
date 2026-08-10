@@ -1,12 +1,13 @@
 use std::time::Duration;
 
 use gpui::{
-    App, ClickEvent, ClipboardItem, Context, DismissEvent, EventEmitter, FocusHandle, Focusable,
-    FontWeight, Rgba, SharedString, Task, Window, deferred, div, prelude::*, px,
+    App, ClickEvent, ClipboardItem, Context, DismissEvent, Entity, EventEmitter, FocusHandle,
+    Focusable, FontWeight, Rgba, SharedString, Task, Window, deferred, div, prelude::*, px,
 };
 use mezon_store::{AccountStore, BadgeService, Settings, WalletStore};
 
 use crate::chat::message::{CustomStatusModal, SendTokenModal, TransactionHistoryModal};
+use crate::components::compositions::CustomStatusBubble;
 use crate::components::primitives::{Avatar, Icon, IconName};
 use crate::theme::ActiveTheme;
 
@@ -76,7 +77,7 @@ pub struct FooterProfilePopup {
     user_status: String,
     status_menu_open: bool,
     status_duration_for: Option<&'static str>,
-    custom_status_expanded: bool,
+    custom_status_bubble: Entity<CustomStatusBubble>,
     user_id_copied: bool,
     _copy_user_id_reset: Option<Task<()>>,
 }
@@ -148,7 +149,7 @@ impl FooterProfilePopup {
             user_status,
             status_menu_open: false,
             status_duration_for: None,
-            custom_status_expanded: false,
+            custom_status_bubble: cx.new(|_| CustomStatusBubble::new()),
             user_id_copied: false,
             _copy_user_id_reset: None,
         }
@@ -257,150 +258,130 @@ impl Render for FooterProfilePopup {
 
         let custom_status = self.user_status.clone();
         let has_custom = !custom_status.is_empty();
-        let avatar_row = div()
-            .relative()
+        let custom_status_bubble = self.custom_status_bubble.clone();
+        custom_status_bubble.update(cx, |bubble, cx| {
+            bubble.set_content(
+                custom_status.clone().into(),
+                px(212.),
+                bubble_bg,
+                border,
+                text_primary,
+                cx,
+            );
+        });
+        let avatar_row = div().relative().flex().flex_row().mt(px(-50.)).child(
+            div()
+                .relative()
+                .ml(px(16.))
+                .p(px(6.))
+                .w(px(90.))
+                .h(px(90.))
+                .rounded_full()
+                .bg(bg_card)
+                .child(
+                    Avatar::new()
+                        .name(self.display_name.clone())
+                        .src(self.avatar.clone())
+                        .size_px(px(78.)),
+                )
+                .child(
+                    div()
+                        .absolute()
+                        .bottom(px(4.))
+                        .right(px(6.))
+                        .size(px(18.))
+                        .rounded_full()
+                        .border_2()
+                        .border_color(bg_card)
+                        .bg(current_status_color),
+                ),
+        );
+
+        let custom_status_overlay = div()
+            .id("footer-custom-status-wrap")
+            .group("footer-custom-status")
+            .absolute()
+            .left(px(112.))
+            .top(px(85.))
             .flex()
-            .flex_row()
-            .mt(px(-50.))
+            .flex_col()
+            .gap(px(12.))
+            .on_hover({
+                let custom_status_bubble = custom_status_bubble.clone();
+                move |hovered: &bool, _window, cx| {
+                    custom_status_bubble.update(cx, |bubble, cx| {
+                        bubble.set_expanded(*hovered, cx);
+                    });
+                }
+            })
+            .child(div().size(px(12.)).rounded_full().bg(bubble_bg).shadow_md())
             .child(
                 div()
                     .relative()
-                    .ml(px(16.))
-                    .p(px(6.))
-                    .w(px(90.))
-                    .h(px(90.))
-                    .rounded_full()
-                    .bg(bg_card)
-                    .child(
-                        Avatar::new()
-                            .name(self.display_name.clone())
-                            .src(self.avatar.clone())
-                            .size_px(px(78.)),
-                    )
+                    .max_w(px(212.))
+                    .child(custom_status_bubble)
                     .child(
                         div()
                             .absolute()
-                            .bottom(px(4.))
-                            .right(px(6.))
-                            .size(px(18.))
+                            .top(px(-16.))
+                            .right(px(4.))
+                            .flex()
+                            .flex_row()
+                            .items_center()
                             .rounded_full()
-                            .border_2()
-                            .border_color(bg_card)
-                            .bg(current_status_color),
+                            .bg(bubble_bg)
+                            .border_1()
+                            .border_color(border)
+                            .p(px(2.))
+                            .shadow_md()
+                            .opacity(0.)
+                            .group_hover("footer-custom-status", |s| s.opacity(1.))
+                            .child(
+                                div()
+                                    .id("footer-custom-status-edit")
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .px_1()
+                                    .cursor_pointer()
+                                    .hover(move |s| s.bg(hover_bg))
+                                    .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                                        let locale = this.locale.clone();
+                                        cx.emit(DismissEvent);
+                                        CustomStatusModal::open(locale, window, cx);
+                                    }))
+                                    .child(
+                                        Icon::new(IconName::PenEdit)
+                                            .size(px(14.))
+                                            .text_color(text_secondary),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .id("footer-custom-status-clear")
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .px_1()
+                                    .cursor_pointer()
+                                    .hover(move |s| s.bg(hover_bg))
+                                    .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| {
+                                        this.user_status = String::new();
+                                        if let Some(store) = AccountStore::try_global(cx) {
+                                            store.update(cx, |store, cx| {
+                                                store.set_custom_status(String::new(), 0, true, cx)
+                                            });
+                                        }
+                                        cx.notify();
+                                    }))
+                                    .child(
+                                        Icon::new(IconName::DeleteMessageRightClick)
+                                            .size(px(14.))
+                                            .text_color(gpui::rgb(0xdc2626)),
+                                    ),
+                            ),
                     ),
-            )
-            .when(has_custom, |row| {
-                row.child(
-                    div()
-                        .id("footer-custom-status-wrap")
-                        .group("footer-custom-status")
-                        .absolute()
-                        .left(px(112.))
-                        .top(px(30.))
-                        .flex()
-                        .flex_col()
-                        .gap(px(12.))
-                        .on_hover(cx.listener(|this, hovered: &bool, _window, cx| {
-                            if this.custom_status_expanded != *hovered {
-                                this.custom_status_expanded = *hovered;
-                                cx.notify();
-                            }
-                        }))
-                        .child(div().size(px(12.)).rounded_full().bg(bubble_bg).shadow_md())
-                        .child(
-                            div()
-                                .id("footer-custom-status-bubble")
-                                .relative()
-                                .flex()
-                                .items_center()
-                                .bg(bubble_bg)
-                                .px(px(16.))
-                                .py(px(12.))
-                                .rounded(px(12.))
-                                .shadow_lg()
-                                .child(
-                                    div()
-                                        .max_w(px(180.))
-                                        .when(!self.custom_status_expanded, |d| d.truncate())
-                                        .text_size(px(14.))
-                                        .text_color(text_primary)
-                                        .child(custom_status.clone()),
-                                )
-                                .child(
-                                    div()
-                                        .absolute()
-                                        .top(px(-16.))
-                                        .right(px(4.))
-                                        .flex()
-                                        .flex_row()
-                                        .items_center()
-                                        .rounded_full()
-                                        .bg(bubble_bg)
-                                        .border_1()
-                                        .border_color(border)
-                                        .p(px(2.))
-                                        .shadow_md()
-                                        .opacity(0.)
-                                        .group_hover("footer-custom-status", |s| s.opacity(1.))
-                                        .child(
-                                            div()
-                                                .id("footer-custom-status-edit")
-                                                .flex()
-                                                .items_center()
-                                                .justify_center()
-                                                .px_1()
-                                                .cursor_pointer()
-                                                .hover(move |s| s.bg(hover_bg))
-                                                .on_click(cx.listener(
-                                                    |this, _: &ClickEvent, window, cx| {
-                                                        let locale = this.locale.clone();
-                                                        cx.emit(DismissEvent);
-                                                        CustomStatusModal::open(locale, window, cx);
-                                                    },
-                                                ))
-                                                .child(
-                                                    Icon::new(IconName::PenEdit)
-                                                        .size(px(14.))
-                                                        .text_color(text_secondary),
-                                                ),
-                                        )
-                                        .child(
-                                            div()
-                                                .id("footer-custom-status-clear")
-                                                .flex()
-                                                .items_center()
-                                                .justify_center()
-                                                .px_1()
-                                                .cursor_pointer()
-                                                .hover(move |s| s.bg(hover_bg))
-                                                .on_click(cx.listener(
-                                                    |this, _: &ClickEvent, _window, cx| {
-                                                        this.user_status = String::new();
-                                                        if let Some(store) =
-                                                            AccountStore::try_global(cx)
-                                                        {
-                                                            store.update(cx, |store, cx| {
-                                                                store.set_custom_status(
-                                                                    String::new(),
-                                                                    0,
-                                                                    true,
-                                                                    cx,
-                                                                )
-                                                            });
-                                                        }
-                                                        cx.notify();
-                                                    },
-                                                ))
-                                                .child(
-                                                    Icon::new(IconName::DeleteMessageRightClick)
-                                                        .size(px(14.))
-                                                        .text_color(gpui::rgb(0xdc2626)),
-                                                ),
-                                        ),
-                                ),
-                        ),
-                )
-            });
+            );
 
         let identity = div()
             .flex()
@@ -660,6 +641,7 @@ impl Render for FooterProfilePopup {
 
         div()
             .track_focus(&self.focus_handle)
+            .relative()
             .key_context("menu")
             .on_action(cx.listener(|this, _: &::menu::Cancel, _window, cx| {
                 if this.status_duration_for.is_some() {
@@ -686,21 +668,25 @@ impl Render for FooterProfilePopup {
             .child(banner)
             .child(avatar_row)
             .child(
-                div().px(px(16.)).child(
-                    div()
-                        .w_full()
-                        .my(px(16.))
-                        .p_2()
-                        .rounded(px(10.))
-                        .border_1()
-                        .border_color(border)
-                        .bg(bg_box)
-                        .flex()
-                        .flex_col()
-                        .child(identity)
-                        .child(actions),
-                ),
+                div()
+                    .px(px(16.))
+                    .when(has_custom, |container| container.mt(px(24.)))
+                    .child(
+                        div()
+                            .w_full()
+                            .my(px(16.))
+                            .p_2()
+                            .rounded(px(10.))
+                            .border_1()
+                            .border_color(border)
+                            .bg(bg_box)
+                            .flex()
+                            .flex_col()
+                            .child(identity)
+                            .child(actions),
+                    ),
             )
+            .when(has_custom, |popup| popup.child(custom_status_overlay))
     }
 }
 

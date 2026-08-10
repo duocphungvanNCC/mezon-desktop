@@ -345,6 +345,7 @@ pub struct OgpPreview {
     pub url: String,
     pub title: SharedString,
     pub description: SharedString,
+    pub description_collapsed: SharedString,
     pub image_proxied: SharedString,
 }
 
