@@ -7,6 +7,7 @@ use mezon_store::{
     ChannelId, ChannelList, ChannelType, ClanId, ClanImageMimeType, ClanList, CreateEventDraft,
     EventsStore, MAX_CLAN_LOGO_BYTES, Settings,
 };
+use std::rc::Rc;
 
 use crate::app::shell::Shell;
 use crate::components::primitives::{
@@ -82,8 +83,8 @@ enum EventSelectPlacement {
 
 struct EventSelect {
     id: ElementId,
-    items: Vec<SharedString>,
-    icons: Vec<Option<IconName>>,
+    items: Rc<Vec<SharedString>>,
+    icons: Rc<Vec<Option<IconName>>>,
     selected: Option<usize>,
     open: bool,
     placeholder: SharedString,
@@ -97,8 +98,8 @@ impl EventSelect {
     fn new(id: impl Into<ElementId>, items: Vec<SharedString>) -> Self {
         Self {
             id: id.into(),
-            items,
-            icons: Vec::new(),
+            items: Rc::new(items),
+            icons: Rc::new(Vec::new()),
             selected: None,
             open: false,
             placeholder: SharedString::default(),
@@ -123,7 +124,7 @@ impl EventSelect {
     }
 
     fn icons(mut self, value: Vec<Option<IconName>>) -> Self {
-        self.icons = value;
+        self.icons = Rc::new(value);
         self
     }
 
@@ -146,8 +147,8 @@ impl EventSelect {
         icons: Vec<Option<IconName>>,
         cx: &mut Context<Self>,
     ) {
-        self.items = items;
-        self.icons = icons;
+        self.items = Rc::new(items);
+        self.icons = Rc::new(icons);
         if self.selected.is_some_and(|index| index >= self.items.len()) {
             self.selected = None;
         }
@@ -163,8 +164,8 @@ impl Render for EventSelect {
         let select_entity = cx.weak_entity();
         let next_open = !self.open;
         Dropdown::new(self.id.clone())
-            .items(self.items.clone())
-            .icons(self.icons.clone())
+            .shared_items(self.items.clone())
+            .shared_icons(self.icons.clone())
             .selected(self.selected)
             .open(self.open)
             .placeholder(self.placeholder.clone())

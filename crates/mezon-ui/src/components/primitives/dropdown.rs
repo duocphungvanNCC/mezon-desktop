@@ -2,6 +2,7 @@ use std::rc::Rc;
 
 use gpui::{
     App, ElementId, Hsla, MouseButton, SharedString, Window, deferred, div, prelude::*, px,
+    uniform_list,
 };
 
 use super::icon::{Icon, IconName};
@@ -28,8 +29,8 @@ pub enum DropdownPlacement {
 #[derive(IntoElement)]
 pub struct Dropdown {
     id: ElementId,
-    items: Vec<SharedString>,
-    icons: Vec<Option<IconName>>,
+    items: Rc<Vec<SharedString>>,
+    icons: Rc<Vec<Option<IconName>>>,
     selected: Option<usize>,
     open: bool,
     placeholder: SharedString,
@@ -47,8 +48,8 @@ impl Dropdown {
     pub fn new(id: impl Into<ElementId>) -> Self {
         Self {
             id: id.into(),
-            items: Vec::new(),
-            icons: Vec::new(),
+            items: Rc::new(Vec::new()),
+            icons: Rc::new(Vec::new()),
             selected: None,
             open: false,
             placeholder: "Select…".into(),
@@ -69,11 +70,21 @@ impl Dropdown {
     }
 
     pub fn items(mut self, items: Vec<SharedString>) -> Self {
+        self.items = Rc::new(items);
+        self
+    }
+
+    pub fn shared_items(mut self, items: Rc<Vec<SharedString>>) -> Self {
         self.items = items;
         self
     }
 
     pub fn icons(mut self, icons: Vec<Option<IconName>>) -> Self {
+        self.icons = Rc::new(icons);
+        self
+    }
+
+    pub fn shared_icons(mut self, icons: Rc<Vec<Option<IconName>>>) -> Self {
         self.icons = icons;
         self
     }
@@ -201,7 +212,7 @@ impl RenderOnce for Dropdown {
             let on_select = on_select.clone();
             this.child(deferred(
                 v_flex()
-                    .id((popup_id, "popup"))
+                    .id((popup_id.clone(), "popup"))
                     .absolute()
                     .when(self.placement == DropdownPlacement::Down, |el| {
                         el.top_full().mt(px(4.))
@@ -234,46 +245,74 @@ impl RenderOnce for Dropdown {
                                 .child(self.no_results.clone()),
                         )
                     })
-                    .children(self.items.into_iter().enumerate().map(|(index, item)| {
-                        let selected = self.selected == Some(index);
-                        let on_select = on_select.clone();
-                        h_flex()
-                            .id(("dropdown-item", index))
-                            .w_full()
-                            .items_center()
-                            .justify_between()
-                            .gap_2()
-                            .px(px(8.))
-                            .py(px(6.))
-                            .rounded(px(4.))
-                            .text_sm()
-                            .text_color(theme.text_primary)
-                            .cursor_pointer()
-                            .hover(|s| s.bg(theme.bg_hover))
-                            .child(
-                                h_flex()
-                                    .gap_2()
-                                    .when_some(
-                                        self.icons.get(index).copied().flatten(),
-                                        |el, icon| {
-                                            el.child(
-                                                Icon::new(icon)
-                                                    .size_4()
-                                                    .text_color(theme.text_secondary),
-                                            )
-                                        },
-                                    )
-                                    .child(item),
+                    .when(!self.items.is_empty(), |el| {
+                        let item_count = self.items.len();
+                        let list_height = (item_count as f32 * 32.).min(200.);
+                        let items = self.items.clone();
+                        let icons = self.icons.clone();
+                        el.child(
+                            uniform_list(
+                                (popup_id, "items"),
+                                item_count,
+                                move |range, _window, cx| {
+                                    let theme = cx.theme();
+                                    let items = items.clone();
+                                    let icons = icons.clone();
+                                    let on_select = on_select.clone();
+                                    range
+                                        .map(|index| {
+                                            let selected = self.selected == Some(index);
+                                            let on_select = on_select.clone();
+                                            h_flex()
+                                                .id(("dropdown-item", index))
+                                                .w_full()
+                                                .h(px(32.))
+                                                .items_center()
+                                                .justify_between()
+                                                .gap_2()
+                                                .px(px(8.))
+                                                .rounded(px(4.))
+                                                .text_sm()
+                                                .text_color(theme.text_primary)
+                                                .cursor_pointer()
+                                                .hover(|s| s.bg(theme.bg_hover))
+                                                .child(
+                                                    h_flex()
+                                                        .gap_2()
+                                                        .when_some(
+                                                            icons.get(index).copied().flatten(),
+                                                            |el, icon| {
+                                                                el.child(
+                                                                    Icon::new(icon)
+                                                                        .size_4()
+                                                                        .text_color(
+                                                                            theme.text_secondary,
+                                                                        ),
+                                                                )
+                                                            },
+                                                        )
+                                                        .child(items[index].clone()),
+                                                )
+                                                .when(selected, |el| {
+                                                    el.child(
+                                                        Icon::new(IconName::Check)
+                                                            .size_4()
+                                                            .text_color(theme.brand),
+                                                    )
+                                                })
+                                                .when_some(on_select, |el, handler| {
+                                                    el.on_click(move |_, window, cx| {
+                                                        handler(index, window, cx)
+                                                    })
+                                                })
+                                        })
+                                        .collect::<Vec<_>>()
+                                },
                             )
-                            .when(selected, |el| {
-                                el.child(
-                                    Icon::new(IconName::Check).size_4().text_color(theme.brand),
-                                )
-                            })
-                            .when_some(on_select, |el, handler| {
-                                el.on_click(move |_, window, cx| handler(index, window, cx))
-                            })
-                    })),
+                            .h(px(list_height))
+                            .w_full(),
+                        )
+                    }),
             ))
         })
     }

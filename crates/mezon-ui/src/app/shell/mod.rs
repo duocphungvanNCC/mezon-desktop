@@ -50,6 +50,23 @@ struct ToastItem {
     _ttl: Option<Task<()>>,
 }
 
+struct StackedModalHost {
+    view: AnyView,
+    focus_handle: gpui::FocusHandle,
+}
+
+impl Render for StackedModalHost {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .track_focus(&self.focus_handle)
+            .key_context("menu")
+            .on_action(cx.listener(|_, _: &::menu::Cancel, window, cx| {
+                Shell::global(cx).update(cx, |shell, cx| shell.dismiss_modal(window, cx));
+            }))
+            .child(self.view.clone())
+    }
+}
+
 /// Owns the window-level overlay layers (toasts + active modal). Registered as a [`Global`].
 pub struct Shell {
     toasts: Vec<ToastItem>,
@@ -644,11 +661,15 @@ impl Shell {
                 previous_focus,
             ));
         }
-        let focus_handle = view.read(cx).focus_handle.clone();
+        let host = cx.new(|cx| StackedModalHost {
+            view: view.into(),
+            focus_handle: cx.focus_handle(),
+        });
+        let focus_handle = host.read(cx).focus_handle.clone();
         window.focus(&focus_handle, cx);
         self.command_palette_open = false;
         self.modal_fullscreen = false;
-        self.modal = Some(view.into());
+        self.modal = Some(host.into());
         cx.notify();
     }
 
@@ -687,16 +708,9 @@ impl Shell {
 
     pub fn close_modal(&mut self, cx: &mut Context<Self>) {
         if self.modal.take().is_some() {
-            if let Some((underlay, fullscreen, command_palette_open, _)) =
-                self.modal_underlay.take()
-            {
-                self.modal = Some(underlay);
-                self.modal_fullscreen = fullscreen;
-                self.command_palette_open = command_palette_open;
-            } else {
-                self.command_palette_open = false;
-                self.modal_fullscreen = false;
-            }
+            self.modal_underlay = None;
+            self.command_palette_open = false;
+            self.modal_fullscreen = false;
             cx.notify();
         }
     }
