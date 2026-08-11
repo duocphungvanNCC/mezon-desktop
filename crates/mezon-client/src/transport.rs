@@ -106,6 +106,7 @@ pub enum RealtimeEvent {
     VoiceJoined(realtime::VoiceJoinedEvent),
     VoiceLeaved(realtime::VoiceLeavedEvent),
     VoiceReaction(realtime::VoiceReactionSend),
+    ScreenShare(realtime::ScreenShareEvent),
     UserChannelAdded(realtime::UserChannelAdded),
     UserChannelRemoved(realtime::UserChannelRemoved),
     NotifUserChannel(api::NotificationUserChannel),
@@ -161,6 +162,7 @@ impl RealtimeEvent {
             Self::VoiceJoined(_) => "VoiceJoined",
             Self::VoiceLeaved(_) => "VoiceLeaved",
             Self::VoiceReaction(_) => "VoiceReaction",
+            Self::ScreenShare(_) => "ScreenShare",
             Self::UserChannelAdded(_) => "UserChannelAdded",
             Self::UserChannelRemoved(_) => "UserChannelRemoved",
             Self::NotifUserChannel(_) => "NotifUserChannel",
@@ -218,6 +220,7 @@ impl TryFrom<realtime::envelope::Message> for RealtimeEvent {
             realtime::envelope::Message::VoiceJoinedEvent(m) => Ok(Self::VoiceJoined(m)),
             realtime::envelope::Message::VoiceLeavedEvent(m) => Ok(Self::VoiceLeaved(m)),
             realtime::envelope::Message::VoiceReactionSend(m) => Ok(Self::VoiceReaction(m)),
+            realtime::envelope::Message::ScreenShareEvent(m) => Ok(Self::ScreenShare(m)),
             realtime::envelope::Message::UserChannelAddedEvent(m) => Ok(Self::UserChannelAdded(m)),
             realtime::envelope::Message::UserChannelRemovedEvent(m) => {
                 Ok(Self::UserChannelRemoved(m))
@@ -767,6 +770,7 @@ pub struct ApiCategoryDesc {
 pub struct ApiVoiceChannelUser {
     pub channel_id: i64,
     pub user_ids: Vec<i64>,
+    pub share_screen_ids: Vec<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -5038,6 +5042,11 @@ impl MezonTransport {
                 channel_id: u.channel_id,
                 user_ids: u
                     .user_ids
+                    .iter()
+                    .filter_map(|s| s.parse::<i64>().ok())
+                    .collect(),
+                share_screen_ids: u
+                    .share_screen_ids
                     .iter()
                     .filter_map(|s| s.parse::<i64>().ok())
                     .collect(),
