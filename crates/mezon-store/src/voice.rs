@@ -2254,11 +2254,11 @@ impl VoiceStore {
         cx.notify();
     }
 
-    fn teardown(&mut self, mut window: Option<&mut Window>, cx: &mut Context<Self>) {
+    fn teardown(&mut self, window: Option<&mut Window>, cx: &mut Context<Self>) {
         self.cancel_reconnect_watchdog();
         self.close_pip(cx);
         self.fullscreen_screen = None;
-        self.clear_session_handles(window.as_deref_mut(), cx);
+        self.clear_session_handles(window, cx);
         self.connection = VoiceConnection::Idle;
         self.call_status = VoiceCallStatus::Stable;
         self.channel_label.clear();

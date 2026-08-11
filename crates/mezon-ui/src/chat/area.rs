@@ -1,3 +1,4 @@
+use crate::app::shell::Shell;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -234,6 +235,7 @@ impl ChatArea {
                     mention_input.clone(),
                     SharedString::from(locale.clone()),
                     &self.settings,
+                    false,
                     cx,
                 )
             }));
@@ -249,6 +251,13 @@ impl ChatArea {
                 &MessagesStore::global(cx),
                 window,
                 |this: &mut crate::ChatLayout, store, event: &MessagesEvent, window, cx| {
+                    if matches!(event, MessagesEvent::SendFailedWithoutRow) {
+                        let locale = this.chat_area.settings.read(cx).language.clone();
+                        let message =
+                            SharedString::from(mezon_i18n::t(&locale, "message.toast.sendFailed"));
+                        Shell::global(cx).update(cx, |shell, cx| shell.error(message, cx));
+                        return;
+                    }
                     if matches!(event, MessagesEvent::ReplyTargetChanged) {
                         let replying_to = store.read(cx).reply_target().map(|draft| ReplyTarget {
                             sender_name: SharedString::from(draft.sender_name.clone()),

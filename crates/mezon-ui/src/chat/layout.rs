@@ -3,12 +3,12 @@ use std::collections::HashMap;
 use crate::chat::channel_app_bar::ChannelAppBarTarget;
 use gpui::{
     AnyView, App, Context, DismissEvent, Entity, FocusHandle, Focusable, Pixels, ScrollHandle,
-    Size, StyleRefinement, Subscription, Task, Window, canvas, deferred, div, linear_color_stop,
-    linear_gradient, prelude::*, px,
+    Size, StyleRefinement, Subscription, Task, Window, deferred, div, linear_color_stop,
+    linear_gradient, prelude::*, px, relative,
 };
 use mezon_store::{
     AuthState, AutoUpdateStatus, AutoUpdateStore, CHANNEL_ACTIVE_ARCHIVED, CHANNEL_ACTIVE_JOINED,
-    Channel, ChannelId, ChannelList, ChannelType, ClanId, ClanList, ClanMembersStore,
+    Channel, ChannelEvent, ChannelId, ChannelList, ChannelType, ClanId, ClanList, ClanMembersStore,
     DirectChannel, DirectKind, DirectMessageStore, GroupMembersStore, InboxStore,
     MessageSearchEvent, MessageSearchStore, MessagesStore, PinnedEvent, PinnedMessagesStore,
     Settings, StreamStore, THREAD_STATUS_ARCHIVED, ThreadsEvent, ThreadsStore, TopicsEvent,
@@ -62,7 +62,6 @@ pub struct ChatLayout {
     voice_show_chat: bool,
     voice_session_key: Option<String>,
     voice_visual: crate::chat::voice::VoiceVisualState,
-    voice_mini_bar_height: Pixels,
     displayed_stream_joined: bool,
     displayed_stream_connecting: bool,
     displayed_stream_fullscreen: bool,
@@ -345,6 +344,23 @@ impl ChatLayout {
             }
         })
         .detach();
+        cx.subscribe(&channel_list, |this, _, event, cx| {
+            let ChannelEvent::ArchivedByAdministrator { is_thread } = event else {
+                return;
+            };
+            let locale = this.settings.read(cx).language.clone();
+            let key = if *is_thread {
+                "channelMenu.toastArchivedThreadByAdministrator"
+            } else {
+                "channelMenu.toastArchivedByAdministrator"
+            };
+            Shell::global(cx).update(cx, |shell, cx| {
+                shell.success(mezon_i18n::t(&locale, key).to_string(), cx);
+            });
+            this.redirect_archived_thread_route(cx);
+            this.ensure_active_channel_for_clan(cx);
+        })
+        .detach();
         cx.observe(&Router::global(cx), |this, _, cx| {
             let next_route = Router::global(cx).read(cx).route().clone();
             if next_route != this.last_route {
@@ -471,7 +487,6 @@ impl ChatLayout {
             voice_show_chat: false,
             voice_session_key: None,
             voice_visual: Default::default(),
-            voice_mini_bar_height: px(0.),
             displayed_stream_joined: false,
             displayed_stream_connecting: false,
             displayed_stream_fullscreen: false,
@@ -1129,6 +1144,16 @@ impl ChatLayout {
             if channel_list.channel_in_clan(clan_id, thread_id) {
                 return;
             }
+            if channel_list.is_locally_archived(thread_id) {
+                crate::router::replace(
+                    cx,
+                    Route::Channel {
+                        clan_id,
+                        channel_id,
+                    },
+                );
+                return;
+            }
         }
         let resolving = self.channel_list.update(cx, |store, cx| {
             store.ensure_channel_in_clan(clan_id, thread_id, cx)
@@ -1578,15 +1603,6 @@ impl Render for ChatLayout {
             self.stream_store.clone(),
             cx,
         );
-        let nav_bottom_pad = if voice_mini_bar.is_some() {
-            self.voice_mini_bar_height
-        } else {
-            px(0.)
-        } + if stream_connected_bar.is_some() {
-            px(crate::chat::stream::stream_connected_bar_height())
-        } else {
-            px(0.)
-        };
         fn update_banner_bg(hover: bool) -> gpui::Background {
             if hover {
                 linear_gradient(
@@ -1758,7 +1774,7 @@ impl Render for ChatLayout {
                     .flex_col()
                     .w(px(344.0))
                     .h_full()
-                    .relative()
+                    .bg(theme.bg_tertiary)
                     .child(
                         div()
                             .flex()
@@ -1768,58 +1784,44 @@ impl Render for ChatLayout {
                             .bg(theme.bg_tertiary)
                             .overflow_hidden()
                             .child(
-                                div().w(px(72.0)).h_full().pb(nav_bottom_pad).child(
+                                div().w(px(72.0)).h_full().child(
                                     AnyView::from(self.clan_sidebar.clone())
                                         .cached(StyleRefinement::default().size_full()),
                                 ),
                             )
-                            .child(
-                                div()
-                                    .w(px(272.0))
-                                    .h_full()
-                                    .pb(nav_bottom_pad)
-                                    .child(nav_body),
-                            ),
+                            .child(div().w(px(272.0)).h_full().child(nav_body)),
                     )
                     .child(
                         div()
-                            .absolute()
-                            .left(px(12.0))
-                            .right(px(8.0))
-                            .bottom(px(12.0))
+                            .flex_none()
+                            .ml(px(12.))
+                            .mr_2()
+                            .mb_3()
                             .flex()
                             .flex_col()
+                            .max_h(relative(0.5))
+                            .min_h_0()
                             .rounded(px(12.0))
                             .overflow_hidden()
                             .border_1()
                             .border_color(theme.tokens.border_primary)
                             .shadow_lg()
                             .bg(theme.tokens.bg_surface)
-                            .occlude()
-                            .children(stream_connected_bar)
-                            .children(voice_mini_bar.map(|bar| {
-                                let chat = cx.entity();
-                                div().relative().w_full().child(bar).child(
-                                    canvas(
-                                        move |bounds, _, cx| {
-                                            chat.update(cx, |layout, cx| {
-                                                layout.record_voice_mini_bar_height(
-                                                    bounds.size.height,
-                                                    cx,
-                                                )
-                                            })
-                                        },
-                                        |_, _, _, _| {},
-                                    )
-                                    .absolute()
-                                    .size_full(),
-                                )
-                            }))
-                            .children(update_available_pill)
-                            .children(update_pill)
-                            .children(manual_install_pill)
                             .child(
                                 div()
+                                    .id("clan-footer-bars")
+                                    .flex_1()
+                                    .min_h_0()
+                                    .overflow_y_scroll()
+                                    .children(stream_connected_bar)
+                                    .children(voice_mini_bar)
+                                    .children(update_available_pill)
+                                    .children(update_pill)
+                                    .children(manual_install_pill),
+                            )
+                            .child(
+                                div()
+                                    .flex_none()
                                     .w_full()
                                     .h(px(56.0))
                                     .child(AnyView::from(self.user_info_bar.clone())),
@@ -1857,7 +1859,13 @@ impl ChatLayout {
             mention_input.take_ephemeral_receiver(cx)
         });
         if let Some(receiver_id) = ephemeral_receiver {
-            crate::chat::ChatSending::send_ephemeral(receiver_id, content, content_tokens, cx);
+            crate::chat::ChatSending::send_ephemeral(
+                receiver_id,
+                content,
+                content_tokens,
+                attachments,
+                cx,
+            );
             return;
         }
         crate::chat::ChatSending::send_text(
@@ -2241,13 +2249,6 @@ impl ChatLayout {
         };
         view.cached(StyleRefinement::default().size_full())
             .into_any_element()
-    }
-
-    fn record_voice_mini_bar_height(&mut self, height: Pixels, cx: &mut Context<Self>) {
-        if self.voice_mini_bar_height != height {
-            self.voice_mini_bar_height = height;
-            cx.notify();
-        }
     }
 
     fn sync_voice_session_defaults(&mut self, cx: &App) {

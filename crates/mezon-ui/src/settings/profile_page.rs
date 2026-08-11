@@ -1,3 +1,4 @@
+use crate::components::compositions::CustomStatusBubble;
 use crate::components::primitives::{
     Avatar, Button as GpuiButton, ButtonVariants, Icon, IconName, Input, InputEvent, InputState,
     Label, TextArea, TextAreaEvent, TextAreaField, h_flex, v_flex,
@@ -80,6 +81,7 @@ pub struct ProfilePage {
     banner_source: String,
     banner_task: Option<Task<()>>,
     discard_on_next_render: bool,
+    custom_status_bubble: Entity<CustomStatusBubble>,
     #[allow(dead_code)]
     show_delete_confirm: bool,
 }
@@ -215,6 +217,7 @@ impl ProfilePage {
             banner_source: String::new(),
             banner_task: None,
             discard_on_next_render: false,
+            custom_status_bubble: cx.new(|_| CustomStatusBubble::new()),
             show_delete_confirm: false,
         };
         this.refresh_banner_color(cx);
@@ -441,6 +444,23 @@ impl ProfilePage {
             .as_ref()
             .and_then(|p| p.avatar_url.as_ref())
             .map(|url| SharedString::from(crate::util::imgproxy::profile_url(cx, url.as_ref())));
+        let custom_status = self
+            .profile
+            .as_ref()
+            .map_or_else(SharedString::default, |profile| {
+                profile.custom_status.clone()
+            });
+        let custom_status_bubble = self.custom_status_bubble.clone();
+        custom_status_bubble.update(cx, |bubble, cx| {
+            bubble.set_content(
+                custom_status,
+                px(214.),
+                theme.tokens.bg_secondary,
+                theme.border,
+                theme.text_secondary,
+                cx,
+            );
+        });
         let form = self.render_form(theme, cx, avatar_display.clone());
         let preview = self.render_preview(
             theme,
@@ -1167,7 +1187,7 @@ impl ProfilePage {
             .child(
                 div()
                     .relative()
-                    .h(px(330.))
+                    .h(px(320.))
                     .w_full()
                     .rounded_lg()
                     .overflow_hidden()
@@ -1188,19 +1208,33 @@ impl ProfilePage {
                             .absolute()
                             .left(px(20.))
                             .right(px(20.))
-                            .bottom(px(48.))
+                            .bottom(px(20.))
                             .p_4()
                             .rounded_lg()
                             .border_1()
                             .border_color(theme.border)
                             .bg(theme.bg_primary)
                             .child(
-                                Label::new(display_name.clone())
-                                    .text_xl()
-                                    .font_weight(FontWeight::BOLD)
-                                    .text_color(theme.text_secondary),
-                            )
-                            .child(Label::new(username).text_sm().text_color(theme.text_muted)),
+                                v_flex()
+                                    .w(px(300.))
+                                    .max_w_full()
+                                    .min_w_0()
+                                    .child(
+                                        Label::new(display_name.clone())
+                                            .w_full()
+                                            .truncate()
+                                            .text_xl()
+                                            .font_weight(FontWeight::BOLD)
+                                            .text_color(theme.text_secondary),
+                                    )
+                                    .child(
+                                        Label::new(username)
+                                            .w_full()
+                                            .truncate()
+                                            .text_sm()
+                                            .text_color(theme.text_muted),
+                                    ),
+                            ),
                     )
                     .child(
                         div()
@@ -1263,22 +1297,21 @@ impl ProfilePage {
             .when(!custom_status.is_empty(), |preview| {
                 preview.child(
                     div()
+                        .id("user-profile-preview-custom-status")
+                        .group("user-profile-preview-custom-status")
                         .absolute()
                         .left(px(120.))
                         .top(px(168.))
-                        .max_w(px(250.))
-                        .max_h(px(64.))
-                        .px_4()
-                        .py_3()
-                        .rounded_xl()
-                        .bg(theme.tokens.bg_secondary)
-                        .border_1()
-                        .border_color(theme.border)
-                        .shadow_md()
-                        .text_sm()
-                        .text_color(theme.text_secondary)
-                        .overflow_hidden()
-                        .child(custom_status),
+                        .max_w(px(214.))
+                        .on_hover({
+                            let custom_status_bubble = self.custom_status_bubble.clone();
+                            move |hovered: &bool, _window, cx| {
+                                custom_status_bubble.update(cx, |bubble, cx| {
+                                    bubble.set_expanded(*hovered, cx);
+                                });
+                            }
+                        })
+                        .child(self.custom_status_bubble.clone()),
                 )
             })
     }

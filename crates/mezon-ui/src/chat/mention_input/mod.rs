@@ -136,6 +136,12 @@ fn open_message_buzz(window: &mut Window, cx: &mut App) {
     let locale = Settings::try_global(cx)
         .map(|settings| SharedString::from(settings.read(cx).language.clone()))
         .unwrap_or_else(|| SharedString::from("en"));
+    if MessagesStore::global(cx).read(cx).is_anonymous_mode() {
+        let message =
+            SharedString::from(mezon_i18n::t(&locale, "common.cannotSendBuzzWithAnonymous"));
+        Shell::global(cx).update(cx, |shell, cx| shell.info(message, cx));
+        return;
+    }
     MessageBuzzModal::open(locale, window, cx);
 }
 
@@ -705,11 +711,20 @@ impl MentionInput {
         let outgoing = self
             .draft_channel
             .map(|leaving| (leaving, self.take_draft(cx)));
+        let persist_leaving = outgoing.as_ref().map(|(leaving, _)| {
+            ChannelList::global(cx)
+                .read(cx)
+                .should_persist_compose_draft(*leaving)
+        });
         let incoming = store.update(cx, |store, _| {
             if let Some((leaving, draft)) = outgoing {
-                match draft {
-                    Some(draft) => store.set_draft(leaving, draft),
-                    None => store.clear_draft(leaving),
+                if persist_leaving.unwrap_or(false) {
+                    match draft {
+                        Some(draft) => store.set_draft(leaving, draft),
+                        None => store.clear_draft(leaving),
+                    }
+                } else {
+                    store.clear_draft(leaving);
                 }
             }
             channel_id.and_then(|channel_id| store.take_draft(channel_id))
@@ -1597,7 +1612,10 @@ impl MentionInput {
     }
 
     fn check_trigger(&mut self, content: &str, cx: &mut Context<Self>) {
-        let cursor = self.input.read(cx).cursor().min(content.len());
+        let mut cursor = self.input.read(cx).cursor().min(content.len());
+        while cursor > 0 && !content.is_char_boundary(cursor) {
+            cursor -= 1;
+        }
         if cursor == 0 || content.is_empty() {
             self.end_mention(cx);
             return;
@@ -1666,6 +1684,7 @@ impl MentionInput {
                         this.invalidate_pool(Sigil::Hash, cx);
                     }
                     ChannelEvent::Unread(_) | ChannelEvent::InVoiceChanged => {}
+                    ChannelEvent::ArchivedByAdministrator { .. } => {}
                 },
             ),
             cx.subscribe(

@@ -266,7 +266,21 @@ fn dispatch_realtime_push(
                             | RealtimeEvent::ChannelPresence(_)
                             | RealtimeEvent::StatusPresence(_)
                     ) {
-                        tracing::debug!("server push (cid={cid}): {}", event.kind_name());
+                        if let RealtimeEvent::Unhandled(inner) = &event {
+                            if tracing::enabled!(tracing::Level::DEBUG) {
+                                let detail = format!("{inner:?}");
+                                let name = detail
+                                    .split(['(', '{', ' '])
+                                    .next()
+                                    .filter(|n| !n.is_empty())
+                                    .unwrap_or("unknown");
+                                tracing::debug!(
+                                    "server push (cid={cid}): Unhandled variant: {name}"
+                                );
+                            }
+                        } else {
+                            tracing::debug!("server push (cid={cid}): {}", event.kind_name());
+                        }
                     }
                     on_event(event);
                 }
@@ -4460,6 +4474,7 @@ impl MezonTransport {
         hashtags: Vec<OutgoingHashtag>,
         emojis: Vec<OutgoingEmoji>,
         reply: Option<OutgoingReply>,
+        flags: OutgoingMessageFlags,
     ) -> Result<ApiMessage> {
         let references = reply
             .map(|reply| api::MessageRef {
@@ -4491,7 +4506,7 @@ impl MezonTransport {
             false,
             topic_id,
             None,
-            OutgoingMessageFlags::default(),
+            flags,
         )
         .await
     }
@@ -4511,6 +4526,7 @@ impl MezonTransport {
         emojis: Vec<OutgoingEmoji>,
         presign_finish: Option<Vec<String>>,
         reply: Option<OutgoingReply>,
+        flags: OutgoingMessageFlags,
     ) -> Result<ApiMessage> {
         let references = reply
             .map(|reply| api::MessageRef {
@@ -4542,7 +4558,7 @@ impl MezonTransport {
             false,
             topic_id,
             None,
-            OutgoingMessageFlags::default(),
+            flags,
         )
         .await
     }
@@ -4561,6 +4577,7 @@ impl MezonTransport {
         hashtags: Vec<OutgoingHashtag>,
         emojis: Vec<OutgoingEmoji>,
         presign_finish: Option<Vec<String>>,
+        flags: OutgoingMessageFlags,
     ) -> Result<ApiMessage> {
         let references = reply
             .map(|reply| api::MessageRef {
@@ -4592,7 +4609,7 @@ impl MezonTransport {
             false,
             0,
             None,
-            OutgoingMessageFlags::default(),
+            flags,
         )
         .await
     }
@@ -4611,6 +4628,7 @@ impl MezonTransport {
         hashtags: Vec<OutgoingHashtag>,
         emojis: Vec<OutgoingEmoji>,
         ogp: Option<OutgoingOgp>,
+        flags: OutgoingMessageFlags,
     ) -> Result<ApiMessage> {
         let reference = api::MessageRef {
             message_ref_id: reply.message_ref_id,
@@ -4639,7 +4657,7 @@ impl MezonTransport {
             false,
             0,
             ogp,
-            OutgoingMessageFlags::default(),
+            flags,
         )
         .await
     }
@@ -4741,6 +4759,12 @@ impl MezonTransport {
             content.len(),
             attachments.len()
         );
+        let mention_everyone = mentions.iter().any(OutgoingMention::is_here);
+        let mentions = if flags.anonymous_message {
+            Vec::new()
+        } else {
+            mentions
+        };
         // mezon stores message content as JSON `{ "t": <text> }` (matches mezon-js), not raw text.
         let sent = if content_is_json {
             let text = serde_json::from_str::<ApiMessageContent>(content)
@@ -4766,7 +4790,6 @@ impl MezonTransport {
             Some(ogp) => with_ogp_token(content_json, ogp),
             None => content_json,
         };
-        let mention_everyone = sent.mentions.iter().any(OutgoingMention::is_here);
         let proto_mentions: Vec<api::MessageMention> = sent
             .mentions
             .iter()
@@ -6545,6 +6568,20 @@ impl MezonTransport {
         Ok(())
     }
 
+    pub async fn archive_channel(&self, clan_id: i64, channel_id: i64) -> Result<()> {
+        let cid = self.generate_cid();
+        let body = api::ArchiveChannelRequest {
+            clan_id,
+            channel_id,
+        }
+        .encode_to_vec();
+        let (code, _) = self.send_api_request(cid, "ArchiveChannel", body).await?;
+        if code != 0 {
+            return Err(anyhow::anyhow!("API error: code={}", code));
+        }
+        Ok(())
+    }
+
     /// Reactivate archived thread.
     pub async fn active_archived_thread(&self, clan_id: i64, channel_id: i64) -> Result<()> {
         let cid = self.generate_cid();
@@ -7385,6 +7422,8 @@ impl MezonTransport {
         mentions: Vec<OutgoingMention>,
         hashtags: Vec<OutgoingHashtag>,
         emojis: Vec<OutgoingEmoji>,
+        attachments: Vec<api::MessageAttachment>,
+        reply: Option<OutgoingReply>,
     ) -> Result<()> {
         let cid = self.generate_cid();
         let sent = build_send_content(content, &mentions, &hashtags, &emojis);
@@ -7394,11 +7433,28 @@ impl MezonTransport {
             .iter()
             .filter_map(OutgoingMention::to_proto)
             .collect();
+        let references = reply
+            .map(|reply| api::MessageRef {
+                message_ref_id: reply.message_ref_id,
+                content: reply.content,
+                has_attachment: reply.has_attachment,
+                ref_type: 0,
+                message_sender_id: reply.message_sender_id,
+                message_sender_username: reply.message_sender_username,
+                message_sender_avatar: reply.message_sender_avatar,
+                message_sender_clan_nick: reply.message_sender_clan_nick,
+                message_sender_display_name: reply.message_sender_display_name,
+                ..Default::default()
+            })
+            .into_iter()
+            .collect();
         let message = realtime::ChannelMessageSend {
             clan_id,
             channel_id,
             content: sent.json,
             mentions: proto_mentions,
+            attachments,
+            references,
             mode,
             is_public,
             mention_everyone,
@@ -7790,22 +7846,10 @@ impl MezonTransport {
     /// Create event.
     pub async fn create_event(
         &self,
-        title: &str,
-        clan_id: i64,
-        channel_id: i64,
-        start_time: u32,
-        end_time: u32,
+        request: api::CreateEventRequest,
     ) -> Result<api::EventManagement> {
         let cid = self.generate_cid();
-        let body = api::CreateEventRequest {
-            title: title.to_string(),
-            clan_id,
-            channel_id,
-            start_time_seconds: start_time,
-            end_time_seconds: end_time,
-            ..Default::default()
-        }
-        .encode_to_vec();
+        let body = request.encode_to_vec();
         let (code, response) = self.send_api_request(cid, "CreateEvent", body).await?;
         if code != 0 {
             return Err(anyhow::anyhow!("API error: code={}", code));
