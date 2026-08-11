@@ -2159,15 +2159,10 @@ impl ChatLayout {
         }
         if self.topic_panel.is_none() {
             let settings = self.settings.clone();
-            let align_timeline = self.chat_area.timeline.clone();
-            self.topic_panel = Some(cx.new(|cx| {
-                crate::chat::create_topic_panel::TopicPanel::new(
-                    settings,
-                    align_timeline,
-                    window,
-                    cx,
-                )
-            }));
+            self.topic_panel =
+                Some(cx.new(|cx| {
+                    crate::chat::create_topic_panel::TopicPanel::new(settings, window, cx)
+                }));
         }
         self.topic_panel
             .clone()
