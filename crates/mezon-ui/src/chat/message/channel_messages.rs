@@ -1683,7 +1683,8 @@ impl ChannelMessages {
                 | MessagesEvent::ForwardProgress { .. }
                 | MessagesEvent::ForwardFinished { .. }
                 | MessagesEvent::ShareContactFinished { .. }
-                | MessagesEvent::AnonymousModeChanged => return,
+                | MessagesEvent::AnonymousModeChanged
+                | MessagesEvent::SendFailedWithoutRow => return,
                 MessagesEvent::TopicUpdated { .. } => {}
             }
             if structural {

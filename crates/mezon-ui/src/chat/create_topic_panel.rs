@@ -41,6 +41,7 @@ impl TopicPanel {
                 mention_input.clone(),
                 SharedString::from(locale.clone()),
                 &settings,
+                true,
                 cx,
             )
         });

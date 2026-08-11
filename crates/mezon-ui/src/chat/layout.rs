@@ -1832,7 +1832,13 @@ impl ChatLayout {
             mention_input.take_ephemeral_receiver(cx)
         });
         if let Some(receiver_id) = ephemeral_receiver {
-            crate::chat::ChatSending::send_ephemeral(receiver_id, content, content_tokens, cx);
+            crate::chat::ChatSending::send_ephemeral(
+                receiver_id,
+                content,
+                content_tokens,
+                attachments,
+                cx,
+            );
             return;
         }
         crate::chat::ChatSending::send_text(

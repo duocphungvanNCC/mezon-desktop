@@ -1797,6 +1797,8 @@ impl TransportClient {
         mentions: Vec<crate::transport::OutgoingMention>,
         hashtags: Vec<crate::transport::OutgoingHashtag>,
         emojis: Vec<crate::transport::OutgoingEmoji>,
+        attachments: Vec<mezon_proto::api::MessageAttachment>,
+        reply: Option<crate::transport::OutgoingReply>,
     ) -> Result<()> {
         let transport = self.inner.clone();
         let content = content.to_string();
@@ -1813,6 +1815,8 @@ impl TransportClient {
                         mentions,
                         hashtags,
                         emojis,
+                        attachments,
+                        reply,
                     )
                     .await
             })
@@ -2348,6 +2352,7 @@ impl TransportClient {
         hashtags: Vec<crate::transport::OutgoingHashtag>,
         emojis: Vec<crate::transport::OutgoingEmoji>,
         reply: Option<crate::transport::OutgoingReply>,
+        flags: crate::transport::OutgoingMessageFlags,
     ) -> Result<crate::transport::ApiMessage> {
         let transport = self.inner.clone();
         let content = content.to_string();
@@ -2357,7 +2362,7 @@ impl TransportClient {
                 transport
                     .send_topic_message(
                         clan_id, channel_id, &content, is_public, mode, topic_id, mentions,
-                        hashtags, emojis, reply,
+                        hashtags, emojis, reply, flags,
                     )
                     .await
             })
@@ -2380,6 +2385,7 @@ impl TransportClient {
         emojis: Vec<crate::transport::OutgoingEmoji>,
         presign_finish: Option<Vec<String>>,
         reply: Option<crate::transport::OutgoingReply>,
+        flags: crate::transport::OutgoingMessageFlags,
     ) -> Result<crate::transport::ApiMessage> {
         let transport = self.inner.clone();
         let content = content.to_string();
@@ -2400,6 +2406,7 @@ impl TransportClient {
                         emojis,
                         presign_finish,
                         reply,
+                        flags,
                     )
                     .await
             })
@@ -2420,6 +2427,7 @@ impl TransportClient {
         hashtags: Vec<crate::transport::OutgoingHashtag>,
         emojis: Vec<crate::transport::OutgoingEmoji>,
         ogp: Option<crate::transport::OutgoingOgp>,
+        flags: crate::transport::OutgoingMessageFlags,
     ) -> Result<crate::transport::ApiMessage> {
         let transport = self.inner.clone();
         let content = content.to_string();
@@ -2428,7 +2436,7 @@ impl TransportClient {
                 transport
                     .send_channel_message_reply(
                         clan_id, channel_id, &content, is_public, mode, reply, mentions, hashtags,
-                        emojis, ogp,
+                        emojis, ogp, flags,
                     )
                     .await
             })
@@ -2450,6 +2458,7 @@ impl TransportClient {
         hashtags: Vec<crate::transport::OutgoingHashtag>,
         emojis: Vec<crate::transport::OutgoingEmoji>,
         presign_finish: Option<Vec<String>>,
+        flags: crate::transport::OutgoingMessageFlags,
     ) -> Result<crate::transport::ApiMessage> {
         let transport = self.inner.clone();
         let content = content.to_string();
@@ -2469,6 +2478,7 @@ impl TransportClient {
                         hashtags,
                         emojis,
                         presign_finish,
+                        flags,
                     )
                     .await
             })

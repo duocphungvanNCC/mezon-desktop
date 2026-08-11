@@ -136,6 +136,12 @@ fn open_message_buzz(window: &mut Window, cx: &mut App) {
     let locale = Settings::try_global(cx)
         .map(|settings| SharedString::from(settings.read(cx).language.clone()))
         .unwrap_or_else(|| SharedString::from("en"));
+    if MessagesStore::global(cx).read(cx).is_anonymous_mode() {
+        let message =
+            SharedString::from(mezon_i18n::t(&locale, "common.cannotSendBuzzWithAnonymous"));
+        Shell::global(cx).update(cx, |shell, cx| shell.info(message, cx));
+        return;
+    }
     MessageBuzzModal::open(locale, window, cx);
 }
 
@@ -1597,7 +1603,10 @@ impl MentionInput {
     }
 
     fn check_trigger(&mut self, content: &str, cx: &mut Context<Self>) {
-        let cursor = self.input.read(cx).cursor().min(content.len());
+        let mut cursor = self.input.read(cx).cursor().min(content.len());
+        while cursor > 0 && !content.is_char_boundary(cursor) {
+            cursor -= 1;
+        }
         if cursor == 0 || content.is_empty() {
             self.end_mention(cx);
             return;
