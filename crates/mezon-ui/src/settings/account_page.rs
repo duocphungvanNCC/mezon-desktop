@@ -1,5 +1,3 @@
-use std::io::Cursor;
-use std::sync::Arc;
 use std::time::Duration;
 
 use crate::components::primitives::{
@@ -8,15 +6,16 @@ use crate::components::primitives::{
 };
 use base64::Engine;
 use gpui::{
-    ClipboardItem, Context, Entity, FocusHandle, FontWeight, Image as ClipboardImage, ImageFormat,
-    ObjectFit, RenderImage, Rgba, SharedString, Task, Window, div, img, prelude::*, px,
+    App, ClipboardItem, Context, Entity, FocusHandle, FontWeight, ObjectFit, Rgba, SharedString,
+    Task, Window, div, img, prelude::*, px,
 };
-use mezon_store::{AccountStore, Settings, UserAccount};
+use mezon_store::{AccountStore, AppConfig, Settings, UserAccount};
 
 use crate::app::shell::Shell;
 use crate::image_cache::LruImageCache;
 use crate::theme::ActiveTheme;
 use crate::util::avatar_color::spawn_banner_color_task;
+use crate::util::qr_image::{QrImage, QrImageOptions, build_qr_image};
 
 /// The avatar overlaps the banner, so its box is positioned against the card
 /// rather than laid out in flow. Every offset below is derived from these four
@@ -38,26 +37,58 @@ const NAME_LIFT: f32 = (AVATAR_TOP + AVATAR_BOX / 2.0) - (BANNER_HEIGHT + HEADER
 /// Optical nudge so the button's cap height sits level with the name.
 const EDIT_BUTTON_LIFT: f32 = -8.0;
 
-#[derive(Clone)]
-struct QrProfileImage {
-    render: Arc<RenderImage>,
-    clipboard: ClipboardImage,
-}
-
 struct QrProfileModal {
     focus_handle: FocusHandle,
     locale: String,
-    qr_image: Option<QrProfileImage>,
+    qr_image: Option<QrImage>,
+    loading: bool,
     copied: bool,
     copy_reset_task: Option<Task<()>>,
 }
 
 impl QrProfileModal {
-    fn new(data: &str, locale: String, cx: &mut Context<Self>) -> Self {
+    fn open(data: String, locale: String, window: &mut Window, cx: &mut App) {
+        let modal = cx.new(|cx| Self::new(locale, cx));
+        let focus_handle = modal.read(cx).focus_handle.clone();
+        Shell::global(cx).update(cx, |shell, cx| shell.show_modal(modal.clone().into(), cx));
+        window.focus(&focus_handle, cx);
+
+        let executor = cx.background_executor().clone();
+        cx.spawn(async move |cx| {
+            let qr_image = executor
+                .spawn(async move {
+                    build_qr_image(
+                        &data,
+                        QrImageOptions {
+                            target_size: 328,
+                            min_module_scale: 2,
+                            error_correction: qrcode::EcLevel::L,
+                            clipboard_border: 40,
+                        },
+                    )
+                })
+                .await;
+            let _ = modal.update(cx, |this, cx| {
+                this.qr_image = qr_image;
+                this.loading = false;
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn new(locale: String, cx: &mut Context<Self>) -> Self {
+        cx.on_release(|this, cx| {
+            if let Some(qr) = this.qr_image.take() {
+                crate::image_cache::queue_atlas_drop(cx, qr.render);
+            }
+        })
+        .detach();
         Self {
             focus_handle: cx.focus_handle(),
             locale,
-            qr_image: build_qr_image(data, 328),
+            qr_image: None,
+            loading: true,
             copied: false,
             copy_reset_task: None,
         }
@@ -68,9 +99,8 @@ impl QrProfileModal {
             return;
         }
         let Some(qr) = &self.qr_image else {
-            Shell::global(cx).update(cx, |shell, cx| {
-                shell.error("Unable to generate QR code", cx)
-            });
+            let message = mezon_i18n::t(&self.locale, "inviteToChannel.qrModal.errorGenerating");
+            Shell::global(cx).update(cx, |shell, cx| shell.error(message, cx));
             return;
         };
         cx.write_to_clipboard(ClipboardItem::new_image(&qr.clipboard));
@@ -97,7 +127,7 @@ impl QrProfileModal {
         }));
     }
 
-    fn close(cx: &mut gpui::App) {
+    fn close(cx: &mut App) {
         Shell::global(cx).update(cx, |shell, cx| shell.close_modal(cx));
     }
 }
@@ -105,14 +135,12 @@ impl QrProfileModal {
 impl Render for QrProfileModal {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
-        let qr = self.qr_image.clone();
-
         div()
             .track_focus(&self.focus_handle)
             .key_context("menu")
             .on_action(cx.listener(|_, _: &::menu::Cancel, _, cx| Self::close(cx)))
             .relative()
-            .size(px(328.))
+            .size(px(360.))
             .p_4()
             .rounded_lg()
             .bg(gpui::white())
@@ -120,14 +148,21 @@ impl Render for QrProfileModal {
             .flex()
             .items_center()
             .justify_center()
-            .child(match qr {
-                Some(image) => img(image.render)
+            .child(match &self.qr_image {
+                Some(image) => img(image.render.clone())
                     .size_full()
                     .object_fit(ObjectFit::Contain)
                     .into_any_element(),
                 None => div()
-                    .text_color(theme.text_muted)
-                    .child("Unable to generate QR code")
+                    .text_color(theme.tokens.theme_text_color_dark)
+                    .child(mezon_i18n::t(
+                        &self.locale,
+                        if self.loading {
+                            "inviteToChannel.qrModal.generating"
+                        } else {
+                            "inviteToChannel.qrModal.errorGenerating"
+                        },
+                    ))
                     .into_any_element(),
             })
             .child(
@@ -139,10 +174,14 @@ impl Render for QrProfileModal {
             )
             .child(
                 div()
-                    .id("copy-profile-qr")
+                    .id("copy-profile-qr-wrapper")
                     .absolute()
-                    .p_4()
+                    .p_3()
                     .rounded_full()
+                    .bg(theme.tokens.bg_modal)
+                    .flex()
+                    .items_center()
+                    .justify_center()
                     .cursor_pointer()
                     .child(
                         Icon::new(if self.copied {
@@ -301,7 +340,8 @@ impl Render for AccountPage {
         };
 
         let avatar_url = SharedString::from(Self::avatar_source(account.avatar_url.as_deref(), cx));
-        let qr_data = profile_qr_link(account);
+        let qr_account = account.clone();
+        let qr_origin = AppConfig::global(cx).domain_url.clone();
         let qr_locale = locale.clone();
         let banner_color = self
             .banner_color
@@ -400,16 +440,14 @@ impl Render for AccountPage {
                                                     .text_color(gpui::black()),
                                             )
                                             .on_click(move |_, window, cx| {
-                                                let locale = qr_locale.clone();
-                                                let modal = cx.new(|cx| {
-                                                    QrProfileModal::new(&qr_data, locale, cx)
-                                                });
-                                                let focus_handle =
-                                                    modal.read(cx).focus_handle.clone();
-                                                Shell::global(cx).update(cx, |shell, cx| {
-                                                    shell.show_modal(modal.clone().into(), cx)
-                                                });
-                                                window.focus(&focus_handle, cx);
+                                                let qr_data =
+                                                    profile_qr_link(&qr_account, &qr_origin);
+                                                QrProfileModal::open(
+                                                    qr_data,
+                                                    qr_locale.clone(),
+                                                    window,
+                                                    cx,
+                                                );
                                             }),
                                     )
                                     .child(
@@ -577,83 +615,25 @@ fn mask_email(email: &str) -> String {
     }
 }
 
-fn profile_qr_link(account: &UserAccount) -> String {
+fn profile_qr_link(account: &UserAccount, origin: &str) -> String {
+    let name = if account.display_name.is_empty() {
+        account.username.as_str()
+    } else {
+        account.display_name.as_str()
+    };
     let data = serde_json::json!({
         "id": account.user_id.to_string(),
-        "name": account.display_name,
+        "name": name,
         "avatar": account.avatar_url.as_deref().unwrap_or_default(),
     })
     .to_string();
-    let encoded = encode_uri_component(&data);
+    let encoded = mezon_client::encode_url_param(&data);
     let payload = base64::engine::general_purpose::STANDARD.encode(encoded);
-    format!("https://mezon.ai/chat/{}?data={payload}", account.username)
-}
-
-fn encode_uri_component(value: &str) -> String {
-    let mut encoded = String::with_capacity(value.len());
-    for byte in value.bytes() {
-        if byte.is_ascii_alphanumeric()
-            || matches!(
-                byte,
-                b'-' | b'_' | b'.' | b'!' | b'~' | b'*' | b'\'' | b'(' | b')'
-            )
-        {
-            encoded.push(char::from(byte));
-        } else {
-            use std::fmt::Write;
-            let _ = write!(encoded, "%{byte:02X}");
-        }
-    }
-    encoded
-}
-
-fn build_qr_image(data: &str, target_size: usize) -> Option<QrProfileImage> {
-    let code = qrcode::QrCode::new(data.as_bytes()).ok()?;
-    let width = code.width();
-    if width == 0 {
-        return None;
-    }
-    let scale = (target_size / width).max(1);
-    let dimension = (width * scale) as u32;
-    let mut buffer = image::ImageBuffer::<image::Rgba<u8>, Vec<u8>>::from_pixel(
-        dimension,
-        dimension,
-        image::Rgba([255, 255, 255, 255]),
-    );
-
-    for (index, color) in code.to_colors().iter().enumerate() {
-        if *color != qrcode::Color::Dark {
-            continue;
-        }
-        let origin_x = ((index % width) * scale) as u32;
-        let origin_y = ((index / width) * scale) as u32;
-        for y in 0..scale as u32 {
-            for x in 0..scale as u32 {
-                buffer.put_pixel(origin_x + x, origin_y + y, image::Rgba([0, 0, 0, 255]));
-            }
-        }
-    }
-
-    let render = Arc::new(RenderImage::new(vec![image::Frame::new(buffer.clone())]));
-    let clipboard_border = 40u32;
-    let mut clipboard_buffer = image::ImageBuffer::<image::Rgba<u8>, Vec<u8>>::from_pixel(
-        dimension + clipboard_border * 2,
-        dimension + clipboard_border * 2,
-        image::Rgba([255, 255, 255, 255]),
-    );
-    image::imageops::overlay(
-        &mut clipboard_buffer,
-        &buffer,
-        clipboard_border.into(),
-        clipboard_border.into(),
-    );
-    let mut png = Cursor::new(Vec::new());
-    image::DynamicImage::ImageRgba8(clipboard_buffer)
-        .write_to(&mut png, image::ImageFormat::Png)
-        .ok()?;
-    let clipboard = ClipboardImage::from_bytes(ImageFormat::Png, png.into_inner());
-
-    Some(QrProfileImage { render, clipboard })
+    format!(
+        "{}/chat/{}?data={payload}",
+        origin.trim_end_matches('/'),
+        account.username
+    )
 }
 
 #[cfg(test)]
@@ -685,7 +665,24 @@ mod tests {
     }
 
     #[test]
-    fn generated_profile_qr_has_a_scannable_image() {
-        assert!(build_qr_image("https://mezon.ai/chat/alice?data=test", 320).is_some());
+    fn generated_profile_qr_has_png_and_two_pixel_modules() {
+        let data = "https://mezon.ai/chat/alice?data=test";
+        let qr = build_qr_image(
+            data,
+            QrImageOptions {
+                target_size: 328,
+                min_module_scale: 2,
+                error_correction: qrcode::EcLevel::L,
+                clipboard_border: 40,
+            },
+        )
+        .expect("qr image");
+        let module_width =
+            qrcode::QrCode::with_error_correction_level(data.as_bytes(), qrcode::EcLevel::L)
+                .unwrap()
+                .width();
+        assert!(qr.render.size(0).width.0 as usize >= module_width * 2);
+        assert_eq!(qr.clipboard.format, gpui::ImageFormat::Png);
+        assert!(!qr.clipboard.bytes.is_empty());
     }
 }
