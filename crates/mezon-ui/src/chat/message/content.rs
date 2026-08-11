@@ -1834,37 +1834,42 @@ fn render_social_link_card(
     let id = hashed_element_id("msg-social", &resolved);
     let selection = selection.clone();
     div()
-        .id(id)
         .flex()
-        .flex_col()
-        .gap_1()
-        .when(kind != LinkKind::Plain, |card| {
-            card.flex_basis(relative(1.))
-        })
+        .flex_row()
+        .flex_basis(relative(1.))
         .w_full()
         .min_w_0()
-        .max_w(px(400.))
-        .my_1()
-        .p(px(16.))
-        .rounded(px(4.))
-        .border_l_4()
-        .border_color(rgb(accent))
-        .bg(rgb(SOCIAL_CARD_BG))
-        .overflow_hidden()
-        .cursor_pointer()
-        .on_click(move |_, _, cx| {
-            if !selection.borrow().has_selection() {
-                open_message_link(resolved.to_string(), cx);
-            }
-        })
         .child(
             div()
-                .text_size(px(12.))
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_color(rgb(accent))
-                .child(label),
+                .id(id)
+                .flex()
+                .flex_col()
+                .gap_1()
+                .w_full()
+                .min_w_0()
+                .max_w(px(400.))
+                .my_1()
+                .p(px(16.))
+                .rounded(px(4.))
+                .border_l_4()
+                .border_color(rgb(accent))
+                .bg(rgb(SOCIAL_CARD_BG))
+                .overflow_hidden()
+                .cursor_pointer()
+                .on_click(move |_, _, cx| {
+                    if !selection.borrow().has_selection() {
+                        open_message_link(resolved.to_string(), cx);
+                    }
+                })
+                .child(
+                    div()
+                        .text_size(px(12.))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(rgb(accent))
+                        .child(label),
+                )
+                .child(url_row),
         )
-        .child(url_row)
         .into_any_element()
 }
 

@@ -2544,6 +2544,38 @@ struct MarkdownMatch {
     marker: usize,
 }
 
+pub const LINK_MARKDOWN_KIND: &str = "lk";
+pub const YOUTUBE_LINK_MARKDOWN_KIND: &str = "lk_yt";
+pub const FACEBOOK_LINK_MARKDOWN_KIND: &str = "lk_fb";
+pub const TIKTOK_LINK_MARKDOWN_KIND: &str = "lk_tt";
+
+static YOUTUBE_LINK: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+    regex::Regex::new(r"(?:youtube\.com/(?:watch\?v=|embed/|v/|e/|shorts/)|youtu\.be/)")
+        .expect("static youtube link pattern")
+});
+static FACEBOOK_LINK: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+    regex::Regex::new(r"(?:facebook\.com/(?:reel/|watch\?v=|[\w.]+/videos/(?:[\w.]+/)?))[\w-]+")
+        .expect("static facebook link pattern")
+});
+static TIKTOK_LINK: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+    regex::Regex::new(
+        r"(?:tiktok\.com/@[^/]+/video/\d+|vm\.tiktok\.com/[a-zA-Z0-9]+|tiktok\.com/t/[a-zA-Z0-9]+)",
+    )
+    .expect("static tiktok link pattern")
+});
+
+pub fn link_markdown_kind(url: &str) -> &'static str {
+    if YOUTUBE_LINK.is_match(url) {
+        YOUTUBE_LINK_MARKDOWN_KIND
+    } else if FACEBOOK_LINK.is_match(url) {
+        FACEBOOK_LINK_MARKDOWN_KIND
+    } else if TIKTOK_LINK.is_match(url) {
+        TIKTOK_LINK_MARKDOWN_KIND
+    } else {
+        LINK_MARKDOWN_KIND
+    }
+}
+
 fn scan_markdown(chars: &[char]) -> Vec<MarkdownMatch> {
     let n = chars.len();
     let is_triple =
@@ -2585,8 +2617,9 @@ fn scan_markdown(chars: &[char]) -> Vec<MarkdownMatch> {
                 j += 1;
             }
             if j > i + scheme {
+                let url: String = chars[i..j].iter().collect();
                 out.push(MarkdownMatch {
-                    kind: "lk",
+                    kind: link_markdown_kind(&url),
                     start: i,
                     end: j,
                     marker: 0,
@@ -9916,6 +9949,27 @@ mod tests {
     #[test]
     fn detect_markdown_link_has_no_trailing_punctuation_trim() {
         assert_eq!(detect_markdown("see https://a.com."), vec![md("lk", 4, 18)]);
+    }
+
+    #[test]
+    fn detect_markdown_tags_social_links_by_platform() {
+        assert_eq!(
+            detect_markdown("https://www.youtube.com/watch?v=lHW3fsJQ1sg"),
+            vec![md("lk_yt", 0, 43)]
+        );
+        assert_eq!(
+            detect_markdown("https://youtu.be/abc"),
+            vec![md("lk_yt", 0, 20)]
+        );
+        assert_eq!(
+            detect_markdown("https://www.tiktok.com/@user/video/123"),
+            vec![md("lk_tt", 0, 38)]
+        );
+        assert_eq!(
+            detect_markdown("https://www.facebook.com/reel/456"),
+            vec![md("lk_fb", 0, 33)]
+        );
+        assert_eq!(detect_markdown("https://a.com"), vec![md("lk", 0, 13)]);
     }
 
     #[test]
