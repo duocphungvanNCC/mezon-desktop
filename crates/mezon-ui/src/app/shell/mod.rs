@@ -799,10 +799,18 @@ impl Shell {
             .as_ref()
             .map(|(view, fullscreen, _, _)| (view.clone(), *fullscreen));
         let has_toasts = !self.toasts.is_empty();
-        let toasts: Vec<(usize, SharedString, ToastKind, Option<f32>)> = self
+        let toasts: Vec<(usize, SharedString, ToastKind, Option<f32>, bool)> = self
             .toasts
             .iter()
-            .map(|t| (t.id, t.message.clone(), t.kind, t.progress))
+            .map(|t| {
+                (
+                    t.id,
+                    t.message.clone(),
+                    t.kind,
+                    t.progress,
+                    t._ttl.is_some(),
+                )
+            })
             .collect();
 
         div()
@@ -881,16 +889,24 @@ impl Shell {
                         .flex()
                         .flex_col()
                         .gap_2()
-                        .children(toasts.into_iter().map(|(id, message, kind, progress)| {
-                            div()
-                                .id(("toast", id))
-                                .cursor_pointer()
-                                .on_click(move |_, _window, cx| {
-                                    Shell::global(cx)
-                                        .update(cx, |shell, cx| shell.dismiss_by_id(id, cx));
-                                })
-                                .child(Toast::new(message).kind(kind).progress(progress))
-                        })),
+                        .children(toasts.into_iter().map(
+                            |(id, message, kind, progress, timed)| {
+                                let toast = Toast::new(message).kind(kind).progress(progress);
+                                let toast = if timed {
+                                    toast.countdown(id, TOAST_TTL)
+                                } else {
+                                    toast
+                                };
+                                div()
+                                    .id(("toast", id))
+                                    .cursor_pointer()
+                                    .on_click(move |_, _window, cx| {
+                                        Shell::global(cx)
+                                            .update(cx, |shell, cx| shell.dismiss_by_id(id, cx));
+                                    })
+                                    .child(toast)
+                            },
+                        )),
                 ))
             })
     }
