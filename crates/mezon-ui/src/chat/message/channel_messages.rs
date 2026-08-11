@@ -1801,11 +1801,11 @@ impl ChannelMessages {
         });
         let avatar_image_cache = crate::image_cache::shared_avatar_cache(cx);
         let icon_image_cache = cx.new(|cx| {
-            crate::image_cache::LruImageCache::icon_thumbnail(
+            crate::image_cache::LruImageCache::emoji_thumbnail(
                 "message-icons",
-                1024,
-                8 * 1024 * 1024,
-                256 * 1024,
+                crate::image_cache::MESSAGE_ICON_CACHE_CAPACITY,
+                crate::image_cache::MESSAGE_ICON_CACHE_BYTES,
+                crate::image_cache::EMOJI_ENTRY_MAX_BYTES,
                 cx,
             )
         });

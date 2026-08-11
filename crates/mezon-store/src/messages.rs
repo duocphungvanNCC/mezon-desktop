@@ -3909,7 +3909,9 @@ impl MessagesStore {
                 mk,
                 ..Default::default()
             };
-            optimistic = optimistic.with_spans(parse_spans(&tokens));
+            let mut optimistic_spans = parse_spans(&tokens);
+            crate::message::fill_emoji_sources(&mut optimistic_spans, AppConfig::try_global(cx));
+            optimistic = optimistic.with_spans(optimistic_spans);
             if ogp.is_some() {
                 optimistic =
                     optimistic.with_ogp(build_ogp_preview(&tokens, AppConfig::try_global(cx)));
@@ -6745,15 +6747,7 @@ fn message_from_api(m: ApiMessage, cfg: Option<&AppConfig>, viewer_id: Option<Us
         .map(|c| c.avatar_proxy(&m.avatar))
         .unwrap_or_else(|| m.avatar.clone());
     let mut spans = parse_spans(&m.content_tokens);
-    if let Some(cfg) = cfg {
-        for span in &mut spans {
-            if let MessageSpan::Emoji { emoji_id, src, .. } = span
-                && !emoji_id.is_empty()
-            {
-                *src = cfg.emoji_src(emoji_id).into();
-            }
-        }
-    }
+    crate::message::fill_emoji_sources(&mut spans, cfg);
     let mention_targets: Vec<MentionTarget> = m
         .entity_mentions
         .iter()

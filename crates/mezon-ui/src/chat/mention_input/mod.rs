@@ -460,6 +460,7 @@ pub struct MentionInput {
     toggle_bounds: Rc<Cell<Bounds<Pixels>>>,
     _popup_subs: Vec<Subscription>,
     avatar_cache: Entity<LruImageCache>,
+    emoji_cache: Entity<LruImageCache>,
     preview_cache: Entity<LruImageCache>,
     settings: Entity<Settings>,
     pending_attachments: Vec<PendingAttachment>,
@@ -561,6 +562,8 @@ fn write_clipboard_image(image: &Image, base: i64, index: usize) -> Option<PathB
     Some(path)
 }
 
+const SUGGESTION_EMOJI_SOURCE_PX: u32 = 48;
+
 impl MentionInput {
     pub fn new(
         placeholder: impl Into<SharedString>,
@@ -619,6 +622,7 @@ impl MentionInput {
         );
         let store_subs = Self::subscribe_pool_sources(cx);
         let avatar_cache = crate::image_cache::shared_avatar_cache(cx);
+        let emoji_cache = crate::image_cache::shared_emoji_cache(cx);
         let preview_cache = cx.new(|cx| {
             LruImageCache::avatar_thumbnail(
                 "composer-attachment-preview",
@@ -651,6 +655,7 @@ impl MentionInput {
             toggle_bounds: Rc::new(Cell::new(Bounds::default())),
             _popup_subs: Vec::new(),
             avatar_cache,
+            emoji_cache,
             preview_cache,
             settings,
             pending_attachments: Vec::new(),
@@ -1906,7 +1911,11 @@ impl MentionInput {
                 break;
             }
             if emoji.shortname.contains(&needle) {
-                let src = crate::util::imgproxy::emoji_url(cx, &emoji.emoji_id);
+                let src = crate::util::imgproxy::emoji_url_sized(
+                    cx,
+                    &emoji.emoji_id,
+                    SUGGESTION_EMOJI_SOURCE_PX,
+                );
                 out.push(Suggestion::Emoji(emoji.clone(), src.into()));
             }
         }
@@ -2297,7 +2306,13 @@ impl MentionInput {
                     let leading = if src.is_empty() {
                         None
                     } else {
-                        Some(img(src.clone()).size(px(22.)).into_any_element())
+                        Some(
+                            img(src.clone())
+                                .image_cache(&self.emoji_cache)
+                                .id("suggestion-emoji-frames")
+                                .size(px(22.))
+                                .into_any_element(),
+                        )
                     };
                     (
                         leading,
