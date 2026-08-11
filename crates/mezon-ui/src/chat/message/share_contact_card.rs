@@ -90,7 +90,7 @@ pub fn render_share_contact_card(
                 .bg(dot_color),
         );
 
-    let header = div().bg(theme.tokens.bg_primary).p_4().child(
+    let header = div().bg(theme.surfaces.primary).p_4().child(
         div()
             .flex()
             .items_center()
@@ -139,7 +139,7 @@ pub fn render_share_contact_card(
 
     let footer = div()
         .flex()
-        .bg(theme.tokens.bg_primary)
+        .bg(theme.surfaces.primary)
         .child(contact_action_button(
             "share-contact-call",
             IconName::IconPhoneDM,

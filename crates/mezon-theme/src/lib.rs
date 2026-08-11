@@ -1,9 +1,12 @@
+pub mod surface;
+mod surfaces;
 pub mod tokens;
 
 use std::sync::Arc;
 
 use gpui::{App, Global, Rgba};
 
+use crate::surface::ThemeSurfaces;
 use crate::tokens::ThemeTokens;
 
 struct GlobalTheme(Arc<Theme>);
@@ -163,6 +166,7 @@ pub struct Theme {
     pub title_bar_bg: Rgba, // #1e1f22
 
     pub tokens: ThemeTokens,
+    pub surfaces: ThemeSurfaces,
 }
 
 fn rgba(r: u8, g: u8, b: u8, a: f32) -> Rgba {
@@ -196,6 +200,7 @@ impl Theme {
     }
 
     fn dark_base() -> Self {
+        let tokens = ThemeTokens::for_theme("dark");
         Self {
             bg_primary: rgba(49, 51, 56, 1.0),
             bg_secondary: rgba(43, 45, 49, 1.0),
@@ -229,11 +234,13 @@ impl Theme {
 
             border: rgba(100, 100, 100, 0.4),
             title_bar_bg: rgba(30, 31, 34, 1.0),
-            tokens: ThemeTokens::for_theme("dark"),
+            surfaces: ThemeSurfaces::for_theme("dark", &tokens),
+            tokens,
         }
     }
 
     fn light_base() -> Self {
+        let tokens = ThemeTokens::for_theme("light");
         Self {
             bg_primary: rgba(255, 255, 255, 1.0),
             bg_secondary: rgba(242, 243, 245, 1.0),
@@ -267,11 +274,12 @@ impl Theme {
 
             border: rgba(218, 220, 224, 1.0),
             title_bar_bg: rgba(227, 229, 232, 1.0),
-            tokens: ThemeTokens::for_theme("light"),
+            surfaces: ThemeSurfaces::for_theme("light", &tokens),
+            tokens,
         }
     }
 
-    fn from_tokens(mut base: Theme, t: ThemeTokens) -> Theme {
+    fn from_tokens(mut base: Theme, t: ThemeTokens, name: &str) -> Theme {
         base.bg_primary = t.bg_secondary;
         base.bg_secondary = t.bg_theme_direct_message;
         base.bg_tertiary = t.bg_primary;
@@ -282,6 +290,7 @@ impl Theme {
         base.border = t.border_primary;
         base.text_link = t.color_mention_hover;
         base.title_bar_bg = t.bg_primary;
+        base.surfaces = ThemeSurfaces::for_theme(name, &t);
         base.tokens = t;
         base
     }
@@ -295,7 +304,7 @@ impl Theme {
         } else {
             Theme::dark_base()
         };
-        Self::from_tokens(base, t)
+        Self::from_tokens(base, t, name)
     }
 
     pub fn sunrise() -> Self {
