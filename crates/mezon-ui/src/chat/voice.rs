@@ -1432,11 +1432,17 @@ fn render_in_call(
                 .find(|p| p.identity == identity)?;
             let (name, _) =
                 resolve_voice_identity(cx, channel.clan_id, identity, &participant.name);
+            let can_moderate = !participant.is_local
+                && PermissionStore::try_global(cx).is_some_and(|store| {
+                    store
+                        .read(cx)
+                        .check_permission(channel.clan_id, PERMISSION_MANAGE_CHANNEL, cx)
+                });
             let menu = build_participant_menu(
                 voice,
                 identity.to_string(),
                 name,
-                participant.is_local,
+                can_moderate,
                 participant.muted,
                 locale,
             );
@@ -2410,7 +2416,7 @@ fn build_participant_menu(
     voice: &Entity<VoiceStore>,
     identity: String,
     name: String,
-    is_local: bool,
+    can_moderate: bool,
     muted: bool,
     locale: &str,
 ) -> ContextMenu {
@@ -2423,7 +2429,7 @@ fn build_participant_menu(
 
     let mut menu = ContextMenu::new().on_dismiss(dismiss);
 
-    if !is_local {
+    if can_moderate {
         if !muted {
             let voice = voice.clone();
             let identity = identity.clone();
