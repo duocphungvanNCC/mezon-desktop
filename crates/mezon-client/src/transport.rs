@@ -6559,7 +6559,6 @@ impl MezonTransport {
         Ok(())
     }
 
-    /// Archive channel or thread (sets active = 0 on server).
     pub async fn archive_channel(&self, clan_id: i64, channel_id: i64) -> Result<()> {
         let cid = self.generate_cid();
         let body = api::ArchiveChannelRequest {
