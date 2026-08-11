@@ -1913,7 +1913,7 @@ fn render_sidebar_item(
                             } else if !m.avatar_raw.is_empty() {
                                 avatar = avatar.src(SharedString::from(m.avatar_raw.clone()));
                             }
-                            let mut row = div()
+                            div()
                                 .w_full()
                                 .min_w_0()
                                 .flex()
@@ -1929,7 +1929,7 @@ fn render_sidebar_item(
                                         .flex()
                                         .flex_row()
                                         .items_center()
-                                        .gap_1()
+                                        .gap_2()
                                         .child(avatar.with_size(Size::XSmall))
                                         .child(
                                             div()
@@ -1940,15 +1940,14 @@ fn render_sidebar_item(
                                                 .text_color(theme.text_muted)
                                                 .child(name_text),
                                         ),
-                                );
-                            if sharing_screen {
-                                row = row.child(
-                                    Icon::new(IconName::VoiceScreenShareIcon)
-                                        .size(px(16.))
-                                        .text_color(gpui::rgb(0x22c55e)),
-                                );
-                            }
-                            row
+                                )
+                                .when(sharing_screen, |el| {
+                                    el.child(
+                                        Icon::new(IconName::VoiceScreenShareIcon)
+                                            .size(px(16.))
+                                            .text_color(gpui::rgb(0x22c55e)),
+                                    )
+                                })
                         }))
                 };
                 channel_col = channel_col.child(members_el);
