@@ -1074,8 +1074,7 @@ fn render_photo(
             .w(px(att.display_width))
             .h(px(att.display_height))
             .rounded_md()
-            .overflow_hidden()
-            .bg(theme.bg_tertiary);
+            .overflow_hidden();
         el = el.when(
             !sending && !att.upload_failed && !att.presign_pending && !viewer_att.url.is_empty(),
             |d| {
@@ -1099,6 +1098,7 @@ fn render_photo(
                 .id(("msg-img-frames", msg.id.0 as usize))
                 .size_full()
                 .object_fit(ObjectFit::Cover)
+                .with_loading(move || div().size_full().bg(fallback_bg).into_any_element())
                 .with_fallback(move || {
                     div()
                         .size_full()
@@ -1165,8 +1165,7 @@ fn render_photo(
         .w(px(att.display_width))
         .h(px(att.display_height))
         .rounded_md()
-        .overflow_hidden()
-        .bg(theme.bg_tertiary);
+        .overflow_hidden();
     el = el.when(!is_sticker && !att.upload_failed, |d| {
         d.cursor_pointer().on_click(move |_, window, cx| {
             if !selection.borrow().has_selection() {
@@ -1187,6 +1186,7 @@ fn render_photo(
             .id(("msg-img-frames", msg.id.0 as usize))
             .size_full()
             .object_fit(object_fit)
+            .with_loading(move || div().size_full().bg(fallback_bg).into_any_element())
             .with_fallback(move || {
                 div()
                     .size_full()
@@ -1640,18 +1640,35 @@ pub fn recent_emoji_cells(emojis: &[Emoji], cx: &App) -> Vec<RecentEmojiCell> {
         .collect()
 }
 
-fn reaction_emoji_src(reaction: &Reaction, app: &gpui::App) -> SharedString {
+const REACTION_SRC_MEMO_LIMIT: usize = 512;
+
+fn reaction_emoji_src(reaction: &Reaction, ctx: &RowCtx) -> SharedString {
     if reaction.emoji_id.is_empty() || reaction.emoji_id.as_ref() == "0" {
         return SharedString::default();
     }
-    crate::util::imgproxy::emoji_url_sized(app, &reaction.emoji_id, REACTION_EMOJI_SOURCE_PX).into()
+    let mut memo = ctx.row_memo.borrow_mut();
+    if let Some(src) = memo.reaction_srcs.get(&reaction.emoji_id) {
+        return src.clone();
+    }
+    if memo.reaction_srcs.len() >= REACTION_SRC_MEMO_LIMIT {
+        memo.reaction_srcs.clear();
+    }
+    let src: SharedString = crate::util::imgproxy::emoji_url_sized(
+        ctx.app,
+        &reaction.emoji_id,
+        REACTION_EMOJI_SOURCE_PX,
+    )
+    .into();
+    memo.reaction_srcs
+        .insert(reaction.emoji_id.clone(), src.clone());
+    src
 }
 
 fn reaction_pill(reaction: &Reaction, message_id: MessageId, ctx: &RowCtx) -> AnyElement {
     let theme = ctx.theme;
     let reacted = !ctx.current_user_id.is_empty() && reaction.has_sender(ctx.current_user_id);
     let count_label = reaction.count_label.clone();
-    let src = reaction_emoji_src(reaction, ctx.app);
+    let src = reaction_emoji_src(reaction, ctx);
 
     let mut pill = div()
         .id(super::content::hashed_element_id(
@@ -1730,6 +1747,7 @@ fn reaction_pill(reaction: &Reaction, message_id: MessageId, ctx: &RowCtx) -> An
             .image_cache(ctx.icon_cache.clone())
             .child(
                 img(src)
+                    .id("reaction-emoji-frames")
                     .size(px(REACTION_EMOJI_PX))
                     .object_fit(ObjectFit::ScaleDown)
                     .with_fallback(emoji_error_fallback(
@@ -1835,6 +1853,7 @@ pub fn render_hover_actions(msg: &Message, is_different_day: bool, ctx: &RowCtx)
                         .size(px(RECENT_EMOJI_PX))
                         .object_fit(ObjectFit::ScaleDown)
                         .image_cache(&ctx.icon_cache)
+                        .id("recent-emoji-frames")
                         .with_fallback(emoji_error_fallback(
                             px(RECENT_EMOJI_PX),
                             theme.text_secondary,
