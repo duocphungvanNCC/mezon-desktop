@@ -7,7 +7,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use futures::FutureExt as _;
 use futures::future::Shared;
-use gpui::{App, AppContext, Context, Entity, EventEmitter, Global, Subscription, Task};
+use gpui::{
+    App, AppContext, BackgroundExecutor, Context, Entity, EventEmitter, Global, Subscription, Task,
+};
 use mezon_client::transport::{ApiCategoryDesc, ApiChannelDesc, is_channel_limit_api_error};
 use mezon_client::{
     ApiChannelApp, AppApi, ChannelAppLaunchParams, ConnectionStatus, RealtimeEvent,
@@ -30,6 +32,7 @@ const CATEGORY_EVENT_UPDATED: i32 = 2;
 const PREVIOUS_CHANNELS_PERSIST_DEBOUNCE: Duration = Duration::from_millis(500);
 const BADGE_SEED_MAX_ATTEMPTS: u32 = 3;
 const BADGE_SEED_RETRY_BACKOFF: Duration = Duration::from_millis(400);
+const FAVORITES_PAINT_BUDGET: Duration = Duration::from_millis(1500);
 const CHANNEL_DETAIL_MAX_ATTEMPTS: u32 = 3;
 const CHANNEL_DETAIL_RETRY_BACKOFF: Duration = Duration::from_secs(1);
 const THREAD_ARCHIVE_DURATION_SECONDS: i64 = 7 * 24 * 60 * 60;
@@ -692,7 +695,6 @@ impl ChannelList {
                     );
                 }
                 this.pending_badge_seed.insert(clan_id, seed);
-                this.sync_clan_after_read(clan_id, 0, cx);
                 if applied {
                     this.notify_channel_list(clan_id, cx);
                 }
@@ -754,7 +756,6 @@ impl ChannelList {
     pub fn load_for_clan(&mut self, clan_id: ClanId, cx: &mut Context<Self>) {
         self.want_extras.insert(clan_id);
         if self.cache.is_fresh(&clan_id, crate::CACHE_TTL) {
-            self.sync_clan_after_read(clan_id, 0, cx);
             self.ensure_extras(clan_id, cx);
             return;
         }
@@ -861,6 +862,8 @@ impl ChannelList {
         favorite_ids: Option<HashSet<ChannelId>>,
         cx: &mut Context<Self>,
     ) {
+        let favorites_missing = favorite_ids.is_none();
+        let favorites_len = favorite_ids.as_ref().map(HashSet::len);
         if let Some(favorite_ids) = favorite_ids {
             self.favorites.insert(clan_id, favorite_ids);
         }
@@ -883,6 +886,16 @@ impl ChannelList {
         }
         self.sync_user_channels_from_clan_structure(&categories, cx);
         self.cache.insert(clan_id, categories, None);
+        if favorites_missing {
+            self.cache.mark_stale(&clan_id);
+        }
+        tracing::debug!(
+            target: "clan_load",
+            clan_id = clan_id.get(),
+            favorites = favorites_len,
+            stale = favorites_missing,
+            "clan structure applied"
+        );
         self.invalidate_channel_index(clan_id);
         self.channel_detail_failed.clear();
         self.sync_clan_after_read(clan_id, 0, cx);
@@ -899,9 +912,10 @@ impl ChannelList {
         }
         let api = self.api.clone();
         let generation = self.reset_generation;
+        let executor = cx.background_executor().clone();
         let task = cx
             .spawn(async move |this, cx| {
-                let result = Self::fetch_clan_structure(&api, clan_id).await;
+                let result = Self::fetch_clan_structure(&api, clan_id, executor).await;
                 match result {
                     Ok((categories, favorite_ids)) => {
                         let _ = this.update(cx, |this, cx| {
@@ -1069,16 +1083,16 @@ impl ChannelList {
     async fn fetch_clan_structure(
         api: &AppApi,
         clan_id: ClanId,
+        executor: BackgroundExecutor,
     ) -> anyhow::Result<(Vec<Category>, Option<HashSet<ChannelId>>)> {
-        let (channels_res, categories_res, favorites_res) = tokio::join!(
+        let (channels_res, categories_res, favorite_ids) = tokio::join!(
             api.list_channel_descs(clan_id.get(), 1),
             api.list_categories_typed(clan_id.get()),
-            api.list_favorite_channels(clan_id.get()),
+            fetch_favorites_within_paint_budget(api, clan_id, &executor),
         );
 
         let api_channels = channels_res?;
         let api_categories = categories_res?;
-        let favorite_ids = parse_favorite_ids(favorites_res);
 
         let mut channels: Vec<Channel> = api_channels
             .into_iter()
@@ -3692,13 +3706,45 @@ fn carry_live_channel_badges(
     }
 }
 
-fn parse_favorite_ids(result: anyhow::Result<Vec<String>>) -> Option<HashSet<ChannelId>> {
+async fn fetch_favorites_within_paint_budget(
+    api: &AppApi,
+    clan_id: ClanId,
+    executor: &BackgroundExecutor,
+) -> Option<HashSet<ChannelId>> {
+    let favorites = std::pin::pin!(api.list_favorite_channels(clan_id.get()));
+    let budget = std::pin::pin!(executor.timer(FAVORITES_PAINT_BUDGET));
+    match futures::future::select(favorites, budget).await {
+        futures::future::Either::Left((result, _)) => parse_favorite_ids(result, clan_id),
+        futures::future::Either::Right(_) => {
+            tracing::warn!(
+                target: "clan_load",
+                clan_id = clan_id.get(),
+                budget_ms = FAVORITES_PAINT_BUDGET.as_millis(),
+                "list_favorite_channels outran the paint budget, painting the sidebar without it"
+            );
+            None
+        }
+    }
+}
+
+fn parse_favorite_ids(
+    result: anyhow::Result<Vec<String>>,
+    clan_id: ClanId,
+) -> Option<HashSet<ChannelId>> {
     result
-        .inspect_err(|e| tracing::warn!("list_favorite_channels failed: {e}"))
+        .inspect_err(|e| tracing::warn!("list_favorite_channels failed for clan {clan_id}: {e}"))
         .ok()
         .map(|ids| {
             ids.into_iter()
-                .filter_map(|s| s.parse::<ChannelId>().ok())
+                .filter_map(|s| match s.parse::<ChannelId>() {
+                    Ok(id) => Some(id),
+                    Err(e) => {
+                        tracing::warn!(
+                            "list_favorite_channels returned an unparseable id {s:?} for clan {clan_id}: {e}"
+                        );
+                        None
+                    }
+                })
                 .collect()
         })
 }
@@ -5747,6 +5793,53 @@ mod tests {
                     1,
                     "a failed list_favorite_channels must not wipe known favorites"
                 );
+                assert!(
+                    !channels.cache.is_fresh(&ClanId(1), crate::CACHE_TTL),
+                    "a failed fetch must leave the gate open so the next clan entry retries"
+                );
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn a_structure_carrying_favorites_is_stamped_fresh(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let channels = init_channel_list(cx);
+            channels.update(cx, |channels, cx| {
+                channels.apply_clan_structure(
+                    ClanId(1),
+                    structure_with_two_channels(),
+                    favor_ids(&[ChannelId(2)]),
+                    cx,
+                );
+
+                assert!(
+                    channels.cache.is_fresh(&ClanId(1), crate::CACHE_TTL),
+                    "a complete structure must be pinned for the TTL"
+                );
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn favorites_carry_a_parsed_id_and_drop_an_unparseable_one(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let channels = init_channel_list(cx);
+            channels.update(cx, |channels, cx| {
+                let parsed = parse_favorite_ids(
+                    Ok(vec!["2".to_string(), "not-an-id".to_string()]),
+                    ClanId(1),
+                );
+                assert_eq!(parsed, Some([ChannelId(2)].into_iter().collect()));
+
+                assert_eq!(
+                    parse_favorite_ids(Err(anyhow::anyhow!("socket error")), ClanId(1)),
+                    None,
+                    "a favorites error must map to None so the structure still paints"
+                );
+
+                channels.apply_clan_structure(ClanId(1), structure_with_two_channels(), parsed, cx);
+                assert_eq!(channels.categories_for_clan(ClanId(1))[0].channels.len(), 1);
             });
         });
     }
@@ -5759,7 +5852,12 @@ mod tests {
             let channels = init_channel_list(cx);
             channels.update(cx, |channels, cx| {
                 channels.load_for_clan(ClanId(1), cx);
-                channels.apply_clan_structure(ClanId(1), structure_with_two_channels(), None, cx);
+                channels.apply_clan_structure(
+                    ClanId(1),
+                    structure_with_two_channels(),
+                    favor_ids(&[]),
+                    cx,
+                );
                 channels.finish_extras(
                     ClanId(1),
                     ClanExtras {
@@ -6216,7 +6314,12 @@ mod tests {
         cx.update(|cx| {
             let channels = init_channel_list(cx);
             channels.update(cx, |channels, cx| {
-                channels.apply_clan_structure(ClanId(1), structure_with_two_channels(), None, cx);
+                channels.apply_clan_structure(
+                    ClanId(1),
+                    structure_with_two_channels(),
+                    favor_ids(&[]),
+                    cx,
+                );
                 channels.load_for_clan(ClanId(1), cx);
 
                 assert!(
