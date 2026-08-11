@@ -7,11 +7,12 @@
 use std::time::Duration;
 
 use gpui::{
-    AnyView, App, AppContext, Context, Entity, Global, MouseButton, SharedString, Task, Window,
-    deferred, div, hsla, prelude::*, px,
+    AnyView, App, AppContext, Context, Entity, Global, MouseButton, SharedString, Subscription,
+    Task, Window, deferred, div, hsla, prelude::*, px,
 };
 
 use crate::components::primitives::{Toast, ToastKind};
+use crate::router::{Route, Router};
 
 mod coming_soon_modal;
 mod confirm_archive_channel_modal;
@@ -77,6 +78,8 @@ pub struct Shell {
     modal_fullscreen: bool,
     command_palette_open: bool,
     next_id: usize,
+    route: Route,
+    _route_sub: Subscription,
 }
 
 struct GlobalShell(Entity<Shell>);
@@ -84,16 +87,28 @@ impl Global for GlobalShell {}
 
 impl Shell {
     pub fn init(cx: &mut App) -> Entity<Self> {
-        let entity = cx.new(|_| Self {
+        let router = Router::global(cx);
+        let entity = cx.new(|cx| Self {
             toasts: Vec::new(),
             modal: None,
             modal_underlay: None,
             modal_fullscreen: false,
             command_palette_open: false,
             next_id: 0,
+            route: router.read(cx).route(),
+            _route_sub: cx.observe(&router, Self::on_route_changed),
         });
         cx.set_global(GlobalShell(entity.clone()));
         entity
+    }
+
+    fn on_route_changed(&mut self, router: Entity<Router>, cx: &mut Context<Self>) {
+        let route = router.read(cx).route();
+        if route == self.route {
+            return;
+        }
+        self.route = route;
+        self.close_modal(cx);
     }
 
     pub fn global(cx: &App) -> Entity<Self> {
@@ -893,5 +908,82 @@ impl Shell {
                         })),
                 ))
             })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::clan::settings::ClanSettingsPage;
+    use gpui::{IntoElement, TestAppContext};
+    use mezon_store::{ChannelId, ClanId};
+
+    struct StubModal;
+
+    impl Render for StubModal {
+        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+            div()
+        }
+    }
+
+    fn open_shell_with_modal(cx: &mut TestAppContext) -> Entity<Shell> {
+        cx.update(|cx| {
+            Router::init(cx);
+            crate::router::replace(
+                cx,
+                Route::ClanSettings {
+                    clan_id: ClanId(7),
+                    page: ClanSettingsPage::Emoji,
+                },
+            );
+            let shell = Shell::init(cx);
+            let modal = cx.new(|_| StubModal);
+            shell.update(cx, |shell, cx| shell.show_modal(modal.into(), cx));
+            shell
+        })
+    }
+
+    #[gpui::test]
+    fn navigating_away_closes_the_open_modal(cx: &mut TestAppContext) {
+        let shell = open_shell_with_modal(cx);
+        assert!(shell.read_with(cx, |shell, _| shell.has_modal()));
+
+        cx.update(|cx| {
+            crate::router::navigate(
+                cx,
+                Route::Channel {
+                    clan_id: ClanId(7),
+                    channel_id: ChannelId(42),
+                },
+            )
+        });
+        cx.run_until_parked();
+
+        assert!(
+            !shell.read_with(cx, |shell, _| shell.has_modal()),
+            "a modal opened on the screen we just left must not keep covering the destination \
+             a notification click navigated to"
+        );
+    }
+
+    #[gpui::test]
+    fn re_navigating_to_the_same_route_keeps_the_modal(cx: &mut TestAppContext) {
+        let shell = open_shell_with_modal(cx);
+
+        cx.update(|cx| {
+            crate::router::navigate(
+                cx,
+                Route::ClanSettings {
+                    clan_id: ClanId(7),
+                    page: ClanSettingsPage::Emoji,
+                },
+            )
+        });
+        cx.run_until_parked();
+
+        assert!(
+            shell.read_with(cx, |shell, _| shell.has_modal()),
+            "a router notify that does not change the route must leave the modal alone"
+        );
     }
 }
