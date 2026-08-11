@@ -2190,7 +2190,7 @@ impl ChannelList {
         &mut self,
         clan_id: ClanId,
         channel_id: ChannelId,
-        new_badge: u32,
+        cleared_badge: u32,
         seen_ts: i64,
         seen_message_id: MessageId,
         cx: &mut Context<Self>,
@@ -2199,7 +2199,7 @@ impl ChannelList {
             target: "badge_flow",
             clan = clan_id.get(),
             channel = channel_id.get(),
-            new_badge,
+            cleared_badge,
             seen_ts,
             "apply_last_seen (realtime LastSeenUpdated)"
         );
@@ -2216,7 +2216,7 @@ impl ChannelList {
             {
                 let was_unread = ch.is_unread();
                 let was_badge = ch.badge_count;
-                ch.badge_count = new_badge;
+                ch.badge_count = 0;
                 if seen_ts > ch.last_seen_timestamp {
                     ch.last_seen_timestamp = seen_ts;
                 }
@@ -2226,9 +2226,7 @@ impl ChannelList {
                 if !computed {
                     computed = true;
                     visible_changed = was_unread != ch.is_unread() || was_badge != ch.badge_count;
-                    if was_badge > new_badge {
-                        badge_delta = was_badge - new_badge;
-                    }
+                    badge_delta = was_badge;
                 }
             }
         }
@@ -6368,6 +6366,52 @@ mod tests {
                     4,
                     "a later refetch (e.g. after the clan's CACHE_TTL expires) must reapply the \
                      seed itself — the zeroed live rows prove the carry cannot mask this"
+                );
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn last_seen_echo_never_repaints_the_badge_it_just_cleared(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let channels = init_channel_list(cx);
+            channels.update(cx, |channels, cx| {
+                channels.apply_clan_structure(ClanId(1), structure_with_two_channels(), cx);
+                channels.note_channel_message(
+                    ClanId(1),
+                    ChannelId(1),
+                    true,
+                    false,
+                    100,
+                    MessageId(9),
+                    cx,
+                );
+                channels.apply_read(ClanId(1), ChannelId(1), cx);
+                assert_eq!(
+                    channels
+                        .channel(ClanId(1), ChannelId(1))
+                        .unwrap()
+                        .badge_count,
+                    0
+                );
+
+                channels.apply_last_seen(ClanId(1), ChannelId(1), 1, 100, MessageId(9), cx);
+                assert_eq!(
+                    channels
+                        .channel(ClanId(1), ChannelId(1))
+                        .unwrap()
+                        .badge_count,
+                    0,
+                    "LastSeenUpdated carries the badge count the writer CLEARED (React overrides \
+                     lastSeenMess.badge_count with the local count for exactly this reason), so \
+                     echoing our own read back must never repaint the row"
+                );
+                assert!(
+                    !channels
+                        .channel(ClanId(1), ChannelId(1))
+                        .unwrap()
+                        .is_unread(),
+                    "the row must stay read after its own echo"
                 );
             });
         });
