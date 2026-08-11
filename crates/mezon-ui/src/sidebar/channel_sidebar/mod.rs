@@ -21,7 +21,7 @@ use crate::clan::clan_menu::{build_clan_menu, clan_menu_overlay};
 use crate::clan::create_channel_modal::CreateChannelModal;
 use crate::components::compositions::channel_row::{channel_type_icon, shows_left_unread_nub};
 use crate::components::compositions::channel_row_element::{
-    ChannelRowBadge, ChannelRowElement, ThreadConnector,
+    ChannelRowBadge, ChannelRowElement, ChannelRowTrailingAction, ThreadConnector,
 };
 use crate::components::primitives::{Avatar, Icon, IconName, Sizable, Size, context_menu_at};
 use crate::theme::{ActiveTheme, Theme};
@@ -1671,6 +1671,11 @@ fn render_sidebar_item(
             let clan_id_inner = active_clan_id_for_nav;
             let menu_channel_id: ChannelId = ch_id.parse().unwrap_or_default();
             let menu_clan_id: ClanId = clan_id_inner.unwrap_or_default();
+            let show_settings_gear = !*is_thread
+                && clan_id_inner.is_some()
+                && menu::can_open_channel_settings(menu_clan_id, cx);
+            let settings_clan_id = menu_clan_id;
+            let settings_channel_id = menu_channel_id;
 
             let make_channel_element = || {
                 let icon = channel_type_icon(*channel_type, *private);
@@ -1698,34 +1703,50 @@ fn render_sidebar_item(
                 let hoverable = !*selected && !suppress_hover;
                 let show_channel_nub = *unread && !*selected && highlight_type;
                 let show_channel_badge = crate::SHOW_UNREAD_BADGE_COUNT && *badge_count > 0;
-                ChannelRowElement::new(row_elem_id.clone(), icon, name.clone().into())
-                    .icon_color(icon_base, icon_hover)
-                    .name_style(name_base, name_hover, weight)
-                    .selected_bg(if *selected {
-                        Some(theme.tokens.bg_active_member_channel.into())
-                    } else {
-                        None
-                    })
-                    .hover_bg(if hoverable {
-                        Some(theme.bg_hover.into())
-                    } else {
-                        None
-                    })
-                    .muted(*muted)
-                    .unread_nub(if show_channel_nub {
-                        Some(theme.tokens.text_secondary.into())
-                    } else {
-                        None
-                    })
-                    .badge(if show_channel_badge {
-                        Some(ChannelRowBadge {
-                            count: *badge_count,
-                            bg: gpui::rgb(0xda_37_3c).into(),
-                            text_color: gpui::white(),
+                let mut element =
+                    ChannelRowElement::new(row_elem_id.clone(), icon, name.clone().into())
+                        .icon_color(icon_base, icon_hover)
+                        .name_style(name_base, name_hover, weight)
+                        .selected_bg(if *selected {
+                            Some(theme.tokens.bg_active_member_channel.into())
+                        } else {
+                            None
                         })
-                    } else {
-                        None
-                    })
+                        .hover_bg(if hoverable {
+                            Some(theme.bg_hover.into())
+                        } else {
+                            None
+                        })
+                        .muted(*muted)
+                        .unread_nub(if show_channel_nub {
+                            Some(theme.tokens.text_secondary.into())
+                        } else {
+                            None
+                        })
+                        .badge(if show_channel_badge {
+                            Some(ChannelRowBadge {
+                                count: *badge_count,
+                                bg: gpui::rgb(0xda_37_3c).into(),
+                                text_color: gpui::white(),
+                            })
+                        } else {
+                            None
+                        });
+                if show_settings_gear {
+                    let gear_color: gpui::Hsla = theme.tokens.text_theme_primary.into();
+                    let gear_hover: gpui::Hsla = theme.tokens.bg_icon_theme_active.into();
+                    element = element.trailing_action(Some(ChannelRowTrailingAction {
+                        icon: IconName::SettingProfile,
+                        color: gear_color,
+                        hover_color: gear_hover,
+                        on_click: Rc::new(move |window, cx| {
+                            menu::open_channel_settings(settings_clan_id, settings_channel_id)(
+                                window, cx,
+                            );
+                        }),
+                    }));
+                }
+                element
             };
 
             let make_thread_element = || {
