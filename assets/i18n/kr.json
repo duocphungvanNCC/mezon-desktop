@@ -2412,6 +2412,7 @@
   "eventCreator.emptyState.title": "예정된 이벤트이 없습니다.",
   "eventCreator.errorMessages.endTimeAfterStart": "종료 시간은 시작 시간보다 커야 합니다.",
   "eventCreator.errorMessages.invalidTopic": "이벤트 제목이 유효하지 않습니다. '`', '<', '>', ',', '/', '\"', '\\', 및 ''' 문자이 허용되지 않습니다.",
+  "eventCreator.errorMessages.unsupportedImageType": "지원되지 않는 이미지 형식입니다.",
   "eventCreator.errorMessages.startTimeFuture": "시작 시간은 미래여야 합니다.",
   "eventCreator.eventDetail.audienceConsists": "관객은 다음으로부터 구성됨",
   "eventCreator.eventDetail.channel": "채널:",

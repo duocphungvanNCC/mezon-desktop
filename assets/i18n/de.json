@@ -2419,6 +2419,7 @@
   "eventCreator.emptyState.title": "Keine anstehenden Events.",
   "eventCreator.errorMessages.endTimeAfterStart": "Die Endzeit muss nach der Startzeit liegen.",
   "eventCreator.errorMessages.invalidTopic": "Ungültiges Event-Thema. Die Zeichen '`', '<', '>', ',', '/', '\"', '\\' und ''' sind nicht erlaubt.",
+  "eventCreator.errorMessages.unsupportedImageType": "Nicht unterstütztes Bildformat.",
   "eventCreator.errorMessages.startTimeFuture": "Die Startzeit muss in der Zukunft liegen.",
   "eventCreator.eventDetail.audienceConsists": "Das Publikum umfasst Mitglieder aus",
   "eventCreator.eventDetail.channel": "dem Kanal:",

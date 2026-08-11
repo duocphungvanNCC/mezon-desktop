@@ -50,10 +50,28 @@ struct ToastItem {
     _ttl: Option<Task<()>>,
 }
 
+struct StackedModalHost {
+    view: AnyView,
+    focus_handle: gpui::FocusHandle,
+}
+
+impl Render for StackedModalHost {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .track_focus(&self.focus_handle)
+            .key_context("menu")
+            .on_action(cx.listener(|_, _: &::menu::Cancel, window, cx| {
+                Shell::global(cx).update(cx, |shell, cx| shell.dismiss_modal(window, cx));
+            }))
+            .child(self.view.clone())
+    }
+}
+
 /// Owns the window-level overlay layers (toasts + active modal). Registered as a [`Global`].
 pub struct Shell {
     toasts: Vec<ToastItem>,
     modal: Option<AnyView>,
+    modal_underlay: Option<(AnyView, bool, bool, Option<gpui::FocusHandle>)>,
     modal_fullscreen: bool,
     command_palette_open: bool,
     next_id: usize,
@@ -67,6 +85,7 @@ impl Shell {
         let entity = cx.new(|_| Self {
             toasts: Vec::new(),
             modal: None,
+            modal_underlay: None,
             modal_fullscreen: false,
             command_palette_open: false,
             next_id: 0,
@@ -233,6 +252,7 @@ impl Shell {
 
     /// Show `view` as the active modal (backdrop click dismisses). The view renders its own card.
     pub fn show_modal(&mut self, view: AnyView, cx: &mut Context<Self>) {
+        self.modal_underlay = None;
         self.command_palette_open = false;
         self.modal_fullscreen = false;
         self.modal = Some(view);
@@ -242,6 +262,7 @@ impl Shell {
     /// Show `view` as a fullscreen modal (e.g. an image/media viewer): it renders its own
     /// full-viewport backdrop, so the overlay skips the centered card treatment and dim layer.
     pub fn show_fullscreen_modal(&mut self, view: AnyView, cx: &mut Context<Self>) {
+        self.modal_underlay = None;
         self.command_palette_open = false;
         self.modal_fullscreen = true;
         self.modal = Some(view);
@@ -249,6 +270,7 @@ impl Shell {
     }
 
     pub fn show_command_palette(&mut self, view: AnyView, cx: &mut Context<Self>) {
+        self.modal_underlay = None;
         self.command_palette_open = true;
         self.modal = Some(view);
         cx.notify();
@@ -630,9 +652,25 @@ impl Shell {
             title: title.into(),
             content: content.into(),
         });
-        let focus_handle = view.read(cx).focus_handle.clone();
+        let previous_focus = window.focused(cx);
+        if let Some(current) = self.modal.take() {
+            self.modal_underlay = Some((
+                current,
+                self.modal_fullscreen,
+                self.command_palette_open,
+                previous_focus,
+            ));
+        }
+        let host = cx.new(|cx| StackedModalHost {
+            view: view.into(),
+            focus_handle: cx.focus_handle(),
+        });
+        let focus_handle = host.read(cx).focus_handle.clone();
         window.focus(&focus_handle, cx);
-        self.show_modal(view.into(), cx);
+        self.command_palette_open = false;
+        self.modal_fullscreen = false;
+        self.modal = Some(host.into());
+        cx.notify();
     }
 
     pub fn confirm_disable_clan_community(
@@ -670,10 +708,31 @@ impl Shell {
 
     pub fn close_modal(&mut self, cx: &mut Context<Self>) {
         if self.modal.take().is_some() {
+            self.modal_underlay = None;
             self.command_palette_open = false;
             self.modal_fullscreen = false;
             cx.notify();
         }
+    }
+
+    pub fn dismiss_modal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.modal.take().is_none() {
+            return;
+        }
+        if let Some((underlay, fullscreen, command_palette_open, focus_handle)) =
+            self.modal_underlay.take()
+        {
+            self.modal = Some(underlay);
+            self.modal_fullscreen = fullscreen;
+            self.command_palette_open = command_palette_open;
+            if let Some(focus_handle) = focus_handle {
+                window.focus(&focus_handle, cx);
+            }
+        } else {
+            self.command_palette_open = false;
+            self.modal_fullscreen = false;
+        }
+        cx.notify();
     }
 
     pub fn has_modal(&self) -> bool {
@@ -684,6 +743,10 @@ impl Shell {
     pub fn render_overlay(&self) -> impl IntoElement {
         let modal = self.modal.clone();
         let fullscreen = self.modal_fullscreen;
+        let modal_underlay = self
+            .modal_underlay
+            .as_ref()
+            .map(|(view, fullscreen, _, _)| (view.clone(), *fullscreen));
         let has_toasts = !self.toasts.is_empty();
         let toasts: Vec<(usize, SharedString, ToastKind, Option<f32>)> = self
             .toasts
@@ -696,6 +759,31 @@ impl Shell {
             .top_0()
             .left_0()
             .size_full()
+            .when_some(modal_underlay, |el, (view, fullscreen)| {
+                el.child(deferred(if fullscreen {
+                    div()
+                        .absolute()
+                        .top_0()
+                        .left_0()
+                        .size_full()
+                        .occlude()
+                        .child(div().size_full().child(view))
+                        .into_any_element()
+                } else {
+                    div()
+                        .absolute()
+                        .top_0()
+                        .left_0()
+                        .size_full()
+                        .occlude()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .bg(hsla(0., 0., 0., 0.5))
+                        .child(view)
+                        .into_any_element()
+                }))
+            })
             .when_some(modal, |el, view| {
                 el.child(deferred(if fullscreen {
                     div()
@@ -704,8 +792,9 @@ impl Shell {
                         .left_0()
                         .size_full()
                         .key_context("modal_backdrop")
-                        .on_action(|_: &::menu::Cancel, _window, cx| {
-                            Shell::global(cx).update(cx, |shell, cx| shell.close_modal(cx));
+                        .on_action(|_: &::menu::Cancel, window, cx| {
+                            Shell::global(cx)
+                                .update(cx, |shell, cx| shell.dismiss_modal(window, cx));
                         })
                         .child(div().occlude().size_full().child(view))
                         .into_any_element()
@@ -720,11 +809,13 @@ impl Shell {
                         .justify_center()
                         .bg(hsla(0., 0., 0., 0.5))
                         .key_context("modal_backdrop")
-                        .on_action(|_: &::menu::Cancel, _window, cx| {
-                            Shell::global(cx).update(cx, |shell, cx| shell.close_modal(cx));
+                        .on_action(|_: &::menu::Cancel, window, cx| {
+                            Shell::global(cx)
+                                .update(cx, |shell, cx| shell.dismiss_modal(window, cx));
                         })
-                        .on_mouse_down(MouseButton::Left, |_, _, cx| {
-                            Shell::global(cx).update(cx, |shell, cx| shell.close_modal(cx));
+                        .on_mouse_down(MouseButton::Left, |_, window, cx| {
+                            Shell::global(cx)
+                                .update(cx, |shell, cx| shell.dismiss_modal(window, cx));
                         })
                         .child(div().occlude().child(view))
                         .into_any_element()

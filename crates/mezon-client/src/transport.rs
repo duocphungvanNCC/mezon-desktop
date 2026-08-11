@@ -7832,22 +7832,10 @@ impl MezonTransport {
     /// Create event.
     pub async fn create_event(
         &self,
-        title: &str,
-        clan_id: i64,
-        channel_id: i64,
-        start_time: u32,
-        end_time: u32,
+        request: api::CreateEventRequest,
     ) -> Result<api::EventManagement> {
         let cid = self.generate_cid();
-        let body = api::CreateEventRequest {
-            title: title.to_string(),
-            clan_id,
-            channel_id,
-            start_time_seconds: start_time,
-            end_time_seconds: end_time,
-            ..Default::default()
-        }
-        .encode_to_vec();
+        let body = request.encode_to_vec();
         let (code, response) = self.send_api_request(cid, "CreateEvent", body).await?;
         if code != 0 {
             return Err(anyhow::anyhow!("API error: code={}", code));

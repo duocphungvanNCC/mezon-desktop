@@ -1258,6 +1258,13 @@ impl AppApi {
         Ok(self.transport.list_events(clan_id).await?.events)
     }
 
+    pub async fn create_event(
+        &self,
+        request: mezon_proto::api::CreateEventRequest,
+    ) -> Result<mezon_proto::api::EventManagement> {
+        self.transport.create_event(request).await
+    }
+
     pub async fn emoji_recent_list(&self) -> Result<Vec<mezon_proto::api::EmojiRecent>> {
         let resp = self.transport.emoji_recent_list().await?;
         Ok(resp.emoji_recents)

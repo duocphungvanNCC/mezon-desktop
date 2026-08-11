@@ -2419,6 +2419,7 @@
   "eventCreator.emptyState.title": "Inga framtida händelser.",
   "eventCreator.errorMessages.endTimeAfterStart": "Sluttid måste vara större än starttid.",
   "eventCreator.errorMessages.invalidTopic": "Ogiltigt händelseämne. Tecken '`', '<', '>', ',', '/', '\"', '\\', och ''' är inte tillåtna.",
+  "eventCreator.errorMessages.unsupportedImageType": "Bildtypen stöds inte.",
   "eventCreator.errorMessages.startTimeFuture": "Starttid måste vara i framtiden.",
   "eventCreator.eventDetail.audienceConsists": "Publiken består av medlemmar från",
   "eventCreator.eventDetail.channel": "kanal:",
