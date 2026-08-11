@@ -85,6 +85,7 @@ pub struct VoiceMember {
     pub user_id: UserId,
     pub display_name: String,
     pub avatar_url: String,
+    pub sharing_screen: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -334,7 +335,7 @@ struct TopicParentBadge {
 }
 
 struct ClanExtras {
-    voice_map: Option<HashMap<ChannelId, Vec<UserId>>>,
+    voice_map: Option<HashMap<ChannelId, Vec<VoiceMember>>>,
     favorite_ids: Option<HashSet<ChannelId>>,
     app_channels: Option<Vec<AppChannel>>,
 }
@@ -809,6 +810,7 @@ impl ChannelList {
                 RealtimeKind::CategoryEvent,
                 RealtimeKind::VoiceJoined,
                 RealtimeKind::VoiceLeaved,
+                RealtimeKind::ScreenShare,
                 RealtimeKind::UserChannelAdded,
                 RealtimeKind::UserChannelRemoved,
                 RealtimeKind::ChannelArchive,
@@ -1273,14 +1275,26 @@ impl ChannelList {
             .ok()
             .map(|apps| apps.into_iter().map(AppChannel::from).collect());
 
-        let voice_map: Option<HashMap<ChannelId, Vec<UserId>>> = voice_users.map(|users| {
+        let voice_map: Option<HashMap<ChannelId, Vec<VoiceMember>>> = voice_users.map(|users| {
             users
                 .into_iter()
                 .map(|v| {
-                    (
-                        ChannelId(v.channel_id),
-                        v.user_ids.into_iter().map(UserId).collect(),
-                    )
+                    let sharing: HashSet<UserId> =
+                        v.share_screen_ids.into_iter().map(UserId).collect();
+                    let members = v
+                        .user_ids
+                        .into_iter()
+                        .map(|uid| {
+                            let user_id = UserId(uid);
+                            VoiceMember {
+                                user_id,
+                                display_name: user_id.to_string(),
+                                avatar_url: String::new(),
+                                sharing_screen: sharing.contains(&user_id),
+                            }
+                        })
+                        .collect();
+                    (ChannelId(v.channel_id), members)
                 })
                 .collect()
         });
@@ -1325,18 +1339,7 @@ impl ChannelList {
                 .iter_mut()
                 .flat_map(|category| category.channels.iter_mut())
             {
-                let members: Vec<VoiceMember> = voice_map
-                    .get(&ch.id)
-                    .map(|ids| {
-                        ids.iter()
-                            .map(|uid| VoiceMember {
-                                display_name: uid.to_string(),
-                                avatar_url: String::new(),
-                                user_id: *uid,
-                            })
-                            .collect()
-                    })
-                    .unwrap_or_default();
+                let members = voice_map.get(&ch.id).cloned().unwrap_or_default();
                 if ch.voice_members != members {
                     ch.voice_members = members;
                     changed = true;
@@ -2404,6 +2407,7 @@ impl ChannelList {
                     user_id,
                     display_name: e.participant.clone(),
                     avatar_url: String::new(),
+                    sharing_screen: false,
                 };
                 let clan_cached = self.cache.contains(&clan_id);
                 let mut channel_found = false;
@@ -2473,6 +2477,39 @@ impl ChannelList {
                 let in_voice_changed =
                     apply_in_voice_leaved(&mut self.in_voice, user_id, channel_id);
                 notify_in_voice_change(changed, in_voice_changed, cx);
+            }
+            RealtimeEvent::ScreenShare(e) => {
+                let clan_id = ClanId(e.clan_id);
+                let channel_id = ChannelId(e.voice_channel_id);
+                let user_id = UserId(e.user_id);
+                let is_sharing = e.is_sharing;
+                let mut changed = false;
+                if let Some(cats) = self.cache.get_mut(&clan_id) {
+                    for ch in cats
+                        .iter_mut()
+                        .flat_map(|c| c.channels.iter_mut())
+                        .filter(|ch| ch.id == channel_id)
+                    {
+                        if let Some(member) =
+                            ch.voice_members.iter_mut().find(|m| m.user_id == user_id)
+                            && member.sharing_screen != is_sharing
+                        {
+                            member.sharing_screen = is_sharing;
+                            changed = true;
+                        }
+                    }
+                }
+                tracing::debug!(
+                    %clan_id,
+                    %channel_id,
+                    %user_id,
+                    is_sharing,
+                    updated = changed,
+                    "realtime ScreenShare"
+                );
+                if changed {
+                    cx.notify();
+                }
             }
             RealtimeEvent::UserChannelAdded(e) => {
                 let Some(ref desc) = e.channel_desc else {
@@ -3482,6 +3519,7 @@ fn channel_from_desc(
             display_name: String::new(),
             avatar_url: String::new(),
             user_id: uid,
+            sharing_screen: false,
         })
         .collect();
     Channel {
@@ -4458,6 +4496,7 @@ mod tests {
             user_id: UserId(id),
             display_name: format!("user{id}"),
             avatar_url: String::new(),
+            sharing_screen: false,
         };
 
         let mut voice = make_channel(1, "General Voice", "cat");
@@ -4551,6 +4590,7 @@ mod tests {
             user_id: UserId(1),
             display_name: "u1".into(),
             avatar_url: String::new(),
+            sharing_screen: false,
         }];
 
         let mut previous: HashMap<ChannelId, Vec<VoiceMember>> = HashMap::new();
@@ -4561,11 +4601,13 @@ mod tests {
                     user_id: UserId(1),
                     display_name: "u1".into(),
                     avatar_url: String::new(),
+                    sharing_screen: false,
                 },
                 VoiceMember {
                     user_id: UserId(2),
                     display_name: "u2".into(),
                     avatar_url: String::new(),
+                    sharing_screen: true,
                 },
             ],
         );
@@ -4990,6 +5032,7 @@ mod tests {
             user_id: UserId(1),
             display_name: "u1".into(),
             avatar_url: String::new(),
+            sharing_screen: false,
         });
         assert!(ch.voice_members.iter().any(|m| m.user_id == UserId(1)));
         ch.voice_members.retain(|m| m.user_id != UserId(1));
@@ -5304,7 +5347,7 @@ mod tests {
     const VOICE_CHANNEL: ChannelId = ChannelId(2);
     const VOICE_USER: UserId = UserId(7);
 
-    fn voice_extras(voice_map: HashMap<ChannelId, Vec<UserId>>) -> ClanExtras {
+    fn voice_extras(voice_map: HashMap<ChannelId, Vec<VoiceMember>>) -> ClanExtras {
         ClanExtras {
             voice_map: Some(voice_map),
             favorite_ids: Some([VOICE_CHANNEL].into_iter().collect()),
@@ -5312,8 +5355,18 @@ mod tests {
         }
     }
 
-    fn one_user_in_voice() -> HashMap<ChannelId, Vec<UserId>> {
-        [(VOICE_CHANNEL, vec![VOICE_USER])].into_iter().collect()
+    fn one_user_in_voice() -> HashMap<ChannelId, Vec<VoiceMember>> {
+        [(
+            VOICE_CHANNEL,
+            vec![VoiceMember {
+                user_id: VOICE_USER,
+                display_name: VOICE_USER.to_string(),
+                avatar_url: String::new(),
+                sharing_screen: false,
+            }],
+        )]
+        .into_iter()
+        .collect()
     }
 
     fn voice_members_of(channels: &ChannelList, category_ix: usize) -> Vec<UserId> {
@@ -5418,6 +5471,54 @@ mod tests {
 
                 channels.apply_clan_structure(ClanId(1), structure_with_two_channels(), cx);
                 assert_voice_member_on_both_copies(channels, "structure refetch");
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn realtime_screen_share_updates_voice_member_status(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let channels = init_channel_list(cx);
+            channels.update(cx, |channels, cx| {
+                channels.apply_clan_structure(ClanId(1), structure_with_two_channels(), cx);
+                channels.apply_clan_extras(ClanId(1), voice_extras(one_user_in_voice()), cx);
+
+                let sharing = |channels: &ChannelList| {
+                    channels.categories_for_clan(ClanId(1))[1]
+                        .channels
+                        .iter()
+                        .find(|ch| ch.id == VOICE_CHANNEL)
+                        .and_then(|ch| {
+                            ch.voice_members
+                                .iter()
+                                .find(|m| m.user_id == VOICE_USER)
+                                .map(|m| m.sharing_screen)
+                        })
+                };
+
+                assert_eq!(sharing(channels), Some(false));
+
+                channels.handle_event(
+                    &RealtimeEvent::ScreenShare(mezon_proto::realtime::ScreenShareEvent {
+                        clan_id: 1,
+                        voice_channel_id: VOICE_CHANNEL.get(),
+                        user_id: VOICE_USER.get(),
+                        is_sharing: true,
+                    }),
+                    cx,
+                );
+                assert_eq!(sharing(channels), Some(true));
+
+                channels.handle_event(
+                    &RealtimeEvent::ScreenShare(mezon_proto::realtime::ScreenShareEvent {
+                        clan_id: 1,
+                        voice_channel_id: VOICE_CHANNEL.get(),
+                        user_id: VOICE_USER.get(),
+                        is_sharing: false,
+                    }),
+                    cx,
+                );
+                assert_eq!(sharing(channels), Some(false));
             });
         });
     }
@@ -7370,11 +7471,13 @@ mod tests {
                 user_id: UserId(7),
                 display_name: "seven".into(),
                 avatar_url: String::new(),
+                sharing_screen: false,
             },
             VoiceMember {
                 user_id: UserId(0),
                 display_name: "zero".into(),
                 avatar_url: String::new(),
+                sharing_screen: false,
             },
         ];
 
