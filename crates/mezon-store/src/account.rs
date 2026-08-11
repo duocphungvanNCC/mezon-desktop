@@ -52,6 +52,7 @@ pub enum AccountEvent {
     DevicesLoadFailed,
     AccountSaved,
     AccountSaveFailed(String),
+    PasswordSaved,
     UserAvatarUploaded(String),
     ClanAvatarUploaded(ClanId, String),
     UserAvatarUploadFailed(String),
@@ -382,6 +383,31 @@ impl AccountStore {
             }
         })
         .detach();
+    }
+
+    pub fn save_password(
+        &mut self,
+        email: String,
+        password: String,
+        old_password: String,
+        cx: &mut Context<Self>,
+    ) -> Task<anyhow::Result<()>> {
+        let api = self.api.clone();
+        cx.spawn(async move |this, cx| {
+            api.registration_password(&email, &password, &old_password)
+                .await?;
+            this.update(cx, |this, cx| {
+                if let Some(account) = &mut this.account {
+                    account.password_setted = true;
+                }
+                if let Some(account) = &this.account {
+                    Self::spawn_persist_cache(account, cx);
+                }
+                cx.emit(AccountEvent::PasswordSaved);
+                cx.notify();
+            })?;
+            Ok(())
+        })
     }
 
     pub fn set_status(

@@ -2866,6 +2866,25 @@ impl TransportClient {
             .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
     }
 
+    pub async fn registration_password(
+        &self,
+        email: &str,
+        password: &str,
+        old_password: &str,
+    ) -> Result<()> {
+        let transport = self.inner.clone();
+        let request = mezon_proto::api::RegistrationEmailRequest {
+            email: email.to_string(),
+            password: password.to_string(),
+            old_password: old_password.to_string(),
+            ..Default::default()
+        };
+        runtime()
+            .spawn(async move { transport.registration_email(request).await.map(|_| ()) })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
     pub async fn upload_attachment_file(
         &self,
         filename: &str,
