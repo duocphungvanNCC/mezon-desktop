@@ -7,7 +7,9 @@ use gpui::{
     Context, Entity, FontWeight, MouseButton, MouseDownEvent, PathPromptOptions, Pixels, Point,
     Rgba, SharedString, Subscription, Task, Window, anchored, deferred, div, img, prelude::*, px,
 };
-use mezon_store::{AccountEvent, AccountStore, AppConfig, ClanList, Settings, UserAccount};
+use mezon_store::{
+    AccountEvent, AccountStore, AppConfig, ClanList, Settings, UserAccount, UserPresence,
+};
 
 use super::clan_profile_section::ClanProfileSection;
 use super::edit_avatar::EditAvatar;
@@ -1318,10 +1320,9 @@ impl ProfilePage {
 }
 
 pub(super) fn profile_status(status: &str, theme: &Theme) -> (IconName, Rgba) {
-    match status.to_ascii_lowercase().as_str() {
-        "idle" => (IconName::DarkModeIcon, theme.status_idle),
-        "dnd" | "do not disturb" => (IconName::MinusCircleIcon, theme.status_dnd),
-        "invisible" | "offline" => (IconName::OfflineStatus, theme.status_offline),
-        _ => (IconName::OnlineStatus, theme.status_online),
-    }
+    let presence = UserPresence::from_status(status);
+    (
+        crate::util::user_status::status_icon(presence),
+        crate::util::user_status::status_color(presence, theme),
+    )
 }
