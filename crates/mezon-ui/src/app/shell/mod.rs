@@ -14,6 +14,7 @@ use gpui::{
 use crate::components::primitives::{Toast, ToastKind};
 
 mod coming_soon_modal;
+mod confirm_archive_channel_modal;
 mod confirm_delete_canvas_modal;
 mod confirm_delete_emoji_modal;
 mod confirm_delete_message_modal;
@@ -26,6 +27,7 @@ mod confirm_remove_friend_modal;
 mod disable_clan_community_modal;
 mod upload_limit_modal;
 use coming_soon_modal::ComingSoonModal;
+use confirm_archive_channel_modal::ConfirmArchiveChannelModal;
 use confirm_delete_canvas_modal::ConfirmDeleteCanvasModal;
 use confirm_delete_emoji_modal::ConfirmDeleteEmojiModal;
 use confirm_delete_message_modal::ConfirmDeleteMessageModal;
@@ -371,6 +373,55 @@ impl Shell {
             description,
             cancel_label,
             leave_label,
+        });
+        let focus_handle = view.read(cx).focus_handle.clone();
+        window.focus(&focus_handle, cx);
+        self.show_modal(view.into(), cx);
+    }
+
+    pub fn confirm_archive_channel(
+        &mut self,
+        clan_id: mezon_store::ClanId,
+        channel_id: mezon_store::ChannelId,
+        is_thread: bool,
+        locale: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let (title_key, description_key, button_key) = if is_thread {
+            (
+                "channelMenu.modalConfirmArchiveThread.title",
+                "channelMenu.modalConfirmArchiveThread.textConfirm",
+                "channelMenu.modalConfirmArchiveThread.button",
+            )
+        } else {
+            (
+                "channelMenu.modalConfirmArchiveChannel.title",
+                "channelMenu.modalConfirmArchiveChannel.textConfirm",
+                "channelMenu.modalConfirmArchiveChannel.button",
+            )
+        };
+        let title: SharedString = mezon_i18n::t(locale, title_key).to_string().into();
+        let description: SharedString = mezon_i18n::t(locale, description_key).to_string().into();
+        let cancel_label: SharedString = mezon_i18n::t(locale, "common.cancel").to_string().into();
+        let archive_label: SharedString = mezon_i18n::t(locale, button_key).to_string().into();
+        let parent_id = mezon_store::ChannelList::global(cx)
+            .read(cx)
+            .channel(clan_id, channel_id)
+            .and_then(|channel| channel.parent_id)
+            .unwrap_or(mezon_store::ChannelId(0));
+        let view = cx.new(|cx| ConfirmArchiveChannelModal {
+            focus_handle: cx.focus_handle(),
+            clan_id,
+            channel_id,
+            parent_id,
+            is_thread,
+            locale: locale.to_string(),
+            title,
+            description,
+            cancel_label,
+            archive_label,
+            submitting: false,
         });
         let focus_handle = view.read(cx).focus_handle.clone();
         window.focus(&focus_handle, cx);
