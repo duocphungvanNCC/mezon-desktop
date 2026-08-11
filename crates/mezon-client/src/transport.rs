@@ -852,7 +852,7 @@ impl ApiChannelAttachment {
 }
 
 fn parse_message_attachments(bytes: &[u8]) -> Vec<ApiAttachment> {
-    if bytes.is_empty() {
+    if bytes.is_empty() || blob_is_json_null(bytes) {
         return Vec::new();
     }
     if let Some(value) = message_field_json(bytes) {
@@ -1273,7 +1273,7 @@ pub struct ApiEntityMention {
 }
 
 pub fn parse_message_mentions(bytes: &[u8]) -> Vec<ApiEntityMention> {
-    if bytes.is_empty() {
+    if bytes.is_empty() || blob_is_json_null(bytes) {
         return Vec::new();
     }
     if let Some(value) = message_field_json(bytes) {
@@ -1343,6 +1343,10 @@ pub fn enrich_content_tokens(tokens: &mut ApiMessageContent, entity_mentions: &[
 /// decode as protobuf group tags, which is exactly the garbled
 /// "unexpected end group tag" / "buffer underflow" warnings seen in the field.
 /// Sniff and parse those as JSON before attempting a protobuf decode.
+fn blob_is_json_null(bytes: &[u8]) -> bool {
+    std::str::from_utf8(bytes).is_ok_and(|text| text.trim() == "null")
+}
+
 fn message_field_json(bytes: &[u8]) -> Option<serde_json::Value> {
     let text = std::str::from_utf8(bytes).ok()?;
     let trimmed = text.trim();
@@ -1381,12 +1385,6 @@ fn parse_references_json_value(value: &serde_json::Value) -> Vec<ApiMessageRef> 
                 return None;
             }
             let message_sender_id = json_field_i64(item, "message_sender_id");
-            if message_sender_id == 0 {
-                tracing::warn!(
-                    "dropping reference {message_ref_id}: message_sender_id is missing or malformed"
-                );
-                return None;
-            }
             let avatar = match item.get("message_sender_avatar") {
                 Some(serde_json::Value::String(raw)) => raw.clone(),
                 _ => json_field_string(item, "mesages_sender_avatar"),
@@ -1435,7 +1433,7 @@ fn parse_reactions_json_value(value: &serde_json::Value) -> Vec<ApiMessageReacti
 }
 
 fn parse_message_references(bytes: &[u8]) -> Vec<ApiMessageRef> {
-    if bytes.is_empty() {
+    if bytes.is_empty() || blob_is_json_null(bytes) {
         return Vec::new();
     }
     if let Some(value) = message_field_json(bytes) {
@@ -1535,7 +1533,7 @@ fn mention_targets_user(token: &ContentToken, user_id: i64, role_ids: &[i64]) ->
 }
 
 fn parse_message_reactions(bytes: &[u8]) -> Vec<ApiMessageReaction> {
-    if bytes.is_empty() {
+    if bytes.is_empty() || blob_is_json_null(bytes) {
         return Vec::new();
     }
     if let Some(value) = message_field_json(bytes) {
@@ -9225,6 +9223,45 @@ impl MezonTransport {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_null_blob_is_no_data_not_a_decode_error() {
+        let null = b"null";
+        assert!(blob_is_json_null(null));
+        assert!(parse_message_reactions(null).is_empty());
+        assert!(parse_message_references(null).is_empty());
+        assert!(parse_message_mentions(null).is_empty());
+        assert!(parse_message_attachments(null).is_empty());
+        assert!(blob_is_json_null(b"  null\n"));
+        assert!(!blob_is_json_null(b"[]"));
+        assert!(!blob_is_json_null(b"nullish"));
+    }
+
+    #[test]
+    fn a_reference_without_a_sender_id_is_kept() {
+        let value = serde_json::json!([{
+            "message_ref_id": 1840651252770279424i64,
+            "content": "{\"t\":\"quoted body\"}",
+            "message_sender_username": "huy.lexuan",
+        }]);
+        let refs = parse_references_json_value(&value);
+        assert_eq!(
+            refs.len(),
+            1,
+            "React's MessageReply gates only on message_ref_id and renders \
+             message_sender_id 0 with the default avatar, so dropping the whole \
+             reference loses a quote the web app still shows"
+        );
+        assert_eq!(refs[0].message_sender_id, 0);
+        assert_eq!(refs[0].message_sender_username, "huy.lexuan");
+        assert_eq!(refs[0].content, "{\"t\":\"quoted body\"}");
+    }
+
+    #[test]
+    fn a_reference_without_a_ref_id_is_still_dropped() {
+        let value = serde_json::json!([{ "content": "orphan", "message_sender_id": 42 }]);
+        assert!(parse_references_json_value(&value).is_empty());
+    }
 
     #[test]
     fn envelope_cid_last_moves_cid_after_empty_submessage() {
