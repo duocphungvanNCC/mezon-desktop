@@ -1,8 +1,4 @@
-use std::time::Duration;
-
-use gpui::{
-    Animation, AnimationExt as _, App, SharedString, Window, div, prelude::*, px, relative,
-};
+use gpui::{App, SharedString, Window, div, prelude::*, px, relative};
 
 use super::icon::{Icon, IconName};
 use super::stack::h_flex;
@@ -21,7 +17,7 @@ pub struct Toast {
     message: SharedString,
     kind: ToastKind,
     progress: Option<f32>,
-    countdown: Option<(usize, Duration)>,
+    countdown: Option<f32>,
 }
 
 impl Toast {
@@ -44,8 +40,8 @@ impl Toast {
         self
     }
 
-    pub fn countdown(mut self, id: usize, duration: Duration) -> Self {
-        self.countdown = Some((id, duration));
+    pub fn countdown(mut self, progress: Option<f32>) -> Self {
+        self.countdown = progress;
         self
     }
 
@@ -120,16 +116,13 @@ impl RenderOnce for Toast {
                             .h(px(3.))
                             .rounded_full()
                             .overflow_hidden()
-                            .child(if let Some((id, duration)) = self.countdown {
+                            .when(self.progress.is_some(), |track| track.bg(theme.bg_tertiary))
+                            .child(if let Some(progress) = self.countdown {
                                 div()
                                     .h_full()
+                                    .w(relative(progress.clamp(0., 1.)))
                                     .rounded_full()
                                     .bg(accent)
-                                    .with_animation(
-                                        ("toast-countdown", id),
-                                        Animation::new(duration),
-                                        |bar, delta| bar.w(relative(1. - delta)),
-                                    )
                                     .into_any_element()
                             } else {
                                 div()

@@ -42,6 +42,7 @@ use disable_clan_community_modal::DisableClanCommunityModal;
 use upload_limit_modal::UploadLimitModal;
 
 const TOAST_TTL: Duration = Duration::from_secs(4);
+const TOAST_COUNTDOWN_FPS: f32 = 30.;
 
 struct ToastItem {
     id: usize,
@@ -49,7 +50,9 @@ struct ToastItem {
     message: SharedString,
     kind: ToastKind,
     progress: Option<f32>,
-    _ttl: Option<Task<()>>,
+    ttl: Option<Duration>,
+    countdown: Option<f32>,
+    _dismiss_task: Option<Task<()>>,
 }
 
 struct StackedModalHost {
@@ -66,6 +69,12 @@ impl Render for StackedModalHost {
                 Shell::global(cx).update(cx, |shell, cx| shell.dismiss_modal(window, cx));
             }))
             .child(self.view.clone())
+    }
+}
+
+impl Render for Shell {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        self.render_overlay()
     }
 }
 
@@ -109,12 +118,32 @@ impl Shell {
     ) {
         let id = self.next_id;
         self.next_id = self.next_id.wrapping_add(1);
-        let ttl = cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(TOAST_TTL).await;
-            let _ = this.update(cx, |this, cx| {
-                this.toasts.retain(|t| t.id != id);
-                cx.notify();
-            });
+        let ttl = TOAST_TTL;
+        let dismiss_task = cx.spawn(async move |this, cx| {
+            let countdown_steps = ((ttl.as_secs_f32() * TOAST_COUNTDOWN_FPS).ceil() as u32).max(1);
+            let tick = ttl / countdown_steps;
+            for step in 1..=countdown_steps {
+                cx.background_executor().timer(tick).await;
+                let should_continue = this
+                    .update(cx, |this, cx| {
+                        if step == countdown_steps {
+                            this.toasts.retain(|toast| toast.id != id);
+                            cx.notify();
+                            return false;
+                        }
+                        let Some(toast) = this.toasts.iter_mut().find(|toast| toast.id == id)
+                        else {
+                            return false;
+                        };
+                        toast.countdown = Some(1. - step as f32 / countdown_steps as f32);
+                        cx.notify();
+                        true
+                    })
+                    .unwrap_or(false);
+                if !should_continue {
+                    break;
+                }
+            }
         });
         self.toasts.push(ToastItem {
             id,
@@ -122,7 +151,9 @@ impl Shell {
             message: message.into(),
             kind,
             progress: None,
-            _ttl: Some(ttl),
+            ttl: Some(ttl),
+            countdown: Some(1.),
+            _dismiss_task: Some(dismiss_task),
         });
         cx.notify();
     }
@@ -155,7 +186,9 @@ impl Shell {
             message: message.into(),
             kind,
             progress: None,
-            _ttl: None,
+            ttl: None,
+            countdown: None,
+            _dismiss_task: None,
         });
         cx.notify();
     }
@@ -205,7 +238,9 @@ impl Shell {
                 message,
                 kind: ToastKind::Info,
                 progress: Some(progress.clamp(0., 1.)),
-                _ttl: None,
+                ttl: None,
+                countdown: None,
+                _dismiss_task: None,
             });
         }
         cx.notify();
@@ -799,7 +834,14 @@ impl Shell {
             .as_ref()
             .map(|(view, fullscreen, _, _)| (view.clone(), *fullscreen));
         let has_toasts = !self.toasts.is_empty();
-        let toasts: Vec<(usize, SharedString, ToastKind, Option<f32>, bool)> = self
+        let toasts: Vec<(
+            usize,
+            SharedString,
+            ToastKind,
+            Option<f32>,
+            Option<Duration>,
+            Option<f32>,
+        )> = self
             .toasts
             .iter()
             .map(|t| {
@@ -808,7 +850,8 @@ impl Shell {
                     t.message.clone(),
                     t.kind,
                     t.progress,
-                    t._ttl.is_some(),
+                    t.ttl,
+                    t.countdown,
                 )
             })
             .collect();
@@ -890,13 +933,11 @@ impl Shell {
                         .flex_col()
                         .gap_2()
                         .children(toasts.into_iter().map(
-                            |(id, message, kind, progress, timed)| {
-                                let toast = Toast::new(message).kind(kind).progress(progress);
-                                let toast = if timed {
-                                    toast.countdown(id, TOAST_TTL)
-                                } else {
-                                    toast
-                                };
+                            |(id, message, kind, progress, ttl, countdown)| {
+                                let toast = Toast::new(message)
+                                    .kind(kind)
+                                    .progress(progress)
+                                    .countdown(if ttl.is_some() { countdown } else { None });
                                 div()
                                     .id(("toast", id))
                                     .cursor_pointer()
