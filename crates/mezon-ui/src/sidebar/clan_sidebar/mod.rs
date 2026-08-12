@@ -456,6 +456,7 @@ fn nav_arrow(id: &'static str, enabled: bool, is_back: bool, theme: &Theme) -> A
 
     let mut button = div()
         .id(id)
+        .occlude()
         .flex()
         .items_center()
         .justify_center()
