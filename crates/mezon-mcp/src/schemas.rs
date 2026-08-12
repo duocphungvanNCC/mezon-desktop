@@ -360,6 +360,26 @@ pub fn input_schema(name: &str) -> Arc<Map<String, Value>> {
             }),
             &["enabled"],
         )),
+        "list_loaded_messages" => Arc::new(object(
+            json!({
+                "limit": integer("Max rows from each end of the buffer. Default 50.", Some(50)),
+            }),
+            &[],
+        )),
+        "jump_to_message" => Arc::new(object(
+            json!({
+                "message_id": id("Message snowflake id to centre the window on."),
+            }),
+            &["message_id"],
+        )),
+        "set_user_status" => Arc::new(object(
+            json!({
+                "status": string("\"Online\", \"Idle\", \"Do Not Disturb\" or \"Invisible\"."),
+                "minutes": integer("How long the status lasts. 0 (default) means indefinitely.", Some(0)),
+                "until_turn_on": bool("Clear the status when the user turns it back on. Default false."),
+            }),
+            &["status"],
+        )),
         _ => Arc::new(empty()),
     }
 }
