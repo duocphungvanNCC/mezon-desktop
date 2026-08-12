@@ -324,6 +324,12 @@ fn message_offset_at(
 }
 
 const EXPANDED_SELECTION_DRAG_THRESHOLD_PX: f32 = 2.;
+const SELECTION_DRAG_THRESHOLD_PX: f32 = 3.;
+
+fn pointer_left_press_origin(origin: Point<Pixels>, position: Point<Pixels>) -> bool {
+    (position.x - origin.x).as_f32().abs() > SELECTION_DRAG_THRESHOLD_PX
+        || (position.y - origin.y).as_f32().abs() > SELECTION_DRAG_THRESHOLD_PX
+}
 
 #[derive(Clone, Copy)]
 struct ExpandedSelection {
@@ -968,6 +974,19 @@ mod selection_hit_tests {
         assert!(!expanded.drag_started(point(px(12.), px(8.))));
         assert!(expanded.drag_started(point(px(12.1), px(10.))));
     }
+
+    #[test]
+    fn press_jitter_below_the_threshold_stays_a_click() {
+        let origin = point(px(100.), px(200.));
+
+        assert!(!pointer_left_press_origin(origin, origin));
+        assert!(!pointer_left_press_origin(
+            origin,
+            point(px(103.), px(197.))
+        ));
+        assert!(pointer_left_press_origin(origin, point(px(104.), px(200.))));
+        assert!(pointer_left_press_origin(origin, point(px(100.), px(206.))));
+    }
 }
 
 #[cfg(test)]
@@ -1244,6 +1263,7 @@ pub struct ChannelMessages {
     focus_handle: FocusHandle,
     selection: SharedSelection,
     selection_pointer: Option<Point<Pixels>>,
+    selection_press_origin: Option<Point<Pixels>>,
     expanded_selection: Option<ExpandedSelection>,
     selection_autoscroll_scheduled: bool,
     keyboard_scroll: Option<KeyboardScrollAnimation>,
@@ -1883,6 +1903,7 @@ impl ChannelMessages {
             focus_handle: cx.focus_handle(),
             selection: MessageSelectionState::new_shared(),
             selection_pointer: None,
+            selection_press_origin: None,
             expanded_selection: None,
             selection_autoscroll_scheduled: false,
             keyboard_scroll: None,
@@ -2315,6 +2336,7 @@ impl ChannelMessages {
     ) {
         self.selection.borrow_mut().clear();
         self.selection_pointer = None;
+        self.selection_press_origin = None;
         self.expanded_selection = None;
         self.selection_autoscroll_scheduled = false;
         let (initial_content, initial_spans) = MessagesStore::global(cx)
@@ -3182,6 +3204,7 @@ impl ChannelMessages {
         self.cached_for_channel = channel_id;
         self.selection.borrow_mut().clear();
         self.selection_pointer = None;
+        self.selection_press_origin = None;
         self.expanded_selection = None;
         self.selection_autoscroll_scheduled = false;
         self.last_seen_at_bottom = None;
@@ -3837,6 +3860,7 @@ impl ChannelMessages {
                 // unset here prevents a click near a viewport edge from moving
                 // the message list while the button is merely held down.
                 self.selection_pointer = None;
+                self.selection_press_origin = Some(event.position);
                 self.expanded_selection = expanded_selection;
                 if !self.focus_handle.is_focused(window) {
                     window.focus(&self.focus_handle, cx);
@@ -3856,6 +3880,7 @@ impl ChannelMessages {
                 selection.clear();
                 drop(selection);
                 self.selection_pointer = None;
+                self.selection_press_origin = None;
                 self.expanded_selection = None;
                 if had {
                     cx.notify();
@@ -3939,6 +3964,7 @@ impl ChannelMessages {
                 selection.selecting = false;
             }
             self.selection_pointer = None;
+            self.selection_press_origin = None;
             self.expanded_selection = None;
             return;
         }
@@ -3947,6 +3973,12 @@ impl ChannelMessages {
             .is_some_and(|expanded| !expanded.drag_started(event.position))
         {
             return;
+        }
+        if let Some(origin) = self.selection_press_origin {
+            if !pointer_left_press_origin(origin, event.position) {
+                return;
+            }
+            self.selection_press_origin = None;
         }
         self.selection_pointer = Some(event.position);
         let point = {
@@ -4007,6 +4039,9 @@ impl ChannelMessages {
         let preserve_expanded = self
             .expanded_selection
             .is_some_and(|expanded| !expanded.drag_started(event.position));
+        let stayed_a_click = self
+            .selection_press_origin
+            .is_some_and(|origin| !pointer_left_press_origin(origin, event.position));
         let (empty, head_changed) = {
             let Ok(mut state) = self.selection.try_borrow_mut() else {
                 return;
@@ -4015,6 +4050,7 @@ impl ChannelMessages {
                 return;
             }
             let head_changed = !preserve_expanded
+                && !stayed_a_click
                 && point.is_some_and(|point| {
                     update_selection_head(&mut state, point, self.expanded_selection)
                 });
@@ -4022,6 +4058,7 @@ impl ChannelMessages {
             (!state.has_selection(), head_changed)
         };
         self.selection_pointer = None;
+        self.selection_press_origin = None;
         self.expanded_selection = None;
         if empty && let Ok(mut selection) = self.selection.try_borrow_mut() {
             selection.clear();
