@@ -2245,7 +2245,10 @@ impl AppApi {
         email: &str,
         password: &str,
         old_password: &str,
-    ) -> Result<()> {
+    ) -> std::result::Result<
+        crate::transport::ApiSession,
+        crate::transport::RegistrationPasswordError,
+    > {
         self.transport
             .registration_password(email, password, old_password)
             .await

@@ -691,6 +691,25 @@ pub struct ApiSession {
     pub session_id: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RegistrationPasswordError {
+    IncorrectCurrentPassword,
+    Api { code: u32, message: String },
+    Transport(String),
+}
+
+impl std::fmt::Display for RegistrationPasswordError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::IncorrectCurrentPassword => write!(f, "incorrect current password"),
+            Self::Api { code, message } => write!(f, "API error: code={code}, response={message}"),
+            Self::Transport(message) => f.write_str(message),
+        }
+    }
+}
+
+impl std::error::Error for RegistrationPasswordError {}
+
 /// A friend relationship: the friend's account plus the relationship state and
 /// which side initiated it. `state` matches the proto `Friend.State` enum:
 /// 0 = Friend, 1 = InviteSent (outgoing), 2 = InviteReceived (incoming), 3 = Blocked.
@@ -9057,6 +9076,35 @@ impl MezonTransport {
             return Err(anyhow::anyhow!("API error: code={}", code));
         }
         let session = api::Session::decode(response.as_slice())?;
+        Ok(ApiSession {
+            token: session.token,
+            refresh_token: session.refresh_token,
+            user_id: session.user_id,
+            session_id: session.session_id,
+        })
+    }
+
+    pub async fn registration_password(
+        &self,
+        req: api::RegistrationEmailRequest,
+    ) -> std::result::Result<ApiSession, RegistrationPasswordError> {
+        let cid = self.generate_cid();
+        let body = req.encode_to_vec();
+        let (code, response) = self
+            .send_api_request(cid, "RegistrationEmail", body)
+            .await
+            .map_err(|error| RegistrationPasswordError::Transport(error.to_string()))?;
+        if code != 0 {
+            if code == 3 {
+                return Err(RegistrationPasswordError::IncorrectCurrentPassword);
+            }
+            return Err(RegistrationPasswordError::Api {
+                code,
+                message: String::from_utf8_lossy(&response).into_owned(),
+            });
+        }
+        let session = api::Session::decode(response.as_slice())
+            .map_err(|error| RegistrationPasswordError::Transport(error.to_string()))?;
         Ok(ApiSession {
             token: session.token,
             refresh_token: session.refresh_token,
