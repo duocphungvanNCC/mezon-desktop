@@ -52,7 +52,8 @@ pub fn render_share_contact_card(
         .ok()
         .map(UserId)
         .and_then(|uid| {
-            PresenceStore::try_global(ctx.app).map(|store| store.read(ctx.app).is_online(uid))
+            PresenceStore::try_global(ctx.app)
+                .map(|store| store.read(ctx.app).member_online(uid, ctx.app))
         })
         .unwrap_or(false);
     let dot_color = if online {

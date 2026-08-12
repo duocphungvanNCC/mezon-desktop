@@ -1171,10 +1171,8 @@ impl ChatLayout {
     }
 
     fn ensure_active_channel_for_clan(&mut self, cx: &mut Context<Self>) {
-        if !matches!(
-            Router::global(cx).read(cx).route(),
-            Route::Chat | Route::Channel { .. }
-        ) {
+        let route = Router::global(cx).read(cx).route();
+        if !matches!(route, Route::Chat | Route::Channel { .. }) {
             return;
         }
         let Some(clan_id) = self.clan_list.read(cx).active_clan_id else {
@@ -1184,7 +1182,7 @@ impl ChatLayout {
         if let Route::Channel {
             clan_id: route_clan,
             channel_id,
-        } = Router::global(cx).read(cx).route()
+        } = route
             && route_clan == clan_id
         {
             if self
@@ -1215,13 +1213,23 @@ impl ChatLayout {
             return;
         };
 
-        crate::router::navigate(
-            cx,
+        let resolved = Route::Channel {
+            clan_id,
+            channel_id,
+        };
+        let is_redirect = match route {
+            Route::Chat => true,
             Route::Channel {
-                clan_id,
-                channel_id,
-            },
-        );
+                clan_id: route_clan,
+                ..
+            } => route_clan == clan_id,
+            _ => false,
+        };
+        if is_redirect {
+            crate::router::replace(cx, resolved);
+        } else {
+            crate::router::navigate(cx, resolved);
+        }
     }
 
     fn maybe_prefetch_voice_token(&mut self, cx: &mut Context<Self>) {

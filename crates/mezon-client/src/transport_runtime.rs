@@ -435,7 +435,7 @@ impl TransportClient {
         self.inner.credential_rejected()
     }
 
-    pub async fn renew_fallback_token(&self) -> Result<(String, String)> {
+    pub async fn renew_fallback_token(&self) -> Result<crate::transport::RenewedTokens> {
         let transport = self.inner.clone();
         runtime()
             .spawn(async move { transport.renew_fallback_token().await })
@@ -443,7 +443,9 @@ impl TransportClient {
             .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
     }
 
-    pub fn renewed_tokens(&self) -> tokio::sync::watch::Receiver<Option<(String, String)>> {
+    pub fn renewed_tokens(
+        &self,
+    ) -> tokio::sync::watch::Receiver<Option<crate::transport::RenewedTokens>> {
         self.inner.renewed_tokens()
     }
 
