@@ -7,7 +7,8 @@ use gpui::{
 use mezon_store::{
     BadgeService, ChannelList, ClanId, ClanMembersStore, DirectMessageBody, DirectMessageStore,
     FriendState, FriendStore, PERMISSION_CLAN_OWNER, PERMISSION_MANAGE_CLAN, PermissionStore,
-    PresenceStore, ProfileContext, RoleId, RolesStore, Settings, UserId, resolve_user_profile,
+    PresenceStore, ProfileContext, RoleId, RolesStore, Settings, UserId, current_user_presence,
+    current_user_status, resolve_user_profile,
 };
 use ui::{Clickable, PopoverMenu, Toggleable};
 
@@ -646,17 +647,24 @@ impl Render for UserProfilePopover {
             ),
         };
 
-        let custom_status = PresenceStore::global(cx)
-            .read(cx)
-            .user_status(self.user_id)
-            .unwrap_or("")
-            .to_string();
+        let own_status = current_user_presence(cx)
+            .filter(|(id, _)| *id == self.user_id)
+            .and_then(|_| current_user_status(cx))
+            .map(|(_, status)| status);
+        let custom_status = match &own_status {
+            Some(status) => status.custom_status.clone(),
+            None => PresenceStore::global(cx)
+                .read(cx)
+                .user_status(self.user_id)
+                .unwrap_or("")
+                .to_string(),
+        };
 
         let member_since = format_member_since(create_time);
-        let status_icon = if online {
-            IconName::OnlineStatus
-        } else {
-            IconName::OfflineStatus
+        let status_icon = match &own_status {
+            Some(status) => crate::util::user_status::status_icon(status.presence),
+            None if online => IconName::OnlineStatus,
+            None => IconName::OfflineStatus,
         };
 
         let avatar_proxied = if avatar_raw.is_empty() {
@@ -1413,7 +1421,7 @@ fn role_expander_pill(
         .rounded(px(4.))
         .p_1()
         .cursor_pointer()
-        .bg(theme.tokens.bg_theme_input_primary)
+        .bg(theme.surfaces.input_primary)
         .text_color(theme.tokens.text_theme_primary)
         .child(
             div()

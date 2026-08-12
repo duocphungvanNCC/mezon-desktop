@@ -430,6 +430,7 @@ impl AccountStore {
                             &rotated.token,
                             &rotated.refresh_token,
                             &rotated.session_id,
+                            "",
                         );
                         cx.notify();
                         Some(session.clone())

@@ -53,13 +53,13 @@ impl tracing_tracy::Config for TracyConfig {
 
 #[cfg(target_os = "linux")]
 fn configure_linux_session() {
+    if mezon_store::record_wayland_session() {
+        unsafe { std::env::set_var("MEZON_WAYLAND_SESSION", "1") };
+    }
     if std::env::var_os("DISPLAY").is_none() {
         return;
     }
     ensure_linux_ui_scale_factor();
-    if std::env::var_os("WAYLAND_DISPLAY").is_some_and(|display| !display.is_empty()) {
-        mezon_store::record_wayland_session();
-    }
     unsafe {
         std::env::set_var("GDK_BACKEND", "x11");
         std::env::remove_var("WAYLAND_DISPLAY");
@@ -860,7 +860,9 @@ fn run_app(lock: SingleInstance, initial_url: Option<String>) {
                     } else {
                         cx.update(|cx| {
                             if let Some(route) = mezon_ui::router::parse_link(&url) {
-                                mezon_ui::router::navigate(cx, route);
+                                mezon_ui::app::shell::Shell::navigate_from_external_trigger(
+                                    cx, route,
+                                );
                             }
                         });
                     }
@@ -1072,7 +1074,9 @@ fn open_main_window(
                         "notification clicked"
                     );
                     match notification_route(&target) {
-                        Some(route) => mezon_ui::router::navigate(cx, route),
+                        Some(route) => {
+                            mezon_ui::app::shell::Shell::navigate_from_external_trigger(cx, route)
+                        }
                         None => tracing::warn!("notification click with unroutable target"),
                     }
                 });

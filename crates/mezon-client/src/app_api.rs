@@ -9,6 +9,7 @@ use crate::{
         ApiAccount, ApiAttachment, ApiCanvas, ApiCanvasDetail, ApiCategoryDesc, ApiChannelApp,
         ApiChannelAttachment, ApiChannelDesc, ApiClanDesc, ApiDirectChannel, ApiFriend, ApiMessage,
         ApiPinMessage, ApiThreadDesc, ApiVoiceChannelUser, HttpFallbackSession, RealtimeEvent,
+        UpdateChannelDescParams,
     },
 };
 
@@ -186,11 +187,13 @@ impl AppApi {
         self.transport.set_http_fallback(fallback);
     }
 
-    pub async fn renew_fallback_token(&self) -> Result<(String, String)> {
+    pub async fn renew_fallback_token(&self) -> Result<crate::transport::RenewedTokens> {
         self.transport.renew_fallback_token().await
     }
 
-    pub fn renewed_tokens(&self) -> tokio::sync::watch::Receiver<Option<(String, String)>> {
+    pub fn renewed_tokens(
+        &self,
+    ) -> tokio::sync::watch::Receiver<Option<crate::transport::RenewedTokens>> {
         self.transport.renewed_tokens()
     }
 
@@ -488,11 +491,10 @@ impl AppApi {
         &self,
         clan_id: i64,
         channel_id: i64,
-        channel_label: Option<String>,
-        channel_avatar: Option<String>,
+        params: UpdateChannelDescParams,
     ) -> Result<()> {
         self.transport
-            .update_channel_desc(clan_id, channel_id, channel_label, channel_avatar)
+            .update_channel_desc(clan_id, channel_id, params)
             .await
     }
 
@@ -1477,6 +1479,17 @@ impl AppApi {
     ) -> Result<()> {
         self.transport
             .update_channel_private(clan_id, channel_id, channel_private, user_ids, role_ids)
+            .await
+    }
+
+    pub async fn change_channel_category(
+        &self,
+        clan_id: i64,
+        channel_id: i64,
+        new_category_id: i64,
+    ) -> Result<()> {
+        self.transport
+            .change_channel_category(clan_id, channel_id, new_category_id)
             .await
     }
 

@@ -1171,10 +1171,8 @@ impl ChatLayout {
     }
 
     fn ensure_active_channel_for_clan(&mut self, cx: &mut Context<Self>) {
-        if !matches!(
-            Router::global(cx).read(cx).route(),
-            Route::Chat | Route::Channel { .. }
-        ) {
+        let route = Router::global(cx).read(cx).route();
+        if !matches!(route, Route::Chat | Route::Channel { .. }) {
             return;
         }
         let Some(clan_id) = self.clan_list.read(cx).active_clan_id else {
@@ -1184,7 +1182,7 @@ impl ChatLayout {
         if let Route::Channel {
             clan_id: route_clan,
             channel_id,
-        } = Router::global(cx).read(cx).route()
+        } = route
             && route_clan == clan_id
         {
             if self
@@ -1215,13 +1213,23 @@ impl ChatLayout {
             return;
         };
 
-        crate::router::navigate(
-            cx,
+        let resolved = Route::Channel {
+            clan_id,
+            channel_id,
+        };
+        let is_redirect = match route {
+            Route::Chat => true,
             Route::Channel {
-                clan_id,
-                channel_id,
-            },
-        );
+                clan_id: route_clan,
+                ..
+            } => route_clan == clan_id,
+            _ => false,
+        };
+        if is_redirect {
+            crate::router::replace(cx, resolved);
+        } else {
+            crate::router::navigate(cx, resolved);
+        }
     }
 
     fn maybe_prefetch_voice_token(&mut self, cx: &mut Context<Self>) {
@@ -1774,14 +1782,13 @@ impl Render for ChatLayout {
                     .flex_col()
                     .w(px(344.0))
                     .h_full()
-                    .bg(theme.bg_tertiary)
+                    .bg(theme.surfaces.primary.ramp())
                     .child(
                         div()
                             .flex()
                             .flex_row()
                             .flex_1()
                             .min_h_0()
-                            .bg(theme.bg_tertiary)
                             .overflow_hidden()
                             .child(
                                 div().w(px(72.0)).h_full().child(
@@ -1806,7 +1813,7 @@ impl Render for ChatLayout {
                             .border_1()
                             .border_color(theme.tokens.border_primary)
                             .shadow_lg()
-                            .bg(theme.tokens.bg_surface)
+                            .bg(theme.surfaces.surface)
                             .child(
                                 div()
                                     .id("clan-footer-bars")
@@ -2159,15 +2166,10 @@ impl ChatLayout {
         }
         if self.topic_panel.is_none() {
             let settings = self.settings.clone();
-            let align_timeline = self.chat_area.timeline.clone();
-            self.topic_panel = Some(cx.new(|cx| {
-                crate::chat::create_topic_panel::TopicPanel::new(
-                    settings,
-                    align_timeline,
-                    window,
-                    cx,
-                )
-            }));
+            self.topic_panel =
+                Some(cx.new(|cx| {
+                    crate::chat::create_topic_panel::TopicPanel::new(settings, window, cx)
+                }));
         }
         self.topic_panel
             .clone()
@@ -2848,7 +2850,7 @@ impl ChatLayout {
                                 .overflow_hidden()
                                 .border_l_1()
                                 .border_color(theme.border)
-                                .bg(theme.bg_primary)
+                                .bg(theme.surfaces.secondary.ramp())
                                 .child(panel),
                         )
                     })
@@ -2917,7 +2919,7 @@ impl ChatLayout {
                     .min_h_0()
                     .min_w_0()
                     .gap_2()
-                    .bg(theme.bg_secondary)
+                    .bg(theme.surfaces.direct_message.ramp())
                     .child(
                         div()
                             .flex()
@@ -2939,7 +2941,7 @@ impl ChatLayout {
                                 .h_full()
                                 .flex_shrink_0()
                                 .overflow_hidden()
-                                .bg(theme.bg_primary)
+                                .bg(theme.surfaces.secondary.ramp())
                                 .child(panel),
                         )
                     })
