@@ -1830,7 +1830,7 @@ fn render_social_link_card(
         LinkKind::YouTube => (YOUTUBE_ACCENT, "YouTube"),
         LinkKind::Facebook => (FACEBOOK_ACCENT, "Facebook"),
         LinkKind::TikTok => (TIKTOK_ACCENT, "TikTok"),
-        LinkKind::Plain => (SOCIAL_CARD_BG, ""),
+        LinkKind::Plain => return gpui::Empty.into_any_element(),
     };
     let id = ("msg-social", key);
     let selection = selection.clone();
