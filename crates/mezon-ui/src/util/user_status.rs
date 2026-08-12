@@ -1,8 +1,17 @@
-use gpui::Rgba;
-use mezon_store::UserPresence;
+use gpui::{Rgba, rgba};
+use mezon_store::{DmAvatarPresence, UserPresence};
 
 use crate::components::primitives::IconName;
 use crate::theme::Theme;
+
+pub fn presence_badge_color(presence: DmAvatarPresence) -> Option<Rgba> {
+    match presence {
+        DmAvatarPresence::None => None,
+        DmAvatarPresence::Online => Some(rgba(0x22c55eff)),
+        DmAvatarPresence::Dnd => Some(rgba(0xef4444ff)),
+        DmAvatarPresence::Idle => Some(rgba(0xf0b232ff)),
+    }
+}
 
 pub fn status_icon(presence: UserPresence) -> IconName {
     match presence {
@@ -20,6 +29,11 @@ pub fn status_color(presence: UserPresence, theme: &Theme) -> Rgba {
         UserPresence::Dnd => theme.status_dnd,
         UserPresence::Invisible => theme.status_offline,
     }
+}
+
+pub fn status_icon_and_color(status: &str, theme: &Theme) -> (IconName, Rgba) {
+    let presence = UserPresence::from_status(status);
+    (status_icon(presence), status_color(presence, theme))
 }
 
 pub fn status_label_key(presence: UserPresence) -> &'static str {

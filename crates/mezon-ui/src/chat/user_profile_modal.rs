@@ -15,7 +15,7 @@ use gpui::{
 };
 use mezon_store::{
     AccountStore, BadgeService, ClanId, ClanMembersStore, FriendState, FriendStore, PresenceStore,
-    ProfileContext, Settings, UserId, UserPresence,
+    ProfileContext, Settings, UserId,
 };
 use ui::Tooltip;
 
@@ -776,10 +776,4 @@ fn profile_share_contact_button(
         .into_any_element()
 }
 
-fn profile_status(status: &str, theme: &crate::theme::Theme) -> (IconName, Rgba) {
-    let presence = UserPresence::from_status(status);
-    (
-        crate::util::user_status::status_icon(presence),
-        crate::util::user_status::status_color(presence, theme),
-    )
-}
+use crate::util::user_status::status_icon_and_color as profile_status;

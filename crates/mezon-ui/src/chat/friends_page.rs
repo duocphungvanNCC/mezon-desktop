@@ -1,14 +1,15 @@
 use std::collections::HashMap;
 
 use gpui::{
-    App, ClickEvent, Context, Entity, InteractiveElement, IntoElement, ParentElement, Pixels,
-    Point, SharedString, StatefulInteractiveElement, Styled, Subscription, UniformListScrollHandle,
-    Window, div, img, prelude::*, px, relative, rgb, uniform_list,
+    AnyElement, App, ClickEvent, Context, Entity, InteractiveElement, IntoElement, ParentElement,
+    Pixels, Point, SharedString, StatefulInteractiveElement, Styled, Subscription,
+    UniformListScrollHandle, Window, div, img, prelude::*, px, relative, rgb, uniform_list,
 };
 use mezon_store::activity::{ACTIVITY_TYPE_LIVE, ACTIVITY_TYPE_PLAY, ACTIVITY_TYPE_WORK};
 use mezon_store::{
-    ActivityEvent, ActivityStore, BadgeService, DirectMessageStore, Friend, FriendEvent,
-    FriendState, FriendStore, PresenceEvent, PresenceStore, Settings, UserActivity, UserId,
+    ActivityEvent, ActivityStore, BadgeService, DirectMessageStore, DmAvatarPresence, Friend,
+    FriendEvent, FriendState, FriendStore, PresenceEvent, PresenceStore, Settings, UserActivity,
+    UserId, current_user_presence,
 };
 
 use crate::app::shell::{FriendRemovalKind, Shell};
@@ -71,6 +72,7 @@ struct FriendRow {
     avatar_src: SharedString,
     avatar_raw: SharedString,
     online: bool,
+    presence: DmAvatarPresence,
     user_status: SharedString,
     state: FriendState,
 }
@@ -318,10 +320,16 @@ impl FriendsPage {
         let store = PresenceStore::global(cx);
         let presence = store.read(cx);
         let mut changed = false;
+        let own_presence = current_user_presence(cx);
         for row in &mut self.rows {
             let online = presence.is_online(row.id);
             if row.online != online {
                 row.online = online;
+                changed = true;
+            }
+            let badge = presence.member_presence(row.id, own_presence);
+            if row.presence != badge {
+                row.presence = badge;
                 changed = true;
             }
             let status = presence.user_status(row.id).unwrap_or("");
@@ -371,6 +379,7 @@ impl FriendsPage {
             filtered.sort_by_cached_key(|f| f.label().to_lowercase());
         }
 
+        let own_presence = current_user_presence(cx);
         self.rows = filtered
             .into_iter()
             .map(|f| FriendRow {
@@ -381,6 +390,7 @@ impl FriendsPage {
                 avatar_src: SharedString::from(imgproxy::avatar_url(cx, &f.avatar_url)),
                 avatar_raw: SharedString::from(f.avatar_url.clone()),
                 online: presence.is_online(f.id),
+                presence: presence.member_presence(f.id, own_presence),
                 user_status: SharedString::from(
                     presence.user_status(f.id).unwrap_or("").to_string(),
                 ),
@@ -1187,17 +1197,28 @@ fn render_friend_row(
         avatar = avatar.src(row.avatar_raw.clone());
     }
 
-    let dot_fill = if row.online {
-        theme.status_online
-    } else {
-        theme.text_muted
-    };
-    let avatar_slot = div()
-        .relative()
-        .flex_shrink_0()
-        .size(px(AVATAR_SIZE))
-        .child(avatar)
-        .child(
+    let presence_badge: Option<AnyElement> = match row.presence {
+        DmAvatarPresence::None => None,
+        DmAvatarPresence::Idle => Some(
+            div()
+                .absolute()
+                .bottom(px(-1.))
+                .right(px(-1.))
+                .size(px(10.))
+                .child(
+                    Icon::new(IconName::DarkModeIcon)
+                        .size(px(10.))
+                        .with_transformation(gpui::Transformation::rotate(gpui::radians(
+                            -std::f32::consts::FRAC_PI_2,
+                        )))
+                        .text_color(
+                            crate::util::user_status::presence_badge_color(DmAvatarPresence::Idle)
+                                .unwrap_or(theme.status_idle),
+                        ),
+                )
+                .into_any_element(),
+        ),
+        DmAvatarPresence::Online | DmAvatarPresence::Dnd => Some(
             div()
                 .absolute()
                 .bottom(px(-1.))
@@ -1206,8 +1227,17 @@ fn render_friend_row(
                 .rounded_full()
                 .border_2()
                 .border_color(theme.tokens.bg_secondary)
-                .bg(dot_fill),
-        );
+                .bg(crate::util::user_status::presence_badge_color(row.presence)
+                    .unwrap_or(theme.status_online))
+                .into_any_element(),
+        ),
+    };
+    let avatar_slot = div()
+        .relative()
+        .flex_shrink_0()
+        .size(px(AVATAR_SIZE))
+        .child(avatar)
+        .children(presence_badge);
 
     let group_name = row.group_name.clone();
     let mut name_line = div()
