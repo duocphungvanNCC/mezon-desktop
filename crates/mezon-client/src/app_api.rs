@@ -1861,7 +1861,7 @@ impl AppApi {
         mentions: Vec<crate::transport::OutgoingMention>,
         hashtags: Vec<crate::transport::OutgoingHashtag>,
         emojis: Vec<crate::transport::OutgoingEmoji>,
-        presign_finish: Vec<String>,
+        presign_finish: Option<Vec<String>>,
         flags: crate::transport::OutgoingMessageFlags,
     ) -> Result<ApiMessage> {
         let echo: Vec<crate::transport::ApiAttachment> = attachments
@@ -1890,7 +1890,7 @@ impl AppApi {
                 mentions,
                 hashtags,
                 emojis,
-                Some(presign_finish),
+                presign_finish,
                 flags,
             )
             .await?;
@@ -1911,7 +1911,7 @@ impl AppApi {
         mentions: Vec<crate::transport::OutgoingMention>,
         hashtags: Vec<crate::transport::OutgoingHashtag>,
         emojis: Vec<crate::transport::OutgoingEmoji>,
-        presign_finish: Vec<String>,
+        presign_finish: Option<Vec<String>>,
         reply: Option<crate::transport::OutgoingReply>,
         flags: crate::transport::OutgoingMessageFlags,
     ) -> Result<ApiMessage> {
@@ -1941,7 +1941,7 @@ impl AppApi {
                 mentions,
                 hashtags,
                 emojis,
-                Some(presign_finish),
+                presign_finish,
                 reply,
                 flags,
             )
