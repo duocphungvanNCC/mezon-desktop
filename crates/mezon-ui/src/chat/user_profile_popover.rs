@@ -1413,7 +1413,7 @@ fn role_expander_pill(
         .rounded(px(4.))
         .p_1()
         .cursor_pointer()
-        .bg(theme.tokens.bg_theme_input_primary)
+        .bg(theme.surfaces.input_primary)
         .text_color(theme.tokens.text_theme_primary)
         .child(
             div()

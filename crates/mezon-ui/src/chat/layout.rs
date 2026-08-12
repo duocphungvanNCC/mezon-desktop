@@ -1774,14 +1774,13 @@ impl Render for ChatLayout {
                     .flex_col()
                     .w(px(344.0))
                     .h_full()
-                    .bg(theme.bg_tertiary)
+                    .bg(theme.surfaces.primary.ramp())
                     .child(
                         div()
                             .flex()
                             .flex_row()
                             .flex_1()
                             .min_h_0()
-                            .bg(theme.bg_tertiary)
                             .overflow_hidden()
                             .child(
                                 div().w(px(72.0)).h_full().child(
@@ -1806,7 +1805,7 @@ impl Render for ChatLayout {
                             .border_1()
                             .border_color(theme.tokens.border_primary)
                             .shadow_lg()
-                            .bg(theme.tokens.bg_surface)
+                            .bg(theme.surfaces.surface)
                             .child(
                                 div()
                                     .id("clan-footer-bars")
@@ -2843,7 +2842,7 @@ impl ChatLayout {
                                 .overflow_hidden()
                                 .border_l_1()
                                 .border_color(theme.border)
-                                .bg(theme.bg_primary)
+                                .bg(theme.surfaces.secondary.ramp())
                                 .child(panel),
                         )
                     })
@@ -2912,7 +2911,7 @@ impl ChatLayout {
                     .min_h_0()
                     .min_w_0()
                     .gap_2()
-                    .bg(theme.bg_secondary)
+                    .bg(theme.surfaces.direct_message.ramp())
                     .child(
                         div()
                             .flex()
@@ -2934,7 +2933,7 @@ impl ChatLayout {
                                 .h_full()
                                 .flex_shrink_0()
                                 .overflow_hidden()
-                                .bg(theme.bg_primary)
+                                .bg(theme.surfaces.secondary.ramp())
                                 .child(panel),
                         )
                     })
