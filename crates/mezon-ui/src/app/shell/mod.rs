@@ -7,12 +7,12 @@
 use std::time::Duration;
 
 use gpui::{
-    AnyView, App, AppContext, Context, Entity, Global, MouseButton, SharedString, Subscription,
-    Task, Window, deferred, div, hsla, prelude::*, px,
+    AnyView, App, AppContext, Context, Entity, Global, MouseButton, SharedString, Task, Window,
+    deferred, div, hsla, prelude::*, px,
 };
 
 use crate::components::primitives::{Toast, ToastKind};
-use crate::router::{Route, Router};
+use crate::router::Route;
 
 mod coming_soon_modal;
 mod confirm_archive_channel_modal;
@@ -78,8 +78,6 @@ pub struct Shell {
     modal_fullscreen: bool,
     command_palette_open: bool,
     next_id: usize,
-    route: Route,
-    _route_sub: Subscription,
 }
 
 struct GlobalShell(Entity<Shell>);
@@ -87,28 +85,21 @@ impl Global for GlobalShell {}
 
 impl Shell {
     pub fn init(cx: &mut App) -> Entity<Self> {
-        let router = Router::global(cx);
-        let entity = cx.new(|cx| Self {
+        let entity = cx.new(|_| Self {
             toasts: Vec::new(),
             modal: None,
             modal_underlay: None,
             modal_fullscreen: false,
             command_palette_open: false,
             next_id: 0,
-            route: router.read(cx).route(),
-            _route_sub: cx.observe(&router, Self::on_route_changed),
         });
         cx.set_global(GlobalShell(entity.clone()));
         entity
     }
 
-    fn on_route_changed(&mut self, router: Entity<Router>, cx: &mut Context<Self>) {
-        let route = router.read(cx).route();
-        if route == self.route {
-            return;
-        }
-        self.route = route;
-        self.close_modal(cx);
+    pub fn navigate_from_external_trigger(cx: &mut App, route: Route) {
+        Shell::global(cx).update(cx, |shell, cx| shell.close_modal(cx));
+        crate::router::navigate(cx, route);
     }
 
     pub fn global(cx: &App) -> Entity<Self> {
@@ -928,7 +919,7 @@ mod tests {
 
     fn open_shell_with_modal(cx: &mut TestAppContext) -> Entity<Shell> {
         cx.update(|cx| {
-            Router::init(cx);
+            crate::router::Router::init(cx);
             crate::router::replace(
                 cx,
                 Route::ClanSettings {
@@ -943,20 +934,21 @@ mod tests {
         })
     }
 
+    fn conversation_route() -> Route {
+        Route::Channel {
+            clan_id: ClanId(7),
+            channel_id: ChannelId(42),
+        }
+    }
+
     #[gpui::test]
-    fn navigating_away_closes_the_open_modal(cx: &mut TestAppContext) {
+    fn an_external_trigger_closes_the_settings_modal_it_navigates_away_from(
+        cx: &mut TestAppContext,
+    ) {
         let shell = open_shell_with_modal(cx);
         assert!(shell.read_with(cx, |shell, _| shell.has_modal()));
 
-        cx.update(|cx| {
-            crate::router::navigate(
-                cx,
-                Route::Channel {
-                    clan_id: ClanId(7),
-                    channel_id: ChannelId(42),
-                },
-            )
-        });
+        cx.update(|cx| Shell::navigate_from_external_trigger(cx, conversation_route()));
         cx.run_until_parked();
 
         assert!(
@@ -967,23 +959,16 @@ mod tests {
     }
 
     #[gpui::test]
-    fn re_navigating_to_the_same_route_keeps_the_modal(cx: &mut TestAppContext) {
+    fn in_app_navigation_leaves_the_modal_alone(cx: &mut TestAppContext) {
         let shell = open_shell_with_modal(cx);
 
-        cx.update(|cx| {
-            crate::router::navigate(
-                cx,
-                Route::ClanSettings {
-                    clan_id: ClanId(7),
-                    page: ClanSettingsPage::Emoji,
-                },
-            )
-        });
+        cx.update(|cx| crate::router::navigate(cx, conversation_route()));
         cx.run_until_parked();
 
         assert!(
             shell.read_with(cx, |shell, _| shell.has_modal()),
-            "a router notify that does not change the route must leave the modal alone"
+            "only an external trigger closes the modal; a plain route change (an archived-thread \
+             redirect, a permission-driven settings page swap) must leave it open"
         );
     }
 }
