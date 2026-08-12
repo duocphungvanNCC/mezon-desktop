@@ -15,7 +15,7 @@ use gpui::{
 };
 use mezon_store::{
     AccountStore, BadgeService, ClanId, ClanMembersStore, FriendState, FriendStore, PresenceStore,
-    ProfileContext, Settings, UserId,
+    ProfileContext, Settings, UserId, UserPresence,
 };
 use ui::Tooltip;
 
@@ -777,10 +777,9 @@ fn profile_share_contact_button(
 }
 
 fn profile_status(status: &str, theme: &crate::theme::Theme) -> (IconName, Rgba) {
-    match status.to_ascii_lowercase().as_str() {
-        "idle" => (IconName::DarkModeIcon, theme.status_idle),
-        "dnd" | "do not disturb" => (IconName::MinusCircleIcon, theme.status_dnd),
-        "invisible" | "offline" => (IconName::OfflineStatus, theme.status_offline),
-        _ => (IconName::OnlineStatus, theme.status_online),
-    }
+    let presence = UserPresence::from_status(status);
+    (
+        crate::util::user_status::status_icon(presence),
+        crate::util::user_status::status_color(presence, theme),
+    )
 }

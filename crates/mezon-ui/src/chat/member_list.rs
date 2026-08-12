@@ -6,11 +6,12 @@ use gpui::{
     deferred, div, prelude::*, px, rgb, size, uniform_list,
 };
 use mezon_store::{
-    AccountStore, BadgeService, ChannelEvent, ChannelId, ChannelList, ChannelMembersEvent,
-    ChannelMembersStore, ChannelType, ClanId, ClanList, ClanMember, ClanMembersStore, DirectEvent,
-    DirectKind, DirectMessageStore, GroupMember, GroupMembersEvent, GroupMembersStore,
-    PERMISSION_ADMINISTRATOR, PERMISSION_CLAN_OWNER, PermissionStore, PresenceEvent, PresenceStore,
-    ProfileContext, RolesEvent, RolesStore, Settings, UserId, split_members_by_status,
+    AccountEvent, AccountStore, BadgeService, ChannelEvent, ChannelId, ChannelList,
+    ChannelMembersEvent, ChannelMembersStore, ChannelType, ClanId, ClanList, ClanMember,
+    ClanMembersStore, DirectEvent, DirectKind, DirectMessageStore, GroupMember, GroupMembersEvent,
+    GroupMembersStore, PERMISSION_ADMINISTRATOR, PERMISSION_CLAN_OWNER, PermissionStore,
+    PresenceEvent, PresenceStore, ProfileContext, RolesEvent, RolesStore, Settings, UserId,
+    current_user_status, split_members_by_status,
 };
 
 use crate::app::shell::Shell;
@@ -143,6 +144,13 @@ impl MemberListPanel {
             },
         ));
         subs.push(cx.observe(&settings, |_, _, cx| cx.notify()));
+        if let Some(account) = AccountStore::try_global(cx) {
+            subs.push(cx.subscribe(&account, |this, _, event, cx| {
+                if matches!(event, AccountEvent::StatusUpdated) {
+                    this.rebuild(cx);
+                }
+            }));
+        }
 
         match source {
             MemberSource::Channel => {
@@ -509,17 +517,28 @@ fn channel_raw_members(cx: &App, ctx: ChannelContext) -> (Vec<RawMember>, Vec<Ra
         None => store.members(ctx.clan_id),
     };
     let (online_ids, offline_ids) = split_members_by_status(&pool, online);
+    let own = current_user_status(cx);
     let to_raw = |ids: &[UserId], is_online: bool| -> Vec<RawMember> {
         ids.iter()
             .filter_map(|id| store.member(ctx.clan_id, *id))
-            .map(|member| RawMember {
-                user_id: member.id(),
-                name: member.name().to_string(),
-                avatar_raw: member.avatar().to_string(),
-                online: is_online,
-                user_status: presence.user_status(member.id()).unwrap_or("").to_string(),
-                in_voice: is_online && channels.in_voice_status(member.id()).is_some(),
-                role_color: Some(role_color_in(roles, ctx.clan_id, member.id())),
+            .map(|member| {
+                let own_status = own
+                    .as_ref()
+                    .filter(|(id, _)| *id == member.id())
+                    .map(|(_, status)| status);
+                let online = own_status.map_or(is_online, |status| status.online);
+                RawMember {
+                    user_id: member.id(),
+                    name: member.name().to_string(),
+                    avatar_raw: member.avatar().to_string(),
+                    online,
+                    user_status: own_status.map_or_else(
+                        || presence.user_status(member.id()).unwrap_or("").to_string(),
+                        |status| status.custom_status.clone(),
+                    ),
+                    in_voice: online && channels.in_voice_status(member.id()).is_some(),
+                    role_color: Some(role_color_in(roles, ctx.clan_id, member.id())),
+                }
             })
             .collect()
     };
@@ -534,16 +553,29 @@ fn group_raw_members(cx: &App, direct_id: ChannelId) -> Vec<RawMember> {
     let store = store.read(cx);
     let mut members: Vec<&GroupMember> = store.members(direct_id).iter().collect();
     members.sort_by_cached_key(|m| m.name().to_lowercase());
+    let own = current_user_status(cx);
     members
         .into_iter()
-        .map(|member| RawMember {
-            user_id: member.id(),
-            name: member.name().to_string(),
-            avatar_raw: member.avatar().to_string(),
-            online: member.online || presence_online.contains(&member.id()),
-            user_status: presence.user_status(member.id()).unwrap_or("").to_string(),
-            in_voice: false,
-            role_color: None,
+        .map(|member| {
+            let own_status = own
+                .as_ref()
+                .filter(|(id, _)| *id == member.id())
+                .map(|(_, status)| status);
+            RawMember {
+                user_id: member.id(),
+                name: member.name().to_string(),
+                avatar_raw: member.avatar().to_string(),
+                online: own_status.map_or_else(
+                    || member.online || presence_online.contains(&member.id()),
+                    |status| status.online,
+                ),
+                user_status: own_status.map_or_else(
+                    || presence.user_status(member.id()).unwrap_or("").to_string(),
+                    |status| status.custom_status.clone(),
+                ),
+                in_voice: false,
+                role_color: None,
+            }
         })
         .collect()
 }
