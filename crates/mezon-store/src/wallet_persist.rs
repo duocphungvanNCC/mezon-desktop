@@ -11,6 +11,8 @@ pub struct PersistedWalletState {
     pub wallet: Option<WalletDetail>,
     pub zk_proofs: Option<ZkProof>,
     pub ephemeral: Option<EphemeralKeyPair>,
+    #[serde(default)]
+    pub proof_minted_at: Option<i64>,
 }
 
 fn parse_wallet(json: &str) -> Option<PersistedWalletState> {

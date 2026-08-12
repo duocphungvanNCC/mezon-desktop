@@ -26,6 +26,7 @@ mod confirm_leave_thread_modal;
 mod confirm_remove_friend_modal;
 mod disable_clan_community_modal;
 mod upload_limit_modal;
+mod wallet_not_available_modal;
 use coming_soon_modal::ComingSoonModal;
 use confirm_archive_channel_modal::ConfirmArchiveChannelModal;
 use confirm_delete_canvas_modal::ConfirmDeleteCanvasModal;
@@ -40,6 +41,7 @@ pub use confirm_remove_friend_modal::FriendRemovalKind;
 use confirm_remove_friend_modal::{ConfirmRemoveFriendModal, interpolate_username};
 use disable_clan_community_modal::DisableClanCommunityModal;
 use upload_limit_modal::UploadLimitModal;
+use wallet_not_available_modal::WalletNotAvailableModal;
 
 const TOAST_TTL: Duration = Duration::from_secs(4);
 
@@ -702,6 +704,47 @@ impl Shell {
             focus_handle: cx.focus_handle(),
             title: title.into(),
             content: content.into(),
+        });
+        let previous_focus = window.focused(cx);
+        if let Some(current) = self.modal.take() {
+            self.modal_underlay = Some((
+                current,
+                self.modal_fullscreen,
+                self.command_palette_open,
+                previous_focus,
+            ));
+        }
+        let host = cx.new(|cx| StackedModalHost {
+            view: view.into(),
+            focus_handle: cx.focus_handle(),
+        });
+        let focus_handle = host.read(cx).focus_handle.clone();
+        window.focus(&focus_handle, cx);
+        self.command_palette_open = false;
+        self.modal_fullscreen = false;
+        self.modal = Some(host.into());
+        cx.notify();
+    }
+
+    pub fn show_wallet_not_available(
+        &mut self,
+        message: impl Into<SharedString>,
+        locale: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let message = message.into();
+        let title = if message.is_empty() {
+            mezon_i18n::t(locale, "message.wallet.notAvailable").into()
+        } else {
+            message
+        };
+        let view = cx.new(|cx| WalletNotAvailableModal {
+            focus_handle: cx.focus_handle(),
+            title,
+            description: mezon_i18n::t(locale, "message.wallet.descNotAvailable").into(),
+            enable_label: mezon_i18n::t(locale, "message.wallet.enableWallet").into(),
+            cancel_label: mezon_i18n::t(locale, "message.wallet.cancel").into(),
         });
         let previous_focus = window.focused(cx);
         if let Some(current) = self.modal.take() {
