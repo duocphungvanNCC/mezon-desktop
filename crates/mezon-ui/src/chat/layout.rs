@@ -329,6 +329,7 @@ impl ChatLayout {
         cx.observe(&channel_list, |this, _, cx| {
             this.apply_pending_channel(cx);
             this.redirect_archived_thread_route(cx);
+            this.redirect_removed_thread_route(cx);
             this.ensure_active_channel_for_clan(cx);
             this.sync_inbox_context(cx);
             this.sync_stream_session(cx);
@@ -358,6 +359,7 @@ impl ChatLayout {
                 shell.success(mezon_i18n::t(&locale, key).to_string(), cx);
             });
             this.redirect_archived_thread_route(cx);
+            this.redirect_removed_thread_route(cx);
             this.ensure_active_channel_for_clan(cx);
         })
         .detach();
@@ -388,6 +390,7 @@ impl ChatLayout {
             this.reset_message_search(cx);
             this.sync_active_from_route(cx);
             this.redirect_archived_thread_route(cx);
+            this.redirect_removed_thread_route(cx);
             this.ensure_active_channel_for_clan(cx);
             this.sync_stream_session(cx);
             this.sync_voice_frame_pump(cx);
@@ -1168,6 +1171,60 @@ impl ChatLayout {
                 channel_id,
             },
         );
+    }
+
+    fn redirect_removed_thread_route(&mut self, cx: &mut Context<Self>) {
+        let route = Router::global(cx).read(cx).route().clone();
+        match route {
+            Route::Thread {
+                clan_id,
+                channel_id: parent_id,
+                thread_id,
+            } => {
+                let should_redirect = {
+                    let list = self.channel_list.read(cx);
+                    list.is_clan_cache_loaded(clan_id)
+                        && !list.channel_in_clan(clan_id, thread_id)
+                        && !list.is_locally_archived(thread_id)
+                };
+                if !should_redirect {
+                    return;
+                }
+                crate::channel_navigation::navigate_after_thread_removed(
+                    cx, clan_id, thread_id, parent_id,
+                );
+                self.dismiss_threads_popover(cx);
+                self.dismiss_topic_panel(cx);
+            }
+            Route::Channel {
+                clan_id,
+                channel_id,
+            } => {
+                let parent_id = {
+                    let list = self.channel_list.read(cx);
+                    if !list.is_clan_cache_loaded(clan_id) {
+                        return;
+                    }
+                    if list.channel_in_clan(clan_id, channel_id)
+                        || list.is_locally_archived(channel_id)
+                    {
+                        return;
+                    }
+                    list.remembered_channel(clan_id).filter(|parent| {
+                        *parent != channel_id && list.channel_in_clan(clan_id, *parent)
+                    })
+                };
+                let Some(parent_id) = parent_id else {
+                    return;
+                };
+                crate::channel_navigation::navigate_after_thread_removed(
+                    cx, clan_id, channel_id, parent_id,
+                );
+                self.dismiss_threads_popover(cx);
+                self.dismiss_topic_panel(cx);
+            }
+            _ => {}
+        }
     }
 
     fn ensure_active_channel_for_clan(&mut self, cx: &mut Context<Self>) {

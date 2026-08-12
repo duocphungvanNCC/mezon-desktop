@@ -2706,6 +2706,15 @@ impl TransportClient {
             .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
     }
 
+    pub async fn delete_channel(&self, clan_id: i64, channel_id: i64) -> Result<()> {
+        let transport = self.inner.clone();
+
+        runtime()
+            .spawn(async move { transport.delete_channel(clan_id, channel_id).await })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
     pub async fn leave_thread(&self, clan_id: i64, channel_id: i64) -> Result<()> {
         let transport = self.inner.clone();
 

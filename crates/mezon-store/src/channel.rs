@@ -122,6 +122,9 @@ pub const CHANNEL_ACTIVE_ARCHIVED: i32 = 0;
 pub const CHANNEL_ACTIVE_JOINED: i32 = 1;
 pub const ARCHIVE_ERR_IN_PROGRESS: &str = "archive already in progress";
 pub const ARCHIVE_ERR_PERMISSION: &str = "permission denied";
+pub const DELETE_ERR_IN_PROGRESS: &str = "delete already in progress";
+pub const DELETE_ERR_PERMISSION: &str = "permission denied";
+pub const DELETE_ERR_SYSTEM_CHANNEL: &str = "system channel";
 pub const STREAM_MODE_THREAD: i32 = 6;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ArchivedChannelDesc {
@@ -393,6 +396,7 @@ pub struct ChannelList {
     reset_generation: u64,
     reactivating: HashSet<ChannelId>,
     archiving: HashSet<ChannelId>,
+    deleting: HashSet<ChannelId>,
     archived_channel_ids: HashSet<ChannelId>,
     archived_cascade_children: HashMap<ChannelId, Vec<ChannelId>>,
     archived_channel_parents: HashMap<ChannelId, ChannelId>,
@@ -557,6 +561,7 @@ impl ChannelList {
         self.invalidate_channel_index_all();
         self.reactivating.clear();
         self.archiving.clear();
+        self.deleting.clear();
         self.archived_channel_ids.clear();
         self.archived_cascade_children.clear();
         self.archived_channel_parents.clear();
@@ -644,6 +649,7 @@ impl ChannelList {
             reset_generation: 0,
             reactivating: HashSet::new(),
             archiving: HashSet::new(),
+            deleting: HashSet::new(),
             archived_channel_ids: HashSet::new(),
             archived_cascade_children: HashMap::new(),
             archived_channel_parents: HashMap::new(),
@@ -977,6 +983,56 @@ impl ChannelList {
 
             let _ = this.update(cx, |this, _| {
                 this.finish_archiving(channel_id);
+            });
+
+            result
+        })
+    }
+
+    pub fn delete_channel(
+        &self,
+        clan_id: ClanId,
+        channel_id: ChannelId,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<(), String>> {
+        cx.spawn(async move |this, cx| {
+            let prep: Result<(ChannelId, Arc<AppApi>), String> = this
+                .update(cx, |this, cx| {
+                    if ClanList::global(cx).read(cx).welcome_channel_id(clan_id) == Some(channel_id)
+                    {
+                        return Err(DELETE_ERR_SYSTEM_CHANNEL.into());
+                    }
+                    if !this.can_archive_channel_for(clan_id, channel_id, cx) {
+                        return Err(DELETE_ERR_PERMISSION.into());
+                    }
+                    if !this.begin_deleting(channel_id) {
+                        return Err(DELETE_ERR_IN_PROGRESS.into());
+                    }
+                    let parent_id = this
+                        .channel(clan_id, channel_id)
+                        .and_then(|ch| ch.parent_id)
+                        .unwrap_or(ChannelId(0));
+                    Ok((parent_id, this.api.clone()))
+                })
+                .unwrap_or_else(|_| Err("delete channel store unavailable".into()));
+            let (parent_id, api) = match prep {
+                Ok(value) => value,
+                Err(err) => return Err(err),
+            };
+
+            let result = api
+                .delete_channel(clan_id.get(), channel_id.get())
+                .await
+                .map_err(|e| e.to_string());
+
+            if result.is_ok() {
+                let _ = this.update(cx, |this, cx| {
+                    this.apply_local_delete(clan_id, channel_id, parent_id, cx);
+                });
+            }
+
+            let _ = this.update(cx, |this, _| {
+                this.finish_deleting(channel_id);
             });
 
             result
@@ -2391,22 +2447,10 @@ impl ChannelList {
                 }
             }
             RealtimeEvent::ChannelDeleted(e) => {
-                let id = ChannelId(e.channel_id);
-                let mut removed = false;
-                for cats in self.cache.values_mut() {
-                    removed |= remove_channel(cats, id);
-                }
-                removed |=
-                    remove_user_channel(&mut self.user_channels, &mut self.user_channels_order, id);
-                let in_voice_changed = remove_in_voice_in_channel(&mut self.in_voice, id);
-                if removed {
-                    self.invalidate_channel_index_all();
-                    if self.active_channel_id == Some(id) {
-                        self.active_channel_id = None;
-                        cx.emit(ChannelEvent::ActiveChannelChanged(None));
-                    }
-                }
-                notify_in_voice_change(removed, in_voice_changed, cx);
+                let clan_id = ClanId(e.clan_id);
+                let channel_id = ChannelId(e.channel_id);
+                let parent_id = ChannelId(e.parent_id);
+                self.apply_local_delete(clan_id, channel_id, parent_id, cx);
             }
             RealtimeEvent::VoiceJoined(e) => {
                 let clan_id = ClanId(e.clan_id);
@@ -2951,13 +2995,97 @@ impl ChannelList {
         self.archiving.contains(&channel_id)
     }
 
+    pub fn begin_deleting(&mut self, channel_id: ChannelId) -> bool {
+        self.deleting.insert(channel_id)
+    }
+
+    pub fn finish_deleting(&mut self, channel_id: ChannelId) {
+        self.deleting.remove(&channel_id);
+    }
+
+    pub fn is_deleting(&self, channel_id: ChannelId) -> bool {
+        self.deleting.contains(&channel_id)
+    }
+
     pub fn should_persist_compose_draft(&self, channel_id: ChannelId) -> bool {
-        !self.archiving.contains(&channel_id) && !self.is_locally_archived(channel_id)
+        !self.archiving.contains(&channel_id)
+            && !self.deleting.contains(&channel_id)
+            && !self.is_locally_archived(channel_id)
     }
 
     pub fn clear_compose_draft(&self, channel_id: ChannelId, cx: &mut Context<Self>) {
         if let Some(store) = ComposeStore::try_global(cx) {
             store.update(cx, |store, _| store.clear_draft(channel_id));
+        }
+    }
+
+    pub fn apply_local_delete(
+        &mut self,
+        clan_id: ClanId,
+        channel_id: ChannelId,
+        parent_id: ChannelId,
+        cx: &mut Context<Self>,
+    ) {
+        let leaving_badge = self
+            .channel(clan_id, channel_id)
+            .map(|ch| ch.badge_count)
+            .unwrap_or(0);
+        self.channel_detail_pending.remove(&channel_id);
+        self.channel_detail_failed.remove(&channel_id);
+        let mut removed = false;
+        let mut swept_all = false;
+        if let Some(cats) = self.cache.get_mut(&clan_id) {
+            removed = remove_channel(cats, channel_id);
+        } else {
+            swept_all = true;
+            for cats in self.cache.values_mut() {
+                removed |= remove_channel(cats, channel_id);
+            }
+        }
+        removed |= remove_user_channel(
+            &mut self.user_channels,
+            &mut self.user_channels_order,
+            channel_id,
+        );
+        let in_voice_changed = remove_in_voice_in_channel(&mut self.in_voice, channel_id);
+        if removed {
+            if swept_all {
+                self.invalidate_channel_index_all();
+            } else {
+                self.invalidate_channel_index(clan_id);
+            }
+        }
+        let mut changed = removed || in_voice_changed;
+        if self.active_channel_id == Some(channel_id) {
+            let redirect = (!parent_id.is_zero())
+                .then_some(parent_id)
+                .filter(|parent| self.channel_in_clan(clan_id, *parent));
+            if let Some(parent_id) = redirect {
+                self.remembered_channels.insert(clan_id, parent_id);
+            }
+            self.active_channel_id = redirect;
+            cx.emit(ChannelEvent::ActiveChannelChanged(redirect));
+            changed = true;
+        }
+        if !parent_id.is_zero() && removed {
+            crate::threads::ThreadsStore::global(cx).update(cx, |store, cx| {
+                store.remove_thread_locally(&channel_id.to_string(), cx);
+            });
+        }
+        if removed || in_voice_changed {
+            if leaving_badge > 0 {
+                self.sync_clan_after_read(clan_id, leaving_badge, cx);
+            }
+            let draft_key = if parent_id.is_zero() {
+                channel_id
+            } else {
+                parent_id
+            };
+            self.clear_compose_draft(draft_key, cx);
+            notify_in_voice_change(removed, in_voice_changed, cx);
+        }
+        if changed {
+            cx.notify();
         }
     }
 
@@ -6032,6 +6160,19 @@ mod tests {
         }
     }
 
+    fn channel_deleted_event(
+        clan_id: i64,
+        channel_id: i64,
+        parent_id: i64,
+    ) -> mezon_proto::realtime::ChannelDeletedEvent {
+        mezon_proto::realtime::ChannelDeletedEvent {
+            clan_id,
+            channel_id,
+            parent_id,
+            ..Default::default()
+        }
+    }
+
     fn init_channel_list_with_threads(cx: &mut App) -> Entity<ChannelList> {
         let api = Arc::new(mezon_client::AppApi::new(
             Arc::new(mezon_client::TransportClient::new(String::new())),
@@ -6062,6 +6203,72 @@ mod tests {
                 channels.finish_archiving(ChannelId(9));
                 assert!(!channels.is_archiving(ChannelId(9)));
                 assert!(channels.begin_archiving(ChannelId(9)));
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn channel_deleted_socket_event_applies_local_delete(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let channels = init_channel_list_with_threads(cx);
+            channels.update(cx, |channels, cx| {
+                channels.apply_clan_structure(ClanId(1), structure_with_a_thread(), cx);
+                channels.select_channel(ChannelId(9), cx);
+
+                channels.handle_event(
+                    &RealtimeEvent::ChannelDeleted(channel_deleted_event(1, 9, 1)),
+                    cx,
+                );
+
+                assert!(!channels.channel_in_clan(ClanId(1), ChannelId(9)));
+                assert_eq!(channels.active_channel_id, Some(ChannelId(1)));
+                assert_eq!(channels.remembered_channel(ClanId(1)), Some(ChannelId(1)));
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn apply_local_delete_is_idempotent(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let channels = init_channel_list_with_threads(cx);
+            channels.update(cx, |channels, cx| {
+                channels.apply_clan_structure(ClanId(1), structure_with_a_thread(), cx);
+                channels.select_channel(ChannelId(9), cx);
+                channels.apply_local_delete(ClanId(1), ChannelId(9), ChannelId(1), cx);
+                channels.apply_local_delete(ClanId(1), ChannelId(9), ChannelId(1), cx);
+                assert!(!channels.channel_in_clan(ClanId(1), ChannelId(9)));
+                assert_eq!(channels.active_channel_id, Some(ChannelId(1)));
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn apply_local_delete_removes_thread_and_redirects_to_parent(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let channels = init_channel_list_with_threads(cx);
+            channels.update(cx, |channels, cx| {
+                channels.apply_clan_structure(ClanId(1), structure_with_a_thread(), cx);
+                channels.select_channel(ChannelId(9), cx);
+
+                channels.apply_local_delete(ClanId(1), ChannelId(9), ChannelId(1), cx);
+
+                assert!(!channels.channel_in_clan(ClanId(1), ChannelId(9)));
+                assert_eq!(channels.active_channel_id, Some(ChannelId(1)));
+                assert_eq!(channels.remembered_channel(ClanId(1)), Some(ChannelId(1)));
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn begin_deleting_blocks_duplicate_calls(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let channels = init_channel_list_with_threads(cx);
+            channels.update(cx, |channels, _| {
+                assert!(channels.begin_deleting(ChannelId(9)));
+                assert!(!channels.begin_deleting(ChannelId(9)));
+                assert!(channels.is_deleting(ChannelId(9)));
+                channels.finish_deleting(ChannelId(9));
+                assert!(!channels.is_deleting(ChannelId(9)));
             });
         });
     }

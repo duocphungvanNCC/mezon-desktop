@@ -356,6 +356,10 @@ impl ThreadsStore {
         self.set_thread_active(channel_id, THREAD_STATUS_ARCHIVED, cx);
     }
 
+    pub fn remove_thread_locally(&mut self, channel_id: &str, cx: &mut Context<Self>) {
+        self.apply_thread_deleted(channel_id, cx);
+    }
+
     pub fn thread_active(&self, channel_id: &str) -> Option<i32> {
         self.threads
             .iter()
