@@ -12,6 +12,7 @@ use gpui::{
 };
 
 use crate::components::primitives::{Toast, ToastKind};
+use crate::router::Route;
 
 mod coming_soon_modal;
 mod confirm_archive_channel_modal;
@@ -94,6 +95,11 @@ impl Shell {
         });
         cx.set_global(GlobalShell(entity.clone()));
         entity
+    }
+
+    pub fn navigate_from_external_trigger(cx: &mut App, route: Route) {
+        Shell::global(cx).update(cx, |shell, cx| shell.close_modal(cx));
+        crate::router::navigate(cx, route);
     }
 
     pub fn global(cx: &App) -> Entity<Self> {
@@ -893,5 +899,76 @@ impl Shell {
                         })),
                 ))
             })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::clan::settings::ClanSettingsPage;
+    use gpui::{IntoElement, TestAppContext};
+    use mezon_store::{ChannelId, ClanId};
+
+    struct StubModal;
+
+    impl Render for StubModal {
+        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+            div()
+        }
+    }
+
+    fn open_shell_with_modal(cx: &mut TestAppContext) -> Entity<Shell> {
+        cx.update(|cx| {
+            crate::router::Router::init(cx);
+            crate::router::replace(
+                cx,
+                Route::ClanSettings {
+                    clan_id: ClanId(7),
+                    page: ClanSettingsPage::Emoji,
+                },
+            );
+            let shell = Shell::init(cx);
+            let modal = cx.new(|_| StubModal);
+            shell.update(cx, |shell, cx| shell.show_modal(modal.into(), cx));
+            shell
+        })
+    }
+
+    fn conversation_route() -> Route {
+        Route::Channel {
+            clan_id: ClanId(7),
+            channel_id: ChannelId(42),
+        }
+    }
+
+    #[gpui::test]
+    fn an_external_trigger_closes_the_settings_modal_it_navigates_away_from(
+        cx: &mut TestAppContext,
+    ) {
+        let shell = open_shell_with_modal(cx);
+        assert!(shell.read_with(cx, |shell, _| shell.has_modal()));
+
+        cx.update(|cx| Shell::navigate_from_external_trigger(cx, conversation_route()));
+        cx.run_until_parked();
+
+        assert!(
+            !shell.read_with(cx, |shell, _| shell.has_modal()),
+            "a modal opened on the screen we just left must not keep covering the destination \
+             a notification click navigated to"
+        );
+    }
+
+    #[gpui::test]
+    fn in_app_navigation_leaves_the_modal_alone(cx: &mut TestAppContext) {
+        let shell = open_shell_with_modal(cx);
+
+        cx.update(|cx| crate::router::navigate(cx, conversation_route()));
+        cx.run_until_parked();
+
+        assert!(
+            shell.read_with(cx, |shell, _| shell.has_modal()),
+            "only an external trigger closes the modal; a plain route change (an archived-thread \
+             redirect, a permission-driven settings page swap) must leave it open"
+        );
     }
 }
