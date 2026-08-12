@@ -1144,9 +1144,8 @@ impl MessagesStore {
         ))
     }
 
-    /// Emit the splice for a single row appended at the bottom, accounting for
-    /// any front-trim that dropped the oldest rows to keep the buffer within the
-    /// cap. `old_len` is the buffer length before the push.
+    /// Push an optimistic row, unless the tail is detached — appending onto a
+    /// jump-to-message AROUND window would seal the history gap.
     fn append_optimistic(&mut self, channel_id: ChannelId, optimistic: Message) -> Option<usize> {
         if self.tail_detached(channel_id) {
             return None;
@@ -1158,6 +1157,9 @@ impl MessagesStore {
         })
     }
 
+    /// Emit the splice for a single row appended at the bottom, accounting for
+    /// any front-trim that dropped the oldest rows to keep the buffer within the
+    /// cap. `old_len` is the buffer length before the push.
     fn emit_appended(&mut self, old_len: usize, cx: &mut Context<Self>) {
         let new_len = self.messages().len();
         if new_len < old_len {

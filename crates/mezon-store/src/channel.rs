@@ -8320,7 +8320,7 @@ mod tests {
                     ApiChannelDesc {
                         channel_id: 9,
                         channel_label: "Rust 1".into(),
-                        channel_type: CHANNEL_TYPE_THREAD as u32,
+                        channel_type: CHANNEL_TYPE_THREAD,
                         clan_id: 1,
                         category_name: String::new(),
                         category_id: 0,
@@ -8448,7 +8448,7 @@ mod tests {
                     ApiChannelDesc {
                         channel_id: 9,
                         channel_label: "Rust 1".into(),
-                        channel_type: CHANNEL_TYPE_THREAD as u32,
+                        channel_type: CHANNEL_TYPE_THREAD,
                         clan_id: 1,
                         category_name: String::new(),
                         category_id: 0,

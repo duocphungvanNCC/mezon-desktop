@@ -369,6 +369,111 @@ pub fn scroll_messages(cx: &mut App, to_top: bool) -> anyhow::Result<Value> {
     }))
 }
 
+pub fn member_list_snapshot(cx: &App) -> anyhow::Result<Value> {
+    Ok(crate::chat::member_list::member_list_snapshot(cx))
+}
+
+pub fn user_status_snapshot(cx: &App) -> anyhow::Result<Value> {
+    let Some((user_id, status)) = mezon_store::current_user_status(cx) else {
+        return Ok(json!({ "signed_in": false }));
+    };
+    let raw = mezon_store::AccountStore::try_global(cx)
+        .and_then(|store| {
+            store
+                .read(cx)
+                .account
+                .as_ref()
+                .map(|account| account.status.clone())
+        })
+        .unwrap_or_default();
+    Ok(json!({
+        "signed_in": true,
+        "user_id": user_id.to_string(),
+        "account_status": raw,
+        "presence": format!("{:?}", status.presence),
+        "custom_status": status.custom_status,
+        "online": status.online,
+    }))
+}
+
+pub fn set_user_status(
+    cx: &mut App,
+    status: &str,
+    minutes: i32,
+    until_turn_on: bool,
+) -> anyhow::Result<Value> {
+    let store = mezon_store::AccountStore::try_global(cx)
+        .ok_or_else(|| anyhow::anyhow!("not signed in"))?;
+    let before = store
+        .read(cx)
+        .account
+        .as_ref()
+        .map(|account| account.status.clone())
+        .ok_or_else(|| anyhow::anyhow!("not signed in"))?;
+    let status_changed = before != status;
+    store.update(cx, |store, cx| {
+        store.set_status(status.to_string(), minutes, until_turn_on, cx)
+    });
+    let after = store
+        .read(cx)
+        .account
+        .as_ref()
+        .map(|account| account.status.clone())
+        .unwrap_or_default();
+    Ok(json!({
+        "ok": true,
+        "requested": status,
+        "minutes": minutes,
+        "until_turn_on": until_turn_on,
+        "status_before": before,
+        "status_after": after,
+        "status_changed": status_changed,
+    }))
+}
+
+pub fn list_loaded_messages(cx: &App, limit: usize) -> anyhow::Result<Value> {
+    let store = mezon_store::MessagesStore::global(cx);
+    let store = store.read(cx);
+    let rows = store.messages();
+    let row_json = |m: &mezon_store::Message| {
+        json!({
+            "message_id": m.id.to_string(),
+            "optimistic": m.id.is_optimistic(),
+            "sort_id": m.sort_id,
+            "sender": m.sender_name,
+            "send_failed": m.send_failed,
+            "content": m.content.chars().take(60).collect::<String>(),
+        })
+    };
+    let head: Vec<Value> = rows.iter().take(limit).map(row_json).collect();
+    let tail: Vec<Value> = rows
+        .iter()
+        .skip(rows.len().saturating_sub(limit))
+        .map(row_json)
+        .collect();
+    Ok(json!({
+        "channel_id": store.active_channel_id().map(|id| id.to_string()),
+        "loaded_count": rows.len(),
+        "has_more_bottom": store.has_more_bottom(),
+        "oldest": head,
+        "newest": tail,
+    }))
+}
+
+pub fn jump_to_message(cx: &mut App, message_id: i64) -> anyhow::Result<Value> {
+    let store = mezon_store::MessagesStore::global(cx);
+    store.update(cx, |store, cx| {
+        store.jump_to_message(mezon_store::MessageId::new(message_id), cx)
+    });
+    Ok(json!({ "ok": true, "message_id": message_id.to_string() }))
+}
+
+pub fn jump_to_present(cx: &mut App) -> anyhow::Result<Value> {
+    let store = mezon_store::MessagesStore::global(cx);
+    store.update(cx, |store, cx| store.jump_to_present(cx));
+    Ok(json!({ "ok": true }))
+}
+
 pub fn open_message_image_viewer(
     settings: &gpui::Entity<mezon_store::Settings>,
     message_id: i64,

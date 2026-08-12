@@ -185,6 +185,30 @@ impl McpBackend {
                     .unwrap_or(true);
                 self.load_more_messages(older).await
             }
+            "list_loaded_messages" => {
+                let limit = arguments
+                    .get("limit")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(50)
+                    .clamp(1, 500) as usize;
+                self.send_ui_result(|reply| McpCommand::ListLoadedMessages { limit, reply })
+                    .await
+            }
+            "jump_to_message" => {
+                self.require_write_mode("jump_to_message")?;
+                let message_id = parse_i64_field(&arguments, "message_id")?;
+                self.jump_to_message(message_id).await
+            }
+            "jump_to_present" => {
+                self.require_write_mode("jump_to_present")?;
+                self.jump_to_present().await
+            }
+            "get_user_status" => self.get_user_status().await,
+            "get_member_list" => self.get_member_list().await,
+            "set_user_status" => {
+                self.require_write_mode("set_user_status")?;
+                self.set_user_status(&arguments).await
+            }
             "get_settings" => self.get_settings().await,
             "get_voice_status" => self.get_voice_status().await,
             "list_stickers" => self.list_stickers().await,
@@ -872,6 +896,49 @@ impl McpBackend {
     async fn load_more_messages(&self, older: bool) -> anyhow::Result<Value> {
         self.send_ui_result(|reply| McpCommand::LoadMoreMessages { older, reply })
             .await
+    }
+
+    async fn jump_to_message(&self, message_id: i64) -> anyhow::Result<Value> {
+        self.send_ui_result(|reply| McpCommand::JumpToMessage { message_id, reply })
+            .await
+    }
+
+    async fn jump_to_present(&self) -> anyhow::Result<Value> {
+        self.send_ui_result(|reply| McpCommand::JumpToPresent { reply })
+            .await
+    }
+
+    async fn get_user_status(&self) -> anyhow::Result<Value> {
+        self.send_ui_result(|reply| McpCommand::GetUserStatus { reply })
+            .await
+    }
+
+    async fn get_member_list(&self) -> anyhow::Result<Value> {
+        self.send_ui_result(|reply| McpCommand::GetMemberList { reply })
+            .await
+    }
+
+    async fn set_user_status(&self, arguments: &Value) -> anyhow::Result<Value> {
+        let status = arguments
+            .get("status")
+            .and_then(Value::as_str)
+            .ok_or_else(|| anyhow::anyhow!("set_user_status requires string field status"))?
+            .to_string();
+        let minutes = arguments
+            .get("minutes")
+            .and_then(Value::as_i64)
+            .unwrap_or(0) as i32;
+        let until_turn_on = arguments
+            .get("until_turn_on")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        self.send_ui_result(|reply| McpCommand::SetUserStatus {
+            status,
+            minutes,
+            until_turn_on,
+            reply,
+        })
+        .await
     }
 
     async fn navigate(&self, path: &str) -> anyhow::Result<Value> {

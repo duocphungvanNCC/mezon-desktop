@@ -391,19 +391,17 @@ impl AccountStore {
         until_turn_on: bool,
         cx: &mut Context<Self>,
     ) {
-        if let Some(account) = &mut self.account {
-            if account.status == status {
-                return;
-            }
-            account.status = status.clone();
-        } else {
+        let Some(account) = &mut self.account else {
             return;
+        };
+        if account.status != status {
+            account.status = status.clone();
+            if let Some(account) = &self.account {
+                Self::spawn_persist_cache(account, cx);
+            }
+            cx.emit(AccountEvent::StatusUpdated);
+            cx.notify();
         }
-        if let Some(account) = &self.account {
-            Self::spawn_persist_cache(account, cx);
-        }
-        cx.emit(AccountEvent::StatusUpdated);
-        cx.notify();
         let api = self.api.clone();
         cx.spawn(async move |_this, _cx| {
             if let Err(e) = api.update_user_status(status, minutes, until_turn_on).await {

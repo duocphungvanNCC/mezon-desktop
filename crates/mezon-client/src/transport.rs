@@ -6568,7 +6568,6 @@ impl MezonTransport {
             age_restricted: params.age_restricted,
             e2ee: params.e2ee,
             channel_avatar: params.channel_avatar,
-            ..Default::default()
         }
         .encode_to_vec();
         let (code, _) = self

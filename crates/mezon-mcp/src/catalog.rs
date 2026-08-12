@@ -197,6 +197,81 @@ Parameters:
         write: false,
     },
     ToolSpec {
+        name: "jump_to_message",
+        description: "\
+Move the open channel's message list to an AROUND window centred on one message.
+
+This is the deterministic equivalent of clicking a search hit or a reply jump link. The
+newest message stops being loaded, so get_scroll_state reports has_more_bottom=true
+afterwards -- that is the \"tail detached\" state the send and live-append paths branch on.
+Use jump_to_present to return to the tail.
+
+Parameters:
+- message_id (required)",
+        write: true,
+    },
+    ToolSpec {
+        name: "list_loaded_messages",
+        description: "\
+Return the rows the open channel's message list actually holds, oldest first.
+
+This reads the UI buffer, not the API, so it is what the user can see. Compare it with
+list_messages (which reads the server) to tell a delivery failure apart from a message
+the server accepted but the list never rendered.
+
+Parameters:
+- limit (optional, default 50): return at most this many rows from each end of the buffer.",
+        write: false,
+    },
+    ToolSpec {
+        name: "jump_to_present",
+        description: "\
+Return the open channel's message list to the live tail after a jump_to_message.
+
+Parameters: none.",
+        write: true,
+    },
+    ToolSpec {
+        name: "get_user_status",
+        description: "\
+Return the signed-in user's own presence as the UI resolves it.
+
+Reports the raw account status string, the parsed presence, the custom status, and the
+`online` flag every self-aware view derives from it. Pair with get_member_list to check
+that the member list agrees with the account.
+
+Parameters: none.",
+        write: false,
+    },
+    ToolSpec {
+        name: "get_member_list",
+        description: "\
+Return the member-list panel's rows exactly as it computes them for the active screen.
+
+Each section carries the header count the panel renders, and each row carries the
+`online` flag driving its status dot. A row whose `online` contradicts its section is a
+bucketing bug -- the sections come from the presence set while the self row's dot can be
+overridden by the account status.
+
+Parameters: none.",
+        write: false,
+    },
+    ToolSpec {
+        name: "set_user_status",
+        description: "\
+Set the signed-in user's own presence.
+
+Mirrors the footer profile popup. The request always reaches the server, including a
+duration-only change (same status, new minutes). status_changed reports whether the
+local status string moved, which is what drives the StatusUpdated event.
+
+Parameters:
+- status (required): \"Online\", \"Idle\", \"Do Not Disturb\" or \"Invisible\"
+- minutes (optional, default 0): how long the status lasts, 0 for indefinite
+- until_turn_on (optional, default false): clear the status when the user turns it back on",
+        write: true,
+    },
+    ToolSpec {
         name: "open_panel",
         description: "\
 Open one of the composer panels: emoji, sticker, gif or sound.

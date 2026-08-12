@@ -81,4 +81,27 @@ pub enum McpCommand {
         older: bool,
         reply: oneshot::Sender<anyhow::Result<Value>>,
     },
+    ListLoadedMessages {
+        limit: usize,
+        reply: oneshot::Sender<anyhow::Result<Value>>,
+    },
+    JumpToMessage {
+        message_id: i64,
+        reply: oneshot::Sender<anyhow::Result<Value>>,
+    },
+    JumpToPresent {
+        reply: oneshot::Sender<anyhow::Result<Value>>,
+    },
+    SetUserStatus {
+        status: String,
+        minutes: i32,
+        until_turn_on: bool,
+        reply: oneshot::Sender<anyhow::Result<Value>>,
+    },
+    GetUserStatus {
+        reply: oneshot::Sender<anyhow::Result<Value>>,
+    },
+    GetMemberList {
+        reply: oneshot::Sender<anyhow::Result<Value>>,
+    },
 }

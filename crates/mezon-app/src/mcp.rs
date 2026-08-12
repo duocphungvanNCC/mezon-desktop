@@ -180,6 +180,46 @@ impl McpRuntime {
                         let result = cx.update(|cx| load_more_messages(cx, older));
                         let _ = reply.send(result);
                     }
+                    McpCommand::ListLoadedMessages { limit, reply } => {
+                        let result =
+                            cx.update(|cx| mezon_ui::app::capture::list_loaded_messages(cx, limit));
+                        let _ = reply.send(result);
+                    }
+                    McpCommand::JumpToMessage { message_id, reply } => {
+                        let result =
+                            cx.update(|cx| mezon_ui::app::capture::jump_to_message(cx, message_id));
+                        let _ = reply.send(result);
+                    }
+                    McpCommand::JumpToPresent { reply } => {
+                        let result = cx.update(mezon_ui::app::capture::jump_to_present);
+                        let _ = reply.send(result);
+                    }
+                    McpCommand::GetUserStatus { reply } => {
+                        let result =
+                            cx.update(|cx| mezon_ui::app::capture::user_status_snapshot(cx));
+                        let _ = reply.send(result);
+                    }
+                    McpCommand::GetMemberList { reply } => {
+                        let result =
+                            cx.update(|cx| mezon_ui::app::capture::member_list_snapshot(cx));
+                        let _ = reply.send(result);
+                    }
+                    McpCommand::SetUserStatus {
+                        status,
+                        minutes,
+                        until_turn_on,
+                        reply,
+                    } => {
+                        let result = cx.update(|cx| {
+                            mezon_ui::app::capture::set_user_status(
+                                cx,
+                                &status,
+                                minutes,
+                                until_turn_on,
+                            )
+                        });
+                        let _ = reply.send(result);
+                    }
                 }
             }
         })
