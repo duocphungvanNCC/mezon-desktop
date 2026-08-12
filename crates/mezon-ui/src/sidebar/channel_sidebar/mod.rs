@@ -1733,11 +1733,9 @@ fn render_sidebar_item(
                             None
                         });
                 if show_settings_gear {
-                    let gear_color: gpui::Hsla = theme.tokens.text_theme_primary.into();
                     let gear_hover: gpui::Hsla = theme.tokens.bg_icon_theme_active.into();
                     element = element.trailing_action(Some(ChannelRowTrailingAction {
                         icon: IconName::SettingProfile,
-                        color: gear_color,
                         hover_color: gear_hover,
                         on_click: Rc::new(move |window, cx| {
                             menu::open_channel_settings(settings_clan_id, settings_channel_id)(

@@ -3642,7 +3642,7 @@ fn move_channel_to_category(
     new_category_id: &str,
     new_category_name: &str,
 ) -> bool {
-    let Some(mut channel) = categories
+    let Some(channel) = categories
         .iter()
         .filter(|category| category.id != FAVOR_CATE_ID)
         .flat_map(|category| category.channels.iter())
@@ -3654,8 +3654,12 @@ fn move_channel_to_category(
     if !remove_channel(categories, channel_id) {
         return false;
     }
-    channel.category_id = Some(new_category_id.to_string());
-    channel.category_name = new_category_name.to_string();
+    let mut moved = channel.clone();
+    moved.category_id = Some(new_category_id.to_string());
+    moved.category_name = new_category_name.to_string();
+    if insert_channel(categories, moved) {
+        return true;
+    }
     insert_channel(categories, channel)
 }
 

@@ -58,7 +58,6 @@ pub struct ThreadConnector {
 
 pub struct ChannelRowTrailingAction {
     pub icon: IconName,
-    pub color: Hsla,
     pub hover_color: Hsla,
     pub on_click: ClickHandler,
 }
@@ -67,7 +66,6 @@ impl Clone for ChannelRowTrailingAction {
     fn clone(&self) -> Self {
         Self {
             icon: self.icon,
-            color: self.color,
             hover_color: self.hover_color,
             on_click: self.on_click.clone(),
         }

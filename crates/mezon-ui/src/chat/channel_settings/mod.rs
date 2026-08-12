@@ -6,8 +6,8 @@ pub mod permission_overrides;
 pub mod permissions_tab;
 
 use gpui::{
-    App, Context, Entity, FocusHandle, Focusable, FontWeight, ScrollHandle, SharedString, Window,
-    deferred, div, point, prelude::*, px,
+    App, Context, Entity, FocusHandle, Focusable, FontWeight, ScrollHandle, SharedString,
+    Subscription, Window, deferred, div, point, prelude::*, px,
 };
 use mezon_store::{
     ChannelId, ChannelList, ChannelType, ClanId, ClanList, PERMISSION_MANAGE_CHANNEL,
@@ -144,8 +144,11 @@ pub struct ChannelSettingScreen {
     current_tab: ChannelSettingsTab,
     settings: Entity<Settings>,
     permissions_tab: Option<Entity<PermissionsTab>>,
+    permissions_sub: Option<Subscription>,
     overview_tab: Option<Entity<OverviewTab>>,
+    overview_sub: Option<Subscription>,
     category_tab: Option<Entity<CategoryTab>>,
+    category_sub: Option<Subscription>,
     content_scroll: ScrollHandle,
     nav_scroll: ScrollHandle,
     focus_handle: FocusHandle,
@@ -168,8 +171,11 @@ impl ChannelSettingScreen {
             current_tab: ChannelSettingsTab::Overview,
             settings,
             permissions_tab: None,
+            permissions_sub: None,
             overview_tab: None,
+            overview_sub: None,
             category_tab: None,
+            category_sub: None,
             content_scroll: ScrollHandle::new(),
             nav_scroll: ScrollHandle::new(),
             focus_handle: cx.focus_handle(),
@@ -181,10 +187,16 @@ impl ChannelSettingScreen {
         if self.permissions_tab.take().is_some()
             || self.overview_tab.take().is_some()
             || self.category_tab.take().is_some()
+            || self.permissions_sub.take().is_some()
+            || self.overview_sub.take().is_some()
+            || self.category_sub.take().is_some()
             || !self.clan_id.is_zero()
         {
             cx.notify();
         }
+        self.permissions_sub = None;
+        self.overview_sub = None;
+        self.category_sub = None;
         self.clan_id = ClanId(0);
         self.channel_id = ChannelId(0);
         self.current_tab = ChannelSettingsTab::Overview;
@@ -223,8 +235,11 @@ impl ChannelSettingScreen {
         }
         if target_changed || resolved != self.current_tab {
             self.permissions_tab = None;
+            self.permissions_sub = None;
             self.overview_tab = None;
+            self.overview_sub = None;
             self.category_tab = None;
+            self.category_sub = None;
             self.content_scroll.set_offset(point(px(0.0), px(0.0)));
         }
         self.current_tab = resolved;
@@ -292,7 +307,7 @@ impl ChannelSettingScreen {
                 let channel_id = self.channel_id;
                 let settings = self.settings.clone();
                 let tab = cx.new(|cx| PermissionsTab::new(clan_id, channel_id, settings, cx));
-                cx.observe(&tab, |_, _, cx| cx.notify()).detach();
+                self.permissions_sub = Some(cx.observe(&tab, |_, _, cx| cx.notify()));
                 self.permissions_tab = Some(tab);
             }
             ChannelSettingsTab::Category => {
@@ -303,7 +318,7 @@ impl ChannelSettingScreen {
                 let channel_id = self.channel_id;
                 let settings = self.settings.clone();
                 let tab = cx.new(|cx| CategoryTab::new(clan_id, channel_id, settings, cx));
-                cx.observe(&tab, |_, _, cx| cx.notify()).detach();
+                self.category_sub = Some(cx.observe(&tab, |_, _, cx| cx.notify()));
                 self.category_tab = Some(tab);
             }
             _ => {}
@@ -331,7 +346,7 @@ impl ChannelSettingScreen {
                 cx,
             )
         });
-        cx.observe(&tab, |_, _, cx| cx.notify()).detach();
+        self.overview_sub = Some(cx.observe(&tab, |_, _, cx| cx.notify()));
         self.overview_tab = Some(tab);
     }
 
@@ -431,9 +446,9 @@ impl ChannelSettingScreen {
                 .rounded(px(5.0))
                 .text_base()
                 .font_weight(FontWeight::MEDIUM)
-                .when(ctx.is_welcome_channel, |el| {
-                    el.text_color(theme.text_muted).opacity(0.5)
-                })
+                .opacity(0.5)
+                .cursor_default()
+                .when(ctx.is_welcome_channel, |el| el.text_color(theme.text_muted))
                 .when(!ctx.is_welcome_channel, |el| {
                     el.text_color(gpui::rgb(0xdc_26_26))
                 })

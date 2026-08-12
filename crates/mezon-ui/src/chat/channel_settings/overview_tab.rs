@@ -169,14 +169,16 @@ impl OverviewTab {
             let _ = this.update(cx, |this, cx| {
                 this.detail_loading = false;
                 if let Ok(detail) = result {
-                    this.saved_topic = detail.topic.clone();
-                    this.saved_age_restricted = detail.age_restricted;
-                    if !this.is_topic_dirty(cx) {
+                    let topic_dirty = this.is_topic_dirty(cx);
+                    let age_dirty = this.is_age_restricted_dirty(cx);
+                    if !topic_dirty {
+                        this.saved_topic = detail.topic.clone();
                         this.topic_input.update(cx, |state, cx| {
                             state.set_value(detail.topic, cx);
                         });
                     }
-                    if !this.is_age_restricted_dirty(cx) {
+                    if !age_dirty {
+                        this.saved_age_restricted = detail.age_restricted;
                         this.draft_age_restricted = detail.age_restricted;
                     }
                 }
@@ -435,9 +437,12 @@ impl OverviewTab {
         if !self.can_save(cx) {
             return;
         }
-        let label = self.draft_label(cx);
-        let topic = self.draft_topic(cx);
-        let age_restricted = self.draft_age_restricted;
+        let sent_label = match validate_channel_name(&self.draft_label(cx)) {
+            Ok(label) => label,
+            Err(_) => return,
+        };
+        let sent_topic = truncate_chars(&self.draft_topic(cx), MAX_CHANNEL_TOPIC_CHARS);
+        let sent_age_restricted = self.draft_age_restricted;
         self.saving = true;
         cx.notify();
 
@@ -445,7 +450,14 @@ impl OverviewTab {
         let channel_id = self.channel_id;
         let channel_list = ChannelList::global(cx);
         let task = channel_list.update(cx, |store, cx| {
-            store.update_channel_overview(clan_id, channel_id, label, topic, age_restricted, cx)
+            store.update_channel_overview(
+                clan_id,
+                channel_id,
+                sent_label.clone(),
+                sent_topic.clone(),
+                sent_age_restricted,
+                cx,
+            )
         });
         self._save_task = Some(cx.spawn(async move |this, cx| {
             let result = task.await;
@@ -453,9 +465,9 @@ impl OverviewTab {
                 this.saving = false;
                 match result {
                     Ok(()) => {
-                        this.saved_label = this.draft_label(cx);
-                        this.saved_topic = this.draft_topic(cx);
-                        this.saved_age_restricted = this.draft_age_restricted;
+                        this.saved_label = sent_label;
+                        this.saved_topic = sent_topic;
+                        this.saved_age_restricted = sent_age_restricted;
                         this.validation = NameValidation::None;
                     }
                     Err(UpdateChannelOverviewError::InvalidName) => {
