@@ -7,15 +7,15 @@ mod blink;
 
 use blink::CaretBlink;
 use gpui::{
-    Anchor, App, Bounds, ClickEvent, ClipboardEntry, ClipboardItem, Context, CursorStyle,
-    DispatchPhase, Div, Element, ElementId, ElementInputHandler, Entity, EntityInputHandler,
-    FocusHandle, Focusable, FontStyle, FontWeight, GlobalElementId, Hsla, Image, ImageFormat,
-    InspectorElementId, InteractiveElement as _, IntoElement, KeyBinding, KeyContext, LayoutId,
-    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point, Render,
-    RenderOnce, ScrollDelta, ScrollHandle, ScrollWheelEvent, ShapedLine, SharedString,
-    StrikethroughStyle, Style, StyleRefinement, Styled, TextAlign, TextRun, UTF16Selection,
-    UnderlineStyle, Window, WrappedLine, actions, anchored, deferred, div, fill, point, prelude::*,
-    px, size,
+    Anchor, AnyElement, App, Bounds, ClickEvent, ClipboardEntry, ClipboardItem, Context,
+    CursorStyle, DispatchPhase, Display, Div, Element, ElementId, ElementInputHandler, Entity,
+    EntityInputHandler, FocusHandle, Focusable, FontStyle, FontWeight, GlobalElementId, Hsla,
+    Image, ImageFormat, InspectorElementId, InteractiveElement as _, IntoElement, KeyBinding,
+    KeyContext, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad,
+    Pixels, Point, Position, Render, RenderOnce, ScrollDelta, ScrollHandle, ScrollWheelEvent,
+    ShapedLine, SharedString, StrikethroughStyle, Style, StyleRefinement, Styled, TextAlign,
+    TextRun, UTF16Selection, UnderlineStyle, Window, WrappedLine, actions, anchored, deferred, div,
+    fill, point, prelude::*, px, size,
 };
 use mezon_store::{CanvasStore, PlatformStore};
 use serde_json::{Value, json};
@@ -277,8 +277,7 @@ impl CanvasEditorState {
             this.caret_blink.sync_blurred(cx);
             let link_focused = this.link_input.read(cx).focus_handle(cx).is_focused(window);
             if !link_focused {
-                this.block_menu_open = false;
-                this.link_menu_open = false;
+                this.dismiss_bubble_menus();
             }
             cx.notify();
         })
@@ -298,8 +297,7 @@ impl CanvasEditorState {
         if read_only {
             self.selected_range = 0..0;
             self.selection_reversed = false;
-            self.block_menu_open = false;
-            self.link_menu_open = false;
+            self.dismiss_bubble_menus();
         }
         cx.notify();
     }
@@ -551,8 +549,14 @@ impl CanvasEditorState {
         }
     }
 
+    fn dismiss_bubble_menus(&mut self) {
+        self.block_menu_open = false;
+        self.link_menu_open = false;
+    }
+
     fn move_to(&mut self, offset: usize, cx: &mut Context<Self>) {
         let offset = snap_offset(&self.content, offset.min(self.content.len()));
+        self.dismiss_bubble_menus();
         self.selected_range = offset..offset;
         self.selection_reversed = false;
         self.caret_blink.pause_blinking(cx);
@@ -561,6 +565,7 @@ impl CanvasEditorState {
 
     fn select_to(&mut self, offset: usize, cx: &mut Context<Self>) {
         let offset = snap_offset(&self.content, offset.min(self.content.len()));
+        self.dismiss_bubble_menus();
         if self.selection_reversed {
             self.selected_range.start = offset;
         } else {
@@ -1171,6 +1176,7 @@ impl CanvasEditorState {
         let range = range_for_granularity(&self.content, offset, self.select_granularity, true);
         self.select_anchor = range.clone();
         self.selection_reversed = false;
+        self.dismiss_bubble_menus();
         self.selected_range = range;
         self.caret_blink.pause_blinking(cx);
         cx.notify();
@@ -1205,6 +1211,7 @@ impl CanvasEditorState {
         if range == self.selected_range && reversed == self.selection_reversed {
             return;
         }
+        self.dismiss_bubble_menus();
         self.selected_range = range;
         self.selection_reversed = reversed;
         self.caret_blink.pause_blinking(cx);
@@ -1408,6 +1415,7 @@ impl CanvasEditorState {
     }
 
     fn select_all(&mut self, _: &SelectAll, _: &mut Window, cx: &mut Context<Self>) {
+        self.dismiss_bubble_menus();
         self.selected_range = 0..self.content.len();
         self.selection_reversed = false;
         cx.notify();
@@ -2972,6 +2980,158 @@ fn open_canvas_link(url: &str, cx: &mut App) {
     }
 }
 
+const CANVAS_BLOCK_DROPDOWN_GAP: Pixels = px(0.);
+
+struct CanvasFormatToolbar {
+    bar: AnyElement,
+    dropdown: Option<AnyElement>,
+}
+
+impl CanvasFormatToolbar {
+    fn new(bar: impl IntoElement) -> Self {
+        Self {
+            bar: bar.into_any_element(),
+            dropdown: None,
+        }
+    }
+
+    fn with_dropdown(mut self, dropdown: impl IntoElement) -> Self {
+        self.dropdown = Some(dropdown.into_any_element());
+        self
+    }
+}
+
+impl IntoElement for CanvasFormatToolbar {
+    type Element = Self;
+
+    fn into_element(self) -> Self::Element {
+        self
+    }
+}
+
+struct CanvasFormatToolbarLayout {
+    dropdown_id: Option<LayoutId>,
+}
+
+impl Element for CanvasFormatToolbar {
+    type RequestLayoutState = CanvasFormatToolbarLayout;
+    type PrepaintState = ();
+
+    fn id(&self) -> Option<ElementId> {
+        None
+    }
+
+    fn source_location(&self) -> Option<&'static core::panic::Location<'static>> {
+        None
+    }
+
+    fn request_layout(
+        &mut self,
+        _id: Option<&GlobalElementId>,
+        _inspector_id: Option<&InspectorElementId>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> (LayoutId, Self::RequestLayoutState) {
+        let bar_id = self.bar.request_layout(window, cx);
+        let dropdown_id = self.dropdown.as_mut().map(|dropdown| {
+            let menu_id = dropdown.request_layout(window, cx);
+            window.request_layout(
+                Style {
+                    position: Position::Absolute,
+                    display: Display::Flex,
+                    inset: gpui::Edges {
+                        top: px(0.).into(),
+                        left: px(0.).into(),
+                        ..gpui::Edges::auto()
+                    },
+                    ..Style::default()
+                },
+                [menu_id],
+                cx,
+            )
+        });
+
+        let mut child_ids = smallvec::SmallVec::<[LayoutId; 2]>::new();
+        child_ids.push(bar_id);
+        if let Some(dropdown_id) = dropdown_id {
+            child_ids.push(dropdown_id);
+        }
+
+        let layout_id = window.request_layout(
+            Style {
+                position: Position::Relative,
+                display: Display::Block,
+                ..Style::default()
+            },
+            child_ids,
+            cx,
+        );
+
+        (layout_id, CanvasFormatToolbarLayout { dropdown_id })
+    }
+
+    fn prepaint(
+        &mut self,
+        _id: Option<&GlobalElementId>,
+        _inspector_id: Option<&InspectorElementId>,
+        bounds: Bounds<Pixels>,
+        layout: &mut Self::RequestLayoutState,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        self.bar.prepaint(window, cx);
+
+        let Some(dropdown_id) = layout.dropdown_id else {
+            return;
+        };
+        let Some(dropdown) = self.dropdown.as_mut() else {
+            return;
+        };
+
+        let menu_bounds = window.layout_bounds(dropdown_id);
+        let menu_size = menu_bounds.size;
+        let client_inset = window.client_inset().unwrap_or(px(0.));
+        let viewport_bottom = window.viewport_size().height - client_inset;
+        let space_below = viewport_bottom - bounds.bottom();
+        let flip_up = space_below < menu_size.height + CANVAS_BLOCK_DROPDOWN_GAP;
+
+        let attach = if flip_up {
+            point(bounds.left(), bounds.top() - CANVAS_BLOCK_DROPDOWN_GAP)
+        } else {
+            point(bounds.left(), bounds.bottom() + CANVAS_BLOCK_DROPDOWN_GAP)
+        };
+        let anchor = if flip_up {
+            Anchor::BottomLeft
+        } else {
+            Anchor::TopLeft
+        };
+        let desired = Bounds::from_anchor_and_size(anchor, attach, menu_size);
+        let offset = point(
+            (desired.origin.x - menu_bounds.origin.x).round(),
+            (desired.origin.y - menu_bounds.origin.y).round(),
+        );
+        window.with_element_offset(offset, |window| {
+            dropdown.prepaint(window, cx);
+        });
+    }
+
+    fn paint(
+        &mut self,
+        _id: Option<&GlobalElementId>,
+        _inspector_id: Option<&InspectorElementId>,
+        _bounds: Bounds<Pixels>,
+        _layout: &mut Self::RequestLayoutState,
+        _prepaint: &mut Self::PrepaintState,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        self.bar.paint(window, cx);
+        if let Some(dropdown) = self.dropdown.as_mut() {
+            dropdown.paint(window, cx);
+        }
+    }
+}
+
 fn render_bubble_menu(
     editor: Entity<CanvasEditorState>,
     locale: SharedString,
@@ -3010,7 +3170,7 @@ fn render_bubble_menu(
         .rounded(px(10.))
         .bg(menu_bg)
         .border_1()
-        .border_color(brand)
+        .border_color(border)
         .shadow_lg()
         .gap_2()
         .occlude()
@@ -3051,7 +3211,28 @@ fn render_bubble_menu(
                 ),
         );
 
-    h_flex()
+    let block_dropdown_panel = block_menu_open.then(|| {
+        v_flex()
+            .min_w(px(220.))
+            .py(px(6.))
+            .rounded(px(10.))
+            .bg(menu_bg)
+            .border_1()
+            .border_color(border)
+            .shadow_lg()
+            .occlude()
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .children(block_menu_items(
+                editor.clone(),
+                active_block,
+                &locale,
+                icon_color,
+                active_color,
+                border,
+            ))
+    });
+
+    let format_bar = h_flex()
         .occlude()
         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
         .gap(px(2.))
@@ -3063,66 +3244,38 @@ fn render_bubble_menu(
         .shadow_md()
         .child(
             div()
-                .relative()
+                .id("canvas-bubble-block")
+                .px(px(10.))
+                .py(px(6.))
+                .rounded(px(4.))
+                .cursor_pointer()
+                .tooltip(TooltipView::text(block_tooltip))
+                .when(block_menu_open, |el| el.bg(cx.theme().bg_tertiary))
                 .child(
-                    div()
-                        .id("canvas-bubble-block")
-                        .px(px(10.))
-                        .py(px(6.))
-                        .rounded(px(4.))
-                        .cursor_pointer()
-                        .tooltip(TooltipView::text(block_tooltip))
-                        .when(block_menu_open, |el| el.bg(cx.theme().bg_tertiary))
+                    h_flex()
+                        .items_center()
+                        .gap_1()
                         .child(
-                            h_flex()
-                                .items_center()
-                                .gap_1()
-                                .child(
-                                    Icon::new(IconName::ParagraphIcon)
-                                        .size(px(14.))
-                                        .text_color(icon_color),
-                                )
-                                .child(
-                                    Icon::new(IconName::ArrowDown)
-                                        .size(px(12.))
-                                        .text_color(icon_color),
-                                ),
+                            Icon::new(IconName::ParagraphIcon)
+                                .size(px(14.))
+                                .text_color(icon_color),
                         )
-                        .on_mouse_down(MouseButton::Left, {
-                            let editor = editor.clone();
-                            move |_, _, cx| {
-                                cx.stop_propagation();
-                                editor.update(cx, |this, cx| {
-                                    this.block_menu_open = !this.block_menu_open;
-                                    this.link_menu_open = false;
-                                    cx.notify();
-                                });
-                            }
-                        }),
-                )
-                .when(block_menu_open, |el| {
-                    el.child(
-                        div().absolute().top(px(38.)).left_0().child(
-                            v_flex()
-                                .min_w(px(220.))
-                                .py(px(6.))
-                                .rounded(px(10.))
-                                .bg(menu_bg)
-                                .border_1()
-                                .border_color(border)
-                                .shadow_lg()
-                                .occlude()
-                                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                                .children(block_menu_items(
-                                    editor.clone(),
-                                    active_block,
-                                    &locale,
-                                    icon_color,
-                                    active_color,
-                                    border,
-                                )),
+                        .child(
+                            Icon::new(IconName::ArrowDown)
+                                .size(px(12.))
+                                .text_color(icon_color),
                         ),
-                    )
+                )
+                .on_mouse_down(MouseButton::Left, {
+                    let editor = editor.clone();
+                    move |_, _, cx| {
+                        cx.stop_propagation();
+                        editor.update(cx, |this, cx| {
+                            this.block_menu_open = !this.block_menu_open;
+                            this.link_menu_open = false;
+                            cx.notify();
+                        });
+                    }
                 }),
         )
         .child(div().w(px(1.)).h(px(24.)).mx(px(4.)).bg(border))
@@ -3228,7 +3381,13 @@ fn render_bubble_menu(
                         }
                     }),
             )
-        })
+        });
+
+    let mut toolbar = CanvasFormatToolbar::new(format_bar);
+    if let Some(panel) = block_dropdown_panel {
+        toolbar = toolbar.with_dropdown(panel);
+    }
+    toolbar
 }
 
 #[derive(Clone, Copy)]
