@@ -381,6 +381,13 @@ fn jwt_expiry(token: &str) -> u64 {
         .unwrap_or(0)
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct RenewedTokens {
+    pub token: String,
+    pub refresh_token: String,
+    pub id_token: String,
+}
+
 impl HttpFallbackSession {
     fn token_expired(&self) -> bool {
         self.token_lifetime().1
@@ -412,7 +419,7 @@ pub struct MezonTransport {
     fallback_refresh_lock: Arc<tokio::sync::Mutex<()>>,
     /// Token pairs minted by the fallback, published so the store can persist them — otherwise the
     /// connection loop re-arms the fallback with the stale token it still holds.
-    renewed_tokens: watch::Sender<Option<(String, String)>>,
+    renewed_tokens: watch::Sender<Option<RenewedTokens>>,
     #[allow(dead_code)]
     base_path: String,
 }
@@ -458,14 +465,18 @@ impl MezonTransport {
 
     /// Renew the fallback token through the same single-flight path a send would use, so the
     /// connection store and a concurrent send can never spend the same refresh token twice.
-    pub async fn renew_fallback_token(&self) -> Result<(String, String)> {
+    pub async fn renew_fallback_token(&self) -> Result<RenewedTokens> {
         let current = self
             .http_fallback
             .read()
             .clone()
             .ok_or_else(|| anyhow::anyhow!("no session for the HTTP fallback"))?;
-        let renewed = self.refresh_fallback_token(&current).await?;
-        Ok((renewed.token.clone(), renewed.refresh_token.clone()))
+        let (renewed, id_token) = self.refresh_fallback_token(&current).await?;
+        Ok(RenewedTokens {
+            token: renewed.token.clone(),
+            refresh_token: renewed.refresh_token.clone(),
+            id_token,
+        })
     }
 
     /// Generate a unique correlation ID.
@@ -3293,7 +3304,7 @@ impl MezonTransport {
         self.adapter.credential_rejected()
     }
 
-    pub fn renewed_tokens(&self) -> watch::Receiver<Option<(String, String)>> {
+    pub fn renewed_tokens(&self) -> watch::Receiver<Option<RenewedTokens>> {
         self.renewed_tokens.subscribe()
     }
 
@@ -3302,13 +3313,13 @@ impl MezonTransport {
     async fn refresh_fallback_token(
         &self,
         stale: &HttpFallbackSession,
-    ) -> Result<Arc<HttpFallbackSession>> {
+    ) -> Result<(Arc<HttpFallbackSession>, String)> {
         let _guard = self.fallback_refresh_lock.lock().await;
         let current = self.http_fallback.read().clone();
         if let Some(current) = current
             && !current.token_expired()
         {
-            return Ok(current);
+            return Ok((current, String::new()));
         }
 
         let body = api::SessionRefreshRequest {
@@ -3382,14 +3393,18 @@ impl MezonTransport {
             server_key: stale.server_key.clone(),
         });
         *self.http_fallback.write() = Some(renewed.clone());
-        self.renewed_tokens
-            .send_replace(Some((session.token, session.refresh_token)));
+        self.renewed_tokens.send_replace(Some(RenewedTokens {
+            token: session.token,
+            refresh_token: session.refresh_token,
+            id_token: session.id_token.clone(),
+        }));
         tracing::info!(
             target: "socket",
-            "api_http_token_renewed: jwt_valid_for={}s",
-            renewed.token_lifetime().0
+            "api_http_token_renewed: jwt_valid_for={}s id_token_renewed={}",
+            renewed.token_lifetime().0,
+            !session.id_token.is_empty()
         );
-        Ok(renewed)
+        Ok((renewed, session.id_token))
     }
 
     async fn send_api_request_over_http(&self, api_name: &str, body: Vec<u8>) -> Result<Vec<u8>> {
@@ -3407,6 +3422,7 @@ impl MezonTransport {
             self.refresh_fallback_token(&fallback)
                 .await
                 .context("could not renew the token for the HTTP fallback")?
+                .0
         } else {
             fallback
         };
