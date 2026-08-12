@@ -2253,6 +2253,20 @@ impl AppApi {
             .await
     }
 
+    pub async fn registration_password(
+        &self,
+        email: &str,
+        password: &str,
+        old_password: &str,
+    ) -> std::result::Result<
+        crate::transport::ApiSession,
+        crate::transport::RegistrationPasswordError,
+    > {
+        self.transport
+            .registration_password(email, password, old_password)
+            .await
+    }
+
     pub async fn upload_attachment_file(
         &self,
         filename: &str,

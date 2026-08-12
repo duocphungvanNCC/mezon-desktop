@@ -2894,6 +2894,32 @@ impl TransportClient {
             .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
     }
 
+    pub async fn registration_password(
+        &self,
+        email: &str,
+        password: &str,
+        old_password: &str,
+    ) -> std::result::Result<
+        crate::transport::ApiSession,
+        crate::transport::RegistrationPasswordError,
+    > {
+        let transport = self.inner.clone();
+        let request = mezon_proto::api::RegistrationEmailRequest {
+            email: email.to_string(),
+            password: password.to_string(),
+            old_password: old_password.to_string(),
+            ..Default::default()
+        };
+        runtime()
+            .spawn(async move { transport.registration_password(request).await })
+            .await
+            .map_err(|error| {
+                crate::transport::RegistrationPasswordError::Transport(format!(
+                    "transport task failed: {error}"
+                ))
+            })?
+    }
+
     pub async fn upload_attachment_file(
         &self,
         filename: &str,
