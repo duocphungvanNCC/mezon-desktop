@@ -1042,6 +1042,16 @@ fn link_kind_from_marker(marker: &str) -> LinkKind {
     }
 }
 
+/// Inverse of [`link_kind_from_marker`] — `None` for a plain link, which carries no marker.
+pub(crate) fn link_marker_from_kind(kind: LinkKind) -> Option<&'static str> {
+    match kind {
+        LinkKind::YouTube => Some(mezon_client::YOUTUBE_LINK_MARKDOWN_KIND),
+        LinkKind::Facebook => Some(mezon_client::FACEBOOK_LINK_MARKDOWN_KIND),
+        LinkKind::TikTok => Some(mezon_client::TIKTOK_LINK_MARKDOWN_KIND),
+        LinkKind::Plain => None,
+    }
+}
+
 struct ChannelUrlIds {
     clan_id: String,
     channel_id: String,

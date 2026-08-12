@@ -851,17 +851,16 @@ fn render_selectable_segmented_spans(
                         url_row = url_row.child(styled);
                         part_base += part.len();
                     }
-                    url_col = url_col.child(if line.trim().is_empty() {
-                        empty_text_line()
-                    } else {
-                        url_row
-                    });
+                    url_col = url_col.child(url_row);
                     line_base += line.len() + 1;
                 }
+                let card_key = link_part_index;
+                link_part_index += 1;
                 row = row.child(render_social_link_card(
                     *kind,
                     &ctx.selection,
                     resolved,
+                    card_key,
                     url_col,
                 ));
                 base += text.len();
@@ -1409,10 +1408,6 @@ pub(crate) enum CachedSelectableTextPiece {
     LineBreak,
 }
 
-fn empty_text_line() -> gpui::Div {
-    div().w_full().h(rems(1.375))
-}
-
 fn memoized_selectable_text_pieces(
     text: &SharedString,
     ctx: &RowCtx,
@@ -1677,10 +1672,13 @@ fn append_span(
                 .child(text.clone()),
         ),
         MessageSpan::Link { text, url, kind } if *kind != LinkKind::Plain => {
+            let key = *span_key;
+            *span_key += 1;
             row.child(render_social_link_card(
                 *kind,
                 &ctx.selection,
                 SharedString::from(resolve_link_url(url, text)),
+                key,
                 render_social_link_url_row(text, theme),
             ))
         }
@@ -1823,6 +1821,9 @@ fn render_social_link_card(
     kind: LinkKind,
     selection: &SharedSelection,
     resolved: SharedString,
+    // Keyed by position, not by url: the same social link twice in one message would otherwise
+    // hash to one id and the two cards would share their interactive state.
+    key: usize,
     url_row: impl IntoElement,
 ) -> AnyElement {
     let (accent, label) = match kind {
@@ -1831,7 +1832,7 @@ fn render_social_link_card(
         LinkKind::TikTok => (TIKTOK_ACCENT, "TikTok"),
         LinkKind::Plain => (SOCIAL_CARD_BG, ""),
     };
-    let id = hashed_element_id("msg-social", &resolved);
+    let id = ("msg-social", key);
     let selection = selection.clone();
     div()
         .flex()

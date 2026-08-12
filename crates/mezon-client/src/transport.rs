@@ -2553,13 +2553,18 @@ static YOUTUBE_LINK: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::ne
     regex::Regex::new(r"(?:youtube\.com/(?:watch\?v=|embed/|v/|e/|shorts/)|youtu\.be/)")
         .expect("static youtube link pattern")
 });
+// `\w`/`\d` are Unicode classes here but ASCII-only in JS, so the classes are spelled out to keep
+// this in step with mezon-react's getLinkType — a link this crate tags but the web client's own
+// regex rejects renders as a broken embed there.
 static FACEBOOK_LINK: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
-    regex::Regex::new(r"(?:facebook\.com/(?:reel/|watch\?v=|[\w.]+/videos/(?:[\w.]+/)?))[\w-]+")
-        .expect("static facebook link pattern")
+    regex::Regex::new(
+        r"(?:facebook\.com/(?:reel/|watch\?v=|[0-9A-Za-z_.]+/videos/(?:[0-9A-Za-z_.]+/)?))[0-9A-Za-z_-]+",
+    )
+    .expect("static facebook link pattern")
 });
 static TIKTOK_LINK: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
     regex::Regex::new(
-        r"(?:tiktok\.com/@[^/]+/video/\d+|vm\.tiktok\.com/[a-zA-Z0-9]+|tiktok\.com/t/[a-zA-Z0-9]+)",
+        r"(?:tiktok\.com/@[^/]+/video/[0-9]+|vm\.tiktok\.com/[a-zA-Z0-9]+|tiktok\.com/t/[a-zA-Z0-9]+)",
     )
     .expect("static tiktok link pattern")
 });
@@ -2574,6 +2579,18 @@ pub fn link_markdown_kind(url: &str) -> &'static str {
     } else {
         LINK_MARKDOWN_KIND
     }
+}
+
+/// Every kind [`link_markdown_kind`] can return. Consumers that filter detected markdown down to
+/// links must use this instead of comparing against `"lk"`, or they silently drop social links.
+pub fn is_link_markdown_kind(kind: &str) -> bool {
+    matches!(
+        kind,
+        LINK_MARKDOWN_KIND
+            | YOUTUBE_LINK_MARKDOWN_KIND
+            | FACEBOOK_LINK_MARKDOWN_KIND
+            | TIKTOK_LINK_MARKDOWN_KIND
+    )
 }
 
 fn scan_markdown(chars: &[char]) -> Vec<MarkdownMatch> {
@@ -9970,6 +9987,28 @@ mod tests {
             vec![md("lk_fb", 0, 33)]
         );
         assert_eq!(detect_markdown("https://a.com"), vec![md("lk", 0, 13)]);
+    }
+
+    #[test]
+    fn link_markdown_kind_matches_js_ascii_classes() {
+        // mezon-react's getLinkType uses JS `\w`/`\d`, which are ASCII-only. Tagging a link the
+        // web client's own regex then fails to expand leaves it with a broken embed there.
+        assert_eq!(
+            link_markdown_kind("https://www.facebook.com/José/videos/abc"),
+            "lk"
+        );
+        assert_eq!(
+            link_markdown_kind("https://www.facebook.com/jose/videos/abc"),
+            "lk_fb"
+        );
+        assert_eq!(
+            link_markdown_kind("https://www.tiktok.com/@user/video/١٢٣"),
+            "lk"
+        );
+        assert_eq!(
+            link_markdown_kind("https://www.tiktok.com/@user/video/123"),
+            "lk_tt"
+        );
     }
 
     #[test]
