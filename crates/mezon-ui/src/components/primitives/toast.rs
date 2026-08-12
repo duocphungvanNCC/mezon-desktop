@@ -62,13 +62,13 @@ impl RenderOnce for Toast {
             ToastKind::Success => (theme.status_online, IconName::Check),
             ToastKind::Error => (theme.danger_text, IconName::TriangleAlert),
         };
+        let bar_progress = self.countdown.or(self.progress);
 
         div()
             .relative()
             .w(px(360.))
             .max_w(px(360.))
             .min_h(px(56.))
-            .overflow_hidden()
             .rounded(px(10.))
             .border_1()
             .border_color(theme.border)
@@ -104,36 +104,24 @@ impl RenderOnce for Toast {
                             .child(self.message),
                     ),
             )
-            .when(
-                self.progress.is_some() || self.countdown.is_some(),
-                |card| {
-                    card.child(
-                        div()
-                            .absolute()
-                            .bottom(px(3.))
-                            .left(px(4.))
-                            .right(px(4.))
-                            .h(px(3.))
-                            .rounded_full()
-                            .overflow_hidden()
-                            .when(self.progress.is_some(), |track| track.bg(theme.bg_tertiary))
-                            .child(if let Some(progress) = self.countdown {
-                                div()
-                                    .h_full()
-                                    .w(relative(progress.clamp(0., 1.)))
-                                    .rounded_full()
-                                    .bg(accent)
-                                    .into_any_element()
-                            } else {
-                                div()
-                                    .h_full()
-                                    .w(relative(self.progress.unwrap_or_default().clamp(0., 1.)))
-                                    .rounded_full()
-                                    .bg(accent)
-                                    .into_any_element()
-                            }),
-                    )
-                },
-            )
+            .when(bar_progress.is_some(), |card| {
+                card.child(
+                    div()
+                        .absolute()
+                        .bottom(px(3.))
+                        .left(px(4.))
+                        .right(px(4.))
+                        .h(px(3.))
+                        .rounded_full()
+                        .bg(theme.bg_tertiary)
+                        .child(
+                            div()
+                                .h_full()
+                                .w(relative(bar_progress.unwrap_or_default().clamp(0., 1.)))
+                                .rounded_full()
+                                .bg(accent),
+                        ),
+                )
+            })
     }
 }

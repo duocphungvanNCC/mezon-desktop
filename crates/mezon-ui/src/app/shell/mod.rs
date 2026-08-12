@@ -4,7 +4,7 @@
 //! Any view can surface a toast or a modal from anywhere via [`Shell::global`], instead of each
 //! page wiring its own local toast/dialog state.
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use gpui::{
     AnyView, App, AppContext, Context, Entity, Global, MouseButton, SharedString, Task, Window,
@@ -42,7 +42,7 @@ use disable_clan_community_modal::DisableClanCommunityModal;
 use upload_limit_modal::UploadLimitModal;
 
 const TOAST_TTL: Duration = Duration::from_secs(4);
-const TOAST_COUNTDOWN_FPS: f32 = 30.;
+const TOAST_COUNTDOWN_FPS: f32 = 12.;
 
 struct ToastItem {
     id: usize,
@@ -50,7 +50,6 @@ struct ToastItem {
     message: SharedString,
     kind: ToastKind,
     progress: Option<f32>,
-    ttl: Option<Duration>,
     countdown: Option<f32>,
     _dismiss_task: Option<Task<()>>,
 }
@@ -120,13 +119,15 @@ impl Shell {
         self.next_id = self.next_id.wrapping_add(1);
         let ttl = TOAST_TTL;
         let dismiss_task = cx.spawn(async move |this, cx| {
-            let countdown_steps = ((ttl.as_secs_f32() * TOAST_COUNTDOWN_FPS).ceil() as u32).max(1);
-            let tick = ttl / countdown_steps;
-            for step in 1..=countdown_steps {
-                cx.background_executor().timer(tick).await;
+            let started_at = Instant::now();
+            let tick = Duration::from_secs_f32(1. / TOAST_COUNTDOWN_FPS);
+            loop {
+                let remaining = ttl.saturating_sub(started_at.elapsed());
+                cx.background_executor().timer(tick.min(remaining)).await;
+                let elapsed = started_at.elapsed();
                 let should_continue = this
                     .update(cx, |this, cx| {
-                        if step == countdown_steps {
+                        if elapsed >= ttl {
                             this.toasts.retain(|toast| toast.id != id);
                             cx.notify();
                             return false;
@@ -135,7 +136,7 @@ impl Shell {
                         else {
                             return false;
                         };
-                        toast.countdown = Some(1. - step as f32 / countdown_steps as f32);
+                        toast.countdown = Some(1. - elapsed.as_secs_f32() / ttl.as_secs_f32());
                         cx.notify();
                         true
                     })
@@ -151,7 +152,6 @@ impl Shell {
             message: message.into(),
             kind,
             progress: None,
-            ttl: Some(ttl),
             countdown: Some(1.),
             _dismiss_task: Some(dismiss_task),
         });
@@ -186,7 +186,6 @@ impl Shell {
             message: message.into(),
             kind,
             progress: None,
-            ttl: None,
             countdown: None,
             _dismiss_task: None,
         });
@@ -238,7 +237,6 @@ impl Shell {
                 message,
                 kind: ToastKind::Info,
                 progress: Some(progress.clamp(0., 1.)),
-                ttl: None,
                 countdown: None,
                 _dismiss_task: None,
             });
@@ -834,27 +832,6 @@ impl Shell {
             .as_ref()
             .map(|(view, fullscreen, _, _)| (view.clone(), *fullscreen));
         let has_toasts = !self.toasts.is_empty();
-        let toasts: Vec<(
-            usize,
-            SharedString,
-            ToastKind,
-            Option<f32>,
-            Option<Duration>,
-            Option<f32>,
-        )> = self
-            .toasts
-            .iter()
-            .map(|t| {
-                (
-                    t.id,
-                    t.message.clone(),
-                    t.kind,
-                    t.progress,
-                    t.ttl,
-                    t.countdown,
-                )
-            })
-            .collect();
 
         div()
             .absolute()
@@ -932,22 +909,21 @@ impl Shell {
                         .flex()
                         .flex_col()
                         .gap_2()
-                        .children(toasts.into_iter().map(
-                            |(id, message, kind, progress, ttl, countdown)| {
-                                let toast = Toast::new(message)
-                                    .kind(kind)
-                                    .progress(progress)
-                                    .countdown(if ttl.is_some() { countdown } else { None });
-                                div()
-                                    .id(("toast", id))
-                                    .cursor_pointer()
-                                    .on_click(move |_, _window, cx| {
-                                        Shell::global(cx)
-                                            .update(cx, |shell, cx| shell.dismiss_by_id(id, cx));
-                                    })
-                                    .child(toast)
-                            },
-                        )),
+                        .children(self.toasts.iter().map(|item| {
+                            let id = item.id;
+                            let toast = Toast::new(item.message.clone())
+                                .kind(item.kind)
+                                .progress(item.progress)
+                                .countdown(item.countdown);
+                            div()
+                                .id(("toast", id))
+                                .cursor_pointer()
+                                .on_click(move |_, _window, cx| {
+                                    Shell::global(cx)
+                                        .update(cx, |shell, cx| shell.dismiss_by_id(id, cx));
+                                })
+                                .child(toast)
+                        })),
                 ))
             })
     }

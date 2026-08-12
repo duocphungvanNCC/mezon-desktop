@@ -337,7 +337,7 @@ impl Render for RootView {
                     Route::NotFound { .. } => render_not_found(theme, locale),
                     Route::AddFriend { .. } => render_placeholder(theme, "Add Friend"),
                     Route::Invite { .. } => render_placeholder(theme, "Accept Invite"),
-                    _ => uncached_fill(self.chat_layout.clone()),
+                    _ => cached_fill(self.chat_layout.clone()),
                 }
             }
         };
