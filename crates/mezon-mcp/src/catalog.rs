@@ -678,6 +678,144 @@ Parameters:
         write: true,
     },
     ToolSpec {
+        name: "composer_type",
+        description: "\
+Type text into the active channel's composer, exactly as the user would.
+
+Drives the real MentionInput, so trigger characters open their popup: @ (member/role),
+# (channel), : (emoji), / (slash command). Returns the composer state including the
+suggestion list. Follow with composer_pick to accept one, then composer_submit to send.
+
+Parameters:
+- text (required): full composer text to set.",
+        write: true,
+    },
+    ToolSpec {
+        name: "composer_state",
+        description: "\
+Read the active composer: current text, whether a suggestion popup is open, the
+suggestion labels, the selected index, and which panel (emoji/sticker/gif/sound) is open.
+
+Parameters: none.",
+        write: false,
+    },
+    ToolSpec {
+        name: "composer_pick",
+        description: "\
+Accept a suggestion from the open composer popup, like clicking it or pressing Enter.
+
+Parameters:
+- index (optional, default 0): index into the list returned by composer_type/composer_state.",
+        write: true,
+    },
+    ToolSpec {
+        name: "composer_submit",
+        description: "\
+Press Enter on the composer to send whatever it currently holds (text, committed
+mention/emoji tokens, pending attachments).
+
+Parameters: none.",
+        write: true,
+    },
+    ToolSpec {
+        name: "edit_begin",
+        description: "\
+Open the inline edit box on a message, exactly as the Edit action does.
+
+The returned text is what the edit box was SEEDED with — that is the markdown source
+reconstructed from the stored (marker-stripped) content, so it reveals whether code
+fences / markers survive a round-trip. Follow with edit_type / edit_pick / edit_save.
+
+Parameters:
+- message_id (required): message to edit, loaded in the active channel.",
+        write: true,
+    },
+    ToolSpec {
+        name: "edit_type",
+        description: "\
+Replace the inline edit box text. Trigger characters open their popup just like the
+composer.
+
+Parameters:
+- text (required).",
+        write: true,
+    },
+    ToolSpec {
+        name: "edit_pick",
+        description: "\
+Accept a suggestion from the edit box popup.
+
+Parameters:
+- index (optional, default 0).",
+        write: true,
+    },
+    ToolSpec {
+        name: "edit_state",
+        description: "\
+Read the inline edit box: target message id, text, popup state and suggestions.
+
+Parameters: none.",
+        write: false,
+    },
+    ToolSpec {
+        name: "edit_save",
+        description: "\
+Save the inline edit, as pressing Enter does. Runs the real store edit path.
+
+Parameters: none.",
+        write: true,
+    },
+    ToolSpec {
+        name: "composer_panel_send",
+        description: "\
+Send a sticker, GIF or sound exactly as picking it from the composer panel does.
+
+Emits the same composer event the panel emits, so it exercises the real send pipeline.
+Get candidates from list_stickers / list_emojis.
+
+Parameters:
+- kind (required): sticker | gif | sound.
+- url (required): media url.
+- filename (optional), width/height (optional, GIF only).",
+        write: true,
+    },
+    ToolSpec {
+        name: "composer_drop_paths",
+        description: "\
+Drop local files onto the composer, like a drag-and-drop. They become pending
+attachments; send them with composer_submit.
+
+Parameters:
+- paths (required): array of local file paths.",
+        write: true,
+    },
+    ToolSpec {
+        name: "send_buzz",
+        description: "\
+Send a BUZZ message to the active channel. Refused while anonymous mode is on,
+matching the composer's own guard.
+
+Parameters:
+- text (optional): buzz text.",
+        write: true,
+    },
+    ToolSpec {
+        name: "send_attachment",
+        description: "\
+Send a local file to the ACTIVE channel through the app's own composer pipeline.
+
+Unlike send_image (which talks to the API directly), this drives MessagesStore::send_message,
+so it exercises optimistic rows, the presign flow and anonymous mode exactly as the UI does.
+Open the target channel first with open_channel or open_dm.
+
+Parameters:
+- path / paths (optional): one or several local file paths.
+- content (optional): message text. Required when no file is given.
+- anonymous (optional, default false): send as Anonymous in the active clan.
+- reply_to (optional): message id to reply to, loaded in the active channel.",
+        write: true,
+    },
+    ToolSpec {
         name: "send_sticker",
         description: "\
 Send a sticker to a channel by URL or shortname.

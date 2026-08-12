@@ -2369,6 +2369,10 @@ impl ChannelMessages {
         cx.notify();
     }
 
+    pub(crate) fn probe_edit_input(&self) -> Option<(MessageId, Entity<MentionInput>)> {
+        self.edit_input.clone()
+    }
+
     pub(crate) fn save_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some((message_id, input)) = self.edit_input.take() else {
             return;

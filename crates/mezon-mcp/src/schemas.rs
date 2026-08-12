@@ -335,6 +335,79 @@ pub fn input_schema(name: &str) -> Arc<Map<String, Value>> {
             }),
             &["clan_id", "channel_id"],
         )),
+        "composer_type" => Arc::new(object(
+            json!({ "text": string("Full composer text to set.") }),
+            &["text"],
+        )),
+        "composer_pick" => Arc::new(object(
+            json!({
+                "index": json!({
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": "Index into the suggestion list (default 0)."
+                }),
+            }),
+            &[],
+        )),
+        "edit_begin" => Arc::new(object(
+            json!({ "message_id": id("Message id to edit.") }),
+            &["message_id"],
+        )),
+        "edit_type" => Arc::new(object(
+            json!({ "text": string("Full edit-box text to set.") }),
+            &["text"],
+        )),
+        "edit_pick" => Arc::new(object(
+            json!({
+                "index": json!({
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": "Suggestion index (default 0)."
+                }),
+            }),
+            &[],
+        )),
+        "composer_panel_send" => Arc::new(object(
+            json!({
+                "kind": string("sticker | gif | sound."),
+                "url": string("Media url."),
+                "filename": string("Filename for sticker/sound."),
+                "width": json!({"type": "integer", "description": "GIF width."}),
+                "height": json!({"type": "integer", "description": "GIF height."}),
+            }),
+            &["kind", "url"],
+        )),
+        "composer_drop_paths" => Arc::new(object(
+            json!({
+                "paths": json!({
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Local file paths to drop on the composer."
+                }),
+            }),
+            &["paths"],
+        )),
+        "send_buzz" => Arc::new(object(
+            json!({ "text": string("Buzz text.") }),
+            &[],
+        )),
+        "send_attachment" => Arc::new(object(
+            json!({
+                "path": string("Local filesystem path to one file to send."),
+                "paths": json!({
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Local filesystem paths for a multi-attachment (album) send."
+                }),
+                "content": string("Message text. Required when no path/paths is given."),
+                "anonymous": json!({
+                    "type": "boolean",
+                    "description": "Send as Anonymous in the active clan (default false)."
+                }),
+                "reply_to": id("Message id to reply to; must be loaded in the active channel."),
+            }),
+            &[],
+        )),
         "send_sticker" => Arc::new(object(
             json!({
                 "clan_id": id("Clan snowflake id."),
