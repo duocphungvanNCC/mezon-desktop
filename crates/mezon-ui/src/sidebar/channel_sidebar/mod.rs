@@ -694,6 +694,8 @@ impl Render for ChannelSidebar {
         let items = self.items.clone();
         let channel_list_handle = self.channel_list_handle.clone();
         let active_clan_id_for_nav = self.active_clan_id;
+        let can_open_channel_settings = active_clan_id_for_nav
+            .is_some_and(|clan_id| menu::can_open_channel_settings(clan_id, cx));
         let suppress_hover = self.list_state.is_scroll_hover_suppressed();
         let list_state = self.list_state.clone();
         let sidebar = cx.entity().downgrade();
@@ -828,6 +830,7 @@ impl Render for ChannelSidebar {
                     cx,
                     channel_list_handle.clone(),
                     active_clan_id_for_nav,
+                    can_open_channel_settings,
                     sidebar.clone(),
                     suppress_hover,
                     &locale,
@@ -1486,6 +1489,7 @@ fn render_sidebar_item(
     cx: &App,
     channel_list_handle: Entity<ChannelList>,
     active_clan_id_for_nav: Option<ClanId>,
+    can_open_channel_settings: bool,
     sidebar: WeakEntity<ChannelSidebar>,
     suppress_hover: bool,
     locale: &str,
@@ -1673,9 +1677,8 @@ fn render_sidebar_item(
             let clan_id_inner = active_clan_id_for_nav;
             let menu_channel_id: ChannelId = ch_id.parse().unwrap_or_default();
             let menu_clan_id: ClanId = clan_id_inner.unwrap_or_default();
-            let show_settings_gear = !*is_thread
-                && clan_id_inner.is_some()
-                && menu::can_open_channel_settings(menu_clan_id, cx);
+            let show_settings_gear =
+                !*is_thread && clan_id_inner.is_some() && can_open_channel_settings;
             let settings_clan_id = menu_clan_id;
             let settings_channel_id = menu_channel_id;
 

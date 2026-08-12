@@ -751,6 +751,7 @@ pub struct UpdateChannelDescParams {
     pub topic: String,
     pub age_restricted: i32,
     pub e2ee: i32,
+    pub app_id: i64,
     pub channel_avatar: Option<String>,
 }
 
@@ -6546,6 +6547,7 @@ impl MezonTransport {
             channel_id,
             channel_label: params.channel_label,
             category_id: params.category_id,
+            app_id: params.app_id,
             topic: params.topic,
             age_restricted: params.age_restricted,
             e2ee: params.e2ee,

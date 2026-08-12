@@ -56,20 +56,11 @@ pub struct ThreadConnector {
     pub color: Hsla,
 }
 
+#[derive(Clone)]
 pub struct ChannelRowTrailingAction {
     pub icon: IconName,
     pub hover_color: Hsla,
     pub on_click: ClickHandler,
-}
-
-impl Clone for ChannelRowTrailingAction {
-    fn clone(&self) -> Self {
-        Self {
-            icon: self.icon,
-            hover_color: self.hover_color,
-            on_click: self.on_click.clone(),
-        }
-    }
 }
 
 #[derive(Default)]
@@ -205,13 +196,6 @@ fn gear_bounds(row_bounds: Bounds<Pixels>) -> Bounds<Pixels> {
         origin: point(gear_x, gear_y),
         size: size(GEAR_SIZE, GEAR_SIZE),
     }
-}
-
-fn contains_point(bounds: Bounds<Pixels>, point: Point<Pixels>) -> bool {
-    point.x >= bounds.origin.x
-        && point.x <= bounds.origin.x + bounds.size.width
-        && point.y >= bounds.origin.y
-        && point.y <= bounds.origin.y + bounds.size.height
 }
 
 impl Element for ChannelRowElement {
@@ -540,7 +524,7 @@ impl Element for ChannelRowElement {
                                 }
                                 if has_trailing
                                     && hovered_cell.get()
-                                    && contains_point(gear_bounds(hitbox_up.bounds), event.position)
+                                    && gear_bounds(hitbox_up.bounds).contains(&event.position)
                                     && let Some(action) = trailing_action.as_ref()
                                 {
                                     (action.on_click)(window, cx);

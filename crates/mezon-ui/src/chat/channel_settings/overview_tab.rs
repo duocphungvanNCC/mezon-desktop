@@ -17,11 +17,7 @@ use crate::components::primitives::{
 };
 use crate::theme::{ActiveTheme, Theme};
 use crate::util::assets::{CHANNEL_SETTING_LOGO_DARK, CHANNEL_SETTING_LOGO_LIGHT};
-
-fn theme_is_light(theme: &Theme) -> bool {
-    let bg = theme.bg_primary;
-    0.299 * bg.r + 0.587 * bg.g + 0.114 * bg.b > 0.5
-}
+use crate::util::theme::theme_is_light;
 
 const DUPLICATE_DEBOUNCE: Duration = Duration::from_millis(300);
 
@@ -49,8 +45,10 @@ pub struct OverviewTab {
     duplicate_checking: bool,
     detail_loading: bool,
     saving: bool,
+    pending_store_sync: bool,
     _name_sub: Subscription,
     _topic_sub: Subscription,
+    _channel_sync_sub: Subscription,
     _save_task: Option<Task<()>>,
     _duplicate_task: Task<()>,
     _fetch_task: Task<()>,
@@ -150,9 +148,12 @@ impl OverviewTab {
 
         let channel_list = ChannelList::global(cx);
         let permission_store = PermissionStore::global(cx);
+        let channel_sync_sub = cx.observe(&channel_list, |this, _, cx| {
+            this.pending_store_sync = true;
+            cx.notify();
+        });
         let subs = vec![
             cx.observe(&settings, |_, _, cx| cx.notify()),
-            cx.observe(&channel_list, |_, _, cx| cx.notify()),
             cx.observe(&permission_store, |_, _, cx| cx.notify()),
         ];
 
@@ -174,13 +175,24 @@ impl OverviewTab {
                     if !topic_dirty {
                         this.saved_topic = detail.topic.clone();
                         this.topic_input.update(cx, |state, cx| {
-                            state.set_value(detail.topic, cx);
+                            state.set_value(detail.topic.clone(), cx);
                         });
                     }
                     if !age_dirty {
                         this.saved_age_restricted = detail.age_restricted;
                         this.draft_age_restricted = detail.age_restricted;
                     }
+                    ChannelList::global(cx).update(cx, |store, cx| {
+                        store.patch_channel_overview_detail(
+                            clan_id,
+                            channel_id,
+                            detail.topic,
+                            detail.age_restricted,
+                            detail.e2ee,
+                            detail.app_id,
+                            cx,
+                        );
+                    });
                 }
                 cx.notify();
             });
@@ -202,8 +214,10 @@ impl OverviewTab {
             duplicate_checking: false,
             detail_loading: true,
             saving: false,
+            pending_store_sync: false,
             _name_sub: name_sub,
             _topic_sub: topic_sub,
+            _channel_sync_sub: channel_sync_sub,
             _save_task: None,
             _duplicate_task: Task::ready(()),
             _fetch_task: fetch_task,
@@ -274,7 +288,13 @@ impl OverviewTab {
     }
 
     pub fn should_show_save_bar(&self, cx: &App) -> bool {
-        self.can_edit(cx) && self.is_dirty(cx)
+        if !self.can_edit(cx) || !self.is_dirty(cx) {
+            return false;
+        }
+        if self.is_name_dirty(cx) && self.validation != NameValidation::Valid {
+            return false;
+        }
+        true
     }
 
     pub fn reset_draft(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -535,6 +555,7 @@ impl OverviewTab {
         name_label: SharedString,
         theme: &Theme,
         can_edit: bool,
+        cx: &App,
     ) -> impl IntoElement {
         v_flex()
             .w_full()
@@ -546,7 +567,7 @@ impl OverviewTab {
                     .text_color(theme.text_primary)
                     .child(name_label),
             )
-            .child(
+            .child(if can_edit {
                 div()
                     .id("channel-overview-name")
                     .w_full()
@@ -559,9 +580,27 @@ impl OverviewTab {
                     .border_1()
                     .border_color(theme.tokens.border_theme_primary)
                     .bg(theme.tokens.bg_input_secondary)
-                    .when(!can_edit, |el| el.opacity(0.6))
-                    .child(Input::new(&self.name_input).w_full()),
-            )
+                    .child(Input::new(&self.name_input).w_full())
+                    .into_any_element()
+            } else {
+                div()
+                    .id("channel-overview-name")
+                    .w_full()
+                    .h(px(40.))
+                    .flex()
+                    .items_center()
+                    .pl(px(12.))
+                    .pr(px(12.))
+                    .rounded(px(8.))
+                    .border_1()
+                    .border_color(theme.tokens.border_theme_primary)
+                    .bg(theme.tokens.bg_input_secondary)
+                    .opacity(0.6)
+                    .text_size(px(15.))
+                    .text_color(theme.text_primary)
+                    .child(self.draft_label(cx))
+                    .into_any_element()
+            })
     }
 
     fn render_topic_field(
@@ -589,7 +628,7 @@ impl OverviewTab {
                     .text_color(theme.text_primary)
                     .child(topic_label),
             )
-            .child(
+            .child(if can_edit {
                 div()
                     .id("channel-overview-topic")
                     .relative()
@@ -600,7 +639,6 @@ impl OverviewTab {
                     .border_color(theme.tokens.border_theme_primary)
                     .bg(theme.tokens.bg_input_secondary)
                     .overflow_hidden()
-                    .when(!can_edit, |el| el.opacity(0.6))
                     .child(TextAreaField::new(&self.topic_input).w_full())
                     .child(
                         div()
@@ -610,8 +648,25 @@ impl OverviewTab {
                             .text_xs()
                             .text_color(theme.text_muted)
                             .child(remaining.to_string()),
-                    ),
-            )
+                    )
+                    .into_any_element()
+            } else {
+                div()
+                    .id("channel-overview-topic")
+                    .relative()
+                    .w_full()
+                    .min_h(px(87.))
+                    .rounded(px(8.))
+                    .border_1()
+                    .border_color(theme.tokens.border_theme_primary)
+                    .bg(theme.tokens.bg_input_secondary)
+                    .opacity(0.6)
+                    .p_3()
+                    .text_size(px(15.))
+                    .text_color(theme.text_primary)
+                    .child(self.draft_topic(cx))
+                    .into_any_element()
+            })
     }
 
     fn render_age_restricted(
@@ -842,7 +897,10 @@ pub fn render_channel_overview_save_bar(
 
 impl Render for OverviewTab {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        self.sync_from_store(window, cx);
+        if self.pending_store_sync {
+            self.pending_store_sync = false;
+            self.sync_from_store(window, cx);
+        }
 
         let theme = cx.theme().clone();
         let locale = self.settings.read(cx).language.clone();
@@ -868,7 +926,7 @@ impl Render for OverviewTab {
                     .text_color(theme.text_primary)
                     .child(title),
             )
-            .child(self.render_name_field(name_label, &theme, can_edit))
+            .child(self.render_name_field(name_label, &theme, can_edit, cx))
             .when_some(validation_message, |el, message| {
                 el.child(
                     div()

@@ -8063,6 +8063,8 @@ mod tests {
                             avatar_url: String::new(),
                             topic: String::new(),
                             age_restricted: 0,
+                            e2ee: 0,
+                            app_id: 0,
                         }],
                     }],
                 );

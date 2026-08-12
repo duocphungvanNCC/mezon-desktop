@@ -156,6 +156,8 @@ pub struct Channel {
     pub avatar_url: String,
     pub topic: String,
     pub age_restricted: i32,
+    pub e2ee: i32,
+    pub app_id: i64,
 }
 
 impl Channel {
@@ -310,7 +312,7 @@ pub enum UpdateChannelOverviewError {
     Other(String),
 }
 
-pub const MAX_CHANNEL_TOPIC_CHARS: usize = 512;
+pub const MAX_CHANNEL_TOPIC_CHARS: usize = 1024;
 
 pub fn validate_channel_name(name: &str) -> Result<String, CreateChannelError> {
     validate_category_name(name).map_err(|err| match err {
@@ -2199,6 +2201,45 @@ impl ChannelList {
         })
     }
 
+    pub fn patch_channel_overview_detail(
+        &mut self,
+        clan_id: ClanId,
+        channel_id: ChannelId,
+        topic: String,
+        age_restricted: i32,
+        e2ee: i32,
+        app_id: i64,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(channel) = self.channel(clan_id, channel_id).cloned() else {
+            return;
+        };
+        let mut changed = false;
+        if let Some(categories) = self.cache.get_mut(&clan_id) {
+            changed = update_channel(
+                categories,
+                channel_id,
+                None,
+                Some(topic),
+                Some(age_restricted),
+                channel.private,
+            );
+            if changed {
+                for cat in categories.iter_mut() {
+                    for ch in cat.channels.iter_mut() {
+                        if ch.id == channel_id {
+                            ch.e2ee = e2ee;
+                            ch.app_id = app_id;
+                        }
+                    }
+                }
+            }
+        }
+        if changed {
+            cx.notify();
+        }
+    }
+
     pub fn update_channel_overview(
         &mut self,
         clan_id: ClanId,
@@ -2263,17 +2304,19 @@ impl ChannelList {
                 }
             }
 
-            let detail = api
-                .list_channel_detail(channel_id.get())
-                .await
-                .map_err(|e| UpdateChannelOverviewError::Other(e.to_string()))?;
+            let category_id = channel
+                .category_id
+                .as_deref()
+                .and_then(|id| id.parse().ok())
+                .unwrap_or(0);
 
             let params = mezon_client::UpdateChannelDescParams {
                 channel_label: Some(validated.clone()),
-                category_id: detail.category_id,
+                category_id,
                 topic: topic.clone(),
                 age_restricted,
-                e2ee: detail.e2ee,
+                e2ee: channel.e2ee,
+                app_id: channel.app_id,
                 channel_avatar: None,
             };
 
@@ -2538,6 +2581,8 @@ impl ChannelList {
                         avatar_url: String::new(),
                         topic: String::new(),
                         age_restricted: 0,
+                        e2ee: 0,
+                        app_id: 0,
                     };
                     let inserted = if let Some(cats) = self.cache.get_mut(&clan_id) {
                         insert_channel(cats, channel)
@@ -2553,8 +2598,8 @@ impl ChannelList {
             RealtimeEvent::ChannelUpdated(e) => {
                 let id = ChannelId(e.channel_id);
                 let label = (!e.channel_label.is_empty()).then_some(e.channel_label.clone());
-                let topic = Some(e.topic.clone());
-                let age_restricted = Some(e.age_restricted);
+                let topic = (!e.topic.is_empty()).then_some(e.topic.clone());
+                let age_restricted = (!e.topic.is_empty()).then_some(e.age_restricted);
                 let mut changed = false;
                 for cats in self.cache.values_mut() {
                     if update_channel(
@@ -2770,6 +2815,8 @@ impl ChannelList {
                     avatar_url: desc.channel_avatar.clone(),
                     topic: desc.topic.clone(),
                     age_restricted: desc.age_restricted,
+                    e2ee: desc.e2ee,
+                    app_id: desc.app_id,
                 };
                 let inserted = self
                     .cache
@@ -3401,6 +3448,8 @@ impl ChannelList {
                 avatar_url: String::new(),
                 topic: String::new(),
                 age_restricted: 0,
+                e2ee: 0,
+                app_id: 0,
             };
             if let Some(cats) = self.cache.get_mut(&clan_id)
                 && insert_channel(cats, channel)
@@ -3702,6 +3751,8 @@ fn thread_channel_from_context(
         avatar_url: String::new(),
         topic: String::new(),
         age_restricted: 0,
+        e2ee: 0,
+        app_id: 0,
     }
 }
 
@@ -3744,6 +3795,8 @@ fn channel_from_desc(
         avatar_url: c.channel_avatar,
         topic: c.topic,
         age_restricted: c.age_restricted,
+        e2ee: c.e2ee,
+        app_id: c.app_id,
     }
 }
 
@@ -3999,7 +4052,8 @@ fn move_channel_to_category(
     if insert_channel(categories, moved) {
         return true;
     }
-    insert_channel(categories, channel)
+    insert_channel(categories, channel);
+    false
 }
 
 fn notify_in_voice_change(
@@ -4767,6 +4821,8 @@ mod tests {
             avatar_url: String::new(),
             topic: String::new(),
             age_restricted: 0,
+            e2ee: 0,
+            app_id: 0,
         }
     }
 
@@ -5501,6 +5557,8 @@ mod tests {
             avatar_url: String::new(),
             topic: String::new(),
             age_restricted: 0,
+            e2ee: 0,
+            app_id: 0,
         };
         assert!(ch.is_favorite);
     }
@@ -5532,6 +5590,8 @@ mod tests {
                 avatar_url: String::new(),
                 topic: String::new(),
                 age_restricted: 0,
+                e2ee: 0,
+                app_id: 0,
             },
             Channel {
                 id: ChannelId(2),
@@ -5557,6 +5617,8 @@ mod tests {
                 avatar_url: String::new(),
                 topic: String::new(),
                 age_restricted: 0,
+                e2ee: 0,
+                app_id: 0,
             },
         ];
 
@@ -5863,7 +5925,7 @@ mod tests {
         cx.update(|cx| {
             let channels = init_channel_list(cx);
             channels.update(cx, |channels, cx| {
-                channels.apply_clan_structure(ClanId(1), structure_with_two_channels(), cx);
+                channels.apply_clan_structure(ClanId(1), structure_with_two_channels(), None, cx);
                 channels.apply_clan_extras(ClanId(1), voice_extras(one_user_in_voice()), cx);
 
                 let sharing = |channels: &ChannelList| {
@@ -6381,7 +6443,7 @@ mod tests {
         cx.update(|cx| {
             let channels = init_channel_list_with_threads(cx);
             channels.update(cx, |channels, cx| {
-                channels.apply_clan_structure(ClanId(1), structure_with_a_thread(), cx);
+                channels.apply_clan_structure(ClanId(1), structure_with_a_thread(), None, cx);
                 channels.select_channel(ChannelId(9), cx);
 
                 channels.apply_local_archive(ClanId(1), ChannelId(9), ChannelId(1), cx);
@@ -6397,7 +6459,7 @@ mod tests {
         cx.update(|cx| {
             let channels = init_channel_list_with_threads(cx);
             channels.update(cx, |channels, cx| {
-                channels.apply_clan_structure(ClanId(1), structure_with_a_thread(), cx);
+                channels.apply_clan_structure(ClanId(1), structure_with_a_thread(), None, cx);
                 channels.select_channel(ChannelId(9), cx);
 
                 channels.handle_event(
@@ -6416,7 +6478,7 @@ mod tests {
         cx.update(|cx| {
             let channels = init_channel_list_with_threads(cx);
             channels.update(cx, |channels, cx| {
-                channels.apply_clan_structure(ClanId(1), structure_with_a_thread(), cx);
+                channels.apply_clan_structure(ClanId(1), structure_with_a_thread(), None, cx);
                 channels.apply_local_archive(ClanId(1), ChannelId(9), ChannelId(1), cx);
                 channels.apply_local_archive(ClanId(1), ChannelId(9), ChannelId(1), cx);
                 assert!(!channels.channel_in_clan(ClanId(1), ChannelId(9)));
@@ -6432,6 +6494,7 @@ mod tests {
                 channels.apply_clan_structure(
                     ClanId(1),
                     structure_with_parent_and_two_threads(),
+                    None,
                     cx,
                 );
                 channels.apply_local_archive(ClanId(1), ChannelId(1), ChannelId(0), cx);
@@ -6450,6 +6513,7 @@ mod tests {
                 channels.apply_clan_structure(
                     ClanId(1),
                     structure_with_parent_and_two_threads(),
+                    None,
                     cx,
                 );
                 channels.handle_event(
@@ -6480,7 +6544,7 @@ mod tests {
             })
             .detach();
             channels.update(cx, |channels, cx| {
-                channels.apply_clan_structure(ClanId(1), structure_with_a_thread(), cx);
+                channels.apply_clan_structure(ClanId(1), structure_with_a_thread(), None, cx);
                 channels.select_channel(ChannelId(9), cx);
                 let mut event = channel_archive_event(1, 9, 1, 0);
                 event.creator_id = REMOVED_SELF + 1;
@@ -6506,7 +6570,7 @@ mod tests {
             })
             .detach();
             channels.update(cx, |channels, cx| {
-                channels.apply_clan_structure(ClanId(1), structure_with_a_thread(), cx);
+                channels.apply_clan_structure(ClanId(1), structure_with_a_thread(), None, cx);
                 channels.select_channel(ChannelId(9), cx);
                 let mut event = channel_archive_event(1, 9, 1, 0);
                 event.creator_id = REMOVED_SELF;
@@ -6525,7 +6589,7 @@ mod tests {
         cx.update(|cx| {
             let channels = init_channel_list_with_threads(cx);
             channels.update(cx, |channels, cx| {
-                channels.apply_clan_structure(ClanId(1), structure_with_a_thread(), cx);
+                channels.apply_clan_structure(ClanId(1), structure_with_a_thread(), None, cx);
                 if let Some(ch) = channels.channel_mut(ClanId(1), ChannelId(9)) {
                     ch.creator_id = UserId(REMOVED_SELF);
                 }
@@ -8233,7 +8297,7 @@ mod tests {
         cx.update(|cx| {
             let channels = init_channel_list_with_threads(cx);
             channels.update(cx, |channels, cx| {
-                channels.apply_clan_structure(ClanId(1), structure_with_a_thread(), cx);
+                channels.apply_clan_structure(ClanId(1), structure_with_a_thread(), None, cx);
                 channels.apply_local_archive(ClanId(1), ChannelId(9), ChannelId(1), cx);
                 assert!(!channels.ensure_channel_in_clan(ClanId(1), ChannelId(9), cx));
                 assert!(!channels.channel_detail_pending.contains(&ChannelId(9)));
@@ -8248,7 +8312,7 @@ mod tests {
         cx.update(|cx| {
             let channels = init_channel_list_with_threads(cx);
             channels.update(cx, |channels, cx| {
-                channels.apply_clan_structure(ClanId(1), structure_with_a_thread(), cx);
+                channels.apply_clan_structure(ClanId(1), structure_with_a_thread(), None, cx);
                 channels.apply_local_archive(ClanId(1), ChannelId(9), ChannelId(1), cx);
                 assert!(!channels.channel_in_clan(ClanId(1), ChannelId(9)));
                 channels.apply_channel_detail(
@@ -8274,6 +8338,10 @@ mod tests {
                         creator_id: 0,
                         clan_name: String::new(),
                         channel_avatar: String::new(),
+                        topic: String::new(),
+                        age_restricted: 0,
+                        e2ee: 0,
+                        app_id: 0,
                     },
                     cx,
                 );
@@ -8290,7 +8358,7 @@ mod tests {
             ComposeStore::init(cx);
             let channels = init_channel_list_with_threads(cx);
             channels.update(cx, |channels, cx| {
-                channels.apply_clan_structure(ClanId(1), structure_with_a_thread(), cx);
+                channels.apply_clan_structure(ClanId(1), structure_with_a_thread(), None, cx);
                 ComposeStore::global(cx).update(cx, |store, _| {
                     store.set_draft(
                         ChannelId(1),
@@ -8339,6 +8407,10 @@ mod tests {
                     creator_id: UserId(1),
                     active: CHANNEL_ACTIVE_JOINED,
                     avatar_url: String::new(),
+                    topic: String::new(),
+                    age_restricted: 0,
+                    e2ee: 0,
+                    app_id: 0,
                 };
                 channels.user_channels.insert(ChannelId(42), dm);
                 channels.user_channels_order.push(ChannelId(42));
@@ -8352,7 +8424,7 @@ mod tests {
         cx.update(|cx| {
             let channels = init_channel_list_with_threads(cx);
             channels.update(cx, |channels, cx| {
-                channels.apply_clan_structure(ClanId(1), structure_with_a_thread(), cx);
+                channels.apply_clan_structure(ClanId(1), structure_with_a_thread(), None, cx);
                 channels.apply_local_archive(ClanId(1), ChannelId(9), ChannelId(1), cx);
                 assert!(channels.is_locally_archived(ChannelId(9)));
                 channels.apply_thread_reactivated(ClanId(1), ChannelId(9), None, cx);
@@ -8369,7 +8441,7 @@ mod tests {
         cx.update(|cx| {
             let channels = init_channel_list_with_threads(cx);
             channels.update(cx, |channels, cx| {
-                channels.apply_clan_structure(ClanId(1), structure_with_two_channels(), cx);
+                channels.apply_clan_structure(ClanId(1), structure_with_two_channels(), None, cx);
                 assert!(!channels.channel_in_clan(ClanId(1), ChannelId(9)));
                 channels.apply_channel_detail(
                     ClanId(1),
@@ -8394,6 +8466,10 @@ mod tests {
                         creator_id: 0,
                         clan_name: String::new(),
                         channel_avatar: String::new(),
+                        topic: String::new(),
+                        age_restricted: 0,
+                        e2ee: 0,
+                        app_id: 0,
                     },
                     cx,
                 );
@@ -8408,8 +8484,13 @@ mod tests {
         cx.update(|cx| {
             let channels = init_channel_list_with_threads(cx);
             channels.update(cx, |channels, cx| {
-                channels.apply_clan_structure(ClanId(1), structure_with_two_channels(), cx);
-                channels.finish_extras(ClanId(1), favorite_extras(&[ChannelId(1)]), cx);
+                let favorites = HashSet::from([ChannelId(1)]);
+                channels.apply_clan_structure(
+                    ClanId(1),
+                    structure_with_two_channels(),
+                    Some(favorites),
+                    cx,
+                );
                 assert!(
                     channels
                         .categories_for_clan(ClanId(1))

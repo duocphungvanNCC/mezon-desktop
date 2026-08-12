@@ -147,7 +147,7 @@ impl CategoryTab {
                     .child(category_name.to_uppercase()),
             )
             .child(
-                Icon::new(IconName::ArrowDown)
+                Icon::new(IconName::ArrowDownFill)
                     .size(px(16.))
                     .text_color(theme.tokens.text_theme_message),
             );

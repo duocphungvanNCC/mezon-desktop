@@ -184,12 +184,18 @@ impl ChannelSettingScreen {
     }
 
     pub fn release_active_tab(&mut self, cx: &mut Context<Self>) {
-        if self.permissions_tab.take().is_some()
-            || self.overview_tab.take().is_some()
-            || self.category_tab.take().is_some()
-            || self.permissions_sub.take().is_some()
-            || self.overview_sub.take().is_some()
-            || self.category_sub.take().is_some()
+        let had_permissions_tab = self.permissions_tab.take().is_some();
+        let had_overview_tab = self.overview_tab.take().is_some();
+        let had_category_tab = self.category_tab.take().is_some();
+        let had_permissions_sub = self.permissions_sub.take().is_some();
+        let had_overview_sub = self.overview_sub.take().is_some();
+        let had_category_sub = self.category_sub.take().is_some();
+        if had_permissions_tab
+            || had_overview_tab
+            || had_category_tab
+            || had_permissions_sub
+            || had_overview_sub
+            || had_category_sub
             || !self.clan_id.is_zero()
         {
             cx.notify();
