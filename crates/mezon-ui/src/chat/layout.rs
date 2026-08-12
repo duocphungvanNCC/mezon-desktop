@@ -366,6 +366,9 @@ impl ChatLayout {
         cx.observe(&Router::global(cx), |this, _, cx| {
             let next_route = Router::global(cx).read(cx).route().clone();
             if next_route != this.last_route {
+                if matches!(this.last_route, Route::Thread { .. }) {
+                    this.focused_channel_id = None;
+                }
                 match &this.last_route {
                     Route::ClanMembers { .. } => this
                         .clan_members_page
@@ -1185,7 +1188,9 @@ impl ChatLayout {
                     let list = self.channel_list.read(cx);
                     list.is_clan_cache_loaded(clan_id)
                         && !list.channel_in_clan(clan_id, thread_id)
-                        && !list.is_locally_archived(thread_id)
+                        && !list.is_resolving_channel_detail(thread_id)
+                        && (list.is_locally_deleted(thread_id)
+                            || list.is_locally_archived(thread_id))
                 };
                 if !should_redirect {
                     return;
@@ -1193,6 +1198,7 @@ impl ChatLayout {
                 crate::channel_navigation::navigate_after_thread_removed(
                     cx, clan_id, thread_id, parent_id,
                 );
+                self.focused_channel_id = None;
                 self.dismiss_threads_popover(cx);
                 self.dismiss_topic_panel(cx);
             }
@@ -1205,12 +1211,16 @@ impl ChatLayout {
                     if !list.is_clan_cache_loaded(clan_id) {
                         return;
                     }
-                    if list.channel_in_clan(clan_id, channel_id)
-                        || list.is_locally_archived(channel_id)
-                    {
+                    if list.channel_in_clan(clan_id, channel_id) {
                         return;
                     }
-                    list.remembered_channel(clan_id).filter(|parent| {
+                    if list.is_resolving_channel_detail(channel_id) {
+                        return;
+                    }
+                    if !list.is_locally_deleted(channel_id) {
+                        return;
+                    }
+                    list.deleted_channel_parent(channel_id).filter(|parent| {
                         *parent != channel_id && list.channel_in_clan(clan_id, *parent)
                     })
                 };
@@ -1220,6 +1230,7 @@ impl ChatLayout {
                 crate::channel_navigation::navigate_after_thread_removed(
                     cx, clan_id, channel_id, parent_id,
                 );
+                self.focused_channel_id = None;
                 self.dismiss_threads_popover(cx);
                 self.dismiss_topic_panel(cx);
             }

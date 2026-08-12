@@ -658,6 +658,7 @@
   "channelMenu.toastArchiveThread": "Hilo archivado correctamente.",
   "channelMenu.toastArchivedByAdministrator": "Este canal ha sido archivado por el administrador.",
   "channelMenu.toastArchivedThreadByAdministrator": "Este hilo ha sido archivado por el administrador.",
+  "channelMenu.toastDeleteThread": "Hilo eliminado correctamente.",
   "channelMenu.toastDeleteThreadFailed": "Error al eliminar el hilo. Inténtalo de nuevo.",
   "channelMenu.toastDeleteThreadInProgress": "Eliminación en curso. Espera un momento.",
   "channelMenu.toastDeleteThreadPermissionDenied": "No tienes permiso para eliminar este hilo.",

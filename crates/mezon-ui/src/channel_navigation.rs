@@ -22,6 +22,11 @@ pub fn navigate_after_thread_removed(
     if !viewing_removed {
         return;
     }
+    if !parent_id.is_zero() {
+        ChannelList::global(cx).update(cx, |list, cx| {
+            list.clear_compose_draft(parent_id, cx);
+        });
+    }
     let parent_available = ChannelList::global(cx)
         .read(cx)
         .channel_in_clan(clan_id, parent_id);

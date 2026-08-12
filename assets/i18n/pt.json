@@ -653,6 +653,7 @@
   "channelMenu.toastArchiveThread": "Tópico arquivado com sucesso.",
   "channelMenu.toastArchivedByAdministrator": "Este canal foi arquivado pelo administrador.",
   "channelMenu.toastArchivedThreadByAdministrator": "Este tópico foi arquivado pelo administrador.",
+  "channelMenu.toastDeleteThread": "Tópico excluído com sucesso.",
   "channelMenu.toastDeleteThreadFailed": "Falha ao excluir o tópico. Tente novamente.",
   "channelMenu.toastDeleteThreadInProgress": "Exclusão em andamento. Aguarde.",
   "channelMenu.toastDeleteThreadPermissionDenied": "Você não tem permissão para excluir este tópico.",

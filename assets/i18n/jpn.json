@@ -653,6 +653,7 @@
   "channelMenu.toastArchiveThread": "スレッドをアーカイブしました。",
   "channelMenu.toastArchivedByAdministrator": "このチャンネルは管理者によってアーカイブされました。",
   "channelMenu.toastArchivedThreadByAdministrator": "このスレッドは管理者によってアーカイブされました。",
+  "channelMenu.toastDeleteThread": "スレッドを削除しました。",
   "channelMenu.toastDeleteThreadFailed": "スレッドの削除に失敗しました。もう一度お試しください。",
   "channelMenu.toastDeleteThreadInProgress": "削除処理が進行中です。しばらくお待ちください。",
   "channelMenu.toastDeleteThreadPermissionDenied": "このスレッドを削除する権限がありません。",

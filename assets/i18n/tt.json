@@ -658,6 +658,7 @@
   "channelMenu.toastArchiveThread": "Ботаклам уңышлы архивланды.",
   "channelMenu.toastArchivedByAdministrator": "Бу канал администратор тарафыннан архивланды.",
   "channelMenu.toastArchivedThreadByAdministrator": "Бу ботаклам администратор тарафыннан архивланды.",
+  "channelMenu.toastDeleteThread": "Ботаклам уңышлы бетерелде.",
   "channelMenu.toastDeleteThreadFailed": "Ботакламаны бетереп булмады. Яңадан тырыш.",
   "channelMenu.toastDeleteThreadInProgress": "Бетерү эше инде бар. Көтегез.",
   "channelMenu.toastDeleteThreadPermissionDenied": "Бу ботакламаны бетерер хокукыгыз юк.",

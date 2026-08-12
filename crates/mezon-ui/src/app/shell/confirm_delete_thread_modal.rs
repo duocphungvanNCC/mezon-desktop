@@ -60,9 +60,15 @@ impl ConfirmDeleteThreadModal {
             };
             let result = task.await;
 
-            let _ = cx.update(|cx| {
+            cx.update(|cx| {
                 Shell::global(cx).update(cx, |shell, cx| match &result {
-                    Ok(()) => shell.close_modal(cx),
+                    Ok(()) => {
+                        shell.success(
+                            mezon_i18n::t(&locale, "channelMenu.toastDeleteThread").to_string(),
+                            cx,
+                        );
+                        shell.close_modal(cx);
+                    }
                     Err(err) => {
                         tracing::error!("delete_channel failed for {channel_id}: {err}");
                         let key = delete_thread_error_key(err);
@@ -86,6 +92,7 @@ impl ConfirmDeleteThreadModal {
 impl Render for ConfirmDeleteThreadModal {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
+        let submitting = self.submitting;
 
         v_flex()
             .track_focus(&self.focus_handle)
@@ -134,6 +141,7 @@ impl Render for ConfirmDeleteThreadModal {
                         Button::new("confirm-delete-thread-cancel")
                             .label(self.cancel_label.clone())
                             .ghost()
+                            .disabled(submitting)
                             .on_click(cx.listener(|this, _, _window, cx| {
                                 if this.submitting {
                                     return;
@@ -145,6 +153,8 @@ impl Render for ConfirmDeleteThreadModal {
                         Button::new("confirm-delete-thread-confirm")
                             .label(self.delete_label.clone())
                             .danger()
+                            .disabled(submitting)
+                            .loading(submitting)
                             .on_click(cx.listener(|this, _, _window, cx| {
                                 this.delete(cx);
                             })),

@@ -400,6 +400,8 @@ pub struct ChannelList {
     archived_channel_ids: HashSet<ChannelId>,
     archived_cascade_children: HashMap<ChannelId, Vec<ChannelId>>,
     archived_channel_parents: HashMap<ChannelId, ChannelId>,
+    deleted_channel_ids: HashSet<ChannelId>,
+    deleted_channel_parents: HashMap<ChannelId, ChannelId>,
     channel_detail_pending: HashSet<ChannelId>,
     channel_detail_failed: HashSet<ChannelId>,
     _previous_channels_persist: Task<()>,
@@ -565,6 +567,8 @@ impl ChannelList {
         self.archived_channel_ids.clear();
         self.archived_cascade_children.clear();
         self.archived_channel_parents.clear();
+        self.deleted_channel_ids.clear();
+        self.deleted_channel_parents.clear();
         self.channel_detail_pending.clear();
         self.channel_detail_failed.clear();
         self.active_clan_id = None;
@@ -653,6 +657,8 @@ impl ChannelList {
             archived_channel_ids: HashSet::new(),
             archived_cascade_children: HashMap::new(),
             archived_channel_parents: HashMap::new(),
+            deleted_channel_ids: HashSet::new(),
+            deleted_channel_parents: HashMap::new(),
             channel_detail_pending: HashSet::new(),
             channel_detail_failed: HashSet::new(),
             _previous_channels_persist: Task::ready(()),
@@ -1203,6 +1209,18 @@ impl ChannelList {
         self.archived_channel_ids.contains(&channel_id)
     }
 
+    pub fn is_locally_deleted(&self, channel_id: ChannelId) -> bool {
+        self.deleted_channel_ids.contains(&channel_id)
+    }
+
+    pub fn deleted_channel_parent(&self, channel_id: ChannelId) -> Option<ChannelId> {
+        self.deleted_channel_parents.get(&channel_id).copied()
+    }
+
+    pub fn is_resolving_channel_detail(&self, channel_id: ChannelId) -> bool {
+        self.channel_detail_pending.contains(&channel_id)
+    }
+
     /// Mirrors mezon-react's `addThreadToChannels` (channelLoader): when a route targets a
     /// channel/thread absent from the clan structure, fetch its detail and insert it. Returns
     /// `true` while the channel is present or still being resolved (caller should wait), and
@@ -1213,7 +1231,7 @@ impl ChannelList {
         channel_id: ChannelId,
         cx: &mut Context<Self>,
     ) -> bool {
-        if self.is_locally_archived(channel_id) {
+        if self.is_locally_archived(channel_id) || self.is_locally_deleted(channel_id) {
             return false;
         }
         if self.channel_in_clan(clan_id, channel_id) {
@@ -1274,7 +1292,7 @@ impl ChannelList {
         cx: &mut Context<Self>,
     ) {
         let channel_id = ChannelId(desc.channel_id);
-        if self.is_locally_archived(channel_id) {
+        if self.is_locally_archived(channel_id) || self.is_locally_deleted(channel_id) {
             return;
         }
         let badge = desc.badge_count.max(0) as u32;
@@ -3011,6 +3029,7 @@ impl ChannelList {
         !self.archiving.contains(&channel_id)
             && !self.deleting.contains(&channel_id)
             && !self.is_locally_archived(channel_id)
+            && !self.is_locally_deleted(channel_id)
     }
 
     pub fn clear_compose_draft(&self, channel_id: ChannelId, cx: &mut Context<Self>) {
@@ -3026,12 +3045,16 @@ impl ChannelList {
         parent_id: ChannelId,
         cx: &mut Context<Self>,
     ) {
+        self.deleted_channel_ids.insert(channel_id);
+        if !parent_id.is_zero() {
+            self.deleted_channel_parents.insert(channel_id, parent_id);
+        }
+        self.channel_detail_pending.remove(&channel_id);
+        self.channel_detail_failed.remove(&channel_id);
         let leaving_badge = self
             .channel(clan_id, channel_id)
             .map(|ch| ch.badge_count)
             .unwrap_or(0);
-        self.channel_detail_pending.remove(&channel_id);
-        self.channel_detail_failed.remove(&channel_id);
         let mut removed = false;
         let mut swept_all = false;
         if let Some(cats) = self.cache.get_mut(&clan_id) {
@@ -3076,12 +3099,6 @@ impl ChannelList {
             if leaving_badge > 0 {
                 self.sync_clan_after_read(clan_id, leaving_badge, cx);
             }
-            let draft_key = if parent_id.is_zero() {
-                channel_id
-            } else {
-                parent_id
-            };
-            self.clear_compose_draft(draft_key, cx);
             notify_in_voice_change(removed, in_voice_changed, cx);
         }
         if changed {
@@ -5681,7 +5698,7 @@ mod tests {
         cx.update(|cx| {
             let channels = init_channel_list(cx);
             channels.update(cx, |channels, cx| {
-                channels.apply_clan_structure(ClanId(1), structure_with_two_channels(), cx);
+                channels.apply_clan_structure(ClanId(1), structure_with_two_channels(), None, cx);
                 channels.apply_clan_extras(ClanId(1), voice_extras(one_user_in_voice()), cx);
 
                 let sharing = |channels: &ChannelList| {
@@ -6212,7 +6229,7 @@ mod tests {
         cx.update(|cx| {
             let channels = init_channel_list_with_threads(cx);
             channels.update(cx, |channels, cx| {
-                channels.apply_clan_structure(ClanId(1), structure_with_a_thread(), cx);
+                channels.apply_clan_structure(ClanId(1), structure_with_a_thread(), None, cx);
                 channels.select_channel(ChannelId(9), cx);
 
                 channels.handle_event(
@@ -6221,6 +6238,7 @@ mod tests {
                 );
 
                 assert!(!channels.channel_in_clan(ClanId(1), ChannelId(9)));
+                assert!(channels.is_locally_deleted(ChannelId(9)));
                 assert_eq!(channels.active_channel_id, Some(ChannelId(1)));
                 assert_eq!(channels.remembered_channel(ClanId(1)), Some(ChannelId(1)));
             });
@@ -6232,29 +6250,13 @@ mod tests {
         cx.update(|cx| {
             let channels = init_channel_list_with_threads(cx);
             channels.update(cx, |channels, cx| {
-                channels.apply_clan_structure(ClanId(1), structure_with_a_thread(), cx);
+                channels.apply_clan_structure(ClanId(1), structure_with_a_thread(), None, cx);
                 channels.select_channel(ChannelId(9), cx);
                 channels.apply_local_delete(ClanId(1), ChannelId(9), ChannelId(1), cx);
                 channels.apply_local_delete(ClanId(1), ChannelId(9), ChannelId(1), cx);
                 assert!(!channels.channel_in_clan(ClanId(1), ChannelId(9)));
+                assert!(channels.is_locally_deleted(ChannelId(9)));
                 assert_eq!(channels.active_channel_id, Some(ChannelId(1)));
-            });
-        });
-    }
-
-    #[gpui::test]
-    fn apply_local_delete_removes_thread_and_redirects_to_parent(cx: &mut gpui::TestAppContext) {
-        cx.update(|cx| {
-            let channels = init_channel_list_with_threads(cx);
-            channels.update(cx, |channels, cx| {
-                channels.apply_clan_structure(ClanId(1), structure_with_a_thread(), cx);
-                channels.select_channel(ChannelId(9), cx);
-
-                channels.apply_local_delete(ClanId(1), ChannelId(9), ChannelId(1), cx);
-
-                assert!(!channels.channel_in_clan(ClanId(1), ChannelId(9)));
-                assert_eq!(channels.active_channel_id, Some(ChannelId(1)));
-                assert_eq!(channels.remembered_channel(ClanId(1)), Some(ChannelId(1)));
             });
         });
     }
@@ -6278,7 +6280,7 @@ mod tests {
         cx.update(|cx| {
             let channels = init_channel_list_with_threads(cx);
             channels.update(cx, |channels, cx| {
-                channels.apply_clan_structure(ClanId(1), structure_with_a_thread(), cx);
+                channels.apply_clan_structure(ClanId(1), structure_with_a_thread(), None, cx);
                 channels.select_channel(ChannelId(9), cx);
 
                 channels.apply_local_archive(ClanId(1), ChannelId(9), ChannelId(1), cx);
@@ -6294,7 +6296,7 @@ mod tests {
         cx.update(|cx| {
             let channels = init_channel_list_with_threads(cx);
             channels.update(cx, |channels, cx| {
-                channels.apply_clan_structure(ClanId(1), structure_with_a_thread(), cx);
+                channels.apply_clan_structure(ClanId(1), structure_with_a_thread(), None, cx);
                 channels.select_channel(ChannelId(9), cx);
 
                 channels.handle_event(
@@ -6313,7 +6315,7 @@ mod tests {
         cx.update(|cx| {
             let channels = init_channel_list_with_threads(cx);
             channels.update(cx, |channels, cx| {
-                channels.apply_clan_structure(ClanId(1), structure_with_a_thread(), cx);
+                channels.apply_clan_structure(ClanId(1), structure_with_a_thread(), None, cx);
                 channels.apply_local_archive(ClanId(1), ChannelId(9), ChannelId(1), cx);
                 channels.apply_local_archive(ClanId(1), ChannelId(9), ChannelId(1), cx);
                 assert!(!channels.channel_in_clan(ClanId(1), ChannelId(9)));
@@ -6329,6 +6331,7 @@ mod tests {
                 channels.apply_clan_structure(
                     ClanId(1),
                     structure_with_parent_and_two_threads(),
+                    None,
                     cx,
                 );
                 channels.apply_local_archive(ClanId(1), ChannelId(1), ChannelId(0), cx);
@@ -6347,6 +6350,7 @@ mod tests {
                 channels.apply_clan_structure(
                     ClanId(1),
                     structure_with_parent_and_two_threads(),
+                    None,
                     cx,
                 );
                 channels.handle_event(
@@ -6377,7 +6381,7 @@ mod tests {
             })
             .detach();
             channels.update(cx, |channels, cx| {
-                channels.apply_clan_structure(ClanId(1), structure_with_a_thread(), cx);
+                channels.apply_clan_structure(ClanId(1), structure_with_a_thread(), None, cx);
                 channels.select_channel(ChannelId(9), cx);
                 let mut event = channel_archive_event(1, 9, 1, 0);
                 event.creator_id = REMOVED_SELF + 1;
@@ -6403,7 +6407,7 @@ mod tests {
             })
             .detach();
             channels.update(cx, |channels, cx| {
-                channels.apply_clan_structure(ClanId(1), structure_with_a_thread(), cx);
+                channels.apply_clan_structure(ClanId(1), structure_with_a_thread(), None, cx);
                 channels.select_channel(ChannelId(9), cx);
                 let mut event = channel_archive_event(1, 9, 1, 0);
                 event.creator_id = REMOVED_SELF;
@@ -6422,7 +6426,7 @@ mod tests {
         cx.update(|cx| {
             let channels = init_channel_list_with_threads(cx);
             channels.update(cx, |channels, cx| {
-                channels.apply_clan_structure(ClanId(1), structure_with_a_thread(), cx);
+                channels.apply_clan_structure(ClanId(1), structure_with_a_thread(), None, cx);
                 if let Some(ch) = channels.channel_mut(ClanId(1), ChannelId(9)) {
                     ch.creator_id = UserId(REMOVED_SELF);
                 }
@@ -8114,11 +8118,94 @@ mod tests {
     }
 
     #[gpui::test]
+    fn ensure_channel_in_clan_skips_locally_deleted_thread(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let channels = init_channel_list_with_threads(cx);
+            channels.update(cx, |channels, cx| {
+                channels.apply_clan_structure(ClanId(1), structure_with_a_thread(), None, cx);
+                channels.apply_local_delete(ClanId(1), ChannelId(9), ChannelId(1), cx);
+                assert!(!channels.ensure_channel_in_clan(ClanId(1), ChannelId(9), cx));
+                assert!(!channels.channel_detail_pending.contains(&ChannelId(9)));
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn apply_channel_detail_after_delete_does_not_reinsert_thread(cx: &mut gpui::TestAppContext) {
+        use mezon_client::transport::ApiChannelDesc;
+
+        cx.update(|cx| {
+            let channels = init_channel_list_with_threads(cx);
+            channels.update(cx, |channels, cx| {
+                channels.apply_clan_structure(ClanId(1), structure_with_a_thread(), None, cx);
+                channels.apply_local_delete(ClanId(1), ChannelId(9), ChannelId(1), cx);
+                assert!(!channels.channel_in_clan(ClanId(1), ChannelId(9)));
+                channels.apply_channel_detail(
+                    ClanId(1),
+                    ApiChannelDesc {
+                        channel_id: 9,
+                        channel_label: "Rust 1".into(),
+                        channel_type: CHANNEL_TYPE_THREAD as u32,
+                        clan_id: 1,
+                        category_name: String::new(),
+                        category_id: 0,
+                        channel_private: 0,
+                        count_mess_unread: 0,
+                        member_count: 0,
+                        parent_id: 1,
+                        is_mute: false,
+                        last_seen_message_id: 0,
+                        last_seen_timestamp: 0,
+                        last_sent_message_id: 0,
+                        last_sent_timestamp: 0,
+                        badge_count: 0,
+                        active: CHANNEL_ACTIVE_JOINED,
+                        creator_id: 0,
+                        clan_name: String::new(),
+                        channel_avatar: String::new(),
+                    },
+                    cx,
+                );
+                assert!(!channels.channel_in_clan(ClanId(1), ChannelId(9)));
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn delete_thread_preserves_parent_compose_draft(cx: &mut gpui::TestAppContext) {
+        use crate::compose::ComposeDraft;
+
+        cx.update(|cx| {
+            ComposeStore::init(cx);
+            let channels = init_channel_list_with_threads(cx);
+            channels.update(cx, |channels, cx| {
+                channels.apply_clan_structure(ClanId(1), structure_with_a_thread(), None, cx);
+                ComposeStore::global(cx).update(cx, |store, _| {
+                    store.set_draft(
+                        ChannelId(1),
+                        ComposeDraft {
+                            text: "parent draft".into(),
+                            ..Default::default()
+                        },
+                    );
+                });
+                channels.apply_local_delete(ClanId(1), ChannelId(9), ChannelId(1), cx);
+                assert!(
+                    ComposeStore::global(cx)
+                        .read(cx)
+                        .draft(ChannelId(1))
+                        .is_some()
+                );
+            });
+        });
+    }
+
+    #[gpui::test]
     fn ensure_channel_in_clan_skips_locally_archived_thread(cx: &mut gpui::TestAppContext) {
         cx.update(|cx| {
             let channels = init_channel_list_with_threads(cx);
             channels.update(cx, |channels, cx| {
-                channels.apply_clan_structure(ClanId(1), structure_with_a_thread(), cx);
+                channels.apply_clan_structure(ClanId(1), structure_with_a_thread(), None, cx);
                 channels.apply_local_archive(ClanId(1), ChannelId(9), ChannelId(1), cx);
                 assert!(!channels.ensure_channel_in_clan(ClanId(1), ChannelId(9), cx));
                 assert!(!channels.channel_detail_pending.contains(&ChannelId(9)));
@@ -8133,7 +8220,7 @@ mod tests {
         cx.update(|cx| {
             let channels = init_channel_list_with_threads(cx);
             channels.update(cx, |channels, cx| {
-                channels.apply_clan_structure(ClanId(1), structure_with_a_thread(), cx);
+                channels.apply_clan_structure(ClanId(1), structure_with_a_thread(), None, cx);
                 channels.apply_local_archive(ClanId(1), ChannelId(9), ChannelId(1), cx);
                 assert!(!channels.channel_in_clan(ClanId(1), ChannelId(9)));
                 channels.apply_channel_detail(
@@ -8175,7 +8262,7 @@ mod tests {
             ComposeStore::init(cx);
             let channels = init_channel_list_with_threads(cx);
             channels.update(cx, |channels, cx| {
-                channels.apply_clan_structure(ClanId(1), structure_with_a_thread(), cx);
+                channels.apply_clan_structure(ClanId(1), structure_with_a_thread(), None, cx);
                 ComposeStore::global(cx).update(cx, |store, _| {
                     store.set_draft(
                         ChannelId(1),
@@ -8237,7 +8324,7 @@ mod tests {
         cx.update(|cx| {
             let channels = init_channel_list_with_threads(cx);
             channels.update(cx, |channels, cx| {
-                channels.apply_clan_structure(ClanId(1), structure_with_a_thread(), cx);
+                channels.apply_clan_structure(ClanId(1), structure_with_a_thread(), None, cx);
                 channels.apply_local_archive(ClanId(1), ChannelId(9), ChannelId(1), cx);
                 assert!(channels.is_locally_archived(ChannelId(9)));
                 channels.apply_thread_reactivated(ClanId(1), ChannelId(9), None, cx);
@@ -8254,7 +8341,7 @@ mod tests {
         cx.update(|cx| {
             let channels = init_channel_list_with_threads(cx);
             channels.update(cx, |channels, cx| {
-                channels.apply_clan_structure(ClanId(1), structure_with_two_channels(), cx);
+                channels.apply_clan_structure(ClanId(1), structure_with_two_channels(), None, cx);
                 assert!(!channels.channel_in_clan(ClanId(1), ChannelId(9)));
                 channels.apply_channel_detail(
                     ClanId(1),
@@ -8293,8 +8380,13 @@ mod tests {
         cx.update(|cx| {
             let channels = init_channel_list_with_threads(cx);
             channels.update(cx, |channels, cx| {
-                channels.apply_clan_structure(ClanId(1), structure_with_two_channels(), cx);
-                channels.finish_extras(ClanId(1), favorite_extras(&[ChannelId(1)]), cx);
+                channels.apply_clan_structure(
+                    ClanId(1),
+                    structure_with_two_channels(),
+                    favor_ids(&[ChannelId(1)]),
+                    cx,
+                );
+                channels.finish_extras(ClanId(1), complete_extras(), cx);
                 assert!(
                     channels
                         .categories_for_clan(ClanId(1))

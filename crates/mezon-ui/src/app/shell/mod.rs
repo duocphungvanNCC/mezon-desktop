@@ -438,11 +438,16 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let channel_name = mezon_store::ChannelList::global(cx)
+        let (channel_name, parent_id) = mezon_store::ChannelList::global(cx)
             .read(cx)
             .channel(clan_id, channel_id)
-            .map(|channel| channel.name.clone())
-            .unwrap_or_else(|| "Unknown Channel".to_string());
+            .map(|channel| {
+                (
+                    channel.name.clone(),
+                    channel.parent_id.unwrap_or(mezon_store::ChannelId(0)),
+                )
+            })
+            .unwrap_or_else(|| ("Unknown Channel".to_string(), mezon_store::ChannelId(0)));
         let title: SharedString =
             mezon_i18n::t(locale, "channelSetting.confirm.deleteThread.title")
                 .to_string()
@@ -456,11 +461,6 @@ impl Shell {
             mezon_i18n::t(locale, "channelSetting.confirm.deleteThread.confirmText")
                 .to_string()
                 .into();
-        let parent_id = mezon_store::ChannelList::global(cx)
-            .read(cx)
-            .channel(clan_id, channel_id)
-            .and_then(|channel| channel.parent_id)
-            .unwrap_or(mezon_store::ChannelId(0));
         let view = cx.new(|cx| ConfirmDeleteThreadModal {
             focus_handle: cx.focus_handle(),
             clan_id,

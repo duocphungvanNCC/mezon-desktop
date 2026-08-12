@@ -219,9 +219,6 @@ impl ThreadsStore {
                 self.apply_thread_updated(ev, cx);
             }
             RealtimeEvent::ChannelMessage(msg) => self.apply_thread_message(msg, cx),
-            RealtimeEvent::ChannelDeleted(ev) => {
-                self.apply_thread_deleted(&ev.channel_id.to_string(), cx);
-            }
             RealtimeEvent::ChannelArchive(ev) => {
                 self.apply_channel_archive(ev, cx);
             }

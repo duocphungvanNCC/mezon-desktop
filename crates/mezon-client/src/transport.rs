@@ -6413,7 +6413,6 @@ impl MezonTransport {
         let body = api::DeleteChannelDescRequest {
             clan_id,
             channel_id,
-            ..Default::default()
         }
         .encode_to_vec();
 
