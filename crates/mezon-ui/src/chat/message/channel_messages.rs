@@ -323,10 +323,9 @@ fn message_offset_at(
         })
 }
 
-const EXPANDED_SELECTION_DRAG_THRESHOLD_PX: f32 = 2.;
-const SELECTION_DRAG_THRESHOLD_PX: f32 = 3.;
+const SELECTION_DRAG_THRESHOLD_PX: f32 = 2.;
 
-fn pointer_left_press_origin(origin: Point<Pixels>, position: Point<Pixels>) -> bool {
+fn press_drag_started(origin: Point<Pixels>, position: Point<Pixels>) -> bool {
     (position.x - origin.x).as_f32().abs() > SELECTION_DRAG_THRESHOLD_PX
         || (position.y - origin.y).as_f32().abs() > SELECTION_DRAG_THRESHOLD_PX
 }
@@ -341,8 +340,7 @@ struct ExpandedSelection {
 
 impl ExpandedSelection {
     fn drag_started(self, position: Point<Pixels>) -> bool {
-        (position.x - self.origin.x).as_f32().abs() > EXPANDED_SELECTION_DRAG_THRESHOLD_PX
-            || (position.y - self.origin.y).as_f32().abs() > EXPANDED_SELECTION_DRAG_THRESHOLD_PX
+        press_drag_started(self.origin, position)
     }
 }
 
@@ -979,13 +977,10 @@ mod selection_hit_tests {
     fn press_jitter_below_the_threshold_stays_a_click() {
         let origin = point(px(100.), px(200.));
 
-        assert!(!pointer_left_press_origin(origin, origin));
-        assert!(!pointer_left_press_origin(
-            origin,
-            point(px(103.), px(197.))
-        ));
-        assert!(pointer_left_press_origin(origin, point(px(104.), px(200.))));
-        assert!(pointer_left_press_origin(origin, point(px(100.), px(206.))));
+        assert!(!press_drag_started(origin, origin));
+        assert!(!press_drag_started(origin, point(px(102.), px(198.))));
+        assert!(press_drag_started(origin, point(px(102.1), px(200.))));
+        assert!(press_drag_started(origin, point(px(100.), px(202.1))));
     }
 }
 
@@ -3975,7 +3970,7 @@ impl ChannelMessages {
             return;
         }
         if let Some(origin) = self.selection_press_origin {
-            if !pointer_left_press_origin(origin, event.position) {
+            if !press_drag_started(origin, event.position) {
                 return;
             }
             self.selection_press_origin = None;
@@ -4041,7 +4036,7 @@ impl ChannelMessages {
             .is_some_and(|expanded| !expanded.drag_started(event.position));
         let stayed_a_click = self
             .selection_press_origin
-            .is_some_and(|origin| !pointer_left_press_origin(origin, event.position));
+            .is_some_and(|origin| !press_drag_started(origin, event.position));
         let (empty, head_changed) = {
             let Ok(mut state) = self.selection.try_borrow_mut() else {
                 return;

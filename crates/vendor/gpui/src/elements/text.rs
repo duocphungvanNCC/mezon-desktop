@@ -1229,6 +1229,11 @@ impl Element for InteractiveText {
                         window.set_cursor_style(crate::CursorStyle::PointingHand, hitbox)
                     }
 
+                    // mezon vendor edit: register both listeners on every paint
+                    // behind one shared cell so a press resolves inside a single
+                    // frame. Upstream registers one per paint and refreshes in
+                    // between, which drops the click when no repaint lands or the
+                    // element id changed; re-apply on snapshot bump.
                     let mouse_down = interactive_state.mouse_down_index.clone();
                     window.on_mouse_event({
                         let hitbox = hitbox.clone();
