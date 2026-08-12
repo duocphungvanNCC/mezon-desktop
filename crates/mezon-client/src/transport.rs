@@ -6495,13 +6495,13 @@ impl MezonTransport {
         Ok(Self::channel_desc_from_proto(channel))
     }
 
-    /// Delete a channel.
-    pub async fn delete_channel(&self, _channel_id: i64) -> Result<()> {
+    /// Delete a channel or thread.
+    pub async fn delete_channel(&self, clan_id: i64, channel_id: i64) -> Result<()> {
         let cid = self.generate_cid();
 
         let body = api::DeleteChannelDescRequest {
-            channel_id: _channel_id,
-            ..Default::default()
+            clan_id,
+            channel_id,
         }
         .encode_to_vec();
 

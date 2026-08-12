@@ -2396,6 +2396,10 @@ impl AppApi {
         self.transport.archive_channel(clan_id, channel_id).await
     }
 
+    pub async fn delete_channel(&self, clan_id: i64, channel_id: i64) -> Result<()> {
+        self.transport.delete_channel(clan_id, channel_id).await
+    }
+
     pub async fn list_clan_badge_count(&self) -> Result<Vec<(String, i32, bool)>> {
         self.transport.list_clan_badge_count().await
     }

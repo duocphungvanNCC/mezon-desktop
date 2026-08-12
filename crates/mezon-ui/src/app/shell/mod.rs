@@ -22,6 +22,7 @@ mod confirm_delete_message_modal;
 mod confirm_delete_role_modal;
 mod confirm_delete_sound_modal;
 mod confirm_delete_sticker_modal;
+mod confirm_delete_thread_modal;
 mod confirm_delete_webhook_modal;
 mod confirm_leave_thread_modal;
 mod confirm_remove_friend_modal;
@@ -36,6 +37,7 @@ use confirm_delete_message_modal::ConfirmDeleteMessageModal;
 use confirm_delete_role_modal::ConfirmDeleteRoleModal;
 use confirm_delete_sound_modal::ConfirmDeleteSoundModal;
 use confirm_delete_sticker_modal::ConfirmDeleteStickerModal;
+use confirm_delete_thread_modal::ConfirmDeleteThreadModal;
 use confirm_delete_webhook_modal::{ConfirmDeleteWebhookModal, WebhookDeleteTarget};
 use confirm_leave_thread_modal::ConfirmLeaveThreadModal;
 pub use confirm_remove_friend_modal::FriendRemovalKind;
@@ -429,6 +431,54 @@ impl Shell {
             description,
             cancel_label,
             archive_label,
+            submitting: false,
+        });
+        let focus_handle = view.read(cx).focus_handle.clone();
+        window.focus(&focus_handle, cx);
+        self.show_modal(view.into(), cx);
+    }
+
+    pub fn confirm_delete_thread(
+        &mut self,
+        clan_id: mezon_store::ClanId,
+        channel_id: mezon_store::ChannelId,
+        locale: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let (channel_name, parent_id) = mezon_store::ChannelList::global(cx)
+            .read(cx)
+            .channel(clan_id, channel_id)
+            .map(|channel| {
+                (
+                    channel.name.clone(),
+                    channel.parent_id.unwrap_or(mezon_store::ChannelId(0)),
+                )
+            })
+            .unwrap_or_else(|| ("Unknown Channel".to_string(), mezon_store::ChannelId(0)));
+        let title: SharedString =
+            mezon_i18n::t(locale, "channelSetting.confirm.deleteThread.title")
+                .to_string()
+                .into();
+        let description: SharedString =
+            mezon_i18n::t(locale, "channelSetting.confirm.deleteThread.content")
+                .replace("{{channelName}}", &channel_name)
+                .into();
+        let cancel_label: SharedString = mezon_i18n::t(locale, "common.cancel").to_string().into();
+        let delete_label: SharedString =
+            mezon_i18n::t(locale, "channelSetting.confirm.deleteThread.confirmText")
+                .to_string()
+                .into();
+        let view = cx.new(|cx| ConfirmDeleteThreadModal {
+            focus_handle: cx.focus_handle(),
+            clan_id,
+            channel_id,
+            parent_id,
+            locale: locale.to_string(),
+            title,
+            description,
+            cancel_label,
+            delete_label,
             submitting: false,
         });
         let focus_handle = view.read(cx).focus_handle.clone();
