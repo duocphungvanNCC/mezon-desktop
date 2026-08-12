@@ -910,7 +910,18 @@ pub fn parse_spans(content: &ApiMessageContent) -> Vec<MessageSpan> {
     collect(&content.hg, Kind::Hashtag, &mut toks);
     collect(&content.ej, Kind::Emoji, &mut toks);
     collect(&content.mk, Kind::Markdown, &mut toks);
-    collect(&content.lk, Kind::Link(LinkKind::Plain), &mut toks);
+    if content.mk.is_empty() {
+        for t in &content.lk {
+            let s = t.s.unwrap_or(0);
+            let e = t.e.unwrap_or(0);
+            if e > s {
+                let kind = link_kind_from_marker(mezon_client::link_markdown_kind(&slice(s, e)));
+                toks.push((s, e, Kind::Link(kind), t.clone()));
+            }
+        }
+    } else {
+        collect(&content.lk, Kind::Link(LinkKind::Plain), &mut toks);
+    }
     collect(&content.vk, Kind::Link(LinkKind::Plain), &mut toks);
     collect(&content.lky, Kind::Link(LinkKind::YouTube), &mut toks);
     toks.sort_by_key(|t| t.0);
@@ -1028,6 +1039,16 @@ fn link_kind_from_marker(marker: &str) -> LinkKind {
         "lk_fb" => LinkKind::Facebook,
         "lk_tt" => LinkKind::TikTok,
         _ => LinkKind::Plain,
+    }
+}
+
+/// Inverse of [`link_kind_from_marker`] — `None` for a plain link, which carries no marker.
+pub(crate) fn link_marker_from_kind(kind: LinkKind) -> Option<&'static str> {
+    match kind {
+        LinkKind::YouTube => Some(mezon_client::YOUTUBE_LINK_MARKDOWN_KIND),
+        LinkKind::Facebook => Some(mezon_client::FACEBOOK_LINK_MARKDOWN_KIND),
+        LinkKind::TikTok => Some(mezon_client::TIKTOK_LINK_MARKDOWN_KIND),
+        LinkKind::Plain => None,
     }
 }
 
@@ -1806,6 +1827,46 @@ mod tests {
         assert_eq!(
             parse_spans(&content),
             vec![MessageSpan::Text("hello world".into())]
+        );
+    }
+
+    #[test]
+    fn parse_spans_classifies_a_bare_link_token_by_platform() {
+        let url = "https://www.youtube.com/watch?v=lHW3fsJQ1sg";
+        let content = ApiMessageContent {
+            t: url.into(),
+            lk: vec![token(0, url.len() as i64)],
+            ..Default::default()
+        };
+        assert_eq!(
+            parse_spans(&content),
+            vec![MessageSpan::Link {
+                text: url.into(),
+                url: url.into(),
+                kind: LinkKind::YouTube,
+            }]
+        );
+    }
+
+    #[test]
+    fn parse_spans_keeps_a_link_token_plain_when_markdown_tokens_decide_the_kind() {
+        let url = "https://www.youtube.com/watch?v=lHW3fsJQ1sg";
+        let content = ApiMessageContent {
+            t: url.into(),
+            mk: vec![ContentToken {
+                kind: Some("lk".into()),
+                ..token(0, url.len() as i64)
+            }],
+            lk: vec![token(0, url.len() as i64)],
+            ..Default::default()
+        };
+        assert_eq!(
+            parse_spans(&content),
+            vec![MessageSpan::Link {
+                text: url.into(),
+                url: url.into(),
+                kind: LinkKind::Plain,
+            }]
         );
     }
 

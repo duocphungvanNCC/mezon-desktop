@@ -1147,6 +1147,17 @@ impl MessagesStore {
     /// Emit the splice for a single row appended at the bottom, accounting for
     /// any front-trim that dropped the oldest rows to keep the buffer within the
     /// cap. `old_len` is the buffer length before the push.
+    fn append_optimistic(&mut self, channel_id: ChannelId, optimistic: Message) -> Option<usize> {
+        if self.tail_detached(channel_id) {
+            return None;
+        }
+        self.cache.get_mut(&channel_id).map(|channel| {
+            let old_len = channel.messages.len();
+            channel.messages.push_grouped(optimistic);
+            old_len
+        })
+    }
+
     fn emit_appended(&mut self, old_len: usize, cx: &mut Context<Self>) {
         let new_len = self.messages().len();
         if new_len < old_len {
@@ -1521,6 +1532,10 @@ impl MessagesStore {
         let Some(channel_id) = self.active_channel_id else {
             return false;
         };
+        self.tail_detached(channel_id)
+    }
+
+    fn tail_detached(&self, channel_id: ChannelId) -> bool {
         let Some(channel) = self.cache.get(&channel_id) else {
             return false;
         };
@@ -3963,11 +3978,7 @@ impl MessagesStore {
         } else if message_code == LOCATION_CODE {
             optimistic.code = MessageCode::Location;
         }
-        let appended = self.cache.get_mut(&channel_id).map(|channel| {
-            let old_len = channel.messages.len();
-            channel.messages.push_grouped(optimistic);
-            old_len
-        });
+        let appended = self.append_optimistic(channel_id, optimistic);
         if let Some(old_len) = appended {
             self.emit_appended(old_len, cx);
         }
@@ -4314,11 +4325,7 @@ impl MessagesStore {
         if anonymous {
             let _ = anonymize_sender(&mut optimistic, AppConfig::try_global(cx));
         }
-        let appended = self.cache.get_mut(&channel_id).map(|channel| {
-            let old_len = channel.messages.len();
-            channel.messages.push_grouped(optimistic);
-            old_len
-        });
+        let appended = self.append_optimistic(channel_id, optimistic);
         if let Some(old_len) = appended {
             self.emit_appended(old_len, cx);
         }
@@ -5792,6 +5799,7 @@ impl MessagesStore {
     ) {
         self.pending_send_payloads.remove(&temp_id);
         let confirmed_id = confirmed.id;
+        let tail_detached = self.tail_detached(channel_id);
         let Some(channel) = self.cache.get_mut(&channel_id) else {
             self.set_last_message(channel_id, confirmed_id);
             return;
@@ -5806,7 +5814,7 @@ impl MessagesStore {
             let confirmed = merge_sparse_sender(&temp, confirmed);
             channel.messages.replace_at_and_regroup(idx, confirmed);
             false
-        } else if !channel.messages.contains_id(confirmed.id) {
+        } else if !tail_detached && !channel.messages.contains_id(confirmed.id) {
             channel.messages.push_sorted(confirmed);
             true
         } else {
@@ -7031,7 +7039,7 @@ fn first_content_link_url(content: &ApiMessageContent) -> Option<String> {
     }
     detect_markdown(&content.t)
         .into_iter()
-        .find(|tok| tok.kind == "lk")
+        .find(|tok| mezon_client::is_link_markdown_kind(&tok.kind))
         .map(|tok| utf16_slice(&content.t, i64::from(tok.s), i64::from(tok.e)))
         .filter(|url| !url.is_empty())
 }
@@ -7051,9 +7059,25 @@ fn text_to_spans(text: &str) -> Vec<MessageSpan> {
         return Vec::new();
     }
     let markdowns = detect_markdown(text);
+    // Embed bodies stay inline. React only runs its social-link classifier over message content,
+    // so a YouTube URL in a description is a link there, not the block-level card the classified
+    // kinds would render inside the embed's column.
+    let mk = markdown_content_tokens(&markdowns)
+        .into_iter()
+        .map(|mut tok| {
+            if tok
+                .kind
+                .as_deref()
+                .is_some_and(mezon_client::is_link_markdown_kind)
+            {
+                tok.kind = Some(mezon_client::LINK_MARKDOWN_KIND.to_string());
+            }
+            tok
+        })
+        .collect();
     parse_spans(&ApiMessageContent {
         t: text.to_string(),
-        mk: markdown_content_tokens(&markdowns),
+        mk,
         ..Default::default()
     })
 }
@@ -8045,6 +8069,10 @@ mod tests {
                             creator_id: UserId(0),
                             active: crate::channel::CHANNEL_ACTIVE_JOINED,
                             avatar_url: String::new(),
+                            topic: String::new(),
+                            age_restricted: 0,
+                            e2ee: 0,
+                            app_id: 0,
                         }],
                     }],
                 );
@@ -8555,6 +8583,33 @@ mod tests {
                 .iter()
                 .any(|s| matches!(s, MessageSpan::CodeBlock { .. })),
             "embed description should parse a ``` fence into a CodeBlock span"
+        );
+    }
+
+    #[test]
+    fn text_to_spans_keeps_social_links_inline() {
+        let spans = text_to_spans("watch https://youtu.be/abc");
+        assert!(
+            spans.iter().any(|s| matches!(
+                s,
+                MessageSpan::Link {
+                    kind: crate::message::LinkKind::Plain,
+                    ..
+                }
+            )),
+            "an embed description renders inline, so it must not classify a social card"
+        );
+    }
+
+    #[test]
+    fn first_content_link_url_falls_back_to_a_detected_social_link() {
+        let content = ApiMessageContent {
+            t: "https://www.tiktok.com/@user/video/123".into(),
+            ..Default::default()
+        };
+        assert_eq!(
+            first_content_link_url(&content).as_deref(),
+            Some("https://www.tiktok.com/@user/video/123")
         );
     }
 
@@ -10054,6 +10109,106 @@ mod tests {
 
         let parent_tail = parent_buffer.last().map(|m| m.id);
         assert!(!has_more_bottom_for(parent_tail, &parent_buffer));
+    }
+
+    #[gpui::test]
+    fn sending_from_a_jump_window_keeps_the_history_gap_loadable(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let api = Arc::new(mezon_client::AppApi::new(
+                Arc::new(mezon_client::TransportClient::new(String::new())),
+                String::new(),
+            ));
+            crate::realtime::RealtimeDispatch::init(api.clone(), cx);
+            crate::clan::ClanList::init(api.clone(), cx);
+            ChannelList::init(api.clone(), cx);
+            let store = MessagesStore::init(api, cx);
+
+            let channel = ChannelId(7);
+            let temp_id = MessageId::next_optimistic();
+
+            store.update(cx, |store, cx| {
+                store.set_channel(
+                    channel,
+                    vec![
+                        Message::new(MessageId(10), "pinned", "5", "Bob", 100),
+                        Message::new(MessageId(11), "next", "5", "Bob", 110),
+                    ],
+                );
+                store.set_many_last_messages([(channel, MessageId(500))]);
+                assert!(
+                    store.tail_detached(channel),
+                    "an AROUND jump window stops short of the channel tail"
+                );
+
+                assert!(
+                    store
+                        .append_optimistic(channel, Message::new(temp_id, "re", "42", "Me", 900))
+                        .is_none(),
+                    "the optimistic reply must not land next to history it does not adjoin"
+                );
+                assert_eq!(store.messages_in_channel(channel).len(), 2);
+
+                store.reconcile_temp(
+                    channel,
+                    temp_id,
+                    Message::new(MessageId(501), "re", "42", "Me", 900),
+                    cx,
+                );
+            });
+
+            store.update(cx, |store, _cx| {
+                assert_eq!(
+                    store.messages_in_channel(channel).len(),
+                    2,
+                    "the confirmed reply must not be appended onto the jump window either"
+                );
+                assert!(
+                    store.tail_detached(channel),
+                    "the messages between the jump window and the reply stay loadable"
+                );
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn sending_at_the_channel_tail_still_shows_the_optimistic_row(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let api = Arc::new(mezon_client::AppApi::new(
+                Arc::new(mezon_client::TransportClient::new(String::new())),
+                String::new(),
+            ));
+            crate::realtime::RealtimeDispatch::init(api.clone(), cx);
+            crate::clan::ClanList::init(api.clone(), cx);
+            ChannelList::init(api.clone(), cx);
+            let store = MessagesStore::init(api, cx);
+
+            let channel = ChannelId(7);
+            let temp_id = MessageId::next_optimistic();
+
+            store.update(cx, |store, cx| {
+                store.set_channel(
+                    channel,
+                    vec![Message::new(MessageId(10), "hi", "5", "Bob", 100)],
+                );
+                assert!(!store.tail_detached(channel));
+
+                assert_eq!(
+                    store.append_optimistic(channel, Message::new(temp_id, "re", "42", "Me", 900)),
+                    Some(1)
+                );
+                store.reconcile_temp(
+                    channel,
+                    temp_id,
+                    Message::new(MessageId(11), "re", "42", "Me", 900),
+                    cx,
+                );
+
+                let rows = store.messages_in_channel(channel);
+                assert_eq!(rows.len(), 2);
+                assert_eq!(rows[1].id, MessageId(11));
+                assert!(!store.tail_detached(channel));
+            });
+        });
     }
 
     #[test]
