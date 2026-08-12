@@ -1255,7 +1255,7 @@ impl McpBackend {
                 Vec::new(),
                 Vec::new(),
                 Vec::new(),
-                Vec::new(),
+                Some(Vec::new()),
                 Default::default(),
             )
             .await?;

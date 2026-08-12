@@ -21,8 +21,8 @@ use mezon_client::transport::{
 };
 use mezon_client::{
     AppApi, AttachmentUploadOutcome, ConnectionStatus, InboxCategory, InboxMentionSpan,
-    MarkedInboxMessageInput, MezonTransport, RealtimeEvent, UploadFile, UploadThumbnail,
-    UrlAttachment, inbox_notification_from_marked_message_local,
+    MarkedInboxMessageInput, MezonTransport, PresignedAttachment, RealtimeEvent, UploadFile,
+    UploadThumbnail, UrlAttachment, inbox_notification_from_marked_message_local,
 };
 
 use crate::AppConfig;
@@ -4044,11 +4044,32 @@ impl MessagesStore {
                     .iter()
                     .map(|a| presign::normalize_presign_key(&a.url))
                     .collect();
-                let update_mentions = if anonymous {
-                    Vec::new()
-                } else {
-                    transport_mentions.clone()
-                };
+                if anonymous {
+                    send_anonymous_attachment_message(
+                        &api,
+                        &this,
+                        AnonymousAttachmentSend {
+                            clan_id,
+                            channel_id,
+                            temp_id,
+                            content: &content,
+                            is_public,
+                            mode,
+                            presigned,
+                            msg_attachments,
+                            keys,
+                            reply_ref,
+                            mentions: transport_mentions,
+                            hashtags: transport_hashtags,
+                            emojis: transport_emojis,
+                            flags: send_flags,
+                        },
+                        cx,
+                    )
+                    .await;
+                    return;
+                }
+                let update_mentions = transport_mentions.clone();
                 let update_hashtags = transport_hashtags.clone();
                 let update_emojis = transport_emojis.clone();
                 let sent = match api
@@ -4063,7 +4084,7 @@ impl MessagesStore {
                         transport_mentions,
                         transport_hashtags,
                         transport_emojis,
-                        Vec::new(),
+                        Some(Vec::new()),
                         send_flags,
                     )
                     .await
@@ -4080,11 +4101,8 @@ impl MessagesStore {
                 let real_message_id = sent.message_id;
                 let create_time_seconds = sent.create_time.max(0) as u32;
                 let _ = this.update(cx, |this, cx| {
-                    let mut confirmed =
+                    let confirmed =
                         message_from_api(sent, AppConfig::try_global(cx), viewer_user_id(cx));
-                    if anonymous {
-                        let _ = anonymize_sender(&mut confirmed, AppConfig::try_global(cx));
-                    }
                     this.reconcile_temp(channel_id, temp_id, confirmed, cx);
                 });
                 let (on_complete, mut completions) =
@@ -6501,6 +6519,94 @@ fn carry_local_previews(prior: &Message, confirmed: &mut Message) {
         att.uploading = prior_att.uploading;
         att.upload_failed = prior_att.upload_failed;
     }
+}
+
+struct AnonymousAttachmentSend<'a> {
+    clan_id: ClanId,
+    channel_id: ChannelId,
+    temp_id: MessageId,
+    content: &'a str,
+    is_public: bool,
+    mode: i32,
+    presigned: Vec<PresignedAttachment>,
+    msg_attachments: Vec<mezon_proto::api::MessageAttachment>,
+    keys: Vec<String>,
+    reply_ref: Option<OutgoingReply>,
+    mentions: Vec<TransportMention>,
+    hashtags: Vec<TransportHashtag>,
+    emojis: Vec<TransportEmoji>,
+    flags: OutgoingMessageFlags,
+}
+
+async fn send_anonymous_attachment_message(
+    api: &AppApi,
+    this: &WeakEntity<MessagesStore>,
+    send: AnonymousAttachmentSend<'_>,
+    cx: &mut AsyncApp,
+) {
+    let AnonymousAttachmentSend {
+        clan_id,
+        channel_id,
+        temp_id,
+        content,
+        is_public,
+        mode,
+        presigned,
+        msg_attachments,
+        keys,
+        reply_ref,
+        mentions,
+        hashtags,
+        emojis,
+        flags,
+    } = send;
+    if let Err(e) = api.upload_presigned_all(presigned).await {
+        tracing::error!("anonymous attachment upload failed: {e}");
+        let _ = this.update(cx, |this, cx| {
+            this.mark_temp_failed(channel_id, temp_id, cx);
+        });
+        return;
+    }
+    let sent = match api
+        .send_presigned_message(
+            clan_id.get(),
+            channel_id.get(),
+            content,
+            is_public,
+            mode,
+            msg_attachments,
+            reply_ref,
+            mentions,
+            hashtags,
+            emojis,
+            None,
+            flags,
+        )
+        .await
+    {
+        Ok(sent) => sent,
+        Err(e) => {
+            tracing::error!("anonymous send_presigned_message failed: {e}");
+            let _ = this.update(cx, |this, cx| {
+                this.mark_temp_failed(channel_id, temp_id, cx);
+            });
+            return;
+        }
+    };
+    let real_message_id = sent.message_id;
+    let _ = this.update(cx, |this, cx| {
+        let mut confirmed = message_from_api(sent, AppConfig::try_global(cx), viewer_user_id(cx));
+        let _ = anonymize_sender(&mut confirmed, AppConfig::try_global(cx));
+        this.reconcile_temp(channel_id, temp_id, confirmed, cx);
+        for key in keys {
+            this.mark_channel_attachment_outcome(
+                channel_id,
+                MessageId(real_message_id),
+                AttachmentUploadOutcome::Uploaded(key),
+                cx,
+            );
+        }
+    });
 }
 
 async fn upload_attachments_now(
