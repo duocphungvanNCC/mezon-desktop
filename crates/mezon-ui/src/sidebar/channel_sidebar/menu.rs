@@ -1,7 +1,8 @@
 use gpui::{App, ClickEvent, ClipboardItem, Entity, Pixels, Point, WeakEntity, Window};
 use mezon_store::{
-    AppConfig, BadgeService, ChannelId, ChannelList, ChannelType, ClanId,
-    PERMISSION_MANAGE_CHANNEL, PermissionStore, archive_menu_hidden, can_archive_channel,
+    AppConfig, BadgeService, ChannelId, ChannelList, ChannelType, ClanId, PERMISSION_ADMINISTRATOR,
+    PERMISSION_CLAN_OWNER, PERMISSION_MANAGE_CHANNEL, PERMISSION_MANAGE_CLAN, PermissionStore,
+    archive_menu_hidden, can_archive_channel,
 };
 
 use super::ChannelSidebar;
@@ -141,7 +142,18 @@ fn mark_channel_read(
     }
 }
 
-fn open_channel_settings(
+pub(super) fn can_open_channel_settings(clan_id: ClanId, cx: &App) -> bool {
+    let Some(permissions) = PermissionStore::try_global(cx) else {
+        return false;
+    };
+    let permissions = permissions.read(cx);
+    permissions.check(clan_id, None, PERMISSION_CLAN_OWNER, cx)
+        || permissions.check(clan_id, None, PERMISSION_ADMINISTRATOR, cx)
+        || permissions.check(clan_id, None, PERMISSION_MANAGE_CLAN, cx)
+        || permissions.check(clan_id, None, PERMISSION_MANAGE_CHANNEL, cx)
+}
+
+pub(super) fn open_channel_settings(
     clan_id: ClanId,
     channel_id: ChannelId,
 ) -> impl Fn(&mut Window, &mut App) + 'static {

@@ -741,10 +741,29 @@ pub struct ApiChannelDesc {
     pub clan_name: String,
     #[serde(default)]
     pub channel_avatar: String,
+    #[serde(default)]
+    pub topic: String,
+    #[serde(default)]
+    pub age_restricted: i32,
+    #[serde(default)]
+    pub e2ee: i32,
+    #[serde(default)]
+    pub app_id: i64,
 }
 
 fn default_channel_active() -> i32 {
     1
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct UpdateChannelDescParams {
+    pub channel_label: Option<String>,
+    pub category_id: i64,
+    pub topic: String,
+    pub age_restricted: i32,
+    pub e2ee: i32,
+    pub app_id: i64,
+    pub channel_avatar: Option<String>,
 }
 
 /// A direct-message / group conversation descriptor (clan_id = 0 namespace). Unlike
@@ -3620,6 +3639,10 @@ impl MezonTransport {
             creator_id: channel.creator_id,
             clan_name: channel.clan_name,
             channel_avatar: channel.channel_avatar,
+            topic: channel.topic,
+            age_restricted: channel.age_restricted,
+            e2ee: channel.e2ee,
+            app_id: channel.app_id,
         }
     }
 
@@ -6532,15 +6555,19 @@ impl MezonTransport {
         &self,
         clan_id: i64,
         channel_id: i64,
-        channel_label: Option<String>,
-        channel_avatar: Option<String>,
+        params: UpdateChannelDescParams,
     ) -> Result<()> {
         let cid = self.generate_cid();
         let body = api::UpdateChannelDescRequest {
             clan_id,
             channel_id,
-            channel_label,
-            channel_avatar,
+            channel_label: params.channel_label,
+            category_id: params.category_id,
+            app_id: params.app_id,
+            topic: params.topic,
+            age_restricted: params.age_restricted,
+            e2ee: params.e2ee,
+            channel_avatar: params.channel_avatar,
             ..Default::default()
         }
         .encode_to_vec();

@@ -8069,6 +8069,10 @@ mod tests {
                             creator_id: UserId(0),
                             active: crate::channel::CHANNEL_ACTIVE_JOINED,
                             avatar_url: String::new(),
+                            topic: String::new(),
+                            age_restricted: 0,
+                            e2ee: 0,
+                            app_id: 0,
                         }],
                     }],
                 );
