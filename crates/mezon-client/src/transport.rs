@@ -106,6 +106,7 @@ pub enum RealtimeEvent {
     VoiceJoined(realtime::VoiceJoinedEvent),
     VoiceLeaved(realtime::VoiceLeavedEvent),
     VoiceReaction(realtime::VoiceReactionSend),
+    ScreenShare(realtime::ScreenShareEvent),
     UserChannelAdded(realtime::UserChannelAdded),
     UserChannelRemoved(realtime::UserChannelRemoved),
     NotifUserChannel(api::NotificationUserChannel),
@@ -161,6 +162,7 @@ impl RealtimeEvent {
             Self::VoiceJoined(_) => "VoiceJoined",
             Self::VoiceLeaved(_) => "VoiceLeaved",
             Self::VoiceReaction(_) => "VoiceReaction",
+            Self::ScreenShare(_) => "ScreenShare",
             Self::UserChannelAdded(_) => "UserChannelAdded",
             Self::UserChannelRemoved(_) => "UserChannelRemoved",
             Self::NotifUserChannel(_) => "NotifUserChannel",
@@ -218,6 +220,7 @@ impl TryFrom<realtime::envelope::Message> for RealtimeEvent {
             realtime::envelope::Message::VoiceJoinedEvent(m) => Ok(Self::VoiceJoined(m)),
             realtime::envelope::Message::VoiceLeavedEvent(m) => Ok(Self::VoiceLeaved(m)),
             realtime::envelope::Message::VoiceReactionSend(m) => Ok(Self::VoiceReaction(m)),
+            realtime::envelope::Message::ScreenShareEvent(m) => Ok(Self::ScreenShare(m)),
             realtime::envelope::Message::UserChannelAddedEvent(m) => Ok(Self::UserChannelAdded(m)),
             realtime::envelope::Message::UserChannelRemovedEvent(m) => {
                 Ok(Self::UserChannelRemoved(m))
@@ -785,6 +788,7 @@ pub struct ApiCategoryDesc {
 pub struct ApiVoiceChannelUser {
     pub channel_id: i64,
     pub user_ids: Vec<i64>,
+    pub share_screen_ids: Vec<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -866,7 +870,7 @@ impl ApiChannelAttachment {
 }
 
 fn parse_message_attachments(bytes: &[u8]) -> Vec<ApiAttachment> {
-    if bytes.is_empty() {
+    if bytes.is_empty() || blob_is_json_null(bytes) {
         return Vec::new();
     }
     if let Some(value) = message_field_json(bytes) {
@@ -1287,7 +1291,7 @@ pub struct ApiEntityMention {
 }
 
 pub fn parse_message_mentions(bytes: &[u8]) -> Vec<ApiEntityMention> {
-    if bytes.is_empty() {
+    if bytes.is_empty() || blob_is_json_null(bytes) {
         return Vec::new();
     }
     if let Some(value) = message_field_json(bytes) {
@@ -1357,6 +1361,10 @@ pub fn enrich_content_tokens(tokens: &mut ApiMessageContent, entity_mentions: &[
 /// decode as protobuf group tags, which is exactly the garbled
 /// "unexpected end group tag" / "buffer underflow" warnings seen in the field.
 /// Sniff and parse those as JSON before attempting a protobuf decode.
+fn blob_is_json_null(bytes: &[u8]) -> bool {
+    std::str::from_utf8(bytes).is_ok_and(|text| text.trim() == "null")
+}
+
 fn message_field_json(bytes: &[u8]) -> Option<serde_json::Value> {
     let text = std::str::from_utf8(bytes).ok()?;
     let trimmed = text.trim();
@@ -1395,12 +1403,6 @@ fn parse_references_json_value(value: &serde_json::Value) -> Vec<ApiMessageRef> 
                 return None;
             }
             let message_sender_id = json_field_i64(item, "message_sender_id");
-            if message_sender_id == 0 {
-                tracing::warn!(
-                    "dropping reference {message_ref_id}: message_sender_id is missing or malformed"
-                );
-                return None;
-            }
             let avatar = match item.get("message_sender_avatar") {
                 Some(serde_json::Value::String(raw)) => raw.clone(),
                 _ => json_field_string(item, "mesages_sender_avatar"),
@@ -1449,7 +1451,7 @@ fn parse_reactions_json_value(value: &serde_json::Value) -> Vec<ApiMessageReacti
 }
 
 fn parse_message_references(bytes: &[u8]) -> Vec<ApiMessageRef> {
-    if bytes.is_empty() {
+    if bytes.is_empty() || blob_is_json_null(bytes) {
         return Vec::new();
     }
     if let Some(value) = message_field_json(bytes) {
@@ -1549,7 +1551,7 @@ fn mention_targets_user(token: &ContentToken, user_id: i64, role_ids: &[i64]) ->
 }
 
 fn parse_message_reactions(bytes: &[u8]) -> Vec<ApiMessageReaction> {
-    if bytes.is_empty() {
+    if bytes.is_empty() || blob_is_json_null(bytes) {
         return Vec::new();
     }
     if let Some(value) = message_field_json(bytes) {
@@ -2560,6 +2562,55 @@ struct MarkdownMatch {
     marker: usize,
 }
 
+pub const LINK_MARKDOWN_KIND: &str = "lk";
+pub const YOUTUBE_LINK_MARKDOWN_KIND: &str = "lk_yt";
+pub const FACEBOOK_LINK_MARKDOWN_KIND: &str = "lk_fb";
+pub const TIKTOK_LINK_MARKDOWN_KIND: &str = "lk_tt";
+
+static YOUTUBE_LINK: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+    regex::Regex::new(r"(?:youtube\.com/(?:watch\?v=|embed/|v/|e/|shorts/)|youtu\.be/)")
+        .expect("static youtube link pattern")
+});
+// `\w`/`\d` are Unicode classes here but ASCII-only in JS, so the classes are spelled out to keep
+// this in step with mezon-react's getLinkType — a link this crate tags but the web client's own
+// regex rejects renders as a broken embed there.
+static FACEBOOK_LINK: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+    regex::Regex::new(
+        r"(?:facebook\.com/(?:reel/|watch\?v=|[0-9A-Za-z_.]+/videos/(?:[0-9A-Za-z_.]+/)?))[0-9A-Za-z_-]+",
+    )
+    .expect("static facebook link pattern")
+});
+static TIKTOK_LINK: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+    regex::Regex::new(
+        r"(?:tiktok\.com/@[^/]+/video/[0-9]+|vm\.tiktok\.com/[a-zA-Z0-9]+|tiktok\.com/t/[a-zA-Z0-9]+)",
+    )
+    .expect("static tiktok link pattern")
+});
+
+pub fn link_markdown_kind(url: &str) -> &'static str {
+    if YOUTUBE_LINK.is_match(url) {
+        YOUTUBE_LINK_MARKDOWN_KIND
+    } else if FACEBOOK_LINK.is_match(url) {
+        FACEBOOK_LINK_MARKDOWN_KIND
+    } else if TIKTOK_LINK.is_match(url) {
+        TIKTOK_LINK_MARKDOWN_KIND
+    } else {
+        LINK_MARKDOWN_KIND
+    }
+}
+
+/// Every kind [`link_markdown_kind`] can return. Consumers that filter detected markdown down to
+/// links must use this instead of comparing against `"lk"`, or they silently drop social links.
+pub fn is_link_markdown_kind(kind: &str) -> bool {
+    matches!(
+        kind,
+        LINK_MARKDOWN_KIND
+            | YOUTUBE_LINK_MARKDOWN_KIND
+            | FACEBOOK_LINK_MARKDOWN_KIND
+            | TIKTOK_LINK_MARKDOWN_KIND
+    )
+}
+
 fn scan_markdown(chars: &[char]) -> Vec<MarkdownMatch> {
     let n = chars.len();
     let is_triple =
@@ -2601,8 +2652,9 @@ fn scan_markdown(chars: &[char]) -> Vec<MarkdownMatch> {
                 j += 1;
             }
             if j > i + scheme {
+                let url: String = chars[i..j].iter().collect();
                 out.push(MarkdownMatch {
-                    kind: "lk",
+                    kind: link_markdown_kind(&url),
                     start: i,
                     end: j,
                     marker: 0,
@@ -5063,6 +5115,11 @@ impl MezonTransport {
                     .iter()
                     .filter_map(|s| s.parse::<i64>().ok())
                     .collect(),
+                share_screen_ids: u
+                    .share_screen_ids
+                    .iter()
+                    .filter_map(|s| s.parse::<i64>().ok())
+                    .collect(),
             })
             .collect())
     }
@@ -6593,6 +6650,20 @@ impl MezonTransport {
         Ok(())
     }
 
+    pub async fn archive_channel(&self, clan_id: i64, channel_id: i64) -> Result<()> {
+        let cid = self.generate_cid();
+        let body = api::ArchiveChannelRequest {
+            clan_id,
+            channel_id,
+        }
+        .encode_to_vec();
+        let (code, _) = self.send_api_request(cid, "ArchiveChannel", body).await?;
+        if code != 0 {
+            return Err(anyhow::anyhow!("API error: code={}", code));
+        }
+        Ok(())
+    }
+
     /// Reactivate archived thread.
     pub async fn active_archived_thread(&self, clan_id: i64, channel_id: i64) -> Result<()> {
         let cid = self.generate_cid();
@@ -7857,22 +7928,10 @@ impl MezonTransport {
     /// Create event.
     pub async fn create_event(
         &self,
-        title: &str,
-        clan_id: i64,
-        channel_id: i64,
-        start_time: u32,
-        end_time: u32,
+        request: api::CreateEventRequest,
     ) -> Result<api::EventManagement> {
         let cid = self.generate_cid();
-        let body = api::CreateEventRequest {
-            title: title.to_string(),
-            clan_id,
-            channel_id,
-            start_time_seconds: start_time,
-            end_time_seconds: end_time,
-            ..Default::default()
-        }
-        .encode_to_vec();
+        let body = request.encode_to_vec();
         let (code, response) = self.send_api_request(cid, "CreateEvent", body).await?;
         if code != 0 {
             return Err(anyhow::anyhow!("API error: code={}", code));
@@ -9241,6 +9300,45 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_null_blob_is_no_data_not_a_decode_error() {
+        let null = b"null";
+        assert!(blob_is_json_null(null));
+        assert!(parse_message_reactions(null).is_empty());
+        assert!(parse_message_references(null).is_empty());
+        assert!(parse_message_mentions(null).is_empty());
+        assert!(parse_message_attachments(null).is_empty());
+        assert!(blob_is_json_null(b"  null\n"));
+        assert!(!blob_is_json_null(b"[]"));
+        assert!(!blob_is_json_null(b"nullish"));
+    }
+
+    #[test]
+    fn a_reference_without_a_sender_id_is_kept() {
+        let value = serde_json::json!([{
+            "message_ref_id": 1840651252770279424i64,
+            "content": "{\"t\":\"quoted body\"}",
+            "message_sender_username": "huy.lexuan",
+        }]);
+        let refs = parse_references_json_value(&value);
+        assert_eq!(
+            refs.len(),
+            1,
+            "React's MessageReply gates only on message_ref_id and renders \
+             message_sender_id 0 with the default avatar, so dropping the whole \
+             reference loses a quote the web app still shows"
+        );
+        assert_eq!(refs[0].message_sender_id, 0);
+        assert_eq!(refs[0].message_sender_username, "huy.lexuan");
+        assert_eq!(refs[0].content, "{\"t\":\"quoted body\"}");
+    }
+
+    #[test]
+    fn a_reference_without_a_ref_id_is_still_dropped() {
+        let value = serde_json::json!([{ "content": "orphan", "message_sender_id": 42 }]);
+        assert!(parse_references_json_value(&value).is_empty());
+    }
+
+    #[test]
     fn envelope_cid_last_moves_cid_after_empty_submessage() {
         let envelope = realtime::Envelope {
             cid: 7,
@@ -9893,6 +9991,49 @@ mod tests {
     #[test]
     fn detect_markdown_link_has_no_trailing_punctuation_trim() {
         assert_eq!(detect_markdown("see https://a.com."), vec![md("lk", 4, 18)]);
+    }
+
+    #[test]
+    fn detect_markdown_tags_social_links_by_platform() {
+        assert_eq!(
+            detect_markdown("https://www.youtube.com/watch?v=lHW3fsJQ1sg"),
+            vec![md("lk_yt", 0, 43)]
+        );
+        assert_eq!(
+            detect_markdown("https://youtu.be/abc"),
+            vec![md("lk_yt", 0, 20)]
+        );
+        assert_eq!(
+            detect_markdown("https://www.tiktok.com/@user/video/123"),
+            vec![md("lk_tt", 0, 38)]
+        );
+        assert_eq!(
+            detect_markdown("https://www.facebook.com/reel/456"),
+            vec![md("lk_fb", 0, 33)]
+        );
+        assert_eq!(detect_markdown("https://a.com"), vec![md("lk", 0, 13)]);
+    }
+
+    #[test]
+    fn link_markdown_kind_matches_js_ascii_classes() {
+        // mezon-react's getLinkType uses JS `\w`/`\d`, which are ASCII-only. Tagging a link the
+        // web client's own regex then fails to expand leaves it with a broken embed there.
+        assert_eq!(
+            link_markdown_kind("https://www.facebook.com/José/videos/abc"),
+            "lk"
+        );
+        assert_eq!(
+            link_markdown_kind("https://www.facebook.com/jose/videos/abc"),
+            "lk_fb"
+        );
+        assert_eq!(
+            link_markdown_kind("https://www.tiktok.com/@user/video/١٢٣"),
+            "lk"
+        );
+        assert_eq!(
+            link_markdown_kind("https://www.tiktok.com/@user/video/123"),
+            "lk_tt"
+        );
     }
 
     #[test]

@@ -1258,6 +1258,13 @@ impl AppApi {
         Ok(self.transport.list_events(clan_id).await?.events)
     }
 
+    pub async fn create_event(
+        &self,
+        request: mezon_proto::api::CreateEventRequest,
+    ) -> Result<mezon_proto::api::EventManagement> {
+        self.transport.create_event(request).await
+    }
+
     pub async fn emoji_recent_list(&self) -> Result<Vec<mezon_proto::api::EmojiRecent>> {
         let resp = self.transport.emoji_recent_list().await?;
         Ok(resp.emoji_recents)
@@ -2381,6 +2388,10 @@ impl AppApi {
         self.transport
             .active_archived_thread(clan_id, channel_id)
             .await
+    }
+
+    pub async fn archive_channel(&self, clan_id: i64, channel_id: i64) -> Result<()> {
+        self.transport.archive_channel(clan_id, channel_id).await
     }
 
     pub async fn list_clan_badge_count(&self) -> Result<Vec<(String, i32, bool)>> {

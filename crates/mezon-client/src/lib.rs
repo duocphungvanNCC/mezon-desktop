@@ -35,7 +35,7 @@ pub use auth::MezonClient;
 pub use auth::QrLoginId;
 pub use auth::SessionProbe;
 pub use auth::{DEFAULT_API_HOST, DEFAULT_API_PORT, DEFAULT_API_SECURE, DEFAULT_SERVER_KEY};
-pub use channel_app_launch::{ChannelAppLaunchParams, build_channel_app_url};
+pub use channel_app_launch::{ChannelAppLaunchParams, build_channel_app_url, encode_url_param};
 pub use gotify::{GotifyExtras, GotifyNotification, StreamEnd};
 pub use inbox::{
     DIRECTION_AROUND_TIMESTAMP, DIRECTION_BEFORE_TIMESTAMP, INBOX_MESSAGE_MARK_CODE,
@@ -71,9 +71,11 @@ pub use transport::RealtimeEvent;
 pub use transport::{
     ApiCanvas, ApiCanvasDetail, ApiCategoryDesc, ApiChannelApp, ApiChannelAttachment,
     ApiChannelDesc, ApiFriend, ApiPinMessage, ApiStatusError, ApiThreadDesc, ApiVoiceChannelUser,
-    CANVAS_LIST_LIMIT, CANVAS_STATUS_CREATED, CANVAS_STATUS_UPDATE, HttpFallbackSession,
-    UpdateChannelDescParams, api_status_from_error, is_channel_limit_api_error,
-    parse_search_attachment_field, parse_search_mentions_field,
+    CANVAS_LIST_LIMIT, CANVAS_STATUS_CREATED, CANVAS_STATUS_UPDATE, FACEBOOK_LINK_MARKDOWN_KIND,
+    HttpFallbackSession, LINK_MARKDOWN_KIND, TIKTOK_LINK_MARKDOWN_KIND, UpdateChannelDescParams,
+    YOUTUBE_LINK_MARKDOWN_KIND, api_status_from_error, is_channel_limit_api_error,
+    is_link_markdown_kind, link_markdown_kind, parse_search_attachment_field,
+    parse_search_mentions_field,
 };
 pub use transport_adapter::TransportAdapter;
 pub use transport_runtime::TransportClient;

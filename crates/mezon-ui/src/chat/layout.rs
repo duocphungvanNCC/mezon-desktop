@@ -8,7 +8,7 @@ use gpui::{
 };
 use mezon_store::{
     AuthState, AutoUpdateStatus, AutoUpdateStore, CHANNEL_ACTIVE_ARCHIVED, CHANNEL_ACTIVE_JOINED,
-    Channel, ChannelId, ChannelList, ChannelType, ClanId, ClanList, ClanMembersStore,
+    Channel, ChannelEvent, ChannelId, ChannelList, ChannelType, ClanId, ClanList, ClanMembersStore,
     DirectChannel, DirectKind, DirectMessageStore, GroupMembersStore, InboxStore,
     MessageSearchEvent, MessageSearchStore, MessagesStore, PinnedEvent, PinnedMessagesStore,
     Settings, StreamStore, THREAD_STATUS_ARCHIVED, ThreadsEvent, ThreadsStore, TopicsEvent,
@@ -342,6 +342,23 @@ impl ChatLayout {
                 this.canvas_popover_handle.hide(cx);
                 cx.notify();
             }
+        })
+        .detach();
+        cx.subscribe(&channel_list, |this, _, event, cx| {
+            let ChannelEvent::ArchivedByAdministrator { is_thread } = event else {
+                return;
+            };
+            let locale = this.settings.read(cx).language.clone();
+            let key = if *is_thread {
+                "channelMenu.toastArchivedThreadByAdministrator"
+            } else {
+                "channelMenu.toastArchivedByAdministrator"
+            };
+            Shell::global(cx).update(cx, |shell, cx| {
+                shell.success(mezon_i18n::t(&locale, key).to_string(), cx);
+            });
+            this.redirect_archived_thread_route(cx);
+            this.ensure_active_channel_for_clan(cx);
         })
         .detach();
         cx.observe(&Router::global(cx), |this, _, cx| {
@@ -1127,6 +1144,16 @@ impl ChatLayout {
             if channel_list.channel_in_clan(clan_id, thread_id) {
                 return;
             }
+            if channel_list.is_locally_archived(thread_id) {
+                crate::router::replace(
+                    cx,
+                    Route::Channel {
+                        clan_id,
+                        channel_id,
+                    },
+                );
+                return;
+            }
         }
         let resolving = self.channel_list.update(cx, |store, cx| {
             store.ensure_channel_in_clan(clan_id, thread_id, cx)
@@ -1747,14 +1774,13 @@ impl Render for ChatLayout {
                     .flex_col()
                     .w(px(344.0))
                     .h_full()
-                    .bg(theme.bg_tertiary)
+                    .bg(theme.surfaces.primary.ramp())
                     .child(
                         div()
                             .flex()
                             .flex_row()
                             .flex_1()
                             .min_h_0()
-                            .bg(theme.bg_tertiary)
                             .overflow_hidden()
                             .child(
                                 div().w(px(72.0)).h_full().child(
@@ -1779,7 +1805,7 @@ impl Render for ChatLayout {
                             .border_1()
                             .border_color(theme.tokens.border_primary)
                             .shadow_lg()
-                            .bg(theme.tokens.bg_surface)
+                            .bg(theme.surfaces.surface)
                             .child(
                                 div()
                                     .id("clan-footer-bars")
@@ -2132,15 +2158,10 @@ impl ChatLayout {
         }
         if self.topic_panel.is_none() {
             let settings = self.settings.clone();
-            let align_timeline = self.chat_area.timeline.clone();
-            self.topic_panel = Some(cx.new(|cx| {
-                crate::chat::create_topic_panel::TopicPanel::new(
-                    settings,
-                    align_timeline,
-                    window,
-                    cx,
-                )
-            }));
+            self.topic_panel =
+                Some(cx.new(|cx| {
+                    crate::chat::create_topic_panel::TopicPanel::new(settings, window, cx)
+                }));
         }
         self.topic_panel
             .clone()
@@ -2821,7 +2842,7 @@ impl ChatLayout {
                                 .overflow_hidden()
                                 .border_l_1()
                                 .border_color(theme.border)
-                                .bg(theme.bg_primary)
+                                .bg(theme.surfaces.secondary.ramp())
                                 .child(panel),
                         )
                     })
@@ -2890,7 +2911,7 @@ impl ChatLayout {
                     .min_h_0()
                     .min_w_0()
                     .gap_2()
-                    .bg(theme.bg_secondary)
+                    .bg(theme.surfaces.direct_message.ramp())
                     .child(
                         div()
                             .flex()
@@ -2912,7 +2933,7 @@ impl ChatLayout {
                                 .h_full()
                                 .flex_shrink_0()
                                 .overflow_hidden()
-                                .bg(theme.bg_primary)
+                                .bg(theme.surfaces.secondary.ramp())
                                 .child(panel),
                         )
                     })

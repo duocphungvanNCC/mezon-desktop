@@ -635,11 +635,15 @@ impl ChatArea {
             .overflow_hidden()
             .when(!media_channel_view, |col| {
                 let drop_input = mention_input;
+                let input_visible = !send_denied;
                 col.on_drop(
                     move |paths: &ExternalPaths, window: &mut Window, cx: &mut App| {
                         if let Some(drop_input) = drop_input.clone() {
                             let dropped: Vec<PathBuf> = paths.paths().to_vec();
                             drop_input.update(cx, |input, cx| {
+                                if input_visible {
+                                    input.focus_input(window, cx);
+                                }
                                 input.add_dropped_paths(dropped, window, cx)
                             });
                         }

@@ -231,6 +231,7 @@ impl Render for FooterProfilePopup {
         let (
             bg_banner,
             bg_card,
+            bg_card_surface,
             bg_box,
             bg_status_menu,
             bubble_bg,
@@ -243,6 +244,7 @@ impl Render for FooterProfilePopup {
             (
                 theme.tokens.bg_button_primary,
                 theme.tokens.bg_outside_footer,
+                theme.surfaces.outside_footer.ramp(),
                 theme.tokens.theme_setting_primary,
                 theme.tokens.bg_theme_contexify,
                 theme.tokens.bg_surface,
@@ -277,7 +279,7 @@ impl Render for FooterProfilePopup {
                 .w(px(90.))
                 .h(px(90.))
                 .rounded_full()
-                .bg(bg_card)
+                .bg(bg_card_surface)
                 .child(
                     Avatar::new()
                         .name(self.display_name.clone())
@@ -663,7 +665,7 @@ impl Render for FooterProfilePopup {
             .rounded(px(8.))
             .border_1()
             .border_color(border)
-            .bg(bg_card)
+            .bg(bg_card_surface)
             .shadow_lg()
             .child(banner)
             .child(avatar_row)

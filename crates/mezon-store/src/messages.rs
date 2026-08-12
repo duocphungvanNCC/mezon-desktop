@@ -3909,7 +3909,9 @@ impl MessagesStore {
                 mk,
                 ..Default::default()
             };
-            optimistic = optimistic.with_spans(parse_spans(&tokens));
+            let mut optimistic_spans = parse_spans(&tokens);
+            crate::message::fill_emoji_sources(&mut optimistic_spans, AppConfig::try_global(cx));
+            optimistic = optimistic.with_spans(optimistic_spans);
             if ogp.is_some() {
                 optimistic =
                     optimistic.with_ogp(build_ogp_preview(&tokens, AppConfig::try_global(cx)));
@@ -6745,15 +6747,7 @@ fn message_from_api(m: ApiMessage, cfg: Option<&AppConfig>, viewer_id: Option<Us
         .map(|c| c.avatar_proxy(&m.avatar))
         .unwrap_or_else(|| m.avatar.clone());
     let mut spans = parse_spans(&m.content_tokens);
-    if let Some(cfg) = cfg {
-        for span in &mut spans {
-            if let MessageSpan::Emoji { emoji_id, src, .. } = span
-                && !emoji_id.is_empty()
-            {
-                *src = cfg.emoji_src(emoji_id).into();
-            }
-        }
-    }
+    crate::message::fill_emoji_sources(&mut spans, cfg);
     let mention_targets: Vec<MentionTarget> = m
         .entity_mentions
         .iter()
@@ -7037,7 +7031,7 @@ fn first_content_link_url(content: &ApiMessageContent) -> Option<String> {
     }
     detect_markdown(&content.t)
         .into_iter()
-        .find(|tok| tok.kind == "lk")
+        .find(|tok| mezon_client::is_link_markdown_kind(&tok.kind))
         .map(|tok| utf16_slice(&content.t, i64::from(tok.s), i64::from(tok.e)))
         .filter(|url| !url.is_empty())
 }
@@ -7057,9 +7051,25 @@ fn text_to_spans(text: &str) -> Vec<MessageSpan> {
         return Vec::new();
     }
     let markdowns = detect_markdown(text);
+    // Embed bodies stay inline. React only runs its social-link classifier over message content,
+    // so a YouTube URL in a description is a link there, not the block-level card the classified
+    // kinds would render inside the embed's column.
+    let mk = markdown_content_tokens(&markdowns)
+        .into_iter()
+        .map(|mut tok| {
+            if tok
+                .kind
+                .as_deref()
+                .is_some_and(mezon_client::is_link_markdown_kind)
+            {
+                tok.kind = Some(mezon_client::LINK_MARKDOWN_KIND.to_string());
+            }
+            tok
+        })
+        .collect();
     parse_spans(&ApiMessageContent {
         t: text.to_string(),
-        mk: markdown_content_tokens(&markdowns),
+        mk,
         ..Default::default()
     })
 }
@@ -8563,6 +8573,33 @@ mod tests {
                 .iter()
                 .any(|s| matches!(s, MessageSpan::CodeBlock { .. })),
             "embed description should parse a ``` fence into a CodeBlock span"
+        );
+    }
+
+    #[test]
+    fn text_to_spans_keeps_social_links_inline() {
+        let spans = text_to_spans("watch https://youtu.be/abc");
+        assert!(
+            spans.iter().any(|s| matches!(
+                s,
+                MessageSpan::Link {
+                    kind: crate::message::LinkKind::Plain,
+                    ..
+                }
+            )),
+            "an embed description renders inline, so it must not classify a social card"
+        );
+    }
+
+    #[test]
+    fn first_content_link_url_falls_back_to_a_detected_social_link() {
+        let content = ApiMessageContent {
+            t: "https://www.tiktok.com/@user/video/123".into(),
+            ..Default::default()
+        };
+        assert_eq!(
+            first_content_link_url(&content).as_deref(),
+            Some("https://www.tiktok.com/@user/video/123")
         );
     }
 

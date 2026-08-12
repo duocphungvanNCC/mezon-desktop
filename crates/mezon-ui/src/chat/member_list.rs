@@ -1015,9 +1015,9 @@ impl Render for MemberListPanel {
             .w(px(245.))
             .h_full()
             .flex_shrink_0()
-            .bg(theme.bg_secondary)
             .border_l_1()
             .border_color(theme.border)
+            .bg(theme.surfaces.direct_message.ramp())
             .child(list)
             .when_some(
                 menu_overlay,
