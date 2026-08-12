@@ -90,11 +90,17 @@ impl UserPresence {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MemberStatus {
     pub presence: UserPresence,
     pub custom_status: String,
     pub online: bool,
+}
+
+impl Default for MemberStatus {
+    fn default() -> Self {
+        Self::own("", "")
+    }
 }
 
 impl MemberStatus {
@@ -246,6 +252,23 @@ impl PresenceStore {
         match own {
             Some((me, presence)) if me == user_id => presence.is_visible(),
             _ => self.is_online(user_id),
+        }
+    }
+
+    pub fn member_presence(
+        &self,
+        user_id: UserId,
+        own: Option<(UserId, UserPresence)>,
+    ) -> DmAvatarPresence {
+        if let Some((_, presence)) = own.filter(|(me, _)| *me == user_id) {
+            return presence_badge(presence);
+        }
+        if !self.is_online(user_id) {
+            return DmAvatarPresence::None;
+        }
+        match self.presence_status(user_id) {
+            Some(status) => dm_presence_from_status(status),
+            None => DmAvatarPresence::Online,
         }
     }
 
@@ -512,6 +535,9 @@ impl PresenceStore {
             let value = if status.is_empty() { "online" } else { status };
             self.presence_status.insert(*uid, value.to_string());
             self.mark_presence_known(*uid);
+            if value.eq_ignore_ascii_case(USER_STATUS_INVISIBLE) {
+                self.user_online.remove(uid);
+            }
         }
     }
 
@@ -556,9 +582,12 @@ impl PresenceStore {
         &mut self,
         online: &[UserId],
         statuses: &[(UserId, String)],
+        presences: &[(UserId, String)],
         cx: &mut Context<Self>,
     ) {
-        let changed = self.apply_seed_online(online) | self.apply_seed_user_status(statuses);
+        let changed = self.apply_seed_online(online)
+            | self.apply_seed_user_status(statuses)
+            | self.apply_seed_presence_status(presences);
         if changed {
             cx.emit(PresenceEvent::StatusChanged);
             cx.notify();
@@ -569,6 +598,21 @@ impl PresenceStore {
         let mut changed = false;
         for uid in online {
             changed |= self.user_online.insert(*uid);
+        }
+        changed
+    }
+
+    pub(crate) fn apply_seed_presence_status(&mut self, presences: &[(UserId, String)]) -> bool {
+        let mut changed = false;
+        for (uid, status) in presences {
+            if self.presence_status.get(uid).map(String::as_str) != Some(status.as_str()) {
+                self.presence_status.insert(*uid, status.clone());
+                changed = true;
+            }
+            self.mark_presence_known(*uid);
+            if status.eq_ignore_ascii_case(USER_STATUS_INVISIBLE) {
+                changed |= self.user_online.remove(uid);
+            }
         }
         changed
     }
@@ -587,13 +631,17 @@ impl PresenceStore {
     }
 }
 
-fn dm_presence_from_status(status: &str) -> DmAvatarPresence {
-    match UserPresence::from_status(status) {
+fn presence_badge(presence: UserPresence) -> DmAvatarPresence {
+    match presence {
         UserPresence::Online => DmAvatarPresence::Online,
         UserPresence::Idle => DmAvatarPresence::Idle,
         UserPresence::Dnd => DmAvatarPresence::Dnd,
         UserPresence::Invisible => DmAvatarPresence::None,
     }
+}
+
+fn dm_presence_from_status(status: &str) -> DmAvatarPresence {
+    presence_badge(UserPresence::from_status(status))
 }
 
 #[cfg(test)]
@@ -751,6 +799,80 @@ mod tests {
         store.apply_status_presence(&[], &[UserId(1)]);
         assert!(!store.user_online.contains(&UserId(1)));
         assert!(store.user_online.contains(&UserId(2)));
+    }
+
+    #[test]
+    fn seeded_invisible_member_is_dropped_from_the_online_set() {
+        let mut store = empty_store();
+        store.apply_seed_online(&[UserId(1), UserId(2), UserId(3)]);
+        let changed = store.apply_seed_presence_status(&[
+            (UserId(1), USER_STATUS_ONLINE.to_string()),
+            (UserId(2), USER_STATUS_IDLE.to_string()),
+            (UserId(3), USER_STATUS_INVISIBLE.to_string()),
+        ]);
+
+        assert!(changed);
+        assert!(store.is_online(UserId(1)));
+        assert!(store.is_online(UserId(2)));
+        assert!(!store.is_online(UserId(3)));
+        assert_eq!(store.presence_status(UserId(2)), Some(USER_STATUS_IDLE));
+    }
+
+    #[test]
+    fn a_realtime_invisible_join_does_not_stay_online() {
+        let mut store = empty_store();
+        store.apply_status_presence(&[UserId(1), UserId(2)], &[]);
+        store.apply_presence_statuses(
+            &[
+                (UserId(1), USER_STATUS_DND.to_string()),
+                (UserId(2), USER_STATUS_INVISIBLE.to_string()),
+            ],
+            &[],
+        );
+
+        assert!(store.is_online(UserId(1)));
+        assert!(!store.is_online(UserId(2)));
+        assert_eq!(store.presence_status(UserId(1)), Some(USER_STATUS_DND));
+    }
+
+    #[test]
+    fn a_seeded_status_drives_the_member_badge() {
+        let mut store = empty_store();
+        store.apply_seed_online(&[UserId(1), UserId(2), UserId(3), UserId(4)]);
+        store.apply_seed_presence_status(&[
+            (UserId(1), USER_STATUS_ONLINE.to_string()),
+            (UserId(2), USER_STATUS_IDLE.to_string()),
+            (UserId(3), USER_STATUS_DND.to_string()),
+            (UserId(4), USER_STATUS_INVISIBLE.to_string()),
+        ]);
+
+        assert_eq!(
+            store.member_presence(UserId(1), None),
+            DmAvatarPresence::Online
+        );
+        assert_eq!(
+            store.member_presence(UserId(2), None),
+            DmAvatarPresence::Idle
+        );
+        assert_eq!(
+            store.member_presence(UserId(3), None),
+            DmAvatarPresence::Dnd
+        );
+        assert_eq!(
+            store.member_presence(UserId(4), None),
+            DmAvatarPresence::None
+        );
+    }
+
+    #[test]
+    fn an_online_member_without_a_seeded_status_falls_back_to_online() {
+        let mut store = empty_store();
+        store.apply_seed_online(&[UserId(1)]);
+
+        assert_eq!(
+            store.member_presence(UserId(1), None),
+            DmAvatarPresence::Online
+        );
     }
 
     #[test]
