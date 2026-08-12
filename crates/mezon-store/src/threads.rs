@@ -397,7 +397,11 @@ impl ThreadsStore {
         cx: &mut Context<Self>,
     ) {
         let channel_id = ev.channel_id.to_string();
-        self.set_thread_active(&channel_id, ev.status, cx);
+        if ev.active == THREAD_STATUS_ARCHIVED {
+            self.mark_thread_archived(&channel_id, cx);
+        } else {
+            self.mark_thread_active(&channel_id, cx);
+        }
     }
 
     fn apply_thread_message(&mut self, msg: &api::ChannelMessage, cx: &mut Context<Self>) {
@@ -1208,15 +1212,21 @@ fn patch_thread_in_list(
     true
 }
 
-pub fn group_threads(threads: &[ThreadSummary]) -> (Vec<usize>, Vec<usize>, Vec<usize>) {
+pub struct GroupedThreadIndexes {
+    pub joined: Vec<usize>,
+    pub active: Vec<usize>,
+    pub archived: Vec<usize>,
+}
+
+pub fn group_threads(threads: &[ThreadSummary]) -> GroupedThreadIndexes {
     let mut joined = Vec::new();
     let mut active = Vec::new();
-    let mut older = Vec::new();
+    let mut archived = Vec::new();
 
     for (index, t) in threads.iter().enumerate() {
         match t.active {
             THREAD_STATUS_JOINED => joined.push(index),
-            THREAD_STATUS_ARCHIVED => older.push(index),
+            THREAD_STATUS_ARCHIVED => archived.push(index),
             _ => active.push(index),
         }
     }
@@ -1226,9 +1236,13 @@ pub fn group_threads(threads: &[ThreadSummary]) -> (Vec<usize>, Vec<usize>, Vec<
     };
     sort(&mut joined);
     sort(&mut active);
-    sort(&mut older);
+    sort(&mut archived);
 
-    (joined, active, older)
+    GroupedThreadIndexes {
+        joined,
+        active,
+        archived,
+    }
 }
 
 #[cfg(test)]
@@ -1480,7 +1494,7 @@ mod tests {
     }
 
     #[test]
-    fn group_threads_moves_archived_to_older_bucket() {
+    fn group_threads_partitions_by_status() {
         let threads = vec![
             ThreadSummary {
                 channel_id: "1".into(),
@@ -1528,10 +1542,10 @@ mod tests {
                 member_count: 0,
             },
         ];
-        let (joined, active, older) = group_threads(&threads);
-        assert_eq!(joined, vec![0]);
-        assert_eq!(active, vec![2]);
-        assert_eq!(older, vec![1]);
+        let grouped = group_threads(&threads);
+        assert_eq!(grouped.joined, vec![0]);
+        assert_eq!(grouped.active, vec![2]);
+        assert_eq!(grouped.archived, vec![1]);
     }
 
     #[test]
@@ -1550,6 +1564,15 @@ mod tests {
             thread_create_fail_reason(&err),
             ThreadCreateFailReason::Other
         );
+    }
+
+    #[test]
+    fn channel_archive_event_uses_active_not_status() {
+        let archive_active = 0i32;
+        let server_status_on_archive = 1i32;
+        assert_eq!(archive_active, THREAD_STATUS_ARCHIVED);
+        assert_ne!(server_status_on_archive, THREAD_STATUS_ARCHIVED);
+        assert_eq!(server_status_on_archive, THREAD_STATUS_JOINED);
     }
 
     #[gpui::test]

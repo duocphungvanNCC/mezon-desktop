@@ -1175,6 +1175,7 @@ fn reaction_float(r: &DisplayedReaction) -> AnyElement {
                 .justify_center()
                 .child(
                     img(r.emoji_src.clone())
+                        .id(("voice-reaction-frames", seq))
                         .size(px(40.))
                         .object_fit(ObjectFit::Contain)
                         .with_animation(
@@ -1208,7 +1209,10 @@ fn reaction_float(r: &DisplayedReaction) -> AnyElement {
         .into_any_element()
 }
 
-fn reactions_overlay(store: &VoiceStore) -> Option<AnyElement> {
+fn reactions_overlay(
+    store: &VoiceStore,
+    emoji_cache: Entity<crate::image_cache::LruImageCache>,
+) -> Option<AnyElement> {
     let reactions = store.displayed_reactions();
     if reactions.is_empty() {
         return None;
@@ -1218,6 +1222,7 @@ fn reactions_overlay(store: &VoiceStore) -> Option<AnyElement> {
             .absolute()
             .inset_0()
             .overflow_hidden()
+            .image_cache(emoji_cache)
             .children(reactions.iter().map(reaction_float))
             .into_any_element(),
     )
@@ -1357,6 +1362,9 @@ fn render_in_call(
         ),
     });
 
+    let emoji_cache = crate::image_cache::shared_emoji_cache(cx);
+    let reactions = reactions_overlay(voice.read(cx), emoji_cache);
+
     let theme = cx.theme();
     let connection_status: Option<(SharedString, Hsla, bool)> = if connecting {
         Some((
@@ -1484,7 +1492,7 @@ fn render_in_call(
             ))
         })
         .children(connection_toast)
-        .children(reactions_overlay(voice.read(cx)))
+        .children(reactions)
         .children(raised_hands_overlay(cx, channel.clan_id, voice.read(cx)))
         .children(mic_modal)
         .children(participant_menu)

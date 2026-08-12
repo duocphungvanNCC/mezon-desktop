@@ -125,7 +125,7 @@ pub use emoji::{
     normalize_emoji_shortname, strip_emoji_colons, validate_emoji_create_shortname,
     validate_emoticon_file,
 };
-pub use events::{ClanEventItem, EventsEvent, EventsStore};
+pub use events::{ClanEventItem, CreateEventDraft, EventsEvent, EventsStore};
 pub use files::{
     ChannelDocument, FILES_BROAD_QUERY, FILES_CACHE_TTL, FILES_PAGE_SIZE, FILES_TYPED_QUERY,
     FilesEvent, FilesStore, filename_matches_query, is_document, short_file_type_label,
@@ -167,7 +167,7 @@ pub use notification_push::NotificationPushStore;
 pub use notification_setting::{NotificationSettingEvent, NotificationSettingStore};
 pub use ogp::{
     OgpResult, OutgoingOgp, fetch_invite_preview, fetch_ogp, first_previewable_url,
-    internal_invite_id,
+    internal_invite_id, invite_id_from_url, trusted_invite_id,
 };
 pub use permissions::{
     ClanSettingsPermissions, PERMISSION_ADMINISTRATOR, PERMISSION_CLAN_OWNER,
@@ -191,8 +191,8 @@ pub use roles::{
 pub use sticker::{ClanSound, Sticker, StickerEvent, StickerStore};
 pub use stream::{StreamMember, StreamPhase, StreamStore};
 pub use threads::{
-    THREAD_STATUS_ARCHIVED, THREAD_STATUS_JOINED, ThreadCreateFailReason, ThreadSummary,
-    ThreadsEvent, ThreadsStore, group_threads,
+    GroupedThreadIndexes, THREAD_STATUS_ARCHIVED, THREAD_STATUS_JOINED, ThreadCreateFailReason,
+    ThreadSummary, ThreadsEvent, ThreadsStore, group_threads,
 };
 pub use topic_badges::{TopicBadgeEvent, TopicBadgeStore};
 pub use topics::{TopicsEvent, TopicsStore};

@@ -9,7 +9,7 @@ use mezon_store::{
 };
 
 use crate::app::shell::Shell;
-use crate::components::primitives::{Avatar, Icon, IconName};
+use crate::components::primitives::{Avatar, Button, ButtonVariants, Icon, IconName};
 use crate::theme::ActiveTheme;
 
 pub struct ClanEventsModal {
@@ -203,7 +203,7 @@ impl ClanEventsModal {
                             .px_2()
                             .py_1()
                             .rounded_full()
-                            .bg(theme.tokens.bg_secondary)
+                            .bg(theme.surfaces.secondary)
                             .child(interested.to_string())
                             .child(
                                 Icon::new(IconName::MemberList)
@@ -254,7 +254,7 @@ impl ClanEventsModal {
                 .px_4()
                 .py_2()
                 .rounded_lg()
-                .bg(theme.tokens.bg_secondary)
+                .bg(theme.surfaces.secondary)
                 .text_color(theme.text_secondary)
                 .child(Icon::new(icon).size_4().text_color(theme.text_secondary))
                 .child(div().text_color(theme.text_secondary).child(label))
@@ -277,7 +277,7 @@ impl ClanEventsModal {
             .rounded_lg()
             .border_1()
             .border_color(theme.border)
-            .bg(theme.tokens.bg_theme_direct_message)
+            .bg(theme.surfaces.direct_message)
             .overflow_hidden()
             .child(div().p_4().child(heading).child(details))
             .child(
@@ -585,7 +585,20 @@ impl Render for ClanEventsModal {
                                     .text_color(theme.text_secondary),
                             )
                             .child(div().font_weight(FontWeight::BOLD).child(event_count_label))
-                            .child(div().h(px(28.)).w(px(2.)).bg(theme.border)),
+                            .child(div().h(px(28.)).w(px(2.)).bg(theme.border))
+                            .child(
+                                Button::new("create-event")
+                                    .label(tr("eventCreator.actions.create"))
+                                    .primary()
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        super::create_event_modal::open_create_event_modal(
+                                            this.clan_id,
+                                            this.settings.clone(),
+                                            window,
+                                            cx,
+                                        );
+                                    })),
+                            ),
                     )
                     .child(
                         div()

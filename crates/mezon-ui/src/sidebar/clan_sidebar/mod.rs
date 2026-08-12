@@ -344,7 +344,6 @@ impl Render for ClanSidebar {
             .flex_col()
             .w_full()
             .h_full()
-            .pb(px(68.))
             .items_center()
             .child(
                 div()
@@ -352,7 +351,7 @@ impl Render for ClanSidebar {
                     .flex_col()
                     .items_center()
                     .w_full()
-                    .bg(theme.bg_tertiary)
+                    .bg(theme.surface_for(theme.bg_tertiary))
                     .pt(px(window_controls::CLAN_SIDEBAR_HEADER_TOP))
                     .child(render_window_nav(
                         theme,

@@ -65,6 +65,7 @@ const CHANNEL_TYPE_CHANNEL: i32 = 1;
 const CHANNEL_TYPE_THREAD: i32 = 7;
 use crate::message::STICKER_FILETYPE;
 const AUDIO_FILETYPE: &str = "audio/mpeg";
+pub const ANONYMOUS_SENDER_NAME: &str = "Anonymous";
 const MAX_MESSAGES_PER_CHANNEL: usize = 200;
 const MAX_CACHED_CHANNELS: usize = 30;
 const LAST_SEEN_DEBOUNCE: Duration = Duration::from_millis(1000);
@@ -83,6 +84,7 @@ struct PendingSendPayload {
     reply: Option<ReplyDraft>,
     anonymous: bool,
     message_code: i32,
+    url_attachment: Option<UrlAttachment>,
 }
 
 #[derive(Clone, Debug)]
@@ -104,6 +106,9 @@ pub struct TopicAppend {
 
 #[derive(Debug, Clone)]
 pub enum MessagesEvent {
+    /// A send failed with no row to mark (the channel's first page had not landed,
+    /// so there is no optimistic row) — the UI has to surface it as a toast.
+    SendFailedWithoutRow,
     /// The whole viewport was replaced (channel switch / fetch). `count` is the
     /// new row count.
     Reset {
@@ -255,6 +260,24 @@ pub struct OutgoingAttachment {
     pub height: i32,
     pub duration: i32,
     pub poster_jpeg: Option<Vec<u8>>,
+}
+
+impl OutgoingAttachment {
+    pub fn into_upload(self) -> UploadFile {
+        let thumbnail = self.poster_jpeg.map(|jpeg| UploadThumbnail {
+            filename: format!("{}.jpg", self.filename),
+            data: jpeg,
+        });
+        UploadFile {
+            path: self.path,
+            filename: self.filename,
+            filetype: self.filetype,
+            width: self.width,
+            height: self.height,
+            duration: self.duration,
+            thumbnail,
+        }
+    }
 }
 
 #[derive(Default)]
@@ -581,7 +604,7 @@ pub struct MessagesStore {
     pending_send_payloads: HashMap<MessageId, PendingSendPayload>,
     anonymous_clans: HashSet<ClanId>,
     topic_anonymous_mode: bool,
-    last_anonymous_mode: bool,
+    last_anonymous_mode: (bool, bool),
     last_typing_sent: Option<(ChannelId, Instant)>,
     buzz_player: Option<AudioPlayer>,
     buzz_sound_loading: bool,
@@ -951,7 +974,7 @@ impl MessagesStore {
 
         let channel_sub = cx.subscribe(&ChannelList::global(cx), |this, _channel, event, cx| {
             if let ChannelEvent::ActiveChannelChanged(channel_id) = event {
-                if channel_id.is_none() && this.is_dm {
+                if this.is_dm {
                     return;
                 }
                 this.on_active_channel_changed(*channel_id, cx);
@@ -1002,7 +1025,7 @@ impl MessagesStore {
             pending_send_payloads: HashMap::new(),
             anonymous_clans: HashSet::new(),
             topic_anonymous_mode: false,
-            last_anonymous_mode: false,
+            last_anonymous_mode: (false, false),
             last_typing_sent: None,
             buzz_player: None,
             buzz_sound_loading: false,
@@ -1240,15 +1263,33 @@ impl MessagesStore {
         ) {
             return;
         }
-        let badge_count = self.channel_badge_count(channel_id, clan_id, cx);
-        self.pending_last_seen = Some(PendingLastSeen {
+        let live_badge = self.channel_badge_count(channel_id, clan_id, cx);
+        let badge_count = match &self.pending_last_seen {
+            Some(p) if p.channel_id == channel_id => p.badge_count.max(live_badge),
+            _ => live_badge,
+        };
+        tracing::debug!(
+            target: "badge_flow",
+            clan = clan_id.get(),
+            channel = channel_id.get(),
+            message = message_id.get(),
+            badge_count,
+            "viewport seen — arming last-seen debounce"
+        );
+        let pending = PendingLastSeen {
             clan_id,
             channel_id,
             message_id,
             create_time,
             mode: self.mode,
             badge_count,
-        });
+        };
+        if live_badge > 0 || self.channel_is_unread(channel_id, clan_id, cx) {
+            self.apply_local_last_seen(&pending, cx);
+        } else {
+            self.set_last_read_message(channel_id, message_id);
+        }
+        self.pending_last_seen = Some(pending);
         self.arm_last_seen_debounce(cx);
     }
 
@@ -1267,17 +1308,73 @@ impl MessagesStore {
 
     fn channel_badge_count(&self, channel_id: ChannelId, clan_id: ClanId, cx: &App) -> u32 {
         if self.is_dm {
-            DirectMessageStore::global(cx)
-                .read(cx)
-                .find(channel_id)
-                .map(|c| c.unread_count)
+            DirectMessageStore::try_global(cx)
+                .and_then(|dm| dm.read(cx).find(channel_id).map(|c| c.unread_count))
                 .unwrap_or(0)
         } else {
-            ChannelList::global(cx)
-                .read(cx)
-                .channel(clan_id, channel_id)
-                .map(|c| c.badge_count)
+            ChannelList::try_global(cx)
+                .and_then(|cl| {
+                    cl.read(cx)
+                        .channel(clan_id, channel_id)
+                        .map(|c| c.badge_count)
+                })
                 .unwrap_or(0)
+        }
+    }
+
+    fn mark_empty_channel_seen(&mut self, channel_id: ChannelId, cx: &mut Context<Self>) {
+        let Some(clan_id) = self.active_clan_id else {
+            return;
+        };
+        if self.channel_badge_count(channel_id, clan_id, cx) == 0
+            && !self.channel_is_unread(channel_id, clan_id, cx)
+        {
+            return;
+        }
+        let (tail_id, tail_ts) = if self.is_dm {
+            (MessageId(0), 0)
+        } else {
+            ChannelList::try_global(cx)
+                .and_then(|cl| {
+                    cl.read(cx)
+                        .channel(clan_id, channel_id)
+                        .map(|ch| (ch.last_sent_message_id, ch.last_sent_timestamp))
+                })
+                .unwrap_or((MessageId(0), 0))
+        };
+        let pending = PendingLastSeen {
+            clan_id,
+            channel_id,
+            message_id: tail_id,
+            create_time: tail_ts,
+            mode: self.mode,
+            badge_count: self.channel_badge_count(channel_id, clan_id, cx),
+        };
+        tracing::debug!(
+            target: "badge_flow",
+            clan = clan_id.get(),
+            channel = channel_id.get(),
+            badge_count = pending.badge_count,
+            "empty channel opened — clearing its unread state"
+        );
+        self.apply_local_last_seen(&pending, cx);
+        self.pending_last_seen = Some(pending);
+        self.arm_last_seen_debounce(cx);
+    }
+
+    fn channel_is_unread(&self, channel_id: ChannelId, clan_id: ClanId, cx: &App) -> bool {
+        if self.is_dm {
+            DirectMessageStore::try_global(cx).is_some_and(|dm| {
+                dm.read(cx).find(channel_id).is_some_and(|c| {
+                    c.unread_count > 0 || c.last_sent_timestamp > c.last_seen_timestamp
+                })
+            })
+        } else {
+            ChannelList::try_global(cx).is_some_and(|cl| {
+                cl.read(cx)
+                    .channel(clan_id, channel_id)
+                    .is_some_and(|c| c.is_unread())
+            })
         }
     }
 
@@ -1328,7 +1425,21 @@ impl MessagesStore {
             return;
         }
 
-        self.apply_local_last_seen(&pending, cx);
+        tracing::debug!(
+            target: "badge_flow",
+            clan = pending.clan_id.get(),
+            channel = pending.channel_id.get(),
+            message = pending.message_id.get(),
+            badge_count = pending.badge_count,
+            "send_last_seen — writing last seen to server"
+        );
+        let newer_than_tracked = self
+            .last_read_message_by_channel
+            .get(&pending.channel_id)
+            .is_none_or(|cur| snowflake_seq(pending.message_id) >= snowflake_seq(*cur));
+        if newer_than_tracked {
+            self.set_last_read_message(pending.channel_id, pending.message_id);
+        }
         self.last_seen_fingerprint
             .insert(pending.channel_id, fingerprint);
 
@@ -1972,16 +2083,17 @@ impl MessagesStore {
         }
     }
 
+    pub fn topic_anonymous_mode(&self) -> bool {
+        self.topic_anonymous_mode
+    }
+
     pub fn is_anonymous_mode(&self) -> bool {
-        if self.active_topic_id.is_some() && self.topic_anonymous_mode {
-            return true;
-        }
         self.active_clan_id
-            .is_some_and(|id| self.anonymous_clans.contains(&id))
+            .is_some_and(|id| !id.is_zero() && self.anonymous_clans.contains(&id))
     }
 
     pub(crate) fn sync_anonymous_mode(&mut self, cx: &mut Context<Self>) {
-        let next = self.is_anonymous_mode();
+        let next = (self.is_anonymous_mode(), self.topic_anonymous_mode);
         if self.last_anonymous_mode == next {
             return;
         }
@@ -2324,7 +2436,6 @@ impl MessagesStore {
             return;
         }
         let storage_id = self.reaction_storage_channel(message_id);
-        let payload = self.pending_send_payloads.remove(&message_id);
         let snapshot = self
             .cache
             .get(&storage_id)
@@ -2334,9 +2445,24 @@ impl MessagesStore {
         let Some(failed) = snapshot else {
             return;
         };
-        self.apply_message_remove(storage_id, message_id, cx);
+        let payload = self.pending_send_payloads.remove(&message_id);
         if let Some(payload) = payload {
+            self.apply_message_remove(storage_id, message_id, cx);
             let (uid, uname) = (failed.sender_id.clone(), failed.sender_name.to_string());
+            if let Some(attachment) = payload.url_attachment {
+                self.send_url_attachment(
+                    attachment.url,
+                    attachment.filename,
+                    attachment.filetype,
+                    attachment.width,
+                    attachment.height,
+                    uid,
+                    uname,
+                    payload.anonymous,
+                    cx,
+                );
+                return;
+            }
             self.send_message_with_payload(
                 payload.content,
                 uid,
@@ -2368,6 +2494,12 @@ impl MessagesStore {
                 })
             })
             .collect();
+        if content.is_empty() && attachments.is_empty() {
+            tracing::warn!("resend_message: {message_id:?} has no replayable payload left");
+            return;
+        }
+        self.apply_message_remove(storage_id, message_id, cx);
+        let anonymous = is_anonymous_sender_id(&failed.sender_id, cx);
         self.send_message_with_payload(
             content,
             failed.sender_id.clone(),
@@ -2376,7 +2508,7 @@ impl MessagesStore {
             attachments,
             None,
             None,
-            false,
+            anonymous,
             0,
             cx,
         );
@@ -2420,6 +2552,9 @@ impl MessagesStore {
     pub fn send_buzz_message(&mut self, content: String, cx: &mut Context<Self>) {
         let trimmed = content.trim();
         if trimmed.is_empty() {
+            return;
+        }
+        if self.is_anonymous_mode() {
             return;
         }
         let Some(user_id) = viewer_user_id(cx) else {
@@ -3019,13 +3154,15 @@ impl MessagesStore {
         &mut self,
         topic_id: i64,
         api_msg: mezon_client::transport::ApiMessage,
+        anonymous: bool,
         cx: &mut Context<Self>,
     ) -> TopicAppend {
         let topic_key = ChannelId(topic_id);
         let cfg = AppConfig::try_global(cx);
         let viewer_id = viewer_user_id(cx);
         let mut msg = message_from_api(api_msg, cfg, viewer_id);
-        enrich_sparse_topic_ack(&mut msg, viewer_id, self.active_clan_id, cx);
+        let masked = anonymous && anonymize_sender(&mut msg, cfg);
+        enrich_sparse_topic_ack(&mut msg, viewer_id, self.active_clan_id, masked, cx);
         mark_pending_attachments_uploading(&mut msg.attachments);
         let message_id = msg.id;
         let create_time = if msg.create_time > 0 {
@@ -3526,6 +3663,7 @@ impl MessagesStore {
         receiver_id: i64,
         content: String,
         content_tokens: OutgoingContent,
+        attachments: Vec<OutgoingAttachment>,
         cx: &mut Context<Self>,
     ) {
         let Some(channel_id) = self.active_channel_id else {
@@ -3536,6 +3674,14 @@ impl MessagesStore {
         };
         let is_public = self.is_public;
         let mode = self.mode;
+        let reply = self.reply_target.take();
+        if reply.is_some() {
+            cx.emit(MessagesEvent::ReplyTargetChanged);
+        }
+        let reply_clan_id = (!self.is_dm)
+            .then_some(self.active_clan_id)
+            .flatten()
+            .filter(|clan_id| !clan_id.is_zero());
 
         let OutgoingContent {
             mentions,
@@ -3554,11 +3700,41 @@ impl MessagesStore {
             .into_iter()
             .map(OutgoingEmoji::into_transport)
             .collect();
+        let reply_ref = reply.map(|draft| {
+            let (clan_nick, display_name, username, avatar) = reference_sender_fields(
+                draft.sender_id,
+                (
+                    "",
+                    &draft.sender_name,
+                    &draft.sender_name,
+                    &draft.sender_avatar,
+                ),
+                reply_clan_id,
+                cx,
+            );
+            OutgoingReply {
+                message_ref_id: draft.message_ref_id.get(),
+                content: draft.content_preview,
+                has_attachment: draft.has_attachment,
+                message_sender_id: draft.sender_id.get(),
+                message_sender_username: username,
+                message_sender_avatar: avatar,
+                message_sender_clan_nick: clan_nick,
+                message_sender_display_name: display_name,
+            }
+        });
 
         let api = self.api.clone();
         let clan_num = clan_id.get();
         let channel_num = channel_id.get();
         cx.spawn(async move |_this, _cx| {
+            let proto_attachments = match upload_attachments_now(&api, attachments).await {
+                Ok(attachments) => attachments,
+                Err(e) => {
+                    tracing::error!("send_ephemeral_message attachments failed: {e}");
+                    return;
+                }
+            };
             if let Err(e) = api
                 .write_ephemeral_message(
                     receiver_id,
@@ -3570,6 +3746,8 @@ impl MessagesStore {
                     transport_mentions,
                     transport_hashtags,
                     transport_emojis,
+                    proto_attachments,
+                    reply_ref,
                 )
                 .await
             {
@@ -3644,9 +3822,6 @@ impl MessagesStore {
         let pending_ogp = ogp.clone();
 
         self.clear_last_read_message(channel_id);
-        let Some(channel) = self.cache.get_mut(&channel_id) else {
-            return;
-        };
         let grouping_sender_id = if anonymous {
             AppConfig::try_global(cx)
                 .filter(|c| !c.anonymous_user_id.is_empty())
@@ -3655,8 +3830,13 @@ impl MessagesStore {
         } else {
             sender_id.clone()
         };
-        let create_time = optimistic_create_time(&channel.messages, &grouping_sender_id);
-        let sort_id = optimistic_sort_id(&channel.messages);
+        let unloaded = MessageList::default();
+        let loaded = self
+            .cache
+            .get(&channel_id)
+            .map_or(&unloaded, |channel| &channel.messages);
+        let create_time = optimistic_create_time(loaded, &grouping_sender_id);
+        let sort_id = optimistic_sort_id(loaded);
         let temp_id = MessageId::next_optimistic();
         self.pending_send_payloads.insert(
             temp_id,
@@ -3668,6 +3848,7 @@ impl MessagesStore {
                 reply: reply.clone(),
                 anonymous,
                 message_code,
+                url_attachment: None,
             },
         );
 
@@ -3728,7 +3909,9 @@ impl MessagesStore {
                 mk,
                 ..Default::default()
             };
-            optimistic = optimistic.with_spans(parse_spans(&tokens));
+            let mut optimistic_spans = parse_spans(&tokens);
+            crate::message::fill_emoji_sources(&mut optimistic_spans, AppConfig::try_global(cx));
+            optimistic = optimistic.with_spans(optimistic_spans);
             if ogp.is_some() {
                 optimistic =
                     optimistic.with_ogp(build_ogp_preview(&tokens, AppConfig::try_global(cx)));
@@ -3772,23 +3955,22 @@ impl MessagesStore {
                 .with_attachments(optimistic_attachments)
                 .with_media_presentation(album_layout, viewer_media);
         }
-        if let Some(config) = AppConfig::try_global(cx)
-            && anonymous
-            && !config.anonymous_user_id.is_empty()
-        {
-            optimistic.sender_id = config.anonymous_user_id.clone();
-            optimistic.sender_name = "Anonymous".into();
-            optimistic.avatar_url = SharedString::default();
-            optimistic.avatar_proxied = SharedString::default();
+        if anonymous {
+            let _ = anonymize_sender(&mut optimistic, AppConfig::try_global(cx));
         }
         if message_code == MESSAGE_BUZZ_CODE {
             optimistic.code = MessageCode::MessageBuzz;
         } else if message_code == LOCATION_CODE {
             optimistic.code = MessageCode::Location;
         }
-        let old_len = channel.messages.len();
-        channel.messages.push_grouped(optimistic);
-        self.emit_appended(old_len, cx);
+        let appended = self.cache.get_mut(&channel_id).map(|channel| {
+            let old_len = channel.messages.len();
+            channel.messages.push_grouped(optimistic);
+            old_len
+        });
+        if let Some(old_len) = appended {
+            self.emit_appended(old_len, cx);
+        }
 
         let api = self.api.clone();
         let reply_sender = reply.as_ref().map(|draft| {
@@ -3831,21 +4013,7 @@ impl MessagesStore {
             if has_attachments {
                 let files: Vec<UploadFile> = attachments
                     .into_iter()
-                    .map(|att| {
-                        let thumbnail = att.poster_jpeg.map(|jpeg| UploadThumbnail {
-                            filename: format!("{}.jpg", att.filename),
-                            data: jpeg,
-                        });
-                        UploadFile {
-                            path: att.path,
-                            filename: att.filename,
-                            filetype: att.filetype,
-                            width: att.width,
-                            height: att.height,
-                            duration: att.duration,
-                            thumbnail,
-                        }
-                    })
+                    .map(OutgoingAttachment::into_upload)
                     .collect();
                 let presigned = match api.presign_files(files).await {
                     Ok(presigned) => presigned,
@@ -3863,7 +4031,11 @@ impl MessagesStore {
                     .iter()
                     .map(|a| presign::normalize_presign_key(&a.url))
                     .collect();
-                let update_mentions = transport_mentions.clone();
+                let update_mentions = if anonymous {
+                    Vec::new()
+                } else {
+                    transport_mentions.clone()
+                };
                 let update_hashtags = transport_hashtags.clone();
                 let update_emojis = transport_emojis.clone();
                 let sent = match api
@@ -3879,6 +4051,7 @@ impl MessagesStore {
                         transport_hashtags,
                         transport_emojis,
                         Vec::new(),
+                        send_flags,
                     )
                     .await
                 {
@@ -3894,8 +4067,11 @@ impl MessagesStore {
                 let real_message_id = sent.message_id;
                 let create_time_seconds = sent.create_time.max(0) as u32;
                 let _ = this.update(cx, |this, cx| {
-                    let confirmed =
+                    let mut confirmed =
                         message_from_api(sent, AppConfig::try_global(cx), viewer_user_id(cx));
+                    if anonymous {
+                        let _ = anonymize_sender(&mut confirmed, AppConfig::try_global(cx));
+                    }
                     this.reconcile_temp(channel_id, temp_id, confirmed, cx);
                 });
                 let (on_complete, mut completions) =
@@ -3945,6 +4121,7 @@ impl MessagesStore {
                         transport_hashtags,
                         transport_emojis,
                         ogp,
+                        send_flags,
                     )
                     .await
                 } else {
@@ -3965,11 +4142,14 @@ impl MessagesStore {
                 match result {
                     Ok(sent) => {
                         let _ = this.update(cx, |this, cx| {
-                            let confirmed = message_from_api(
+                            let mut confirmed = message_from_api(
                                 sent,
                                 AppConfig::try_global(cx),
                                 viewer_user_id(cx),
                             );
+                            if anonymous {
+                                let _ = anonymize_sender(&mut confirmed, AppConfig::try_global(cx));
+                            }
                             this.reconcile_temp(channel_id, temp_id, confirmed, cx);
                         });
                     }
@@ -3996,11 +4176,12 @@ impl MessagesStore {
         self.send_url_attachment(
             url,
             filename,
-            STICKER_FILETYPE,
+            STICKER_FILETYPE.to_string(),
             0,
             0,
             sender_id,
             sender_name,
+            self.is_anonymous_mode(),
             cx,
         );
     }
@@ -4017,11 +4198,12 @@ impl MessagesStore {
         self.send_url_attachment(
             url,
             String::new(),
-            STICKER_FILETYPE,
+            STICKER_FILETYPE.to_string(),
             width,
             height,
             sender_id,
             sender_name,
+            self.is_anonymous_mode(),
             cx,
         );
     }
@@ -4037,11 +4219,12 @@ impl MessagesStore {
         self.send_url_attachment(
             url,
             filename,
-            AUDIO_FILETYPE,
+            AUDIO_FILETYPE.to_string(),
             0,
             0,
             sender_id,
             sender_name,
+            self.is_anonymous_mode(),
             cx,
         );
     }
@@ -4050,11 +4233,12 @@ impl MessagesStore {
         &mut self,
         url: String,
         filename: String,
-        filetype: &'static str,
+        filetype: String,
         width: i32,
         height: i32,
         sender_id: String,
         sender_name: String,
+        anonymous: bool,
         cx: &mut Context<Self>,
     ) {
         if url.is_empty() {
@@ -4069,18 +4253,47 @@ impl MessagesStore {
         let is_public = self.is_public;
         let mode = self.mode;
         self.clear_last_read_message(channel_id);
-        let Some(channel) = self.cache.get_mut(&channel_id) else {
-            return;
+        let grouping_sender_id = if anonymous {
+            AppConfig::try_global(cx)
+                .filter(|c| !c.anonymous_user_id.is_empty())
+                .map(|c| c.anonymous_user_id.clone())
+                .unwrap_or(sender_id.clone())
+        } else {
+            sender_id.clone()
         };
-        let create_time = optimistic_create_time(&channel.messages, &sender_id);
-        let sort_id = optimistic_sort_id(&channel.messages);
+        let unloaded = MessageList::default();
+        let loaded = self
+            .cache
+            .get(&channel_id)
+            .map_or(&unloaded, |channel| &channel.messages);
+        let create_time = optimistic_create_time(loaded, &grouping_sender_id);
+        let sort_id = optimistic_sort_id(loaded);
         let temp_id = MessageId::next_optimistic();
+        self.pending_send_payloads.insert(
+            temp_id,
+            PendingSendPayload {
+                content: String::new(),
+                content_tokens: OutgoingContent::default(),
+                attachments: Vec::new(),
+                ogp: None,
+                reply: None,
+                anonymous,
+                message_code: 0,
+                url_attachment: Some(UrlAttachment {
+                    url: url.clone(),
+                    filename: filename.clone(),
+                    filetype: filetype.clone(),
+                    width,
+                    height,
+                }),
+            },
+        );
 
         let optimistic_attachment = MessageAttachment::from_api(
             mezon_client::transport::ApiAttachment {
                 url: url.clone(),
                 filename: filename.clone(),
-                filetype: filetype.to_string(),
+                filetype: filetype.clone(),
                 width,
                 height,
                 thumbnail: String::new(),
@@ -4092,14 +4305,23 @@ impl MessagesStore {
 
         let (display_name, avatar_url, avatar_proxied) =
             outgoing_sender_profile(&sender_id, &sender_name, clan_id, cx);
-        let optimistic = Message::new(temp_id, String::new(), sender_id, display_name, create_time)
-            .with_sort_id(sort_id)
-            .with_avatar(avatar_url)
-            .with_avatar_proxied(avatar_proxied)
-            .with_attachments(vec![optimistic_attachment]);
-        let old_len = channel.messages.len();
-        channel.messages.push_grouped(optimistic);
-        self.emit_appended(old_len, cx);
+        let mut optimistic =
+            Message::new(temp_id, String::new(), sender_id, display_name, create_time)
+                .with_sort_id(sort_id)
+                .with_avatar(avatar_url)
+                .with_avatar_proxied(avatar_proxied)
+                .with_attachments(vec![optimistic_attachment]);
+        if anonymous {
+            let _ = anonymize_sender(&mut optimistic, AppConfig::try_global(cx));
+        }
+        let appended = self.cache.get_mut(&channel_id).map(|channel| {
+            let old_len = channel.messages.len();
+            channel.messages.push_grouped(optimistic);
+            old_len
+        });
+        if let Some(old_len) = appended {
+            self.emit_appended(old_len, cx);
+        }
 
         let api = self.api.clone();
         cx.spawn(async move |this, cx| {
@@ -4113,17 +4335,24 @@ impl MessagesStore {
                     vec![UrlAttachment {
                         url,
                         filename,
-                        filetype: filetype.to_string(),
+                        filetype,
                         width,
                         height,
                     }],
+                    OutgoingMessageFlags {
+                        anonymous_message: anonymous,
+                        message_code: 0,
+                    },
                 )
                 .await;
             match result {
                 Ok(sent) => {
                     let _ = this.update(cx, |this, cx| {
-                        let confirmed =
+                        let mut confirmed =
                             message_from_api(sent, AppConfig::try_global(cx), viewer_user_id(cx));
+                        if anonymous {
+                            let _ = anonymize_sender(&mut confirmed, AppConfig::try_global(cx));
+                        }
                         this.reconcile_temp(channel_id, temp_id, confirmed, cx);
                     });
                 }
@@ -4426,6 +4655,9 @@ impl MessagesStore {
                     prepare_messages(page.messages, AppConfig::try_global(cx), viewer_user_id(cx));
                 self.set_channel(channel_id, messages);
                 self.schedule_presign_expiry(cx);
+                if is_current && self.messages().is_empty() {
+                    self.mark_empty_channel_seen(channel_id, cx);
+                }
                 if is_current {
                     let count = self.messages().len();
                     cx.emit(MessagesEvent::Reset { count });
@@ -5560,26 +5792,25 @@ impl MessagesStore {
     ) {
         self.pending_send_payloads.remove(&temp_id);
         let confirmed_id = confirmed.id;
-        let (pushed, old_len) = {
-            let Some(channel) = self.cache.get_mut(&channel_id) else {
-                return;
-            };
-            let old_len = channel.messages.len();
-            if let Some(idx) = channel.messages.position(temp_id) {
-                let temp = channel
-                    .messages
-                    .get_by_id(temp_id)
-                    .expect("temp row must exist at position")
-                    .clone();
-                let confirmed = merge_sparse_sender(&temp, confirmed);
-                channel.messages.replace_at_and_regroup(idx, confirmed);
-                (false, old_len)
-            } else if !channel.messages.contains_id(confirmed.id) {
-                channel.messages.push_sorted(confirmed);
-                (true, old_len)
-            } else {
-                (false, old_len)
-            }
+        let Some(channel) = self.cache.get_mut(&channel_id) else {
+            self.set_last_message(channel_id, confirmed_id);
+            return;
+        };
+        let old_len = channel.messages.len();
+        let pushed = if let Some(idx) = channel.messages.position(temp_id) {
+            let temp = channel
+                .messages
+                .get_by_id(temp_id)
+                .expect("temp row must exist at position")
+                .clone();
+            let confirmed = merge_sparse_sender(&temp, confirmed);
+            channel.messages.replace_at_and_regroup(idx, confirmed);
+            false
+        } else if !channel.messages.contains_id(confirmed.id) {
+            channel.messages.push_sorted(confirmed);
+            true
+        } else {
+            false
         };
         self.set_last_message(channel_id, confirmed_id);
         if self.active_channel_id != Some(channel_id) {
@@ -5601,18 +5832,16 @@ impl MessagesStore {
         temp_id: MessageId,
         cx: &mut Context<Self>,
     ) {
-        let marked = {
-            let Some(channel) = self.cache.get_mut(&channel_id) else {
-                return;
-            };
-            match channel.messages.get_mut_by_id(temp_id) {
-                Some(message) => {
-                    message.send_failed = true;
-                    true
-                }
-                None => false,
-            }
-        };
+        let marked = self
+            .cache
+            .get_mut(&channel_id)
+            .and_then(|channel| channel.messages.get_mut_by_id(temp_id))
+            .map(|message| message.send_failed = true)
+            .is_some();
+        if !marked {
+            self.pending_send_payloads.remove(&temp_id);
+            cx.emit(MessagesEvent::SendFailedWithoutRow);
+        }
         if marked && self.active_channel_id == Some(channel_id) {
             cx.emit(MessagesEvent::Updated {
                 message_id: Some(temp_id),
@@ -5778,9 +6007,10 @@ fn should_write_last_seen(
     channel_tail: Option<MessageId>,
     viewport_id: MessageId,
 ) -> bool {
-    if let Some(seen) = last_seen_id
-        && snowflake_seq(viewport_id) >= snowflake_seq(seen)
-    {
+    let Some(seen) = last_seen_id else {
+        return true;
+    };
+    if snowflake_seq(viewport_id) >= snowflake_seq(seen) {
         return true;
     }
     channel_tail == Some(viewport_id)
@@ -6146,11 +6376,18 @@ fn enrich_sparse_topic_ack(
     msg: &mut Message,
     viewer_id: Option<UserId>,
     clan_id: Option<ClanId>,
+    masked: bool,
     cx: &App,
 ) {
     let Some(gaps) = sparse_topic_ack_gaps(msg) else {
         return;
     };
+    if masked {
+        if gaps.time {
+            msg.set_create_time(unix_now_seconds());
+        }
+        return;
+    }
     let sender_id = if gaps.sender {
         viewer_id
             .map(|id| id.to_string())
@@ -6254,6 +6491,50 @@ fn carry_local_previews(prior: &Message, confirmed: &mut Message) {
         att.uploading = prior_att.uploading;
         att.upload_failed = prior_att.upload_failed;
     }
+}
+
+async fn upload_attachments_now(
+    api: &AppApi,
+    attachments: Vec<OutgoingAttachment>,
+) -> anyhow::Result<Vec<mezon_proto::api::MessageAttachment>> {
+    if attachments.is_empty() {
+        return Ok(Vec::new());
+    }
+    let files: Vec<UploadFile> = attachments
+        .into_iter()
+        .map(OutgoingAttachment::into_upload)
+        .collect();
+    let presigned = api.presign_files(files).await?;
+    let uploaded: Vec<mezon_proto::api::MessageAttachment> =
+        presigned.iter().map(|p| p.attachment.clone()).collect();
+    api.upload_presigned_all(presigned).await?;
+    Ok(uploaded)
+}
+
+pub fn is_anonymous_sender_id(sender_id: &str, cx: &App) -> bool {
+    AppConfig::try_global(cx)
+        .is_some_and(|cfg| !cfg.anonymous_user_id.is_empty() && sender_id == cfg.anonymous_user_id)
+}
+
+pub fn is_anonymous_user_id(user_id: UserId, cx: &App) -> bool {
+    AppConfig::try_global(cx)
+        .and_then(|cfg| cfg.anonymous_user_id.parse::<i64>().ok())
+        .is_some_and(|anonymous| anonymous == user_id.get())
+}
+
+fn anonymize_sender(msg: &mut Message, cfg: Option<&AppConfig>) -> bool {
+    let Some(anonymous_user_id) = cfg
+        .map(|c| c.anonymous_user_id.as_str())
+        .filter(|id| !id.is_empty())
+    else {
+        return false;
+    };
+    msg.sender_id = anonymous_user_id.to_string();
+    msg.sender_user_id = anonymous_user_id.parse::<i64>().ok().map(UserId);
+    msg.sender_name = ANONYMOUS_SENDER_NAME.into();
+    msg.avatar_url = SharedString::default();
+    msg.avatar_proxied = SharedString::default();
+    true
 }
 
 fn merge_sparse_sender(prior: &Message, mut incoming: Message) -> Message {
@@ -6466,15 +6747,7 @@ fn message_from_api(m: ApiMessage, cfg: Option<&AppConfig>, viewer_id: Option<Us
         .map(|c| c.avatar_proxy(&m.avatar))
         .unwrap_or_else(|| m.avatar.clone());
     let mut spans = parse_spans(&m.content_tokens);
-    if let Some(cfg) = cfg {
-        for span in &mut spans {
-            if let MessageSpan::Emoji { emoji_id, src, .. } = span
-                && !emoji_id.is_empty()
-            {
-                *src = cfg.emoji_src(emoji_id).into();
-            }
-        }
-    }
+    crate::message::fill_emoji_sources(&mut spans, cfg);
     let mention_targets: Vec<MentionTarget> = m
         .entity_mentions
         .iter()
@@ -6696,9 +6969,14 @@ pub(crate) fn build_ogp_preview(
     Some(Box::new(OgpPreview {
         url,
         title: title.into(),
-        description: description.into(),
+        description: description.clone().into(),
+        description_collapsed: collapse_ogp_description(&description).into(),
         image_proxied: image_proxied.into(),
     }))
+}
+
+fn collapse_ogp_description(description: &str) -> String {
+    description.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 fn utf16_slice(text: &str, start: i64, end: i64) -> String {
@@ -7714,6 +7992,72 @@ mod tests {
                 "a dm is not a clan channel, so clearing the clan selection must leave it open"
             );
             assert_eq!(store.viewport_messages().len(), 1, "its rows must survive");
+        });
+    }
+
+    #[gpui::test]
+    fn selecting_a_clan_channel_must_not_hijack_an_open_dm(cx: &mut gpui::TestAppContext) {
+        let (store, dm) = cx.update(|cx| {
+            let api = Arc::new(mezon_client::AppApi::new(
+                Arc::new(mezon_client::TransportClient::new(String::new())),
+                String::new(),
+            ));
+            crate::realtime::RealtimeDispatch::init(api.clone(), cx);
+            crate::clan::ClanList::init(api.clone(), cx);
+            ChannelList::init(api.clone(), cx);
+            let store = MessagesStore::init(api, cx);
+            let dm = ChannelId(11);
+            store.update(cx, |store, cx| {
+                store.set_channel(dm, vec![Message::new(MessageId(1), "hi", "5", "Bob", 100)]);
+                store.activate(ClanId(0), dm, false, true, 3, 4, cx);
+            });
+            (store, dm)
+        });
+
+        cx.update(|cx| {
+            ChannelList::global(cx).update(cx, |channels, cx| {
+                channels.seed_clan_channels_for_test(
+                    ClanId(1),
+                    vec![crate::channel::Category {
+                        id: "1".into(),
+                        clan_id: ClanId(1),
+                        name: "General".into(),
+                        order: 0,
+                        channels: vec![crate::channel::Channel {
+                            id: ChannelId(22),
+                            name: "general".into(),
+                            channel_type: crate::channel::ChannelType::Text,
+                            private: false,
+                            clan_id: ClanId(1),
+                            clan_name: String::new(),
+                            category_name: "General".into(),
+                            category_id: Some("1".into()),
+                            member_count: 0,
+                            badge_count: 0,
+                            muted: false,
+                            parent_id: None,
+                            last_seen_message_id: MessageId(0),
+                            last_seen_timestamp: 0,
+                            last_sent_message_id: MessageId(0),
+                            last_sent_timestamp: 0,
+                            voice_members: Vec::new(),
+                            is_favorite: false,
+                            creator_id: UserId(0),
+                            active: crate::channel::CHANNEL_ACTIVE_JOINED,
+                            avatar_url: String::new(),
+                        }],
+                    }],
+                );
+                cx.emit(ChannelEvent::ActiveChannelChanged(Some(ChannelId(22))));
+            });
+        });
+
+        cx.update(|cx| {
+            assert_eq!(
+                store.read(cx).active_channel_id(),
+                Some(dm),
+                "the clan channel selection must not move a dm timeline; the route drives it"
+            );
         });
     }
 
@@ -9389,6 +9733,32 @@ mod tests {
     }
 
     #[test]
+    fn anonymize_sender_clears_resolved_user_identity() {
+        let cfg = AppConfig {
+            anonymous_user_id: "9876".to_string(),
+            ..Default::default()
+        };
+        let mut msg = Message::new(MessageId(1), "hi", "42", "gia.chuvan", 1_700_000_000)
+            .with_avatar("avatar.png")
+            .with_avatar_proxied(gpui::SharedString::from("proxy.png"));
+        anonymize_sender(&mut msg, Some(&cfg));
+        assert_eq!(msg.sender_id, "9876");
+        assert_eq!(msg.sender_user_id, Some(UserId(9876)));
+        assert_eq!(msg.sender_name, "Anonymous");
+        assert!(msg.avatar_url.is_empty());
+        assert!(msg.avatar_proxied.is_empty());
+    }
+
+    #[test]
+    fn anonymize_sender_keeps_identity_when_config_missing() {
+        let mut msg = Message::new(MessageId(1), "hi", "42", "gia.chuvan", 1_700_000_000);
+        anonymize_sender(&mut msg, None);
+        assert_eq!(msg.sender_id, "42");
+        assert_eq!(msg.sender_user_id, Some(UserId(42)));
+        assert_eq!(msg.sender_name, "gia.chuvan");
+    }
+
+    #[test]
     fn reconcile_temp_preserves_sender_from_optimistic_when_ack_sparse() {
         let temp_id = MessageId::next_optimistic();
         let temp = Message::new(temp_id, "hello", "42", "gia.chuvan", 1_700_000_000)
@@ -9732,6 +10102,13 @@ mod tests {
         assert!(should_write_last_seen(Some(seen), Some(tail), newer));
         assert!(should_write_last_seen(Some(seen), Some(tail), tail));
         assert!(!should_write_last_seen(Some(newer), Some(tail), seen));
+        assert!(
+            should_write_last_seen(None, Some(tail), newer),
+            "a first-ever visit (no known last-seen, e.g. an unopened thread whose seed rows \
+             carry zeros) counts what the viewer is looking at as seen — otherwise a stale \
+             channel tail starves the gate and the badge never clears"
+        );
+        assert!(should_write_last_seen(None, None, newer));
     }
 
     fn topic_proto(
@@ -10162,6 +10539,86 @@ mod tests {
         assert_eq!(msg.create_time, 1_700_000_000);
         assert!(!msg.day_label.is_empty());
         assert!(!msg.time_hhmm.is_empty());
+    }
+
+    fn test_store(cx: &mut App) -> Entity<MessagesStore> {
+        let api = Arc::new(mezon_client::AppApi::new(
+            Arc::new(mezon_client::TransportClient::new(String::new())),
+            String::new(),
+        ));
+        crate::realtime::RealtimeDispatch::init(api.clone(), cx);
+        crate::clan::ClanList::init(api.clone(), cx);
+        ChannelList::init(api.clone(), cx);
+        crate::account::AccountStore::init(api.clone(), cx);
+        MessagesStore::init(api, cx)
+    }
+
+    #[gpui::test]
+    fn resend_keeps_a_failed_row_it_cannot_replay(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let store = test_store(cx);
+            let channel = ChannelId(7);
+            store.update(cx, |store, cx| {
+                let mut failed = Message::new(MessageId(1), "", "5", "Bob", 100);
+                failed.send_failed = true;
+                store.set_channel(channel, vec![failed]);
+                store.active_channel_id = Some(channel);
+                store.active_clan_id = Some(ClanId(1));
+
+                store.resend_message(MessageId(1), cx);
+
+                assert!(
+                    store
+                        .cache
+                        .get(&channel)
+                        .is_some_and(|c| c.messages.contains_id(MessageId(1))),
+                    "a row with nothing left to replay must stay instead of sending empty"
+                );
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn a_url_attachment_send_keeps_a_replayable_payload(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let store = test_store(cx);
+            store.update(cx, |store, cx| {
+                store.active_channel_id = Some(ChannelId(7));
+                store.active_clan_id = Some(ClanId(1));
+
+                store.send_sticker(
+                    "https://cdn.example/sticker.webp".to_string(),
+                    "sticker.webp".to_string(),
+                    "5".to_string(),
+                    "Bob".to_string(),
+                    cx,
+                );
+
+                let payload = store
+                    .pending_send_payloads
+                    .values()
+                    .next()
+                    .expect("sticker send records a payload to retry with");
+                assert_eq!(
+                    payload.url_attachment.as_ref().map(|a| a.url.as_str()),
+                    Some("https://cdn.example/sticker.webp")
+                );
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn enrich_sparse_topic_ack_keeps_the_anonymous_identity(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let mut msg = Message::new(MessageId(7), "hi", "9876", "Anonymous", 0);
+            enrich_sparse_topic_ack(&mut msg, Some(UserId(42)), Some(ClanId(1)), true, cx);
+
+            assert_eq!(msg.sender_id, "9876");
+            assert_eq!(msg.sender_user_id, Some(UserId(9876)));
+            assert_eq!(msg.sender_name, "Anonymous");
+            assert!(msg.avatar_url.is_empty());
+            assert!(msg.create_time > 0);
+        });
     }
 
     #[test]

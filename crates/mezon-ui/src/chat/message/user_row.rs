@@ -411,7 +411,7 @@ fn render_edit_box(
                 .rounded(px(8.))
                 .border_1()
                 .border_color(theme.tokens.border_primary)
-                .bg(theme.tokens.bg_surface)
+                .bg(theme.surfaces.surface)
                 .child(input),
         )
         .child(
@@ -456,6 +456,9 @@ fn build_avatar_element(msg: &Message, ctx: &RowCtx, cx: &App) -> AnyElement {
     let Some(user_id) = msg.sender_user_id else {
         return plain;
     };
+    if mezon_store::is_anonymous_user_id(user_id, cx) {
+        return plain;
+    }
     let avatar_key = user_id.get() as usize;
     super::content::profile_popover_trigger(
         ("msg-avatar-trigger", avatar_key),

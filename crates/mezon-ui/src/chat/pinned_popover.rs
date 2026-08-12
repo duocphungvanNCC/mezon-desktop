@@ -49,6 +49,7 @@ struct PinCardVm {
     message_id: SharedString,
     create_time: i64,
     sender_label: SharedString,
+    is_anonymous: bool,
     avatar_src: Option<SharedString>,
     avatar_fallback: Option<SharedString>,
     pin: Arc<PinnedMessage>,
@@ -76,6 +77,7 @@ impl PinCardVm {
             message_id: msg.message_id.clone().into(),
             create_time: msg.create_time,
             sender_label,
+            is_anonymous: mezon_store::is_anonymous_sender_id(&msg.sender_id, cx),
             avatar_src,
             avatar_fallback,
             pin: Arc::new(msg.clone()),
@@ -221,6 +223,7 @@ impl PinnedPopoverPanel {
                 channel_id,
                 cx,
             );
+            vm.is_anonymous = mezon_store::is_anonymous_sender_id(&pin.sender_id, cx);
             (vm.avatar_src, vm.avatar_fallback) =
                 resolve_pin_avatar_urls(pin, clan_id, channel_id, cx);
         }
@@ -500,12 +503,15 @@ fn pin_card(
     let mut avatar = Avatar::new()
         .name(&sender_label)
         .with_size(Size::Small)
+        .anonymous(vm.is_anonymous)
         .image_cache(avatar_cache.clone());
-    if let Some(src) = &avatar_src {
-        avatar = avatar.src(src.clone());
-    }
-    if let Some(fallback) = &avatar_fallback {
-        avatar = avatar.fallback_src(fallback.clone());
+    if !vm.is_anonymous {
+        if let Some(src) = &avatar_src {
+            avatar = avatar.src(src.clone());
+        }
+        if let Some(fallback) = &avatar_fallback {
+            avatar = avatar.fallback_src(fallback.clone());
+        }
     }
 
     let name_row = h_flex()
@@ -659,6 +665,7 @@ fn render_pin_text_body(
     if pin.content.is_empty() {
         return div().into_any_element();
     }
+    let mut link_key = 0usize;
     div()
         .w_full()
         .min_w_0()
@@ -666,6 +673,7 @@ fn render_pin_text_body(
         .child(pin_plain_line(
             &pin.content,
             theme.tokens.text_theme_message,
+            &mut link_key,
         ))
         .into_any_element()
 }
@@ -806,13 +814,15 @@ fn pin_is_http_url(text: &str) -> bool {
     text.starts_with("http://") || text.starts_with("https://")
 }
 
-fn pin_link_row(text: &str, url: &str, color: gpui::Rgba) -> gpui::AnyElement {
-    pin_link_element(text, url, color, true)
+fn pin_link_row(text: &str, url: &str, color: gpui::Rgba, link_key: usize) -> gpui::AnyElement {
+    pin_link_element(text, url, color, true, link_key)
 }
 
-fn pin_plain_line(text: &str, color: gpui::Rgba) -> gpui::AnyElement {
+fn pin_plain_line(text: &str, color: gpui::Rgba, link_key: &mut usize) -> gpui::AnyElement {
     if pin_is_http_url(text) {
-        return pin_link_row(text, text, color);
+        let key = *link_key;
+        *link_key += 1;
+        return pin_link_row(text, text, color, key);
     }
     div()
         .w_full()
@@ -839,6 +849,7 @@ fn render_pin_spans(spans: &[MessageSpan], theme: &Theme) -> gpui::AnyElement {
     let mut col = v_flex().w_full().min_w_0().max_w_full();
     let mut row = pin_inline_row();
     let mut has_inline = false;
+    let mut link_key = 0usize;
 
     for span in spans {
         match span {
@@ -862,9 +873,10 @@ fn render_pin_spans(spans: &[MessageSpan], theme: &Theme) -> gpui::AnyElement {
                             row = row.child(child);
                         }
                     } else if pin_is_http_url(line) {
-                        col = col.child(pin_link_row(line, line, link_color));
+                        col = col.child(pin_link_row(line, line, link_color, link_key));
+                        link_key += 1;
                     } else {
-                        col = col.child(pin_plain_line(line, body_color));
+                        col = col.child(pin_plain_line(line, body_color, &mut link_key));
                     }
                 }
             }
@@ -895,7 +907,10 @@ fn render_pin_spans(spans: &[MessageSpan], theme: &Theme) -> gpui::AnyElement {
             MessageSpan::Link { text, url, .. } => {
                 has_inline = true;
                 let resolved = resolve_message_link_url(url, text);
-                row = row.child(pin_link_element(text, &resolved, link_color, false));
+                row = row.child(pin_link_element(
+                    text, &resolved, link_color, false, link_key,
+                ));
+                link_key += 1;
             }
             MessageSpan::Mention { display, .. } | MessageSpan::Hashtag { display, .. } => {
                 has_inline = true;

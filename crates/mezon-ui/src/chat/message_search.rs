@@ -23,7 +23,8 @@ use crate::chat::inbox::render_message_head;
 use crate::chat::layout::ChatLayout;
 use crate::chat::member_list::{MentionMemberRaw, mention_member_pool};
 use crate::chat::message::{
-    RichRunPalette, format_message_time, open_message_link, render_ogp_preview, rich_run_highlight,
+    RichRunPalette, format_message_time, open_message_link, render_ogp_preview,
+    rich_run_highlight_with_link_underline,
 };
 use crate::chat::role_style::message_sender_color;
 use crate::components::primitives::{Icon, IconName, Input, InputState, Sizable, Size, Spinner};
@@ -753,7 +754,7 @@ fn render_search_row(
                     .px_2()
                     .py_1()
                     .rounded(px(6.))
-                    .bg(theme.tokens.bg_secondary)
+                    .bg(theme.surfaces.secondary)
                     .text_size(px(10.))
                     .text_color(theme.tokens.text_theme_primary)
                     .cursor_pointer()
@@ -1145,7 +1146,7 @@ fn render_rich_search_content(
     for run in layout.runs.iter() {
         tokens.push((
             run.range.clone(),
-            rich_run_highlight(run.kind, &palette),
+            rich_run_highlight_with_link_underline(run.kind, &palette),
             SearchHighlightKind::Rich(run.kind),
         ));
     }
@@ -1494,7 +1495,7 @@ pub fn render_header_search_bar(
                 .rounded_lg()
                 .border_1()
                 .border_color(theme.tokens.border_primary)
-                .bg(theme.tokens.bg_surface)
+                .bg(theme.surfaces.surface)
                 .px_2()
                 .cursor_pointer()
                 .on_mouse_down(MouseButton::Left, move |_, window, cx| {
