@@ -914,7 +914,7 @@ mod tests {
             session_id: "retired-sid".into(),
             ..Default::default()
         };
-        session.apply_refresh("new-jwt", "new-refresh", "rotated-sid");
+        session.apply_refresh("new-jwt", "new-refresh", "rotated-sid", "new-id-token");
         assert_eq!(session.session_id, "rotated-sid");
         assert_eq!(session.ws_credential(), "rotated-sid");
     }

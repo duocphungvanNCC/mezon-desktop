@@ -87,7 +87,7 @@ impl ConfirmArchiveChannelModal {
             };
             let result = task.await;
 
-            let _ = cx.update(|cx| {
+            cx.update(|cx| {
                 Shell::global(cx).update(cx, |shell, cx| {
                     shell.close_modal(cx);
                     match &result {

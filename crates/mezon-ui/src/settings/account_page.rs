@@ -68,7 +68,7 @@ impl QrProfileModal {
                     )
                 })
                 .await;
-            let _ = modal.update(cx, |this, cx| {
+            modal.update(cx, |this, cx| {
                 this.qr_image = qr_image;
                 this.loading = false;
                 cx.notify();
