@@ -352,7 +352,7 @@ impl Render for RootView {
             .font_family(base_font_family)
             .text_color(theme.text_primary)
             .overflow_hidden()
-            .child(crate::theme::surface_background(theme.surfaces.secondary))
+            .bg(theme.surfaces.secondary.ramp())
             .child(window_controls::render_app_drag_header())
             .image_cache(self.image_cache.clone())
             .on_action(cx.listener(|_, _: &crate::ToggleInspector, window, cx| {

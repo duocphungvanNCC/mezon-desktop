@@ -1015,12 +1015,9 @@ impl Render for MemberListPanel {
             .w(px(245.))
             .h_full()
             .flex_shrink_0()
-            .relative()
             .border_l_1()
             .border_color(theme.border)
-            .child(crate::theme::surface_background(
-                theme.surfaces.direct_message,
-            ))
+            .bg(theme.surfaces.direct_message.ramp())
             .child(list)
             .when_some(
                 menu_overlay,

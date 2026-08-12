@@ -1,4 +1,7 @@
-use gpui::{Background, Fill, Hsla, Rgba, linear_color_stop, linear_gradient};
+use gpui::{
+    Background, Fill, Hsla, LinearColorStop, MAX_GRADIENT_RAMP_STOPS, Rgba, linear_color_stop,
+    linear_gradient_multi,
+};
 
 use crate::surfaces::surface_gradients;
 use crate::tokens::ThemeTokens;
@@ -76,54 +79,39 @@ impl ThemeSurface {
             .is_some_and(|gradient| gradient.viewport_anchored)
     }
 
-    pub fn layer_count(&self) -> usize {
-        match self.gradient {
-            Some(gradient) if gradient.stops.len() >= 2 => gradient.stops.len() - 1,
-            _ => 1,
-        }
-    }
-
-    pub fn layer(&self, index: usize) -> Option<Background> {
-        let solid = || (index == 0).then(|| Background::from(Hsla::from(self.solid)));
-        let Some(gradient) = self.gradient else {
-            return solid();
-        };
-        let (Some(from), Some(to)) = (gradient.stops.get(index), gradient.stops.get(index + 1))
-        else {
-            return solid();
-        };
-        let to_color = gradient.composite(to.color);
-        let from_color = if index == 0 {
-            gradient.composite(from.color)
-        } else {
-            fade_out(to_color)
-        };
-        Some(linear_gradient(
-            gradient.angle,
-            linear_color_stop(from_color, from.position),
-            linear_color_stop(to_color, to.position),
-        ))
-    }
-
     pub fn fill(&self) -> Background {
-        let solid = Background::from(Hsla::from(self.solid));
-        let Some(gradient) = self.gradient else {
-            return solid;
-        };
-        if gradient.viewport_anchored {
-            return solid;
+        match self.gradient {
+            Some(gradient) if !gradient.viewport_anchored => self.ramp_of(gradient),
+            _ => Background::from(Hsla::from(self.solid)),
         }
-        let (Some(first), Some(last)) = (gradient.stops.first(), gradient.stops.last()) else {
-            return solid;
+    }
+
+    pub fn ramp(&self) -> Background {
+        match self.gradient {
+            Some(gradient) => self.ramp_of(gradient),
+            None => Background::from(Hsla::from(self.solid)),
+        }
+    }
+
+    fn ramp_of(&self, gradient: SurfaceGradient) -> Background {
+        let count = gradient.stops.len().min(MAX_GRADIENT_RAMP_STOPS);
+        let Some(first) = gradient.stops.first() else {
+            return Background::from(Hsla::from(self.solid));
         };
-        if gradient.stops.len() < 2 {
+        if count < 2 {
             return Background::from(Hsla::from(gradient.composite(first.color)));
         }
-        linear_gradient(
-            gradient.angle,
-            linear_color_stop(gradient.composite(first.color), first.position),
-            linear_color_stop(gradient.composite(last.color), last.position),
-        )
+
+        let mut stops = [LinearColorStop::default(); MAX_GRADIENT_RAMP_STOPS];
+        for (slot, stop) in gradient.stops.iter().take(count).enumerate() {
+            stops[slot] = linear_color_stop(gradient.composite(stop.color), stop.position);
+        }
+        let background = linear_gradient_multi(gradient.angle, &stops[..count]);
+        if gradient.viewport_anchored {
+            background.viewport_anchored()
+        } else {
+            background
+        }
     }
 }
 
@@ -153,6 +141,20 @@ pub struct ThemeSurfaces {
 }
 
 impl ThemeSurfaces {
+    pub fn solid(tokens: &ThemeTokens) -> Self {
+        Self {
+            primary: ThemeSurface::from_solid(tokens.bg_primary),
+            secondary: ThemeSurface::from_solid(tokens.bg_secondary),
+            surface: ThemeSurface::from_solid(tokens.bg_surface),
+            direct_message: ThemeSurface::from_solid(tokens.bg_theme_direct_message),
+            input_primary: ThemeSurface::from_solid(tokens.bg_theme_input_primary),
+            active_friend_list: ThemeSurface::from_solid(tokens.bg_active_friend_list),
+            modal_search: ThemeSurface::from_solid(tokens.bg_modal_theme_search),
+            outside_footer: ThemeSurface::from_solid(tokens.bg_outside_footer),
+            footer: ThemeSurface::from_solid(tokens.bg_footer),
+        }
+    }
+
     pub fn for_theme(theme: &str, tokens: &ThemeTokens) -> Self {
         let gradients = surface_gradients(theme);
         Self {
@@ -194,10 +196,6 @@ impl ThemeSurfaces {
             },
         }
     }
-}
-
-fn fade_out(color: Rgba) -> Rgba {
-    Rgba { a: 0.0, ..color }
 }
 
 fn source_over(top: Rgba, bottom: Rgba) -> Rgba {
@@ -246,6 +244,16 @@ mod tests {
         stop(rgba(0.0, 0.0, 1.0, 1.0), 1.0),
     ];
 
+    const REACT_GRADIENT_THEMES: [&str; 7] = [
+        "sunrise",
+        "purple_haze",
+        "redDark",
+        "abyss_dark",
+        "berrynade",
+        "cisher",
+        "sunset",
+    ];
+
     fn close(actual: f32, expected: f32) -> bool {
         (actual - expected).abs() < 0.0005
     }
@@ -279,7 +287,7 @@ mod tests {
     }
 
     #[test]
-    fn layer_count_matches_stop_segments() {
+    fn every_stop_survives_the_ramp() {
         let surface = ThemeSurface {
             solid: rgba(0.0, 0.0, 0.0, 1.0),
             gradient: Some(SurfaceGradient {
@@ -290,38 +298,27 @@ mod tests {
                 viewport_anchored: false,
             }),
         };
-        assert_eq!(surface.layer_count(), 2);
-        assert!(surface.layer(0).is_some());
-        assert!(surface.layer(1).is_some());
-        assert!(surface.layer(2).is_none());
-    }
-
-    #[test]
-    fn ramp_layers_fade_in_from_the_previous_stop() {
-        let surface = ThemeSurface {
-            solid: rgba(0.0, 0.0, 0.0, 1.0),
-            gradient: Some(SurfaceGradient {
-                angle: 90.0,
-                stops: THREE_STOPS,
-                overlay: None,
-                base: None,
-                viewport_anchored: false,
-            }),
-        };
-        let base = surface.layer(0).expect("first segment");
-        let ramp = surface.layer(1).expect("second segment");
-        assert!(base.as_solid().is_none());
+        let ramp = surface.ramp();
         assert!(ramp.as_solid().is_none());
-        assert_ne!(base, ramp);
+        assert_eq!(ramp, surface.fill());
+        assert_ne!(
+            ramp,
+            linear_gradient_multi(
+                90.0,
+                &[
+                    linear_color_stop(THREE_STOPS[0].color, THREE_STOPS[0].position),
+                    linear_color_stop(THREE_STOPS[2].color, THREE_STOPS[2].position),
+                ]
+            ),
+            "the middle stop must not be dropped"
+        );
     }
 
     #[test]
-    fn solid_surface_has_one_layer() {
+    fn solid_surface_stays_solid() {
         let surface = ThemeSurface::from_solid(rgba(0.1, 0.2, 0.3, 1.0));
-        assert_eq!(surface.layer_count(), 1);
-        assert!(surface.layer(0).is_some());
-        assert!(surface.layer(1).is_none());
         assert_eq!(surface.fill().as_solid(), Some(Hsla::from(surface.solid)));
+        assert_eq!(surface.ramp().as_solid(), Some(Hsla::from(surface.solid)));
     }
 
     #[test]
@@ -337,19 +334,12 @@ mod tests {
             }),
         };
         assert_eq!(surface.fill().as_solid(), Some(Hsla::from(surface.solid)));
-        assert!(surface.layer(0).is_some());
+        assert!(surface.ramp().as_solid().is_none());
     }
 
     #[test]
     fn react_themes_expose_gradient_surfaces() {
-        for theme in [
-            "sunrise",
-            "purple_haze",
-            "abyss_dark",
-            "berrynade",
-            "cisher",
-            "sunset",
-        ] {
+        for theme in REACT_GRADIENT_THEMES {
             let tokens = ThemeTokens::for_theme(theme);
             let surfaces = ThemeSurfaces::for_theme(theme, &tokens);
             assert!(
@@ -367,14 +357,7 @@ mod tests {
     fn composited_stops_average_to_the_flattened_token() {
         let mut worst = 0.0f32;
         let mut worst_label = String::new();
-        for theme in [
-            "sunrise",
-            "purple_haze",
-            "abyss_dark",
-            "berrynade",
-            "cisher",
-            "sunset",
-        ] {
+        for theme in REACT_GRADIENT_THEMES {
             let tokens = ThemeTokens::for_theme(theme);
             let surfaces = ThemeSurfaces::for_theme(theme, &tokens);
             for (name, surface) in [

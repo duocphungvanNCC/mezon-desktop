@@ -815,6 +815,287 @@ pub(crate) fn surface_gradients(theme: &str) -> SurfaceGradients {
                 viewport_anchored: true,
             }),
         },
+        "redDark" => SurfaceGradients {
+            primary: Some(SurfaceGradient {
+                angle: 64.92,
+                stops: &[
+                    GradientStop {
+                        color: Rgba {
+                            r: 0.58428,
+                            g: 0.03532,
+                            b: 0.03532,
+                            a: 1.0,
+                        },
+                        position: 0.1617,
+                    },
+                    GradientStop {
+                        color: Rgba {
+                            r: 0.0,
+                            g: 0.0,
+                            b: 0.0,
+                            a: 1.0,
+                        },
+                        position: 0.72,
+                    },
+                ],
+                overlay: Some(Rgba {
+                    r: 0.0,
+                    g: 0.0,
+                    b: 0.0,
+                    a: 0.7,
+                }),
+                base: None,
+                viewport_anchored: false,
+            }),
+            secondary: Some(SurfaceGradient {
+                angle: 64.92,
+                stops: &[
+                    GradientStop {
+                        color: Rgba {
+                            r: 0.58428,
+                            g: 0.03532,
+                            b: 0.03532,
+                            a: 1.0,
+                        },
+                        position: 0.4,
+                    },
+                    GradientStop {
+                        color: Rgba {
+                            r: 0.1158,
+                            g: 0.0042,
+                            b: 0.0042,
+                            a: 1.0,
+                        },
+                        position: 0.9,
+                    },
+                ],
+                overlay: Some(Rgba {
+                    r: 0.0,
+                    g: 0.0,
+                    b: 0.0,
+                    a: 0.8,
+                }),
+                base: None,
+                viewport_anchored: false,
+            }),
+            surface: Some(SurfaceGradient {
+                angle: 180.0,
+                stops: &[
+                    GradientStop {
+                        color: Rgba {
+                            r: 0.0,
+                            g: 0.0,
+                            b: 0.0,
+                            a: 0.65,
+                        },
+                        position: 0.0,
+                    },
+                    GradientStop {
+                        color: Rgba {
+                            r: 0.24706,
+                            g: 0.06667,
+                            b: 0.06667,
+                            a: 0.65,
+                        },
+                        position: 1.0,
+                    },
+                ],
+                overlay: None,
+                base: Some(Rgba {
+                    r: 0.1538,
+                    g: 0.0462,
+                    b: 0.0462,
+                    a: 1.0,
+                }),
+                viewport_anchored: true,
+            }),
+            direct_message: Some(SurfaceGradient {
+                angle: 64.92,
+                stops: &[
+                    GradientStop {
+                        color: Rgba {
+                            r: 0.58428,
+                            g: 0.03532,
+                            b: 0.03532,
+                            a: 1.0,
+                        },
+                        position: 0.1617,
+                    },
+                    GradientStop {
+                        color: Rgba {
+                            r: 0.0,
+                            g: 0.0,
+                            b: 0.0,
+                            a: 1.0,
+                        },
+                        position: 0.72,
+                    },
+                ],
+                overlay: Some(Rgba {
+                    r: 0.0,
+                    g: 0.0,
+                    b: 0.0,
+                    a: 0.65,
+                }),
+                base: None,
+                viewport_anchored: true,
+            }),
+            input_primary: Some(SurfaceGradient {
+                angle: 64.92,
+                stops: &[
+                    GradientStop {
+                        color: Rgba {
+                            r: 0.58428,
+                            g: 0.03532,
+                            b: 0.03532,
+                            a: 1.0,
+                        },
+                        position: 0.1617,
+                    },
+                    GradientStop {
+                        color: Rgba {
+                            r: 0.0,
+                            g: 0.0,
+                            b: 0.0,
+                            a: 1.0,
+                        },
+                        position: 0.72,
+                    },
+                ],
+                overlay: Some(Rgba {
+                    r: 0.0,
+                    g: 0.0,
+                    b: 0.0,
+                    a: 0.5,
+                }),
+                base: None,
+                viewport_anchored: true,
+            }),
+            active_friend_list: Some(SurfaceGradient {
+                angle: 64.92,
+                stops: &[
+                    GradientStop {
+                        color: Rgba {
+                            r: 0.58428,
+                            g: 0.03532,
+                            b: 0.03532,
+                            a: 1.0,
+                        },
+                        position: 0.1617,
+                    },
+                    GradientStop {
+                        color: Rgba {
+                            r: 0.0,
+                            g: 0.0,
+                            b: 0.0,
+                            a: 1.0,
+                        },
+                        position: 0.72,
+                    },
+                ],
+                overlay: Some(Rgba {
+                    r: 0.0,
+                    g: 0.0,
+                    b: 0.0,
+                    a: 0.75,
+                }),
+                base: None,
+                viewport_anchored: true,
+            }),
+            modal_search: Some(SurfaceGradient {
+                angle: 64.92,
+                stops: &[
+                    GradientStop {
+                        color: Rgba {
+                            r: 0.58428,
+                            g: 0.03532,
+                            b: 0.03532,
+                            a: 1.0,
+                        },
+                        position: 0.4,
+                    },
+                    GradientStop {
+                        color: Rgba {
+                            r: 0.1158,
+                            g: 0.0042,
+                            b: 0.0042,
+                            a: 1.0,
+                        },
+                        position: 0.9,
+                    },
+                ],
+                overlay: Some(Rgba {
+                    r: 0.0,
+                    g: 0.0,
+                    b: 0.0,
+                    a: 0.8,
+                }),
+                base: None,
+                viewport_anchored: false,
+            }),
+            outside_footer: Some(SurfaceGradient {
+                angle: 64.92,
+                stops: &[
+                    GradientStop {
+                        color: Rgba {
+                            r: 0.82,
+                            g: 0.28,
+                            b: 0.28,
+                            a: 1.0,
+                        },
+                        position: 0.4,
+                    },
+                    GradientStop {
+                        color: Rgba {
+                            r: 0.28,
+                            g: 0.12,
+                            b: 0.12,
+                            a: 1.0,
+                        },
+                        position: 0.9,
+                    },
+                ],
+                overlay: Some(Rgba {
+                    r: 0.0,
+                    g: 0.0,
+                    b: 0.0,
+                    a: 0.6,
+                }),
+                base: None,
+                viewport_anchored: false,
+            }),
+            footer: Some(SurfaceGradient {
+                angle: 64.92,
+                stops: &[
+                    GradientStop {
+                        color: Rgba {
+                            r: 0.4,
+                            g: 0.0,
+                            b: 0.0,
+                            a: 1.0,
+                        },
+                        position: 0.4,
+                    },
+                    GradientStop {
+                        color: Rgba {
+                            r: 0.08,
+                            g: 0.0,
+                            b: 0.0,
+                            a: 1.0,
+                        },
+                        position: 0.9,
+                    },
+                ],
+                overlay: Some(Rgba {
+                    r: 0.0,
+                    g: 0.0,
+                    b: 0.0,
+                    a: 0.9,
+                }),
+                base: None,
+                viewport_anchored: false,
+            }),
+        },
         "abyss_dark" => SurfaceGradients {
             primary: Some(SurfaceGradient {
                 angle: 48.17,

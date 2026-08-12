@@ -1774,8 +1774,7 @@ impl Render for ChatLayout {
                     .flex_col()
                     .w(px(344.0))
                     .h_full()
-                    .relative()
-                    .child(crate::theme::surface_background(theme.surfaces.primary))
+                    .bg(theme.surfaces.primary.ramp())
                     .child(
                         div()
                             .flex()
@@ -2843,8 +2842,7 @@ impl ChatLayout {
                                 .overflow_hidden()
                                 .border_l_1()
                                 .border_color(theme.border)
-                                .relative()
-                                .child(crate::theme::surface_background(theme.surfaces.secondary))
+                                .bg(theme.surfaces.secondary.ramp())
                                 .child(panel),
                         )
                     })
@@ -2913,9 +2911,7 @@ impl ChatLayout {
                     .min_h_0()
                     .min_w_0()
                     .gap_2()
-                    .child(crate::theme::surface_background(
-                        theme.surfaces.direct_message,
-                    ))
+                    .bg(theme.surfaces.direct_message.ramp())
                     .child(
                         div()
                             .flex()
@@ -2937,8 +2933,7 @@ impl ChatLayout {
                                 .h_full()
                                 .flex_shrink_0()
                                 .overflow_hidden()
-                                .relative()
-                                .child(crate::theme::surface_background(theme.surfaces.secondary))
+                                .bg(theme.surfaces.secondary.ramp())
                                 .child(panel),
                         )
                     })
