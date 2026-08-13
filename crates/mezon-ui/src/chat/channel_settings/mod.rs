@@ -14,6 +14,7 @@ use mezon_store::{
     PERMISSION_MANAGE_CLAN, PermissionStore, Settings,
 };
 
+use crate::app::shell::Shell;
 use crate::components::primitives::{Icon, IconName, h_flex, v_flex};
 use crate::theme::{ActiveTheme, Theme};
 use category_tab::CategoryTab;
@@ -435,6 +436,10 @@ impl ChannelSettingScreen {
         } else {
             mezon_i18n::t(locale, "channelSetting.fields.channelDelete.delete")
         };
+        let can_delete_channel = !ctx.is_thread && !ctx.is_welcome_channel;
+        let clan_id = self.clan_id;
+        let channel_id = self.channel_id;
+        let delete_locale = locale.to_string();
         nav = nav.child(
             div()
                 .w(px(SIDEBAR_ITEM_WIDTH))
@@ -452,11 +457,26 @@ impl ChannelSettingScreen {
                 .rounded(px(5.0))
                 .text_base()
                 .font_weight(FontWeight::MEDIUM)
-                .opacity(0.5)
-                .cursor_default()
-                .when(ctx.is_welcome_channel, |el| el.text_color(theme.text_muted))
-                .when(!ctx.is_welcome_channel, |el| {
-                    el.text_color(gpui::rgb(0xdc_26_26))
+                .when(can_delete_channel, |el| {
+                    el.cursor_pointer()
+                        .text_color(gpui::rgb(0xdc_26_26))
+                        .hover(|style| style.bg(theme.tokens.bg_item_theme_hover))
+                        .on_click(move |_, window, cx| {
+                            let locale = delete_locale.clone();
+                            Shell::global(cx).update(cx, |shell, cx| {
+                                shell.confirm_delete_channel(
+                                    clan_id, channel_id, &locale, window, cx,
+                                );
+                            });
+                        })
+                })
+                .when(!can_delete_channel, |el| {
+                    el.opacity(0.5)
+                        .cursor_default()
+                        .when(ctx.is_welcome_channel, |el| el.text_color(theme.text_muted))
+                        .when(!ctx.is_welcome_channel, |el| {
+                            el.text_color(gpui::rgb(0xdc_26_26))
+                        })
                 })
                 .child(delete_label),
         );
