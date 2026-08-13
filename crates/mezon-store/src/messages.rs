@@ -21,8 +21,8 @@ use mezon_client::transport::{
 };
 use mezon_client::{
     AppApi, AttachmentUploadOutcome, ConnectionStatus, InboxCategory, InboxMentionSpan,
-    MarkedInboxMessageInput, MezonTransport, RealtimeEvent, UploadFile, UploadThumbnail,
-    UrlAttachment, inbox_notification_from_marked_message_local,
+    MarkedInboxMessageInput, MezonTransport, PresignedAttachment, RealtimeEvent, UploadFile,
+    UploadThumbnail, UrlAttachment, inbox_notification_from_marked_message_local,
 };
 
 use crate::AppConfig;
@@ -1144,9 +1144,8 @@ impl MessagesStore {
         ))
     }
 
-    /// Emit the splice for a single row appended at the bottom, accounting for
-    /// any front-trim that dropped the oldest rows to keep the buffer within the
-    /// cap. `old_len` is the buffer length before the push.
+    /// Push an optimistic row, unless the tail is detached — appending onto a
+    /// jump-to-message AROUND window would seal the history gap.
     fn append_optimistic(&mut self, channel_id: ChannelId, optimistic: Message) -> Option<usize> {
         if self.tail_detached(channel_id) {
             return None;
@@ -1158,6 +1157,9 @@ impl MessagesStore {
         })
     }
 
+    /// Emit the splice for a single row appended at the bottom, accounting for
+    /// any front-trim that dropped the oldest rows to keep the buffer within the
+    /// cap. `old_len` is the buffer length before the push.
     fn emit_appended(&mut self, old_len: usize, cx: &mut Context<Self>) {
         let new_len = self.messages().len();
         if new_len < old_len {
@@ -4042,11 +4044,32 @@ impl MessagesStore {
                     .iter()
                     .map(|a| presign::normalize_presign_key(&a.url))
                     .collect();
-                let update_mentions = if anonymous {
-                    Vec::new()
-                } else {
-                    transport_mentions.clone()
-                };
+                if anonymous {
+                    send_anonymous_attachment_message(
+                        &api,
+                        &this,
+                        AnonymousAttachmentSend {
+                            clan_id,
+                            channel_id,
+                            temp_id,
+                            content: &content,
+                            is_public,
+                            mode,
+                            presigned,
+                            msg_attachments,
+                            keys,
+                            reply_ref,
+                            mentions: transport_mentions,
+                            hashtags: transport_hashtags,
+                            emojis: transport_emojis,
+                            flags: send_flags,
+                        },
+                        cx,
+                    )
+                    .await;
+                    return;
+                }
+                let update_mentions = transport_mentions.clone();
                 let update_hashtags = transport_hashtags.clone();
                 let update_emojis = transport_emojis.clone();
                 let sent = match api
@@ -4061,7 +4084,7 @@ impl MessagesStore {
                         transport_mentions,
                         transport_hashtags,
                         transport_emojis,
-                        Vec::new(),
+                        Some(Vec::new()),
                         send_flags,
                     )
                     .await
@@ -4078,11 +4101,8 @@ impl MessagesStore {
                 let real_message_id = sent.message_id;
                 let create_time_seconds = sent.create_time.max(0) as u32;
                 let _ = this.update(cx, |this, cx| {
-                    let mut confirmed =
+                    let confirmed =
                         message_from_api(sent, AppConfig::try_global(cx), viewer_user_id(cx));
-                    if anonymous {
-                        let _ = anonymize_sender(&mut confirmed, AppConfig::try_global(cx));
-                    }
                     this.reconcile_temp(channel_id, temp_id, confirmed, cx);
                 });
                 let (on_complete, mut completions) =
@@ -6501,6 +6521,94 @@ fn carry_local_previews(prior: &Message, confirmed: &mut Message) {
     }
 }
 
+struct AnonymousAttachmentSend<'a> {
+    clan_id: ClanId,
+    channel_id: ChannelId,
+    temp_id: MessageId,
+    content: &'a str,
+    is_public: bool,
+    mode: i32,
+    presigned: Vec<PresignedAttachment>,
+    msg_attachments: Vec<mezon_proto::api::MessageAttachment>,
+    keys: Vec<String>,
+    reply_ref: Option<OutgoingReply>,
+    mentions: Vec<TransportMention>,
+    hashtags: Vec<TransportHashtag>,
+    emojis: Vec<TransportEmoji>,
+    flags: OutgoingMessageFlags,
+}
+
+async fn send_anonymous_attachment_message(
+    api: &AppApi,
+    this: &WeakEntity<MessagesStore>,
+    send: AnonymousAttachmentSend<'_>,
+    cx: &mut AsyncApp,
+) {
+    let AnonymousAttachmentSend {
+        clan_id,
+        channel_id,
+        temp_id,
+        content,
+        is_public,
+        mode,
+        presigned,
+        msg_attachments,
+        keys,
+        reply_ref,
+        mentions,
+        hashtags,
+        emojis,
+        flags,
+    } = send;
+    if let Err(e) = api.upload_presigned_all(presigned).await {
+        tracing::error!("anonymous attachment upload failed: {e}");
+        let _ = this.update(cx, |this, cx| {
+            this.mark_temp_failed(channel_id, temp_id, cx);
+        });
+        return;
+    }
+    let sent = match api
+        .send_presigned_message(
+            clan_id.get(),
+            channel_id.get(),
+            content,
+            is_public,
+            mode,
+            msg_attachments,
+            reply_ref,
+            mentions,
+            hashtags,
+            emojis,
+            None,
+            flags,
+        )
+        .await
+    {
+        Ok(sent) => sent,
+        Err(e) => {
+            tracing::error!("anonymous send_presigned_message failed: {e}");
+            let _ = this.update(cx, |this, cx| {
+                this.mark_temp_failed(channel_id, temp_id, cx);
+            });
+            return;
+        }
+    };
+    let real_message_id = sent.message_id;
+    let _ = this.update(cx, |this, cx| {
+        let mut confirmed = message_from_api(sent, AppConfig::try_global(cx), viewer_user_id(cx));
+        let _ = anonymize_sender(&mut confirmed, AppConfig::try_global(cx));
+        this.reconcile_temp(channel_id, temp_id, confirmed, cx);
+        for key in keys {
+            this.mark_channel_attachment_outcome(
+                channel_id,
+                MessageId(real_message_id),
+                AttachmentUploadOutcome::Uploaded(key),
+                cx,
+            );
+        }
+    });
+}
+
 async fn upload_attachments_now(
     api: &AppApi,
     attachments: Vec<OutgoingAttachment>,
@@ -7039,7 +7147,7 @@ fn first_content_link_url(content: &ApiMessageContent) -> Option<String> {
     }
     detect_markdown(&content.t)
         .into_iter()
-        .find(|tok| tok.kind == "lk")
+        .find(|tok| mezon_client::is_link_markdown_kind(&tok.kind))
         .map(|tok| utf16_slice(&content.t, i64::from(tok.s), i64::from(tok.e)))
         .filter(|url| !url.is_empty())
 }
@@ -7059,9 +7167,25 @@ fn text_to_spans(text: &str) -> Vec<MessageSpan> {
         return Vec::new();
     }
     let markdowns = detect_markdown(text);
+    // Embed bodies stay inline. React only runs its social-link classifier over message content,
+    // so a YouTube URL in a description is a link there, not the block-level card the classified
+    // kinds would render inside the embed's column.
+    let mk = markdown_content_tokens(&markdowns)
+        .into_iter()
+        .map(|mut tok| {
+            if tok
+                .kind
+                .as_deref()
+                .is_some_and(mezon_client::is_link_markdown_kind)
+            {
+                tok.kind = Some(mezon_client::LINK_MARKDOWN_KIND.to_string());
+            }
+            tok
+        })
+        .collect();
     parse_spans(&ApiMessageContent {
         t: text.to_string(),
-        mk: markdown_content_tokens(&markdowns),
+        mk,
         ..Default::default()
     })
 }
@@ -8053,6 +8177,10 @@ mod tests {
                             creator_id: UserId(0),
                             active: crate::channel::CHANNEL_ACTIVE_JOINED,
                             avatar_url: String::new(),
+                            topic: String::new(),
+                            age_restricted: 0,
+                            e2ee: 0,
+                            app_id: 0,
                         }],
                     }],
                 );
@@ -8563,6 +8691,33 @@ mod tests {
                 .iter()
                 .any(|s| matches!(s, MessageSpan::CodeBlock { .. })),
             "embed description should parse a ``` fence into a CodeBlock span"
+        );
+    }
+
+    #[test]
+    fn text_to_spans_keeps_social_links_inline() {
+        let spans = text_to_spans("watch https://youtu.be/abc");
+        assert!(
+            spans.iter().any(|s| matches!(
+                s,
+                MessageSpan::Link {
+                    kind: crate::message::LinkKind::Plain,
+                    ..
+                }
+            )),
+            "an embed description renders inline, so it must not classify a social card"
+        );
+    }
+
+    #[test]
+    fn first_content_link_url_falls_back_to_a_detected_social_link() {
+        let content = ApiMessageContent {
+            t: "https://www.tiktok.com/@user/video/123".into(),
+            ..Default::default()
+        };
+        assert_eq!(
+            first_content_link_url(&content).as_deref(),
+            Some("https://www.tiktok.com/@user/video/123")
         );
     }
 

@@ -309,6 +309,7 @@ pub enum MessageSpan {
     CodeBlock {
         language: Option<String>,
         text: SharedString,
+        fenced_source: SharedString,
     },
     Link {
         text: SharedString,
@@ -989,6 +990,7 @@ pub fn parse_spans(content: &ApiMessageContent) -> Vec<MessageSpan> {
                         spans.push(MessageSpan::CodeBlock {
                             language,
                             text: text.into(),
+                            fenced_source: inner.clone().into(),
                         });
                     }
                     "lk" | "vk" | "lk_yt" | "lk_fb" | "lk_tt" => {
@@ -1039,6 +1041,16 @@ fn link_kind_from_marker(marker: &str) -> LinkKind {
         "lk_fb" => LinkKind::Facebook,
         "lk_tt" => LinkKind::TikTok,
         _ => LinkKind::Plain,
+    }
+}
+
+/// Inverse of [`link_kind_from_marker`] — `None` for a plain link, which carries no marker.
+pub(crate) fn link_marker_from_kind(kind: LinkKind) -> Option<&'static str> {
+    match kind {
+        LinkKind::YouTube => Some(mezon_client::YOUTUBE_LINK_MARKDOWN_KIND),
+        LinkKind::Facebook => Some(mezon_client::FACEBOOK_LINK_MARKDOWN_KIND),
+        LinkKind::TikTok => Some(mezon_client::TIKTOK_LINK_MARKDOWN_KIND),
+        LinkKind::Plain => None,
     }
 }
 
@@ -1200,9 +1212,9 @@ pub fn markdown_edit_source(content: &str, spans: &[MessageSpan]) -> Option<Stri
                 out.push_str(t);
                 out.push('`');
             }
-            MessageSpan::CodeBlock { text, .. } => {
+            MessageSpan::CodeBlock { fenced_source, .. } => {
                 out.push_str("```");
-                out.push_str(text);
+                out.push_str(fenced_source);
                 out.push_str("```");
             }
             MessageSpan::Link { text, .. } => out.push_str(text),
@@ -1236,17 +1248,45 @@ pub fn strip_code_fence(s: &str) -> (Option<String>, String) {
 
     if let Some((first, rest)) = body.split_once('\n') {
         let rest = rest.trim_end();
-        if !rest.is_empty()
-            && !first.is_empty()
-            && first.len() <= 32
-            && first.bytes().all(|b| {
-                b.is_ascii_alphanumeric() || b == b'+' || b == b'-' || b == b'_' || b == b'#'
-            })
-        {
-            return (Some(first.to_string()), rest.to_string());
+        let candidate = first.trim();
+        if !rest.is_empty() && is_code_fence_language(candidate) {
+            return (Some(candidate.to_string()), rest.to_string());
         }
     }
     (None, body.to_string())
+}
+
+const CODE_FENCE_LANGUAGES: &[&str] = &[
+    "c",
+    "c++",
+    "c#",
+    "js",
+    "ts",
+    "py",
+    "java",
+    "javascript",
+    "typescript",
+    "python",
+    "go",
+    "rust",
+    "kotlin",
+    "sql",
+    "html",
+    "json",
+    "css",
+    "swift",
+    "yaml",
+    "php",
+    "jsx",
+    "bash",
+];
+
+fn is_code_fence_language(candidate: &str) -> bool {
+    if candidate.is_empty() {
+        return false;
+    }
+    let lowered = candidate.to_ascii_lowercase();
+    CODE_FENCE_LANGUAGES.contains(&lowered.as_str())
 }
 
 pub(crate) fn split_token_transaction(content: &str) -> TokenTransaction {
@@ -1781,6 +1821,77 @@ mod tests {
         assert_eq!(
             markdown_edit_source(&content.t, &spans),
             Some("`x` @bob".to_string())
+        );
+    }
+
+    fn edit_source_for_composer_text(raw: &str) -> (String, Option<String>) {
+        let sent = mezon_client::transport::build_send_content(raw, &[], &[], &[]);
+        let content: ApiMessageContent =
+            serde_json::from_str(&sent.json).expect("send content json");
+        let spans = parse_spans(&content);
+        let source = markdown_edit_source(&content.t, &spans);
+        (content.t.clone(), source)
+    }
+
+    #[test]
+    fn code_fence_keeps_a_first_line_that_is_not_a_known_language() {
+        for body in [
+            "\na\nb\nc\n",
+            "\nx\ny\n",
+            "\nfoo\nbar()\n",
+            "\nresult\nvalue\n",
+        ] {
+            let (language, text) = strip_code_fence(body);
+            assert_eq!(language, None, "body {body:?} must have no language");
+            assert_eq!(text, body.trim(), "body {body:?} must keep every line");
+        }
+    }
+
+    #[test]
+    fn code_fence_strips_only_a_whitelisted_language() {
+        assert_eq!(
+            strip_code_fence("rust\nlet x = 1;\n"),
+            (Some("rust".into()), "let x = 1;".into())
+        );
+        assert_eq!(
+            strip_code_fence("PYTHON\nprint(1)\n"),
+            (Some("PYTHON".into()), "print(1)".into())
+        );
+        assert_eq!(
+            strip_code_fence("rustacean\nlet x = 1;\n"),
+            (None, "rustacean\nlet x = 1;".into())
+        );
+    }
+
+    #[test]
+    fn code_fence_keeps_a_lone_language_word_as_body() {
+        assert_eq!(strip_code_fence("rust"), (None, "rust".into()));
+    }
+
+    #[test]
+    fn edit_source_round_trips_a_bare_code_fence() {
+        let raw = "```let x = 1;```";
+        let (_, source) = edit_source_for_composer_text(raw);
+        assert_eq!(source.as_deref(), Some(raw));
+    }
+
+    #[test]
+    fn edit_source_round_trips_a_code_fence_with_a_language_tag() {
+        let raw = "```rust\nlet x = 1;\n```";
+        let (stored, source) = edit_source_for_composer_text(raw);
+        assert!(
+            source.is_some(),
+            "editing must restore the fence; stored text was {stored:?}"
+        );
+    }
+
+    #[test]
+    fn edit_source_round_trips_a_multiline_code_fence() {
+        let raw = "before\n```\nlet x = 1;\nfn main() {}\n```\nafter";
+        let (stored, source) = edit_source_for_composer_text(raw);
+        assert!(
+            source.is_some(),
+            "editing must restore the fence; stored text was {stored:?}"
         );
     }
 

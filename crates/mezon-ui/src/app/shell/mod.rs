@@ -7,12 +7,12 @@
 use std::time::Duration;
 
 use gpui::{
-    AnyView, App, AppContext, Context, Entity, Global, MouseButton, SharedString, Subscription,
-    Task, Window, deferred, div, hsla, prelude::*, px,
+    AnyView, App, AppContext, Context, Entity, Global, MouseButton, SharedString, Task, Window,
+    deferred, div, hsla, prelude::*, px,
 };
 
 use crate::components::primitives::{Toast, ToastKind};
-use crate::router::{Route, Router};
+use crate::router::Route;
 
 mod coming_soon_modal;
 mod confirm_archive_channel_modal;
@@ -22,11 +22,13 @@ mod confirm_delete_message_modal;
 mod confirm_delete_role_modal;
 mod confirm_delete_sound_modal;
 mod confirm_delete_sticker_modal;
+mod confirm_delete_thread_modal;
 mod confirm_delete_webhook_modal;
 mod confirm_leave_thread_modal;
 mod confirm_remove_friend_modal;
 mod disable_clan_community_modal;
 mod upload_limit_modal;
+mod wallet_not_available_modal;
 use coming_soon_modal::ComingSoonModal;
 use confirm_archive_channel_modal::ConfirmArchiveChannelModal;
 use confirm_delete_canvas_modal::ConfirmDeleteCanvasModal;
@@ -35,12 +37,14 @@ use confirm_delete_message_modal::ConfirmDeleteMessageModal;
 use confirm_delete_role_modal::ConfirmDeleteRoleModal;
 use confirm_delete_sound_modal::ConfirmDeleteSoundModal;
 use confirm_delete_sticker_modal::ConfirmDeleteStickerModal;
+use confirm_delete_thread_modal::ConfirmDeleteThreadModal;
 use confirm_delete_webhook_modal::{ConfirmDeleteWebhookModal, WebhookDeleteTarget};
 use confirm_leave_thread_modal::ConfirmLeaveThreadModal;
 pub use confirm_remove_friend_modal::FriendRemovalKind;
 use confirm_remove_friend_modal::{ConfirmRemoveFriendModal, interpolate_username};
 use disable_clan_community_modal::DisableClanCommunityModal;
 use upload_limit_modal::UploadLimitModal;
+use wallet_not_available_modal::WalletNotAvailableModal;
 
 const TOAST_TTL: Duration = Duration::from_secs(4);
 
@@ -78,8 +82,6 @@ pub struct Shell {
     modal_fullscreen: bool,
     command_palette_open: bool,
     next_id: usize,
-    route: Route,
-    _route_sub: Subscription,
 }
 
 struct GlobalShell(Entity<Shell>);
@@ -87,28 +89,21 @@ impl Global for GlobalShell {}
 
 impl Shell {
     pub fn init(cx: &mut App) -> Entity<Self> {
-        let router = Router::global(cx);
-        let entity = cx.new(|cx| Self {
+        let entity = cx.new(|_| Self {
             toasts: Vec::new(),
             modal: None,
             modal_underlay: None,
             modal_fullscreen: false,
             command_palette_open: false,
             next_id: 0,
-            route: router.read(cx).route(),
-            _route_sub: cx.observe(&router, Self::on_route_changed),
         });
         cx.set_global(GlobalShell(entity.clone()));
         entity
     }
 
-    fn on_route_changed(&mut self, router: Entity<Router>, cx: &mut Context<Self>) {
-        let route = router.read(cx).route();
-        if route == self.route {
-            return;
-        }
-        self.route = route;
-        self.close_modal(cx);
+    pub fn navigate_from_external_trigger(cx: &mut App, route: Route) {
+        Shell::global(cx).update(cx, |shell, cx| shell.close_modal(cx));
+        crate::router::navigate(cx, route);
     }
 
     pub fn global(cx: &App) -> Entity<Self> {
@@ -443,6 +438,54 @@ impl Shell {
         self.show_modal(view.into(), cx);
     }
 
+    pub fn confirm_delete_thread(
+        &mut self,
+        clan_id: mezon_store::ClanId,
+        channel_id: mezon_store::ChannelId,
+        locale: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let (channel_name, parent_id) = mezon_store::ChannelList::global(cx)
+            .read(cx)
+            .channel(clan_id, channel_id)
+            .map(|channel| {
+                (
+                    channel.name.clone(),
+                    channel.parent_id.unwrap_or(mezon_store::ChannelId(0)),
+                )
+            })
+            .unwrap_or_else(|| ("Unknown Channel".to_string(), mezon_store::ChannelId(0)));
+        let title: SharedString =
+            mezon_i18n::t(locale, "channelSetting.confirm.deleteThread.title")
+                .to_string()
+                .into();
+        let description: SharedString =
+            mezon_i18n::t(locale, "channelSetting.confirm.deleteThread.content")
+                .replace("{{channelName}}", &channel_name)
+                .into();
+        let cancel_label: SharedString = mezon_i18n::t(locale, "common.cancel").to_string().into();
+        let delete_label: SharedString =
+            mezon_i18n::t(locale, "channelSetting.confirm.deleteThread.confirmText")
+                .to_string()
+                .into();
+        let view = cx.new(|cx| ConfirmDeleteThreadModal {
+            focus_handle: cx.focus_handle(),
+            clan_id,
+            channel_id,
+            parent_id,
+            locale: locale.to_string(),
+            title,
+            description,
+            cancel_label,
+            delete_label,
+            submitting: false,
+        });
+        let focus_handle = view.read(cx).focus_handle.clone();
+        window.focus(&focus_handle, cx);
+        self.show_modal(view.into(), cx);
+    }
+
     pub fn confirm_delete_canvas(
         &mut self,
         canvas_id: String,
@@ -739,6 +782,47 @@ impl Shell {
         cx.notify();
     }
 
+    pub fn show_wallet_not_available(
+        &mut self,
+        message: impl Into<SharedString>,
+        locale: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let message = message.into();
+        let title = if message.is_empty() {
+            mezon_i18n::t(locale, "message.wallet.notAvailable").into()
+        } else {
+            message
+        };
+        let view = cx.new(|cx| WalletNotAvailableModal {
+            focus_handle: cx.focus_handle(),
+            title,
+            description: mezon_i18n::t(locale, "message.wallet.descNotAvailable").into(),
+            enable_label: mezon_i18n::t(locale, "message.wallet.enableWallet").into(),
+            cancel_label: mezon_i18n::t(locale, "message.wallet.cancel").into(),
+        });
+        let previous_focus = window.focused(cx);
+        if let Some(current) = self.modal.take() {
+            self.modal_underlay = Some((
+                current,
+                self.modal_fullscreen,
+                self.command_palette_open,
+                previous_focus,
+            ));
+        }
+        let host = cx.new(|cx| StackedModalHost {
+            view: view.into(),
+            focus_handle: cx.focus_handle(),
+        });
+        let focus_handle = host.read(cx).focus_handle.clone();
+        window.focus(&focus_handle, cx);
+        self.command_palette_open = false;
+        self.modal_fullscreen = false;
+        self.modal = Some(host.into());
+        cx.notify();
+    }
+
     pub fn confirm_disable_clan_community(
         &mut self,
         on_confirm: impl Fn(&mut App) + 'static,
@@ -928,7 +1012,7 @@ mod tests {
 
     fn open_shell_with_modal(cx: &mut TestAppContext) -> Entity<Shell> {
         cx.update(|cx| {
-            Router::init(cx);
+            crate::router::Router::init(cx);
             crate::router::replace(
                 cx,
                 Route::ClanSettings {
@@ -943,20 +1027,21 @@ mod tests {
         })
     }
 
+    fn conversation_route() -> Route {
+        Route::Channel {
+            clan_id: ClanId(7),
+            channel_id: ChannelId(42),
+        }
+    }
+
     #[gpui::test]
-    fn navigating_away_closes_the_open_modal(cx: &mut TestAppContext) {
+    fn an_external_trigger_closes_the_settings_modal_it_navigates_away_from(
+        cx: &mut TestAppContext,
+    ) {
         let shell = open_shell_with_modal(cx);
         assert!(shell.read_with(cx, |shell, _| shell.has_modal()));
 
-        cx.update(|cx| {
-            crate::router::navigate(
-                cx,
-                Route::Channel {
-                    clan_id: ClanId(7),
-                    channel_id: ChannelId(42),
-                },
-            )
-        });
+        cx.update(|cx| Shell::navigate_from_external_trigger(cx, conversation_route()));
         cx.run_until_parked();
 
         assert!(
@@ -967,23 +1052,16 @@ mod tests {
     }
 
     #[gpui::test]
-    fn re_navigating_to_the_same_route_keeps_the_modal(cx: &mut TestAppContext) {
+    fn in_app_navigation_leaves_the_modal_alone(cx: &mut TestAppContext) {
         let shell = open_shell_with_modal(cx);
 
-        cx.update(|cx| {
-            crate::router::navigate(
-                cx,
-                Route::ClanSettings {
-                    clan_id: ClanId(7),
-                    page: ClanSettingsPage::Emoji,
-                },
-            )
-        });
+        cx.update(|cx| crate::router::navigate(cx, conversation_route()));
         cx.run_until_parked();
 
         assert!(
             shell.read_with(cx, |shell, _| shell.has_modal()),
-            "a router notify that does not change the route must leave the modal alone"
+            "only an external trigger closes the modal; a plain route change (an archived-thread \
+             redirect, a permission-driven settings page swap) must leave it open"
         );
     }
 }
