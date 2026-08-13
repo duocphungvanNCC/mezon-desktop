@@ -7,7 +7,9 @@ use mezon_client::{AppApi, ConnectionStatus};
 use mezon_proto::api;
 
 use crate::Freshness;
-use crate::emoji::{MAX_STICKER_BYTES, is_valid_emoticon_shortname, upload_emoticon_file};
+use crate::emoji::{
+    EmoticonErrorKind, MAX_STICKER_BYTES, is_valid_emoticon_shortname, upload_emoticon_file,
+};
 use crate::ids::ClanId;
 use crate::voice::{MAX_SOUND_BYTES, upload_sound_file};
 
@@ -232,7 +234,10 @@ impl StickerStore {
         let clan = clan_id.get();
         cx.spawn(async move |this, cx| {
             if !is_valid_emoticon_shortname(&shortname) {
-                return Err("invalid_name".into());
+                return Err(EmoticonErrorKind::InvalidName
+                    .code()
+                    .unwrap_or_default()
+                    .into());
             }
             let (id, url) =
                 upload_emoticon_file(&api, &path, "stickers", MAX_STICKER_BYTES, is_for_sale)
@@ -272,7 +277,10 @@ impl StickerStore {
         let clan = clan_id.get();
         cx.spawn(async move |this, cx| {
             if !is_valid_emoticon_shortname(&shortname) {
-                return Err("invalid_name".into());
+                return Err(EmoticonErrorKind::InvalidName
+                    .code()
+                    .unwrap_or_default()
+                    .into());
             }
             api.update_clan_sticker_by_id(id, clan, &source, &shortname, "Among Us")
                 .await
@@ -324,7 +332,10 @@ impl StickerStore {
         let clan = clan_id.get();
         cx.spawn(async move |this, cx| {
             if !is_valid_emoticon_shortname(&shortname) {
-                return Err("invalid_name".into());
+                return Err(EmoticonErrorKind::InvalidName
+                    .code()
+                    .unwrap_or_default()
+                    .into());
             }
             let (id, url) = upload_sound_file(&api, &path, MAX_SOUND_BYTES).await?;
             api.add_clan_sticker(

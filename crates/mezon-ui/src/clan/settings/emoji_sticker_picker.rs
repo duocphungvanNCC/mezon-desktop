@@ -5,9 +5,10 @@ use gpui::{
     SharedString, Subscription, Task, Window, div, img, prelude::*, px,
 };
 use mezon_store::{
-    ClanId, EMOJI_UPLOAD_MAX_PX, EMOTICON_SHORTNAME_MAX, EmojiStore, MAX_EMOJI_BYTES,
-    MAX_STICKER_BYTES, STICKER_UPLOAD_MAX_PX, Settings, StickerStore, is_valid_emoticon_shortname,
-    strip_emoji_colons, validate_emoticon_file,
+    ClanId, EMOJI_UPLOAD_MAX_PX, EMOTICON_SHORTNAME_MAX, EMOTICON_SHORTNAME_MIN, EmojiStore,
+    EmoticonErrorKind, MAX_EMOJI_BYTES, MAX_STICKER_BYTES, STICKER_UPLOAD_MAX_PX, Settings,
+    StickerStore, classify_emoticon_error, is_valid_emoticon_shortname, strip_emoji_colons,
+    validate_emoticon_file,
 };
 
 use crate::app::shell::Shell;
@@ -17,17 +18,6 @@ use crate::components::primitives::{
 use crate::theme::{ActiveTheme, Theme};
 
 const FORM_CONTROL_H: f32 = 34.0;
-
-fn default_emoticon_shortname(kind: EmoticonKind) -> String {
-    let timestamp = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis())
-        .unwrap_or(0);
-    match kind {
-        EmoticonKind::Emoji => format!("emoji_{timestamp}"),
-        EmoticonKind::Sticker => format!("sticker_{timestamp}"),
-    }
-}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum EmoticonKind {
@@ -238,14 +228,21 @@ impl EmojiStickerPicker {
                 })
                 .await;
             if let Err(code) = validated {
-                let message = emoticon_error_message(kind, &locale, &code);
-                let _ = this.update(cx, |this, cx| {
+                let is_size_limit = classify_emoticon_error(&code) == EmoticonErrorKind::SizeLimit;
+                let message =
+                    (!is_size_limit).then(|| emoticon_error_message(kind, &locale, &code));
+                let _ = this.update_in(cx, |this, window, cx| {
                     finish(this);
                     this.picked_path = None;
                     this.preview = None;
                     cx.notify();
+                    if is_size_limit {
+                        show_emoticon_upload_limit(kind, &locale, window, cx);
+                    }
                 });
-                show_error(cx, message);
+                if let Some(message) = message {
+                    show_error(cx, message);
+                }
                 return;
             }
             let label = path
@@ -253,15 +250,11 @@ impl EmojiStickerPicker {
                 .and_then(|n| n.to_str())
                 .unwrap_or("file")
                 .to_string();
-            let default_name = default_emoticon_shortname(kind);
-            let _ = this.update_in(cx, |this, window, cx| {
+            let _ = this.update(cx, |this, cx| {
                 finish(this);
                 this.picked_path = Some(path.clone());
                 this.file_label = label.into();
                 this.preview = Some(EmoticonPreview::Local(path));
-                this.name_input.update(cx, |state, cx| {
-                    state.set_value(default_name, window, cx);
-                });
                 cx.notify();
             });
         }));
@@ -282,8 +275,8 @@ impl EmojiStickerPicker {
                     mezon_i18n::t(&locale, "clanStickerSetting.toast.validateName")
                 }
             }
-            .replace("{{min}}", "3")
-            .replace("{{max}}", "64");
+            .replace("{{min}}", &EMOTICON_SHORTNAME_MIN.to_string())
+            .replace("{{max}}", &EMOTICON_SHORTNAME_MAX.to_string());
             Shell::global(cx).update(cx, |shell, cx| shell.error(message, cx));
             return;
         }
@@ -338,12 +331,19 @@ impl EmojiStickerPicker {
                 }
                 Err(e) => {
                     tracing::error!("emoticon save failed: {e}");
-                    let message = emoticon_error_message(kind, &locale, &e);
-                    let _ = this.update(cx, |this, cx| {
+                    let is_size_limit = classify_emoticon_error(&e) == EmoticonErrorKind::SizeLimit;
+                    let message =
+                        (!is_size_limit).then(|| emoticon_error_message(kind, &locale, &e));
+                    let _ = this.update_in(cx, |this, window, cx| {
                         this.submitting = false;
                         cx.notify();
+                        if is_size_limit {
+                            show_emoticon_upload_limit(kind, &locale, window, cx);
+                        }
                     });
-                    show_error(cx, message);
+                    if let Some(message) = message {
+                        show_error(cx, message);
+                    }
                 }
             }
         }));
@@ -448,30 +448,45 @@ impl EmojiStickerPicker {
 }
 
 fn emoticon_error_message(kind: EmoticonKind, locale: &str, code: &str) -> String {
-    match code {
-        "size_limit" | "image_too_large" => match kind {
+    match classify_emoticon_error(code) {
+        EmoticonErrorKind::SizeLimit | EmoticonErrorKind::ImageTooLarge => match kind {
             EmoticonKind::Emoji => mezon_i18n::t(locale, "clanEmojiSetting.toast.errorSizeLimit"),
             EmoticonKind::Sticker => {
                 mezon_i18n::t(locale, "clanStickerSetting.toast.errorSizeLimit")
             }
         }
         .to_string(),
-        "invalid_name" => match kind {
+        EmoticonErrorKind::InvalidName => match kind {
             EmoticonKind::Emoji => mezon_i18n::t(locale, "clanEmojiSetting.toast.validateName"),
             EmoticonKind::Sticker => mezon_i18n::t(locale, "clanStickerSetting.toast.validateName"),
         }
-        .replace("{{min}}", "3")
-        .replace("{{max}}", "64"),
-        "unsupported_type" | "empty" | "invalid_image" => {
+        .replace("{{min}}", &EMOTICON_SHORTNAME_MIN.to_string())
+        .replace("{{max}}", &EMOTICON_SHORTNAME_MAX.to_string()),
+        EmoticonErrorKind::UnsupportedType
+        | EmoticonErrorKind::Empty
+        | EmoticonErrorKind::InvalidImage => {
             mezon_i18n::t(locale, "common.onlyImageFiles").to_string()
         }
-        _ => mezon_i18n::t(locale, "common.somethingWentWrong").to_string(),
+        EmoticonErrorKind::Other => mezon_i18n::t(locale, "common.somethingWentWrong").to_string(),
     }
 }
 
 fn show_error(cx: &mut AsyncApp, message: String) {
     cx.update(|cx| {
         Shell::global(cx).update(cx, |shell, cx| shell.error(message, cx));
+    });
+}
+
+fn show_emoticon_upload_limit(kind: EmoticonKind, locale: &str, window: &mut Window, cx: &mut App) {
+    let title = mezon_i18n::t(locale, "common.filesTooPowerful");
+    let max_bytes = match kind {
+        EmoticonKind::Emoji => MAX_EMOJI_BYTES,
+        EmoticonKind::Sticker => MAX_STICKER_BYTES,
+    };
+    let size_limit = format!("{} KB", max_bytes / 1024);
+    let content = mezon_i18n::t(locale, "common.maxFileSize").replace("{{sizeLimit}}", &size_limit);
+    Shell::global(cx).update(cx, |shell, cx| {
+        shell.show_upload_limit(title, content, window, cx);
     });
 }
 

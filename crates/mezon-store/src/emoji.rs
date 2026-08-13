@@ -29,6 +29,49 @@ pub const STICKER_UPLOAD_MAX_PX: u32 = 320;
 pub const EMOTICON_SHORTNAME_MIN: usize = 3;
 pub const EMOTICON_SHORTNAME_MAX: usize = 64;
 pub const EMOTICON_ALLOWED_EXTENSIONS: &[&str] = &["jpg", "jpeg", "png", "gif"];
+const EMOTICON_SIZE_LIMIT_ERROR: &str = "size_limit";
+const EMOTICON_IMAGE_TOO_LARGE_ERROR: &str = "image_too_large";
+const EMOTICON_INVALID_NAME_ERROR: &str = "invalid_name";
+const EMOTICON_UNSUPPORTED_TYPE_ERROR: &str = "unsupported_type";
+const EMOTICON_EMPTY_ERROR: &str = "empty";
+const EMOTICON_INVALID_IMAGE_ERROR: &str = "invalid_image";
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EmoticonErrorKind {
+    SizeLimit,
+    ImageTooLarge,
+    InvalidName,
+    UnsupportedType,
+    Empty,
+    InvalidImage,
+    Other,
+}
+
+impl EmoticonErrorKind {
+    pub const fn code(self) -> Option<&'static str> {
+        match self {
+            Self::SizeLimit => Some(EMOTICON_SIZE_LIMIT_ERROR),
+            Self::ImageTooLarge => Some(EMOTICON_IMAGE_TOO_LARGE_ERROR),
+            Self::InvalidName => Some(EMOTICON_INVALID_NAME_ERROR),
+            Self::UnsupportedType => Some(EMOTICON_UNSUPPORTED_TYPE_ERROR),
+            Self::Empty => Some(EMOTICON_EMPTY_ERROR),
+            Self::InvalidImage => Some(EMOTICON_INVALID_IMAGE_ERROR),
+            Self::Other => None,
+        }
+    }
+}
+
+pub fn classify_emoticon_error(error: &str) -> EmoticonErrorKind {
+    match error {
+        EMOTICON_SIZE_LIMIT_ERROR => EmoticonErrorKind::SizeLimit,
+        EMOTICON_IMAGE_TOO_LARGE_ERROR => EmoticonErrorKind::ImageTooLarge,
+        EMOTICON_INVALID_NAME_ERROR => EmoticonErrorKind::InvalidName,
+        EMOTICON_UNSUPPORTED_TYPE_ERROR => EmoticonErrorKind::UnsupportedType,
+        EMOTICON_EMPTY_ERROR => EmoticonErrorKind::Empty,
+        EMOTICON_INVALID_IMAGE_ERROR => EmoticonErrorKind::InvalidImage,
+        _ => EmoticonErrorKind::Other,
+    }
+}
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Emoji {
@@ -365,7 +408,7 @@ impl EmojiStore {
         let path = path.to_path_buf();
         let raw_name = strip_emoji_colons(shortname);
         if !is_valid_emoticon_shortname(&raw_name) {
-            return cx.spawn(async move |_, _| Err("invalid_name".into()));
+            return cx.spawn(async move |_, _| Err(EMOTICON_INVALID_NAME_ERROR.into()));
         }
         let shortname = normalize_emoji_shortname(&raw_name);
         if let Err(err) = validate_emoji_create_shortname(&shortname) {
@@ -399,7 +442,7 @@ impl EmojiStore {
         };
         let raw_name = strip_emoji_colons(shortname);
         if !is_valid_emoticon_shortname(&raw_name) {
-            return cx.spawn(async move |_, _| Err("invalid_name".into()));
+            return cx.spawn(async move |_, _| Err(EMOTICON_INVALID_NAME_ERROR.into()));
         }
         let shortname = normalize_emoji_shortname(&raw_name);
         if let Err(err) = validate_emoji_create_shortname(&shortname) {
@@ -613,17 +656,17 @@ pub fn normalize_emoji_shortname(name: &str) -> String {
 pub fn validate_emoji_create_shortname(shortname: &str) -> Result<(), String> {
     let runes: Vec<char> = shortname.chars().collect();
     let len = runes.len();
-    if !(3..=64).contains(&len) {
-        return Err("invalid_name".into());
+    if !(EMOTICON_SHORTNAME_MIN..=EMOTICON_SHORTNAME_MAX).contains(&len) {
+        return Err(EMOTICON_INVALID_NAME_ERROR.into());
     }
     if len >= 2 && runes[0] == ':' && runes[1] == ':' {
-        return Err("invalid_name".into());
+        return Err(EMOTICON_INVALID_NAME_ERROR.into());
     }
     if len >= 2 && runes[len - 2] == ':' && runes[len - 1] == ':' {
-        return Err("invalid_name".into());
+        return Err(EMOTICON_INVALID_NAME_ERROR.into());
     }
     if shortname.contains([' ', '\n', '\t', '\r']) {
-        return Err("invalid_name".into());
+        return Err(EMOTICON_INVALID_NAME_ERROR.into());
     }
     Ok(())
 }
@@ -632,26 +675,26 @@ pub fn strip_emoji_colons(name: &str) -> String {
     name.trim().trim_matches(':').to_string()
 }
 
-pub fn validate_emoticon_file(path: &Path, max_bytes: u64, max_px: u32) -> Result<(), String> {
+pub fn validate_emoticon_file(path: &Path, max_bytes: u64, _max_px: u32) -> Result<(), String> {
     let ext = path
         .extension()
         .and_then(|e| e.to_str())
         .unwrap_or("")
         .to_ascii_lowercase();
     if !EMOTICON_ALLOWED_EXTENSIONS.contains(&ext.as_str()) {
-        return Err("unsupported_type".into());
+        return Err(EMOTICON_UNSUPPORTED_TYPE_ERROR.into());
     }
     let len = std::fs::metadata(path)
-        .map_err(|_| "invalid_image".to_string())?
+        .map_err(|_| EMOTICON_INVALID_IMAGE_ERROR.to_string())?
         .len();
     if len == 0 {
-        return Err("empty".into());
+        return Err(EMOTICON_EMPTY_ERROR.into());
     }
     if len > max_bytes {
-        return Err("size_limit".into());
+        return Err(EMOTICON_SIZE_LIMIT_ERROR.into());
     }
-    let data = std::fs::read(path).map_err(|_| "invalid_image".to_string())?;
-    decode_emoticon_image(&data, max_px)?;
+    let data = std::fs::read(path).map_err(|_| EMOTICON_INVALID_IMAGE_ERROR.to_string())?;
+    decode_emoticon_image(&data)?;
     Ok(())
 }
 
@@ -687,9 +730,6 @@ fn prepare_emoticon_from_path(
         .unwrap_or("png")
         .to_ascii_lowercase();
     let (bytes, filetype) = prepare_emoticon_upload_bytes(&data, &ext, max_px)?;
-    if bytes.len() as u64 > max_bytes {
-        return Err("size_limit".into());
-    }
     Ok(PreparedEmoticon { bytes, filetype })
 }
 
@@ -742,32 +782,26 @@ fn box_blur_rgba(img: &mut image::RgbaImage, radius: u32) {
     }
 }
 
-fn emoticon_image_limits(max_px: u32) -> image::Limits {
-    let mut limits = image::Limits::default();
-    limits.max_image_width = Some(max_px);
-    limits.max_image_height = Some(max_px);
-    limits.max_alloc = Some(max_px as u64 * max_px as u64 * 4);
-    limits
-}
-
-fn decode_emoticon_image(data: &[u8], max_px: u32) -> Result<image::DynamicImage, String> {
+fn decode_emoticon_image(data: &[u8]) -> Result<image::DynamicImage, String> {
     let mut reader = image::ImageReader::new(std::io::Cursor::new(data))
         .with_guessed_format()
         .map_err(|e| e.to_string())?;
-    reader.limits(emoticon_image_limits(max_px));
+    reader.limits(image::Limits::default());
     reader.decode().map_err(emoticon_decode_error)
 }
 
 fn emoticon_decode_error(err: image::ImageError) -> String {
     match err {
-        image::ImageError::Limits(_) => "image_too_large".into(),
-        image::ImageError::Decoding(_) | image::ImageError::Parameter(_) => "invalid_image".into(),
-        _ => "invalid_image".into(),
+        image::ImageError::Limits(_) => EMOTICON_IMAGE_TOO_LARGE_ERROR.into(),
+        image::ImageError::Decoding(_) | image::ImageError::Parameter(_) => {
+            EMOTICON_INVALID_IMAGE_ERROR.into()
+        }
+        _ => EMOTICON_INVALID_IMAGE_ERROR.into(),
     }
 }
 
 fn create_blurred_watermarked_webp(data: &[u8], filetype: &str) -> Result<Vec<u8>, String> {
-    let img = decode_emoticon_image(data, STICKER_UPLOAD_MAX_PX)?;
+    let img = decode_emoticon_image(data)?;
     let mut rgba = img.to_rgba8();
     box_blur_rgba(&mut rgba, 2);
 
@@ -851,7 +885,7 @@ fn prepare_emoticon_upload_bytes(
         return Ok((data.to_vec(), "image/gif"));
     }
 
-    let img = decode_emoticon_image(data, max_px)?;
+    let img = decode_emoticon_image(data)?;
     let thumb = img.thumbnail(max_px, max_px);
     let rgba = thumb.to_rgba8();
     let (width, height) = rgba.dimensions();
@@ -1258,5 +1292,19 @@ mod tests {
         let (out, mime) = prepare_emoticon_upload_bytes(data, "gif", EMOJI_UPLOAD_MAX_PX).unwrap();
         assert_eq!(mime, "image/gif");
         assert_eq!(out, data);
+    }
+
+    #[test]
+    fn prepare_emoticon_upload_resizes_source_larger_than_emoji_dimensions() {
+        let img = image::RgbaImage::from_pixel(256, 192, image::Rgba([10, 20, 30, 255]));
+        let mut png = Vec::new();
+        image::DynamicImage::ImageRgba8(img)
+            .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+            .unwrap();
+
+        let (out, _) = prepare_emoticon_upload_bytes(&png, "png", EMOJI_UPLOAD_MAX_PX).unwrap();
+        let resized = image::load_from_memory(&out).unwrap();
+
+        assert_eq!((resized.width(), resized.height()), (128, 96));
     }
 }
