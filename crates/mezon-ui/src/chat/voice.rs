@@ -3439,31 +3439,38 @@ fn device_entries(
     locale: &str,
     cx: &App,
 ) -> Vec<(Option<String>, String)> {
-    let mut entries = vec![(
-        None,
-        mezon_i18n::t(locale, "channelVoice.device.systemDefault").to_string(),
-    )];
+    let system_default = || mezon_i18n::t(locale, "channelVoice.device.systemDefault").to_string();
     match kind {
         DeviceKind::AudioInput | DeviceKind::AudioOutput => {
+            let mut entries = Vec::new();
             if let Some(audio) = AudioStore::try_global(cx) {
                 let audio = audio.read(cx);
-                let devices = if matches!(kind, DeviceKind::AudioInput) {
-                    &audio.input_devices
+                let (devices, default_name) = if matches!(kind, DeviceKind::AudioInput) {
+                    (&audio.input_devices, &audio.default_input_name)
                 } else {
-                    &audio.output_devices
+                    (&audio.output_devices, &audio.default_output_name)
                 };
+                let default_label = match default_name {
+                    Some(name) => format!("Default - {name}"),
+                    None => system_default(),
+                };
+                entries.push((None, default_label));
                 for device in devices {
                     entries.push((Some(device.id.clone()), device.name.clone()));
                 }
+            } else {
+                entries.push((None, system_default()));
             }
+            entries
         }
         DeviceKind::VideoInput => {
+            let mut entries = vec![(None, system_default())];
             for device in store.camera_devices() {
                 entries.push((Some(device.id.clone()), device.name.clone()));
             }
+            entries
         }
     }
-    entries
 }
 
 fn device_kind_label(kind: DeviceKind, locale: &str) -> String {
